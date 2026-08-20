@@ -421,6 +421,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
 
 - 已完成（2026-06-06）：大笔记本 KG 性能与合并治理——Ask 去同步 backfill/全量扫描 + notebook 级索引 + 阶段计时；node_context/concept_detail 收窄查询；unified-KG 改显式 rebuild + dirty status（摄取不再同步重建、打开图谱不自动重建）；跨文档概念合并改有界 top-k 向量候选 + 别名归一化；可选 LLM 概念合并预审。已通过 `scripts/check.sh` 与前端 build。
+- 已完成（2026-08-20）：手动概念判重队列不回流——候选按 canonical component 对确定性去重，rejected/deferred 稳定 seed 决策经 confirmed union 传播为整组 cannot-link，旧部署同展示对的重复 pending 由一次点击原子收束；「分开」不再置图谱 dirty 或触发全库重建，只有「合并」重聚。聚类算法版本已提升，相关后端与前端接线回归已补齐；完整检查结果以本次交付验证为准。
 - 已完成（2026-06-06）：推理模式 agentic search 实时进度——`/ask/stream` 输出 NDJSON progress/final 事件，Ask 前端在运行中展示按事件刷新的折叠 agent 轨迹摘要，点击可展开完整步骤，并在答案中保留默认折叠的最终 trace。已通过 `scripts/check.sh` 与前端 build。
 - 已完成（2026-07-10）：reasoning `follow_chain`——该能力不新增 migration 或改写历史数据，查询期复用既有端点索引，对有证据、审核可用、条件兼容的同类型两跳关系做有界类型化组合；关系前提可引用、推论不入库，Ask/深度报告与流式 `推导` 轨迹均已接通。已通过 `scripts/check.sh` 与前端 build。
 - 已完成（2026-06-25）：用户账号系统——

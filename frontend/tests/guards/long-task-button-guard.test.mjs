@@ -36,7 +36,7 @@ const LONG_TASK_BUTTONS = [
   { match: 'runScaleIndexOp("rebuild", bumpCheckupRepairPoll)', why: "H8 损坏态重建索引:该格常驻显示,不走「忙碌换取消」" },
   { match: "confirmUpload(", why: "上传:multipart 传大文件期间不能重复提交", requires: "uploadBusy" },
   { match: "reparseSource(", why: "来源重新解析:同步等完,大 PDF 可能数分钟" },
-  { match: "decideMerge(", why: "待确认合并落决定:连带跑一次全量概念合并重建" },
+  { match: "decideMerge(", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交", requires: "kgRefreshBusy" },
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
   { match: "runMerge(", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重" },
   { match: "reviewAllMerges", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "reviewAllStarting" },

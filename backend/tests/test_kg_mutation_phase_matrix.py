@@ -358,7 +358,7 @@ def _seed_merge_candidate(repo, notebook_id, a="K-a", b="K-b"):
         ).fetchone()["id"]
 
 
-def test_confirm_and_reject_merge_commit_then_invalidate_then_dirty(
+def test_only_confirm_merge_invalidates_and_marks_dirty(
     repo, monkeypatch
 ):
     notebook_id, _objects, _relations = _seed_kg(repo, "merge decision phase")
@@ -373,7 +373,9 @@ def test_confirm_and_reject_merge_commit_then_invalidate_then_dirty(
 
     events.clear()
     repo.reject_merge(notebook_id, second)
-    assert events == ["write.begin", "write.commit", "invalidate", "dirty"]
+    # A rejection is a durable cannot-link but does not alter the current
+    # clusters, so it neither invalidates retrieval nor dirties the graph.
+    assert events == ["write.begin", "write.commit"]
 
 
 def test_review_pending_merges_dirty_then_invalidate_only_with_decisions(

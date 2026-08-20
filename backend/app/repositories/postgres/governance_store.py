@@ -524,9 +524,29 @@ class GovernanceStore:
     ) -> None:
         if status not in ("confirmed", "rejected"):
             raise ValueError(f"invalid merge status: {status!r}")
+        target = connection.execute(
+            "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+            "WHERE id=%s AND notebook_id=%s",
+            (candidate_id, notebook_id),
+        ).fetchone()
+        if target is None:
+            return
+        # Preserve the existing administrative flip semantics for the selected
+        # row even when it was already decided.
         connection.execute(
-            "UPDATE concept_merge_candidates SET status=%s, updated_at=%s WHERE id=%s AND notebook_id=%s",
-            (status, normalize_timestamp(now), candidate_id, notebook_id))
+            "UPDATE concept_merge_candidates SET status=%s, updated_at=%s "
+            "WHERE id=%s AND notebook_id=%s",
+            (status, normalize_timestamp(now), candidate_id, notebook_id),
+        )
+        # One row represents a displayed canonical-pair decision.  Settle any
+        # legacy duplicate seed-edge rows for that same pair in the same write.
+        connection.execute(
+            "UPDATE concept_merge_candidates SET status=%s, updated_at=%s "
+            "WHERE notebook_id=%s AND status='pending' AND "
+            "((canonical_a=%s AND canonical_b=%s) OR (canonical_a=%s AND canonical_b=%s))",
+            (status, normalize_timestamp(now), notebook_id,
+             target["canonical_a"], target["canonical_b"],
+             target["canonical_b"], target["canonical_a"]))
 
     @staticmethod
     def record_merge_review(
