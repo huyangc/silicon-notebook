@@ -70,7 +70,7 @@ from app.repositories.ports import (
     AgentProfileRevisionConflict,
 )
 from app.services.agent_profile_block import (
-    AGENT_PROFILE_NAME_PAGE,
+    resolve_agent_profile_names,
     AGENT_PROFILE_VALUE_MAX_CHARS,
     PROFILE_LABEL_ORDER,
 )
@@ -318,20 +318,14 @@ def rebuild_understanding(
 def _observation_agent_names(owner_id: str) -> dict[str, str]:
     """Agent id → 显示名,只解析调用者**自己**名下的 Agent。
 
-    形状与 ``mcp_server.py`` 自己的 ``_profile_names`` 完全一致(同一个
-    ``list_agent_profiles(owner_id, 0, AGENT_PROFILE_NAME_PAGE)`` 调用,页大小
-    是两侧共用的同一个具名常量——见该常量自己的 docstring),但不跨模块 import
-    那个私有(下划线开头)辅助函数——它的命名本身就标着「不为跨模块复用设计」,
-    而这个路由文件已经有一批自己风格一致的私有辅助(``_block_out`` 等)。两侧
-    命名同名值同源是刻意的:一个 Agent 记录列表里显示的名字,必须与 MCP 工具
-    面(``get_cited_element`` 等)已经在用的是同一个名字,不是又一套独立拼写。
+    与 ``mcp_server.py`` 的 ``_profile_names`` 共用同一个分页 helper
+    ``resolve_agent_profile_names``(codex #535 R2 P2:原先各自只读第一页
+    100 条,超过一页的 owner 会让老 profile 的记录落到「该 Agent」兜底名;
+    现在按 roster 翻到尽头,两侧按构造是同一个查找)。
     """
-    return {
-        profile.id: profile.name
-        for profile in repository().list_agent_profiles(
-            owner_id, 0, AGENT_PROFILE_NAME_PAGE
-        )
-    }
+    return resolve_agent_profile_names(
+        repository().list_agent_profiles, owner_id
+    )
 
 
 @router.get(
