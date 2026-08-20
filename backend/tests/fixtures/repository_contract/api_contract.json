@@ -11401,6 +11401,17 @@
           "summary": "Update Admin User Upload Limit"
         }
       },
+      "/api/agent-mcp/onboarding": {
+        "get": {
+          "operationId": "onboarding_api_agent_mcp_onboarding_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Machine-readable Agent MCP onboarding instructions"
+        }
+      },
       "/api/agent-profiles": {
         "get": {
           "operationId": "list_agent_profiles_api_agent_profiles_get",

@@ -762,8 +762,24 @@
 }
 
 .agent-issued-token strong { grid-column: 1 / -1; color: #775410; font-size: 13px; }
-.agent-issued-token code { min-width: 0; overflow-wrap: anywhere; color: #2e3440; }
+.agent-issued-token-value {
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  color: #2e3440;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
 .agent-issued-token button { font-size: 11px; }
+.agent-token-onboarding {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #5d6673;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.agent-token-onboarding a { margin: 0 4px; color: var(--blue); font-weight: 600; }
+.agent-token-copy-feedback { grid-column: 1 / -1; color: #9a4e12; font-size: 12px; }
 
 .memory-save-modal { z-index: 84; }
 

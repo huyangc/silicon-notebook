@@ -15,6 +15,7 @@ import {
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { requestJson } from "./api-client.ts";
+import { copyTextSafely } from "./copy-text";
 import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
 import { FloatingModalCard } from "./floating-modal-card";
 import { resolvePromotionTarget, type MountedBase } from "./notebook-bases";
@@ -169,6 +170,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
   const [selectedProfile, setSelectedProfile] = useState("");
   const [draft, setDraft] = useState<AgentTokenDraft>(() => agentTokenDraft());
   const [issued, setIssued] = useState<AgentTokenIssued | null>(null);
+  const [tokenCopyStatus, setTokenCopyStatus] = useState<"idle" | "copying" | "copied" | "manual">("idle");
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [profilePageLoading, setProfilePageLoading] = useState(false);
@@ -184,6 +186,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
   const profileOffsetRef = useRef(0);
   const tokenOffsetRef = useRef(0);
   const mutationControllersRef = useRef(new Set<AbortController>());
+  const issuedTokenRef = useRef<HTMLTextAreaElement | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
@@ -366,7 +369,22 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
     );
     if (!token) return;
     setIssued(token);
+    setTokenCopyStatus("idle");
     setRefresh((value) => value + 1);
+  }
+
+  async function copyIssuedToken() {
+    if (!issued || tokenCopyStatus === "copying") return;
+    setTokenCopyStatus("copying");
+    const copied = await copyTextSafely(issued.token);
+    if (!mountedRef.current) return;
+    if (copied) {
+      setTokenCopyStatus("copied");
+      return;
+    }
+    setTokenCopyStatus("manual");
+    issuedTokenRef.current?.focus();
+    issuedTokenRef.current?.select();
   }
 
   async function revokeToken(tokenId: string) {
@@ -437,9 +455,28 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
           {issued && (
             <div className="agent-issued-token" role="status">
               <strong>请立即保存：明文 token 仅显示这一次</strong>
-              <code>{issued.token}</code>
-              <button type="button" onClick={() => navigator.clipboard.writeText(issued.token)}><Copy size={14} /> 复制</button>
-              <button type="button" onClick={() => setIssued(null)}><X size={14} /> 我已保存</button>
+              <textarea
+                ref={issuedTokenRef}
+                className="agent-issued-token-value"
+                aria-label="新签发的明文 token"
+                readOnly
+                rows={2}
+                value={issued.token}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <button type="button" disabled={tokenCopyStatus === "copying"} onClick={() => { void copyIssuedToken(); }}>
+                {tokenCopyStatus === "copied" ? <Check size={14} /> : <Copy size={14} />}
+                {tokenCopyStatus === "copying" ? "复制中…" : tokenCopyStatus === "copied" ? "已复制" : "复制"}
+              </button>
+              <button type="button" onClick={() => { setIssued(null); setTokenCopyStatus("idle"); }}><X size={14} /> 我已保存</button>
+              <p className="agent-token-onboarding">
+                把上方 token 与
+                <a href="/api/agent-mcp/onboarding" target="_blank" rel="noreferrer">Agent MCP 接入说明链接</a>
+                一起交给 Agent，它可以读取说明并自行配置 MCP；链接本身不包含 token。
+              </p>
+              {tokenCopyStatus === "manual" && (
+                <span className="agent-token-copy-feedback" aria-live="polite">自动复制失败，token 已全选，请按 Ctrl/Cmd+C 复制。</span>
+              )}
             </div>
           )}
 

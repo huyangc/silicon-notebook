@@ -519,6 +519,13 @@ Token 有过期时间、默认 notebook、notebook allowlist，并只授予所�
 `ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`
 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
+签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
+用 `MCP_PUBLIC_URL` 给出精确服务地址，并从 `mcp_server.PUBLIC_TOOLS` 派生工具清单。用户把链接与
+token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token，并且在 repository warm-up
+尚未完成时也可读取。
+带任意 query string 或 Authorization header 的请求会被拒绝。启动也会拒绝非绝对
+`http(s)`、path 不精确等于 `/mcp`，或含 userinfo、query/fragment、空白/控制符/反引号的
+`MCP_PUBLIC_URL`。
 loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
 启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
 （并恢复 Host/Origin 校验），并把 `MCP_PUBLIC_URL` 设为公开的 HTTPS `/mcp` URL。
@@ -532,6 +539,11 @@ export SILICON_NOTEBOOK_AGENT_TOKEN='<一次性显示的 token>'
 codex mcp add silicon-notebook --url http://127.0.0.1:8000/mcp \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
+
+Codex 持久化的是环境变量名，不是 token 值。Agent shell 子进程中的临时 `export` 无法修改
+当前客户端的父进程环境。Agent 可以保存 URL/配置；若没有获准使用的持久 secret 机制，必须请
+用户在启动 Codex 的环境中设置变量并重启。`codex mcp list` 只证明配置项存在；只有新 session
+发现 MCP，并成功执行 `list_notebooks` 与 `select_notebook`，才算认证接入成功。
 
 当前本机 Claude Code CLI 接受 HTTP transport 和显式 Authorization header：
 
@@ -1486,7 +1498,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview`、`POST /api/notebooks/{id}/memories/from-answer`
-- Agent 接入：`GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
+- Agent 接入：匿名机器可读说明 `GET /api/agent-mcp/onboarding`；认证管理面 `GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
 - Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `knowledge:read`，代码写入需要 `knowhow:code`（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
 - 重新合并（界面：知识图谱视图与「索引与构建」面板里的**「重新合并」**）：`POST /api/notebooks/{id}/unified-kg/rebuild` 启动**后台**任务并返回 `{status: "rebuilding", notebook_id, job_id}`——它不再返回 `{clusters: N}`，因为这件事的工作量取决于笔记本规模而不是这一次点击：内容版本闸让「输入没变」的库仍然毫秒级返回，但真正要重聚的那一趟会在整张图上流式扫种子代表（基准库规模是分钟到小时级，早已越过 PostgreSQL 的语句超时，而且整段时间钉着一个请求 worker）。它没有 LLM 前置条件——但并非严格零模型：`kg_merge_review` / `kg_concept_description` 已配置时会作为 fail-open 增强被调用。单飞**与补上关联共用同一个任务槽**：一本库一格，因为重新合并会整表重写 `concept_clusters` 与板块划分，而补上关联往聚类要读的那张图上追加边——并发不是多花一份钱，是一方在另一方还在读的输入上发布结果。再点一次、或另一件正在跑时点，都返回 409 并**点名真正占着槽的那个动作**。与补上关联一样，任务槽是**按进程**的（生产固定 `--workers 1`）；离线 CLI（`scripts/recluster_kg.py`、`batch_ingest`）是独立进程、直接调用这一趟，不在此列。完成信号是 `GET /api/notebooks/{id}/unified-kg/rebuild/status`（notebook 读权限），返回 `{job_id, notebook_id, status, running, clusters}`，`status` ∈ `running` / `succeeded` / `failed` / `idle`；`idle` 同时覆盖「从没跑过」「进程重启过」和「这一格现在被补上关联占着」，所以浏览器的有界轮询一定会收工，两个轮询也都不会挂在对方的任务上。任一终态都按当前范围重拉图谱、待确认合并与概念合并状态，忙碌指示按「在重新合并的是哪个笔记本」作用域。它与 `GET .../unified-kg/status` 刻意分开——后者的 `building` 说的是可视化产物。强制全量重聚（改了聚类**设置**，那是内容版本闸看不见的）仍然只在 CLI。一条合并决定（合并/分开）若撞上共享任务槽（409），会在客户端记一个待补发标记，等占槽任务的终态轮询观测到时自动补发（补发本身撞到非 409 的瞬时失败同样保留标记续轮询，不会丢弃），且受同一次轮询的尝试上限兜底；这是一份**作用域限定在标签页保持打开期间的尽力承诺**。重载或重开页面即丢失客户端标记，不会有任何东西自动补发这条决定——这是刻意的：标记无法从泛化的 dirty 标志重建，因为普通的补上关联同样会把图谱标成 dirty，据此推断待补发会在用户没有请求的情况下自动发起一次可能数小时的全量重聚。兜底是既有的「待重建」dirty 标签加一次手动点击「重新合并」。能补上这个缺口的服务端持久重试队列是后续迭代的候选项，本次未实现。

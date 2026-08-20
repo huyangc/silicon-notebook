@@ -77,6 +77,43 @@ test("copyTextSafely contains Clipboard API rejection", async () => {
 });
 
 
+test("copyTextSafely falls back after Clipboard API rejection", async () => {
+  let fallbackCopied = false;
+  const textarea = {
+    value: "",
+    style: {},
+    setAttribute() {},
+    select() {},
+    remove() {},
+  };
+  const restoreNavigator = replaceGlobal("navigator", {
+    clipboard: {
+      async writeText() {
+        throw new Error("clipboard denied");
+      },
+    },
+  });
+  const restoreDocument = replaceGlobal("document", {
+    createElement() { return textarea; },
+    execCommand(command) {
+      assert.equal(command, "copy");
+      fallbackCopied = true;
+      return true;
+    },
+    body: { appendChild() {} },
+  });
+
+  try {
+    assert.equal(await copyTextSafely("agent-token-secret"), true);
+    assert.equal(textarea.value, "agent-token-secret");
+    assert.equal(fallbackCopied, true);
+  } finally {
+    restoreDocument();
+    restoreNavigator();
+  }
+});
+
+
 test("copyTextSafely reports a failed DOM fallback and always removes its textarea", async () => {
   let removed = false;
   const textarea = {

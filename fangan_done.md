@@ -343,6 +343,9 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `candidate < personal source < confirmed Memory < base KG/base source` 权威规则。
 - **Agent 接入 UI 与 token**：总 Memory 页可创建/停用稳定 Agent profile，签发明文只显示一次的
   opaque token，配置默认 notebook、notebook allowlist、过期时间与最小 scope，并列出、撤销 token。
+  签发回执现同时提供公开、机器可读的 `GET /api/agent-mcp/onboarding` 链接：Markdown 使用
+  `MCP_PUBLIC_URL` 给出精确 MCP 地址、从 `PUBLIC_TOOLS` 派生当前工具清单，且在 warm-up 期间也
+  可匿名读取；token 与链接分开交付，端点不接收、不拼入也不回显 bearer token（方案 §19.3）。
   Scope 为 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
   `ask:execute`、`knowhow:code`；撤销、过期、profile 停用或 notebook 权限变化会在后续调用重新校验并立即生效。
 - **官方 MCP Streamable HTTP**：`/mcp` 提供十一个工具：Memory/context 七工具 `list_notebooks`、`select_notebook`、

@@ -84,14 +84,21 @@ test("global Memory owns one semantic Agent-access surface", async () => {
   const modelImports = new Set(
     importsFrom(panel, "./agent-token-model").map((item) => item.imported),
   );
+  const copyImports = new Set(
+    importsFrom(panel, "./copy-text").map((item) => item.imported),
+  );
   const visibleCopy = jsxTextValues(panel).join(" ");
 
   assert.equal(declarationNames.has("AgentAccessManager"), true);
   assert.equal(modelImports.has("agentTokenRequest"), true);
   assert.equal(modelImports.has("agentPagePath"), true);
+  assert.equal(copyImports.has("copyTextSafely"), true);
   assert.match(visibleCopy, /笔记本白名单/);
   assert.match(visibleCopy, /过期时间/);
   assert.match(visibleCopy, /明文 token 仅显示这一次/);
+  assert.match(visibleCopy, /自动复制失败/);
+  assert.match(visibleCopy, /Agent MCP 接入说明链接/);
+  assert.match(visibleCopy, /链接本身不包含 token/);
 });
 
 test("profile and token page paths retain independent offsets", () => {

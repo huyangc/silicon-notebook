@@ -152,7 +152,36 @@ def validate_mcp_deployment(
     over plain HTTP the Agent Bearer token additionally crosses the network in
     cleartext. Only safe on a trusted private network.
     """
-    parsed = urlparse(public_url)
+    # MCP_PUBLIC_URL used to be only transport metadata. It is now also shown
+    # verbatim in the anonymous Agent-onboarding Markdown, so it is an
+    # instruction-plane trust boundary: fail before startup rather than letting
+    # credentials or Markdown control text become public Agent instructions.
+    if (
+        not public_url
+        or public_url != public_url.strip()
+        or any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127
+            for char in public_url
+        )
+        or "`" in public_url
+    ):
+        raise RuntimeError("invalid MCP_PUBLIC_URL")
+    try:
+        parsed = urlparse(public_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("invalid MCP_PUBLIC_URL") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/mcp"
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise RuntimeError("invalid MCP_PUBLIC_URL")
     public_host = parsed.hostname or ""
     remotely_reachable = not _is_loopback(bind_host) or (
         public_host and not _is_loopback(public_host)
