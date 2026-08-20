@@ -2262,7 +2262,12 @@ export default function Home() {
    * 竞态由 `refreshAfterAccessChange` 自己的世代闸挡住,与本地那条完全同路。
    */
   useEffect(() => {
-    if (!authChecked) return;
+    // ⚠ 闸必须同时看 `currentUser`,只看 `authChecked` 不够:没有存过 token 时
+    // `authChecked` 照样会被置真而 `currentUser` 仍是 null——监听于是装在**登录页**上,
+    // 用户切回这个标签页就发一次 `listNotebooks()`,而它是 `unauthorized:
+    // "clear-and-reload"`,401 会把页面整个重载,未登录用户每切回来一次就被刷一次
+    // (codex #529 R8 P2)。
+    if (!authChecked || !currentUser) return;
     let lastAt = 0;
     function revalidate() {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
@@ -2278,7 +2283,7 @@ export default function Home() {
       document.removeEventListener("visibilitychange", revalidate);
       window.removeEventListener("focus", revalidate);
     };
-  }, [authChecked]);
+  }, [authChecked, currentUser]);
 
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。

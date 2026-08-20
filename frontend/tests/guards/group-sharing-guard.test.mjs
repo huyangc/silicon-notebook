@@ -260,4 +260,15 @@ test("远端撤销:标签页重新可见时复用同一条对账路径", () => {
     ),
     "live ref 没有接到 refreshAfterAccessChange——复核成了只刷列表的旁路",
   );
+
+  // ⚠ 监听必须只装在**已登录**的页面上。没存过 token 时 `authChecked` 照样会被置真而
+  // `currentUser` 仍是 null:只看 authChecked 的话,监听会装在登录页上,用户切回标签页就
+  // 发一次 listNotebooks(),而它是 `unauthorized: "clear-and-reload"`——401 把整页重载,
+  // 未登录用户每切回来一次就被刷一次(codex #529 R8 P2)。
+  assert.ok(
+    ifConditionsIn(page).some(
+      (condition) => /authChecked/.test(condition) && /currentUser/.test(condition),
+    ),
+    "访问权复核的监听没有同时门控已登录用户,会装在登录页上并触发 401 重载",
+  );
 });
