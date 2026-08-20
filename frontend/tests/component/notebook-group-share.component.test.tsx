@@ -34,7 +34,7 @@ import { NotebookGroupShare } from "../../app/notebook-group-share.tsx";
 
 const ADMIN_GROUP: GroupSummary = {
   id: "g1", name: "封装项目", kind: "project", description: "",
-  my_role: "admin", member_count: 3, created_at: "",
+  owner_id: "u1", my_role: "admin", member_count: 3, created_at: "",
 };
 const MEMBER_GROUP: GroupSummary = { ...ADMIN_GROUP, id: "g2", name: "工艺部", kind: "department", my_role: "member" };
 

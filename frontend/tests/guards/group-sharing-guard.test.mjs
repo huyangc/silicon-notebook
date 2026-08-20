@@ -1,6 +1,6 @@
 // 群组知识共享 P1-T4 的接线守卫。
 //
-// 这里钉的是**只存在于 page.tsx 里的接线**——组件测试测得到 GroupsModal /
+// 这里钉的是**只存在于 page.tsx 里的接线**——组件测试测得到 GroupsPage /
 // NotebookGroupShare 自身,却测不到「它们有没有被挂上去」「群组共享的卡片有没有把
 // 那个假失败的按钮收起来」。判据一律用语义结构或 onClick/条件的源码文本,不用行号。
 //
@@ -23,28 +23,30 @@ import {
 const page = await parseModule("page.tsx");
 const pageText = page.getFullText();
 
-test("群组管理弹窗与「共享给群组」都真的挂在 page 上,不是只写了组件", () => {
+test("独立群组页面与「共享给群组」都真的挂在 page 上,不是只写了组件", () => {
   assert.deepEqual(
-    importsFrom(page, "./groups-panel").map((item) => item.imported),
-    ["GroupsModal"],
+    importsFrom(page, "./groups-page").map((item) => item.imported),
+    ["GroupsPage"],
   );
-  const modals = jsxElements(page, "GroupsModal");
-  assert.equal(modals.length, 1);
-  assert.equal(modals[0].bindings.onClose, "() => setGroupsOpen(false)");
-  // 入口在账户菜单里:两截接线(回调打开 + 条件渲染弹窗)各自被删都不会让组件测试报红。
+  const pages = jsxElements(page, "GroupsPage");
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].bindings.onBack, "showCollection");
+  assert.equal(pages[0].bindings.initialGroupId, "groupNavigation.groupId");
+  assert.equal(pages[0].bindings.initialTab, "groupNavigation.tab");
+  // 入口在账户菜单里:回调打开 + 条件渲染页面各自被删都不会让组件测试报红。
   const menus = jsxElements(page, "AccountMenu");
   assert.equal(menus.length, 1);
-  assert.equal(menus[0].bindings.onOpenGroups, "() => setGroupsOpen(true)");
+  assert.equal(menus[0].bindings.onOpenGroups, '() => showGroups({}, "push")');
 
   const shares = jsxElements(page, "NotebookGroupShare");
   assert.equal(shares.length, 1, "「共享给群组」必须恰好挂在分享弹窗里一次");
   assert.equal(shares[0].bindings.notebookId, "currentNotebook.id");
-  // ⚠ 这一条原本写的是「群组弹窗改的是成员/授权面,只影响列表(它不在某本笔记本的
-  // 上下文里)」,只钉 `loadNotebookCollection()`。那个前提是**错的**:群组弹窗从工作区
+  // ⚠ 这一条原本写的是「群组页面改的是成员/授权面,只影响列表(它不在某本笔记本的
+  // 上下文里)」,只钉 `loadNotebookCollection()`。那个前提是**错的**:群组入口从工作区
   // 的顶栏也打得开,而退出群组 / 被移出 / 删组 / 撤销共享都可能把用户正站在里面的那本
   // 库从脚下抽走。只刷清单的话 `currentNotebook` 一动不动,人继续待在一本已经读不到的
   // 库里,整屏毫无反应,只能手动刷新(2026-08-20 用户反馈)。
-  assert.match(modals[0].bindings.onChanged ?? "", /refreshAfterAccessChange\(\)/);
+  assert.match(pages[0].bindings.onChanged ?? "", /refreshAfterAccessChange\(\)/);
 });
 
 // 「退出共享」早就有这套对账(退掉之后跳走),群组那条路直到 2026-08-20 才补上。两条
@@ -249,7 +251,7 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
 test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", () => {
   assert.deepEqual(
     importsFrom(page, "./group-api").map((item) => item.imported).sort(),
-    ["grantedViaLabel", "isGroupGranted", "partitionByGrant"],
+    ["GroupPageTab", "grantedViaLabel", "groupsHash", "isGroupGranted", "parseGroupsHash", "partitionByGrant"],
   );
   const lists = jsxElements(page, "NotebookList");
   assert.equal(lists.length, 2, "列表视图应当分成两段:自有/只读共享 与 群组");

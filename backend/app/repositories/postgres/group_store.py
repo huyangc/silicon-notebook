@@ -34,6 +34,9 @@ from app.repositories.ports import (
     GroupGrantAlreadyExists,
     GroupMembershipRequiredError,
     GroupNotFoundError,
+    GroupOwnerProtectedError,
+    GroupOwnerRequiredError,
+    GroupOwnerTransferTargetError,
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     NotebookManageRequiredError,
@@ -115,6 +118,7 @@ class GroupStore:
             "name": row["name"],
             "kind": row["kind"],
             "description": row["description"],
+            "owner_id": row["owner_id"],
             "my_role": my_role,
             "member_count": member_count,
             "created_at": iso_timestamp(row["created_at"]),
@@ -178,9 +182,9 @@ class GroupStore:
         with self.database.write() as connection:
             connection.execute(
                 "INSERT INTO groups "
-                "(id,name,kind,description,created_by,created_at,updated_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (group_id, name, kind, description, created_by, stamp, stamp),
+                "(id,name,kind,description,created_by,owner_id,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (group_id, name, kind, description, created_by, created_by, stamp, stamp),
             )
             connection.execute(
                 "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
@@ -291,7 +295,56 @@ class GroupStore:
             )
         return int(cursor.rowcount or 0) > 0
 
-    def delete_group(self, group_id: str) -> bool:
+    def transfer_group_owner(
+        self,
+        group_id: str,
+        *,
+        new_owner_id: str,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> dict:
+        """Transfer owner and promote the target under the group root lock."""
+        with self.database.write() as connection:
+            self._lock_group_on(connection, group_id)
+            row = connection.execute(
+                "SELECT owner_id FROM groups WHERE id=%s", (group_id,)
+            ).fetchone()
+            if not actor_is_system_admin and row["owner_id"] != actor_id:
+                raise GroupOwnerRequiredError(group_id)
+            if self._role_on(connection, group_id, new_owner_id) is None:
+                raise GroupOwnerTransferTargetError(new_owner_id)
+            connection.execute(
+                "UPDATE group_members SET role='admin' "
+                "WHERE group_id=%s AND user_id=%s",
+                (group_id, new_owner_id),
+            )
+            connection.execute(
+                "UPDATE groups SET owner_id=%s, updated_at=%s WHERE id=%s",
+                (new_owner_id, self.now(), group_id),
+            )
+            projected = connection.execute(
+                "SELECT * FROM groups WHERE id=%s", (group_id,)
+            ).fetchone()
+            member_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS c FROM group_members WHERE group_id=%s",
+                    (group_id,),
+                ).fetchone()["c"]
+            )
+            actor_role = self._role_on(connection, group_id, actor_id)
+            return self._group_row(
+                projected,
+                my_role=actor_role or "",
+                member_count=member_count,
+            )
+
+    def delete_group(
+        self,
+        group_id: str,
+        *,
+        actor_id: str | None = None,
+        actor_is_system_admin: bool = False,
+    ) -> bool:
         """删组 + 清掉指向本组的全部授权边,一个写事务(已定裁决 3)。
 
         ⚠ **锁必须在最前面**:`_lock_group_on` 先把 `groups` 行排他锁住,再清边、再删
@@ -316,6 +369,12 @@ class GroupStore:
                 self._lock_group_on(connection, group_id)
             except GroupNotFoundError:
                 return False
+            if actor_id is not None and not actor_is_system_admin:
+                owner = connection.execute(
+                    "SELECT owner_id FROM groups WHERE id=%s", (group_id,)
+                ).fetchone()["owner_id"]
+                if owner != actor_id:
+                    raise GroupOwnerRequiredError(group_id)
             connection.execute(
                 "DELETE FROM notebook_grants "
                 "WHERE principal_type IN ('group','group_admins') AND principal_id=%s",
@@ -413,6 +472,11 @@ class GroupStore:
         with self.database.write() as connection:
             self._lock_group_on(connection, group_id)
             current = self._role_on(connection, group_id, user_id)
+            owner = connection.execute(
+                "SELECT owner_id FROM groups WHERE id=%s", (group_id,)
+            ).fetchone()["owner_id"]
+            if user_id == owner and current is not None and role != "admin":
+                raise GroupOwnerProtectedError(group_id)
             if (
                 current == "admin"
                 and role != "admin"
@@ -439,6 +503,11 @@ class GroupStore:
             current = self._role_on(connection, group_id, user_id)
             if current is None:
                 return False
+            owner = connection.execute(
+                "SELECT owner_id FROM groups WHERE id=%s", (group_id,)
+            ).fetchone()["owner_id"]
+            if user_id == owner:
+                raise GroupOwnerProtectedError(group_id)
             if current == "admin" and self._admin_count_on(connection, group_id) <= 1:
                 raise LastGroupAdminError(group_id)
             connection.execute(
@@ -556,7 +625,14 @@ class GroupStore:
             )
         return int(cursor.rowcount or 0) > 0
 
-    def list_group_shared_notebooks(self, group_id: str) -> list[dict]:
+    def list_group_shared_notebooks(
+        self, group_id: str, *, include_admin_only: bool = True
+    ) -> list[dict]:
+        principal_clause = (
+            "ng.principal_type IN ('group','group_admins')"
+            if include_admin_only
+            else "ng.principal_type='group'"
+        )
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT ng.notebook_id AS notebook_id, ng.role AS role, "
@@ -564,7 +640,7 @@ class GroupStore:
                 "FROM notebook_grants ng "
                 "JOIN notebooks nb ON nb.id=ng.notebook_id "
                 "LEFT JOIN users u ON u.id=nb.created_by "
-                "WHERE ng.principal_type IN ('group','group_admins') "
+                f"WHERE {principal_clause} "
                 "AND ng.principal_id=%s AND nb.status != 'copying' "
                 'ORDER BY nb.created_at ASC, nb.id COLLATE "C" ASC, '
                 'ng.id COLLATE "C" ASC',

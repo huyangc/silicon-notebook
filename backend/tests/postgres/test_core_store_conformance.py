@@ -77,7 +77,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 33
+    assert PostgresMigrator(postgres_database).migrate() == 34
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -869,11 +869,14 @@ def test_group_store_crud_and_membership_mirror_the_sqlite_store(
     """群组 / 组成员的 PG 行为必须与 `test_group_routes.py` 的 SQLite 矩阵逐条相同。
 
     G1 只跑得到 SQLite 那一份,单靠它看不见「只改了一个后端」的分叉。这里钉的三件事
-    都是**分叉了不会报错、只会静默走样**的形态:建组是不是真的连组管理员一起落库、
-    最后一名组管理员保护是不是真的在同一事务里判、成员/群组清单的顺序会不会随
-    collation 漂。
+    都是**分叉了不会报错、只会静默走样**的形态:建组是否同时落下 owner 与管理员、
+    owner 保护和转让是否在同一事务里判、成员/群组清单的顺序会不会随 collation 漂。
     """
-    from app.repositories.ports import LastGroupAdminError
+    from app.repositories.ports import (
+        GroupOwnerProtectedError,
+        GroupOwnerRequiredError,
+        GroupOwnerTransferTargetError,
+    )
 
     groups = core_stores.groups
     owner = core_stores.identity.create_user("k00123456", "password-40")
@@ -885,6 +888,7 @@ def test_group_store_crud_and_membership_mirror_the_sqlite_store(
     )
     # 建组即建组管理员 —— 中间没有「有组无管理员」的窗口。
     assert created["my_role"] == "admin"
+    assert created["owner_id"] == owner.id
     assert created["member_count"] == 1
     assert created["kind"] == "project"
     assert created["description"] == "说明"
@@ -919,14 +923,33 @@ def test_group_store_crud_and_membership_mirror_the_sqlite_store(
     # 时,PG 的 collation 与 SQLite 的字节序会给出不同的成员顺序。
     assert [m["id"] for m in members] == sorted(m["id"] for m in members)
 
-    # 最后一名组管理员:降级与移除都必须被同一事务里的判定拦下。
-    with pytest.raises(LastGroupAdminError):
+    # 唯一 owner 与成员行在同一事务里受保护；即便另有管理员也不能绕过转让。
+    with pytest.raises(GroupOwnerProtectedError):
         groups.upsert_member(group_id, owner.id, role="member", added_by=owner.id)
-    with pytest.raises(LastGroupAdminError):
+    with pytest.raises(GroupOwnerProtectedError):
         groups.remove_member(group_id, owner.id)
     groups.upsert_member(group_id, member.id, role="admin", added_by=owner.id)
+
+    with pytest.raises(GroupOwnerRequiredError):
+        groups.transfer_group_owner(
+            group_id, new_owner_id=member.id, actor_id=member.id
+        )
+    with pytest.raises(GroupOwnerTransferTargetError):
+        groups.transfer_group_owner(
+            group_id, new_owner_id=outsider.id, actor_id=owner.id
+        )
+    transferred = groups.transfer_group_owner(
+        group_id, new_owner_id=member.id, actor_id=owner.id
+    )
+    assert transferred["owner_id"] == member.id
+    assert {row["id"]: row["role"] for row in groups.list_members(group_id)} == {
+        owner.id: "admin",
+        member.id: "admin",
+    }
     assert groups.remove_member(group_id, owner.id) is True
     assert groups.remove_member(group_id, owner.id) is False
+    with pytest.raises(GroupOwnerProtectedError):
+        groups.remove_member(group_id, member.id)
 
     assert groups.update_group(group_id, name="改名") is True
     assert groups.get_group(group_id)["name"] == "改名"
@@ -938,6 +961,11 @@ def test_group_store_crud_and_membership_mirror_the_sqlite_store(
     assert groups.find_user_by_username("k0012345") is None  # 精确匹配,不认前缀
     assert groups.find_user_by_id(owner.id)["username"] == "k00123456"
     assert groups.find_user_by_id("user-missing") is None
+
+    # 删除也在同一把群组根锁内复核 live owner，路由前置判断不是授权真源。
+    with pytest.raises(GroupOwnerRequiredError):
+        groups.delete_group(group_id, actor_id=owner.id)
+    assert groups.get_group(group_id)["owner_id"] == member.id
 
 
 def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
@@ -2100,7 +2128,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 33
+    assert PostgresMigrator(postgres_database).migrate() == 34
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2178,7 +2206,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 33
+    assert PostgresMigrator(postgres_database).migrate() == 34
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2243,7 +2271,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 33
+    assert PostgresMigrator(postgres_database).migrate() == 34
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

@@ -1890,7 +1890,7 @@
       },
       {
         "name": "groups",
-        "sql_sha256": "34b897a00a90b1166357474ad9bbf2439c874b1288ca2edb45e94da767067a63",
+        "sql_sha256": "04b023ba83b705aee23c92ee22506c7269890af8bff1ab658f100a7f2454f15d",
         "type": "table"
       },
       {
@@ -2229,6 +2229,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 55
+    "user_version": 56
   }
 }

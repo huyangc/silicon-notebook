@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=55, postgres_version=33, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=56, postgres_version=34, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -615,6 +615,9 @@ _TABLES = (
     # key (see migrations.py _migration_49) — so it is FK-consistent at any
     # rank above 15 and is placed last for reading order alongside its
     # sibling tables.
+    # SQLite v56 / PostgreSQL v34 adds groups.owner_id. It is plain identity
+    # text, joins no unique surface, and therefore needs no new transform or
+    # replication-key treatment here.
     _table("groups", ("id",), ReplicationKeyKind.DECLARED_PK, 80, "timestamptz"),
     _table(
         "group_members",

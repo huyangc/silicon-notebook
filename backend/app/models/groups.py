@@ -65,6 +65,14 @@ class GroupMemberRoleRequest(BaseModel):
     role: str = "member"
 
 
+class GroupOwnerTransferRequest(BaseModel):
+    """Transfer the one live group-owner authority to an existing member."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_owner_id: str
+
+
 class UserRef(BaseModel):
     """按用户名精确查到的用户。供组管理员加人;不含邮箱等任何额外身份信息。"""
 
@@ -83,6 +91,9 @@ class GroupSummary(BaseModel):
     name: str
     kind: str = "project"
     description: str = ""
+    # Immutable creation audit remains in storage as created_by. owner_id is
+    # the current, transferable authority and always names a group member.
+    owner_id: str
     # 请求者本人在该组里的角色;不是成员时为空串(`?scope=all` 的管理面会出现)。
     my_role: str = ""
     member_count: int = 0

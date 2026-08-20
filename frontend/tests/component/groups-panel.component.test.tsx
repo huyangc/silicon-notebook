@@ -59,6 +59,7 @@ const ADMIN_GROUP: GroupSummary = {
   name: "封装项目",
   kind: "project",
   description: "封装工艺相关的项目组",
+  owner_id: "u1",
   my_role: "admin",
   member_count: 2,
   created_at: "",

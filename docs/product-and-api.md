@@ -144,6 +144,11 @@ mechanism.
   sends it to the update endpoint is rejected rather than silently ignored,
   because a user who could relabel their own project group as a "department"
   would defeat the very gate that makes the label mean something.
+- Every group has exactly one live **owner** (`groups.owner_id`). The creator is
+  the initial owner and also an admin. Ownership may be transferred only to an
+  existing member; the target is atomically promoted to admin, while the former
+  owner remains an admin. The owner cannot be demoted, removed, or leave until
+  ownership is transferred. `created_by` remains immutable creation audit.
 - An **authorization edge** is `(notebook, principal, role)` with `principal ∈
   {user, group, group_admins, everyone}` and `role ∈ {viewer, admin}`. Every row
   in the table is a *live* grant — the decision predicate applies no status
@@ -241,26 +246,39 @@ cover self-service leave (leaving presupposes actually being a member), does not
 fabricate membership (`my_role` still reports empty truthfully), and relaxes no
 notebook-dimension read or write guard.
 
+### Group workspace
+
+The avatar-menu entry opens a collection-level page, not a modal. Its left rail
+selects a group; the workspace has Knowledge libraries, Members, Share requests,
+and Settings tabs. Every member can inspect and open the notebooks their current
+group role actually grants them; a `group_admins`-only library is not disclosed
+to a plain member. Owners and group admins can add notebooks they have management rights
+on, revoke group visibility, and optionally grant group admins content-management
+rights. Owner transfer and group deletion are separate confirmed settings actions.
+The page reuses the collection shell, typography, controls, spacing, colors, and
+responsive breakpoints; its group/tab selection is addressable in the URL hash.
+
 ### Endpoints
 
-Twenty-one endpoints in `group_routes.py` (including the seven P2 approval-flow
+Twenty-two endpoints in `group_routes.py` (including the seven P2 approval-flow
 endpoints), plus one read-only addition on the notebook router.
 
 | Endpoint | Who | Notes |
 | --- | --- | --- |
-| `POST /groups` | any user (`project`); admin (`department`/`domain`) | creator becomes group admin in the same transaction |
+| `POST /groups` | any user (`project`); admin (`department`/`domain`) | creator becomes owner and group admin in the same transaction |
 | `GET /groups` | any user | groups I am in; `?scope=all` is admin-only |
 | `GET /groups/{id}` | group member (admin bypass) | detail + member roster |
 | `PATCH /groups/{id}` | group admin | `name` / `description` only |
-| `DELETE /groups/{id}` | group admin | clears grants pointing at the group in the same write transaction |
+| `DELETE /groups/{id}` | group owner (admin recovery bypass) | clears grants pointing at the group in the same write transaction |
+| `POST /groups/{id}/transfer` | group owner (admin recovery bypass) | target must be a current member; promotes the target to admin and keeps the former owner as admin |
 | `PUT /groups/{id}/members/{user_id}` | group admin | add or change role in one call |
-| `DELETE /groups/{id}/members/{user_id}` | group admin | 409 if it would remove the last admin |
-| `DELETE /groups/{id}/membership` | member | self-service leave; 409 for the last admin |
+| `DELETE /groups/{id}/members/{user_id}` | group admin | 409 for the owner (transfer first) or if it would remove the last admin |
+| `DELETE /groups/{id}/membership` | member | self-service leave; the owner must transfer first; 409 for the last remaining admin |
 | `GET /users/resolve?username=` | any signed-in user | exact username lookup, returns id/username/display name only |
 | `GET /notebooks/{id}/grants` | `notebook:manage` | every edge on the library, all four principal types |
 | `POST /notebooks/{id}/grants` | `notebook:manage` **and** group admin | only `group` / `group_admins` principals |
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | notebook-side revocation |
-| `GET /groups/{id}/shared-notebooks` | group admin | "libraries shared with this group" |
+| `GET /groups/{id}/shared-notebooks` | group member (admin bypass) | member-visible inventory of libraries shared with this group |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | group admin | group-side revocation; removes every edge pointing at this group |
 | `POST /notebooks/{id}/share-requests` | `notebook:manage` **and** target-group **plain member** | **P2** submit a share request; a group's *admin* is refused with 403 — he shares directly via `POST /notebooks/{id}/grants` and never goes through this table. Idempotent (an in-flight request returns the existing pending row, not a 409) |
 | `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** the requester's own requests on this library (dialog echoes pending/rejected) |
@@ -2111,7 +2129,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = publishable as a public knowledge base, personal = default user notes); a `base` notebook only participates in another notebook's retrieval once that notebook explicitly mounts it (`GET`/`PUT /api/notebooks/{id}/bases`, candidates via `GET /api/notebooks/{id}/mountable`).
 - Reference-library mounts: `GET /api/notebooks/{id}/bases` → `MountedBase[]` (this notebook's mount edges, including greyed-out inactive ones); `PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → full replace, returns the updated `MountedBase[]` (400 if any id is outside the mountable candidate set; owner-only); `GET /api/notebooks/{id}/mountable` → `MountableNotebook[]` (mountable candidates: every public knowledge base, this notebook's own same-owner libraries, and — since group knowledge sharing — every library this notebook's owner can read, subject to the borrowed-mount gate; each candidate carries `origin ∈ {base, mine, shared}` so the picker can group them truthfully).
-- Groups and authorization edges: `POST`/`GET /api/groups`, `GET`/`PATCH`/`DELETE /api/groups/{id}`, `PUT`/`DELETE /api/groups/{id}/members/{user_id}`, `DELETE /api/groups/{id}/membership`, `GET /api/users/resolve?username=`, `GET`/`POST /api/notebooks/{id}/grants`, `DELETE /api/notebooks/{id}/grants/{grant_id}`, `GET`/`DELETE /api/groups/{id}/shared-notebooks[/{notebook_id}]`, plus the read-only `GET /api/notebooks/{id}/share`. Roles, visibility (404 not 403), the double condition on edge creation, asymmetric revocation and the registered limits are all in 群组知识共享 above.
+- Groups and authorization edges: `POST`/`GET /api/groups`, `GET`/`PATCH`/`DELETE /api/groups/{id}`, `POST /api/groups/{id}/transfer`, `PUT`/`DELETE /api/groups/{id}/members/{user_id}`, `DELETE /api/groups/{id}/membership`, `GET /api/users/resolve?username=`, `GET`/`POST /api/notebooks/{id}/grants`, `DELETE /api/notebooks/{id}/grants/{grant_id}`, `GET`/`DELETE /api/groups/{id}/shared-notebooks[/{notebook_id}]`, plus the read-only `GET /api/notebooks/{id}/share`. Roles, unique ownership, visibility (404 not 403), the double condition on edge creation, asymmetric revocation and the registered limits are all in Group workspace above.
 - Edge trust & curation: `GET /api/notebooks/{id}/edge-review-queue`, `POST /api/notebooks/{id}/relations/{rel_id}/review`
 - Governance / promotion: `POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`, `GET /api/promotion-queue`, `POST /api/promotion-queue/{candidate_id}/approve|reject`
 - Deep report (two-phase): `POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`; performs corpus-blind understanding and stops at `status=intent_ready` for manual confirmation, unless the request has `auto_generate=true` and the question is clear (no blocking ambiguity), in which case intent is also auto-confirmed — through the same deterministic freeze and no second LLM call — before planning starts. `GET /api/notebooks/{id}/reports/{rid}` exposes durable `understanding` plus status/progress. `POST .../reports/{rid}/intent` body `{resolved_question, answers:[{id,answer}]}` validates every required ambiguity and atomically claims the only transition into corpus-backed planning; it returns `{status:"planning"}`, while a duplicate/stale confirmation returns 409 without launching another job. Planning then stops at `outline_ready`, or proceeds directly to generation when the original request had `auto_generate=true` (the intent stage above already auto-confirmed under the same condition — no blocking ambiguity). The enriched `outline` carries per-section `intent_ids`, `intent_questions`, editable `sub_queries`, objective `coverage`, perspectives / tensions / sufficiency; `content_md` and live `section_status` remain on detail. `PATCH .../reports/{rid}/outline` body `{sections}` edits the draft only while `outline_ready`; it preserves the server intent catalog, accepts at most `REPORT_MAX_SECTIONS`, and accepts at most `REPORT_MAX_SUBQUERIES_PER_SECTION` nonblank retrieval directions per section. The browser mirrors both rails from `/api/system/config` and blocks over-limit submission; direct clients receive 422 instead of having excess sections or directions silently truncated. The endpoint also returns 422 if there is no valid section or a mandatory intent loses its final section binding. `POST .../reports/{rid}/generate` body `{depth?}` atomically launches **phase-2 generation** from either `outline_ready` or a `failed` report that still has an outline; all other states return 409. Retry preserves the confirmed intent/outline and clears prior generated artifacts in the claim transaction. Generated sections include backend-derived `evidence_level`/`grounded`; references can carry exact `source_id`/`element_id` metadata. Also `GET /reports` (list), `POST .../cancel`, `DELETE`, `POST .../reports/export` body `{report_ids}` → `reports.zip`. Section concurrency follows the report-specific database-protection rails above, not `KG_JOB_CONCURRENCY`.

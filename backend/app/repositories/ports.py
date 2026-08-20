@@ -3074,6 +3074,18 @@ class LastGroupAdminError(RuntimeError):
     """
 
 
+class GroupOwnerProtectedError(RuntimeError):
+    """An operation tried to demote, remove, or self-remove the current owner."""
+
+
+class GroupOwnerRequiredError(RuntimeError):
+    """A transaction-time recheck found that the actor is no longer owner."""
+
+
+class GroupOwnerTransferTargetError(RuntimeError):
+    """The requested new owner is not a current member of this group."""
+
+
 class GroupGrantAlreadyExists(RuntimeError):
     """同一本笔记本上,同一个主体已经有一条授权边(UNIQUE 冲突)。
 
@@ -3233,7 +3245,31 @@ class GroupStorePort(Protocol):
         name: "str | None" = None,
         description: "str | None" = None,
     ) -> bool: ...
-    def delete_group(self, group_id: str) -> bool: ...
+    def transfer_group_owner(
+        self,
+        group_id: str,
+        *,
+        new_owner_id: str,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> dict:
+        """Atomically transfer owner to an existing member and promote them.
+
+        ``created_by`` is never touched. The old owner remains an admin. The
+        transaction locks/rechecks the group root so concurrent transfer,
+        member removal, and role changes cannot leave an owner outside the
+        membership set.
+        """
+        ...
+    def delete_group(
+        self,
+        group_id: str,
+        *,
+        actor_id: "str | None" = None,
+        actor_is_system_admin: bool = False,
+    ) -> bool:
+        """Delete the aggregate, transactionally rechecking owner when supplied."""
+        ...
     def upsert_member(
         self, group_id: str, user_id: str, *, role: str, added_by: str
     ) -> str: ...
@@ -3266,7 +3302,9 @@ class GroupStorePort(Protocol):
         """
         ...
     def delete_grant(self, notebook_id: str, grant_id: str) -> bool: ...
-    def list_group_shared_notebooks(self, group_id: str) -> list[dict]: ...
+    def list_group_shared_notebooks(
+        self, group_id: str, *, include_admin_only: bool = True
+    ) -> list[dict]: ...
     def delete_group_grants_for_notebook(
         self, group_id: str, notebook_id: str
     ) -> int: ...

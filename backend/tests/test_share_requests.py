@@ -337,9 +337,15 @@ def test_another_managers_pending_request_is_a_conflict_not_a_silent_handover(
     demote = client.put(
         f"/api/groups/{group_id}/members/{boss_id}", json={"role": "member"}, headers=boss
     )
-    assert demote.status_code == 409  # 唯一组管理员不能自我降级,补一个再降
+    assert demote.status_code == 409  # owner 不能自我降级,先补成员并转让 owner
     third, third_id, _ = _new_user(client)
     _add_member(client, boss, group_id, third_id, role="admin")
+    transferred = client.post(
+        f"/api/groups/{group_id}/transfer",
+        json={"new_owner_id": third_id},
+        headers=boss,
+    )
+    assert transferred.status_code == 200, transferred.text
     assert client.put(
         f"/api/groups/{group_id}/members/{boss_id}", json={"role": "member"}, headers=boss
     ).status_code == 200
@@ -1078,10 +1084,16 @@ def test_a_demoted_admin_cannot_decide_in_the_toctou_window(
     boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
     request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
 
-    # 再加一名组管理员,好让 boss 可以被合法降级(最后一名组管理员保护会拦住降级)。
+    # 再加一名组管理员并把 owner 转给他，旧 owner 才能被合法降级。
     deputy, deputy_id, _ = _new_user(client)
     _add_member(client, boss, group_id, deputy_id, role="admin")
     boss_id = client.get("/api/me", headers=boss).json()["id"]
+    transferred = client.post(
+        f"/api/groups/{group_id}/transfer",
+        json={"new_owner_id": deputy_id},
+        headers=boss,
+    )
+    assert transferred.status_code == 200, transferred.text
 
     store = _app_group_store()
     original = store.user_group_role

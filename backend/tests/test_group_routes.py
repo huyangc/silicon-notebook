@@ -8,7 +8,7 @@ T2 已经让 `notebook_grants` 一有行、读权与挂载有效性就自动生�
 * 谁能建哪一类组(项目人人可建;部门/领域仅系统管理员);
 * 建组即建组管理员——中间不存在一个「有组无管理员」的窗口;
 * 群组的可见性口径是 **404**(非成员与不存在同一形态,不泄露存在性);
-* 最后一名组管理员不可被降级/移除/退出(409),判定与写入同事务;
+* 唯一 owner 不可被降级/移除/退出，转让后原 owner 保留管理员;
 * 授权边创建的**双重条件**——对库有管理权 **且** 是目标组的组管理员,缺哪一半各有
   各自的响应;
 * 撤销的**不对称**——笔记本维度与群组维度两个入口各只要一半权限;
@@ -145,6 +145,7 @@ def test_creator_becomes_group_admin_in_the_same_write(tmp_path, monkeypatch):
     created = client.post("/api/groups", json={"name": "项目"}, headers=owner).json()
 
     assert created["my_role"] == "admin"
+    assert created["owner_id"] == owner_id
     assert created["member_count"] == 1
     assert [(m["id"], m["role"]) for m in created["members"]] == [(owner_id, "admin")]
     assert created["members"][0]["username"] == owner_name
@@ -284,7 +285,9 @@ def test_unknown_group_role_is_rejected(tmp_path, monkeypatch):
     ).status_code == 422
 
 
-def test_the_last_group_admin_cannot_be_demoted_removed_or_leave(tmp_path, monkeypatch):
+def test_group_owner_must_transfer_before_leaving_and_old_owner_stays_admin(
+    tmp_path, monkeypatch
+):
     client = _client(tmp_path, monkeypatch)
     owner, owner_id, _ = _new_user(client)
     group_id = _make_group(client, owner)
@@ -307,14 +310,43 @@ def test_the_last_group_admin_cannot_be_demoted_removed_or_leave(tmp_path, monke
         assert response.status_code == 409, response.text
         assert response.headers.get("X-User-Message") == "1"
 
-    # 有第二名管理员之后,原管理员才能退出。
+    transferred = client.post(
+        f"/api/groups/{group_id}/transfer",
+        json={"new_owner_id": member_id},
+        headers=owner,
+    )
+    assert transferred.status_code == 200, transferred.text
+    assert transferred.json()["owner_id"] == member_id
+    roles = {item["id"]: item["role"] for item in transferred.json()["members"]}
+    assert roles == {owner_id: "admin", member_id: "admin"}
+
+    # 转让后原 owner 已是普通管理员，可以退出。
+    assert (
+        client.delete(f"/api/groups/{group_id}/membership", headers=owner).status_code
+        == 204
+    )
+    assert client.get(f"/api/groups/{group_id}", headers=owner).status_code == 404
+
+
+def test_only_owner_can_transfer_or_delete_group(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    deputy, deputy_id, _ = _new_user(client)
     client.put(
-        f"/api/groups/{group_id}/members/{member_id}",
+        f"/api/groups/{group_id}/members/{deputy_id}",
         json={"role": "admin"},
         headers=owner,
     )
-    assert client.delete(f"/api/groups/{group_id}/membership", headers=owner).status_code == 204
-    assert client.get(f"/api/groups/{group_id}", headers=owner).status_code == 404
+
+    denied = client.post(
+        f"/api/groups/{group_id}/transfer",
+        json={"new_owner_id": deputy_id},
+        headers=deputy,
+    )
+    assert denied.status_code == 403
+    assert client.delete(f"/api/groups/{group_id}", headers=deputy).status_code == 403
+    assert client.get(f"/api/groups/{group_id}", headers=owner).json()["owner_id"] == owner_id
 
 
 def test_a_plain_member_can_always_leave(tmp_path, monkeypatch):
@@ -332,14 +364,14 @@ def test_a_plain_member_can_always_leave(tmp_path, monkeypatch):
     assert client.get(f"/api/groups/{group_id}", headers=owner).json()["member_count"] == 1
 
 
-def test_concurrent_last_admin_demotions_cannot_both_win(repo):
-    """判定与写入必须在同一事务里 —— 两次并发降级不可能都通过。
+def test_store_owner_protection_is_inside_the_member_write_transaction(repo):
+    """直接调用 store 也不能把 owner 降级或移出。
 
     走 store 而不是 HTTP:要观察的是事务边界,不是路由。SQLite 侧由进程级写锁串行,
     所以这条在真实并发下也成立(PG 侧另在同一事务里锁 `groups` 行,由 G3 conformance
     覆盖)。
     """
-    from app.repositories.ports import LastGroupAdminError
+    from app.repositories.ports import GroupOwnerProtectedError, GroupOwnerRequiredError
 
     store = repo._runtime.groups
     with repo._write() as db:
@@ -355,16 +387,24 @@ def test_concurrent_last_admin_demotions_cannot_both_win(repo):
     )
     store.upsert_member(group["id"], "g-admin-b", role="admin", added_by="g-admin-a")
 
-    # 两名管理员:先降一个成功,再降另一个必须失败。
+    # 非 owner 管理员可降级；owner 即使还有另一名管理员也必须先转让。
     assert store.upsert_member(
         group["id"], "g-admin-b", role="member", added_by="g-admin-a"
     ) == "updated"
-    with pytest.raises(LastGroupAdminError):
+    with pytest.raises(GroupOwnerProtectedError):
         store.upsert_member(
             group["id"], "g-admin-a", role="member", added_by="g-admin-a"
         )
-    with pytest.raises(LastGroupAdminError):
+    with pytest.raises(GroupOwnerProtectedError):
         store.remove_member(group["id"], "g-admin-a")
+
+    store.transfer_group_owner(
+        group["id"], new_owner_id="g-admin-b", actor_id="g-admin-a"
+    )
+    # 路由鉴权之后若恰好完成一次转让，旧 owner 也不能穿过事务删除群组。
+    with pytest.raises(GroupOwnerRequiredError):
+        store.delete_group(group["id"], actor_id="g-admin-a")
+    assert store.get_group(group["id"])["owner_id"] == "g-admin-b"
 
 
 # ------------------------------------------------------------- 用户名解析
@@ -596,6 +636,34 @@ def test_a_grant_id_from_another_notebook_cannot_be_deleted(tmp_path, monkeypatc
     assert len(
         client.get(f"/api/notebooks/{victim_notebook}/grants", headers=victim).json()
     ) == 1
+
+
+def test_plain_member_inventory_excludes_group_admin_only_notebooks(
+    tmp_path, monkeypatch
+):
+    """成员清单只能披露调用者实际有读权的 notebook。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    admin, admin_id, _ = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    for user_id, role in ((admin_id, "admin"), (member_id, "member")):
+        client.put(
+            f"/api/groups/{group_id}/members/{user_id}",
+            json={"role": role},
+            headers=owner,
+        )
+    _grant(client, owner, notebook_id, group_id, "group_admins", "admin")
+
+    admin_inventory = client.get(
+        f"/api/groups/{group_id}/shared-notebooks", headers=admin
+    )
+    assert [item["notebook_id"] for item in admin_inventory.json()] == [notebook_id]
+    assert client.get(
+        f"/api/groups/{group_id}/shared-notebooks", headers=member
+    ).json() == []
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 404
 
 
 def test_deleting_a_group_clears_its_grants_in_the_same_write(tmp_path, monkeypatch, repo):
