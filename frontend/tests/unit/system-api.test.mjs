@@ -98,9 +98,10 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
     assert.equal(config.source_image_max_bytes, null);
     assert.equal(config.source_image_max_per_source, null);
     assert.equal(config.source_images_enabled, true);
-    // user_search_profile_enabled 刻意不下发,模拟旧后端——与上面几个字段相反的
-    // 方向:缺失按 true(部署默认值本身就是开启,不是这项特性不存在)。
-    assert.equal(config.user_search_profile_enabled, true);
+    // user_search_profile_enabled 刻意不下发,模拟旧后端——缺失按 false
+    // (codex #535 R1 P2:字段与 PATCH /me/search-profile 端点同批新增,缺字段
+    // = 旧后端没有那个路由,按 true 渲染入口只会让保存打出裸 404)。
+    assert.equal(config.user_search_profile_enabled, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

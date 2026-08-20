@@ -466,3 +466,12 @@ def test_repeated_job_write_of_the_same_value_skips_the_update(
     assert row["updated_at"] == "2026-08-20T00:00:00"
     stored = parse_search_profile(row["search_profile_json"])
     assert stored["fields"]["answer_language"]["value"] == "zh"
+
+
+def test_fullwidth_latin_and_halfwidth_katakana_are_not_chinese():
+    """codex #535 R1 P2:0xFF00-0xFFEF 整块含全角拉丁与半角片假名——OCR 出的
+    「ＨＥＬＬＯ」/半角片假名问题不得判成 zh;中文常用全角标点仍计入。"""
+    assert classify_ask_language("ＨＥＬＬＯ ＷＯＲＬＤ ＴＥＳＴ") != "zh"
+    assert classify_ask_language("ｱｲｳｴｵ ｶｷｸｹｺ ｻｼｽｾｿ") != "zh"
+    # 全角标点混在中文正文里照常计入 CJK
+    assert classify_ask_language("这个库支持哪些格式？请列出全部！") == "zh"
