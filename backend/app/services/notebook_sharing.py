@@ -10,6 +10,7 @@ from typing import Callable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
 from app.repositories.ports import (
+    AgentObservationStorePort,
     AgentProfileStorePort,
     NotebookTooLargeToCopyError,
     RepositoryDatabasePort,
@@ -768,6 +769,7 @@ class NotebookSharingService:
         database: RepositoryDatabasePort,
         copy_stats: Callable[[str], dict],
         profiles: "AgentProfileStorePort | None" = None,
+        observations: "AgentObservationStorePort | None" = None,
     ) -> None:
         self._store = store
         self._copies = copies
@@ -781,6 +783,12 @@ class NotebookSharingService:
         # wired (older composition roots / test doubles): membership removal
         # must never fail because of it.
         self._profiles = profiles
+        # codex #535 R6 P2 (Agentic Memory P3): the member's Agent observation
+        # queue for this notebook follows the same blank-slate contract as the
+        # overlay blocks above — rows are derived entirely from that person's
+        # own Agents' use of this library, so removal clears them too. ``None``
+        # = not wired, same fail-open posture as ``profiles``.
+        self._observations = observations
 
     # ---------------------------------------------------------------- share
     def share_notebook(self, notebook_id: str) -> dict:
@@ -1027,8 +1035,24 @@ class NotebookSharingService:
         (pre-check) or fails its settle and wipes what it wrote (post-guard);
         the block delete below then covers the fully-settled-before-removal
         case."""
-        if self._profiles is None or not user_id:
+        if not user_id:
             return
+        if self._profiles is not None:
+            self._clear_profile_halves(notebook_id, user_id)
+        # codex #535 R6 P2:观察行同批清空——它们是这个人自己的 Agent 在本库
+        # 留下的使用痕迹,移出后残留会经 GET .../agent-observations 立即复活,
+        # 还会喂进重新加入后的第一次覆盖层巡固,破坏「空白起点」契约。座位与
+        # profiles 各自独立判 None(旧组合根/替身可能只接了一半)。
+        if self._observations is not None:
+            try:
+                self._observations.clear_observations(notebook_id, user_id)
+            except Exception:  # noqa: BLE001 — access change already committed
+                _log.exception(
+                    "failed to clear agent observations for notebook %s",
+                    notebook_id,
+                )
+
+    def _clear_profile_halves(self, notebook_id: str, user_id: str) -> None:
         try:
             self._profiles.clear_job_row(notebook_id, user_id)
         except Exception:  # noqa: BLE001 — access change already committed

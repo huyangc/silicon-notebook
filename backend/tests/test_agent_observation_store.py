@@ -433,3 +433,31 @@ def test_idempotency_window_is_bounded_by_ring_retention(harness):
     )
     assert retry_dup is False
     assert retry_id != first_id
+
+
+def test_member_removal_clears_that_members_observations(harness):
+    """codex #535 R6 P2:成员移出走覆盖层同一条空白起点契约——remove_member
+    同批清空该成员本库观察行,别人的行与别库的行不动。"""
+    from app.services.notebook_sharing import NotebookSharingService
+
+    store = harness.store
+    store.append_observation("nb-1", "user-a", "agent-1",
+                             text="mine", client_request_id="m-1")
+    store.append_observation("nb-1", "user-b", "agent-1",
+                             text="theirs", client_request_id="t-1")
+    store.append_observation("nb-2", "user-a", "agent-1",
+                             text="other nb", client_request_id="o-1")
+
+    class _SharingStore:
+        def remove_member(self, notebook_id, user_id):
+            return None
+
+    service = NotebookSharingService.__new__(NotebookSharingService)
+    service._store = _SharingStore()
+    service._profiles = None
+    service._observations = store
+    service.remove_member("nb-1", "user-a")
+
+    assert store.list_observations("nb-1", "user-a", limit=10) == []
+    assert len(store.list_observations("nb-1", "user-b", limit=10)) == 1
+    assert len(store.list_observations("nb-2", "user-a", limit=10)) == 1
