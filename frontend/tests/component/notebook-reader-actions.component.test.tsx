@@ -262,6 +262,25 @@ test("顶栏徽章:不再把长说明塞进顶栏(用户明确不需要「怎么
   );
 });
 
+// 徽章按 `.reader-badge-chip` 的 max-width 有界,长组名(上限 120 字符,且
+// `grantedViaLabel` 会把多个组名串起来)会被省略号截掉。完整文本必须同时在 tooltip 里,
+// 否则读者看得见「只读 · 来自群组《长长长…」却看不出到底是哪个组(codex #529 R1 P2)。
+test("顶栏徽章:tooltip 同时带完整徽章文本与身份说明", () => {
+  const long = "封装工艺与良率改善跨部门协同项目组第二阶段";
+  render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: [{ group_id: "g9", group_name: long, kind: "project" }] })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+    />,
+  );
+
+  const chip = screen.getByText(`只读 · 来自群组《${long}》`);
+  const title = chip.getAttribute("title") ?? "";
+  expect(title).toContain(long);
+  expect(title).toContain("组管理员");
+});
+
 test("顶栏徽章:链接共享的「退出共享」是这一行唯一的动作,必须还在", () => {
   const { container } = render(
     <ReaderNotebookBadge notebook={notebook({})} leaveBusy={false} onLeave={vi.fn()} />,

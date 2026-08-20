@@ -6198,7 +6198,11 @@ export default function Home() {
     if (!openId || remaining.some((n) => n.id === openId)) return;
     const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
     if (firstOwned) {
-      await openNotebook(firstOwned.id, "none");
+      // ⚠ `openNotebook` 返回 false = 这次切换在飞行中被顶替(用户自己点去了别处,
+      // epoch guard 弃掉了结果)。那时**不能**再写 history:界面停在用户新选的库上,
+      // 而地址栏指向 firstOwned,两者从此对不上(codex #529 R1 P2)。同文件的
+      // `openNotebookMemory` 早就是这个写法,这里对齐它。
+      if (!(await openNotebook(firstOwned.id, "none"))) return;
       window.history.replaceState(null, "", notebookHash(firstOwned.id));
     } else {
       showCollection();

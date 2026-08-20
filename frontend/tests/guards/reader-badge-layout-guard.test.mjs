@@ -47,6 +47,16 @@ test(".reader-badge-title 必须可压缩并省略,而不是把徽章挤走", ()
   assert.match(rule, /white-space:\s*nowrap/);
 });
 
+test(".reader-badge-chip 自己也必须有界(否则长组名把标题重新压成 0)", () => {
+  // 组名上限 120 字符,`grantedViaLabel` 还会把多个组名串起来。一个不缩不换行的徽章
+  // 能吃掉整条 `.workspace-title`(max-width: min(48vw, 720px)),标题于是又被压到 0 宽
+  // ——正是这次改动要根除的那个 bug 换个入口回来(codex #529 R1 P2)。
+  const rule = block(".reader-badge-chip");
+  assert.match(rule, /max-width:\s*\d/, "徽章没有上限,长组名可以吃满整行");
+  assert.match(rule, /text-overflow:\s*ellipsis/, "超出必须省略,不能撑破这一行");
+  assert.match(rule, /min-width:\s*0/);
+});
+
 test(".workspace-header 仍是固定高度——上面两条的前提没变", () => {
   // 若哪天它改成 auto,换行就不再是灾难,这两条守卫也该跟着重估(而不是默默失去意义)。
   assert.match(block(".workspace-header"), /height:\s*72px/);
