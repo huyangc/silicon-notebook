@@ -170,9 +170,13 @@ export function summarizeShareUpdate(
  *  界面必须直接不给发布动作、并说明当前链接已经包含了这条回答——给了按钮只会换回一句
  *  「这条会话已有变化，请刷新后重新分享」，而实际上什么都没变过，那句话是误导。
  *
- *  水位 id 在 turns 里解析不到（水位答案被删）时**不**判 ahead：后端那条回归检查同样
- *  会跳过并照常推进（见该方法的 "a current boundary that no longer resolves ... skips
- *  the check and advances"），此时禁用发布会拦掉一次本来能成的分享。 */
+ *  水位 id 在 turns 里解析不到时**不**判 ahead，但也**不能**判「未越界」——那是
+ *  `watermarkUnknown`，第三种状态（codex #530 R2 P1）。两种成因：水位答案被删（那时后端
+ *  的回归检查同样会跳过并照常推进，见该方法的 "a current boundary that no longer
+ *  resolves ... skips the check and advances"，所以发布必须保持可用），或者**它比我们
+ *  读到的 turns 更新**——另一个标签页在我们读完会话详情之后把分享推进到了新一轮。后者
+ *  下断言「没越界」就是在承诺一个更窄的范围，而复制按钮当场可用。发布照旧允许（服务端
+ *  要么钉住、要么 409 让用户刷新），但范围**不可**声称已知。 */
 export type ShareBoundary = {
   /** 边界答案在权威 turn 顺序里的下标；-1 = 未指定边界，或指定了但解析不出。 */
   index: number;
@@ -184,7 +188,26 @@ export type ShareBoundary = {
   watermarkAhead: boolean;
   /** `watermarkAhead` 时，公开页比这条边界多包含的轮数。 */
   aheadCount: number;
+  /** 水位停在边界**之前**：这条回答目前**还不在**链接里，要按「更新到这一条」才进去。
+   *  界面必须点明这一点——链接与复制按钮就在文案下面，照着「已包含」去复制会发出一份
+   *  缺了这条回答的快照（codex #530 R2 P2）。 */
+  watermarkBehind: boolean;
+  /** 水位 id 非空但不在 turns 里：链接的真实范围**未知**（见上面的 doc）。 */
+  watermarkUnknown: boolean;
 };
+
+/** 边界模式下「当前链接相对这条回答处在什么位置」——文案分支的唯一判据。抽成纯函数是
+ *  因为它决定的是一句会被照着复制链接的话，而不是样式（codex #530 R1/R2 三条都出在这里）。 */
+export type ShareScopeState = "unshared" | "at" | "behind" | "ahead" | "unknown";
+
+export function shareScopeState(boundary: ShareBoundary, shared: boolean): ShareScopeState {
+  if (!shared) return "unshared";
+  // 边界本身解析不出时，「这条回答在不在链接里」同样答不了。
+  if (boundary.unresolved || boundary.watermarkUnknown) return "unknown";
+  if (boundary.watermarkAhead) return "ahead";
+  if (boundary.watermarkBehind) return "behind";
+  return "at";
+}
 
 export function resolveShareBoundary(
   turns: ConversationDetail["turns"],
@@ -192,18 +215,37 @@ export function resolveShareBoundary(
   sharedThroughId: string,
 ): ShareBoundary {
   const id = String(throughAnswerId || "").trim();
+  const markId = String(sharedThroughId || "").trim();
   if (!id) {
-    return { index: -1, turns, unresolved: false, watermarkAhead: false, aheadCount: 0 };
+    return {
+      index: -1,
+      turns,
+      unresolved: false,
+      watermarkAhead: false,
+      aheadCount: 0,
+      watermarkBehind: false,
+      watermarkUnknown: false,
+    };
   }
   const index = turns.findIndex((turn) => turn.answer_id === id);
   if (index < 0) {
     // 详情没加载出来，或这条答案已不在会话里。披露一个数都算不出，所以给空批次让
     // 组件走 countsError 兜底文案；**仍可发布**——expected_through_id 就是用户点的
     // 那条 id，不依赖 turns，服务端要么钉在它上面、要么 409。
-    return { index: -1, turns: [], unresolved: true, watermarkAhead: false, aheadCount: 0 };
+    return {
+      index: -1,
+      turns: [],
+      unresolved: true,
+      watermarkAhead: false,
+      aheadCount: 0,
+      watermarkBehind: false,
+      watermarkUnknown: false,
+    };
   }
-  const markId = String(sharedThroughId || "").trim();
   const markIndex = markId ? turns.findIndex((turn) => turn.answer_id === markId) : -1;
+  // 水位 id 非空却不在 turns 里 → 范围未知，**既不是** ahead 也不是 behind（三值，
+  // 不是「不是 ahead 就等于没越界」的二值，codex #530 R2 P1）。
+  const unknown = Boolean(markId) && markIndex < 0;
   const ahead = markIndex > index;
   return {
     index,
@@ -211,5 +253,7 @@ export function resolveShareBoundary(
     unresolved: false,
     watermarkAhead: ahead,
     aheadCount: ahead ? markIndex - index : 0,
+    watermarkBehind: markIndex >= 0 && markIndex < index,
+    watermarkUnknown: unknown,
   };
 }

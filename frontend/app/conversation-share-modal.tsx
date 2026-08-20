@@ -32,6 +32,7 @@ import {
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
   resolveShareBoundary,
+  shareScopeState,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   type ShareDisclosure,
@@ -59,6 +60,25 @@ async function copyToClipboard(text: string): Promise<void> {
 }
 
 type BusyAction = "" | "share" | "update" | "revoke" | "copy";
+
+/** 会话列表那个入口的既有文案，一个字未动。 */
+const UNBOUNDED_SCOPE_COPY =
+  "发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次「更新到最新」。撤销即刻失效。";
+
+/** 边界模式（分享到某条回答为止）按 `ShareScopeState` 分五句。每一句描述的都是**当前**
+ *  链接里有什么——只有 `unshared` 那句才是对「按下去会发布什么」的承诺，因为那时还没有
+ *  链接可复制。三条评审意见（#530 R1 P1、R2 P1、R2 P2）全部出在把这五种情形写成一句。 */
+const BOUNDED_SCOPE_COPY: Record<ReturnType<typeof shareScopeState>, string> = {
+  unshared:
+    "发布成一条免登录的只读快照，只包含这条回答以及它之前的问答。之后的问答不会出现在链接里。撤销即刻失效。",
+  at: "链接的内容就到这条回答为止，它之后的问答不在里面。撤销即刻失效。",
+  behind:
+    "当前链接停在更早的一轮，还不包含这条回答——现在复制发出去的是不含它的快照。点「更新到这一条」才会把它纳入。撤销即刻失效。",
+  ahead:
+    "这条会话此前已经分享过，链接覆盖的范围比你点的这条回答更靠后。公开范围只能往后推、不能收回，所以它不会被缩小到这一条。撤销即刻失效。",
+  unknown:
+    "无法确认当前链接的范围——它可能已在别处被推进到这里看不到的轮次。现在复制发出去的内容可能多于这条回答，请刷新后重新查看。",
+};
 
 export function ConversationShareModal({
   notebookId,
@@ -161,14 +181,19 @@ export function ConversationShareModal({
     [turns, throughAnswerId, watermarkId, shared],
   );
   const scopedTurns = boundary.turns;
+  // 当前链接相对这条回答处在什么位置——所有范围文案的唯一判据（五值，不是「越没越过」
+  // 的二值；codex #530 R1/R2 三条都出在把它当二值上）。
+  const scope = shareScopeState(boundary, shared);
   // 边界解析不出（详情没加载出来,或这条答案已不在会话里）→ 一个数都算不出,与详情加载
   // 失败同一条退化路径:不带数字、但**附图与个人记忆两个面都提**的兜底文案。仍可发布——
-  // expected 是用户点的那条 id,不依赖 turns。
-  const countsUnavailable = countsError || boundary.unresolved;
+  // expected 是用户点的那条 id,不依赖 turns。水位指向本地看不到的答案（unknown）同理:
+  // 链接的真实范围我们答不上来,给数字就是编（codex #530 R2 P1）。
+  const countsUnavailable = countsError || boundary.unresolved || boundary.watermarkUnknown;
   // ⚠ 水位已越过边界时,当前链接实际公开的是「整条到水位为止」而不是用户点的那一段,所以
   // 披露必须按**完整** turns 统计。按截断批次算会**少报**公开页真实包含的附图/记忆条数——
-  // 披露描述的是「链接里有什么」,不是「用户点了哪一条」。
-  const disclosureTurns = boundary.watermarkAhead ? turns : scopedTurns;
+  // 披露描述的是「链接里有什么」,不是「用户点了哪一条」。unknown 同走这一支(它至少是
+  // 我们已知的上界),数字本身已由 countsUnavailable 压掉。
+  const disclosureTurns = (boundary.watermarkAhead || boundary.watermarkUnknown) ? turns : scopedTurns;
   const disclosure = useMemo(
     () => summarizeShareDisclosure(disclosureTurns, shared ? watermarkId : "", watermark),
     [disclosureTurns, watermarkId, watermark, shared],
@@ -279,14 +304,11 @@ export function ConversationShareModal({
               {error && <p className="password-change-status error">{error}</p>}
               {notice && <p className="tool-hint" style={{ margin: 0 }}>{notice}</p>}
 
+              {/* ⚠ 这句话排在链接框与复制按钮**之上**，所以它必须描述链接**当前**的内容，
+                  而不是「按下按钮会发布什么」——用户读完这句就复制发出去了，纠正写在下面
+                  没用（codex #530 R1 P1 / R2 P2）。五个状态各一句，不共用。 */}
               <p className="tool-hint" style={{ margin: 0 }}>
-                {!bounded
-                  ? "发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次「更新到最新」。撤销即刻失效。"
-                  : boundary.watermarkAhead
-                    // 这一支绝不能承诺「只包含这条回答之前」——链接的范围由此前的分享
-                    // 决定，比这条回答更靠后，而复制按钮就在这句话下面（codex #530 R1 P1）。
-                    ? "这条会话此前已经分享过，链接覆盖的范围比你点的这条回答更靠后。公开范围只能往后推、不能收回，所以它不会被缩小到这一条。撤销即刻失效。"
-                    : "发布成一条免登录的只读快照，只包含这条回答以及它之前的问答。之后的问答不会出现在链接里。撤销即刻失效。"}
+                {bounded ? BOUNDED_SCOPE_COPY[scope] : UNBOUNDED_SCOPE_COPY}
               </p>
 
               {shared ? (<>

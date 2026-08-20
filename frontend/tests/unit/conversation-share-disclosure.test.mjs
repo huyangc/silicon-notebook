@@ -6,6 +6,7 @@ import {
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
   resolveShareBoundary,
+  shareScopeState,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   withinWatermark,
@@ -273,4 +274,52 @@ test("兜底文案两条各自独立：边界模式那句写的是「更新到�
     assert.ok(line.includes("附图"));
     assert.ok(line.includes("个人记忆"));
   }
+});
+
+
+// --- codex #530 R2：水位相对边界是**五值**不是二值 --------------------------
+//
+// 「不是 ahead」曾被当成「链接就到这条为止」，于是两种情形被写成了假话：水位停在更早
+// 一轮（这条回答还没进链接），以及水位指向本地 turns 里没有的答案（另一个标签页在我们
+// 读完详情之后推进了分享）。两种情形下链接与复制按钮都当场可用。
+
+test("水位停在边界之前 → watermarkBehind（这条回答还没进链接）", () => {
+  const turns = [
+    turnId("a1", "2026-01-01T00:00:00Z"),
+    turnId("a2", "2026-01-01T00:01:00Z"),
+    turnId("a3", "2026-01-01T00:02:00Z"),
+  ];
+  const boundary = resolveShareBoundary(turns, "a3", "a1");
+  assert.equal(boundary.watermarkBehind, true);
+  assert.equal(boundary.watermarkAhead, false);
+  assert.equal(boundary.watermarkUnknown, false);
+  assert.equal(shareScopeState(boundary, true), "behind");
+});
+
+test("水位指向 turns 里没有的答案 → watermarkUnknown，绝不当成「没越界」", () => {
+  // 成因之一：另一个标签页在我们读完会话详情之后把分享推进到了新的一轮。
+  const turns = [turnId("a1", "2026-01-01T00:00:00Z"), turnId("a2", "2026-01-01T00:01:00Z")];
+  const boundary = resolveShareBoundary(turns, "a1", "a3-not-loaded-here");
+  assert.equal(boundary.watermarkUnknown, true);
+  assert.equal(boundary.watermarkAhead, false);
+  assert.equal(boundary.watermarkBehind, false);
+  assert.equal(shareScopeState(boundary, true), "unknown");
+  // 发布仍不受影响：expected 是用户点的那条 id，服务端要么钉住、要么 409。
+  assert.deepEqual(boundary.turns.map((t) => t.answer_id), ["a1"]);
+});
+
+test("shareScopeState 五值齐全且互斥", () => {
+  const turns = [
+    turnId("a1", "2026-01-01T00:00:00Z"),
+    turnId("a2", "2026-01-01T00:01:00Z"),
+    turnId("a3", "2026-01-01T00:02:00Z"),
+  ];
+  // 未分享时不看水位。
+  assert.equal(shareScopeState(resolveShareBoundary(turns, "a2", ""), false), "unshared");
+  assert.equal(shareScopeState(resolveShareBoundary(turns, "a2", "a2"), true), "at");
+  assert.equal(shareScopeState(resolveShareBoundary(turns, "a2", "a1"), true), "behind");
+  assert.equal(shareScopeState(resolveShareBoundary(turns, "a2", "a3"), true), "ahead");
+  assert.equal(shareScopeState(resolveShareBoundary(turns, "a2", "zzz"), true), "unknown");
+  // 边界本身解析不出时，「这条回答在不在链接里」同样答不了。
+  assert.equal(shareScopeState(resolveShareBoundary(turns, "zzz", "a1"), true), "unknown");
 });
