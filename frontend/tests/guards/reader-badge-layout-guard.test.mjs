@@ -58,8 +58,22 @@ test(".reader-badge-chip 自己也必须有界(否则长组名把标题重新压
 });
 
 test(".workspace-header 仍是固定高度——上面两条的前提没变", () => {
-  // 若哪天它改成 auto,换行就不再是灾难,这两条守卫也该跟着重估(而不是默默失去意义)。
+  // 「恒不换行」成立**只因为**它是固定 72px。哪天改成 auto,换行就不再是灾难,上面两条
+  // 守卫也该跟着重估(而不是默默失去意义)。
   assert.match(block(".workspace-header"), /height:\s*72px/);
+});
+
+test("窄屏(前提不成立处)必须放开换行,否则标题被挤没", () => {
+  // ≤760px 时顶栏已经是 `height: auto`,前提没了,恒单行就只剩代价:320px 上
+  // 「返回主页」+ 徽章 +「退出共享」实测只给标题留 43px(26px 字号连一个半字都放不下),
+  // 放开换行后标题独占整行 196px(codex #529 R6 P2)。
+  const narrow = css.slice(css.lastIndexOf("@media (max-width: 760px) {"));
+  assert.match(narrow, /\.workspace-header\s*\{[^}]*height:\s*auto/,
+    "窄屏顶栏不再是 auto 高度——下面这条放开换行的前提也就变了,需要重估");
+  assert.match(narrow, /\.reader-badge-row\s*\{[^}]*flex-wrap:\s*wrap/,
+    "窄屏没有放开换行,标题会被徽章与动作挤没");
+  assert.match(narrow, /\.reader-badge-title\s*\{[^}]*flex-basis:\s*100%/,
+    "标题没有独占一行,换行也救不了它");
 });
 
 test("空转保护:这三条选择器确实都在被检查的那份 CSS 里", () => {

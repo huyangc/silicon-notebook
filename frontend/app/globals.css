@@ -7410,6 +7410,23 @@ button.tag:hover {
     min-width: 0;
   }
 
+  /* 恒单行的前提是 `.workspace-header` 固定 72px(见上面那条 `height: auto`——这里前提
+     已经不成立了)。窄屏换行不再有代价,而**不**换行反而会把标题压没:320px 上「返回主页」
+     + 徽章 + 「退出共享」实测只给标题留 43px,26px 字号连一个半字都放不下
+     (codex #529 R6 P2)。前提没了,约定跟着松开:标题独占一行,徽章与动作排到下一行。 */
+  .reader-badge-row {
+    flex-wrap: wrap;
+  }
+
+  .reader-badge-title {
+    flex-basis: 100%;
+    font-size: 20px;
+  }
+
+  .reader-badge-chip {
+    max-width: 100%;
+  }
+
   .workspace-toolbar {
     max-width: 100%;
     flex-wrap: wrap;
