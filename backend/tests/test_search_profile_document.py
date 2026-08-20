@@ -349,3 +349,17 @@ def test_mutation_without_the_origin_guard_job_can_overwrite_user():
     # And the REAL merge_field must NOT reproduce that behavior:
     real = merge_field(profile, "answer_language", "zh", "job")
     assert real["fields"]["answer_language"]["value"] == "en"
+
+
+def test_rewriting_the_same_value_and_origin_preserves_the_entry():
+    """codex #535 R3 P3:值与来源都没变的重写保留原条目(含 updated_at)——
+    否则归纳 job 每周期铸新时间戳,skip-UPDATE 闸形同虚设。"""
+    first = merge_field(
+        {"version": 1, "fields": {}}, "answer_language", "zh", "job"
+    )
+    stamp = first["fields"]["answer_language"]["updated_at"]
+    again = merge_field(first, "answer_language", "zh", "job")
+    assert again["fields"]["answer_language"]["updated_at"] == stamp
+    # 值变了照常换新条目
+    changed = merge_field(first, "answer_language", "en", "job")
+    assert changed["fields"]["answer_language"]["value"] == "en"

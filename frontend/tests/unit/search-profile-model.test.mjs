@@ -212,3 +212,12 @@ test("每种拒绝原因都有非空的中文提示,且不是兜底文案本身"
     assert.notEqual(message, "无法添加这条术语", `reason=${reason} 落到了兜底文案`);
   }
 });
+
+
+test("validateNewDomainTerm 按 Unicode 码点计数,与后端 Python len() 对齐", () => {
+  // 20 个 emoji = 20 码点(后端合法)但 40 个 UTF-16 code unit
+  const emoji = "\u{1F600}".repeat(20);
+  assert.equal(validateNewDomainTerm([], emoji).ok, true);
+  const tooLong = "\u{1F600}".repeat(33);
+  assert.deepEqual(validateNewDomainTerm([], tooLong), { ok: false, reason: "too_long" });
+});
