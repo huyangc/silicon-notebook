@@ -201,6 +201,56 @@ not.
 If a client cannot interpolate and the raw token ends up on disk, treat that file as a
 credential: short expiry, least privilege, rotate and revoke.
 
+### Long-running calls and client timeouts
+
+`ask_notebook` with `mode="reasoning"` is a minutes-long call: planning, federated
+retrieval, the reflect loop and answer synthesis all happen inside that one tool call, and
+nothing returns until the answer does. MCP clients do not wait indefinitely for a tool, so
+this is the one part of the surface where client configuration still matters after the
+token works.
+
+The server does its half automatically, and there is nothing to enable. Every tool emits an
+MCP progress notification every 5 seconds while its work runs — carrying only the tool name
+and elapsed seconds, never the question or any notebook content — and the transport answers
+over `text/event-stream` so those notifications actually reach the client. A client that
+resets its timer on progress, as Claude Code does, therefore no longer walks out on a long
+`ask_notebook`.
+
+What remains is the client's own ceiling, which a server cannot raise:
+
+- **Claude Code** applies an *idle* timeout (nothing received for N seconds) plus a flat
+  per-call ceiling. Raise them with `"timeout"` in **milliseconds** on this server's entry
+  in `~/.claude.json`, or in a project's `.mcp.json`, and restart the client:
+
+  ```json
+  {
+    "mcpServers": {
+      "silicon-notebook": {
+        "type": "http",
+        "url": "http://127.0.0.1:8000/mcp/",
+        "timeout": 600000,
+        "headers": { "Authorization": "Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}" }
+      }
+    }
+  }
+  ```
+
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` and `MCP_TOOL_TIMEOUT` (both milliseconds, read from
+  the environment of the running client) are the global equivalents. Defaults differ
+  between client versions, so set the value the deployment needs instead of relying on one.
+- **Codex** uses `tool_timeout_sec` on the server entry.
+- **A reverse proxy in front of the backend is a third, independent timeout.** Responses
+  already carry `X-Accel-Buffering: no` and a 15-second SSE keep-alive comment, which is
+  enough for nginx; a proxy that ignores that header needs response buffering turned off
+  for the `/mcp` location and a read timeout above the longest answer expected. A proxy
+  that buffers the stream defeats the heartbeat *silently* — the call still succeeds on the
+  server and the client still gives up.
+
+If answers are routinely longer than a client is willing to wait, the durable fix is to
+make the tool call short rather than to keep raising ceilings: ask in `mode="chunk"`, or
+push the heavy work onto the background tools (`build_kg` / `build_retrieval_index`, then
+poll `get_build_status`) which return immediately by design.
+
 ## 5. First Agent task
 
 Use an explicit first prompt:
@@ -252,6 +302,7 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 - When the token carries `sources:write`: `add_source_text` returns a source id, `get_source_status` eventually reports it parsed, and the source list shows it with the neutral 「Agent 添加」 badge.
 - When the token carries `maintenance:execute`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
 - `delete_source` refuses a source that a person uploaded, and succeeds only on one the Agent added.
+- With `ask:execute`: an `ask_notebook` call in `mode="reasoning"` runs to completion instead of being cut off by the client's timeout — the client should show periodic progress while it runs.
 - The verification token is revoked after the test; disable the Profile if it is no longer needed.
 
 ### Verify the transport by hand
@@ -279,7 +330,10 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
   -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
-# 3. tools/list -> 200 with the full published tool list
+# 3. tools/list -> 200 with the full published tool list. The body is a
+#    text/event-stream frame: the JSON-RPC result is on its `data:` line.
+#    Sending `accept: application/json` alone answers 406 -- the transport
+#    streams so that long tools can push progress notifications.
 auth | curl -K - -s -X POST "$MCP_URL" \
   -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
@@ -306,6 +360,8 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | Codex cannot see the server | Run `codex mcp list`, export the token before starting Codex, and start a new session/restart the app or extension. |
 | `404`, or a refused connection, while configuring a client | Retry the endpoint the deployment publishes, exactly as the token receipt's onboarding instructions print it. Adding a trailing slash, or falling back to `<host>:8000/mcp/`, applies only to a confirmed backend-direct endpoint: a proxy may route only the published path, its backend port may be private, and reaching for that port can also drop the token to cleartext (§4). |
 | `307 Temporary Redirect` on `POST /mcp` | Expected — the MCP app is mounted at `/mcp` with its own root route. Configure `/mcp/` instead of relying on the client to follow the redirect. |
+| A `reasoning` `ask_notebook` is cut off after tens of seconds with a client-side transport error, while the server goes on to finish the answer | The client's own MCP timeout, not the server's. Raise it (§4 "Long-running calls and client timeouts"). The server heartbeats every 5s, so a client that honours progress notifications should not hit this; if it persists, suspect a reverse proxy buffering the response stream or applying its own read timeout. |
+| `406 Not Acceptable` on `POST /mcp/` | The request accepted only `application/json`. The transport answers over SSE so progress notifications can reach the client during a long call; send `accept: application/json, text/event-stream`, which the Streamable HTTP spec requires and every real client already does. |
 | `400 Bad Request: Missing session ID` | A tool call reached the server before `initialize` plus `notifications/initialized`, or the `MCP-Session-Id` header was lost. Real clients handle this; hand-written `curl` must not skip it (§8). |
 | Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |
 | `claude mcp list` does not show the server in another directory | `claude mcp add` defaults to the local, per-directory scope. Re-add it with `-s user`. |

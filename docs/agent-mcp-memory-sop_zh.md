@@ -202,6 +202,49 @@ claude mcp list
 若某个客户端不支持插值、真实 token 落到了磁盘上，就把该文件当凭据对待：短有效期、最小权限，
 并及时轮换与撤销。
 
+### 长任务调用与客户端超时
+
+`mode="reasoning"` 的 `ask_notebook` 是一次几分钟的调用：规划、联邦检索、反思循环与答案合成
+全都发生在这**一次**工具调用里，答案出来之前什么都不返回。MCP 客户端不会无限等一次工具，所以
+这是 token 打通之后、唯一还需要关心客户端配置的地方。
+
+服务端那一半是自动的，没有开关要打开。每个工具在工作期间都会**每 5 秒**发一次 MCP progress
+通知——只带工具名与已耗秒数，绝不带问题原文或任何笔记本内容——并且传输以
+`text/event-stream` 应答，好让这些通知真的到得了客户端。凡是收到 progress 就重置计时的客户端
+（Claude Code 就是），因此不会再中途放弃一次长 `ask_notebook`。
+
+剩下的是客户端自己的上限，服务端抬不动它：
+
+- **Claude Code** 同时有 *idle* 超时（若干秒内什么都没收到）和每次调用的固定上限。在
+  `~/.claude.json`（或项目的 `.mcp.json`）里给该服务条目加 **毫秒** 单位的 `"timeout"`，
+  然后重启客户端：
+
+  ```json
+  {
+    "mcpServers": {
+      "silicon-notebook": {
+        "type": "http",
+        "url": "http://127.0.0.1:8000/mcp/",
+        "timeout": 600000,
+        "headers": { "Authorization": "Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}" }
+      }
+    }
+  }
+  ```
+
+  全局等价物是环境变量 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 与 `MCP_TOOL_TIMEOUT`（都以毫秒计，
+  取自运行中客户端进程的环境）。默认值随客户端版本而异，所以请直接设成该部署需要的值，
+  而不是指望某个默认值。
+- **Codex** 是服务条目上的 `tool_timeout_sec`。
+- **后端前面的反向代理是第三道、互相独立的超时。** 响应已经带上 `X-Accel-Buffering: no` 与
+  15 秒一次的 SSE 保活注释，对 nginx 足够；不认这个 header 的代理需要为 `/mcp` 这条 location
+  关闭响应缓冲，并把读超时设到高于预期的最长一次回答。缓冲了这条流的代理会**无声地**架空心跳
+  ——服务端照样成功，客户端照样放弃。
+
+如果某部署的回答长期超过客户端愿意等的时间，长久的解法是让工具调用本身变短，而不是一路调高
+上限：改用 `mode="chunk"` 提问，或把重活交给天生立即返回的后台工具
+（`build_kg` / `build_retrieval_index`，再轮询 `get_build_status`）。
+
 ## 5. 在 Agent 对话中做第一次调用
 
 给 Agent 一个明确且可审计的首轮任务，例如：
@@ -277,6 +320,7 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 - token 带 `sources:write` 时：`add_source_text` 返回来源 id，`get_source_status` 最终报告解析完成，来源列表把它显示为中性的「Agent 添加」徽标。
 - token 带 `maintenance:execute` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
 - `delete_source` 对用户上传的来源拒绝，只有 Agent 添加的来源才能删成功。
+- 带 `ask:execute` 时：`mode="reasoning"` 的 `ask_notebook` 能跑完，不会被客户端超时掐断——运行期间客户端应能看到周期性进度。
 - 示例结束后撤销测试 token；若不再需要该身份，再停用 Profile。
 
 ### 用 curl 手工验证传输层
@@ -303,7 +347,9 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
   -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
-# 3. tools/list -> 200，返回完整工具清单
+# 3. tools/list -> 200，返回完整工具清单。响应体是一帧 text/event-stream，
+#    JSON-RPC 结果在它的 `data:` 行上。只写 `accept: application/json` 会得到 406——
+#    传输是流式的，长任务才能借它推送 progress 通知。
 auth | curl -K - -s -X POST "$MCP_URL" \
   -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
@@ -330,6 +376,8 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | Codex 看不到服务 | 运行 `codex mcp list`，确认环境变量已在启动 Codex 前导出，然后新开 session/重启 app 或 extension。 |
 | 配置客户端时 `404` 或连接被拒 | 先照签发回执的接入说明**逐字**重试它印出的那个地址。补结尾斜杠、或回落到 `<host>:8000/mcp/`，都只适用于确认是直连后端的地址：有代理时它可能只路由公布的那条路径，后端端口可能是私有的，硬去够那个端口还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
+| `reasoning` 档的 `ask_notebook` 跑了几十秒就被客户端以传输错误中断，而服务端继续把答案生成完 | 是客户端自己的 MCP 超时，不是服务端的。按第 4 节「长任务调用与客户端超时」调高。服务端每 5 秒发一次心跳，遵守 progress 通知的客户端本不该撞上；若仍出现，怀疑反向代理缓冲了响应流或有自己的读超时。 |
+| `POST /mcp/` 返回 `406 Not Acceptable` | 该请求只接受了 `application/json`。传输以 SSE 应答，长任务的 progress 通知才到得了客户端；请发 `accept: application/json, text/event-stream`——这是 Streamable HTTP 规范的要求，所有真实客户端本来就这么发。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
 | 换个目录后 `claude mcp list` 看不到该服务 | `claude mcp add` 默认写入项目级（按目录）作用域。改用 `-s user` 重新添加。 |
