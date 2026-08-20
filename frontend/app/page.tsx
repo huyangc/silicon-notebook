@@ -6245,15 +6245,15 @@ export default function Home() {
    * 一本已经 403 的库。
    */
   async function reconcileOpenNotebook(remaining: NotebookSummary[], navEpoch: number) {
-    // ⚠ 用户可能在重取清单在飞的那段时间里自己切库。切库(`openNotebook`)与回集合页
-    // (`showCollection`)都会**同步**递增 `workspaceEpochRef`,所以世代变了就说明导航
-    // 已经不归这次对账管,整条放弃。
+    // ⚠ 世代闸:用户可能在重取清单在飞的那段时间里自己切库或回集合页,两者都会**同步**
+    // 递增 `workspaceEpochRef`。世代变了就说明导航已经不归这次对账管,整条放弃。
     //
-    // 少了这道闸会**反过来打断用户**:他点开的那本新库还在等首批请求,而在那段窗口里
-    // `currentNotebookIdRef` 仍指向刚被撤销的旧库——对账于是判定「需要跳走」,再发一次
-    // `openNotebook(firstOwned)`,那次调用递增世代,把用户自己发起的导航作废掉。
-    // 只看下面那句 `openNotebook` 的返回值救不了这种:被顶掉的是**先发起**的那一次
-    // (codex #529 R2 P2)。
+    // 换用 `activeNotebookIdRef` 之后(见下),这道闸挡的**只剩**一种情形:快照之后发起
+    // 的那次导航已经**落地**了。此时 `activeNotebookIdRef` 是那本新库、不是 null,而
+    // `remaining` 是导航之前取的——一份可能还没有它的旧清单,照着判会把用户刚打开的库
+    // 判成「已失去访问」并再次跳走。世代不等即放弃,是让那次导航自己说了算。
+    //
+    // 反过来,导航**尚未**落地那一半由下面的 `null` 判据覆盖(codex #529 R2 / R9 P2)。
     if (workspaceEpochRef.current !== navEpoch) return;
     // ⚠ 判据用 `activeNotebookIdRef` 而**不是** `currentNotebookIdRef`。后者是渲染期从
     // state 抄下来的,在一次切库**落地之前**始终还指着上一本库;于是「用户在弹窗还在飞
