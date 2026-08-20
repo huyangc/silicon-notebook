@@ -73,51 +73,87 @@ class AgentObservationStore:
         losing writer changed nothing, so there is nothing new to evict for.
         It is still the last statement before the transaction ends on that
         path, same ordering guarantee as the SQLite mirror.
+
+        ⚠ A losing INSERT's re-read can itself come back empty: ``ON
+        CONFLICT ... DO NOTHING`` does NOT lock the row it lost to, so the
+        conflicting row can be deleted (``clear_observations``) in the
+        window between the losing INSERT and this method's re-read SELECT —
+        a real, if narrow, race on a table with no other locking on read.
+        When that happens the SAME INSERT is retried exactly once IN THIS
+        SAME TRANSACTION: if the conflict is now gone, the retry itself
+        becomes the new winner and proceeds down the normal eviction path;
+        if the retry loses to a fresh row (someone else's concurrent insert
+        landed with the same key), that row's id is returned deduplicated,
+        same as the first attempt would have. Only if the retry ALSO loses
+        AND its own re-read ALSO comes back empty — the same row deleted
+        twice inside one transaction is not a race this method can resolve
+        by retrying again — does this raise a named ``RuntimeError`` rather
+        than let an untyped ``TypeError`` (indexing ``None``) escape.
         """
         now = self.now()
-        request_id = str(client_request_id)
+        request_id = str(client_request_id or "")
+        if not request_id:
+            raise ValueError("client_request_id must be a non-empty string")
         observation_id = self.new_id("obs")
+        insert_sql = (
+            "INSERT INTO agent_observations "
+            "(id,notebook_id,owner_id,agent_profile_id,text,"
+            "client_request_id,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (notebook_id,owner_id,agent_profile_id,"
+            "client_request_id) WHERE client_request_id IS NOT NULL "
+            "DO NOTHING"
+        )
+        insert_params = (
+            observation_id,
+            notebook_id,
+            owner_id,
+            agent_profile_id,
+            text,
+            request_id,
+            now,
+        )
+        select_sql = (
+            "SELECT id FROM agent_observations WHERE notebook_id=%s "
+            "AND owner_id = %s AND agent_profile_id=%s "
+            "AND client_request_id=%s"
+        )
+        select_params = (notebook_id, owner_id, agent_profile_id, request_id)
+
+        def _attempt(connection) -> "tuple[bool, object]":
+            """One INSERT attempt. Returns ``(won, row)`` — ``row`` is only
+            meaningful (and may still be ``None``, see the docstring above)
+            when ``won`` is ``False``."""
+            cursor = connection.execute(insert_sql, insert_params)
+            if cursor.rowcount == 1:
+                return True, None
+            return False, connection.execute(select_sql, select_params).fetchone()
+
         with self.database.write() as connection:
-            insert_cursor = connection.execute(
-                "INSERT INTO agent_observations "
-                "(id,notebook_id,owner_id,agent_profile_id,text,"
-                "client_request_id,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT (notebook_id,owner_id,agent_profile_id,"
-                "client_request_id) WHERE client_request_id IS NOT NULL "
-                "DO NOTHING",
+            won, row = _attempt(connection)
+            if not won and row is None:
+                won, row = _attempt(connection)
+                if not won and row is None:
+                    raise RuntimeError(
+                        "agent observation idempotent insert lost a delete "
+                        "race twice"
+                    )
+            if not won:
+                return str(row["id"]), True
+            connection.execute(
+                "DELETE FROM agent_observations WHERE notebook_id=%s "
+                "AND owner_id = %s AND id NOT IN ("
+                "SELECT id FROM agent_observations WHERE notebook_id=%s "
+                'AND owner_id = %s ORDER BY created_at DESC, '
+                'id COLLATE "C" DESC LIMIT %s)',
                 (
-                    observation_id,
                     notebook_id,
                     owner_id,
-                    agent_profile_id,
-                    text,
-                    request_id,
-                    now,
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_RING_MAX,
                 ),
             )
-            if insert_cursor.rowcount == 1:
-                connection.execute(
-                    "DELETE FROM agent_observations WHERE notebook_id=%s "
-                    "AND owner_id = %s AND id NOT IN ("
-                    "SELECT id FROM agent_observations WHERE notebook_id=%s "
-                    'AND owner_id = %s ORDER BY created_at DESC, '
-                    'id COLLATE "C" DESC LIMIT %s)',
-                    (
-                        notebook_id,
-                        owner_id,
-                        notebook_id,
-                        owner_id,
-                        AGENT_OBSERVATION_RING_MAX,
-                    ),
-                )
-                return observation_id, False
-            row = connection.execute(
-                "SELECT id FROM agent_observations WHERE notebook_id=%s "
-                "AND owner_id = %s AND agent_profile_id=%s "
-                "AND client_request_id=%s",
-                (notebook_id, owner_id, agent_profile_id, request_id),
-            ).fetchone()
-        return str(row["id"]), True
+        return observation_id, False
 
     def recent_observations(
         self, notebook_id: str, owner_id: str, *, limit: int

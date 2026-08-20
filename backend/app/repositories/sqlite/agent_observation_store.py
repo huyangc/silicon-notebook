@@ -18,6 +18,22 @@ from typing import Callable
 from app.repositories.ports import AGENT_OBSERVATION_RING_MAX, project_observation_row
 from app.repositories.sqlite.database import SqliteDatabase
 
+# Absolute-instant ordering, matching the ``conversations`` table's own
+# ``CONVERSATION_ANSWERS_ORDER_DESC`` precedent (``app/repositories/sqlite/
+# ask_state_store.py``): ``julianday()`` leads the ORDER BY so two rows are
+# compared by the instant they represent rather than by their raw text, which
+# would silently reorder rows whose ``created_at`` carries different UTC
+# offsets even though they are byte-for-byte the same clock reading in a
+# different rendering. ``id`` — not ``rowid`` — is the final tie-break: this
+# table's id is a caller-opaque uuid, not an insertion-order column, so unlike
+# ``conversations`` there is no insertion-order semantic to preserve here —
+# see the port's ``append_observation`` docstring for why plain ``id`` byte
+# ordering (not clock precision) is what actually keeps this deterministic
+# across backends.
+AGENT_OBSERVATIONS_ORDER_DESC = (
+    "ORDER BY julianday(created_at) DESC, created_at DESC, id DESC"
+)
+
 
 class AgentObservationStore:
     def __init__(
@@ -66,8 +82,22 @@ class AgentObservationStore:
         buffer keeps the newest N rows, not "the newest N plus whatever was
         just added".
         """
+        request_id = str(client_request_id or "")
+        if not request_id:
+            # An empty/missing client_request_id must never reach the store:
+            # it is the one value that would silently fold every no-id write
+            # for this (notebook_id, owner_id, agent_profile_id) tuple onto
+            # the same partial-unique-index slot the FIRST such write claims
+            # (see ``idx_agent_observations_request`` — the index is
+            # ``WHERE client_request_id IS NOT NULL``, but an EMPTY STRING is
+            # not NULL, so it participates and collides). The caller (the
+            # add_observation MCP tool, T3) must reject a missing id before
+            # it ever gets here, the same way ``memory_inputs.
+            # normalize_client_request_id`` already does for Memory
+            # proposals — this is a fail-loud backstop for a caller that
+            # forgot to, not a validation path a legitimate request can hit.
+            raise ValueError("client_request_id must be a non-empty string")
         now = self.now()
-        request_id = str(client_request_id)
         observation_id = self.new_id("obs")
         with self.database.write() as db:
             self.database.begin_immediate(db)
@@ -107,7 +137,7 @@ class AgentObservationStore:
                 "DELETE FROM agent_observations WHERE notebook_id=? "
                 "AND owner_id = ? AND id NOT IN ("
                 "SELECT id FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)",
+                "AND owner_id = ? " + AGENT_OBSERVATIONS_ORDER_DESC + " LIMIT ?)",
                 (
                     notebook_id,
                     owner_id,
@@ -125,7 +155,7 @@ class AgentObservationStore:
             rows = connection.execute(
                 "SELECT id, agent_profile_id, text, created_at "
                 "FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                "AND owner_id = ? " + AGENT_OBSERVATIONS_ORDER_DESC + " LIMIT ?",
                 (notebook_id, owner_id, max(0, int(limit))),
             ).fetchall()
         return [
@@ -145,7 +175,7 @@ class AgentObservationStore:
             rows = connection.execute(
                 "SELECT id, agent_profile_id, text, created_at "
                 "FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                "AND owner_id = ? " + AGENT_OBSERVATIONS_ORDER_DESC + " LIMIT ?",
                 (notebook_id, owner_id, max(0, int(limit))),
             ).fetchall()
         return [

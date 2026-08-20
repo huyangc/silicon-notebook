@@ -29,6 +29,10 @@ from app.repositories.ports import AGENT_OBSERVATION_RING_MAX
 from app.repositories.sqlite.agent_observation_store import AgentObservationStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SqliteMigrator
+from tests.agent_observation_parity_cases import (
+    AGENT_OBSERVATION_TIE_BREAK_IDS,
+    AGENT_OBSERVATION_TIE_BREAK_SURVIVORS,
+)
 
 NOW = "2026-08-20T00:00:00+00:00"
 NOTEBOOK_ID = "nb-1"
@@ -270,3 +274,138 @@ def test_notebook_delete_cascades_observation_rows(harness: Harness):
             "SELECT notebook_id FROM agent_observations"
         ).fetchall()
     assert [row["notebook_id"] for row in remaining] == [OTHER_NOTEBOOK_ID]
+
+
+# ------------------------------------------------------------------ ordering
+def test_eviction_tie_breaks_on_id_when_created_at_is_identical(harness: Harness):
+    """T2 修复轮回归——真正的 tie-break 测试。EVERY row shares the exact
+    same ``created_at`` (a fixed clock, not ``_Clock``'s one-second-per-call
+    advance), which isolates the ``id DESC`` comparison from ``created_at``
+    entirely: the existing ``test_append_observation_evicts_down_to_the_
+    ring_max_keeping_the_newest`` above never actually exercises the id
+    tie-break, because its ``_Clock`` gives every row a unique timestamp.
+
+    The id list (``tests.agent_observation_parity_cases``) is shuffled
+    relative to insertion order specifically so "keep the last N inserted"
+    and "keep the top N ids by descending sort" produce DIFFERENT surviving
+    sets — see that module's docstring.
+    """
+    id_iter = iter(AGENT_OBSERVATION_TIE_BREAK_IDS)
+
+    def fixed_new_id(prefix: str) -> str:
+        return next(id_iter)
+
+    store = AgentObservationStore(harness.database, new_id=fixed_new_id, now=lambda: NOW)
+    for i, expected_id in enumerate(AGENT_OBSERVATION_TIE_BREAK_IDS):
+        observation_id, deduplicated = store.append_observation(
+            NOTEBOOK_ID, "user-tie", "agent-1",
+            text=f"note {i}", client_request_id=f"req-{i}",
+        )
+        assert observation_id == expected_id
+        assert deduplicated is False
+
+    rows = store.list_observations(
+        NOTEBOOK_ID, "user-tie", limit=len(AGENT_OBSERVATION_TIE_BREAK_IDS)
+    )
+    assert {row["id"] for row in rows} == AGENT_OBSERVATION_TIE_BREAK_SURVIVORS
+
+
+def test_recent_observations_orders_by_absolute_instant_not_text(harness: Harness):
+    """T2 修复轮回归——两行 ``created_at`` 的 TEXT 序与它们代表的绝对时刻
+    相反(不同 UTC offset),镜像 ``conversations``'
+    ``CONVERSATION_ANSWERS_ORDER_DESC`` 先例的同一条教训: a naive
+    ``ORDER BY created_at DESC`` text comparison ranks the row whose text
+    happens to sort higher first, even when it is chronologically OLDER.
+
+    OLD: ``"2026-08-20T10:00:00+00:00"`` — absolute UTC 10:00.
+    NEW: ``"2026-08-20T09:00:00-02:00"`` — absolute UTC 11:00 (genuinely
+    LATER than OLD), but its text is LEXICOGRAPHICALLY SMALLER than OLD's
+    (``"09"`` < ``"10"`` at the first differing character) — text-only
+    ordering would rank OLD as "most recent"; the fix must not.
+    """
+    ids = iter(["obs-old", "obs-new"])
+
+    def fixed_new_id(prefix: str) -> str:
+        return next(ids)
+
+    timestamps = iter(
+        [
+            "2026-08-20T10:00:00+00:00",  # OLD, absolute 10:00
+            "2026-08-20T09:00:00-02:00",  # NEW, absolute 11:00
+        ]
+    )
+
+    def fixed_clock() -> str:
+        return next(timestamps)
+
+    store = AgentObservationStore(harness.database, new_id=fixed_new_id, now=fixed_clock)
+    old_id, _ = store.append_observation(
+        NOTEBOOK_ID, "user-offset", "agent-1", text="old", client_request_id="r-old",
+    )
+    new_id, _ = store.append_observation(
+        NOTEBOOK_ID, "user-offset", "agent-1", text="new", client_request_id="r-new",
+    )
+    assert (old_id, new_id) == ("obs-old", "obs-new")
+
+    rows = store.list_observations(NOTEBOOK_ID, "user-offset", limit=10)
+    assert [row["id"] for row in rows] == ["obs-new", "obs-old"]
+
+
+def test_ring_eviction_is_per_notebook_scope(harness: Harness):
+    """B 的规格②(cross-notebook isolation)——同一个 OWNER 跨两本笔记本时,
+    一本笔记本灌满环形绝不能连带淘汰另一本笔记本的行:淘汰 SQL 同时按
+    ``notebook_id`` 与 ``owner_id`` 两列限定作用域,不是只按 owner。"""
+    other_id, other_dup = harness.store.append_observation(
+        OTHER_NOTEBOOK_ID, "user-a", "agent-1",
+        text="other-notebook-note", client_request_id="other-req",
+    )
+    assert other_dup is False
+
+    for i in range(AGENT_OBSERVATION_RING_MAX + 5):
+        harness.store.append_observation(
+            NOTEBOOK_ID, "user-a", "agent-1",
+            text=f"note {i}", client_request_id=f"req-{i}",
+        )
+
+    other_rows = harness.store.recent_observations(OTHER_NOTEBOOK_ID, "user-a", limit=10)
+    assert [row["id"] for row in other_rows] == [other_id]
+
+
+# --------------------------------------------------------------- transaction
+def test_append_observation_opens_exactly_one_write_transaction(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+):
+    """接缝断言——一次 ``append_observation`` 必须恰好开 1 个
+    ``SqliteDatabase.write()`` 事务(挡「淘汰挪到写事务之外」这类移动变异,
+    该变异会打破幂等读、INSERT 与淘汰 DELETE 同原子提交的契约,却不会让
+    任何既有断言变红,因为它们只看最终数据库状态)。"""
+    calls = {"n": 0}
+    original_write = harness.database.write
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def counting_write(*args, **kwargs):
+        calls["n"] += 1
+        with original_write(*args, **kwargs) as conn:
+            yield conn
+
+    monkeypatch.setattr(harness.database, "write", counting_write)
+
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1", text="x", client_request_id="req-tx",
+    )
+    assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------- validation
+def test_append_observation_rejects_empty_client_request_id(harness: Harness):
+    """空/缺失 client_request_id 绝不能到达 store:它是唯一会让同一个
+    (notebook_id, owner_id, agent_profile_id) 元组下所有「无 id」写入折叠进
+    同一个部分唯一索引槽位的值(索引谓词是 ``client_request_id IS NOT
+    NULL``,空字符串不是 NULL,照样参与比较并冲突)。调用方(T3 的
+    add_observation MCP 工具)必须在到达这里之前就拒收,这里是响亮的兜底。"""
+    with pytest.raises(ValueError):
+        harness.store.append_observation(
+            NOTEBOOK_ID, "user-a", "agent-1", text="x", client_request_id="",
+        )

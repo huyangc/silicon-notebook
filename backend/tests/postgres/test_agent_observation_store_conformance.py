@@ -28,6 +28,10 @@ import pytest
 from app.repositories.ports import AGENT_OBSERVATION_RING_MAX
 from app.repositories.postgres.agent_observation_store import AgentObservationStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
+from tests.agent_observation_parity_cases import (
+    AGENT_OBSERVATION_TIE_BREAK_IDS,
+    AGENT_OBSERVATION_TIE_BREAK_SURVIVORS,
+)
 
 NOW = "2026-08-20T00:00:00+00:00"
 NOTEBOOK_ID = "nb-agent-observation"
@@ -178,33 +182,46 @@ def test_idempotency_key_includes_agent_profile_id(agent_observation_harness):
     assert id_a != id_b
 
 
-def test_eviction_orders_by_created_at_desc_id_collate_c_desc_same_as_sqlite(
+def test_eviction_tie_breaks_on_id_when_created_at_is_identical(
     agent_observation_harness,
 ):
-    """Same inputs, same surviving rows as the SQLite mirror's own eviction
-    test — the two backends must never independently decide which rows in a
-    tied ordering survive."""
+    """T2 修复轮回归——取代原先名不副实的
+    ``test_eviction_orders_by_created_at_desc_id_collate_c_desc_same_as_
+    sqlite``:那条测试用的 ``_Clock`` 每次调用前进一秒,created_at 永不相同,
+    ``id COLLATE "C" DESC`` 比较从未真正被触发过——「最后插入的 N 行」与
+    「按 id 降序的前 N 行」在那组输入下逐位相同,一次意外的巧合通过。
+
+    这里改为固定时钟(每一行的 created_at 完全相同),把 id 比较从
+    created_at 里完全隔离出来;id 列表(``tests.agent_observation_parity_
+    cases``)相对插入顺序被打乱,专门让「保留最后插入的 N 行」与「保留 id
+    降序最大的 N 行」在这份输入下给出不同结果——与 SQLite 镜像共用同一份
+    id 列表与同一份期望存活集合,证明两个后端在并列排序下选出**逐位相同**
+    的存活行,而不是各自独立决定。"""
     harness = agent_observation_harness
-    total = AGENT_OBSERVATION_RING_MAX + 5
-    inserted_ids: list[str] = []
-    for i in range(total):
-        observation_id, deduplicated = harness.store.append_observation(
-            NOTEBOOK_ID, "user-a", "agent-1",
+    id_iter = iter(AGENT_OBSERVATION_TIE_BREAK_IDS)
+
+    def fixed_new_id(prefix: str) -> str:
+        return next(id_iter)
+
+    store = AgentObservationStore(harness.database, new_id=fixed_new_id, now=lambda: NOW)
+    for i, expected_id in enumerate(AGENT_OBSERVATION_TIE_BREAK_IDS):
+        observation_id, deduplicated = store.append_observation(
+            NOTEBOOK_ID, "user-tie", "agent-1",
             text=f"note {i}", client_request_id=f"req-{i}",
         )
+        assert observation_id == expected_id
         assert deduplicated is False
-        inserted_ids.append(observation_id)
 
-    rows = harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=total)
-    assert len(rows) == AGENT_OBSERVATION_RING_MAX
-    kept_ids = {row["id"] for row in rows}
-    assert kept_ids == set(inserted_ids[-AGENT_OBSERVATION_RING_MAX:])
+    rows = store.list_observations(
+        NOTEBOOK_ID, "user-tie", limit=len(AGENT_OBSERVATION_TIE_BREAK_IDS)
+    )
+    assert {row["id"] for row in rows} == AGENT_OBSERVATION_TIE_BREAK_SURVIVORS
 
     with harness.database.connect() as connection:
         total_rows = connection.execute(
             "SELECT COUNT(*) AS n FROM agent_observations "
             "WHERE notebook_id=%s AND owner_id=%s",
-            (NOTEBOOK_ID, "user-a"),
+            (NOTEBOOK_ID, "user-tie"),
         ).fetchone()["n"]
     assert total_rows == AGENT_OBSERVATION_RING_MAX
 
@@ -254,6 +271,21 @@ def test_clear_observations_without_agent_profile_removes_everything_in_scope(
     removed = harness.store.clear_observations(NOTEBOOK_ID, "user-a")
     assert removed == 2
     assert harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10) == []
+
+
+def test_append_observation_rejects_empty_client_request_id(
+    agent_observation_harness,
+):
+    """镜像 SQLite 侧同名测试——空 client_request_id 绝不能到达 store,
+    它是唯一会让同一个 (notebook_id, owner_id, agent_profile_id) 元组下所有
+    「无 id」写入折叠进同一个部分唯一索引槽位的值(索引谓词是
+    ``client_request_id IS NOT NULL``,空字符串不是 NULL,照样参与
+    ``ON CONFLICT`` 冲突推断)。"""
+    harness = agent_observation_harness
+    with pytest.raises(ValueError):
+        harness.store.append_observation(
+            NOTEBOOK_ID, "user-a", "agent-1", text="x", client_request_id="",
+        )
 
 
 def test_notebook_delete_cascades_observation_rows(agent_observation_harness):
