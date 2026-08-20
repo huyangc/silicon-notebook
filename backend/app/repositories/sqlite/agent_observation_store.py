@@ -31,7 +31,10 @@ from app.repositories.sqlite.database import SqliteDatabase
 # ordering (not clock precision) is what actually keeps this deterministic
 # across backends.
 AGENT_OBSERVATIONS_ORDER_DESC = (
-    "ORDER BY julianday(created_at) DESC, created_at DESC, id DESC"
+    # codex #535 R7 P2:同一绝对时刻、不同 UTC offset 拼写的行(合库/导入可造)
+    # 在 julianday 上并列——夹一个文本 created_at 会让 SQLite 按拼写、PG 按 id
+    # 各选各的存活行。并列直接落 id,与 PG 的 timestamptz+id 语义逐位一致。
+    "ORDER BY julianday(created_at) DESC, id DESC"
 )
 
 
