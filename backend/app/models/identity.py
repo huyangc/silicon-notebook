@@ -2,13 +2,24 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.services.search_profile import (
-    ANSWER_DETAIL_VALUES,
-    ANSWER_LANGUAGE_VALUES,
-    ANSWER_SHAPE_VALUES,
-    SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS,
-    SEARCH_PROFILE_DOMAIN_TERMS_MAX,
+# Closed value domains for the per-user search/answer style preference
+# document. They LIVE here (the models layer) rather than in
+# ``app.services.search_profile`` because the domain-model boundary guard
+# (``test_model_domain_boundaries``) forbids ``app.models`` importing
+# ``app.services`` — and both layers need these: the wire models below
+# validate requests against them, and the service module validates stored
+# documents against the SAME sets (it imports them from here; services →
+# models is the allowed direction). Definitions and prose contract stay
+# documented in ``app.services.search_profile``'s module docstring.
+ANSWER_LANGUAGE_VALUES: frozenset[str] = frozenset({"auto", "zh", "en"})
+ANSWER_SHAPE_VALUES: frozenset[str] = frozenset(
+    {"auto", "bullets", "table_first", "prose"}
 )
+ANSWER_DETAIL_VALUES: frozenset[str] = frozenset({"auto", "concise", "detailed"})
+#: Bounds for the user-authored ``domain_terms`` list. Exact values are
+#: registered only in ``docs/product-and-api*.md`` (numeric-limit red line).
+SEARCH_PROFILE_DOMAIN_TERMS_MAX = 10
+SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS = 32
 
 
 class UserProfile(BaseModel):
