@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   assignmentsIn,
   callsIn,
+  controlFlowIn,
   findFunction,
   ifConditionsIn,
   importsFrom,
@@ -80,6 +81,18 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
     insideReconcile.includes("refreshActiveNotebook"),
     "库还在时不刷当前笔记本详情——授权降档后界面会继续亮着写入口",
   );
+
+  // 兜底导航自己失败(瞬时抖动)时必须落到一个**可自恢复**的状态。`openNotebook` 一进门
+  // 就把 `activeNotebookIdRef` 置成 null,而屏幕上还留着那本已经读不到的库;就地抛出去
+  // 的话,之后每一次复核都在 `!openId` 上直接返回,人被永久钉在陈旧工作区里
+  // (codex #529 R12 P2)。
+  const fallback = controlFlowIn(reconcile)
+    .find((node) => node.kind === "if" && node.condition === "firstOwned");
+  assert.ok(fallback, "对账里找不到「跳到自有库」那条兜底分支");
+  const attempt = fallback.then.find((node) => node.kind === "try");
+  assert.ok(attempt, "兜底导航没有被 try 包住——它失败时会把人留在读不到的库里");
+  assert.match(JSON.stringify(attempt.catch ?? []), /showCollection/,
+    "兜底导航失败后没有退回集合页");
 
   const groupPath = findFunction(page, "refreshAfterAccessChange");
   assert.ok(groupPath, "缺群组侧的收口 refreshAfterAccessChange");
