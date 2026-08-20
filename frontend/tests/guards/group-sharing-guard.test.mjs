@@ -106,6 +106,13 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
     ifConditionsIn(groupPath).some((condition) => /notebookListSeqRef/.test(condition)),
     "重取清单没有过期结果闸,旧响应会把撤销前的快照盖回去",
   );
+  // 发布闸必须比的是**已发布水位**而不是「发起序号是不是还等于最新」:后者「发起即占位」,
+  // 一次**失败**的复核会连并发的成功加载一起作废(它自己什么都没发布),初次加载因此可能
+  // 永远停在空清单上(codex #529 R13 P2)。
+  assert.ok(
+    ifConditionsIn(groupPath).some((condition) => /notebookListPublishedRef/.test(condition)),
+    "发布闸不是按已发布水位判的,一次失败的复核会吞掉并发的成功加载",
+  );
 
   // 闸必须覆盖**每一个**写清单的路径。`loadNotebookCollection` 把 listNotebooks() 和更慢的
   // health/config 放在同一个 Promise.all 里,它的清单可以在撤销之前取回、却被慢请求拖到
@@ -113,8 +120,8 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   const collection = findFunction(page, "loadNotebookCollection");
   assert.ok(collection, "缺 loadNotebookCollection");
   assert.ok(
-    ifConditionsIn(collection).some((condition) => /notebookListSeqRef/.test(condition)),
-    "集合刷新绕过了清单写入世代闸,旧响应会复活已撤销的卡片",
+    ifConditionsIn(collection).some((condition) => /notebookListPublishedRef/.test(condition)),
+    "集合刷新绕过了清单发布闸,旧响应会复活已撤销的卡片",
   );
 
   // 链接共享的退出走**同一个收口**,不另抄一份重取+对账:抄一份就会漏掉其中一道闸,

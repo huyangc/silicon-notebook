@@ -1996,6 +1996,15 @@ export default function Home() {
    * (codex #529 R5 P2)。与本文件既有的 `sourcePageRequestRef` 等过期结果 guard 同一形状。
    */
   const notebookListSeqRef = useRef(0);
+  /**
+   * 已经**发布**出去的那次清单结果的发起序号。
+   *
+   * 与上面那个「发起序号」分开,是因为「谁在跑」和「谁落了地」是两件事:发起即占位的
+   * 写法会让一次**失败**的复核把并发的成功加载一起作废(它自己什么都没发布,而那一次
+   * 成功的结果被序号检查丢掉),初次加载因此可能永远停在空清单上(codex #529 R13 P2)。
+   * 失败的请求不推进这个水位,所以它谁也吞不掉。
+   */
+  const notebookListPublishedRef = useRef(0);
   // Live refs for source paging/query so long-lived poll effects (paper-meta
   // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
   // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
@@ -3120,9 +3129,12 @@ export default function Home() {
         ? "服务正常"
           : "服务正常 · 模型服务不可用",
     );
-    // 只有最新一次发出的清单算数;health/statusText 不进这道闸(新旧都无害,而漏掉
-    // 它们会让一次落后的刷新连服务状态都不更新)。
-    if (notebookListSeqRef.current === listSeq) setNotebooks(notebookResponse);
+    // 同一道发布闸:比已发布的那次更晚发起才落地。health/statusText 不进这道闸
+    // (新旧都无害,而漏掉它们会让一次落后的刷新连服务状态都不更新)。
+    if (listSeq > notebookListPublishedRef.current) {
+      notebookListPublishedRef.current = listSeq;
+      setNotebooks(notebookResponse);
+    }
     if (systemConfiguration) {
       setSourceUploadMaxBytes(systemConfiguration.source_upload_max_bytes);
       setSourceUploadMaxFilesPerBatch(systemConfiguration.source_upload_max_files_per_batch);
@@ -6344,18 +6356,23 @@ export default function Home() {
     // 而**先发的那次可以后回**。没有这道请求世代闸,旧响应会用 `setNotebooks` 把撤销前的
     // 快照盖回去——工作区已经正确跳走了,列表里那本读不到的库却又活了过来,要等下一次刷新
     // 才消失(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个:那是两回事。
-    const seq = ++notebookListSeqRef.current;
+    const issueSeq = ++notebookListSeqRef.current;
     const remaining = await listNotebooks();
-    if (notebookListSeqRef.current !== seq) {
-      // 有更新的一次清单写入赢了这一局。它只刷列表、**不做访问权对账**,所以这里必须
-      // 再来一次,否则「被撤销后仍留在那本库里」正好从这条竞态里漏掉。只重来一次:与
-      // 持续不断的集合刷新互相追着跑没有意义,那种情况下用户显然在操作,下一次交互会
-      // 撞到 403,切回标签页的复核也仍在。
+    // 发布闸:只有比**已发布**的那次更晚发起的结果才落地。先发后回的旧响应因此进不来,
+    // 而失败的请求什么也不发布——所以它绝不会顺手吞掉一次并发的成功加载(codex #529 R13:
+    // 「发起即占位」的写法会让一次瞬时失败把初次加载的清单永远压在空态上)。
+    if (issueSeq > notebookListPublishedRef.current) {
+      notebookListPublishedRef.current = issueSeq;
+      setNotebooks(remaining);
+    }
+    // 对账闸,与发布闸问的**不是同一件事**:这里问「期间有没有更晚发起的清单请求」。
+    // 有的话就让它负责对账——它带回来的授权更新。而它可能是 `loadNotebookCollection`,
+    // 那条只刷列表、**不做访问权对账**,所以这里必须再来一次,否则「被撤销后仍留在那本
+    // 库里」正好从这条竞态里漏掉。只重来一次:与持续不断的集合刷新互相追着跑没有意义。
+    if (issueSeq !== notebookListSeqRef.current) {
       if (retry) await refreshAfterAccessChange(navEpoch, false);
       return;
     }
-    // 清单照刷:它无害且必要,被 navEpoch 挡掉的只有导航那一步。
-    setNotebooks(remaining);
     await reconcileOpenNotebook(remaining, navEpoch);
   }
 
