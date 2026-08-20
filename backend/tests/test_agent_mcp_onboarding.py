@@ -18,6 +18,13 @@ def test_onboarding_document_is_public_and_uses_configured_mcp_url(monkeypatch):
     assert "select_notebook" in response.text
     assert "propose_memory" in response.text
     assert "export SILICON_NOTEBOOK_AGENT_TOKEN" not in response.text
+    # The interpolated header form must stay ON OFFER next to the placeholder.
+    # Dropping it leaves the anonymous instruction plane telling every Agent to
+    # paste the credential into `~/.claude.json` — and this document is the one
+    # a user never reviews before the Agent acts on it. The `export` assertion
+    # above still holds: an Agent subprocess cannot export into its parent, so
+    # the variable is a reported user action, not a command to run.
+    assert "Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}" in response.text
     assert "does not persist the token" in response.text
     assert "does not prove an authenticated connection" in response.text
 

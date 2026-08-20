@@ -714,16 +714,20 @@ it must ask the user to set the variable in the environment that launches Codex 
 session to discover the MCP and complete `list_notebooks` plus `select_notebook`.
 
 For Claude Code, the currently installed CLI accepts an HTTP transport and an explicit
-Authorization header:
+Authorization header, and resolves `${VAR}` inside that header at connect time from the
+environment of the process that launched it:
 
 ```bash
-claude mcp add --transport http silicon-notebook http://127.0.0.1:8000/mcp \
-  --header "Authorization: Bearer <one-time-issued-token>"
+claude mcp add --transport http silicon-notebook 'http://127.0.0.1:8000/mcp/' \
+  --header 'Authorization: Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}'
 ```
 
-Claude Code may persist that raw header in its local configuration. Use least-privilege
-scopes, a short expiry, protect the local config, and revoke/rotate the token after use.
-Do not assume shell environment interpolation in that header.
+Single-quote the header so the shell does not expand it first; the stored configuration then
+holds the variable name instead of the credential. An undefined variable is sent verbatim and
+fails as a bad token with no configuration-time error, so only a real connection proves it
+resolved. Without `-s user` the entry is registered for the current directory only. A client
+that cannot interpolate persists the raw header instead: use least-privilege scopes, a short
+expiry, protect the local config, and revoke/rotate the token after use.
 
 Every new MCP session must call `select_notebook` before a data tool. The exact tool set is
 these 20 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:

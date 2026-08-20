@@ -64,6 +64,8 @@ claude mcp add --transport http silicon-notebook \\
   --header 'Authorization: Bearer <AGENT_TOKEN>'
 ```
 
+Claude Code resolves `${{VAR}}` inside that header when it connects, reading the environment of the process that launched it. Prefer the single-quoted `--header 'Authorization: Bearer ${{SILICON_NOTEBOOK_AGENT_TOKEN}}'` so the credential never reaches `~/.claude.json`, and report the remaining user action: provide that variable in the environment that launches Claude Code, then restart it. An undefined variable is sent verbatim and fails as a bad token with no configuration-time error, so do not claim success before a restarted session completes `list_notebooks` plus `select_notebook`. Without `-s user` the server is registered for the current directory only.
+
 If the current client uses a different MCP configuration format, create one Streamable HTTP server entry named `silicon-notebook`, set its URL to the endpoint above, and send the bearer token in the Authorization header. Do not write the token into a repository.
 
 ## First connection
