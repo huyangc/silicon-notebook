@@ -6822,12 +6822,14 @@ export default function Home() {
             onOpenGroups={() => setGroupsOpen(true)}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
             onOpenSearchProfile={() => {
-              // codex #535 R4 P2:归纳 job 可能在本次浏览器会话期间更新了偏好
-              // 文档,currentUser 还是登录时那份——先刷一次 /me 再开弹窗,推断
-              // 徽标与「设为你的选择」才拿得到新值;刷新失败照常打开(纯优化,
-              // 不能把设置入口做成依赖一次网络往返)。
-              setSearchProfileModalOpen(true);
-              void fetchMe().then(setCurrentUser).catch(() => undefined);
+              // codex #535 R4→R10 P2:先等 /me 刷新**落定**再开弹窗——边开边刷
+              // 会让用户在慢网络下基于陈旧值完成「设为你的选择」,把旧推断值
+              // 以 user 来源写回,或让迟到的刷新盖掉 PATCH 刚返回的本地态。
+              // 刷新失败照常打开(fail-open,设置入口不依赖一次网络往返成功)。
+              void fetchMe()
+                .then(setCurrentUser)
+                .catch(() => undefined)
+                .finally(() => setSearchProfileModalOpen(true));
             }}
             onChangePassword={() => setPasswordModalOpen(true)}
             onLogout={() => handleLogout().catch(reportError)}
