@@ -520,9 +520,9 @@ Token 有过期时间、默认 notebook、notebook allowlist，并只授予所�
 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。本机可用
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
-按 `MCP_PUBLIC_URL` 加上挂载路由的结尾斜杠给出客户端地址（`POST /mcp` 是 307 指向 `/mcp/`，
-不让 Agent 依赖客户端在重定向中保留方法、请求体与 Authorization），并从 `mcp_server.PUBLIC_TOOLS`
-派生工具清单。用户把链接与
+把 `MCP_PUBLIC_URL` 逐字印成要配置的地址（绝不改写——代理可能只公布这一条精确路由），同时写明
+打到后端的 `POST /mcp` 是 307 指向 `/mcp/`，好让客户端无法在重定向中保留方法、请求体与
+Authorization 的 Agent 知道解法；工具清单从 `mcp_server.PUBLIC_TOOLS` 派生。用户把链接与
 token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token，并且在 repository warm-up
 尚未完成时也可读取。
 带任意 query string 或 Authorization header 的请求会被拒绝。启动也会拒绝非绝对

@@ -91,8 +91,8 @@ curl -s http://127.0.0.1:8000/api/ready
 ### 服务地址
 
 权威地址是部署自己公布的那个：`MCP_PUBLIC_URL`，签发回执上的接入说明链接会原样印出它。直接**逐字**
-使用该值，再按下面补上结尾斜杠。只有拿不到这个值时，才回落到直连后端的默认形态
-`<scheme>://<host>:<后端端口>/mcp/`，其中端口是 `8000`。
+配置该值。只有拿不到这个值时，才回落到直连后端的默认形态 `<scheme>://<host>:<后端端口>/mcp/`，
+其中端口是 `8000`。
 
 除路径外的每一段都随部署变化，靠猜时的失败各不相同：
 
@@ -103,9 +103,10 @@ curl -s http://127.0.0.1:8000/api/ready
 - **scheme**：当前产品默认允许明文 HTTP（见第 9 节），只有部署确实终结 TLS 的地方才有 TLS。对只有
   HTTP 的主机，`https://` 是连接被拒、不会自动回落；反过来，也**绝不能**为了直连而把已公布的
   `https://` 地址降级到后端端口——那会让 Bearer token 明文过网。
-- **结尾斜杠**：MCP 应用挂在 `/mcp`，它自身的路由是 `/`，所以 `POST /mcp` 会回
-  `307 Temporary Redirect` 指向 `/mcp/`。会跟随 307（保留方法与请求体，官方 Python MCP client
-  始终跟随）的客户端两种写法都能用；直接写 `/mcp/` 就不再依赖这一行为。
+- **结尾斜杠**：MCP 应用挂在 `/mcp`，它自身的路由是 `/`，所以打到后端的 `POST /mcp` 会回
+  `307 Temporary Redirect` 指向 `/mcp/`。能在重定向中原样保留方法、请求体与 Authorization 的
+  客户端（官方 Python MCP client 始终如此）按配置值直接可用。若你的客户端做不到：直连后端时
+  带斜杠的形态就是解法；有代理时它只有在代理确实路由了才存在——去试，别假设。
 
 一次真实的排查（该远程部署后端前面没有任何代理）：
 
@@ -116,8 +117,9 @@ curl -s http://127.0.0.1:8000/api/ready
 | `http://notebook.example.internal:8000/mcp` | `307` 重定向到 `/mcp/` |
 | `http://notebook.example.internal:8000/mcp/` | 真正的鉴权 endpoint |
 
-`MCP_PUBLIC_URL` 自己必须**不带**结尾斜杠：启动只接受路径精确为 `/mcp` 的 URL。这个差异由接入说明
-替读者消化掉了——它会在配置值旁边直接给出带斜杠的客户端地址。
+`MCP_PUBLIC_URL` 自己必须**不带**结尾斜杠：启动只接受路径精确为 `/mcp` 的 URL。接入说明**逐字**
+印出这个配置值、绝不凭空造出一个带斜杠的变体（代理可能只公布不带斜杠的那条路由），但它会写明
+重定向与解法，好让客户端跟不了 307 的 Agent 不必自己猜。
 
 ### Codex CLI
 
@@ -284,26 +286,35 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 
 ```bash
 MCP_URL='http://127.0.0.1:8000/mcp/'
-AUTH="Authorization: Bearer $SILICON_NOTEBOOK_AGENT_TOKEN"
 CT='content-type: application/json'
 ACCEPT='accept: application/json, text/event-stream'
+# token 经 stdin 上的 `-K -` 配置传入，绝不写成 `-H` 参数：argv 对本机任何进程可读，
+# 还会进命令审计日志。
+auth() { printf 'header = "Authorization: Bearer %s"\n' "$SILICON_NOTEBOOK_AGENT_TOKEN"; }
 
 # 1. initialize -> 200，响应头 mcp-session-id 即会话 id
-curl -sD - -o /dev/null -X POST "$MCP_URL" -H "$AUTH" -H "$CT" -H "$ACCEPT" \
+auth | curl -K - -sD - -o /dev/null -X POST "$MCP_URL" -H "$CT" -H "$ACCEPT" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 
 SESSION='<上一步响应头里的 mcp-session-id>'
 
 # 2. notifications/initialized -> 202，空响应体
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
-  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
+  -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 3. tools/list -> 200，返回完整工具清单
-curl -s -X POST "$MCP_URL" \
-  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+auth | curl -K - -s -X POST "$MCP_URL" \
+  -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 4. 终止会话 -> 200，此后该 session id 一律 404
+auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
+  -H "MCP-Session-Id: $SESSION"
 ```
+
+第 4 步不是可有可无的收尾：会话是有状态的，服务端没有配置空闲超时，每少发一次 `DELETE`，
+就有一条 transport 一直挂在内存里，直到进程重启。
 
 第 1 步 `401` 是 token 问题；第 3 步 `400 Missing session ID` 说明 `MCP-Session-Id` 头掉了，
 不是服务端没有工具。

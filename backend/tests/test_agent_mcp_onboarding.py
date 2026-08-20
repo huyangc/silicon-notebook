@@ -2,7 +2,8 @@ from fastapi.testclient import TestClient
 
 
 def test_onboarding_document_is_public_and_uses_configured_mcp_url(monkeypatch):
-    monkeypatch.setenv("MCP_PUBLIC_URL", "https://notebook.example.test/mcp")
+    url = "https://notebook.example.test/mcp"
+    monkeypatch.setenv("MCP_PUBLIC_URL", url)
     monkeypatch.setenv("MCP_REQUIRE_HTTPS", "1")
 
     from app.main import create_app
@@ -28,12 +29,15 @@ def test_onboarding_document_is_public_and_uses_configured_mcp_url(monkeypatch):
         "--header 'Authorization: Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}'"
         in response.text
     )
-    # The client must be pointed at the MOUNTED route. The MCP app is mounted
-    # at `/mcp` with its own root route, so `POST /mcp` is a 307 to `/mcp/`;
-    # printing only the slashless `MCP_PUBLIC_URL` (which startup validation
-    # pins to exactly `/mcp`) leaves every Agent depending on its client
-    # preserving method, body and Authorization across that redirect.
-    assert "`https://notebook.example.test/mcp/`" in response.text
+    # `POST /mcp` is a 307 to the mounted `/mcp/` route, so the document must
+    # say so: silence leaves every Agent depending on its client preserving
+    # method, body and Authorization across that redirect. It states the
+    # remedy WITHOUT rewriting `MCP_PUBLIC_URL` — that value is the
+    # deployment's published contract, and a proxy may route only the
+    # unslashed path, so a fabricated `…/mcp/` could advertise a 404.
+    assert "307 Temporary Redirect" in response.text
+    assert "trailing slash" in response.text
+    assert f"`{url}/`" not in response.text
     assert "does not persist the token" in response.text
     assert "does not prove an authenticated connection" in response.text
 
