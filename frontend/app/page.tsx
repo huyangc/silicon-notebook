@@ -6193,7 +6193,17 @@ export default function Home() {
    * `replaceState` 顶掉旧的 `#notebook=<id>`,否则那条历史条目还活着,按返回键会撞上
    * 一本已经 403 的库。
    */
-  async function reconcileOpenNotebook(remaining: NotebookSummary[]) {
+  async function reconcileOpenNotebook(remaining: NotebookSummary[], navEpoch: number) {
+    // ⚠ 用户可能在重取清单在飞的那段时间里自己切库。切库(`openNotebook`)与回集合页
+    // (`showCollection`)都会**同步**递增 `workspaceEpochRef`,所以世代变了就说明导航
+    // 已经不归这次对账管,整条放弃。
+    //
+    // 少了这道闸会**反过来打断用户**:他点开的那本新库还在等首批请求,而在那段窗口里
+    // `currentNotebookIdRef` 仍指向刚被撤销的旧库——对账于是判定「需要跳走」,再发一次
+    // `openNotebook(firstOwned)`,那次调用递增世代,把用户自己发起的导航作废掉。
+    // 只看下面那句 `openNotebook` 的返回值救不了这种:被顶掉的是**先发起**的那一次
+    // (codex #529 R2 P2)。
+    if (workspaceEpochRef.current !== navEpoch) return;
     const openId = currentNotebookIdRef.current;
     if (!openId || remaining.some((n) => n.id === openId)) return;
     const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
@@ -6217,20 +6227,24 @@ export default function Home() {
    * 不为同一件事发两次同样的请求。
    */
   async function refreshAfterAccessChange() {
+    // 世代必须在**第一个 await 之前**取,它是「这次对账发起时用户在哪」的快照。
+    const navEpoch = workspaceEpochRef.current;
     const remaining = await listNotebooks();
+    // 清单照刷:它无害且必要,被世代挡掉的只有导航那一步。
     setNotebooks(remaining);
-    await reconcileOpenNotebook(remaining);
+    await reconcileOpenNotebook(remaining, navEpoch);
   }
 
   async function handleLeaveShared() {
     if (!currentNotebook) return;
     const leftId = currentNotebook.id;
+    const navEpoch = workspaceEpochRef.current;
     setLeaveBusy(true);
     try {
       await leaveNotebook(leftId);
       const remaining = await listNotebooks();
       setNotebooks(remaining);
-      await reconcileOpenNotebook(remaining);
+      await reconcileOpenNotebook(remaining, navEpoch);
       setToast("已退出只读共享");
     } finally {
       setLeaveBusy(false);

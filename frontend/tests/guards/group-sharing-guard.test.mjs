@@ -81,6 +81,15 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
     ),
     "对账里的 replaceState 没有被 openNotebook 的返回值挡住",
   );
+
+  // 对账还必须先问一句「用户是不是已经自己走了」。重取清单在飞的那段时间里,用户点开
+  // 的新库还在等首批请求,`currentNotebookIdRef` 仍指向刚被撤销的旧库——没有这道世代闸,
+  // 对账会判定「需要跳走」并发出一次新的 `openNotebook`,反过来把**用户自己**发起的
+  // 导航作废掉(codex #529 R2 P2)。上面那条返回值闸救不了它:被顶掉的是先发起的那次。
+  assert.ok(
+    ifConditionsIn(reconcile).some((condition) => /workspaceEpochRef/.test(condition)),
+    "对账没有世代闸,会打断用户自己发起的切库",
+  );
 });
 
 // 加/撤群组授权、开启/取消链接分享都会翻转「未共享门」——本笔记本一旦被共享出去,
