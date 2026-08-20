@@ -24,7 +24,7 @@
 // 轮询尝试上限,超限走中性文案而不猜结局。
 "use client";
 
-import { useCallback, useEffect, useState, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { ChevronDown, Sparkles } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
@@ -343,19 +343,28 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
   const [clearingAgentId, setClearingAgentId] = useState("");
   const [clearingAll, setClearingAll] = useState(false);
   const [confirmingAll, setConfirmingAll] = useState(false);
+  // codex #535 R5 P2:任一清空在飞时**全部**清空按钮禁用(见 anyClearing),
+  // 且 load 带代次守卫——快速连清两个 Agent 时,先发请求的 load 若最后返回,
+  // 会拿旧快照盖掉后一次的结果,让已删除的记录复活到下次刷新。
+  const loadEpochRef = useRef(0);
 
   const load = useCallback(async () => {
+    const epoch = ++loadEpochRef.current;
     setLoading(true);
     setError("");
     try {
       const next = await fetchAgentObservations(notebookId);
-      setItems(next.items);
+      if (epoch === loadEpochRef.current) setItems(next.items);
     } catch (err) {
-      setError(toUserMessage(err, "没能读到 Agent 记录，请稍后重试"));
+      if (epoch === loadEpochRef.current) {
+        setError(toUserMessage(err, "没能读到 Agent 记录，请稍后重试"));
+      }
     } finally {
-      setLoading(false);
+      if (epoch === loadEpochRef.current) setLoading(false);
     }
   }, [notebookId]);
+
+  const anyClearing = clearingAgentId !== "" || clearingAll;
 
   function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
     if (event.currentTarget.open && items === null && !loading) {
@@ -421,7 +430,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={clearingAll}
+                    disabled={anyClearing}
                     onClick={() => { void clearAll(); }}
                   >
                     {clearingAll ? "清空中…" : "确认清空全部记录"}
@@ -429,7 +438,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={clearingAll}
+                    disabled={anyClearing}
                     onClick={() => setConfirmingAll(false)}
                   >
                     取消
@@ -439,7 +448,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
                 <button
                   type="button"
                   className="sort-button"
-                  disabled={clearingAll}
+                  disabled={anyClearing}
                   onClick={() => setConfirmingAll(true)}
                 >
                   清空全部记录
@@ -453,7 +462,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={clearingAgentId === group.agentProfileId}
+                    disabled={anyClearing}
                     onClick={() => { void clearAgent(group.agentProfileId); }}
                   >
                     {clearingAgentId === group.agentProfileId ? "清空中…" : "清空这个 Agent 的记录"}

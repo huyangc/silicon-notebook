@@ -1891,7 +1891,7 @@ it there.
 | --- | --- |
 | Fields | 4 (`answer_language`, `answer_shape`, `answer_detail`, `domain_terms`) |
 | `domain_terms` cap | ≤10 terms, ≤32 characters each |
-| Rendered style-block character cap | 200 (`SEARCH_PROFILE_BLOCK_MAX_CHARS`) — terms are packed one at a time and kept as long as they fit, rather than dropped as one all-or-nothing chunk |
+| Rendered style-block character cap | 600 (`SEARCH_PROFILE_BLOCK_MAX_CHARS`) — sized so the maximal legal profile always renders completely (codex #535 R5: a budget smaller than the combined input caps silently drops choices the UI reported as saved); per-term packing is kept as defence in depth |
 | Inference sample size | last 30 completed asks (`SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT`) |
 | Inference minimum sample floor | 10 (`SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES`) — below this the job writes nothing |
 | Inference majority threshold | 0.7 of the full sample (`SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO`; the "other"-language share stays in the denominator) |

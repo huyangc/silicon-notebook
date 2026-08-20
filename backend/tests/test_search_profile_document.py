@@ -290,10 +290,13 @@ def test_render_never_leaks_ids_notebook_or_source_words():
     assert "source_id" not in block and "user id" not in block
 
 
-def test_overflowing_domain_terms_are_packed_one_at_a_time_not_dropped_whole():
-    """T8:满长 domain_terms(10 x 32 字符)远超可渲染预算,但渲染器逐条装入
-    直到预算耗尽,不是把整个列表丢光——评审发现的 320 输入 vs ~96 预算错配
-    (见 p3-rulings.md「T6 domain_terms」条)。"""
+def test_overflowing_domain_terms_are_packed_one_at_a_time_not_dropped_whole(monkeypatch):
+    """T8→R5 改造:codex #535 R5 把预算抬到「最大合法档案必然装下」,合法输入
+    再也够不着溢出分支——本用例改为把预算临时缩回 200,钉住逐条装入这条
+    **纵深防御**在未来加字段/抬上限时仍然成立(装不下的整条丢,绝不截半)。"""
+    from app.services import search_profile as sp
+
+    monkeypatch.setattr(sp, "SEARCH_PROFILE_BLOCK_MAX_CHARS", 200)
     profile = merge_field(_empty(), "answer_language", "zh", "user")
     long_terms = [
         f"{i:02d}-" + "x" * (SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS - 3)
@@ -301,7 +304,7 @@ def test_overflowing_domain_terms_are_packed_one_at_a_time_not_dropped_whole():
     ]
     profile = merge_field(profile, "domain_terms", long_terms, "user")
     block = render_style_block(profile)
-    assert len(block) <= SEARCH_PROFILE_BLOCK_MAX_CHARS
+    assert len(block) <= 200
     # The bounded block must still say SOMETHING (the language preference
     # survives).
     assert "Chinese" in block
@@ -363,3 +366,26 @@ def test_rewriting_the_same_value_and_origin_preserves_the_entry():
     # 值变了照常换新条目
     changed = merge_field(first, "answer_language", "en", "job")
     assert changed["fields"]["answer_language"]["value"] == "en"
+
+
+def test_the_maximal_legal_profile_renders_completely():
+    """codex #535 R5 P2:值域上限允许的最大档案(最长短语 + 10×32 满额术语)
+    必须完整渲染——预算与输入上限不许静默漂移分开,否则「已保存」的用户选择
+    会在渲染点被静默丢弃。"""
+    terms = ["漢" * SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS
+             for _ in range(SEARCH_PROFILE_DOMAIN_TERMS_MAX)]
+    # 术语必须互不相同才能都进列表——首字符编号区分
+    terms = [f"{chr(0x4E00 + i)}" + "漢" * (SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS - 1)
+             for i in range(SEARCH_PROFILE_DOMAIN_TERMS_MAX)]
+    profile = {"version": 1, "fields": {}}
+    for field, value in (
+        ("answer_language", "zh"),
+        ("answer_shape", "table_first"),
+        ("answer_detail", "detailed"),
+        ("domain_terms", terms),
+    ):
+        profile = merge_field(profile, field, value, "user")
+    block = render_style_block(profile)
+    assert len(block) <= SEARCH_PROFILE_BLOCK_MAX_CHARS
+    for term in terms:
+        assert term in block, "满额术语被静默丢弃"
