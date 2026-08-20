@@ -50,8 +50,13 @@ def build_chunks(elements: List[dict], target_chars: int = 600,
             else:
                 section = prefix = text
             continue
-        if (etype in _SKIP_TYPES and not e.get("caption")) or not text:
-            continue                # 跳过无图注的 image/figure 与空文本；带图注的图保留图注进检索
+        if (etype in _SKIP_TYPES and not e.get("caption")
+                and not e.get("description")) or not text:
+            # 跳过既无图注又无图片描述的 image/figure 与空文本；带图注或带
+            # `> **图片描述**` 引用块的图保留那段文字进检索。描述这一半不能省：
+            # 导出工具产出的图往往没有 alt，只有描述块，只看 caption 会把它们
+            # 连同描述一起判成不可检索。
+            continue
         buf.append((e["id"], text))
         buf_len += len(text)
         if buf_len >= target_chars:

@@ -118,6 +118,38 @@ def test_build_chunks_consumes_section_path_breadcrumb_from_metadata(repo):
     assert "Manual" not in chunk_rows[idx]["text"]
 
 
+def test_build_chunks_carries_metadata_description_for_image_elements(repo):
+    """同上，钉住 metadata.description 那一半：markdown 的 `> **图片描述**` 引用块
+    是没有 alt 的图片进检索的唯一入口，投影漏带它会让这类图片连同描述一起消失
+    （手搓扁平 dict 的 test_description_reaches_chunking_without_any_alt_caption
+    证明不了投影方带没带这个键）。"""
+    nb, sid = _seed_source_with_elements(repo, rows=[
+        ("image", "三级流水线示意", json.dumps({"description": "三级流水线示意"})),
+    ])
+
+    repo._build_chunks_for_source(sid)
+
+    with repo._connect() as db:
+        chunk_rows = db.execute(
+            "SELECT text FROM chunks WHERE source_id=? ORDER BY id", (sid,)
+        ).fetchall()
+    assert any("三级流水线示意" in row["text"] for row in chunk_rows)
+
+
+def test_build_chunks_skips_image_elements_with_neither_caption_nor_description(repo):
+    """反向护栏：放宽的是判据不是类型，两样都没有的图片仍然不进检索。"""
+    nb, sid = _seed_source_with_elements(repo, rows=[
+        ("image", "Markdown 图 1", "{}"),
+    ])
+
+    repo._build_chunks_for_source(sid)
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE source_id=?", (sid,)
+        ).fetchone()["n"] == 0
+
+
 def test_build_chunks_carries_metadata_caption_for_image_elements(repo):
     """source_elements_for_chunking 把 metadata.caption 投影出来供 build_chunks
     判定(image/figure 元素仅在无图注时跳过);带图注的 markdown 图片元素必须真的

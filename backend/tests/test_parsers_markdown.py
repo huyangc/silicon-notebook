@@ -303,3 +303,89 @@ def test_empty_payload_returns_empty_string_and_never_calls_persist():
     asset_id = _persist_markdown_data_uri("data:image/png;base64,", persist, 1)
     assert asset_id == ""
     assert persist.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 图片描述块（`> **图片描述**`）
+# ---------------------------------------------------------------------------
+
+DESCRIBED_MD = """![某个图注](images/a.png)
+
+> **图片描述**
+> 三级流水线示意，从取指到写回
+> 第二行细节
+"""
+
+
+def test_image_description_joins_the_caption_in_element_text():
+    els = parse_markdown_text("s1", DESCRIBED_MD)
+    imgs = [e for e in els if e.element_type == "image"]
+    assert len(imgs) == 1
+    assert imgs[0].metadata.get("caption") == "某个图注"
+    assert imgs[0].metadata.get("description") == "三级流水线示意，从取指到写回 第二行细节"
+    # 元素文本就是这张图进 chunk 的那段字：图注与描述都要在里面。
+    assert imgs[0].text == "某个图注 三级流水线示意，从取指到写回 第二行细节"
+
+
+def test_image_description_does_not_also_become_its_own_element():
+    """描述已经折进图片元素，再出一条就是同一段话占两个检索位。"""
+    els = parse_markdown_text("s1", DESCRIBED_MD)
+    assert [e.element_type for e in els] == ["image"]
+
+
+def test_description_only_image_still_produces_an_element():
+    text = "![](images/a.png)\n\n> **图片描述**\n> 只有描述\n"
+    els = parse_markdown_text("s1", text)
+    assert len(els) == 1
+    assert els[0].element_type == "image"
+    assert els[0].metadata.get("caption") is None
+    assert els[0].metadata.get("description") == "只有描述"
+    assert els[0].text == "只有描述"
+    assert els[0].metadata.get("src") == "images/a.png"
+
+
+def test_description_reaches_chunking_without_any_alt_caption():
+    """没有 alt 的图只有描述这一个进检索的入口——`caption` 空不能把它挡在外面。"""
+    from app.services.chunking import build_chunks
+
+    els = parse_markdown_text("s1", "![](images/a.png)\n\n> **图片描述**\n> 只有描述\n")
+    img = [e for e in els if e.element_type == "image"][0]
+    # 镜像 source_elements_for_chunking 的扁平化输出形态
+    flat = {
+        "id": img.id or "e1",
+        "element_type": img.element_type,
+        "text": img.text,
+        "caption": img.metadata.get("caption") or "",
+        "description": img.metadata.get("description") or "",
+    }
+    chunks = build_chunks([flat], target_chars=600, overlap_chars=0)
+    assert "只有描述" in " ".join(c["text"] for c in chunks)
+
+
+def test_image_with_neither_caption_nor_description_stays_out_of_chunking():
+    """反向护栏：放行的判据是「有描述」，不是「是图片元素」。"""
+    from app.services.chunking import build_chunks
+
+    flat = {"id": "e1", "element_type": "image", "text": "Markdown 图 1",
+            "caption": "", "description": ""}
+    assert build_chunks([flat], target_chars=600, overlap_chars=0) == []
+
+
+def test_description_survives_alongside_a_persisted_data_uri_image():
+    calls = []
+
+    def persist(img_bytes, img_name):
+        calls.append(img_name)
+        return "asset-1"
+
+    text = (
+        f"![图注](data:image/png;base64,{PNG_B64})\n\n"
+        "> **图片描述**\n> 描述正文\n"
+    )
+    els = parse_markdown_text("s1", text, persist_image=persist)
+    assert calls == ["md-img-1.png"]
+    assert len(els) == 1
+    assert els[0].metadata.get("asset_id") == "asset-1"
+    assert els[0].metadata.get("description") == "描述正文"
+    # data URI 仍然绝不进 metadata（任何键都不行）。
+    assert "base64" not in json.dumps(els[0].metadata)

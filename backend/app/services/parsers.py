@@ -502,6 +502,12 @@ def parse_markdown_text(
     elements: List[SourceElement] = []
     counters: Dict[str, int] = {}
     for block in blocks:
+        if block.type == "image_description":
+            # `> **图片描述**` 引用块的文本已经折进上一条 image 元素（见下面的
+            # image 分支），再出一条元素就是把同一段描述发两遍——两条都会进
+            # chunk，同一份内容占两个检索位。它仍以独立块的形式存在，是为了让
+            # KG 侧拿到逐字原文跨度。
+            continue
         counters[block.type] = counters.get(block.type, 0) + 1
         ordinal = counters[block.type]
         metadata: Dict[str, Any] = {
@@ -528,6 +534,13 @@ def parse_markdown_text(
             caption = block.text.strip()
             if caption:
                 metadata["caption"] = caption
+            # 紧跟这张图的 `> **图片描述**` 引用块（structural_markdown 已折进
+            # block.metadata）。它与 alt 图注并列、不互相覆盖：alt 是图注，描述
+            # 是对图的展开说明，界面分两处渲染，检索则两段都要。
+            raw_description = block.metadata.get("description", "")
+            description = raw_description.strip() if isinstance(raw_description, str) else ""
+            if description:
+                metadata["description"] = description
             src = block.metadata.get("src", "")
             asset_id = ""
             # Scheme match is case-insensitive: markdown-it tokenizes
@@ -540,9 +553,14 @@ def parse_markdown_text(
                     metadata["asset_id"] = asset_id
             else:
                 metadata["src"] = src
-            if not caption and not asset_id:
+            if not caption and not description and not asset_id:
                 continue  # 既不可显示又不可检索的占位行没有价值
-            element_text = caption or f"Markdown 图 {ordinal}"
+            # 图注与描述都进元素文本：元素文本就是这张图进 chunk 的那段字，少
+            # 带一半等于让描述检索不到。分隔符是换行只为可读——`_element` 对
+            # image 类型照旧压平空白，落库的是单行。
+            element_text = "\n".join(
+                part for part in (caption, description) if part
+            ) or f"Markdown 图 {ordinal}"
         elements.append(
             _element(
                 source_id,

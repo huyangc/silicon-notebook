@@ -615,6 +615,9 @@ export type MarkdownImageRef = {
   destEnd: number;
   /** 是否独占一整段（服务端唯一会落成图片元素的形态）。 */
   standalone: boolean;
+  /** 图片行之后是否紧跟着一个「图片描述」引用块（见 `hasImageDescriptionBelow`）。
+   *  命中的图即使没有 alt 也能被检索到，因此不该报「无图注」。 */
+  described: boolean;
   /** 0 起的行号，供 UI 定位。 */
   line: number;
 };
@@ -685,6 +688,95 @@ const THEMATIC_BREAK_LINE = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t
 /** setext 标题下划线：纯 `=` 串或纯 `-` 串的一行。 */
 const SETEXT_UNDERLINE_LINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
+/** 引用行：`> ` 前最多 3 空格缩进，`>` 后可有一个空格。捕获组是去掉标记后的内容。 */
+const BLOCKQUOTE_LINE = /^ {0,3}>[ \t]?(.*)$/;
+
+/** 「图片描述」引用块的标记行——服务端 `structural_markdown._IMAGE_DESCRIPTION_MARKER`
+ *  的镜像（那边不需要捕获组，描述文本是从渲染后的 token 里剥的；这边要靠捕获组
+ *  判断同一行冒号后面还有没有正文）。粗体与行尾冒号都可有可无；标记之后还跟内容
+ *  时必须隔一个冒号，否则「图片描述如下：……」这类正常引用会被误判。 */
+const IMAGE_DESCRIPTION_MARKER =
+  /^[ \t]*(?:\*\*|__)?[ \t]*图片描述[ \t]*(?:\*\*|__)?[ \t]*(?:[:：][ \t]*(.*))?$/;
+
+/** 引用块内一行是不是服务端 `_OPAQUE_BLOCKS`（围栏代码块 / HTML 块 / 缩进代码块）
+ *  的开头。这几种块的正文挂在 token.content 上、没有 inline 子节点，服务端一遇到
+ *  就整块不认；列表/标题/表格/嵌套引用**不在此列**（它们的正文在 inline 上，照收）。
+ *  缩进码那一条按「剥掉全部引用标记后仍有 4 个前导空格」判，与 CommonMark 一致；
+ *  列表项的深缩进续行会被它误判成不认——方向安全（多留一条提示）。
+ *
+ *  围栏与 HTML 块前面**必须**容许 0–3 个空格（codex #536 R1 P2）：markdown-it 照
+ *  CommonMark 认这种缩进，`>  ``` ` 的正文照样进 fence token、服务端整块不认，而
+ *  只认顶格的正则会漏过它、把这张图说成有描述——正是这条镜像绝不能出现的方向。 */
+const OPAQUE_BLOCK_IN_QUOTE = /^(?: {4,}| {0,3}(?:`{3,}|~{3,}|<))/;
+
+/** 逐层剥掉行首的引用标记（`>`、`> >`、`>>` 都算），拿到这一行真正的内容。 */
+function stripQuoteMarkers(line: string): string {
+  let rest = line;
+  for (;;) {
+    const next = rest.replace(/^ {0,3}>[ \t]?/, "");
+    if (next === rest) return rest;
+    rest = next;
+  }
+}
+
+/** 把 `![alt](dest)` / `[text](dest)` 剥成 alt/text，目标串里的括号按**配对**扫。
+ *
+ *  正则做不到这件事：CommonMark 允许目标串带配对括号（`![](foo(bar)baz.png)` 是
+ *  合法图片），`\([^)]*\)` 会停在里层那个 `)` 上、把 `baz.png)` 留下来当正文
+ *  （codex #536 R4 P2）。不配对就把剩下的整段当作已消耗——宁可少留字（判否、多
+ *  一条提示），不能多留。
+ */
+function stripLinkAndImageSyntax(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const isImage = text.startsWith("![", i);
+    if (!isImage && text.charAt(i) !== "[") {
+      out += text.charAt(i);
+      i += 1;
+      continue;
+    }
+    const labelStart = i + (isImage ? 2 : 1);
+    const labelEnd = text.indexOf("]", labelStart);
+    if (labelEnd < 0 || text.charAt(labelEnd + 1) !== "(") {
+      out += text.charAt(i);
+      i += 1;
+      continue;
+    }
+    out += text.slice(labelStart, labelEnd);
+    let depth = 0;
+    let at = labelEnd + 1;
+    for (; at < text.length; at += 1) {
+      const ch = text.charAt(at);
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) { at += 1; break; }
+      }
+    }
+    i = at;                       // 不配对时 at 已走到串尾：整段算消耗掉
+  }
+  return out;
+}
+
+/** 这段引用文字渲染出来还剩不剩下字。
+ *
+ *  服务端的「非空」是**渲染之后**的：`&lt;br&gt;` 只是 html_inline、`&amp;nbsp;` 解码成空白、
+ *  `![](…)` 空 alt 渲染成空串，三者都让描述判空、整块不折叠。这里剥掉图片/链接
+ *  语法、HTML 标签与实体之后，要求**至少剩一个字母或数字**——用「必须剩下字」这
+ *  个正向判据，而不是逐个减去标点：减法要穷举标点才不漏，正向判据对任何剥不干净
+ *  的残渣天然判否。
+ *
+ *  代价是纯标点/纯符号的描述（「→→→」）这边判否而服务端折叠——方向安全，只是多
+ *  留一条提示（codex #536 R3 P2）。
+ */
+function quotedTextHasWords(text: string): boolean {
+  const stripped = stripLinkAndImageSyntax(text)
+    .replace(/<[^>]*>/g, "")
+    .replace(/&[#0-9a-zA-Z]+;/g, "");
+  return /[\p{L}\p{N}]/u.test(stripped);
+}
+
 /** 上一行是否结束了上一个块，使得图片行能起一个新段落。
  *
  *  空行以外，ATX 标题与主题分隔线同样是块边界——服务端实测 `# 标题\n![a](x.png)`
@@ -705,7 +797,52 @@ function closesBlockAbove(raw: string): boolean {
  */
 function opensBlockBelow(raw: string): boolean {
   if (ATX_HEADING_LINE.test(raw)) return true;
+  // 引用块同样能打断段落（CommonMark），服务端实测 `![a](x.png)\n> 引用` 产出
+  // `[image, paragraph]`——图片确实独占一段。「图片描述」引用块常常就这样紧贴着
+  // 图片行写，漏了这一条会把它们整片判成不可改写、连图都不内联。
+  // 反方向刻意**不**对称：`> 引用\n![a](x.png)` 里的图片行是引用块的 lazy
+  // continuation，会被整个吸进引用里（实测只产出一个 paragraph），所以
+  // `closesBlockAbove` 绝不能认 `>`。
+  if (BLOCKQUOTE_LINE.test(raw)) return true;
   return THEMATIC_BREAK_LINE.test(raw) && !SETEXT_UNDERLINE_LINE.test(raw);
+}
+
+/** 图片行之后是否紧跟着一个「图片描述」引用块。
+ *
+ *  服务端 `structural_markdown._image_description` 的镜像：图片行之后（中间可以
+ *  隔空行）的下一个块是引用块，块内第一行只有 `**图片描述**` 标记，块里没有服务端
+ *  认不了的不透明块，且标记之后还有渲染得出字的引用文本。命中的图片即便没有 alt
+ *  也能进检索，所以「无图注」那条回执必须闭嘴——否则用户会照着一条假警告去逐张
+ *  补 alt。
+ *
+ *  **必须扫完整个引用块**，不能在第一条内容行上下结论：服务端是对整块判的，「先
+ *  一句引导语、再一个围栏代码块」这种写法只看第一行会判成有描述，而服务端整块
+ *  不认——那张图既无图注又无描述、真的检索不到，回执却什么都不说。
+ *
+ *  这一位**只喂回执**，不参与任何改写决策，所以镜像不必逐字，但方向是硬的：判窄
+ *  了（例如描述正文靠 lazy continuation 不带 `>` 写在下一行，服务端认、这里不认）
+ *  最多多留一条提示；判宽了才会把一张真的检索不到的图说成没问题。
+ */
+function hasImageDescriptionBelow(
+  md: string, lines: LineInfo[], imageLine: number,
+): boolean {
+  let index = imageLine + 1;
+  while (index < lines.length && lines[index].blank) index += 1;
+  if (index >= lines.length || lines[index].fenced) return false;
+  const opening = BLOCKQUOTE_LINE.exec(md.slice(lines[index].start, lines[index].end));
+  if (opening === null) return false;
+  const marker = IMAGE_DESCRIPTION_MARKER.exec(stripQuoteMarkers(opening[0]));
+  if (marker === null) return false;
+  let described = quotedTextHasWords(marker[1] ?? "");   // `> **图片描述**：正文`
+  for (let below = index + 1; below < lines.length; below += 1) {
+    const raw = md.slice(lines[below].start, lines[below].end);
+    if (BLOCKQUOTE_LINE.exec(raw) === null) break;       // 引用块到此为止
+    const content = stripQuoteMarkers(raw);
+    if (content.trim() === "") continue;                 // 引用块内的空行
+    if (OPAQUE_BLOCK_IN_QUOTE.test(content)) return false;
+    if (quotedTextHasWords(content)) described = true;
+  }
+  return described;
 }
 
 /** 一行上的行内代码跨度（绝对偏移，左闭右开）。
@@ -806,6 +943,7 @@ function parseImageAt(md: string, at: number): MarkdownImageRef | null {
       destStart: at,
       destEnd: j + 1,
       standalone: false,
+      described: false,
       line: 0,
     };
   }
@@ -868,6 +1006,7 @@ function parseImageAt(md: string, at: number): MarkdownImageRef | null {
     destStart,
     destEnd,
     standalone: false,
+    described: false,
     line: 0,
   };
 }
@@ -896,6 +1035,7 @@ function findHtmlImgTags(md: string): MarkdownImageRef[] {
       destStart: match.index,
       destEnd: match.index + match[0].length,
       standalone: false,
+      described: false,
       line: 0,
     });
   }
@@ -996,6 +1136,7 @@ export function findMarkdownImages(md: string): MarkdownImageRef[] {
       && indentWidth(raw) === 0
       && (above === null || above.blank || closesBlockAbove(md.slice(above.start, above.end)))
       && (below === null || below.blank || opensBlockBelow(md.slice(below.start, below.end)));
+    ref.described = hasImageDescriptionBelow(md, lines, lineIndex);
     refs.push(ref);
   }
   return refs;
@@ -1391,7 +1532,9 @@ export function inlineMdImages(
       alt: ref.alt,
       line: ref.line,
     });
-    if (ref.alt.trim() === "") {
+    // 带「图片描述」引用块的图片即便没有 alt 也能被检索到（服务端把描述折进图片
+    // 元素的文本），此时报「无图注」就是假警告。
+    if (ref.alt.trim() === "" && !ref.described) {
       receipt.noAlt.push({ src: ref.src, path: hit.path, line: ref.line });
     }
   }

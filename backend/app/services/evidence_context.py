@@ -97,9 +97,10 @@ def _citation_image(
 
     准入判据只有两条：``element_type == 'image'``（已由 `image_asset_rows` 在
     SQL 里下推，本函数因此只看后半条）且 ``metadata.asset_id`` 非空。刻意**不**
-    要求图注非空：图注是图片进检索的唯一入口（无图注的图片压根不进 chunk，见
-    `chunking.py`），所以「命中了却没图注」在正常管线里到不了这里；真到了（例如
-    别的路径直接把 element id 递进来），少一行说明也不是丢弃这张图的理由。
+    要求图注非空：图注（或 markdown 的 `> **图片描述**` 引用块，见下面的回退）
+    是图片进检索的唯一入口——两者皆空的图片压根不进 chunk，见 `chunking.py`——
+    所以「命中了却两样都没有」在正常管线里到不了这里；真到了（例如别的路径直接
+    把 element id 递进来），少一行说明也不是丢弃这张图的理由。
     合成投影行（knowhow / memory）无需特判，两条前提见
     `attach_citation_images` 的 docstring。
     """
@@ -113,6 +114,11 @@ def _citation_image(
     if not asset_id or not isinstance(asset_id, str):
         return None
     caption = metadata.get("caption")
+    if not isinstance(caption, str) or not caption.strip():
+        # markdown 的 `> **图片描述**` 引用块：没有 alt 图注的图靠它进检索，
+        # 也就只有它能给附图配一行说明。两者都没有才留空。
+        description = metadata.get("description")
+        caption = description if isinstance(description, str) else caption
     return CitationImage(
         element_id=element_id,
         asset_id=asset_id,

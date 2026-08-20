@@ -60,9 +60,11 @@ class CitationImage(BaseModel):
     引证内容视觉区分，绝不冒充模型引用过的证据。
 
     ``caption`` 取 ``source_elements.metadata.caption``（解析器只在图注非空时写
-    这个键），刻意**不**回退到元素 ``text``：无图注的图片元素 ``text`` 是
+    这个键），无图注时回退到 ``metadata.description``——markdown 的
+    `> **图片描述**` 引用块，没有 alt 的图正是靠它进的检索，那段字是用户自己写下
+    的描述。刻意**不**回退到元素 ``text``：两样都没有的图片元素 ``text`` 是
     「Markdown 图 3」/「PDF p.2 图 1」这类占位定位串，把它当图注渲染是在编造一个
-    用户从没写过的说明。缺图注时留空，由前端只渲染图。
+    用户从没写过的说明。两样都没有时留空，由前端只渲染图。
 
     ``asset_id`` 只是句柄，不是内容：前端仍走 active-notebook 资产代理端点
     (``GET /api/notebooks/{active}/assets/{asset_id}``) 取图，那里每请求实时复验

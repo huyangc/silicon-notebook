@@ -749,6 +749,12 @@ const STANDALONE_CASES = [
   ["prose on the line directly above", "\nlead-in\n![a](x.png)\n\n", false],
   ["prose on the line directly below", "\n![a](x.png)\ntrailer\n", false],
   ["a bare # that is not a heading below", "lead\n\n![a](x.png)\n#下节\n", false],
+  // 引用块能打断段落（CommonMark），服务端实测 `![a](x.png)\n> 引用` 产出
+  // `[image, paragraph]`。「图片描述」引用块常常就这样紧贴着图片行写。
+  ["a blockquote directly below", "lead\n\n![a](x.png)\n> 引用\n", true],
+  // 反方向不对称：上面那行是引用时，图片行是它的 lazy continuation，会被整个
+  // 吸进引用块里（服务端实测只产出一个 paragraph）。
+  ["a blockquote directly above", "> 引用\n![a](x.png)\n", false],
   ["an indented code block", "\n    ![a](x.png)\n", false],
 ];
 
@@ -1040,6 +1046,107 @@ test("an image with no caption is inlined but flagged as unsearchable", () => {
   assert.equal(out.ok, true);
   assert.equal(out.receipt.inlined.length, 2);
   assert.deepEqual(out.receipt.noAlt.map((n) => n.path), ["a.png"]);
+});
+
+
+test("an image described by a 图片描述 quote is not flagged as unsearchable", () => {
+  // 服务端把 `> **图片描述**` 引用块折进图片元素的文本，这张图因此能被检索到 ——
+  // 此时还报「无图注」就是假警告，用户会照着它去给每张图补 alt。
+  const files = [{ path: "a.png", bytes: PNG }];
+  const out = inlineOf("n.md", "![](a.png)\n\n> **图片描述**\n> 三级流水线示意\n", files);
+  assert.equal(out.ok, true);
+  assert.equal(out.receipt.inlined.length, 1);
+  assert.deepEqual(out.receipt.noAlt, []);
+});
+
+
+test("图片描述 detection mirrors the server's shape rules", () => {
+  // 每条的期望值都是**实跑服务端 `parse_blocks` 得到的**（image 块有没有拿到
+  // description），不是照着实现推的。两侧分歧就是一条假回执：判宽会把一张真检索
+  // 不到的图说成没问题，判窄只是多留一条提示。
+  const cases = [
+    ["marker then quoted text", "![](a.png)\n\n> **图片描述**\n> 正文\n", true],
+    ["marker with the text after a colon", "![](a.png)\n\n> **图片描述**：正文\n", true],
+    ["no blank line in between", "![](a.png)\n> **图片描述**\n> 正文\n", true],
+    ["unbolded marker", "![](a.png)\n\n> 图片描述\n> 正文\n", true],
+    ["a blank quote line before the text", "![](a.png)\n\n> **图片描述**\n>\n> 正文\n", true],
+    // 「后续的所有引用行都是描述」——列表/标题/表格/嵌套引用的正文都在 inline 上，
+    // 服务端照收（VLM 写的图片描述常带项目符号）。
+    ["a list inside the quote", "![](a.png)\n\n> **图片描述**\n> - 列表项\n", true],
+    ["a list after a lead-in line",
+      "![](a.png)\n\n> **图片描述**\n> 引导语：\n> - 取指\n> - 写回\n", true],
+    ["a nested quote", "![](a.png)\n\n> **图片描述**\n> > 嵌套\n", true],
+    ["a heading after a lead-in line",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n> # 小标题\n", true],
+    ["a table after a lead-in line",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n", true],
+    // 不透明块（正文不在 inline 上）：服务端整块不认。这三条**必须**扫完整个引用块
+    // 才看得见——只看第一条内容行会全判成 true，正是那条假回执。
+    ["a fence after a lead-in line",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n> ```\n> code\n> ```\n", false],
+    ["an html block after a lead-in line",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n> <div>x</div>\n", false],
+    // 围栏/HTML 缩进 1–3 空格仍是围栏/HTML（CommonMark），服务端逐条实测同判。
+    ["a fence indented by three spaces",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n>    ```\n>    code\n>    ```\n", false],
+    ["a tilde fence indented by one space",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n>  ~~~\n>  code\n>  ~~~\n", false],
+    ["an html block indented by two spaces",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n>   <div>x</div>\n", false],
+    ["an indented code block after a lead-in line",
+      "![](a.png)\n\n> **图片描述**\n> 引导\n>\n>     code\n", false],
+    ["an ordinary quote", "![](a.png)\n\n> 普通引用\n", false],
+    // 标记行按**原文**判：markdown-it 会把 `- `/`# ` 从 inline content 上剥掉，
+    // 按 content 判会把普通的引用列表/标题认成标记行（codex #536 R2 P2）。
+    ["a list item named 图片描述", "![](a.png)\n\n> - 图片描述\n> 正文\n", false],
+    ["a heading named 图片描述", "![](a.png)\n\n> # 图片描述\n> 正文\n", false],
+    ["marker-lookalike prose", "![](a.png)\n\n> 图片描述如下：一张示意图\n", false],
+    ["the marker with nothing under it", "![](a.png)\n\n> **图片描述**\n", false],
+    // 渲染后为空：服务端的「非空」是渲染之后的，两者都判空。
+    ["a colon with only a line break tag", "![](a.png)\n\n> **图片描述**：<br>\n", false],
+    ["a colon with only an empty-alt image",
+      "![](a.png)\n\n> **图片描述**：![](data:image/png;base64,AAAA)\n", false],
+    // 实体在服务端是**解码后**判空的（codex #536 R3 P2）。
+    ["a colon with only a nbsp entity", "![](a.png)\n\n> **图片描述**：&nbsp;\n", false],
+    ["a colon with only a numeric entity", "![](a.png)\n\n> **图片描述**：&#32;\n", false],
+    ["an entity followed by real text", "![](a.png)\n\n> **图片描述**：&nbsp;正文\n", true],
+    ["an empty-alt image whose destination has a paren",
+      "![](a.png)\n\n> **图片描述**：![](data:image/png;base64,AA(BB)\n", false],
+    // CommonMark 允许目标串带配对括号，正则会停在里层 `)` 上（codex #536 R4 P2）。
+    ["an empty-alt image with balanced parens in the destination",
+      "![](a.png)\n\n> **图片描述**：![](foo(bar)baz.png)\n", false],
+    ["an image with alt and balanced parens in the destination",
+      "![](a.png)\n\n> **图片描述**：![说明](foo(bar)baz.png)\n", true],
+    ["a link with balanced parens in the destination",
+      "![](a.png)\n\n> **图片描述**：[文字](foo(bar)baz.png)\n", true],
+    ["an empty-alt image with an angle-bracket destination",
+      "![](a.png)\n\n> **图片描述**：![](<foo(bar).png>)\n", false],
+    ["prose in between", "![](a.png)\n\n中间段落\n\n> **图片描述**\n> 正文\n", false],
+    // 链接引用定义不产出任何 token，但它是原文里的内容——服务端按「原文之间只有
+    // 空白」判相邻，所以不折叠。
+    ["a link reference definition in between",
+      "![](a.png)\n\n[foo]: /url\n\n> **图片描述**\n> 正文\n", false],
+    ["nothing below at all", "![](a.png)\n", false],
+    // 行尾格式不改变判定：前端 scanLines 剥 CR，服务端剥掉原文标记行的 `\r`
+    // （codex #536 R2 P2），两侧对同一份 CRLF 文档必须同判。
+    ["a CRLF document", "![](a.png)\r\n\r\n> **图片描述**\r\n> 正文\r\n", true],
+  ];
+  for (const [label, doc, expected] of cases) {
+    // 只看第一条引用（描述块里可能自带图片，如空 alt 的 data URI 那条）。
+    const refs = findMarkdownImages(doc);
+    assert.ok(refs.length >= 1, label);
+    assert.equal(refs[0].described, expected, label);
+  }
+});
+
+
+test("the 图片描述 mirror stays narrower than the server, never wider", () => {
+  // 前端没有 markdown 解析器（压缩包管线刻意零依赖），做不到逐字对等，所以判据是
+  // **方向**：服务端折叠而这边判否，只是多留一条「无图注」提示；反过来才是把一张
+  // 真检索不到的图说成没问题。下面这条是已登记的窄向分歧——`&amp;` 解码成 `&`，
+  // 服务端认作非空正文，这边的「必须剩一个字母或数字」判否。
+  const refs = findMarkdownImages("![](a.png)\n\n> **图片描述**：&amp;\n");
+  assert.equal(refs[0].described, false);
 });
 
 

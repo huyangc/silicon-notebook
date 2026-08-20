@@ -127,8 +127,10 @@ class ChunkStore:
 
     def source_elements_for_chunking(self, source_id: str) -> list:
         """元素 id 形如 el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。
-        额外带出 metadata 里的 caption：MinerU 带图注的 image 元素需凭它进检索
-        chunk（build_chunks 对 image/figure 仅在无 caption 时跳过）。同时带出
+        额外带出 metadata 里的 caption 与 description：MinerU 带图注的 image 元素
+        需凭前者进检索 chunk，markdown 的 `> **图片描述**` 引用块凭后者（没有 alt
+        的图只有描述这一个入口；build_chunks 对 image/figure 仅在两者皆空时跳过）。
+        同时带出
         section_path（markdown 解析路径存的完整标题面包屑，含自身、" > " 分隔）：
         build_chunks 的 heading 分支用它代替标题自身文本作 section 标签，避免子标题
         （如 Arguments/Examples）覆盖掉上级标题（命令名）；缺省时 build_chunks 自行
@@ -140,6 +142,7 @@ class ChunkStore:
         out = []
         for r in erows:
             caption = ""
+            description = ""
             section_path = ""
             raw = r["metadata"]
             if raw:
@@ -149,9 +152,11 @@ class ChunkStore:
                     parsed = None
                 if isinstance(parsed, dict):
                     caption = str(parsed.get("caption") or "")
+                    description = str(parsed.get("description") or "")
                     section_path = str(parsed.get("section_path") or "")
             out.append({"id": r["id"], "element_type": r["element_type"],
                         "text": r["text"], "caption": caption,
+                        "description": description,
                         "section_path": section_path})
         return out
 

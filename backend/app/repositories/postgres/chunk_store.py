@@ -148,7 +148,7 @@ class ChunkStore:
         ).fetchall()
 
     def source_elements_for_chunking(self, source_id: str) -> list[dict]:
-        """额外带出 metadata 里的 caption 与 section_path，语义与 SQLite 侧
+        """额外带出 metadata 里的 caption、description 与 section_path，语义与 SQLite 侧
         ChunkStore.source_elements_for_chunking 逐字对等：section_path 是
         markdown 解析路径存的完整标题面包屑（含自身、" > " 分隔），供
         build_chunks 的 heading 分支代替标题自身文本作 section 标签；缺省时
@@ -164,6 +164,7 @@ class ChunkStore:
             metadata = json_value(row["metadata"], {})
             is_dict = isinstance(metadata, dict)
             caption = str(metadata.get("caption") or "") if is_dict else ""
+            description = str(metadata.get("description") or "") if is_dict else ""
             section_path = str(metadata.get("section_path") or "") if is_dict else ""
             output.append(
                 {
@@ -171,6 +172,7 @@ class ChunkStore:
                     "element_type": row["element_type"],
                     "text": row["text"],
                     "caption": caption,
+                    "description": description,
                     "section_path": section_path,
                 }
             )
