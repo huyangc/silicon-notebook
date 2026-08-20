@@ -91,7 +91,8 @@ function isValidDomainTerms(value: unknown): value is string[] {
     Array.isArray(value)
     && value.length <= DOMAIN_TERMS_MAX
     && value.every((term) => (
-      typeof term === "string" && term.length > 0 && term.length <= DOMAIN_TERM_MAX_CHARS
+      typeof term === "string" && term.length > 0
+        && Array.from(term).length <= DOMAIN_TERM_MAX_CHARS
     ))
   );
 }
@@ -219,7 +220,10 @@ export type DomainTermValidation =
 export function validateNewDomainTerm(existing: string[], candidateRaw: string): DomainTermValidation {
   const term = candidateRaw.trim();
   if (!term) return { ok: false, reason: "empty" };
-  if (term.length > DOMAIN_TERM_MAX_CHARS) return { ok: false, reason: "too_long" };
+  // codex #535 R3 P2:按 Unicode 码点计数(Array.from),与后端 Python len()
+  // 对齐——UTF-16 code unit 计数会把后端合法的 20 个 emoji 术语拒掉,而一旦
+  // 经 API 写入又会被本地解析丢弃,持久化数据被静默藏起。
+  if (Array.from(term).length > DOMAIN_TERM_MAX_CHARS) return { ok: false, reason: "too_long" };
   if (existing.includes(term)) return { ok: false, reason: "duplicate" };
   if (existing.length >= DOMAIN_TERMS_MAX) return { ok: false, reason: "limit_reached" };
   return { ok: true, term };

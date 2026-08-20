@@ -959,7 +959,9 @@ export default function Home() {
   // 「我的回答偏好」入口的部署总闸(账户菜单)。默认 true——反方向:配置还没读回来、
   // 或后端是没升级到这一批的旧版本时仍给入口(system-api.ts 同样把字段缺失解析成
   // true);真正的写路径仍由 PATCH /me/search-profile 的 409 兜底。
-  const [userSearchProfileEnabled, setUserSearchProfileEnabled] = useState(true);
+  // codex #535 R3 P2:初始 false——config 未返回/瞬态失败/旧后端时不得先亮出
+  // 一个 PATCH 端点不存在的入口;system-api 对缺失字段也归一成 false,两侧同向。
+  const [userSearchProfileEnabled, setUserSearchProfileEnabled] = useState(false);
   // 待上传列表：文件 + 每项文档类型 + 每项是否被用户显式表态，**一个** state 对象。
   // 三条数组必须逐项对齐（uploadDocTypeFields 按下标配对），而入列会被跨 await 的
   // 异步链触发（zip 解包、文件夹遍历）——拆成三个 state 就只能各自 setState，等长

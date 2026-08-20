@@ -263,6 +263,17 @@ def merge_field(profile: Mapping[str, Any], field: str, value: Any, origin: str)
     if not _validate_field_value(field, value):
         raise ValueError(f"invalid value for search-profile field {field!r}: {value!r}")
 
+    if (
+        existing is not None
+        and existing.get("value") == value
+        and existing.get("origin") == origin
+    ):
+        # codex #535 R3 P3:值与来源都没变的重写保留原条目(含 updated_at)——
+        # 否则归纳 job 每次选出同一语言都会铸新时间戳,序列化结果永远不等,
+        # identity store 里那道「serialized == raw 就跳过 UPDATE」的闸形同虚设,
+        # 且档案的更新时刻被每个归纳周期虚假推进。
+        return {"version": SEARCH_PROFILE_VERSION, "fields": fields}
+
     fields[field] = {
         "value": value,
         "origin": origin,
