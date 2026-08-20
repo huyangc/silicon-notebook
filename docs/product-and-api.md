@@ -680,7 +680,7 @@ needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
 `memory:propose`, `ask:execute`, `knowhow:code`, `sources:write`, `sources:delete`, and
 `maintenance:execute`; it can be revoked immediately. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
-then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
+then connect to the Streamable HTTP server at `/mcp/` (`/mcp` reaches it through a 307).
 The one-time token receipt also links to anonymous `GET /api/agent-mcp/onboarding`, a
 machine-readable Markdown handoff that publishes the client endpoint as `MCP_PUBLIC_URL` plus
 the mounted route's trailing slash — `POST /mcp` is a 307 to `/mcp/`, so an Agent is never left
@@ -704,7 +704,7 @@ For Codex, place the issued token in an environment variable and register the se
 
 ```bash
 export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time-issued-token>'
-codex mcp add silicon-notebook --url http://127.0.0.1:8000/mcp \
+codex mcp add silicon-notebook --url 'http://127.0.0.1:8000/mcp/' \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
 
