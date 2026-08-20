@@ -73,6 +73,13 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
     insideReconcile.includes("openNotebook") || insideReconcile.includes("showCollection"),
     "对账不落地:既没跳到别的库,也没退回集合页",
   );
+  // 「还在清单里」≠「什么都没变」:撤掉一条边之后访问权还在但档位可能降了(组管理员
+  // 只剩另一个组的只读边),工作区那份独立 state 不跟着刷就会继续亮着写入口,而每次写
+  // 都在 API 上被拒(codex #529 R11 P2)。
+  assert.ok(
+    insideReconcile.includes("refreshActiveNotebook"),
+    "库还在时不刷当前笔记本详情——授权降档后界面会继续亮着写入口",
+  );
 
   const groupPath = findFunction(page, "refreshAfterAccessChange");
   assert.ok(groupPath, "缺群组侧的收口 refreshAfterAccessChange");

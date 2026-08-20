@@ -6285,7 +6285,21 @@ export default function Home() {
     // 所以 null 恰好覆盖「导航在飞」与「人在集合页」两种「无库可对账」的情形,直接返回
     // 就是对的——用户马上要落地的那本库由 `openNotebook` 自己负责,轮不到这里替他决定。
     const openId = activeNotebookIdRef.current;
-    if (!openId || remaining.some((n) => n.id === openId)) return;
+    if (!openId) return;
+    if (remaining.some((n) => n.id === openId)) {
+      // 还在清单里 ≠ 什么都没变。同一本库可以经多条路进来,撤掉其中一条之后访问权还在,
+      // 但**档位可能降了**:组管理员被移出那个组、只剩另一个组的只读边,`can_manage_content`
+      // 与 `granted_via` 都变了。工作区渲染自 `currentNotebook` 这份独立 state,不跟着刷
+      // 就会继续亮着一整屏写入口、挂着旧的来源徽章,而每一次写都会在 API 上被拒
+      // (codex #529 R11 P2)。
+      //
+      // 走既有的 `refreshActiveNotebook`(共享面变更一直用它),而不是拿列表行去合并:
+      // 列表投影里 `document_limit` 是 0 哨兵、`paper_meta_missing` 恒 null,合进详情会把
+      // 那些字段一起改坏。也刻意不先比对字段再决定要不要刷——这个 PR 里每一个「聪明的
+      // 代理判据」最后都被证明选错了字段,一次点查换掉一整类这种错。
+      await refreshActiveNotebook();
+      return;
+    }
     const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
     if (firstOwned) {
       // ⚠ `openNotebook` 返回 false = 这次切换在飞行中被顶替(用户自己点去了别处,
