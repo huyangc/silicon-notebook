@@ -41,6 +41,9 @@ from app.repositories.ports import (
     GroupGrantAlreadyExists,
     GroupMembershipRequiredError,
     GroupNotFoundError,
+    GroupOwnerProtectedError,
+    GroupOwnerRequiredError,
+    GroupOwnerTransferTargetError,
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     NotebookManageRequiredError,
@@ -154,6 +157,7 @@ class GroupStore:
             "name": row["name"],
             "kind": row["kind"],
             "description": row["description"],
+            "owner_id": row["owner_id"],
             "my_role": my_role,
             "member_count": member_count,
             "created_at": row["created_at"],
@@ -222,9 +226,9 @@ class GroupStore:
         with self.database.write() as db:
             db.execute(
                 "INSERT INTO groups "
-                "(id,name,kind,description,created_by,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (group_id, name, kind, description, created_by, stamp, stamp),
+                "(id,name,kind,description,created_by,owner_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (group_id, name, kind, description, created_by, created_by, stamp, stamp),
             )
             db.execute(
                 "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
@@ -334,7 +338,56 @@ class GroupStore:
             )
         return cursor.rowcount > 0
 
-    def delete_group(self, group_id: str) -> bool:
+    def transfer_group_owner(
+        self,
+        group_id: str,
+        *,
+        new_owner_id: str,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> dict:
+        """Transfer owner and promote the target in one serialized write."""
+        with self.database.write() as db:
+            self._require_group_on(db, group_id)
+            row = db.execute(
+                "SELECT owner_id FROM groups WHERE id=?", (group_id,)
+            ).fetchone()
+            if not actor_is_system_admin and row["owner_id"] != actor_id:
+                raise GroupOwnerRequiredError(group_id)
+            if self._role_on(db, group_id, new_owner_id) is None:
+                raise GroupOwnerTransferTargetError(new_owner_id)
+            db.execute(
+                "UPDATE group_members SET role='admin' "
+                "WHERE group_id=? AND user_id=?",
+                (group_id, new_owner_id),
+            )
+            db.execute(
+                "UPDATE groups SET owner_id=?, updated_at=? WHERE id=?",
+                (new_owner_id, self.now(), group_id),
+            )
+            projected = db.execute(
+                "SELECT * FROM groups WHERE id=?", (group_id,)
+            ).fetchone()
+            member_count = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM group_members WHERE group_id=?",
+                    (group_id,),
+                ).fetchone()["c"]
+            )
+            actor_role = self._role_on(db, group_id, actor_id)
+            return self._group_row(
+                projected,
+                my_role=actor_role or "",
+                member_count=member_count,
+            )
+
+    def delete_group(
+        self,
+        group_id: str,
+        *,
+        actor_id: str | None = None,
+        actor_is_system_admin: bool = False,
+    ) -> bool:
         """删组 + 清掉指向本组的全部授权边,一个写事务(已定裁决 3)。
 
         `group_members` 由 FK 级联带走(连接恒开 `PRAGMA foreign_keys = ON`);
@@ -344,9 +397,19 @@ class GroupStore:
         是进程级写锁,同一时刻只有一个写事务在跑,并发的 `create_grant` 插不进「清边」
         与「删组」之间。PG 没有那把锁,所以那边必须在事务开头显式 `FOR UPDATE`,否则
         会留下孤儿授权边(理由完整写在 `postgres/group_store.py::delete_group`)。
-        在这里补一次 `SELECT` 只会多一次查询而不多一分保证。
+        Owner 路径仍在这个串行写事务内复核生效中的 owner；这不是为了加锁，
+        而是关闭路由前置鉴权与删除之间的所有权转让窗口。没有传 actor 的内部维护
+        调用保留原来的无鉴权 store 契约。
         """
         with self.database.write() as db:
+            if actor_id is not None:
+                row = db.execute(
+                    "SELECT owner_id FROM groups WHERE id=?", (group_id,)
+                ).fetchone()
+                if row is None:
+                    return False
+                if not actor_is_system_admin and row["owner_id"] != actor_id:
+                    raise GroupOwnerRequiredError(group_id)
             db.execute(
                 "DELETE FROM notebook_grants "
                 "WHERE principal_type IN ('group','group_admins') AND principal_id=?",
@@ -415,6 +478,11 @@ class GroupStore:
         with self.database.write() as db:
             self._require_group_on(db, group_id)
             current = self._role_on(db, group_id, user_id)
+            owner = db.execute(
+                "SELECT owner_id FROM groups WHERE id=?", (group_id,)
+            ).fetchone()["owner_id"]
+            if user_id == owner and current is not None and role != "admin":
+                raise GroupOwnerProtectedError(group_id)
             if (
                 current == "admin"
                 and role != "admin"
@@ -441,6 +509,11 @@ class GroupStore:
             current = self._role_on(db, group_id, user_id)
             if current is None:
                 return False
+            owner = db.execute(
+                "SELECT owner_id FROM groups WHERE id=?", (group_id,)
+            ).fetchone()["owner_id"]
+            if user_id == owner:
+                raise GroupOwnerProtectedError(group_id)
             if current == "admin" and self._admin_count_on(db, group_id) <= 1:
                 raise LastGroupAdminError(group_id)
             db.execute(
@@ -575,8 +648,15 @@ class GroupStore:
             )
         return cursor.rowcount > 0
 
-    def list_group_shared_notebooks(self, group_id: str) -> list[dict]:
-        """共享给本组的笔记本清单(组管理员视角)。同库两条边折成一项。"""
+    def list_group_shared_notebooks(
+        self, group_id: str, *, include_admin_only: bool = True
+    ) -> list[dict]:
+        """Return the caller-visible group inventory; fold two edges per notebook."""
+        principal_clause = (
+            "ng.principal_type IN ('group','group_admins')"
+            if include_admin_only
+            else "ng.principal_type='group'"
+        )
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT ng.notebook_id AS notebook_id, ng.role AS role, "
@@ -584,7 +664,7 @@ class GroupStore:
                 "FROM notebook_grants ng "
                 "JOIN notebooks nb ON nb.id=ng.notebook_id "
                 "LEFT JOIN users u ON u.id=nb.created_by "
-                "WHERE ng.principal_type IN ('group','group_admins') AND ng.principal_id=? "
+                f"WHERE {principal_clause} AND ng.principal_id=? "
                 "AND nb.status != 'copying' "
                 "ORDER BY nb.created_at ASC, nb.id ASC, ng.id ASC",
                 (group_id,),

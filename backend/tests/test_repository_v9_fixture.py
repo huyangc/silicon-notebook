@@ -125,8 +125,8 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # agent_profile_jobs.claim_token 巡固认领代际列，v54 Agentic Memory P2
     # 部署级全局的 retrieval_experiences 检索策略经验库，以及 v55 Agentic Memory
     # P3 的 agent_observations 观察日志表 / user_profiles.search_profile_json
-    # 检索偏好列，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 55
+    # 检索偏好列，以及 v56 群组唯一 owner 指针，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 56
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

@@ -35,6 +35,8 @@ export type GroupSummary = {
   name: string;
   kind: string;
   description: string;
+  /** 当前唯一 owner；created_by 仅留在服务端作不可变创建审计。 */
+  owner_id: string;
   /** 请求者本人在该组里的角色;不是成员时为空串(管理员的全部群组视图会出现)。 */
   my_role: string;
   member_count: number;
@@ -86,6 +88,28 @@ export type GrantedGroupRef = {
   kind: string;
 };
 
+export type GroupPageTab = "notebooks" | "members" | "requests" | "settings";
+
+export const groupsHash = (groupId = "", tab: GroupPageTab = "notebooks"): string => {
+  const parts = ["groups"];
+  if (groupId) parts.push(`group=${encodeURIComponent(groupId)}`);
+  if (groupId && tab !== "notebooks") parts.push(`tab=${encodeURIComponent(tab)}`);
+  return `#${parts.join("&")}`;
+};
+
+export const parseGroupsHash = (
+  hash: string,
+): { groupId: string; tab: GroupPageTab } | null => {
+  const raw = hash.replace(/^#/, "");
+  if (raw !== "groups" && !raw.startsWith("groups&")) return null;
+  const params = new URLSearchParams(raw === "groups" ? "" : raw.slice(7));
+  const rawTab = params.get("tab");
+  const tab: GroupPageTab = rawTab === "members" || rawTab === "requests" || rawTab === "settings"
+    ? rawTab
+    : "notebooks";
+  return { groupId: params.get("group") || "", tab };
+};
+
 // --- 传输 -------------------------------------------------------------------
 
 const TAG = "groups";
@@ -121,6 +145,17 @@ export const updateGroup = (
 
 export const deleteGroup = (groupId: string): Promise<void> =>
   requestVoid(`/groups/${groupId}`, { method: "DELETE", tag: TAG });
+
+/** 转让唯一 owner。目标必须是现有成员，服务端会原子提升为管理员；原 owner 保留管理员。 */
+export const transferGroupOwner = (
+  groupId: string,
+  newOwnerId: string,
+): Promise<GroupDetail> =>
+  requestJson(`/groups/${groupId}/transfer`, {
+    method: "POST",
+    body: JSON.stringify({ new_owner_id: newOwnerId }),
+    tag: TAG,
+  });
 
 export const putGroupMember = (
   groupId: string,

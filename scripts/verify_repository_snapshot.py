@@ -3041,7 +3041,7 @@ GROUP_SHARING_TABLES = {
                   created_by  TEXT REFERENCES users(id),
                   created_at  TEXT NOT NULL,
                   updated_at  TEXT NOT NULL
-                )""",
+                , owner_id TEXT NOT NULL DEFAULT '')""",
     "group_members": """CREATE TABLE group_members (
                   group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
                   user_id   TEXT NOT NULL REFERENCES users(id),
@@ -3384,6 +3384,36 @@ MIGRATION_MANIFEST[(54, 55)] = {
     "tables": AGENT_OBSERVATION_TABLES,
     "columns": SEARCH_PROFILE_COLUMNS,
     "indexes": AGENT_OBSERVATION_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
+# v56: groups.owner_id is the live, transferable ownership pointer. Existing
+# groups deterministically inherit created_by; the latter remains immutable
+# audit. This is one column only: no new table/index/trigger/view.
+GROUP_OWNER_COLUMNS = {
+    "groups": {
+        "owner_id": ("owner_id", "TEXT", 1, "''", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 56, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "groups": {
+                **manifest["columns"].get("groups", {}),
+                **GROUP_OWNER_COLUMNS["groups"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(55, 56)] = {
+    "tables": {},
+    "columns": GROUP_OWNER_COLUMNS,
+    "indexes": {},
     "triggers": {},
     "views": {},
 }

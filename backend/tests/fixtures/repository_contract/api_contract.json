@@ -3352,11 +3352,16 @@
             "name": {
               "title": "Name",
               "type": "string"
+            },
+            "owner_id": {
+              "title": "Owner Id",
+              "type": "string"
             }
           },
           "required": [
             "id",
-            "name"
+            "name",
+            "owner_id"
           ],
           "title": "GroupDetail",
           "type": "object"
@@ -3404,6 +3409,21 @@
             }
           },
           "title": "GroupMemberRoleRequest",
+          "type": "object"
+        },
+        "GroupOwnerTransferRequest": {
+          "additionalProperties": false,
+          "description": "Transfer the one live group-owner authority to an existing member.",
+          "properties": {
+            "new_owner_id": {
+              "title": "New Owner Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "new_owner_id"
+          ],
+          "title": "GroupOwnerTransferRequest",
           "type": "object"
         },
         "GroupSharedNotebookItem": {
@@ -3471,11 +3491,16 @@
             "name": {
               "title": "Name",
               "type": "string"
+            },
+            "owner_id": {
+              "title": "Owner Id",
+              "type": "string"
             }
           },
           "required": [
             "id",
-            "name"
+            "name",
+            "owner_id"
           ],
           "title": "GroupSummary",
           "type": "object"
@@ -13193,7 +13218,7 @@
       },
       "/api/groups/{group_id}/membership": {
         "delete": {
-          "description": "自助退出。最后一名组管理员不得退出——否则组就没人能管了。",
+          "description": "自助退出。Owner 必须先转让；最后一名普通管理员也不得直接退出。",
           "operationId": "leave_group_route_api_groups__group_id__membership_delete",
           "parameters": [
             {
@@ -13368,7 +13393,7 @@
       },
       "/api/groups/{group_id}/shared-notebooks": {
         "get": {
-          "description": "组管理员视角:共享给本组的知识库清单。",
+          "description": "Group workspace inventory. Members may view; admins manage it.",
           "operationId": "list_group_shared_notebooks_route_api_groups__group_id__shared_notebooks_get",
           "parameters": [
             {
@@ -13450,6 +13475,56 @@
             }
           },
           "summary": "Delete Group Shared Notebook Route"
+        }
+      },
+      "/api/groups/{group_id}/transfer": {
+        "post": {
+          "description": "Transfer the unique owner to an existing member; the old owner stays admin.",
+          "operationId": "transfer_group_owner_route_api_groups__group_id__transfer_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupOwnerTransferRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Transfer Group Owner Route"
         }
       },
       "/api/health": {

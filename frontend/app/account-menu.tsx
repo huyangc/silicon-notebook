@@ -25,7 +25,7 @@ type AccountMenuProps = {
    *  user_search_profile_enabled，缺失按 true）；关闭时整个菜单项不渲染。 */
   searchProfileEnabled: boolean;
   onOpenMemory: () => void;
-  /** 群组管理弹窗。任何登录用户都可用（项目组人人可建）。 */
+  /** 打开独立群组管理页。任何登录用户都可用（项目组人人可建）。 */
   onOpenGroups: () => void;
   onToggleAdvancedMode: () => void;
   onOpenSearchProfile: () => void;

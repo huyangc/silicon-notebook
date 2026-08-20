@@ -65,7 +65,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # user_profiles.search_profile_json (nullable; NULL means "not set yet",
 # same as v45's ui_mode). Zero behavior change: no reader or writer exists
 # yet.
-SCHEMA_VERSION = 55
+# v56 adds groups.owner_id. created_by remains immutable creation audit;
+# owner_id is the live, transferable authority and is backfilled from it.
+SCHEMA_VERSION = 56
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3046,6 +3048,53 @@ class SqliteMigrator:
             )
             self.add_column_if_missing(
                 db, "user_profiles", "search_profile_json", "TEXT",
+            )
+
+    def _migration_56(self) -> None:
+        """Give every group one transferable owner without rewriting audit.
+
+        ``groups.created_by`` remains the immutable historical creator.
+        ``owner_id`` is the live authority used by transfer/delete/leave
+        protection. Existing groups choose a current admin deterministically,
+        preferring the creator only when the creator is still an admin. This
+        preserves the pre-owner membership state instead of reviving someone
+        who already left or was demoted.
+
+        The required plain TEXT value deliberately has no foreign key. Group
+        ownership must imply a matching ``group_members`` row; a users FK does
+        not express that invariant, while a composite FK would add a duplicate
+        unique surface. Stores enforce membership and ownership together under
+        the group aggregate lock. This additive migration adds no table, index,
+        foreign key, or unique surface.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "groups", "owner_id", "TEXT NOT NULL DEFAULT ''",
+            )
+            db.execute(
+                "UPDATE groups SET owner_id=COALESCE(("
+                "SELECT gm.user_id FROM group_members gm "
+                "WHERE gm.group_id=groups.id AND gm.role='admin' "
+                "ORDER BY CASE WHEN gm.user_id=groups.created_by THEN 0 ELSE 1 END, "
+                "gm.added_at ASC, gm.user_id ASC LIMIT 1), '') "
+                "WHERE owner_id=''"
+            )
+            # Store APIs have always protected the last admin, so this fallback
+            # is only for manually corrupted historical rows. It repairs the
+            # aggregate rather than leaving a non-empty owner invariant broken.
+            db.execute(
+                "UPDATE group_members SET role='admin' "
+                "WHERE (group_id,user_id) IN ("
+                "SELECT id,created_by FROM groups WHERE owner_id='')"
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO group_members "
+                "(group_id,user_id,role,added_at,added_by) "
+                "SELECT id,created_by,'admin',created_at,created_by "
+                "FROM groups WHERE owner_id=''"
+            )
+            db.execute(
+                "UPDATE groups SET owner_id=created_by WHERE owner_id=''"
             )
 
     def _recover_interrupted_jobs(self) -> None:

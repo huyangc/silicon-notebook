@@ -196,9 +196,16 @@ import {
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
-import { GroupsModal } from "./groups-panel";
+import { GroupsPage } from "./groups-page";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
-import { grantedViaLabel, isGroupGranted, partitionByGrant } from "./group-api";
+import {
+  grantedViaLabel,
+  groupsHash,
+  isGroupGranted,
+  parseGroupsHash,
+  partitionByGrant,
+  type GroupPageTab,
+} from "./group-api";
 import { NotebookMenuActions, ReaderNotebookBadge } from "./notebook-reader-actions";
 import { PasswordChangeModal } from "./password-change-modal";
 import { SearchProfileModal } from "./search-profile-modal";
@@ -845,7 +852,11 @@ export default function Home() {
   const [searchHits, setSearchHits] = useState<Record<string, SearchHit[]>>({});
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
-  const [outerView, setOuterView] = useState<"notebooks" | "memory">("notebooks");
+  const [outerView, setOuterView] = useState<"notebooks" | "memory" | "groups">("notebooks");
+  const [groupNavigation, setGroupNavigation] = useState<{ groupId: string; tab: GroupPageTab }>({
+    groupId: "",
+    tab: "notebooks",
+  });
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourceScopeSelection, setSourceScopeSelection] = useState<SourceScopeSelection>(
     defaultSourceScopeSelection,
@@ -1148,8 +1159,6 @@ export default function Home() {
   const [leaveBusy, setLeaveBusy] = useState(false);
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
   const [sharedByMeOpen, setSharedByMeOpen] = useState(false);
-  // 群组管理弹窗(账户菜单入口)。与笔记本无关,故不随切库复位。
-  const [groupsOpen, setGroupsOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [contentOverview, setContentOverview] = useState<NotebookContentOverview | null>(null);
   const [contentOverviewLoading, setContentOverviewLoading] = useState(false);
@@ -2195,8 +2204,11 @@ export default function Home() {
       .then(async (u) => {
         setCurrentUser(u);
         await loadNotebookCollection();
+        const groupTarget = parseGroupsHash(window.location.hash);
         const target = parseMemoryHash(window.location.hash);
-        if (target?.scope === "global") {
+        if (groupTarget) {
+          showGroups(groupTarget, "none");
+        } else if (target?.scope === "global") {
           showGlobalMemory({
             notebookId: target.filterNotebookId,
             status: target.status,
@@ -2234,6 +2246,11 @@ export default function Home() {
     if (!authChecked) return;
     function onPopState() {
       const hash = window.location.hash;
+      const groupTarget = parseGroupsHash(hash);
+      if (groupTarget) {
+        showGroups(groupTarget, "none");
+        return;
+      }
       const memory = parseMemoryHash(hash);
       if (memory?.scope === "global") {
         showGlobalMemory({
@@ -2268,7 +2285,7 @@ export default function Home() {
   /**
    * 别人撤销你的访问权时的复核(codex #529 R3 P1)。
    *
-   * `refreshAfterAccessChange` 只挂在群组弹窗的 `onChanged` 上,覆盖的是**在这台浏览器上
+   * `refreshAfterAccessChange` 只挂在独立群组页的 `onChanged` 上,覆盖的是**在这台浏览器上
    * 发起**的改动(自己退出群组、自己删组、自己撤销共享)。而「被移出群组」「组被别的管理员
    * 删掉」「库主撤销共享」都发生在别处,本浏览器收不到任何事件——人会继续坐在一本已经读不到
    * 的库里,直到某次交互撞上 403。
@@ -3358,9 +3375,12 @@ export default function Home() {
 
   // --- Pending center: precise deep-link per item type --------------------
   async function openPendingItem(item: PendingItem) {
-    // 共享申请是**组维度**的待办,没有 notebook——直接打开群组弹窗,组管理员在
+    // 共享申请是**组维度**的待办,没有 notebook——直接打开独立群组页,组管理员在
     // 「待审批申请」区批准/驳回。放在 openNotebook 之前:它没有 notebook_id 可开。
-    if (item.type === "share_request") { setGroupsOpen(true); return; }
+    if (item.type === "share_request") {
+      showGroups({ groupId: item.group_id || "", tab: "requests" }, "push");
+      return;
+    }
     if (!item.notebook_id || !await openNotebook(item.notebook_id)) return;
     if (item.type === "report_outline") {
       switchChatMode("reports");
@@ -3437,6 +3457,25 @@ export default function Home() {
     setMemoryNavigationTarget(target);
     setOuterView("memory");
     window.history.replaceState(null, "", memoryHash(null, target));
+  }
+
+  function showGroups(
+    target: { groupId?: string; tab?: GroupPageTab } = {},
+    history: "push" | "replace" | "none" = "replace",
+  ) {
+    showCollection();
+    const next: { groupId: string; tab: GroupPageTab } = {
+      groupId: target.groupId || "",
+      tab: target.tab || "notebooks",
+    };
+    setGroupNavigation(next);
+    setOuterView("groups");
+    window.history[history === "push" ? "pushState" : "replaceState"](
+      null,
+      "",
+      groupsHash(next.groupId, next.tab),
+    );
+    window.scrollTo(0, 0);
   }
 
   async function handleMemorySaved(memory: MemoryRecord) {
@@ -6348,7 +6387,7 @@ export default function Home() {
   }
 
   /**
-   * 群组弹窗里任何改变访问权的动作之后的收口(退出/移出/删组/撤销共享)。
+   * 独立群组页里任何改变访问权的动作之后的收口(退出/移出/删组/撤销共享)。
    *
    * 刻意不走 `loadNotebookCollection()`:那一份还会顺带重取健康状态与系统配置,而群组
    * 改的只是「我能看到哪些库」。这里一次 `listNotebooks()` 既刷清单、又喂给上面的对账,
@@ -6778,7 +6817,7 @@ export default function Home() {
           <button className="brand-mark" onClick={showCollection} title="笔记本列表">SN</button>
           <div>
             <div className="brand-title">silicon-notebook</div>
-            <div className="brand-subtitle">{isWorkspace ? "笔记本工作区" : outerView === "memory" ? "私有记忆" : "笔记本列表"}</div>
+            <div className="brand-subtitle">{isWorkspace ? "笔记本工作区" : outerView === "memory" ? "私有记忆" : outerView === "groups" ? "群组工作台" : "笔记本列表"}</div>
           </div>
         </div>
         <div className="topbar-right">
@@ -6819,7 +6858,7 @@ export default function Home() {
             advancedMode={isAdvanced(uiMode)}
             searchProfileEnabled={userSearchProfileEnabled}
             onOpenMemory={showGlobalMemory}
-            onOpenGroups={() => setGroupsOpen(true)}
+            onOpenGroups={() => showGroups({}, "push")}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
             onOpenSearchProfile={() => {
               // codex #535 R4→R10 P2:先等 /me 刷新**落定**再开弹窗——边开边刷
@@ -6957,6 +6996,23 @@ export default function Home() {
             initialMemoryId={memoryNavigationTarget.itemId}
           />
         </main>
+      )}
+
+      {!isWorkspace && outerView === "groups" && currentUser && (
+        <GroupsPage
+          currentUserId={currentUser.id}
+          isSystemAdmin={currentUser.role === "admin"}
+          notebooks={notebooks}
+          initialGroupId={groupNavigation.groupId}
+          initialTab={groupNavigation.tab}
+          onBack={showCollection}
+          onChanged={() => { refreshAfterAccessChange().catch(reportError); }}
+          onOpenNotebook={(notebookId) => { void openNotebook(notebookId); }}
+          onNavigate={(groupId, nextTab) => {
+            setGroupNavigation({ groupId, tab: nextTab });
+            window.history.replaceState(null, "", groupsHash(groupId, nextTab));
+          }}
+        />
       )}
 
       {isWorkspace && currentNotebook && (
@@ -8488,16 +8544,6 @@ export default function Home() {
           currentUser={currentUser}
           onSaved={setCurrentUser}
           onClose={() => setSearchProfileModalOpen(false)}
-        />
-      )}
-
-      {groupsOpen && (
-        <GroupsModal
-          isSystemAdmin={currentUser.role === "admin"}
-          // 退出/移出/删组/撤销共享都可能把当前打开的这本库从我脚下抽走,所以这里必须
-          // 连工作区一起对账,而不只是刷一下清单(见 refreshAfterAccessChange)。
-          onChanged={() => { refreshAfterAccessChange().catch(reportError); }}
-          onClose={() => setGroupsOpen(false)}
         />
       )}
 

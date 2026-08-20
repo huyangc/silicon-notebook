@@ -60,6 +60,7 @@ from app.models.groups import (
     GroupDetail,
     GroupMemberItem,
     GroupMemberRoleRequest,
+    GroupOwnerTransferRequest,
     GroupSharedNotebookItem,
     GroupSummary,
     GroupUpdate,
@@ -76,6 +77,9 @@ from app.repositories.ports import (
     GroupGrantAlreadyExists,
     GroupMembershipRequiredError,
     GroupNotFoundError,
+    GroupOwnerProtectedError,
+    GroupOwnerRequiredError,
+    GroupOwnerTransferTargetError,
     LastGroupAdminError,
     NotebookManageRequiredError,
     NotebookNotFoundError,
@@ -172,6 +176,27 @@ def _require_group_admin(group_id: str, user: UserProfile) -> None:
     if _is_system_admin(user) and groups.get_group(group_id) is not None:
         return
     raise _group_not_found()
+
+
+def _require_group_owner(group_id: str, user: UserProfile) -> None:
+    """Owner-only group actions, with the existing system-admin recovery bypass."""
+    groups = group_repository()
+    group = groups.get_group(group_id, user_id=user.id)
+    if group is None or (not group["my_role"] and not _is_system_admin(user)):
+        raise _group_not_found()
+    if group["owner_id"] == user.id or _is_system_admin(user):
+        return
+    # The caller can only reach an owner action through a visible group. Say
+    # which authority is missing instead of pretending the known group vanished.
+    raise user_error(403, "只有群组所有者可以执行此操作")
+
+
+def _require_group_visible(group_id: str, user: UserProfile) -> dict:
+    """Any member may read the group workspace; system admins retain recovery access."""
+    group = group_repository().get_group(group_id, user_id=user.id)
+    if group is None or (not group["my_role"] and not _is_system_admin(user)):
+        raise _group_not_found()
+    return group
 
 
 def _validated_name(raw: str) -> str:
@@ -314,9 +339,51 @@ def delete_group_route(
     会永远挂着一条指向已不存在的组的边——`principal_id` 是刻意无 FK 的多态列,
     数据库替不了这件事。
     """
-    _require_group_admin(group_id, user)
-    if not group_repository().delete_group(group_id):
+    _require_group_owner(group_id, user)
+    try:
+        deleted = group_repository().delete_group(
+            group_id,
+            actor_id=user.id,
+            actor_is_system_admin=_is_system_admin(user),
+        )
+    except GroupOwnerRequiredError:
+        raise user_error(403, "你已不再是该群组的所有者")
+    if not deleted:
         raise _group_not_found()
+
+
+@router.post("/groups/{group_id}/transfer", response_model=GroupDetail)
+def transfer_group_owner_route(
+    group_id: str,
+    payload: GroupOwnerTransferRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> GroupDetail:
+    """Transfer the unique owner to an existing member; the old owner stays admin."""
+    _require_group_owner(group_id, user)
+    groups = group_repository()
+    target_id = payload.new_owner_id.strip()
+    if not target_id:
+        raise user_error(400, "请选择新的群组所有者")
+    try:
+        group = groups.transfer_group_owner(
+            group_id,
+            new_owner_id=target_id,
+            actor_id=user.id,
+            actor_is_system_admin=_is_system_admin(user),
+        )
+    except GroupNotFoundError:
+        raise _group_not_found()
+    except GroupOwnerRequiredError:
+        raise user_error(403, "你已不再是该群组的所有者")
+    except GroupOwnerTransferTargetError:
+        raise user_error(409, "新的群组所有者必须是当前群组成员")
+    # A member promoted to admin gains this group's pending approvals in the
+    # account badge. The ownership write has already committed, so notification
+    # stays fail-open just like the ordinary member-role route below.
+    publish_snapshot(target_id)
+    return GroupDetail(
+        **group, members=[GroupMemberItem(**m) for m in groups.list_members(group_id)]
+    )
 
 
 # ------------------------------------------------------------------- 组成员
@@ -339,6 +406,8 @@ def put_group_member_route(
         raise user_error(404, "没有找到要添加的用户")
     try:
         groups.upsert_member(group_id, user_id, role=role, added_by=user.id)
+    except GroupOwnerProtectedError:
+        raise user_error(409, "群组所有者不能被降级，请先转让群组")
     except LastGroupAdminError:
         raise user_error(409, "群组至少要保留一名组管理员")
     except GroupNotFoundError:
@@ -363,6 +432,8 @@ def remove_group_member_route(
     _require_group_admin(group_id, user)
     try:
         removed = group_repository().remove_member(group_id, user_id)
+    except GroupOwnerProtectedError:
+        raise user_error(409, "群组所有者不能被移出，请先转让群组")
     except LastGroupAdminError:
         raise user_error(409, "群组至少要保留一名组管理员")
     except GroupNotFoundError:
@@ -377,10 +448,12 @@ def remove_group_member_route(
 def leave_group_route(
     group_id: str, user: UserProfile = Depends(get_current_user)
 ) -> None:
-    """自助退出。最后一名组管理员不得退出——否则组就没人能管了。"""
+    """自助退出。Owner 必须先转让；最后一名普通管理员也不得直接退出。"""
     _require_own_membership(group_id, user)
     try:
         group_repository().remove_member(group_id, user.id)
+    except GroupOwnerProtectedError:
+        raise user_error(409, "群组所有者必须先转让群组才能退出")
     except LastGroupAdminError:
         raise user_error(409, "你是这个群组唯一的组管理员,请先指定其他组管理员再退出")
     except GroupNotFoundError:
@@ -486,11 +559,14 @@ def delete_notebook_grant_route(notebook_id: str, grant_id: str) -> None:
 def list_group_shared_notebooks_route(
     group_id: str, user: UserProfile = Depends(get_current_user)
 ) -> List[GroupSharedNotebookItem]:
-    """组管理员视角:共享给本组的知识库清单。"""
-    _require_group_admin(group_id, user)
+    """Group workspace inventory. Members may view; admins manage it."""
+    group = _require_group_visible(group_id, user)
     return [
         GroupSharedNotebookItem(**item)
-        for item in group_repository().list_group_shared_notebooks(group_id)
+        for item in group_repository().list_group_shared_notebooks(
+            group_id,
+            include_admin_only=(group["my_role"] == "admin" or _is_system_admin(user)),
+        )
     ]
 
 
