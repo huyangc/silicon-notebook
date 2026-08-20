@@ -25,7 +25,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type SyntheticEvent } from "react";
-import { Sparkles } from "lucide-react";
+import { ChevronDown, Sparkles } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
 import {
@@ -37,6 +37,7 @@ import {
   saveUnderstandingBlock,
 } from "../features/agent-profile/profile-api.ts";
 import {
+  AGENT_OBSERVATION_SAMPLE_MAX,
   AGENT_PROFILE_VALUE_MAX_CHARS,
   BASE_LABELS,
   OVERLAY_LABELS,
@@ -393,7 +394,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
 
   return (
     <details className="agent-observation-panel" onToggle={onToggle}>
-      <summary>Agent 记录</summary>
+      <summary><ChevronDown size={14} /> Agent 记录</summary>
       <div className="stack">
         <p className="tool-hint" style={{ margin: 0 }}>
           外部 Agent 通过接口写下的使用线索。它们只会用来更新你自己的「我的检索心得」，不会进入回答，也不会被引用。
@@ -404,6 +405,13 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
         {loading && items === null ? <p className="tool-hint">加载中…</p> : null}
         {items !== null && items.length === 0 ? (
           <p className="tool-hint">暂无 Agent 记录</p>
+        ) : null}
+        {/* 服务端按最近 `AGENT_OBSERVATION_SAMPLE_MAX` 条取数(见该常量注释里的
+            镜像关系)、不分页、也不回传取了多少——`items.length` 恰好等于这个
+            上限时,唯一能说清「还有更早的记录没显示」的办法就是这一行提示,
+            否则用户会把「取满了」误读成「一共就这么多」。 */}
+        {items !== null && items.length === AGENT_OBSERVATION_SAMPLE_MAX ? (
+          <p className="tool-hint">仅显示最近 {AGENT_OBSERVATION_SAMPLE_MAX} 条</p>
         ) : null}
         {items !== null && items.length > 0 ? (
           <>

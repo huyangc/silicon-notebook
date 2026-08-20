@@ -262,14 +262,20 @@ PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access",
 #: `ask_trace_steps`,但同样只能读发起人自己的行,同一层三判据照样成立。
 TRACE_READ_METHODS = ("recent_user_ask_traces", "recent_user_report_traces")
 
-#: Agentic Memory P3(T4)。层三的**第二组**——必须自带 owner 谓词的观察 store
-#: 方法。刻意与 `TRACE_READ_METHODS` 分开而不是并进同一个元组:那条元组的判据
-#: 扫的是 `_STORE_PATHS`(`ask_state_store.py`)里的 `created_by` 谓词,而
-#: `recent_observations` 住在**另一份文件**(`agent_observation_store.py`)、
-#: 认的是**另一个列名**(`owner_id`)——混进一个元组会让扫描器去
-#: `ask_state_store.py` 里找一个根本不存在的方法,`test_the_trace_read_...`
-#: 那条「方法必须存在」的断言就会先于「谓词必须在 SQL 里」报红,报错信息答非所问。
-OBSERVATION_READ_METHODS = ("recent_observations",)
+#: Agentic Memory P3(T4,T3-T5 修复轮补 `list_observations`)。层三的**第二
+#: 组**——必须自带 owner 谓词的观察 store 方法。刻意与 `TRACE_READ_METHODS`
+#: 分开而不是并进同一个元组:那条元组的判据扫的是 `_STORE_PATHS`
+#: (`ask_state_store.py`)里的 `created_by` 谓词,而这两个方法住在**另一份
+#: 文件**(`agent_observation_store.py`)、认的是**另一个列名**(`owner_id`)
+#: ——混进一个元组会让扫描器去 `ask_state_store.py` 里找一个根本不存在的方法,
+#: `test_the_trace_read_...` 那条「方法必须存在」的断言就会先于「谓词必须在
+#: SQL 里」报红,报错信息答非所问。
+#: `list_observations` 是 `agent_profile_routes.py`(P3-T5 的「Agent 记录」
+#: 读端点)的取数方法——与 `recent_observations` 是同一张表上的姊妹读(同一条
+#: `owner_id = ?`/`owner_id = %s` 形状,见两个后端各自的 docstring),补它是因为
+#: 层三扫的是**登记过的方法名**:不登记,`list_observations` 的谓词漂到 Python
+#: 侧过滤这件事,这份守卫会像什么都没发生一样全绿。
+OBSERVATION_READ_METHODS = ("recent_observations", "list_observations")
 
 #: 层三(第二组)认的谓词形状,镜像 `USER_PREDICATE_TOKENS` 但换一个列名:
 #: `owner_id` 是 `agent_observations` 表实际的列名(见 `_migration_55`),
@@ -548,11 +554,14 @@ def test_the_allowlists_are_not_silently_empty():
     # 那样 `test_the_global_trace_read_never_reaches_either_chain` 一个
     # 断言都不执行而 pytest 全绿。
     assert GLOBAL_TRACE_READ_METHODS
-    # Agentic Memory P3(T4):层三第二组的四种空转形态,同 TRACE_READ_METHODS/
-    # _STORE_PATHS 那一条同构——`OBSERVATION_READ_METHODS`/`_OBSERVATION_STORE_
-    # PATHS` 任一被清空,`test_the_observation_read_carries_the_owner_predicate_
-    # in_sql` 就会 parametrize 出零个用例而整条判据一个字都不检查。
-    assert OBSERVATION_READ_METHODS
+    # Agentic Memory P3(T4,T3-T5 修复轮抬下限):层三第二组的四种空转形态,同
+    # TRACE_READ_METHODS/_STORE_PATHS 那一条同构——`OBSERVATION_READ_METHODS`/
+    # `_OBSERVATION_STORE_PATHS` 任一被清空,`test_the_observation_read_carries_
+    # the_owner_predicate_in_sql` 就会 parametrize 出零个用例而整条判据一个字都
+    # 不检查。下限从「非空」抬到 `>= 2`:`list_observations` 补进来之后,清到只剩
+    # `recent_observations` 一条也不该算「达标」——那正是 P3-T5 修复轮补它之前
+    # 的状态,补一条方法却把下限继续留在「非空」,不会拦住它将来被误删回一条。
+    assert len(OBSERVATION_READ_METHODS) >= 2
     assert len(_OBSERVATION_STORE_PATHS) == 2
     assert "observations" in PORT_ATTRIBUTES
 

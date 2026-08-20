@@ -3680,6 +3680,39 @@ async def test_get_notebook_profile_reports_disabled_instead_of_failing(
 
 
 @pytest.mark.anyio
+async def test_add_observation_fails_loudly_when_disabled(mcp_env, monkeypatch):
+    """The deliberate counterpart of
+    ``test_get_notebook_profile_reports_disabled_instead_of_failing`` right
+    above: the READ side degrades to ``enabled: False`` because a caller
+    cannot act on a closed sign, but the WRITE side must not go on quietly
+    accumulating rows a now-disabled consolidation pass will never read (see
+    ``add_observation``'s own kill-switch comment — "a 5th ... but a
+    DIFFERENT contract on purpose"). ``isError`` here, not a soft
+    ``{"accepted": False}`` payload."""
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _OBSERVATION_WRITE)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
+        get_settings.cache_clear()
+        try:
+            result = await client.call("add_observation", {
+                "text": "Should never be written while disabled.",
+                "client_request_id": "obs-disabled-1",
+            })
+        finally:
+            monkeypatch.setenv("AGENT_PROFILE_ENABLED", "true")
+            get_settings.cache_clear()
+
+    assert result.isError
+    repo = repository()
+    assert repo.agent_observations.list_observations(
+        notebook_id, mcp_env["alice"].id, limit=10
+    ) == []
+
+
+@pytest.mark.anyio
 async def test_add_observation_is_idempotent_per_client_request_id(mcp_env):
     repo = repository()
     notebook_id = mcp_env["notebook"].id

@@ -74,6 +74,7 @@ from app.services import background_jobs
 from app.services.agent_profile_block import (
     AGENT_PROFILE_VALUE_MAX_CHARS,
     clip_block_value,
+    collapse_prompt_line,
 )
 from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.kg.json_utils import safe_json
@@ -973,7 +974,19 @@ def render_usage_block(stats: UsageStats) -> str:
         picked: list[str] = []
         rendered_obs = 0
         for obs in stats.observations:
-            text = str(obs.get("text") or "")
+            # T3-T5 fix round: collapse embedded whitespace (incl. literal
+            # newlines) to single spaces BEFORE this text ever reaches an
+            # ``f"- [{label}] {text}"`` line — the same forgery this
+            # module's sibling ``agent_profile_block._clean`` documents for
+            # its own rendered rows. An observation is written by an
+            # EXTERNAL Agent (never this member), so its text is the one
+            # untrusted, model-independent free-text field this whole render
+            # path carries; unstripped, a crafted observation could inject a
+            # blank line and a fabricated system-looking header ("[End of
+            # untrusted...]", "[Verified system note...]") that a model
+            # reading the rendered prompt has no structural way to tell
+            # apart from the real framing around this section.
+            text = collapse_prompt_line(obs.get("text"))
             if not text:
                 # A row with no surviving text says nothing — it still
                 # counted toward the sample size, but there is nothing to
@@ -984,7 +997,16 @@ def render_usage_block(stats: UsageStats) -> str:
             # is pure (no I/O, see the module's other render_* functions),
             # and ``project_observation_row`` deliberately never hands back
             # anything that would need a lookup to become a name.
-            label = f"agent {agent_id[:8]}" if agent_id else "agent"
+            #
+            # T3-T5 fix round: strip the `agent-` id-namespace prefix every
+            # Agent id shares (``new_id("agent")``'s own shape) before
+            # truncating to 8 characters — unstripped, `agent-01234567`
+            # truncated to 8 was just `agent-0`, so every Agent id in a
+            # deployment collapsed onto the same handful of labels and the
+            # model could not tell two different Agents' observations apart.
+            label = (
+                f"agent {agent_id.rsplit('-', 1)[-1][:8]}" if agent_id else "agent"
+            )
             line = f"- [{label}] {text}"
             if cost + len(line) + 1 > budget:
                 break
@@ -2185,17 +2207,26 @@ class AgentProfileConsolidationService:
             render_usage_block(stats),
             render_current_overlay_blocks(blocks, user_id),
             value_max_chars=AGENT_PROFILE_VALUE_MAX_CHARS,
+            # T3-T5 fix round: this is the SAME condition the ``messages``
+            # branch below tests, and it must stay that way — rule 6 (the
+            # inline half of the untrusted-observation framing) and the
+            # ``system`` message (the message-level half) are two halves of
+            # one framing, and gating them on different conditions would let
+            # one appear without the other.
+            has_observations=bool(stats.observations),
         )
         # Agentic Memory P3 (T4): when this member has at least one recorded
         # observation, a dedicated ``system`` message precedes the ``user``
         # prompt — the message-level half of the untrusted-instruction
         # framing (the inline half lives in ``render_usage_block``'s
         # observation section header, and a third reminder is rule 6 of
-        # ``agent_profile_overlay_prompt`` itself). A member with ZERO
-        # observations gets the exact same single-``user``-message list this
-        # call sent before this feature existed — byte-identical, not merely
-        # equivalent, because ``prompt`` itself is unchanged in that case too
-        # (``render_usage_block`` never reaches its observation branch).
+        # ``agent_profile_overlay_prompt`` itself, now gated on the same
+        # ``has_observations`` condition — T3-T5 fix round). A member with
+        # ZERO observations gets the exact same single-``user``-message list
+        # this call sent before this feature existed — byte-identical, not
+        # merely equivalent, because ``prompt`` itself is unchanged in that
+        # case too (``render_usage_block`` never reaches its observation
+        # branch, and ``agent_profile_overlay_prompt`` never renders rule 6).
         messages: list[dict[str, str]] = (
             [
                 {

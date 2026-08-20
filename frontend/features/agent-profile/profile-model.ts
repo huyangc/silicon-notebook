@@ -261,6 +261,15 @@ export type AgentObservationsResponse = {
   items: AgentObservation[];
 };
 
+/**
+ * 真源镜像:后端 `GET .../agent-observations` 的 `limit` 查询参数默认值
+ * `AGENT_OBSERVATION_SAMPLE_MAX`(`backend/app/repositories/ports.py`）。
+ * 前端从不传 `limit`,响应模型也不回传它用了哪个值(见 `AgentObservationsResponse`
+ * 的字段集合),所以「这一页是不是恰好取满了」只能靠这份镜像常量判断——两边
+ * 必须同值,改后端默认值时要跟着改这里。
+ */
+export const AGENT_OBSERVATION_SAMPLE_MAX = 20;
+
 /** 一个 Agent 名下的全部记录,保持服务端给的新到旧顺序不变。 */
 export type AgentObservationGroup = {
   agentProfileId: string;

@@ -572,6 +572,33 @@ test("Agent 记录：按 Agent 分组渲染，每条带 Agent 名与相对时间
   expect(screen.getAllByRole("button", { name: "清空这个 Agent 的记录" })).toHaveLength(2);
 });
 
+test("Agent 记录：条数恰好达到服务端上限时提示「仅显示最近 20 条」，没达到时不提示", async () => {
+  const user = userEvent.setup();
+  const twenty = Array.from({ length: 20 }, (_, index) =>
+    observation({ id: `obs-${index}`, agent_profile_id: "agent-1" }),
+  );
+  mockFetchObservations.mockResolvedValueOnce({ enabled: true, items: twenty });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+
+  expect(await screen.findByText("仅显示最近 20 条")).toBeInTheDocument();
+});
+
+test("Agent 记录：条数未达服务端上限时不显示「仅显示最近」提示", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValueOnce({
+    enabled: true,
+    items: [observation({ id: "obs-1" })],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+
+  await screen.findByText("巡检助手");
+  expect(screen.queryByText(/仅显示最近/)).not.toBeInTheDocument();
+});
+
 test("Agent 记录：清空单个 Agent 不需要二次确认，成功后重取", async () => {
   const user = userEvent.setup();
   mockFetchObservations.mockResolvedValueOnce({
