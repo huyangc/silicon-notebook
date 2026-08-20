@@ -201,6 +201,7 @@ import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-grou
 import { grantedViaLabel, isGroupGranted, partitionByGrant } from "./group-api";
 import { NotebookMenuActions, ReaderNotebookBadge } from "./notebook-reader-actions";
 import { PasswordChangeModal } from "./password-change-modal";
+import { SearchProfileModal } from "./search-profile-modal";
 import { AskComposer } from "./ask-composer";
 import { quotedPhraseHint } from "./query-syntax";
 import { AskIntentReview } from "./ask-intent-review";
@@ -900,6 +901,7 @@ export default function Home() {
   const [mountEdges, setMountEdges] = useState<MountedBase[]>([]);
   const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [searchProfileModalOpen, setSearchProfileModalOpen] = useState(false);
   // 必办 4(spec §6):删除确认弹窗要显示"N 个笔记本正在把它作为参考库"—— CASCADE
   // 会连同这些边一起清空且不可撤销。只在打开删除确认弹窗时才拉取(openDeleteConfirm)。
   const [deleteMountedByCount, setDeleteMountedByCount] = useState(0);
@@ -954,6 +956,10 @@ export default function Home() {
   // 能力(旧后端缺字段,`system-api.ts` 同样解析成 false)时不给入口——那颗按钮打开的
   // 每个端点在关闸时都是 409 / enabled=false。
   const [agentProfileEnabled, setAgentProfileEnabled] = useState(false);
+  // 「我的回答偏好」入口的部署总闸(账户菜单)。默认 true——反方向:配置还没读回来、
+  // 或后端是没升级到这一批的旧版本时仍给入口(system-api.ts 同样把字段缺失解析成
+  // true);真正的写路径仍由 PATCH /me/search-profile 的 409 兜底。
+  const [userSearchProfileEnabled, setUserSearchProfileEnabled] = useState(true);
   // 待上传列表：文件 + 每项文档类型 + 每项是否被用户显式表态，**一个** state 对象。
   // 三条数组必须逐项对齐（uploadDocTypeFields 按下标配对），而入列会被跨 await 的
   // 异步链触发（zip 解包、文件夹遍历）——拆成三个 state 就只能各自 setState，等长
@@ -3148,6 +3154,7 @@ export default function Home() {
       setSourceImageMaxPerSource(systemConfiguration.source_image_max_per_source);
       setSourceImagesEnabled(systemConfiguration.source_images_enabled);
       setAgentProfileEnabled(systemConfiguration.agent_profile_enabled);
+      setUserSearchProfileEnabled(systemConfiguration.user_search_profile_enabled);
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
@@ -6808,9 +6815,11 @@ export default function Home() {
             showAdminUsage={canSeeAdminUsage(currentUser.role)}
             canChangePassword={currentUser.id !== "user-local"}
             advancedMode={isAdvanced(uiMode)}
+            searchProfileEnabled={userSearchProfileEnabled}
             onOpenMemory={showGlobalMemory}
             onOpenGroups={() => setGroupsOpen(true)}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
+            onOpenSearchProfile={() => setSearchProfileModalOpen(true)}
             onChangePassword={() => setPasswordModalOpen(true)}
             onLogout={() => handleLogout().catch(reportError)}
           />
@@ -8461,6 +8470,14 @@ export default function Home() {
 
       {passwordModalOpen && (
         <PasswordChangeModal onClose={() => setPasswordModalOpen(false)} />
+      )}
+
+      {searchProfileModalOpen && currentUser && (
+        <SearchProfileModal
+          currentUser={currentUser}
+          onSaved={setCurrentUser}
+          onClose={() => setSearchProfileModalOpen(false)}
+        />
       )}
 
       {groupsOpen && (

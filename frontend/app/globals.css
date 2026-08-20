@@ -6948,6 +6948,88 @@ button.tag:hover {
   color: var(--green);
 }
 
+/* 「我的回答偏好」弹窗(Agentic Memory P3, T9)。表单骨架复用 .edit-form/
+   .modal-actions.padded/.password-change-status(错误态)/.tag-row/.tag(术语
+   chip)/.badge(来源徽标),这里只补本弹窗独有的字段行布局与小号“恢复自动”按钮
+   ——全部namespaced 到 .search-profile-* 前缀,不改任何共享规则。 */
+.search-profile-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+.search-profile-reset-all {
+  border: none;
+  background: transparent;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.search-profile-reset-all:disabled {
+  opacity: .55;
+  cursor: default;
+}
+.search-profile-field {
+  display: grid;
+  gap: 7px;
+}
+.search-profile-field-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #4f5663;
+  font-size: 13px;
+  font-weight: 700;
+}
+.search-profile-field-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.search-profile-modal select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 12px;
+  color: var(--ink);
+  background: #fff;
+  font-weight: 500;
+  font-size: 14px;
+}
+.search-profile-field-reset {
+  border: none;
+  background: transparent;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+.search-profile-field-reset:disabled {
+  opacity: .55;
+  cursor: default;
+}
+.search-profile-terms {
+  display: grid;
+  gap: 8px;
+}
+.search-profile-term-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.search-profile-term-input input {
+  flex: 1;
+  min-width: 0;
+}
+.search-profile-term-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
 .info-body {
   display: flex;
   flex-wrap: wrap;

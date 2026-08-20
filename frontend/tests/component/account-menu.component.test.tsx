@@ -9,7 +9,12 @@ function renderMenu(
   onLogout = vi.fn(),
   advancedMode = false,
   onToggleAdvancedMode = vi.fn(),
-  { canChangePassword = true, onChangePassword = vi.fn() } = {},
+  {
+    canChangePassword = true,
+    onChangePassword = vi.fn(),
+    searchProfileEnabled = true,
+    onOpenSearchProfile = vi.fn(),
+  } = {},
 ) {
   render(
     <AccountMenu
@@ -20,14 +25,16 @@ function renderMenu(
       showAdminUsage
       canChangePassword={canChangePassword}
       advancedMode={advancedMode}
+      searchProfileEnabled={searchProfileEnabled}
       onOpenMemory={() => undefined}
       onOpenGroups={() => undefined}
       onToggleAdvancedMode={onToggleAdvancedMode}
+      onOpenSearchProfile={onOpenSearchProfile}
       onChangePassword={onChangePassword}
       onLogout={onLogout}
     />,
   );
-  return { onLogout, onToggleAdvancedMode, onChangePassword };
+  return { onLogout, onToggleAdvancedMode, onChangePassword, onOpenSearchProfile };
 }
 
 
@@ -106,4 +113,23 @@ test("高级模式开启时显示已开启状态", async () => {
   const toggle = screen.getByRole("menuitemcheckbox", { name: /高级模式/ });
   expect(toggle).toHaveAttribute("aria-checked", "true");
   expect(toggle).toHaveTextContent("已开启");
+});
+
+test("「我的回答偏好」是菜单动作,点击关闭菜单并触发回调", async () => {
+  const user = userEvent.setup();
+  const { onOpenSearchProfile } = renderMenu();
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+  await user.click(screen.getByRole("menuitem", { name: "我的回答偏好" }));
+
+  expect(onOpenSearchProfile).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+});
+
+test("部署总闸关闭(searchProfileEnabled=false)时不显示「我的回答偏好」入口", async () => {
+  const user = userEvent.setup();
+  renderMenu(vi.fn(), false, vi.fn(), { searchProfileEnabled: false });
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+  expect(screen.queryByRole("menuitem", { name: "我的回答偏好" })).not.toBeInTheDocument();
 });
