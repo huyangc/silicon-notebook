@@ -666,3 +666,29 @@ test("Agent 记录：读取失败时人话上屏", async () => {
 
   expect(await screen.findByText("网络不太好，请稍后重试")).toBeInTheDocument();
 });
+
+
+test("任一清空在飞时全部清空按钮禁用(codex #535 R5)", async () => {
+  mockFetchObservations.mockResolvedValue({ enabled: true, items: [
+    { id: "o1", agent_profile_id: "agent-a", agent_name: "A", text: "x", created_at: "2026-08-20T00:00:00+00:00" },
+    { id: "o2", agent_profile_id: "agent-b", agent_name: "B", text: "y", created_at: "2026-08-20T00:00:00+00:00" },
+  ] });
+  let release: () => void = () => undefined;
+  mockClearObservations.mockImplementation(
+    () => new Promise<{ removed: number }>((resolve) => { release = () => resolve({ removed: 1 }); }),
+  );
+  const testUser = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await testUser.click(screen.getByText("Agent 记录"));
+
+  const clearButtons = await screen.findAllByText("清空这个 Agent 的记录");
+  await testUser.click(clearButtons[0]);
+  // 第一个清空在飞:另一组的清空与「清空全部记录」都必须禁用
+  // (先发的 load 最后返回会拿旧快照复活已删记录)
+  const otherClear = screen.getByText("清空这个 Agent 的记录");
+  expect(otherClear.closest("button")).toBeDisabled();
+  const clearAllEntry = screen.getByText("清空全部记录");
+  expect(clearAllEntry.closest("button")).toBeDisabled();
+  release();
+});

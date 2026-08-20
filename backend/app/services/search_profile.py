@@ -107,7 +107,13 @@ SEARCH_PROFILE_ORIGINS: frozenset[str] = frozenset({"user", "job"})
 #: Hard cap on :func:`render_style_block`'s output. Consumed starting T8
 #: (the plan/answer prompt injection); the constant lands now because T8's
 #: renderer is this module's job, not the injection call site's.
-SEARCH_PROFILE_BLOCK_MAX_CHARS = 200
+# codex #535 R5 P2:预算必须大到「最大合法档案必然完整渲染」——三个封闭
+# 字段的最长短语 + 10×32 满额术语 + 框定语合计 < 600,否则 UI/API 报告
+# 「已保存」的用户选择会在渲染点被静默丢弃(违反「用户编辑的数据不得静默
+# 截断」红线)。逐条装入循环保留,作为对未来加字段时的纵深防御;
+# test_the_maximal_legal_profile_renders_completely 钉住「上限与预算不许
+# 静默漂移分开」这条不变量。精确值只登记 docs/product-and-api*.md。
+SEARCH_PROFILE_BLOCK_MAX_CHARS = 600
 
 
 def _empty_profile() -> dict:

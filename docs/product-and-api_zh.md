@@ -1424,7 +1424,7 @@ Agentic Memory P3 的第二条、相互独立的 B 线：一份很小的按用�
 | --- | --- |
 | 字段数 | 4（`answer_language`、`answer_shape`、`answer_detail`、`domain_terms`） |
 | `domain_terms` 上限 | ≤10 条，每条 ≤32 字符 |
-| 渲染出的风格块字符上限 | 200（`SEARCH_PROFILE_BLOCK_MAX_CHARS`）——术语逐条装入直到预算耗尽，不整段丢弃 |
+| 渲染出的风格块字符上限 | 600（`SEARCH_PROFILE_BLOCK_MAX_CHARS`）——预算按「最大合法档案必然完整渲染」定标（codex #535 R5：预算小于输入上限之和会让「已保存」的用户选择在渲染点被静默丢弃）；逐条装入保留为纵深防御 |
 | 归纳取样规模 | 最近 30 次已完成提问（`SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT`） |
 | 归纳最小样本地板 | 10（`SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES`）——低于此不写 |
 | 归纳多数阈值 | 占全样本 0.7（`SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO`；「其他」语言占比仍留在分母里） |
