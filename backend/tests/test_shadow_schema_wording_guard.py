@@ -259,3 +259,52 @@ def test_every_partial_unique_index_has_a_pinned_predicate():
         if index.unique and index.predicate_tokens:
             assert name in _UNIQUE_PREDICATES, f"unpinned partial unique index: {name}"
             assert _UNIQUE_PREDICATES[name][1] == index.predicate_tokens, name
+
+
+def test_agent_observations_park_strategies_are_the_pinned_shape():
+    """Agentic Memory P3, T1: ``agent_observations`` has TWO unique surfaces
+    that must resolve to two DIFFERENT park strategies, exactly as recorded
+    in the T1 park-strategy argument (``_migration_55`` / 0033_agent_
+    observations.sql):
+
+    - ``pk_agent_observations`` is a single-column primary key equal, verbatim,
+      to the manifest's declared replication key -- so it must resolve to
+      REPLICATION_KEY (zero sentinel column, zero nullable column, zero leaf
+      delete/reinsert).
+    - ``idx_agent_observations_request`` is the add_observation idempotency
+      index. Its first three columns (notebook_id, owner_id, agent_profile_id)
+      are all NOT NULL, so the only column the resolver can pick to park on is
+      the nullable fourth one, client_request_id -- it must resolve to NULL
+      with park_column == "client_request_id", never a sentinel strategy.
+
+    This is a direct assertion of the resolved shape (as opposed to
+    `test_every_partial_unique_index_has_a_pinned_predicate` above, which
+    only proves construction does not raise). Mutation-verified during T1's
+    implementation: reverting client_request_id to `NOT NULL DEFAULT ''`
+    flips this test's strategy assertion to SENTINEL_TEXT (red), and
+    removing the `_UNIQUE_PREDICATES` pin makes `_build_unique_surfaces`
+    raise at construction (red for the whole file, per the test directly
+    above this one).
+    """
+    from app.migration.shadow.manifest import MANIFEST
+    from app.migration.shadow.replicator import _ParkStrategy, _build_unique_surfaces
+
+    surfaces = _build_unique_surfaces(MANIFEST)
+
+    pk_surface = surfaces["pk_agent_observations"]
+    assert pk_surface.table == "agent_observations"
+    assert pk_surface.columns == ("id",)
+    assert pk_surface.strategy is _ParkStrategy.REPLICATION_KEY
+    assert pk_surface.park_column is None
+
+    idx_surface = surfaces["idx_agent_observations_request"]
+    assert idx_surface.table == "agent_observations"
+    assert idx_surface.columns == (
+        "notebook_id",
+        "owner_id",
+        "agent_profile_id",
+        "client_request_id",
+    )
+    assert idx_surface.strategy is _ParkStrategy.NULL
+    assert idx_surface.park_column == "client_request_id"
+    assert idx_surface.predicate == "client_request_id IS NOT NULL"

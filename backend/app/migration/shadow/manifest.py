@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=54, postgres_version=32, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=55, postgres_version=33, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -69,6 +69,7 @@ _TRANSFORM_ORDER = ("bytea", "jsonb", "timestamptz", "boolean")
 _SQLITE_NULL_GUARD_KEYS = frozenset(
     {
         "agent_access_tokens.id",
+        "agent_observations.id",
         "agent_profiles.id",
         "answers.id",
         "app_settings.key",
@@ -693,6 +694,31 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         86,
         "jsonb+timestamptz",
+    ),
+    # SQLite v55 / PostgreSQL v33: Agentic Memory P3's per-(notebook, owner,
+    # agent) append-only observation log (Agentic Memory P3, T1 — zero
+    # behavior change, no reader/writer yet). It FKs onto notebooks (rank 15)
+    # only, so the appended rank stays FK-consistent, and it has no incoming
+    # foreign key of its own (leaf table).
+    #
+    # The declared replication key is the table's single-column ``id``
+    # primary key, matching the SQLite ``TEXT PRIMARY KEY`` declaration
+    # verbatim — that equality is the park precondition:
+    # _build_unique_surfaces resolves the surface to REPLICATION_KEY, so no
+    # sentinel column, no nullable column and no leaf delete/reinsert is
+    # involved for the primary key itself. The table's SECOND unique
+    # surface — the partial ``idx_agent_observations_request`` idempotency
+    # index over (notebook_id, owner_id, agent_profile_id,
+    # client_request_id) — parks differently: it is pinned in
+    # replicator.py's _UNIQUE_PREDICATES as a NULL park (the nullable
+    # client_request_id column IS the park column; a write with no
+    # client_request_id simply does not participate in the partial index).
+    _table(
+        "agent_observations",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        87,
+        "timestamptz",
     ),
 )
 
