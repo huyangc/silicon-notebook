@@ -43,6 +43,12 @@ class _FakeConnection:
         self.executed_kinds: list[str] = []
 
     def execute(self, sql: str, params: tuple):
+        if "pg_advisory_xact_lock" in sql:
+            # codex #535 R1 P2 加的 per-(notebook, owner) 淘汰串行化锁——它是
+            # 每次 append 的固定前奏,与本文件要测的重试分支无关;吞掉而不消耗
+            # 脚本,让各用例的语句脚本仍只描述 INSERT/SELECT/DELETE 序列。
+            self.executed_kinds.append("ADVISORY_LOCK")
+            return _Cursor(rowcount=1, row=None)
         self.executed_kinds.append(sql.strip().split(None, 1)[0].upper())
         handler = self._script.pop(0)
         return handler(sql, params)
@@ -86,7 +92,7 @@ def test_retries_once_and_wins_when_the_loser_reread_is_none():
     )
     assert observation_id == "obs-retry"
     assert deduplicated is False
-    assert connection.executed_kinds == ["INSERT", "SELECT", "INSERT", "DELETE"]
+    assert connection.executed_kinds == ["ADVISORY_LOCK", "INSERT", "SELECT", "INSERT", "DELETE"]
 
 
 def test_retries_once_and_lands_on_a_fresh_conflicting_row():
@@ -107,7 +113,7 @@ def test_retries_once_and_lands_on_a_fresh_conflicting_row():
     )
     assert observation_id == "obs-someone-else"
     assert deduplicated is True
-    assert connection.executed_kinds == ["INSERT", "SELECT", "INSERT", "SELECT"]
+    assert connection.executed_kinds == ["ADVISORY_LOCK", "INSERT", "SELECT", "INSERT", "SELECT"]
 
 
 def test_raises_a_named_error_when_the_reread_is_none_twice():
@@ -128,7 +134,7 @@ def test_raises_a_named_error_when_the_reread_is_none_twice():
         store.append_observation(
             "nb-1", "user-a", "agent-1", text="x", client_request_id="req-1",
         )
-    assert connection.executed_kinds == ["INSERT", "SELECT", "INSERT", "SELECT"]
+    assert connection.executed_kinds == ["ADVISORY_LOCK", "INSERT", "SELECT", "INSERT", "SELECT"]
 
 
 def test_no_retry_at_all_when_the_first_insert_wins_outright():
@@ -146,7 +152,7 @@ def test_no_retry_at_all_when_the_first_insert_wins_outright():
     )
     assert observation_id == "obs-retry"
     assert deduplicated is False
-    assert connection.executed_kinds == ["INSERT", "DELETE"]
+    assert connection.executed_kinds == ["ADVISORY_LOCK", "INSERT", "DELETE"]
 
 
 def test_append_observation_rejects_empty_client_request_id():

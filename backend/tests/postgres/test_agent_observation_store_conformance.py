@@ -303,3 +303,46 @@ def test_notebook_delete_cascades_observation_rows(agent_observation_harness):
             "SELECT notebook_id FROM agent_observations"
         ).fetchall()
     assert [row["notebook_id"] for row in remaining] == [OTHER_NOTEBOOK_ID]
+
+
+def test_concurrent_appends_at_the_ring_limit_never_exceed_the_cap(
+    agent_observation_harness,
+):
+    """codex #535 R1 P2:满环时两个并发事务各按提交前快照算保留名单,会删同
+    一条最旧行、双双提交后组里留 RING_MAX+1 行。per-(notebook, owner) 的
+    advisory 事务锁把「插入+淘汰」串行化,组行数恒 ≤ RING_MAX。"""
+    import threading
+
+    harness = agent_observation_harness
+    store = harness.store
+    for index in range(AGENT_OBSERVATION_RING_MAX):
+        store.append_observation(
+            NOTEBOOK_ID, "user-a", "agent-1",
+            text=f"seed {index}", client_request_id=f"ring-seed-{index}",
+        )
+    barrier = threading.Barrier(2)
+    errors: list = []
+
+    def _append(tag: str) -> None:
+        try:
+            barrier.wait(timeout=10)
+            store.append_observation(
+                NOTEBOOK_ID, "user-a", "agent-1",
+                text=f"burst {tag}", client_request_id=f"ring-burst-{tag}",
+            )
+        except Exception as exc:  # pragma: no cover - 失败时上浮断言
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_append, args=(t,)) for t in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors
+    with harness.database.connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS n FROM agent_observations "
+            "WHERE notebook_id=%s AND owner_id=%s",
+            (NOTEBOOK_ID, "user-a"),
+        ).fetchone()
+    assert int(row["n"]) == AGENT_OBSERVATION_RING_MAX

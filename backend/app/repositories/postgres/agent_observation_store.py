@@ -129,6 +129,14 @@ class AgentObservationStore:
             return False, connection.execute(select_sql, select_params).fetchone()
 
         with self.database.write() as connection:
+            # codex #535 R1 P2:满环并发时两个事务各自按提交前快照算保留名单,
+            # 会删同一条最旧行、双双提交后组里留下 RING_MAX+1 行。按
+            # (notebook, owner) 取事务级 advisory 锁把「插入+淘汰」串行化
+            # (先例 cluster_lock.py/governance_store.py 同款 hashtextextended)。
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"agent-observations:{notebook_id}:{owner_id}",),
+            )
             won, row = _attempt(connection)
             if not won and row is None:
                 won, row = _attempt(connection)

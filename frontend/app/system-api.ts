@@ -57,10 +57,12 @@ export type SystemConfiguration = {
    *  压根没有这个特性,渲染入口只会打开一个整片 404 的面板。 */
   agent_profile_enabled: boolean;
   /** 「我的回答偏好」入口的能力位（账户菜单），直接反映后端
-   *  Settings.user_search_profile_enabled。缺失(旧后端)按 **true** 处理——与
-   *  `agent_profile_enabled` 的「缺失按 false」相反：这里的部署默认值本身就是
-   *  开启,旧后端缺这个字段不该把入口隐藏成一个「看起来关闭了」的状态;真正的
-   *  写路径仍由 `PATCH /me/search-profile` 的 409 兜底。 */
+   *  Settings.user_search_profile_enabled。缺失(旧后端)按 **false** 处理——与
+   *  `agent_profile_enabled` 同一条论证(codex #535 R1 P2 订正了最初的反向
+   *  设定):这个字段与 `PATCH /me/search-profile` 端点是同一批新增的,缺字段
+   *  可靠地说明这个后端**没有那个端点**,按 true 渲染入口只会让保存打出裸 404
+   *  而不是承诺过的 409 文案;「部署默认开启」描述的是新后端的 Settings 默认值,
+   *  救不了一个路由都不存在的旧后端。 */
   user_search_profile_enabled: boolean;
 };
 
@@ -197,9 +199,8 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   // 同样缺失按 false:这个字段与四个理解端点是同一批新增的,不存在「后端已经有
   // 端点、字段却没下发」的组合——缺字段可靠地说明这个后端根本没有这个特性。
   const agentProfileEnabled = record.agent_profile_enabled;
-  // 反方向:缺失按 true(见上面 SystemConfiguration.user_search_profile_enabled
-  // 的字段注释)——部署默认值本身就是开启,不能把「旧后端没有这个字段」误判成
-  // 「这项功能被部署方关闭了」。
+  // 同样缺失按 false(见上面 SystemConfiguration.user_search_profile_enabled
+  // 的字段注释):字段与端点同批新增,缺字段=旧后端没有那个路由。
   const searchProfileEnabled = record.user_search_profile_enabled;
   const supportedExtensions = normalizedExtensions(record.supported_source_extensions)
     ?? DEFAULT_SUPPORTED_SOURCE_EXTENSIONS;
@@ -225,7 +226,7 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     source_image_max_per_source: imageMaxPerSource,
     source_images_enabled: imagesEnabled !== false,
     agent_profile_enabled: agentProfileEnabled === true,
-    user_search_profile_enabled: searchProfileEnabled !== false,
+    user_search_profile_enabled: searchProfileEnabled === true,
   };
 }
 

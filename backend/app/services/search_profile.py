@@ -463,7 +463,13 @@ _CJK_RANGES: "tuple[tuple[int, int], ...]" = (
     (0x4E00, 0x9FFF),   # CJK Unified Ideographs
     (0x3400, 0x4DBF),   # CJK Unified Ideographs Extension A
     (0x3000, 0x303F),   # CJK Symbols and Punctuation
-    (0xFF00, 0xFFEF),   # Halfwidth and Fullwidth Forms
+    # codex #535 R1 P2:整个 Halfwidth and Fullwidth Forms (0xFF00-0xFFEF)
+    # 含全角拉丁字母 (0xFF21-0xFF3A/0xFF41-0xFF5A) 与半角片假名
+    # (0xFF66-0xFF9F)——OCR 出来的「ＨＥＬＬＯ」或日文半角片假名问题会被
+    # 整句判成中文。只保留中文正文高频的全角标点片段(！＂＃…／、：；
+    # ＜＝＞？＠),字母与片假名不再计入 CJK。
+    (0xFF01, 0xFF0F),   # Fullwidth punctuation: ！ ＂ ＃ … ，(0xFF0C) ／
+    (0xFF1A, 0xFF20),   # Fullwidth punctuation: ： ； ＜ ＝ ＞ ？ ＠
 )
 
 
