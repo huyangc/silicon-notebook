@@ -54,6 +54,12 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 一条没有间距的文字。样式表没有可消费的 AST,jsdom 也不做布局(量出来的 rect 恒为 0),
   // 文本是唯一诚实的输入;同文件对两个 tsx 的断言仍走 semantic-source 的语义解析。
   "tests/guards/group-layout-guard.test.mjs",
+  // 同上,只读 globals.css:断言只读/群组共享库的顶栏身份行 `.reader-badge-row` 恒不换行、
+  // 标题可压缩并省略。它此前用会换行的 `.tag-row`,而 `.workspace-header` 是固定 72px 单行,
+  // 于是标题被推到可视区之上——群组共享库点进去整份库名一个像素都看不见。样式表没有可消费的
+  // AST,jsdom 又不做布局(量出来的 rect 恒为 0),文本是唯一诚实的输入;组件那侧的结构前提
+  // 由 tests/component/notebook-reader-actions.component.test.tsx 真渲染断言。
+  "tests/guards/reader-badge-layout-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

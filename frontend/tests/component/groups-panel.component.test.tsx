@@ -245,7 +245,7 @@ test("驳回申请不写边,只刷新审核队列", async () => {
   expect(approveShareRequest).not.toHaveBeenCalled();
 });
 
-test("删除群组是两步确认,并说清共享会被一并收回", async () => {
+test("删除群组是两步确认,并说清知识库本身不会被删", async () => {
   const user = userEvent.setup();
   vi.mocked(deleteGroup).mockResolvedValue(undefined);
   renderModal();
@@ -256,7 +256,12 @@ test("删除群组是两步确认,并说清共享会被一并收回", async () =
 
   await user.click(screen.getByRole("button", { name: "删除群组" }));
   expect(deleteGroup).not.toHaveBeenCalled();
-  expect(screen.getByText(/共享给这个群组的知识库会一并收回/)).toBeInTheDocument();
+  // ⚠ 原文是「共享给这个群组的知识库会一并收回」。删组只删授权边(`delete_group` 在同
+  // 一个写事务里清 `notebook_grants`),知识库本身一个字都不动——那句话读起来像是库被
+  // 拿走了,是一句吓人的假话(2026-08-20 用户反馈)。
+  expect(screen.getByText(/组成员将失去对这些知识库的访问权/)).toBeInTheDocument();
+  expect(screen.getByText(/知识库本身仍属于原作者，不会被删除/)).toBeInTheDocument();
+  expect(screen.queryByText(/一并收回/)).toBeNull();
 
   await user.click(screen.getByRole("button", { name: "确认删除" }));
   await waitFor(() => expect(deleteGroup).toHaveBeenCalledWith("g1"));

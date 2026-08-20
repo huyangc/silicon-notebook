@@ -716,7 +716,12 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                     {canManage && (
                       confirming === `delete:${detail.id}` ? (
                         <>
-                          <span className="tool-hint">删除后，共享给这个群组的知识库会一并收回。</span>
+                          <span className="tool-hint">
+                            {/* 删组只删授权边(`delete_group` 同事务清 `notebook_grants`),
+                                知识库本身一个字都不动。原文「知识库会一并收回」读起来像是库
+                                被拿走了,是一句吓人的假话(用户反馈,2026-08-20)。 */}
+                            删除后，组成员将失去对这些知识库的访问权。知识库本身仍属于原作者，不会被删除。
+                          </span>
                           <button
                             className="new-pill danger-pill"
                             disabled={busy}

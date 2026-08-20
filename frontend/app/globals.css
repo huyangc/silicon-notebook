@@ -890,6 +890,56 @@ button {
   box-shadow: 0 0 0 3px rgba(15, 109, 122, 0.12);
 }
 
+/* 只读 / 群组共享库的顶栏身份行（`ReaderNotebookBadge`）。
+   刻意**不**复用 `.tag-row`：它 `flex-wrap: wrap`，而 `.workspace-header` 是固定
+   72px 的单行。一旦换行，这一行会排成「标题 / 徽章 / 说明」三行、在 72px 里居中，
+   于是标题被推到可视区**之上**（群组共享库实测：整个库名一个字都看不见），说明文字
+   又漏到标题栏外面盖住下方内容。这一行因此恒不换行：标题让位并省略，徽章不缩。 */
+.reader-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+/* 标题在这一行里必须可压缩。`.notebook-title-input` 自己是 `width: 100%`——那在
+   owner 的顶栏里是对的（它独占整行），但在这一行里会把徽章整个顶出去。 */
+.reader-badge-title {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  padding: 3px 7px;
+  color: #17202a;
+  font-size: 26px;
+  font-weight: 680;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 身份标注是**状态**，不是主操作。`.new-pill` 是黑底 42px 的主按钮样式，摆在 26px
+   的库名旁边会把库名本身盖过去（正是用户反馈的「点进来完全看不到 notebook 名字」
+   的另一半）。这里用与 `.source-kg-badge` 同档的轻量 chip。 */
+.reader-badge-chip {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 「退出共享」是这一行里唯一的动作，绝不能被标题挤没。 */
+.reader-badge-action {
+  flex: 0 0 auto;
+}
+
 .notebook-home {
   flex: 0 0 auto;
   height: 40px;
