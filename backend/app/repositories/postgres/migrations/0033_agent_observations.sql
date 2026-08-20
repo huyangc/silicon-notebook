@@ -53,15 +53,31 @@
 --    index non-partial either -- a non-partial unique index would make the
 --    NULL park strategy inapplicable to this surface.
 --
--- 5. No other index is created. There are exactly two read paths --
---    recent_observations/list_observations scan by (notebook_id, owner_id)
---    and the idempotency check point-reads the partial unique index above
---    -- and every read returns at most a bounded sample while the
---    per-(notebook_id, owner_id) ring eviction (AGENT_OBSERVATION_RING_MAX,
---    landing with the store in a later task) bounds each group. The TABLE
---    total is NOT capped -- it grows with notebooks x members -- so this is
---    a registered cost call, not a proof: revisit with measurements if the
---    scan ever shows up, rather than citing this note as "no index needed".
+-- 5. idx_agent_observations_scope covers (notebook_id, owner_id, created_at,
+--    id) -- a NON-unique index, so it adds nothing to the forward-shadow
+--    unique surface. T2's quality review measured the two hot read paths on
+--    a 100k-row table WITHOUT this index -- append_observation's eviction
+--    DELETE at ~9.5ms and recent_observations/list_observations at ~3.2ms,
+--    both table-scanning past every OTHER (notebook_id, owner_id) group's
+--    rows to find the one being read -- and WITH it, ~1.1ms and ~0.07ms
+--    respectively. Superseded T1 registered "no index" as a deferred cost
+--    call awaiting measurement rather than a proof; this is that
+--    measurement. id closes the same ordering the eviction DELETE and both
+--    reads already use (see the port's ORDER BY contract) -- a covering
+--    index without it would still leave every same-created_at tie
+--    unindexed for the final tie-break.
+--
+-- 5b. id is NOT NULL (see the CREATE TABLE below) for the same reason the
+--     SQLite mirror's TEXT PRIMARY KEY needed it spelled out explicitly:
+--     without it, a single NULL-id row would poison the ring eviction on
+--     the SQLite side, where NOT IN (SELECT id FROM ... LIMIT N) evaluates
+--     to NULL -- never TRUE -- for every comparison once the subquery
+--     result contains even one NULL, silently deleting nothing and growing
+--     that whole (notebook_id, owner_id) group's ring unbounded. PostgreSQL
+--     never had this gap (a PRIMARY KEY column is NOT NULL by definition
+--     here), but the two backends' eviction DELETE text and this
+--     constraint stay stated identically so a reader comparing the two
+--     migrations sees the same guarantee on both sides.
 --
 -- 6. Deep notebook copy does NOT carry this table -- same as agent_
 --    notebook_profile/agent_profile_jobs (see 0029_agent_profile.sql):
@@ -117,5 +133,8 @@ ALTER TABLE agent_observations
 CREATE UNIQUE INDEX idx_agent_observations_request
   ON agent_observations(notebook_id, owner_id, agent_profile_id, client_request_id)
   WHERE client_request_id IS NOT NULL;
+
+CREATE INDEX idx_agent_observations_scope
+  ON agent_observations(notebook_id, owner_id, created_at, id);
 
 ALTER TABLE user_profiles ADD COLUMN search_profile_json text COLLATE "C";

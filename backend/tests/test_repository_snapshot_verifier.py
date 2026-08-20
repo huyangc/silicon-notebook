@@ -57,12 +57,15 @@ def _rollback_v55(db: sqlite3.Connection) -> None:
     verifier reports them as manifested additions that never happened.
     Rollback runs newest-first, so this precedes _rollback_v54 at every call
     site. No separate DROP INDEX: SQLite's DROP TABLE takes the table's
-    indexes with it, so idx_agent_observations_request disappears with the
-    table (a standalone DROP INDEX here would be a dead line — the T1
-    quality review proved deleting it changes nothing). agent_observations
-    has no incoming foreign key from anywhere, so the table drop is the
-    whole table-side rollback; the unrelated user_profiles column drop
-    comes last.
+    indexes with it, so both idx_agent_observations_request (the T1
+    idempotency index) and idx_agent_observations_scope (the T2/T6 fix
+    round's non-unique scope index, added to the still-unmerged v55
+    migration in place rather than as a new hop) disappear with the table
+    (a standalone DROP INDEX here would be a dead line — the T1 quality
+    review proved deleting the first one changes nothing, and the same
+    argument applies to the second). agent_observations has no incoming
+    foreign key from anywhere, so the table drop is the whole table-side
+    rollback; the unrelated user_profiles column drop comes last.
     """
     db.execute("DROP TABLE agent_observations")
     db.execute("ALTER TABLE user_profiles DROP COLUMN search_profile_json")

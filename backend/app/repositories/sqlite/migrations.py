@@ -2960,17 +2960,35 @@ class SqliteMigrator:
            turn the index non-partial either — a non-partial unique index
            would make the NULL park strategy inapplicable to this surface.
 
-        5. No other index is created. There are exactly two read paths —
-           ``recent_observations``/``list_observations`` scan by
-           ``(notebook_id, owner_id)`` and the idempotency check point-reads
-           the partial unique index above — and every read returns at
-           most a bounded sample while the per-``(notebook_id, owner_id)``
-           ring eviction (``AGENT_OBSERVATION_RING_MAX``, landing with the
-           store in a later task) bounds each group. The TABLE total is NOT
-           capped — it grows with notebooks × members — so this is a
-           registered cost call, not a proof: revisit with measurements if
-           the scan ever shows up, rather than citing this note as "no
-           index needed".
+        5. ``idx_agent_observations_scope`` covers ``(notebook_id, owner_id,
+           created_at, id)`` — a NON-unique index, so it adds nothing to the
+           forward-shadow unique surface. T2's quality review measured the
+           two hot read paths on a 100k-row table WITHOUT this index —
+           ``append_observation``'s eviction DELETE at ~9.5ms and
+           ``recent_observations``/``list_observations`` at ~3.2ms, both
+           table-scanning past every OTHER ``(notebook_id, owner_id)``
+           group's rows to find the one being read — and WITH it, ~1.1ms and
+           ~0.07ms respectively. Superseded T1 registered "no index" as a
+           deferred cost call awaiting measurement rather than a proof; this
+           is that measurement. ``id`` closes the same ordering the eviction
+           DELETE and both reads already use (see the port's ``ORDER BY``
+           contract) — a covering index without it would still leave every
+           same-``created_at`` tie unindexed for the final tie-break.
+
+        5b. ``id`` is ``NOT NULL`` (SQLite's own PK-implies-NOT-NULL rule
+            only fires for ``INTEGER PRIMARY KEY``; a ``TEXT PRIMARY KEY``
+            column is nullable unless told otherwise). Without this, a
+            single NULL-id row would poison the ring eviction: SQLite's
+            ``NOT IN (SELECT id FROM ... LIMIT N)`` evaluates to NULL — never
+            TRUE — for every row being compared once the subquery result
+            contains even one NULL, so the DELETE silently deletes nothing
+            and the ring grows unbounded for that whole
+            ``(notebook_id, owner_id)`` group. The application layer never
+            constructs a NULL id (``new_id("obs")`` always returns a real
+            string), so this is a defence against a corrupt/foreign write,
+            not a documented legitimate shape — unlike ``client_request_id``
+            above, which the schema deliberately leaves nullable for the
+            shadow park strategy.
 
         6. Deep notebook copy does NOT carry this table — same as
            ``agent_notebook_profile``/``agent_profile_jobs`` (see
@@ -3011,7 +3029,7 @@ class SqliteMigrator:
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS agent_observations (
-                  id                TEXT PRIMARY KEY,
+                  id                TEXT PRIMARY KEY NOT NULL,
                   notebook_id       TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
                   owner_id          TEXT NOT NULL DEFAULT '',
                   agent_profile_id  TEXT NOT NULL DEFAULT '',
@@ -3022,6 +3040,8 @@ class SqliteMigrator:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_observations_request
                   ON agent_observations(notebook_id, owner_id, agent_profile_id, client_request_id)
                   WHERE client_request_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_agent_observations_scope
+                  ON agent_observations(notebook_id, owner_id, created_at, id);
                 """
             )
             self.add_column_if_missing(

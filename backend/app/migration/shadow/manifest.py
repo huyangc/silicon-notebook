@@ -69,7 +69,6 @@ _TRANSFORM_ORDER = ("bytea", "jsonb", "timestamptz", "boolean")
 _SQLITE_NULL_GUARD_KEYS = frozenset(
     {
         "agent_access_tokens.id",
-        "agent_observations.id",
         "agent_profiles.id",
         "answers.id",
         "app_settings.key",
