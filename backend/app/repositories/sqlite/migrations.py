@@ -2919,11 +2919,13 @@ class SqliteMigrator:
            owner_id``/``notebook_grants.principal_id`` (see
            ``_migration_51``/``_migration_49``): a nullable owner_id would
            make every row incomparable under a UNIQUE index that includes
-           it. It does not participate in any unique surface on this table
-           at all (unlike ``agent_notebook_profile``, whose PK IS
-           ``(notebook_id, owner_id, label)``) — the idempotency key below
-           needs ``agent_profile_id`` too, which owner_id alone cannot
-           stand in for.
+           it. It is not part of this table's PRIMARY KEY (unlike
+           ``agent_notebook_profile``, whose PK IS
+           ``(notebook_id, owner_id, label)``), but it IS the second column
+           of the idempotency unique index below — making it nullable would
+           let NULL-owner rows escape that index entirely (duplicate
+           ``client_request_id`` writes would land) and would drift the
+           shadow park column off ``client_request_id``.
 
         2. ``agent_profile_id`` is a bare provenance id with NO foreign key
            — same precedent as ``sources.agent_profile_id`` (v48) and
@@ -2961,12 +2963,14 @@ class SqliteMigrator:
         5. No other index is created. There are exactly two read paths —
            ``recent_observations``/``list_observations`` scan by
            ``(notebook_id, owner_id)`` and the idempotency check point-reads
-           the partial unique index above — and the table's own row count
-           is capped by an application-layer ring eviction
-           (``AGENT_OBSERVATION_RING_MAX`` per ``(notebook_id, owner_id)``,
-           landing with the store in a later task), so a
-           ``(notebook_id, owner_id)`` index would only ever cover rows
-           already bounded to a small ring.
+           the partial unique index above — and every read returns at
+           most a bounded sample while the per-``(notebook_id, owner_id)``
+           ring eviction (``AGENT_OBSERVATION_RING_MAX``, landing with the
+           store in a later task) bounds each group. The TABLE total is NOT
+           capped — it grows with notebooks × members — so this is a
+           registered cost call, not a proof: revisit with measurements if
+           the scan ever shows up, rather than citing this note as "no
+           index needed".
 
         6. Deep notebook copy does NOT carry this table — same as
            ``agent_notebook_profile``/``agent_profile_jobs`` (see
@@ -2982,7 +2986,15 @@ class SqliteMigrator:
            re-parents each notebook's observation rows the same way every
            other per-notebook table already does.
 
-        8. ``user_profiles.search_profile_json`` is nullable; NULL means
+        8. ``created_at`` accepts ONLY ISO timestamps — never the empty
+           string. It is deliberately NOT in
+           ``POSTGRES_EMPTY_TIME_SENTINELS``: the SQLite side would accept
+           ``''`` without any symptom, and forward shadow would then hand
+           ``''`` to a PG ``timestamptz`` and poison the whole direction
+           (the ``notebook_share_requests.decided_at`` lesson). Same
+           handling as ``retrieval_experiences``.
+
+        9. ``user_profiles.search_profile_json`` is nullable; NULL means
            "the user has never set a preference and no consolidation job
            has ever written one" — same contract as v45's ``ui_mode``. It
            is NOT backfilled for existing rows, and it does NOT go into
