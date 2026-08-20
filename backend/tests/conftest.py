@@ -3,6 +3,7 @@
 import os
 from itertools import count
 from pathlib import Path
+import shutil
 import time
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
@@ -61,6 +62,94 @@ _GRAPH_INDEX_CONTRACT_MODULES = {
 # directories lazily when a test actually uses them; SQLite only needs the
 # already-existing base directory for its database file.
 _TEST_ISOLATION_IDS = count()
+_TEST_PASSWORD_HASH_ITERATIONS = 1
+_REAL_PASSWORD_HASH_MODULES = {
+    "test_auth_utils.py",
+    "test_repository_snapshot_verifier.py",
+}
+_REAL_SQLITE_MIGRATION_MODULES = {
+    "test_agent_observation_store.py",
+    "test_agent_profile_job_base.py",
+    "test_agent_profile_job_observations.py",
+    "test_agent_profile_job_overlay.py",
+    "test_agent_profile_store.py",
+    "test_catalog_store.py",
+    "test_merge_dbs_taxonomy.py",
+    "test_repository_snapshot_verifier.py",
+    "test_retrieval_experience_store.py",
+    "test_search_profile_job.py",
+    "test_shadow_sqlite_schema_validation.py",
+    "test_ui_mode.py",
+}
+
+
+@pytest.fixture(scope="session")
+def _sqlite_schema_template(tmp_path_factory) -> Path:
+    """Build the immutable current SQLite schema once in each xdist worker."""
+    from app.core.config import Settings
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.migrations import SqliteMigrator
+
+    template_root = tmp_path_factory.getbasetemp() / "sqlite-schema-template"
+    template_root.mkdir(parents=True, exist_ok=True)
+    template_path = template_root / "template.db"
+    settings = Settings(
+        database_url=f"sqlite:///{template_path}",
+        storage_dir=str(template_root / "storage"),
+    )
+    database = SqliteDatabase(settings, _REPO_ROOT)
+    SqliteMigrator(database, settings).migrate()
+    database.close_local()
+    return template_path
+
+
+@pytest.fixture(autouse=True)
+def _reuse_current_sqlite_schema(monkeypatch, request, _sqlite_schema_template):
+    """Copy current empty DDL while migration contract tests run the real ladder."""
+    if request.path.name in _REAL_SQLITE_MIGRATION_MODULES:
+        return
+
+    from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
+
+    real_migrate = SqliteMigrator.migrate
+
+    def migrate_from_template(migrator: SqliteMigrator) -> list[int]:
+        database_path = migrator.database.db_path
+        if database_path.exists():
+            return real_migrate(migrator)
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_sqlite_schema_template, database_path)
+        return list(range(1, SCHEMA_VERSION + 1))
+
+    monkeypatch.setattr(SqliteMigrator, "migrate", migrate_from_template)
+
+
+@pytest.fixture(autouse=True)
+def _fast_default_password_hashing(monkeypatch, request):
+    """Keep repository-heavy tests from benchmarking PBKDF2 thousands of times.
+
+    ``test_auth_utils.py`` imports the real helpers during collection and still
+    exercises the production default cost directly.  Repository stores import
+    ``hash_password`` lazily, so this fixture only replaces their default call
+    during a test.  Explicit iteration counts, random salts, persisted fields,
+    and real ``verify_password`` behavior remain intact.
+    """
+    if request.path.name in _REAL_PASSWORD_HASH_MODULES:
+        return
+
+    from app.services import auth_utils
+
+    real_hash_password = auth_utils.hash_password
+
+    def fast_hash_password(
+        password: str,
+        *,
+        salt: str | None = None,
+        iterations: int = _TEST_PASSWORD_HASH_ITERATIONS,
+    ) -> tuple[str, str, int]:
+        return real_hash_password(password, salt=salt, iterations=iterations)
+
+    monkeypatch.setattr(auth_utils, "hash_password", fast_hash_password)
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
