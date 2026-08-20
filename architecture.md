@@ -84,7 +84,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 
 ### 2.3 API、模型与领域服务
 
-- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供二十个工具（七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理与三个构建）的 scoped Streamable HTTP 面，权威清单是它自己的 `PUBLIC_TOOLS`；`deps.py` 承载访问控制依赖。
+- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供二十二个工具（七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理、三个构建与两个库理解）的 scoped Streamable HTTP 面，权威清单是它自己的 `PUBLIC_TOOLS`；`deps.py` 承载访问控制依赖。
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑；`kg/maintenance_jobs.py` 独立拥有 relink/rebuild 的共享单飞槽和后台任务编排，算法仍归 `KnowledgeLifecycleService`。
@@ -297,14 +297,15 @@ evidence，不提供原始 revision/provenance 浏览。批准前会重新校验
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
 
-当前公开二十个工具，权威清单是 `mcp_server.PUBLIC_TOOLS`：Memory/context 七工具
+当前公开二十二个工具，权威清单是 `mcp_server.PUBLIC_TOOLS`：Memory/context 七工具
 `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、
 `get_memory`、`ask_notebook`、`propose_memory`；knowhow 四工具 `list_knowhow_tables`、
 `get_knowhow_discrimination`、`get_knowhow_row` 与 `put_knowhow_cell_code`；引用点查
 `get_cited_element`；来源管理五工具 `add_source_text`、`add_source_url`、
 `get_source_status`、`reparse_source` 与 `delete_source`；构建三工具 `build_kg`、
-`build_retrieval_index` 与 `get_build_status`。读取需相应 read scope，格子代码写入需
-`knowhow:code`。
+`build_retrieval_index` 与 `get_build_status`；库理解两工具 `get_notebook_profile` 与
+`add_observation`（Agentic Memory P3）。读取需相应 read scope，格子代码写入需
+`knowhow:code`，观察记录写入需 `agent_observation:write`。
 
 来源管理与构建工具的权限面刻意比浏览器窄（P2 后浏览器 HTTP 面的六个内容写能力已翻 admin、组管理员可写，MCP/Agent 面**仍恒 owner**、刻意不跟——长期 token 是独立凭据）。`add_source_text`/`add_source_url`/
 `reparse_source` 需 `sources:write`，`build_kg`/`build_retrieval_index` 需

@@ -55,6 +55,8 @@ SQLite v53 新增 `agent_profile_jobs.claim_token`（Agentic Memory P2）：巡�
 
 SQLite v54 新增 `retrieval_experiences`（Agentic Memory P2）：**部署级全局**的检索策略经验库。一条经验说的是「在**这类问题形态**下，**这个检索动作**值得／不值得用」，外加一句模型撰写的理由、一个 `support`（多少次 run 支持这条结论）与一个 `adopted`（注入之后模型真的选了这个动作多少次）。本表刻意**没有** `notebook_id`、没有 owner 列、两个方向都没有外键：它存的是「怎么查」的通用打法，不是任何人的内容——所以笔记本深拷贝结构上够不着它（与 `groups`/`group_members` 同一句论证），`scripts/merge_dbs.py` 把它归进全局并集表。主键是单列**内容寻址** `TEXT`——「情境指纹 + 动作」的确定性哈希——这既让跨独立部署的并集是安全的（递增 id 会在主键冲突时静默丢行），也因为声明的 replication key 与它逐字相等，让它唯一那个 unique surface 自动落 `REPLICATION_KEY` 停车：无哨兵列、无 `_UNIQUE_PREDICATES` 条目。刻意不建索引：行数有硬上限，读路径只有主键点查与一次有界全扫。由于 v54/v32 又新增一张（无父、叶）表，正向 shadow 的不变量变为 81 张业务表、110 个 unique surface；分支计数闭包上界仍为 12 个 row slot。PostgreSQL v32 为配对 schema，当前配对为 SQLite54/PG32/epoch1。
 
+SQLite v55 一次迁移落两样（Agentic Memory P3）：叶表 `agent_observations`（一个出向 FK 到 `notebooks`、无入向 FK——外部 Agent 按 `(笔记本, 用户)` 的观察队列，环形淘汰，只喂不可信的覆盖层巡固 prompt）与可空列 `user_profiles.search_profile_json`（每用户检索/回答风格偏好文档；`NULL`＝从未设置过，与 `ui_mode` 同一套契约）。`agent_observations` 的幂等唯一索引 `idx_agent_observations_request`（`(notebook_id, owner_id, agent_profile_id, client_request_id) WHERE client_request_id IS NOT NULL`）与 `idx_conversations_share_token` 同款走 NULL 停车；另有一条非唯一索引 `idx_agent_observations_scope` 支撑环形淘汰删除与有界读取，不计入 unique surface。`user_profiles.search_profile_json` 不新增 unique surface、外键或 JSON 列登记（与 `ui_mode` 同等对待）。由于 v55/v33 又新增一张只带出向 FK 的叶表，正向 shadow 的不变量变为 82 张业务表、112 个 unique surface（新表声明的 PK 加它唯一那条部分索引）；分支计数闭包上界仍为 12 个 row slot。PostgreSQL v33 为配对 schema，当前配对为 SQLite55/PG33/epoch1。
+
 只能在应用/API 与后台 writer 停止后执行：
 
 ```bash
@@ -103,7 +105,7 @@ bash scripts/check.sh
 | G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试、冷图/索引契约与全仓语义扫描 | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
 | G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
 
-G1 并行运行三个有界 lane：`check_backend.sh` 以默认 12 个 worker 执行稳定 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx` 与 production build。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 负责 TypeScript 校验并且不得启用 `ignoreBuildErrors`，因此 G1 不再先用 `tsc --noEmit` 解析一遍同一程序再立即由 build 重复解析，`npm run lint` 仍作为 G0 定向命令保留。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract` 全仓语义扫描和 PostgreSQL 树；G2 先执行 G1，再执行精确互补的 backend marker 集。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的二十个工具：七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理与三个构建工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+G1 并行运行三个有界 lane：`check_backend.sh` 以默认 12 个 worker 执行稳定 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx` 与 production build。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 负责 TypeScript 校验并且不得启用 `ignoreBuildErrors`，因此 G1 不再先用 `tsc --noEmit` 解析一遍同一程序再立即由 build 重复解析，`npm run lint` 仍作为 G0 定向命令保留。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract` 全仓语义扫描和 PostgreSQL 树；G2 先执行 G1，再执行精确互补的 backend marker 集。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的二十二个工具：七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理、三个构建与两个库理解工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 

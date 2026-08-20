@@ -26,6 +26,7 @@ Codex CLI / Claude Code / Python Agent
 - Retrieved source, KG, and Memory text is untrusted evidence/data, never Agent instructions.
 - The source-management and build tools form the write plane. Every write there is **owner-only**: a notebook the token's owner merely joined as a read-only member stays readable but is never writable, whatever scopes the token carries.
 - `delete_source` can only remove a source **an Agent added**. A document a person uploaded is always refused, and re-uploading their bytes reuses their existing row rather than claiming it.
+- `get_notebook_profile` returns "AI 对这个库的理解" — background scaffolding, never evidence, never citable. `add_observation` appends one line to the Agent's own observation log; that line is untrusted input a later consolidation job may fold into the caller's own private notes, never an instruction the model should act on. Both are Agentic Memory P3 additions.
 
 ## 2. Check the local service
 
@@ -64,6 +65,8 @@ Use a notebook the account can read. To test formal context retrieval, that note
 | Delete a source **the Agent itself added** | `sources:delete` (owner-only; `sources:write` does not imply it) |
 | Read build status | `knowledge:read` |
 | Trigger a knowledge-graph or retrieval-index build | `maintenance:execute` (owner-only) |
+| Read "AI 对这个库的理解" (notebook understanding) | `agent_profile:read` |
+| Append a line to the Agent's own observation log | `agent_observation:write` |
 
 The complete example uses `knowledge:read`, `memory:read`, `memory:read_candidates`, and `memory:propose`.
 
@@ -72,6 +75,11 @@ Only three of those scopes are the write plane — `sources:write`, `sources:del
 expected to file documents or run builds: the first changes what the notebook contains, the
 third changes what it costs to analyze, and `sources:delete` is irreversible. The status
 reads beside them (`get_source_status`, `get_build_status`) need only `knowledge:read`.
+`agent_observation:write` is scope-driven rather than owner-only (like `knowhow:code`): its
+blast radius is structurally capped at the Agent's own observation log, so it works even for
+a token whose owner joined the notebook as a read-only member. Text written through it is
+untrusted input the notebook-understanding consolidation job may fold into the caller's own
+overlay — it never becomes evidence and is never cited.
 
 `list_notebooks` and `select_notebook` require no scope at all — a live token, an allowlisted
 notebook, and read access to it are the whole check — so every session can start even with a
@@ -265,6 +273,8 @@ retrieved text.
 
 When a write is intended, separately ask the Agent to call `propose_memory` with a reason, task context, evidence refs, and a stable client request id, and to describe the result as an unconfirmed candidate.
 
+With `agent_profile:read`, the Agent may also call `get_notebook_profile` before retrieval to see prior background notes on this notebook (never evidence, never citable). With `agent_observation:write`, ask it to call `add_observation` with one short, factual line about what it noticed while working — that line is untrusted input a later background job may fold into the caller's own notes.
+
 ## 6. Runnable official-client example
 
 [scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py) uses the official Python `mcp` client already pinned by the backend requirements. It is read-only by default; `--propose` creates an idempotent candidate for UI review.
@@ -286,6 +296,8 @@ Set `SILICON_NOTEBOOK_NOTEBOOK_ID` or pass `--notebook-id` to select a specific 
 
 Its default client request id is suffixed with the notebook id, so rerunning it for the same Profile/notebook is idempotent. Pass a new `--client-request-id` when a new candidate is intentional.
 
+Pass `--profile` (requires `agent_profile:read`) to also call `get_notebook_profile` and print only block counts and character counts — never the block text itself, since this script's output is meant to be pasted into chat or logs.
+
 ## 7. Review the candidate in the UI
 
 Return to **Private Memory**, filter status to **待确认** and origin to **Agent 提议**, open the candidate, inspect its Profile and evidence provenance, then confirm, reject, or edit it. Only confirmation moves it into the formal notebook retrieval plane.
@@ -303,6 +315,8 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 - When the token carries `maintenance:execute`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
 - `delete_source` refuses a source that a person uploaded, and succeeds only on one the Agent added.
 - With `ask:execute`: an `ask_notebook` call in `mode="reasoning"` runs to completion instead of being cut off by the client's timeout — the client should show periodic progress while it runs.
+- When the token carries `agent_profile:read`: `get_notebook_profile` returns `enabled` plus `base`/`mine` blocks (or `enabled: false` with empty blocks if the feature is off or nothing has been consolidated yet).
+- When the token carries `agent_observation:write`: `add_observation` returns an `observation_id` immediately, and a repeated call with the same `client_request_id` returns the same id (`deduplicated: true`).
 - The verification token is revoked after the test; disable the Profile if it is no longer needed.
 
 ### Verify the transport by hand
@@ -374,6 +388,8 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | A source the Agent added is no longer deletable after a notebook copy | By design. A deep copy clears source provenance, so every source in the copy counts as user-added. |
 | `add_source_text` returns `reused: true` | Byte-identical content already exists in this notebook, so the existing source is returned instead of a duplicate. If it was originally uploaded by a person, it stays user-added and is not deletable through MCP. |
 | `reparse_source` refuses | That source is already being parsed. Poll `get_source_status` and retry once it settles. |
+| `get_notebook_profile` returns `enabled: false` | The `AGENT_PROFILE_ENABLED` deployment switch is off, or the notebook has no consolidated understanding yet — not an error. |
+| `add_observation` raises "this capability is currently disabled" | The `AGENT_PROFILE_ENABLED` deployment switch is off. Unlike the read tool above, the write tool refuses rather than silently accepting data no job will ever read. |
 
 ## 10. Revoke and rotate
 

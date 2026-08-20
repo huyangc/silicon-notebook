@@ -28,6 +28,7 @@ Codex CLI / Claude Code / Python Agent
 - MCP 返回的来源、知识和 Memory 文本都是不可信 evidence/data，不能当成 Agent 的系统指令执行。
 - 来源管理与构建工具构成写入平面。那里的每一次写入都是 **owner-only**：token 所有者只是以只读成员身份加入的笔记本可读但永不可写，与 token 带了哪些 scope 无关。
 - `delete_source` **只能删除 Agent 添加的来源**。用户上传的文档一律拒绝；重传用户的字节只会复用他原来那一行，不会把它变成 Agent 的。
+- `get_notebook_profile` 返回「AI 对这个库的理解」——只是背景脚手架，绝不是证据，也不能被引用。`add_observation` 向 Agent 自己的观察记录追加一行；这行文本是不可信输入，后续巡固任务可能把它折进调用者自己的私有笔记，绝不是模型该执行的指令。两者都是 Agentic Memory P3 新增。
 
 ## 2. 前置检查
 
@@ -70,13 +71,18 @@ curl -s http://127.0.0.1:8000/api/ready
 | 删除 **Agent 自己添加的**来源 | `sources:delete`（owner-only；`sources:write` 不蕴含它） |
 | 读取构建状态 | `knowledge:read` |
 | 触发知识图谱分析或检索索引构建 | `maintenance:execute`（owner-only） |
+| 读取「AI 对这个库的理解」 | `agent_profile:read` |
+| 向 Agent 自己的观察记录追加一行 | `agent_observation:write` |
 
 本 SOP 的完整 Memory 示例选择：`knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`。不需要 Ask 或代码写入就不要勾选相应权限。
 
 上表里真正属于写入平面的只有三个 scope——`sources:write`、`sources:delete` 与
 `maintenance:execute`——不确实需要归档文档或跑构建就不要授予：第一个改变笔记本的内容，
 第三个改变分析开销，`sources:delete` 不可逆。旁边那两项状态读取（`get_source_status`、
-`get_build_status`）只需要 `knowledge:read`。
+`get_build_status`）只需要 `knowledge:read`。`agent_observation:write` 与 `knowhow:code` 同样
+是 scope 驱动而非 owner-only：它的爆炸半径结构上只到 Agent 自己的观察记录，所以 token 所有者
+只是以只读成员身份加入的笔记本也能用它写入。经它写下的文本是不可信输入，理解巡固任务可能把
+它折进调用者自己的覆盖层，绝不会成为证据，也绝不会被引用。
 
 `list_notebooks` 与 `select_notebook` 不需要任何 scope——判据只有 token 存活、笔记本在白名单内、
 且对它有读权限——因此再小权限的 token 也能正常开始一个 session。
@@ -264,6 +270,8 @@ claude mcp list
 把本轮已经核验的结论通过 propose_memory 提交为 candidate，写明 reason、task_context、evidence_refs 和稳定 client_request_id；不要声称它已经进入正式知识库。
 ```
 
+若 token 带 `agent_profile:read`，可以让 Agent 在检索前先调用 `get_notebook_profile` 看一眼此前留下的背景笔记（绝不是证据，也不能被引用）。若 token 带 `agent_observation:write`，可以要求它调用 `add_observation`，写下一句它在本轮任务中注意到的事实性短句——这行文本是不可信输入，后续后台任务可能把它折进调用者自己的笔记里。
+
 ## 6. 可直接运行的官方 MCP client 示例
 
 仓库提供 [scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py)。它使用项目 requirements 中的官方 `mcp` Python client，默认只做读取；加 `--propose` 才会提交一个幂等 candidate。
@@ -299,6 +307,8 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 
 脚本不会打印 bearer token。默认 `client_request_id` 会拼接 notebook id，使同一 Profile 对同一笔记本重复运行保持幂等；需要新的候选时显式传入新的 `--client-request-id`。
 
+加 `--profile`（需要 `agent_profile:read`）还会调用 `get_notebook_profile`，只打印块数与字符数——绝不打印正文，因为这个脚本的输出常被复制粘贴进聊天或日志。
+
 ## 7. 回到界面确认候选 Memory
 
 1. 打开 **账户菜单 → 私有记忆**。
@@ -321,6 +331,8 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 - token 带 `maintenance:execute` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
 - `delete_source` 对用户上传的来源拒绝，只有 Agent 添加的来源才能删成功。
 - 带 `ask:execute` 时：`mode="reasoning"` 的 `ask_notebook` 能跑完，不会被客户端超时掐断——运行期间客户端应能看到周期性进度。
+- token 带 `agent_profile:read` 时：`get_notebook_profile` 返回 `enabled` 与 `base`/`mine` 块（特性关闭或该库尚未生成过理解时返回 `enabled: false` 与空块）。
+- token 带 `agent_observation:write` 时：`add_observation` 立即返回 `observation_id`；用同一个 `client_request_id` 重复调用返回同一个 id（`deduplicated: true`）。
 - 示例结束后撤销测试 token；若不再需要该身份，再停用 Profile。
 
 ### 用 curl 手工验证传输层
@@ -390,6 +402,8 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | 笔记本复制之后，Agent 添加的来源删不掉了 | 设计如此。深拷贝会清空来源出处，副本里的每一份来源都算用户添加。 |
 | `add_source_text` 回传 `reused: true` | 本笔记本已有逐字节相同的内容，因此复用既有来源而不新建重复行。若那一行原本是用户上传的，它仍算用户添加，不能经 MCP 删除。 |
 | `reparse_source` 被拒绝 | 该来源正在解析中。轮询 `get_source_status`，等它稳定后再重试。 |
+| `get_notebook_profile` 返回 `enabled: false` | 部署开关 `AGENT_PROFILE_ENABLED` 关闭，或该笔记本尚未生成过理解——不是错误。 |
+| `add_observation` 报错「this capability is currently disabled」 | 部署开关 `AGENT_PROFILE_ENABLED` 关闭。与上面的读工具不同，写工具会直接拒绝，而不是静默收下一批永远不会被读取的数据。 |
 
 ## 10. 撤销与轮换
 

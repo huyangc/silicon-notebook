@@ -85,6 +85,16 @@ def _arguments() -> argparse.Namespace:
         default="silicon-notebook-mcp-memory-sop-v1",
         help="Stable idempotency key for the candidate proposal.",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Also call get_notebook_profile (Agentic Memory P3, requires "
+            "agent_profile:read) and print only block counts and character "
+            "counts -- never the block text itself, since this script's "
+            "output is meant to be pasted into chat/logs."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -110,6 +120,23 @@ def _choose_notebook(items: list[dict[str, Any]], requested_id: str) -> dict[str
 def _print_result(label: str, payload: dict[str, Any]) -> None:
     print(f"\n{label}")
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _print_profile_summary(payload: dict[str, Any]) -> None:
+    """Print only shape (block counts, character counts) for
+    ``get_notebook_profile`` -- never the block text itself. Unlike
+    ``_print_result``, this deliberately does not dump the payload verbatim:
+    the blocks are prompt scaffolding about how this notebook has been used,
+    and a quickstart script's output is the kind of thing that gets pasted
+    into chat or committed to a log."""
+    print("\nNotebook understanding (get_notebook_profile)")
+    if not payload.get("enabled", False):
+        print("  enabled: false (feature is off, or nothing consolidated yet)")
+        return
+    for group in ("shared", "mine"):
+        blocks = payload.get(group, [])
+        chars = sum(len(str(block.get("value", ""))) for block in blocks)
+        print(f"  {group}: {len(blocks)} block(s), {chars} character(s) total")
 
 
 async def _run(args: argparse.Namespace) -> None:
@@ -166,6 +193,10 @@ async def _run(args: argparse.Namespace) -> None:
         )
         _print_result("Formal notebook context (confirmed plane)", formal)
         _print_result("Agent Memory (candidate + confirmed when scoped)", memories)
+
+        if args.profile:
+            profile = _payload(await session.call_tool("get_notebook_profile", {}))
+            _print_profile_summary(profile)
 
         if args.propose:
             request_id = f"{args.client_request_id}:{notebook_id}"[:200]

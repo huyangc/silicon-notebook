@@ -246,7 +246,7 @@
 | --- | --- | --- |
 | **P1** | 层 A 最小闭环：`agent_notebook_profile` 表 + 阈值巡固 job + 规划注入（Ask+报告共用）+ 界面面板（看/改/清空/手动重建）+ 开关 | 同一 notebook 连续多轮 Ask，第二轮起规划上下文带画像；关闸后与现状逐字一致 |
 | **P2**（已完成） | 层 B-经验：trace 蒸馏 IF-THEN（全局库；v1 按意图形状匹配，见 §10.1 偏离④）+ 任务级注入；另加三条 P1 加固（claim 代际、迟到通知成员资格复核、报告样本入巡固） | 蒸馏落库 + 观测事件 + 注入通路带守卫可开（P2 开工前裁决改写的交付判据，见下方偏离①） |
-| **P3** | 层 C：MCP 两个新 tool + 观察队列 + SOP 文档；层 B-Profile：用户设置页 + 归纳 | code agent 经 MCP 拿到画像并能追加观察 |
+| **P3**（已完成） | 层 C：MCP 两个新 tool + 观察队列 + SOP 文档；层 B-Profile：用户设置页 + 归纳 | code agent 经 MCP 拿到画像并能追加观察 |
 | **P4** | reflect 循环内 `consult_memory` action（`allow_*` 策略位 + 档位预算账目）；步级经验注入 | 仅 deep 以上档启用，trace 有独立步 |
 
 P1 独立成立且收益/成本比最高；P2–P4 各自可独立砍掉不影响前序。
@@ -260,6 +260,21 @@ P1 独立成立且收益/成本比最高；P2–P4 各自可独立砍掉不影�
 3. **注入默认关闭**（`RETRIEVAL_EXPERIENCE_INJECT_ENABLED=false`），独立于蒸馏闸（`RETRIEVAL_EXPERIENCE_ENABLED` 默认开）——落地设计稿风险 #4「蒸馏与注入解耦，效果不好可只留蒸馏观测不注入」的缓解方案。**交付判据因此从「失败查法可见地不再重复（有 A/B 判据再细化）」改写为「蒸馏落库 + 观测事件 + 注入通路带守卫可开」**——本期不强求可验证的检索效果提升，只要求机制到位、可被后续 A/B 观测启用。
 4. **§12-Q3「按 notebook 特征加权」在 v1 弱化为「仅按意图形状匹配」**。两类特征均未采集，且都已登记而非遗漏：①问题派生特征（是否含引号短语、是否含可精确查找的标识符）——隐私守卫要求投影模块与蒸馏 prompt 模块**同时**零 `question` 引用，采集这两个布尔值需要触碰问题原文，会让守卫的「零自由文本」性质自相矛盾；②notebook 语料形状特征（文档数分桶、语料语种、是否有知识图谱）——在 `support` 常等于 1 的情况下，一个人人可读的全局行上带独特语料指纹，会指认出某个人在某个库的某一次 run，隐私优先于加权精度。将来补键是零迁移的（`situation_json` 是开放 map + 内容寻址 id，新增键只产生新条目，旧条目随淘汰自然老化）。
 5. **P2 额外做了三条设计稿未列出的加固**，均为把 P1 遗留、已登记的残余竞态关掉：① claim 代际（`agent_profile_jobs.claim_token`）关闭成员移出重建行导致的结算错代/写错代（P1 的 R4 残余）；② `note_ask_completed`/`note_report_completed`/`start_overlay` 在 bump/认领之前复核读侧参与集，关闭迟到完成通知复活已移出成员链路的残余（P1 的 R5 残余，claim 代际单独关不掉它，因为重建出来的行拿到的是合法的新代际）；③ 报告自己的分节检索账目（`reports.sections_json[i].attempted`）并入覆盖层巡固样本，但只喂 `retrieval_notes`（措辞经验）不喂 `usage_gaps`（零命中信号）——`attempted.new` 数的是 run 共享候选池的新增量，不是「这个方向查了没查到」，两者语义不同，不能混用。
+
+### 10.2 P3 实际形态与设计稿的偏离（登记，2026-08-20）
+
+以下偏离均在 P3 开工前后由主 agent 显式裁决（裁决记录随 `claude/agentic-memory-p3` 分支的任务级提交与 codex PR 评审沉淀在提交历史里，未另存为本文档的一节——与 §10.1 对 P2 的同款「见文末」指针一样，那份记录本身并不在这份设计稿文件中），实现按此落地，非执行走样：
+
+1. **`add_observation` 走「scope 驱动 + 读级 notebook 访问」，不过 `_writable_notebook` 的 owner-only 门**（第二个如此的 Agent 写，第一个是 P1/P2 已有的 `put_knowhow_cell_code`）。理由与 `knowhow:code` 同构：owner-only 红线守的是会改变全体成员检索的写，而这个工具的爆炸半径结构上只到 token 持有者**自己**的 `(notebook, owner)` 观察队列——`agent_profile_id` 服务端实时派生、写入只追加进调用者自己那一份，读取（覆盖层巡固、`GET .../agent-observations`）同样按 `owner_id` 谓词收窄到本人。要求 owner 门等于禁止只读成员的 Agent 写这个成员自己拥有的私有覆盖层。本期同批把 CLAUDE.md/AGENTS.md「写类一律 owner-only」改写为「两个豁免」并附完整论证，交由 codex PR 评审复核。
+2. **仅有观察记录不足以单独触发一轮覆盖层巡固**——`_consolidate_overlay` 的空样本闸维持不变（`if not stats.asks and not stats.reports:`），观察记录非空但提问/报告皆空时仍判定为空样本、不排队。理由：100% 不可信输入不构成一次模型调用的理由，既是隐私考量也是成本考量（一个恶意/失控的 Agent 不能靠灌观察记录白烧模型预算）。
+3. **观察渲染段独立 600 字符预算**（`AGENT_PROFILE_OBSERVATION_SECTION_MAX_CHARS`），刻意不是既有 3,000 字符「提问+报告」共享段的一个切片。理由：两者是不同信任类——提问/报告是该成员自己的真实活动，观察是外部 Agent 写的、只有相符时才可采信的辅助信号；共享一个池会让一个爱写短句的 Agent 把成员真实样本挤出去。副作用是无观察记录的成员 prompt 逐字不变（`agent_profile_overlay_prompt` 新增 `has_observations` keyword-only 参数，默认 False）。
+4. **B-Profile v1 只归纳一个字段**（`answer_language`，确定性多数统计、零 LLM），设计稿 §6.2 提到的档位众数与常用领域词**刻意不归纳**且登记为 v1 边界，非遗漏：档位众数目前没有能安全消费它的下游、纯风险无收益；常用领域词若被后台归纳固化进未来每次 prompt，是比「你倾向用中文提问」重得多的一种主张，v1 把 `domain_terms` 完全留给用户自己填。
+5. **`get_notebook_profile` 的 MCP 投影不带 `evidence`**（HTTP 面 `GET /notebooks/{id}/understanding` 的响应带 `evidence` 来源 id 列表，MCP 版本刻意裁掉），只出 `{label, value, updated_at}`。理由：token 可能只持 `agent_profile:read` 而无 `knowledge:read`，把 evidence 里的 source id 递出去等于给一份只读画像凭据一条可探测源 id 存在性的旁路，与「公开分享投影是白名单不是脱敏」同一条论证。
+6. **归纳出的 `origin="job"` 值绝不单独进入 prompt**——`render_style_block` 只渲染 `origin="user"` 的字段（`_user_field_value` 判据），job 写入的推断值必须经用户显式确认（即执行一次 `origin="user"` 写入）才生效，设置界面照常显示推断值并带「自动判断」徽标。理由：镜像 P2 检索策略经验库「先接好管线、注入待验证」的姿态——一个推断错的 `answer_language` 会与 `answer_prompt` 「按提问语言回答」的默认规则直接矛盾，且用户从未同意过这个值。
+7. **下拉的「自动」有两种语义，刻意维持而非统一**：显式选中「自动/跟随提问」写入 `origin="user"` 的**冻结值**（归纳任务此后不再覆盖——「别替我猜」本身是一个真实偏好）；「恢复自动」是**清空**该字段条目、交还给归纳任务重新填。两态由界面上的来源标记「你设置的」/「自动判断」区分。主 agent 曾在裁决过程中初判「应统一为清空语义」，复核后推翻、维持双态实现。
+8. **风格块不进 reflect 循环**——只注入规划 prompt 与答案合成 prompt，不像理解块与检索策略经验条目那样同时进 reflect。理由：措辞/组织偏好与「下一步该选哪个检索动作」无关，进 reflect 只会增加每轮 prompt 体积而无实际收益。
+9. **`user_search_profile_job` 的归纳取数按 `status='done'` 收窄，且在触发阈值的同一把单飞锁内同步跑完**（v1 归纳规则本身零 LLM，是一次确定性字符类统计，成本可控）。取 `status='done'` 而非全部提问记录：与覆盖层巡固读报告样本时的既有姊妹方法同一口径。锁内同步跑的最坏上界是一次 SQLite 写锁等待（`db_busy_timeout_ms`），不是无界阻塞。
+10. **schema v55 迁移一次落两样并追加两条 T1 未预见的加固**（T2 修复轮实测驱动，非原始 T1 设计）：`agent_observations` 除幂等唯一索引外还追加一条**非唯一**索引 `idx_agent_observations_scope`（`notebook_id, owner_id, created_at, id`）——T2 质量评审在 100k 行规模实测淘汰/读取从 9.5ms/3.2ms 降到 1.1ms/0.07ms，认定「零索引」的原始登记只是「待测量的成本判断」而非结论；同时 `id` 列改为 `NOT NULL`——SQLite 的 `TEXT PRIMARY KEY` 不隐含 `NOT NULL`，一行 NULL id 会让环形淘汰的 `NOT IN (SELECT ... LIMIT N)` 对每行判 NULL、DELETE 静默 no-op，该组合永久增长。两条加固均在**未合入迁移原地修改**（迁移尚未随任何已发布版本落库），不算追加新迁移版本。
 
 ---
 

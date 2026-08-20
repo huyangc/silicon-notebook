@@ -2593,6 +2593,11 @@ class SQLiteMaintenancePort(
 #: classify_ask_language`'s own docstring for the flip side of this same
 #: choice, and ``test_search_profile_job.py`` for the boundary case this
 #: keeps distinguishable from the excluded-denominator alternative).
+#:
+#: Exact values are registered in ``docs/product-and-api*.md`` only; these
+#: names are the protocol boundary, not a deployment knob a config file
+#: could raise (same registration rule as ``AGENT_OBSERVATION_RING_MAX``
+#: above).
 SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT = 30
 SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES = 10
 SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO = 0.7
