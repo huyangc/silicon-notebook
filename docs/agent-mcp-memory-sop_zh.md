@@ -2,7 +2,7 @@
 
 [English](./agent-mcp-memory-sop.md) · [返回 README](../README_zh.md)
 
-本文面向已经在本机启动 `silicon-notebook` 的使用者，说明如何在网页界面签发最小权限 Agent token，如何让 Codex CLI、Claude Code 或一个 Python Agent 连接 `/mcp`，以及如何验证正式知识检索和候选 Memory 的完整闭环。
+本文面向已经启动 `silicon-notebook`（本机或远程部署）的使用者，说明如何在网页界面签发最小权限 Agent token，如何让 Codex CLI、Claude Code 或一个 Python Agent 连接 `/mcp/`，以及如何验证正式知识检索和候选 Memory 的完整闭环。
 
 这里的 Memory 是 `silicon-notebook` 中与用户、笔记本绑定的私有 Memory，不是 Codex/Claude 客户端自身的个人偏好记忆。
 
@@ -11,7 +11,8 @@
 ```text
 Codex CLI / Claude Code / Python Agent
   └─ Authorization: Bearer <Agent token>
-      └─ Streamable HTTP http://127.0.0.1:8000/mcp
+      └─ Streamable HTTP http://127.0.0.1:8000/mcp/
+         （远程部署：http(s)://<host>:<后端端口>/mcp/，见第 4 节）
           ├─ 当前 token 的笔记本白名单
           ├─ 来源、知识对象与已确认 Memory（正式平面）
           ├─ Agent candidate Memory（待用户确认平面）
@@ -37,6 +38,8 @@ curl -s http://127.0.0.1:8000/api/ready
 ```
 
 应看到 `"ready": true`。然后打开 <http://127.0.0.1:3000> 并登录。全新本机数据库的内置账号是 `admin`，本地默认密码是 `admin`；已有部署以实际配置为准。
+
+远程部署时，下文所有 URL（含 `/api/ready`）都要换成该部署的 host 与后端端口；MCP 地址与它同源同端口。
 
 还需要至少一个当前账号可读的笔记本。若要验证 `search_notebook_context`，该笔记本应已有来源、知识对象或 confirmed Memory。
 
@@ -83,7 +86,33 @@ curl -s http://127.0.0.1:8000/api/ready
 
 不要把真实 token 写入 Git、README 或脚本参数。只通过可信渠道把它单独交给目标 Agent，不要拼进接入说明 URL；配置完成后交由客户端的 secret/环境变量机制保存，后续对话不要反复回显。后续示例都从环境变量读取。
 
-## 4. 在 Codex CLI 注册 MCP
+## 4. 配置 MCP 客户端
+
+### 服务地址
+
+地址形态是 `<scheme>://<host>:<后端端口>/mcp/`。除路径外的每一段都随部署变化，写错时的失败各不相同：
+
+- **端口**：后端在自己的端口上提供 MCP（默认 `8000`），不是 80/443。只写
+  `http://notebook.example.internal/mcp` 会打到 80 端口上的服务——通常是前端或反向代理——返回 `404`。
+- **scheme**：当前产品默认允许明文 HTTP（见第 9 节）。只有部署确实终结 TLS 时 `https://` 才成立；
+  对只有 HTTP 的主机，它是连接被拒，不会自动回落。
+- **结尾斜杠**：MCP 应用挂在 `/mcp`，它自身的路由是 `/`，所以 `POST /mcp` 会回
+  `307 Temporary Redirect` 指向 `/mcp/`。会跟随 307（保留方法与请求体，官方 Python MCP client
+  始终跟随）的客户端两种写法都能用；直接写 `/mcp/` 就不再依赖这一行为。
+
+一次真实的远程部署排查：
+
+| 尝试的 URL | 结果 |
+| --- | --- |
+| `https://notebook.example.internal/mcp` | 连接被拒——443 上没有 TLS 服务 |
+| `http://notebook.example.internal/mcp` | `404`——80 端口不是后端 |
+| `http://notebook.example.internal:8000/mcp` | `307` 重定向到 `/mcp/` |
+| `http://notebook.example.internal:8000/mcp/` | 真正的鉴权 endpoint |
+
+服务端的 `MCP_PUBLIC_URL` 是另一个值，必须**不带**结尾斜杠：启动只接受路径精确为 `/mcp` 的 URL。
+因此接入说明里印出的是不带斜杠的形态；写进客户端配置时自己补上斜杠。
+
+### Codex CLI
 
 先在**将要启动 Codex 的同一个 shell**中设置 token：
 
@@ -95,7 +124,7 @@ export SILICON_NOTEBOOK_AGENT_TOKEN='<界面只显示一次的 token>'
 
 ```bash
 codex mcp add silicon-notebook \
-  --url http://127.0.0.1:8000/mcp \
+  --url http://127.0.0.1:8000/mcp/ \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
 
@@ -113,7 +142,7 @@ codex mcp list
 
 ```toml
 [mcp_servers.silicon-notebook]
-url = "http://127.0.0.1:8000/mcp"
+url = "http://127.0.0.1:8000/mcp/"
 bearer_token_env_var = "SILICON_NOTEBOOK_AGENT_TOKEN"
 enabled = true
 enabled_tools = [
@@ -130,15 +159,39 @@ Codex 的 MCP 配置格式与 Streamable HTTP Bearer token 支持见[官方 MCP 
 
 ### Claude Code
 
-当前 Claude Code CLI 可用显式 Authorization header：
+Claude Code 会在连接时解析 header 里的 `${VAR}`，因此 token 根本不必写进配置文件
+（在 Claude Code 2.1.226 上实测）：
 
 ```bash
+export SILICON_NOTEBOOK_AGENT_TOKEN='<界面只显示一次的 token>'
+
 claude mcp add --transport http silicon-notebook \
-  http://127.0.0.1:8000/mcp \
-  --header "Authorization: Bearer <界面只显示一次的 token>"
+  'http://127.0.0.1:8000/mcp/' \
+  --header 'Authorization: Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}'
+
+claude mcp list
 ```
 
-Claude Code 可能把原始 header 持久化到本机配置。应使用短有效期和最小权限，并保护、及时撤销该配置；不要假设 header 会插值 shell 环境变量。
+四个决定它能否真正生效的细节：
+
+- **header 必须用单引号**。双引号会让 shell 在 `claude` 看到之前就展开 `${…}`：要么把真实 token
+  写进配置文件，要么（变量还没设置时）写进一个空串。
+- **`~/.claude.json` 里存的是字面量 `${SILICON_NOTEBOOK_AGENT_TOKEN}`**，由 Claude Code 在连接时
+  替换成真实值。`${VAR:-default}` 缺省语法同样支持。
+- **变量必须在启动 `claude` 的同一个 shell 里导出，改了要重开会话**。取值来自运行中客户端进程的
+  环境，不是每次请求重新读取。
+- **未定义的变量会被原样透传**。变量名写错时，发出去的就是字面量 `Bearer ${TYPOD_NAME}`，只会以
+  坏 token 失败，配置阶段不会报错。这类错误是无声的，只有真的连一次才能证明变量解析成功。
+
+`claude mcp add` 不带 `-s` 时写入**项目级（local）**作用域——即 `~/.claude.json` 的
+`projects.<当前目录>.mcpServers`，只在该目录下可见。要在本机所有项目里可用就加 `-s user`；要随仓库
+共享则用 `-s project` 写入 `.mcp.json`（同样只能写 `${VAR}`，绝不能写真实 token）。
+
+`claude mcp list` 自带存活健康检查，会逐个显示 `✔ Connected`。它与第 8 节的 curl 生命周期一起，
+才算证明 token 已正确解析；仅仅在列表里看到这一项并不算。
+
+若某个客户端不支持插值、真实 token 落到了磁盘上，就把该文件当凭据对待：短有效期、最小权限，
+并及时轮换与撤销。
 
 ## 5. 在 Agent 对话中做第一次调用
 
@@ -207,7 +260,7 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 
 - `curl /api/ready` 返回 ready。
 - 界面中 token 的默认 notebook 在白名单内，scope 与用途一致。
-- `codex mcp list` 或客户端 MCP 页面显示 `silicon-notebook`。
+- `codex mcp list` 显示 `silicon-notebook`，或 `claude mcp list` 对它显示 `✔ Connected`。
 - 新 session 先 `list_notebooks`，再成功 `select_notebook`。
 - `search_notebook_context` 不返回未确认 candidate。
 - 具备 `memory:read_candidates` 时，`search_agent_memory` 能召回刚提交的 candidate。
@@ -216,6 +269,37 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 - token 带 `maintenance:execute` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
 - `delete_source` 对用户上传的来源拒绝，只有 Agent 添加的来源才能删成功。
 - 示例结束后撤销测试 token；若不再需要该身份，再停用 Profile。
+
+### 用 curl 手工验证传输层
+
+`curl` 不能跳过 MCP 的会话握手：对一条全新连接直接发 `tools/list`，回的是
+`400 Bad Request: Missing session ID`——这是协议状态，不是配置错误。完整生命周期是三次请求：
+
+```bash
+MCP_URL='http://127.0.0.1:8000/mcp/'
+AUTH="Authorization: Bearer $SILICON_NOTEBOOK_AGENT_TOKEN"
+CT='content-type: application/json'
+ACCEPT='accept: application/json, text/event-stream'
+
+# 1. initialize -> 200，响应头 mcp-session-id 即会话 id
+curl -sD - -o /dev/null -X POST "$MCP_URL" -H "$AUTH" -H "$CT" -H "$ACCEPT" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+SESSION='<上一步响应头里的 mcp-session-id>'
+
+# 2. notifications/initialized -> 202，空响应体
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
+  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 3. tools/list -> 200，返回完整工具清单
+curl -s -X POST "$MCP_URL" \
+  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+第 1 步 `401` 是 token 问题；第 3 步 `400 Missing session ID` 说明 `MCP-Session-Id` 头掉了，
+不是服务端没有工具。
 
 ## 9. 常见问题
 
@@ -226,7 +310,12 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 | `notebook is outside the token allowlist` | 回到 Agent 接入签发包含该 notebook 的新 token；不要扩大旧 token 之外的隐式权限。 |
 | scope/permission error | 对照上方 scope 表重新签发最小权限 token。token scope 不可在客户端侧提升。 |
 | Codex 看不到服务 | 运行 `codex mcp list`，确认环境变量已在启动 Codex 前导出，然后新开 session/重启 app 或 extension。 |
-| 本机 HTTP 可以，远程不安全 | loopback 可用 HTTP。跨可信内网时 token 会明文过网；公网部署必须设置 `MCP_REQUIRE_HTTPS=1` 并把 `MCP_PUBLIC_URL` 指向公开 HTTPS `/mcp`。 |
+| 配置客户端时 `404` 或连接被拒 | 地址形态是 `<host>:<后端端口>/mcp/`（第 4 节）。80/443 通常是前端，或压根没有 TLS 监听。 |
+| `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
+| `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
+| Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
+| 换个目录后 `claude mcp list` 看不到该服务 | `claude mcp add` 默认写入项目级（按目录）作用域。改用 `-s user` 重新添加。 |
+| 本机 HTTP 可以，远程不安全 | loopback 用 HTTP 没问题。远程当前**默认也允许**明文 HTTP——后端只打一条启动告警并放宽 Host/Origin 校验——于是 Bearer token 每一跳都是明文。填上域名不等于自动安全：明文 HTTP 只在可信内网可接受，跨不受信网络必须设置 `MCP_REQUIRE_HTTPS=1` 并把 `MCP_PUBLIC_URL` 指向公开 HTTPS `/mcp`。 |
 | 只看到 confirmed，看不到 candidate | token 还需要 `memory:read_candidates`；正式上下文工具本来就刻意排除 candidate。 |
 | Python 示例缺少 `mcp`/`httpx` | 激活项目虚拟环境并安装 `backend/requirements.txt`。 |
 | `build_kg` 拒绝：已有构建在运行 | 这是预期的排队信号，不是错误。笔记本级单飞守卫正在生效；轮询 `get_build_status` 直到它清空，不要立刻重试。 |
