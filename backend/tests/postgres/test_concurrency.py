@@ -27,7 +27,7 @@ def test_legacy_merge_pair_decisions_lock_all_duplicates_in_one_order(
     postgres_database,
 ):
     """Different legacy ids for one displayed pair must not deadlock."""
-    assert PostgresMigrator(postgres_database).migrate() == 32
+    assert PostgresMigrator(postgres_database).migrate() == 33
     now = "2026-08-20T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
