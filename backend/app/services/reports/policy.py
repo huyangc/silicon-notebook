@@ -16,6 +16,8 @@ DEFAULT_REASONING_MAX_EXACT_LOOKUPS = 3
 DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS = 3
 DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR = 2
 DEFAULT_REASONING_MAX_OUTLINE_UPDATES = 6
+# Agentic Memory P4 (T5).
+DEFAULT_REASONING_MAX_CONSULT_MEMORY = 2
 
 # Structural protocol bounds are invariant rather than deployment tuning.
 OUTLINE_MAX_SECTIONS = 12
@@ -61,6 +63,7 @@ class ReasoningActionPolicy:
     max_follow_chain_actions: int
     community_peers_cap_factor: int
     max_outline_updates: int
+    max_consult_memory: int
 
     @property
     def max_pending_outline_evidence(self) -> int:
@@ -119,11 +122,17 @@ def reasoning_action_policy(settings) -> ReasoningActionPolicy:
             "reasoning_max_outline_updates",
             DEFAULT_REASONING_MAX_OUTLINE_UPDATES,
         )),
+        max_consult_memory=int(getattr(
+            settings,
+            "reasoning_max_consult_memory",
+            DEFAULT_REASONING_MAX_CONSULT_MEMORY,
+        )),
     )
 
 
 __all__ = [
     "DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR",
+    "DEFAULT_REASONING_MAX_CONSULT_MEMORY",
     "DEFAULT_REASONING_MAX_EXACT_LOOKUPS",
     "DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS",
     "DEFAULT_REASONING_MAX_OUTLINE_UPDATES",
