@@ -51,7 +51,6 @@ test("经群组共享进来的库:标注来源群组,且**没有**退出入口",
 
   expect(screen.getByText("只读 · 来自群组《封装项目》")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "退出共享" })).not.toBeInTheDocument();
-  expect(screen.getByText(/由组管理员管理/)).toBeInTheDocument();
 });
 
 test("退出在飞时按钮禁用并换成进行态文案", () => {
@@ -130,8 +129,6 @@ test("组管理员打开共享库:徽章说「可管理」而不是「只读」"
 
   expect(screen.getByText("可管理 · 来自群组《封装项目》")).toBeInTheDocument();
   expect(screen.queryByText(/^只读 ·/)).not.toBeInTheDocument();
-  // 说明改成「你是该群组的管理员」——原来那句「由组管理员管理」是说给**别人**听的。
-  expect(screen.getByText(/你是该群组的管理员/)).toBeInTheDocument();
   // 他的访问来自授权边,「退出共享」打的是成员表,对他仍是空操作。
   expect(screen.queryByRole("button", { name: "退出共享" })).not.toBeInTheDocument();
 });
@@ -145,7 +142,6 @@ test("同一本库、只差 can_manage_content:纯只读成员仍写「只读」
     />,
   );
   expect(screen.getByText("只读 · 来自群组《封装项目》")).toBeInTheDocument();
-  expect(screen.getByText(/由组管理员管理/)).toBeInTheDocument();
 });
 
 test("卡片菜单:组管理员只有「由组管理员管理」——没有编辑/删除/退出", () => {
@@ -217,4 +213,59 @@ test("顶栏徽章:纯只读成员的标题不可编辑,即便传了 rename", ()
   );
   expect(screen.queryByRole("textbox", { name: "笔记本名称" })).not.toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "封装工艺库" })).toBeInTheDocument();
+});
+
+
+// ---------------------------------------------------- 顶栏版式(2026-08-20 用户反馈)
+//
+// 现象:群组共享库点进去「完全看不到 notebook 名字」。原因不在数据——`notebook.name`
+// 一直是对的——而在版式:徽章行原本用 `.tag-row`(flex-wrap: wrap),里面塞了标题 +
+// 徽章 + 一句长说明,而 `.workspace-header` 是**固定 72px 单行**。三样东西排成三行、
+// 在 72px 里垂直居中,标题那一行就被推到可视区**之上**(静态量过:innerH 141 > 72,
+// 标题 top 在 header top 之上),说明文字则漏到标题栏外面盖住下方内容。
+//
+// jsdom 没有排版,量不了那 141px;能在这里钉住的是**成因**的三条结构性前提。
+// `.reader-badge-row` 自己「不换行」由 `tests/guards/reader-badge-layout-guard.test.mjs`
+// 在 CSS 里钉。
+
+test("顶栏徽章:库名必须在(它是这一行的主角,不是徽章)", () => {
+  const { container } = render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+    />,
+  );
+
+  expect(screen.getByRole("heading", { name: "封装工艺库" })).toBeInTheDocument();
+  // 恒单行的那个容器,不是会换行的 `.tag-row`。
+  expect(container.querySelector(".reader-badge-row")).not.toBeNull();
+  expect(container.querySelector(".tag-row")).toBeNull();
+});
+
+test("顶栏徽章:不再把长说明塞进顶栏(用户明确不需要「怎么停止访问」)", () => {
+  const { container } = render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+    />,
+  );
+
+  expect(container.querySelector(".tool-hint")).toBeNull();
+  expect(screen.queryByText(/停止访问/)).toBeNull();
+  expect(screen.queryByText(/联系组管理员/)).toBeNull();
+  // 身份解释没有消失,只是挪进了 tooltip。
+  expect(screen.getByText("只读 · 来自群组《封装项目》")).toHaveAttribute(
+    "title",
+    expect.stringContaining("组管理员"),
+  );
+});
+
+test("顶栏徽章:链接共享的「退出共享」是这一行唯一的动作,必须还在", () => {
+  const { container } = render(
+    <ReaderNotebookBadge notebook={notebook({})} leaveBusy={false} onLeave={vi.fn()} />,
+  );
+  expect(screen.getByRole("button", { name: "退出共享" })).toHaveClass("reader-badge-action");
+  expect(container.querySelector(".tool-hint")).toBeNull();
 });

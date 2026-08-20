@@ -29,8 +29,40 @@ test("群组管理弹窗与「共享给群组」都真的挂在 page 上,不是�
   const shares = jsxElements(page, "NotebookGroupShare");
   assert.equal(shares.length, 1, "「共享给群组」必须恰好挂在分享弹窗里一次");
   assert.equal(shares[0].bindings.notebookId, "currentNotebook.id");
-  // 群组弹窗改的是成员/授权面,只影响列表(它不在某本笔记本的上下文里)。
-  assert.match(modals[0].bindings.onChanged ?? "", /loadNotebookCollection\(\)/);
+  // ⚠ 这一条原本写的是「群组弹窗改的是成员/授权面,只影响列表(它不在某本笔记本的
+  // 上下文里)」,只钉 `loadNotebookCollection()`。那个前提是**错的**:群组弹窗从工作区
+  // 的顶栏也打得开,而退出群组 / 被移出 / 删组 / 撤销共享都可能把用户正站在里面的那本
+  // 库从脚下抽走。只刷清单的话 `currentNotebook` 一动不动,人继续待在一本已经读不到的
+  // 库里,整屏毫无反应,只能手动刷新(2026-08-20 用户反馈)。
+  assert.match(modals[0].bindings.onChanged ?? "", /refreshAfterAccessChange\(\)/);
+});
+
+// 「退出共享」早就有这套对账(退掉之后跳走),群组那条路直到 2026-08-20 才补上。两条
+// 必须共用同一个实现:分开写会让其中一条在后续改动里悄悄退化回「只刷列表」。
+test("访问权变动之后必须连当前工作区一起对账,而不只是刷清单", () => {
+  const reconcile = findFunction(page, "reconcileOpenNotebook");
+  assert.ok(reconcile, "缺统一的工作区对账入口 reconcileOpenNotebook");
+  const insideReconcile = callsIn(reconcile);
+  // 判据是「重取回来的清单里还有没有它」——同一本库可以经多条路进来(另一个群组、
+  // 直接成员、everyone 边),退掉其中一条不必然失去访问。
+  assert.ok(
+    insideReconcile.includes("openNotebook") || insideReconcile.includes("showCollection"),
+    "对账不落地:既没跳到别的库,也没退回集合页",
+  );
+
+  const groupPath = findFunction(page, "refreshAfterAccessChange");
+  assert.ok(groupPath, "缺群组侧的收口 refreshAfterAccessChange");
+  const insideGroup = callsIn(groupPath);
+  assert.ok(insideGroup.includes("listNotebooks"), "没重取清单");
+  assert.ok(insideGroup.includes("reconcileOpenNotebook"), "重取了清单却不对账当前工作区");
+
+  // 链接共享的退出走同一个对账,不另抄一份。
+  const leave = findFunction(page, "handleLeaveShared");
+  assert.ok(leave, "缺 handleLeaveShared");
+  assert.ok(
+    callsIn(leave).includes("reconcileOpenNotebook"),
+    "「退出只读共享」没复用同一个对账实现",
+  );
 });
 
 // 加/撤群组授权、开启/取消链接分享都会翻转「未共享门」——本笔记本一旦被共享出去,

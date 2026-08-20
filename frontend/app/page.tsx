@@ -6159,6 +6159,46 @@ export default function Home() {
   }
 
   // D. 退出共享(只读成员移除自己):刷新列表;若当前被移除则切到第一个自有库
+  /**
+   * 访问权变动之后,把**我正站在哪本库里**也对一遍账。
+   *
+   * 只刷新清单是不够的:工作区开在 `currentNotebook` 上,它是另一份 state,清单变了
+   * 它一动不动。于是「退出群组 / 被移出群组 / 组被删 / 共享被撤销」之后,人还站在一本
+   * 自己已经读不到的库里,整屏毫无反应,只能手动刷新——用户反馈的正是这条(2026-08-20)。
+   *
+   * 判据是「重取回来的清单里还有没有它」而不是「刚才那个动作针对的是不是它」:同一本库
+   * 可以经**多条**路进来(另一个群组、直接成员、everyone 授权边),退掉其中一条并不必然
+   * 失去访问。清单是服务端算过权限的那一份,照它走既不会误踢也不会漏踢。
+   *
+   * 落点沿用「退出只读共享」既有的那套:优先跳到自己的第一本库,一本都没有才回集合页。
+   * `replaceState` 顶掉旧的 `#notebook=<id>`,否则那条历史条目还活着,按返回键会撞上
+   * 一本已经 403 的库。
+   */
+  async function reconcileOpenNotebook(remaining: NotebookSummary[]) {
+    const openId = currentNotebookIdRef.current;
+    if (!openId || remaining.some((n) => n.id === openId)) return;
+    const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
+    if (firstOwned) {
+      await openNotebook(firstOwned.id, "none");
+      window.history.replaceState(null, "", notebookHash(firstOwned.id));
+    } else {
+      showCollection();
+    }
+  }
+
+  /**
+   * 群组弹窗里任何改变访问权的动作之后的收口(退出/移出/删组/撤销共享)。
+   *
+   * 刻意不走 `loadNotebookCollection()`:那一份还会顺带重取健康状态与系统配置,而群组
+   * 改的只是「我能看到哪些库」。这里一次 `listNotebooks()` 既刷清单、又喂给上面的对账,
+   * 不为同一件事发两次同样的请求。
+   */
+  async function refreshAfterAccessChange() {
+    const remaining = await listNotebooks();
+    setNotebooks(remaining);
+    await reconcileOpenNotebook(remaining);
+  }
+
   async function handleLeaveShared() {
     if (!currentNotebook) return;
     const leftId = currentNotebook.id;
@@ -6167,18 +6207,7 @@ export default function Home() {
       await leaveNotebook(leftId);
       const remaining = await listNotebooks();
       setNotebooks(remaining);
-      const stillThere = remaining.some((n) => n.id === leftId);
-      if (!stillThere) {
-        const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
-        if (firstOwned) {
-          // 传 "none" 让 openNotebook 别写 history,自己 replaceState 顶替被退出的
-          // #notebook=<leftId>——否则那条历史条目存活,按返回键会撞上已经 403 的旧笔记本。
-          await openNotebook(firstOwned.id, "none");
-          window.history.replaceState(null, "", notebookHash(firstOwned.id));
-        } else {
-          showCollection();
-        }
-      }
+      await reconcileOpenNotebook(remaining);
       setToast("已退出只读共享");
     } finally {
       setLeaveBusy(false);
@@ -8242,7 +8271,9 @@ export default function Home() {
       {groupsOpen && (
         <GroupsModal
           isSystemAdmin={currentUser.role === "admin"}
-          onChanged={() => { loadNotebookCollection().catch(reportError); }}
+          // 退出/移出/删组/撤销共享都可能把当前打开的这本库从我脚下抽走,所以这里必须
+          // 连工作区一起对账,而不只是刷一下清单(见 refreshAfterAccessChange)。
+          onChanged={() => { refreshAfterAccessChange().catch(reportError); }}
           onClose={() => setGroupsOpen(false)}
         />
       )}

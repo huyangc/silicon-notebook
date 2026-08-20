@@ -60,12 +60,35 @@ type ReaderNotebookBadgeProps = {
 };
 
 /**
- * 工作区顶栏:身份徽章 + (仅只读共享)退出入口 / (群组共享)由谁管理的说明。
+ * 身份说明只进 tooltip,不进顶栏正文。
+ *
+ * 它原本是一句 `.tool-hint` 长文,和标题、徽章挤在同一个 `.tag-row` 里。那个类
+ * `flex-wrap: wrap`,而 `.workspace-header` 是固定 72px 单行——三样东西排成三行、
+ * 在 72px 里居中,结果标题被推到可视区**之上**(实测 innerH 141 > 72,标题整个看不见),
+ * 说明文字漏到标题栏外面盖住下方内容。用户反馈的「点进来完全看不到 notebook 名字」
+ * 就是它。版式已由 `.reader-badge-row` 收口,但那句话本身也不该占着顶栏:
+ *
+ *   「要停止访问,请联系组管理员撤销共享」——用户明确说不需要这条(2026-08-20)。
+ *
+ * 访问的开关本来就不在这个人手里(群组共享没有自助退出,那正是下面 `!granted` 才渲染
+ * 「退出共享」的原因),把一条他按不动的操作指引常驻在标题旁边,既占地方又帮不上忙。
+ */
+function badgeHint(granted: boolean, canManage: boolean): string {
+  if (!granted) return "只读，无写权限";
+  return canManage
+    ? "你可以管理这本笔记本的内容，但它属于原作者"
+    : "只读，无写权限。这本笔记本由组管理员共享给群组";
+}
+
+/**
+ * 工作区顶栏:库名 + 身份徽章 + (仅链接共享)退出入口。
  *
  * 三种形态:
  * - 只读共享(分享链接):`只读 · 来自 X` + 「退出共享」按钮;
- * - 群组共享、无管理权:`只读 · 来自群组《X》` + 由组管理员管理的说明;
- * - 群组共享、有管理权:`可管理 · 来自群组《X》` + 说明改成「你是该群组的管理员」。
+ * - 群组共享、无管理权:`只读 · 来自群组《X》`;
+ * - 群组共享、有管理权:`可管理 · 来自群组《X》`,库名就地可改。
+ *
+ * 恒单行:版式约定见 `globals.css` 的 `.reader-badge-row`。
  */
 export function ReaderNotebookBadge({
   notebook,
@@ -82,11 +105,10 @@ export function ReaderNotebookBadge({
   // state 抑制:它必须在同一个事件循环里立即生效,state 更新做不到。
   const cancelledRef = useRef(false);
   return (
-    <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+    <div className="reader-badge-row">
       {canManage && rename ? (
         <input
-          className="notebook-title-input"
-          style={{ margin: 0 }}
+          className="notebook-title-input reader-badge-title"
           value={rename.value}
           disabled={rename.saving}
           aria-label="笔记本名称"
@@ -109,25 +131,18 @@ export function ReaderNotebookBadge({
           }}
         />
       ) : (
-        <h1 className="notebook-title-input" style={{ margin: 0 }}>{notebook.name}</h1>
+        // 只读成员没有改名权,所以**不**戴 `.notebook-title-input`——那个类带着 hover/
+        // focus 的输入框态,套在一个点不动的标题上是在承诺一个不存在的交互。
+        <h1 className="reader-badge-title" title={notebook.name}>{notebook.name}</h1>
       )}
-      <span
-        className="new-pill"
-        title={canManage ? "你可以管理这本笔记本的内容，但它不属于你" : "只读，无写权限"}
-      >
+      <span className="reader-badge-chip" title={badgeHint(granted, canManage)}>
         {granted
           ? `${accessWord} · ${grantedViaLabel(notebook)}`
           : `${accessWord} · 来自 ${notebook.shared_from || "他人"}`}
       </span>
-      {granted ? (
-        <span className="tool-hint">
-          {canManage
-            ? "你是该群组的管理员，可以管理这本笔记本的内容；它仍属于原作者，删除笔记本只有作者本人可以做。"
-            : "由组管理员管理；要停止访问，请联系组管理员撤销共享，或在账户菜单的「群组」里退出该群组。"}
-        </span>
-      ) : (
+      {!granted && (
         <button
-          className="sort-button"
+          className="sort-button reader-badge-action"
           disabled={leaveBusy}
           title="退出该只读共享（仅移除你自己的访问）"
           onClick={onLeave}
