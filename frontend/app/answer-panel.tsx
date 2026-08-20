@@ -10,6 +10,7 @@ import {
   Copy,
   ExternalLink,
   ListChecks,
+  Share2,
   Sparkles,
   Table2,
   ThumbsDown,
@@ -1188,6 +1189,7 @@ export function AnswerView({
   buildingScaleIndex,
   scaleIndexStatus,
   onSaveMemory,
+  onShare,
   memorySaved,
   onTestModel,
   onOpenModelStatus,
@@ -1218,6 +1220,11 @@ export function AnswerView({
   buildingScaleIndex: boolean;
   scaleIndexStatus?: Pick<ScaleIndexStatus, "exists" | "building" | "state"> | null;
   onSaveMemory?: (answerId: string) => void;
+  /** 「分享到这条回答」：把这条回答**及它之前的全部问答**发布成一条免登录只读链接
+   *  （page.tsx 据此打开会话分享弹窗，并把分享水位钉在这条答案上）。可选——只有承接
+   *  得了「当前会话是哪一条」的调用方才传，dev/logs 的只读排障视图不传就不渲染
+   *  （同 onSaveMemory / onFeedback 的既有惯例：写回服务端的动作没有回调就不出按钮）。 */
+  onShare?: (answerId: string) => void;
   memorySaved: boolean;
   onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
   onOpenModelStatus?: (serviceId: string) => void;
@@ -1426,6 +1433,19 @@ export function AnswerView({
             title={copied ? "已复制" : "复制回答"}
             type="button"
           >{copied ? <Check size={16} /> : <Copy size={16} />}</button>
+          {/* 分享到这条回答为止。`answer_id` 是分享水位的锚（服务端把
+              `expected_through_id` 钉在这条答案上），生成中的回答还没有答案行、
+              `answer_id` 为空，此时按钮不渲染——渲染了点下去也只会拿到一句
+              「这条会话还没有已完成的回答」。 */}
+          {onShare && answer.answer_id && (
+            <button
+              aria-label="分享到这条回答"
+              className="answer-action"
+              onClick={() => onShare(answer.answer_id)}
+              title="分享到这条回答（含此前的全部问答）"
+              type="button"
+            ><Share2 size={16} /></button>
+          )}
         </div>
       </div>
     </div>

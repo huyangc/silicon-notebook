@@ -1077,7 +1077,12 @@ export default function Home() {
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   // 会话公开分享弹窗：null=未打开，否则是正在分享的那条会话（按 id 作 key 重挂，
   // 切会话即重置弹窗态，避免把上一条的分享态按到新会话头上）。
-  const [sharingSession, setSharingSession] = useState<ConversationSummary | null>(null);
+  // 会话分享弹窗的目标。**不是**裸 ConversationSummary:每条回答下面的分享按钮要求把
+  // 发布边界一起带上(`throughAnswerId` = 分享到这条答案为止),而会话列表里那个按钮
+  // 传空串保持既有语义(整条会话 /「更新到最新」)。标题只作弹窗抬头显示。
+  const [sharingSession, setSharingSession] = useState<
+    { id: string; title: string; throughAnswerId: string } | null
+  >(null);
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
   const [askMode, setAskMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [askRetrievalEffort, setAskRetrievalEffort] = useState<AskRetrievalEffortId>(
@@ -7387,7 +7392,7 @@ export default function Home() {
                               </small>
                             </button>
                             <div className="chat-session-card-actions">
-                              <button type="button" title="分享" onClick={() => setSharingSession(session)}><Share2 size={14} /></button>
+                              <button type="button" title="分享" onClick={() => setSharingSession({ id: session.id, title: session.title || "", throughAnswerId: "" })}><Share2 size={14} /></button>
                               <button type="button" title="重命名" onClick={() => beginRenameSession(session)}><Edit3 size={14} /></button>
                               <button type="button" title="删除" onClick={() => requestDeleteSession(session)}><Trash2 size={14} /></button>
                             </div>
@@ -7435,6 +7440,14 @@ export default function Home() {
                             buildingScaleIndex={buildingScaleIndex}
                             scaleIndexStatus={scaleIndexStatus}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
+                            // 分享到这条回答为止。会话 id 是弹窗的寻址依据,还没落库的
+                            // 新会话(conversationId 为 null)不给按钮——那种情形连
+                            // `answer_id` 都还没有,弹窗打开也只能 404。
+                            onShare={conversationId ? ((answerId) => setSharingSession({
+                              id: conversationId,
+                              title: sessions.find((session) => session.id === conversationId)?.title || "",
+                              throughAnswerId: answerId,
+                            })) : undefined}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
                             onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
                             onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
@@ -8531,10 +8544,13 @@ export default function Home() {
 
       {sharingSession && currentNotebookId && (
         <ConversationShareModal
-          key={sharingSession.id}
+          // key 含边界:同一条会话里换一条回答再点分享,必须整块重挂,否则弹窗会带着
+          // 上一次的 notice/error 与已加载态,把「已生成分享链接」按到新的边界上。
+          key={`${sharingSession.id}:${sharingSession.throughAnswerId}`}
           notebookId={currentNotebookId}
           conversationId={sharingSession.id}
           title={sharingSession.title || ""}
+          throughAnswerId={sharingSession.throughAnswerId}
           onClose={() => setSharingSession(null)}
         />
       )}
