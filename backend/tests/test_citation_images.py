@@ -185,6 +185,39 @@ def test_image_without_a_caption_still_attaches_but_with_an_empty_caption():
     assert images["el-img"].caption == ""
 
 
+def test_image_description_stands_in_when_there_is_no_alt_caption():
+    # markdown 的 `> **图片描述**` 引用块：没有 alt 的图正是靠它进的检索，命中
+    # 之后附图旁边只有它能当说明。这不是回退到元素 text（那是占位定位串），而是
+    # 用户为这张图写下的描述。
+    sources = _SpySources({
+        "el-img": _row("image", {"asset_id": "asset-2", "description": "三级流水线示意"}),
+    })
+    images = _service(sources).citation_images_for(["el-img"])
+
+    assert images["el-img"].caption == "三级流水线示意"
+
+
+def test_an_alt_caption_wins_over_the_description():
+    sources = _SpySources({
+        "el-img": _row("image", {"asset_id": "asset-2", "caption": "图 1",
+                                 "description": "长长的描述正文"}),
+    })
+    images = _service(sources).citation_images_for(["el-img"])
+
+    assert images["el-img"].caption == "图 1"
+
+
+def test_a_runaway_description_is_truncated_to_the_same_named_cap():
+    long_description = "描" * (CITATION_IMAGE_CAPTION_CHARS + 50)
+    sources = _SpySources({
+        "el-img": _row("image", {"asset_id": "asset-1", "description": long_description}),
+    })
+
+    images = _service(sources).citation_images_for(["el-img"])
+
+    assert len(images["el-img"].caption) == CITATION_IMAGE_CAPTION_CHARS
+
+
 def test_a_runaway_caption_is_truncated_to_the_named_cap():
     # `caption` 是本 payload 唯一的自由文本；兄弟字段各有上界（Citation
     # .quoted_span 200 / 枚举行 summary 300），少一个上界就够让一份图注畸长的

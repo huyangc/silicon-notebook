@@ -2735,7 +2735,8 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
 def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
     postgres_database,
 ):
-    """PG 侧 source_elements_for_chunking 的 metadata 提取(caption + section_path)
+    """PG 侧 source_elements_for_chunking 的 metadata 提取(caption + description
+    + section_path)
     与 SQLite 侧语义对等。历史上这半边零覆盖:把提取写成 metadata.get("section_paths")
     这类笔误只会让 PG 部署静默退回旧标签,本地门与 CI 都不报红——SQLite 半边有
     集成回归门,这条钉住 PG 半边(质量评审 P2-2)。"""
@@ -2760,6 +2761,8 @@ def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
              {"section_path": "Manual > Commands > set_db"}),
             ("el-src-crumb-0002", "paragraph", "body text", {}),
             ("el-src-crumb-0003", "image", "", {"caption": "flow diagram"}),
+            ("el-src-crumb-0004", "image", "三级流水线示意",
+             {"description": "三级流水线示意"}),
         ]
         for element_id, element_type, text, metadata in rows:
             connection.execute(
@@ -2775,6 +2778,10 @@ def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
     assert by_id["el-src-crumb-0001"]["section_path"] == "Manual > Commands > set_db"
     assert by_id["el-src-crumb-0002"]["section_path"] == ""
     assert by_id["el-src-crumb-0003"]["caption"] == "flow diagram"
+    assert by_id["el-src-crumb-0003"]["description"] == ""
+    # markdown 的 `> **图片描述**` 引用块：没有 alt 图注的图片凭它进检索
+    # （build_chunks 对 image/figure 仅在 caption 与 description 皆空时跳过）。
+    assert by_id["el-src-crumb-0004"]["description"] == "三级流水线示意"
     assert [element["id"] for element in elements] == sorted(by_id)
 
 

@@ -9935,24 +9935,37 @@ function ElementBody({ element, notebookId }: { element: SourceElement; notebook
   if (element.element_type === "image") {
     const assetId = typeof element.metadata?.asset_id === "string" ? element.metadata.asset_id : "";
     const caption = typeof element.metadata?.caption === "string" ? element.metadata.caption : "";
+    // markdown 的 `> **图片描述**` 引用块。与图注并列渲染而不是二选一：图注是
+    // 一行标签，描述是对图的展开说明，两者都写了就都显示。
+    const description = typeof element.metadata?.description === "string"
+      ? element.metadata.description
+      : "";
+    const descriptionLines = description.split("\n").filter((line) => line.trim() !== "");
+    const descriptionNode = descriptionLines.length > 0 ? (
+      <div className="element-image-description">
+        {descriptionLines.map((line, index) => <p key={index}>{line}</p>)}
+      </div>
+    ) : null;
     const url = sourceImageAssetUrl(API_BASE, notebookId, assetId);
     if (url) {
       return (
         <figure className="element-image-figure">
-          <AuthedImage url={url} alt={caption || "figure"} />
+          <AuthedImage url={url} alt={caption || description || "figure"} />
           {caption ? <figcaption>{caption}</figcaption> : null}
+          {descriptionNode}
         </figure>
       );
     }
-    if (caption) {
+    if (caption || descriptionNode) {
       return (
         <figure className="element-image-figure">
-          <figcaption>{caption}</figcaption>
+          {caption ? <figcaption>{caption}</figcaption> : null}
+          {descriptionNode}
         </figure>
       );
     }
-    // 无可渲染图片资源(如 MINERU_RETURN_IMAGES=0 关闭图片)且无 caption 时，
-    // 回退到与其余元素类型一致的纯文本展示，避免空的占位边框。
+    // 无可渲染图片资源(如 MINERU_RETURN_IMAGES=0 关闭图片)且既无 caption 也无
+    // 图片描述时，回退到与其余元素类型一致的纯文本展示，避免空的占位边框。
     return <p>{element.text}</p>;
   }
   return <p>{element.text}</p>;

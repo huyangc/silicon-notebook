@@ -56,6 +56,10 @@ _QTYPE_MAP = {
     "table": "table",
     "image": "figure_caption",
     "blockquote": "paragraph",
+    # `> **图片描述**` 引用块：parsers 把它折进图片元素，KG 侧仍按普通段落走
+    # verbatim 切片那条路（`else` 分支），与折叠前的 blockquote-as-paragraph
+    # 逐字同义——描述正文照常参与 KG 抽取。
+    "image_description": "paragraph",
 }
 
 

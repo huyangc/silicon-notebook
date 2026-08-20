@@ -106,3 +106,30 @@ def test_uncaptioned_data_uri_image_produces_no_kg_element():
     els = parse_elements(text, "doc.md", None)
     assert not [e for e in els if e.type == "figure_caption"]
     assert all("base64" not in e.text for e in els)
+
+
+DESCRIBED_MD = """![某个图注](images/a.png)
+
+> **图片描述**
+> 三级流水线示意，从取指到写回
+"""
+
+
+def test_image_description_still_enters_kg_as_a_verbatim_paragraph():
+    """描述在 parsers 那边折进了图片元素，KG 侧仍按普通段落切原文——折叠前它就是
+    一个 blockquote-as-paragraph 块，折叠不该让这段正文退出 KG 抽取窗口。"""
+    els = parse_elements(DESCRIBED_MD, "doc.md", None)
+    desc = [e for e in els if "三级流水线" in e.text]
+    assert len(desc) == 1
+    assert desc[0].type == "paragraph"
+    # 证据跨度必须切得回原文（`_ev()` 按它落 char_start/char_end）。
+    assert DESCRIBED_MD[desc[0].char_start:desc[0].char_end] == desc[0].text
+    assert desc[0].text.startswith("> **图片描述**")
+
+
+def test_described_image_caption_element_unchanged():
+    els = parse_elements(DESCRIBED_MD, "doc.md", None)
+    caps = [e for e in els if e.type == "figure_caption"]
+    assert len(caps) == 1
+    assert caps[0].text == "某个图注"
+    assert DESCRIBED_MD[caps[0].char_start:caps[0].char_end] == "某个图注"

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from markdown_it import MarkdownIt
 
@@ -154,6 +154,111 @@ def _inline_text(tok) -> str:
         elif c.type in ("softbreak", "hardbreak"):
             parts.append(" ")
     return "".join(parts).strip()
+
+
+# ---------------------------------------------------------------------------
+# 图片描述块：`![alt](src)` 之后紧跟的 `> **图片描述**` 引用块
+# ---------------------------------------------------------------------------
+
+# 约定形态是「图片行 → 一个空行 → 一个引用块」，块内第一行只有 `**图片描述**`
+# 这个标记，其后**所有**引用行都是这张图的描述。标记的唯一真源就是下面两个
+# 正则（要认别的写法只改这里）；前端 `md-bundle.ts` 抑制「无图注」回执时镜像
+# 同一条判据。
+#
+# 第一条在引用块内的**原始 markdown 行**上判定：`**`/`__` 粗体可有可无、行尾
+# 冒号可有可无。标记之后还跟内容时必须隔一个冒号——否则「图片描述如下：……」
+# 这类正常引用会被整块吞成描述。第二条在**渲染后**的文本上剥掉同一个标记：
+# 渲染后粗体定界符已经不在了，所以两条正则长得不一样。
+_IMAGE_DESCRIPTION_MARKER = re.compile(
+    r"^[ \t]*(?:\*\*|__)?[ \t]*图片描述[ \t]*(?:\*\*|__)?[ \t]*(?:[:：].*)?$"
+)
+_IMAGE_DESCRIPTION_PREFIX = re.compile(r"^[ \t]*图片描述[ \t]*[:：]?[ \t]*")
+
+# 正文挂在 token.content 上、没有 inline 子节点的块。折叠是「把引用块的文字并进
+# 图片元素」，靠逐条渲染 inline 完成，所以这几种块一旦出现在引用块里就折不动
+# ——收下它们等于静默丢内容（折叠后引用块不再单独成段元素）。列表/标题/表格/
+# 嵌套引用不在此列：它们的正文都在 inline 子节点上，照收。
+_OPAQUE_BLOCKS = frozenset({"fence", "code_block", "html_block"})
+
+# 行首的一层引用标记（`>`、`> `、以及嵌套的每一层）。前端 `stripQuoteMarkers` 的
+# 镜像：标记行必须按**原文**判，见 `_image_description` 里的理由。
+_QUOTE_MARKER = re.compile(r"^ {0,3}>[ \t]?")
+
+
+def _strip_quote_markers(line: str) -> str:
+    while True:
+        rest = _QUOTE_MARKER.sub("", line, count=1)
+        if rest == line:
+            return line
+        line = rest
+
+
+def _image_description(
+    tokens, i: int, n: int, text: str, offs: List[int]
+) -> Optional[tuple[str, int]]:
+    """`tokens[i]` 是 blockquote_open 时，判定它是不是一个「图片描述」引用块。
+
+    返回 `(描述文本, 该引用块之后的 token 下标)`；不是描述块返回 None，调用方
+    照旧 fall through（块内段落各自成段），既有行为逐字不变。
+
+    约定是「后续的**所有**引用行都是描述」，所以块内的列表、标题、表格、嵌套引用
+    照收——它们的正文都挂在 `inline` 子节点上，逐条渲染出来就是那些行的文字。只
+    拒绝 `_OPAQUE_BLOCKS`：那几种块的正文在 `content` 而不在 inline 子节点上，收
+    下它们就会把这段内容**静默丢掉**（折叠之后引用块不再单独成段元素，丢了就是
+    真丢了）。
+
+    三条准入，任一不满足即 None：① 块内没有 `_OPAQUE_BLOCKS`；② 第一行**在原文里**
+    只有 `图片描述` 标记；③ 剥掉标记后还剩非空文本——只有一个光标记的引用块什么
+    描述都没带来，折叠它反而把这行字弄丢。
+
+    第二条必须回原文取那一行（codex #536 R2 P2）：markdown-it 会把列表/标题的结构
+    前缀从 `inline.content` 上剥掉，`> - 图片描述`、`> # 图片描述` 的 content 都正是
+    `图片描述`，按 content 判就会把一条普通的引用列表认成标记行、连同它的结构一起
+    折进上面那张图。契约说的是「标记行只有标记本身」，原文才答得了这个问题。
+    """
+    depth = 0
+    inlines: List[Any] = []
+    j = i
+    while j < n:
+        t = tokens[j]
+        if t.type == "blockquote_open":
+            depth += 1
+        elif t.type == "blockquote_close":
+            depth -= 1
+            if depth == 0:
+                j += 1
+                break
+        elif t.type == "inline":
+            inlines.append(t)
+        elif t.type in _OPAQUE_BLOCKS:
+            return None
+        j += 1
+    else:
+        return None  # 没有闭合的引用块（到不了这里的畸形 token 流）
+    if not inlines:
+        return None
+    marker_line = inlines[0].map[0] if inlines[0].map else -1
+    if not 0 <= marker_line < len(offs):
+        return None
+    line_end = offs[marker_line + 1] if marker_line + 1 < len(offs) else len(text)
+    # `\r` 一并剥掉：`_line_char_offsets` 只按 `\n` 切行，CRLF 原文的行尾会留一个
+    # `\r`，让标记正则的 `$` 匹配不上（`$` 认 `\n` 不认 `\r`）。前端 `scanLines`
+    # 本来就剥了 CR，不剥这边就是「同一份 CRLF 文档前端说有描述、服务端说没有」
+    # ——正是这条镜像绝不能出现的方向（codex #536 R2 P2）。
+    first_line = _strip_quote_markers(text[offs[marker_line]:line_end].rstrip("\r\n"))
+    if not _IMAGE_DESCRIPTION_MARKER.match(first_line):
+        return None
+    parts: List[str] = []
+    for index, tok in enumerate(inlines):
+        rendered = _inline_text(tok)
+        if index == 0:
+            rendered = _IMAGE_DESCRIPTION_PREFIX.sub("", rendered, count=1).strip()
+        if rendered:
+            parts.append(rendered)
+    description = "\n".join(parts).strip()
+    if not description:
+        return None
+    return description, j
 
 
 def _table_text(tokens, i: int) -> str:
@@ -303,6 +408,28 @@ def parse_blocks(text: str) -> List[Block]:
             i = j
             continue
 
+        if t.type == "blockquote_open":
+            # 图片行紧跟的 `> **图片描述**` 引用块折进上一个 image 块：描述文本
+            # 挂进它的 metadata（parsers 把它并进图片元素的文本，让这张图可被
+            # 检索），同时另出一个 image_description 块保留逐字原文跨度——KG 侧
+            # 照旧按普通段落切窗，与折叠前同义。不是描述块、前一块不是图片、或
+            # 两者之间隔了别的内容时一律 fall through：块内段落各自成段，行为
+            # 与接入前逐字一致。
+            found = _image_description(tokens, i, n, text, offs)
+            if found is not None and blocks and blocks[-1].type == "image":
+                description, after = found
+                cs, ce, ls, le = _span(text, offs, t.map)
+                if not text[blocks[-1].char_end:cs].strip():
+                    blocks[-1].metadata["description"] = description
+                    emit(Block(type="image_description", text=description,
+                               raw=text[cs:ce], char_start=cs, char_end=ce,
+                               line_start=ls, line_end=le,
+                               section_path=section_path()))
+                    i = after
+                    continue
+            i += 1
+            continue
+
         if t.type == "paragraph_open":
             inline = tokens[i + 1] if i + 1 < n else None
             raw_inline = (inline.content if inline else "") or ""
@@ -323,9 +450,23 @@ def parse_blocks(text: str) -> List[Block]:
             if img is not None:
                 caption = (img.content or "").strip()
                 src = img.attrs.get("src", "") if hasattr(img, "attrs") else ""
+                # 紧跟其后的「图片描述」引用块同样是这张图进检索的入口，所以
+                # 既没有 alt、src 又不是 data URI 的图片此时也要产出块——老判据
+                # 会把它整条丢掉，连带描述一起变成不可检索的孤儿引用。
+                # 相邻判据必须与下面 blockquote 分支真正折叠时用的**同一条**
+                # （原文之间只有空白）：链接引用定义 `[foo]: /url` 之类不产出
+                # 任何 token，只按 token 相邻判会在这里产出一个既无图注也无描述
+                # 的空图片块，而折叠那边并不认它。
+                described = False
+                if i + 3 < n and tokens[i + 3].type == "blockquote_open":
+                    quote_start = _span(text, offs, tokens[i + 3].map)[0]
+                    described = (
+                        not text[ce:quote_start].strip()
+                        and _image_description(tokens, i + 3, n, text, offs) is not None
+                    )
                 # URI schemes are case-insensitive and markdown-it accepts
                 # `DATA:`/`Data:` image sources — match them all here.
-                if caption or src[:5].lower() == "data:":
+                if caption or src[:5].lower() == "data:" or described:
                     emit(Block(type="image", text=caption, raw=text[cs:ce],
                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
                                section_path=section_path(), metadata={"src": src}))

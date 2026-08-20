@@ -7326,6 +7326,20 @@ button.tag:hover {
   line-height: 1.5;
 }
 
+/* markdown 的 `> **图片描述**` 引用块。比图注重一档：它是正文级的说明，而
+   figcaption 只是一行标签。 */
+.element-image-description {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.6;
+}
+
+.element-image-description p {
+  margin: 0;
+}
+
 .toast {
   position: fixed;
   right: 24px;
