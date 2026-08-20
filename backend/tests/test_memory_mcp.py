@@ -3816,6 +3816,46 @@ async def test_add_observation_landing_after_member_removal_is_compensated(
 
 
 @pytest.mark.anyio
+async def test_token_level_failure_after_append_keeps_the_rows(
+    mcp_env, monkeypatch,
+):
+    """codex #535 R13 P2:append 后的复核只认 notebook 读权——token 在两步
+    之间被吊销/过期不清行:owner 仍是成员,行是他自己的合法队列,按 token
+    失效补偿会把他保留的全部观察(含别的 Agent 写的)一起误删。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bob = mcp_env["bob"]
+
+    issued = mcp_env["service"].issue_agent_token(
+        bob.id, mcp_env["bob_profile"].id, _OBSERVATION_WRITE,
+        notebook_id, [notebook_id], None,
+    )
+    bob_token = issued.token
+    store = repo.agent_observations
+    real_append = store.append_observation
+
+    def append_then_revoke_token(*args, **kwargs):
+        result = real_append(*args, **kwargs)
+        # token 失效,notebook 读权仍在——复核只认读权,不得触发补偿
+        repo.revoke_agent_token(bob.id, issued.id)
+        return result
+
+    monkeypatch.setattr(store, "append_observation", append_then_revoke_token)
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = _payload(await client.call("add_observation", {
+            "text": "written just before revocation", "client_request_id": "tok-1",
+        }))
+
+    assert result["accepted"] is True
+    rows = repo.agent_observations.list_observations(
+        notebook_id, bob.id, limit=10
+    )
+    assert len(rows) == 1, "token 级失效不得触发补偿清理"
+
+
+@pytest.mark.anyio
 async def test_add_observation_requires_its_own_scope(mcp_env):
     notebook_id = mcp_env["notebook"].id
     token = _agent_token(mcp_env, ["knowledge:read"])
