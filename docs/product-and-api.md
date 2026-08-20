@@ -681,6 +681,14 @@ needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
 `maintenance:execute`; it can be revoked immediately. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
+The one-time token receipt also links to anonymous `GET /api/agent-mcp/onboarding`, a
+machine-readable Markdown handoff that uses `MCP_PUBLIC_URL` for the exact endpoint and
+derives its tool list from `mcp_server.PUBLIC_TOOLS`. The user gives this link and token to
+the Agent separately; the endpoint never accepts, embeds, or reflects a bearer token and is
+available even while repository warm-up is still running.
+Requests carrying any query string or Authorization header are rejected. Startup likewise
+rejects an `MCP_PUBLIC_URL` that is not absolute `http(s)` with exact `/mcp` path, or that
+contains userinfo, a query/fragment, whitespace/control characters, or a backtick.
 By default MCP allows remote plain HTTP and relaxes Host/Origin (DNS-rebinding)
 checks — intended for a trusted private network — and prints a startup warning
 because the Agent token then travels in cleartext. On any public deployment set
@@ -697,6 +705,13 @@ export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time-issued-token>'
 codex mcp add silicon-notebook --url http://127.0.0.1:8000/mcp \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
+
+Codex persists the environment-variable name, not the token value. A transient `export`
+inside an Agent shell subprocess cannot change the running client's parent environment.
+An Agent may save the URL/configuration, but without an approved persistent secret mechanism
+it must ask the user to set the variable in the environment that launches Codex and restart.
+`codex mcp list` proves configuration presence only; authenticated success requires a new
+session to discover the MCP and complete `list_notebooks` plus `select_notebook`.
 
 For Claude Code, the currently installed CLI accepts an HTTP transport and an explicit
 Authorization header:
@@ -1910,7 +1925,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - Memory: `GET /api/memories`, `GET /api/notebooks/{id}/memories`, `GET|PATCH /api/memories/{memory_id}`, `POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`, `POST /api/answers/{answer_id}/memory-preview`, `POST /api/notebooks/{id}/memories/from-answer`
-- Agent access: `GET|POST /api/agent-profiles`, `PATCH /api/agent-profiles/{profile_id}`, `POST /api/agent-profiles/{profile_id}/tokens`, `GET /api/agent-tokens`, `DELETE /api/agent-tokens/{token_id}`; Streamable HTTP MCP is mounted at `/mcp`
+- Agent access: anonymous machine-readable onboarding at `GET /api/agent-mcp/onboarding`; authenticated `GET|POST /api/agent-profiles`, `PATCH /api/agent-profiles/{profile_id}`, `POST /api/agent-profiles/{profile_id}/tokens`, `GET /api/agent-tokens`, `DELETE /api/agent-tokens/{token_id}`; Streamable HTTP MCP is mounted at `/mcp`
 - Knowhow agent surface: `GET /api/agent/knowhow/tables?notebook_id=`, `GET /api/agent/knowhow/tables/{table_id}/discrimination`, `GET /api/agent/knowhow/rows/{row_id}`, `GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code` — reachable by either a signed-in session or an Agent Bearer token; reads need `knowledge:read`, code writes need `knowhow:code` (see [Memory and Agent MCP](#memory-and-agent-mcp))
 - Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
 - Concept rebuild (UI: **重新合并** in the Knowledge Graph view and the 「索引与构建」 panel): `POST /api/notebooks/{id}/unified-kg/rebuild` starts a **background** pass and returns `{status: "rebuilding", notebook_id, job_id}` — it no longer returns `{clusters: N}`, because the work is proportional to the notebook rather than to the click: the content-version gate still answers an unchanged notebook in milliseconds, but a real recluster streams seed representatives over the whole graph (minutes to hours on a base-tier library, past PostgreSQL's statement timeout, with a request worker pinned for the duration). It has no LLM precondition — but it is not strictly zero-model: when `kg_merge_review` / `kg_concept_description` are configured, the pass invokes them as fail-open enrichment. Single flight is **shared with isolated-node relink**: one per-notebook slot covers both passes, because a rebuild rewrites `concept_clusters` and the community partition wholesale while relink appends edges to the graph clustering reads — overlapping them lets one publish over inputs the other is still consuming. A second click, or a click while the other pass runs, returns 409 naming the action that actually holds the slot. Like relink, the claim is per serving **process** (production pins `--workers 1`); offline CLI runs (`scripts/recluster_kg.py`, `batch_ingest`) are separate processes, call the pass directly and are not covered. `GET /api/notebooks/{id}/unified-kg/rebuild/status` (notebook read) is the completion signal, returning `{job_id, notebook_id, status, running, clusters}` where `status` is `running` / `succeeded` / `failed` / `idle`; `idle` covers "never ran here", "the process restarted" AND "the shared slot is held by a relink pass", so a bounded client poll always terminates and neither poll can be parked on the other's job. The browser refreshes the graph, pending merges and unified status at the current range on any terminal state, and its busy indicator is scoped to the notebook being rebuilt. This is deliberately separate from `GET .../unified-kg/status`, whose `building` flag is about the visualization artefact. Forced full recluster (changed clustering *settings*, which the content-version gate cannot see) remains CLI-only. A merge decision (confirm/reject) that races the shared slot (409) is remembered client-side and auto-resubmitted once the occupying task's terminal poll observes it (also retried, without dropping the mark, on a transient non-409 resubmit failure), bounded by the same poll's attempt cap; this is a **best-effort promise scoped to the browser tab while it stays open**. A reload or reopen drops the client-side mark and nothing resubmits the decision automatically — deliberately: the mark cannot be reconstructed from the generic dirty flag, because an ordinary relink also dirties the graph, and inferring a pending rebuild from it would auto-launch an unrequested, potentially hours-long recluster. The durable fallback is the existing 「待重建」 dirty label plus a manual **重新合并** click. A server-persisted retry queue that would close this gap is a candidate for a future iteration, not implemented here.

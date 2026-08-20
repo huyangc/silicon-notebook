@@ -195,6 +195,12 @@ npm run stop
 `127.0.0.1`；显式绑定非 loopback 地址时必须配置非默认
 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
 
+部署 Agent MCP 时，把 `MCP_PUBLIC_URL` 设为客户端真正可达的 `/mcp` 精确地址。该值同时用于
+MCP transport metadata，以及新签发 token 旁所链接的匿名机器说明
+`GET /api/agent-mcp/onboarding`。公网还必须设置 `MCP_REQUIRE_HTTPS=1`；接入说明链接本身绝不携带
+bearer token。由于该值会进入 Agent 指令正文，启动会拒绝 userinfo、query、fragment、非精确
+`/mcp` path，以及空白/控制符/反引号。
+
 生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
 Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
 采集事故；见[生产事故即时采集](./operations_zh.md#生产事故即时采集)。先重启会丢掉命令需要关联的

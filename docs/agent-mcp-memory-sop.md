@@ -74,9 +74,9 @@ reads beside them (`get_source_status`, `get_build_status`) need only `knowledge
 notebook, and read access to it are the whole check — so every session can start even with a
 minimal token.
 
-6. Set a short expiry and issue the token. Copy the plaintext immediately; it is displayed only once.
+6. Set a short expiry and issue the token. Copy the plaintext immediately; it is displayed only once. The receipt also shows an **Agent MCP onboarding instructions** link. Give the Agent that link and the token as two separate values: the public Markdown tells it the deployment's exact MCP endpoint and client configuration steps, while the link itself never contains the token. The same document is available anonymously at `GET /api/agent-mcp/onboarding`, so an Agent can read it before MCP is configured.
 
-Never commit the token or place it in documentation, script arguments, or chat. The examples read it from the process environment.
+Never commit the token or place it in documentation or script arguments. Share it only with the intended Agent over a trusted channel, separately from the onboarding URL; after configuration, keep it in the client's secret/environment mechanism and do not repeat it in later conversation. The examples read it from the process environment.
 
 ## 4. Configure Codex CLI
 
@@ -93,6 +93,8 @@ codex mcp list
 ```
 
 Start a new `codex` session. For the Codex desktop app or IDE extension, save the server and restart the client. The desktop app, CLI, and IDE extension on one Codex host share MCP configuration; use `/mcp` in an interactive client to inspect the connection.
+
+`bearer_token_env_var` persists only the variable name, not its value. The export above works because it is performed in the same trusted shell that launches the new Codex process; an `export` executed by an Agent's shell tool is only a child-process value and disappears when that command ends. A running Agent can save the MCP URL/configuration, but it cannot update its parent's environment or hot-load the tools into its current session. It must not write the token into a repository or shell startup file without explicit user authorization. If no approved persistent secret mechanism is available, it should leave one explicit user action: set `SILICON_NOTEBOOK_AGENT_TOKEN` in the environment that launches Codex, then restart/start a new session. `codex mcp list` confirms configuration presence only; connection success requires an active MCP plus successful `list_notebooks` and `select_notebook` calls in the new session.
 
 A trusted repository may instead use project-scoped `.codex/config.toml` without storing the token value:
 

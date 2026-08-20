@@ -229,6 +229,13 @@ Override `BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports.
 backend defaults to `127.0.0.1`; binding it to a non-loopback address requires a
 non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
 
+For Agent MCP deployments, set `MCP_PUBLIC_URL` to the exact client-reachable `/mcp` URL.
+That value configures both MCP transport metadata and the anonymous machine-readable
+`GET /api/agent-mcp/onboarding` document linked beside newly issued tokens. Public networks
+must also set `MCP_REQUIRE_HTTPS=1`; the onboarding link never carries the bearer token.
+Startup rejects userinfo, query strings, fragments, paths other than exactly `/mcp`, and
+whitespace/control/backtick characters because this value is rendered into Agent instructions.
+
 The supported production diagnostics target is Ubuntu 24.04 running this normal
 `npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
 leave it running and capture the incident **while the hang is still present**; see

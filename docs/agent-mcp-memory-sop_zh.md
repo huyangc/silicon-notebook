@@ -79,9 +79,9 @@ curl -s http://127.0.0.1:8000/api/ready
 且对它有读权限——因此再小权限的 token 也能正常开始一个 session。
 
 7. 设置短有效期。网页会把浏览器本地时间转换成带时区的 UTC 瞬间；后端拒绝没有时区的时间。
-8. 点击 **签发 Token**，立即复制明文 token。它只显示一次；已签发列表只保留脱敏摘要。
+8. 点击 **签发 Token**，立即复制明文 token。它只显示一次；已签发列表只保留脱敏摘要。签发回执同时显示 **Agent MCP 接入说明链接**。把该链接和 token 作为两个独立值交给 Agent：公开 Markdown 会告诉它本部署的精确 MCP 地址与客户端配置步骤，而链接本身绝不包含 token。该说明可匿名通过 `GET /api/agent-mcp/onboarding` 读取，因此 Agent 在 MCP 尚未配置前也能先读懂如何接入。
 
-不要把真实 token 写入 Git、README、脚本参数或聊天内容。后续示例都从环境变量读取。
+不要把真实 token 写入 Git、README 或脚本参数。只通过可信渠道把它单独交给目标 Agent，不要拼进接入说明 URL；配置完成后交由客户端的 secret/环境变量机制保存，后续对话不要反复回显。后续示例都从环境变量读取。
 
 ## 4. 在 Codex CLI 注册 MCP
 
@@ -106,6 +106,8 @@ codex mcp list
 ```
 
 然后启动一个新的 `codex` session。若使用 Codex desktop app 或 IDE extension，保存 MCP 配置后重启对应客户端；同一 Codex host 的 desktop app、CLI 与 IDE extension 共享 MCP 配置。在交互界面中使用 `/mcp` 检查 `silicon-notebook` 及其工具是否已连接。
+
+`bearer_token_env_var` 只持久化环境变量名，不保存变量值。上面的 `export` 之所以有效，是因为它发生在随后启动新 Codex 进程的同一个可信 shell；Agent 通过 shell tool 执行的 `export` 只属于短命子进程，命令结束即消失。正在运行的 Agent 可以保存 MCP URL/配置，但不能修改父进程环境，也不能让当前 session 热加载新工具。未经用户明确授权，不得把 token 写进仓库或 shell 启动文件。若没有获准使用的持久 secret 机制，Agent 必须只留下一个明确的用户动作：在启动 Codex 的环境中设置 `SILICON_NOTEBOOK_AGENT_TOKEN`，再重启/新开 session。`codex mcp list` 只证明配置项存在；只有新 session 中 MCP 显示已连接，并成功调用 `list_notebooks` 与 `select_notebook`，才算接入成功。
 
 也可以在受信任项目的 `.codex/config.toml` 中使用项目级配置。不要把 token 值放进文件：
 

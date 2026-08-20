@@ -6,7 +6,9 @@ export async function copyTextSafely(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {
-      return false;
+      // Clipboard API can exist while being denied by browser permissions or an
+      // insecure context. Continue into the DOM fallback instead of making the
+      // copy button appear inert.
     }
   }
   if (typeof document === "undefined" || typeof document.execCommand !== "function") return false;

@@ -11,6 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.auth_routes import auth_router
+from app.api.agent_mcp_onboarding import (
+    AGENT_MCP_ONBOARDING_PATH,
+    agent_mcp_onboarding_router,
+)
 from app.api.debug_logs import router as debug_logs_router
 from app.api.deps import (
     USER_MESSAGE_HEADER,
@@ -38,7 +42,15 @@ logger = logging.getLogger("silicon_notebook.startup")
 # the anonymous liveness/readiness probes + API docs. CORS preflight (OPTIONS)
 # is always allowed so the browser can even learn about the 503.
 _READINESS_OPEN_PATHS = frozenset(
-    {"/", "/api/ready", "/docs", "/redoc", "/openapi.json", "/favicon.ico"}
+    {
+        "/",
+        "/api/ready",
+        AGENT_MCP_ONBOARDING_PATH,
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/favicon.ico",
+    }
 )
 
 
@@ -339,6 +351,10 @@ def create_app() -> FastAPI:
         return readiness.snapshot()
 
     app.include_router(auth_router, prefix="/api")  # 公开：注册/登录/登出
+    # 机器可读的接入说明不含 token，也不要求先有浏览器 session。用户把这条
+    # URL 与另行签发的一次性明文 token 一起交给 Agent，Agent 才能在尚未接通
+    # MCP 的前提下先读取配置步骤。MCP_PUBLIC_URL 是说明里唯一的服务地址真源。
+    app.include_router(agent_mcp_onboarding_router(mcp_public_url), prefix="/api")
     app.include_router(
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
