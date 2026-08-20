@@ -4614,7 +4614,8 @@ class RetrievalExperienceStorePort(Protocol):
 
 #: Hard ceiling on how many observation rows ONE ``(notebook_id, owner_id)``
 #: pair keeps. ``append_observation`` evicts down to this bound, oldest-first
-#: by ``(created_at DESC, id DESC)``, in the SAME write transaction as the
+#: by absolute instant then ``id`` (see its docstring's point 2b for the
+#: exact per-backend ``ORDER BY``), in the SAME write transaction as the
 #: insert that may have just pushed the group over it. The TABLE total is not
 #: capped by this constant — it grows with notebooks × members — only each
 #: group's own ring is. Exact value is registered in
@@ -4669,7 +4670,16 @@ class AgentObservationStorePort(Protocol):
     explicit ``limit`` and are always further bounded by
     ``AGENT_OBSERVATION_RING_MAX`` — the group they scan can never hold more
     rows than that, because ``append_observation`` evicts down to it on every
-    write. There is no unbounded scan anywhere in this port.
+    write. That bound is what makes the reads and the eviction DELETE cheap
+    to POINT AT — ``idx_agent_observations_scope`` (``notebook_id, owner_id,
+    created_at, id``) lets both land on this ONE group's rows directly
+    instead of scanning past every OTHER ``(notebook_id, owner_id)`` group in
+    the table, which is not bounded by this ring (it grows with notebooks ×
+    members). T2's quality review measured the difference on a 100k-row
+    table: the eviction DELETE went from ~9.5ms to ~1.1ms, and
+    ``recent_observations``/``list_observations`` from ~3.2ms to ~0.07ms,
+    with the index in place — see the migration's own comment for the exact
+    numbers this cost call is registered against.
     """
 
     def append_observation(
@@ -4706,19 +4716,30 @@ class AgentObservationStorePort(Protocol):
 
         2b. The SAME write transaction's LAST step evicts this
             ``(notebook_id, owner_id)`` group down to
-            ``AGENT_OBSERVATION_RING_MAX`` rows, oldest-first by
-            ``(created_at DESC, id DESC)`` — i.e. it deletes every row NOT
-            among the newest ``AGENT_OBSERVATION_RING_MAX`` under that
-            ordering. Registered trade-off: SQLite's ``created_at`` is
-            second-granular, so same-second rows tie-break on ``id`` (a
-            random uuid) rather than insertion order — for a 200-row ring
-            buffer of untrusted advisory text, that has no practical
-            consequence, and it buys not having to introduce an auto-
-            incrementing sequence column on a backend (PostgreSQL) that has
-            no ``rowid`` equivalent among ``POSTGRES_ROWID_ORDINAL_TABLES``.
-            Both backends use this SAME ordering and each carries its own
-            regression pinning it — the two must never independently decide
-            which rows survive a tie.
+            ``AGENT_OBSERVATION_RING_MAX`` rows, oldest-first by absolute
+            instant descending then ``id`` descending — i.e. it deletes every
+            row NOT among the newest ``AGENT_OBSERVATION_RING_MAX`` under
+            that ordering. ``created_at`` comes from the shared ``now`` seam
+            (``repository_facade``'s ``datetime.now().astimezone().
+            isoformat(timespec="microseconds")``) on both backends, so it is
+            MICROSECOND-granular, not second-granular — same-instant ties are
+            possible but rare, not a routine occurrence this ordering has to
+            paper over. ``id`` (a random uuid, not an insertion-order column)
+            is still the tie-break, for a different reason than clock
+            resolution: it is the one thing BOTH backends can compare
+            identically without either adding an auto-incrementing sequence
+            column PostgreSQL has no ``rowid`` equivalent for (this table is
+            not in ``POSTGRES_ROWID_ORDINAL_TABLES``) or leaving the outcome
+            of a genuine tie backend-dependent. SQLite additionally compares
+            by ``julianday(created_at)`` before the raw text — mirroring
+            ``conversations``' own ``CONVERSATION_ANSWERS_ORDER_DESC``
+            precedent — so a legacy naive-UTC row and a newer offset-aware
+            row are compared by the instant they represent, not by which one
+            happens to sort first as text; PostgreSQL's ``timestamptz``
+            already normalises that away at storage time. Both backends use
+            this SAME effective ordering and each carries its own regression
+            pinning it — the two must never independently decide which rows
+            survive a tie.
         """
         ...
 
@@ -4726,10 +4747,12 @@ class AgentObservationStorePort(Protocol):
         self, notebook_id: str, owner_id: str, *, limit: int
     ) -> list[dict]:
         """The newest ``limit`` rows for exactly one ``(notebook_id,
-        owner_id)`` scope, ordered ``(created_at DESC, id DESC)`` — the SAME
-        ordering ``append_observation``'s eviction step uses, so "recent"
-        means the same thing on both sides of this port: nothing this method
-        can return is a row the eviction would have already dropped.
+        owner_id)`` scope, ordered newest-instant-first then ``id``
+        descending — the SAME ordering ``append_observation``'s eviction
+        step uses (see its docstring's point 2b for the exact per-backend
+        ``ORDER BY``), so "recent" means the same thing on both sides of
+        this port: nothing this method can return is a row the eviction
+        would have already dropped.
 
         3. ``owner_id`` is baked into the SQL text as a literal ``owner_id =
         ?`` / ``owner_id = %s`` equality predicate — a privacy boundary, not
