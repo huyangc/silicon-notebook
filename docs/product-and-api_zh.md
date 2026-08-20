@@ -531,6 +531,34 @@ token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token�
 loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
 启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
 （并恢复 Host/Origin 校验），并把 `MCP_PUBLIC_URL` 设为公开的 HTTPS `/mcp` URL。
+
+**长任务发心跳，传输走 SSE。** MCP 客户端不会无限等一次工具调用：Claude Code 用的是
+*idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
+客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
+检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 20 个工具的阻塞主体一律
+跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
+来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
+`progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
+一拍都不会发。它也绝不会让调用失败——通知写不出去（客户端挂断）就停止心跳，工作照常跑完。
+心跳不是我们这边的超时：这个面上没有任何东西会放弃仍在运行的工作。
+
+要把这些心跳送到客户端，Streamable HTTP 传输必须以 `text/event-stream` 应答，而不是缓冲成
+一个 JSON body：JSON 模式下 SDK 会把每请求的流读干、只找响应，**沿途经过的每一条通知都被
+丢弃**——`report_progress` 照样“成功”，客户端什么也收不到。唯一一处用户可见的代价，写在这里
+而不是留给别人踩：`POST /mcp/` 必须带 `Accept: application/json, text/event-stream`，否则
+传输直接回 **406 Not Acceptable**。Streamable HTTP 规范本来就要求客户端两个都发，官方 SDK、
+测试与 SOP 里手写的 `curl` 也都是这么发的。响应带 `X-Accel-Buffering: no` 与 15 秒一次的 SSE
+保活注释，好让前置 nginx 不去缓冲这条流、把心跳静默架空；不认这个 header 的代理需要为
+`/mcp` 这条 location 关闭响应缓冲，并把读超时设到高于该部署预期的最长一次回答。注意两层是
+不同的东西：保活注释是让 HTTP 与代理计时器不掉线的裸字节，只有 progress 通知才能重置客户端
+MCP 层的 idle 计时。
+
+客户端自己的上限仍是外层边界，且只能由客户端配置，服务端抬不动它。Claude Code 是在
+`~/.claude.json`（或项目的 `.mcp.json`）里给该服务条目加 `"timeout": <毫秒>` 后重启，全局
+等价物是环境变量 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 与 `MCP_TOOL_TIMEOUT`；Codex 是服务条目
+上的 `tool_timeout_sec`。默认值随客户端与版本而异，所以 `reasoning` 回答或构建耗时较长的部署
+应显式调高，而不是指望某个特定默认值。
 过期时间必须带明确时区偏移；浏览器把本地 `datetime-local` 转成 UTC，后端按 UTC 瞬间归一化保存。
 无时区 datetime 会被拒绝，不会按服务端本地时区猜测。
 

@@ -697,6 +697,47 @@ checks — intended for a trusted private network — and prints a startup warni
 because the Agent token then travels in cleartext. On any public deployment set
 `MCP_REQUIRE_HTTPS=1` to enforce HTTPS (and restore Host/Origin validation), and
 set `MCP_PUBLIC_URL` to the public HTTPS `/mcp` URL.
+
+**Long-running tools heartbeat, and the transport answers over SSE.** MCP clients do
+not wait indefinitely for a tool call: Claude Code applies an *idle* timeout — it aborts a
+call that has produced neither a response nor a progress notification for a while — and
+other clients apply a flat per-call ceiling instead. `ask_notebook` in `reasoning` mode
+routinely runs for minutes (plan, federated retrieval, reflect loop, synthesis) and
+`build_kg` can take longer still, so without a heartbeat the client abandons a call the
+server is still executing successfully and the Agent sees a transport error where the
+answer was about to arrive. Every one of the 20 tools therefore runs its blocking body
+under one progress heartbeat that fires every **5 seconds** and carries only the tool name
+and elapsed wall-clock seconds — never the question, a notebook or source name, or any
+other notebook content, the same rule the observability events follow. It is free where it
+is not wanted: the notification is a no-op unless the client asked for progress with a
+`progressToken` in the request's `_meta`, and the first beat is a whole interval away, so a
+tool that answers in milliseconds never sends one. It never fails a call either — if the
+notification cannot be written (the client hung up) beating stops and the work runs to
+completion. The heartbeat is not a timeout of ours: nothing on this surface gives up on
+work that is still running.
+
+Delivering those beats requires the Streamable HTTP transport to answer over
+`text/event-stream` rather than a buffered JSON body, because in JSON mode the SDK drains
+the per-request stream looking for the response and **discards every notification it passes
+on the way** — `report_progress` still "succeeds" and the client receives nothing. The one
+user-visible cost, stated rather than left to be discovered: a `POST /mcp/` must send
+`Accept: application/json, text/event-stream` or the transport answers **406 Not
+Acceptable**. The Streamable HTTP specification already requires clients to send both, and
+the official SDK, the tests and the SOP's hand-rolled `curl` all do. Responses carry
+`X-Accel-Buffering: no` and a 15-second SSE keep-alive comment, so an nginx in front does
+not buffer the stream and silently defeat the heartbeat; a proxy that ignores that header
+needs response buffering turned off for the `/mcp` location and a read timeout above the
+longest answer the deployment expects. Note the two layers are different: the keep-alive
+comment is raw bytes that keep HTTP and proxy timers alive, while only the progress
+notification resets a client's MCP-level idle timer.
+
+The client's own ceiling remains the outer bound and is the client's to configure — a
+server cannot raise it. For Claude Code, set `"timeout": <milliseconds>` on the server's
+entry in `~/.claude.json` (or the project's `.mcp.json`) and restart it; the environment
+variables `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` and `MCP_TOOL_TIMEOUT` are the global
+equivalents. Codex uses `tool_timeout_sec` on the server entry. Defaults differ by client
+and version, so raise the ceiling for a deployment whose `reasoning` answers or builds run
+long instead of relying on any particular default.
 Expiry values must include an explicit timezone offset; the browser converts its local
 datetime input to UTC and the backend stores a normalized UTC instant. Naive datetimes are
 rejected rather than interpreted in the server's local timezone.
