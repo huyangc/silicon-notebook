@@ -155,6 +155,7 @@ Inside a notebook:
   - The exact-completeness executor is deliberately narrower than the intent labels: confirmation reclassifies scope from the final edited wording and authoritative clarification answers, and only direct whole-table physical-row/method lists, direct row/record counts, and their hybrid analysis may enumerate. Conditional subsets, distinct/type counts such as “how many kinds”, and group-by requests without a deterministic plan must fall back and disclose that exact completeness is unsupported. The lightweight catalog returns at most 8 table descriptors and no cells, code attachments, or health payloads; an explicitly named table is prioritized before applying that window, while aggregate counts/sequences still cover the whole notebook. Responses separate per-table, batch, and synthesis coverage: a 200/200 enumeration with a 100/200 model preview is “enumeration complete, analysis partial”, while an 8-table batch truncation does not make an individually exhausted selected table partial. KG objects/relations, confirmed Memory, and query-time chains share the KG character budget; structured preview, chunks, and direct elements share the source budget; the final evidence block may not exceed their sum.
   - Reasoning mode wires the exact-identifier channel in twice, and both are zero-model. This wiring reaches the `reasoning` ask mode and, because the report engine reuses `ReasoningRetriever` verbatim, every deep-report section's retrieval; `graph` mode does not wire it in. (1) A deterministic seed pass runs once immediately after the initial retrieval whenever `exact_probe_terms(question)` is non-empty — mirroring the PPR seed pass, it does not bet on whether the agent picks the action. It scores its hits by the joined identifier names it actually probed, not by the raw question — producer-native scoring is this retriever's existing convention (a PPR hit is not scored "relevance to the raw question" either), and scoring the exact match against every unrelated token in a long question sank a genuine hit's relevance low enough to lose the character-budget cut and, as the sole anchor, the grounded/overview threshold (a measured regression). It records an `exact_lookup` trace step whose detail carries the names actually probed (already truncated to `EXACT_LOOKUP_MAX_IDENTIFIERS`), the yield, and `phase`. It is placed after the PPR seed pass so PPR's dedup and counts stay bit-identical. A question with no identifier issues zero calls and adds zero trace steps. (2) The reflect model may choose the `exact_lookup` action with an `exact_term`, scored the same producer-native way. The action shares the seed pass's `exact_probe_terms` gate — an arbitrary low-selectivity string, and equally an ordinary hyphenated English compound, is refused with a skip rather than becoming a library-wide substring scan, because that gate is a measured cost contract and must not be delegated to the model — shares one per-run ledger keyed by name so the seed pass's names cannot be re-requested, executes only the names new this round, and is capped at `_MAX_EXACT_LOOKUPS = 3` agent invocations (the seed pass does not consume that quota). Every skip — channel disabled, missing name, non-identifier shape, duplicate, or over the per-run cap — feeds a teaching note back into that same ledger (not just a TraceStep), deduplicated by reason/name so a model repeating the same invalid input does not grow the ledger without bound; e.g. a non-identifier term teaches back "「2.1」不是可精确查找的名称(要像 set_db、config.yaml 这样带下划线或点;只用连字符连接的词还需带数字,如 GPT-4)" — phrased as what to supply next, because a note that only says "invalid" gets the model to retry with another equally invalid ordinary word — so the next reflection can act on the reason instead of silently retrying. `exact_term` is cleaned (unwrapped, not truncated) at parse time so the `reflect()` fail-closed 2000-character field cap can actually reject an oversized value; truncation to the lexical layer's phrase cap happens only at the point of use. Both paths go through `_filter_candidates` and an `allow_exact_lookup` instance policy flag mirroring `allow_ppr`: knowhow completion sets it `False` for the same reason it disables PPR/community below — its JSON-envelope query would otherwise make the seed pass unconditionally (and uselessly) probe the envelope's own field names on every completion request. The action name and prompt line are static rather than flag-dependent, following the precedent set by `ppr_retrieve`: with `EXACT_LOOKUP_ENABLED=false` or the policy flag off, the action is skipped at execution with zero I/O instead of being removed from the prompt/whitelist, so the action contract does not drift with deployment configuration. The trace step renders with the concise `精查` label.
   - Reasoning mode exposes `follow_chain` as an internal agent action, not a separate Ask mode or button. It may compose only evidence-backed, same-type two-hop paths from the explicit transitive whitelist (`derived_from/kind_of/prerequisite_of/precedes/part_of`). The two stored relations are separately citable; the composed conclusion must be labelled as an inference and must never be persisted as a KG edge. Its live/final trace step must render with the concise `推导` label and bounded detail rather than raw evidence text.
+  - Reasoning mode exposes `consult_memory` (Agentic Memory P4) as a twelfth, zero-parameter reflect action the model may spend one turn on, not a separate Ask mode or a channel that reads any user content: it recalls entries from the deployment-global retrieval-strategy experience library plus the caller's own notebook-understanding overlay note, never evidence, never citable with `[k]`, and never a source of retrieval scope — the same "how to search, never what to read" rule the passive experience block already keeps. It exists in the schema only when `retrieval_effort` is `deep`/`thorough`/`exhaustive` and the experience library's own injection flag is on; the tier gate is folded into that same flag rather than being an independent switch. Its trace step renders with the concise `回想` label (never `记忆`, which the Memory-recall step already owns) and a call that returns nothing new records a `skip` step instead. Full contract: `docs/product-and-api.md`/`_zh.md`, "Retrieval strategy experience" / 「检索策略经验」.
   - Answers must stay evidence-grounded, render Markdown/code/formula/table content cleanly, use compact numbered citations (`[1]`, `[2]`, ...), including model-emitted numeric citation groups such as `[1, 2, 3]` when every number maps to a known answer reference, expand citation details inside the answer panel (not in an overflowing floating popover), and support lightweight 👍/👎/copy actions. A whole-line single-line `$$...$$` emitted next to prose is still display math, and wide display formulas scroll locally rather than widening/clipping the Ask, report, Memory, or Knowhow panel. Do not flatten all related knowledge under each answer; route deeper exploration from the citation area into the Knowledge Graph.
   - Ask input ergonomics: `Enter` submits, `Shift+Enter` inserts a newline. While a model response is running, lock the input and mode controls, prevent duplicate sends, and turn the send button into an interrupt control that restores the draft question for editing. Explicit interruption must call `POST /notebooks/{id}/ask/jobs/{job_id}/cancel`; that endpoint sets the backend cancellation event so the in-flight Ask worker / LLM path stops and does not save a cancelled final answer. A transport disconnect only stops delivery to that client; navigation, refresh, or loss of the `/ask/stream` connection leaves the detached worker running to completion.
   - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
@@ -1041,6 +1042,59 @@ searches but never *what* it may read. Full contract, closed vocabularies, and
 numeric ceilings: `docs/product-and-api.md`/`_zh.md`, "Retrieval strategy
 experience" / 「检索策略经验」.
 
+**Agentic Memory P4 additions.** Closes the step→anchor attribution gap the P2
+`RunObservation` docstring used to register as unrecoverable, and adds two new
+consumers of the same experience library. (1) Write side (T1/T2): the four
+action branches whose own results are individually addressable ids —
+`retrieve` (initial pull and every `add_subquery` turn), `ppr`,
+`exact_lookup`, `expand` — now write `result_ids` into their own trace-step
+detail unconditionally at every call site (both the deterministic seed pass
+and the agent-chosen turn), bounded to `TRACE_RESULT_IDS_MAX`; an empty list
+on a genuine zero-hit result is the signal, not an absent field.
+`expand_community`/`follow_chain`/`enumerate`/`outline` are deliberately left
+untouched, and `search_elements` lands on a `fallback` step outside the
+eight-word action vocabulary entirely, so element-level anchors remain
+structurally unattributable — a registered boundary. The final
+`synthesis`/`answer` step separately writes `anchor_evidence_ids` (the
+answer's actually-bound `[k]` anchors by `object_id`), bounded to
+`TRACE_ANCHOR_EVIDENCE_IDS_MAX`. Neither key is rendered by
+`getTraceStepDetail` on the frontend under any step type — they are opaque
+handles read only by the distillation projection. (2) Distillation side
+(T3/T4): `ActionObservation` gains `attributable: bool` and
+`anchored_hits: int` (two closed-shape fields, not one nullable count — the
+privacy guard's annotation scanner accepts only `int`/`bool`/closed
+`Literal`, not `Optional[int]`); the raw id-to-id intersection happens once,
+locally, inside the projection's own loop, and never becomes a field on
+`RunObservation`, so the model writing an entry's rationale still never sees
+an id. A run persisted before this phase, or an action that produced no
+`result_ids` this run, has `attributable=False` — "no evidence either way",
+never "this action did not help". (3) Two new, independent read paths onto
+the same library (T5/T6), both gated only by the existing injection flag
+(`RETRIEVAL_EXPERIENCE_INJECT_ENABLED`, default off) — `consult_memory` is a
+zero-parameter reflect ACTION the model may choose to spend one turn on
+(distinct SELECTION from the passive block: excludes rows the passive block
+already delivered, prioritizes actions gone quiet this run, also merges in
+the caller's own not-yet-delivered notebook-understanding overlay note),
+additionally gated on `retrieval_effort` ∈ {deep, thorough, exhaustive} — that
+tier gate is folded into the SAME boolean as the injection flag rather than
+being an independent policy bit, a deliberate narrowing of the original
+design sketch registered at the opening of the phase: offering an action that
+can never return anything when the injection flag alone is off would spend a
+real reflect-turn budget on a provably-empty channel. Deep Report's
+per-section deep-dive inherits it automatically once depth resolves to `deep`
+or above, through the same depth→tier table the outline scratchpad (PR-5)
+already uses. Its trace step carries UI label "回想" (never "记忆", which the
+Memory-recall step already owns). The step-level zero-hit nudge is a separate,
+zero-LLM, server-driven mechanism: after any of four instrumented action
+branches (`ppr`/`exact_lookup`/`expand`/`follow_chain`) records its second
+consecutive zero-new-result invocation in one run, the server appends one
+sentence — quoting a matching `bad`-polarity library entry verbatim — to the
+reflect loop's own account-back summary, capped at two nudges per run across
+all four actions combined, with no effort-tier requirement (it costs no extra
+turn). Full contract and numeric ceilings:
+`docs/product-and-api.md`/`_zh.md`, "Retrieval strategy experience" /
+「检索策略经验」.
+
 ### Database Backend And Switching Contract
 
 - At the `open_fresh_live_sqlite` call boundary, a non-transient `sqlite3.OperationalError` is a source-binding identity failure. Locked, busy, and interrupted opens remain transient whole-batch retries; SQLite operational errors after that open boundary retain their existing schema/query classifications.
@@ -1194,6 +1248,7 @@ Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, to
 | 画像 / 覆盖层画像（agent_notebook_profile 个人层） | 我的检索心得 |
 | 观察队列（observation, agent_observations，Agentic Memory P3） | Agent 记录 |
 | 回答风格偏好（search profile, user_profiles.search_profile_json，Agentic Memory P3） | 我的回答偏好 |
+| consult_memory（模型主动拉取检索经验的 reflect 动作／trace 步，Agentic Memory P4） | 回想 |
 
 **图谱质量分析视图（批 1）的四行补记**：「合并后的知识对象」同时覆盖内部计量单位代号
 `canonical`（按节点数）与 `clusters`（按簇数）——两者在这份报告里数的是同一种东西，映射到

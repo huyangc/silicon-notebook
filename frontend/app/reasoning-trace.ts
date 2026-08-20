@@ -27,6 +27,12 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 里出现两条读起来一样、说的却是两回事的步(一条是「这个库是什么」,一条是
   // 「这类问题该怎么查」)。注入默认关闭,且没蒸出内容时后端不落这一步。
   experience: "打法",
+  // consult_memory = reflect 循环里模型主动拉取的一次经验查询(Agentic Memory
+  // P4):合并送达部署级「打法」经验库里这一轮新命中的条目、外加本人覆盖层
+  // 「检索心得」里还没被动块带出的那句话。⚠ 不能叫「记忆」——那个词已经被
+  // Memory 召回步(见上面 memory: "记忆")占用,两步同名会让轨迹里出现两条读
+  // 起来一样、说的却是两回事的步。
+  consult_memory: "回想",
   answer: "合成",
   // answer = 检索器决定作答并报告采用了哪些证据;synthesis = 答案真的写出来了。
   // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
@@ -36,15 +42,16 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 11 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
+// 全部 12 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
 // `decision.next_action == "answer" or decision.sufficient` 起,到
 // `elif decision.next_action == "expand_community":` 止(PR-2 在其中插入了
 // enumerate_elements/enumerate_kg_objects 两个,精确查找通道插入了 exact_lookup
-// 一个,O1 插入了 update_outline(`OUTLINE_ACTION`)一个,原为 7 个)。按分支内容
-// 定位而非行号:本仓库的行号指针已知会随后续改动腐烂(见
-// test_architecture_documentation 一类语义化守卫的教训),这里不重蹈覆辙。用
-// 「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/exact_lookup/
-// update_outline 这些是内部机制,不该摆给用户)。
+// 一个,O1 插入了 update_outline(`OUTLINE_ACTION`)一个,Agentic Memory P4 插入了
+// consult_memory(`CONSULT_MEMORY_ACTION`,仅 deep 及以上档且经验注入闸开启时
+// 出现)一个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续
+// 改动腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不重
+// 蹈覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
+// exact_lookup/update_outline/consult_memory 这些是内部机制,不该摆给用户)。
 //
 // PR-2.5 的来源清单刻意**不在**这张表里:它不是新增动作,而是 enumerate 动作的
 // 一个参数值(`enumerate.collection="sources"`),所以反思步的「下一步意图」仍是
@@ -63,6 +70,7 @@ const NEXT_ACTION: Record<string, string> = {
   follow_chain: "顺着推导链继续",
   exact_lookup: "按名称精确查找",
   update_outline: "整理大纲",
+  consult_memory: "回想以往的查法",
 };
 
 export type ReasoningTraceSummary = {
@@ -132,6 +140,15 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   // experience 与 profile 同一条理由:它的 detail 是 entries/chars,两个都不是
   // 「候选数」,落到下面的通用分支就会渲染出一个读起来对、其实错位的数。
   if (step.step_type === "experience") {
+    return typeof detail.entries === "number" ? `${detail.entries} 条打法` : "";
+  }
+  // consult_memory(Agentic Memory P4,T5):同一条理由,必须排在通用分支之前。
+  // 后端 reasoning_retrieval.py 实际写入的 detail 只有 entries(本次新增的经验
+  // 库条目数)与 chars(渲染出的整块字符数)——本人覆盖层「检索心得」是否被一并
+  // 带出只是块内附加的一行文字,没有独立计数字段可读,所以这里不编造一个「M 条
+  // 心得」出来。entries 为 0 但仍落这一步的情形(只带出覆盖层那句话、经验库没有
+  // 新条目)照常显示「0 条打法」,与 profile/experience 对 0 的处理方式一致。
+  if (step.step_type === "consult_memory") {
     return typeof detail.entries === "number" ? `${detail.entries} 条打法` : "";
   }
   if (step.step_type === "memory") {
