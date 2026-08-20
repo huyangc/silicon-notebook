@@ -144,9 +144,16 @@ class OfficialMcpClient:
     async def __aexit__(self, *exc_info):
         await self.stack.aclose()
 
-    async def call(self, name: str, arguments: dict | None = None):
+    async def call(
+        self, name: str, arguments: dict | None = None, *, progress_callback=None
+    ):
         assert self.session is not None
-        return await self.session.call_tool(name, arguments or {})
+        # Passing a progress_callback is what makes the SDK put a
+        # `progressToken` in the request's `_meta`; without one the server's
+        # `Context.report_progress` short-circuits and nothing is sent.
+        return await self.session.call_tool(
+            name, arguments or {}, progress_callback=progress_callback
+        )
 
 
 @pytest.fixture
@@ -3295,3 +3302,229 @@ async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
         assert (await client.call("build_retrieval_index", {})).isError
 
     assert scheduled_kg_jobs == []
+
+
+# --- Long-running tools: MCP progress heartbeat -----------------------------
+#
+# An MCP client does not wait forever. Claude Code aborts a tool call that has
+# sent neither a response nor a progress notification for N seconds, and
+# `ask_notebook` in `reasoning` mode runs for minutes -- so without a heartbeat
+# the client gives up on a call the server is still executing successfully.
+#
+# The trap these tests exist for is that the fix is TWO things, and either one
+# alone is silently useless: `_run_with_progress` must emit the beats, and the
+# transport must be in SSE mode to carry them. With `json_response=True` the
+# SDK opens a per-request stream, drains it looking for the response, and
+# discards every notification on the way -- `report_progress` still "succeeds"
+# and the client receives nothing. Only an end-to-end assertion catches that,
+# which is why these go through the official client rather than spying on the
+# server-side call.
+
+
+def _slow_ask(mcp_env, monkeypatch, seconds: float):
+    """Point `ask_notebook` at an answer that takes `seconds` to produce."""
+    import time as _time
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+
+    def slow_answer(*args, **kwargs):
+        _time.sleep(seconds)
+        return SimpleNamespace(
+            answer_id="ans-slow", answer="Slow answer.", conclusion="Slow.",
+            grounded=True, evidence_level="grounded", mode="chunk",
+            conversation_id="conv-slow", anchors=[], citations=[],
+        )
+
+    monkeypatch.setattr(service, "ask", slow_answer)
+
+
+@pytest.mark.anyio
+async def test_a_slow_tool_heartbeats_progress_to_the_client(mcp_env, monkeypatch):
+    """The whole point: beats reach the CLIENT while the tool is still running.
+
+    Mutation guards (all three verified by replay, see task report):
+      1. `json_response=True` on the FastMCP constructor -> zero beats
+      2. deleting the `_run_with_progress` wrapper at ask_notebook's call site
+         (back to a bare `anyio.to_thread.run_sync`) -> zero beats
+      3. moving the heartbeat's `report_progress` after the work -> zero beats
+    """
+    from app.api import mcp_server
+
+    monkeypatch.setattr(mcp_server, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
+    _slow_ask(mcp_env, monkeypatch, 0.45)
+
+    beats: list[tuple[float, float, str | None]] = []
+
+    async def on_progress(progress, total, message):
+        beats.append((asyncio.get_running_loop().time(), progress, message))
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"},
+            progress_callback=on_progress,
+        ))
+        finished_at = asyncio.get_running_loop().time()
+
+    assert answer["answer"] == "Slow answer."
+    # A 450ms call at a 50ms interval; assert only that SOME arrived, so the
+    # test does not become a scheduler-timing flake.
+    assert len(beats) >= 2, beats
+    # Every beat landed before the result, which is the property that keeps the
+    # client's idle timer from expiring.
+    assert all(at < finished_at for at, _, _ in beats)
+    # MCP requires the progress value to increase with every notification.
+    values = [progress for _, progress, _ in beats]
+    assert values == sorted(values) and len(set(values)) == len(values), values
+    # The message names the tool and the elapsed seconds and NOTHING else --
+    # no question text, no notebook or source name. Same rule the telemetry
+    # events follow, and this string goes to a client we do not control.
+    assert all(message.startswith("ask_notebook: ") for _, _, message in beats)
+    assert all("evidence" not in message for _, _, message in beats)
+
+
+@pytest.mark.anyio
+async def test_no_progress_is_sent_when_the_client_did_not_ask_for_it(
+    mcp_env, monkeypatch
+):
+    """A client that sends no progressToken is charged nothing.
+
+    `Context.report_progress` short-circuits before touching the session, so
+    the heartbeat costs a sleeping task and no wire traffic. Spied on the
+    SERVER side because there is, by construction, nothing to observe on the
+    client side.
+    """
+    from mcp.server.session import ServerSession
+
+    from app.api import mcp_server
+
+    sent: list[tuple] = []
+    original = ServerSession.send_progress_notification
+
+    async def spy(self, *args, **kwargs):
+        sent.append((args, kwargs))
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ServerSession, "send_progress_notification", spy)
+    monkeypatch.setattr(mcp_server, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
+    _slow_ask(mcp_env, monkeypatch, 0.3)
+
+    async def on_progress(progress, total, message):
+        return None
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"}
+        ))
+        silent = list(sent)
+        # Both directions in one test on purpose: asserting only "nothing was
+        # sent" would still pass with the heartbeat deleted outright, which is
+        # not the property being pinned.
+        _payload(await client.call(
+            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"},
+            progress_callback=on_progress,
+        ))
+
+    assert answer["answer"] == "Slow answer."
+    assert silent == []
+    assert len(sent) >= 2, sent
+
+
+@pytest.mark.anyio
+async def test_a_tool_error_survives_the_heartbeat_task_group(mcp_env, monkeypatch):
+    """The heartbeat must not turn a tool's own message into an ExceptionGroup.
+
+    anyio 4 wraps an exception raised in a task group's BODY, and FastMCP turns
+    whatever leaves a tool into the text the Agent reads. `_run_with_progress`
+    therefore captures the failure in the child task and re-raises it after the
+    group closes. Mutation guard: move the work back into the `async with`
+    body and this reads `unhandled errors in a TaskGroup` instead.
+    """
+    from app.api import mcp_server
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(mcp_server, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+
+    def boom(*args, **kwargs):
+        raise ValueError("this exact sentence must reach the Agent")
+
+    monkeypatch.setattr(service, "ask", boom)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        failed = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "chunk"}
+        )
+
+    assert failed.isError
+    text = failed.content[0].text
+    assert "this exact sentence must reach the Agent" in text
+    assert "TaskGroup" not in text and "ExceptionGroup" not in text
+
+
+@pytest.mark.anyio
+async def test_the_mcp_transport_answers_over_sse_not_buffered_json(mcp_env):
+    """Pins the transport mode itself, in the one place it is observable.
+
+    `json_response=True` would answer this POST `application/json` and quietly
+    drop every notification the tools emit. Asserting the response's
+    content-type keeps that flip from passing review as a harmless-looking
+    one-word change.
+    """
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        await _wait_for_ready(app)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+            headers={"Authorization": f"Bearer {mcp_env['token_a'].token}"},
+            follow_redirects=True,
+        ) as http:
+            accepted = await http.post(
+                "/mcp",
+                headers={
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": {"name": "transport-mode", "version": "0"},
+                    },
+                },
+            )
+            # And the cost of SSE mode, stated as a test rather than left to be
+            # discovered: a POST that accepts only JSON is refused. The
+            # Streamable HTTP spec requires clients to send both media types.
+            json_only = await http.post(
+                "/mcp",
+                headers={
+                    "content-type": "application/json",
+                    "accept": "application/json",
+                },
+                json={
+                    "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": {"name": "json-only", "version": "0"},
+                    },
+                },
+            )
+
+    assert accepted.status_code == 200
+    assert accepted.headers["content-type"].startswith("text/event-stream")
+    assert json_only.status_code == 406
