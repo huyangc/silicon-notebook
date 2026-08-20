@@ -35,6 +35,7 @@ clipping it (see ``parse_distillation_reply``).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 from app.repositories.ports import RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS
@@ -401,10 +402,44 @@ def worst_experience_for(
     return best
 
 
+@dataclass(frozen=True)
+class RenderedConsultBlock:
+    """What ``render_consult_block`` actually put in front of the model.
+
+    Agentic Memory P4 (修复轮 spec④/Q-P1-3): the 600-character cap drops
+    whole rows, so "the caller selected N rows this call" and "N rows are now
+    visible in the rendered output" can differ, and only the second one is a
+    fact the caller may act on — bump the delivered-ids bookkeeping so a
+    dropped row can still be offered again later, write the trace step's
+    ``entries`` count, and decide whether this call counted as "found
+    something new" at all. A plain ``str`` return could not carry that
+    distinction without the caller re-deriving it by re-scanning the output.
+
+    ⚠ Field named ``rendered_text`` rather than the shorter ``text`` on
+    purpose: this module is one of the three the retrieval-experience privacy
+    guard (``test_retrieval_experience_privacy_guard.py``) statically scans
+    for a fixed list of dangerous free-text identifiers, and ``text`` is one
+    of them (a document's body, in every OTHER module that name would refer
+    to) — the guard cannot tell "this text is the module's own bounded,
+    already-privacy-checked render output" apart from "this text is raw
+    document content" from the identifier alone, so it does not try; the
+    identifier itself has to stay off the list.
+    """
+
+    rendered_text: str
+    #: Ids of the ``rows`` entries that actually made it into
+    #: ``rendered_text`` — a STRICT subset of what the caller passed in, in
+    #: the same order.
+    delivered_ids: tuple[str, ...]
+    #: Whether ``extra_lines`` (the profile-overlay note, at most one line)
+    #: made it into ``rendered_text``.
+    overlay_rendered: bool
+
+
 def render_consult_block(
     rows: Sequence[Mapping[str, Any]],
     extra_lines: Sequence[str] = (),
-) -> str:
+) -> RenderedConsultBlock:
     """Render a ``consult_memory`` result as one prompt block, hard-capped at
     ``CONSULT_MEMORY_BLOCK_MAX_CHARS`` — same shape as
     ``render_experience_block`` (rows dropped whole rather than clipped), with
@@ -418,6 +453,13 @@ def render_consult_block(
     we already know that might help right now") and a model reading two
     separately-capped blocks back to back has no way to tell they are related.
 
+    ⚠ Agentic Memory P4 (修复轮 Q-P1-3): ``extra_lines`` renders FIRST, ahead
+    of ``rows`` — the overlay note is a single, bounded, personal signal (this
+    member's own retrieval notes, no other channel surfaces them), where a
+    library row is one of possibly many shared tactics that can simply be
+    offered again on a later call if it gets crowded out this time. When
+    budget is tight, the scarcer signal should win the seat.
+
     ``rows`` is expected to be the RUN's whole accumulated selection so far
     (the caller re-renders the full set on every ``consult_memory`` call
     rather than appending a freshly-capped block per call — see the call
@@ -425,10 +467,22 @@ def render_consult_block(
     budget instead of two.
     """
     lines: list[str] = []
+    delivered_ids: list[str] = []
+    overlay_rendered = False
     budget = (
         CONSULT_MEMORY_BLOCK_MAX_CHARS - len(_CONSULT_HEADER)
         - len(_CONSULT_GUIDANCE) - 2
     )
+    for extra in extra_lines or ():
+        cleaned = _clean(extra)
+        if not cleaned:
+            continue
+        row = f"- {cleaned}"
+        if len(row) + 1 > budget:
+            break
+        budget -= len(row) + 1
+        lines.append(row)
+        overlay_rendered = True
     for entry in rows or ():
         if not usable_entry(entry):
             continue
@@ -439,18 +493,15 @@ def render_consult_block(
             break
         budget -= len(row) + 1
         lines.append(row)
-    for extra in extra_lines or ():
-        cleaned = _clean(extra)
-        if not cleaned:
-            continue
-        row = f"- {cleaned}"
-        if len(row) + 1 > budget:
-            break
-        budget -= len(row) + 1
-        lines.append(row)
+        delivered_ids.append(str(entry.get("id") or ""))
     if not lines:
-        return ""
-    return "\n".join([_CONSULT_HEADER, _CONSULT_GUIDANCE, *lines])
+        return RenderedConsultBlock(
+            rendered_text="", delivered_ids=(), overlay_rendered=False)
+    joined = "\n".join([_CONSULT_HEADER, _CONSULT_GUIDANCE, *lines])
+    return RenderedConsultBlock(
+        rendered_text=joined, delivered_ids=tuple(delivered_ids),
+        overlay_rendered=overlay_rendered,
+    )
 
 
 def render_experience_block(entries: Sequence[Mapping[str, Any]]) -> str:
@@ -552,6 +603,7 @@ __all__ = [
     "RETRIEVAL_EXPERIENCE_BLOCK_MAX_CHARS",
     "RETRIEVAL_EXPERIENCE_INJECT_TOP_K",
     "RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR",
+    "RenderedConsultBlock",
     "action_id_for",
     "adopted_entry_ids",
     "clip_rationale",

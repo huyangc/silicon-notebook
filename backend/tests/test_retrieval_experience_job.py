@@ -337,6 +337,36 @@ def test_a_truncated_anchor_list_makes_the_whole_run_unattributable():
     assert (retrieve.attributable, retrieve.anchored_hits) == (False, 0)
 
 
+def test_a_truncated_result_ids_list_poisons_only_that_action_not_the_whole_run():
+    """修复轮 spec②:某个动作自己的 result_ids 被写侧截断(``result_ids_
+    truncated``)时,只有**这个动作**在本 run 里 attributable=False——被截掉
+    的尾巴里可能恰好是答案绑定的锚点,"没交上截断的那部分"与"确实没命中"
+    分不清楚。没被截断的另一个动作不受连坐,镜像的是 pass 1 对锚点列表
+    本身截断时"整个 run 判 False"的语义,但这里爆炸半径只到"这一个动作"。
+    """
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 21,
+                            "result_ids": ["c-1"] * 20,
+                            "result_ids_truncated": True}},
+                {"step_type": "ppr",
+                 "detail": {"count": 1, "result_ids": ["c-2"]}},
+                {"step_type": "synthesis",
+                 "detail": {"anchors": 1, "anchor_evidence_ids": ["c-2"]}},
+            ]
+        )
+    )
+    assert observed is not None
+    by_action = {a.action: a for a in observed.observation.actions}
+    assert (by_action["retrieve"].attributable,
+           by_action["retrieve"].anchored_hits) == (False, 0)
+    assert (by_action["ppr"].attributable,
+           by_action["ppr"].anchored_hits) == (True, 1)
+
+
 def test_a_run_whose_synthesis_step_was_dropped_by_the_step_limit_is_not_attributable():
     """不能依赖步序/步的存在——一个 run 的 trace 步数被
     ``RETRIEVAL_EXPERIENCE_BATCH_STEPS`` 截断,synthesis 步整个不在
@@ -350,6 +380,35 @@ def test_a_run_whose_synthesis_step_was_dropped_by_the_step_limit_is_not_attribu
                 {"step_type": "retrieve",
                  "detail": {"count": 1, "result_ids": ["c-1"]}},
                 # 无 synthesis/answer 步——store 的 step_limit 把它截掉了
+            ]
+        )
+    )
+    assert observed is not None
+    retrieve = next(a for a in observed.observation.actions if a.action == "retrieve")
+    assert (retrieve.attributable, retrieve.anchored_hits) == (False, 0)
+
+
+def test_a_surviving_answer_step_with_no_anchor_key_is_not_a_usable_anchor_source():
+    """修复轮 Q-P1-1:比上一条更精确的截尾常态形状——不是"synthesis/answer
+    步整个不在 steps 里",而是**同名但不带锚点**的另一种 "answer" 步活了
+    下来(reasoning_retrieval.py 自己的候选池汇总步,``summary="合成候选"``,
+    detail 只有 kg/elements 计数,从来不写 anchor_evidence_ids),真正带
+    ``anchor_evidence_ids`` 的那条 synthesis 步被 step_limit 切掉了。
+
+    按 step_type 判定会把这条"answer"步误认成一个合法的(空)锚点来源,让
+    这个 run 的每个动作的 anchored_hits 全部被算成 0——而真相是这条 run
+    的锚点根本不可读,必须与"没有 synthesis/answer 步"同一判决:
+    ``(False, 0)``。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 1, "result_ids": ["c-1"]}},
+                # 候选池汇总的 "answer" 步——同名但从不携带 anchor_evidence_ids。
+                {"step_type": "answer", "summary": "合成候选",
+                 "detail": {"kg": 5, "elements": 3}},
+                # 真正带锚点的 synthesis 步不在这里——模拟它被 step_limit 切掉。
             ]
         )
     )
