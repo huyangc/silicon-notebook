@@ -24,6 +24,11 @@ from app.repositories.postgres._store_utils import (
     utc_now,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.services.search_profile import (
+    merge_field,
+    parse_search_profile,
+    serialize_search_profile,
+)
 _UPLOAD_LIMIT_DEFAULT_KEY = "upload_document_limit_default"
 _DOCUMENT_LIMIT_MIN = 1
 _DOCUMENT_LIMIT_MAX = 100000
@@ -67,6 +72,13 @@ class IdentityStore:
         user_row = user  # type: ignore[assignment]
         profile_row = profile  # type: ignore[assignment]
         ui_mode = (profile_row.get("ui_mode") if profile_row else None) or "auto"
+        # Agentic Memory P3(T6):同 SQLite 侧,parse_search_profile 统一
+        # fail-open,非空 fields 才挂到 UserProfile 上(NULL/畸形文档都折成
+        # None,与"从未设置"同一展示口径)。
+        parsed_search_profile = parse_search_profile(
+            profile_row.get("search_profile_json") if profile_row else None
+        )
+        search_profile = parsed_search_profile if parsed_search_profile["fields"] else None
         return UserProfile(
             id=user_row["id"],
             email=user_row["email"],
@@ -78,6 +90,7 @@ class IdentityStore:
                 profile_row.get("domain_focus") if profile_row else None, []
             ),
             ui_mode=ui_mode,
+            search_profile=search_profile,
         )
 
     def _create_user_in_txn(self, connection, username: str, password: str):
@@ -346,6 +359,62 @@ class IdentityStore:
                     "ON CONFLICT (id) DO UPDATE SET ui_mode=EXCLUDED.ui_mode,updated_at=EXCLUDED.updated_at "
                     "RETURNING *",
                     (f"profile-{user_id}", user_id, jsonb([]), ui_mode, now, now),
+                ).fetchone()
+            return self._user_profile(user, profile)
+
+    def set_user_search_profile(
+        self, user_id: str, fields: "dict", origin: str
+    ) -> UserProfile:
+        """读-改-写 ``user_profiles.search_profile_json`` 里的 ``fields``
+        (Agentic Memory P3, T6)。规则(job 不覆盖用户已写字段、value=None
+        清空字段)全部在 ``search_profile.merge_field`` 里,这里只负责把
+        「读、逐字段合并、序列化、写」钉在**同一个** ``write()`` 事务内。
+
+        ⚠ 与 SQLite 侧的关键差异:SQLite 靠进程级 write_lock 天然把「用户
+        编辑」与「后台归纳」两个写者串行化到同一个 ``write()`` 块的粒度;
+        PostgreSQL 每个连接互相独立、没有这道进程锁,必须显式 ``SELECT ...
+        FOR UPDATE`` 锁住这一行,否则两个并发事务会各自读到同一份旧文档、
+        后提交的一方整体覆盖前一方刚合并进去的字段(lost-update)。
+
+        缺 profile 行时的 upsert 形状镜像 ``set_user_ui_mode`` 那条同款
+        codex R1 P1 教训:先按 ``user_id`` 尝试 UPDATE(能覆盖种子行与派生
+        id 行两种形状),缺行才补 INSERT 且保留 ``ON CONFLICT (id) DO
+        UPDATE`` 吞掉两个并发请求都 UPDATE 到 0 行后同时补插的竞态——但
+        这条竞态本身只发生在 profile 行整个不存在的边界情形;一旦行存在,
+        ``FOR UPDATE`` 才是本方法真正的并发保证。目标用户不存在 →
+        KeyError。"""
+        if origin not in {"user", "job"}:
+            raise ValueError("invalid search-profile origin")
+        now = utc_now()
+        with self.database.write() as db:
+            user = db.execute("SELECT * FROM users WHERE id=%s", (user_id,)).fetchone()
+            if user is None:
+                raise KeyError(user_id)
+            row = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id=%s FOR UPDATE", (user_id,)
+            ).fetchone()
+            raw = row.get("search_profile_json") if row is not None else None
+            profile_doc = parse_search_profile(raw)
+            for field, value in fields.items():
+                profile_doc = merge_field(profile_doc, field, value, origin)
+            serialized = serialize_search_profile(profile_doc)
+            if row is not None:
+                profile = db.execute(
+                    "UPDATE user_profiles SET search_profile_json=%s,updated_at=%s "
+                    "WHERE user_id=%s RETURNING *",
+                    (serialized, now, user_id),
+                ).fetchone()
+            else:
+                profile = db.execute(
+                    "INSERT INTO user_profiles "
+                    "(id,user_id,memory_mode,domain_focus,search_profile_json,"
+                    "created_at,updated_at) "
+                    "VALUES (%s,%s,'manual',%s,%s,%s,%s) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "search_profile_json=EXCLUDED.search_profile_json,"
+                    "updated_at=EXCLUDED.updated_at "
+                    "RETURNING *",
+                    (f"profile-{user_id}", user_id, jsonb([]), serialized, now, now),
                 ).fetchone()
             return self._user_profile(user, profile)
 

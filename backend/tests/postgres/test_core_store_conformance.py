@@ -308,6 +308,111 @@ def test_set_user_ui_mode_updates_a_non_derived_profile_row_in_place(
     assert kept["id"] == "profile-seeded-shape"
 
 
+def test_set_user_search_profile_round_trips_and_survives_a_missing_profile_row(
+    core_stores: CoreStores,
+):
+    """Agentic Memory P3(T6):PostgreSQL 侧 ``set_user_search_profile`` 与
+    SQLite 语义逐字对齐——``origin="user"`` 写入后可读回,``origin="job"``
+    不覆盖已被用户写过的字段,且缺 profile 行时走补 INSERT 而不是 404。"""
+    store = core_stores.identity
+    user = store.create_user("e00123456", "correct horse battery staple")
+
+    updated = store.set_user_search_profile(
+        user.id, {"answer_language": "zh"}, origin="user"
+    )
+    assert updated.search_profile["fields"]["answer_language"]["value"] == "zh"
+    assert updated.search_profile["fields"]["answer_language"]["origin"] == "user"
+
+    # job 不覆盖已被用户写过的字段(跨进程存储层同一条契约)。
+    unchanged = store.set_user_search_profile(
+        user.id, {"answer_language": "en"}, origin="job"
+    )
+    assert unchanged.search_profile["fields"]["answer_language"]["value"] == "zh"
+
+    # job 仍可自由填一个用户从未碰过的字段。
+    filled = store.set_user_search_profile(
+        user.id, {"answer_detail": "concise"}, origin="job"
+    )
+    assert filled.search_profile["fields"]["answer_detail"]["value"] == "concise"
+    assert filled.search_profile["fields"]["answer_detail"]["origin"] == "job"
+    assert filled.search_profile["fields"]["answer_language"]["value"] == "zh"
+
+    # 清空(value=None)删除该字段条目。
+    cleared = store.set_user_search_profile(
+        user.id, {"answer_language": None}, origin="user"
+    )
+    assert "answer_language" not in cleared.search_profile["fields"]
+
+    # 缺 profile 行时的补 INSERT 路径(镜像 set_user_ui_mode 的同款测试)。
+    _write_sql(
+        core_stores,
+        "DELETE FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    recreated = store.set_user_search_profile(
+        user.id, {"answer_shape": "prose"}, origin="user"
+    )
+    assert recreated.search_profile["fields"]["answer_shape"]["value"] == "prose"
+    row_count = _fetch_one(
+        core_stores,
+        "SELECT COUNT(*) AS n FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert row_count["n"] == 1
+
+
+def test_set_user_search_profile_serializes_concurrent_writers_via_row_lock(
+    core_stores: CoreStores,
+):
+    """PostgreSQL 每个连接互相独立、没有 SQLite 那道进程级 write_lock,必须靠
+    显式 ``SELECT ... FOR UPDATE`` 才能保证「用户编辑」与「后台归纳」并发写
+    不同字段时两个字段都留下——这条测试专门钉这个跨连接场景(SQLite 侧的
+    对应测试在 test_system_routes.py,靠进程写锁天然获得同样的保证,两条测试
+    因此不是同一份重复,而是各自验证各自后端的并发保证机制)。"""
+    store = core_stores.identity
+    user = store.create_user("f00123456", "correct horse battery staple")
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def _write_user():
+        try:
+            barrier.wait(timeout=5)
+            store.set_user_search_profile(
+                user.id, {"answer_shape": "table_first"}, origin="user"
+            )
+        except Exception as exc:  # pragma: no cover - surfaced via errors list
+            errors.append(exc)
+
+    def _write_job():
+        try:
+            barrier.wait(timeout=5)
+            store.set_user_search_profile(
+                user.id, {"answer_language": "zh"}, origin="job"
+            )
+        except Exception as exc:  # pragma: no cover - surfaced via errors list
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_write_user), threading.Thread(target=_write_job)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, errors
+
+    final = _fetch_one(
+        core_stores,
+        "SELECT search_profile_json FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    from app.services.search_profile import parse_search_profile
+
+    parsed = parse_search_profile(final["search_profile_json"])
+    assert parsed["fields"]["answer_shape"]["value"] == "table_first"
+    assert parsed["fields"]["answer_language"]["value"] == "zh"
+
+
 def test_change_user_password_round_trips_and_scopes_session_revocation(
     core_stores: CoreStores,
 ):

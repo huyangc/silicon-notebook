@@ -17,7 +17,12 @@ from app.api.deps import (
     user_error,
 )
 from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
-from app.models.identity import PasswordChangeRequest, UiModeUpdate, UserProfile
+from app.models.identity import (
+    PasswordChangeRequest,
+    SearchProfileUpdate,
+    UiModeUpdate,
+    UserProfile,
+)
 from app.repositories.identity_errors import (
     BuiltinAdminPasswordError,
     PasswordMismatchError,
@@ -32,6 +37,11 @@ from app.services.parser_registry import (
     parser_engine_capabilities,
 )
 from app.services.pending_bus import pending_bus
+from app.services.reasoning_retrieval import search_profile_wiring_active
+
+#: 与 agent_profile_routes.py 的 ``_DISABLED_MESSAGE`` 同一措辞——两处都是
+#: 「功能被总开关关闭」的同一类用户文案，保持逐字一致而非各写一份。
+_SEARCH_PROFILE_DISABLED_MESSAGE = "这项功能当前未开启，暂时无法编辑"
 
 
 router = APIRouter()
@@ -71,6 +81,28 @@ def update_my_ui_mode(
     """自助切换界面模式偏好("auto"|"advanced")；只写调用者自己的 user_profiles
     行，不做 admin 校验。合法值由 pydantic Literal 在到达这里之前已经拒绝。"""
     return identity_repository().set_user_ui_mode(user.id, payload.ui_mode)
+
+
+@router.patch("/me/search-profile", response_model=UserProfile)
+def update_my_search_profile(
+    payload: SearchProfileUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> UserProfile:
+    """自助编辑调用者自己的检索/回答风格偏好(Agentic Memory P3, T6)。只写调用者
+    自己的 user_profiles 行,不做 admin 校验——与 ``update_my_ui_mode`` 同格。
+
+    ``payload.model_fields_set`` 区分「请求体里没出现这个字段」(维持原值)与
+    「出现且值为 null」(=清空该字段,交还给 T7 归纳 job 重新填);未出现的字段
+    一律不进 ``fields`` 字典,不会被 ``set_user_search_profile`` 触碰。合法值域
+    由 pydantic 的 Literal/自定义校验器在到达这里之前已经拒绝(422)。总闸关闭
+    时拒绝写入(409)——与 ``GET /me`` 仍照常返回上次归纳/编辑的旧值不同,写入
+    在关闭期间不该继续积累数据。"""
+    if not search_profile_wiring_active(get_settings(), identity_repository()):
+        raise user_error(409, _SEARCH_PROFILE_DISABLED_MESSAGE)
+    fields = {name: getattr(payload, name) for name in payload.model_fields_set}
+    if not fields:
+        return user
+    return identity_repository().set_user_search_profile(user.id, fields, origin="user")
 
 
 @router.patch("/me/password", status_code=204)
@@ -122,6 +154,7 @@ def system_configuration(
         source_image_max_per_source=settings.mineru_max_images_per_source,
         source_images_enabled=settings.mineru_return_images,
         agent_profile_enabled=settings.agent_profile_enabled,
+        user_search_profile_enabled=settings.user_search_profile_enabled,
     )
 
 

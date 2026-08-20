@@ -15,6 +15,11 @@ from app.repositories.identity_errors import (
     SelfDemotionError,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.services.search_profile import (
+    merge_field,
+    parse_search_profile,
+    serialize_search_profile,
+)
 
 
 def _now() -> str:
@@ -83,6 +88,15 @@ class IdentityStore:
         ui_mode = "auto"
         if profile is not None and "ui_mode" in profile.keys() and profile["ui_mode"]:
             ui_mode = profile["ui_mode"]
+        # Agentic Memory P3(T6):search_profile 走 parse_search_profile 统一
+        # fail-open——列缺失(旧库尚未跑迁移)/NULL/畸形 JSON 全部落到空 profile,
+        # 再折成 None(同 NULL 一个展示口径:"没有可展示的偏好")。非空 fields
+        # 才把解析后的整份文档挂到 UserProfile 上。
+        search_profile = None
+        if profile is not None and "search_profile_json" in profile.keys():
+            parsed = parse_search_profile(profile["search_profile_json"])
+            if parsed["fields"]:
+                search_profile = parsed
         return UserProfile(
             id=user["id"],
             email=user["email"],
@@ -92,6 +106,7 @@ class IdentityStore:
             memory_mode=profile["memory_mode"] if profile else "manual",
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
             ui_mode=ui_mode,
+            search_profile=search_profile,
         )
 
     def _create_user_in_txn(self, db, username: str, password: str) -> UserProfile:
@@ -327,6 +342,58 @@ class IdentityStore:
                     "(id, user_id, memory_mode, domain_focus, ui_mode, created_at, updated_at) "
                     "VALUES (?, ?, 'manual', '[]', ?, ?, ?)",
                     (f"profile-{user_id}", user_id, ui_mode, now, now),
+                )
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return self._user_profile(user, profile)
+
+    def set_user_search_profile(
+        self, user_id: str, fields: "dict", origin: str
+    ) -> UserProfile:
+        """读-改-写 ``user_profiles.search_profile_json`` 里的 ``fields``
+        (Agentic Memory P3, T6)。``origin="user"`` 是自助编辑(PATCH
+        /me/search-profile),``origin="job"`` 是 T7 归纳 job 的写入;两者的
+        合并规则(job 不覆盖已被用户写过的字段、value=None 清空字段)全部在
+        ``search_profile.merge_field`` 里,这里只负责把「读、逐字段合并、
+        序列化、写」钉在**同一个** ``write()`` 块内。
+
+        SQLite 的 ``write()`` 本身就是进程内写串行(write_lock),同一进程里
+        「用户编辑」与「后台归纳」两个写者天然互斥在这一个块的粒度上,不需要
+        像 PostgreSQL 侧那样再显式 ``FOR UPDATE``——但读、合并、写仍必须留在
+        同一个块里,拆成两次独立的 ``write()`` 调用会在两次调用之间打开一个
+        「两个写者都读到旧文档、后写者整体覆盖前写者刚提交的字段」的
+        lost-update 窗口,即使锁本身是串行的。
+
+        缺 profile 行(理论上不会发生——create_user/_seed 必建)时补插一行,
+        镜像 ``set_user_ui_mode`` 的自愈语义(自助写自己的偏好不该因为一行
+        缺失的种子数据就 404)。目标用户不存在 → KeyError。"""
+        if origin not in {"user", "job"}:
+            raise ValueError("invalid search-profile origin")
+        now = _now()
+        with self.database.write() as db:
+            user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if user is None:
+                raise KeyError(user_id)
+            row = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            raw = row["search_profile_json"] if row is not None else None
+            profile_doc = parse_search_profile(raw)
+            for field, value in fields.items():
+                profile_doc = merge_field(profile_doc, field, value, origin)
+            serialized = serialize_search_profile(profile_doc)
+            cursor = db.execute(
+                "UPDATE user_profiles SET search_profile_json = ?, updated_at = ? "
+                "WHERE user_id = ?",
+                (serialized, now, user_id),
+            )
+            if cursor.rowcount == 0:
+                db.execute(
+                    "INSERT INTO user_profiles "
+                    "(id, user_id, memory_mode, domain_focus, search_profile_json, "
+                    "created_at, updated_at) VALUES (?, ?, 'manual', '[]', ?, ?, ?)",
+                    (f"profile-{user_id}", user_id, serialized, now, now),
                 )
             profile = db.execute(
                 "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)

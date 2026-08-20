@@ -695,6 +695,21 @@ class Settings(BaseSettings):
         5, ge=1, validation_alias="AGENT_PROFILE_BASE_TRIGGER")
     agent_profile_overlay_trigger: int = Field(
         10, ge=1, validation_alias="AGENT_PROFILE_OVERLAY_TRIGGER")
+    # Agentic Memory P3(B-Profile,T6):每用户「检索/回答风格偏好」文档
+    # (``user_profiles.search_profile_json``)总开关。判据只有一处——
+    # ``reasoning_retrieval.search_profile_wiring_active``,T7 归纳 job 的
+    # 触发闸、T8 的 Ask plan/answer 注入闸与本端点的可写性/可见性判据三处必须
+    # 共用它(镜像上面 agent_profile_enabled 的教训)。关掉即完全回到接入前:
+    # 不归纳、不注入、``PATCH /me/search-profile`` 一律 409、``GET /me`` 仍
+    # 回 ``search_profile: null``(与列缺失同一口径,不额外区分)。
+    user_search_profile_enabled: bool = Field(
+        True, validation_alias="USER_SEARCH_PROFILE_ENABLED")
+    # T7 归纳 job 的触发阈值(确定性闸,零模型调用——v1 归纳规则本身就是零 LLM
+    # 的多数语言统计):该用户累计完成的 Ask 数。``ge=1`` 而非允许 0,理由同
+    # 两条巡固链路的触发阈值——0 会让每一次提问都排一次归纳,那不是「更灵敏」,
+    # 是把一次后台整理变成随每次提问触发的同步成本。
+    user_search_profile_trigger: int = Field(
+        20, ge=1, validation_alias="USER_SEARCH_PROFILE_TRIGGER")
     # Agentic Memory P2:部署级**全局**的检索策略经验库。两把闸刻意**分开**,
     # 因为蒸馏与注入是两个独立的决定,而且它们的风险完全不同:蒸馏只是往一张
     # 没有任何用户可见面的表里攒行(默认 **开**,先把数据攒起来),注入才会改变

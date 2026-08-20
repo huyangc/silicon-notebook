@@ -8716,6 +8716,77 @@
           "title": "SearchHit",
           "type": "object"
         },
+        "SearchProfileUpdate": {
+          "additionalProperties": false,
+          "description": "``PATCH /me/search-profile`` request body.\n\nEvery field is ``Optional`` with a default of ``None`` — but ``None`` is\nNOT \"leave unchanged\". The route handler distinguishes \"field omitted\nfrom the request body\" (leave that field alone) from \"field sent as\n``null``\" (clear that field) via ``model_fields_set``, which pydantic\npopulates with exactly the field names that were present in the payload\nregardless of what value they carried. A field absent from\n``model_fields_set`` is never touched; one present with value ``None``\nis passed through to ``search_profile.merge_field`` as a clear.",
+          "properties": {
+            "answer_detail": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "concise",
+                    "detailed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Answer Detail"
+            },
+            "answer_language": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "zh",
+                    "en"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Answer Language"
+            },
+            "answer_shape": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "bullets",
+                    "table_first",
+                    "prose"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Answer Shape"
+            },
+            "domain_terms": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Domain Terms"
+            }
+          },
+          "title": "SearchProfileUpdate",
+          "type": "object"
+        },
         "SetBasesRequest": {
           "description": "全量替换本 notebook 的参考库挂载集合。空数组 = 取消全部挂载。",
           "properties": {
@@ -9865,6 +9936,10 @@
             "user_activity_view_enabled": {
               "title": "User Activity View Enabled",
               "type": "boolean"
+            },
+            "user_search_profile_enabled": {
+              "title": "User Search Profile Enabled",
+              "type": "boolean"
             }
           },
           "required": [
@@ -9878,7 +9953,8 @@
             "source_image_max_bytes",
             "source_image_max_per_source",
             "source_images_enabled",
-            "agent_profile_enabled"
+            "agent_profile_enabled",
+            "user_search_profile_enabled"
           ],
           "title": "SystemConfiguration",
           "type": "object"
@@ -10625,6 +10701,18 @@
             "role": {
               "title": "Role",
               "type": "string"
+            },
+            "search_profile": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search Profile"
             },
             "ui_mode": {
               "default": "auto",
@@ -13488,6 +13576,45 @@
             }
           },
           "summary": "Me Pending Stream"
+        }
+      },
+      "/api/me/search-profile": {
+        "patch": {
+          "description": "自助编辑调用者自己的检索/回答风格偏好(Agentic Memory P3, T6)。只写调用者\n自己的 user_profiles 行,不做 admin 校验——与 ``update_my_ui_mode`` 同格。\n\n``payload.model_fields_set`` 区分「请求体里没出现这个字段」(维持原值)与\n「出现且值为 null」(=清空该字段,交还给 T7 归纳 job 重新填);未出现的字段\n一律不进 ``fields`` 字典,不会被 ``set_user_search_profile`` 触碰。合法值域\n由 pydantic 的 Literal/自定义校验器在到达这里之前已经拒绝(422)。总闸关闭\n时拒绝写入(409)——与 ``GET /me`` 仍照常返回上次归纳/编辑的旧值不同,写入\n在关闭期间不该继续积累数据。",
+          "operationId": "update_my_search_profile_api_me_search_profile_patch",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchProfileUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UserProfile"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update My Search Profile"
         }
       },
       "/api/me/share-requests": {
