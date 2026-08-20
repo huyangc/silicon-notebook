@@ -39,7 +39,7 @@ curl -s http://127.0.0.1:8000/api/ready
 
 应看到 `"ready": true`。然后打开 <http://127.0.0.1:3000> 并登录。全新本机数据库的内置账号是 `admin`，本地默认密码是 `admin`；已有部署以实际配置为准。
 
-远程部署时，用该部署自己公布的地址，而不是手工改写下文这些：界面与 `/api/ready` 用它的 Web 地址，MCP 用接入说明印出的带斜杠 `MCP_PUBLIC_URL`（第 4 节）。两者**不一定同源**——代理可能单独公布 MCP，而后端自己的端口可能是私有的、或只有明文 HTTP。
+远程部署时，用该部署自己公布的地址，而不是手工改写下文这些：界面与 `/api/ready` 用它的 Web 地址，MCP 用接入说明**逐字**印出的 `MCP_PUBLIC_URL`（第 4 节）。两者**不一定同源**——代理可能单独公布 MCP，而后端自己的端口可能是私有的、或只有明文 HTTP。
 
 还需要至少一个当前账号可读的笔记本。若要验证 `search_notebook_context`，该笔记本应已有来源、知识对象或 confirmed Memory。
 
@@ -328,7 +328,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | `notebook is outside the token allowlist` | 回到 Agent 接入签发包含该 notebook 的新 token；不要扩大旧 token 之外的隐式权限。 |
 | scope/permission error | 对照上方 scope 表重新签发最小权限 token。token scope 不可在客户端侧提升。 |
 | Codex 看不到服务 | 运行 `codex mcp list`，确认环境变量已在启动 Codex 前导出，然后新开 session/重启 app 或 extension。 |
-| 配置客户端时 `404` 或连接被拒 | 用部署公布的带斜杠地址——`MCP_PUBLIC_URL` 加 `/`，签发回执的接入说明里就印着它。`<host>:8000/mcp/` 只适用于确认没有代理的直连部署；有代理时后端端口可能是私有的，硬去够它还可能把 token 降级成明文（第 4 节）。 |
+| 配置客户端时 `404` 或连接被拒 | 先照签发回执的接入说明**逐字**重试它印出的那个地址。补结尾斜杠、或回落到 `<host>:8000/mcp/`，都只适用于确认是直连后端的地址：有代理时它可能只路由公布的那条路径，后端端口可能是私有的，硬去够那个端口还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
