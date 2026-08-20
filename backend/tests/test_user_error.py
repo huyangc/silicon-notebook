@@ -261,6 +261,13 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "（正在整理，请稍候），无插值、无异常原文；真实响应由"
         "test_agent_profile_routes.py 的忙碌 409 与关闸 409 用例覆盖（断言逐字文案）。"
     ),
+    "app/api/agent_profile_routes.py::clear_agent_observations": (
+        "唯一动态 detail 是与 update_understanding_block 等三个端点共享的同一个中文"
+        "模块常量 _DISABLED_MESSAGE（这项功能当前未开启，暂时无法编辑），无插值、"
+        "无异常原文（Agentic Memory P3，T5）。真实响应由"
+        "test_agent_profile_api.py::test_disabled_get_returns_empty_not_404_delete_returns_409"
+        "覆盖（断言 409 + X-User-Message 逐字文案）。"
+    ),
     "app/api/catalog_routes.py::start_command_catalog": (
         "三处 detail：本文件顶部维护的中文常量 `_ALREADY_RUNNING_MESSAGE`"
         "（该来源已有识别任务在跑）、`catalog_job.MODEL_UNAVAILABLE_MESSAGE`"
@@ -336,6 +343,13 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_api_dismiss_with_too_many_explicit_candidates_is_a_user_readable_422 与"
         "test_api_dismiss_during_an_in_flight_reparse_is_a_user_readable_409 覆盖，"
         "均断言 X-User-Message 头与逐字 detail。"
+    ),
+    "app/api/system_routes.py::update_my_search_profile": (
+        "唯一动态 detail 是本文件顶部维护的中文模块常量"
+        "_SEARCH_PROFILE_DISABLED_MESSAGE（这项功能当前未开启，暂时无法编辑），"
+        "无插值、无异常原文（Agentic Memory P3，T6）。真实响应由"
+        "test_system_routes.py::test_patch_search_profile_is_409_when_globally_disabled"
+        "覆盖（断言 409 + X-User-Message 逐字文案）。"
     ),
 }
 
