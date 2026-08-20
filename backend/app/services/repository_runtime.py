@@ -151,6 +151,11 @@ class RepositoryRuntime:
         # note in particular why a store with no tenancy column is the right
         # shape here, and what carries its isolation argument instead.
         self.retrieval_experiences = bundle.retrieval_experiences
+        # Agentic Memory P3 (T2): bare store seat, no consumer yet — T3 (MCP
+        # ``add_observation``), T4 (untrusted overlay-consolidation sample)
+        # and T5 (the member-facing "my observations" API) wire on top of
+        # this. See AgentObservationStorePort in repositories/ports.py.
+        self.agent_observations = bundle.agent_observations
         self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries, self.kg_build_jobs)
         # Source files resolve storage_dir through the database. Construct eagerly
         # BEFORE the catalog so its storage_dir callable can bind THIS store

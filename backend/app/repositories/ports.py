@@ -4591,3 +4591,178 @@ class RetrievalExperienceStorePort(Protocol):
         ``adopted`` bump is deliberately invisible to it.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Agentic Memory P3 (T2): the per-(notebook, owner) log of short lines an
+# external Agent writes via the ``add_observation`` MCP tool (T3). Feeds T4's
+# per-member overlay consolidation as UNTRUSTED input only — never the
+# answer/report path itself. See ``agent_observations`` in ``_migration_55``
+# (SQLite) / ``0033_agent_observations.sql`` (PostgreSQL) for the schema
+# rationale this port's contract continues.
+# ---------------------------------------------------------------------------
+
+#: Hard ceiling on how many observation rows ONE ``(notebook_id, owner_id)``
+#: pair keeps. ``append_observation`` evicts down to this bound, oldest-first
+#: by ``(created_at DESC, id DESC)``, in the SAME write transaction as the
+#: insert that may have just pushed the group over it. The TABLE total is not
+#: capped by this constant — it grows with notebooks × members — only each
+#: group's own ring is. Exact value is registered in
+#: ``docs/product-and-api*.md`` only; this name is the protocol boundary, not
+#: a deployment knob a config file could raise.
+AGENT_OBSERVATION_RING_MAX = 200
+
+#: How many of the newest rows a single ``recent_observations``/
+#: ``list_observations`` read pulls back by default. Independent of the ring
+#: bound above — a caller is free to ask for fewer than the ring holds, and
+#: nothing here requires the two constants to move together.
+AGENT_OBSERVATION_SAMPLE_MAX = 20
+
+
+def project_observation_row(
+    observation_id: object,
+    agent_profile_id: object,
+    text: object,
+    created_at: object,
+) -> dict:
+    """The ONLY shape a caller of ``recent_observations``/``list_observations``
+    ever sees: ``{"id", "agent_profile_id", "text", "created_at"}``.
+
+    ⚠ ``owner_id`` is deliberately NOT one of the four fields, even though it
+    is the column both read methods filter by. Every consumer of these rows —
+    T4's untrusted overlay-consolidation prompt, T5's "my observations" API —
+    already knows whose scope it asked for, because it is the caller who
+    supplied ``owner_id`` as the query parameter in the first place.
+    Projecting it back into the row would be a second, redundant copy of a
+    value no reader needs, and one more field an accidental ``**row`` forward
+    could leak into a response shape that was never audited for it.
+
+    Both backends call this with already-normalised field values — SQLite's
+    ``created_at`` comes back as ISO text as stored; PostgreSQL's is coerced
+    through ``iso_timestamp`` first — so this function itself stays free of
+    any per-backend timestamp handling.
+    """
+    return {
+        "id": str(observation_id or ""),
+        "agent_profile_id": str(agent_profile_id or ""),
+        "text": str(text or ""),
+        "created_at": str(created_at or ""),
+    }
+
+
+class AgentObservationStorePort(Protocol):
+    """Durable rows for ``agent_observations`` — Agentic Memory P3's
+    append-only per-(notebook, owner) log of short lines an external Agent
+    writes about how it used this notebook.
+
+    Every read here is bounded by construction: both read methods take an
+    explicit ``limit`` and are always further bounded by
+    ``AGENT_OBSERVATION_RING_MAX`` — the group they scan can never hold more
+    rows than that, because ``append_observation`` evicts down to it on every
+    write. There is no unbounded scan anywhere in this port.
+    """
+
+    def append_observation(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        agent_profile_id: str,
+        *,
+        text: str,
+        client_request_id: str,
+    ) -> tuple[str, bool]:
+        """Append one observation; return ``(observation_id, deduplicated)``.
+
+        1. Idempotent on ``(notebook_id, owner_id, agent_profile_id,
+           client_request_id)`` — the same four columns
+           ``idx_agent_observations_request`` covers — decided inside the
+           SAME write transaction as the insert it may replace. ⚠
+           ``agent_profile_id`` MUST be part of that key: two different
+           Agents that each happen to mint the client-side request id
+           ``"obs-1"`` are two different observations, not one. A caller that
+           lands on an existing row gets that row's id back with
+           ``deduplicated=True`` and writes nothing new.
+
+        2. ``created_at`` is written as an ISO timestamp and ONLY an ISO
+           timestamp — never the empty string. The column is deliberately
+           excluded from ``POSTGRES_EMPTY_TIME_SENTINELS``: SQLite would
+           accept ``''`` with no local symptom, and forward shadow would then
+           hand that empty string to a PostgreSQL ``timestamptz`` and poison
+           the whole replication direction (the
+           ``notebook_share_requests.decided_at`` lesson). There is no
+           parameter on this method that could produce an empty value — the
+           timestamp comes from the store's own clock seam, never from the
+           caller — and that is deliberate, not incidental.
+
+        2b. The SAME write transaction's LAST step evicts this
+            ``(notebook_id, owner_id)`` group down to
+            ``AGENT_OBSERVATION_RING_MAX`` rows, oldest-first by
+            ``(created_at DESC, id DESC)`` — i.e. it deletes every row NOT
+            among the newest ``AGENT_OBSERVATION_RING_MAX`` under that
+            ordering. Registered trade-off: SQLite's ``created_at`` is
+            second-granular, so same-second rows tie-break on ``id`` (a
+            random uuid) rather than insertion order — for a 200-row ring
+            buffer of untrusted advisory text, that has no practical
+            consequence, and it buys not having to introduce an auto-
+            incrementing sequence column on a backend (PostgreSQL) that has
+            no ``rowid`` equivalent among ``POSTGRES_ROWID_ORDINAL_TABLES``.
+            Both backends use this SAME ordering and each carries its own
+            regression pinning it — the two must never independently decide
+            which rows survive a tie.
+        """
+        ...
+
+    def recent_observations(
+        self, notebook_id: str, owner_id: str, *, limit: int
+    ) -> list[dict]:
+        """The newest ``limit`` rows for exactly one ``(notebook_id,
+        owner_id)`` scope, ordered ``(created_at DESC, id DESC)`` — the SAME
+        ordering ``append_observation``'s eviction step uses, so "recent"
+        means the same thing on both sides of this port: nothing this method
+        can return is a row the eviction would have already dropped.
+
+        3. ``owner_id`` is baked into the SQL text as a literal ``owner_id =
+        ?`` / ``owner_id = %s`` equality predicate — a privacy boundary, not
+        a filter a caller could omit or apply after the fact in Python. Every
+        row projects through ``project_observation_row``, which deliberately
+        does NOT include ``owner_id`` in its output — see that function's
+        docstring for why.
+
+        This is T4's read: the untrusted-overlay-consolidation sample calls
+        it with ``limit=AGENT_OBSERVATION_SAMPLE_MAX``.
+        """
+        ...
+
+    def list_observations(
+        self, notebook_id: str, owner_id: str, *, limit: int
+    ) -> list[dict]:
+        """Byte-identical to ``recent_observations`` in ordering, filtering
+        and projection — the SAME query under a second name.
+
+        Kept as a genuinely separate port method, rather than having T5's
+        HTTP route call ``recent_observations`` directly, because the two
+        call sites answer different questions that only happen to share an
+        implementation today: T4 asks "what should the consolidation job
+        read", T5's "my observations" panel asks "what should this member
+        see". Naming the panel's read after the consolidation job's use case
+        would make a future divergence between them (the panel growing
+        pagination, say) look like it required auditing T4's call sites too,
+        when it would not.
+        """
+        ...
+
+    def clear_observations(
+        self, notebook_id: str, owner_id: str, *, agent_profile_id: str = ""
+    ) -> int:
+        """Delete observations for one ``(notebook_id, owner_id)`` scope.
+        Returns the row count deleted.
+
+        4. ``agent_profile_id=""`` (the default) clears EVERY observation in
+        scope, regardless of which Agent wrote it. A non-empty value narrows
+        the delete to that one Agent's rows only, leaving every other Agent's
+        observations in the same scope untouched. Both forms already carry a
+        confirmed scope by construction: ``notebook_id``/``owner_id`` come
+        from the caller's own authenticated server-side identity, never from
+        request input a caller could spoof.
+        """
+        ...
