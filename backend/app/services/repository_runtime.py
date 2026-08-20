@@ -464,6 +464,12 @@ class RepositoryRuntime:
             # ask_state 上加方法:隔离守卫的端口白名单是按链路分的,而按人判定
             # 的方法绝不该出现在底座那张里。
             access=self.sharing_store,
+            # Agentic Memory P3 (T4):覆盖层的第三个取数座位,唯一够得着
+            # ``agent_observations``——外部 Agent 经 MCP `add_observation`(T3)
+            # 写下的、关于它自己怎么用这个库的短句。座位单开一个而不是往
+            # ask_state 上加方法,理由与 ask_state/access 同形:隔离守卫的端口
+            # 白名单按链路分,这个座位必须永远只出现在覆盖层那张里。
+            observations=self.agent_observations,
         )
         # Agentic Memory P2 (T5):检索打法的蒸馏任务。与它的 P1 兄弟同处这个
         # **后端中性** runtime,同样只吃端口与两个进程级对象。单例同样是必要的
