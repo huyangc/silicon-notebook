@@ -56,13 +56,14 @@ def _rollback_v55(db: sqlite3.Connection) -> None:
     forged "before" snapshot too, or its objects already exist there and the
     verifier reports them as manifested additions that never happened.
     Rollback runs newest-first, so this precedes _rollback_v54 at every call
-    site. Reverse migration order: DROP INDEX before DROP TABLE (the index
-    depends on the table existing), then the unrelated user_profiles column
-    drop last. agent_observations has no incoming foreign key from anywhere,
-    so the table drop alone (after its own index) is the whole table-side
-    rollback.
+    site. No separate DROP INDEX: SQLite's DROP TABLE takes the table's
+    indexes with it, so idx_agent_observations_request disappears with the
+    table (a standalone DROP INDEX here would be a dead line — the T1
+    quality review proved deleting it changes nothing). agent_observations
+    has no incoming foreign key from anywhere, so the table drop is the
+    whole table-side rollback; the unrelated user_profiles column drop
+    comes last.
     """
-    db.execute("DROP INDEX idx_agent_observations_request")
     db.execute("DROP TABLE agent_observations")
     db.execute("ALTER TABLE user_profiles DROP COLUMN search_profile_json")
 
