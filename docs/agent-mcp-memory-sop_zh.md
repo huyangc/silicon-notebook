@@ -317,7 +317,7 @@ curl -s -X POST "$MCP_URL" \
 | `notebook is outside the token allowlist` | 回到 Agent 接入签发包含该 notebook 的新 token；不要扩大旧 token 之外的隐式权限。 |
 | scope/permission error | 对照上方 scope 表重新签发最小权限 token。token scope 不可在客户端侧提升。 |
 | Codex 看不到服务 | 运行 `codex mcp list`，确认环境变量已在启动 Codex 前导出，然后新开 session/重启 app 或 extension。 |
-| 配置客户端时 `404` 或连接被拒 | 地址形态是 `<host>:<后端端口>/mcp/`（第 4 节）。80/443 通常是前端，或压根没有 TLS 监听。 |
+| 配置客户端时 `404` 或连接被拒 | 用部署公布的带斜杠地址——`MCP_PUBLIC_URL` 加 `/`，签发回执的接入说明里就印着它。`<host>:8000/mcp/` 只适用于确认没有代理的直连部署；有代理时后端端口可能是私有的，硬去够它还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
