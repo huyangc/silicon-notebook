@@ -306,6 +306,16 @@ class IdentityRepository(Protocol):
     def audit_labels_for_user_ids(self, user_ids: Sequence[str]) -> dict[str, str]: ...
     def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]: ...
     def set_user_ui_mode(self, user_id: str, ui_mode: str) -> UserProfile: ...
+    # Agentic Memory P3(B-Profile,T6):读-改-写 ``user_profiles.
+    # search_profile_json`` 里的若干字段并返回更新后的 UserProfile。
+    # ``origin="user"``(自助编辑,PATCH /me/search-profile)无条件覆盖;
+    # ``origin="job"``(T7 归纳)跳过已被用户写过的字段——两侧规则都在
+    # ``app.services.search_profile.merge_field`` 里,这里只是端口签名。
+    # 读-改-写必须在同一写事务内(SQLite 写锁天然串行/PostgreSQL 显式行锁),
+    # 否则用户编辑与后台归纳并发写会互相丢字段。
+    def set_user_search_profile(
+        self, user_id: str, fields: "Mapping[str, object]", origin: str
+    ) -> UserProfile: ...
     def change_user_password(
         self, user_id: str, old_password: str, new_password: str, *, keep_token: str | None = None
     ) -> None: ...

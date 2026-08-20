@@ -1,6 +1,14 @@
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.services.search_profile import (
+    ANSWER_DETAIL_VALUES,
+    ANSWER_LANGUAGE_VALUES,
+    ANSWER_SHAPE_VALUES,
+    SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS,
+    SEARCH_PROFILE_DOMAIN_TERMS_MAX,
+)
 
 
 class UserProfile(BaseModel):
@@ -12,12 +20,82 @@ class UserProfile(BaseModel):
     memory_mode: str = "manual"
     domain_focus: List[str] = Field(default_factory=list)
     ui_mode: str = "auto"
+    #: Agentic Memory P3 (T6) — the per-user search/answer style preference
+    #: document (``user_profiles.search_profile_json``, parsed). ``None``
+    #: means "the user has never set a preference and no inference job has
+    #: ever written one" — same NULL-means-unset contract as ``ui_mode``,
+    #: but represented as an optional structured dict instead of a string
+    #: default, since a per-field ``{value, origin, updated_at}`` shape has
+    #: no single sentinel to fall back to. See
+    #: ``app.services.search_profile`` for the document contract.
+    search_profile: Optional[Dict[str, Any]] = None
 
 
 class UiModeUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ui_mode: Literal["auto", "advanced"]
+
+
+#: Wire-level Literal restatements of search_profile.py's closed value
+#: domains, kept in sync by the assertions below — same "duplicate as a
+#: Literal, then assert the two agree" idiom `agent_profile.py`'s
+#: `UnderstandingLabel` already uses, so a value added in one place and not
+#: the other fails at import time instead of the wire model silently
+#: accepting (or rejecting) a value the store-layer validator disagrees with.
+AnswerLanguage = Literal["auto", "zh", "en"]
+AnswerShape = Literal["auto", "bullets", "table_first", "prose"]
+AnswerDetail = Literal["auto", "concise", "detailed"]
+assert set(AnswerLanguage.__args__) == ANSWER_LANGUAGE_VALUES, (
+    "AnswerLanguage and ANSWER_LANGUAGE_VALUES must name exactly the same values"
+)
+assert set(AnswerShape.__args__) == ANSWER_SHAPE_VALUES, (
+    "AnswerShape and ANSWER_SHAPE_VALUES must name exactly the same values"
+)
+assert set(AnswerDetail.__args__) == ANSWER_DETAIL_VALUES, (
+    "AnswerDetail and ANSWER_DETAIL_VALUES must name exactly the same values"
+)
+
+
+class SearchProfileUpdate(BaseModel):
+    """``PATCH /me/search-profile`` request body.
+
+    Every field is ``Optional`` with a default of ``None`` — but ``None`` is
+    NOT "leave unchanged". The route handler distinguishes "field omitted
+    from the request body" (leave that field alone) from "field sent as
+    ``null``" (clear that field) via ``model_fields_set``, which pydantic
+    populates with exactly the field names that were present in the payload
+    regardless of what value they carried. A field absent from
+    ``model_fields_set`` is never touched; one present with value ``None``
+    is passed through to ``search_profile.merge_field`` as a clear.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer_language: Optional[AnswerLanguage] = None
+    answer_shape: Optional[AnswerShape] = None
+    answer_detail: Optional[AnswerDetail] = None
+    domain_terms: Optional[List[str]] = None
+
+    @field_validator("domain_terms")
+    @classmethod
+    def _validate_domain_terms(cls, value: "List[str] | None") -> "List[str] | None":
+        if value is None:
+            return value
+        if len(value) > SEARCH_PROFILE_DOMAIN_TERMS_MAX:
+            raise ValueError(
+                f"at most {SEARCH_PROFILE_DOMAIN_TERMS_MAX} domain terms are allowed"
+            )
+        cleaned: List[str] = []
+        for term in value:
+            trimmed = term.strip()
+            if not trimmed or len(trimmed) > SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS:
+                raise ValueError(
+                    "each domain term must be 1.."
+                    f"{SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS} characters after trimming"
+                )
+            cleaned.append(trimmed)
+        return cleaned
 
 
 class AgentProfile(BaseModel):

@@ -213,6 +213,26 @@ def experience_wiring_active(settings, experience_store) -> bool:
     )
 
 
+def search_profile_wiring_active(settings, identity_store) -> bool:
+    """接线层面上,Agentic Memory P3(B-Profile)的「用户检索/回答风格偏好」是否
+    可用(kill switch + store 在)。
+
+    第三个同款单点判据,理由与另外两个逐字相同:T7 归纳 job 的触发闸、T8 的
+    Ask plan/answer 注入闸,与 ``PATCH /me/search-profile``/``GET /me`` 的
+    可写性/可见性判据必须共用同一个函数——各写一份的话,关掉总开关会留下
+    「归纳还在跑但用户已经写不进新偏好」或「端点报 409 但 prompt 还在读旧
+    文档」这类半关状态。
+
+    ``identity_store is None`` 是「这个调用方没接线」的拼写,镜像
+    ``profile_wiring_active``/``experience_wiring_active``——生产路径的
+    identity_store 是核心座位、恒非 None,这个分支只服务窄测试替身。
+    """
+    return bool(
+        getattr(settings, "user_search_profile_enabled", True)
+        and identity_store is not None
+    )
+
+
 #: 本类跑出来的 run 在情境指纹里的 ``mode``。写死而不是从调用方收:``chunk`` 与
 #: ``graph`` 两个引擎根本不经过 ``ReasoningRetriever``,深度报告的逐节深挖用的也
 #: 正是这条逐步推理管线。收一个参数只会多出一个可以被传错的值,而它必须与蒸馏侧
