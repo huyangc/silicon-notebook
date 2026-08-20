@@ -10,6 +10,8 @@ export const AGENT_SCOPE_OPTIONS = [
   { value: "sources:write", label: "添加/重新解析来源" },
   { value: "sources:delete", label: "删除 Agent 添加的来源" },
   { value: "maintenance:execute", label: "触发图谱分析与检索索引构建" },
+  { value: "agent_profile:read", label: "读取对这个库的理解" },
+  { value: "agent_observation:write", label: "写入使用线索" },
 ] as const;
 
 export const AGENT_ACCESS_PAGE_SIZE = 25;
