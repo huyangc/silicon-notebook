@@ -3857,7 +3857,8 @@ class KnowledgeLifecycleService:
         except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
             self.event_log.logger.warning("rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
         from uuid import uuid4 as _uuid4
-        from app.services.kg_merge import (cluster_seeds, _norm, _discriminative_conflict,
+        from app.services.kg_merge import (cluster_seeds, filter_pending_seeds_by_decisions,
+                                           _norm, _discriminative_conflict,
                                            seed_claim, seed_formula, seed_procedure)
         # Each rebuild gets a unique run_id so concurrent rebuilds of the SAME
         # notebook never wipe or read each other's scratch rows.
@@ -4174,10 +4175,28 @@ class KnowledgeLifecycleService:
             _t = _time.perf_counter()
             with self._write() as db:
                 self.governance_store.delete_pending_merges(db, notebook_id)
+                # Decisions may land after the earlier cluster_seeds snapshot.
+                # DELETE first so PostgreSQL serializes against updates of the
+                # old pending rows; then read decisions and filter in this same
+                # transaction before publishing replacement rows.
+                live_decided = self.governance_store.decided_seed_pairs_from(
+                    db, notebook_id
+                )
+                live_confirmed = {
+                    pair for pair, status in live_decided.items()
+                    if status == "confirmed"
+                }
+                live_rejected = {
+                    pair for pair, status in live_decided.items()
+                    if status in ("rejected", "deferred")
+                }
+                pending_seeds = filter_pending_seeds_by_decisions(
+                    sd["pending_seeds"], seeds, live_confirmed, live_rejected
+                )
                 self.governance_store.insert_pending_merge_rows(
                     db,
                     [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
-                     for sa, sb, ca, cb, score in sd["pending_seeds"]])
+                     for sa, sb, ca, cb, score in pending_seeds])
             _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
             self._invalidate_unified_cache(notebook_id)
             # #distinct concept canonicals (== set of cluster_map values in the legacy

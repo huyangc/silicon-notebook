@@ -368,25 +368,38 @@ class KnowledgeGovernanceService:
         with self._connect() as db:
             return self.governance_store.has_pending_merges(db, notebook_id)
 
-    def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
+    def _set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> str:
         if status not in ("confirmed", "rejected"):
             raise ValueError(f"invalid merge status: {status!r}")
         with self._write() as db:
-            self.governance_store.set_merge_decision(
+            previous_status = self.governance_store.set_merge_decision(
                 db, notebook_id, candidate_id, status, self._now()
             )
+        if previous_status is None:
+            raise KeyError(candidate_id)
+        return previous_status
+
+    def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
+        self._set_merge_decision(notebook_id, candidate_id, status)
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
         self.get_notebook(notebook_id)
-        self.set_merge_decision(notebook_id, candidate_id, "confirmed")
+        self._set_merge_decision(notebook_id, candidate_id, "confirmed")
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
 
     def reject_merge(self, notebook_id: str, candidate_id: str) -> None:
         self.get_notebook(notebook_id)
-        self.set_merge_decision(notebook_id, candidate_id, "rejected")
-        self._invalidate_unified_cache(notebook_id)
-        self._mark_unified_kg_dirty(notebook_id)
+        previous_status = self._set_merge_decision(notebook_id, candidate_id, "rejected")
+        # A rejection changes neither concept_clusters nor any retrieval
+        # product.  The durable cannot-link is consumed by the next rebuild,
+        # while the current graph is already correct, so do not launch/advertise
+        # an unnecessary whole-notebook rebuild for this path. Reversing an
+        # already-confirmed decision is different: that union may already be
+        # materialized, so the normal dirty/invalidation path remains required.
+        if previous_status == "confirmed":
+            self._invalidate_unified_cache(notebook_id)
+            self._mark_unified_kg_dirty(notebook_id)
 
     # ------------------------------------------------------------------
     # kg_conflict_candidates — storage primitives (T1)
@@ -1142,7 +1155,10 @@ class KnowledgeGovernanceService:
                     db, notebook_id, candidate_id, status, confidence,
                     decision["rationale"], now,
                 )
-        if confirmed or rejected:
+        # Only a confirmed merge changes clustering.  Rejected/deferred rows are
+        # durable cannot-links for future rebuilds; the current graph remains
+        # valid and must not be marked dirty merely because the queue shrank.
+        if confirmed:
             self._mark_unified_kg_dirty(notebook_id)
             self._invalidate_unified_cache(notebook_id)
         return {"reviewed": len(decisions), "confirmed": confirmed, "rejected": rejected, "unsure": unsure}

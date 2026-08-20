@@ -13,8 +13,8 @@
 //   ④ 忙碌位与轮询都按**笔记本集合**判(经共享纯函数 busyForNotebook / claimNotebookSlot /
 //      releaseNotebookClaim)。裸布尔在类型上完全合法、单测也照样绿,只有在「点完 A 切到 B
 //      再点一次」时才现形;
-//   ⑤ decideMerge 也走同一个忙碌位集合。它落完决定要**启动**一次重新合并,后台化之后
-//      它不再等那次跑完——不认领忙碌位,轮询 effect 根本不会开,图谱就永远停在决定之前。
+//   ⑤ decideMerge 的「合并」分支也走同一个忙碌位集合并启动重新合并；「分开」只落
+//      durable cannot-link，不改变当前簇，因此不得为它启动全库重建。
 //
 // 覆盖边界(如实说明):本守卫认的是源码文本形态,不是运行时行为。轮询的时序、取消与切库
 // 竞态由 kg-rebuild-status.test.mjs 的纯函数用例 + 后端用例覆盖。
@@ -758,13 +758,23 @@ test("page.tsx 有重新合并的完成信号(否则忙碌位解除不掉)", asy
   );
 });
 
-test("decideMerge 启动的重新合并也挂在同一个忙碌位集合上", async () => {
+test("decideMerge 只有确认分支启动重新合并并挂在同一个忙碌位集合上", async () => {
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "decideMerge").getText(page);
 
   const claimAt = body.indexOf("setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb))");
+  const guardedClaimAt = body.indexOf("if (confirm) setRebuildingNotebookIds", body.indexOf("async function decideMerge"));
+  const confirmBranchAt = body.indexOf("if (confirm) {", guardedClaimAt);
   const postAt = body.indexOf("rebuildUnifiedKg(");
-  assert.ok(postAt >= 0, "decideMerge 落完决定后必须启动一次重新合并");
+  assert.ok(postAt >= 0, "decideMerge 确认合并后必须启动一次重新合并");
+  assert.ok(
+    guardedClaimAt >= 0 && confirmBranchAt >= 0 && confirmBranchAt < postAt,
+    "只有确认合并可以认领重建位并 POST；分开不改变当前簇，不能触发全库重新合并",
+  );
+  assert.ok(
+    body.includes("if (!currentNotebookId || decidingMerge || kgRefreshBusy) return;"),
+    "上一条确认触发的重建完成前必须拒绝新决定，否则旧候选决定会与重建发布竞态",
+  );
   assert.ok(
     claimAt >= 0 && claimAt < postAt,
     "decideMerge 必须在发请求之前认领忙碌位 —— 不认领,轮询 effect 根本不会开,"
@@ -781,11 +791,11 @@ test("decideMerge 启动的重新合并也挂在同一个忙碌位集合上", as
   );
 });
 
-test("decideMerge 的 409 分支不静默：必须显式提示用户", async () => {
+test("decideMerge 确认分支的 409 不静默：必须显式提示用户", async () => {
   // 双 opus 评审 P2-1:409 = 共槽已经有一次重新合并/补上关联在跑,决定本身已经落库,
   // 但没能立刻触发重新合并去更新图谱——如果占槽的是「补上关联」,rebuild/status 对它
   // 如实回 idle,轮询几乎立刻收工并刷新一次,那次刷新拿到的仍是决定生效前的图。此前这
-  // 条分支什么都不说,用户点了「合并」/「分开」却看不到任何反馈,会以为点击没有反应。
+  // 条分支什么都不说,用户点了「合并」却看不到任何反馈,会以为点击没有反应。
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "decideMerge").getText(page);
 
@@ -853,7 +863,7 @@ test("codex R10:decideMerge 的 POST 提交期同样标记 submittingMaintenance
     + "`${nb}:rebuild`——codex R12:同库若有一次 relink POST 还没返回,两次提交的保护"
     + "窗口重叠,不能共用裸 nb 键互相冲掉对方的保护)",
   );
-  assert.ok(postAt >= 0, "decideMerge 必须启动一次重新合并");
+  assert.ok(postAt >= 0, "decideMerge 确认分支必须启动一次重新合并");
   assert.ok(
     addAt < postAt,
     "标记必须在 await rebuildUnifiedKg 之前置上,否则 POST 在飞期间轮询读到的陈旧 idle"

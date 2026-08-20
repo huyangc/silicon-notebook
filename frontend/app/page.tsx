@@ -1209,7 +1209,7 @@ export default function Home() {
   // 按钮消费的是「**当前这个库**在不在补」——切到别的库，那边的按钮照常可点。
   const relinkingKg = relinkBusyFor(relinkingNotebookIds, currentNotebookId);
   const kgRefreshBusy = busyForNotebook(rebuildingNotebookIds, currentNotebookId);
-  // decideMerge 落一条合并决定时若撞上 409(共槽已有整理任务在跑)：决定本身已经落库，
+  // decideMerge 落一条确认合并决定时若撞上 409(共槽已有整理任务在跑)：决定本身已经落库，
   // 但没能触发一次能看见它的重新合并。这里记一个「待补发」标记——与忙碌位同数据结构
   // 风格(按笔记本的一个集合,只加/只清自己那一格,复用同一套 claimNotebookSlot /
   // releaseNotebookClaim)，由下面「重新合并」轮询的终态收尾消费：占槽任务结束后自动
@@ -1901,9 +1901,9 @@ export default function Home() {
     } catch (e) { reportError(e); return false; }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
-  // 正在处理的单条待确认合并(候选 id + 这次点的是合并还是拒绝)。decideMerge 落决定后会
-  // 顺带跑一次 rebuildUnifiedKg + 重拉整张图,是这一列里最贵的一步;不锁住的话用户在
-  // 若干行上连点就会并发排出若干次全量概念合并重建。整列一起禁用(不只是被点的那行)。
+  // 正在处理的单条待确认合并(候选 id + 这次点的是合并还是拒绝)。确认分支会顺带跑一次
+  // rebuildUnifiedKg + 重拉整张图；拒绝分支虽不重建，也仍要防重复提交同一决定。处理期
+  // 整列一起禁用(不只是被点的那行)。
   const [decidingMerge, setDecidingMerge] = useState<{ id: string; confirm: boolean } | null>(null);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
   // 「全部自动判重」的 POST 在飞(还没拿到 job)。见 reviewAllMerges 里的注释。
@@ -5987,38 +5987,39 @@ export default function Home() {
     try { setNodeCtx(await fetchNodeContext(currentNotebookId, contextObjectId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
   }
 
-  // 落一条合并决定，然后**启动**一次重新合并让图谱跟上这条决定。
+  // 落一条合并决定。只有「合并」会启动重新合并让图谱跟上；「分开」只写入
+  // durable cannot-link，当前 concept_clusters 没有变化，因此不应为它全库重建。
   //
-  // 后台化之后这一步不再等它跑完：POST 立刻回来，图谱与待确认列表由上面那条
+  // 确认分支后台化之后不再等它跑完：POST 立刻回来，图谱与待确认列表由上面那条
   // rebuild/status 轮询在终态重拉（所以这里的忙碌位也要走同一个集合，否则轮询 effect
-  // 根本不会开）。409 = 共槽已经有一次重新合并/补上关联在跑：决定本身已经落库，不是
+  // 根本不会开）。409 = 共槽已经有一次重新合并/补上关联在跑：确认本身已经落库，不是
   // 失败，忙碌位要**保留**。但那次占槽任务(重新合并或补上关联,谁先跑起来的都可能)
-  // 未必会让图谱看见这条决定——它可能在决定落库**之前**就已经捕获了输入版本与
+  // 未必会让图谱看见这条确认——它可能在确认落库**之前**就已经捕获了输入版本与
   // decided pairs,跑完发布的还是旧聚类;占槽的若是补上关联,rebuild/status 对它如实
   // 回 idle(两个状态视图只认自己的 kind),轮询几乎立刻收工并刷新一次,拿到的同样是
-  // 决定生效前的图。所以这里在 pendingRebuildNotebookIds 给这个库留一个「待补发」
+  // 确认生效前的图。所以这里在 pendingRebuildNotebookIds 给这个库留一个「待补发」
   // 标记,由 rebuild 轮询的终态收尾消费:那次占槽任务结束后自动补发一次
-  // rebuildUnifiedKg,不需要用户自己记得再点。落决定本身失败才是真失败，忙碌位当场
+  // rebuildUnifiedKg,不需要用户自己记得再点。落确认本身失败才是真失败，忙碌位当场
   // 清掉。
   //
   // codex P2-1(边界登记,非缺陷):这份自动补发是**客户端 best-effort 承诺**，标记只活在
   // 这个标签页的内存里。作用域=标签页保持打开,或占槽任务仍在跑、图谱仍 dirty 时重载/
   // 重开页面(那种情况下上面 [currentNotebookId] 那条恢复 effect 会从服务端状态重建
   // 标记)。若重载/重开发生在占槽任务已经收工**之后**——标记已经连同其余前端 state 一起
-  // 丢了,没有任何东西会去补发这条已经落库的决定,直到用户自己想起来手动点一次
+  // 丢了,没有任何东西会去补发这条已经落库的确认,直到用户自己想起来手动点一次
   // 「重新合并」;既有的「待重建」dirty 标签就是这个缺口的持久信号,不需要额外 UI。补上
   // 这个缺口需要服务端持久重试队列(而不是纯前端标记)——已登记为后续独立立项,本次刻意
   // 不做(超出这一批的范围,且值不值得为这条边界换一套持久化基础设施还需要真实发生频率
   // 的数据支撑)。
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
-    if (!currentNotebookId || decidingMerge) return;
+    if (!currentNotebookId || decidingMerge || kgRefreshBusy) return;
     const nb = currentNotebookId;
     setDecidingMerge({ id: candidate.id, confirm });
     try {
       if (confirm) await confirmMerge(nb, candidate.id);
       else await rejectMerge(nb, candidate.id);
       setPendingMerges((items) => withoutDecidedMerge(items, candidate));
-      setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
+      if (confirm) setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
       // codex R10:这次 POST 与 refreshUnifiedKg/settleOrRetryRebuild 的补发同样会撞
       // 「POST 比首个 3s 轮询 tick 慢」的陈旧 idle 竞态——轮询会先读到服务端旧的 idle
       // 并当终态收工,随后这次 POST 才成功,没人再轮询,决定生效不会被看见。统一包上
@@ -6028,21 +6029,23 @@ export default function Home() {
       // (用户在它落地前就确认了合并、触发这次 rebuild POST),两次提交的保护窗口重叠;
       // 旧代码共用裸 nb 键时,先落地的那次在自己的 finally 里把唯一条目删掉,仍在飞的
       // 另一次就此失去保护。
-      submittingMaintenanceRef.current.add(`${nb}:rebuild`);
-      try {
-        const started = await rebuildUnifiedKg(nb);
-        // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
-        // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
-        expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
-      } catch (err) {
-        if (httpErrorStatus(err) !== 409) {
-          setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-          throw err;
+      if (confirm) {
+        submittingMaintenanceRef.current.add(`${nb}:rebuild`);
+        try {
+          const started = await rebuildUnifiedKg(nb);
+          // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
+          // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
+          expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
+        } catch (err) {
+          if (httpErrorStatus(err) !== 409) {
+            setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+            throw err;
+          }
+          setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
+          setToast("合并已记录，将在当前任务完成后自动重新合并");
+        } finally {
+          submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
         }
-        setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
-        setToast("合并已记录，将在当前任务完成后自动重新合并");
-      } finally {
-        submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
       }
       const pend = await fetchPendingMerges(nb);
       setPendingMerges(withoutDecidedMerge(pend, candidate));
@@ -9249,12 +9252,12 @@ export default function Home() {
                   <div className="kg-merge-row" key={m.id}>
                     <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
                     <span className="kg-merge-actions">
-                      {/* 落决定会连带跑一次全量概念合并重建 + 重拉整张图,是这一列里最贵的
-                          一步。任一行在处理中就把整列锁住,只有被点的那颗改文案。 */}
-                      <button disabled={decidingMerge !== null} onClick={() => decideMerge(m, true)}>
+                      {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
+                          与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
+                      <button disabled={decidingMerge !== null || kgRefreshBusy} onClick={() => decideMerge(m, true)}>
                         {decidingMerge?.id === m.id && decidingMerge.confirm ? "合并中…" : "合并"}
                       </button>
-                      <button disabled={decidingMerge !== null} onClick={() => decideMerge(m, false)}>
+                      <button disabled={decidingMerge !== null || kgRefreshBusy} onClick={() => decideMerge(m, false)}>
                         {decidingMerge?.id === m.id && !decidingMerge.confirm ? "分开中…" : "拒绝"}
                       </button>
                     </span>

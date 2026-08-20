@@ -48,6 +48,36 @@ def test_cluster_and_candidate_crud(repo):
     repo.set_merge_decision(nb.id, pend[0]["id"], "rejected")
     assert repo.pending_merges(nb.id) == []
     assert repo.decided_pairs(nb.id) == {("K1", "K2"): "rejected"}
+    repo.set_merge_decision(nb.id, pend[0]["id"], "confirmed")
+    assert repo.decided_pairs(nb.id) == {("K1", "K2"): "confirmed"}
+
+
+def test_merge_decision_settles_legacy_duplicate_canonical_pair_rows(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_merge_candidate(nb.id, "K-left", "K-right", 0.91)
+    repo.write_merge_candidate(nb.id, "K-right", "K-left", 0.89)
+    repo.write_merge_candidate(nb.id, "K-left", "K-other", 0.88)
+    target = next(
+        row for row in repo.pending_merges(nb.id)
+        if frozenset((row["canonical_a"], row["canonical_b"]))
+        == frozenset(("K-left", "K-right"))
+    )
+
+    repo.reject_merge(nb.id, target["id"])
+
+    remaining = repo.pending_merges(nb.id)
+    assert len(remaining) == 1
+    assert frozenset((remaining[0]["canonical_a"], remaining[0]["canonical_b"])) == frozenset(
+        ("K-left", "K-other")
+    )
+    with repo._connect() as db:
+        statuses = db.execute(
+            "SELECT status FROM concept_merge_candidates WHERE notebook_id=? AND "
+            "((canonical_a='K-left' AND canonical_b='K-right') OR "
+            "(canonical_a='K-right' AND canonical_b='K-left'))",
+            (nb.id,),
+        ).fetchall()
+    assert [row["status"] for row in statuses] == ["rejected", "rejected"]
 
 def test_set_merge_decision_rejects_bad_status(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

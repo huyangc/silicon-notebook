@@ -81,7 +81,9 @@ def _norm(name: str) -> str:
 # 代码修改(归一化规则、哨兵策略、护栏)都必须 bump —— 数据版本看不见纯代码变更,
 # 不 bump 则已部署库的「刷新图谱」会被版本闸静默跳过、修复永不生效。
 # v2: Unicode-safe _norm(NFKC+\w) + seed_or_unique 空seed哨兵(2026-07-08)。
-CLUSTER_ALGO_VERSION = 2
+# v3: rejected/deferred 是 canonical component 间的 cannot-link；pending 按
+# canonical pair 去重，避免同一簇对通过另一个 seed 邻居反复进入审阅队列。
+CLUSTER_ALGO_VERSION = 3
 
 
 def seed_or_unique(seed: str, object_id: str) -> str:
@@ -319,6 +321,51 @@ def _seed_with_alias(obj, seed_fn, alias_map: Dict[str, str]) -> str:
     return base
 
 
+def filter_pending_seeds_by_decisions(
+    pending_seeds: List[tuple],
+    seeds: List[str],
+    confirmed: Set[FrozenSet[str]],
+    rejected: Set[FrozenSet[str]],
+) -> List[tuple]:
+    """Revalidate precomputed pending rows against a live decision snapshot.
+
+    Rebuild computes candidates before its long derivation tail. A manual or
+    automated decision may commit before the final pending refresh; filtering
+    again inside that refresh transaction prevents the stale candidate snapshot
+    from republishing an already-decided component pair.
+    """
+    uf = _UF(seeds)
+    for pair in confirmed:
+        if len(pair) != 2:
+            continue
+        a, b = tuple(pair)
+        if a in uf.p and b in uf.p:
+            uf.union(a, b)
+    rejected_pairs = {frozenset(pair) for pair in rejected}
+    rejected_components: Set[FrozenSet[str]] = set()
+    for pair in rejected_pairs:
+        if len(pair) != 2:
+            continue
+        a, b = tuple(pair)
+        if a not in uf.p or b not in uf.p:
+            continue
+        ra, rb = uf.find(a), uf.find(b)
+        if ra != rb:
+            rejected_components.add(frozenset((ra, rb)))
+    kept: List[tuple] = []
+    for row in pending_seeds:
+        a, b = row[0], row[1]
+        if a not in uf.p or b not in uf.p:
+            continue
+        if frozenset((a, b)) in rejected_pairs:
+            continue
+        ra, rb = uf.find(a), uf.find(b)
+        if ra == rb or frozenset((ra, rb)) in rejected_components:
+            continue
+        kept.append(row)
+    return kept
+
+
 def cluster_seeds(
     seeds: List[str],
     reps: Dict[str, np.ndarray],
@@ -347,11 +394,29 @@ def cluster_seeds(
         if a in uf.p and b in uf.p:
             uf.union(a, b)
     rej = {frozenset(p) for p in rejected}
+    # A human rejects the two *displayed canonical components*, not merely the
+    # one ANN seed edge that happened to represent them.  Project every stable
+    # rejected seed pair through the confirmed union-find so another member of
+    # either component cannot immediately recreate the same visible candidate.
+    # A rejected pair already inside one confirmed component is contradictory
+    # historical input; confirmed remains authoritative, as before.
+    rejected_components: Set[FrozenSet[str]] = set()
+    for pair in rej:
+        if len(pair) != 2:
+            continue
+        a, b = tuple(pair)
+        if a not in uf.p or b not in uf.p:
+            continue
+        ra, rb = uf.find(a), uf.find(b)
+        if ra != rb:
+            rejected_components.add(frozenset((ra, rb)))
     raw = _ann_candidates(seeds, reps, k=top_k, lo=lo, max_reps=rep_ann_max,
                           ann_threads=ann_threads)
     cand = []
     for a, b, sim in raw:
         if rej and frozenset((a, b)) in rej:
+            continue
+        if rejected_components and frozenset((uf.find(a), uf.find(b))) in rejected_components:
             continue
         if conflict_fn and conflict_fn(seed_first_name.get(a, a), seed_first_name.get(b, b)):
             continue
@@ -370,12 +435,27 @@ def cluster_seeds(
         canon_name[cid] = seed_first_name[best]
     auto_candidates = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
                        if sim >= hi and frozenset((a, b)) in auto_set and canon_id[a] != canon_id[b]]
-    pending = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
-               if sim < hi and canon_id[a] != canon_id[b]]
-    pending.sort(key=lambda t: t[2], reverse=True)
-    pending_seeds = [(a, b, canon_id[a], canon_id[b], sim) for a, b, sim in cand
-                     if sim < hi and canon_id[a] != canon_id[b]]
-    pending_seeds.sort(key=lambda t: t[4], reverse=True)
+    # Several ANN seed edges can connect the same two confirmed components.
+    # The UI asks one component-level question, so retain one deterministic,
+    # highest-scoring representative rather than enqueueing visually identical
+    # rows that reappear after the first one is decided.
+    pending_by_component: Dict[FrozenSet[str], tuple] = {}
+    for a, b, sim in cand:
+        ca, cb = canon_id[a], canon_id[b]
+        if sim >= hi or ca == cb:
+            continue
+        key = frozenset((ca, cb))
+        row = (a, b, ca, cb, sim)
+        previous = pending_by_component.get(key)
+        if previous is None or sim > previous[4] or (
+            sim == previous[4] and tuple(sorted((a, b))) < tuple(sorted(previous[:2]))
+        ):
+            pending_by_component[key] = row
+    pending_seeds = sorted(
+        pending_by_component.values(),
+        key=lambda t: (-t[4], tuple(sorted((t[0], t[1])))),
+    )
+    pending = [(ca, cb, sim) for _a, _b, ca, cb, sim in pending_seeds]
     was_capped = len(pending) > max_pending
     return {"seed_to_canonical": canon_id, "canonical_names": canon_name,
             "auto_candidates": auto_candidates, "pending": pending[:max_pending],

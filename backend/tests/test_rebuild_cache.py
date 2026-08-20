@@ -270,8 +270,7 @@ def test_decision_flip_same_second_moves_version_and_recomputes(repo, monkeypatc
     v0 = repo._cluster_input_version(nb.id)
 
     # FLIP confirmed -> rejected via the real mutator (same-second, COUNT fixed).
-    repo.set_merge_decision(nb.id, "mc-flip", "rejected")
-    repo._mark_unified_kg_dirty(nb.id)                  # mirror confirm/reject_merge wrappers
+    repo.reject_merge(nb.id, "mc-flip")
     v1 = repo._cluster_input_version(nb.id)
     assert v1 != v0, "version must move on a confirmed<->rejected flip (same-second)"
 

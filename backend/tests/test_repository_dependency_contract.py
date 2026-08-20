@@ -72,6 +72,9 @@ LIFECYCLE_STORE_CALLS = {
         "validate_source_fact_publish",
     },
     "governance_store": {
+        # Rebuild must re-read live decisions inside the pending-publication
+        # transaction so a decision committed after clustering cannot resurface.
+        "decided_seed_pairs_from",
         "delete_clusters",
         "delete_pending_merges",
         "incremental_cluster_rows",

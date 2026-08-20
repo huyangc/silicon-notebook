@@ -416,6 +416,61 @@ def test_cluster_seeds_emits_pending_seeds():
                for sa, sb, *_ in res["pending_seeds"])
 
 
+def test_rejected_pair_blocks_every_neighbor_between_confirmed_components():
+    """Rejecting the displayed component pair is a cannot-link for the whole
+    pair, not just for the ANN edge whose seeds were stored on that row."""
+    seeds = ["left anchor", "left neighbor", "right anchor", "right neighbor"]
+    vectors = {
+        "left anchor": np.array([0.0, 1.0], dtype=np.float32),
+        "left neighbor": np.array([1.0, 0.0], dtype=np.float32),
+        "right anchor": np.array([0.0, -1.0], dtype=np.float32),
+        "right neighbor": np.array([0.98, 0.2], dtype=np.float32),
+    }
+    members_count = {seed: 1 for seed in seeds}
+    first_name = {seed: seed for seed in seeds}
+    result = cluster_seeds(
+        seeds,
+        vectors,
+        members_count,
+        first_name,
+        confirmed={
+            frozenset(("left anchor", "left neighbor")),
+            frozenset(("right anchor", "right neighbor")),
+        },
+        rejected={frozenset(("left anchor", "right anchor"))},
+        hi=0.999,
+        lo=0.5,
+    )
+    assert result["pending"] == []
+
+
+def test_pending_candidates_are_unique_per_confirmed_component_pair():
+    seeds = ["left one", "left two", "right one", "right two"]
+    vectors = {
+        "left one": np.array([1.0, 0.0], dtype=np.float32),
+        "left two": np.array([0.99, 0.01], dtype=np.float32),
+        "right one": np.array([0.98, 0.2], dtype=np.float32),
+        "right two": np.array([0.97, 0.21], dtype=np.float32),
+    }
+    members_count = {seed: 1 for seed in seeds}
+    first_name = {seed: seed for seed in seeds}
+    result = cluster_seeds(
+        seeds,
+        vectors,
+        members_count,
+        first_name,
+        confirmed={
+            frozenset(("left one", "left two")),
+            frozenset(("right one", "right two")),
+        },
+        rejected=set(),
+        hi=0.9999,
+        lo=0.5,
+    )
+    assert len(result["pending"]) == 1
+    assert len(result["pending_seeds"]) == 1
+
+
 # --- Unicode / CJK normalization (P0 fix) ------------------------------------
 
 def test_norm_preserves_cjk_names():

@@ -521,12 +521,42 @@ class GovernanceStore:
         candidate_id: str,
         status: str,
         now: str,
-    ) -> None:
+    ) -> str | None:
         if status not in ("confirmed", "rejected"):
             raise ValueError(f"invalid merge status: {status!r}")
+        target = connection.execute(
+            "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+            "WHERE id=%s AND notebook_id=%s",
+            (candidate_id, notebook_id),
+        ).fetchone()
+        if target is None:
+            return None
+        # Lock the complete displayed pair in one deterministic order. Legacy
+        # duplicates can be selected concurrently by separate requests; locking
+        # only each selected id lets their later sibling updates deadlock.
+        siblings = connection.execute(
+            "SELECT id, status FROM concept_merge_candidates WHERE notebook_id=%s AND "
+            "((canonical_a=%s AND canonical_b=%s) OR (canonical_a=%s AND canonical_b=%s)) "
+            "ORDER BY id COLLATE \"C\" FOR UPDATE",
+            (notebook_id, target["canonical_a"], target["canonical_b"],
+             target["canonical_b"], target["canonical_a"]),
+        ).fetchall()
+        if not siblings:
+            return None
+        previous_status = (
+            "confirmed" if any(r["status"] == "confirmed" for r in siblings)
+            else str(siblings[0]["status"])
+        )
+        # One row represents a displayed canonical-pair decision.  Settle any
+        # legacy duplicate rows, including older decisions, in the same write.
         connection.execute(
-            "UPDATE concept_merge_candidates SET status=%s, updated_at=%s WHERE id=%s AND notebook_id=%s",
-            (status, normalize_timestamp(now), candidate_id, notebook_id))
+            "UPDATE concept_merge_candidates SET status=%s, updated_at=%s "
+            "WHERE notebook_id=%s AND "
+            "((canonical_a=%s AND canonical_b=%s) OR (canonical_a=%s AND canonical_b=%s))",
+            (status, normalize_timestamp(now), notebook_id,
+             target["canonical_a"], target["canonical_b"],
+             target["canonical_b"], target["canonical_a"]))
+        return previous_status
 
     @staticmethod
     def record_merge_review(
@@ -582,20 +612,22 @@ class GovernanceStore:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=%s AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
         return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
 
-    def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
+    @staticmethod
+    def decided_seed_pairs_from(
+        connection: Any, notebook_id: str
+    ) -> Dict[frozenset, str]:
         """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
 
         Seed-name keys are STABLE across rebuilds (canonical ids shift when a
         cluster's min-member changes; seed names don't). Legacy rows written
         before the seed_a/seed_b columns existed carry '' → fall back to
         strip-"K-"(canonical), matching the old decided_pairs key derivation."""
-        with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT canonical_a, canonical_b, seed_a, seed_b, status "
-                "FROM concept_merge_candidates WHERE notebook_id=%s "
-                "AND status IN ('confirmed','rejected','deferred')",
-                (notebook_id,),
-            ).fetchall()
+        rows = connection.execute(
+            "SELECT canonical_a, canonical_b, seed_a, seed_b, status "
+            "FROM concept_merge_candidates WHERE notebook_id=%s "
+            "AND status IN ('confirmed','rejected','deferred')",
+            (notebook_id,),
+        ).fetchall()
         def _strip(cid: str) -> str:
             return cid[2:] if cid.startswith("K-") else cid
         out: Dict[frozenset, str] = {}
@@ -604,6 +636,10 @@ class GovernanceStore:
             b = r["seed_b"] or _strip(r["canonical_b"])
             out[frozenset((a, b))] = r["status"]
         return out
+
+    def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
+        with self.database.connect() as db:
+            return self.decided_seed_pairs_from(db, notebook_id)
 
     # ------------------------------------------------------ merge review job
     @staticmethod
