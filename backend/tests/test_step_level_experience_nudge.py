@@ -271,6 +271,62 @@ def test_nudge_appears_after_two_zero_hit_exact_lookups(repo):
     assert "exact_lookup rarely finds this shape." in llm.reflect_prompts[2]
 
 
+def test_zero_hit_streak_resets_on_a_genuine_hit_between_two_misses(repo):
+    """修复轮 spec③:命中把「连续零命中」计数清零,「已连续」这句提示措辞才
+    是真话——旧版只累加不清零,0→命中→0 这种夹心序列会被误判成"连续 2
+    次"而错误触发。这里用带真实可命中小节的手册笔记本(``_seed_manual_
+    notebook``,与 test_reasoning_retrieval.py 的 exact_lookup 用例组同一
+    份 fixture)构造一次真命中夹在两次未命中中间,计数应停在 1、不触发提示。
+
+    变异验证:把 reasoning_retrieval.py 里新增的
+    ``else: zero_hit_by_action["exact_lookup"] = 0`` 分支删掉,这条用例会
+    翻红(第三次未命中被算成"连续 2 次",提示被触发)。
+    """
+    from tests.test_reasoning_retrieval import _seed_manual_notebook
+
+    notebook = _seed_manual_notebook(repo)
+    repo.settings.graph_ppr_enabled = False
+    repo.settings.reasoning_stale_limit = 10
+    _write_experience(repo, "exact_lookup",
+                      "bad", "exact_lookup rarely finds this shape.")
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "missing_cmd"},
+        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "exact_lookup", "exact_term": "unknown_flag"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    result = _run(retriever, notebook, "standard")
+
+    exact_steps = [s for s in result.trace if s.step_type == "exact_lookup"]
+    # miss, hit, miss — the middle hit must reset the streak.
+    assert [s.detail["found"] for s in exact_steps] == [0, 2, 0]
+    assert all("已连续" not in prompt for prompt in llm.reflect_prompts)
+
+
+def test_zero_hit_streak_still_fires_on_two_true_consecutive_misses(repo):
+    """对照组:两次真正连续的零命中(中间没有命中夹着)照常触发提示——证明
+    上一条用例通过不是因为提示机制整体失效,而是清零逻辑真的在起作用。"""
+    from tests.test_reasoning_retrieval import _seed_manual_notebook
+
+    notebook = _seed_manual_notebook(repo)
+    repo.settings.graph_ppr_enabled = False
+    repo.settings.reasoning_stale_limit = 10
+    _write_experience(repo, "exact_lookup",
+                      "bad", "exact_lookup rarely finds this shape.")
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "missing_cmd"},
+        {"next_action": "exact_lookup", "exact_term": "unknown_flag"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    result = _run(retriever, notebook, "standard")
+
+    exact_steps = [s for s in result.trace if s.step_type == "exact_lookup"]
+    assert [s.detail["found"] for s in exact_steps] == [0, 0]
+    assert any("已连续" in prompt for prompt in llm.reflect_prompts)
+
+
 def test_nudge_is_not_gated_by_effort_tier(repo):
     """consult_memory 只在 deep 及以上档;这条提示没有档位闸——standard 档
     照样生效。"""
