@@ -99,6 +99,9 @@ export function ReaderNotebookBadge({
   const granted = isGroupGranted(notebook);
   const canManage = Boolean(notebook.can_manage_content);
   const accessWord = canManage ? "可管理" : "只读";
+  const badgeLabel = granted
+    ? `${accessWord} · ${grantedViaLabel(notebook)}`
+    : `${accessWord} · 来自 ${notebook.shared_from || "他人"}`;
   // Escape 之后紧跟的那次 blur **不提交**。`onReset()` 只是排一次 state 更新,而同一个
   // 事件里立刻调用的 `blur()` 会同步触发 onBlur——它读到的仍是本次渲染的**旧**编辑值,
   // 于是「取消」反而把已被撤销的标题 PATCH 了出去(codex #519 R1 P2)。用 ref 而不是
@@ -135,10 +138,13 @@ export function ReaderNotebookBadge({
         // focus 的输入框态,套在一个点不动的标题上是在承诺一个不存在的交互。
         <h1 className="reader-badge-title" title={notebook.name}>{notebook.name}</h1>
       )}
-      <span className="reader-badge-chip" title={badgeHint(granted, canManage)}>
-        {granted
-          ? `${accessWord} · ${grantedViaLabel(notebook)}`
-          : `${accessWord} · 来自 ${notebook.shared_from || "他人"}`}
+      {/* 徽章有界(见 `.reader-badge-chip` 的 max-width),长组名会被省略,所以完整文本
+          必须和身份说明一起进 tooltip——否则读者看不出这本库到底来自哪个组。 */}
+      <span
+        className="reader-badge-chip"
+        title={`${badgeLabel}\n${badgeHint(granted, canManage)}`}
+      >
+        {badgeLabel}
       </span>
       {!granted && (
         <button

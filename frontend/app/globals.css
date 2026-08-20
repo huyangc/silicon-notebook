@@ -924,7 +924,15 @@ button {
    的库名旁边会把库名本身盖过去（正是用户反馈的「点进来完全看不到 notebook 名字」
    的另一半）。这里用与 `.source-kg-badge` 同档的轻量 chip。 */
 .reader-badge-chip {
-  flex: 0 0 auto;
+  /* 徽章**自己也必须有界**,否则合法的长组名会把「看不到库名」原样带回来:组名上限
+     120 字符(`GROUP_INPUT_LIMITS.nameMaxChars`),而 `grantedViaLabel` 还会把多个组名
+     串起来(`来自群组《A》《B》`)。一个不缩不换行的徽章能吃掉整条 `.workspace-title`
+     (`max-width: min(48vw, 720px)`),标题就又被压到 0 宽(codex #529 R1 P2)。
+     `max-width` 是**给标题留的地**:徽章起始就不许超过这一行的 40%,所以标题恒有
+     ~60% 可用;超出的部分省略,完整文本连同身份说明一起进 tooltip。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 3px 10px;
@@ -932,7 +940,9 @@ button {
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+  overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* 「退出共享」是这一行里唯一的动作，绝不能被标题挤没。 */
