@@ -53,10 +53,11 @@ from typing import Any, Mapping
 
 # --------------------------------------------------------------------------- #
 # Closed vocabularies. These are protocol boundaries (CLAUDE.md "数值上限"),
-# not implementation details — the SearchProfileUpdate wire model
-# (app/models/identity.py) imports the numeric caps below directly rather
-# than re-stating them, and both IdentityStore implementations import the
-# functions in this module rather than reimplementing validation.
+# not implementation details. They are DEFINED in app/models/identity.py
+# (the domain-model boundary guard forbids models → services imports, and
+# the SearchProfileUpdate wire model needs them too) and re-exported here;
+# both IdentityStore implementations import the FUNCTIONS in this module
+# rather than reimplementing validation.
 # --------------------------------------------------------------------------- #
 
 #: The document's own schema version. Bumping this is a future concern (no
@@ -64,11 +65,17 @@ from typing import Any, Mapping
 #: later version can tell old documents apart without guessing from shape.
 SEARCH_PROFILE_VERSION = 1
 
-ANSWER_LANGUAGE_VALUES: frozenset[str] = frozenset({"auto", "zh", "en"})
-ANSWER_SHAPE_VALUES: frozenset[str] = frozenset(
-    {"auto", "bullets", "table_first", "prose"}
+# Value domains are DEFINED in ``app.models.identity`` (the boundary guard
+# forbids models → services imports, and the wire models need them too);
+# re-exported here so this module stays the one place consumers read the
+# document contract from.
+from app.models.identity import (  # noqa: E402  (contract re-export)
+    ANSWER_DETAIL_VALUES,
+    ANSWER_LANGUAGE_VALUES,
+    ANSWER_SHAPE_VALUES,
+    SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS,
+    SEARCH_PROFILE_DOMAIN_TERMS_MAX,
 )
-ANSWER_DETAIL_VALUES: frozenset[str] = frozenset({"auto", "concise", "detailed"})
 
 #: Closed field-name vocabulary. Anything else is dropped on read, rejected
 #: on write.
@@ -84,8 +91,7 @@ SEARCH_PROFILE_ORIGINS: frozenset[str] = frozenset({"user", "job"})
 #: characters. Registered in docs/product-and-api*.md alongside the other
 #: field caps once T8/T9 land the consumer surfaces (T6 only establishes the
 #: enforced boundary).
-SEARCH_PROFILE_DOMAIN_TERMS_MAX = 10
-SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS = 32
+
 
 #: Hard cap on :func:`render_style_block`'s output. Consumed starting T8
 #: (the plan/answer prompt injection); the constant lands now because T8's
