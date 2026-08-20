@@ -142,10 +142,25 @@ TRACE_RESULT_IDS_MAX = 20
 # final ``synthesis``/``answer`` trace step's detail — the answer's actually
 # bound [k] anchors, by ``AnswerAnchor.object_id``. Set to 96, the largest
 # ``ranked_final_cap`` across all retrieval-effort tiers (the exhaustive
-# tier's), so a genuinely complete anchor list is never truncated by this cap
-# in practice under the existing per-tier retrieval budget — it is a protocol
-# ceiling, not a real-world limit. Same four-point disclosure argument as
-# ``TRACE_RESULT_IDS_MAX`` above.
+# tier's), so a genuinely complete RANKED answer's anchor list is never
+# truncated by this cap in practice under the existing per-tier retrieval
+# budget — for that shape of run it is a protocol ceiling, not a real-world
+# limit. Same four-point disclosure argument as ``TRACE_RESULT_IDS_MAX``
+# above.
+#
+# ⚠ Registered exception (修复轮 96 上界披露): a COLLECTION-ENUMERATION run
+# is not bound by ``ranked_final_cap`` at all — every row that enters the
+# synthesis preview gets an isolated ``k5001+`` anchor id (see the citation
+# contract in ``docs/product-and-api*.md``), and a large enumerated list can
+# genuinely bind more than 96 of them. When that happens this cap DOES bind,
+# the write side sets the sparse ``anchor_evidence_ids_truncated`` marker, and
+# the read side (``retrieval_experience_projection.py``'s pass 1) treats a
+# truncated anchor list as poison for the WHOLE run's step→anchor
+# attribution, not just the excess tail. That is the deliberately SAFE
+# direction: losing attribution signal for an oversized enumeration run costs
+# nothing but a slightly thinner distillation sample, where silently
+# accepting a truncated anchor set would teach the library "no hit" for
+# actions whose real result may have been in the cut-off tail.
 TRACE_ANCHOR_EVIDENCE_IDS_MAX = 96
 
 
