@@ -70,6 +70,7 @@ from app.repositories.ports import (
     AgentProfileRevisionConflict,
 )
 from app.services.agent_profile_block import (
+    AGENT_PROFILE_NAME_PAGE,
     AGENT_PROFILE_VALUE_MAX_CHARS,
     PROFILE_LABEL_ORDER,
 )
@@ -318,15 +319,18 @@ def _observation_agent_names(owner_id: str) -> dict[str, str]:
     """Agent id → 显示名,只解析调用者**自己**名下的 Agent。
 
     形状与 ``mcp_server.py`` 自己的 ``_profile_names`` 完全一致(同一个
-    ``list_agent_profiles(owner_id, 0, 100)`` 调用),但不跨模块 import 那个
-    私有(下划线开头)辅助函数——它的命名本身就标着「不为跨模块复用设计」,而
-    这个路由文件已经有一批自己风格一致的私有辅助(``_block_out`` 等)。两侧
+    ``list_agent_profiles(owner_id, 0, AGENT_PROFILE_NAME_PAGE)`` 调用,页大小
+    是两侧共用的同一个具名常量——见该常量自己的 docstring),但不跨模块 import
+    那个私有(下划线开头)辅助函数——它的命名本身就标着「不为跨模块复用设计」,
+    而这个路由文件已经有一批自己风格一致的私有辅助(``_block_out`` 等)。两侧
     命名同名值同源是刻意的:一个 Agent 记录列表里显示的名字,必须与 MCP 工具
     面(``get_cited_element`` 等)已经在用的是同一个名字,不是又一套独立拼写。
     """
     return {
         profile.id: profile.name
-        for profile in repository().list_agent_profiles(owner_id, 0, 100)
+        for profile in repository().list_agent_profiles(
+            owner_id, 0, AGENT_PROFILE_NAME_PAGE
+        )
     }
 
 
@@ -345,7 +349,9 @@ def get_agent_observations(
     # ``owner_id`` 是本端点的隔离层三:永远是已认证调用者自己的 id,从不取自
     # 请求(路径/查询/body 都没有任何字段能指向别的成员)——与 ``mine`` scope
     # 的 ``_owner_for_scope`` 同一条不变式,只是这里连分支都不需要,唯一的
-    # owner 就是 ``user.id``。
+    # owner 就是 ``user.id``。请求形状本身(路径/查询参数的存在与类型)由
+    # `api_contract` 架构守卫冻结兜底,这里不重复断言(T3-T5 修复轮质量评审
+    # 变异 ③ 的结论)。
     if not _wiring_active():
         return AgentObservationsResponse(enabled=False, items=[])
     rows = repository().agent_observations.list_observations(
@@ -378,7 +384,9 @@ def clear_agent_observations(
     user: UserProfile = Depends(get_current_user),
 ) -> AgentObservationsCleared:
     # 同一条不变式:``owner_id`` 只能是 ``user.id``。``agent_profile_id`` 是
-    # 唯一的请求参数,它只收窄「清哪个 Agent」,从不改「清谁的」。
+    # 唯一的请求参数,它只收窄「清哪个 Agent」,从不改「清谁的」。请求形状本身
+    # 同样由 `api_contract` 架构守卫冻结兜底(T3-T5 修复轮质量评审变异 ③ 的
+    # 结论)。
     if not _wiring_active():
         raise user_error(409, _DISABLED_MESSAGE)
     removed = repository().agent_observations.clear_observations(

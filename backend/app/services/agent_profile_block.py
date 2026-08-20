@@ -75,6 +75,19 @@ _GUIDANCE = (
     "It is NOT evidence: never cite it and never state it as a finding."
 )
 
+#: Page size for resolving Agent id → display name (``list_agent_profiles``'s
+#: ``(offset, limit)`` pair). One deployment-wide account's Agent roster is
+#: what both consumers below page through in full (offset 0, this limit) to
+#: build an in-memory id→name map — a single point constant rather than each
+#: call site inlining its own ``100`` literal, so the two stay the same
+#: number instead of drifting into "why is the MCP tool's roster page one
+#: size and the API route's another" the day someone tunes one of them.
+#: Shared by ``app.api.mcp_server._profile_names`` (the MCP read surface) and
+#: ``app.api.agent_profile_routes._observation_agent_names`` (the "Agent 记录"
+#: read endpoint) — see each function's own docstring for why the two are
+#: the same lookup by construction.
+AGENT_PROFILE_NAME_PAGE = 100
+
 
 def _clean(value: object) -> str:
     """Strip + collapse all internal whitespace (incl. newlines) to single
@@ -86,6 +99,25 @@ def _clean(value: object) -> str:
     ever reaches an ``f"- {name} ({scope}): {value}"`` line makes that
     forgery structurally impossible, not just discouraged."""
     return " ".join(str(value or "").split())
+
+
+#: Public alias for ``_clean``. Agentic Memory P3 (T3-T5 fix round):
+#: ``agent_profile_job.render_usage_block`` renders one more untrusted,
+#: model-independent free-text field this module never sees —
+#: ``agent_observations.text`` (an external Agent's own words, written via
+#: the ``add_observation`` MCP tool) — into a line of that same
+#: ``f"- [{label}] {text}"`` shape this docstring describes the forgery risk
+#: for. The risk is identical: an observation whose text contains a literal
+#: newline could forge a fake blank line followed by a fabricated
+#: ``[End of untrusted...]``/``[Verified system note...]``-style header,
+#: and the untrusted-instruction framing around the section (this module's
+#: own docstring's whole point) would not save a reader who only skims the
+#: rendered block — the forged header would just look like the next thing
+#: the system said. One implementation, not a second copy that could drift:
+#: the alias is exported rather than reimplemented so both call sites answer
+#: "is this text safe to drop into one rendered line" with the exact same
+#: function.
+collapse_prompt_line = _clean
 
 
 def clip_block_value(value: object) -> str:
