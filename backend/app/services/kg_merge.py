@@ -321,6 +321,51 @@ def _seed_with_alias(obj, seed_fn, alias_map: Dict[str, str]) -> str:
     return base
 
 
+def filter_pending_seeds_by_decisions(
+    pending_seeds: List[tuple],
+    seeds: List[str],
+    confirmed: Set[FrozenSet[str]],
+    rejected: Set[FrozenSet[str]],
+) -> List[tuple]:
+    """Revalidate precomputed pending rows against a live decision snapshot.
+
+    Rebuild computes candidates before its long derivation tail. A manual or
+    automated decision may commit before the final pending refresh; filtering
+    again inside that refresh transaction prevents the stale candidate snapshot
+    from republishing an already-decided component pair.
+    """
+    uf = _UF(seeds)
+    for pair in confirmed:
+        if len(pair) != 2:
+            continue
+        a, b = tuple(pair)
+        if a in uf.p and b in uf.p:
+            uf.union(a, b)
+    rejected_pairs = {frozenset(pair) for pair in rejected}
+    rejected_components: Set[FrozenSet[str]] = set()
+    for pair in rejected_pairs:
+        if len(pair) != 2:
+            continue
+        a, b = tuple(pair)
+        if a not in uf.p or b not in uf.p:
+            continue
+        ra, rb = uf.find(a), uf.find(b)
+        if ra != rb:
+            rejected_components.add(frozenset((ra, rb)))
+    kept: List[tuple] = []
+    for row in pending_seeds:
+        a, b = row[0], row[1]
+        if a not in uf.p or b not in uf.p:
+            continue
+        if frozenset((a, b)) in rejected_pairs:
+            continue
+        ra, rb = uf.find(a), uf.find(b)
+        if ra == rb or frozenset((ra, rb)) in rejected_components:
+            continue
+        kept.append(row)
+    return kept
+
+
 def cluster_seeds(
     seeds: List[str],
     reps: Dict[str, np.ndarray],

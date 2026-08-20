@@ -363,6 +363,7 @@ def test_only_confirm_merge_invalidates_and_marks_dirty(
 ):
     notebook_id, _objects, _relations = _seed_kg(repo, "merge decision phase")
     first = _seed_merge_candidate(repo, notebook_id, "K-a", "K-b")
+    duplicate = _seed_merge_candidate(repo, notebook_id, "K-a", "K-b")
     second = _seed_merge_candidate(repo, notebook_id, "K-c", "K-d")
     events = []
     _trace_transactions(repo, monkeypatch, events)
@@ -371,11 +372,32 @@ def test_only_confirm_merge_invalidates_and_marks_dirty(
     repo.confirm_merge(notebook_id, first)
     assert events == ["write.begin", "write.commit", "invalidate", "dirty"]
 
+    # Model a legacy/stale pending duplicate beside an already-confirmed row.
+    # Rejecting the visible pending id is still a reversal of the pair's
+    # materialized union, so every sibling must settle and the graph must dirty.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE concept_merge_candidates SET status='pending' WHERE id=?",
+            (duplicate,),
+        )
+
     events.clear()
     repo.reject_merge(notebook_id, second)
     # A rejection is a durable cannot-link but does not alter the current
     # clusters, so it neither invalidates retrieval nor dirties the graph.
     assert events == ["write.begin", "write.commit"]
+
+    events.clear()
+    repo.reject_merge(notebook_id, duplicate)
+    assert events == ["write.begin", "write.commit", "invalidate", "dirty"]
+    with repo._connect() as db:
+        statuses = db.execute(
+            "SELECT status FROM concept_merge_candidates WHERE notebook_id=? AND "
+            "((canonical_a='K-a' AND canonical_b='K-b') OR "
+            "(canonical_a='K-b' AND canonical_b='K-a'))",
+            (notebook_id,),
+        ).fetchall()
+    assert statuses and {row["status"] for row in statuses} == {"rejected"}
 
 
 def test_review_pending_merges_dirty_then_invalidate_only_with_decisions(

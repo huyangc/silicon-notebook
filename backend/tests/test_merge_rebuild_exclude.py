@@ -57,3 +57,36 @@ def test_rebuild_writes_seed_cols_and_excludes_decided(repo):
                    (nb, sa, sb, sb, sa))
     repo.rebuild_unified_kg(nb, force=True)
     assert pair not in _pending_pairs(repo, nb)
+
+
+def test_pending_refresh_revalidates_decisions_that_land_after_clustering(
+    repo, monkeypatch
+):
+    nb = repo.create_notebook(NotebookCreate(name="nb-race")).id
+    kg = [{"local_id": f"c{i}", "object_type": "concept",
+           "payload": {"name": name, "section_path": ""}, "evidence": []}
+          for i, name in enumerate(["concept a", "concept b", "concept c", "concept d"])]
+    repo.store_kg(nb, None, kg, [])
+    repo.rebuild_unified_kg(nb)
+    before = _pending_pairs(repo, nb)
+    assert before
+    target = next(iter(before))
+    seed_a, seed_b = tuple(target)
+    governance_store = repo._runtime.knowledge_lifecycle.governance_store
+    original_delete = governance_store.delete_pending_merges
+
+    def reject_during_refresh(connection, notebook_id):
+        connection.execute(
+            "UPDATE concept_merge_candidates SET status='rejected' "
+            "WHERE notebook_id=? AND status='pending' AND "
+            "((seed_a=? AND seed_b=?) OR (seed_a=? AND seed_b=?))",
+            (notebook_id, seed_a, seed_b, seed_b, seed_a),
+        )
+        original_delete(connection, notebook_id)
+
+    monkeypatch.setattr(
+        governance_store, "delete_pending_merges", reject_during_refresh
+    )
+    repo.rebuild_unified_kg(nb, force=True)
+
+    assert target not in _pending_pairs(repo, nb)

@@ -23,6 +23,65 @@ from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 
 @pytest.mark.postgres_integration
+def test_legacy_merge_pair_decisions_lock_all_duplicates_in_one_order(
+    postgres_database,
+):
+    """Different legacy ids for one displayed pair must not deadlock."""
+    assert PostgresMigrator(postgres_database).migrate() == 32
+    now = "2026-08-20T00:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("merge-race-user", "merge-race@example.test", "Merge race", "admin",
+             "active", now, now, "merge_race", "", "", 0),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("nb-merge-race", "Merge race", "", "", "ready", "merge-race-user",
+             now, now, "personal"),
+        )
+        connection.execute(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("merge-race-a", "nb-merge-race", "K-a", "K-b", 0.9, "pending", now, now,
+             "merge-race-b", "nb-merge-race", "K-b", "K-a", 0.9, "pending", now, now),
+        )
+
+    store = GovernanceStore(
+        postgres_database,
+        type("Seams", (), {"now": lambda self: now})(),
+    )
+    barrier = threading.Barrier(2)
+
+    def decide(candidate_id: str, status: str):
+        barrier.wait(timeout=5)
+        with postgres_database.write() as connection:
+            return store.set_merge_decision(
+                connection, "nb-merge-race", candidate_id, status, now
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result(timeout=5) for future in (
+            executor.submit(decide, "merge-race-a", "confirmed"),
+            executor.submit(decide, "merge-race-b", "rejected"),
+        )]
+
+    assert "pending" in results
+    with postgres_database.connect() as connection:
+        rows = connection.execute(
+            "SELECT status FROM concept_merge_candidates "
+            "WHERE notebook_id='nb-merge-race' ORDER BY id"
+        ).fetchall()
+    assert len(rows) == 2
+    assert len({row["status"] for row in rows}) == 1
+    assert rows[0]["status"] in {"confirmed", "rejected"}
+
+
+@pytest.mark.postgres_integration
 @pytest.mark.parametrize("winner", ["cancel", "save"])
 def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
     postgres_database, monkeypatch, winner
