@@ -358,6 +358,15 @@ const SOURCE_ELEMENT_PAGE_SIZE = 40;
 // mismatchStreak 防的是"POST 已经返回、expectation 已经写好,但这个 job_id 从此再也
 // 不会出现"这种死等——三层各管一段窗口,合起来才是完整的时序覆盖。
 const MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK = 2;
+
+/**
+ * 标签页重新可见时,两次「访问权复核」之间至少隔这么久。
+ *
+ * 它只是节流,不是新鲜度承诺:密集 alt-tab 不该每切回一次就发一次 `listNotebooks()`。
+ * 复核本身是尽力而为的——没有推送通道,一直停在前台不动的标签页仍然要等下一次交互
+ * 撞上 403(见 page.tsx 里那个 visibilitychange effect 的说明)。
+ */
+const ACCESS_REVALIDATE_MIN_INTERVAL_MS = 30_000;
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -1976,6 +1985,7 @@ export default function Home() {
   // can distinguish「用户切库了」from「本 effect 恰好被清理了」——两者都会让闭包里
   // 的 cancelled 变 true,但只有前者需要放弃刷新。同 sourcesRef 的既有轻量方案。
   const currentNotebookIdRef = useRef<string | null>(null);
+  const revalidateAccessRef = useRef<() => void>(() => {});
   // Live refs for source paging/query so long-lived poll effects (paper-meta
   // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
   // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
@@ -2228,6 +2238,43 @@ export default function Home() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [authChecked]);
 
+  /**
+   * 别人撤销你的访问权时的复核(codex #529 R3 P1)。
+   *
+   * `refreshAfterAccessChange` 只挂在群组弹窗的 `onChanged` 上,覆盖的是**在这台浏览器上
+   * 发起**的改动(自己退出群组、自己删组、自己撤销共享)。而「被移出群组」「组被别的管理员
+   * 删掉」「库主撤销共享」都发生在别处,本浏览器收不到任何事件——人会继续坐在一本已经读不到
+   * 的库里,直到某次交互撞上 403。
+   *
+   * 没有推送通道,所以这里退而求其次:在标签页**重新可见**时复用同一条对账路径。那正是用户
+   * 会重新看这一屏的时刻,也是撤销后最可能被察觉的时刻。
+   *
+   * 三点刻意如此:
+   * - **不是保证**。一直停在前台不动的标签页仍要等下一次交互报错;文档里按这个口径写。
+   * - **节流**。alt-tab 密集时不该每次切回都发一次请求。
+   * - **失败不动人**。`listNotebooks()` 抛出时整条对账不执行(`reconcileOpenNotebook` 根本
+   *   走不到),一次网络抖动绝不会把用户从他还有权限的库里赶出去。
+   * 竞态由 `refreshAfterAccessChange` 自己的世代闸挡住,与本地那条完全同路。
+   */
+  useEffect(() => {
+    if (!authChecked) return;
+    let lastAt = 0;
+    function revalidate() {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastAt < ACCESS_REVALIDATE_MIN_INTERVAL_MS) return;
+      lastAt = now;
+      // 走 ref 读**当前那一份**闭包:这个 effect 只挂载一次,直接捕获会读到挂载时的旧状态。
+      revalidateAccessRef.current();
+    }
+    document.addEventListener("visibilitychange", revalidate);
+    window.addEventListener("focus", revalidate);
+    return () => {
+      document.removeEventListener("visibilitychange", revalidate);
+      window.removeEventListener("focus", revalidate);
+    };
+  }, [authChecked]);
+
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
   useEffect(() => {
@@ -2406,6 +2453,8 @@ export default function Home() {
   sourcesPageRef.current = sourcesPage;
   sourceQueryRef.current = sourceQuery;
   currentNotebookIdRef.current = currentNotebookId;
+  // 同上:长驻的 visibilitychange 监听只能读到挂载那一刻的闭包,用 live ref 顶替。
+  revalidateAccessRef.current = () => { refreshAfterAccessChange().catch(reportError); };
   const hasPending = sources.some(
     (source) => !["extracted", "failed"].includes(source.parse_status)
   );
