@@ -210,9 +210,10 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
   // 顶部 NEXT_ACTION 上方注释)。精确查找通道加了 exact_lookup,PR-2 加了
   // enumerate_elements/enumerate_kg_objects,原为 7 个。PR-2.5 的来源清单是
   // enumerate 动作的一个参数值而不是第 11 个动作,所以那次没有改这张表。O1 的
-  // update_outline(大纲便签)才是货真价实的第 11 个动作 id,这条随之补上——
-  // 这条注释兑现了它自己曾经许下的诺言("后端加第 11 个值时这条会提醒补")。
-  // search_evidence 曾短暂作为第 12 个动作存在(模型判断来源那一版),随该特性整体
+  // update_outline(大纲便签)是货真价实的第 11 个动作 id,那次补上了这条注释。
+  // Agentic Memory P4 的 consult_memory(仅 deep 及以上档且经验注入闸开启时出现)
+  // 是第 12 个,这条随之补上。
+  // search_evidence 曾短暂作为一个动作存在(模型判断来源那一版),随该特性整体
   // 移除;它是这张表**减少**过的唯一一次,所以这里也留个记号:动作被删时同样要改这张表。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
@@ -221,6 +222,7 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
     ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
     exact_lookup: "按名称精确查找", update_outline: "整理大纲",
+    consult_memory: "回想以往的查法",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
@@ -572,6 +574,113 @@ test("experience 分支先于通用 count 分支命中", () => {
       detail: { entries: 1, count: 99 },
     }),
     "1 条打法",
+  );
+});
+
+// Agentic Memory P4(T5):reflect 循环里模型主动拉取的一次经验查询。标签必须
+// 与 memory("记忆")/profile("经验")/experience("打法")互不相同——四步各自说的
+// 是不同的事(记忆召回 / 库理解 / 打法背景 / 主动回想),同名会让轨迹读不出区别。
+test("consult_memory 有自己的短标签,且与另外三步不同名", () => {
+  const step = {
+    step_type: "consult_memory",
+    summary: "回想以往检索打法,新增 2 条",
+    detail: { entries: 2, chars: 118 },
+  };
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "回想");
+  assert.equal(getTraceStepDetail(step), "2 条打法");
+  assert.notEqual(TRACE_STEP_LABELS.consult_memory, TRACE_STEP_LABELS.memory);
+  assert.notEqual(TRACE_STEP_LABELS.consult_memory, TRACE_STEP_LABELS.profile);
+  assert.notEqual(TRACE_STEP_LABELS.consult_memory, TRACE_STEP_LABELS.experience);
+  assert.notEqual(TRACE_STEP_LABELS.consult_memory, TRACE_STEP_LABELS.answer);
+
+  // entries 缺失/非数字时给空串,绝不上屏 "undefined 条打法"。
+  assert.equal(
+    getTraceStepDetail({ step_type: "consult_memory", summary: "", detail: {} }),
+    "",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "consult_memory", summary: "", detail: { entries: "2" } }),
+    "",
+  );
+  // chars 单独存在也不足以渲染:它是整块字符数,不是「几条」。后端 detail 里
+  // 没有独立的「心得条数」字段(本人覆盖层那句话只是块内附加的一行文字),所以
+  // 这里不该渲染出任何"M 条心得"字样。
+  assert.equal(
+    getTraceStepDetail({ step_type: "consult_memory", summary: "", detail: { chars: 118 } }),
+    "",
+  );
+  // entries=0(只带出覆盖层那句话、经验库没有新条目)仍是合法数字,照常渲染。
+  assert.equal(
+    getTraceStepDetail({ step_type: "consult_memory", summary: "", detail: { entries: 0 } }),
+    "0 条打法",
+  );
+});
+
+// 分支顺序守卫(同 profile/experience 的理由):consult_memory 必须排在通用
+// `detail.count` 分支之前,否则哪天它的 detail 多出一个 count 键就会被渲染成
+// 「N 个候选」——一个读起来对、其实完全错位的数。
+test("consult_memory 分支先于通用 count 分支命中", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "consult_memory",
+      summary: "",
+      detail: { entries: 1, count: 99 },
+    }),
+    "1 条打法",
+  );
+});
+
+// Agentic Memory P4(T1/T2):result_ids/anchor_evidence_ids 是 step→anchor 归因
+// 的原始材料,经 ports.py 的 project_run 无条件写进多类步骤的 detail(包括零命中
+// 的空列表)。它们只是不透明句柄,不该改变任何一步既有的折叠态展示——钉住"A 不
+// 上屏":同一份 detail 加上/不加这两个键,getTraceStepDetail 的输出必须逐字相同。
+test("result_ids/anchor_evidence_ids 出现在 detail 里不改变既有渲染(不上屏)", () => {
+  const ids = ["ko-aaaaaaaaaaaaaaaa", "ko-bbbbbbbbbbbbbbbb"];
+
+  const retrieveBase = { step_type: "retrieve", summary: "", detail: { count: 4 } };
+  const retrieveWithIds = {
+    step_type: "retrieve",
+    summary: "",
+    detail: { count: 4, result_ids: ids },
+  };
+  assert.equal(getTraceStepDetail(retrieveWithIds), getTraceStepDetail(retrieveBase));
+
+  const pprBase = { step_type: "ppr", summary: "", detail: { found: 3, phase: "seed" } };
+  const pprWithIds = {
+    step_type: "ppr",
+    summary: "",
+    detail: { found: 3, phase: "seed", result_ids: ids },
+  };
+  assert.equal(getTraceStepDetail(pprWithIds), getTraceStepDetail(pprBase));
+
+  const expandBase = {
+    step_type: "expand",
+    summary: "",
+    detail: { object_id: "ko-x", name: "示例节点", found: 2 },
+  };
+  const expandWithIds = {
+    step_type: "expand",
+    summary: "",
+    detail: { object_id: "ko-x", name: "示例节点", found: 2, result_ids: ids },
+  };
+  assert.equal(getTraceStepDetail(expandWithIds), getTraceStepDetail(expandBase));
+
+  const synthesisBase = { step_type: "synthesis", summary: "", detail: { anchors: 5 } };
+  const synthesisWithIds = {
+    step_type: "synthesis",
+    summary: "",
+    detail: { anchors: 5, anchor_evidence_ids: ids, anchor_evidence_ids_truncated: true },
+  };
+  assert.equal(getTraceStepDetail(synthesisWithIds), getTraceStepDetail(synthesisBase));
+
+  // 零命中(空列表)同样不该泄漏成任何数字。
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "follow_chain",
+      summary: "",
+      detail: { hops: 2, count: 0, result_ids: [] },
+    }),
+    getTraceStepDetail({ step_type: "follow_chain", summary: "", detail: { hops: 2, count: 0 } }),
   );
 });
 
