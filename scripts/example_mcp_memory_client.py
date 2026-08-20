@@ -18,7 +18,11 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
-DEFAULT_URL = "http://127.0.0.1:8000/mcp"
+# The mounted route: `POST /mcp` is a 307 to `/mcp/`. The official client
+# always follows redirects, so both work here — the slash keeps this in
+# step with the runbook, which tells readers to configure the form that
+# does not depend on a client preserving method/body/Authorization.
+DEFAULT_URL = "http://127.0.0.1:8000/mcp/"
 REQUIRED_TOOLS = {
     "list_notebooks",
     "select_notebook",

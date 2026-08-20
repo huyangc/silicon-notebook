@@ -518,7 +518,7 @@ Token 有过期时间、默认 notebook、notebook allowlist，并只授予所�
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
 `ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`
 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
-SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
+SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。本机可用
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
 按 `MCP_PUBLIC_URL` 加上挂载路由的结尾斜杠给出客户端地址（`POST /mcp` 是 307 指向 `/mcp/`，
 不让 Agent 依赖客户端在重定向中保留方法、请求体与 Authorization），并从 `mcp_server.PUBLIC_TOOLS`
@@ -538,7 +538,7 @@ Codex 推荐把签发的 token 放入环境变量，再注册服务：
 
 ```bash
 export SILICON_NOTEBOOK_AGENT_TOKEN='<一次性显示的 token>'
-codex mcp add silicon-notebook --url http://127.0.0.1:8000/mcp \
+codex mcp add silicon-notebook --url 'http://127.0.0.1:8000/mcp/' \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 ```
 
