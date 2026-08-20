@@ -105,6 +105,10 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("understanding",),
     ("understanding", "rebuild"),
     ("understanding", None),
+    # Agent 观察管理(Agentic Memory P3-T5)。固定字面量单段:GET 的 limit 与
+    # DELETE 的 agent_profile_id 都在查询串里,路径本身无用户内容,整条可原样
+    # 进诊断快照;少了这条会落到兜底 {redacted},丢观测。
+    ("agent-observations",),
     # 群组授权边(群组知识共享 P1-T3)。路径里没有任何用户内容:第二段是固定字面量,
     # 授权边 id 走 None 打 {id},主体 id / 角色都在请求体里,所以整条路径可以原样
     # 进诊断快照。
