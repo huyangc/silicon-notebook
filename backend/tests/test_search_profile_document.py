@@ -12,7 +12,11 @@
     具体的一端(detail→shape→language)整条丢,直到落进
     ``SEARCH_PROFILE_BLOCK_MAX_CHARS``。T8 改动:此前 v1 是把 domain_terms
     整段丢弃,评审发现 320 字符输入 vs ~96 字符可渲染预算会静默丢光全部
-    术语;裁决见 p3-rulings.md「T6 domain_terms」条。
+    术语;裁决见 p3-rulings.md「T6 domain_terms」条。T9 修复轮再加两条:
+    origin="job" 的字段(未经人工审阅的推断值)绝不渲染,仅 origin="user"
+    的字段进入模型 prompt;domain_terms 的每一条在装入前先压成单行(见
+    ``test_search_profile_injection.py`` 的范围守卫里另一处含换行代表值的
+    覆盖)。
   * 变异验证:删掉 ``merge_field`` 里的 origin 检查后,「job 不覆盖 user」这条
     断言必须报红(证明测试真的钉住了这条规则,而不是巧合通过)。
 """
@@ -232,6 +236,37 @@ def test_empty_profile_renders_empty_string():
 def test_auto_values_are_never_rendered():
     profile = merge_field(_empty(), "answer_language", "auto", "user")
     assert render_style_block(profile) == ""
+
+
+def test_job_inferred_value_is_never_rendered_until_a_person_accepts_it():
+    """T9 修复轮(main-agent ruling「job 推断值 v1 不注入」):``origin="job"``
+    是未经审阅的推断,绝不能单靠自己进入模型 prompt——见
+    ``search_profile._user_field_value`` 自己的 docstring。这面向的是 P2
+    检索经验库同一条「先攒机制、注入待验证」的姿态,只是这里没有一个独立的
+    注入开关要加:字段的 ``origin`` 本身已经带着这个语义所需的全部信息
+    (``merge_field`` 从不让 job 写洗白一个用户已经写过的字段,所以「origin
+    仍是 job」本身就意味着「还没有人看过这个值」)。
+
+    变异验证(报告里记录):把 ``_user_field_value`` 改回无条件读
+    ``entry.get("value")``(不检查 origin)⇒ 本测试的第一条断言必须报红。
+    """
+    profile = merge_field(_empty(), "answer_language", "zh", "job")
+    assert render_style_block(profile) == ""
+
+    # 同一个字段,一旦被人接受(origin 经 PATCH /me/search-profile 的正常写
+    # 路径翻成 "user")——渲染立刻恢复正常,值本身逐字未变。
+    accepted = merge_field(profile, "answer_language", "zh", "user")
+    assert "Chinese" in render_style_block(accepted)
+
+
+def test_job_origin_field_is_skipped_while_a_sibling_user_field_still_renders():
+    """一个字段仍是未审阅的 job 推断,不该拖累同一份 profile 里另一个字段
+    (已经是 origin="user")的正常渲染——两个字段各自独立过 origin 门。"""
+    profile = merge_field(_empty(), "answer_language", "zh", "job")
+    profile = merge_field(profile, "answer_shape", "prose", "user")
+    block = render_style_block(profile)
+    assert "Chinese" not in block
+    assert "flowing prose" in block
 
 
 def test_set_fields_are_rendered_and_bounded():

@@ -413,6 +413,65 @@ def test_set_user_search_profile_serializes_concurrent_writers_via_row_lock(
     assert parsed["fields"]["answer_language"]["value"] == "zh"
 
 
+def test_set_user_search_profile_skips_the_update_when_unchanged(
+    core_stores: CoreStores, monkeypatch
+):
+    """T7-T9 修复轮(P2-6,PostgreSQL 镜像):合并结果与既存
+    ``search_profile_json`` 逐字相同时,``set_user_search_profile`` 必须跳过
+    ``UPDATE`` 本身——原理与 SQLite 侧的同名测试
+    (``backend/tests/test_search_profile_job.py::
+    test_repeated_job_write_of_the_same_value_skips_the_update``)一致,这里
+    钉住 PostgreSQL 适配器的同一条优化:直接比对最终值不能证明「真的跳过
+    了」,改用一把会推进的假时钟证明 ``user_profiles.updated_at`` 这一列
+    没有被第二次写入。
+
+    ``create_user`` 先用真实时钟建号(它自己的 ``utc_now()`` 调用不该被这条
+    测试的假时钟污染),之后才把
+    ``app.repositories.postgres.identity_store.utc_now`` 与
+    ``app.services.search_profile.datetime`` 一起钉死——前者控制本方法用来
+    推进**行级** ``updated_at`` 列的时钟输入,后者控制 ``merge_field`` 写入
+    文档内**逐字段** ``updated_at`` 的时钟输入(两者是独立的时钟 seam,不钉
+    住第二个,两次调用产出的 JSON 会在秒边界上偶发不同,让「同一份文档」这个
+    前提本身不成立)。
+    """
+    from datetime import datetime as _real_datetime
+    from datetime import timezone as _timezone
+
+    import app.repositories.postgres.identity_store as pg_identity_store_module
+    from app.services import search_profile as search_profile_module
+    from app.services.search_profile import parse_search_profile
+
+    store = core_stores.identity
+    user = store.create_user("h00123456", "correct horse battery staple")
+
+    class _FixedDatetime(_real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _real_datetime(2026, 8, 20, 0, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(search_profile_module, "datetime", _FixedDatetime)
+
+    first_tick = _real_datetime(2026, 8, 20, 0, 0, 0, tzinfo=_timezone.utc)
+    second_tick = _real_datetime(2026, 8, 20, 0, 0, 5, tzinfo=_timezone.utc)
+    row_clock = iter([first_tick, second_tick])
+    monkeypatch.setattr(pg_identity_store_module, "utc_now", lambda: next(row_clock))
+
+    store.set_user_search_profile(user.id, {"answer_language": "zh"}, origin="job")
+    store.set_user_search_profile(user.id, {"answer_language": "zh"}, origin="job")
+
+    row = _fetch_one(
+        core_stores,
+        "SELECT updated_at, search_profile_json FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    # The row-level updated_at must still be the FIRST clock tick, not the
+    # second one -- the second call's UPDATE (and its clock read) must never
+    # have run.
+    assert row["updated_at"] == first_tick
+    parsed = parse_search_profile(row["search_profile_json"])
+    assert parsed["fields"]["answer_language"]["value"] == "zh"
+
+
 def test_change_user_password_round_trips_and_scopes_session_revocation(
     core_stores: CoreStores,
 ):

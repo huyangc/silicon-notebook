@@ -36,11 +36,20 @@ plus at most one primary-key UPSERT — the same "bounded and zero-model, so it
 does not need its own queue" argument ``mcp_server.add_observation`` already
 makes for skipping a background hand-off. It therefore runs SYNCHRONOUSLY,
 under the SAME process-local lock that claims the trigger, rather than
-handing off to ``background_jobs``: a coarse lock held for microseconds of
-bounded DB work is simpler and no slower in practice than a per-user lock
-dict plus a running-set plus a requeue loop, and single-flight-per-user falls
-out of it for free (see :meth:`SearchProfileInferenceService.note_ask_
-completed`'s docstring).
+handing off to ``background_jobs``: a coarse lock held for one bounded read
+plus one bounded write of DB work is simpler and no slower in practice than a
+per-user lock dict plus a running-set plus a requeue loop, and
+single-flight-per-user falls out of it for free (see
+:meth:`SearchProfileInferenceService.note_ask_completed`'s docstring). T9 fix
+round: this used to say "microseconds" — the honest worst-case bound is NOT
+that tight. The SQLite write path (``IdentityStore.set_user_search_profile``)
+takes the store's own process-local ``write()`` lock too, so the two locks
+can stack when a concurrent writer (a person's own ``PATCH
+/me/search-profile`` edit, or another triggered inference run for a
+DIFFERENT user sharing the same store) is already inside it; the actual
+worst-case wait this lock can impose on an unrelated user's
+``note_ask_completed`` call is bounded by one SQLite write-lock acquisition —
+``settings.db_busy_timeout_ms`` — not a microsecond-scale constant.
 
 **Counter is process-local and resets on restart** — the same registered
 trade-off as ``RetrievalExperienceDistillationService._pending`` and

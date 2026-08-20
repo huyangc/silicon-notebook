@@ -77,6 +77,17 @@ from app.models.identity import (  # noqa: E402  (contract re-export)
     SEARCH_PROFILE_DOMAIN_TERMS_MAX,
 )
 
+# T9 fix round (P1): ``render_style_block``'s ``domain_terms`` packing reuses
+# the SAME single-line-folding primitive Agentic Memory P1 already exports
+# for exactly this purpose (untrusted, model-independent free text landing
+# in a rendered prompt line) — see this alias's own docstring in
+# ``agent_profile_block.py`` and :func:`render_style_block`'s docstring below
+# for why a bare newline in a domain term is a forgery risk, not just a
+# cosmetic one. Importing the module-level alias (not reimplementing
+# ``" ".join(value.split())`` a third time) is a leaf → leaf import: neither
+# module imports the other, so this creates no cycle.
+from app.services.agent_profile_block import collapse_prompt_line  # noqa: E402
+
 #: Closed field-name vocabulary. Anything else is dropped on read, rejected
 #: on write.
 SEARCH_PROFILE_FIELDS: frozenset[str] = frozenset(
@@ -275,7 +286,27 @@ def merge_field(profile: Mapping[str, Any], field: str, value: Any, origin: str)
 # site's; T8 only decides WHEN to call it.
 # --------------------------------------------------------------------------- #
 
-_LANGUAGE_PHRASES = {"zh": "answer in Chinese", "en": "answer in English"}
+#: ``answer_language`` is the one field whose rendered phrase must say more
+#: than "here is a preference" — ``answer_prompt``'s own rule 4 ("Answer in
+#: the question's language") is a DEFAULT the model is told to follow on
+#: every call, and a bare "answer in Chinese" reads as just another style
+#: tip sitting next to "prefer bullet points". Without an explicit note that
+#: this is the user's own stated override, a model that also sees a
+#: non-Chinese question has two instructions that look equally weighted and
+#: no signal for which one wins. The ", an override" suffix is kept to three
+#: words (not the fuller sentence a docstring can afford) because it competes
+#: with ``domain_terms`` for the SAME ~200-char
+#: :data:`SEARCH_PROFILE_BLOCK_MAX_CHARS` budget (see
+#: :func:`render_style_block`'s own docstring) — measured against the
+#: existing four-field coverage test (language+shape+detail+two short terms),
+#: the phrase has only ~32 chars of headroom before it starts pushing a
+#: person's own domain terms out of the block; a longer, more explanatory
+#: phrase here would starve the one part of the block a person is most
+#: likely to have filled with more than a couple of words.
+_LANGUAGE_PHRASES = {
+    "zh": "answer in Chinese, an override",
+    "en": "answer in English, an override",
+}
 _SHAPE_PHRASES = {
     "bullets": "prefer bullet points",
     "table_first": "prefer tables where the content fits one",
@@ -293,8 +324,42 @@ _BLOCK_PREAMBLE = (
 )
 
 
+def _user_field_value(fields: Mapping[str, Any], field: str) -> Any:
+    """Return ``field``'s value IFF its current stored origin is
+    ``"user"`` — ``None`` for a missing entry AND for a present
+    ``origin="job"`` entry alike.
+
+    T9 fix round (main-agent ruling, "job 推断值 v1 不注入"): a T7-inferred
+    value must never reach a model prompt on its own. This mirrors the P2
+    experience library's own "attach the machinery, gate the injection
+    behind its own switch until the behavior is validated" posture — except
+    here there IS no separate injection switch to add, because the field's
+    ``origin`` already carries exactly the bit this needs (``merge_field``
+    never lets a job write launder over a user's own choice, so "origin is
+    still job" already means "no person has looked at this value yet").
+    Concretely: ``answer_language`` is the one field the T7 job can write,
+    and an inferred language directly CONTRADICTS ``answer_prompt``'s rule 4
+    ("Answer in the question's language") the instant it is wrong — a job
+    that mis-classifies one noisy sample streak would silently start
+    overriding a rule the user never asked to override. The settings UI
+    still shows the inferred value (with an "inferred" badge) so a person
+    can review and explicitly ACCEPT it — accepting is exactly the
+    ``origin="user"`` write ``PATCH /me/search-profile`` already performs,
+    which is what flips this predicate from ``False`` to ``True`` for that
+    field. Nothing else about the document changes: the value stays exactly
+    where the job wrote it, this function just refuses to hand it to
+    :func:`render_style_block`'s caller until a person has taken ownership
+    of it.
+    """
+    entry = fields.get(field)
+    if not isinstance(entry, Mapping) or entry.get("origin") != "user":
+        return None
+    return entry.get("value")
+
+
 def render_style_block(profile: Mapping[str, Any]) -> str:
-    """Render ``profile``'s SET fields as one bounded English prompt line.
+    """Render ``profile``'s SET, USER-AUTHORED fields as one bounded English
+    prompt line.
 
     This is model-facing scaffolding text (an internal prompt fragment), not
     user-facing UI copy — the UI-vocabulary guard does not apply to it. It
@@ -303,11 +368,12 @@ def render_style_block(profile: Mapping[str, Any]) -> str:
     asserts this structurally, mirroring the retrieval-experience action
     vocabulary's own scope-word guard).
 
-    A field with no entry, or whose value is the sentinel ``"auto"``, is
+    A field with no entry, whose value is the sentinel ``"auto"``, or whose
+    CURRENT stored origin is ``"job"`` (see :func:`_user_field_value`) is
     silently omitted rather than rendered as "no preference" — an absent
-    field and an explicit "auto" are the same thing to a reader of the
-    block (compare :func:`merge_field`, which never stores "auto" for this
-    exact reason).
+    field, an explicit "auto", and an unreviewed job inference are all the
+    same thing to a reader of the block: nothing a person has actually
+    chosen.
 
     Bounded to :data:`SEARCH_PROFILE_BLOCK_MAX_CHARS`. ``domain_terms`` is
     the single most likely overflow source (it alone can carry up to 10 x 32
@@ -321,32 +387,39 @@ def render_style_block(profile: Mapping[str, Any]) -> str:
     (single-sentence, rarely oversized) parts from the least-specific end —
     detail, then shape, then language — the same one-chunk-at-a-time
     trimming they always used. A term is never truncated mid-word: it is
-    either whole in the block or entirely absent from it. An empty profile
-    (or one where nothing survives the budget) renders to ``""`` — a call
-    site must treat that identically to "the feature never ran" (the
-    historical, pre-feature call shape).
+    either whole in the block or entirely absent from it, but each term IS
+    collapsed to one line before packing (:func:`app.services.
+    agent_profile_block.collapse_prompt_line` — the same untrusted-free-text
+    forgery concern that function's own docstring documents applies here
+    unchanged: ``domain_terms`` is user-supplied free text, and a term
+    containing a literal newline could otherwise forge a fake extra
+    ``"; "``-joined clause, or even something that reads like a second
+    ``[...]``-style block header, inside this single rendered prompt line).
+    An empty profile (or one where nothing survives the budget) renders to
+    ``""`` — a call site must treat that identically to "the feature never
+    ran" (the historical, pre-feature call shape).
     """
     fields = profile.get("fields") or {}
     fixed_parts: list[str] = []
 
-    language_entry = fields.get("answer_language") or {}
-    language = language_entry.get("value")
+    language = _user_field_value(fields, "answer_language")
     if language and language != "auto" and language in _LANGUAGE_PHRASES:
         fixed_parts.append(_LANGUAGE_PHRASES[language])
 
-    shape_entry = fields.get("answer_shape") or {}
-    shape = shape_entry.get("value")
+    shape = _user_field_value(fields, "answer_shape")
     if shape and shape != "auto" and shape in _SHAPE_PHRASES:
         fixed_parts.append(_SHAPE_PHRASES[shape])
 
-    detail_entry = fields.get("answer_detail") or {}
-    detail = detail_entry.get("value")
+    detail = _user_field_value(fields, "answer_detail")
     if detail and detail != "auto" and detail in _DETAIL_PHRASES:
         fixed_parts.append(_DETAIL_PHRASES[detail])
 
-    terms_entry = fields.get("domain_terms") or {}
-    terms = terms_entry.get("value")
-    remaining_terms: list[str] = list(terms) if isinstance(terms, list) else []
+    terms = _user_field_value(fields, "domain_terms")
+    remaining_terms: list[str] = (
+        [cleaned for term in terms if (cleaned := collapse_prompt_line(term))]
+        if isinstance(terms, list)
+        else []
+    )
 
     while True:
         parts = list(fixed_parts)
@@ -434,10 +507,17 @@ def classify_ask_language(text: "str | None") -> str:
     non-whitespace characters, returns ``"other"`` — this is the ONLY value
     this function may return that :func:`merge_field` can never legally
     store (``answer_language``'s domain is ``{"auto", "zh", "en"}``), which
-    is precisely the point: "other" means "this row is not evidence either
-    way", so it drops out of the T7 job's majority count rather than
-    dragging the ratio toward whichever of "zh"/"en" happens to be more
-    common among the OTHER rows.
+    is precisely the point: "other" means "this row is not evidence FOR
+    EITHER CANDIDATE", not "this row is not evidence at all". T9 fix round:
+    an "other" row can never itself be the majority winner
+    (``search_profile_job._WRITABLE_LANGUAGES`` is the closed ``("zh", "en")``
+    tuple the job may ever write) but it DOES stay in the denominator the
+    job's ``SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO`` threshold is measured
+    against (see that constant's own docstring in ``app.repositories.ports``
+    for why the fuller sample is the more conservative reading) — a person
+    whose recent questions are half clearly Chinese and half unclassifiable
+    id/error-code text should NOT count as "100% Chinese of the evidence
+    that mattered" the way an excluded-denominator reading would make them.
     """
     if not text:
         return "other"

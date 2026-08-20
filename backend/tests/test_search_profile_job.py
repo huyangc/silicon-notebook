@@ -208,6 +208,41 @@ def test_clear_majority_writes_the_winning_language():
     assert identity.calls == [(USER_A, {"answer_language": "en"}, "job")]
 
 
+def test_full_sample_denominator_rejects_a_majority_that_an_excluded_denominator_would_accept():
+    """T7-T9 修复轮(P2-3):挑一组两种分母口径给出**不同**答案的样本,
+    把「分母保留全样本」这条裁决(见 SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO
+    在 ``app.repositories.ports`` 的自身文档)钉成可辨的行为,而不只是文档
+    措辞。6 条 zh + 4 条 other:
+      * 全样本分母(本仓库的实际选择):6/10 = 0.6,低于 0.7 → 不写。
+      * 排除 other 的分母(未采纳的替代口径):6/6 = 1.0,会写。
+    这条测试断言前者——若未来有人把分母改成排除 "other",这条测试必须报红。
+    """
+    rows = [{"language": "zh"}] * 6 + [{"language": "other"}] * 4
+    ask_state = _FakeAskState(rows)
+    identity = _FakeIdentity()
+    events = _Events()
+    service = _service(ask_state=ask_state, identity=identity, events=events)
+    for _ in range(3):
+        service.note_ask_completed(USER_A)
+    assert identity.calls == []
+    assert events.emitted[-1]["status"] == "skipped"
+    assert events.emitted[-1]["reason"] == "no_clear_majority"
+
+
+def test_majority_ratio_boundary_at_exactly_the_threshold_writes():
+    """T7-T9 修复轮(P2-4):当前判据是 ``winner_count / total <
+    MAJORITY_RATIO`` 才跳过——恰好等于阈值(7/10 = 0.7)不满足 ``<``,因此
+    照常写入。钉住这条边界,不让判据悄悄从 ``<`` 漂移成 ``<=``。"""
+    assert SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO == 0.7
+    rows = [{"language": "zh"}] * 7 + [{"language": "en"}] * 3
+    ask_state = _FakeAskState(rows)
+    identity = _FakeIdentity()
+    service = _service(ask_state=ask_state, identity=identity)
+    for _ in range(3):
+        service.note_ask_completed(USER_A)
+    assert identity.calls == [(USER_A, {"answer_language": "zh"}, "job")]
+
+
 def test_wiring_disabled_skips_everything():
     class _Disabled(_Settings):
         user_search_profile_enabled = False
@@ -371,3 +406,63 @@ def test_job_never_overwrites_a_user_authored_field(sqlite_harness):
     entry = stored["fields"]["answer_language"]
     assert entry["value"] == "en"
     assert entry["origin"] == "user"
+
+
+def test_repeated_job_write_of_the_same_value_skips_the_update(
+    monkeypatch, sqlite_harness
+):
+    """T7-T9 修复轮(P2-6):合并结果与既存 ``search_profile_json`` 逐字相同
+    时,``set_user_search_profile`` 必须跳过 ``UPDATE`` 本身——这是 T7 job
+    的常见形状(连续两次触发,归纳出同一个赢家语言)。
+
+    直接比对最终值不能证明「真的跳过了」:哪怕 UPDATE 真的执行了,只要值
+    没变,最终值断言照样通过。这里改用一把会推进的假时钟(``_now``)钉住
+    ``user_profiles.updated_at`` 这一列本身没有被第二次写入——第二次调用
+    如果真的执行了 UPDATE,``updated_at`` 会跳到假时钟的第二个刻度;如果
+    被正确跳过,它必须原地停在第一次调用的刻度。
+
+    ``merge_field`` 自己写入的是文档内**逐字段**的 ``updated_at``(走真实
+    ``datetime.now(timezone.utc)``,与本方法用来推进**行级** ``updated_at``
+    列的 ``_now()`` seam 是两个不同的时钟输入——见 ``merge_field`` 自己的
+    docstring)。为了让两次调用产出逐字相同的 ``search_profile_json``(否则
+    这条测试本身在秒边界上会偶发抖动,与本仓库的确定性红线冲突),这里连带
+    把 ``search_profile`` 模块的 ``datetime`` 也钉死到一个固定值。
+    """
+    from datetime import datetime as _real_datetime
+    from datetime import timezone as _timezone
+
+    from app.repositories.sqlite import identity_store as identity_store_module
+    from app.services import search_profile as search_profile_module
+
+    class _FixedDatetime(_real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _real_datetime(2026, 8, 20, 0, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(search_profile_module, "datetime", _FixedDatetime)
+    assert search_profile_module.datetime.now(_timezone.utc).isoformat() == (
+        "2026-08-20T00:00:00+00:00"
+    )
+
+    row_clock = iter(["2026-08-20T00:00:00", "2026-08-20T00:00:05"])
+    monkeypatch.setattr(identity_store_module, "_now", lambda: next(row_clock))
+
+    sqlite_harness.identity.set_user_search_profile(
+        USER_A, {"answer_language": "zh"}, origin="job"
+    )
+    sqlite_harness.identity.set_user_search_profile(
+        USER_A, {"answer_language": "zh"}, origin="job"
+    )
+
+    with sqlite_harness.database.write() as db:
+        row = db.execute(
+            "SELECT updated_at, search_profile_json FROM user_profiles "
+            "WHERE user_id=?",
+            (USER_A,),
+        ).fetchone()
+    # The row-level updated_at must still be the FIRST clock tick, not the
+    # second one -- the second call's UPDATE (and its clock read) must never
+    # have run.
+    assert row["updated_at"] == "2026-08-20T00:00:00"
+    stored = parse_search_profile(row["search_profile_json"])
+    assert stored["fields"]["answer_language"]["value"] == "zh"

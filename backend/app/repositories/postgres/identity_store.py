@@ -383,7 +383,14 @@ class IdentityStore:
         UPDATE`` 吞掉两个并发请求都 UPDATE 到 0 行后同时补插的竞态——但
         这条竞态本身只发生在 profile 行整个不存在的边界情形;一旦行存在,
         ``FOR UPDATE`` 才是本方法真正的并发保证。目标用户不存在 →
-        KeyError。"""
+        KeyError。
+
+        T9 修复轮(P2-6,镜像 SQLite 侧同名方法):合并结果与既存
+        ``search_profile_json`` 逐字相同时跳过 ``UPDATE`` 本身,直接复用
+        ``FOR UPDATE`` 已经锁定/读到的那一行——比较是纯字符串比较,不额外
+        查询;省下的是一次 ``UPDATE`` 语句(以及它顺带推进的
+        ``updated_at``)。行锁本身仍然照常持有到事务结束,这条优化只省写,
+        不省锁。"""
         if origin not in SEARCH_PROFILE_ORIGINS:
             raise ValueError("invalid search-profile origin")
         now = utc_now()
@@ -399,6 +406,8 @@ class IdentityStore:
             for field, value in fields.items():
                 profile_doc = merge_field(profile_doc, field, value, origin)
             serialized = serialize_search_profile(profile_doc)
+            if row is not None and serialized == raw:
+                return self._user_profile(user, row)
             if row is not None:
                 profile = db.execute(
                     "UPDATE user_profiles SET search_profile_json=%s,updated_at=%s "
