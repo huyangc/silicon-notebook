@@ -7,6 +7,7 @@ import {
   LogOut,
   SlidersHorizontal,
   Users,
+  Wand2,
 } from "lucide-react";
 
 
@@ -20,10 +21,14 @@ type AccountMenuProps = {
   canChangePassword: boolean;
   /** 当前是否为高级模式；开关渲染其开/关态，点击调用 onToggleAdvancedMode。 */
   advancedMode: boolean;
+  /** 「我的回答偏好」入口的部署总闸（/system/config 的
+   *  user_search_profile_enabled，缺失按 true）；关闭时整个菜单项不渲染。 */
+  searchProfileEnabled: boolean;
   onOpenMemory: () => void;
   /** 群组管理弹窗。任何登录用户都可用（项目组人人可建）。 */
   onOpenGroups: () => void;
   onToggleAdvancedMode: () => void;
+  onOpenSearchProfile: () => void;
   onChangePassword: () => void;
   onLogout: () => void | Promise<void>;
 };
@@ -37,9 +42,11 @@ export function AccountMenu({
   showAdminUsage,
   canChangePassword,
   advancedMode,
+  searchProfileEnabled,
   onOpenMemory,
   onOpenGroups,
   onToggleAdvancedMode,
+  onOpenSearchProfile,
   onChangePassword,
   onLogout,
 }: AccountMenuProps) {
@@ -143,6 +150,21 @@ export function AccountMenu({
             <span>高级模式</span>
             <span className="user-menu-state">{advancedMode ? "已开启" : "已关闭"}</span>
           </button>
+          {searchProfileEnabled && (
+            <button
+              className="user-logout"
+              type="button"
+              role="menuitem"
+              title="设置回答的语言、组织方式、详略与常用术语"
+              onClick={() => {
+                setOpen(false);
+                onOpenSearchProfile();
+              }}
+            >
+              <Wand2 size={16} />
+              <span>我的回答偏好</span>
+            </button>
+          )}
           {canChangePassword && (
             <button
               className="user-logout"

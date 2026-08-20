@@ -6,6 +6,7 @@ import {
 } from "./errors.ts";
 import { performApiRequest, requestJson } from "./api-client.ts";
 import { normalizeUiMode, type UiMode } from "./ui-mode.ts";
+import type { SearchProfilePatchBody } from "./search-profile-model.ts";
 
 export { API_BASE } from "./api-config.ts";
 export { authHeaders, clearToken, getToken, setToken } from "./auth-session.ts";
@@ -20,6 +21,12 @@ export type AuthUser = {
   // 旧后端缺这个字段；normalizeUiMode 在每个写入点兜底成 "auto"，所以这里存的
   // 永远是已归一化的合法值，读取侧不必再判空/判非法。
   ui_mode: UiMode;
+  // Agentic Memory P3（T6/T9）：检索/回答风格偏好文档。`unknown`——这是后端
+  // `Dict[str, Any]` 的宽松 wire 类型（`{version, fields: {field: {value,
+  // origin, updated_at}}}` 或 `null`），消费方必须经
+  // `search-profile-model.ts` 的 `parseSearchProfile` 防御性解析，不能在这里
+  // 假装它是已经校验过的强类型。
+  search_profile: unknown;
 };
 
 /** fetchMe / updateUiMode 的响应体归一化——两处都要把后端 ui_mode 收敛成合法值。 */
@@ -103,6 +110,20 @@ export async function updateUiMode(mode: UiMode): Promise<AuthUser> {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ui_mode: mode }),
+  });
+  return normalizeAuthUser(user);
+}
+
+/** PATCH /me/search-profile——自助编辑「我的回答偏好」，返回更新后的完整用户
+ * 档案（同 updateUiMode 同格）。`body` 由 `search-profile-model.ts` 的
+ * `buildSearchProfilePatch` 构造，未触碰的字段整体不出现在 JSON 里；总闸关闭
+ * 时后端回 409，由调用方经既有人话层展示。 */
+export async function patchSearchProfile(body: SearchProfilePatchBody): Promise<AuthUser> {
+  const user = await requestJson<AuthUser>("/me/search-profile", {
+    tag: "auth",
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
   return normalizeAuthUser(user);
 }

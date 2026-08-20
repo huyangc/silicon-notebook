@@ -56,6 +56,12 @@ export type SystemConfiguration = {
    *  字段:这里不存在「端点已经在、字段还没下发」的组合,缺字段就是这个后端
    *  压根没有这个特性,渲染入口只会打开一个整片 404 的面板。 */
   agent_profile_enabled: boolean;
+  /** 「我的回答偏好」入口的能力位（账户菜单），直接反映后端
+   *  Settings.user_search_profile_enabled。缺失(旧后端)按 **true** 处理——与
+   *  `agent_profile_enabled` 的「缺失按 false」相反：这里的部署默认值本身就是
+   *  开启,旧后端缺这个字段不该把入口隐藏成一个「看起来关闭了」的状态;真正的
+   *  写路径仍由 `PATCH /me/search-profile` 的 409 兜底。 */
+  user_search_profile_enabled: boolean;
 };
 
 export type ParserEngineCapability = {
@@ -191,6 +197,10 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   // 同样缺失按 false:这个字段与四个理解端点是同一批新增的,不存在「后端已经有
   // 端点、字段却没下发」的组合——缺字段可靠地说明这个后端根本没有这个特性。
   const agentProfileEnabled = record.agent_profile_enabled;
+  // 反方向:缺失按 true(见上面 SystemConfiguration.user_search_profile_enabled
+  // 的字段注释)——部署默认值本身就是开启,不能把「旧后端没有这个字段」误判成
+  // 「这项功能被部署方关闭了」。
+  const searchProfileEnabled = record.user_search_profile_enabled;
   const supportedExtensions = normalizedExtensions(record.supported_source_extensions)
     ?? DEFAULT_SUPPORTED_SOURCE_EXTENSIONS;
   // 图片护栏值缺失(旧后端)一律按 `null` = 「拿不到这个上限,不做本地预检」,与
@@ -215,6 +225,7 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     source_image_max_per_source: imageMaxPerSource,
     source_images_enabled: imagesEnabled !== false,
     agent_profile_enabled: agentProfileEnabled === true,
+    user_search_profile_enabled: searchProfileEnabled !== false,
   };
 }
 

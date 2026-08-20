@@ -32,6 +32,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_image_max_per_source: 200,
       source_images_enabled: false,
       agent_profile_enabled: true,
+      user_search_profile_enabled: true,
     }), {
       status: 200,
     });
@@ -60,6 +61,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_image_max_per_source: 200,
       source_images_enabled: false,
       agent_profile_enabled: true,
+      user_search_profile_enabled: true,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -96,6 +98,26 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
     assert.equal(config.source_image_max_bytes, null);
     assert.equal(config.source_image_max_per_source, null);
     assert.equal(config.source_images_enabled, true);
+    // user_search_profile_enabled 刻意不下发,模拟旧后端——与上面几个字段相反的
+    // 方向:缺失按 true(部署默认值本身就是开启,不是这项特性不存在)。
+    assert.equal(config.user_search_profile_enabled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchSystemConfiguration honors an explicit false for user_search_profile_enabled", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    user_search_profile_enabled: false,
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.user_search_profile_enabled, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
