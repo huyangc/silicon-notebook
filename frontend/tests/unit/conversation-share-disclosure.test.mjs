@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
+  SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
+  resolveShareBoundary,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   withinWatermark,
@@ -190,4 +192,85 @@ test("withinWatermark includes a turn when either timestamp is unparseable", () 
   assert.equal(withinWatermark("not-a-date", "2026-01-01T00:00:00Z"), true);
   assert.equal(withinWatermark("2026-01-01T00:00:00Z", "garbage"), true);
   assert.equal(withinWatermark("anything", ""), true); // empty watermark = include all
+});
+
+// --- 分享边界（每条回答下的分享按钮，T6）------------------------------------
+//
+// 承重的那一条是 watermarkAhead：后端水位 advance-only（`share_conversation`，
+// codex #522 R3），边界排在已发布水位之前一律 409。界面据此决定给不给发布按钮，
+// 所以这个分类错了，用户要么点了拿回一句误导的「会话已有变化」，要么本来能推进却
+// 被拦住。
+
+test("空边界逐字返回原样 turns —— 会话列表那个按钮的既有语义不变", () => {
+  const turns = [turn("2026-01-01T00:00:00Z"), turn("2026-01-01T00:01:00Z")];
+  const boundary = resolveShareBoundary(turns, "", "");
+  assert.equal(boundary.index, -1);
+  assert.equal(boundary.turns, turns); // 同一引用：没有复制、没有裁剪
+  assert.equal(boundary.unresolved, false);
+  assert.equal(boundary.watermarkAhead, false);
+  assert.equal(boundary.aheadCount, 0);
+});
+
+test("命中的边界把 turns 截到那条答案（含）为止", () => {
+  const turns = [
+    turnId("a1", "2026-01-01T00:00:00Z"),
+    turnId("a2", "2026-01-01T00:01:00Z"),
+    turnId("a3", "2026-01-01T00:02:00Z"),
+  ];
+  const boundary = resolveShareBoundary(turns, "a2", "");
+  assert.equal(boundary.index, 1);
+  assert.deepEqual(boundary.turns.map((t) => t.answer_id), ["a1", "a2"]);
+  assert.equal(boundary.unresolved, false);
+});
+
+test("边界解析不出 → unresolved + 空批次（披露退化成不带数字的兜底，不是算错的数字）", () => {
+  const turns = [turnId("a1", "2026-01-01T00:00:00Z")];
+  const boundary = resolveShareBoundary(turns, "gone", "");
+  assert.equal(boundary.unresolved, true);
+  assert.equal(boundary.index, -1);
+  assert.deepEqual(boundary.turns, []);
+  // 仍不判 ahead：调用方据此保留发布动作（expected 是那条 id 本人，不依赖 turns）。
+  assert.equal(boundary.watermarkAhead, false);
+});
+
+test("水位越过边界 → watermarkAhead + 多包含的轮数（后端不允许收回，界面必须不给按钮）", () => {
+  const turns = [
+    turnId("a1", "2026-01-01T00:00:00Z"),
+    turnId("a2", "2026-01-01T00:01:00Z"),
+    turnId("a3", "2026-01-01T00:02:00Z"),
+    turnId("a4", "2026-01-01T00:03:00Z"),
+  ];
+  const boundary = resolveShareBoundary(turns, "a2", "a4");
+  assert.equal(boundary.watermarkAhead, true);
+  assert.equal(boundary.aheadCount, 2);
+});
+
+test("水位正好在边界上、或还在边界之前 → 不判 ahead（推进是合法的）", () => {
+  const turns = [
+    turnId("a1", "2026-01-01T00:00:00Z"),
+    turnId("a2", "2026-01-01T00:01:00Z"),
+    turnId("a3", "2026-01-01T00:02:00Z"),
+  ];
+  assert.equal(resolveShareBoundary(turns, "a2", "a2").watermarkAhead, false);
+  assert.equal(resolveShareBoundary(turns, "a3", "a1").watermarkAhead, false);
+});
+
+test("水位答案已被删（id 解析不到）→ 不判 ahead —— 后端那条回归检查同样跳过并推进", () => {
+  const turns = [turnId("a1", "2026-01-01T00:00:00Z"), turnId("a2", "2026-01-01T00:01:00Z")];
+  const boundary = resolveShareBoundary(turns, "a1", "deleted-answer");
+  assert.equal(boundary.watermarkAhead, false);
+  assert.equal(boundary.aheadCount, 0);
+  assert.deepEqual(boundary.turns.map((t) => t.answer_id), ["a1"]);
+});
+
+test("兜底文案两条各自独立：边界模式那句写的是「更新到这一条」而不是「更新到最新」", () => {
+  // 用户据以决定要不要按下去的那句话，必须与按钮上写的公开范围一致。
+  assert.ok(SHARE_UPDATE_COUNTS_ERROR.includes("更新到最新"));
+  assert.ok(SHARE_UPDATE_BOUNDED_COUNTS_ERROR.includes("更新到这一条"));
+  assert.ok(!SHARE_UPDATE_BOUNDED_COUNTS_ERROR.includes("更新到最新"));
+  // 两句都必须同时提到附图与个人记忆（consent 红线：绝不静默省略其中一面）。
+  for (const line of [SHARE_UPDATE_COUNTS_ERROR, SHARE_UPDATE_BOUNDED_COUNTS_ERROR]) {
+    assert.ok(line.includes("附图"));
+    assert.ok(line.includes("个人记忆"));
+  }
 });

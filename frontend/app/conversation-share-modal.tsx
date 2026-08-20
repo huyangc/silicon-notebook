@@ -29,7 +29,9 @@ import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
+  SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
+  resolveShareBoundary,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   type ShareDisclosure,
@@ -62,11 +64,16 @@ export function ConversationShareModal({
   notebookId,
   conversationId,
   title,
+  throughAnswerId = "",
   onClose,
 }: {
   notebookId: string;
   conversationId: string;
   title: string;
+  /** 发布边界：分享到**这条答案**为止，即每条回答下面那个分享按钮（T6）。空串 = 整条
+   *  会话 /「更新到最新」，也就是会话列表里那个按钮的既有语义——该模式下本组件的行为
+   *  与接入前逐字相同（`resolveShareBoundary` 原样返回 turns，两个 ahead 位恒 false）。 */
+  throughAnswerId?: string;
   onClose: () => void;
 }) {
   const aliveRef = useRef(true);
@@ -145,16 +152,41 @@ export function ConversationShareModal({
 
   const shared = Boolean(token);
   const link = shared ? buildPublicConversationLink(token, typeof window !== "undefined" ? window.location.origin : "") : "";
+  const bounded = Boolean(throughAnswerId);
+  // 本次要发布的那批轮次。`throughAnswerId` 为空时逐字等于 `turns`（既有语义）;非空时
+  // 截到那条答案（含）为止——披露、`expected_through_id` 与所有按钮文案都从同一批派生,
+  // 「披露的快照 == 发布的快照」这条不变量因此对两种模式同时成立。
+  const boundary = useMemo(
+    () => resolveShareBoundary(turns, throughAnswerId, shared ? watermarkId : ""),
+    [turns, throughAnswerId, watermarkId, shared],
+  );
+  const scopedTurns = boundary.turns;
+  // 边界解析不出（详情没加载出来,或这条答案已不在会话里）→ 一个数都算不出,与详情加载
+  // 失败同一条退化路径:不带数字、但**附图与个人记忆两个面都提**的兜底文案。仍可发布——
+  // expected 是用户点的那条 id,不依赖 turns。
+  const countsUnavailable = countsError || boundary.unresolved;
+  // ⚠ 水位已越过边界时,当前链接实际公开的是「整条到水位为止」而不是用户点的那一段,所以
+  // 披露必须按**完整** turns 统计。按截断批次算会**少报**公开页真实包含的附图/记忆条数——
+  // 披露描述的是「链接里有什么」,不是「用户点了哪一条」。
+  const disclosureTurns = boundary.watermarkAhead ? turns : scopedTurns;
   const disclosure = useMemo(
-    () => summarizeShareDisclosure(turns, shared ? watermarkId : "", watermark),
-    [turns, watermarkId, watermark, shared],
+    () => summarizeShareDisclosure(disclosureTurns, shared ? watermarkId : "", watermark),
+    [disclosureTurns, watermarkId, watermark, shared],
   );
-  // 前瞻披露:「更新到最新」会把水位推到全部轮次,consent 判据是**这个按钮将要公开
-  // 什么**,所以它必须在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。
+  // 前瞻披露:推进水位会公开新增轮次,consent 判据是**这个按钮将要公开什么**,所以它必须
+  // 在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。边界模式下「更新后」的范围
+  // 就是截断批次(只消费于 `canAdvance`,而那要求 !watermarkAhead,故这里用 scopedTurns)。
   const updatePreview = useMemo(
-    () => summarizeShareUpdate(turns, shared ? watermarkId : "", watermark),
-    [turns, watermarkId, watermark, shared],
+    () => summarizeShareUpdate(scopedTurns, shared ? watermarkId : "", watermark),
+    [scopedTurns, watermarkId, watermark, shared],
   );
+  // 「更新」块的渲染条件。既有模式沿用 newCount>0（含 countsError 时 turns 为空 → 不显示,
+  // 逐字保留接入前行为）;边界模式另接住 countsUnavailable——算不出新增轮数,但确实还没
+  // 发布到这里,藏起来等于把一次合法的推进变没了。水位已越过边界时后端只会 409,所以那一
+  // 支不给按钮（见 `ShareBoundary` 的注释:后端水位 advance-only）。
+  const canAdvance = shared
+    && !boundary.watermarkAhead
+    && (disclosure.newCount > 0 || (bounded && countsUnavailable));
 
   async function doShare(action: "share" | "update") {
     // 防御性复查:分享状态未知时绝不发布(CTA 已 disabled,这里兜底 codex #522 R6 P1)。
@@ -163,10 +195,15 @@ export function ConversationShareModal({
     setError("");
     setNotice("");
     try {
-      // 水位钉死在弹窗据以算披露的那批 `turns` 的**最新**一条(ASC 排序,末条即最新)。
+      // 水位钉死在弹窗据以算披露的那批轮次的**最新**一条(ASC 排序,末条即最新)。
       // 发布的快照 == 披露的快照(codex #522 R2 P1)。详情没加载出来(countsError)时
       // turns 为空,expected="" 回退「当前最新」——那种情形披露也已退化成不带数字的告警。
-      const expectedThroughId = turns.length ? turns[turns.length - 1].answer_id : "";
+      //
+      // ⚠ 边界模式下 `throughAnswerId` **本人**就是 expected,不经 turns 兜底:详情加载
+      // 失败时回退成 "" 会让服务端按**当前最新**发布,而那恰恰是用户没点的那些轮次——
+      // 界面上写着「分享到这一条」,发出去的却是整条会话。
+      const expectedThroughId = throughAnswerId
+        || (scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "");
       const resp = await shareConversation(notebookId, conversationId, expectedThroughId);
       if (!aliveRef.current) return;
       setToken(resp.share_token || "");
@@ -223,6 +260,11 @@ export function ConversationShareModal({
             <div>
               <h2>分享会话</h2>
               <p style={{ wordBreak: "break-word" }}>{title || "未命名会话"}</p>
+              {bounded && !boundary.unresolved && (
+                <p className="tool-hint" style={{ margin: "4px 0 0" }}>
+                  分享至第 {boundary.index + 1} 轮回答（本会话共 {turns.length} 轮）。
+                </p>
+              )}
             </div>
             <button className="icon-button" onClick={onClose} title="关闭">×</button>
           </div>
@@ -234,8 +276,9 @@ export function ConversationShareModal({
               {notice && <p className="tool-hint" style={{ margin: 0 }}>{notice}</p>}
 
               <p className="tool-hint" style={{ margin: 0 }}>
-                发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次
-                「更新到最新」。撤销即刻失效。
+                {bounded
+                  ? "发布成一条免登录的只读快照，只包含这条回答以及它之前的问答。之后的问答不会出现在链接里。撤销即刻失效。"
+                  : "发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次「更新到最新」。撤销即刻失效。"}
               </p>
 
               {shared ? (<>
@@ -257,11 +300,22 @@ export function ConversationShareModal({
                   {disclosure.newCount > 0 && `，之后新增 ${disclosure.newCount} 轮未包含`}
                 </p>
 
-                {disclosure.newCount > 0 && (
+                {/* 水位已经越过用户点的这条回答。后端水位 advance-only,把范围收回来在
+                    服务端做不到(只会换回一句"这条会话已有变化"的 409,而实际什么都没变),
+                    所以这一支**不给发布按钮**,改为说清现状与唯一可行的出路:先撤销、再从
+                    这条回答重新分享(撤销会清空水位,重发即可钉在更早的边界上)。 */}
+                {boundary.watermarkAhead && (
+                  <p className="tool-hint" style={{ margin: 0 }}>
+                    这条回答已经在链接里了——当前链接还多包含它之后的 {boundary.aheadCount} 轮。
+                    公开范围只能往后推、不能收回；要缩小到这一条，请先「撤销分享」，再从这条回答重新分享。
+                  </p>
+                )}
+
+                {canAdvance && (
                   <div className="conversation-share-update">
                     {/* consent 红线:披露必须在按钮**之前**呈现,点了才涨会先公开
                         水位之后新轮引用的私有 Memory(codex #522 R1 P1)。 */}
-                    <ShareUpdateDisclosureLines preview={updatePreview} countsError={countsError} />
+                    <ShareUpdateDisclosureLines preview={updatePreview} countsError={countsUnavailable} bounded={bounded} />
                     <button
                       type="button"
                       className="sort-button"
@@ -269,12 +323,12 @@ export function ConversationShareModal({
                       onClick={() => void doShare("update")}
                     >
                       <RefreshCw size={13} className={busy === "update" ? "busy-spin" : undefined} />
-                      {" "}{busy === "update" ? "更新中…" : "更新到最新"}
+                      {" "}{busy === "update" ? "更新中…" : (bounded ? "更新到这一条" : "更新到最新")}
                     </button>
                   </div>
                 )}
 
-                <ShareDisclosureLines disclosure={disclosure} countsError={countsError} />
+                <ShareDisclosureLines disclosure={disclosure} countsError={countsUnavailable} />
 
                 <button
                   type="button"
@@ -285,7 +339,7 @@ export function ConversationShareModal({
                   <X size={13} /> {busy === "revoke" ? "撤销中…" : "撤销分享"}
                 </button>
               </>) : (<>
-                <ShareDisclosureLines disclosure={disclosure} countsError={countsError} />
+                <ShareDisclosureLines disclosure={disclosure} countsError={countsUnavailable} />
                 <button
                   type="button"
                   className="button conversation-share-cta"
@@ -293,7 +347,7 @@ export function ConversationShareModal({
                   onClick={() => void doShare("share")}
                 >
                   <Link2 size={14} className={busy === "share" ? "busy-spin" : undefined} />
-                  {" "}{busy === "share" ? "分享中…" : "生成分享链接"}
+                  {" "}{busy === "share" ? "分享中…" : (bounded ? "分享到这一条" : "生成分享链接")}
                 </button>
               </>)}
             </>)}
@@ -338,14 +392,18 @@ function ShareDisclosureLines({
 function ShareUpdateDisclosureLines({
   preview,
   countsError,
+  bounded,
 }: {
   preview: ShareUpdatePreview;
   countsError: boolean;
+  /** 边界模式（分享到某条回答为止）。只影响措辞:兜底文案里的按钮名必须与旁边那个
+   *  按钮上写的字一致,否则用户据以决定的那句话说的是另一个公开范围。 */
+  bounded?: boolean;
 }) {
   if (countsError) {
     return (
       <p className="tool-hint" style={{ margin: 0 }}>
-        {SHARE_UPDATE_COUNTS_ERROR}
+        {bounded ? SHARE_UPDATE_BOUNDED_COUNTS_ERROR : SHARE_UPDATE_COUNTS_ERROR}
       </p>
     );
   }

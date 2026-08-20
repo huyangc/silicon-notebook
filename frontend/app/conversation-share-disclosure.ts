@@ -23,6 +23,11 @@ export const SHARE_DISCLOSURE_COUNTS_ERROR =
   "公开页可能包含引用到的附图与个人记忆摘录（本次未能统计数量）。";
 export const SHARE_UPDATE_COUNTS_ERROR =
   "「更新到最新」会公开新增轮次，其中可能包含新引用的附图与个人记忆摘录（本次未能统计数量）。";
+// 同上，边界模式（每条回答下的分享按钮）的措辞。**必须另起一条常量而不是复用上面那句**：
+// 那句写着「更新到最新」，而这个按钮推进到的是用户点的那条回答、不是最新——用户据以决定
+// 要不要按下去的那句话，说错了公开范围就等于没披露。
+export const SHARE_UPDATE_BOUNDED_COUNTS_ERROR =
+  "「更新到这一条」会公开新增轮次，其中可能包含新引用的附图与个人记忆摘录（本次未能统计数量）。";
 
 export type ShareDisclosure = {
   sharedCount: number;
@@ -150,5 +155,61 @@ export function summarizeShareUpdate(
     afterUpdate,
     newMemoryCount: afterUpdate.memoryCount - current.memoryCount,
     newImageCount: afterUpdate.imageCount - current.imageCount,
+  };
+}
+
+/** 一次「分享到某条回答为止」请求解析出的边界（每条回答下的分享按钮，T6）。
+ *
+ *  `throughAnswerId` 为空＝会话列表里那个分享按钮的既有语义（整条会话 / 更新到最新），
+ *  此时本函数逐字返回原样的 turns，下游一切判定与接入前一致。
+ *
+ *  `watermarkAhead` 是本类型存在的理由。后端水位是 **advance-only**
+ *  （`ask_state_store.share_conversation`，codex #522 R3）：边界排在已发布水位**之前**
+ *  的请求一律 `ConversationShareWatermarkStale` → 409，绝不允许把已经公开出去的轮次
+ *  再收回来。所以「已分享到第 7 轮、又点第 3 轮下面的分享」在服务端是**做不到**的一件事，
+ *  界面必须直接不给发布动作、并说明当前链接已经包含了这条回答——给了按钮只会换回一句
+ *  「这条会话已有变化，请刷新后重新分享」，而实际上什么都没变过，那句话是误导。
+ *
+ *  水位 id 在 turns 里解析不到（水位答案被删）时**不**判 ahead：后端那条回归检查同样
+ *  会跳过并照常推进（见该方法的 "a current boundary that no longer resolves ... skips
+ *  the check and advances"），此时禁用发布会拦掉一次本来能成的分享。 */
+export type ShareBoundary = {
+  /** 边界答案在权威 turn 顺序里的下标；-1 = 未指定边界，或指定了但解析不出。 */
+  index: number;
+  /** 本次将要发布的那批轮次——截到边界答案（含）为止；未指定边界时是全部轮次。 */
+  turns: ConversationDetail["turns"];
+  /** 指定了边界但 turns 里找不到它 → 披露算不出，退化成不带数字的兜底文案。 */
+  unresolved: boolean;
+  /** 当前水位已越过边界：公开页已包含这条回答，而且还包含更多（后端不允许收回）。 */
+  watermarkAhead: boolean;
+  /** `watermarkAhead` 时，公开页比这条边界多包含的轮数。 */
+  aheadCount: number;
+};
+
+export function resolveShareBoundary(
+  turns: ConversationDetail["turns"],
+  throughAnswerId: string,
+  sharedThroughId: string,
+): ShareBoundary {
+  const id = String(throughAnswerId || "").trim();
+  if (!id) {
+    return { index: -1, turns, unresolved: false, watermarkAhead: false, aheadCount: 0 };
+  }
+  const index = turns.findIndex((turn) => turn.answer_id === id);
+  if (index < 0) {
+    // 详情没加载出来，或这条答案已不在会话里。披露一个数都算不出，所以给空批次让
+    // 组件走 countsError 兜底文案；**仍可发布**——expected_through_id 就是用户点的
+    // 那条 id，不依赖 turns，服务端要么钉在它上面、要么 409。
+    return { index: -1, turns: [], unresolved: true, watermarkAhead: false, aheadCount: 0 };
+  }
+  const markId = String(sharedThroughId || "").trim();
+  const markIndex = markId ? turns.findIndex((turn) => turn.answer_id === markId) : -1;
+  const ahead = markIndex > index;
+  return {
+    index,
+    turns: turns.slice(0, index + 1),
+    unresolved: false,
+    watermarkAhead: ahead,
+    aheadCount: ahead ? markIndex - index : 0,
   };
 }
