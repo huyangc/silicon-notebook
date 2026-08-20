@@ -65,6 +65,10 @@ from app.repositories.ports import (
     project_trace_step,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+# Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
+# back from ``recent_user_ask_languages`` is turned into a closed language
+# bucket, before it leaves this store — see that method's own docstring.
+from app.services.search_profile import classify_ask_language
 # The public projection's turn ceiling is the single source of truth for how many
 # turns one anonymous page renders; the token-resolved query below bounds its
 # fetch to ``MAX_TURNS + 1`` (cap + 1) so a >MAX_TURNS conversation cannot force
@@ -620,6 +624,30 @@ class AskStateStore:
                     project_report_attempt(row["query"], row["failed"])
                 )
         return reports
+
+    def recent_user_ask_languages(self, user_id: str, *, limit: int) -> list[dict]:
+        """ONE person's recent asks, projected to nothing but a closed
+        three-value language bucket (Agentic Memory P3, T7). See
+        ``AskStateStorePort.recent_user_ask_languages`` for the full
+        contract; the two properties that must not drift from it:
+
+        ⚠ The question text NEVER leaves this method — it is read, classified
+        by ``classify_ask_language`` and discarded in the same statement's
+        result-row loop, so no caller outside this file can ever hold it.
+
+        ⚠ ``created_by = ?`` is in the SQL text, unscoped by notebook (see the
+        port docstring for why), and ``status = 'done'`` mirrors the two
+        sibling reads above.
+        """
+        limit = max(1, int(limit))
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT question FROM ask_jobs "
+                "WHERE created_by = ? AND status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        return [{"language": classify_ask_language(row["question"])} for row in rows]
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

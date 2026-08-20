@@ -43,6 +43,11 @@ from app.repositories.postgres.database import PostgresDatabase
 # adapter's import of the same constant for why the token-resolved query bounds
 # its fetch to ``MAX_TURNS + 1`` (codex #522 R6 P2). Pure leaf module, no cycle.
 from app.services.conversation_public_view import MAX_TURNS
+# Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
+# back from ``recent_user_ask_languages`` is turned into a closed language
+# bucket, before it leaves this store — see that method's own docstring, and
+# the SQLite adapter's mirror import for the same reason.
+from app.services.search_profile import classify_ask_language
 
 
 # Canonical oldest -> newest order for one conversation's answers. Mirrors
@@ -538,6 +543,22 @@ class AskStateStore:
                     project_report_attempt(row["query"], row["failed"])
                 )
         return reports
+
+    def recent_user_ask_languages(self, user_id: str, *, limit: int) -> list[dict]:
+        """ONE person's recent asks, projected to nothing but a closed
+        three-value language bucket (Agentic Memory P3, T7). Mirrors the
+        SQLite adapter's method — see ``AskStateStorePort.
+        recent_user_ask_languages`` for the full contract.
+        """
+        limit = max(1, int(limit))
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT question FROM ask_jobs "
+                "WHERE created_by = %s AND status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT %s",
+                (user_id, limit),
+            ).fetchall()
+        return [{"language": classify_ask_language(row["question"])} for row in rows]
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

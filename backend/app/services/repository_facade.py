@@ -1157,6 +1157,19 @@ class RepositoryFacade:
         """
         return self._runtime.retrieval_experience_jobs
 
+    @property
+    def search_profile_jobs(self):
+        """Agentic Memory P3(B-Profile)的检索偏好归纳 service(T7)——一跳委托到
+        中性 runtime 上的那**一个**实例,与 ``agent_profile_jobs``/
+        ``retrieval_experience_jobs`` 同一条理由落在 runtime:每用户阈值计数是
+        进程内状态,分身即两份各自计到一半的计数器。
+
+        今天没有消费方(触发点 ask_execution 走的是 runtime 自己的
+        ``self.search_profile_jobs``),这个属性同样是为将来可能的手动触发入口
+        留的一跳,与它的两个兄弟属性同一份理由。
+        """
+        return self._runtime.search_profile_jobs
+
     def _count(self, db: object, table: str, column: str, value: str) -> int:
         return self._runtime.notebook_summaries.count(db, table, column, value)
 

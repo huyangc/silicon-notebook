@@ -707,6 +707,61 @@ def test_recent_user_report_traces_scopes_to_the_reading_member(content_harness)
     ) == []
 
 
+def test_recent_user_ask_languages_scopes_to_the_asking_member(content_harness):
+    """Agentic Memory P3 (B-Profile, T7): the THIRD trace read, on PostgreSQL.
+
+    ⚠ Same privacy-boundary contract as the two reads above — ``created_by =
+    %s`` is written into the statement (pinned statically by
+    ``test_agent_profile_isolation_guard.py`` over the now three-element
+    ``TRACE_READ_METHODS``) — but this method's projection is narrower still:
+    every row is EXACTLY ``{"language": ...}``, never the question text
+    itself, because it feeds a deterministic inference job that must never
+    see anyone's question wording (see
+    ``AskStateStorePort.recent_user_ask_languages``'s own docstring).
+
+    Also pins the ``status = 'done'`` gate: a job that never reached the
+    successful-delivery path (mirroring the ``note_ask_completed`` trigger's
+    own gate) must not contribute a row, even though its question text is
+    perfectly readable.
+    """
+    mark = "%s"
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at,username,password_hash,password_salt,password_iterations) "
+            f"VALUES ({','.join([mark] * 11)})",
+            ("user-other", "other@example.test", "Other", "user", "active",
+             NOW, NOW, "o00456789", "", "", 0),
+        )
+    mine, _conv = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="这是中文提问"), "reasoning", "user-content"
+    )
+    content_harness.ask.finish_job(mine, "done")
+    unfinished, _conv2 = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="never finished"), "reasoning", "user-content"
+    )
+    content_harness.ask.finish_job(unfinished, "failed", error="boom")
+    theirs, _conv3 = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="their english question"), "reasoning",
+        "user-other",
+    )
+    content_harness.ask.finish_job(theirs, "done")
+
+    rows = content_harness.ask.recent_user_ask_languages("user-content", limit=30)
+
+    # Projected, not passed through: a "done" job for this member contributes
+    # exactly one row shaped {"language": ...}, no question text anywhere —
+    # the failed job and the other member's job are both excluded.
+    assert rows == [{"language": "zh"}]
+    assert set().union(*[set(row.keys()) for row in rows]) == {"language"}
+    assert content_harness.ask.recent_user_ask_languages(
+        "user-other", limit=30
+    ) == [{"language": "en"}]
+    assert content_harness.ask.recent_user_ask_languages(
+        "user-nobody", limit=30
+    ) == []
+
+
 def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     content_harness,
 ):

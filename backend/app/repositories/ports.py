@@ -2555,6 +2555,26 @@ class SQLiteMaintenancePort(
     ) -> dict[str, object]: ...
 
 
+#: Agentic Memory P3 (B-Profile, T7) — bounded read size and the two
+#: thresholds the deterministic inference job applies to what
+#: ``AskStateStorePort.recent_user_ask_languages`` returns. Registered here,
+#: module-level and beside the port they describe, the same placement as
+#: ``RETRIEVAL_EXPERIENCE_BATCH_RUNS``/``AGENT_OBSERVATION_RING_MAX`` beside
+#: their own ports rather than inside ``search_profile_job.py``: these
+#: numbers describe the SHAPE of the read (how many rows, how sure a
+#: majority has to be before the job trusts it), which is a property of the
+#: read itself, not of whichever caller happens to invoke it.
+#:
+#: ``SAMPLE_LIMIT`` bounds the read; ``MIN_SAMPLES`` is the floor below which
+#: the job writes nothing at all (a person's first few questions are not
+#: enough evidence either way); ``MAJORITY_RATIO`` is how dominant one
+#: language's share of the (non-"other") sample has to be before the job
+#: calls it a "明确多数" rather than a toss-up it should stay silent about.
+SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT = 30
+SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES = 10
+SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO = 0.7
+
+
 # --- Task 22: Ask/answer/conversation/job/trace persistence ----------------
 @runtime_checkable
 class AskStateStorePort(Protocol):
@@ -2801,6 +2821,60 @@ class AskStateStorePort(Protocol):
     # ``agent_profile_job.render_usage_block``); with the shipped defaults a
     # full sample overruns the cap routinely, so this is the common case,
     # not an edge one.
+
+    def recent_user_ask_languages(
+        self, user_id: str, *, limit: int
+    ) -> list[dict]: ...
+    # ⚠ Agentic Memory P3 (B-Profile, T7) — the THIRD read on this port whose
+    # ``user_id`` argument is a PRIVACY BOUNDARY, and the narrowest
+    # projection of the three. Every row it returns is EXACTLY
+    # ``{"language": "zh" | "en" | "other"}`` — a closed three-value bucket
+    # computed FROM the question text INSIDE the store (both backends call
+    # ``app.services.search_profile.classify_ask_language`` on the row
+    # before it leaves the SQL boundary), never the question text itself.
+    # ``recent_user_ask_traces``/``recent_user_report_traces`` above both
+    # cross this port's boundary carrying real question/direction wording —
+    # safe there because their consumer (the private overlay block) renders
+    # it back to the very same person who wrote it. This method feeds a
+    # deterministic, ZERO-LLM inference job whose entire reason to exist is
+    # to never see that text at all, anywhere outside the store, so the
+    # classification happens on the near side of the read rather than the
+    # far side.
+    #
+    # ⚠ Deliberately UNSCOPED BY NOTEBOOK — the SQL carries
+    # ``created_by = ?``/``= %s`` and nothing else, unlike its two siblings
+    # above which also take a ``notebook_id``. Their per-(notebook, user)
+    # narrowing exists because what they write is a per-notebook overlay
+    # block; a person's own spoken/written language does not change by
+    # notebook, and narrowing this read to one notebook would only shrink
+    # the sample for no privacy benefit — the isolation this method needs is
+    # "this person, nobody else", which the ``created_by`` predicate alone
+    # already gives it.
+    #
+    # ⚠ Reads ONLY ``status = 'done'`` jobs, mirroring
+    # ``recent_completed_ask_runs``/``recent_user_report_traces`` above —
+    # the trigger that drives this job (``note_ask_completed``) only fires
+    # on an ask's successful-delivery path (see
+    # ``AskExecutionCoordinator.start``'s ``worker()``), so a statement that
+    # also matched cancelled/failed rows would disagree with what actually
+    # produces a sample.
+    #
+    # Bounded by ``limit`` (``SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT`` at the
+    # call site): the ``limit`` most recent asks by
+    # ``created_at DESC, id DESC`` — newest evidence of how a person
+    # currently writes, not their oldest.
+    #
+    # ⚠ Both backends' ``ask_state_store.py`` pin this method into
+    # ``TRACE_READ_METHODS`` (``test_agent_profile_isolation_guard.py``),
+    # which statically scans its SQL text for the same ``created_by``
+    # predicate token the two siblings above use — even though this method
+    # belongs to NEITHER chain that guard file's layer one/two classify (it
+    # feeds ``search_profile_job.py``, a module those two layers never scan
+    # at all). Only layer three's "does the SQL literally carry the
+    # predicate" check applies here, and it is exactly the check this method
+    # needs: a Python-side filter reading ``row["created_by"] == user_id``
+    # after an unscoped SELECT would look identical in every test that does
+    # not specifically assert the predicate is IN THE SQL TEXT.
 
 
 # Memory write/revision values are storage-neutral domain types.  The port

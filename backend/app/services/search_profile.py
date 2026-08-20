@@ -347,3 +347,99 @@ def render_style_block(profile: Mapping[str, Any]) -> str:
         parts.pop()  # drop the least-specific (rightmost) part and retry
 
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# Language classification — the T7 deterministic-inference job's ENTIRE
+# reason to be zero-LLM: this is a pure, deterministic character-class ratio
+# over already-persisted question text, not a model call. It lives here
+# rather than in ``search_profile_job.py`` because it is a property of the
+# DOCUMENT's own ``answer_language`` value domain (what counts as "zh" vs
+# "en" is the same question whether the caller is the T7 job or some future
+# consumer), and because BOTH backends' ``ask_state_store.py`` import it
+# directly — the classification happens ON THE STORE SIDE of the read (see
+# ``AskStateStorePort.recent_user_ask_languages``), so a second copy living
+# next to the job would invite the two to drift apart.
+# --------------------------------------------------------------------------- #
+
+#: CJK code point ranges checked by :func:`classify_ask_language`. Deliberately
+#: narrow to the ranges that indicate CHINESE specifically (the only
+#: non-Latin bucket this v1 classifier writes) — Unified Ideographs plus the
+#: Extension A block and CJK punctuation/fullwidth forms a Chinese question
+#: commonly mixes in ("，", "：", fullwidth parens). Hiragana/Katakana/Hangul
+#: are deliberately NOT included: a Japanese- or Korean-heavy question is not
+#: Chinese, and folding their ranges in here would misclassify it as "zh"
+#: rather than correctly falling through to "other".
+_CJK_RANGES: "tuple[tuple[int, int], ...]" = (
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0x3400, 0x4DBF),   # CJK Unified Ideographs Extension A
+    (0x3000, 0x303F),   # CJK Symbols and Punctuation
+    (0xFF00, 0xFFEF),   # Halfwidth and Fullwidth Forms
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    code = ord(ch)
+    return any(low <= code <= high for low, high in _CJK_RANGES)
+
+
+#: Below this CJK-character ratio (of the question's non-whitespace
+#: characters), a question does not count as Chinese even if it contains
+#: SOME CJK text — a single borrowed term ("用 API 怎么调") should not flip
+#: an otherwise-English question, and the same asymmetry protects the other
+#: direction: a Chinese question that quotes a few English words does not
+#: flip back either, because it never drops below this ratio in the first
+#: place.
+_ASK_LANGUAGE_CJK_RATIO = 0.3
+
+#: Below this ASCII-letter ratio, a CJK-free question still does not count
+#: as English — a bare identifier (``set_db_verbose_mode``, mostly letters
+#: but not prose) can clear this bar and legitimately count as "en" wording,
+#: while an id-shaped token (``REQ-2024-08-0091``, mostly digits/punctuation)
+#: cannot, and correctly falls through to "other" instead of quietly
+#: outvoting a person's real language on the strength of a pasted error code.
+_ASK_LANGUAGE_LATIN_ALPHA_RATIO = 0.5
+
+
+def classify_ask_language(text: "str | None") -> str:
+    """Classify one Ask question into the closed three-value bucket
+    ``"zh"`` / ``"en"`` / ``"other"``.
+
+    Pure, deterministic, zero I/O and zero model calls — CJK-ratio first
+    (a question can legitimately mix scripts, and the CJK share of its
+    non-whitespace characters is what settles a mixed question, not which
+    script happens to appear first in the string), then a SEPARATE ASCII
+    letter-ratio threshold decides "en" for CJK-free text. Whitespace never
+    enters either ratio's denominator: it carries no language signal in
+    either script's tokenization and would otherwise make identical
+    questions classify differently depending on incidental spacing.
+
+    ``None``/empty/whitespace-only input, and any question with zero
+    non-whitespace characters, returns ``"other"`` — this is the ONLY value
+    this function may return that :func:`merge_field` can never legally
+    store (``answer_language``'s domain is ``{"auto", "zh", "en"}``), which
+    is precisely the point: "other" means "this row is not evidence either
+    way", so it drops out of the T7 job's majority count rather than
+    dragging the ratio toward whichever of "zh"/"en" happens to be more
+    common among the OTHER rows.
+    """
+    if not text:
+        return "other"
+    total = 0
+    cjk = 0
+    latin_alpha = 0
+    for ch in text:
+        if ch.isspace():
+            continue
+        total += 1
+        if _is_cjk(ch):
+            cjk += 1
+        elif ch.isascii() and ch.isalpha():
+            latin_alpha += 1
+    if total == 0:
+        return "other"
+    if cjk / total >= _ASK_LANGUAGE_CJK_RATIO:
+        return "zh"
+    if latin_alpha / total >= _ASK_LANGUAGE_LATIN_ALPHA_RATIO:
+        return "en"
+    return "other"
