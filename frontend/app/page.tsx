@@ -1981,9 +1981,16 @@ export default function Home() {
   // 的 cancelled 变 true,但只有前者需要放弃刷新。同 sourcesRef 的既有轻量方案。
   const currentNotebookIdRef = useRef<string | null>(null);
   const revalidateAccessRef = useRef<() => void>(() => {});
-  // 「只有最新一次访问权复核的结果算数」:先发后回的旧响应必须整条丢弃,不能把撤销前的
-  // 笔记本清单盖回去。与本文件既有的 `sourcePageRequestRef` 等过期结果 guard 同一形状。
-  const accessRefreshSeqRef = useRef(0);
+  /**
+   * 笔记本清单的**写入世代**:每个会 `setNotebooks` 的路径都必须先 bump、写之前再 check,
+   * 只有最新一次发出的结果算数。
+   *
+   * 光管住访问权复核那一条不够:`loadNotebookCollection` 也写这份清单,而它把
+   * `listNotebooks()` 和更慢的 health/config 放在同一个 `Promise.all` 里——它的清单可能在
+   * 撤销**之前**就取回来了,却被慢请求拖到撤销之后才落地,把那张已经读不到的卡片复活
+   * (codex #529 R5 P2)。与本文件既有的 `sourcePageRequestRef` 等过期结果 guard 同一形状。
+   */
+  const notebookListSeqRef = useRef(0);
   // Live refs for source paging/query so long-lived poll effects (paper-meta
   // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
   // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
@@ -3070,6 +3077,10 @@ export default function Home() {
   }, [modelPanelOpen]);
 
   async function loadNotebookCollection(opts: { guard?: () => boolean } = {}) {
+    // 清单写入世代:这条路径也写 `setNotebooks`,所以同样要 bump-then-check。它的
+    // `listNotebooks()` 和更慢的 health/config 同在一个 `Promise.all` 里,清单可能在撤销
+    // 之前就取回、却被慢请求拖到撤销之后才落地(codex #529 R5 P2)。
+    const listSeq = ++notebookListSeqRef.current;
     // The model status request reads only the persisted local snapshot. It is
     // deliberately detached so a missing status endpoint cannot hide notebooks.
     void refreshModelStatus();
@@ -3092,7 +3103,9 @@ export default function Home() {
         ? "服务正常"
           : "服务正常 · 模型服务不可用",
     );
-    setNotebooks(notebookResponse);
+    // 只有最新一次发出的清单算数;health/statusText 不进这道闸(新旧都无害,而漏掉
+    // 它们会让一次落后的刷新连服务状态都不更新)。
+    if (notebookListSeqRef.current === listSeq) setNotebooks(notebookResponse);
     if (systemConfiguration) {
       setSourceUploadMaxBytes(systemConfiguration.source_upload_max_bytes);
       setSourceUploadMaxFilesPerBatch(systemConfiguration.source_upload_max_files_per_batch);
@@ -6263,14 +6276,23 @@ export default function Home() {
     // 「这次对账发起时用户在哪」的快照。默认参数在**第一个 await 之前**求值,所以直接
     // 调用是对的;`handleLeaveShared` 传自己更早取的那一份(它在 await 撤销请求之前)。
     navEpoch: number = workspaceEpochRef.current,
+    /** 输掉清单写入竞态时是否重来一次(只重来一次,见下)。 */
+    retry: boolean = true,
   ) {
     // ⚠ 两次复核可以叠在一起(切回标签页触发一次,用户紧接着在弹窗里退出群组又触发一次),
     // 而**先发的那次可以后回**。没有这道请求世代闸,旧响应会用 `setNotebooks` 把撤销前的
     // 快照盖回去——工作区已经正确跳走了,列表里那本读不到的库却又活了过来,要等下一次刷新
     // 才消失(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个:那是两回事。
-    const seq = ++accessRefreshSeqRef.current;
+    const seq = ++notebookListSeqRef.current;
     const remaining = await listNotebooks();
-    if (accessRefreshSeqRef.current !== seq) return;
+    if (notebookListSeqRef.current !== seq) {
+      // 有更新的一次清单写入赢了这一局。它只刷列表、**不做访问权对账**,所以这里必须
+      // 再来一次,否则「被撤销后仍留在那本库里」正好从这条竞态里漏掉。只重来一次:与
+      // 持续不断的集合刷新互相追着跑没有意义,那种情况下用户显然在操作,下一次交互会
+      // 撞到 403,切回标签页的复核也仍在。
+      if (retry) await refreshAfterAccessChange(navEpoch, false);
+      return;
+    }
     // 清单照刷:它无害且必要,被 navEpoch 挡掉的只有导航那一步。
     setNotebooks(remaining);
     await reconcileOpenNotebook(remaining, navEpoch);

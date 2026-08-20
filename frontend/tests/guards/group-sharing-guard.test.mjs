@@ -67,8 +67,18 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   // 没有请求世代闸,旧响应会把撤销前的清单盖回去——工作区已经跳走了,列表里那本读不到
   // 的库却又活过来(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个。
   assert.ok(
-    ifConditionsIn(groupPath).some((condition) => /accessRefreshSeqRef/.test(condition)),
+    ifConditionsIn(groupPath).some((condition) => /notebookListSeqRef/.test(condition)),
     "重取清单没有过期结果闸,旧响应会把撤销前的快照盖回去",
+  );
+
+  // 闸必须覆盖**每一个**写清单的路径。`loadNotebookCollection` 把 listNotebooks() 和更慢的
+  // health/config 放在同一个 Promise.all 里,它的清单可以在撤销之前取回、却被慢请求拖到
+  // 撤销之后才落地,把那张已经读不到的卡片复活(codex #529 R5 P2)。
+  const collection = findFunction(page, "loadNotebookCollection");
+  assert.ok(collection, "缺 loadNotebookCollection");
+  assert.ok(
+    ifConditionsIn(collection).some((condition) => /notebookListSeqRef/.test(condition)),
+    "集合刷新绕过了清单写入世代闸,旧响应会复活已撤销的卡片",
   );
 
   // 链接共享的退出走**同一个收口**,不另抄一份重取+对账:抄一份就会漏掉其中一道闸,
