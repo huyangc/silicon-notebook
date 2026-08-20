@@ -6283,11 +6283,24 @@ export default function Home() {
     }
     const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
     if (firstOwned) {
-      // ⚠ `openNotebook` 返回 false = 这次切换在飞行中被顶替(用户自己点去了别处,
-      // epoch guard 弃掉了结果)。那时**不能**再写 history:界面停在用户新选的库上,
-      // 而地址栏指向 firstOwned,两者从此对不上(codex #529 R1 P2)。同文件的
-      // `openNotebookMemory` 早就是这个写法,这里对齐它。
-      if (!(await openNotebook(firstOwned.id, "none"))) return;
+      try {
+        // ⚠ `openNotebook` 返回 false = 这次切换在飞行中被顶替(用户自己点去了别处,
+        // epoch guard 弃掉了结果)。那时**不能**再写 history:界面停在用户新选的库上,
+        // 而地址栏指向 firstOwned,两者从此对不上(codex #529 R1 P2)。同文件的
+        // `openNotebookMemory` 早就是这个写法,这里对齐它。
+        if (!(await openNotebook(firstOwned.id, "none"))) return;
+      } catch {
+        // ⚠ 兜底导航自己失败(瞬时抖动)时**不能就地停手**:`openNotebook` 一进门就把
+        // `activeNotebookIdRef` 置成了 null,而屏幕上还留着那本已经读不到的库。之后每
+        // 一次复核都会因为「无库可对账」在上面直接返回,人被永久钉在一个陈旧工作区里,
+        // 只能自己手动导航才出得来(codex #529 R12 P2)。
+        //
+        // 退回集合页:那本来就是这条路径的另一半落点(没有自有库时走的就是它),而且
+        // 状态可自恢复。带一句说明,免得人莫名其妙被弹出工作区。
+        showCollection();
+        setToast("你已失去这本笔记本的访问权");
+        return;
+      }
       window.history.replaceState(null, "", notebookHash(firstOwned.id));
     } else {
       showCollection();
