@@ -105,6 +105,8 @@ bash scripts/check.sh
 
 验证采用分级门禁：G0 按改动选跑目标测试；G1 `scripts/check.sh` 是编辑期及每次 PR/push 的离线门（稳定后端、契约、前端测试及负责类型检查的 production build），默认使用 12 个 backend worker、每个前端 runner 4 个测试 worker，Apple Silicon warm 目标不超过 60 秒；G2 `scripts/check_extended.sh` 追加真实索引/性能测试、冷图/索引契约与全仓语义扫描，每天 18:17 UTC（北京时间次日 02:17）执行一次，也可手动触发；G3 `scripts/check_postgres.sh` 保持为独立 PostgreSQL 集成门。CI 另有 `level-1-frontend-node26`：与 G1 同触发，用同一个前端 wrapper 在 Node.js 当前大版本上重跑一遍，补上「文档承诺 Node ≥ 20、G1 只钉 22」的验证缺口。CI 各 lane 时长仅作观察。
 
+后端普通仓储测试只在 pytest 内按 worker 复用一份当前空 SQLite schema，并使用测试专用的快速密码哈希；迁移/快照契约与认证 helper 测试仍走真实生产路径，每条测试仍拥有独立的可变数据库文件。
+
 仅 Codex 的执行说明：`scripts/check.sh` 包含绑定 loopback 端口和管理子进程的生命周期测试，Codex 第一次运行就必须申请沙箱外执行，不得先在沙箱内试错。GitHub 网络操作（`git fetch`、`git push`、`gh auth/repo/pr`）同样应直接申请沙箱外执行；普通本地只读 Git 检查仍留在沙箱内。
 
 数据库专项覆盖现在只面向直接 PostgreSQL 后端；已退役的 SQLite 后端实现专项测试、SQLite→PostgreSQL 导入/正向 shadow 测试和跨后端 parity 测试不再属于当前测试套件。

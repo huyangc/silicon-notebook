@@ -208,3 +208,49 @@ def test_parallel_graph_tests_share_repo_local_matplotlib_cache():
     cache_dir = Path(os.environ["MPLCONFIGDIR"]).resolve()
     assert cache_dir == (ROOT / ".local" / "matplotlib").resolve()
     assert tuple(cache_dir.glob("fontlist-v*.json"))
+
+
+def test_reused_sqlite_schema_keeps_each_test_database_mutably_isolated(tmp_path):
+    from app.core.config import Settings
+    from app.models.schemas import NotebookCreate
+    from app.repositories.sqlite.migrations import SCHEMA_VERSION
+    from app.services.sqlite_repository import SQLiteRepository
+
+    first = SQLiteRepository(
+        Settings(
+            database_url=f"sqlite:///{tmp_path / 'first.db'}",
+            storage_dir=str(tmp_path / "first-storage"),
+        )
+    )
+    second = SQLiteRepository(
+        Settings(
+            database_url=f"sqlite:///{tmp_path / 'second.db'}",
+            storage_dir=str(tmp_path / "second-storage"),
+        )
+    )
+    created = first.create_notebook(NotebookCreate(name="template isolation"))
+
+    with first._connect() as first_db, second._connect() as second_db:
+        assert first_db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert second_db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert second_db.execute(
+            "SELECT 1 FROM notebooks WHERE id=?", (created.id,)
+        ).fetchone() is None
+    first.close_local()
+    second.close_local()
+
+
+def test_direct_sqlite_migrator_contracts_bypass_the_schema_template():
+    conftest_source = (ROOT / "backend" / "tests" / "conftest.py").read_text(
+        encoding="utf-8"
+    )
+    missing = []
+    for path in sorted((ROOT / "backend" / "tests").glob("test_*.py")):
+        if path.name == Path(__file__).name:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "SqliteMigrator(" not in source or ".migrate(" not in source:
+            continue
+        if f'"{path.name}"' not in conftest_source:
+            missing.append(path.name)
+    assert missing == []
