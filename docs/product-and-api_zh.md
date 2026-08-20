@@ -545,15 +545,18 @@ Codex 持久化的是环境变量名，不是 token 值。Agent shell 子进程�
 用户在启动 Codex 的环境中设置变量并重启。`codex mcp list` 只证明配置项存在；只有新 session
 发现 MCP，并成功执行 `list_notebooks` 与 `select_notebook`，才算认证接入成功。
 
-当前本机 Claude Code CLI 接受 HTTP transport 和显式 Authorization header：
+当前本机 Claude Code CLI 接受 HTTP transport 和显式 Authorization header，并会在连接时按启动它
+的进程环境解析 header 里的 `${VAR}`：
 
 ```bash
-claude mcp add --transport http silicon-notebook http://127.0.0.1:8000/mcp \
-  --header "Authorization: Bearer <一次性显示的 token>"
+claude mcp add --transport http silicon-notebook 'http://127.0.0.1:8000/mcp/' \
+  --header 'Authorization: Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}'
 ```
 
-Claude Code 可能把这段原始 header 保存到本机配置。应使用最小 scope、短有效期，保护
-本机配置，并在使用后撤销/轮换；不要假设该 header 会做 shell 环境变量插值。
+header 必须单引号，否则 shell 会先展开它；这样落到配置里的是变量名而不是凭据。未定义的变量会被
+原样发出、只以坏 token 失败且配置阶段不报错，所以只有真的连一次才能证明它解析成功。不加
+`-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
+scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
 每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的二十个工具如下，
 权威清单是 `mcp_server.PUBLIC_TOOLS`：

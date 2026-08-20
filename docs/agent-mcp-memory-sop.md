@@ -85,21 +85,29 @@ Never commit the token or place it in documentation or script arguments. Share i
 
 ### The endpoint URL
 
-The endpoint is `<scheme>://<host>:<backend port>/mcp/`. Everything except the path is
-deployment-specific, and each part fails differently when it is wrong:
+The authoritative endpoint is the one the deployment publishes as `MCP_PUBLIC_URL` and echoes in
+the onboarding instructions linked on the token receipt. Use that value verbatim, adding the
+trailing slash described below. Only when no such value is available does the direct-backend
+default apply: `<scheme>://<host>:<backend port>/mcp/`, where the port is `8000`.
 
-- **Port.** The backend serves MCP on its own port (`8000` by default), not on 80/443. A bare
-  `http://notebook.example.internal/mcp` reaches whatever answers on port 80 — usually the
-  frontend or a reverse proxy — and returns `404`.
-- **Scheme.** Plain HTTP is the current product default (see §9). `https://` works only if the
-  deployment actually terminates TLS; against an HTTP-only host it is a refused connection, not
-  a fallback.
+Everything except the path varies by deployment, and each part fails differently when guessed:
+
+- **Port.** Behind a reverse proxy the endpoint is whatever that proxy publishes — often
+  `https://<host>/mcp` — and the backend port may be private or unreachable. Addressed
+  *directly*, the backend serves MCP on its own port (`8000` by default), not on 80/443: a bare
+  `http://notebook.example.internal/mcp` then reaches whatever answers on port 80 — usually the
+  frontend — and returns `404`.
+- **Scheme.** Plain HTTP is the current product default (see §9); TLS exists only where the
+  deployment actually terminates it. `https://` against an HTTP-only host is a refused
+  connection, not a fallback — and conversely, never downgrade a published `https://` endpoint
+  to the backend port to reach it directly, which puts the bearer token on the wire in
+  cleartext.
 - **Trailing slash.** The MCP application is mounted at `/mcp` and its own route is `/`, so
   `POST /mcp` answers `307 Temporary Redirect` to `/mcp/`. Clients that follow a 307 (method and
   body preserved — the official Python MCP client always does) work either way; writing `/mcp/`
   removes the dependency on that behavior.
 
-A worked remote example:
+A worked example, for a remote deployment with nothing in front of the backend:
 
 | URL tried | Result |
 | --- | --- |
@@ -108,9 +116,9 @@ A worked remote example:
 | `http://notebook.example.internal:8000/mcp` | `307` redirect to `/mcp/` |
 | `http://notebook.example.internal:8000/mcp/` | The authenticated MCP endpoint |
 
-The server-side `MCP_PUBLIC_URL` is a separate value and must stay slashless: startup rejects any
-path other than exactly `/mcp`. The onboarding Markdown therefore prints the slashless form; add
-the trailing slash when writing it into a client configuration.
+`MCP_PUBLIC_URL` itself must stay slashless: startup rejects any path other than exactly `/mcp`.
+The onboarding Markdown therefore prints the slashless form, and the trailing slash is added when
+writing it into a client configuration.
 
 ### Codex CLI
 
