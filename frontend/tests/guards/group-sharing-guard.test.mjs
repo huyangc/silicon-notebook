@@ -8,7 +8,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { callsIn, findFunction, importsFrom, jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
+import {
+  callsIn,
+  findFunction,
+  ifConditionsIn,
+  importsFrom,
+  jsxElements,
+  parseModule,
+} from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
 const pageText = page.getFullText();
@@ -62,6 +69,17 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   assert.ok(
     callsIn(leave).includes("reconcileOpenNotebook"),
     "「退出只读共享」没复用同一个对账实现",
+  );
+
+  // history 只在这次 fallback 导航**真的成功**之后才写:用户在它在飞时自己点去别处,
+  // epoch guard 会弃掉结果并返回 false,而无条件的 `replaceState` 仍会把地址栏改成
+  // firstOwned——界面停在用户新选的库上,URL 指向另一本,两者从此对不上
+  // (codex #529 R1 P2)。同文件的 `openNotebookMemory` 早就是这个写法。
+  assert.ok(
+    ifConditionsIn(reconcile).some(
+      (condition) => /^!/.test(condition) && /await\s*openNotebook/.test(condition),
+    ),
+    "对账里的 replaceState 没有被 openNotebook 的返回值挡住",
   );
 });
 
