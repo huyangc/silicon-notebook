@@ -392,7 +392,7 @@ export function GroupsPage({
                   {shared && <span className="group-count-chip">{shared.length}</span>}
                 </div>
                 {shared === null ? <p className="tool-hint">加载中…</p> : shared.length === 0 ? (
-                  <EmptyState icon={<BookOpen size={22} />} title="还没有群组知识库">{canManage ? "从下方选择你有权管理的 Notebook。" : "等待群组管理员添加知识库。"}</EmptyState>
+                  <EmptyState icon={<BookOpen size={22} />} title="还没有群组知识库">{canManage ? "从下方选择你有权管理的笔记本。" : "等待群组管理员添加知识库。"}</EmptyState>
                 ) : <div className="group-notebook-grid">{shared.map((item) => {
                   const adminsManage = item.roles.includes("admin");
                   const ICanManageNotebook = manageableById.has(item.notebook_id);
@@ -429,10 +429,10 @@ export function GroupsPage({
 
                 {canManage && <section className="group-add-notebooks">
                   <div className="group-page-section-head compact"><div><span className="eyebrow">ADD NOTEBOOKS</span><h3>添加知识库</h3>
-                    <p>这里只显示你有管理权、且尚未共享给本组的 Notebook。</p></div></div>
-                  <label className="group-page-search"><Search size={16} /><input value={notebookQuery} placeholder="搜索可添加的 Notebook"
+                    <p>这里只显示你有管理权、且尚未共享给本组的笔记本。</p></div></div>
+                  <label className="group-page-search"><Search size={16} /><input value={notebookQuery} placeholder="搜索可添加的笔记本"
                     onChange={(event) => setNotebookQuery(event.target.value)} /></label>
-                  {candidates.length === 0 ? <p className="group-inline-empty">没有符合条件的 Notebook。</p> : <div className="group-candidate-list">
+                  {candidates.length === 0 ? <p className="group-inline-empty">没有符合条件的笔记本。</p> : <div className="group-candidate-list">
                     {candidates.map((item) => <label className="group-candidate-row" key={item.id}>
                       <input type="checkbox" checked={pickedNotebooks.has(item.id)} onChange={(event) => {
                         setPickedNotebooks((current) => { const next = new Set(current); if (event.target.checked) next.add(item.id); else next.delete(item.id); return next; });
@@ -480,7 +480,7 @@ export function GroupsPage({
 
               {tab === "requests" && (<>
                 <div className="group-page-section-head"><div><span className="eyebrow">INCOMING</span><h3>待审批贡献</h3>
-                  <p>批准后 Notebook 先以成员可查看方式进入群组，管理权可由 Notebook 管理者另行开启。</p></div>{pendingCount > 0 && <span className="group-count-chip">{pendingCount}</span>}</div>
+                  <p>批准后笔记本先以成员可查看方式进入群组，管理权可由笔记本管理者另行开启。</p></div>{pendingCount > 0 && <span className="group-count-chip">{pendingCount}</span>}</div>
                 {!canManage ? <EmptyState icon={<Inbox size={22} />} title="没有审批权限">只有 owner 和组管理员可以处理贡献申请。</EmptyState>
                   : requests === null ? <p className="tool-hint">加载中…</p> : requests.length === 0 ? <EmptyState icon={<Inbox size={22} />} title="没有待审批申请">新的成员贡献申请会出现在这里。</EmptyState>
                     : <div className="group-request-list">{requests.map((request) => <div className="group-request-row" key={request.id}>

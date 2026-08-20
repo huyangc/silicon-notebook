@@ -3074,8 +3074,9 @@ class SqliteMigrator:
             db.execute(
                 "UPDATE groups SET owner_id=COALESCE(("
                 "SELECT gm.user_id FROM group_members gm "
+                "JOIN groups candidate_group ON candidate_group.id=gm.group_id "
                 "WHERE gm.group_id=groups.id AND gm.role='admin' "
-                "ORDER BY CASE WHEN gm.user_id=groups.created_by THEN 0 ELSE 1 END, "
+                "ORDER BY CASE WHEN gm.user_id=candidate_group.created_by THEN 0 ELSE 1 END, "
                 "gm.added_at ASC, gm.user_id ASC LIMIT 1), '') "
                 "WHERE owner_id=''"
             )
