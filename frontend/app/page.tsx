@@ -6274,7 +6274,17 @@ export default function Home() {
     // 只看下面那句 `openNotebook` 的返回值救不了这种:被顶掉的是**先发起**的那一次
     // (codex #529 R2 P2)。
     if (workspaceEpochRef.current !== navEpoch) return;
-    const openId = currentNotebookIdRef.current;
+    // ⚠ 判据用 `activeNotebookIdRef` 而**不是** `currentNotebookIdRef`。后者是渲染期从
+    // state 抄下来的,在一次切库**落地之前**始终还指着上一本库;于是「用户在弹窗还在飞
+    // 的时候关掉它、点开另一本库」这条时序里,对账会读到那本刚被撤销的旧库、判定需要
+    // 跳走,反过来把用户自己发起的导航作废掉——而上面那道世代闸挡不住它:导航是在世代
+    // 快照**之前**发起的,两边世代相等(codex #529 R9 P2)。
+    //
+    // `activeNotebookIdRef` 是权威的「此刻真正装载着哪一本」:`openNotebook` 一进门就把
+    // 它置 null,只有取数成功且世代仍匹配才写上新 id;`showCollection`/登出同样置 null。
+    // 所以 null 恰好覆盖「导航在飞」与「人在集合页」两种「无库可对账」的情形,直接返回
+    // 就是对的——用户马上要落地的那本库由 `openNotebook` 自己负责,轮不到这里替他决定。
+    const openId = activeNotebookIdRef.current;
     if (!openId || remaining.some((n) => n.id === openId)) return;
     const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
     if (firstOwned) {

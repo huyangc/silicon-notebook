@@ -16,6 +16,7 @@ import {
   importsFrom,
   jsxElements,
   parseModule,
+  variableInitializersIn,
 } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
@@ -50,6 +51,21 @@ test("群组管理弹窗与「共享给群组」都真的挂在 page 上,不是�
 test("访问权变动之后必须连当前工作区一起对账,而不只是刷清单", () => {
   const reconcile = findFunction(page, "reconcileOpenNotebook");
   assert.ok(reconcile, "缺统一的工作区对账入口 reconcileOpenNotebook");
+  // 判据必须是权威的「此刻真正装载着哪一本」(`activeNotebookIdRef`),不能用渲染期从
+  // state 抄下来的 `currentNotebookIdRef`——后者在一次切库落地之前还指着上一本库,于是
+  // 「弹窗还在飞时用户关掉它、点开另一本」这条时序里,对账会读到刚被撤销的旧库并把用户
+  // 自己发起的导航作废掉;世代闸挡不住它(导航发起在世代快照之前,两边相等)。
+  // codex #529 R9 P2。
+  const reconcileText = variableInitializersIn(reconcile);
+  assert.ok(
+    reconcileText.some((row) => /activeNotebookIdRef\.current/.test(row.initializer ?? "")),
+    "对账没有读 activeNotebookIdRef",
+  );
+  assert.ok(
+    !reconcileText.some((row) => /currentNotebookIdRef/.test(row.initializer ?? "")),
+    "对账读了渲染期的 currentNotebookIdRef——切库在飞时它是陈旧的",
+  );
+
   const insideReconcile = callsIn(reconcile);
   // 判据是「重取回来的清单里还有没有它」——同一本库可以经多条路进来(另一个群组、
   // 直接成员、everyone 边),退掉其中一条不必然失去访问。
