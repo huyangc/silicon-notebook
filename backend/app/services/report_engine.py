@@ -1577,6 +1577,11 @@ class ReportEngine:
             # ``has_exclusions`` 四个键仍诚实地落 ``unknown``/``False``——节问题
             # 没有实体/主题/约束/排除项那份结构,编一份出来才是漏接。
             retrieval_experiences=deps.retrieval_experiences,
+            # Agentic Memory P3(B-Profile,T8)刻意**不接**:``identity_store``
+            # 缺省 None ⇒ ``search_profile_wiring_active`` 恒假 ⇒ 逐节深挖的规划
+            # 提示与本类自己的节撰写 prompt 都不带用户风格提示——B-Profile v1 只
+            # 覆盖 Ask,报告面留空本身就是这条边界的落地方式(计划 T8 点 7),不需要
+            # 另一把开关。``ReportEngineDependencies`` 也没有对应字段。
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
               limits=limits,
               intent_queries=([sec_question, *directions]

@@ -88,3 +88,40 @@ def test_extract_prompt_excludes_enumerated_values_and_meta_claims():
     assert "stands alone as truth-evaluable" in p
     assert "section headings" in p
     assert "narrative/meta sentences about the document" in p
+
+
+# --------------------------------------------------------------------------- #
+# Agentic Memory P3 (T8) — style_block 新增形参:默认值空转 + 落点/双拼写覆盖。
+# --------------------------------------------------------------------------- #
+def test_style_block_default_is_byte_identical_to_omitting_it():
+    """新形参默认空串 ⇒ 不传它与显式传 ``style_block=""`` 逐字节相同——三个
+    消费点(合成 + 两份规划拼写)都要测,这是「关闭态回到接入前」在 prompts
+    层的判据(镜像 profile_block/experience_block 的冻结基线先例)。"""
+    from app.services.prompts import answer_prompt, expand_query_prompt, plan_prompt
+
+    assert answer_prompt("q?", "k1: [concept] X") == answer_prompt(
+        "q?", "k1: [concept] X", style_block="")
+    assert plan_prompt("q") == plan_prompt("q", style_block="")
+    assert expand_query_prompt("q") == expand_query_prompt("q", style_block="")
+
+
+def test_style_block_lands_between_the_rules_and_the_question_in_answer_prompt():
+    """合成侧:渲染在编号规则之后、``Question:`` 行之前(计划 T8 点 3)。"""
+    from app.services.prompts import answer_prompt
+
+    p = answer_prompt("q?", "k1: [concept] X", style_block="STYLE_MARKER_XYZ")
+    assert "STYLE_MARKER_XYZ" in p
+    rules_end = p.index("11. When the question asks you to enumerate")
+    question_line = p.index("Question: q?")
+    assert rules_end < p.index("STYLE_MARKER_XYZ") < question_line
+
+
+def test_style_block_reaches_both_planning_prompt_spellings():
+    """规划侧:``plan_prompt``(backup 拼写)与 ``expand_query_prompt``
+    (production 实际发送的那份)必须都加上这个参数——「要到达规划模型的东西
+    必须两份都加」,镜像 profile_block/experience_block 的既有钉法。"""
+    from app.services.prompts import expand_query_prompt, plan_prompt
+
+    assert "STYLE_MARKER_XYZ" in plan_prompt("q", style_block="STYLE_MARKER_XYZ")
+    assert "STYLE_MARKER_XYZ" in expand_query_prompt(
+        "q", style_block="STYLE_MARKER_XYZ")

@@ -74,6 +74,7 @@ from app.services.retrieval import (
     is_generated_question_only_chunk,
     merge_retrieval_supports,
 )
+from app.services.search_profile import render_style_block
 from app.services.source_scope import source_scope_context, source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
@@ -337,6 +338,7 @@ class AskService:
         collection_enumeration=None,
         agent_profile=None,
         retrieval_experiences=None,
+        identity_store=None,
         selected_source_graph=None,
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
@@ -373,6 +375,15 @@ class AskService:
         # 默认**关闭**的开关 —— 两者任一不满足,这条 run 与接入前逐字相同
         # (见 ``experience_wiring_active``)。
         self.retrieval_experiences = retrieval_experiences
+        # Agentic Memory P3(B-Profile,T8):``IdentityStorePort``,用于按本次
+        # 提问的 user_id 点读该用户的检索/回答风格偏好文档(``search_profile_json``)
+        # 并渲染进 answer_prompt 的 ``style_block`` —— 与 agent_profile/
+        # retrieval_experiences 同款:缺省 None ⇒ 那条 run 与接入前逐字相同
+        # (见 ``reasoning_retrieval.search_profile_wiring_active``)。⚠ 报告面
+        # (``report_engine.py``/``ReportEngineDependencies``)刻意**不**接这个座位
+        # ——B-Profile v1 只覆盖 Ask(计划 T8 点 7),这条留空本身就是那条边界的
+        # 落地方式,不需要另一把开关。
+        self.identity_store = identity_store
         self.selected_source_graph = selected_source_graph
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
@@ -963,6 +974,34 @@ class AskService:
     # synthesis helpers
     # ------------------------------------------------------------------
 
+    def _search_profile_style_block(self, user_id: str) -> str:
+        """Agentic Memory P3(B-Profile,T8):按本次提问 ``user_id`` 一次主键点读
+        该用户的检索/回答风格偏好文档,渲染成一句有界英文提示,供
+        ``answer_prompt`` 的 ``style_block`` 形参消费(合成侧独立于
+        ``ReasoningRetriever.run()`` 自己为规划侧做的那次点读——两个消费点各自
+        fail-open、各自按需读一次,不共享缓存,镜像 P1/P2 两个既有块「谁读 store
+        就在哪读」的形态,不新造一条跨组件传值的路)。
+
+        ⚠ 绝不回退 ``current_user()`` ContextVar —— 后台/跨用户路径会在
+        ContextVar 未设时读到 seeded admin,把一个人的偏好注给另一个人的回答
+        (同 ``ReasoningRetriever.profile_owner_id`` 的红线)。空 ``user_id``、
+        关闸(``search_profile_wiring_active`` 假)与任何读取/渲染异常都 fail-open
+        成空串——调用形状与接入前逐字相同,风格提示是背景,不是任何一次问答的
+        必需品。
+        """
+        if not user_id:
+            return ""
+        from app.services.reasoning_retrieval import search_profile_wiring_active
+        if not search_profile_wiring_active(self.settings, self.identity_store):
+            return ""
+        try:
+            profile = self.identity_store.get_user_search_profile(user_id)
+            if not profile:
+                return ""
+            return render_style_block(profile)
+        except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
+            return ""
+
     def _answer_chunks(
         self,
         question,
@@ -973,11 +1012,14 @@ class AskService:
         memory_hits=None,
         llm_client=None,
         baseline_sink: dict | None = None,
+        style_block: str = "",
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
         notebook_id:转发给 _chunk_answer_context 解 anchor.tier(见其 docstring);
-        chunk 自带 notebook_id(跨库召回)优先,这只是单库 chunk 的回退值。"""
+        chunk 自带 notebook_id(跨库召回)优先,这只是单库 chunk 的回退值。
+        ``style_block``:Agentic Memory P3(T8)——调用方按本次提问 user_id 点读
+        并渲染好的风格提示,空串=接入前逐字行为(见 ``_search_profile_style_block``)。"""
         raise_if_cancelled(cancel_event)
         context_block, id_map = self._chunk_answer_context(chunks, notebook_id=notebook_id)
         context_block, id_map = self._append_memory_context(
@@ -993,7 +1035,8 @@ class AskService:
             })
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            [{"role": "user", "content": answer_prompt(
+                question, context_block, history, style_block=style_block)}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -1019,12 +1062,13 @@ class AskService:
         memory_hits=None,
         llm_client=None,
         baseline_sink: dict | None = None,
+        style_block: str = "",
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
         返回 (answer, llm_grounded, anchors)。notebook_id:转发给 _chunk_answer_context
         解 anchor.tier(见其 docstring);chunk 自带 notebook_id(跨库召回)优先,
-        这只是单库 chunk 的回退值。"""
+        这只是单库 chunk 的回退值。``style_block``:见 ``_answer_chunks`` 同名参数。"""
         # chunk 段编号 k1..kN,KG 段从 _MIX_KG_KEY_BASE 起;若 chunk 数逼近 base 会在
         # 合并 id_map 时撞 KG key(静默覆盖)。按 base-1 硬截(token 预算下通常远不及此)。
         chunks = chunks[: self._MIX_KG_KEY_BASE - 1]
@@ -1049,7 +1093,8 @@ class AskService:
             })
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            [{"role": "user", "content": answer_prompt(
+                question, context_block, history, style_block=style_block)}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -1231,6 +1276,7 @@ class AskService:
         section_title: str = "",
         section_index: int = 0,
         section_total: int = 0,
+        style_block: str = "",
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -1254,7 +1300,8 @@ class AskService:
         ``outline_synthesis.OUTLINE_SECTION_KEY_STRIDE``),prompt 多一段节级指令,
         证据精炼跳过。缺省为「不在按节合成里」,单次合成路径逐字节不变。节模式下
         调用方只传该节绑定的证据,Memory / 推导链 / 集合地图 / 结构化预览一律不传
-        ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。"""
+        ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。``style_block``:
+        见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。"""
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
@@ -1440,6 +1487,7 @@ class AskService:
                 section_title=section_title,
                 section_index=section_index,
                 section_total=section_total,
+                style_block=style_block,
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -1484,6 +1532,7 @@ class AskService:
         answer_client,
         cancel_event: CancelEvent = None,
         on_section=None,
+        style_block: str = "",
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
 
@@ -1501,6 +1550,9 @@ class AskService:
         轨迹会在「合成」上静止几分钟。**进度步实时发出、不因后续回退而回收**:那一节
         确实写完了、那笔钱确实付了,事后抹掉等于让轨迹少报整轮做过的工作;回退由收尾
         那条 synthesis 步的 ``outline_fallback`` 说清楚。
+
+        ``style_block``:见 ``_answer_chunks`` 同名参数,原样转发给每一节的
+        ``_answer_reasoning`` 调用——同一份风格提示对全篇一致,不按节重新点读。
         """
         from app.services.outline_synthesis import outline_answer_text
 
@@ -1539,6 +1591,7 @@ class AskService:
                     section_title=item.section.title,
                     section_index=item.index + 1,
                     section_total=total,
+                    style_block=style_block,
                 )
                 return text_, grounded_, anchors_
 
@@ -1696,6 +1749,9 @@ class AskService:
         # synthesis under the new source ceiling.
         history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
+        # Agentic Memory P3(T8):合成侧的风格提示,一次点读、贯穿本次 ask_chunk
+        # 用到的每个 answer_prompt 调用(见 _search_profile_style_block)。
+        style_block = self._search_profile_style_block(user_id)
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
 
@@ -1902,13 +1958,13 @@ class AskService:
                                  question, selected, kg_block, kg_id_map, history,
                                  cancel_event=cancel_event, notebook_id=notebook_id,
                                  memory_hits=memory_hits, llm_client=answer_client,
-                                 baseline_sink=chunk_baseline)
+                                 baseline_sink=chunk_baseline, style_block=style_block)
                              if overlay_on else
                              self._answer_chunks(
                                  question, selected, history, cancel_event=cancel_event,
                                  notebook_id=notebook_id, memory_hits=memory_hits,
                                  llm_client=answer_client,
-                                 baseline_sink=chunk_baseline)),
+                                 baseline_sink=chunk_baseline, style_block=style_block)),
                     getattr(answer_client, "model", ""))
                 synth_failed = not _ok
             ask_stage("answer_llm", _t)
@@ -2087,6 +2143,9 @@ class AskService:
 
         history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
+        # Agentic Memory P3(T8):合成侧的风格提示,一次点读、贯穿本次 ask_reasoning
+        # 的单次合成与按节合成两条路径(见 _search_profile_style_block)。
+        style_block = self._search_profile_style_block(user_id)
         intent_contract = self._confirmed_reasoning_intent(payload, history)
         reasoning_history = history
         limits = ask_retrieval_limits(payload.retrieval_effort)
@@ -2475,6 +2534,12 @@ class AskService:
                     # Agentic Memory P2:检索打法库。刻意**没有** owner 参数
                     # ——那张表没有任何租户维度,条目也不属于任何人。
                     retrieval_experiences=self.retrieval_experiences,
+                    # Agentic Memory P3(T8):规划侧的风格提示座位。retriever 内部
+                    # 用 profile_owner_id(= user_id)自己点读一次,与上面 style_block
+                    # (合成侧、供 _answer_reasoning 用)各自独立读取——两个消费点
+                    # 各自 fail-open,不共享一次读取(见 _search_profile_style_block
+                    # 的模块注释)。
+                    identity_store=self.identity_store,
                 ).run(
                     notebook_id,
                     research_question,
@@ -2687,7 +2752,8 @@ class AskService:
                     structured_map=structured_map,
                     collection_map_block=collection_map_prompt_block,
                     counts_sink=reasoning_counts,
-                    baseline_sink=reasoning_baseline)
+                    baseline_sink=reasoning_baseline,
+                    style_block=style_block)
                 return ans, llm_grounded_, anchors_
 
             # ---------------------------------------------- 按节合成(设计文档 §3.1)
@@ -2745,6 +2811,7 @@ class AskService:
                             history=reasoning_history, limits=limits,
                             answer_client=answer_client, cancel_event=cancel_event,
                             on_section=record_section_step,
+                            style_block=style_block,
                         )
             # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
             # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
@@ -3221,6 +3288,9 @@ class AskService:
         )
         source_graph_status = None
         raise_if_cancelled(cancel_event)
+        # Agentic Memory P3(T8):合成侧的风格提示,一次点读、贯穿本次 ask_graph
+        # 用到的每个 answer_prompt 调用(见 _search_profile_style_block)。
+        style_block = self._search_profile_style_block(user_id)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
         if self._primary_llm_unconfigured():
@@ -3267,7 +3337,7 @@ class AskService:
                         lambda: self._answer_chunks(
                             question, [], history, cancel_event=cancel_event,
                             notebook_id=notebook_id, memory_hits=memory_hits,
-                            llm_client=answer_client,
+                            llm_client=answer_client, style_block=style_block,
                         ),
                         getattr(answer_client, "model", ""),
                     )
@@ -3334,7 +3404,7 @@ class AskService:
                             lambda: self._answer_chunks(
                                 question, ppr_chunks, history, cancel_event=cancel_event,
                                 notebook_id=notebook_id, memory_hits=memory_hits,
-                                llm_client=answer_client),
+                                llm_client=answer_client, style_block=style_block),
                             getattr(answer_client, "model", ""),
                         )
                         synth_failed = not _ok
@@ -3567,7 +3637,8 @@ class AskService:
                         lambda: self._answer_mix(
                             question, src_chunks, mix_kg_block, mix_id_map, history,
                             cancel_event=cancel_event, notebook_id=notebook_id,
-                            memory_hits=memory_hits, llm_client=answer_client),
+                            memory_hits=memory_hits, llm_client=answer_client,
+                            style_block=style_block),
                         getattr(answer_client, "model", ""),
                     )
                     synth_failed = not _ok
@@ -3662,7 +3733,9 @@ class AskService:
                     llm_client = answer_client
                     raw = llm_client.chat_json(
                         [{"role": "user",
-                          "content": answer_prompt(question, context_block, history)}],
+                          "content": answer_prompt(
+                              question, context_block, history,
+                              style_block=style_block)}],
                         ANSWER_SCHEMA_HINT,
                         cancel_event=cancel_event,
                         **cap_kwargs(llm_client, "answer_max_tokens"),

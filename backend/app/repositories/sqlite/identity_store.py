@@ -401,6 +401,26 @@ class IdentityStore:
             ).fetchone()
             return self._user_profile(user, profile)
 
+    def get_user_search_profile(self, user_id: str) -> "dict | None":
+        """一次主键点读该用户的检索/回答风格偏好**文档**(Agentic Memory P3,
+        T8)——不是整个 ``UserProfile``,不 join ``users`` 表:调用方
+        (``AskService._search_profile_style_block``/``ReasoningRetriever.run()``)
+        只需要喂给 ``render_style_block`` 的这一份 JSON。空 ``user_id``、行不
+        存在、列缺失(旧库未跑迁移)与畸形 JSON 全部 fail-open 到 ``None``,
+        与 ``_user_profile`` 静默降级的口径一致——见 ``parse_search_profile``
+        的 fail-open 矩阵。"""
+        if not user_id:
+            return None
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT search_profile_json FROM user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None or "search_profile_json" not in row.keys():
+            return None
+        parsed = parse_search_profile(row["search_profile_json"])
+        return parsed if parsed["fields"] else None
+
     def change_user_password(
         self,
         user_id: str,
