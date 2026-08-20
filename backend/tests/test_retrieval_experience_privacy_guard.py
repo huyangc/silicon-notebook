@@ -574,21 +574,32 @@ def test_running_project_run_never_leaks_a_result_or_anchor_id_into_the_observat
 # ------------------------------ 判据七:result_ids/anchor_evidence_ids 只活在
 #                                 project_run 一个函数里
 
-#: Agentic Memory P4 (T3) 新增的读取面。合法(判据二的禁键表不含它们),但只
-#: 应该在 ``project_run`` 一个函数的子树里出现——挪到同模块的另一个函数,语义
-#:不变,却会让"id 只是函数局部变量"这句承诺失去唯一站得住脚的理由。
+#: Agentic Memory P4 (T3) 新增的读取面。合法(判据二的禁键表不含它们——它们
+#: 不是自由文本,是不透明句柄的字段名),但只应该在 ``retrieval_experience_
+#: projection.py`` 的 ``project_run`` 一个函数的子树里出现。⚠ 判据必须与判据
+#: 二同一副骨架——**三个模块一起扫**,而不是只扫 projection.py:把交集计算从
+#: ``project_run`` 挪到 job 模块的 ``_observe``(或 block 模块的任何函数)是
+#: 语义完全不变的移动变异,只扫 projection.py 会对它视而不见——那正是「id 只
+#: 活在 project_run 局部变量」这句承诺唯一站得住脚的理由。
 _ATTRIBUTION_KEYS = {"result_ids", "anchor_evidence_ids"}
 
 
-def _function_node(tree: ast.Module, name: str) -> ast.FunctionDef:
+def _function_node(tree: ast.Module, name: str) -> ast.FunctionDef | None:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
-    raise AssertionError(f"{name} 函数未找到")
+    return None
 
 
-def _attribution_hits_outside(tree: ast.Module, scoped: ast.AST) -> list[tuple[str, str, int]]:
-    scoped_ids = {id(node) for node in ast.walk(scoped)}
+def _attribution_hits_outside_project_run(path: Path) -> list[tuple[str, str, int]]:
+    """``result_ids``/``anchor_evidence_ids`` 出现在 ``path`` 这个文件里,
+    ``project_run`` 子树**之外**的每一处。文件里如果根本没有 ``project_run``
+    函数(job.py、block.py,以及任何临时测试文件),"子树之外"就是"整个文件"
+    ——这两个键名在那样的文件里出现,一次都不许。
+    """
+    tree = _module_tree(path)
+    scoped = _function_node(tree, "project_run")
+    scoped_ids = {id(node) for node in ast.walk(scoped)} if scoped is not None else set()
     docstrings = _docstring_nodes(tree)
     violations: list[tuple[str, str, int]] = []
     for node in ast.walk(tree):
@@ -610,28 +621,32 @@ def _attribution_hits_outside(tree: ast.Module, scoped: ast.AST) -> list[tuple[s
     return violations
 
 
-def test_result_and_anchor_ids_are_read_only_inside_project_run():
-    """判据七。``retrieval_experience_projection.py`` 里,``result_ids`` /
-    ``anchor_evidence_ids`` 这两个键只应该在 ``project_run`` 一个函数的子树内
-    被读取——挪到 ``validate_situation``、``experience_id``、
-    ``situation_similarity`` 或任何其他函数,语义完全不变,只扫「关键名合法」
-    的判据二不会报警,因为它们本来就是合法键名。
+@pytest.mark.parametrize("module_name", sorted(_SCANNED_MODULES))
+def test_result_and_anchor_ids_are_read_only_inside_project_run(module_name):
+    """判据七,**本守卫的核心**,参数化到三个模块——但真正的性质与判据二一样是
+    「三个一起」:把交集计算从 ``projection.py`` 的 ``project_run`` 挪到
+    ``job.py`` 的 ``_observe``,语义完全不变,只扫 projection.py 的判据会全绿。
+    在 projection.py 内部,这两个键只许出现在 ``project_run`` 子树里——挪到
+    ``validate_situation``、``experience_id``、``situation_similarity`` 或
+    任何其他函数同样违规。在 job.py / block.py 里,出现一次就是违规,因为
+    ``project_run`` 在那两个文件里根本不存在。
     """
-    tree = _module_tree(_SCANNED_MODULES["projection"])
-    scoped = _function_node(tree, "project_run")
-    violations = _attribution_hits_outside(tree, scoped)
+    violations = _attribution_hits_outside_project_run(_SCANNED_MODULES[module_name])
     assert not violations, (
-        f"{violations}。result_ids/anchor_evidence_ids 只应该在 project_run "
-        "内部被读取——出现在别处意味着「归因用的原始 id」有了第二条活路，"
-        "而这个设计的唯一承诺就是它只活在一个函数的局部变量里。"
+        f"{module_name} 模块在 project_run 之外出现了 {violations}。"
+        "result_ids/anchor_evidence_ids 只应该在 projection.py 的 project_run "
+        "内部被读取——出现在别处(包括挪到另一个模块)意味着「归因用的原始 "
+        "id」有了第二条活路，而这个设计的唯一承诺就是它只活在一个函数的局部"
+        "变量里。"
     )
 
 
 def test_the_attribution_scan_can_actually_see_a_violation_outside_project_run():
-    """空转保护:扫描器必须真的认得出「挪到别的函数」这种违规。"""
+    """空转保护:扫描器必须真的认得出两种违规——同模块内挪到别的函数,以及
+    挪到一个根本没有 ``project_run`` 的模块。"""
     import tempfile
 
-    source = (
+    same_module_violation = (
         '"""docstring 提到 result_ids 不该报警。"""\n'
         "def project_run(run):\n"
         "    return run.get(\"result_ids\")\n"
@@ -640,14 +655,17 @@ def test_the_attribution_scan_can_actually_see_a_violation_outside_project_run()
         "    b = row[\"result_ids\"]\n"
         "    return a, b\n"
     )
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
-        handle.write(source)
-        path = Path(handle.name)
-    try:
-        tree = _module_tree(path)
-        scoped = _function_node(tree, "project_run")
-        violations = _attribution_hits_outside(tree, scoped)
-    finally:
-        path.unlink()
-    names = {name for _kind, name, _line in violations}
-    assert names == {"anchor_evidence_ids", "result_ids"}, violations
+    other_module_violation = (
+        "def _observe(row):\n"
+        "    return row.get(\"result_ids\"), row.get(\"anchor_evidence_ids\")\n"
+    )
+    for source in (same_module_violation, other_module_violation):
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+            handle.write(source)
+            path = Path(handle.name)
+        try:
+            violations = _attribution_hits_outside_project_run(path)
+        finally:
+            path.unlink()
+        names = {name for _kind, name, _line in violations}
+        assert names == {"anchor_evidence_ids", "result_ids"}, (source, violations)
