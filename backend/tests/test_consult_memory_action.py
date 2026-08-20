@@ -623,3 +623,22 @@ def test_consult_returns_entries_the_passive_block_selected_but_never_delivered(
         s.detail.get("reason") for s in result.trace if s.step_type == "skip"
     ]
     assert "consult_memory_nothing_new" not in skip_reasons
+
+
+def test_the_zero_hit_priority_set_filters_to_positive_counts():
+    """codex #538 R1 P2:命中清零后键仍留在 zero_hit_by_action 字典里——按键集
+    传给 select_consultable 会把刚成功的动作当「哑火」优先。
+
+    源码钉而非编排钉,如实登记原因:要在真 run 里造出「键在、计数 0」需要
+    miss→hit 序列,而 miss 会推进 stale 熔断、hit 需要 fixture 打开 PPR/图,
+    两者都让用例变成对无关机制的编排;这个性质本身是调用点的一个表达式,
+    按源码钉(变异回 set(zero_hit_by_action) 即红)。"""
+    import inspect
+    import app.services.reasoning_retrieval as rr
+
+    source = inspect.getsource(rr.ReasoningRetriever.run)
+    call_start = source.index("select_consultable(")
+    call_src = source[call_start:call_start + 600]
+    assert "zero_hit_by_action.items() if c > 0" in call_src, (
+        "select_consultable 的 zero_hit_actions 必须按正计数过滤"
+    )
