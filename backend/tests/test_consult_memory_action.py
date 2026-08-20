@@ -600,20 +600,26 @@ def test_a_broken_experience_store_read_skips_the_turn_instead_of_failing_the_ru
 
 
 def test_consult_returns_entries_the_passive_block_selected_but_never_delivered(repo):
-    """codex #538 R1 P2:排除集只含真送达的被动块前缀——被 600 字符硬顶挤掉
-    的 top-3 尾巴模型从没见过,consult 必须还得出来。三条同场景满长 rationale
-    条目让被动块只装得下部分,consult 一轮应送达剩余条目。"""
+    """codex #538 R1 P2:排除集只含真送达的被动块前缀。精确构造:恰好 3 条
+    同场景条目、满长 rationale——被动块行预算 391 只装得下 2 行,第 3 条
+    「选中未送达」。修复后 consult 恰好送达那 1 条;回退成按选中集排除则
+    3 条全被挡、落 nothing_new。"""
     notebook = _seed(repo)
     filler = "x" * 150
-    _write_many_experiences(repo, [
-        ("ppr", "bad", f"ppr {filler}a."),
-        ("exact_lookup", "bad", f"exact {filler}b."),
-        ("follow_chain", "bad", f"chain {filler}c."),
-    ])
+    _write_experience(repo, "ppr", "bad", f"ppr {filler}a.")
+    _write_experience(repo, "exact_lookup", "bad", f"exact {filler}b.")
+    _write_experience(repo, "follow_chain", "bad", f"chain {filler}c.")
     llm = _SeqLLM([{"next_action": "consult_memory"},
                    {"next_action": "answer", "sufficient": True}])
     retriever = _retriever(repo, llm)
     result, _limits = _run(retriever, notebook, "deep")
-    assert _steps(result, "consult_memory"), (
-        "被动块装不下的条目应可经 consult 送达"
-    )
+
+    passive = next(s for s in result.trace if s.step_type == "experience")
+    assert passive.detail["entries"] == 2, "前提:被动块只送达 2/3 条"
+    consult_steps = _steps(result, "consult_memory")
+    assert consult_steps, "选中未送达的第 3 条必须可经 consult 送达"
+    assert consult_steps[0].detail["entries"] == 1
+    skip_reasons = [
+        s.detail.get("reason") for s in result.trace if s.step_type == "skip"
+    ]
+    assert "consult_memory_nothing_new" not in skip_reasons
