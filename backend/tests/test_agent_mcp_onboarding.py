@@ -24,7 +24,16 @@ def test_onboarding_document_is_public_and_uses_configured_mcp_url(monkeypatch):
     # a user never reviews before the Agent acts on it. The `export` assertion
     # above still holds: an Agent subprocess cannot export into its parent, so
     # the variable is a reported user action, not a command to run.
-    assert "Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}" in response.text
+    assert (
+        "--header 'Authorization: Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}'"
+        in response.text
+    )
+    # The client must be pointed at the MOUNTED route. The MCP app is mounted
+    # at `/mcp` with its own root route, so `POST /mcp` is a 307 to `/mcp/`;
+    # printing only the slashless `MCP_PUBLIC_URL` (which startup validation
+    # pins to exactly `/mcp`) leaves every Agent depending on its client
+    # preserving method, body and Authorization across that redirect.
+    assert "`https://notebook.example.test/mcp/`" in response.text
     assert "does not persist the token" in response.text
     assert "does not prove an authenticated connection" in response.text
 
