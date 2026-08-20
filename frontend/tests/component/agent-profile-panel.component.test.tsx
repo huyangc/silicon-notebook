@@ -692,3 +692,15 @@ test("任一清空在飞时全部清空按钮禁用(codex #535 R5)", async () =>
   expect(clearAllEntry.closest("button")).toBeDisabled();
   release();
 });
+
+
+test("后端关闸的响应不渲染成空清单(codex #535 R9)", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValue({ enabled: false, items: [] });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+
+  expect(await screen.findByText("该功能已在此部署关闭")).toBeInTheDocument();
+  expect(screen.queryByText("暂无 Agent 记录")).not.toBeInTheDocument();
+});

@@ -338,6 +338,7 @@ function UnderstandingChain({
  */
 function AgentObservationSection({ notebookId }: { notebookId: string }) {
   const [items, setItems] = useState<AgentObservation[] | null>(null);
+  const [remoteDisabled, setRemoteDisabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [clearingAgentId, setClearingAgentId] = useState("");
@@ -354,7 +355,12 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
     setError("");
     try {
       const next = await fetchAgentObservations(notebookId);
-      if (epoch === loadEpochRef.current) setItems(next.items);
+      if (epoch === loadEpochRef.current) {
+        // codex #535 R9 P2:后端可能在浏览器仍持旧配置时已关掉该能力——响应
+        // 的 enabled=false 必须保真,不能把「关闭」渲染成「暂无记录」。
+        setRemoteDisabled(next.enabled === false);
+        setItems(next.items);
+      }
     } catch (err) {
       if (epoch === loadEpochRef.current) {
         setError(toUserMessage(err, "没能读到 Agent 记录，请稍后重试"));
@@ -413,7 +419,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
         ) : null}
         {loading && items === null ? <p className="tool-hint">加载中…</p> : null}
         {items !== null && items.length === 0 ? (
-          <p className="tool-hint">暂无 Agent 记录</p>
+          <p className="tool-hint">{remoteDisabled ? "该功能已在此部署关闭" : "暂无 Agent 记录"}</p>
         ) : null}
         {/* 服务端按最近 `AGENT_OBSERVATION_SAMPLE_MAX` 条取数(见该常量注释里的
             镜像关系)、不分页、也不回传取了多少——`items.length` 恰好等于这个
