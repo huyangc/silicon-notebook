@@ -1,4 +1,4 @@
-"""Agentic Memory P1(T6)——「AI 对这个库的理解」的读/编辑/清空/手动重建 API 面。
+"""Agentic Memory P1(T6)/P3(T5)——「AI 对这个库的理解」+「Agent 记录」API 面。
 
 四个端点全部挂在 ``require_notebook_read`` 之下(owner ∪ 只读成员 ∪ 有效授权边;
 非授权一律 404,不泄露存在性)。写操作再按 ``scope`` 分两条口径:
@@ -25,6 +25,17 @@ rebuild`` 关闸时统一 409(判定在计划里明确要求的是 rebuild,PUT/D
 ``repository().agent_profile``(store)与 ``repository().agent_profile_jobs``
 (巡固触发 service,``start_base``/``start_overlay`` 是 T6 手动重建复用的同一条
 claim→submit 路径,见 ``agent_profile_job.py`` 的模块 docstring)。
+
+――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+P3(T5)在同一 router 里再加两个端点:``GET``/``DELETE
+/notebooks/{id}/agent-observations``——外部 Agent 经 ``add_observation`` MCP
+工具(T3)写下的短句,读/清界面。两个端点都是上面 ``scope="mine"`` 的那种
+"mine"——``owner_id`` 永远是已认证调用者自己的 id,不接受任何请求字段指向别
+的成员,所以**都只需要 ``require_notebook_read``,不需要**
+``agent_profile:write``:这批行是调用者自己写给自己看的东西,与共享底座的
+admin 档写权限无关。总闸判据同一个 ``_wiring_active()``——GET 关闸回
+``enabled=false`` + 空列表,DELETE 关闸走 ``_DISABLED_MESSAGE`` 同款 409。
 """
 from __future__ import annotations
 
@@ -39,6 +50,9 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.models.agent_profile import (
+    AgentObservationOut,
+    AgentObservationsCleared,
+    AgentObservationsResponse,
     UnderstandingBlockOut,
     UnderstandingBlockUpdate,
     UnderstandingJobs,
@@ -50,7 +64,11 @@ from app.models.agent_profile import (
     UnderstandingScope,
 )
 from app.models.identity import UserProfile
-from app.repositories.ports import AgentProfileRevisionConflict
+from app.repositories.ports import (
+    AGENT_OBSERVATION_RING_MAX,
+    AGENT_OBSERVATION_SAMPLE_MAX,
+    AgentProfileRevisionConflict,
+)
 from app.services.agent_profile_block import (
     AGENT_PROFILE_VALUE_MAX_CHARS,
     PROFILE_LABEL_ORDER,
@@ -289,3 +307,81 @@ def rebuild_understanding(
     if not started:
         raise user_error(409, _REBUILD_BUSY_MESSAGE)
     return UnderstandingRebuildResponse(started=True)
+
+
+# --------------------------------------------------------------------------
+# P3(T5)——「Agent 记录」:调用者自己的 observation 日志读/清。
+# --------------------------------------------------------------------------
+
+
+def _observation_agent_names(owner_id: str) -> dict[str, str]:
+    """Agent id → 显示名,只解析调用者**自己**名下的 Agent。
+
+    形状与 ``mcp_server.py`` 自己的 ``_profile_names`` 完全一致(同一个
+    ``list_agent_profiles(owner_id, 0, 100)`` 调用),但不跨模块 import 那个
+    私有(下划线开头)辅助函数——它的命名本身就标着「不为跨模块复用设计」,而
+    这个路由文件已经有一批自己风格一致的私有辅助(``_block_out`` 等)。两侧
+    命名同名值同源是刻意的:一个 Agent 记录列表里显示的名字,必须与 MCP 工具
+    面(``get_cited_element`` 等)已经在用的是同一个名字,不是又一套独立拼写。
+    """
+    return {
+        profile.id: profile.name
+        for profile in repository().list_agent_profiles(owner_id, 0, 100)
+    }
+
+
+@router.get(
+    "/notebooks/{notebook_id}/agent-observations",
+    response_model=AgentObservationsResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_agent_observations(
+    notebook_id: str,
+    limit: int = Query(
+        AGENT_OBSERVATION_SAMPLE_MAX, ge=1, le=AGENT_OBSERVATION_RING_MAX
+    ),
+    user: UserProfile = Depends(get_current_user),
+) -> AgentObservationsResponse:
+    # ``owner_id`` 是本端点的隔离层三:永远是已认证调用者自己的 id,从不取自
+    # 请求(路径/查询/body 都没有任何字段能指向别的成员)——与 ``mine`` scope
+    # 的 ``_owner_for_scope`` 同一条不变式,只是这里连分支都不需要,唯一的
+    # owner 就是 ``user.id``。
+    if not _wiring_active():
+        return AgentObservationsResponse(enabled=False, items=[])
+    rows = repository().agent_observations.list_observations(
+        notebook_id, user.id, limit=limit
+    )
+    names = _observation_agent_names(user.id)
+    return AgentObservationsResponse(
+        enabled=True,
+        items=[
+            AgentObservationOut(
+                id=str(row.get("id") or ""),
+                agent_profile_id=str(row.get("agent_profile_id") or ""),
+                agent_name=names.get(str(row.get("agent_profile_id") or ""), ""),
+                text=str(row.get("text") or ""),
+                created_at=str(row.get("created_at") or ""),
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/agent-observations",
+    response_model=AgentObservationsCleared,
+    dependencies=[Depends(require_notebook_read)],
+)
+def clear_agent_observations(
+    notebook_id: str,
+    agent_profile_id: str = Query(""),
+    user: UserProfile = Depends(get_current_user),
+) -> AgentObservationsCleared:
+    # 同一条不变式:``owner_id`` 只能是 ``user.id``。``agent_profile_id`` 是
+    # 唯一的请求参数,它只收窄「清哪个 Agent」,从不改「清谁的」。
+    if not _wiring_active():
+        raise user_error(409, _DISABLED_MESSAGE)
+    removed = repository().agent_observations.clear_observations(
+        notebook_id, user.id, agent_profile_id=agent_profile_id
+    )
+    return AgentObservationsCleared(removed=removed)

@@ -18,10 +18,14 @@ vi.mock("../../features/agent-profile/profile-api.ts", () => ({
   saveUnderstandingBlock: vi.fn(),
   clearUnderstandingBlock: vi.fn(),
   rebuildUnderstanding: vi.fn(),
+  fetchAgentObservations: vi.fn(),
+  clearAgentObservations: vi.fn(),
 }));
 
 import {
+  clearAgentObservations,
   clearUnderstandingBlock,
+  fetchAgentObservations,
   fetchUnderstanding,
   rebuildUnderstanding,
   saveUnderstandingBlock,
@@ -63,12 +67,16 @@ const mockFetch = vi.mocked(fetchUnderstanding);
 const mockSave = vi.mocked(saveUnderstandingBlock);
 const mockClear = vi.mocked(clearUnderstandingBlock);
 const mockRebuild = vi.mocked(rebuildUnderstanding);
+const mockFetchObservations = vi.mocked(fetchAgentObservations);
+const mockClearObservations = vi.mocked(clearAgentObservations);
 
 beforeEach(() => {
   mockFetch.mockResolvedValue(response());
   mockSave.mockImplementation(async (_nb, label, body) => block(label, body.value, body.expected_revision + 1));
   mockClear.mockImplementation(async (_nb, label) => block(label, "", 9));
   mockRebuild.mockResolvedValue({ started: true });
+  mockFetchObservations.mockResolvedValue({ enabled: true, items: [] });
+  mockClearObservations.mockResolvedValue({ removed: 0 });
 });
 
 test("可写成员：两档都渲染，五块齐全（服务端没回的补成空块）", async () => {
@@ -404,6 +412,9 @@ test("总闸关掉：GET 回 enabled=false 时面板不给任何编辑入口", a
   expect(await screen.findByText("这项功能当前未开启。")).toBeInTheDocument();
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "重新整理" })).not.toBeInTheDocument();
+  // 「Agent 记录」判据取同一个 enabled——关闸时整个小节都不渲染,不新开一个布尔。
+  expect(screen.queryByText("Agent 记录")).not.toBeInTheDocument();
+  expect(mockFetchObservations).not.toHaveBeenCalled();
 });
 
 // ---------------------------------------------------------------- 依据渲染
@@ -501,4 +512,130 @@ test("入口按钮点开时把开关交回调用方（弹窗由工作区在根�
 
   await user.click(screen.getByRole("button", { name: /AI 对这个库的理解/ }));
   expect(onOpen).toHaveBeenCalledOnce();
+});
+
+// ---------------------------------------------------------- 「Agent 记录」(P3-T5)
+//
+// 与上面「理解」两条链完全独立的第二套小节:默认收起、首次展开才发第一次请求
+// (效率红线——大多数用户可能永远不点开);清空是同步请求,不是后台任务,不走
+// notebook-busy-set 那一套。
+
+function observation(over: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "obs-1",
+    agent_profile_id: "agent-1",
+    agent_name: "巡检助手",
+    text: "常按型号查参数表",
+    created_at: new Date().toISOString(),
+    ...over,
+  };
+}
+
+test("Agent 记录：折叠面板默认收起，展开前一次请求都不发", async () => {
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+
+  expect(screen.getByText("Agent 记录")).toBeInTheDocument();
+  expect(mockFetchObservations).not.toHaveBeenCalled();
+});
+
+test("Agent 记录：展开后拉取一次，空态显示「暂无 Agent 记录」", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValue({ enabled: true, items: [] });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+
+  await user.click(screen.getByText("Agent 记录"));
+
+  await waitFor(() => expect(mockFetchObservations).toHaveBeenCalledWith("nb1"));
+  expect(await screen.findByText("暂无 Agent 记录")).toBeInTheDocument();
+});
+
+test("Agent 记录：按 Agent 分组渲染，每条带 Agent 名与相对时间", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValue({
+    enabled: true,
+    items: [
+      observation({ id: "obs-1", agent_profile_id: "agent-1", agent_name: "巡检助手", text: "常按型号查参数表" }),
+      observation({ id: "obs-2", agent_profile_id: "agent-2", agent_name: "汇总助手", text: "常汇总多份来源" }),
+    ],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+
+  expect(await screen.findByText("巡检助手")).toBeInTheDocument();
+  expect(screen.getByText("汇总助手")).toBeInTheDocument();
+  expect(screen.getByText("常按型号查参数表")).toBeInTheDocument();
+  expect(screen.getByText("常汇总多份来源")).toBeInTheDocument();
+  expect(screen.getAllByText("刚刚").length).toBeGreaterThan(0);
+  expect(screen.getAllByRole("button", { name: "清空这个 Agent 的记录" })).toHaveLength(2);
+});
+
+test("Agent 记录：清空单个 Agent 不需要二次确认，成功后重取", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValueOnce({
+    enabled: true,
+    items: [observation()],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+  await screen.findByText("巡检助手");
+
+  mockFetchObservations.mockResolvedValueOnce({ enabled: true, items: [] });
+  await user.click(screen.getByRole("button", { name: "清空这个 Agent 的记录" }));
+
+  await waitFor(() => expect(mockClearObservations).toHaveBeenCalledWith("nb1", "agent-1"));
+  expect(await screen.findByText("暂无 Agent 记录")).toBeInTheDocument();
+});
+
+test("Agent 记录：清空全部是两步确认，第一下只出确认按钮，确认后省略 agentProfileId 全清", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValueOnce({
+    enabled: true,
+    items: [
+      observation({ id: "obs-1", agent_profile_id: "agent-1" }),
+      observation({ id: "obs-2", agent_profile_id: "agent-2", agent_name: "汇总助手" }),
+    ],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+  await screen.findByText("巡检助手");
+
+  await user.click(screen.getByRole("button", { name: "清空全部记录" }));
+  expect(mockClearObservations).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "确认清空全部记录" })).toBeInTheDocument();
+
+  mockFetchObservations.mockResolvedValueOnce({ enabled: true, items: [] });
+  await user.click(screen.getByRole("button", { name: "确认清空全部记录" }));
+
+  await waitFor(() => expect(mockClearObservations).toHaveBeenCalledWith("nb1"));
+  expect(await screen.findByText("暂无 Agent 记录")).toBeInTheDocument();
+});
+
+test("Agent 记录：清空全部可以取消，不发请求", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValueOnce({ enabled: true, items: [observation()] });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+  await screen.findByText("巡检助手");
+
+  await user.click(screen.getByRole("button", { name: "清空全部记录" }));
+  await user.click(screen.getByRole("button", { name: "取消" }));
+
+  expect(mockClearObservations).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "清空全部记录" })).toBeInTheDocument();
+});
+
+test("Agent 记录：读取失败时人话上屏", async () => {
+  const user = userEvent.setup();
+  mockFetchObservations.mockRejectedValue(humanizedError("网络不太好，请稍后重试", 500));
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+
+  expect(await screen.findByText("网络不太好，请稍后重试")).toBeInTheDocument();
 });

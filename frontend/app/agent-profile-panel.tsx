@@ -24,12 +24,14 @@
 // 轮询尝试上限,超限走中性文案而不猜结局。
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type SyntheticEvent } from "react";
 import { Sparkles } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
 import {
+  clearAgentObservations,
   clearUnderstandingBlock,
+  fetchAgentObservations,
   fetchUnderstanding,
   rebuildUnderstanding,
   saveUnderstandingBlock,
@@ -47,12 +49,15 @@ import {
   claimNotebookSlot,
   draftIsStale,
   evidenceSourceIds,
+  groupObservationsByAgent,
   isUnderstandingChainBusy,
+  observationRelativeTime,
   orderedUnderstandingBlocks,
   releaseNotebookClaim,
   understandingValueLength,
   understandingValueTooLong,
   zeroHitCount,
+  type AgentObservation,
   type UnderstandingBlock,
   type UnderstandingDraft,
   type UnderstandingJobStatus,
@@ -317,6 +322,149 @@ function UnderstandingChain({
         );
       })}
     </section>
+  );
+}
+
+/**
+ * 「Agent 记录」——P3-T5 的第二套小节,与上面五块「理解」完全独立:只读/清空,
+ * 没有编辑,内容也不是 AI 整理出的结论,而是外部 Agent 自己写下的原始短句。
+ *
+ * 折叠面板默认收起、且**首次展开才发第一次请求**:这份记录多数用户可能永远
+ * 不点开,总闸开着就无条件跟着面板一起加载是白付一次查询。展开状态与已加载
+ * 的数据都是本组件自己的 state——它不参与上面「理解」两条链的轮询/忙碌位,
+ * 清空不是后台任务(同步请求、发出即完成),不需要 `notebook-busy-set` 那一套
+ * 按笔记本单飞的语义。
+ */
+function AgentObservationSection({ notebookId }: { notebookId: string }) {
+  const [items, setItems] = useState<AgentObservation[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [clearingAgentId, setClearingAgentId] = useState("");
+  const [clearingAll, setClearingAll] = useState(false);
+  const [confirmingAll, setConfirmingAll] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await fetchAgentObservations(notebookId);
+      setItems(next.items);
+    } catch (err) {
+      setError(toUserMessage(err, "没能读到 Agent 记录，请稍后重试"));
+    } finally {
+      setLoading(false);
+    }
+  }, [notebookId]);
+
+  function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
+    if (event.currentTarget.open && items === null && !loading) {
+      void load();
+    }
+  }
+
+  async function clearAgent(agentProfileId: string) {
+    setClearingAgentId(agentProfileId);
+    setError("");
+    try {
+      await clearAgentObservations(notebookId, agentProfileId);
+      await load();
+    } catch (err) {
+      setError(toUserMessage(err, "没能清空，请稍后重试"));
+    } finally {
+      setClearingAgentId("");
+    }
+  }
+
+  async function clearAll() {
+    setConfirmingAll(false);
+    setClearingAll(true);
+    setError("");
+    try {
+      await clearAgentObservations(notebookId);
+      await load();
+    } catch (err) {
+      setError(toUserMessage(err, "没能清空，请稍后重试"));
+    } finally {
+      setClearingAll(false);
+    }
+  }
+
+  const groups = items ? groupObservationsByAgent(items) : [];
+
+  return (
+    <details className="agent-observation-panel" onToggle={onToggle}>
+      <summary>Agent 记录</summary>
+      <div className="stack">
+        <p className="tool-hint" style={{ margin: 0 }}>
+          外部 Agent 通过接口写下的使用线索。它们只会用来更新你自己的「我的检索心得」，不会进入回答，也不会被引用。
+        </p>
+        {error ? (
+          <p className="tool-hint" role="alert" style={{ color: "var(--danger)" }}>{error}</p>
+        ) : null}
+        {loading && items === null ? <p className="tool-hint">加载中…</p> : null}
+        {items !== null && items.length === 0 ? (
+          <p className="tool-hint">暂无 Agent 记录</p>
+        ) : null}
+        {items !== null && items.length > 0 ? (
+          <>
+            <div>
+              {confirmingAll ? (
+                <div className="tag-row">
+                  <button
+                    type="button"
+                    className="sort-button"
+                    disabled={clearingAll}
+                    onClick={() => { void clearAll(); }}
+                  >
+                    {clearingAll ? "清空中…" : "确认清空全部记录"}
+                  </button>
+                  <button
+                    type="button"
+                    className="sort-button"
+                    disabled={clearingAll}
+                    onClick={() => setConfirmingAll(false)}
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="sort-button"
+                  disabled={clearingAll}
+                  onClick={() => setConfirmingAll(true)}
+                >
+                  清空全部记录
+                </button>
+              )}
+            </div>
+            {groups.map((group) => (
+              <div className="item" key={group.agentProfileId}>
+                <div className="tag-row" style={{ justifyContent: "space-between" }}>
+                  <strong>{group.agentName}</strong>
+                  <button
+                    type="button"
+                    className="sort-button"
+                    disabled={clearingAgentId === group.agentProfileId}
+                    onClick={() => { void clearAgent(group.agentProfileId); }}
+                  >
+                    {clearingAgentId === group.agentProfileId ? "清空中…" : "清空这个 Agent 的记录"}
+                  </button>
+                </div>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {group.items.map((item) => (
+                    <li key={item.id}>
+                      <span className="tool-hint">{observationRelativeTime(item.created_at)}　</span>
+                      {item.text}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </>
+        ) : null}
+      </div>
+    </details>
   );
 }
 
@@ -610,6 +758,7 @@ export function AgentProfilePanel({
         onOpenSource={onOpenSource}
         resolveSourceTitle={resolveSourceTitle}
       />
+      <AgentObservationSection notebookId={notebookId} />
     </div>
   );
 }

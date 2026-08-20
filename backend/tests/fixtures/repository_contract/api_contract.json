@@ -582,6 +582,78 @@
           "title": "AdminUserUsage",
           "type": "object"
         },
+        "AgentObservationOut": {
+          "additionalProperties": false,
+          "description": "One line an external Agent wrote via ``add_observation``, projected\nfor the caller's own \"Agent 记录\" list. Wraps the store's four-field\n``project_observation_row`` shape (``id``/``agent_profile_id``/``text``/\n``created_at``) plus a resolved display name — never the raw\n``owner_id``, which this endpoint never returns because it is always\nexactly the caller who asked for it (mirrors ``project_observation_row``'s\nown reasoning for omitting it).",
+          "properties": {
+            "agent_name": {
+              "title": "Agent Name",
+              "type": "string"
+            },
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "agent_profile_id",
+            "agent_name",
+            "text",
+            "created_at"
+          ],
+          "title": "AgentObservationOut",
+          "type": "object"
+        },
+        "AgentObservationsCleared": {
+          "additionalProperties": false,
+          "description": "``DELETE /notebooks/{id}/agent-observations`` response.",
+          "properties": {
+            "removed": {
+              "title": "Removed",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "removed"
+          ],
+          "title": "AgentObservationsCleared",
+          "type": "object"
+        },
+        "AgentObservationsResponse": {
+          "additionalProperties": false,
+          "description": "``GET /notebooks/{id}/agent-observations``. ``enabled=false`` (总闸关闭,\nor the deployment never wired a profile store) always carries an empty\nlist rather than 404 — same \"off\" vs \"on but nothing written yet\"\ndistinction ``UnderstandingResponse`` makes.",
+          "properties": {
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/AgentObservationOut"
+              },
+              "title": "Items",
+              "type": "array"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "title": "AgentObservationsResponse",
+          "type": "object"
+        },
         "AgentProfile": {
           "properties": {
             "created_at": {
@@ -14418,6 +14490,104 @@
             }
           },
           "summary": "Update Notebook"
+        }
+      },
+      "/api/notebooks/{notebook_id}/agent-observations": {
+        "delete": {
+          "operationId": "clear_agent_observations_api_notebooks__notebook_id__agent_observations_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "agent_profile_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Agent Profile Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentObservationsCleared"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Clear Agent Observations"
+        },
+        "get": {
+          "operationId": "get_agent_observations_api_notebooks__notebook_id__agent_observations_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 20,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentObservationsResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Observations"
         }
       },
       "/api/notebooks/{notebook_id}/analytics": {

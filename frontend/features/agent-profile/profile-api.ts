@@ -12,6 +12,7 @@
  */
 import { requestJson } from "../../app/api-client.ts";
 import type {
+  AgentObservationsResponse,
   UnderstandingBlock,
   UnderstandingResponse,
   UnderstandingScope,
@@ -73,5 +74,35 @@ export function rebuildUnderstanding(
   return requestJson<{ started: boolean }>(
     `/notebooks/${notebookId}/understanding/rebuild`,
     { ...options, method: "POST", body: JSON.stringify({ scope }) },
+  );
+}
+
+/**
+ * 读调用者自己的「Agent 记录」(P3-T5)——外部 Agent 经接口写下的使用线索,新到旧。
+ * 服务端永远从登录身份解析归属,这里没有第二个人的记录可读。总闸关掉时后端回
+ * `enabled:false` + 空列表(不是 404),与 `fetchUnderstanding` 同一口径。
+ */
+export function fetchAgentObservations(notebookId: string): Promise<AgentObservationsResponse> {
+  return requestJson<AgentObservationsResponse>(
+    `/notebooks/${notebookId}/agent-observations`,
+    options,
+  );
+}
+
+/**
+ * 清调用者自己的 Agent 记录。省略 `agentProfileId` 清全部;传了只清那一个
+ * Agent 名下的记录。返回删除的行数(界面目前不展示这个数字,重取列表本身
+ * 就是最直接的确认)。
+ */
+export function clearAgentObservations(
+  notebookId: string,
+  agentProfileId?: string,
+): Promise<{ removed: number }> {
+  const query = agentProfileId
+    ? `?agent_profile_id=${encodeURIComponent(agentProfileId)}`
+    : "";
+  return requestJson<{ removed: number }>(
+    `/notebooks/${notebookId}/agent-observations${query}`,
+    { ...options, method: "DELETE" },
   );
 }
