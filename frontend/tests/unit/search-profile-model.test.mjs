@@ -11,8 +11,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ANSWER_DETAIL_LABELS,
   ANSWER_DETAIL_OPTIONS,
+  ANSWER_LANGUAGE_LABELS,
   ANSWER_LANGUAGE_OPTIONS,
+  ANSWER_SHAPE_LABELS,
   ANSWER_SHAPE_OPTIONS,
   DOMAIN_TERM_MAX_CHARS,
   DOMAIN_TERMS_MAX,
@@ -31,17 +34,34 @@ import {
 // --------------------------------------------------------------------------
 // ① 映射全覆盖
 // --------------------------------------------------------------------------
+//
+// 断言直接查 `Object.hasOwn`，不经过 label() 的包装函数——label() 对未命中的
+// key 会补一个中性兜底词（"自动"/"跟随提问"这类真实存在的词），如果改成「结果
+// 不等于某个哨兵串」，一旦某个取值真的漏译了，测试仍然通过（因为漏译后返回的
+// 兜底词当然不等于哨兵串），完全测不出问题。必须直接问「这张表里到底有没有
+// 这个 key」。
 
-test("回答语言/组织方式/详略三张表覆盖各自的全部封闭取值", () => {
-  const FALLBACK = "__no_such_value__";
+test("回答语言/组织方式/详略三张表覆盖各自的全部封闭取值（Object.hasOwn 直查）", () => {
   for (const value of ANSWER_LANGUAGE_OPTIONS) {
-    assert.notEqual(answerLanguageLabel(value), FALLBACK, `answer_language 漏译:${value}`);
+    assert.ok(Object.hasOwn(ANSWER_LANGUAGE_LABELS, value), `answer_language 漏译:${value}`);
   }
   for (const value of ANSWER_SHAPE_OPTIONS) {
-    assert.notEqual(answerShapeLabel(value), FALLBACK, `answer_shape 漏译:${value}`);
+    assert.ok(Object.hasOwn(ANSWER_SHAPE_LABELS, value), `answer_shape 漏译:${value}`);
   }
   for (const value of ANSWER_DETAIL_OPTIONS) {
-    assert.notEqual(answerDetailLabel(value), FALLBACK, `answer_detail 漏译:${value}`);
+    assert.ok(Object.hasOwn(ANSWER_DETAIL_LABELS, value), `answer_detail 漏译:${value}`);
+  }
+});
+
+test("包装函数(label() 之后)对每个封闭取值都返回该表里的真实译文", () => {
+  for (const value of ANSWER_LANGUAGE_OPTIONS) {
+    assert.equal(answerLanguageLabel(value), ANSWER_LANGUAGE_LABELS[value]);
+  }
+  for (const value of ANSWER_SHAPE_OPTIONS) {
+    assert.equal(answerShapeLabel(value), ANSWER_SHAPE_LABELS[value]);
+  }
+  for (const value of ANSWER_DETAIL_OPTIONS) {
+    assert.equal(answerDetailLabel(value), ANSWER_DETAIL_LABELS[value]);
   }
 });
 
