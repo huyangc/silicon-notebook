@@ -500,6 +500,21 @@ class RetrievalExperienceDistillationService:
 
 # --------------------------------------------------------------- aggregation
 
+#: Index layout of ``_SituationGroup.actions``' per-action tally list.
+#: Agentic Memory P4 (T4) widened it from 2 entries to 4 — ``ANCHORED``/
+#: ``ATTRIBUTABLE_RUNS`` fold in ``ActionObservation.anchored_hits`` /
+#: ``attributable`` (see that type's docstring in
+#: ``retrieval_experience_projection.py`` for what the two source fields
+#: mean). Named indices rather than four more ``__slots__`` entries: the
+#: tally is already a plain list keyed by action id, and a fifth parallel
+#: dict would just be the same information split across two containers that
+#: have to stay in lock-step.
+_TALLY_INVOCATIONS = 0
+_TALLY_ZERO_HITS = 1
+_TALLY_ANCHORED = 2
+_TALLY_ATTRIBUTABLE_RUNS = 3
+
+
 class _SituationGroup:
     """One question shape plus everything the batch saw under it."""
 
@@ -523,6 +538,10 @@ class _SituationGroup:
         self.runs_with_actions = 0
         self.run_ids: list[str] = []
         self.citations = 0
+        # Agentic Memory P4 (T4): four ints per action, see the module-level
+        # ``_TALLY_*`` indices above — invocations, zero-hit count, and the
+        # two new step→anchor attribution scalars folded in from
+        # ``ActionObservation``.
         self.actions: dict[str, list[int]] = {}
         # codex #524 R9 P2:每个动作记下**哪些 run** 真的用过它——一个 run 的
         # 重试不是跨 run 的模式,而条目的 provenance/support 若归属全组 run,
@@ -536,9 +555,18 @@ class _SituationGroup:
         if run.observation.actions:
             self.runs_with_actions += 1
         for action in run.observation.actions:
-            tally = self.actions.setdefault(action.action, [0, 0])
-            tally[0] += action.invocations
-            tally[1] += action.zero_hits
+            tally = self.actions.setdefault(action.action, [0, 0, 0, 0])
+            tally[_TALLY_INVOCATIONS] += action.invocations
+            tally[_TALLY_ZERO_HITS] += action.zero_hits
+            tally[_TALLY_ANCHORED] += action.anchored_hits
+            # ``attributable`` is a per-(run, action) verdict already —
+            # ``ActionObservation`` aggregates every invocation of this
+            # action WITHIN one run before this loop ever sees it — so
+            # incrementing once per absorbed run is exactly "how many runs
+            # in this group could this action's contribution be checked
+            # against the answer's anchors", not a double count.
+            if action.attributable:
+                tally[_TALLY_ATTRIBUTABLE_RUNS] += 1
             self.action_run_ids.setdefault(action.action, []).append(run.run_id)
 
     def runs_for(self, action: str) -> list[str]:
@@ -630,6 +658,20 @@ def render_observations(groups: Sequence[_SituationGroup]) -> str:
     against ``N`` instead of ``M`` would make a busy shape with many
     step-truncated runs read as rarer per action than it really is among the
     runs that had anything to tally.
+
+    Agentic Memory P4 (T4): each action line may carry a trailing
+    ``anchored=N (attributable in M of K runs)`` clause — ``N`` the summed
+    ``anchored_hits`` across the group, ``M`` how many of the ``K`` runs that
+    invoked this action could be checked against the answer's anchors at all
+    (``_TALLY_ATTRIBUTABLE_RUNS``), ``K`` the same ``runs_using`` the existing
+    ``came_back_empty`` clause already reads against. The clause is rendered
+    **only when** ``M > 0`` — never a bare ``anchored=0 (attributable in 0 of
+    K runs)`` — so a batch entirely predating step→anchor attribution (every
+    run in it old-shape) renders BYTE-IDENTICAL to what this function emitted
+    before T4 landed. A batch mixing old and new runs therefore shows the
+    clause only on the actions some run in it could actually attribute;
+    actions only ever invoked by old-shape runs stay silent about it, exactly
+    like the batch that predates the feature entirely.
     """
     lines = ["[Recent searches, grouped by question shape]"]
     for index, group in enumerate(groups):
@@ -647,10 +689,18 @@ def render_observations(groups: Sequence[_SituationGroup]) -> str:
             if tally is None:
                 continue
             runs_using = len(group.action_run_ids.get(action, ()))
-            lines.append(
-                f"  {action}: used={tally[0]} came_back_empty={tally[1]} "
+            line = (
+                f"  {action}: used={tally[_TALLY_INVOCATIONS]} "
+                f"came_back_empty={tally[_TALLY_ZERO_HITS]} "
                 f"(in {runs_using} of {group.runs_with_actions} runs)"
             )
+            attributable_runs = tally[_TALLY_ATTRIBUTABLE_RUNS]
+            if attributable_runs > 0:
+                line += (
+                    f" anchored={tally[_TALLY_ANCHORED]} "
+                    f"(attributable in {attributable_runs} of {runs_using} runs)"
+                )
+            lines.append(line)
     return "\n".join(lines)
 
 

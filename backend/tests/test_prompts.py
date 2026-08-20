@@ -1,4 +1,8 @@
-from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
+from app.services.prompts import (
+    answer_prompt,
+    retrieval_experience_prompt,
+    ANSWER_SCHEMA_HINT,
+)
 import json
 
 
@@ -125,3 +129,21 @@ def test_style_block_reaches_both_planning_prompt_spellings():
     assert "STYLE_MARKER_XYZ" in plan_prompt("q", style_block="STYLE_MARKER_XYZ")
     assert "STYLE_MARKER_XYZ" in expand_query_prompt(
         "q", style_block="STYLE_MARKER_XYZ")
+
+
+def test_retrieval_experience_prompt_rule_3_explains_the_anchored_figure():
+    """Agentic Memory P4 (T4):规则 3 的一份静态措辞——不按批次动态改写,
+    只需在场就把"anchored= 是逐步成功证据、缺席则说明这批早于归因接线"
+    这句话讲清楚,并保留"Prefer what FAILED"这句既有底线。"""
+    p = retrieval_experience_prompt(
+        "[Recent searches, grouped by question shape]\ns0: mode=reasoning",
+        "[Existing entries for similar shapes]\n(none)",
+        actions=("ppr", "retrieve"),
+        rationale_max_chars=80,
+    )
+    assert "Prefer what FAILED" in p
+    assert "anchored=" in p
+    assert "per-action success" in p
+    assert "predates this check" in p
+    assert "total_citations" in p
+    assert "must never be attributed to one particular action" in p
