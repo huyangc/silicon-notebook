@@ -241,3 +241,79 @@ export function isUnderstandingChainBusy(
 ): boolean {
   return job?.status === "running";
 }
+
+// ---------------------------------------------------------------------------
+// P3(T5)——「Agent 记录」:调用者自己的 observation 日志,只读/清空,不可编辑。
+// 与上面五块「理解」完全独立的第二套小节,共用同一个面板、同一个总闸判据。
+// ---------------------------------------------------------------------------
+
+/** 一条 GET `.../agent-observations` 返回的记录,逐字对齐后端 `AgentObservationOut`。 */
+export type AgentObservation = {
+  id: string;
+  agent_profile_id: string;
+  agent_name: string;
+  text: string;
+  created_at: string;
+};
+
+export type AgentObservationsResponse = {
+  enabled: boolean;
+  items: AgentObservation[];
+};
+
+/** 一个 Agent 名下的全部记录,保持服务端给的新到旧顺序不变。 */
+export type AgentObservationGroup = {
+  agentProfileId: string;
+  agentName: string;
+  items: AgentObservation[];
+};
+
+/**
+ * 名字缺失时(该 Agent 的资料已被删除)的占位显示名。空字符串会让分组标题
+ * 那一行看起来像是漏渲染了,不如显式说清楚。
+ */
+const UNKNOWN_AGENT_DISPLAY_NAME = "该 Agent";
+
+/**
+ * 按 `agent_profile_id` 分组,组的先后顺序 = 该组第一条记录在原列表里出现的
+ * 顺序(即服务端给的新到旧顺序),组内顺序不变。
+ */
+export function groupObservationsByAgent(
+  items: readonly AgentObservation[],
+): AgentObservationGroup[] {
+  const order: string[] = [];
+  const groups = new Map<string, AgentObservationGroup>();
+  for (const item of items) {
+    const key = item.agent_profile_id;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        agentProfileId: key,
+        agentName: item.agent_name || UNKNOWN_AGENT_DISPLAY_NAME,
+        items: [],
+      };
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.items.push(item);
+  }
+  return order.map((key) => groups.get(key) as AgentObservationGroup);
+}
+
+/**
+ * 「Agent 记录」列表用的相对时间,刻度与 `page.tsx` 里 Ask 问答用的
+ * `formatRelativeTime` 逐字相同(刚刚/N 分钟前/N 小时前/N 天前/回落到日期),
+ * 但独立成一份纯函数——那一个是 `page.tsx` 的模块内私有函数、没有导出,而这个
+ * 面板要能脱离 `page.tsx` 单独渲染测试。刻度保持一致是刻意的:同一产品里不该
+ * 出现两套「多久之前」的措辞。
+ */
+export function observationRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "";
+  const diffSec = Math.round((Date.now() - then) / 1000);
+  if (diffSec < 60) return "刚刚";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
+  return new Date(then).toLocaleDateString();
+}

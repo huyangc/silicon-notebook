@@ -7586,6 +7586,30 @@ button.tag:hover {
   white-space: nowrap;
 }
 
+/* 「Agent 记录」折叠小节(Agentic Memory P3-T5)——默认收起,主体只在展开时才
+   请求过数据,样式只负责让 <summary> 看着像个可点的小节标题。 */
+.agent-observation-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 4px;
+}
+
+.agent-observation-panel > summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ink);
+  list-style: none;
+}
+
+.agent-observation-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-observation-panel > .stack {
+  margin-top: 10px;
+}
+
 .kg-action-stack {
   display: flex;
   flex-direction: column;

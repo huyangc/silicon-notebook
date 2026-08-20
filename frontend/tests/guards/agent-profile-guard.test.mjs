@@ -172,6 +172,8 @@ test("面板只经 profile-api 发请求：不拼 URL、不碰 api-client、不�
       "saveUnderstandingBlock",
       "clearUnderstandingBlock",
       "rebuildUnderstanding",
+      "fetchAgentObservations",
+      "clearAgentObservations",
     ]),
   );
 
@@ -187,6 +189,10 @@ test("面板只经 profile-api 发请求：不拼 URL、不碰 api-client、不�
   // URL 拼接同样只许住在 api 模块里:组件里出现端点路径就说明有第二条通往网络的路。
   assert.ok(
     !panel.getFullText().includes("/understanding"),
+    "面板里出现了端点路径 —— URL 拼接只属于 profile-api",
+  );
+  assert.ok(
+    !panel.getFullText().includes("/agent-observations"),
     "面板里出现了端点路径 —— URL 拼接只属于 profile-api",
   );
   // 反向:api 模块确实经共用客户端发请求(而不是自己 fetch)。

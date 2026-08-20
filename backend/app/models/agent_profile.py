@@ -121,3 +121,55 @@ class UnderstandingRebuildResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     started: bool
+
+
+# ---------------------------------------------------------------------------
+# Agentic Memory P3 (T5): "Agent 记录" — the caller's own read/clear view over
+# ``agent_observations`` (T2's store, T3's ``add_observation`` MCP tool). Both
+# endpoints below are ``scope="mine"`` in every sense the ``Understanding*``
+# models above use that word: ``owner_id`` is always the authenticated caller,
+# never a request field, so there is nothing here a client could point at
+# someone else's rows.
+# ---------------------------------------------------------------------------
+
+
+class AgentObservationOut(BaseModel):
+    """One line an external Agent wrote via ``add_observation``, projected
+    for the caller's own "Agent 记录" list. Wraps the store's four-field
+    ``project_observation_row`` shape (``id``/``agent_profile_id``/``text``/
+    ``created_at``) plus a resolved display name — never the raw
+    ``owner_id``, which this endpoint never returns because it is always
+    exactly the caller who asked for it (mirrors ``project_observation_row``'s
+    own reasoning for omitting it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    #: Raw Agent id, carried through so the browser can pass it back as the
+    #: ``agent_profile_id`` filter on ``DELETE .../agent-observations``
+    #: ("清空这个 Agent 的记录"). Never shown to the user directly — that is
+    #: what ``agent_name`` is for.
+    agent_profile_id: str
+    agent_name: str
+    text: str
+    created_at: str
+
+
+class AgentObservationsResponse(BaseModel):
+    """``GET /notebooks/{id}/agent-observations``. ``enabled=false`` (总闸关闭,
+    or the deployment never wired a profile store) always carries an empty
+    list rather than 404 — same "off" vs "on but nothing written yet"
+    distinction ``UnderstandingResponse`` makes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    items: list[AgentObservationOut] = Field(default_factory=list)
+
+
+class AgentObservationsCleared(BaseModel):
+    """``DELETE /notebooks/{id}/agent-observations`` response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    removed: int
