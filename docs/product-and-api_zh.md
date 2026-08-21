@@ -1202,6 +1202,12 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 早先的版本允许意图规划器输出 `source_refs`，由 `/ask/intent` 在有界、纯身份的来源目录里按稳定 id、显示标题或原始文件名做规范化**精确等值**匹配，配一道 `source_scope_confirmation` 审阅闸与签名预检能力，并提供 `search_evidence(query, source_refs?)` 动作在已确认 run 内继续收窄。这整套合同已移除。精确等值兑现不了简称——问「pdagent」而来源标题是「PDAGENT-BENCH: Characterizing, Grounding, and Architecting LLM/VLM Agents for VLSI Physical Design」时解析结果为零匹配——而该设计又是 fail closed 的，于是一句普通问题会以确定性 422 失败、重试无效。既然来源勾选本就在用户手里，模型再猜一遍只增加失败模式，不增加能力。
 
+#### 模型 JSON 恢复与流保活
+
+`reasoning_agent` 决策与 `ask_answer` 合成始终先走严格 JSON 解析。严格解析失败后，共享修复层只允许接收对象首尾完整、且仅有可恢复语法错误（如缺引号/逗号）的响应。修复结果不得超出 schema example 的顶层字段，布尔字段必须是真正的 JSON boolean，枚举样例值必须留在词表内，拒绝非有限数；每个非空字符串值还必须逐字存在于原始响应中。截断对象、数组/标量、未知字段、类型混淆和字符串重构仍视为畸形响应。检索器异常会降级成可持久化的终态 Ask 回答，不再因为不存在的 result 中止编排。
+
+`/ask/stream` 的交付队列空闲时每 **5 秒**发送一条不含业务内容的空白 NDJSON 行，并关闭常见代理缓冲；既有客户端会忽略空行。这样慢反思或慢合成期间 transport 仍有字节流动，但不会伪造推理步骤；断连仍只停止该客户端接收，detached job 继续运行。心跳只处理 idle timeout——ingress/CDN 若配置总请求时长硬上限，仍需由部署者调整。
+
 ### 逐步推理档位与完整集合请求
 
 档位在提问框里通过与深度报告「研究深度」**同一个**档位控件选择——共用一个组件，两处不会走样：一个带当前档名的 chip，点开是滑块弹层，显示该档档名与一句中性说明。界面只呈现档名与那句说明；精确上限在下面这张表（由 `frontend/app/ask-retrieval-effort.ts` 与 `backend/app/core/ask_retrieval_policy.py` 双向锁定），不铺在控件上。`answer_element_items` 与下表末三列的 `enum_*` 是这个镜像关系的例外——它们都是后端专有字段，前端没有对应消费者，只影响服务端最终合成 prompt 的组装与[集合枚举工具](#集合枚举工具)的预算。

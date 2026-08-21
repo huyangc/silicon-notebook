@@ -2,6 +2,7 @@ import asyncio
 import json
 import queue
 import threading
+from time import monotonic
 from typing import Any, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
@@ -62,6 +63,10 @@ from app.services.conversation_public_view import (
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.source_scope import retrieval_scope_receipt_context
 
+
+# Protocol heartbeat: keep the NDJSON transport active across model calls whose
+# own trace event may take longer than a reverse proxy's idle timeout.
+ASK_STREAM_HEARTBEAT_SECONDS = 5.0
 
 router = APIRouter()
 # Anonymous surface (T3): the ONE conversation read that needs no session. It
@@ -617,6 +622,7 @@ async def _stream_ask_events(
             notebook_id, payload, spec,
             user_id=repo.current_user().id,
         )
+    last_delivery = monotonic()
     # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
     while True:
@@ -628,10 +634,17 @@ async def _stream_ask_events(
             try:
                 event = await asyncio.to_thread(events.get, True, 0.1)
             except queue.Empty:
+                now = monotonic()
+                if now - last_delivery >= ASK_STREAM_HEARTBEAT_SECONDS:
+                    # An empty NDJSON line is transport-only: it carries no
+                    # notebook content and existing clients already ignore it.
+                    yield "\n"
+                    last_delivery = now
                 continue
         if event is None:
             break
         yield _ndjson_line(event)
+        last_delivery = monotonic()
 
 
 @router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
@@ -661,6 +674,10 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             ),
         ),
         media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -16,7 +16,11 @@ from typing import Any, Callable
 from app.core.config import Settings
 from app.core.ask_context import _ASK_MODEL_ERRORS
 from app.core.llm import OpenAICompatibleClient
-from app.core.llm_logging import interaction_support_scope
+from app.core.llm_logging import (
+    current_interaction_support_id,
+    interaction_support_scope,
+)
+from app.core.model_json import ModelJsonRepairError, parse_model_json_object
 from app.core.model_safety import (
     MODEL_ERROR_MISSING_CONFIG,
     MODEL_ERROR_UPSTREAM,
@@ -55,6 +59,8 @@ from app.services.rerank_client import RerankClient
 _WORKER_ENVIRONMENT_VARIABLES = ("WEB_CONCURRENCY", "UVICORN_WORKERS")
 _MODEL_CONFIG_RELOAD_INTERVAL_SECONDS = 1.0
 logger = logging.getLogger("silicon_notebook.model_provider")
+
+_JSON_REPAIR_WORKLOADS = frozenset({"reasoning_agent", "ask_answer"})
 
 
 def validate_process_local_scheduler_deployment(
@@ -213,15 +219,11 @@ def _safe_status_class(error: BaseException) -> str:
 
 
 def _validate_json_object(content: Any) -> str:
-    if not isinstance(content, str) or not content.strip():
-        raise MalformedModelResponse()
+    """Compatibility strict validator retained for direct tests/callers."""
     try:
-        value = json.loads(content)
-    except (TypeError, ValueError) as exc:
+        return parse_model_json_object(content, "", allow_repair=False).content
+    except ModelJsonRepairError as exc:
         raise MalformedModelResponse() from exc
-    if not isinstance(value, dict):
-        raise MalformedModelResponse()
-    return content
 
 
 def _validate_rerank_rows(rows: Any, document_count: int) -> list[dict]:
@@ -440,6 +442,19 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         service = self._provider.registry.service_for(self._workload.id)
         return service.model if service is not None else ""
 
+    def _emit_json_repair_event(self, *, status: str, reason: str) -> None:
+        try:
+            self._provider.event_log.emit({
+                "kind": "model_json_repair",
+                "status": status,
+                "workload_id": self._workload.id,
+                "support_id": current_interaction_support_id(),
+                "reason": reason,
+            })
+        except Exception:
+            # Diagnostics must never change whether a model response succeeds.
+            pass
+
     def chat_json(
         self,
         messages,
@@ -473,7 +488,33 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 bypass_cache=bypass_cache,
                 response_validator=response_validator,
             )
-            return _validate_json_object(content)
+            repair_mode = (
+                self.settings.model_json_repair_mode
+                if self._workload.id in _JSON_REPAIR_WORKLOADS
+                else "off"
+            )
+            try:
+                parsed = parse_model_json_object(
+                    content,
+                    response_schema_hint,
+                    allow_repair=repair_mode in {"shadow", "on"},
+                )
+            except ModelJsonRepairError as exc:
+                if repair_mode in {"shadow", "on"}:
+                    self._emit_json_repair_event(
+                        status="rejected", reason=exc.reason
+                    )
+                raise MalformedModelResponse() from exc
+            if parsed.repaired:
+                self._emit_json_repair_event(
+                    status=(
+                        "repairable" if repair_mode == "shadow" else "repaired"
+                    ),
+                    reason="syntax",
+                )
+                if repair_mode == "shadow":
+                    raise MalformedModelResponse()
+            return parsed.content
 
         return self._resolve(self._submit(
             runtime, invoke, cancel_event=cancel_event

@@ -29,3 +29,4 @@ psycopg-pool>=3.2,<4
 hnswlib>=0.8.0
 scipy>=1.11
 orjson>=3
+json-repair==0.63.3  # bounded fallback for malformed JSON model responses

@@ -291,6 +291,91 @@ def test_chat_rejects_empty_or_non_object_success_with_safe_support_metadata(pay
         provider.close()
 
 
+def test_approved_chat_workload_repairs_complete_json_syntax_faults():
+    events = _EventLog()
+    provider = _provider(
+        chat=_Chat('{answer: "Recovered [k1]", grounded: true}'), events=events
+    )
+    try:
+        raw = provider.chat("ask_answer").chat_json(
+            [{"role": "user", "content": "q"}],
+            '{"answer":"","grounded":true}',
+        )
+
+        assert json.loads(raw) == {
+            "answer": "Recovered [k1]",
+            "grounded": True,
+        }
+        repair = next(
+            event for event in events.events
+            if event.get("kind") == "model_json_repair"
+        )
+        assert repair["status"] == "repaired"
+        assert repair["workload_id"] == "ask_answer"
+        assert repair["support_id"].startswith("mdl-")
+        assert "Recovered" not in json.dumps(repair)
+    finally:
+        provider.close()
+
+
+def test_shadow_mode_observes_repair_but_keeps_strict_failure():
+    events = _EventLog()
+    provider = RuntimeModelProvider(
+        Settings(
+            _env_file=None,
+            event_log_enabled=False,
+            llm_log_enabled=False,
+            model_json_repair_mode="shadow",
+        ),
+        events,
+        registry=_registry(),
+        chat_factory=lambda _service: _Chat('{answer: "x", grounded: true}'),
+    )
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("ask_answer").chat_json(
+                [], '{"answer":"","grounded":true}'
+            )
+
+        assert caught.value.code == "malformed_response"
+        repair = next(
+            event for event in events.events
+            if event.get("kind") == "model_json_repair"
+        )
+        assert repair["status"] == "repairable"
+    finally:
+        provider.close()
+
+
+def test_unapproved_workload_remains_strict_when_repair_is_on():
+    provider = _provider(chat=_Chat('{query: "q"}'))
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("query_rewrite").chat_json([], '{"query":""}')
+
+        assert caught.value.code == "malformed_response"
+    finally:
+        provider.close()
+
+
+def test_json_repair_observability_failure_does_not_reject_repaired_response():
+    class FailingEventLog(_EventLog):
+        def emit(self, event: dict) -> None:
+            raise OSError("diagnostic sink unavailable")
+
+    provider = _provider(
+        chat=_Chat('{answer: "kept", grounded: false}'),
+        events=FailingEventLog(),
+    )
+    try:
+        content = provider.chat("ask_answer").chat_json(
+            [], '{"answer":"","grounded":true}'
+        )
+        assert json.loads(content) == {"answer": "kept", "grounded": False}
+    finally:
+        provider.close()
+
+
 def test_upstream_failure_never_exposes_raw_exception_endpoint_or_key():
     class FailingChat(_Chat):
         def chat_json(self, messages, response_schema_hint, **kwargs):

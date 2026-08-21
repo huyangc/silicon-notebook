@@ -1454,6 +1454,23 @@ def test_fail_closed_reasoning_rejects_provider_and_malformed_reflection(rrepo):
         retriever.reflect("q", "evidence")
 
 
+def test_non_fail_closed_reflection_does_not_treat_string_false_as_true(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    class StringBoolean:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return '{"next_action":"answer","sufficient":"false","reason":"more"}'
+
+    bind_chat_client(rrepo, "reasoning_agent", StringBoolean())
+    decision = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=False
+    ).reflect("q", "evidence")
+
+    assert decision.sufficient is False
+
+
 def test_run_expand_summary_uses_node_name_not_id(rrepo):
     """trace 可读性: expand step 的 summary 应显示节点名(人读), 而非裸 object_id。"""
     from app.services.reasoning_retrieval import ReasoningRetriever

@@ -885,6 +885,7 @@ parsed by MinerU.
 
 ```text
 LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
+MODEL_JSON_REPAIR_MODE  # off | shadow | on (default on)
 EVENT_LOG_ENABLED / EVENT_LOG_DIR
 SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (default 3000)
 SILICON_NOTEBOOK_CORS_ORIGINS
@@ -899,5 +900,18 @@ retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
 `EVIDENCE_TAU_HIGH`), the opt-in debug log viewer (`DEBUG_LOGS_ENABLED`), and runtime
 identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
 `SILICON_NOTEBOOK_SINGLE_USER_NAME`).
+
+`MODEL_JSON_REPAIR_MODE` applies only to `reasoning_agent` and `ask_answer`.
+`off` keeps strict rejection, `shadow` records whether a response would be safely
+repairable but still rejects it, and `on` accepts conservative repairs (the default).
+It does not complete truncated output or relax schema/type/prose safety checks. Repair
+events are content-free and correlate through the model call's safe `support_id`.
+
+The same-origin `/api/*` rewrite has a finite proxy idle timeout. Ask therefore sends a
+content-free blank NDJSON heartbeat every 5 seconds and returns anti-buffering headers;
+do not configure an ingress to buffer `application/x-ndjson`. This addresses idle
+timeouts. If a CDN/load balancer enforces an absolute request-duration ceiling, raise
+that deployment setting above the longest supported Ask run or use the durable job to
+reopen the completed conversation after a disconnect.
 
 When the required chat workloads are unbound, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.

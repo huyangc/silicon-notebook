@@ -2052,7 +2052,7 @@ class ReasoningRetriever:
             if self.fail_closed and not isinstance(sufficient_value, bool):
                 raise ValueError("reasoning model returned invalid sufficient")
             d = ReflectDecision(
-                sufficient=bool(sufficient_value),
+                sufficient=sufficient_value is True,
                 next_action=action, reason=str(data.get("reason", "")))
             exp = data.get("expand")
             if isinstance(exp, dict):

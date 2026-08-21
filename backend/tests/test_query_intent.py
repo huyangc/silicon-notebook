@@ -80,6 +80,19 @@ def test_query_intent_is_corpus_blind_and_bounded():
     assert "source_refs" not in contract
 
 
+def test_query_intent_does_not_treat_string_false_as_true():
+    class _StringBooleanClient(_IntentClient):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            data = json.loads(super().chat_json(messages, schema_hint, **kwargs))
+            data["needs_clarification"] = "false"
+            return json.dumps(data)
+
+    contract = plan_query_intent(_StringBooleanClient(), "比较两个 PLL")
+
+    assert contract["needs_clarification"] is False
+    assert contract["ambiguities"] == []
+
+
 @pytest.mark.parametrize(
     ("question", "scope"),
     [

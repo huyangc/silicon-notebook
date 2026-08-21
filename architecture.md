@@ -126,6 +126,8 @@ notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 
 
 模型服务状态是只读投影：`GET /api/model-services/status` 返回脱敏后的服务身份、workload 绑定、容量、运行/排队数、熔断与最近健康状态，不触发上游探测。只有 admin 能显式调用单服务或全服务 test endpoint。所有模型失败都携带安全 `support_id`，用户把它提交给维护人员，维护人员再以服务端日志关联具体坏掉的服务；状态与 UI 永不返回端点、凭据、provider body、prompt/response 或 raw exception。schema v24 已不可逆清空 `user_profiles.model_settings`、删除旧的逐用户健康行，并按部署服务 ID 持久化健康状态；个人配置路由与页面已下线。
 
+模型 JSON 在 scheduler 的统一出口严格优先解析；只有 `reasoning_agent` / `ask_answer` 可按 `MODEL_JSON_REPAIR_MODE` 进入 `app.core.model_json` 的保守恢复层。该层只处理首尾完整对象的可恢复语法错误（如缺引号/逗号），限制顶层 shape 与明确类型，并要求每个非空字符串值仍逐字存在；截断和语义重写不修。修复观测只记录稳定状态/reason、workload 与安全 `support_id`。Ask 的 NDJSON transport 在队列空闲时发送 5 秒空白心跳并关闭常见代理缓冲，前端丢弃空行；它只保持传输活跃，不制造 trace step，也不改变 detached worker 的生命周期。
+
 新增可由环境覆盖的 pydantic v2 setting 必须使用 `validation_alias`；列表类值按现有 `NoDecode` 约定解析。
 
 ### 2.6 生产 DFX 诊断边界
@@ -390,6 +392,7 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 ## 4. 关键行为契约
 
 - **断连不等于取消**：transport 断连只停止向该客户端继续推送；detached Ask worker 仍执行并可持久化。只有显式 cancel endpoint 能设置 cancellation event。
+- **空闲不等于无响应**：Ask stream 每 5 秒发一条无内容空白行来防代理 idle timeout；总请求时长硬上限仍是部署侧边界。
 - **显式中断端到端**：前端 interrupt 控件拿已返回的 `job_id` 调 cancel endpoint；worker 与流式 LLM 在保存最终回答前检查取消状态。
 - **启动失败有持久化终态**：Ask/report 同步提交失败时，已创建的 job/report 进入 failed、进程内 cancellation entry 被注销，提交异常继续抛给调用方；正常完成顺序不变。
 - **检索范围按 mode**：`chunk` 基线只读 active notebook；KG overlay/PPR 才可加入 federated KG/base-backed chunk；`graph`/`reasoning` 走 federated KG。

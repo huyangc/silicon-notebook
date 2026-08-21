@@ -1094,7 +1094,7 @@ class AskService:
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
-        llm_grounded = bool(data.get("grounded", False))
+        llm_grounded = data.get("grounded", False) is True
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
@@ -1152,7 +1152,7 @@ class AskService:
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
-        llm_grounded = bool(data.get("grounded", False))
+        llm_grounded = data.get("grounded", False) is True
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
@@ -1548,7 +1548,7 @@ class AskService:
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
-        llm_grounded = bool(data.get("grounded", False))
+        llm_grounded = data.get("grounded", False) is True
         # 节模式:先按本节号段清洗正文,再解析锚点。
         #
         # 顺序是有讲究的。**清洗必须在解析之前**,因为 `parse_anchors` 对混合组
@@ -2177,7 +2177,7 @@ class AskService:
         """Reasoning-mode ask: agentic plan→retrieve→reflect(自由深挖)→answer。
         检索委托 ReasoningRetriever;答案/证据分档复用 fast 路径口径;响应携带
         reasoning_trace。任何阶段异常不向用户抛出(逐层容错 + 兜底空候选)。"""
-        from app.services.reasoning_retrieval import ReasoningRetriever
+        from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
@@ -2566,6 +2566,7 @@ class AskService:
                 if on_trace:
                     on_trace(step)
 
+            result = ReasoningResult()
             try:
                 # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
                 # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
@@ -3814,7 +3815,7 @@ class AskService:
                     if not isinstance(data, dict):
                         return "", False, []
                     _ans = str(data.get("answer", "")).strip()
-                    _g = bool(data.get("grounded", False))
+                    _g = data.get("grounded", False) is True
                     _anc = self._parse_answer_anchors(_ans, id_map)
                     # Scrub citation-shaped tokens that did NOT bind to a real
                     # id_map entry (out-of-map ids like [k99], malformed [ k1]).

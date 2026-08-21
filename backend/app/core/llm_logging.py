@@ -39,6 +39,11 @@ def interaction_support_scope(support_id: str) -> Iterator[None]:
         _INTERACTION_SUPPORT_ID.reset(token)
 
 
+def current_interaction_support_id() -> str:
+    """Return the opaque scheduler correlation id for the active model call."""
+    return _INTERACTION_SUPPORT_ID.get()
+
+
 class LLMInteractionLogger:
     def __init__(self, settings: Settings):
         # Reuse EventLogger's single write/console implementation in per-user mode;
