@@ -120,20 +120,3 @@ def register_citation_tools(
                 "source_title": 300,
             },
         )
-
-    # --- Agent source management ------------------------------------------
-    # Three shared rules, stated once here rather than in five docstrings:
-    #
-    # 1. Every WRITE tool goes through `_writable_notebook`, not
-    #    `_selected_notebook`: the scope check only proves READ access (see
-    #    that helper). `get_source_status` is a read and stays on the plain
-    #    gate.
-    # 2. Every tool that names a source_id goes through `_own_source`: the
-    #    SELECTED notebook only, never the mounted participant set, and never a
-    #    hidden memory/knowhow projection row.
-    # 3. Created rows are stamped with `principal.profile_id`
-    #    (v48 `sources.agent_profile_id`). That column is what makes
-    #    `delete_source` safe, and it is written ONLY on the insert branch —
-    #    an Agent re-uploading bytes a person already added reuses that
-    #    person's row and does not inherit delete rights over it.
-

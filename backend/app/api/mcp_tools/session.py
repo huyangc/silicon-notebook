@@ -93,4 +93,3 @@ def register_session_tools(
                 "notebook_context": "confirmed only",
             },
         }, field_limits={"name": 200, "purpose": 500})
-

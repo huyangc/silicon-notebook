@@ -165,11 +165,3 @@ def register_maintenance_tools(
                 "user_message": 500, "state": 40,
             },
         )
-
-    # --- Agentic Memory P3 (T3): notebook understanding + observation log --
-    # Registered right after get_build_status, the last of the pre-existing
-    # 20 tools. Both reuse `_selected_notebook` exactly like every read-only
-    # tool above -- neither goes through `_writable_notebook`'s owner-only
-    # gate; see that function's own docstring (updated by this feature) for
-    # why `add_observation` specifically does not.
-
