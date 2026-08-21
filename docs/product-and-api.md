@@ -829,7 +829,7 @@ UTF-8 object exceeds 16,384 bytes; descriptors allow at most 16 parameters, a 64
 and a 1,000-character description. Results must be JSON objects no deeper than 5 levels and at
 most 12,000 UTF-8 bytes. The byte/depth rail is enforced while copying, so oversized containers
 are rejected before a second unbounded graph is built. Provider exceptions surface only as stable
-error codes; core audit contains tool/plugin/status only. Inputs and results are rejected whole,
+error codes; core audit is token-owner-scoped and contains tool/plugin/status only. Inputs and results are rejected whole,
 never silently truncated. The default topology has no
 provider contributions, so the shipped surface remains exactly the 22 tools above.
 

@@ -630,7 +630,7 @@ FastMCP 对象、原始 bearer 或 Memory 审核能力；每次调用都重新�
 provider 的所有写 scope 都强制经过 owner-only notebook 闸。provider 参数对象序列化后的 UTF-8
 超过 16,384 bytes 时整次拒绝；descriptor 最多 16 个参数、工具名最多 64 字符、说明最多 1,000 字符，
 结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行字节/深度 rail，
-超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 仅含 tool/plugin/status。
+超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 按 token owner 归属且仅含 tool/plugin/status。
 输入和结果都整次拒绝，绝不静默截断。默认 topology 没有 provider contribution，因此发布面
 仍精确等于上表 22 个工具。
 

@@ -11,10 +11,13 @@ from pydantic import StrictBool, StrictFloat, StrictInt, StrictStr
 
 from app.api.mcp_tools._shared import (
     _budget_response,
+    _owner_request_context,
+    _principal,
     _run_with_progress,
     _selected_notebook,
     _writable_notebook,
 )
+from app.models.identity import AgentPrincipal
 from app.api.mcp_tools.citations import register_citation_tools
 from app.api.mcp_tools.knowhow import register_knowhow_tools
 from app.api.mcp_tools.maintenance import register_maintenance_tools
@@ -161,10 +164,12 @@ def _plugin_adapter(
         try:
             validate_agent_tool_arguments(tool, arguments)
         except Exception:
-            _emit_agent_tool_audit(audit_sink, tool, "invalid")
+            _emit_agent_tool_audit(audit_sink, tool, "invalid", principal=None)
             raise
         if not provider_host.available(tool):
-            _emit_agent_tool_audit(audit_sink, tool, "unavailable")
+            _emit_agent_tool_audit(
+                audit_sink, tool, "unavailable", principal=None
+            )
             raise PermissionError("Agent tool is unavailable")
         try:
             repo = repository_provider()
@@ -179,10 +184,10 @@ def _plugin_adapter(
             else:  # pragma: no cover - catalog freeze owns this invariant
                 raise PermissionError("Agent tool policy is unavailable")
         except PermissionError:
-            _emit_agent_tool_audit(audit_sink, tool, "denied")
+            _emit_agent_tool_audit(audit_sink, tool, "denied", principal=None)
             raise
         except Exception:
-            _emit_agent_tool_audit(audit_sink, tool, "failed")
+            _emit_agent_tool_audit(audit_sink, tool, "failed", principal=None)
             raise RuntimeError("agent_tool_boundary_failed") from None
         context = AgentExecutionContext(
             actor_id=principal.owner_id,
@@ -196,9 +201,13 @@ def _plugin_adapter(
             try:
                 result = provider_host.invoke(tool, context, frozen_arguments)
             except Exception:
-                _emit_agent_tool_audit(audit_sink, tool, "failed")
+                _emit_agent_tool_audit(
+                    audit_sink, tool, "failed", principal=principal
+                )
                 raise
-            _emit_agent_tool_audit(audit_sink, tool, "ok")
+            _emit_agent_tool_audit(
+                audit_sink, tool, "ok", principal=principal
+            )
             return result
 
         result = await _run_with_progress(ctx, run, label=tool.name)
@@ -232,19 +241,33 @@ def _emit_agent_tool_audit(
     sink: Callable[[dict[str, object]], None] | None,
     tool: PublishedAgentTool,
     status: str,
+    *,
+    principal: AgentPrincipal | None,
 ) -> None:
     if sink is None:
         return
+    if principal is None:
+        try:
+            # Middleware identity is used only for audit ownership. Live scope,
+            # allowlist and membership authority still comes from the gates
+            # above; this value never authorizes provider execution.
+            principal = _principal()
+        except Exception:
+            # A production tool call always passed bearer middleware. If a
+            # direct test or malformed composition lacks that owner, skip the
+            # per-user event instead of cross-writing the fallback directory.
+            return
     try:
-        sink(
-            {
-                "kind": "agent_tool_provider",
-                "plugin_id": tool.plugin_id,
-                "contribution_id": tool.contribution_id,
-                "tool": tool.name,
-                "status": status,
-            }
-        )
+        with _owner_request_context(principal):
+            sink(
+                {
+                    "kind": "agent_tool_provider",
+                    "plugin_id": tool.plugin_id,
+                    "contribution_id": tool.contribution_id,
+                    "tool": tool.name,
+                    "status": status,
+                }
+            )
     except Exception:
         # Audit is fail-open and deliberately content-free. It must never make a
         # completed provider call fail or expose an audit backend to the plugin.

@@ -303,7 +303,7 @@ run 收尾时，`outline_synthesis.plan_outline_sections` 把终态大纲的证�
 
 ### 3.4 Memory 与 Agent MCP
 
-`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 七个显式 registrar 捕获精确 22-tool core 前缀，再追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor。core handler 的 schema/validation/auth/I/O 顺序不变；provider handler 只收到最小 execution context 和标量参数，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget。插件拿不到 FastMCP/repository/raw bearer，也不能发明 scope 或触达 Memory review；异常只映射稳定公开码，core 只发 tool/plugin/status 的 content-free audit，并在复制结果时即时执行预算。默认 topology 为空，注册与 listing 零 repository/model I/O。
+`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 七个显式 registrar 捕获精确 22-tool core 前缀，再追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor。core handler 的 schema/validation/auth/I/O 顺序不变；provider handler 只收到最小 execution context 和标量参数，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget。插件拿不到 FastMCP/repository/raw bearer，也不能发明 scope 或触达 Memory review；异常只映射稳定公开码，core 在已认证 token owner 的 request/log context 下只发 tool/plugin/status 的 content-free audit，并在复制结果时即时执行预算。默认 topology 为空，注册与 listing 零 repository/model I/O。
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
 使用确定性 preview。外部 Agent 通过 `propose_memory` 只能写 candidate；同一用户、同一 notebook

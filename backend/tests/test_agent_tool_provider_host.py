@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from types import SimpleNamespace
@@ -34,6 +35,8 @@ from app.extension_sdk import (
 )
 from app.extensions import build_extension_runtime, default_extension_runtime
 from app.extensions.registry import ExtensionRegistryError
+from app.core.event_logging import EventLogger
+from app.models.identity import AgentPrincipal
 from tests.test_memory_mcp import OfficialMcpClient, _payload, mcp_env
 
 
@@ -293,11 +296,24 @@ async def test_provider_adapter_emits_content_free_core_owned_audit(
     host = _runtime(provider).agent_tools
     tool = host.public_tools[0]
     events: list[dict[str, object]] = []
+    audit_principal = AgentPrincipal(
+        profile_id="profile-audit",
+        profile_name="Audit profile",
+        owner_id="user-audit",
+        scopes=["knowledge:read"],
+        default_notebook_id="notebook-1",
+        notebook_ids=["notebook-1"],
+        token_id="token-audit",
+    )
+    monkeypatch.setattr(mcp_tool_host, "_principal", lambda: audit_principal)
 
     monkeypatch.setattr(
         mcp_tool_host,
         "_selected_notebook",
-        lambda *_args: (SimpleNamespace(owner_id="actor-1"), "notebook-1"),
+        lambda *_args: (
+            SimpleNamespace(owner_id="user-aaa", profile_name="Profile A"),
+            "notebook-1",
+        ),
     )
 
     async def run_once(_ctx, work, *, label):
@@ -323,7 +339,7 @@ async def test_provider_adapter_emits_content_free_core_owned_audit(
             "status": "ok",
         }
     ]
-    assert "actor-1" not in repr(events)
+    assert "user-aaa" not in repr(events)
     assert "notebook-1" not in repr(events)
 
     failing_provider = _Provider((_descriptor(),))
@@ -367,6 +383,104 @@ async def test_provider_adapter_emits_content_free_core_owned_audit(
         object(), message="still works", count=1
     )
     assert fail_open_result["echo"] == "still works"
+
+    boundary_events: list[dict[str, object]] = []
+    boundary_adapter = mcp_tool_host._plugin_adapter(
+        tool,
+        host,
+        lambda: object(),
+        audit_sink=boundary_events.append,
+    )
+    with pytest.raises(ValueError, match="invalid Agent tool arguments"):
+        await boundary_adapter(object(), message="missing count")
+    assert boundary_events[-1]["status"] == "invalid"
+
+    unavailable_host = _runtime(
+        _Provider((_descriptor(),)),
+        availability=lambda _context: Availability(
+            AvailabilityStatus.UNAVAILABLE, "fixture_disabled"
+        ),
+    ).agent_tools
+    unavailable_adapter = mcp_tool_host._plugin_adapter(
+        unavailable_host.public_tools[0],
+        unavailable_host,
+        lambda: object(),
+        audit_sink=boundary_events.append,
+    )
+    with pytest.raises(PermissionError, match="unavailable"):
+        await unavailable_adapter(object(), message="hello", count=1)
+    assert boundary_events[-1]["status"] == "unavailable"
+
+    monkeypatch.setattr(
+        mcp_tool_host,
+        "_selected_notebook",
+        lambda *_args: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+    with pytest.raises(PermissionError, match="denied"):
+        await boundary_adapter(object(), message="hello", count=1)
+    assert boundary_events[-1]["status"] == "denied"
+
+
+@pytest.mark.anyio
+async def test_provider_audit_is_written_to_each_live_token_owner_directory(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.api import mcp_tool_host
+
+    provider = _Provider((_descriptor(),))
+    host = _runtime(provider).agent_tools
+    tool = host.public_tools[0]
+    owners = [
+        AgentPrincipal(
+            profile_id=f"profile-{suffix}",
+            profile_name=f"Profile {suffix}",
+            owner_id=f"user-{suffix}",
+            scopes=["knowledge:read"],
+            default_notebook_id="notebook-1",
+            notebook_ids=["notebook-1"],
+            token_id=f"token-{suffix}",
+        )
+        for suffix in ("aaa", "bbb")
+    ]
+
+    async def run_once(_ctx, work, *, label):
+        assert label == tool.name
+        return work()
+
+    monkeypatch.setattr(mcp_tool_host, "_run_with_progress", run_once)
+    logger = EventLogger(
+        SimpleNamespace(
+            event_log_enabled=True,
+            event_log_dir=str(tmp_path),
+            llm_log_max_chars=4_000,
+        ),
+        channel="events",
+        per_user=True,
+    )
+    adapter = mcp_tool_host._plugin_adapter(
+        tool,
+        host,
+        lambda: object(),
+        audit_sink=logger.emit,
+    )
+    for principal in owners:
+        monkeypatch.setattr(
+            mcp_tool_host,
+            "_selected_notebook",
+            lambda *_args, selected=principal: (selected, "notebook-1"),
+        )
+        await adapter(object(), message="hello", count=1)
+
+    for principal in owners:
+        paths = list((tmp_path / principal.owner_id).glob("events-*.jsonl"))
+        assert len(paths) == 1
+        payload = json.loads(paths[0].read_text(encoding="utf-8"))
+        assert payload["kind"] == "agent_tool_provider"
+        assert payload["status"] == "ok"
+        assert principal.owner_id not in payload
+    assert not (tmp_path / "user-local").exists()
+    assert not (tmp_path / "_system").exists()
 
 
 @pytest.mark.anyio
