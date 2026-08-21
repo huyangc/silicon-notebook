@@ -417,6 +417,73 @@ def test_commit_stage_preserves_the_shared_response_object_graph(monkeypatch):
     assert committed.response.answer_id == "answer-1"
 
 
+@pytest.mark.parametrize("authoritative_held,fake_held", [(True, False), (False, True)])
+def test_commit_stage_requires_the_injected_connection_probe_identity(
+    monkeypatch, authoritative_held, fake_held,
+):
+    service = _minimal_ask_service()
+    service.retrieval_connection_probe = SimpleNamespace(
+        is_connection_held=lambda: authoritative_held
+    )
+    saves = []
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: saves.append(True))
+    runtime = ReasoningRetrievalRuntime(
+        scope=None,
+        retrieval_run=None,
+        cancellation=None,
+        trace_sink=None,
+        connection_probe=SimpleNamespace(is_connection_held=lambda: fake_held),
+    )
+    draft = ReasoningResponseDraft(
+        notebook_id="nb",
+        question="q",
+        response=AskResponse(conclusion="ok"),
+        conversation_id="conv",
+        user_id="user",
+        job_id="",
+        asked_at="",
+    )
+
+    with pytest.raises(StageBoundaryError, match="connection authority changed"):
+        service._commit_reasoning_draft(draft, runtime)
+    assert saves == []
+
+
+def test_commit_stage_rejects_wrong_run_kind_and_empty_actor(monkeypatch):
+    service = _minimal_ask_service()
+    saves = []
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: saves.append(True))
+    cancel_event = threading.Event()
+    with retrieval_run(
+        run_kind="report_generation",
+        actor_id="victim",
+        cancel_event=cancel_event,
+    ) as run:
+        runtime = ReasoningRetrievalRuntime(
+            scope=None,
+            retrieval_run=run,
+            cancellation=cancel_event,
+            trace_sink=None,
+            connection_probe=None,
+        )
+        draft = ReasoningResponseDraft(
+            notebook_id="nb",
+            question="q",
+            response=AskResponse(conclusion="ok"),
+            conversation_id="conv",
+            user_id="victim",
+            job_id="",
+            asked_at="",
+        )
+        with pytest.raises(StageBoundaryError, match="run kind changed"):
+            service._commit_reasoning_draft(draft, runtime)
+
+        empty_actor = dataclasses.replace(draft, user_id="")
+        with pytest.raises(StageBoundaryError, match="actor authority"):
+            service._commit_reasoning_draft(empty_actor, runtime)
+    assert saves == []
+
+
 def test_memory_return_cancellation_prevents_unconfigured_answer_persistence():
     cancel_event = threading.Event()
     service = _minimal_ask_service()

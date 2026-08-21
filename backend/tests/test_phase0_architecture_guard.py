@@ -123,6 +123,19 @@ def test_application_stage_guard_accepts_only_stable_contract_layers(tmp_path):
     assert boundary_violations(app) == []
 
 
+def test_application_stage_guard_rejects_bare_app_package_escape(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "import app\n"
+        "BAD = app.services\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app",
+    ]
+
+
 def test_facade_freeze_rejects_addition_but_allows_surface_reduction(tmp_path):
     path = tmp_path / "facade.py"
     _write(

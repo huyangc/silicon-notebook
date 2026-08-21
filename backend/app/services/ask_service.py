@@ -2197,7 +2197,7 @@ class AskService:
         return self._run_reasoning_stage(prepared, runtime).response
 
     def _assert_reasoning_runtime(
-        self, runtime, point: str, *, notebook_id: str = "", user_id: str = "",
+        self, runtime, point: str, *, notebook_id: str, user_id: str,
     ) -> None:
         from app.application.ask_reasoning import (
             ReasoningRetrievalRuntime,
@@ -2208,6 +2208,14 @@ class AskService:
 
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError(f"invalid Ask reasoning runtime at {point}")
+        if type(notebook_id) is not str or not notebook_id:
+            raise StageBoundaryError(
+                f"invalid Ask reasoning notebook authority at {point}"
+            )
+        if type(user_id) is not str or not user_id:
+            raise StageBoundaryError(
+                f"invalid Ask reasoning actor authority at {point}"
+            )
         if runtime.cancellation is not None and not isinstance(
             runtime.cancellation, threading.Event
         ):
@@ -2222,17 +2230,25 @@ class AskService:
             raise StageBoundaryError(
                 f"Ask reasoning retrieval run changed at {point}"
             )
-        if scope is not None and notebook_id:
+        if runtime.connection_probe is not self.retrieval_connection_probe:
+            raise StageBoundaryError(
+                f"Ask reasoning connection authority changed at {point}"
+            )
+        if scope is not None:
             if getattr(scope, "notebook_id", None) != notebook_id:
                 raise StageBoundaryError(
                     f"Ask reasoning scope notebook changed at {point}"
                 )
         if run is not None:
+            if getattr(run, "run_kind", None) != "ask_reasoning":
+                raise StageBoundaryError(
+                    f"Ask reasoning run kind changed at {point}"
+                )
             if getattr(run, "cancel_event", None) is not runtime.cancellation:
                 raise StageBoundaryError(
                     f"Ask reasoning cancellation authority changed at {point}"
                 )
-            if user_id and getattr(run, "actor_id", None) != user_id:
+            if getattr(run, "actor_id", None) != user_id:
                 raise StageBoundaryError(
                     f"Ask reasoning actor authority changed at {point}"
                 )

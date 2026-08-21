@@ -41,6 +41,15 @@ def matches_module_prefix(module: str, prefixes: tuple[str, ...]) -> bool:
     )
 
 
+def imports_bare_module(path: Path, module: str) -> bool:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return any(
+        isinstance(node, ast.Import)
+        and any(alias.name == module for alias in node.names)
+        for node in ast.walk(tree)
+    )
+
+
 def python_modules(app_root: Path) -> dict[str, Path]:
     return {
         module_name(app_root, path): path
@@ -188,10 +197,10 @@ def boundary_violations(app_root: Path) -> list[str]:
             forbidden = minimal_matching_module_references(
                 imports,
                 lambda imported: imported.startswith("app.")
-                and not matches_module_prefix(
-                    imported, ALLOWED_APPLICATION_PREFIXES
-                ),
+                and not matches_module_prefix(imported, ALLOWED_APPLICATION_PREFIXES),
             )
+            if imports_bare_module(path, "app"):
+                forbidden.add("app")
             for imported in sorted(forbidden):
                 violations.append(
                     f"{module} imports forbidden implementation {imported}"
