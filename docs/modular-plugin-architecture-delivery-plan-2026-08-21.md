@@ -153,7 +153,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-05：Parser routing 一次性切换
 
-状态：实现中；生产 ingestion 已切到唯一 ProviderChain，旧 dispatcher/facade patch seam 已删除，正在完成双路 review 与 CI。
+状态：已完成并合入；生产 ingestion 已切到唯一 ProviderChain，旧 dispatcher/facade patch seam 已删除，双路 review 与 CI 均通过。
 
 - 内置解析、MinerU self-hosted、MinerU cloud 全部切到 ProviderChain；
 - 保留 automatic routing、自托管不落公共云、workbook 对账、探针/带图重映射、fallback warning 真源集合；
@@ -163,6 +163,8 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 ### Phase 3：Ask/Report application pipeline（3 PR）
 
 #### PR-06：Ask reasoning/retrieval stage DTO
+
+状态：实现中；已建立 prepare → retrieval evidence → response draft → committed answer 的不可变应用合同，正在完成双路 review 与 CI。
 
 - 先拆 `reasoning_retrieval.run` / `ask_reasoning` 的不可变 stage input/output；
 - 显式标注 scope、retrieval run、leaf slot、连接持有区间、取消点；

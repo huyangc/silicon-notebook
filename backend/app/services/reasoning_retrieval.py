@@ -2280,6 +2280,128 @@ class ReasoningRetriever:
                 continue
         return "\n".join(lines) if lines else "(no candidates yet)"
 
+    def run_stage(self, stage, runtime):
+        """Execute one explicitly bounded retrieval stage.
+
+        ``run`` remains the frozen compatibility seam used by Report and
+        narrow tests.  The Ask application pipeline enters here so scope, run,
+        cancellation, leaf-slot ownership and connection policy travel as one
+        immutable input.  The actual algorithm is still exactly ``run`` and
+        every leaf keeps its existing ``retrieval_fanout_slot`` placement.
+        """
+        from app.application.ask_reasoning import (
+            ReasoningEvidenceSnapshot,
+            ReasoningRetrievalRuntime,
+            ReasoningRunInput,
+            StageBoundaryError,
+        )
+        from app.services.retrieval_run import current_retrieval_run
+        from app.services.source_scope import current_source_scope
+
+        if type(stage) is not ReasoningRunInput:
+            raise StageBoundaryError("invalid reasoning retrieval stage input")
+        if type(runtime) is not ReasoningRetrievalRuntime:
+            raise StageBoundaryError("invalid reasoning retrieval runtime")
+        if runtime.cancellation is not None and not isinstance(
+            runtime.cancellation, threading.Event
+        ):
+            raise StageBoundaryError(
+                "invalid reasoning retrieval cancellation authority"
+            )
+        if runtime.cancellation is not self.cancel_event:
+            raise StageBoundaryError(
+                "reasoning retrieval cancellation authority changed"
+            )
+        if current_source_scope() is not runtime.scope:
+            raise StageBoundaryError(
+                "reasoning retrieval scope changed before execution"
+            )
+        if current_retrieval_run() is not runtime.retrieval_run:
+            raise StageBoundaryError(
+                "reasoning retrieval run changed before execution"
+            )
+        if runtime.scope is not None:
+            scope_notebook_id = getattr(runtime.scope, "notebook_id", None)
+            if (
+                type(scope_notebook_id) is not str
+                or not scope_notebook_id
+                or scope_notebook_id != stage.notebook_id
+            ):
+                raise StageBoundaryError(
+                    "reasoning retrieval scope notebook changed before execution"
+                )
+        if runtime.retrieval_run is not None and (
+            getattr(runtime.retrieval_run, "cancel_event", None)
+            is not runtime.cancellation
+        ):
+            raise StageBoundaryError(
+                "reasoning retrieval run cancellation authority changed"
+            )
+        if runtime.retrieval_run is not None:
+            run_kind = getattr(runtime.retrieval_run, "run_kind", None)
+            if type(run_kind) is not str or run_kind != "ask_reasoning":
+                raise StageBoundaryError("invalid reasoning retrieval run kind")
+            actor_id = getattr(runtime.retrieval_run, "actor_id", None)
+            if type(actor_id) is not str or not actor_id:
+                raise StageBoundaryError(
+                    "invalid reasoning retrieval actor authority"
+                )
+        checker = getattr(runtime.connection_probe, "is_connection_held", None)
+        if runtime.connection_probe is not None and not callable(checker):
+            raise StageBoundaryError("invalid reasoning retrieval connection probe")
+        if runtime.trace_sink is not None and not callable(runtime.trace_sink):
+            raise StageBoundaryError("invalid reasoning retrieval trace sink")
+        if callable(checker):
+            try:
+                held = checker()
+            except Exception as exc:
+                raise StageBoundaryError(
+                    "reasoning retrieval connection probe failed"
+                ) from exc
+            if type(held) is not bool:
+                raise StageBoundaryError(
+                    "invalid reasoning retrieval connection state"
+                )
+            if held:
+                raise StageBoundaryError(
+                    "reasoning retrieval entered while holding a database connection"
+                )
+        raise_if_cancelled(runtime.cancellation)
+        result = self.run(
+            stage.notebook_id,
+            stage.question,
+            stage.history,
+            on_step=runtime.trace_sink,
+            top_n=stage.top_n,
+            max_steps=stage.max_steps,
+            intent_queries=list(stage.intent_queries),
+            limits=stage.limits,
+            intent_detail=(stage.intent.as_json_mapping() if stage.intent else None),
+        )
+        if type(result) is not ReasoningResult:
+            raise StageBoundaryError("invalid reasoning retrieval result")
+        raise_if_cancelled(runtime.cancellation)
+        if current_source_scope() is not runtime.scope:
+            raise StageBoundaryError(
+                "reasoning retrieval scope changed during execution"
+            )
+        if current_retrieval_run() is not runtime.retrieval_run:
+            raise StageBoundaryError(
+                "reasoning retrieval run changed during execution"
+            )
+        if callable(checker):
+            try:
+                held = checker()
+            except Exception as exc:
+                raise StageBoundaryError(
+                    "reasoning retrieval connection probe failed"
+                ) from exc
+            if type(held) is not bool or held:
+                raise StageBoundaryError(
+                    "reasoning retrieval returned with a database connection held"
+                )
+        return ReasoningEvidenceSnapshot.from_result(result)
+
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
             limits: Optional[AskRetrievalLimits] = None,

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD_PATH = ROOT / "scripts" / "check_architecture_boundaries.py"
@@ -72,6 +74,91 @@ def test_guard_detects_domain_contract_moved_to_an_adapter(tmp_path):
 
     assert boundary_violations(app) == [
         "app.domain.retrieval imports forbidden app.repositories.sqlite.query_store"
+    ]
+
+
+def test_guard_keeps_application_stage_contracts_out_of_implementations(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "from app import services\n"
+        "from app.repositories.sqlite import query_store\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app.repositories.sqlite",
+        "app.application.ask imports forbidden implementation app.services",
+    ]
+
+
+def test_application_stage_guard_is_an_allowlist_not_an_implementation_denylist(
+    tmp_path,
+):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "from .. import bootstrap\n"
+        "from app import main\n"
+        "from app.extension_sdk import PluginManifest\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app.bootstrap",
+        "app.application.ask imports forbidden implementation app.extension_sdk",
+        "app.application.ask imports forbidden implementation app.main",
+        "app.application.ask imports the extension composition surface "
+        "outside an approved root",
+    ]
+
+
+def test_application_stage_guard_accepts_only_stable_contract_layers(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "from app.core.ask_retrieval_policy import AskRetrievalLimits\n"
+        "from app.domain.cancellation import CancelEvent\n"
+        "from app.models.ask import AskResponse\n"
+        "import app.application as application_contracts\n"
+        "import app.models.ask as ask_models\n"
+        "from . import values\n",
+    )
+    _write(app / "application/values.py", "VALUE = 1\n")
+
+    assert boundary_violations(app) == []
+
+
+def test_application_stage_guard_rejects_bare_app_package_escape(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "import app\n"
+        "BAD = app.services\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app",
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement,escape",
+    [
+        ("import app.application", "app.services"),
+        ("import app.models.ask", "app.bootstrap"),
+    ],
+)
+def test_application_stage_guard_rejects_unaliased_submodule_root_binding(
+    tmp_path, statement, escape,
+):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        f"{statement}\n"
+        f"BAD = {escape}\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app",
     ]
 
 
@@ -265,3 +352,18 @@ def test_extension_boundary_is_present_in_all_agent_entry_documents():
         assert "capability" in normalized, name
         assert "subagent review" in normalized, name
         assert "ci" in normalized, name
+
+
+def test_ask_application_stage_boundary_is_in_all_agent_entry_documents():
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+        normalized = (
+            (ROOT / name)
+            .read_text(encoding="utf-8")
+            .casefold()
+            .replace("_", " ")
+            .replace("-", " ")
+        )
+        assert "application" in normalized, name
+        assert "stage" in normalized, name
+        assert "retrieval run" in normalized, name
+        assert "connection" in normalized or "连接" in normalized, name

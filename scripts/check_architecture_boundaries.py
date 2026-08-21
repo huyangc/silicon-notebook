@@ -18,12 +18,43 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
+ALLOWED_APPLICATION_PREFIXES = (
+    "app.application",
+    "app.core.ask_retrieval_policy",
+    "app.domain.cancellation",
+    "app.models.ask",
+)
+
+
 def module_name(app_root: Path, path: Path) -> str:
     relative = path.relative_to(app_root.parent).with_suffix("")
     parts = list(relative.parts)
     if parts[-1] == "__init__":
         parts.pop()
     return ".".join(parts)
+
+
+def matches_module_prefix(module: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for prefix in prefixes
+    )
+
+
+def imports_bare_module(path: Path, module: str) -> bool:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return any(
+        isinstance(node, ast.Import)
+        and any(
+            alias.name == module
+            or (
+                alias.name.startswith(f"{module}.")
+                and alias.asname is None
+            )
+            for alias in node.names
+        )
+        for node in ast.walk(tree)
+    )
 
 
 def python_modules(app_root: Path) -> dict[str, Path]:
@@ -169,6 +200,18 @@ def boundary_violations(app_root: Path) -> list[str]:
             )
             for imported in sorted(forbidden):
                 violations.append(f"{module} imports forbidden {imported}")
+        if module == "app.application" or module.startswith("app.application."):
+            forbidden = minimal_matching_module_references(
+                imports,
+                lambda imported: imported.startswith("app.")
+                and not matches_module_prefix(imported, ALLOWED_APPLICATION_PREFIXES),
+            )
+            if imports_bare_module(path, "app"):
+                forbidden.add("app")
+            for imported in sorted(forbidden):
+                violations.append(
+                    f"{module} imports forbidden implementation {imported}"
+                )
         if module == "app.extension_sdk" or module.startswith("app.extension_sdk."):
             forbidden = minimal_matching_module_references(
                 imports,
