@@ -805,6 +805,7 @@ def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
 def test_generate_retries_failed_report_from_confirmed_outline(client, monkeypatch):
     import app.api.report_routes as R
     from app.api.deps import repository
+    from app.models.source_scope import ResolvedSourceScope
 
     monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
     monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
@@ -822,7 +823,25 @@ def test_generate_retries_failed_report_from_confirmed_outline(client, monkeypat
         nb["id"], rid, status="failed", error="pool timeout",
         outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
         content_md="# stale", sections=[{"title": "A", "markdown": "stale"}],
+        understanding={
+            "source_scope": {
+                "mode": "include",
+                "source_ids": ["src-before-revalidation"],
+                "narrowed": False,
+            }
+        },
     )
+    refreshed_scope = ResolvedSourceScope(
+        mode="include",
+        source_ids=["src-after-revalidation"],
+        narrowed=True,
+    )
+    monkeypatch.setattr(
+        R,
+        "_validate_source_scope",
+        lambda _repo, _notebook, _scope: refreshed_scope,
+    )
+    monkeypatch.setattr(R, "_require_non_empty_scope", lambda *_args: None)
 
     response = client.post(
         f"/api/notebooks/{nb['id']}/reports/{rid}/generate", json={}
@@ -834,6 +853,11 @@ def test_generate_retries_failed_report_from_confirmed_outline(client, monkeypat
     assert detail["status"] == "generating"
     assert detail["outline"][0]["title"] == "A"
     assert detail["content_md"] == "" and detail["sections"] == []
+    assert detail["understanding"]["source_scope"] == {
+        "mode": "include",
+        "source_ids": ["src-after-revalidation"],
+        "narrowed": True,
+    }
 
 
 def test_generate_does_not_retry_failed_report_without_outline(client, monkeypatch):

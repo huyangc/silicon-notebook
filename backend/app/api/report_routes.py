@@ -523,12 +523,12 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
         # gone away since the outline was approved, and generation is by far
         # the most expensive phase to run against an empty universe.
         _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
-        if understanding_changed:
-            repo.update_report(
-                notebook_id, report_id, understanding=understanding
-            )
     depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
-    if not repo.claim_report_generation(notebook_id, report_id):
+    if not repo.claim_report_generation(
+        notebook_id,
+        report_id,
+        understanding if understanding_changed else None,
+    ):
         raise user_error(409, "当前报告已进入其他处理阶段")
     launch_kwargs: dict = {}
     if resolved_scope is not None:

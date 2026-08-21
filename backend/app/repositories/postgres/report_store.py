@@ -98,7 +98,12 @@ class ReportStore:
             ).fetchone()
         return row is not None
 
-    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+    def claim_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        understanding: dict | None = None,
+    ) -> bool:
         """Atomically claim an outline-ready or failed report for generation.
 
         A failed report retains its confirmed intent and outline, so retry can
@@ -106,20 +111,31 @@ class ReportStore:
         Prior generated artifacts are cleared in the same CAS transaction.
         """
         now = normalize_timestamp(self.now())
+        understanding_sql = (
+            "jsonb_set(%s::jsonb - 'credibility',"
+            "'{_generation_started_at}',%s,true)"
+            if understanding is not None
+            else "jsonb_set(understanding_json - 'credibility',"
+            "'{_generation_started_at}',%s,true)"
+        )
+        understanding_args = (
+            [jsonb(understanding), jsonb(now.isoformat())]
+            if understanding is not None
+            else [jsonb(now.isoformat())]
+        )
         with self.database.write() as db:
             row = db.execute(
                 "UPDATE reports SET status='generating',progress=%s,"
                 "error='',content_md='',sections_json='[]'::jsonb,"
                 "gaps_json='[]'::jsonb,references_json='[]'::jsonb,"
                 "section_status_json='[]'::jsonb,"
-                "understanding_json=jsonb_set(understanding_json - 'credibility',"
-                "'{_generation_started_at}',%s,true),updated_at=%s "
+                f"understanding_json={understanding_sql},updated_at=%s "
                 "WHERE id=%s AND notebook_id=%s "
                 "AND status IN ('outline_ready','failed') "
                 "RETURNING id",
                 (
                     "准备生成",
-                    jsonb(now.isoformat()),
+                    *understanding_args,
                     now,
                     report_id,
                     notebook_id,

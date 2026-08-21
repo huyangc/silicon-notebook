@@ -3786,9 +3786,18 @@ class RepositoryFacade:
             notebook_id, report_id, understanding
         )
 
-    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+    def claim_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        understanding: dict | None = None,
+    ) -> bool:
+        if understanding is None:
+            return self._runtime.report_store.claim_report_generation(
+                notebook_id, report_id
+            )
         return self._runtime.report_store.claim_report_generation(
-            notebook_id, report_id
+            notebook_id, report_id, understanding
         )
 
     def _report_row_to_dict(self, row, *, full: bool) -> dict:
