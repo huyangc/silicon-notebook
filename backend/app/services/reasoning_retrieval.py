@@ -2302,6 +2302,12 @@ class ReasoningRetriever:
             raise StageBoundaryError("invalid reasoning retrieval stage input")
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError("invalid reasoning retrieval runtime")
+        if runtime.cancellation is not None and not isinstance(
+            runtime.cancellation, threading.Event
+        ):
+            raise StageBoundaryError(
+                "invalid reasoning retrieval cancellation authority"
+            )
         if runtime.cancellation is not self.cancel_event:
             raise StageBoundaryError(
                 "reasoning retrieval cancellation authority changed"
@@ -2313,6 +2319,19 @@ class ReasoningRetriever:
         if current_retrieval_run() is not runtime.retrieval_run:
             raise StageBoundaryError(
                 "reasoning retrieval run changed before execution"
+            )
+        if runtime.scope is not None and (
+            getattr(runtime.scope, "notebook_id", None) != stage.notebook_id
+        ):
+            raise StageBoundaryError(
+                "reasoning retrieval scope notebook changed before execution"
+            )
+        if runtime.retrieval_run is not None and (
+            getattr(runtime.retrieval_run, "cancel_event", None)
+            is not runtime.cancellation
+        ):
+            raise StageBoundaryError(
+                "reasoning retrieval run cancellation authority changed"
             )
         checker = getattr(runtime.connection_probe, "is_connection_held", None)
         if runtime.connection_probe is not None and not callable(checker):
@@ -2344,7 +2363,7 @@ class ReasoningRetriever:
             max_steps=stage.max_steps,
             intent_queries=list(stage.intent_queries),
             limits=stage.limits,
-            intent_detail=(stage.intent.as_mapping() if stage.intent else None),
+            intent_detail=(stage.intent.as_json_mapping() if stage.intent else None),
         )
         if type(result) is not ReasoningResult:
             raise StageBoundaryError("invalid reasoning retrieval result")

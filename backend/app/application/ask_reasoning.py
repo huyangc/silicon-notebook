@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
 from app.domain.cancellation import CancelEvent
+from app.models.ask import AskResponse
 
 
 class StageBoundaryError(RuntimeError):
@@ -63,6 +64,21 @@ class ReasoningIntentProjection:
             "expected_output": self.expected_output,
             "mandatory_topics": self.mandatory_topics,
         })
+
+    def as_json_mapping(self) -> dict[str, object]:
+        """Fresh legacy-shaped projection for callbacks and service adapters."""
+        return {
+            "resolved_question": self.resolved_question,
+            "result_scope": self.result_scope,
+            "completeness_required": self.completeness_required,
+            "retrieval_effort": self.retrieval_effort,
+            "entities": list(self.entities),
+            "constraints": list(self.constraints),
+            "excluded_topics": list(self.excluded_topics),
+            "assumptions": list(self.assumptions),
+            "expected_output": self.expected_output,
+            "mandatory_topics": list(self.mandatory_topics),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,11 +174,16 @@ class RetrievedReasoningAsk:
 
 @dataclass(frozen=True, slots=True)
 class ReasoningResponseDraft:
-    """Core-owned response after synthesis/binding, before the only save."""
+    """Exclusive core-owned response graph before the only atomic save.
+
+    The frozen envelope transfers ownership without serializing or copying the
+    graph: collection result cards and the citation list intentionally share
+    Citation instances for image-admission accounting.
+    """
 
     notebook_id: str
     question: str
-    response_json: str
+    response: AskResponse
     conversation_id: str
     user_id: str
     job_id: str
@@ -174,7 +195,7 @@ class ReasoningResponseDraft:
 class CommittedReasoningAnswer:
     """Answer after the atomic answer/job-terminal persistence boundary."""
 
-    response_json: str
+    response: AskResponse
     baseline_manifest: object | None = None
 
 

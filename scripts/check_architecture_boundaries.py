@@ -18,12 +18,11 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
-FORBIDDEN_APPLICATION_PREFIXES = (
-    "app.api",
-    "app.extensions",
-    "app.features",
-    "app.repositories",
-    "app.services",
+ALLOWED_APPLICATION_PREFIXES = (
+    "app.application",
+    "app.core.ask_retrieval_policy",
+    "app.domain.cancellation",
+    "app.models.ask",
 )
 
 
@@ -33,6 +32,13 @@ def module_name(app_root: Path, path: Path) -> str:
     if parts[-1] == "__init__":
         parts.pop()
     return ".".join(parts)
+
+
+def matches_module_prefix(module: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for prefix in prefixes
+    )
 
 
 def python_modules(app_root: Path) -> dict[str, Path]:
@@ -181,8 +187,9 @@ def boundary_violations(app_root: Path) -> list[str]:
         if module == "app.application" or module.startswith("app.application."):
             forbidden = minimal_matching_module_references(
                 imports,
-                lambda imported: imported.startswith(
-                    FORBIDDEN_APPLICATION_PREFIXES
+                lambda imported: imported.startswith("app.")
+                and not matches_module_prefix(
+                    imported, ALLOWED_APPLICATION_PREFIXES
                 ),
             )
             for imported in sorted(forbidden):

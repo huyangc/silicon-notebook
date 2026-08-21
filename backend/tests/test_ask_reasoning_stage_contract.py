@@ -19,8 +19,7 @@ from app.application.ask_reasoning import (
 )
 from app.core.ask_retrieval_policy import ask_retrieval_limits
 from app.core.config import Settings
-from app.models.schemas import AskRequest
-from app.models.schemas import AskResponse
+from app.models.schemas import AskRequest, AskResponse, Citation
 from app.services.cancellation import AskCancelled
 from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
 from app.services.retrieval_run import current_retrieval_run, retrieval_run
@@ -99,6 +98,9 @@ def test_reasoning_stage_data_contracts_are_frozen_slotted_and_narrow():
     assert isinstance(run_input.intent.as_mapping(), MappingProxyType)
     with pytest.raises(TypeError):
         run_input.intent.as_mapping()["result_scope"] = "complete"
+    trace_detail = run_input.intent.as_json_mapping()
+    assert trace_detail["entities"] == ["entity"]
+    assert isinstance(trace_detail["entities"], list)
 
 
 def test_reasoning_evidence_snapshot_breaks_container_aliases_without_deepcopy():
@@ -215,6 +217,47 @@ def test_typed_retrieval_stage_rejects_authority_replacement(monkeypatch):
         retriever.run_stage(_run_input(), runtime)
 
 
+def test_typed_retrieval_stage_binds_scope_notebook_and_run_cancellation(
+    monkeypatch,
+):
+    run_cancel = threading.Event()
+    other_cancel = threading.Event()
+    retriever = _retriever(other_cancel)
+    called = []
+    monkeypatch.setattr(
+        retriever, "run", lambda *args, **kwargs: called.append(True)
+    )
+    with source_scope_context(
+        "other-notebook", {"mode": "include", "source_ids": ["source-1"]}
+    ):
+        scope = current_source_scope()
+        runtime = ReasoningRetrievalRuntime(
+            scope=scope,
+            retrieval_run=None,
+            cancellation=other_cancel,
+            trace_sink=None,
+            connection_probe=None,
+        )
+        with pytest.raises(StageBoundaryError, match="scope notebook changed"):
+            retriever.run_stage(_run_input(), runtime)
+
+    with retrieval_run(
+        run_kind="ask_reasoning", actor_id="user", cancel_event=run_cancel
+    ) as run:
+        runtime = ReasoningRetrievalRuntime(
+            scope=None,
+            retrieval_run=run,
+            cancellation=other_cancel,
+            trace_sink=None,
+            connection_probe=None,
+        )
+        with pytest.raises(
+            StageBoundaryError, match="run cancellation authority changed"
+        ):
+            retriever.run_stage(_run_input(), runtime)
+    assert called == []
+
+
 def test_typed_retrieval_stage_rejects_raising_connection_probe_before_run(
     monkeypatch,
 ):
@@ -256,6 +299,26 @@ def test_typed_retrieval_stage_rejects_non_contract_legacy_result(monkeypatch):
         retriever.run_stage(_run_input(), runtime)
 
 
+def test_typed_retrieval_stage_rejects_non_core_cancellation_token(monkeypatch):
+    token = object()
+    retriever = _retriever(token)
+    called = []
+    monkeypatch.setattr(
+        retriever, "run", lambda *args, **kwargs: called.append(True)
+    )
+    runtime = ReasoningRetrievalRuntime(
+        scope=None,
+        retrieval_run=None,
+        cancellation=token,  # type: ignore[arg-type]
+        trace_sink=None,
+        connection_probe=None,
+    )
+
+    with pytest.raises(StageBoundaryError, match="cancellation authority"):
+        retriever.run_stage(_run_input(), runtime)
+    assert called == []
+
+
 def test_public_ask_owns_one_scope_run_and_cancellation_authority(monkeypatch):
     service = _minimal_ask_service()
     cancel_event = threading.Event()
@@ -272,7 +335,7 @@ def test_public_ask_owns_one_scope_run_and_cancellation_authority(monkeypatch):
         seen["execute_scope"] = current_source_scope()
         seen["execute_run"] = current_retrieval_run()
         return CommittedReasoningAnswer(
-            response_json=AskResponse(conclusion="ok").model_dump_json()
+            response=AskResponse(conclusion="ok")
         )
 
     monkeypatch.setattr(service, "_prepare_reasoning_ask", prepare)
@@ -295,6 +358,63 @@ def test_public_ask_owns_one_scope_run_and_cancellation_authority(monkeypatch):
     assert runtime.retrieval_run.actor_id == "user"
     assert runtime.cancellation is cancel_event
     assert runtime.retrieval_run.cancel_event is cancel_event
+
+
+def test_ask_stage_binds_run_actor_to_explicit_persistence_user():
+    service = _minimal_ask_service()
+    cancel_event = threading.Event()
+    with retrieval_run(
+        run_kind="ask_reasoning",
+        actor_id="other-user",
+        cancel_event=cancel_event,
+    ):
+        with pytest.raises(StageBoundaryError, match="actor authority changed"):
+            service.ask_reasoning(
+                "nb",
+                AskRequest(question="q", mode="reasoning"),
+                user_id="user",
+                cancel_event=cancel_event,
+            )
+
+
+def test_commit_stage_preserves_the_shared_response_object_graph(monkeypatch):
+    service = _minimal_ask_service()
+    citation = Citation(
+        label="source",
+        source_id="source-1",
+        element_id="element-1",
+        location_label="§1",
+        quoted_span="evidence",
+    )
+    response = AskResponse(
+        conclusion="ok",
+        citations=[citation, citation],
+    )
+    assert response.citations[0] is response.citations[1]
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
+    runtime = ReasoningRetrievalRuntime(
+        scope=None,
+        retrieval_run=None,
+        cancellation=None,
+        trace_sink=None,
+        connection_probe=None,
+    )
+    draft = ReasoningResponseDraft(
+        notebook_id="nb",
+        question="q",
+        response=response,
+        conversation_id="conv",
+        user_id="user",
+        job_id="",
+        asked_at="",
+    )
+
+    committed = service._commit_reasoning_draft(draft, runtime)
+
+    assert committed.response is response
+    assert committed.response.citations[0] is citation
+    assert committed.response.citations[1] is citation
+    assert committed.response.answer_id == "answer-1"
 
 
 def test_memory_return_cancellation_prevents_unconfigured_answer_persistence():

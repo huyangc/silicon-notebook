@@ -89,6 +89,40 @@ def test_guard_keeps_application_stage_contracts_out_of_implementations(tmp_path
     ]
 
 
+def test_application_stage_guard_is_an_allowlist_not_an_implementation_denylist(
+    tmp_path,
+):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "from .. import bootstrap\n"
+        "from app import main\n"
+        "from app.extension_sdk import PluginManifest\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app.bootstrap",
+        "app.application.ask imports forbidden implementation app.extension_sdk",
+        "app.application.ask imports forbidden implementation app.main",
+        "app.application.ask imports the extension composition surface "
+        "outside an approved root",
+    ]
+
+
+def test_application_stage_guard_accepts_only_stable_contract_layers(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "from app.core.ask_retrieval_policy import AskRetrievalLimits\n"
+        "from app.domain.cancellation import CancelEvent\n"
+        "from app.models.ask import AskResponse\n"
+        "from . import values\n",
+    )
+    _write(app / "application/values.py", "VALUE = 1\n")
+
+    assert boundary_violations(app) == []
+
+
 def test_facade_freeze_rejects_addition_but_allows_surface_reduction(tmp_path):
     path = tmp_path / "facade.py"
     _write(

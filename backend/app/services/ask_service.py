@@ -2194,10 +2194,11 @@ class AskService:
             notebook_id, payload, user_id=user_id, job_id=job_id,
             runtime=runtime,
         )
-        committed = self._run_reasoning_stage(prepared, runtime)
-        return AskResponse.model_validate_json(committed.response_json)
+        return self._run_reasoning_stage(prepared, runtime).response
 
-    def _assert_reasoning_runtime(self, runtime, point: str) -> None:
+    def _assert_reasoning_runtime(
+        self, runtime, point: str, *, notebook_id: str = "", user_id: str = "",
+    ) -> None:
         from app.application.ask_reasoning import (
             ReasoningRetrievalRuntime,
             StageBoundaryError,
@@ -2207,12 +2208,34 @@ class AskService:
 
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError(f"invalid Ask reasoning runtime at {point}")
-        if current_source_scope() is not runtime.scope:
+        if runtime.cancellation is not None and not isinstance(
+            runtime.cancellation, threading.Event
+        ):
+            raise StageBoundaryError(
+                f"invalid Ask reasoning cancellation authority at {point}"
+            )
+        scope = current_source_scope()
+        run = current_retrieval_run()
+        if scope is not runtime.scope:
             raise StageBoundaryError(f"Ask reasoning scope changed at {point}")
-        if current_retrieval_run() is not runtime.retrieval_run:
+        if run is not runtime.retrieval_run:
             raise StageBoundaryError(
                 f"Ask reasoning retrieval run changed at {point}"
             )
+        if scope is not None and notebook_id:
+            if getattr(scope, "notebook_id", None) != notebook_id:
+                raise StageBoundaryError(
+                    f"Ask reasoning scope notebook changed at {point}"
+                )
+        if run is not None:
+            if getattr(run, "cancel_event", None) is not runtime.cancellation:
+                raise StageBoundaryError(
+                    f"Ask reasoning cancellation authority changed at {point}"
+                )
+            if user_id and getattr(run, "actor_id", None) != user_id:
+                raise StageBoundaryError(
+                    f"Ask reasoning actor authority changed at {point}"
+                )
         checker = getattr(runtime.connection_probe, "is_connection_held", None)
         if runtime.connection_probe is not None and not callable(checker):
             raise StageBoundaryError(
@@ -2246,7 +2269,9 @@ class AskService:
             ReasoningIntentProjection,
         )
 
-        self._assert_reasoning_runtime(runtime, "prepare")
+        self._assert_reasoning_runtime(
+            runtime, "prepare", notebook_id=notebook_id, user_id=user_id,
+        )
         cancel_event = runtime.cancellation
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
@@ -2325,7 +2350,7 @@ class AskService:
         intent_step = TraceStep(
             step_type="intent",
             summary="已按确认后的问题理解开始检索",
-            detail=dict(intent_projection.as_mapping()),
+            detail=intent_projection.as_json_mapping(),
             # The understanding phase runs entirely in ``/ask/intent``, before
             # this durable job exists, so the server cannot time it.  The UI
             # reports what it measured; without it the replayed trace would
@@ -2370,9 +2395,16 @@ class AskService:
             raise StageBoundaryError("invalid reasoning response draft")
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError("invalid reasoning commit runtime")
-        self._assert_reasoning_runtime(runtime, "before-persist")
+        if type(draft.response) is not AskResponse:
+            raise StageBoundaryError("invalid reasoning response graph")
+        response = draft.response
+        self._assert_reasoning_runtime(
+            runtime,
+            "before-persist",
+            notebook_id=draft.notebook_id,
+            user_id=draft.user_id,
+        )
         raise_if_cancelled(runtime.cancellation)
-        response = AskResponse.model_validate_json(draft.response_json)
         response.answer_id = self._save_answer(
             draft.notebook_id,
             draft.question,
@@ -2383,7 +2415,7 @@ class AskService:
             asked_at=draft.asked_at,
         )
         return CommittedReasoningAnswer(
-            response_json=response.model_dump_json(),
+            response=response,
             baseline_manifest=draft.baseline_manifest,
         )
 
@@ -2402,7 +2434,12 @@ class AskService:
             raise StageBoundaryError("invalid prepared Ask reasoning input")
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError("invalid Ask reasoning runtime")
-        self._assert_reasoning_runtime(runtime, "reasoning-stage-entry")
+        self._assert_reasoning_runtime(
+            runtime,
+            "reasoning-stage-entry",
+            notebook_id=prepared.notebook_id,
+            user_id=prepared.user_id,
+        )
         notebook_id = prepared.notebook_id
         question = prepared.question
         conversation_id = prepared.conversation_id
@@ -2420,7 +2457,7 @@ class AskService:
         intent_step = TraceStep(
             step_type="intent",
             summary="已按确认后的问题理解开始检索",
-            detail=dict(prepared.intent_projection.as_mapping()),
+            detail=prepared.intent_projection.as_json_mapping(),
             duration_ms=prepared.intent_trace_duration_ms,
         )
         user_id = prepared.user_id
@@ -2437,7 +2474,7 @@ class AskService:
                 ReasoningResponseDraft(
                     notebook_id=notebook_id,
                     question=question,
-                    response_json=response.model_dump_json(),
+                    response=response,
                     conversation_id=conversation_id,
                     user_id=user_id,
                     job_id=job_id,
