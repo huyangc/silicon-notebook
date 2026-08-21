@@ -276,7 +276,12 @@ class SourceElementEnricherHost:
             accepted.extend(patches)
             remaining -= len(patches)
             remaining_bytes -= used_bytes
-            self._emit(sink, registration, "available", len(patches), started)
+            event_status = (
+                "available"
+                if result.status is ExtensionResultStatus.AVAILABLE
+                else "unavailable"
+            )
+            self._emit(sink, registration, event_status, len(patches), started)
             if remaining <= 0:
                 break
         if not self._connection_clear(call.connection_probe):

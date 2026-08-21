@@ -131,13 +131,16 @@ def enrich_source_elements(
             patch_metadata = _thaw(patch.metadata)
         except (TypeError, ValueError):
             return elements
-        byte_count += len(
-            json.dumps(
-                {"metadata": patch_metadata, "caption": patch.caption},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
+        try:
+            byte_count += len(
+                json.dumps(
+                    {"metadata": patch_metadata, "caption": patch.caption},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError, UnicodeError):
+            return elements
         if byte_count > max_metadata_bytes:
             return elements
         owner = (patch.plugin_id, patch.plugin_version)
