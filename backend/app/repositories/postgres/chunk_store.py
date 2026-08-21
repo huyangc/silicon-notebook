@@ -108,8 +108,10 @@ class ChunkStore:
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT q.id,q.chunk_id,q.source_id,q.vector "
-                "FROM chunk_questions q JOIN sources s "
-                "ON s.id=q.source_id AND s.notebook_id=q.notebook_id "
+                "FROM chunk_questions q JOIN chunks c "
+                "ON c.id=q.chunk_id AND c.notebook_id=q.notebook_id "
+                "AND c.source_id=q.source_id JOIN sources s "
+                "ON s.id=c.source_id AND s.notebook_id=c.notebook_id "
                 "WHERE q.notebook_id=%s AND (s.source_type!='memory' OR EXISTS ("
                 "SELECT 1 FROM memory_items m WHERE m.id=s.memory_id "
                 "AND m.notebook_id=q.notebook_id AND m.created_by=%s)) "

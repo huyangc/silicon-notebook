@@ -19,13 +19,21 @@ from app.services.source_scope import current_source_scope
 class _CancellationToken:
     def __init__(self, event: Any) -> None:
         self._event = event
+        self._observed_cancelled = False
 
     def is_set(self) -> bool:
+        if self._observed_cancelled:
+            return True
         if self._event is None:
             return False
         cancelled = self._event.is_set()
         if type(cancelled) is not bool:
             raise TypeError("malformed cancellation state")
+        if cancelled:
+            # Core cancellation is monotonic. Cache the first authoritative
+            # True so the host's is_set()+raise_if_cancelled() sequence cannot
+            # be turned into a hostile second-read type change.
+            self._observed_cancelled = True
         return cancelled
 
     def raise_if_cancelled(self) -> None:
@@ -50,6 +58,8 @@ class GeneratedQuestionContributionCall:
         evaluate: Callable[[tuple[list[RetrievedChunk], Any, Any]], Any],
         matrix_hydrate: Callable[[Sequence[str]], tuple[Any, Any, Any]],
         failure_event: Callable[[], None],
+        matrix_failure_event: Callable[[], None] = lambda: None,
+        cancel_event: Any = None,
     ) -> None:
         self._notebook_id = notebook_id
         self._baseline = baseline
@@ -57,6 +67,8 @@ class GeneratedQuestionContributionCall:
         self._evaluate = evaluate
         self._matrix_hydrate = matrix_hydrate
         self._failure_event = failure_event
+        self._matrix_failure_event = matrix_failure_event
+        self._cancellation = _CancellationToken(cancel_event)
         self._attempted = False
         self._failure_emitted = False
         self._evaluated: tuple[Any, Any, Any] | None = None
@@ -130,13 +142,16 @@ class GeneratedQuestionContributionCall:
         expected_tail = tuple(
             proposal.identity for proposal in self._proposals
         ) if self._mode == "on" and self._changed else ()
-        expected_set = set(expected_tail)
+        expected_by_id = {
+            proposal.identity: proposal.value for proposal in self._proposals
+        }
         accepted_generated = tuple(
             chunk.chunk_id for chunk in host_tail
-            if chunk.chunk_id in expected_set
+            if expected_by_id.get(chunk.chunk_id) is chunk
         )
         independent_tail = tuple(
-            chunk for chunk in host_tail if chunk.chunk_id not in expected_set
+            chunk for chunk in host_tail
+            if expected_by_id.get(chunk.chunk_id) is not chunk
         )
         generated_accepted = (
             self._mode == "on"
@@ -151,11 +166,35 @@ class GeneratedQuestionContributionCall:
         )
         if independent_tail:
             try:
+                self._cancellation.raise_if_cancelled()
+            except AskCancelled:
+                raise
+            except Exception:
+                return self._baseline
+            try:
                 _rows, final_ids, final_matrix = self._matrix_hydrate(
                     [chunk.chunk_id for chunk in (*original, *visible_tail)]
                 )
+            except AskCancelled:
+                raise
             except Exception:
-                self._emit_failure()
+                # Authority admission has already succeeded for the independent
+                # tail.  A failed optional diversity-matrix rebuild must not
+                # erase that evidence; downstream MMR treats ids absent from
+                # the original matrix as zero pair-similarity.
+                final_ids, final_matrix = _ids, _matrix
+                try:
+                    self._matrix_failure_event()
+                except Exception:
+                    pass
+            try:
+                # The bounded matrix read is allowed to finish safely, but a
+                # cancellation raised while it was in flight must take effect
+                # before any newly admitted evidence becomes visible.
+                self._cancellation.raise_if_cancelled()
+            except AskCancelled:
+                raise
+            except Exception:
                 return self._baseline
         else:
             final_ids, final_matrix = evaluated_ids, evaluated_matrix
@@ -310,12 +349,12 @@ def generated_question_call_context(
     call: GeneratedQuestionContributionCall,
     *,
     actor_id: str,
-    cancel_event: Any,
     connection_probe: Any,
     admission_hydrate: Callable[
         [str, str, Sequence[str]], Sequence[RetrievedChunk]
     ],
-    max_results: int,
+    max_items: int,
+    max_tokens: int,
     generated_question_enabled: bool = True,
 ) -> RetrievalContributionCallContext:
     """Build the candidate-stage invocation envelope without performing I/O."""
@@ -325,7 +364,8 @@ def generated_question_call_context(
     scope_id = hashlib.sha256(
         f"{run_id}:{id(call)}".encode("ascii")
     ).hexdigest()
-    execution_limit = max(1, int(max_results))
+    execution_limit = max(1, int(max_items))
+    token_limit = max(1, int(max_tokens))
     return RetrievalContributionCallContext(
         actor_id=actor_id,
         notebook_id=call._notebook_id,
@@ -333,9 +373,9 @@ def generated_question_call_context(
         scope_narrowed=bool(getattr(scope, "restricted", False)),
         run_id=run_id,
         run_kind=str(getattr(run, "run_kind", "") or "ask_chunk"),
-        cancellation=_CancellationToken(cancel_event),
+        cancellation=call._cancellation,
         max_items=execution_limit,
-        max_tokens=1,
+        max_tokens=token_limit,
         max_proposals=execution_limit,
         admission_source=_AdmissionSource(
             call, call._notebook_id, actor_id, admission_hydrate

@@ -190,7 +190,11 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
         chunks.replace_chunk_questions(
             f"chunk-{source_id}",
             notebook_id,
-            source_id,
+            (
+                "source-pg-visible"
+                if source_id == "source-pg-memory-bob"
+                else source_id
+            ),
             ((f"question-{source_id}", "Question?", [0.25, 0.75]),),
             created_at=now,
         )

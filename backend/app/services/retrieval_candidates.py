@@ -2011,6 +2011,13 @@ class CandidateRetrievalService(_RetrievalState):
                 allowed_source_ids=allowed_source_ids,
             ),
             matrix_hydrate=self._hydrate_chunk_candidates,
+            matrix_failure_event=lambda: self._emit_generated_question_query_event({
+                "kind": "retrieval_contributor_matrix_rebuild",
+                "mode": mode,
+                "status": "failed_open",
+                "baseline_hits": len(scored),
+            }),
+            cancel_event=getattr(run, "cancel_event", None),
             failure_event=lambda: self._emit_generated_question_query_event({
                 "kind": "chunk_question_index_query",
                 "notebook_id": notebook_id,
@@ -2023,10 +2030,13 @@ class CandidateRetrievalService(_RetrievalState):
             call_context = generated_question_call_context(
                 call,
                 actor_id=actor_id,
-                cancel_event=getattr(run, "cancel_event", None),
                 connection_probe=self.database,
                 admission_hydrate=self.hydrate_retrieval_contribution_chunks,
-                max_results=self.settings.generated_question_recall,
+                max_items=max(
+                    self.settings.chunk_recall,
+                    self.settings.generated_question_recall,
+                ),
+                max_tokens=self.settings.max_total_tokens,
                 generated_question_enabled=generated_enabled,
             )
             host_chunks = host.run(
@@ -2149,9 +2159,20 @@ class CandidateRetrievalService(_RetrievalState):
                 "added_chunks": 0,
             })
             return baseline
-        chunks, _supp_ids, _supp_matrix = self._hydrate_chunk_candidates(
-            selected_chunk_ids
+        authorized_chunks = self._hydrate_generated_question_chunks(
+            notebook_id,
+            actor_id,
+            selected_chunk_ids,
+            allowed_source_ids=allowed,
         )
+        chunks = [{
+            "chunk_id": chunk.chunk_id,
+            "source_id": chunk.source_id,
+            "source_title": chunk.source_title,
+            "section_path": chunk.section_path,
+            "text": chunk.text,
+            "element_ids": list(chunk.element_ids),
+        } for chunk in authorized_chunks]
         supplemental = score_chunks(
             query,
             chunks,
@@ -2542,6 +2563,22 @@ class CandidateRetrievalService(_RetrievalState):
         self, notebook_id: str, actor_id: str, candidate_ids: Iterable[str]
     ) -> list[RetrievedChunk]:
         """One scope-before-read authority batch for extension proposals."""
+        return self._hydrate_generated_question_chunks(
+            notebook_id,
+            actor_id,
+            candidate_ids,
+            allowed_source_ids=None,
+        )
+
+    def _hydrate_generated_question_chunks(
+        self,
+        notebook_id: str,
+        actor_id: str,
+        candidate_ids: Iterable[str],
+        *,
+        allowed_source_ids: Iterable[str] | None,
+    ) -> list[RetrievedChunk]:
+        """Hydrate GQ originals only after notebook/scope/actor SQL checks."""
         from app.services.source_scope import current_source_scope
 
         scope = current_source_scope()
@@ -2549,7 +2586,10 @@ class CandidateRetrievalService(_RetrievalState):
             return []
         source_mode: str | None = None
         source_ids: tuple[str, ...] = ()
-        if scope is not None and scope.ceiling_active:
+        if allowed_source_ids is not None:
+            source_mode = "include"
+            source_ids = tuple(sorted(set(allowed_source_ids)))
+        elif scope is not None and scope.ceiling_active:
             source_mode = scope.mode
             values = (
                 scope.source_ids | scope.hidden_source_ids

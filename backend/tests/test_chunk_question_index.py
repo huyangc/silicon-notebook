@@ -290,6 +290,66 @@ def test_shadow_observes_but_on_returns_only_the_original_chunk(repo, monkeypatc
     assert matrix.shape[0] == 0  # no original chunk embedding was fabricated
 
 
+def test_on_uses_one_embed_scan_authority_batch_and_final_matrix_read(
+    repo, monkeypatch
+):
+    notebook = _seed_original_chunk(repo)
+    candidates = repo.retrieval.candidates
+    store = repo._runtime.chunk_store
+    question = "How long does ZX-81 holdover acquisition take?"
+    vector = repo._runtime.models.embedding("chunk_embedding").embed_texts(
+        [question]
+    )[0]
+    store.replace_chunk_questions(
+        "chunk-1",
+        notebook.id,
+        "source-1",
+        (("question-io-count", question, vector),),
+        created_at=_now(),
+    )
+    monkeypatch.setattr(repo.settings, "generated_question_index_mode", "on")
+    monkeypatch.setattr(repo.settings, "generated_question_trigger_hits", 2)
+    counts = {"scan": 0, "embed": 0, "authority": 0, "matrix": 0}
+    actors = []
+    real_scan = candidates.chunks.question_index_rows
+    real_embed = candidates._embed_query
+    real_authority = candidates._hydrate_generated_question_chunks
+    real_matrix = candidates._hydrate_chunk_candidates
+
+    def scan(*args, **kwargs):
+        counts["scan"] += 1
+        actors.append(kwargs["actor_id"])
+        return real_scan(*args, **kwargs)
+
+    def embed(query):
+        counts["embed"] += 1
+        return real_embed(query)
+
+    def authority(*args, **kwargs):
+        counts["authority"] += 1
+        actors.append(args[1])
+        return real_authority(*args, **kwargs)
+
+    def matrix(ids):
+        counts["matrix"] += 1
+        return real_matrix(ids)
+
+    monkeypatch.setattr(candidates.chunks, "question_index_rows", scan)
+    monkeypatch.setattr(candidates, "_embed_query", embed)
+    monkeypatch.setattr(
+        candidates, "_hydrate_generated_question_chunks", authority
+    )
+    monkeypatch.setattr(candidates, "_hydrate_chunk_candidates", matrix)
+
+    scored, _ids, _matrix = candidates._run_chunk_candidate_contributors(
+        notebook.id, question, ([], [], None)
+    )
+
+    assert [chunk.chunk_id for chunk in scored] == ["chunk-1"]
+    assert counts == {"scan": 1, "embed": 1, "authority": 1, "matrix": 1}
+    assert actors == [repo.current_user().id, repo.current_user().id]
+
+
 def test_off_and_satisfied_trigger_are_exact_zero_cost(repo, monkeypatch):
     candidates = repo.retrieval.candidates
     original = RetrievedChunk(
@@ -367,6 +427,13 @@ def test_scan_overflow_stops_before_embedding_and_hydration(repo, monkeypatch):
             AssertionError("overflow path hydrated chunks")
         ),
     )
+    monkeypatch.setattr(
+        candidates,
+        "_hydrate_generated_question_chunks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("overflow path hydrated scoped chunks")
+        ),
+    )
     monkeypatch.setattr(candidates.event_log, "emit", events.append)
 
     result = candidates._run_chunk_candidate_contributors(
@@ -418,6 +485,35 @@ def test_question_rows_honor_the_source_ceiling(repo):
         notebook.id,
         "source-excluded",
         (("aaa-excluded", "Excluded?", vector),),
+        created_at=now,
+    )
+    other_notebook = repo.create_notebook(NotebookCreate(name="foreign"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "source-foreign", other_notebook.id, "Foreign", "md", "ready",
+                now, now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "chunk-foreign", other_notebook.id, "source-foreign",
+                "FOREIGN SECRET", "", "[]", now,
+            ),
+        )
+    # Each standalone FK is valid, but the tuple is not.  This lexically first
+    # corrupt row must be rejected before LIMIT so it cannot hide the valid row.
+    store.replace_chunk_questions(
+        "chunk-foreign",
+        notebook.id,
+        "source-1",
+        (("aaa-mismatched-owner", "Foreign?", vector),),
         created_at=now,
     )
     store.replace_chunk_questions(
@@ -562,7 +658,9 @@ def test_retrieval_contribution_authority_filters_private_memory_without_scope(
         store.replace_chunk_questions(
             chunk_id,
             notebook.id,
-            source_id,
+            # A corrupt cross-source tuple for Bob remains individually
+            # FK-valid.  The store query must join the actual chunk owner.
+            "source-1" if chunk_id == "chunk-memory-bob" else source_id,
             ((f"question-{chunk_id}", "Question?", [0.25] * 16),),
             created_at=now,
         )
@@ -590,6 +688,67 @@ def test_retrieval_contribution_authority_filters_private_memory_without_scope(
     assert {row["chunk_id"] for row in question_rows} == {
         "chunk-1", "chunk-knowhow", "chunk-memory-alice",
     }
+
+
+def test_untrusted_question_row_cannot_bypass_actor_chunk_authority(
+    repo, monkeypatch
+):
+    notebook = _seed_original_chunk(repo)
+    bob = repo.create_user("b00987654", "password-12")
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_items "
+            "(id,notebook_id,created_by,origin,status,title,content_md,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "memory-bob-hostile", notebook.id, bob.id, "external_agent",
+                "confirmed", "Bob", "BOB PRIVATE TEXT", now, now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,memory_id,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "source-memory-bob-hostile", notebook.id, "Bob", "memory",
+                "ready", "memory-bob-hostile", now, now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "chunk-memory-bob-hostile", notebook.id,
+                "source-memory-bob-hostile", "BOB PRIVATE TEXT", "", "[]",
+                now,
+            ),
+        )
+
+    candidates = repo.retrieval.candidates
+    vector = [0.25] * 16
+    monkeypatch.setattr(repo.settings, "generated_question_index_mode", "on")
+    monkeypatch.setattr(repo.settings, "generated_question_trigger_hits", 2)
+    monkeypatch.setattr(candidates, "_embed_query", lambda _query: vector)
+    monkeypatch.setattr(
+        candidates.chunks,
+        "question_index_rows",
+        lambda *_args, **_kwargs: [{
+            "id": "hostile-question-row",
+            "chunk_id": "chunk-memory-bob-hostile",
+            "source_id": "source-memory-bob-hostile",
+            "vector": vector,
+        }],
+    )
+    baseline = ([], [], None)
+
+    result = candidates._run_chunk_candidate_contributors(
+        notebook.id, "private text", baseline
+    )
+
+    assert result is baseline
+    assert "BOB PRIVATE TEXT" not in repr(result)
 
 
 @pytest.mark.parametrize("mode", ["shadow", "on"])
@@ -650,19 +809,13 @@ def test_question_index_hydration_failure_does_not_mutate_baseline(
         ),
     )
     baseline = ([original], ["chunk-1"], None)
-    calls = 0
-    real_hydrate = candidates._hydrate_chunk_candidates
-
-    def fail_second_hydrate(chunk_ids):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise RuntimeError("hydrate failed")
-        return real_hydrate(chunk_ids)
-
     monkeypatch.setattr(repo.settings, "generated_question_index_mode", "on")
     monkeypatch.setattr(repo.settings, "generated_question_trigger_hits", 2)
-    monkeypatch.setattr(candidates, "_hydrate_chunk_candidates", fail_second_hydrate)
+    monkeypatch.setattr(
+        candidates,
+        "_hydrate_chunk_candidates",
+        lambda _ids: (_ for _ in ()).throw(RuntimeError("hydrate failed")),
+    )
 
     result = candidates._run_chunk_candidate_contributors(
         notebook.id, question, baseline

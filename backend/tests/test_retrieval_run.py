@@ -248,6 +248,61 @@ def test_retrieval_run_actor_is_core_only_and_never_emitted():
     assert "secret-user-id" not in json.dumps(log.events[0])
 
 
+def test_actor_identity_survives_the_report_worker_copy_context():
+    observed = []
+
+    def worker():
+        state = current_retrieval_run()
+        observed.append(state.actor_id if state is not None else None)
+
+    with retrieval_run(run_kind="report_generation", actor_id="report-actor"):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(contextvars.copy_context().run, worker).result(timeout=2)
+
+    assert observed == ["report-actor"]
+
+
+def test_ask_and_report_entrypoints_install_their_actor_identity():
+    from types import SimpleNamespace
+
+    from app.models.ask import AskRequest
+    from app.services.ask_service import AskService
+    from app.services.report_engine import ReportEngine
+
+    observed = []
+    ask = object.__new__(AskService)
+    ask.event_log = None
+    ask.ask_chunk = lambda *_args, **_kwargs: observed.append(
+        ("ask", current_retrieval_run().actor_id)
+    )
+    AskService.ask(
+        ask,
+        "notebook",
+        AskRequest(question="question", mode="chunk"),
+        user_id="ask-actor",
+    )
+
+    report = object.__new__(ReportEngine)
+    report.dependencies = SimpleNamespace(event_log=None)
+    report.settings = SimpleNamespace(report_retrieval_fanout=2)
+    report.user_id = "report-actor"
+    report.cancel_event = None
+    report._plan_outline_run = lambda *_args, **_kwargs: observed.append(
+        ("plan", current_retrieval_run().actor_id)
+    )
+    report._generate_run = lambda *_args, **_kwargs: observed.append(
+        ("generate", current_retrieval_run().actor_id)
+    )
+    ReportEngine.plan_outline(report, "notebook", "report", "question")
+    ReportEngine.generate(report, "notebook", "report", "question")
+
+    assert observed == [
+        ("ask", "ask-actor"),
+        ("plan", "report-actor"),
+        ("generate", "report-actor"),
+    ]
+
+
 def test_event_log_base_exception_still_restores_contextvar():
     class _InterruptingLog:
         def emit(self, _event):
