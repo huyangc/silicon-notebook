@@ -24,7 +24,7 @@ from app.services.cancellation import AskCancelled
 from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
 from app.services.retrieval_run import current_retrieval_run, retrieval_run
 from app.services.source_scope import current_source_scope, source_scope_context
-from tests.test_ask_service_boundary import _minimal_ask_service
+from tests.test_ask_service_boundary import _EnumerableKnowhow, _minimal_ask_service
 
 
 def _projection() -> ReasoningIntentProjection:
@@ -434,6 +434,33 @@ def test_memory_return_cancellation_prevents_unconfigured_answer_persistence():
         service.ask_reasoning(
             "nb",
             AskRequest(question="q", mode="reasoning"),
+            user_id="user",
+            cancel_event=cancel_event,
+        )
+    assert saves == []
+
+
+def test_memory_return_cancellation_prevents_structured_fallback_persistence():
+    cancel_event = threading.Event()
+    service = _minimal_ask_service()
+    service.model_clients.primary_unconfigured = lambda: True
+    service.knowhow_store = _EnumerableKnowhow()
+    saves = []
+    service._save_answer = lambda *args, **kwargs: saves.append(True)
+
+    class Memory:
+        def notebook_memory_hits(self, *_args):
+            cancel_event.set()
+            return []
+
+    service.memory_retriever = Memory()
+    with pytest.raises(AskCancelled):
+        service.ask_reasoning(
+            "nb",
+            AskRequest(
+                question="列出所有方法并比较优缺点",
+                mode="reasoning",
+            ),
             user_id="user",
             cancel_event=cancel_event,
         )
