@@ -24,6 +24,23 @@ from app.extension_sdk.contracts import (
     ProviderChainResult,
     ProviderResult,
 )
+from app.extension_sdk.retrieval import (
+    RETRIEVAL_CONTRIBUTOR_POINT,
+    ConnectionLeaseProbe,
+    EvidenceCandidate,
+    EvidenceProvenance,
+    EvidenceProvenanceKind,
+    EvidenceReadRequest,
+    FrozenRetrievalScopeRef,
+    RetrievalContributionBudget,
+    RetrievalContributionEvent,
+    RetrievalContributor,
+    RetrievalExtensionContext,
+    RetrievalInvocation,
+    RetrievalRunRef,
+    ScheduledModelAccess,
+    ScopeBoundEvidenceReader,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -48,4 +65,19 @@ __all__ = [
     "ProviderChainAttempt",
     "ProviderChainResult",
     "ProviderResult",
+    "RETRIEVAL_CONTRIBUTOR_POINT",
+    "ConnectionLeaseProbe",
+    "EvidenceCandidate",
+    "EvidenceProvenance",
+    "EvidenceProvenanceKind",
+    "EvidenceReadRequest",
+    "FrozenRetrievalScopeRef",
+    "RetrievalContributionBudget",
+    "RetrievalContributionEvent",
+    "RetrievalContributor",
+    "RetrievalExtensionContext",
+    "RetrievalInvocation",
+    "RetrievalRunRef",
+    "ScheduledModelAccess",
+    "ScopeBoundEvidenceReader",
 ]

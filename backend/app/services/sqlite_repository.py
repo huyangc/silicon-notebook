@@ -45,12 +45,17 @@ class SQLiteRepository(RepositoryFacade):
     """Preserve the historical SQLite API while isolating backend concerns."""
 
     def __init__(
-        self, settings: Settings, *, model_provider: Any | None = None
+        self,
+        settings: Settings,
+        *,
+        model_provider: Any | None = None,
+        retrieval_contributor_host: Any | None = None,
     ) -> None:
         super().__init__(
             settings,
             SqlitePersistenceBundleFactory(),
             model_provider=model_provider,
+            retrieval_contributor_host=retrieval_contributor_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)

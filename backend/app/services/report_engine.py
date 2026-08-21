@@ -522,6 +522,7 @@ class ReportEngineDependencies:
     corpus_profile: Any = None
     generation_gate: Any = None
     selected_source_graph: Any = None
+    retrieval_contributors: Any = None
     scale_version: Any = None
     selected_graph_hydrate: Any = None
     # Agentic Memory P1:Agent 对该库的已有理解 store(``AgentProfileStorePort``)。
@@ -552,10 +553,18 @@ class ReportEngine:
         self.cancel_event = cancel_event
 
     def _activate_selected_source_graph(self, notebook_id: str, result: Any) -> None:
+        baseline_input = getattr(result, "chunks", None) or []
+        retrieval_contributors = getattr(
+            self.dependencies, "retrieval_contributors", None
+        )
+        if retrieval_contributors is not None:
+            baseline_input = retrieval_contributors.run(
+                baseline_input, invocation="selected_evidence"
+            )
         service = self.dependencies.selected_source_graph
         if service is None:
             return
-        baseline = list(getattr(result, "chunks", None) or [])
+        baseline = list(baseline_input)
         object_seeds = {
             str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
             for hit in (getattr(result, "top_hits", None) or [])

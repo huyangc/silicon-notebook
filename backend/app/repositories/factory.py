@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
+from app.extensions import default_extension_runtime
 from app.repositories.ports import NotebookRepository
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -12,9 +13,12 @@ class RepositoryBackendUnavailableError(RuntimeError):
 
 
 def create_repository(settings: Settings) -> NotebookRepository:
+    retrieval_contributors = default_extension_runtime().retrieval_contributors
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
-        return SQLiteRepository(settings)
+        return SQLiteRepository(
+            settings, retrieval_contributor_host=retrieval_contributors
+        )
     if scheme == "postgresql":
         try:
             from app.repositories.postgres.repository import PostgresRepository
@@ -28,5 +32,7 @@ def create_repository(settings: Settings) -> NotebookRepository:
                 ) from None
             raise
 
-        return PostgresRepository(settings)
+        return PostgresRepository(
+            settings, retrieval_contributor_host=retrieval_contributors
+        )
     raise AssertionError("validated settings returned an unsupported scheme")

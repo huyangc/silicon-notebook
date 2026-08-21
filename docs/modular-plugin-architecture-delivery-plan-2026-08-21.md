@@ -65,9 +65,9 @@ PR 描述必须包含：
 
 ## 4. PR 分解
 
-### PR-00：Phase 0 架构底座（当前）
+### PR-00：Phase 0 架构底座（已合入）
 
-状态：已实现，等待按新流水开 PR。
+状态：已通过两路 subagent review 与 CI，PR #541 squash merge。
 
 范围：
 
@@ -82,6 +82,8 @@ PR 描述必须包含：
 
 #### PR-01：RetrievalContributorHost + Contract Kit
 
+状态：实现中。
+
 范围：
 
 - 定义 point-specific context/result/budget/cancellation/provenance 合同；
@@ -89,6 +91,11 @@ PR 描述必须包含：
 - 建立 baseline-preserving host、request-time availability、脱敏 failure/event；
 - host 在零 contribution 时短路返回原 baseline，不走降级 adapter；
 - Ask/Report 只接同一个共享 host 入口，不注册真实 contributor；
+- 共享 host 通过 `selected_evidence` / `chunk_candidates` 两个类型化 invocation
+  保留真实能力原有的不同物理时点，不把 generated-question 移到 MMR/fusion 后，
+  也不把 selected-source graph 移到其 attestation/baseline guard 前；
+- scope/provenance 复检必须 batch 化，禁止按 candidate 产生 N+1；核心 request
+  cancellation 传播，插件自己的失败、超时或 local cancellation 才 fail-open；
 - contract kit 覆盖 no-op、异常、超时、取消、越 scope、非法 provenance、驱逐/重排 baseline、连接持有与 content-free event。
 
 不做：selected-source graph 或 generated-question 迁移，不新增用户能力。

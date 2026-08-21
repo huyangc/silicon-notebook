@@ -186,6 +186,7 @@ def boundary_violations(app_root: Path) -> list[str]:
         )
         is_extension_composition = (
             module == "app.main"
+            or module == "app.repositories.factory"
             or module == "app.extensions"
             or module.startswith("app.extensions.")
             or module == "app.extension_sdk"
@@ -193,7 +194,7 @@ def boundary_violations(app_root: Path) -> list[str]:
         )
         if imports_extension_surface and not is_extension_composition:
             violations.append(
-                f"{module} consumes the Phase-0 empty registry; existing workflows must stay untouched"
+                f"{module} imports the extension composition surface outside an approved root"
             )
     return violations
 

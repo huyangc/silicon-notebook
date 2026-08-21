@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import re
 from types import MappingProxyType
 from typing import Iterable
 
@@ -15,10 +16,17 @@ from app.extension_sdk import (
     ExtensionContribution,
     ExtensionManifest,
 )
+from app.extensions.capabilities import (
+    EMPTY_CAPABILITY_CATALOG,
+    CapabilityDecisionCatalog,
+)
 
 
 class ExtensionRegistryError(ValueError):
     """Invalid extension topology discovered during startup."""
+
+
+_STABLE_REASON = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -68,8 +76,11 @@ class ExtensionRegistry:
     configuration, or other request-time state.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, capability_catalog: CapabilityDecisionCatalog | None = None
+    ) -> None:
         self._frozen = False
+        self._capabilities = capability_catalog or EMPTY_CAPABILITY_CATALOG
         self._manifests: dict[str, ExtensionManifest] = {}
         self._contributions: dict[str, RegisteredContribution] = {}
         self._points: dict[str, list[RegisteredContribution]] = defaultdict(list)
@@ -146,6 +157,7 @@ class ExtensionRegistry:
         if self._frozen:
             return self
         self._validate_dependencies()
+        self._validate_required_capabilities()
         for point, registrations in self._points.items():
             providers = [
                 item
@@ -195,6 +207,19 @@ class ExtensionRegistry:
         for plugin_id in graph:
             visit(plugin_id)
 
+    def _validate_required_capabilities(self) -> None:
+        for plugin_id, manifest in self._manifests.items():
+            missing = sorted(
+                capability
+                for capability in manifest.requires
+                if not self._capabilities.has(capability)
+            )
+            if missing:
+                raise ExtensionRegistryError(
+                    f"extension {plugin_id!r} requires capabilities without "
+                    f"decision entries {missing!r}"
+                )
+
     def manifests(self) -> tuple[ExtensionManifest, ...]:
         self._require_frozen()
         return tuple(self._manifests.values())
@@ -213,18 +238,51 @@ class ExtensionRegistry:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="unknown_contribution",
             )
+        manifest = self._manifests[registered.plugin_id]
+        for capability in manifest.requires:
+            decision = self._capabilities.availability(capability, context)
+            if decision.status is not AvailabilityStatus.AVAILABLE:
+                return decision
         probe = registered.contribution.availability
         if probe is None:
             return Availability.available()
-        return probe(context)
+        try:
+            result = probe(context)
+        except Exception:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="availability_probe_failed",
+            )
+        if not isinstance(result, Availability):
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_probe",
+            )
+        reason = str(result.reason_code or "")
+        if reason and not _STABLE_REASON.fullmatch(reason):
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_reason",
+            )
+        return result
+
+    def capability_availability(
+        self, capability: str, context: object | None = None
+    ) -> Availability:
+        self._require_frozen()
+        return self._capabilities.availability(capability, context)
 
     def _require_frozen(self) -> None:
         if not self._frozen:
             raise ExtensionRegistryError("extension registry is not frozen")
 
 
-def frozen_registry(bundles: Iterable[ExtensionBundle] = ()) -> ExtensionRegistry:
-    registry = ExtensionRegistry()
+def frozen_registry(
+    bundles: Iterable[ExtensionBundle] = (),
+    *,
+    capability_catalog: CapabilityDecisionCatalog | None = None,
+) -> ExtensionRegistry:
+    registry = ExtensionRegistry(capability_catalog)
     for bundle in bundles:
         registry.register(bundle)
     return registry.freeze()

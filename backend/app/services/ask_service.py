@@ -341,6 +341,7 @@ class AskService:
         retrieval_experiences=None,
         identity_store=None,
         selected_source_graph=None,
+        retrieval_contributors=None,
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
     ) -> None:
@@ -386,6 +387,7 @@ class AskService:
         # 落地方式,不需要另一把开关。
         self.identity_store = identity_store
         self.selected_source_graph = selected_source_graph
+        self.retrieval_contributors = retrieval_contributors
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
 
@@ -398,6 +400,11 @@ class AskService:
         max_results: int = 20,
     ):
         """Append quality-approved G after frozen B; otherwise return B."""
+        retrieval_contributors = getattr(self, "retrieval_contributors", None)
+        if retrieval_contributors is not None:
+            chunks = retrieval_contributors.run(
+                chunks, invocation="selected_evidence"
+            )
         if self.selected_source_graph is None:
             return list(chunks), None
         object_seeds = {
@@ -495,6 +502,7 @@ class AskService:
                 run_kind=f"ask_{spec.id}",
                 event_log=getattr(self, "event_log", None),
                 correlation_id=job_id,
+                cancel_event=cancel_event,
             ):
                 if spec.streaming:
                     return handler(
