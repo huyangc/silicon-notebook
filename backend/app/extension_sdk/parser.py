@@ -64,6 +64,7 @@ class ParserAvailabilityContext:
     plugin_id: str
     contribution_id: str
     source: ParserSourceRef
+    cancellation: CancellationToken | None = None
 
 
 @runtime_checkable
@@ -82,7 +83,7 @@ class ParserConnectionLeaseProbe(Protocol):
 class ParserExtensionContext:
     source: ParserSourceRef
     cancellation: CancellationToken
-    access: ParserLinkAccess
+    access: ParserLinkAccess | None
 
 
 @dataclass(frozen=True)

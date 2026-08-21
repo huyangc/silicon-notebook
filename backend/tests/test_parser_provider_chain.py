@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.cancellation import CoreCancellation
 from app.extension_sdk import (
     EXTENSION_API_VERSION,
     PARSER_PROVIDER_CHAIN_POINT,
@@ -38,6 +39,10 @@ from app.extensions.parser_chain import (
 
 
 class NativeCancelled(RuntimeError):
+    pass
+
+
+class NativeCoreCancelled(CoreCancellation):
     pass
 
 
@@ -222,6 +227,25 @@ def test_empty_chain_returns_exact_baseline_without_touching_callbacks():
     assert calls == []
 
 
+def test_nonempty_chain_requires_one_authoritative_cancellation_token():
+    bundle = _bundle("candidate")
+    calls = []
+
+    result = _host(bundle).run(
+        "legacy",
+        source=ParserSourceRef("file", ".pdf"),
+        route_policy=lambda *_: calls.append("route"),
+        context_factory=lambda *_: calls.append("context"),
+        admit=lambda *_: calls.append("admit"),
+        materialize=lambda *_: calls.append("materialize"),
+        cancellation=None,
+    )
+
+    assert result.value == "legacy"
+    assert result.attempt.reason_code == "invalid_cancellation_token"
+    assert calls == []
+
+
 def test_reject_failure_and_invalid_result_continue_to_first_accept():
     bundles = tuple(_bundle(item) for item in ("a", "b", "c", "d"))
     accesses = {
@@ -239,7 +263,7 @@ def test_reject_failure_and_invalid_result_continue_to_first_accept():
     assert all("secret" not in repr(item) and "/tmp" not in repr(item) for item in events)
 
 
-def test_accept_stops_before_later_route_or_availability_probe():
+def test_route_plan_freezes_before_io_but_accept_stops_later_availability():
     availability_calls = []
     first = _bundle("a")
     second = _bundle(
@@ -259,7 +283,7 @@ def test_accept_stops_before_later_route_or_availability_probe():
     )
 
     assert result.value == "parsed"
-    assert routes == ["a"]
+    assert routes == ["a", "b"]
     assert availability_calls == []
     assert second.link.calls == 0
 
@@ -292,13 +316,19 @@ def test_prohibited_route_skips_availability_context_and_probe():
 
 def test_live_availability_skips_execution_until_enabled():
     state = {"enabled": False}
-    bundle = _bundle(
-        "optional",
-        availability=lambda _context: (
+    availability_contexts = []
+
+    def availability(context):
+        availability_contexts.append(context)
+        return (
             Availability.available()
             if state["enabled"]
             else Availability(AvailabilityStatus.DISABLED, "feature_disabled")
-        ),
+        )
+
+    bundle = _bundle(
+        "optional",
+        availability=availability,
     )
     access = _Access(_accept("optional", "parsed"))
     host = _host(bundle)
@@ -310,6 +340,10 @@ def test_live_availability_skips_execution_until_enabled():
     assert first.value == "legacy"
     assert second.value == "parsed"
     assert access.calls == 1
+    assert len(availability_contexts) == 2
+    assert all(
+        context.cancellation is not None for context in availability_contexts
+    )
 
 
 def test_admission_rejection_has_zero_materialization_side_effects():
@@ -405,6 +439,56 @@ def test_plugin_warning_and_subclassed_result_are_invalid_and_fail_open():
     assert second.value == "legacy"
 
 
+def test_hostile_plugin_warning_never_reaches_core_callbacks():
+    class HostileWarning:
+        def __ne__(self, _other):
+            return False
+
+    admitted = []
+    result = ProviderChainResult(
+        ParserProposal("candidate", "bad"),
+        ProviderChainAttempt(
+            ProviderAcceptance.ACCEPT,
+            "accepted",
+            HostileWarning(),
+        ),
+    )
+
+    visible, _ = _run(
+        _host(_bundle("candidate")),
+        {"candidate": _Access(result)},
+        admit=lambda *_: admitted.append(True),
+    )
+
+    assert visible.value == "legacy"
+    assert admitted == []
+
+
+def test_hostile_proposal_contribution_id_never_reaches_core_callbacks():
+    class EvilStr(str):
+        def __eq__(self, _other):
+            raise RuntimeError("hostile equality")
+
+    admitted = []
+    materialized = []
+    bundle = _bundle("candidate")
+    result = ProviderChainResult(
+        ParserProposal(EvilStr("candidate"), "bad"),
+        ProviderChainAttempt(ProviderAcceptance.ACCEPT, "accepted"),
+    )
+
+    visible, _ = _run(
+        _host(bundle),
+        {"candidate": _Access(result)},
+        admit=lambda *_: admitted.append(True),
+        materialize=lambda *_: materialized.append(True),
+    )
+
+    assert visible.value == "legacy"
+    assert admitted == []
+    assert materialized == []
+
+
 def test_self_hosted_failure_never_enables_forbidden_cloud_fallback():
     self_hosted = _bundle("selfhost")
     cloud = _bundle("cloud", after=("selfhost",))
@@ -430,6 +514,42 @@ def test_self_hosted_failure_never_enables_forbidden_cloud_fallback():
 
     assert result.value == "local"
     assert routes == ["selfhost", "cloud", "builtin"]
+    assert accesses["cloud"].calls == 0
+
+
+def test_route_plan_cannot_open_cloud_after_self_hosted_probe_failure():
+    state = {"selfhost_failed": False}
+    self_hosted = _bundle("selfhost")
+    cloud = _bundle("cloud", after=("selfhost",))
+    builtin = _bundle("builtin", after=("cloud",))
+
+    def selfhost_failure():
+        state["selfhost_failed"] = True
+        raise RuntimeError("offline")
+
+    accesses = {
+        "selfhost": _Access(selfhost_failure),
+        "cloud": _Access(_accept("cloud", "external")),
+        "builtin": _Access(_accept("builtin", "local")),
+    }
+
+    def stateful_route(link, _source):
+        if link == "cloud":
+            return ParserRouteDecision(
+                state["selfhost_failed"],
+                "public_cloud",
+                "self_hosted_trust_boundary",
+            )
+        return ParserRouteDecision(True, "local")
+
+    result, _ = _run(
+        _host(self_hosted, cloud, builtin),
+        accesses,
+        route_policy=stateful_route,
+    )
+
+    assert result.value == "local"
+    assert accesses["selfhost"].calls == 1
     assert accesses["cloud"].calls == 0
 
 
@@ -508,6 +628,68 @@ def test_materialization_finishes_before_late_native_cancellation_propagates():
     assert persisted == ["write"]
 
 
+def test_late_malformed_cancellation_cannot_relabel_completed_commit():
+    bundle = _bundle("candidate")
+    token = _Token()
+    persisted = []
+
+    def materialize(*_args):
+        persisted.append("write")
+        token.state = object()
+        return "committed"
+
+    result, _ = _run(
+        _host(bundle),
+        {"candidate": _Access(_accept("candidate", "proposal"))},
+        token=token,
+        materialize=materialize,
+    )
+
+    assert result.value == "committed"
+    assert result.attempt.acceptance is ProviderAcceptance.ACCEPT
+    assert persisted == ["write"]
+
+
+def test_cancellation_from_final_warning_receipt_propagates_after_commit():
+    bundle = _bundle("candidate")
+    token = _Token()
+    persisted = []
+    warnings = []
+
+    def materialize(*_args):
+        persisted.append("write")
+        return "committed"
+
+    def warning_sink(code):
+        warnings.append(code)
+        token.state = True
+
+    source = ParserSourceRef("file", ".pdf")
+    access = _Access(_accept("candidate", "proposal"))
+    connection = _Connection()
+
+    with pytest.raises(NativeCancelled):
+        _host(bundle).run(
+            "legacy",
+            source=source,
+            route_policy=lambda *_: ParserRouteDecision(
+                True,
+                "local",
+                fallback_warning_code="high_fidelity_fallback",
+            ),
+            context_factory=lambda contribution_id: ParserHostContext(
+                contribution_id, source, token, access, connection
+            ),
+            admit=lambda *_: ParserAdmissionDecision(True),
+            materialize=materialize,
+            cancellation=token,
+            warning_sink=warning_sink,
+        )
+
+    assert persisted == ["write"]
+    assert warnings == ["high_fidelity_fallback"]
+
+
 def test_malformed_or_hostile_cancellation_fails_open_before_commit():
     states = iter((False, False, object()))
     token = _Token(state=lambda: next(states, object()))
@@ -557,6 +739,30 @@ def test_default_parser_topology_is_dag_ordered_but_not_wired_to_ingestion():
         assert "app.extensions" not in source
 
 
+def test_default_parser_link_order_matches_the_parser_registry_truth():
+    from app.services.parser_registry import PARSER_ENGINES
+    from app.services.parsers import (
+        MINERU_CAPABLE_SUFFIXES,
+        MINERU_FALLBACK_WARNING_SUFFIXES,
+    )
+
+    contribution_ids = [
+        item.contribution.declaration.id
+        for item in default_extension_runtime().registry.contributions(
+            PARSER_PROVIDER_CHAIN_POINT
+        )
+    ]
+    assert contribution_ids == [f"parser.{engine.id}" for engine in PARSER_ENGINES]
+    mineru_suffixes = {
+        f".{extension}"
+        for engine in PARSER_ENGINES
+        if engine.id.startswith("mineru_")
+        for extension in engine.file_extensions
+    }
+    assert set(MINERU_CAPABLE_SUFFIXES) == mineru_suffixes
+    assert set(MINERU_FALLBACK_WARNING_SUFFIXES) < mineru_suffixes
+
+
 def test_default_parser_capabilities_are_live_and_point_specific():
     runtime = default_extension_runtime()
     source = ParserSourceRef("file", ".pdf")
@@ -578,6 +784,66 @@ def test_default_parser_capabilities_are_live_and_point_specific():
 
     assert result.value == "parsed"
     assert [access.calls for access in accesses.values()] == [1, 1, 1]
+
+
+def test_default_runtime_propagates_native_core_cancellation():
+    token = _Token(state=True, native_error=NativeCoreCancelled)
+
+    with pytest.raises(NativeCoreCancelled):
+        _run(
+            default_extension_runtime().parser_chain,
+            {
+                PARSER_SELF_HOSTED_CONTRIBUTION_ID: _Access(_reject()),
+                PARSER_CLOUD_CONTRIBUTION_ID: _Access(_reject()),
+                PARSER_BUILTIN_CONTRIBUTION_ID: _Access(_reject()),
+            },
+            token=token,
+        )
+
+
+def test_default_required_capability_is_live_before_access_projection():
+    runtime = default_extension_runtime()
+    source = ParserSourceRef("file", ".pdf")
+    token = _Token()
+    state = {"access": None}
+    events = []
+    probe = _Access(_accept(PARSER_SELF_HOSTED_CONTRIBUTION_ID, "parsed"))
+
+    def context_factory(contribution_id):
+        access = state["access"] if contribution_id == (
+            PARSER_SELF_HOSTED_CONTRIBUTION_ID
+        ) else _Access(_reject())
+        return ParserHostContext(
+            contribution_id, source, token, access, _Connection()
+        )
+
+    def run():
+        return runtime.parser_chain.run(
+            "legacy",
+            source=source,
+            route_policy=lambda link, _source: ParserRouteDecision(
+                link == PARSER_SELF_HOSTED_CONTRIBUTION_ID,
+                "private_service" if link == (
+                    PARSER_SELF_HOSTED_CONTRIBUTION_ID
+                ) else "local",
+                "route_prohibited" if link != (
+                    PARSER_SELF_HOSTED_CONTRIBUTION_ID
+                ) else "",
+            ),
+            context_factory=context_factory,
+            admit=lambda *_: ParserAdmissionDecision(True),
+            materialize=lambda _link, proposal: proposal.value,
+            cancellation=token,
+            event_sink=events.append,
+        )
+
+    assert run().value == "legacy"
+    assert probe.calls == 0
+    assert events[0]["failure_code"] == "required_capability_unavailable"
+    events.clear()
+    state["access"] = probe
+    assert run().value == "parsed"
+    assert probe.calls == 1
 
 
 def test_exact_true_without_registered_native_type_uses_host_cancellation():

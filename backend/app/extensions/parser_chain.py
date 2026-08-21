@@ -11,6 +11,7 @@ import re
 import time
 from typing import Any, Callable, Generic, TypeVar
 
+from app.domain.cancellation import CoreCancellation
 from app.extension_sdk import (
     PARSER_PROVIDER_CHAIN_POINT,
     AvailabilityStatus,
@@ -67,7 +68,9 @@ class ParserProviderChainHost(Generic[T]):
         *,
         clock: Callable[[], float] = time.monotonic,
         event_sink: Callable[[dict[str, object]], None] | None = None,
-        cancellation_exceptions: tuple[type[Exception], ...] = (),
+        cancellation_exceptions: tuple[type[Exception], ...] = (
+            CoreCancellation,
+        ),
     ) -> None:
         if not registry.frozen:
             raise ExtensionRegistryError("parser chain requires a frozen registry")
@@ -148,13 +151,16 @@ class ParserProviderChainHost(Generic[T]):
     ) -> ProviderChainResult[T]:
         if not self._valid_source(source):
             return self._exhausted(baseline, "invalid_parser_source")
-        if cancellation is not None and not self._valid_cancellation(cancellation):
+        if cancellation is None or not self._valid_cancellation(cancellation):
             return self._exhausted(baseline, "invalid_cancellation_token")
         if not all(callable(item) for item in (
             route_policy, context_factory, admit, materialize
         )):
             return self._exhausted(baseline, "invalid_parser_callbacks")
 
+        planned_routes: list[
+            tuple[ParserRouteDecision | None, str, str]
+        ] = []
         for link in self._links:
             contribution_id = link.registered.contribution.declaration.id
             self._raise_if_cancelled(cancellation)
@@ -162,18 +168,32 @@ class ParserProviderChainHost(Generic[T]):
                 route = route_policy(contribution_id, source)
             except Exception:
                 self._raise_if_cancelled(cancellation)
-                self._emit(
-                    contribution_id, "failed", "route_policy_failed", "", 0,
-                    event_sink,
+                planned_routes.append(
+                    (None, "failed", "route_policy_failed")
                 )
                 continue
             self._raise_if_cancelled(cancellation)
             if not self._valid_route(route):
+                planned_routes.append(
+                    (None, "invalid", "invalid_route_decision")
+                )
+                continue
+            planned_routes.append((route, "", ""))
+
+        for link, planned_route in zip(self._links, planned_routes):
+            contribution_id = link.registered.contribution.declaration.id
+            route, route_outcome, route_failure = planned_route
+            if route is None:
                 self._emit(
-                    contribution_id, "invalid", "invalid_route_decision", "", 0,
+                    contribution_id,
+                    route_outcome,
+                    route_failure,
+                    "",
+                    0,
                     event_sink,
                 )
                 continue
+            self._raise_if_cancelled(cancellation)
             if not route.allowed:
                 self._emit(
                     contribution_id,
@@ -191,6 +211,7 @@ class ParserProviderChainHost(Generic[T]):
                     plugin_id=link.registered.plugin_id,
                     contribution_id=contribution_id,
                     source=source,
+                    cancellation=cancellation,
                 ),
             )
             self._raise_if_cancelled(cancellation)
@@ -223,7 +244,7 @@ class ParserProviderChainHost(Generic[T]):
                     event_sink,
                 )
                 continue
-            if cancellation is not None and context.cancellation is not cancellation:
+            if context.cancellation is not cancellation:
                 self._emit(
                     contribution_id,
                     "invalid",
@@ -261,6 +282,16 @@ class ParserProviderChainHost(Generic[T]):
                     contribution_id,
                     "unavailable",
                     "required_capability_unavailable",
+                    "",
+                    0,
+                    event_sink,
+                )
+                continue
+            if not self._valid_access(context.access):
+                self._emit(
+                    contribution_id,
+                    "invalid",
+                    "invalid_parser_link_access",
                     "",
                     0,
                     event_sink,
@@ -386,7 +417,7 @@ class ParserProviderChainHost(Generic[T]):
                     event_sink,
                 )
                 continue
-            self._raise_if_cancelled(cancellation)
+            self._raise_if_cancelled_after_commit(cancellation)
             warning = route.fallback_warning_code
             self._emit(
                 contribution_id,
@@ -401,6 +432,7 @@ class ParserProviderChainHost(Generic[T]):
                     warning_sink(warning)
                 except Exception:
                     pass
+            self._raise_if_cancelled_after_commit(cancellation)
             return ProviderChainResult(
                 value,
                 ProviderChainAttempt(
@@ -409,6 +441,7 @@ class ParserProviderChainHost(Generic[T]):
                     warning_code=warning,
                 ),
             )
+        self._raise_if_cancelled(cancellation)
         return self._exhausted(baseline, "parser_chain_exhausted")
 
     def _required_capabilities_available(
@@ -467,11 +500,17 @@ class ParserProviderChainHost(Generic[T]):
                 and ParserProviderChainHost._valid_cancellation(
                     context.cancellation
                 )
-                and callable(getattr(context.access, "probe", None))
                 and callable(
                     getattr(context.connection, "is_connection_held", None)
                 )
             )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _valid_access(access: object) -> bool:
+        try:
+            return callable(getattr(access, "probe", None))
         except Exception:
             return False
 
@@ -485,6 +524,7 @@ class ParserProviderChainHost(Generic[T]):
                 or not ParserProviderChainHost._valid_optional_code(
                     result.attempt.reason_code
                 )
+                or type(result.attempt.warning_code) is not str
                 or result.attempt.warning_code != ""
             ):
                 return False
@@ -506,6 +546,7 @@ class ParserProviderChainHost(Generic[T]):
                 )
             return (
                 type(result.value) is ParserProposal
+                and type(result.value.contribution_id) is str
                 and result.value.contribution_id == contribution_id
                 and result.attempt.reason_code in {"", "accepted"}
             )
@@ -564,11 +605,21 @@ class ParserProviderChainHost(Generic[T]):
                 if (
                     type(confirmed) is bool
                     and confirmed
-                    and type(exc) in self._cancellation_exceptions
+                    and isinstance(exc, self._cancellation_exceptions)
                 ):
                     raise
                 raise _MalformedCancellationToken() from exc
         raise ParserChainCancelled()
+
+    def _raise_if_cancelled_after_commit(
+        self, cancellation: CancellationToken
+    ) -> None:
+        """Never describe a completed commit as rejected for a hostile token."""
+
+        try:
+            self._raise_if_cancelled(cancellation)
+        except _MalformedCancellationToken:
+            return
 
     @staticmethod
     def _valid_optional_code(value: object) -> bool:

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import time
 
-from app.domain.cancellation import CancelEvent
+from app.domain.cancellation import CancelEvent, CoreCancellation
 
 
-class AskCancelled(Exception):
+class AskCancelled(CoreCancellation):
     """Raised when an in-flight Ask request is cancelled by the client."""
 
 
