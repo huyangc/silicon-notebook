@@ -88,8 +88,7 @@ def project_knowledge_candidates(
     if host is None or source_type in _HIDDEN_SOURCE_TYPES:
         return objects, relations
     try:
-        if host.has_contributors is not True:
-            return objects, relations
+        has_contributors = host.has_contributors
     except CoreCancellation:
         _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
@@ -100,6 +99,8 @@ def project_knowledge_candidates(
         return objects, relations
     _raise_control_cancelled(control)
     _assert_connection_clear(connection_probe, control)
+    if has_contributors is not True:
+        return objects, relations
     if (
         type(source_id) is not str
         or not source_id
@@ -119,15 +120,21 @@ def project_knowledge_candidates(
         return objects, relations
     try:
         schemas_by_type = effective_schemas(notebook_id)
-        schemas = _schema_snapshot(schemas_by_type)
-        if not schemas:
-            return objects, relations
         _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
+        schemas = _schema_snapshot(schemas_by_type)
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
+        if not schemas:
+            return objects, relations
         now = clock()
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
         if type(now) not in {int, float} or not math.isfinite(float(now)):
             return objects, relations
         element_snapshot = _element_snapshot(elements, source_id)
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
         if not element_snapshot:
             return objects, relations
         cancellation = _ControlCancellation(control)

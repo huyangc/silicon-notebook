@@ -651,7 +651,10 @@ def test_application_adapter_refuses_to_enter_store_after_fake_host_leaks_lease(
         )
 
 
-def test_application_adapter_checks_lease_before_schema_resolution():
+@pytest.mark.parametrize("has_contributors", [False, True])
+def test_application_adapter_checks_lease_before_schema_resolution(
+    has_contributors,
+):
     probe = _Probe()
     schema_calls = []
 
@@ -659,7 +662,7 @@ def test_application_adapter_checks_lease_before_schema_resolution():
         @property
         def has_contributors(self):
             probe.held = True
-            return True
+            return has_contributors
 
     with pytest.raises(KnowledgeProjectionBoundaryError):
         project_knowledge_candidates(
@@ -681,6 +684,76 @@ def test_application_adapter_checks_lease_before_schema_resolution():
             event_sink=None,
         )
     assert schema_calls == []
+
+
+@pytest.mark.parametrize("schema_result", [{}, object()])
+def test_schema_resolver_cannot_leak_lease_through_an_empty_result(schema_result):
+    probe = _Probe()
+
+    class Host:
+        has_contributors = True
+
+        def project_application(self, _call, *, event_sink=None):
+            raise AssertionError("leaking schema resolver reached projector host")
+
+    def leaking_schema(_notebook_id):
+        probe.held = True
+        return schema_result
+
+    with pytest.raises(KnowledgeProjectionBoundaryError):
+        project_knowledge_candidates(
+            [],
+            [],
+            source_id="source-1",
+            source_title="Source",
+            source_type="file",
+            elements=_elements(),
+            host=Host(),
+            effective_schemas=leaking_schema,
+            notebook_id="notebook-1",
+            control=None,
+            connection_probe=probe,
+            max_objects=8,
+            max_relations=8,
+            max_candidate_bytes=8192,
+            timeout_seconds=60,
+            event_sink=None,
+        )
+
+
+def test_adapter_clock_cannot_leak_lease_through_an_invalid_result():
+    probe = _Probe()
+
+    class Host:
+        has_contributors = True
+
+        def project_application(self, _call, *, event_sink=None):
+            raise AssertionError("leaking clock reached projector host")
+
+    def leaking_clock():
+        probe.held = True
+        return float("nan")
+
+    with pytest.raises(KnowledgeProjectionBoundaryError):
+        project_knowledge_candidates(
+            [],
+            [],
+            source_id="source-1",
+            source_title="Source",
+            source_type="file",
+            elements=_elements(),
+            host=Host(),
+            effective_schemas=lambda _notebook_id: OBJECT_SCHEMAS,
+            notebook_id="notebook-1",
+            control=None,
+            connection_probe=probe,
+            max_objects=8,
+            max_relations=8,
+            max_candidate_bytes=8192,
+            timeout_seconds=60,
+            event_sink=None,
+            clock=leaking_clock,
+        )
 
 
 def test_forged_probe_cancellation_never_authorizes_core_store():
