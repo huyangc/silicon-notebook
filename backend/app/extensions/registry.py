@@ -123,6 +123,12 @@ class ExtensionRegistry:
                 or type(declaration.point) is not str
                 or not _STABLE_METADATA_ID.fullmatch(declaration.point)
                 or type(declaration.kind) is not ContributionKind
+                or not self._valid_ordering(declaration.after)
+                or not self._valid_ordering(declaration.before)
+                or (
+                    declaration.kind is not ContributionKind.PROVIDER_CHAIN
+                    and (declaration.after or declaration.before)
+                )
             ):
                 raise ExtensionRegistryError(
                     "contribution declaration must use stable metadata identifiers and kind"
@@ -167,6 +173,12 @@ class ExtensionRegistry:
             or type(declaration.point) is not str
             or not _STABLE_METADATA_ID.fullmatch(declaration.point)
             or type(declaration.kind) is not ContributionKind
+            or not self._valid_ordering(declaration.after)
+            or not self._valid_ordering(declaration.before)
+            or (
+                declaration.kind is not ContributionKind.PROVIDER_CHAIN
+                and (declaration.after or declaration.before)
+            )
         ):
             raise ExtensionRegistryError(
                 "contribution declaration must use stable metadata identifiers and kind"
@@ -190,6 +202,13 @@ class ExtensionRegistry:
         self._validate_dependencies()
         self._validate_required_capabilities()
         for point, registrations in self._points.items():
+            kinds = {
+                item.contribution.declaration.kind for item in registrations
+            }
+            if ContributionKind.PROVIDER_CHAIN in kinds and len(kinds) != 1:
+                raise ExtensionRegistryError(
+                    f"provider chain {point!r} mixes contribution kinds"
+                )
             providers = [
                 item
                 for item in registrations
@@ -199,7 +218,18 @@ class ExtensionRegistry:
                 raise ExtensionRegistryError(
                     f"extension point {point!r} has multiple single providers"
                 )
-            registrations.sort(key=lambda item: item.contribution.declaration.id)
+            if registrations and all(
+                item.contribution.declaration.kind
+                is ContributionKind.PROVIDER_CHAIN
+                for item in registrations
+            ):
+                registrations[:] = self._ordered_provider_chain(
+                    point, registrations
+                )
+            else:
+                registrations.sort(
+                    key=lambda item: item.contribution.declaration.id
+                )
         self._manifests = MappingProxyType(dict(self._manifests))  # type: ignore[assignment]
         self._contributions = MappingProxyType(  # type: ignore[assignment]
             dict(self._contributions)
@@ -250,6 +280,68 @@ class ExtensionRegistry:
                     f"extension {plugin_id!r} requires capabilities without "
                     f"decision entries {missing!r}"
                 )
+
+    @staticmethod
+    def _valid_ordering(value: object) -> bool:
+        return (
+            type(value) is tuple
+            and all(
+                type(item) is str and _STABLE_METADATA_ID.fullmatch(item)
+                for item in value
+            )
+            and len(value) == len(set(value))
+        )
+
+    @staticmethod
+    def _ordered_provider_chain(
+        point: str,
+        registrations: list[RegisteredContribution],
+    ) -> list[RegisteredContribution]:
+        by_id = {
+            item.contribution.declaration.id: item for item in registrations
+        }
+        graph = {contribution_id: set() for contribution_id in by_id}
+        indegree = {contribution_id: 0 for contribution_id in by_id}
+
+        def edge(source: str, target: str) -> None:
+            if source == target:
+                raise ExtensionRegistryError(
+                    f"provider chain {point!r} contains a self dependency"
+                )
+            if source not in by_id or target not in by_id:
+                raise ExtensionRegistryError(
+                    f"provider chain {point!r} references an unknown link"
+                )
+            if target not in graph[source]:
+                graph[source].add(target)
+                indegree[target] += 1
+
+        for contribution_id, registered in by_id.items():
+            declaration = registered.contribution.declaration
+            for dependency in declaration.after:
+                edge(dependency, contribution_id)
+            for successor in declaration.before:
+                edge(contribution_id, successor)
+
+        ready = sorted(
+            contribution_id
+            for contribution_id, degree in indegree.items()
+            if degree == 0
+        )
+        ordered: list[RegisteredContribution] = []
+        while ready:
+            contribution_id = ready.pop(0)
+            ordered.append(by_id[contribution_id])
+            for successor in sorted(graph[contribution_id]):
+                indegree[successor] -= 1
+                if indegree[successor] == 0:
+                    ready.append(successor)
+                    ready.sort()
+        if len(ordered) != len(registrations):
+            raise ExtensionRegistryError(
+                f"provider chain {point!r} contains an ordering cycle"
+            )
+        return ordered
 
     def manifests(self) -> tuple[ExtensionManifest, ...]:
         self._require_frozen()

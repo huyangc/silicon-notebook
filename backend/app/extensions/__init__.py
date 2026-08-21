@@ -8,6 +8,7 @@ from app.extensions.bootstrap import (
 )
 from app.extensions.capabilities import CapabilityDecisionCatalog
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
+from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost, RetrievalHostCancelled
 
 __all__ = [
@@ -15,6 +16,8 @@ __all__ = [
     "ExtensionRegistryError",
     "ExtensionRuntime",
     "CapabilityDecisionCatalog",
+    "ParserChainCancelled",
+    "ParserProviderChainHost",
     "RetrievalContributorHost",
     "RetrievalHostCancelled",
     "build_extension_registry",

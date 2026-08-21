@@ -117,6 +117,123 @@ def test_single_provider_conflict_is_rejected_but_chain_has_stable_id_order():
     ] == ["early", "late"]
 
 
+def test_provider_chain_uses_dag_edges_then_stable_id_ties():
+    declarations = {
+        "a": ContributionDeclaration(
+            "a", "parser.chain", ContributionKind.PROVIDER_CHAIN
+        ),
+        "b": ContributionDeclaration(
+            "b",
+            "parser.chain",
+            ContributionKind.PROVIDER_CHAIN,
+            after=("z",),
+        ),
+        "z": ContributionDeclaration(
+            "z",
+            "parser.chain",
+            ContributionKind.PROVIDER_CHAIN,
+            before=("b",),
+        ),
+    }
+
+    for registration_order in (("b", "a", "z"), ("z", "b", "a")):
+        registry = build_extension_registry(tuple(
+            _Bundle(
+                _manifest(f"plugin-{name}", declarations[name]),
+                (object(),),
+            )
+            for name in registration_order
+        ))
+        assert [
+            item.contribution.declaration.id
+            for item in registry.contributions("parser.chain")
+        ] == ["a", "z", "b"]
+
+
+@pytest.mark.parametrize(
+    ("declarations", "message"),
+    [
+        (
+            (ContributionDeclaration(
+                "a", "parser.chain", ContributionKind.PROVIDER_CHAIN,
+                after=("missing",),
+            ),),
+            "unknown",
+        ),
+        (
+            (ContributionDeclaration(
+                "a", "parser.chain", ContributionKind.PROVIDER_CHAIN,
+                after=("a",),
+            ),),
+            "self dependency",
+        ),
+        (
+            (
+                ContributionDeclaration(
+                    "a", "parser.chain", ContributionKind.PROVIDER_CHAIN,
+                    after=("b",),
+                ),
+                ContributionDeclaration(
+                    "b", "parser.chain", ContributionKind.PROVIDER_CHAIN,
+                    after=("a",),
+                ),
+            ),
+            "cycle",
+        ),
+    ],
+)
+def test_provider_chain_rejects_unknown_self_and_cyclic_edges(
+    declarations, message
+):
+    bundles = tuple(
+        _Bundle(_manifest(f"plugin-{item.id}", item), (object(),))
+        for item in declarations
+    )
+    with pytest.raises(ExtensionRegistryError, match=message):
+        build_extension_registry(bundles)
+
+
+def test_provider_chain_ordering_is_exact_and_forbidden_on_other_kinds():
+    malformed = replace(
+        ContributionDeclaration(
+            "a", "parser.chain", ContributionKind.PROVIDER_CHAIN
+        ),
+        after=["b"],
+    )
+    with pytest.raises(ExtensionRegistryError, match="stable metadata"):
+        build_extension_registry((
+            _Bundle(_manifest("malformed", malformed), (object(),)),
+        ))
+
+    ordered_contributor = ContributionDeclaration(
+        "a",
+        "retrieval.contributor",
+        ContributionKind.CONTRIBUTOR,
+        after=("b",),
+    )
+    with pytest.raises(ExtensionRegistryError, match="stable metadata"):
+        build_extension_registry((
+            _Bundle(
+                _manifest("ordered-contributor", ordered_contributor),
+                (object(),),
+            ),
+        ))
+
+
+def test_provider_chain_cannot_mix_kinds_at_one_point():
+    chain = ContributionDeclaration(
+        "chain", "parser.chain", ContributionKind.PROVIDER_CHAIN
+    )
+    observer = ContributionDeclaration(
+        "observer", "parser.chain", ContributionKind.OBSERVER
+    )
+    with pytest.raises(ExtensionRegistryError, match="mixes"):
+        build_extension_registry((
+            _Bundle(_manifest("chain-plugin", chain), (object(),)),
+            _Bundle(_manifest("observer-plugin", observer), (object(),)),
+        ))
+
+
 def test_unknown_dependencies_and_dependency_cycles_fail_at_startup():
     with pytest.raises(ExtensionRegistryError, match="unknown"):
         build_extension_registry((_Bundle(_manifest("a", depends_on=("missing",))),))
