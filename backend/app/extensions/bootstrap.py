@@ -4,9 +4,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable
+from typing import Callable, Mapping
 
-from app.extension_sdk import ExtensionBundle
+from app.extension_sdk import ExtensionBundle, RetrievalAdmissionPolicy
 from app.extensions.capabilities import (
     CapabilityDecision,
     CapabilityDecisionCatalog,
@@ -36,6 +36,9 @@ def build_extension_runtime(
     bundles: Iterable[ExtensionBundle] = (),
     *,
     capability_decisions: dict[str, CapabilityDecision] | None = None,
+    retrieval_admission_policies: Mapping[
+        str, RetrievalAdmissionPolicy
+    ] | None = None,
     event_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> ExtensionRuntime:
     registry = build_extension_registry(
@@ -44,7 +47,9 @@ def build_extension_runtime(
     return ExtensionRuntime(
         registry=registry,
         retrieval_contributors=RetrievalContributorHost(
-            registry, event_sink=event_sink
+            registry,
+            admission_policies=retrieval_admission_policies,
+            event_sink=event_sink,
         ),
     )
 

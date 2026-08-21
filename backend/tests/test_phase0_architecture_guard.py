@@ -161,12 +161,31 @@ def test_guard_rejects_workflow_consuming_extension_composition(tmp_path):
     ]
 
 
-def test_guard_allows_only_named_repository_composition_root(tmp_path):
+def test_guard_rejects_plugin_importing_core_implementations(tmp_path):
     app = tmp_path / "app"
+    _write(
+        app / "extensions/builtin/unsafe.py",
+        "from app.services import repository_facade\n"
+        "from app.repositories.sqlite import query_store\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.extensions.builtin.unsafe imports forbidden core implementation "
+        "app.repositories.sqlite",
+        "app.extensions.builtin.unsafe imports forbidden core implementation "
+        "app.services.repository_facade",
+    ]
+
+
+def test_guard_allows_only_named_application_composition_root(tmp_path):
+    app = tmp_path / "app"
+    _write(app / "bootstrap.py", "from app import extensions\n")
     _write(app / "repositories/factory.py", "from app import extensions\n")
     _write(app / "repositories/other_factory.py", "from app import extensions\n")
 
     assert boundary_violations(app) == [
+        "app.repositories.factory imports the extension composition "
+        "surface outside an approved root",
         "app.repositories.other_factory imports the extension composition "
         "surface outside an approved root"
     ]
@@ -179,7 +198,7 @@ def test_registry_composition_does_not_change_route_topology(monkeypatch):
     sentinel = object()
     monkeypatch.setattr(
         app_main,
-        "default_extension_runtime",
+        "application_extension_runtime",
         lambda: type("Runtime", (), {"registry": sentinel})(),
     )
     composed = app_main.create_app()

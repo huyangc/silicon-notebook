@@ -94,7 +94,7 @@ def test_session_index_contains_known_repository_import(python_source_index):
         path="backend/app/api/deps.py",
         scope="<module>",
         kind="import",
-        target="app.repositories.factory:create_repository",
+        target="app.bootstrap:create_application_repository",
     ) in imports
 
 

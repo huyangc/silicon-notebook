@@ -8,6 +8,7 @@ from typing import Any, Iterable, List, Optional
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
+from app.domain.extensions import RetrievalContributorHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     reset_request_user,
@@ -49,7 +50,7 @@ class SQLiteRepository(RepositoryFacade):
         settings: Settings,
         *,
         model_provider: Any | None = None,
-        retrieval_contributor_host: Any | None = None,
+        retrieval_contributor_host: RetrievalContributorHostPort | None = None,
     ) -> None:
         super().__init__(
             settings,

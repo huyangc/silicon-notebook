@@ -24,9 +24,12 @@ from app.extension_sdk import (
     FrozenRetrievalScopeRef,
     NotebookRef,
     RETRIEVAL_CONTRIBUTOR_POINT,
+    RETRIEVAL_SCOPE_READER_CAPABILITY,
     RetrievalContributionBudget,
     RetrievalExtensionContext,
+    RetrievalHostContext,
     RetrievalRunRef,
+    SCHEDULED_MODEL_ACCESS_CAPABILITY,
 )
 from app.extensions import build_extension_runtime
 from app.extensions.retrieval import RetrievalHostCancelled
@@ -54,6 +57,8 @@ def _bundle(
     implementation: object,
     *,
     availability=None,
+    requires=(),
+    optional_requires=(),
 ) -> _Bundle:
     declaration = ContributionDeclaration(
         contribution_id,
@@ -68,6 +73,8 @@ def _bundle(
             display_name=contribution_id,
             trust="builtin",
             contributions=(declaration,),
+            requires=tuple(requires),
+            optional_requires=tuple(optional_requires),
         ),
         implementation,
         availability,
@@ -75,13 +82,18 @@ def _bundle(
 
 
 class _Reader:
-    def __init__(self, allowed=()) -> None:
+    def __init__(self, allowed=(), authoritative=None) -> None:
         self.allowed = set(allowed)
+        self.authoritative = authoritative or {}
         self.calls = []
 
-    def allows_many(self, candidates):
-        self.calls.append(candidates)
-        return tuple(candidate.identity in self.allowed for candidate in candidates)
+    def read(self, request):
+        self.calls.append(request)
+        return tuple(
+            self.authoritative.get(identity, _candidate(identity))
+            for identity in request.identities
+            if identity in self.allowed
+        )
 
 
 class _Connection:
@@ -115,18 +127,21 @@ def _context(
     connection=None,
     max_items=20,
     max_tokens=200,
+    max_proposals=100,
     deadline=None,
-) -> RetrievalExtensionContext:
-    return RetrievalExtensionContext(
+) -> RetrievalHostContext:
+    return RetrievalHostContext(
         invocation="selected_evidence",
         actor=ActorRef("actor"),
         notebook=NotebookRef("notebook"),
         scope=FrozenRetrievalScopeRef("scope", narrowed=True),
         run=RetrievalRunRef("run", "ask"),
         cancellation=cancel or threading.Event(),
-        budget=RetrievalContributionBudget(max_items, max_tokens, deadline),
-        reader=reader,
-        models=None,
+        budget=RetrievalContributionBudget(
+            max_items, max_tokens, max_proposals, deadline
+        ),
+        admission_reader=reader,
+        model_access=None,
         connection=connection or _Connection(),
     )
 
@@ -201,7 +216,6 @@ def test_retrieval_context_exposes_only_point_specific_capabilities():
         "budget",
         "reader",
         "models",
-        "connection",
     }
 
 
@@ -252,7 +266,7 @@ def test_valid_candidates_append_in_id_order_with_one_batch_scope_check():
     assert result == ("base", "early", "late")
     assert result[0] is baseline[0]
     assert len(reader.calls) == 2
-    assert [item.identity for item in reader.calls[0]] == [
+    assert list(reader.calls[0].identities) == [
         "base",
         "early",
         "outside",
@@ -263,6 +277,10 @@ def test_budget_is_shared_across_contributors_and_never_consumes_baseline():
     first = _Contributor(_result(_candidate("one", token_cost=3)))
     second = _Contributor(_result(_candidate("two", token_cost=3)))
     reader = _Reader({"one", "two"})
+    reader.authoritative = {
+        "one": _candidate("one", token_cost=3),
+        "two": _candidate("two", token_cost=3),
+    }
     runtime = build_extension_runtime(
         (_bundle("a", first), _bundle("b", second))
     )
@@ -369,7 +387,7 @@ def test_scope_and_provenance_validation_is_batch_and_fail_closed():
 
     assert result == ("base", "hit-0")
     assert len(reader.calls) == 1
-    assert len(reader.calls[0]) == 20
+    assert len(reader.calls[0].identities) == 20
 
 
 def test_core_cancellation_propagates_and_stops_later_contributors():
@@ -416,8 +434,35 @@ def test_core_cancellation_during_availability_propagates_its_native_error():
                 _Reader({"new"}), cancel=cancellation
             ),
             baseline_identity=str,
+            cancellation=cancellation,
         )
 
+    assert contributor.calls == 0
+
+
+def test_pre_cancelled_request_skips_availability_and_context():
+    cancellation = _Cancellation()
+    cancellation.cancelled = True
+    probes = []
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((
+        _bundle(
+            "pre_cancelled",
+            contributor,
+            availability=lambda context: probes.append(context) or Availability.available(),
+        ),
+    ))
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            baseline_identity=str,
+            cancellation=cancellation,
+        )
+
+    assert probes == []
     assert contributor.calls == 0
 
 
@@ -474,3 +519,226 @@ def test_events_have_exact_content_free_shape_and_sink_failure_is_fail_open():
         context_factory=lambda: _context(_Reader()),
         baseline_identity=str,
     ) is baseline
+
+
+def test_invocation_routing_is_frozen_against_implementation_mutation():
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((_bundle("frozen_route", contributor),))
+    contributor.invocations = frozenset({"chunk_candidates"})
+
+    assert runtime.retrieval_contributors.run(
+        ["base"],
+        invocation="selected_evidence",
+        context_factory=lambda: _context(_Reader({"new"})),
+        baseline_identity=str,
+    ) == ("base", "new")
+    baseline = ["base"]
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="chunk_candidates",
+        context_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+    ) is baseline
+
+
+def test_capability_ports_are_projected_per_manifest_and_live_decision():
+    contexts = {}
+    plain = _Contributor(
+        _result(_candidate("plain")),
+        on_call=lambda context: contexts.setdefault("plain", context),
+    )
+    scoped = _Contributor(
+        _result(_candidate("scoped")),
+        on_call=lambda context: contexts.setdefault("scoped", context),
+    )
+    modeled = _Contributor(
+        _result(_candidate("modeled")),
+        on_call=lambda context: contexts.setdefault("modeled", context),
+    )
+    model = object()
+    state = {"model": True}
+    runtime = build_extension_runtime(
+        (
+            _bundle("plain", plain),
+            _bundle(
+                "scoped",
+                scoped,
+                requires=(RETRIEVAL_SCOPE_READER_CAPABILITY,),
+            ),
+            _bundle(
+                "modeled",
+                modeled,
+                optional_requires=(SCHEDULED_MODEL_ACCESS_CAPABILITY,),
+            ),
+        ),
+        capability_decisions={
+            RETRIEVAL_SCOPE_READER_CAPABILITY: lambda _context: Availability.available(),
+            SCHEDULED_MODEL_ACCESS_CAPABILITY: lambda _context: (
+                Availability.available()
+                if state["model"]
+                else Availability(AvailabilityStatus.DISABLED, "model_disabled")
+            ),
+        },
+    )
+    reader = _Reader({"plain", "scoped", "modeled"})
+    context = _context(reader)
+    object.__setattr__(context, "model_access", model)
+
+    runtime.retrieval_contributors.run(
+        ["base"],
+        invocation="selected_evidence",
+        context_factory=lambda: context,
+        baseline_identity=str,
+    )
+
+    assert contexts["plain"].reader is None
+    assert contexts["plain"].models is None
+    assert contexts["scoped"].reader is reader
+    assert contexts["scoped"].models is None
+    assert contexts["modeled"].reader is None
+    assert contexts["modeled"].models is model
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        EvidenceCandidate(
+            "bad_token", "notebook", "source",
+            EvidenceProvenance("chunk", "element"), "value", "oops",
+        ),
+        EvidenceCandidate(
+            "bad_bool", "notebook", "source",
+            EvidenceProvenance("chunk", "element"), "value", True,
+        ),
+        EvidenceCandidate(
+            "bad_provenance", "notebook", "source", object(), "value", 1,
+        ),
+        EvidenceCandidate(
+            [], "notebook", "source",
+            EvidenceProvenance("chunk", "element"), "value", 1,
+        ),
+    ],
+)
+def test_malformed_candidate_fields_are_total_and_fail_open(candidate):
+    contributor = _Contributor(_result(candidate))
+    runtime = build_extension_runtime((_bundle("malformed_fields", contributor),))
+    baseline = ["base"]
+
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: _context(_Reader()),
+        baseline_identity=str,
+    ) is baseline
+
+
+def test_invalid_result_and_availability_enums_are_fail_open():
+    bad_result = ContributorResult((), "evil")
+    contributor = _Contributor(bad_result)
+    runtime = build_extension_runtime((
+        _bundle(
+            "bad_enums",
+            contributor,
+            availability=lambda _context: Availability("evil"),
+        ),
+    ))
+    baseline = ["base"]
+
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: _context(_Reader()),
+        baseline_identity=str,
+    ) is baseline
+    assert contributor.calls == 0
+
+
+def test_proposal_limit_bounds_reader_work_before_hydration():
+    candidates = tuple(_candidate(f"hit-{index}") for index in range(1000))
+    contributor = _Contributor(_result(*candidates))
+    reader = _Reader({candidate.identity for candidate in candidates})
+    runtime = build_extension_runtime((_bundle("bounded", contributor),))
+
+    runtime.retrieval_contributors.run(
+        ["base"],
+        invocation="selected_evidence",
+        context_factory=lambda: _context(
+            reader, max_items=1, max_tokens=1, max_proposals=7
+        ),
+        baseline_identity=str,
+    )
+
+    assert len(reader.calls) == 1
+    assert len(reader.calls[0].identities) == 7
+
+
+def test_core_hydrated_value_wins_and_metadata_mismatch_is_rejected():
+    proposal = _candidate("safe", value="plugin-forged-body")
+    authority = _candidate("safe", value="core-authoritative-body")
+    mismatch = _candidate("mismatch", source_id="forged-source")
+    reader = _Reader(
+        {"safe", "mismatch"},
+        authoritative={
+            "safe": authority,
+            "mismatch": _candidate("mismatch", source_id="real-source"),
+        },
+    )
+    contributor = _Contributor(_result(proposal, mismatch))
+    runtime = build_extension_runtime((_bundle("authority", contributor),))
+
+    assert runtime.retrieval_contributors.run(
+        ["base"],
+        invocation="selected_evidence",
+        context_factory=lambda: _context(reader),
+        baseline_identity=str,
+    ) == ("base", "core-authoritative-body")
+
+
+def test_unavailable_probe_gets_io_free_context_and_skips_full_context():
+    observed = []
+    contributor = _Contributor(_result(_candidate("new")))
+
+    def probe(context):
+        observed.append(context)
+        assert not hasattr(context, "reader")
+        assert not hasattr(context, "models")
+        assert not hasattr(context, "connection")
+        return Availability(AvailabilityStatus.DISABLED, "feature_disabled")
+
+    runtime = build_extension_runtime((
+        _bundle("io_free_probe", contributor, availability=probe),
+    ))
+    baseline = ["base"]
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+        baseline_identity=str,
+    ) is baseline
+    assert len(observed) == 1
+    assert contributor.calls == 0
+
+
+def test_atomic_admission_discards_whole_contribution_on_one_rejection():
+    contributor = _Contributor(_result(
+        _candidate("accepted"),
+        _candidate("outside"),
+    ))
+    runtime = build_extension_runtime(
+        (_bundle("selected_graph", contributor),),
+        retrieval_admission_policies={"selected_graph": "atomic"},
+    )
+    baseline = ["base"]
+
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: _context(_Reader({"accepted"})),
+        baseline_identity=str,
+    ) is baseline
+
+
+def test_registry_rejects_content_shaped_metadata_ids():
+    with pytest.raises(ExtensionRegistryError, match="identifiers"):
+        build_extension_runtime((
+            _bundle("user question source title", _Contributor(_result())),
+        ))

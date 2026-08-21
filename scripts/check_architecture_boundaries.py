@@ -18,6 +18,13 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
+FORBIDDEN_PLUGIN_IMPLEMENTATION_PREFIXES = (
+    "app.repositories.postgres",
+    "app.repositories.sqlite",
+    "app.services.repository_facade",
+    "app.services.repository_runtime",
+    "app.services.sqlite_repository",
+)
 
 
 def module_name(app_root: Path, path: Path) -> str:
@@ -179,6 +186,22 @@ def boundary_violations(app_root: Path) -> list[str]:
             )
             for imported in sorted(forbidden):
                 violations.append(f"{module} imports forbidden {imported}")
+        is_plugin_implementation = (
+            module.startswith("app.extensions.builtin.")
+            or module.startswith("app.extensions.plugins.")
+            or (module.startswith("app.features.") and module.endswith(".plugin"))
+        )
+        if is_plugin_implementation:
+            forbidden = minimal_matching_module_references(
+                imports,
+                lambda imported: imported.startswith(
+                    FORBIDDEN_PLUGIN_IMPLEMENTATION_PREFIXES
+                ),
+            )
+            for imported in sorted(forbidden):
+                violations.append(
+                    f"{module} imports forbidden core implementation {imported}"
+                )
         imports_extension_surface = any(
             imported in {"app.extensions", "app.extension_sdk"}
             or imported.startswith(("app.extensions.", "app.extension_sdk."))
@@ -186,7 +209,7 @@ def boundary_violations(app_root: Path) -> list[str]:
         )
         is_extension_composition = (
             module == "app.main"
-            or module == "app.repositories.factory"
+            or module == "app.bootstrap"
             or module == "app.extensions"
             or module.startswith("app.extensions.")
             or module == "app.extension_sdk"

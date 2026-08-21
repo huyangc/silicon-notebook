@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.core.config import Settings
 from app.domain.repository import RepositoryCompatibilitySeams
+from app.domain.extensions import RetrievalContributorHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -91,7 +92,7 @@ class RepositoryRuntime:
         persistence_factory: PersistenceBundleFactory,
         *,
         model_provider: Any | None = None,
-        retrieval_contributor_host: Any | None = None,
+        retrieval_contributor_host: RetrievalContributorHostPort | None = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings

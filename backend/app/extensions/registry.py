@@ -27,6 +27,9 @@ class ExtensionRegistryError(ValueError):
 
 
 _STABLE_REASON = re.compile(r"^[a-z][a-z0-9_]*$")
+_STABLE_METADATA_ID = re.compile(
+    r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+)
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,11 @@ class ExtensionRegistry:
         if self._frozen:
             raise ExtensionRegistryError("extension registry is frozen")
         manifest = bundle.manifest
-        if not manifest.id or not manifest.version or not manifest.display_name:
+        if (
+            not _STABLE_METADATA_ID.fullmatch(str(manifest.id or ""))
+            or not manifest.version
+            or not manifest.display_name
+        ):
             raise ExtensionRegistryError("extension manifest identifiers must be non-empty")
         if manifest.api_version != EXTENSION_API_VERSION:
             raise ExtensionRegistryError(
@@ -143,8 +150,13 @@ class ExtensionRegistry:
             raise ExtensionRegistryError(
                 f"contribution {declaration.id!r} differs from its manifest declaration"
             )
-        if not declaration.id or not declaration.point:
-            raise ExtensionRegistryError("contribution id and point must be non-empty")
+        if (
+            not _STABLE_METADATA_ID.fullmatch(str(declaration.id or ""))
+            or not _STABLE_METADATA_ID.fullmatch(str(declaration.point or ""))
+        ):
+            raise ExtensionRegistryError(
+                "contribution id and point must be stable metadata identifiers"
+            )
         if declaration.id in self._contributions:
             raise ExtensionRegistryError(
                 f"duplicate contribution id {declaration.id!r}"
@@ -243,6 +255,20 @@ class ExtensionRegistry:
             decision = self._capabilities.availability(capability, context)
             if decision.status is not AvailabilityStatus.AVAILABLE:
                 return decision
+        return self.contribution_availability(contribution_id, context)
+
+    def contribution_availability(
+        self, contribution_id: str, context: object | None = None
+    ) -> Availability:
+        """Evaluate only the contribution's I/O-free live probe."""
+
+        self._require_frozen()
+        registered = self._contributions.get(contribution_id)
+        if registered is None:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="unknown_contribution",
+            )
         probe = registered.contribution.availability
         if probe is None:
             return Availability.available()
@@ -257,6 +283,11 @@ class ExtensionRegistry:
             return Availability(
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="invalid_availability_probe",
+            )
+        if not isinstance(result.status, AvailabilityStatus):
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_status",
             )
         reason = str(result.reason_code or "")
         if reason and not _STABLE_REASON.fullmatch(reason):

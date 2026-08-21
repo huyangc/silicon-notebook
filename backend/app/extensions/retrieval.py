@@ -1,63 +1,90 @@
 """Baseline-preserving runner for ``retrieval.contributor`` extensions."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+import math
 import re
 import time
+from types import MappingProxyType
 from typing import Any, TypeVar
 
 from app.extension_sdk import (
+    RETRIEVAL_CONTRIBUTOR_POINT,
+    RETRIEVAL_SCOPE_READER_CAPABILITY,
+    SCHEDULED_MODEL_ACCESS_CAPABILITY,
     AvailabilityStatus,
+    CancellationToken,
     EvidenceCandidate,
+    EvidenceProvenance,
+    EvidenceReadRequest,
     ExtensionFailure,
     ExtensionFailureKind,
     ExtensionResultStatus,
-    RETRIEVAL_CONTRIBUTOR_POINT,
+    RetrievalAdmissionPolicy,
+    RetrievalAvailabilityContext,
     RetrievalContributionEvent,
     RetrievalExtensionContext,
+    RetrievalHostContext,
     RetrievalInvocation,
 )
-from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
+from app.extensions.registry import (
+    ExtensionRegistry,
+    ExtensionRegistryError,
+    RegisteredContribution,
+)
 
 
 T = TypeVar("T")
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
 _PROVENANCE_KINDS = frozenset({
-    "chunk",
-    "element",
-    "knowledge_object",
-    "relation",
-    "ppr",
+    "chunk", "element", "knowledge_object", "relation", "ppr",
 })
 _INVOCATIONS = frozenset({"selected_evidence", "chunk_candidates"})
+_ADMISSION_POLICIES = frozenset({"additive", "atomic"})
 
 
 class RetrievalHostCancelled(RuntimeError):
     """Core request cancellation; callers must propagate, never fail open."""
 
 
-class RetrievalContributorHost:
-    """Run additive contributors without letting them rewrite the baseline.
+@dataclass(frozen=True)
+class _FrozenRegistration:
+    registered: RegisteredContribution
+    invocations: frozenset[RetrievalInvocation]
+    requires: frozenset[str]
+    optional_requires: frozenset[str]
+    admission: RetrievalAdmissionPolicy
 
-    The empty-registry path deliberately returns the exact input object before
-    consulting clocks, cancellation, availability, context or event sinks.
-    """
+
+class RetrievalContributorHost:
+    """Run governed contributors without letting them rewrite the baseline."""
 
     def __init__(
         self,
         registry: ExtensionRegistry,
         *,
+        admission_policies: Mapping[str, RetrievalAdmissionPolicy] | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._registry = registry
         self._event_sink = event_sink
         self._clock = clock
-        self._registrations = registry.contributions(
-            RETRIEVAL_CONTRIBUTOR_POINT
-        )
-        for registered in self._registrations:
-            implementation = registered.contribution.implementation
+        policies = dict(admission_policies or {})
+        registered = registry.contributions(RETRIEVAL_CONTRIBUTOR_POINT)
+        known_ids = {item.contribution.declaration.id for item in registered}
+        unknown = sorted(set(policies) - known_ids)
+        if unknown:
+            raise ExtensionRegistryError(
+                f"admission policies name unknown contributions {unknown!r}"
+            )
+        manifests = {manifest.id: manifest for manifest in registry.manifests()}
+        frozen: list[_FrozenRegistration] = []
+        by_invocation: dict[str, list[_FrozenRegistration]] = {
+            invocation: [] for invocation in _INVOCATIONS
+        }
+        for item in registered:
+            implementation = item.contribution.implementation
             invocations = getattr(implementation, "invocations", None)
             if (
                 not isinstance(invocations, frozenset)
@@ -66,66 +93,116 @@ class RetrievalContributorHost:
                 or not callable(getattr(implementation, "contribute", None))
             ):
                 raise ExtensionRegistryError(
-                    f"retrieval contributor "
-                    f"{registered.contribution.declaration.id!r} "
+                    f"retrieval contributor {item.contribution.declaration.id!r} "
                     "does not implement the retrieval contributor contract"
                 )
-
-    @property
-    def registry(self) -> ExtensionRegistry:
-        return self._registry
+            contribution_id = item.contribution.declaration.id
+            admission = policies.get(contribution_id, "additive")
+            if admission not in _ADMISSION_POLICIES:
+                raise ExtensionRegistryError(
+                    f"retrieval contributor {contribution_id!r} has invalid "
+                    "core admission policy"
+                )
+            manifest = manifests[item.plugin_id]
+            snapshot = _FrozenRegistration(
+                registered=item,
+                invocations=frozenset(invocations),
+                requires=frozenset(manifest.requires),
+                optional_requires=frozenset(manifest.optional_requires),
+                admission=admission,
+            )
+            frozen.append(snapshot)
+            for invocation in snapshot.invocations:
+                by_invocation[invocation].append(snapshot)
+        self._registrations = tuple(frozen)
+        self._by_invocation = MappingProxyType({
+            invocation: tuple(items)
+            for invocation, items in by_invocation.items()
+        })
+        self._registry = registry
 
     def run(
         self,
         baseline: Sequence[T],
         *,
         invocation: RetrievalInvocation,
-        context_factory: Callable[[], RetrievalExtensionContext] | None = None,
+        context_factory: Callable[[], RetrievalHostContext] | None = None,
         baseline_identity: Callable[[T], str] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> Sequence[T]:
-        registrations = tuple(
-            registered
-            for registered in self._registrations
-            if invocation in getattr(
-                registered.contribution.implementation, "invocations", ()
-            )
-        )
+        registrations = self._by_invocation.get(invocation, ())
         if not registrations:
             return baseline
 
-        # A configured contributor without a request-scoped core context is a
-        # composition failure, not permission to call it with broader access.
-        if context_factory is None:
-            for registered in registrations:
+        available: list[_FrozenRegistration] = []
+        for registration in registrations:
+            if cancellation is not None:
+                self._raise_if_token_cancelled(cancellation)
+            contribution_id = registration.registered.contribution.declaration.id
+            availability = self._registry.contribution_availability(
+                contribution_id,
+                RetrievalAvailabilityContext(
+                    plugin_id=registration.registered.plugin_id,
+                    contribution_id=contribution_id,
+                    invocation=invocation,
+                    cancellation=cancellation,
+                ),
+            )
+            if cancellation is not None:
+                self._raise_if_token_cancelled(cancellation)
+            if availability.status is not AvailabilityStatus.AVAILABLE:
                 self._emit(
-                    registered.contribution.declaration.id,
+                    contribution_id,
+                    outcome=availability.status.value,
+                    failure_code=self._stable_code(
+                        availability.reason_code, "contribution_unavailable"
+                    ),
+                )
+                continue
+            available.append(registration)
+        if not available:
+            return baseline
+
+        if context_factory is None:
+            for registration in available:
+                self._emit(
+                    registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="missing_retrieval_context",
                 )
             return baseline
-
         try:
             context = context_factory()
         except Exception:
-            for registered in registrations:
+            for registration in available:
                 self._emit(
-                    registered.contribution.declaration.id,
+                    registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="retrieval_context_failed",
                 )
             return baseline
-        if context.invocation != invocation:
-            for registered in registrations:
-                self._emit(
-                    registered.contribution.declaration.id,
+        def emit(contribution_id, **kwargs):
+            self._emit(
+                contribution_id,
+                event_sink=getattr(context, "event_sink", None),
+                **kwargs,
+            )
+
+        if (
+            not isinstance(context, RetrievalHostContext)
+            or context.invocation != invocation
+        ):
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="retrieval_invocation_mismatch",
                 )
             return baseline
         if baseline_identity is None:
-            for registered in registrations:
-                self._emit(
-                    registered.contribution.declaration.id,
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="missing_baseline_identity",
                 )
@@ -137,119 +214,114 @@ class RetrievalContributorHost:
         except Exception:
             connection_held = True
         if connection_held:
-            for registered in registrations:
-                self._emit(
-                    registered.contribution.declaration.id,
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
                     outcome="blocked",
                     failure_code="database_connection_held",
                 )
             return baseline
 
-        try:
-            item_limit = max(0, int(context.budget.max_items))
-            token_limit = max(0, int(context.budget.max_tokens))
-        except (TypeError, ValueError, OverflowError):
-            for registered in registrations:
-                self._emit(
-                    registered.contribution.declaration.id,
+        budget = self._validated_budget(context)
+        if budget is None:
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="invalid_contribution_budget",
                 )
             return baseline
-        if item_limit == 0 or token_limit == 0:
+        item_limit, token_limit, proposal_limit = budget
+        if item_limit == 0 or token_limit == 0 or proposal_limit == 0:
             return baseline
-
         try:
-            baseline_ids = {
-                str(baseline_identity(item) or "") for item in baseline
-            }
+            baseline_ids: set[str] = set()
+            for item in baseline:
+                identity = baseline_identity(item)
+                if not isinstance(identity, str) or not identity:
+                    raise ValueError("invalid baseline identity")
+                baseline_ids.add(identity)
         except Exception:
-            for registered in registrations:
-                self._emit(
-                    registered.contribution.declaration.id,
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="baseline_identity_failed",
                 )
             return baseline
+
         accepted: list[T] = []
         accepted_ids: set[str] = set()
         used_tokens = 0
-
-        for registered in registrations:
+        for registration in available:
             if len(accepted) >= item_limit:
                 break
             self._raise_if_core_cancelled(context)
-            contribution_id = registered.contribution.declaration.id
-            try:
-                availability = self._registry.availability(
-                    contribution_id, context
-                )
-            except Exception:
-                self._emit(
+            contribution_id = registration.registered.contribution.declaration.id
+            granted = self._granted_capabilities(registration, context)
+            if granted is None:
+                emit(
                     contribution_id,
                     outcome="unavailable",
-                    failure_code="availability_failed",
+                    failure_code="required_capability_unavailable",
                 )
                 continue
-            self._raise_if_core_cancelled(context)
-            if availability.status is not AvailabilityStatus.AVAILABLE:
-                self._emit(
-                    contribution_id,
-                    outcome=availability.status.value,
-                    failure_code=self._stable_code(
-                        availability.reason_code, "contribution_unavailable"
-                    ),
-                )
-                continue
-
             if self._deadline_expired(context):
-                self._emit(
+                emit(
                     contribution_id,
                     outcome="timeout",
                     failure_code="contribution_timeout",
                 )
                 continue
-
+            plugin_context = RetrievalExtensionContext(
+                invocation=context.invocation,
+                actor=context.actor,
+                notebook=context.notebook,
+                scope=context.scope,
+                run=context.run,
+                cancellation=context.cancellation,
+                budget=context.budget,
+                reader=(
+                    context.admission_reader
+                    if RETRIEVAL_SCOPE_READER_CAPABILITY in granted
+                    else None
+                ),
+                models=(
+                    context.model_access
+                    if SCHEDULED_MODEL_ACCESS_CAPABILITY in granted
+                    else None
+                ),
+            )
             started = self._clock()
             try:
-                implementation = registered.contribution.implementation
-                result = implementation.contribute(context)
+                result = registration.registered.contribution.implementation.contribute(
+                    plugin_context
+                )
             except TimeoutError:
-                self._emit(
-                    contribution_id,
-                    outcome="timeout",
-                    failure_code="contribution_timeout",
-                    started=started,
+                emit(
+                    contribution_id, outcome="timeout",
+                    failure_code="contribution_timeout", started=started,
                 )
                 continue
             except Exception:
-                # Recheck the core token before mapping an extension exception
-                # to fail-open. A request cancellation is terminal and must be
-                # propagated to the Ask/Report owner.
                 self._raise_if_core_cancelled(context)
-                self._emit(
-                    contribution_id,
-                    outcome="failed",
-                    failure_code="contribution_failed",
-                    started=started,
+                emit(
+                    contribution_id, outcome="failed",
+                    failure_code="contribution_failed", started=started,
                 )
                 continue
 
             self._raise_if_core_cancelled(context)
             if self._deadline_expired(context):
-                self._emit(
-                    contribution_id,
-                    outcome="timeout",
-                    failure_code="contribution_timeout",
-                    started=started,
+                emit(
+                    contribution_id, outcome="timeout",
+                    failure_code="contribution_timeout", started=started,
                 )
                 continue
             if not self._valid_result(result):
-                self._emit(
-                    contribution_id,
-                    outcome="invalid",
-                    failure_code="invalid_contribution_result",
-                    started=started,
+                emit(
+                    contribution_id, outcome="invalid",
+                    failure_code="invalid_contribution_result", started=started,
                 )
                 continue
             if result.failure is not None:
@@ -258,84 +330,92 @@ class RetrievalContributorHost:
                     and context.cancellation.is_set()
                 ):
                     self._raise_if_core_cancelled(context)
-                self._emit(
-                    contribution_id,
-                    outcome=result.failure.kind.value,
+                emit(
+                    contribution_id, outcome=result.failure.kind.value,
                     failure_code=self._stable_code(
                         result.failure.code, "contribution_failed"
                     ),
-                    dropped_count=len(result.items),
-                    started=started,
+                    dropped_count=len(result.items), started=started,
                 )
                 continue
             if result.status is ExtensionResultStatus.UNAVAILABLE:
-                self._emit(
-                    contribution_id,
-                    outcome="unavailable",
+                emit(
+                    contribution_id, outcome="unavailable",
                     failure_code="contribution_unavailable",
-                    dropped_count=len(result.items),
-                    started=started,
+                    dropped_count=len(result.items), started=started,
                 )
                 continue
 
-            kept = 0
-            dropped = 0
-            structurally_valid: list[EvidenceCandidate[Any]] = []
-            for candidate in result.items:
-                if not self._candidate_structurally_valid(candidate):
+            proposals = result.items[:proposal_limit]
+            dropped = len(result.items) - len(proposals)
+            valid: list[EvidenceCandidate[Any]] = []
+            for candidate in proposals:
+                if self._candidate_structurally_valid(candidate):
+                    valid.append(candidate)
+                else:
                     dropped += 1
-                    continue
-                structurally_valid.append(candidate)
+            if registration.admission == "atomic" and dropped:
+                emit(
+                    contribution_id, outcome="rejected",
+                    dropped_count=len(result.items),
+                    failure_code="atomic_admission_rejected", started=started,
+                )
+                continue
             try:
-                scope_decisions = context.reader.allows_many(
-                    tuple(structurally_valid)
+                hydrated = context.admission_reader.read(
+                    EvidenceReadRequest(tuple(item.identity for item in valid))
                 )
             except Exception:
                 self._raise_if_core_cancelled(context)
-                scope_decisions = ()
+                hydrated = ()
             self._raise_if_core_cancelled(context)
             if self._deadline_expired(context):
-                self._emit(
-                    contribution_id,
-                    outcome="timeout",
+                emit(
+                    contribution_id, outcome="timeout",
                     failure_code="contribution_timeout",
-                    dropped_count=len(result.items),
-                    started=started,
+                    dropped_count=len(result.items), started=started,
                 )
                 continue
-            if (
-                not isinstance(scope_decisions, tuple)
-                or len(scope_decisions) != len(structurally_valid)
-                or any(
-                    not isinstance(decision, bool)
-                    for decision in scope_decisions
+            authoritative = self._authoritative_by_identity(
+                hydrated, expected_limit=len(valid)
+            )
+            if authoritative is None:
+                dropped += len(valid)
+                valid = []
+                authoritative = {}
+
+            pending: list[EvidenceCandidate[Any]] = []
+            pending_ids: set[str] = set()
+            pending_tokens = 0
+            for proposal in valid:
+                candidate = authoritative.get(proposal.identity)
+                if (
+                    candidate is None
+                    or not self._same_authority(proposal, candidate)
+                    or candidate.identity in baseline_ids
+                    or candidate.identity in accepted_ids
+                    or candidate.identity in pending_ids
+                    or len(accepted) + len(pending) >= item_limit
+                    or used_tokens + pending_tokens + candidate.token_cost > token_limit
+                ):
+                    dropped += 1
+                    continue
+                pending.append(candidate)
+                pending_ids.add(candidate.identity)
+                pending_tokens += candidate.token_cost
+            if registration.admission == "atomic" and dropped:
+                emit(
+                    contribution_id, outcome="rejected",
+                    dropped_count=len(result.items),
+                    failure_code="atomic_admission_rejected", started=started,
                 )
-            ):
-                dropped += len(structurally_valid)
-                structurally_valid = []
-                scope_decisions = ()
-            for candidate, allowed in zip(structurally_valid, scope_decisions):
-                if not allowed:
-                    dropped += 1
-                    continue
-                identity = candidate.identity
-                if identity in baseline_ids or identity in accepted_ids:
-                    dropped += 1
-                    continue
-                token_cost = max(0, int(candidate.token_cost))
-                if len(accepted) >= item_limit or used_tokens + token_cost > token_limit:
-                    dropped += 1
-                    continue
-                accepted.append(candidate.value)
-                accepted_ids.add(identity)
-                used_tokens += token_cost
-                kept += 1
-            self._emit(
-                contribution_id,
-                outcome=result.status.value,
-                accepted_count=kept,
-                dropped_count=dropped,
-                started=started,
+                continue
+            accepted.extend(candidate.value for candidate in pending)
+            accepted_ids.update(pending_ids)
+            used_tokens += pending_tokens
+            emit(
+                contribution_id, outcome=result.status.value,
+                accepted_count=len(pending), dropped_count=dropped, started=started,
             )
 
         self._raise_if_core_cancelled(context)
@@ -343,80 +423,165 @@ class RetrievalContributorHost:
             return baseline
         return tuple((*baseline, *accepted))
 
+    def _granted_capabilities(
+        self, registration: _FrozenRegistration, context: RetrievalHostContext,
+    ) -> frozenset[str] | None:
+        granted: set[str] = set()
+        for capability in sorted(
+            registration.requires | registration.optional_requires
+        ):
+            decision = self._registry.capability_availability(capability, context)
+            if not isinstance(decision.status, AvailabilityStatus):
+                if capability in registration.requires:
+                    return None
+                continue
+            if decision.status is AvailabilityStatus.AVAILABLE:
+                granted.add(capability)
+            elif capability in registration.requires:
+                return None
+        return frozenset(granted)
+
+    @staticmethod
+    def _validated_budget(
+        context: RetrievalHostContext,
+    ) -> tuple[int, int, int] | None:
+        values = (
+            context.budget.max_items,
+            context.budget.max_tokens,
+            context.budget.max_proposals,
+        )
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in values
+        ):
+            return None
+        deadline = context.budget.deadline_monotonic
+        if (
+            deadline is not None
+            and (
+                not isinstance(deadline, (int, float))
+                or isinstance(deadline, bool)
+                or not math.isfinite(deadline)
+            )
+        ):
+            return None
+        return values
+
     @staticmethod
     def _valid_result(result: object) -> bool:
-        return (
-            hasattr(result, "items")
-            and isinstance(getattr(result, "items"), tuple)
-            and isinstance(getattr(result, "status", None), ExtensionResultStatus)
-            and (
-                getattr(result, "failure", None) is None
-                or isinstance(result.failure, ExtensionFailure)
+        try:
+            failure = getattr(result, "failure", None)
+            return (
+                type(getattr(result, "items", None)) is tuple
+                and isinstance(getattr(result, "status", None), ExtensionResultStatus)
+                and (
+                    failure is None
+                    or (
+                        isinstance(failure, ExtensionFailure)
+                        and isinstance(failure.kind, ExtensionFailureKind)
+                        and isinstance(failure.code, str)
+                    )
+                )
             )
-        )
+        except Exception:
+            return False
 
     @staticmethod
     def _candidate_structurally_valid(candidate: object) -> bool:
-        if not isinstance(candidate, EvidenceCandidate):
+        try:
+            return (
+                isinstance(candidate, EvidenceCandidate)
+                and isinstance(candidate.identity, str)
+                and bool(candidate.identity)
+                and isinstance(candidate.notebook_id, str)
+                and bool(candidate.notebook_id)
+                and isinstance(candidate.source_id, str)
+                and bool(candidate.source_id)
+                and isinstance(candidate.provenance, EvidenceProvenance)
+                and isinstance(candidate.provenance.kind, str)
+                and candidate.provenance.kind in _PROVENANCE_KINDS
+                and isinstance(candidate.provenance.reference, str)
+                and bool(candidate.provenance.reference)
+                and candidate.value is not None
+                and isinstance(candidate.token_cost, int)
+                and not isinstance(candidate.token_cost, bool)
+                and candidate.token_cost >= 0
+            )
+        except Exception:
             return False
-        if (
-            not candidate.identity
-            or not candidate.notebook_id
-            or not candidate.source_id
-            or candidate.provenance.kind not in _PROVENANCE_KINDS
-            or not candidate.provenance.reference
-            or candidate.value is None
-            or candidate.token_cost < 0
-        ):
-            return False
-        return True
+
+    @classmethod
+    def _authoritative_by_identity(
+        cls, candidates: object, *, expected_limit: int,
+    ) -> dict[str, EvidenceCandidate[Any]] | None:
+        if not isinstance(candidates, tuple) or len(candidates) > expected_limit:
+            return None
+        result: dict[str, EvidenceCandidate[Any]] = {}
+        for candidate in candidates:
+            if (
+                not cls._candidate_structurally_valid(candidate)
+                or candidate.identity in result
+            ):
+                return None
+            result[candidate.identity] = candidate
+        return result
 
     @staticmethod
-    def _raise_if_core_cancelled(context: RetrievalExtensionContext) -> None:
-        raise_cancelled = getattr(
-            context.cancellation, "raise_if_cancelled", None
+    def _same_authority(
+        proposal: EvidenceCandidate[Any], authoritative: EvidenceCandidate[Any],
+    ) -> bool:
+        return (
+            proposal.identity == authoritative.identity
+            and proposal.notebook_id == authoritative.notebook_id
+            and proposal.source_id == authoritative.source_id
+            and proposal.provenance == authoritative.provenance
         )
+
+    @staticmethod
+    def _raise_if_core_cancelled(context: RetrievalHostContext) -> None:
+        RetrievalContributorHost._raise_if_token_cancelled(context.cancellation)
+
+    @staticmethod
+    def _raise_if_token_cancelled(cancellation: object) -> None:
+        raise_cancelled = getattr(cancellation, "raise_if_cancelled", None)
         if callable(raise_cancelled):
             raise_cancelled()
-        elif context.cancellation.is_set():
+        elif cancellation.is_set():
             raise RetrievalHostCancelled("retrieval request cancelled")
 
-    def _deadline_expired(self, context: RetrievalExtensionContext) -> bool:
+    def _deadline_expired(self, context: RetrievalHostContext) -> bool:
         deadline = context.budget.deadline_monotonic
         return deadline is not None and self._clock() >= deadline
 
     @staticmethod
-    def _stable_code(value: str, fallback: str) -> str:
-        return value if _STABLE_CODE.fullmatch(str(value or "")) else fallback
+    def _stable_code(value: object, fallback: str) -> str:
+        return (
+            value
+            if isinstance(value, str) and _STABLE_CODE.fullmatch(value)
+            else fallback
+        )
 
     def _emit(
-        self,
-        contribution_id: str,
-        *,
-        outcome: str,
-        accepted_count: int = 0,
-        dropped_count: int = 0,
-        failure_code: str = "",
-        started: float | None = None,
+        self, contribution_id: str, *, outcome: str,
+        accepted_count: int = 0, dropped_count: int = 0,
+        failure_code: str = "", started: float | None = None,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        if self._event_sink is None:
+        sink = event_sink or self._event_sink
+        if sink is None:
             return
         elapsed_ms = (
             max(0, round((self._clock() - started) * 1000))
-            if started is not None
-            else 0
+            if started is not None else 0
         )
         event = RetrievalContributionEvent(
-            kind="retrieval_contribution",
-            contribution_id=contribution_id,
-            outcome=outcome,
-            accepted_count=accepted_count,
-            dropped_count=dropped_count,
-            elapsed_ms=elapsed_ms,
+            kind="retrieval_contribution", contribution_id=contribution_id,
+            outcome=outcome, accepted_count=accepted_count,
+            dropped_count=dropped_count, elapsed_ms=elapsed_ms,
             failure_code=failure_code,
         )
         try:
-            self._event_sink({
+            sink({
                 "kind": event.kind,
                 "contribution_id": event.contribution_id,
                 "outcome": event.outcome,

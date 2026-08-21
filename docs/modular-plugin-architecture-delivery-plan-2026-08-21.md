@@ -82,7 +82,7 @@ PR 描述必须包含：
 
 #### PR-01：RetrievalContributorHost + Contract Kit
 
-状态：实现中。
+状态：实现完成，正在闭合双路 subagent review。
 
 范围：
 
@@ -96,6 +96,14 @@ PR 描述必须包含：
   也不把 selected-source graph 移到其 attestation/baseline guard 前；
 - scope/provenance 复检必须 batch 化，禁止按 candidate 产生 N+1；核心 request
   cancellation 传播，插件自己的失败、超时或 local cancellation 才 fail-open；
+- `app.bootstrap` 是把扩展 runtime 与 repository adapter 接起来的唯一外层组合根，
+  workflow 只依赖 domain host port；availability probe 不得获得 reader/model/connection，
+  执行 context 在确认至少一个 contribution available 后才构造；
+- manifest 声明与实时 capability decision 共同裁剪每个 contribution 可见的窄端口；
+  invocation 路由和 core-owned admission policy 随拓扑冻结，implementation 运行期改字段
+  不得改写路由；强合同 contribution 可登记 atomic admission；
+- proposal 在 core-owned deployment limit 后才进入一次权威 batch hydrate；插件提交的 value
+  不得直接进入结果，畸形 enum/identity/provenance/token 必须完整 fail-open；
 - contract kit 覆盖 no-op、异常、超时、取消、越 scope、非法 provenance、驱逐/重排 baseline、连接持有与 content-free event。
 
 不做：selected-source graph 或 generated-question 迁移，不新增用户能力。

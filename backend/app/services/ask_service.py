@@ -402,8 +402,13 @@ class AskService:
         """Append quality-approved G after frozen B; otherwise return B."""
         retrieval_contributors = getattr(self, "retrieval_contributors", None)
         if retrieval_contributors is not None:
+            from app.services.retrieval_run import current_retrieval_run
+
+            run = current_retrieval_run()
             chunks = retrieval_contributors.run(
-                chunks, invocation="selected_evidence"
+                chunks,
+                invocation="selected_evidence",
+                cancellation=(run.cancel_event if run is not None else None),
             )
         if self.selected_source_graph is None:
             return list(chunks), None

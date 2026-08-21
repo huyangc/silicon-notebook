@@ -8,8 +8,12 @@ database connection, raw model client or mutable request context.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Any, Callable, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
+from app.domain.extensions import (
+    RetrievalContributorHostPort,
+    RetrievalInvocation,
+)
 from app.extension_sdk.contracts import (
     ActorRef,
     CancellationToken,
@@ -19,7 +23,9 @@ from app.extension_sdk.contracts import (
 
 
 RETRIEVAL_CONTRIBUTOR_POINT = "retrieval.contributor"
-RetrievalInvocation = Literal["selected_evidence", "chunk_candidates"]
+RETRIEVAL_SCOPE_READER_CAPABILITY = "retrieval:scope_bound_evidence"
+SCHEDULED_MODEL_ACCESS_CAPABILITY = "model:scheduled_access"
+RetrievalAdmissionPolicy = Literal["additive", "atomic"]
 EvidenceProvenanceKind = Literal[
     "chunk", "element", "knowledge_object", "relation", "ppr"
 ]
@@ -45,6 +51,7 @@ class RetrievalContributionBudget:
 
     max_items: int
     max_tokens: int
+    max_proposals: int
     deadline_monotonic: float | None = None
 
 
@@ -78,15 +85,11 @@ class EvidenceReadRequest:
 
 @runtime_checkable
 class ScopeBoundEvidenceReader(Protocol):
-    """Core-owned scope decision; implementations must filter before reading."""
+    """Core-owned bounded hydrate; implementations filter before reading."""
 
     def read(
         self, request: EvidenceReadRequest
     ) -> tuple[EvidenceCandidate[Any], ...]: ...
-
-    def allows_many(
-        self, candidates: tuple[EvidenceCandidate[Any], ...]
-    ) -> tuple[bool, ...]: ...
 
 
 @runtime_checkable
@@ -112,9 +115,35 @@ class RetrievalExtensionContext:
     run: RetrievalRunRef
     cancellation: CancellationToken
     budget: RetrievalContributionBudget
-    reader: ScopeBoundEvidenceReader
+    reader: ScopeBoundEvidenceReader | None
     models: ScheduledModelAccess | None
+
+
+@dataclass(frozen=True)
+class RetrievalAvailabilityContext:
+    """I/O-free metadata supplied to a contribution availability probe."""
+
+    plugin_id: str
+    contribution_id: str
+    invocation: RetrievalInvocation
+    cancellation: CancellationToken | None = None
+
+
+@dataclass(frozen=True)
+class RetrievalHostContext:
+    """Core-only call state projected into one narrower plugin context."""
+
+    invocation: RetrievalInvocation
+    actor: ActorRef
+    notebook: NotebookRef
+    scope: FrozenRetrievalScopeRef
+    run: RetrievalRunRef
+    cancellation: CancellationToken
+    budget: RetrievalContributionBudget
+    admission_reader: ScopeBoundEvidenceReader
+    model_access: ScheduledModelAccess | None
     connection: ConnectionLeaseProbe
+    event_sink: Callable[[dict[str, object]], None] | None = None
 
 
 @runtime_checkable
