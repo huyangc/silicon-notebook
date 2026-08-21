@@ -7,6 +7,7 @@ from typing import Any, Literal, Protocol, TypeVar
 
 
 RetrievalInvocation = Literal["selected_evidence", "chunk_candidates"]
+GENERATED_QUESTION_ACCESS_CAPABILITY = "retrieval:generated_question_access"
 T = TypeVar("T")
 
 
@@ -62,6 +63,7 @@ class RetrievalContributionCallContext:
     admission_source: RetrievalEvidenceReadPort
     selected_source_graph_source: RetrievalProposalSourcePort | None
     connection_probe: Any
+    generated_question_source: RetrievalProposalSourcePort | None = None
     deadline_monotonic: float | None = None
 
 
@@ -76,4 +78,5 @@ class RetrievalContributorHostPort(Protocol):
         baseline_identity: Callable[[T], str] | None = None,
         cancellation: Any | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
+        disabled_capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[T]: ...

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from app.domain.extensions import (
+    GENERATED_QUESTION_ACCESS_CAPABILITY,
     RetrievalContributorHostPort,
     RetrievalInvocation,
 )
@@ -141,6 +142,13 @@ class SelectedSourceGraphAccess(Protocol):
     def contribute(self) -> ContributorResult[EvidenceCandidate[Any]]: ...
 
 
+@runtime_checkable
+class GeneratedQuestionAccess(Protocol):
+    """Request-bound core adapter for the optional question index lane."""
+
+    def contribute(self) -> ContributorResult[EvidenceCandidate[Any]]: ...
+
+
 @dataclass(frozen=True)
 class RetrievalExtensionContext:
     invocation: RetrievalInvocation
@@ -153,6 +161,7 @@ class RetrievalExtensionContext:
     reader: ScopeBoundEvidenceReader | None
     models: ScheduledModelAccess | None
     selected_source_graph: SelectedSourceGraphAccess | None = None
+    generated_question: GeneratedQuestionAccess | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +189,7 @@ class RetrievalHostContext:
     model_access: ScheduledModelAccess | None
     connection: ConnectionLeaseProbe
     selected_source_graph_access: SelectedSourceGraphAccess | None = None
+    generated_question_access: GeneratedQuestionAccess | None = None
 
 
 @runtime_checkable

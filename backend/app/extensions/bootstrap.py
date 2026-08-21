@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Callable, Mapping
 
 from app.extension_sdk import (
+    GENERATED_QUESTION_ACCESS_CAPABILITY,
     SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     Availability,
     AvailabilityStatus,
@@ -15,6 +16,8 @@ from app.extension_sdk import (
     RetrievalHostContext,
 )
 from app.extensions.builtin import (
+    GENERATED_QUESTION_BUNDLE,
+    GENERATED_QUESTION_CONTRIBUTION_ID,
     SELECTED_SOURCE_GRAPH_BUNDLE,
     SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID,
 )
@@ -80,12 +83,25 @@ def default_extension_runtime() -> ExtensionRuntime:
             "selected_source_graph_access_unavailable",
         )
 
+    def generated_question_access(context: object | None) -> Availability:
+        if (
+            type(context) is RetrievalHostContext
+            and context.generated_question_access is not None
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "generated_question_access_unavailable",
+        )
+
     return build_extension_runtime(
-        (SELECTED_SOURCE_GRAPH_BUNDLE,),
+        (GENERATED_QUESTION_BUNDLE, SELECTED_SOURCE_GRAPH_BUNDLE),
         capability_decisions={
+            GENERATED_QUESTION_ACCESS_CAPABILITY: generated_question_access,
             SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,
         },
         retrieval_admission_policies={
+            GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
             SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
         },
     )

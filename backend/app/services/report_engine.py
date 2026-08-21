@@ -1177,6 +1177,7 @@ class ReportEngine:
                 DEFAULT_REPORT_RETRIEVAL_FANOUT,
             )),
             correlation_id=rid,
+            actor_id=self.user_id,
             cancel_event=self.cancel_event,
         ):
             return self._plan_outline_run(
@@ -2515,6 +2516,7 @@ class ReportEngine:
                 DEFAULT_REPORT_RETRIEVAL_FANOUT,
             )),
             correlation_id=rid,
+            actor_id=self.user_id,
             cancel_event=self.cancel_event,
         ):
             return self._generate_run(notebook_id, rid, question, depth)

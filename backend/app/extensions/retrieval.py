@@ -16,6 +16,7 @@ from app.domain.extensions import (
 from app.extension_sdk import (
     RETRIEVAL_CONTRIBUTOR_POINT,
     RETRIEVAL_SCOPE_READER_CAPABILITY,
+    GENERATED_QUESTION_ACCESS_CAPABILITY,
     SCHEDULED_MODEL_ACCESS_CAPABILITY,
     SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     ActorRef,
@@ -124,6 +125,10 @@ class _SelectedSourceGraphAccess:
         )
 
 
+class _GeneratedQuestionAccess(_SelectedSourceGraphAccess):
+    """Same narrow proposal bridge, kept point-specific in the SDK context."""
+
+
 class RetrievalHostCancelled(RuntimeError):
     """Core request cancellation; callers must propagate, never fail open."""
 
@@ -215,6 +220,7 @@ class RetrievalContributorHost:
         baseline_identity: Callable[[T], str] | None = None,
         cancellation: CancellationToken | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
+        disabled_capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[T]:
         try:
             return self._run(
@@ -225,6 +231,7 @@ class RetrievalContributorHost:
                 baseline_identity=baseline_identity,
                 cancellation=cancellation,
                 event_sink=event_sink,
+                disabled_capabilities=disabled_capabilities,
             )
         except _MalformedCancellationToken:
             return baseline
@@ -239,8 +246,21 @@ class RetrievalContributorHost:
         baseline_identity: Callable[[T], str] | None = None,
         cancellation: CancellationToken | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
+        disabled_capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[T]:
-        registrations = self._by_invocation.get(invocation, ())
+        if (
+            not isinstance(disabled_capabilities, frozenset)
+            or any(
+                type(capability) is not str or not capability
+                for capability in disabled_capabilities
+            )
+        ):
+            return baseline
+        registrations = tuple(
+            registration
+            for registration in self._by_invocation.get(invocation, ())
+            if registration.requires.isdisjoint(disabled_capabilities)
+        )
         if not registrations:
             return baseline
 
@@ -452,6 +472,11 @@ class RetrievalContributorHost:
                     if SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY in granted
                     else None
                 ),
+                generated_question=(
+                    context.generated_question_access
+                    if GENERATED_QUESTION_ACCESS_CAPABILITY in granted
+                    else None
+                ),
             )
             started = self._clock()
             try:
@@ -611,6 +636,17 @@ class RetrievalContributorHost:
                     ))
                 )
             )
+            or (
+                call.generated_question_source is not None
+                and (
+                    not callable(getattr(
+                        call.generated_question_source, "propose", None
+                    ))
+                    or not callable(getattr(
+                        call.generated_question_source, "read", None
+                    ))
+                )
+            )
             or not callable(
                 getattr(call.connection_probe, "is_connection_held", None)
             )
@@ -620,6 +656,11 @@ class RetrievalContributorHost:
         access = (
             _SelectedSourceGraphAccess(graph_source)
             if graph_source is not None else None
+        )
+        question_source = call.generated_question_source
+        question_access = (
+            _GeneratedQuestionAccess(question_source)
+            if question_source is not None else None
         )
         return RetrievalHostContext(
             invocation=invocation,
@@ -637,6 +678,7 @@ class RetrievalContributorHost:
             admission_reader=_CallEvidenceReader(call.admission_source),
             model_access=None,
             selected_source_graph_access=access,
+            generated_question_access=question_access,
             connection=call.connection_probe,
         )
 

@@ -168,19 +168,55 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     assert captured == {"retrieval_contributor_host": host}
 
 
-def test_default_topology_registers_one_atomic_selected_graph_contributor():
+def test_default_topology_registers_two_point_specific_atomic_contributors():
     from app.extensions import default_extension_runtime
-    from app.extensions.builtin import SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID
+    from app.extensions.builtin import (
+        GENERATED_QUESTION_CONTRIBUTION_ID,
+        SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID,
+    )
 
     runtime = default_extension_runtime()
     contributions = runtime.registry.contributions("retrieval.contributor")
 
     assert [item.contribution.declaration.id for item in contributions] == [
+        GENERATED_QUESTION_CONTRIBUTION_ID,
         SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID
     ]
     frozen = runtime.retrieval_contributors._registrations
-    assert len(frozen) == 1
-    assert frozen[0].admission == "atomic"
+    assert {
+        item.registered.contribution.declaration.id: item.admission
+        for item in frozen
+    } == {
+        GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
+        SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
+    }
+
+
+def test_chunk_candidate_host_anchor_stays_between_baseline_and_selection():
+    services = Path(__file__).resolve().parents[1] / "app" / "services"
+    source = (services / "retrieval_candidates.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    owner = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "CandidateRetrievalService"
+    )
+    retrieve = next(
+        node for node in owner.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_retrieve_chunks"
+    )
+    calls = [
+        node.func.attr
+        for node in ast.walk(retrieve)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+
+    assert calls == [
+        "_retrieve_chunks_baseline",
+        "_run_chunk_candidate_contributors",
+    ]
+    assert "_generated_question_supplement(" not in source
 
 
 def test_ask_and_report_no_longer_call_graph_service_directly():
