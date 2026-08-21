@@ -1,0 +1,500 @@
+"""Memory recall, formal context, Ask, and Memory proposal MCP tools."""
+
+from typing import Any, Callable, Mapping, Sequence
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from app.core.memory_inputs import (
+    normalize_client_request_id,
+    normalize_content,
+    normalize_evidence_refs,
+    normalize_reason,
+    normalize_tags,
+    normalize_task_context,
+    normalize_title,
+)
+from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
+from app.services.agent_profile_block import resolve_agent_profile_names
+
+from ._shared import (
+    RESULT_LIMIT,
+    TEXT_LIMIT,
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+)
+
+
+# Citations have no per-item cap of their own. Pre-fitting them keeps the shared
+# output-budget convergence loop from halving the answer text first under a
+# realistic CJK citation payload.
+CITATIONS_BUDGET_CHARS = 1_800
+# Mirrors AskIntentPreviewRequest.conversation_id.
+CONVERSATION_ID_MAX_LENGTH = 200
+
+
+def _validate_proposal_input(
+    title: str,
+    content_md: str,
+    tags: Sequence[str] | None,
+    reason: str,
+    task_context: Mapping[str, Any],
+    evidence_refs: Sequence[Mapping[str, Any]],
+    client_request_id: str,
+) -> tuple[str, str, list[str], str, dict[str, Any], list[dict[str, Any]], str]:
+    """Validate the MCP write envelope before any provider lookup."""
+    clean_title = normalize_title(title)
+    clean_content = normalize_content(content_md)
+    clean_reason = normalize_reason(reason)
+    clean_request_id = normalize_client_request_id(client_request_id)
+    if not clean_reason:
+        raise ValueError("reason must be nonblank")
+    clean_tags = normalize_tags(tags or [])
+    clean_task_context = normalize_task_context(task_context)
+    if not clean_task_context:
+        raise ValueError("task_context must be nonblank")
+    clean_evidence = normalize_evidence_refs(evidence_refs)
+    return (
+        clean_title,
+        clean_content,
+        clean_tags,
+        clean_reason,
+        clean_task_context,
+        clean_evidence,
+        clean_request_id,
+    )
+
+
+def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
+    return resolve_agent_profile_names(service.list_agent_profiles, owner_id)
+
+
+def register_memory_context_tools(
+    server: FastMCP, repository_provider: Callable[[], Any]
+) -> None:
+    @server.tool(
+        description=(
+            "Search owner-private Memory in the selected notebook. Candidate "
+            "entries are unconfirmed evidence and never formal notebook conclusions."
+        )
+    )
+    async def search_agent_memory(
+        query: str, ctx: Context, limit: int = 8
+    ) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "memory:read"
+        )
+
+        def load() -> list[dict[str, Any]]:
+            include_candidates = True
+            try:
+                repo.require_agent_access(
+                    principal, "memory:read_candidates", notebook_id
+                )
+            except PermissionError:
+                include_candidates = False
+            hits = repo.agent_memory_hits(
+                principal.owner_id,
+                notebook_id,
+                query,
+                include_candidates=include_candidates,
+                limit=min(limit, RESULT_LIMIT),
+            )
+            profiles = _profile_names(
+                repo, principal.owner_id
+            )
+            rows: list[dict[str, Any]] = []
+            for hit in hits:
+                try:
+                    record = repo.get_memory(hit.memory_id, principal.owner_id)
+                except (KeyError, PermissionError):
+                    # Retrieval and hydration are separate reads. A lifecycle
+                    # transition/delete/access loss between them must fail
+                    # closed for this hit without aborting the whole search.
+                    continue
+                if record.notebook_id != notebook_id or record.status not in {
+                    "candidate", "confirmed"
+                }:
+                    continue
+                if record.status == "candidate" and not include_candidates:
+                    continue
+                rows.append(
+                    {
+                        "memory_id": record.id,
+                        "title": record.title,
+                        "content": record.content_md,
+                        "status": record.status,
+                        "unconfirmed": record.status == "candidate",
+                        "formal_notebook_conclusion": record.status == "confirmed",
+                        "created_by_agent": profiles.get(
+                            record.agent_profile_id or "", ""
+                        ),
+                        "score": round(float(hit.score), 6),
+                        "authority": int(hit.authority),
+                        "provenance": record.provenance,
+                        "content_is_untrusted_evidence": True,
+                    }
+                )
+            return rows
+
+        rows = await _run_with_progress(
+            ctx, load, label="search_agent_memory"
+        )
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        return _budget_response(
+            {"notebook_id": notebook_id, "items": rows[:cap]},
+            initial_omitted_items=max(0, len(rows) - cap),
+            field_limits={"title": 300, "content": TEXT_LIMIT,
+                          "created_by_agent": 200},
+            provenance_budget_chars=2_000,
+        )
+
+    @server.tool(
+        description=(
+            "Search source, KG, and confirmed Memory in the selected notebook. "
+            "Candidate Memory is never returned."
+        )
+    )
+    async def search_notebook_context(
+        query: str, ctx: Context, limit: int = 12
+    ) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> list[dict[str, Any]]:
+            with _owner_request_context(principal):
+                response = repo.search_notebook(notebook_id, query)
+            allow_memory = True
+            try:
+                repo.require_agent_access(
+                    principal, "memory:read", notebook_id
+                )
+            except PermissionError:
+                allow_memory = False
+            rows: list[dict[str, Any]] = []
+            for hit in response.hits:
+                if hit.memory_id and not allow_memory:
+                    continue
+                rows.append(
+                    {
+                        "type": "memory" if hit.memory_id else hit.scope.lower(),
+                        "label": hit.label,
+                        "text": hit.text,
+                        "memory_id": hit.memory_id,
+                        "source_id": hit.source_id,
+                        "element_id": hit.element_id,
+                        "authority": (
+                            "confirmed_memory" if hit.memory_id else "notebook_evidence"
+                        ),
+                        "provenance": hit.provenance,
+                        "content_is_untrusted_evidence": True,
+                    }
+                )
+            return rows
+
+        rows = await _run_with_progress(
+            ctx, load, label="search_notebook_context"
+        )
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        return _budget_response(
+            {"notebook_id": notebook_id, "items": rows[:cap]},
+            initial_omitted_items=max(0, len(rows) - cap),
+            field_limits={"type": 100, "label": 300, "text": TEXT_LIMIT,
+                          "authority": 100},
+            provenance_budget_chars=2_000,
+        )
+
+    @server.tool(description="Get one owner-private Memory from the selected notebook.")
+    async def get_memory(memory_id: str, ctx: Context) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "memory:read"
+        )
+
+        def load() -> dict[str, Any]:
+            item = repo.get_memory(memory_id, principal.owner_id)
+            if item.notebook_id != notebook_id or item.status in {
+                "rejected",
+                "deprecated",
+            }:
+                raise KeyError(memory_id)
+            if item.status == "candidate":
+                repo.require_agent_access(
+                    principal, "memory:read_candidates", notebook_id
+                )
+            profiles = _profile_names(
+                repo, principal.owner_id
+            )
+            return _budget_response({
+                "memory_id": item.id,
+                "notebook_id": item.notebook_id,
+                "title": item.title,
+                "content": item.content_md,
+                "tags": list(item.tags),
+                "status": item.status,
+                "unconfirmed": item.status == "candidate",
+                "formal_notebook_conclusion": item.status == "confirmed",
+                "created_by_agent": profiles.get(
+                    item.agent_profile_id or "", ""
+                ),
+                "provenance": item.provenance,
+                "content_is_untrusted_evidence": True,
+            }, field_limits={"title": 300, "content": 6_000, "tags": 200,
+                             "created_by_agent": 200},
+                provenance_budget_chars=2_000,
+                tags_budget_chars=1_500)
+
+        return await _run_with_progress(ctx, load, label="get_memory")
+
+    @server.tool(
+        description=(
+            "Ask the selected notebook using confirmed formal context only. "
+            "Pass the conversation_id from a prior response to continue that "
+            "conversation across turns. Any conversation of the same owner in "
+            "the same notebook can be continued -- including ones started by "
+            "another Agent profile or in the web UI. If the id belongs to a "
+            "different notebook or owner, the server silently starts a new "
+            "conversation instead of erroring -- compare the returned "
+            "conversation_id against the one you sent to detect that."
+        )
+    )
+    async def ask_notebook(
+        question: str, ctx: Context, mode: str = "chunk",
+        conversation_id: str = "",
+    ) -> dict[str, Any]:
+        if mode not in {"chunk", "reasoning"}:
+            raise ValueError("mode must be chunk or reasoning")
+        # Same rail the HTTP entry points enforce, checked HERE rather than left
+        # to `AskRequest`'s validator below, for the reason `conversation_id`
+        # already has its own check: a pydantic ValidationError raised deep in
+        # `run_ask` surfaces to an Agent as an opaque model dump, while this
+        # says what to do about it.
+        #
+        # This is a real behaviour change for long-lived Agent tokens, which
+        # could previously submit a question of any length -- deliberate, and
+        # registered in docs. The projection that serves a shared conversation's
+        # question verbatim to anonymous readers cannot be bounded by anything
+        # except the write side, and an MCP client is a write side like any
+        # other. 4,000 characters is a question no Agent should need to exceed;
+        # past it the material belongs in an uploaded source, not in the prompt.
+        if len(question) > ASK_QUESTION_MAX_CHARS:
+            raise ValueError(
+                f"question too long: {len(question)} characters, the maximum is "
+                f"{ASK_QUESTION_MAX_CHARS}. Shorten the question, or add the "
+                f"long material to the notebook as a source and ask about it."
+            )
+        if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
+            raise ValueError("conversation_id too long")
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "ask:execute"
+        )
+
+        def run_ask():
+            with _owner_request_context(principal):
+                # 硬约束(PR#334):空库(ask_available=False)一律拒绝——与 /ask、/ask/stream
+                # 同一权威闸门,覆盖 MCP 这个 user-facing ask 入口(codex 第10轮 P2)。
+                # get_notebook 在 owner 上下文内,confirmed-memory 判定按调用者作用域。
+                notebook = repo.get_notebook(notebook_id)
+                if not notebook.ask_available:
+                    raise ValueError(
+                        "该笔记本还没有可用于回答的内容，请先添加来源，"
+                        "或在「设置 → 编辑当前笔记本」里挂载一个参考库。"
+                    )
+                return repo.ask(
+                    notebook_id,
+                    AskRequest(
+                        question=question,
+                        mode=mode,
+                        conversation_id=conversation_id or None,
+                    ),
+                )
+
+        answer = await _run_with_progress(ctx, run_ask, label="ask_notebook")
+
+        def check_memory_scope() -> bool:
+            # Mirrors search_notebook_context's allow_memory gate exactly: a
+            # token without memory:read must not see memory-backed citations,
+            # even though chunk/reasoning ask unconditionally builds them.
+            try:
+                repo.require_agent_access(principal, "memory:read", notebook_id)
+                return True
+            except PermissionError:
+                return False
+
+        allow_memory = await anyio.to_thread.run_sync(check_memory_scope)
+
+        anchor_rows = []
+        for anchor in answer.anchors[:RESULT_LIMIT]:
+            row = {
+                "key": anchor.key,
+                "object_id": anchor.object_id,
+                "object_type": anchor.object_type,
+                "label": anchor.label,
+                "source_title": anchor.source_title,
+                "location_label": anchor.location_label,
+                "source_id": anchor.source_id,
+                "element_id": anchor.element_id,
+                "tier": anchor.tier,
+                "provenance": anchor.provenance,
+            }
+            if anchor.knowhow is not None:
+                row["knowhow"] = {
+                    "table_id": anchor.knowhow.table_id,
+                    "row_id": anchor.knowhow.row_id,
+                }
+            anchor_rows.append(row)
+        # Scope-filtered rows leave NO trace, exactly as search_notebook_context
+        # drops memory hits: `omitted_items` would otherwise tell a token
+        # without memory:read how many private Memory citations back this answer
+        # -- a number it is not entitled to. Budget truncation is a different
+        # thing and is still reported.
+        #
+        # ⚠ The filter must run BEFORE the [:RESULT_LIMIT] slice, and the
+        # omitted count below must be taken from the FILTERED length. Filtering
+        # inside the loop over an already-sliced list leaks the very number this
+        # is protecting: with 25 citations of which 3 are Memory, a token with
+        # memory:read gets 20 rows + omitted_items=5, and a token without gets
+        # 18 rows + omitted_items=5 -- and 20-18 is the Memory count, recovered
+        # by arithmetic from a response that was supposed to hide it.
+        visible_citations = [
+            citation for citation in answer.citations
+            if allow_memory or not citation.memory_id
+        ]
+        citation_rows = []
+        for citation in visible_citations[:RESULT_LIMIT]:
+            row = {
+                "label": citation.label,
+                "source_id": citation.source_id,
+                "element_id": citation.element_id,
+                "location_label": citation.location_label,
+                "quoted_span": citation.quoted_span,
+                "source_file_name": citation.source_file_name,
+                "tier": citation.tier,
+                "content_is_untrusted_evidence": True,
+            }
+            # Both keys are omitted when empty, matching get_cited_element's
+            # rule for the same field: a citation from the notebook the Agent
+            # itself selected carries notebook_id="", and a non-Memory citation
+            # carries memory_id="". Emitting the empty string says nothing the
+            # caller does not already know and spends response budget on every
+            # citation of every answer -- and this is the one tool whose payload
+            # actually competes for that budget (see CITATIONS_BUDGET_CHARS).
+            if citation.notebook_id:
+                row["notebook_id"] = citation.notebook_id
+            if citation.memory_id:
+                row["memory_id"] = citation.memory_id
+            if citation.knowhow is not None:
+                row["knowhow"] = {
+                    "table_id": citation.knowhow.table_id,
+                    "row_id": citation.knowhow.row_id,
+                }
+            citation_rows.append(row)
+        return _budget_response({
+            "notebook_id": notebook_id,
+            "answer_id": answer.answer_id,
+            "answer": answer.answer or answer.conclusion,
+            "conclusion": answer.conclusion,
+            "grounded": answer.grounded,
+            "evidence_level": answer.evidence_level,
+            "mode": answer.mode,
+            "conversation_id": answer.conversation_id,
+            "anchors": anchor_rows,
+            "citations": citation_rows,
+        }, initial_omitted_items=(
+                max(0, len(answer.anchors) - RESULT_LIMIT)
+                # `visible_citations`, not `answer.citations` -- see the note
+                # above the filter: counting the unfiltered list here is exactly
+                # how the hidden Memory count leaks back out.
+                + max(0, len(visible_citations) - RESULT_LIMIT)
+            ),
+            field_limits={"answer": 6_000, "conclusion": 1_000,
+                          "object_type": 100, "label": 300,
+                          "source_title": 300, "location_label": 300,
+                          "quoted_span": 200, "source_file_name": 300},
+            anchors_budget_chars=3_500,
+            anchor_provenance_budget_chars=500,
+            citations_budget_chars=CITATIONS_BUDGET_CHARS)
+
+    @server.tool(
+        description=(
+            "Propose an owner-private candidate Memory in the selected notebook. "
+            "It remains unconfirmed until the user reviews it in silicon-notebook."
+        )
+    )
+    async def propose_memory(
+        title: str,
+        content_md: str,
+        reason: str,
+        task_context: Mapping[str, Any],
+        evidence_refs: list[dict[str, Any]],
+        client_request_id: str,
+        ctx: Context,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        (
+            title,
+            content_md,
+            clean_tags,
+            reason,
+            clean_task_context,
+            clean_evidence_refs,
+            client_request_id,
+        ) = _validate_proposal_input(
+            title,
+            content_md,
+            tags,
+            reason,
+            task_context,
+            evidence_refs,
+            client_request_id,
+        )
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "memory:propose"
+        )
+
+        def create() -> Any:
+            return repo.create_memory_candidate(
+                notebook_id,
+                principal.owner_id,
+                principal.profile_id,
+                client_request_id,
+                title,
+                content_md,
+                clean_tags,
+                reason,
+                clean_task_context,
+                clean_evidence_refs,
+            )
+
+        item = await _run_with_progress(ctx, create, label="propose_memory")
+        return _budget_response({
+            "memory_id": item.id,
+            "notebook_id": item.notebook_id,
+            "status": item.status,
+            "title": item.title,
+            "created_by_agent": principal.profile_name,
+            "requires_user_confirmation": True,
+        }, field_limits={"title": 300, "created_by_agent": 200})
+
+    # --- knowhow-tables PR-2+3 Task 10: agent surface (design doc §⑥) ------
+    # Same service core as app.api.knowhow_agent_routes's HTTP endpoints
+    # (app.services.knowhow.api), imported function-locally to keep this
+    # feature's dependency inside the feature. Every tool below reuses
+    # _selected_notebook exactly like search_notebook_context/ask_notebook, so
+    # no bespoke auth flow is needed here even though this feature's HTTP side
+    # has no notebook_id in its URL at all.
+    # (The original note here claimed the local import avoided shifting
+    # "exact-line-pinned" consumer sites checked by a
+    # `test_repository_surface_manifest.py`. That was already wrong: no such
+    # test exists, the architecture guards are semantic — {path, scope, kind,
+    # target}, no line numbers — and the source-management block below inserted
+    # ~450 lines above those sites with every guard still green.)
+    from app.services.knowhow import api as knowhow_api
+    from app.services.knowhow import audit as knowhow_audit

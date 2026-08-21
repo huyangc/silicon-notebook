@@ -4,6 +4,8 @@
 
 This document preserves the contributor-facing architecture summary, verification gate, workflow, test architecture, and documentation-maintenance contract. [AGENTS.md](../AGENTS.md) remains the full agent/developer contract and [architecture.md](../architecture.md) the detailed runtime architecture.
 
+The external-Agent MCP surface is composed from fixed built-in capability bundles under `app.api.mcp_tools`. `app.api.mcp_server` remains the only FastMCP transport/session composition root and explicitly invokes the registrars in the 22-tool public order. Registrars do no provider work; handlers reuse one live bearer/principal/notebook authority implementation and one output/progress implementation. This boundary is deliberately not dynamic discovery or `agent.tool_provider`; no bundle may import extensions/SDK/registry or cache request authority at registration time.
+
 ## Numeric limits and truncation
 
 Production code must not hide result-changing literal slices or limits at a

@@ -16,6 +16,8 @@ Report 完成后扩展点使用独立的部署 deadline 与 finding 上限。取
 
 Knowledge extraction 同样提供休眠的 `knowledge.candidate_projector` 批量扩展点，物理位置在旧 core extraction、relink 与 partial-retry gate 之后、唯一一次 core-owned 来源代次事务之前。Contributor 只取得不可变的来源内元素/schema 视图和 request-local opaque ref，只能提议有界对象与关系；evidence 原文、active schema、edge pair、归属、代次、审核状态及单次原子发布仍由 core 复检和拥有。同步 callback 可安全完成，但 deadline 后返回的结果不予接纳。默认拓扑为空；隐藏 Memory/Knowhow 来源永不进入该 point，无插件路径不增加 snapshot、capability、clock、event、数据库、模型、embedding 或检索工作。
 
+现有 22 个内建 MCP 工具现由固定 capability bundle 在一个薄 `mcp_server` 组合根中显式注册。工具顺序、schema、实时 token/成员权复核、owner-only 写闸、Memory candidate 审核边界及 repository/model I/O 均保持不变；全部 22 个工具现统一满足文档规定的「恰好一次 progress wrapper」不变量。这只是内部高内聚重构，不开放动态工具注册表或 `agent.tool_provider` 接口。
+
 ## 核心能力
 
 - 结构化来源摄取；MinerU 配置后可保留元素级证据、公式、表格和文档内图片；来源详情只加载一页有界元素并按需继续展开，不再一次渲染整篇大文档。公式证据会在来源详情与知识图谱出处卡中排版，LaTeX 渲染失败时仍显示原文，宽块级公式只在所属面板内横向滚动。

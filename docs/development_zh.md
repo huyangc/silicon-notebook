@@ -4,6 +4,8 @@
 
 本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。完整 Agent/开发约束仍以 [AGENTS.md](../AGENTS.md) 为准，详细运行时架构以 [architecture.md](../architecture.md) 为准。
 
+外部 Agent MCP 面由 `app.api.mcp_tools` 下的固定内建 capability bundle 组合；`app.api.mcp_server` 仍是唯一 FastMCP transport/session 组合根，并按 22 工具公开顺序显式调用 registrar。registrar 不触发 provider 工作，handler 复用唯一的实时 bearer/principal/notebook 权威实现及统一 output/progress 实现。该边界刻意不是动态发现或 `agent.tool_provider`；bundle 不得 import extensions/SDK/registry，也不得在注册期缓存请求权威。
+
 ## 数值上限与截断
 
 生产代码不得在调用点隐藏会改变结果的数字切片或上限。不可调的 wire/storage
