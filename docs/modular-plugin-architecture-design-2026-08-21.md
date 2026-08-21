@@ -769,6 +769,8 @@ PR gate 至少检查：
 
 ## 14. 迁移方案
 
+具体 PR 边界、subagent review、CI 与合入流水见[交付与 PR 流水计划](./modular-plugin-architecture-delivery-plan-2026-08-21.md)。Phase 是迁移波次，不等同于单个 PR。
+
 ### 并行轨道 F：前端状态所有权 hooks（Phase 0 之后即可启动，不等 SDK）
 
 `page.tsx` 的 state-owner hooks 抽取是纯重构，不依赖 Extension SDK 的任何类型；把它捆在 Phase 5 会让 `page.tsx` 在 SDK 建设期间每个 PR 继续膨胀。因此单列为并行轨道：
