@@ -12,7 +12,7 @@ Ask 完成后扩展点使用部署配置的协作式 deadline：已开始的同�
 
 Report 完成后扩展点使用独立的部署 deadline 与 finding 上限。取消或失去终态认领权的旧 generation 不能伪造完成票据：SQLite/PostgreSQL 都用带状态谓词的同一原子 CAS 发布 `done`，只有提交成功才进入 auditor/observer host。
 
-来源 ingestion 还在解析完成与 core element 事务之间提供休眠的 `source.element_enricher` 批量扩展点，默认拓扑为空。未来 contributor 只能基于不可变解析元素视图补充有界、命名空间隔离且由原文接地的 metadata，不能修改文本、顺序、身份、parser/asset provenance，也不能写数据库或发起检索/模型工作；非法或失败 contribution 原样回到 parser baseline。
+来源 ingestion 还在解析完成与 core element 事务之间提供休眠的 `source.element_enricher` 批量扩展点，默认拓扑为空。未来 contributor 必须声明且实时通过元素正文 capability 后才能取得不可变解析元素视图，只能补充有界、命名空间隔离的 metadata，持久化字节预算包含插件 owner provenance；不能修改文本、顺序、身份、parser/asset provenance，也不能写数据库或发起检索/模型工作。每个 contribution 独立原子接纳，一条非法 contribution 不会抹掉其他合法 contribution 或 parser baseline。
 
 ## 核心能力
 

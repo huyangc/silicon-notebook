@@ -58,6 +58,13 @@ class ElementEnrichmentContext:
 
 @runtime_checkable
 class ElementEnricher(Protocol):
+    """Return one atomic ``AVAILABLE`` batch or a failure-only empty result.
+
+    ``PARTIAL`` and ``UNAVAILABLE`` cannot carry candidates at this point: core
+    admission isolates contributors and never persists a partially validated
+    contribution.
+    """
+
     def enrich(
         self, context: ElementEnrichmentContext
     ) -> ContributorResult[ElementEnrichmentCandidate]: ...

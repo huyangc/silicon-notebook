@@ -1,7 +1,6 @@
 """Core admission adapter for parsed-element metadata contributions."""
 from __future__ import annotations
 
-import json
 import math
 import re
 import time
@@ -14,6 +13,10 @@ from app.domain.extensions import (
     ElementEnrichmentPatch,
     ElementEnricherHostPort,
     ParsedElementEnvelope,
+)
+from app.domain.element_enrichment import (
+    persisted_element_enrichment_size,
+    valid_element_enrichment_owner,
 )
 from app.models.sources import SourceElement
 
@@ -65,21 +68,27 @@ def enrich_source_elements(
         return elements
     if type(now) not in {int, float} or not math.isfinite(float(now)):
         return elements
-    envelopes = tuple(
-        ParsedElementEnvelope(
-            ordinal=index,
-            element_type=element.element_type,
-            location_label=element.location_label,
-            text=element.text,
-            caption=(
-                element.metadata.get("caption", "")
-                if type(element.metadata.get("caption", "")) is str
-                else ""
-            ),
-        )
-        for index, element in enumerate(elements, start=1)
-    )
     try:
+        envelopes_list: list[ParsedElementEnvelope] = []
+        for index, element in enumerate(elements, start=1):
+            metadata = element.metadata
+            if type(metadata) is not dict:
+                return elements
+            caption = metadata.get("caption", "")
+            if type(caption) is not str:
+                caption = ""
+            fields = (
+                element.element_type,
+                element.location_label,
+                element.text,
+                caption,
+            )
+            if any(type(field) is not str for field in fields):
+                return elements
+            envelopes_list.append(
+                ParsedElementEnvelope(index, fields[0], fields[1], fields[2], fields[3])
+            )
+        envelopes = tuple(envelopes_list)
         patches = host.enrich_application(
             ElementEnrichmentCallContext(
                 envelopes,
@@ -100,68 +109,68 @@ def enrich_source_elements(
         return elements
     if len(patches) > max_proposals:
         return elements
-    result = list(elements)
-    byte_count = 0
-    provenance: dict[str, tuple[str, str]] = {}
-    for patch in patches:
-        if (
-            type(patch) is not ElementEnrichmentPatch
-            or type(patch.ordinal) is not int
-            or not 1 <= patch.ordinal <= len(result)
-            or not _stable_id(patch.plugin_id)
-            or not _stable_id(patch.contribution_id)
-            or type(patch.plugin_version) is not str
-            or not patch.plugin_version
-            or type(patch.caption) is not str
-            or len(patch.caption) > max_caption_chars
-        ):
-            return elements
-        baseline = result[patch.ordinal - 1]
-        metadata = deepcopy(baseline.metadata)
-        existing_extensions = metadata.get("extensions")
-        if existing_extensions is None:
-            extensions: dict[str, object] = {}
-        elif type(existing_extensions) is dict:
-            extensions = deepcopy(existing_extensions)
-        else:
-            return elements
-        if patch.contribution_id in extensions:
-            return elements
-        try:
-            patch_metadata = _thaw(patch.metadata)
-        except (TypeError, ValueError):
-            return elements
-        try:
-            byte_count += len(
-                json.dumps(
-                    {"metadata": patch_metadata, "caption": patch.caption},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-        except (TypeError, ValueError, UnicodeError):
-            return elements
-        if byte_count > max_metadata_bytes:
-            return elements
-        owner = (patch.plugin_id, patch.plugin_version)
-        previous_owner = provenance.setdefault(patch.contribution_id, owner)
-        if previous_owner != owner:
-            return elements
-        payload = {
-            "plugin_id": patch.plugin_id,
-            "plugin_version": patch.plugin_version,
-            "metadata": patch_metadata,
-        }
-        if patch.caption:
-            if metadata.get("caption") or patch.caption not in baseline.text:
+    try:
+        result = list(elements)
+        byte_count = 0
+        provenance: dict[str, tuple[str, str]] = {}
+        for patch in patches:
+            if (
+                type(patch) is not ElementEnrichmentPatch
+                or type(patch.ordinal) is not int
+                or not 1 <= patch.ordinal <= len(result)
+                or not valid_element_enrichment_owner(
+                    patch.plugin_id,
+                    patch.plugin_version,
+                    patch.contribution_id,
+                )
+                or type(patch.caption) is not str
+                or len(patch.caption) > max_caption_chars
+            ):
                 return elements
-            payload["caption"] = patch.caption
-        extensions[patch.contribution_id] = payload
-        metadata["extensions"] = extensions
-        result[patch.ordinal - 1] = baseline.model_copy(
-            update={"metadata": metadata}
-        )
-    return result
+            baseline = result[patch.ordinal - 1]
+            if type(baseline.metadata) is not dict:
+                return elements
+            metadata = deepcopy(baseline.metadata)
+            existing_extensions = metadata.get("extensions")
+            if existing_extensions is None:
+                extensions: dict[str, object] = {}
+            elif type(existing_extensions) is dict:
+                extensions = deepcopy(existing_extensions)
+            else:
+                return elements
+            if patch.contribution_id in extensions:
+                return elements
+            patch_metadata = _thaw(patch.metadata)
+            byte_count += persisted_element_enrichment_size(
+                plugin_id=patch.plugin_id,
+                plugin_version=patch.plugin_version,
+                contribution_id=patch.contribution_id,
+                metadata=patch_metadata,
+                caption=patch.caption,
+            )
+            if byte_count > max_metadata_bytes:
+                return elements
+            owner = (patch.plugin_id, patch.plugin_version)
+            previous_owner = provenance.setdefault(patch.contribution_id, owner)
+            if previous_owner != owner:
+                return elements
+            payload = {
+                "plugin_id": patch.plugin_id,
+                "plugin_version": patch.plugin_version,
+                "metadata": patch_metadata,
+            }
+            if patch.caption:
+                if metadata.get("caption") or patch.caption not in baseline.text:
+                    return elements
+                payload["caption"] = patch.caption
+            extensions[patch.contribution_id] = payload
+            metadata["extensions"] = extensions
+            result[patch.ordinal - 1] = baseline.model_copy(
+                update={"metadata": metadata}
+            )
+        return result
+    except Exception:
+        return elements
 
 
 def _thaw(value: object, *, depth: int = 0) -> object:
@@ -183,9 +192,4 @@ def _thaw(value: object, *, depth: int = 0) -> object:
     raise TypeError("invalid extension metadata")
 
 
-_STABLE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-
-
-def _stable_id(value: object) -> bool:
-    return type(value) is str and _STABLE_ID.fullmatch(value) is not None

@@ -28,6 +28,7 @@ from app.extension_sdk import (
     ExtensionResultStatus,
 )
 from app.extensions.bootstrap import build_extension_runtime, default_extension_runtime
+from app.extensions.registry import ExtensionRegistryError
 from app.models.sources import SourceElement
 from app.services.source_element_enrichment import enrich_source_elements
 
@@ -64,6 +65,9 @@ def _bundle(
     implementation: object,
     *,
     availability=None,
+    requires=(SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY,),
+    optional_requires=(),
+    version="1.0.0",
 ) -> _Bundle:
     declaration = ContributionDeclaration(
         contribution_id,
@@ -73,12 +77,13 @@ def _bundle(
     return _Bundle(
         ExtensionManifest(
             id=f"plugin-{contribution_id}",
-            version="1.0.0",
+            version=version,
             api_version=EXTENSION_API_VERSION,
             display_name=contribution_id,
             trust="builtin",
             contributions=(declaration,),
-            requires=(SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY,),
+            requires=requires,
+            optional_requires=optional_requires,
         ),
         ExtensionContribution(declaration, implementation, availability),
     )
@@ -95,16 +100,22 @@ def _runtime(*bundles: _Bundle):
     )
 
 
-def _call(*, probe: object | None = None, max_proposals: int = 8):
+def _call(
+    *,
+    probe: object | None = None,
+    cancellation: object | None = None,
+    max_proposals: int = 8,
+    max_metadata_bytes: int = 4096,
+):
     return ElementEnrichmentCallContext(
         elements=(
             ParsedElementEnvelope(1, "paragraph", "p1", "trusted caption", ""),
             ParsedElementEnvelope(2, "table", "p2", "row", "existing"),
         ),
-        cancellation=_Cancellation(),
+        cancellation=cancellation or _Cancellation(),
         connection_probe=probe or _Probe(),
         max_proposals=max_proposals,
-        max_metadata_bytes=4096,
+        max_metadata_bytes=max_metadata_bytes,
         max_caption_chars=128,
         deadline_monotonic=time.monotonic() + 60.0,
     )
@@ -118,6 +129,64 @@ def test_default_topology_keeps_element_enrichment_dormant():
     assert default_extension_runtime().element_enrichers.has_contributors is False
 
 
+@pytest.mark.parametrize(
+    "requires,optional_requires",
+    [
+        ((), ()),
+        ((), (SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY,)),
+    ],
+)
+def test_element_enricher_requires_declared_content_capability(
+    requires, optional_requires
+):
+    class Enricher:
+        def enrich(self, _context):
+            raise AssertionError("undeclared content capability reached plugin")
+
+    with pytest.raises(ExtensionRegistryError):
+        _runtime(
+            _bundle(
+                "enrich.undeclared",
+                Enricher(),
+                requires=requires,
+                optional_requires=optional_requires,
+            )
+        )
+
+
+def test_declared_content_capability_remains_live_and_can_deny_text_access():
+    calls = []
+
+    class Enricher:
+        def enrich(self, _context):
+            calls.append("called")
+            return _available()
+
+    runtime = build_extension_runtime(
+        (_bundle("enrich.denied", Enricher()),),
+        capability_decisions={
+            SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY: (
+                lambda _context: Availability(
+                    AvailabilityStatus.UNAVAILABLE,
+                    "content_access_unavailable",
+                )
+            )
+        },
+    )
+    assert runtime.element_enrichers.enrich_application(_call()) == ()
+    assert calls == []
+
+
+@pytest.mark.parametrize("version", ["v" * 65, "\ud800"])
+def test_element_enricher_rejects_unsafe_or_unbounded_owner_version(version):
+    class Enricher:
+        def enrich(self, _context):
+            return _available()
+
+    with pytest.raises(ExtensionRegistryError):
+        _runtime(_bundle("enrich.version", Enricher(), version=version))
+
+
 def test_empty_registry_returns_before_context_clock_probe_or_event():
     runtime = _runtime()
 
@@ -128,6 +197,28 @@ def test_empty_registry_returns_before_context_clock_probe_or_event():
     assert runtime.element_enrichers.enrich_application(
         object(), event_sink=poison
     ) == ()
+
+
+def test_hostile_cancellation_and_connection_getters_fail_open():
+    class Enricher:
+        def enrich(self, _context):
+            raise AssertionError("hostile boundary reached plugin")
+
+    class HostileCancellation:
+        @property
+        def is_set(self):
+            raise RuntimeError("private cancellation failure")
+
+    class HostileProbe:
+        @property
+        def is_connection_held(self):
+            raise RuntimeError("private probe failure")
+
+    host = _runtime(_bundle("enrich.boundary", Enricher())).element_enrichers
+    assert host.enrich_application(
+        _call(cancellation=HostileCancellation())
+    ) == ()
+    assert host.enrich_application(_call(probe=HostileProbe())) == ()
 
 
 def test_contributor_gets_one_immutable_batch_and_returns_namespaced_patch():
@@ -190,6 +281,43 @@ def test_invalid_contribution_fails_open_without_blocking_later_contributor():
     assert [patch.contribution_id for patch in patches] == ["b.valid"]
 
 
+def test_ungrounded_caption_only_rejects_its_contribution():
+    class Valid:
+        def enrich(self, context):
+            return _available(
+                ElementEnrichmentCandidate(context.elements[0].ref, {"ok": True})
+            )
+
+    class Poison:
+        def enrich(self, context):
+            return _available(
+                ElementEnrichmentCandidate(
+                    context.elements[1].ref,
+                    {"poison": True},
+                    "invented caption",
+                )
+            )
+
+    host = _runtime(
+        _bundle("a.valid", Valid()), _bundle("b.poison", Poison())
+    ).element_enrichers
+    patches = host.enrich_application(_call())
+    assert [patch.contribution_id for patch in patches] == ["a.valid"]
+
+
+def test_full_persisted_namespace_counts_toward_byte_budget():
+    class Enricher:
+        def enrich(self, context):
+            return _available(
+                ElementEnrichmentCandidate(context.elements[0].ref, {})
+            )
+
+    host = _runtime(_bundle("enrich.bytes", Enricher())).element_enrichers
+    # The old metadata+caption-only calculation admitted this empty payload.
+    # The complete persisted owner/namespace envelope is necessarily larger.
+    assert host.enrich_application(_call(max_metadata_bytes=10)) == ()
+
+
 @pytest.mark.parametrize(
     "result_factory",
     [
@@ -212,6 +340,11 @@ def test_invalid_contribution_fails_open_without_blocking_later_contributor():
             (ElementEnrichmentCandidate(context.elements[0].ref, {}),),
             ExtensionResultStatus.AVAILABLE,
             ExtensionFailure(ExtensionFailureKind.FAILED, "failed"),
+        ),
+        lambda context: ContributorResult(
+            (ElementEnrichmentCandidate(context.elements[0].ref, {}),),
+            ExtensionResultStatus.PARTIAL,
+            ExtensionFailure(ExtensionFailureKind.FAILED, "partial"),
         ),
     ],
 )
@@ -471,6 +604,84 @@ def test_core_adapter_treats_ordinary_host_failure_as_exact_baseline():
         connection_probe=_Probe(),
         max_proposals=8,
         max_metadata_bytes=4096,
+        max_caption_chars=128,
+        timeout_seconds=10.0,
+        event_sink=None,
+    ) is baseline
+
+
+def test_core_adapter_hostile_baseline_metadata_fails_open():
+    class HostileMetadata(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("private metadata failure")
+
+    baseline = SourceElement.model_construct(
+        id="",
+        source_id="source-1",
+        element_type="paragraph",
+        location_label="p1",
+        text="trusted body",
+        metadata=HostileMetadata(),
+    )
+    elements = [baseline]
+    host = _FakeHost(())
+    assert enrich_source_elements(
+        elements,
+        host=host,
+        connection_probe=_Probe(),
+        max_proposals=8,
+        max_metadata_bytes=4096,
+        max_caption_chars=128,
+        timeout_seconds=10.0,
+        event_sink=None,
+    ) is elements
+
+
+@pytest.mark.parametrize("version", ["v" * 65, "\ud800"])
+def test_core_adapter_rejects_unsafe_owner_version(version):
+    baseline = [_element()]
+    host = _FakeHost(
+        (
+            ElementEnrichmentPatch(
+                1,
+                "plugin-tags",
+                version,
+                "enrich.tags",
+                MappingProxyType({}),
+            ),
+        )
+    )
+    assert enrich_source_elements(
+        baseline,
+        host=host,
+        connection_probe=_Probe(),
+        max_proposals=8,
+        max_metadata_bytes=4096,
+        max_caption_chars=128,
+        timeout_seconds=10.0,
+        event_sink=None,
+    ) is baseline
+
+
+def test_core_adapter_counts_full_persisted_namespace_toward_budget():
+    baseline = [_element()]
+    host = _FakeHost(
+        (
+            ElementEnrichmentPatch(
+                1,
+                "plugin-tags",
+                "1.0.0",
+                "enrich.tags",
+                MappingProxyType({}),
+            ),
+        )
+    )
+    assert enrich_source_elements(
+        baseline,
+        host=host,
+        connection_probe=_Probe(),
+        max_proposals=8,
+        max_metadata_bytes=10,
         max_caption_chars=128,
         timeout_seconds=10.0,
         event_sink=None,

@@ -12,7 +12,7 @@ Ask post-completion extension points use a cooperative deployment deadline: alre
 
 Report post-completion extension points have their own deployment deadline and finding cap. A cancelled or stale generation cannot fabricate a completion ticket: SQLite and PostgreSQL publish `done` with the same status-guarded atomic compare-and-set, and only a successful commit reaches the auditor/observer hosts.
 
-Source ingestion also has a dormant `source.element_enricher` batch point after parsing and before the core element transaction. The default topology is empty. Future contributors may add only bounded, namespaced metadata grounded in the immutable parsed-element view; they cannot change text, order, identity, parser/asset provenance, write the database, or start retrieval/model work. Invalid or failed contributions return the exact parser baseline.
+Source ingestion also has a dormant `source.element_enricher` batch point after parsing and before the core element transaction. The default topology is empty. Future contributors must declare the live element-content capability before receiving the immutable parsed-element view and may add only bounded, namespaced metadata; the persisted-byte budget includes plugin ownership provenance. They cannot change text, order, identity, parser/asset provenance, write the database, or start retrieval/model work. Each contribution is admitted atomically, so one invalid contribution cannot erase another valid contribution or the parser baseline.
 
 ## Highlights
 

@@ -1,7 +1,6 @@
 """Governed runner for ``source.element_enricher`` contributions."""
 from __future__ import annotations
 
-import json
 import math
 import re
 import time
@@ -14,7 +13,12 @@ from app.domain.extensions import (
     ElementEnrichmentPatch,
     ParsedElementEnvelope,
 )
+from app.domain.element_enrichment import (
+    persisted_element_enrichment_size,
+    valid_element_enrichment_owner,
+)
 from app.extension_sdk import (
+    SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY,
     SOURCE_ELEMENT_ENRICHER_POINT,
     AvailabilityStatus,
     ContributionKind,
@@ -49,7 +53,10 @@ class _MalformedCancellation(RuntimeError):
 
 
 def _cancelled(token: object) -> bool:
-    check = getattr(token, "is_set", None)
+    try:
+        check = getattr(token, "is_set", None)
+    except Exception as exc:
+        raise _MalformedCancellation from exc
     if not callable(check):
         raise _MalformedCancellation
     try:
@@ -64,7 +71,10 @@ def _cancelled(token: object) -> bool:
 def _raise_if_cancelled(token: object) -> None:
     if not _cancelled(token):
         return
-    raiser = getattr(token, "raise_if_cancelled", None)
+    try:
+        raiser = getattr(token, "raise_if_cancelled", None)
+    except Exception as exc:
+        raise _MalformedCancellation from exc
     if not callable(raiser):
         raise _MalformedCancellation
     raiser()
@@ -118,6 +128,17 @@ class SourceElementEnricherHost:
                 declaration.kind is not ContributionKind.CONTRIBUTOR
                 or type(registered.plugin_id) is not str
                 or type(manifest.version) is not str
+                or type(manifest.requires) is not tuple
+                or not any(
+                    type(capability) is str
+                    and capability == SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY
+                    for capability in manifest.requires
+                )
+                or not valid_element_enrichment_owner(
+                    registered.plugin_id,
+                    manifest.version,
+                    declaration.id,
+                )
                 or not callable(getattr(implementation, "enrich", None))
             ):
                 raise ExtensionRegistryError("invalid source element enricher")
@@ -268,6 +289,7 @@ class SourceElementEnricherHost:
                 min(remaining, call.max_proposals),
                 remaining_bytes,
                 call.max_caption_chars,
+                views,
             )
             if validated is None:
                 self._emit(sink, registration, "invalid", 0, started)
@@ -297,6 +319,7 @@ class SourceElementEnricherHost:
         remaining: int,
         max_bytes: int,
         max_caption: int,
+        views: list[ElementView],
     ) -> tuple[list[ElementEnrichmentPatch], int] | None:
         if type(result) is not ContributorResult or type(result.items) is not tuple:
             return None
@@ -329,17 +352,22 @@ class SourceElementEnricherHost:
                 return None
             if type(item.caption) is not str or len(item.caption) > max_caption:
                 return None
+            baseline_view = views[ordinal - 1]
+            if item.caption and (
+                baseline_view.caption or item.caption not in baseline_view.text
+            ):
+                return None
             if type(item.metadata) is not dict:
                 return None
             try:
                 metadata = _freeze_json(item.metadata)
                 thawed = _thaw_json(metadata)
-                byte_count += len(
-                    json.dumps(
-                        {"metadata": thawed, "caption": item.caption},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
+                byte_count += persisted_element_enrichment_size(
+                    plugin_id=registration.plugin_id,
+                    plugin_version=registration.plugin_version,
+                    contribution_id=registration.contribution_id,
+                    metadata=thawed,
+                    caption=item.caption,
                 )
             except Exception:
                 return None
@@ -360,10 +388,10 @@ class SourceElementEnricherHost:
 
     @staticmethod
     def _connection_clear(probe: object) -> bool:
-        check = getattr(probe, "is_connection_held", None)
-        if not callable(check):
-            return False
         try:
+            check = getattr(probe, "is_connection_held", None)
+            if not callable(check):
+                return False
             held = check()
         except Exception:
             return False
