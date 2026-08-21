@@ -201,7 +201,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-10：Knowledge candidate projector
 
-状态：实现中；默认空 topology、point-specific batch host、core admission 与唯一事务前接线已落地，等待三路 review 与 CI 闭环。
+状态：已完成并由 PR #552 交付；默认空 topology、point-specific batch host、core admission、唯一事务前接线、三路 review 与 CI 均已闭环。
 
 - 插件只产生候选，核心继续拥有 schema validation、审核、写事务和生命周期；
 - 不允许插件直接写核心表或持有核心事务。
