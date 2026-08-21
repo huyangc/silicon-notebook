@@ -773,20 +773,20 @@ class SelectedSourceGraphContributionCall:
             failed = self._fail_closed_activation("extension_admission_failed")
             if failed is None:
                 return [*self._baseline, *non_graph_tail], None
-            return [*failed.chunks, *non_graph_tail], failed.status
+            return [*self._baseline, *non_graph_tail], failed.status
         # Use the legacy result rather than rebuilding it: duplicate-support
         # overlays and its frozen baseline copies are part of the stronger
         # selected-source graph contract.
         if status.state == "active":
             return [*activated.chunks[:len(self._baseline)], *host_tail], status
-        return [*activated.chunks, *host_tail], status
+        return [*self._baseline, *host_tail], status
 
     def fail_closed_result(self, reason: str):
         """Keep workflow callers behind the bridge on seam-level failure."""
         failed = self._fail_closed_activation(reason)
         if failed is None:
             return list(self._baseline), None
-        return list(failed.chunks), failed.status
+        return list(self._baseline), failed.status
 
     def _fail_closed_activation(
         self, reason: str
@@ -838,8 +838,12 @@ class SelectedSourceGraphContributionCall:
             return (
                 len(result.chunks) == len(baseline)
                 and all(
-                    self._baseline_chunk_is_monotonic(candidate, original)
+                    self._baseline_chunk_is_exact(candidate, original)
                     for candidate, original in zip(result.chunks, baseline)
+                )
+                and (
+                    result.status.state == "shadow"
+                    or not result.enrichment_chunks
                 )
             )
         if (
@@ -878,6 +882,16 @@ class SelectedSourceGraphContributionCall:
                 support in candidate.retrieval_supports
                 for support in original.retrieval_supports
             )
+        )
+
+    @classmethod
+    def _baseline_chunk_is_exact(
+        cls, candidate: RetrievedChunk, original: RetrievedChunk
+    ) -> bool:
+        return (
+            cls._chunk_baseline_signature(candidate)
+            == cls._chunk_baseline_signature(original)
+            and candidate.retrieval_supports == original.retrieval_supports
         )
 
     @staticmethod

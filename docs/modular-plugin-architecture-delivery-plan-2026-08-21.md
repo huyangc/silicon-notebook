@@ -110,7 +110,7 @@ PR 描述必须包含：
 
 #### PR-02：Selected-source graph adapter
 
-状态：实现完成；三轮 subagent P1 已闭合，正在对修订 HEAD 重跑双路 review 与 CI。
+状态：实现完成；四轮 subagent P1 已闭合，正在对修订 HEAD 重跑双路 review 与 CI。
 
 范围：
 

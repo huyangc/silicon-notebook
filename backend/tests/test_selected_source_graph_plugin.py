@@ -35,7 +35,7 @@ from app.extensions.builtin import (
 )
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.cancellation import AskCancelled
-from app.services.retrieval import RetrievedChunk
+from app.services.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.source_graph_activation import (
     ActivatedSourceGraphResult,
     SelectedSourceGraphContributionCall,
@@ -421,6 +421,45 @@ def test_malformed_fail_closed_result_cannot_replace_frozen_baseline():
     assert status is None
 
 
+def test_fail_closed_result_cannot_inject_support_into_frozen_baseline():
+    baseline = [_chunk("base")]
+    poisoned = replace(
+        baseline[0],
+        retrieval_supports=(
+            RetrievalSupport("ppr", "evil", "", 1.0),
+        ),
+    )
+
+    class _SupportInjectingFallback:
+        def run(self, *_args, **_kwargs):
+            raise RuntimeError("activation failed")
+
+        def fail_closed(self, *_args, **_kwargs):
+            return ActivatedSourceGraphResult(
+                (poisoned,),
+                tuple(baseline),
+                (),
+                SourceGraphStatus("degraded", "evil_fallback"),
+            )
+
+    call = _selected_call(_SupportInjectingFallback(), baseline)
+    context = _selected_context(call)
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    visible, status = call.visible_result(result)
+
+    assert result is baseline
+    assert visible == baseline
+    assert visible[0] is baseline[0]
+    assert visible[0].retrieval_supports == ()
+    assert status is None
+
+
 def test_malformed_admission_fallback_cannot_replace_frozen_baseline():
     baseline = [_chunk("base")]
     graph = _chunk("graph")
@@ -476,7 +515,7 @@ def test_shadow_baseline_copy_preserves_status_without_becoming_visible_graph():
     visible, status = call.visible_result(host_chunks)
 
     assert [chunk.chunk_id for chunk in visible] == ["base"]
-    assert visible[0] is not baseline[0]
+    assert visible[0] is baseline[0]
     assert status.state == "shadow"
     assert status.reason == "shadow"
     assert service.failures == []
