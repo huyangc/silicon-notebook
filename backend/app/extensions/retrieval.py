@@ -199,10 +199,7 @@ class RetrievalContributorHost:
                 **kwargs,
             )
 
-        if (
-            type(context) is not RetrievalHostContext
-            or context.invocation != invocation
-        ):
+        if type(context) is not RetrievalHostContext:
             for registration in available:
                 emit(
                     registration.registered.contribution.declaration.id,
@@ -211,6 +208,14 @@ class RetrievalContributorHost:
                 )
             return baseline
         self._raise_if_core_cancelled(context)
+        if context.invocation != invocation:
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
+                    outcome="invalid_context",
+                    failure_code="retrieval_invocation_mismatch",
+                )
+            return baseline
         if baseline_identity is None:
             for registration in available:
                 emit(

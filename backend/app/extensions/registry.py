@@ -122,9 +122,10 @@ class ExtensionRegistry:
                 or not _STABLE_METADATA_ID.fullmatch(declaration.id)
                 or type(declaration.point) is not str
                 or not _STABLE_METADATA_ID.fullmatch(declaration.point)
+                or type(declaration.kind) is not ContributionKind
             ):
                 raise ExtensionRegistryError(
-                    "contribution id and point must be stable metadata identifiers"
+                    "contribution declaration must use stable metadata identifiers and kind"
                 )
             declaration_ids.append(declaration.id)
         if len(declaration_ids) != len(set(declaration_ids)):
@@ -165,9 +166,10 @@ class ExtensionRegistry:
             or not _STABLE_METADATA_ID.fullmatch(declaration.id)
             or type(declaration.point) is not str
             or not _STABLE_METADATA_ID.fullmatch(declaration.point)
+            or type(declaration.kind) is not ContributionKind
         ):
             raise ExtensionRegistryError(
-                "contribution id and point must be stable metadata identifiers"
+                "contribution declaration must use stable metadata identifiers and kind"
             )
         declared = {item.id: item for item in manifest.contributions}
         if declared.get(declaration.id) != declaration:

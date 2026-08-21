@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import fields
+from dataclasses import fields, replace
 from concurrent.futures import ThreadPoolExecutor
 import inspect
 import threading
@@ -510,6 +510,26 @@ def test_cancellation_after_context_factory_precedes_context_validation():
             context_factory=context_factory,
             baseline_identity=str,
             cancellation=cancellation,
+        )
+    assert contributor.calls == 0
+
+
+def test_context_cancellation_precedes_invocation_mismatch():
+    cancellation = _Cancellation()
+    cancellation.cancelled = True
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((_bundle("cancel_mismatch", contributor),))
+    mismatched = replace(
+        _context(_Reader({"new"}), cancel=cancellation),
+        invocation="chunk_candidates",
+    )
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda: mismatched,
+            baseline_identity=str,
         )
     assert contributor.calls == 0
 
@@ -1090,3 +1110,28 @@ def test_registry_validates_declaration_ids_before_hashing_them():
 
     with pytest.raises(ExtensionRegistryError, match="stable metadata"):
         build_extension_runtime((bundle,))
+
+
+def test_registry_rejects_non_enum_kind_through_generic_registrar():
+    declaration = ContributionDeclaration(
+        "invalid-kind",
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        "evil",  # type: ignore[arg-type]
+    )
+
+    class GenericBundle:
+        manifest = ExtensionManifest(
+            id="plugin-invalid-kind",
+            version="1.0.0",
+            api_version=EXTENSION_API_VERSION,
+            display_name="invalid kind",
+            trust="builtin",
+            contributions=(declaration,),
+        )
+
+        @staticmethod
+        def register(registrar):
+            registrar.add(ExtensionContribution(declaration, _Contributor(_result())))
+
+    with pytest.raises(ExtensionRegistryError, match="stable metadata identifiers and kind"):
+        build_extension_runtime((GenericBundle(),))
