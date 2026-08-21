@@ -33,6 +33,7 @@ from app.services.retrieval import (
     RetrievedElement,
     RetrievedKnowledge,
     RetrievedRelation,
+    RetrievedChunk,
     _TYPE_WEIGHT,
     _fuse,
     _payload_text,
@@ -2485,6 +2486,45 @@ class CandidateRetrievalService(_RetrievalState):
         } for r in rows]
         ids, mat = build_matrix((r["vid"], r["vector"]) for r in vrows)
         return chunks, ids, mat
+
+    def hydrate_retrieval_contribution_chunks(
+        self, notebook_id: str, candidate_ids: Iterable[str]
+    ) -> list[RetrievedChunk]:
+        """One scope-before-read authority batch for extension proposals."""
+        from app.services.source_scope import current_source_scope
+
+        scope = current_source_scope()
+        if scope is not None and scope.notebook_id != notebook_id:
+            return []
+        source_mode: str | None = None
+        source_ids: tuple[str, ...] = ()
+        if scope is not None and scope.ceiling_active:
+            source_mode = scope.mode
+            values = (
+                scope.source_ids | scope.hidden_source_ids
+                if source_mode == "include" else scope.source_ids
+            )
+            source_ids = tuple(sorted(values))
+
+        rows = []
+        with self._connect() as db:
+            for batch in self._in_batches(candidate_ids):
+                rows.extend(self.chunks.retrieval_contribution_rows(
+                    db,
+                    notebook_id,
+                    batch,
+                    source_mode=source_mode,
+                    source_ids=source_ids,
+                ))
+        return [RetrievedChunk(
+            chunk_id=str(row["id"]),
+            source_id=str(row["source_id"]),
+            source_title=str(row["source_title"]),
+            section_path=str(row["section_path"]),
+            text=str(row["text"]),
+            element_ids=list(json.loads(row["element_ids"] or "[]")),
+            notebook_id=str(row["chunk_notebook_id"]),
+        ) for row in rows]
 
     # Compatibility for internal subclasses and older tests.  Composition
     # boundaries use the public RetrievalPort method above.

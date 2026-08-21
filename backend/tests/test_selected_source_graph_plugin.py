@@ -12,6 +12,27 @@ from app.domain.extensions import (
     RetrievalEvidenceProposal,
 )
 from app.extensions import default_extension_runtime
+from app.extension_sdk import (
+    EXTENSION_API_VERSION,
+    RETRIEVAL_CONTRIBUTOR_POINT,
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
+    Availability,
+    AvailabilityStatus,
+    ContributionDeclaration,
+    ContributionKind,
+    ContributorResult,
+    EvidenceCandidate,
+    EvidenceProvenance,
+    ExtensionContribution,
+    ExtensionManifest,
+    ExtensionResultStatus,
+    RetrievalHostContext,
+)
+from app.extensions import build_extension_runtime
+from app.extensions.builtin import (
+    SELECTED_SOURCE_GRAPH_BUNDLE,
+    SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.cancellation import AskCancelled
 from app.services.retrieval import RetrievedChunk
@@ -68,7 +89,8 @@ def _call_context(source, database):
         max_items=1,
         max_tokens=1,
         max_proposals=1,
-        proposal_source=source,
+        admission_source=source,
+        selected_source_graph_source=source,
         connection_probe=database,
     )
 
@@ -156,12 +178,15 @@ def _selected_call(service, baseline):
     )
 
 
-def _selected_context(call, cancellation=None):
+def _selected_context(call, cancellation=None, admission_hydrate=None):
     return selected_source_graph_call_context(
         call,
         actor_id="actor",
         cancel_event=cancellation,
         connection_probe=SimpleNamespace(is_connection_held=lambda: False),
+        admission_hydrate=(
+            admission_hydrate or (lambda _notebook_id, _ids: ())
+        ),
         max_results=5,
         max_tokens=100,
     )
@@ -228,6 +253,33 @@ def test_malformed_call_cancellation_is_fail_open_before_proposal_io():
     assert service.failures == []
 
 
+def test_hostile_cancellation_truth_value_is_fail_open_before_proposal_io():
+    class _HostileTruth:
+        def __bool__(self):
+            raise RuntimeError("hostile cancellation truth")
+
+    class _HostileCancellation:
+        def is_set(self):
+            return _HostileTruth()
+
+    baseline = [_chunk("base")]
+    service = _GraphService(_chunk("graph"))
+    call = _selected_call(service, baseline)
+    cancellation = _HostileCancellation()
+    context = replace(_selected_context(call), cancellation=cancellation)
+
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=cancellation,
+    )
+
+    assert result is baseline
+    assert call._attempted is False
+
+
 def test_absent_graph_service_projects_capability_unavailable():
     baseline = [_chunk("base")]
     call = _selected_call(None, baseline)
@@ -243,7 +295,7 @@ def test_absent_graph_service_projects_capability_unavailable():
         cancellation=context.cancellation,
     )
 
-    assert context.selected_source_graph_available is False
+    assert context.selected_source_graph_source is None
     assert projected.selected_source_graph_access is None
     assert result is baseline
 
@@ -272,3 +324,245 @@ def test_malformed_graph_result_and_fail_closed_result_stay_optional():
     assert result is baseline
     assert visible == baseline
     assert status is None
+
+
+def test_graph_result_cannot_replace_frozen_baseline_with_shape_valid_chunks():
+    baseline = [_chunk("base")]
+    evil = _chunk("evil")
+    graph = _chunk("graph")
+
+    class _BaselineReplacingService(_GraphService):
+        def run(self, *_args, **_kwargs):
+            return ActivatedSourceGraphResult(
+                (evil, graph),
+                (evil,),
+                (graph,),
+                SourceGraphStatus("active", "quality_approved"),
+            )
+
+    service = _BaselineReplacingService(graph)
+    call = _selected_call(service, baseline)
+    context = _selected_context(call)
+
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    visible, status = call.visible_result(result)
+
+    assert result is baseline
+    assert visible == baseline
+    assert status.state == "degraded"
+    assert service.failures == ["activation_seam_failed"]
+
+
+def test_malformed_fail_closed_result_cannot_replace_frozen_baseline():
+    baseline = [_chunk("base")]
+    evil = _chunk("evil")
+
+    class _MaliciousFallback:
+        def run(self, *_args, **_kwargs):
+            raise RuntimeError("activation failed")
+
+        def fail_closed(self, *_args, **_kwargs):
+            return ActivatedSourceGraphResult(
+                (evil,),
+                (evil,),
+                (),
+                SourceGraphStatus("degraded", "evil_fallback"),
+            )
+
+    call = _selected_call(_MaliciousFallback(), baseline)
+    context = _selected_context(call)
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    visible, status = call.visible_result(result)
+
+    assert result is baseline
+    assert visible == baseline
+    assert status is None
+
+
+def test_malformed_admission_fallback_cannot_replace_frozen_baseline():
+    baseline = [_chunk("base")]
+    graph = _chunk("graph")
+    evil = _chunk("evil")
+
+    class _MaliciousAdmissionFallback(_GraphService):
+        def fail_closed(self, _notebook_id, _baseline, reason):
+            self.failures.append(reason)
+            return ActivatedSourceGraphResult(
+                (evil,),
+                (evil,),
+                (),
+                SourceGraphStatus("degraded", "evil_fallback"),
+            )
+
+    service = _MaliciousAdmissionFallback(graph)
+    call = _selected_call(service, baseline)
+    context = _selected_context(call)
+    call.propose()
+
+    visible, status = call.visible_result(baseline)
+
+    assert visible == baseline
+    assert status is None
+    assert service.failures == ["extension_admission_failed"]
+
+
+class _IndependentContributor:
+    invocations = frozenset({"selected_evidence"})
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def contribute(self, _context):
+        self.calls += 1
+        return ContributorResult((EvidenceCandidate(
+            identity="other",
+            notebook_id="notebook",
+            source_id="source",
+            provenance=EvidenceProvenance("chunk", "other"),
+            value=object(),
+            token_cost=1,
+        ),), ExtensionResultStatus.AVAILABLE)
+
+
+class _IndependentBundle:
+    declaration = ContributionDeclaration(
+        "builtin.independent",
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        ContributionKind.CONTRIBUTOR,
+    )
+    manifest = ExtensionManifest(
+        id="builtin.independent",
+        version="1.0.0",
+        api_version=EXTENSION_API_VERSION,
+        display_name="Independent",
+        trust="builtin",
+        contributions=(declaration,),
+    )
+
+    def __init__(self, implementation) -> None:
+        self.implementation = implementation
+
+    def register(self, registrar) -> None:
+        registrar.add_contributor(ExtensionContribution(
+            self.declaration, self.implementation
+        ))
+
+
+def test_absent_graph_capability_keeps_independent_real_host_contribution():
+    contributor = _IndependentContributor()
+    hydrate_calls = []
+
+    def graph_availability(context):
+        if (
+            type(context) is RetrievalHostContext
+            and context.selected_source_graph_access is not None
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "selected_source_graph_access_unavailable",
+        )
+
+    runtime = build_extension_runtime(
+        (SELECTED_SOURCE_GRAPH_BUNDLE, _IndependentBundle(contributor)),
+        capability_decisions={
+            SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: graph_availability,
+        },
+        retrieval_admission_policies={
+            SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
+        },
+    )
+    baseline = [_chunk("base")]
+    call = _selected_call(None, baseline)
+
+    def hydrate(notebook_id, identities):
+        hydrate_calls.append((notebook_id, identities))
+        chunk = _chunk("other")
+        chunk.notebook_id = "notebook"
+        return [chunk]
+
+    context = _selected_context(call, admission_hydrate=hydrate)
+    result = runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+
+    assert [chunk.chunk_id for chunk in result] == ["base", "other"]
+    assert contributor.calls == 1
+    assert hydrate_calls == [("notebook", ("other",))]
+
+
+def test_graph_and_independent_authorities_share_host_without_extra_graph_io():
+    contributor = _IndependentContributor()
+    runtime = build_extension_runtime(
+        (SELECTED_SOURCE_GRAPH_BUNDLE, _IndependentBundle(contributor)),
+        capability_decisions={
+            SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: lambda _context: (
+                Availability.available()
+            ),
+        },
+        retrieval_admission_policies={
+            SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
+        },
+    )
+    baseline = [_chunk("base")]
+    call = _selected_call(_GraphService(_chunk("graph")), baseline)
+    hydrate_calls = []
+
+    def hydrate(notebook_id, identities):
+        hydrate_calls.append((notebook_id, identities))
+        chunk = _chunk("other")
+        chunk.notebook_id = notebook_id
+        return [chunk]
+
+    context = _selected_context(call, admission_hydrate=hydrate)
+    result = runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+
+    assert [chunk.chunk_id for chunk in result] == ["base", "other", "graph"]
+    assert contributor.calls == 1
+    assert hydrate_calls == [("notebook", ("other",))]
+
+
+def test_graph_only_authority_stays_in_memory_without_fallback_hydration():
+    baseline = [_chunk("base")]
+    service = _GraphService(_chunk("graph"))
+    call = _selected_call(service, baseline)
+    hydrate_calls = []
+    context = _selected_context(
+        call,
+        admission_hydrate=lambda notebook_id, identities: hydrate_calls.append(
+            (notebook_id, identities)
+        ) or (),
+    )
+
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+
+    assert [chunk.chunk_id for chunk in result] == ["base", "graph"]
+    assert hydrate_calls == []

@@ -62,7 +62,8 @@ def _retrieval_call(source, database):
         max_items=1,
         max_tokens=1,
         max_proposals=1,
-        proposal_source=source,
+        admission_source=source,
+        selected_source_graph_source=source,
         connection_probe=database,
     )
 

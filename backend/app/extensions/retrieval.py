@@ -128,6 +128,10 @@ class RetrievalHostCancelled(RuntimeError):
     """Core request cancellation; callers must propagate, never fail open."""
 
 
+class _MalformedCancellationToken(RuntimeError):
+    """Internal sentinel: malformed optional context must preserve baseline."""
+
+
 @dataclass(frozen=True)
 class _FrozenRegistration:
     registered: RegisteredContribution
@@ -202,6 +206,30 @@ class RetrievalContributorHost:
         self._registry = registry
 
     def run(
+        self,
+        baseline: Sequence[T],
+        *,
+        invocation: RetrievalInvocation,
+        context_factory: Callable[[], RetrievalHostContext] | None = None,
+        call_context: RetrievalContributionCallContext | None = None,
+        baseline_identity: Callable[[T], str] | None = None,
+        cancellation: CancellationToken | None = None,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> Sequence[T]:
+        try:
+            return self._run(
+                baseline,
+                invocation=invocation,
+                context_factory=context_factory,
+                call_context=call_context,
+                baseline_identity=baseline_identity,
+                cancellation=cancellation,
+                event_sink=event_sink,
+            )
+        except _MalformedCancellationToken:
+            return baseline
+
+    def _run(
         self,
         baseline: Sequence[T],
         *,
@@ -574,15 +602,28 @@ class RetrievalContributorHost:
             or not RetrievalContributorHost._valid_cancellation_token(
                 call.cancellation
             )
-            or not callable(getattr(call.proposal_source, "propose", None))
-            or not callable(getattr(call.proposal_source, "read", None))
+            or not callable(getattr(call.admission_source, "read", None))
+            or (
+                call.selected_source_graph_source is not None
+                and (
+                    not callable(getattr(
+                        call.selected_source_graph_source, "propose", None
+                    ))
+                    or not callable(getattr(
+                        call.selected_source_graph_source, "read", None
+                    ))
+                )
+            )
             or not callable(
                 getattr(call.connection_probe, "is_connection_held", None)
             )
-            or type(call.selected_source_graph_available) is not bool
         ):
             return None
-        access = _SelectedSourceGraphAccess(call.proposal_source)
+        graph_source = call.selected_source_graph_source
+        access = (
+            _SelectedSourceGraphAccess(graph_source)
+            if graph_source is not None else None
+        )
         return RetrievalHostContext(
             invocation=invocation,
             actor=ActorRef(call.actor_id),
@@ -596,11 +637,9 @@ class RetrievalContributorHost:
                 call.max_proposals,
                 call.deadline_monotonic,
             ),
-            admission_reader=_CallEvidenceReader(call.proposal_source),
+            admission_reader=_CallEvidenceReader(call.admission_source),
             model_access=None,
-            selected_source_graph_access=(
-                access if call.selected_source_graph_available else None
-            ),
+            selected_source_graph_access=access,
             connection=call.connection_probe,
         )
 
@@ -735,10 +774,22 @@ class RetrievalContributorHost:
 
     @staticmethod
     def _raise_if_token_cancelled(cancellation: object) -> None:
-        raise_cancelled = getattr(cancellation, "raise_if_cancelled", None)
+        try:
+            raise_cancelled = getattr(cancellation, "raise_if_cancelled", None)
+            is_set = getattr(cancellation, "is_set", None)
+        except Exception as exc:
+            raise _MalformedCancellationToken() from exc
         if callable(raise_cancelled):
             raise_cancelled()
-        elif cancellation.is_set():
+        if not callable(is_set):
+            raise _MalformedCancellationToken()
+        try:
+            cancelled = is_set()
+        except Exception as exc:
+            raise _MalformedCancellationToken() from exc
+        if type(cancelled) is not bool:
+            raise _MalformedCancellationToken()
+        if cancelled:
             raise RetrievalHostCancelled("retrieval request cancelled")
 
     def _deadline_expired(self, context: RetrievalHostContext) -> bool:

@@ -1398,6 +1398,15 @@ class ChunkStorePort(Protocol):
     @staticmethod
     def graph_hydrate_rows(db: object, chunk_ids: Sequence[str]) -> list[Any]: ...
     @staticmethod
+    def retrieval_contribution_rows(
+        db: object,
+        notebook_id: str,
+        chunk_ids: Sequence[str],
+        *,
+        source_mode: str | None,
+        source_ids: Sequence[str],
+    ) -> list[Any]: ...
+    @staticmethod
     def id_element_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
     def chunks_for_element_ids(
@@ -2230,6 +2239,9 @@ class RetrievalPort(Protocol):
     def hydrate_chunk_candidates(
         self, candidate_ids: Iterable[str]
     ) -> tuple[list[dict[str, Any]], list[str], Any]: ...
+    def hydrate_retrieval_contribution_chunks(
+        self, notebook_id: str, candidate_ids: Iterable[str]
+    ) -> list[RetrievedChunk]: ...
     def community_queries(
         self, settings: Settings | None = None
     ) -> CommunityQueryPort: ...

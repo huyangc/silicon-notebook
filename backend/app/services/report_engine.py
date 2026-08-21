@@ -529,6 +529,7 @@ class ReportEngineDependencies:
     selected_source_graph: Any = None
     retrieval_contributors: RetrievalContributorHostPort | None = None
     retrieval_connection_probe: Any = None
+    retrieval_contributor_hydrate: Any = None
     scale_version: Any = None
     selected_graph_hydrate: Any = None
     # Agentic Memory P1:Agent 对该库的已有理解 store(``AgentProfileStorePort``)。
@@ -618,6 +619,10 @@ class ReportEngine:
                 actor_id=self.user_id,
                 cancel_event=self.cancel_event,
                 connection_probe=connection_probe,
+                admission_hydrate=(
+                    self.dependencies.retrieval_contributor_hydrate
+                    or (lambda _notebook_id, _ids: ())
+                ),
                 max_results=self.settings.ppr_top_chunks,
                 max_tokens=int(
                     self.settings.selected_source_graph_enrichment_tokens

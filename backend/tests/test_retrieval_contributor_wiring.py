@@ -19,6 +19,73 @@ class _RecordingHost:
         return baseline if self.output is None else self.output
 
 
+def _graph_service_access_violations(text: str) -> list[str]:
+    tree = ast.parse(text)
+    graph_aliases = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "getattr"
+            and len(node.value.args) >= 2
+            and isinstance(node.value.args[1], ast.Constant)
+            and node.value.args[1].value == "selected_source_graph"
+        ):
+            graph_aliases.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in graph_aliases
+            ):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in graph_aliases:
+                        graph_aliases.add(target.id)
+                        changed = True
+
+    def graph_value(node) -> bool:
+        return (
+            isinstance(node, ast.Name) and node.id in graph_aliases
+        ) or (
+            isinstance(node, ast.Attribute)
+            and node.attr == "selected_source_graph"
+        )
+
+    violations = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in {"run", "fail_closed"}
+            and graph_value(node.value)
+        ):
+            violations.append(node.attr)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and graph_value(node.args[0])
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in {"run", "fail_closed"}
+        ):
+            violations.append(str(node.args[1].value))
+        if isinstance(node, ast.Call):
+            bridge_call = (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "SelectedSourceGraphContributionCall"
+            )
+            for index, argument in enumerate(node.args):
+                if graph_value(argument) and not (bridge_call and index == 0):
+                    violations.append("graph_service_forwarded")
+    return violations
+
+
 def test_ask_and_report_keep_other_host_output_when_graph_capability_is_absent():
     baseline = [SimpleNamespace(chunk_id="base")]
     appended = [*baseline, SimpleNamespace(chunk_id="plugin")]
@@ -29,6 +96,7 @@ def test_ask_and_report_keep_other_host_output_when_graph_capability_is_absent()
     ask.retrieval_contributors = host
     ask.selected_source_graph = None
     ask.retrieval_connection_probe = connection_probe
+    ask.retrieval_contributor_hydrate = lambda _notebook_id, _ids: ()
     ask.current_user_id = lambda: "actor"
     ask.settings = SimpleNamespace(selected_source_graph_enrichment_tokens=1)
     ask_chunks, ask_status = ask._activate_selected_source_graph("notebook", baseline)
@@ -38,6 +106,7 @@ def test_ask_and_report_keep_other_host_output_when_graph_capability_is_absent()
         retrieval_contributors=host,
         selected_source_graph=None,
         retrieval_connection_probe=connection_probe,
+        retrieval_contributor_hydrate=lambda _notebook_id, _ids: (),
     )
     report.settings = SimpleNamespace(
         ppr_top_chunks=1,
@@ -99,70 +168,18 @@ def test_ask_and_report_no_longer_call_graph_service_directly():
     services = Path(__file__).resolve().parents[1] / "app" / "services"
     for name in ("ask_service.py", "report_engine.py"):
         text = (services / name).read_text(encoding="utf-8")
-        tree = ast.parse(text)
-        graph_aliases = set()
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Name)
-                and node.value.func.id == "getattr"
-                and len(node.value.args) >= 2
-                and isinstance(node.value.args[1], ast.Constant)
-                and node.value.args[1].value == "selected_source_graph"
-            ):
-                graph_aliases.update(
-                    target.id
-                    for target in node.targets
-                    if isinstance(target, ast.Name)
-                )
-        changed = True
-        while changed:
-            changed = False
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.Assign)
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id in graph_aliases
-                ):
-                    for target in node.targets:
-                        if (
-                            isinstance(target, ast.Name)
-                            and target.id not in graph_aliases
-                        ):
-                            graph_aliases.add(target.id)
-                            changed = True
-        forbidden = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if isinstance(node.func, ast.Attribute):
-                receiver = node.func.value
-                direct_graph_receiver = (
-                    isinstance(receiver, ast.Attribute)
-                    and receiver.attr == "selected_source_graph"
-                )
-                aliased_graph_receiver = (
-                    isinstance(receiver, ast.Name)
-                    and receiver.id in graph_aliases
-                )
-                if (
-                    node.func.attr in {"run", "fail_closed"}
-                    and (direct_graph_receiver or aliased_graph_receiver)
-                ):
-                    forbidden.append(node.func.attr)
-            elif (
-                isinstance(node.func, ast.Call)
-                and isinstance(node.func.func, ast.Name)
-                and node.func.func.id == "getattr"
-                and len(node.func.args) >= 2
-                and isinstance(node.func.args[0], ast.Name)
-                and node.func.args[0].id in graph_aliases
-                and isinstance(node.func.args[1], ast.Constant)
-                and node.func.args[1].value in {"run", "fail_closed"}
-            ):
-                forbidden.append(node.func.args[1].value)
-        assert forbidden == []
+        assert _graph_service_access_violations(text) == []
+
+
+def test_graph_service_direct_call_guard_catches_alias_and_forwarding_mutations():
+    mutations = (
+        "self.selected_source_graph.run()",
+        "service = getattr(self, 'selected_source_graph'); service.fail_closed()",
+        "service = getattr(self, 'selected_source_graph'); runner = service.run; runner()",
+        "service = getattr(self, 'selected_source_graph'); getattr(service, 'run')()",
+        "service = getattr(self, 'selected_source_graph'); helper(service)",
+    )
+    assert all(_graph_service_access_violations(text) for text in mutations)
 
 
 def test_report_runs_selected_evidence_without_graph_service():
@@ -176,6 +193,7 @@ def test_report_runs_selected_evidence_without_graph_service():
         retrieval_connection_probe=SimpleNamespace(
             is_connection_held=lambda: False
         ),
+        retrieval_contributor_hydrate=lambda _notebook_id, _ids: (),
     )
     report.settings = SimpleNamespace(
         ppr_top_chunks=1,

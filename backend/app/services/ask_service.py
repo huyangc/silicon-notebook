@@ -347,6 +347,9 @@ class AskService:
         selected_source_graph=None,
         retrieval_contributors=None,
         retrieval_connection_probe=None,
+        retrieval_contributor_hydrate: Callable[
+            [str, Any], Any
+        ] = lambda _notebook_id, _ids: (),
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
     ) -> None:
@@ -394,6 +397,7 @@ class AskService:
         self.selected_source_graph = selected_source_graph
         self.retrieval_contributors = retrieval_contributors
         self.retrieval_connection_probe = retrieval_connection_probe
+        self.retrieval_contributor_hydrate = retrieval_contributor_hydrate
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
 
@@ -458,6 +462,7 @@ class AskService:
                 actor_id=str(self.current_user_id() or ""),
                 cancel_event=cancel_event,
                 connection_probe=connection_probe,
+                admission_hydrate=self.retrieval_contributor_hydrate,
                 max_results=max_results,
                 max_tokens=int(
                     self.settings.selected_source_graph_enrichment_tokens

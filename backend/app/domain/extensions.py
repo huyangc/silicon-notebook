@@ -37,6 +37,14 @@ class RetrievalProposalSourcePort(Protocol):
     ) -> tuple[RetrievalEvidenceProposal, ...]: ...
 
 
+class RetrievalEvidenceReadPort(Protocol):
+    """Core-owned batch authority for one retrieval invocation."""
+
+    def read(
+        self, identities: tuple[str, ...]
+    ) -> tuple[RetrievalEvidenceProposal, ...]: ...
+
+
 @dataclass(frozen=True)
 class RetrievalContributionCallContext:
     """Core-only inputs from a workflow to the shared contributor host."""
@@ -51,10 +59,10 @@ class RetrievalContributionCallContext:
     max_items: int
     max_tokens: int
     max_proposals: int
-    proposal_source: RetrievalProposalSourcePort
+    admission_source: RetrievalEvidenceReadPort
+    selected_source_graph_source: RetrievalProposalSourcePort | None
     connection_probe: Any
     deadline_monotonic: float | None = None
-    selected_source_graph_available: bool = True
 
 
 class RetrievalContributorHostPort(Protocol):

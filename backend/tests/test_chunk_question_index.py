@@ -11,6 +11,7 @@ from app.services.chunk_question_index import (
 from app.services.embedding import FakeEmbedder
 from app.services.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.sqlite_repository import SQLiteRepository, _now
+from app.services.source_scope import source_scope_context
 from tests.model_testkit import bind_all_embedding_clients
 
 
@@ -296,6 +297,50 @@ def test_question_rows_honor_the_source_ceiling(repo):
     assert [row["chunk_id"] for row in store.question_index_rows(
         notebook.id, allowed_source_ids=("source-1",), limit=10
     )] == ["chunk-1"]
+
+
+def test_retrieval_contribution_authority_applies_notebook_and_source_in_sql(
+    repo,
+):
+    notebook = _seed_original_chunk(repo)
+    other_notebook = repo.create_notebook(NotebookCreate(name="other"))
+    now = _now()
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                ("source-2", notebook.id, "Excluded", "md", "ready", now, now),
+                (
+                    "source-other", other_notebook.id, "Other", "md", "ready",
+                    now, now,
+                ),
+            ),
+        )
+        db.executemany(
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                ("chunk-2", notebook.id, "source-2", "excluded", "", "[]", now),
+                (
+                    "chunk-other", other_notebook.id, "source-other", "other",
+                    "", "[]", now,
+                ),
+            ),
+        )
+
+    with source_scope_context(
+        notebook.id,
+        {"mode": "include", "source_ids": ["source-1"], "narrowed": True},
+    ):
+        rows = repo.retrieval.hydrate_retrieval_contribution_chunks(
+            notebook.id, ("chunk-1", "chunk-2", "chunk-other")
+        )
+
+    assert [chunk.chunk_id for chunk in rows] == ["chunk-1"]
+    assert rows[0].notebook_id == notebook.id
 
 
 @pytest.mark.parametrize("mode", ["shadow", "on"])

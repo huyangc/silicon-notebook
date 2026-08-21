@@ -91,6 +91,7 @@ def _wire_ask_graph_host(ask):
     ask.retrieval_connection_probe = SimpleNamespace(
         is_connection_held=lambda: False
     )
+    ask.retrieval_contributor_hydrate = lambda _notebook_id, _ids: ()
     ask.current_user_id = lambda: "ask-user"
     ask.settings = SimpleNamespace(
         selected_source_graph_enrichment_tokens=1000,
@@ -104,6 +105,9 @@ def _wire_report_graph_host(report, dependencies):
     )
     dependencies.retrieval_connection_probe = SimpleNamespace(
         is_connection_held=lambda: False
+    )
+    dependencies.retrieval_contributor_hydrate = (
+        lambda _notebook_id, _ids: ()
     )
     dependencies.event_log = _Events()
     report.user_id = "report-user"

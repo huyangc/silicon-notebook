@@ -20,7 +20,7 @@ from app.domain.extensions import (
     RetrievalEvidenceProposal,
 )
 from app.services.cancellation import AskCancelled
-from app.services.retrieval import RetrievedChunk, RetrievalSupport
+from app.services.retrieval import RetrievedChunk, RetrievalSupport, est_tokens
 from app.services.source_graph_rollout import (
     decide_source_graph_rollout,
     load_quality_attestation,
@@ -580,6 +580,58 @@ class _AskCancellationToken:
             raise AskCancelled()
 
 
+class _SelectedEvidenceAdmissionSource:
+    """Graph in-memory authority plus one scope-bound core fallback batch."""
+
+    def __init__(
+        self,
+        graph: "SelectedSourceGraphContributionCall | None",
+        notebook_id: str,
+        fallback: Callable[[str, Sequence[str]], Sequence[RetrievedChunk]],
+    ) -> None:
+        self._graph = graph
+        self._notebook_id = notebook_id
+        self._fallback = fallback
+
+    def read(
+        self, identities: tuple[str, ...]
+    ) -> tuple[RetrievalEvidenceProposal, ...]:
+        primary = self._graph.read(identities) if self._graph is not None else ()
+        by_id = {proposal.identity: proposal for proposal in primary}
+        missing = tuple(identity for identity in identities if identity not in by_id)
+        if missing:
+            try:
+                hydrated = self._fallback(self._notebook_id, missing)
+            except Exception:
+                return ()
+            if type(hydrated) not in (list, tuple):
+                return ()
+            missing_set = set(missing)
+            for chunk in hydrated:
+                if (
+                    type(chunk) is not RetrievedChunk
+                    or type(chunk.chunk_id) is not str
+                    or chunk.chunk_id not in missing_set
+                    or chunk.chunk_id in by_id
+                    or type(chunk.source_id) is not str
+                    or not chunk.source_id
+                    or type(chunk.notebook_id) is not str
+                    or chunk.notebook_id != self._notebook_id
+                    or type(chunk.text) is not str
+                ):
+                    return ()
+                by_id[chunk.chunk_id] = RetrievalEvidenceProposal(
+                    identity=chunk.chunk_id,
+                    notebook_id=self._notebook_id,
+                    source_id=chunk.source_id,
+                    provenance_kind="chunk",
+                    provenance_reference=chunk.chunk_id,
+                    value=chunk,
+                    token_cost=est_tokens(chunk.text),
+                )
+        return tuple(by_id[identity] for identity in identities if identity in by_id)
+
+
 class SelectedSourceGraphContributionCall:
     """Request-local bridge retaining the legacy activation's stronger result.
 
@@ -635,7 +687,10 @@ class SelectedSourceGraphContributionCall:
                 self._baseline,
                 **self._kwargs,
             )
-            if not self._valid_activation_result(activated):
+            if (
+                not self._valid_activation_result(activated)
+                or not self._activation_preserves_frozen_baseline(activated)
+            ):
                 raise TypeError("invalid selected-source graph result")
         except AskCancelled:
             raise
@@ -698,14 +753,12 @@ class SelectedSourceGraphContributionCall:
             identity for identity in accepted_ids if identity in expected_set
         )
         if status.state == "active" and accepted_graph_ids != expected_ids:
-            failed = self._service.fail_closed(
-                self._notebook_id,
-                self._baseline,
-                "extension_admission_failed",
-            )
             non_graph_tail = tuple(
                 chunk for chunk in host_tail if chunk.chunk_id not in expected_set
             )
+            failed = self._fail_closed_activation("extension_admission_failed")
+            if failed is None:
+                return [*self._baseline, *non_graph_tail], None
             return [*failed.chunks, *non_graph_tail], failed.status
         # Use the legacy result rather than rebuilding it: duplicate-support
         # overlays and its frozen baseline copies are part of the stronger
@@ -730,7 +783,10 @@ class SelectedSourceGraphContributionCall:
             failed = self._service.fail_closed(
                 self._notebook_id, self._baseline, reason
             )
-            if not self._valid_activation_result(failed):
+            if (
+                not self._valid_activation_result(failed)
+                or not self._activation_preserves_frozen_baseline(failed)
+            ):
                 return None
             return failed
         except Exception:
@@ -752,6 +808,71 @@ class SelectedSourceGraphContributionCall:
         except Exception:
             return False
 
+    def _activation_preserves_frozen_baseline(
+        self, result: ActivatedSourceGraphResult
+    ) -> bool:
+        baseline = self._baseline
+        if (
+            len(result.baseline_chunks) != len(baseline)
+            or any(
+                candidate is not original
+                for candidate, original in zip(result.baseline_chunks, baseline)
+            )
+        ):
+            return False
+        if result.status.state != "active":
+            return (
+                len(result.chunks) == len(baseline)
+                and all(
+                    candidate is original
+                    for candidate, original in zip(result.chunks, baseline)
+                )
+                and not result.enrichment_chunks
+            )
+        if (
+            result.status.baseline_preserved is not True
+            or type(result.status.baseline_evicted_count) is not int
+            or result.status.baseline_evicted_count != 0
+            or len(result.chunks)
+            != len(baseline) + len(result.enrichment_chunks)
+        ):
+            return False
+        prefix = result.chunks[:len(baseline)]
+        tail = result.chunks[len(baseline):]
+        return (
+            all(
+                self._chunk_baseline_signature(candidate)
+                == self._chunk_baseline_signature(original)
+                and all(
+                    support in candidate.retrieval_supports
+                    for support in original.retrieval_supports
+                )
+                for candidate, original in zip(prefix, baseline)
+            )
+            and all(
+                candidate is enrichment
+                for candidate, enrichment in zip(tail, result.enrichment_chunks)
+            )
+            and not (
+                {chunk.chunk_id for chunk in baseline}
+                & {chunk.chunk_id for chunk in result.enrichment_chunks}
+            )
+        )
+
+    @staticmethod
+    def _chunk_baseline_signature(chunk: RetrievedChunk) -> tuple[object, ...]:
+        return (
+            chunk.chunk_id,
+            chunk.source_id,
+            chunk.source_title,
+            chunk.section_path,
+            chunk.text,
+            tuple(chunk.element_ids),
+            chunk.score,
+            chunk.relevance,
+            chunk.notebook_id,
+        )
+
 
 def selected_source_graph_call_context(
     call: SelectedSourceGraphContributionCall,
@@ -759,6 +880,9 @@ def selected_source_graph_call_context(
     actor_id: str,
     cancel_event: Any,
     connection_probe: Any,
+    admission_hydrate: Callable[
+        [str, Sequence[str]], Sequence[RetrievedChunk]
+    ],
     max_results: int,
     max_tokens: int,
 ) -> RetrievalContributionCallContext:
@@ -785,7 +909,13 @@ def selected_source_graph_call_context(
         max_items=execution_limit,
         max_tokens=max(_MIN_CONTRIBUTION_EXECUTION_BUDGET, int(max_tokens)),
         max_proposals=execution_limit,
-        proposal_source=call,
+        admission_source=_SelectedEvidenceAdmissionSource(
+            call if call._service is not None else None,
+            call._notebook_id,
+            admission_hydrate,
+        ),
+        selected_source_graph_source=(
+            call if call._service is not None else None
+        ),
         connection_probe=connection_probe,
-        selected_source_graph_available=call._service is not None,
     )
