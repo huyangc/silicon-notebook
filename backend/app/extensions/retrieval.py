@@ -216,6 +216,19 @@ class RetrievalContributorHost:
         if not registrations:
             return baseline
 
+        if (
+            cancellation is not None
+            and not self._valid_cancellation_token(cancellation)
+        ):
+            for registration in registrations:
+                self._emit(
+                    registration.registered.contribution.declaration.id,
+                    outcome="invalid_context",
+                    failure_code="invalid_cancellation_token",
+                    event_sink=event_sink,
+                )
+            return baseline
+
         if context_factory is not None and call_context is not None:
             context_factory = None
         elif call_context is not None:
@@ -315,8 +328,16 @@ class RetrievalContributorHost:
             connection_held = context.connection.is_connection_held()
         except Exception:
             self._raise_if_core_cancelled(context)
-            connection_held = True
+            connection_held = None
         self._raise_if_core_cancelled(context)
+        if type(connection_held) is not bool:
+            for registration in available:
+                emit(
+                    registration.registered.contribution.declaration.id,
+                    outcome="invalid_context",
+                    failure_code="invalid_connection_probe",
+                )
+            return baseline
         if connection_held:
             for registration in available:
                 emit(
@@ -550,11 +571,15 @@ class RetrievalContributorHost:
             or type(call.scope_narrowed) is not bool
             or type(call.run_id) is not str
             or type(call.run_kind) is not str
+            or not RetrievalContributorHost._valid_cancellation_token(
+                call.cancellation
+            )
             or not callable(getattr(call.proposal_source, "propose", None))
             or not callable(getattr(call.proposal_source, "read", None))
             or not callable(
                 getattr(call.connection_probe, "is_connection_held", None)
             )
+            or type(call.selected_source_graph_available) is not bool
         ):
             return None
         access = _SelectedSourceGraphAccess(call.proposal_source)
@@ -573,8 +598,21 @@ class RetrievalContributorHost:
             ),
             admission_reader=_CallEvidenceReader(call.proposal_source),
             model_access=None,
-            selected_source_graph_access=access,
+            selected_source_graph_access=(
+                access if call.selected_source_graph_available else None
+            ),
             connection=call.connection_probe,
+        )
+
+    @staticmethod
+    def _valid_cancellation_token(cancellation: object) -> bool:
+        try:
+            is_set = getattr(cancellation, "is_set", None)
+            raise_cancelled = getattr(cancellation, "raise_if_cancelled", None)
+        except Exception:
+            return False
+        return callable(is_set) and (
+            raise_cancelled is None or callable(raise_cancelled)
         )
 
     def _granted_capabilities(

@@ -565,42 +565,53 @@ class ReportEngine:
         connection_probe = getattr(
             self.dependencies, "retrieval_connection_probe", None
         )
-        if service is None or host is None or connection_probe is None:
+        if host is None or connection_probe is None:
             return
         baseline = list(original)
-        object_seeds = {
-            str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
-            for hit in (getattr(result, "top_hits", None) or [])
-            if str(getattr(hit, "object_id", "") or "")
-        }
-        chunk_seeds = {
-            str(chunk.chunk_id): float(getattr(chunk, "relevance", 0.0) or 0.0)
-            for chunk in baseline
-            if str(getattr(chunk, "chunk_id", "") or "")
-        }
-
-        call = SelectedSourceGraphContributionCall(
-            service,
-            notebook_id,
-            baseline,
-            object_seeds=object_seeds,
-            chunk_seeds=chunk_seeds,
-            source_titles=self.dependencies.source_query.source_titles,
-            hydrate_chunk_ids=self.dependencies.selected_graph_hydrate,
-            parent_version=(
-                (lambda: self.dependencies.scale_version(notebook_id))
-                if self.dependencies.scale_version is not None else None
-            ),
-            max_results=self.settings.ppr_top_chunks,
-            unsafe_scope_drift=lambda: bool(
-                getattr(
-                    self.dependencies.retrieval,
-                    "unsafe_source_scope_restricted",
-                    lambda _nb: False,
-                )(notebook_id)
-            ),
-            leaf_io=retrieval_fanout_slot,
-        )
+        if service is None:
+            call = SelectedSourceGraphContributionCall(
+                None,
+                notebook_id,
+                baseline,
+                max_results=self.settings.ppr_top_chunks,
+            )
+        else:
+            object_seeds = {
+                str(hit.object_id): float(
+                    getattr(hit, "relevance", 0.0) or 0.0
+                )
+                for hit in (getattr(result, "top_hits", None) or [])
+                if str(getattr(hit, "object_id", "") or "")
+            }
+            chunk_seeds = {
+                str(chunk.chunk_id): float(
+                    getattr(chunk, "relevance", 0.0) or 0.0
+                )
+                for chunk in baseline
+                if str(getattr(chunk, "chunk_id", "") or "")
+            }
+            call = SelectedSourceGraphContributionCall(
+                service,
+                notebook_id,
+                baseline,
+                object_seeds=object_seeds,
+                chunk_seeds=chunk_seeds,
+                source_titles=self.dependencies.source_query.source_titles,
+                hydrate_chunk_ids=self.dependencies.selected_graph_hydrate,
+                parent_version=(
+                    (lambda: self.dependencies.scale_version(notebook_id))
+                    if self.dependencies.scale_version is not None else None
+                ),
+                max_results=self.settings.ppr_top_chunks,
+                unsafe_scope_drift=lambda: bool(
+                    getattr(
+                        self.dependencies.retrieval,
+                        "unsafe_source_scope_restricted",
+                        lambda _nb: False,
+                    )(notebook_id)
+                ),
+                leaf_io=retrieval_fanout_slot,
+            )
         try:
             call_context = selected_source_graph_call_context(
                 call,
@@ -622,18 +633,16 @@ class ReportEngine:
                     getattr(self.dependencies, "event_log", None), "emit", None
                 ),
             )
+            visible, status = call.visible_result(host_chunks)
         except AskCancelled:
             raise
         except Exception:
             # Report retrieval has already frozen B.  Graph/version/scope I/O
             # may only degrade the optional enrichment lane.
-            failed = service.fail_closed(
-                notebook_id, baseline, "activation_seam_failed"
-            )
-            visible, status = list(failed.chunks), failed.status
-        else:
-            visible, status = call.visible_result(host_chunks)
+            visible, status = call.fail_closed_result("activation_seam_failed")
         if status is None:
+            if visible != baseline:
+                result.chunks = visible
             return
         result.baseline_chunks = baseline
         result.chunks = visible

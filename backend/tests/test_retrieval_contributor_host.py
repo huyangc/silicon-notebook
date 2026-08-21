@@ -628,6 +628,32 @@ def test_connection_held_blocks_contributor_before_io():
     assert contributor.calls == 0
 
 
+def test_malformed_connection_probe_is_fail_closed_before_contributor():
+    class _HostileTruth:
+        def __bool__(self):
+            raise RuntimeError("must not evaluate hostile truthiness")
+
+    contributor = _Contributor(_result(_candidate("new")))
+    events = []
+    runtime = build_extension_runtime(
+        (_bundle("bad_probe", contributor),), event_sink=events.append
+    )
+    baseline = ["base"]
+
+    result = runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: _context(
+            _Reader({"new"}), connection=_Connection(held=_HostileTruth())
+        ),
+        baseline_identity=str,
+    )
+
+    assert result is baseline
+    assert contributor.calls == 0
+    assert events[-1]["failure_code"] == "invalid_connection_probe"
+
+
 def test_events_have_exact_content_free_shape_and_sink_failure_is_fail_open():
     events = []
     contributor = _Contributor(error=RuntimeError("question and source secret"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -206,3 +207,68 @@ def test_selected_graph_adapter_propagates_native_request_cancellation():
         )
 
     assert service.failures == []
+
+
+def test_malformed_call_cancellation_is_fail_open_before_proposal_io():
+    baseline = [_chunk("base")]
+    service = _GraphService(_chunk("graph"))
+    call = _selected_call(service, baseline)
+    context = replace(_selected_context(call), cancellation=object())
+
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+
+    assert result is baseline
+    assert call._attempted is False
+    assert service.failures == []
+
+
+def test_absent_graph_service_projects_capability_unavailable():
+    baseline = [_chunk("base")]
+    call = _selected_call(None, baseline)
+    context = _selected_context(call)
+    host = default_extension_runtime().retrieval_contributors
+
+    projected = host._context_from_call("selected_evidence", context)
+    result = host.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+
+    assert context.selected_source_graph_available is False
+    assert projected.selected_source_graph_access is None
+    assert result is baseline
+
+
+def test_malformed_graph_result_and_fail_closed_result_stay_optional():
+    class _MalformedService:
+        def run(self, *_args, **_kwargs):
+            return SimpleNamespace(status=object())
+
+        def fail_closed(self, *_args, **_kwargs):
+            raise RuntimeError("malformed fallback")
+
+    baseline = [_chunk("base")]
+    call = _selected_call(_MalformedService(), baseline)
+    context = _selected_context(call)
+
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    visible, status = call.visible_result(result)
+
+    assert result is baseline
+    assert visible == baseline
+    assert status is None

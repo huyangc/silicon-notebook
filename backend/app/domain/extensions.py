@@ -54,6 +54,7 @@ class RetrievalContributionCallContext:
     proposal_source: RetrievalProposalSourcePort
     connection_probe: Any
     deadline_monotonic: float | None = None
+    selected_source_graph_available: bool = True
 
 
 class RetrievalContributorHostPort(Protocol):

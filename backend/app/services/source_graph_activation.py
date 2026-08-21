@@ -30,6 +30,9 @@ from app.services.source_scope import current_source_scope
 
 _MIN_CONTRIBUTION_EXECUTION_BUDGET = 1
 _HOST_ACCOUNTED_TOKEN_COST = 0
+_SOURCE_GRAPH_STATES = frozenset({
+    "active", "shadow", "off", "historical", "degraded",
+})
 
 
 @dataclass(frozen=True)
@@ -587,7 +590,7 @@ class SelectedSourceGraphContributionCall:
 
     def __init__(
         self,
-        service: SelectedSourceGraphActivationService,
+        service: SelectedSourceGraphActivationService | None,
         notebook_id: str,
         baseline_chunks: Sequence[RetrievedChunk],
         *,
@@ -616,43 +619,54 @@ class SelectedSourceGraphContributionCall:
             "leaf_io": leaf_io,
         }
         self._activated: ActivatedSourceGraphResult | None = None
+        self._attempted = False
         self._proposals: tuple[RetrievalEvidenceProposal, ...] = ()
         self._by_id: dict[str, RetrievalEvidenceProposal] = {}
 
     def propose(self) -> tuple[RetrievalEvidenceProposal, ...]:
-        if self._activated is not None:
+        if self._attempted:
             return self._proposals
+        self._attempted = True
+        if self._service is None:
+            return ()
         try:
             activated = self._service.run(
                 self._notebook_id,
                 self._baseline,
                 **self._kwargs,
             )
+            if not self._valid_activation_result(activated):
+                raise TypeError("invalid selected-source graph result")
         except AskCancelled:
             raise
         except Exception:
-            activated = self._service.fail_closed(
-                self._notebook_id,
-                self._baseline,
-                "activation_seam_failed",
-            )
+            activated = self._fail_closed_activation("activation_seam_failed")
+            if activated is None:
+                return ()
         self._activated = activated
         if activated.status.state != "active":
             return ()
-        self._proposals = tuple(
-            RetrievalEvidenceProposal(
-                identity=chunk.chunk_id,
-                notebook_id=self._notebook_id,
-                source_id=chunk.source_id,
-                provenance_kind="ppr",
-                provenance_reference=chunk.chunk_id,
-                value=chunk,
-                # The legacy activation already enforces its independent token
-                # budget.  The host must not spend or truncate it a second time.
-                token_cost=_HOST_ACCOUNTED_TOKEN_COST,
+        try:
+            self._proposals = tuple(
+                RetrievalEvidenceProposal(
+                    identity=chunk.chunk_id,
+                    notebook_id=self._notebook_id,
+                    source_id=chunk.source_id,
+                    provenance_kind="ppr",
+                    provenance_reference=chunk.chunk_id,
+                    value=chunk,
+                    # The legacy activation already enforces its independent
+                    # token budget.  The host must not spend or truncate it a
+                    # second time.
+                    token_cost=_HOST_ACCOUNTED_TOKEN_COST,
+                )
+                for chunk in activated.enrichment_chunks
             )
-            for chunk in activated.enrichment_chunks
-        )
+        except Exception:
+            self._activated = self._fail_closed_activation(
+                "activation_seam_failed"
+            )
+            return ()
         self._by_id = {proposal.identity: proposal for proposal in self._proposals}
         return self._proposals
 
@@ -669,7 +683,7 @@ class SelectedSourceGraphContributionCall:
         """Apply the legacy output only after the generic atomic host accepts G."""
         activated = self._activated
         if activated is None:
-            return list(self._baseline), None
+            return list(host_chunks), None
         status = activated.status
         host_chunks = tuple(host_chunks)
         host_tail = host_chunks[len(self._baseline):]
@@ -699,6 +713,44 @@ class SelectedSourceGraphContributionCall:
         if status.state == "active":
             return [*activated.chunks[:len(self._baseline)], *host_tail], status
         return [*activated.chunks, *host_tail], status
+
+    def fail_closed_result(self, reason: str):
+        """Keep workflow callers behind the bridge on seam-level failure."""
+        failed = self._fail_closed_activation(reason)
+        if failed is None:
+            return list(self._baseline), None
+        return list(failed.chunks), failed.status
+
+    def _fail_closed_activation(
+        self, reason: str
+    ) -> ActivatedSourceGraphResult | None:
+        if self._service is None:
+            return None
+        try:
+            failed = self._service.fail_closed(
+                self._notebook_id, self._baseline, reason
+            )
+            if not self._valid_activation_result(failed):
+                return None
+            return failed
+        except Exception:
+            return None
+
+    @staticmethod
+    def _valid_activation_result(result: object) -> bool:
+        try:
+            return (
+                type(result) is ActivatedSourceGraphResult
+                and type(result.status) is SourceGraphStatus
+                and type(result.status.state) is str
+                and result.status.state in _SOURCE_GRAPH_STATES
+                and type(result.status.reason) is str
+                and type(result.chunks) is tuple
+                and type(result.baseline_chunks) is tuple
+                and type(result.enrichment_chunks) is tuple
+            )
+        except Exception:
+            return False
 
 
 def selected_source_graph_call_context(
@@ -735,4 +787,5 @@ def selected_source_graph_call_context(
         max_proposals=execution_limit,
         proposal_source=call,
         connection_probe=connection_probe,
+        selected_source_graph_available=call._service is not None,
     )

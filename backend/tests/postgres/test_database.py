@@ -98,6 +98,24 @@ def test_retrieval_host_releases_pool_size_one_before_contributor_fanout(
     assert source.calls == 1
 
 
+def test_connection_probe_depth_resets_after_nested_and_exceptional_leases(
+    postgres_database,
+):
+    assert postgres_database.is_connection_held() is False
+    with postgres_database.connect():
+        assert postgres_database.is_connection_held() is True
+        with postgres_database.connect():
+            assert postgres_database.is_connection_held() is True
+        assert postgres_database.is_connection_held() is True
+    assert postgres_database.is_connection_held() is False
+
+    with pytest.raises(RuntimeError, match="lease failure"):
+        with postgres_database.connect():
+            assert postgres_database.is_connection_held() is True
+            raise RuntimeError("lease failure")
+    assert postgres_database.is_connection_held() is False
+
+
 def test_write_commits_and_rows_are_dicts(postgres_database):
     with postgres_database.write() as conn:
         conn.execute("CREATE TABLE commit_probe (id integer PRIMARY KEY, value text)")

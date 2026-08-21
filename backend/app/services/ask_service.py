@@ -409,37 +409,45 @@ class AskService:
         service = getattr(self, "selected_source_graph", None)
         host = getattr(self, "retrieval_contributors", None)
         connection_probe = getattr(self, "retrieval_connection_probe", None)
-        if service is None or host is None or connection_probe is None:
+        if host is None or connection_probe is None:
             return list(chunks), None
-        object_seeds = {
-            str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
-            for hit in top_hits
-            if str(getattr(hit, "object_id", "") or "")
-        }
-        chunk_seeds = {
-            str(chunk.chunk_id): float(getattr(chunk, "relevance", 0.0) or 0.0)
-            for chunk in chunks
-            if str(getattr(chunk, "chunk_id", "") or "")
-        }
-
-        call = SelectedSourceGraphContributionCall(
-            service,
-            notebook_id,
-            chunks,
-            object_seeds=object_seeds,
-            chunk_seeds=chunk_seeds,
-            source_titles=self.source_titles,
-            hydrate_chunk_ids=self.selected_graph_hydrate,
-            parent_version=lambda: self.scale_version(notebook_id),
-            max_results=max_results,
-            unsafe_scope_drift=lambda: bool(
-                getattr(
-                    self.retrieval,
-                    "unsafe_source_scope_restricted",
-                    lambda _nb: False,
-                )(notebook_id)
-            ),
-        )
+        if service is None:
+            call = SelectedSourceGraphContributionCall(
+                None, notebook_id, chunks, max_results=max_results
+            )
+        else:
+            object_seeds = {
+                str(hit.object_id): float(
+                    getattr(hit, "relevance", 0.0) or 0.0
+                )
+                for hit in top_hits
+                if str(getattr(hit, "object_id", "") or "")
+            }
+            chunk_seeds = {
+                str(chunk.chunk_id): float(
+                    getattr(chunk, "relevance", 0.0) or 0.0
+                )
+                for chunk in chunks
+                if str(getattr(chunk, "chunk_id", "") or "")
+            }
+            call = SelectedSourceGraphContributionCall(
+                service,
+                notebook_id,
+                chunks,
+                object_seeds=object_seeds,
+                chunk_seeds=chunk_seeds,
+                source_titles=self.source_titles,
+                hydrate_chunk_ids=self.selected_graph_hydrate,
+                parent_version=lambda: self.scale_version(notebook_id),
+                max_results=max_results,
+                unsafe_scope_drift=lambda: bool(
+                    getattr(
+                        self.retrieval,
+                        "unsafe_source_scope_restricted",
+                        lambda _nb: False,
+                    )(notebook_id)
+                ),
+            )
         from app.services.retrieval_run import current_retrieval_run
 
         run = current_retrieval_run()
@@ -465,14 +473,11 @@ class AskService:
                     getattr(self, "event_log", None), "emit", None
                 ),
             )
+            return call.visible_result(host_chunks)
         except AskCancelled:
             raise
         except Exception:
-            failed = service.fail_closed(
-                notebook_id, chunks, "activation_seam_failed"
-            )
-            return list(failed.chunks), failed.status
-        return call.visible_result(host_chunks)
+            return call.fail_closed_result("activation_seam_failed")
 
     def _graph_source_chunks_with_activation(
         self,
