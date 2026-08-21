@@ -131,8 +131,8 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
     now = "2026-08-21T00:00:00+00:00"
     PostgresMigrator(postgres_database).migrate()
     identity = IdentityStore(postgres_database, postgres_settings)
-    alice = identity.create_user("pa00123456", "password-12")
-    bob = identity.create_user("pb00123456", "password-12")
+    alice = identity.create_user("a00876543", "password-12")
+    bob = identity.create_user("b00876543", "password-12")
     notebooks = NotebookStore(
         postgres_database,
         new_id=lambda _prefix: "nb-contribution-authority",
