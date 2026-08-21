@@ -556,7 +556,7 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
 检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 20 个工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 22 个 core 工具及每个 provider 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -630,7 +630,7 @@ FastMCP 对象、原始 bearer 或 Memory 审核能力；每次调用都重新�
 provider 的所有写 scope 都强制经过 owner-only notebook 闸。provider 参数对象序列化后的 UTF-8
 超过 16,384 bytes 时整次拒绝；descriptor 最多 16 个参数、工具名最多 64 字符、说明最多 1,000 字符，
 结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行字节/深度 rail，
-超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 按 token owner 归属且仅含 tool/plugin/status。
+超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 按 token owner 归属且仅含 tool/plugin/status。FastMCP schema 错误发生在 provider host 之前，归 transport/request audit；provider audit 的 `invalid` 表示 schema 合法但未通过 host 的额外 wire admission。
 输入和结果都整次拒绝，绝不静默截断。默认 topology 没有 provider contribution，因此发布面
 仍精确等于上表 22 个工具。
 

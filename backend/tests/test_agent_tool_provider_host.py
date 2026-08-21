@@ -391,8 +391,11 @@ async def test_provider_adapter_emits_content_free_core_owned_audit(
         lambda: object(),
         audit_sink=boundary_events.append,
     )
-    with pytest.raises(ValueError, match="invalid Agent tool arguments"):
-        await boundary_adapter(object(), message="missing count")
+    # FastMCP itself owns missing/wrong schema fields before this handler. The
+    # provider-host invalid branch is for schema-valid values that fail its
+    # additional wire admission, such as the serialized byte rail.
+    with pytest.raises(ValueError, match="configured limit"):
+        await boundary_adapter(object(), message="x" * 17_000, count=1)
     assert boundary_events[-1]["status"] == "invalid"
 
     unavailable_host = _runtime(
