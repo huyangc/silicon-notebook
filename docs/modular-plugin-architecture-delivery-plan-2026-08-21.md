@@ -211,6 +211,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-11：`create_memory_mcp` capability bundle 拆分
 
+- 状态：已完成并由 PR #553 交付；固定七个内建 capability bundle、唯一 `PUBLIC_TOOLS` 真源、22-tool schema/权限/Memory review gate 等价、三路 review 与 CI 已闭合；
 - 先完成 A4 高内聚重构；
 - 工具权限、公开 allowlist、agent token、Memory review gate 等行为不变；
 - 本 PR 不开放通用 tool provider。
