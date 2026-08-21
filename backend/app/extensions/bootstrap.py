@@ -11,4 +11,3 @@ def build_extension_registry(
     bundles: Iterable[ExtensionBundle] = (),
 ) -> ExtensionRegistry:
     return frozen_registry(bundles)
-

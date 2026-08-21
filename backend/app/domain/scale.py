@@ -11,4 +11,3 @@ class ScaleIndexView(Protocol):
     idf: Any
     chunk_index: Any
     manifest: dict
-

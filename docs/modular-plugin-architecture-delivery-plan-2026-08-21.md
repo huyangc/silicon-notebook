@@ -1,6 +1,6 @@
 # 模块化插件架构交付与 PR 流水计划
 
-日期：2026-08-21  
+日期：2026-08-21
 依据：[`modular-plugin-architecture-design-2026-08-21.md`](./modular-plugin-architecture-design-2026-08-21.md)
 
 ## 1. 决策
@@ -85,6 +85,7 @@ PR 描述必须包含：
 范围：
 
 - 定义 point-specific context/result/budget/cancellation/provenance 合同；
+- 建立 capability decision catalog；registry freeze 校验每个 required capability 的判定入口存在，但不冻结其实时 availability；
 - 建立 baseline-preserving host、request-time availability、脱敏 failure/event；
 - host 在零 contribution 时短路返回原 baseline，不走降级 adapter；
 - Ask/Report 只接同一个共享 host 入口，不注册真实 contributor；
@@ -249,4 +250,3 @@ Review 输出统一为：finding severity、绝对路径/行号、违反的不�
 4. PR-03：generated-question supplement adapter；
 5. Phase 1 出口 review 后，再冻结 PR-04/05 的具体 diff 范围；
 6. 前端 PR-F1 可在 PR-01 合入后启动独立流水，但不得与另一个 `page.tsx` PR 并行。
-

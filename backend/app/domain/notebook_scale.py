@@ -20,4 +20,3 @@ class NotebookScaleFacts:
             "nodes": self.nodes,
             "edges": self.edges,
         }
-

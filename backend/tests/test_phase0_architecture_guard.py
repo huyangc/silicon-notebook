@@ -50,6 +50,17 @@ def test_guard_detects_contract_moved_back_into_services(tmp_path):
     ]
 
 
+def test_guard_detects_member_style_service_imports(tmp_path):
+    app = tmp_path / "app"
+    _write(app / "repositories/ports.py", "from app import services\n")
+    _write(app / "domain/retrieval.py", "from app import services\n")
+
+    assert boundary_violations(app) == [
+        "app.domain.retrieval imports forbidden app.services",
+        "app.repositories.ports imports service app.services",
+    ]
+
+
 def test_guard_detects_domain_contract_moved_to_an_adapter(tmp_path):
     app = tmp_path / "app"
     _write(app / "__init__.py", "")
@@ -83,6 +94,18 @@ def test_facade_freeze_rejects_addition_but_allows_surface_reduction(tmp_path):
     )
     assert facade_surface_additions(path, "RepositoryFacade", allowed) == ["added"]
 
+    _write(
+        path,
+        "class RepositoryFacade(Mixin):\n"
+        "    def existing(self): pass\n"
+        "    def second(self): pass\n"
+        "    added = existing\n",
+    )
+    assert facade_surface_additions(path, "RepositoryFacade", allowed) == [
+        "<base:Mixin>",
+        "added",
+    ]
+
     _write(path, "class RepositoryFacade:\n    def existing(self): pass\n")
     assert facade_surface_additions(path, "RepositoryFacade", allowed) == []
 
@@ -91,21 +114,34 @@ def test_repository_service_reverse_import_ceiling_only_allows_reduction(tmp_pat
     app = tmp_path / "app"
     _write(app / "repositories/sqlite/query_store.py", "")
     _write(app / "repositories/postgres/query_store.py", "")
+    _write(app / "repositories/filesystem/artifact_store.py", "")
 
     assert repository_service_import_violations(
-        app, {"sqlite": 0, "postgres": 0}
+        app, {"sqlite": 0, "postgres": 0, "other": 0}
     ) == []
 
     _write(
         app / "repositories/sqlite/query_store.py",
         "from app.services.retrieval import RetrievedChunk\n",
     )
+    _write(
+        app / "repositories/postgres/query_store.py",
+        "from ...services.retrieval import RetrievedChunk\n",
+    )
+    _write(
+        app / "repositories/filesystem/artifact_store.py",
+        "from app import services\n",
+    )
     assert repository_service_import_violations(
-        app, {"sqlite": 0, "postgres": 0}
-    ) == ["repositories/sqlite service imports grew: 1 > 0"]
+        app, {"sqlite": 0, "postgres": 0, "other": 0}
+    ) == [
+        "repositories/other service imports grew: 1 > 0",
+        "repositories/postgres service imports grew: 1 > 0",
+        "repositories/sqlite service imports grew: 1 > 0",
+    ]
 
 
-def test_empty_registry_cannot_change_existing_workflow_import_paths():
+def test_empty_registry_is_statically_isolated_from_existing_workflows():
     violations = boundary_violations(ROOT / "backend/app")
 
     assert not [item for item in violations if "empty registry" in item]
@@ -117,12 +153,34 @@ def test_empty_registry_cannot_change_existing_workflow_import_paths():
 
 def test_guard_rejects_existing_workflow_consuming_empty_registry(tmp_path):
     app = tmp_path / "app"
-    _write(app / "services/workflow.py", "from app.extensions import registry\n")
+    _write(app / "services/workflow.py", "from app import extensions\n")
 
     assert boundary_violations(app) == [
         "app.services.workflow consumes the Phase-0 empty registry; "
         "existing workflows must stay untouched"
     ]
+
+
+def test_registry_composition_does_not_change_route_topology(monkeypatch):
+    from app import main as app_main
+
+    baseline = app_main.create_app()
+    sentinel = object()
+    monkeypatch.setattr(app_main, "build_extension_registry", lambda: sentinel)
+    composed = app_main.create_app()
+
+    def route_signature(app):
+        return [
+            (
+                route.path,
+                tuple(sorted(getattr(route, "methods", ()) or ())),
+                route.name,
+            )
+            for route in app.routes
+        ]
+
+    assert composed.state.extension_registry is sentinel
+    assert route_signature(composed) == route_signature(baseline)
 
 
 def test_phase0_boundary_is_present_in_all_agent_entry_documents():
@@ -136,3 +194,5 @@ def test_phase0_boundary_is_present_in_all_agent_entry_documents():
         )
         assert "phase 0" in normalized, name
         assert "extension sdk" in normalized, name
+        assert "subagent review" in normalized, name
+        assert "ci" in normalized, name

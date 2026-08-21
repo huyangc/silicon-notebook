@@ -39,6 +39,8 @@ from app.services.repository_facade import (
     _now,
 )
 from app.services.retrieval import RetrievedKnowledge
+
+
 class SQLiteRepository(RepositoryFacade):
     """Preserve the historical SQLite API while isolating backend concerns."""
 

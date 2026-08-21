@@ -8,4 +8,3 @@ __all__ = [
     "ExtensionRegistryError",
     "build_extension_registry",
 ]
-

@@ -323,6 +323,7 @@
     },
     "SQLiteRepository": {
       "allowed_names": [
+        "<base:RepositoryFacade>",
         "checkup",
         "close_local",
         "db_path",
@@ -332,6 +333,7 @@
     }
   },
   "repository_service_import_ceiling": {
+    "other": 7,
     "postgres": 32,
     "sqlite": 32
   }

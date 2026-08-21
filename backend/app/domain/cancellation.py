@@ -6,4 +6,3 @@ from typing import Optional
 
 
 CancelEvent = Optional[threading.Event]
-

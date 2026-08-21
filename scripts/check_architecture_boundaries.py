@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Callable
 import json
 from pathlib import Path
 
@@ -17,16 +18,6 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
-EMPTY_REGISTRY_IMPORTERS = frozenset(
-    {
-        "app.main",
-        "app.extensions",
-        "app.extensions.bootstrap",
-        "app.extensions.registry",
-    }
-)
-
-
 def module_name(app_root: Path, path: Path) -> str:
     relative = path.relative_to(app_root.parent).with_suffix("")
     parts = list(relative.parts)
@@ -43,6 +34,33 @@ def python_modules(app_root: Path) -> dict[str, Path]:
     }
 
 
+def import_from_base(module: str, path: Path, node: ast.ImportFrom) -> str:
+    if node.level:
+        package = (
+            module.split(".")
+            if path.name == "__init__.py"
+            else module.split(".")[:-1]
+        )
+        keep = len(package) - (node.level - 1)
+        return ".".join(
+            [*package[:keep], *(node.module or "").split(".")]
+        ).rstrip(".")
+    return node.module or ""
+
+
+def import_from_targets(
+    module: str, path: Path, node: ast.ImportFrom
+) -> set[str]:
+    base = import_from_base(module, path, node)
+    targets = {base} if base else set()
+    targets.update(
+        ".".join(part for part in (base, alias.name) if part)
+        for alias in node.names
+        if alias.name != "*"
+    )
+    return targets
+
+
 def imported_modules(
     module: str, path: Path, *, include_members: bool = False
 ) -> set[str]:
@@ -52,27 +70,30 @@ def imported_modules(
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.level:
-                package = (
-                    module.split(".")
-                    if path.name == "__init__.py"
-                    else module.split(".")[:-1]
-                )
-                keep = len(package) - (node.level - 1)
-                base = ".".join(
-                    [*package[:keep], *(node.module or "").split(".")]
-                ).rstrip(".")
-            else:
-                base = node.module or ""
+            targets = import_from_targets(module, path, node)
+            base = import_from_base(module, path, node)
             if base:
                 imports.add(base)
             if include_members or node.module is None:
-                for alias in node.names:
-                    if alias.name != "*":
-                        imports.add(
-                            ".".join(part for part in (base, alias.name) if part)
-                        )
+                imports.update(targets)
     return imports
+
+
+def minimal_matching_module_references(
+    imports: set[str], predicate: Callable[[str], bool]
+) -> set[str]:
+    """Keep the shortest matching module reference for each imported branch."""
+
+    matches = {imported for imported in imports if predicate(imported)}
+    return {
+        imported
+        for imported in matches
+        if not any(
+            imported.startswith(f"{candidate}.")
+            for candidate in matches
+            if candidate != imported
+        )
+    }
 
 
 def import_graph(app_root: Path) -> dict[str, set[str]]:
@@ -132,25 +153,43 @@ def boundary_violations(app_root: Path) -> list[str]:
     modules = python_modules(app_root)
     violations: list[str] = []
     for module, path in modules.items():
-        imports = imported_modules(module, path)
+        # Include imported members so legal spellings such as
+        # ``from app import services`` cannot hide a forbidden module edge.
+        imports = imported_modules(module, path, include_members=True)
         if module == "app.repositories.ports":
-            for imported in sorted(imports):
-                if imported.startswith("app.services"):
-                    violations.append(f"{module} imports service {imported}")
+            forbidden = minimal_matching_module_references(
+                imports, lambda imported: imported.startswith("app.services")
+            )
+            for imported in sorted(forbidden):
+                violations.append(f"{module} imports service {imported}")
         if module == "app.domain" or module.startswith("app.domain."):
-            for imported in sorted(imports):
-                if imported.startswith(FORBIDDEN_DOMAIN_PREFIXES):
-                    violations.append(f"{module} imports forbidden {imported}")
+            forbidden = minimal_matching_module_references(
+                imports,
+                lambda imported: imported.startswith(FORBIDDEN_DOMAIN_PREFIXES),
+            )
+            for imported in sorted(forbidden):
+                violations.append(f"{module} imports forbidden {imported}")
         if module == "app.extension_sdk" or module.startswith("app.extension_sdk."):
-            for imported in sorted(imports):
-                if imported.startswith("app.") and not imported.startswith(
-                    ("app.domain", "app.extension_sdk")
-                ):
-                    violations.append(f"{module} imports forbidden {imported}")
-        if any(
-            imported == "app.extensions" or imported.startswith("app.extensions.")
+            forbidden = minimal_matching_module_references(
+                imports,
+                lambda imported: imported.startswith("app.")
+                and not imported.startswith(("app.domain", "app.extension_sdk")),
+            )
+            for imported in sorted(forbidden):
+                violations.append(f"{module} imports forbidden {imported}")
+        imports_extension_surface = any(
+            imported in {"app.extensions", "app.extension_sdk"}
+            or imported.startswith(("app.extensions.", "app.extension_sdk."))
             for imported in imports
-        ) and module not in EMPTY_REGISTRY_IMPORTERS:
+        )
+        is_extension_composition = (
+            module == "app.main"
+            or module == "app.extensions"
+            or module.startswith("app.extensions.")
+            or module == "app.extension_sdk"
+            or module.startswith("app.extension_sdk.")
+        )
+        if imports_extension_surface and not is_extension_composition:
             violations.append(
                 f"{module} consumes the Phase-0 empty registry; existing workflows must stay untouched"
             )
@@ -166,23 +205,31 @@ def repository_service_import_counts(app_root: Path) -> dict[str, int]:
     harmless changes to a multi-symbol import.
     """
 
-    counts: dict[str, int] = {}
-    for backend in ("sqlite", "postgres"):
+    counts = {"sqlite": 0, "postgres": 0, "other": 0}
+    repositories_root = app_root / "repositories"
+    for path in sorted(repositories_root.rglob("*.py")):
+        relative = path.relative_to(repositories_root)
+        backend = (
+            relative.parts[0]
+            if relative.parts and relative.parts[0] in {"sqlite", "postgres"}
+            else "other"
+        )
+        module = module_name(app_root, path)
         count = 0
-        for path in sorted((app_root / "repositories" / backend).rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    imports_service = any(
-                        alias.name.startswith("app.services") for alias in node.names
-                    )
-                elif isinstance(node, ast.ImportFrom):
-                    imports_service = (node.module or "").startswith("app.services")
-                else:
-                    continue
-                if imports_service:
-                    count += 1
-        counts[backend] = count
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                targets = {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                targets = import_from_targets(module, path, node)
+            else:
+                continue
+            if any(
+                target == "app.services" or target.startswith("app.services.")
+                for target in targets
+            ):
+                count += 1
+        counts[backend] += count
     return counts
 
 
@@ -210,6 +257,16 @@ def public_class_surface(path: Path, class_name: str) -> set[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and not node.name.startswith("_")
     }
+    names.update(f"<base:{ast.unparse(base)}>" for base in class_node.bases)
+    for node in class_node.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names.update(
+            target.id
+            for target in targets
+            if isinstance(target, ast.Name) and not target.id.startswith("_")
+        )
     for node in ast.walk(class_node):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue

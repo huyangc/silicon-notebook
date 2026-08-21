@@ -39,4 +39,3 @@ def remap_json_ids(value: Any, maps: dict) -> Any:
     if isinstance(value, list):
         return [remap_json_ids(item, maps) for item in value]
     return value
-
