@@ -2455,7 +2455,10 @@ class AskService:
             ReasoningRetrievalRuntime,
             StageBoundaryError,
         )
-        from app.services.reasoning_retrieval import ReasoningRetriever
+        from app.services.reasoning_retrieval import (
+            ReasoningResult,
+            ReasoningRetriever,
+        )
 
         if type(prepared) is not PreparedReasoningAsk:
             raise StageBoundaryError("invalid prepared Ask reasoning input")
