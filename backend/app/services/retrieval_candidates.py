@@ -2488,7 +2488,7 @@ class CandidateRetrievalService(_RetrievalState):
         return chunks, ids, mat
 
     def hydrate_retrieval_contribution_chunks(
-        self, notebook_id: str, candidate_ids: Iterable[str]
+        self, notebook_id: str, actor_id: str, candidate_ids: Iterable[str]
     ) -> list[RetrievedChunk]:
         """One scope-before-read authority batch for extension proposals."""
         from app.services.source_scope import current_source_scope
@@ -2513,6 +2513,7 @@ class CandidateRetrievalService(_RetrievalState):
                     db,
                     notebook_id,
                     batch,
+                    actor_id=actor_id,
                     source_mode=source_mode,
                     source_ids=source_ids,
                 ))

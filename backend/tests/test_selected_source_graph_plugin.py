@@ -178,15 +178,19 @@ def _selected_call(service, baseline):
     )
 
 
-def _selected_context(call, cancellation=None, admission_hydrate=None):
+def _selected_context(
+    call, cancellation=None, admission_hydrate=None, admission_leaf_io=None
+):
     return selected_source_graph_call_context(
         call,
         actor_id="actor",
         cancel_event=cancellation,
         connection_probe=SimpleNamespace(is_connection_held=lambda: False),
         admission_hydrate=(
-            admission_hydrate or (lambda _notebook_id, _ids: ())
+            admission_hydrate
+            or (lambda _notebook_id, _actor_id, _ids: ())
         ),
+        admission_leaf_io=admission_leaf_io,
         max_results=5,
         max_tokens=100,
     )
@@ -274,6 +278,32 @@ def test_hostile_cancellation_truth_value_is_fail_open_before_proposal_io():
         call_context=context,
         baseline_identity=lambda chunk: chunk.chunk_id,
         cancellation=cancellation,
+    )
+
+    assert result is baseline
+    assert call._attempted is False
+
+
+def test_production_cancellation_adapter_rejects_hostile_event_truth():
+    class _HostileTruth:
+        def __bool__(self):
+            raise RuntimeError("hostile cancellation truth")
+
+    class _HostileEvent:
+        def is_set(self):
+            return _HostileTruth()
+
+    baseline = [_chunk("base")]
+    service = _GraphService(_chunk("graph"))
+    call = _selected_call(service, baseline)
+    context = _selected_context(call, cancellation=_HostileEvent())
+
+    result = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
     )
 
     assert result is baseline
@@ -418,6 +448,40 @@ def test_malformed_admission_fallback_cannot_replace_frozen_baseline():
     assert service.failures == ["extension_admission_failed"]
 
 
+def test_shadow_baseline_copy_preserves_status_without_becoming_visible_graph():
+    baseline = [_chunk("base")]
+    graph = _chunk("graph")
+
+    class _ShadowService(_GraphService):
+        def run(self, *_args, **_kwargs):
+            return ActivatedSourceGraphResult(
+                (replace(baseline[0]),),
+                tuple(baseline),
+                (graph,),
+                SourceGraphStatus(
+                    "shadow", "shadow", enrichment_count=1
+                ),
+            )
+
+    service = _ShadowService(graph)
+    call = _selected_call(service, baseline)
+    context = _selected_context(call)
+    host_chunks = default_extension_runtime().retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    visible, status = call.visible_result(host_chunks)
+
+    assert [chunk.chunk_id for chunk in visible] == ["base"]
+    assert visible[0] is not baseline[0]
+    assert status.state == "shadow"
+    assert status.reason == "shadow"
+    assert service.failures == []
+
+
 class _IndependentContributor:
     invocations = frozenset({"selected_evidence"})
 
@@ -487,8 +551,8 @@ def test_absent_graph_capability_keeps_independent_real_host_contribution():
     baseline = [_chunk("base")]
     call = _selected_call(None, baseline)
 
-    def hydrate(notebook_id, identities):
-        hydrate_calls.append((notebook_id, identities))
+    def hydrate(notebook_id, actor_id, identities):
+        hydrate_calls.append((notebook_id, actor_id, identities))
         chunk = _chunk("other")
         chunk.notebook_id = "notebook"
         return [chunk]
@@ -504,7 +568,7 @@ def test_absent_graph_capability_keeps_independent_real_host_contribution():
 
     assert [chunk.chunk_id for chunk in result] == ["base", "other"]
     assert contributor.calls == 1
-    assert hydrate_calls == [("notebook", ("other",))]
+    assert hydrate_calls == [("notebook", "actor", ("other",))]
 
 
 def test_graph_and_independent_authorities_share_host_without_extra_graph_io():
@@ -523,14 +587,26 @@ def test_graph_and_independent_authorities_share_host_without_extra_graph_io():
     baseline = [_chunk("base")]
     call = _selected_call(_GraphService(_chunk("graph")), baseline)
     hydrate_calls = []
+    leaf_slots = []
 
-    def hydrate(notebook_id, identities):
-        hydrate_calls.append((notebook_id, identities))
+    class _LeafSlot:
+        def __enter__(self):
+            leaf_slots.append("enter")
+
+        def __exit__(self, *_args):
+            leaf_slots.append("exit")
+
+    def hydrate(notebook_id, actor_id, identities):
+        hydrate_calls.append((notebook_id, actor_id, identities))
         chunk = _chunk("other")
         chunk.notebook_id = notebook_id
         return [chunk]
 
-    context = _selected_context(call, admission_hydrate=hydrate)
+    context = _selected_context(
+        call,
+        admission_hydrate=hydrate,
+        admission_leaf_io=_LeafSlot,
+    )
     result = runtime.retrieval_contributors.run(
         baseline,
         invocation="selected_evidence",
@@ -541,7 +617,8 @@ def test_graph_and_independent_authorities_share_host_without_extra_graph_io():
 
     assert [chunk.chunk_id for chunk in result] == ["base", "other", "graph"]
     assert contributor.calls == 1
-    assert hydrate_calls == [("notebook", ("other",))]
+    assert hydrate_calls == [("notebook", "actor", ("other",))]
+    assert leaf_slots == ["enter", "exit"]
 
 
 def test_graph_only_authority_stays_in_memory_without_fallback_hydration():
@@ -549,11 +626,20 @@ def test_graph_only_authority_stays_in_memory_without_fallback_hydration():
     service = _GraphService(_chunk("graph"))
     call = _selected_call(service, baseline)
     hydrate_calls = []
+
+    class _ForbiddenLeafSlot:
+        def __enter__(self):
+            raise AssertionError("graph request-memory authority acquired leaf slot")
+
+        def __exit__(self, *_args):
+            return None
+
     context = _selected_context(
         call,
-        admission_hydrate=lambda notebook_id, identities: hydrate_calls.append(
-            (notebook_id, identities)
+        admission_hydrate=lambda notebook_id, actor_id, identities: (
+            hydrate_calls.append((notebook_id, actor_id, identities))
         ) or (),
+        admission_leaf_io=_ForbiddenLeafSlot,
     )
 
     result = default_extension_runtime().retrieval_contributors.run(

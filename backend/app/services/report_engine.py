@@ -621,8 +621,9 @@ class ReportEngine:
                 connection_probe=connection_probe,
                 admission_hydrate=(
                     self.dependencies.retrieval_contributor_hydrate
-                    or (lambda _notebook_id, _ids: ())
+                    or (lambda _notebook_id, _actor_id, _ids: ())
                 ),
+                admission_leaf_io=retrieval_fanout_slot,
                 max_results=self.settings.ppr_top_chunks,
                 max_tokens=int(
                     self.settings.selected_source_graph_enrichment_tokens

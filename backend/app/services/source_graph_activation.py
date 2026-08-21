@@ -573,7 +573,12 @@ class _AskCancellationToken:
         self._event = event
 
     def is_set(self) -> bool:
-        return bool(self._event is not None and self._event.is_set())
+        if self._event is None:
+            return False
+        cancelled = self._event.is_set()
+        if type(cancelled) is not bool:
+            raise TypeError("malformed cancellation state")
+        return cancelled
 
     def raise_if_cancelled(self) -> None:
         if self.is_set():
@@ -587,11 +592,17 @@ class _SelectedEvidenceAdmissionSource:
         self,
         graph: "SelectedSourceGraphContributionCall | None",
         notebook_id: str,
-        fallback: Callable[[str, Sequence[str]], Sequence[RetrievedChunk]],
+        actor_id: str,
+        fallback: Callable[
+            [str, str, Sequence[str]], Sequence[RetrievedChunk]
+        ],
+        leaf_io: Callable[[], Any] | None,
     ) -> None:
         self._graph = graph
         self._notebook_id = notebook_id
+        self._actor_id = actor_id
         self._fallback = fallback
+        self._leaf_io = leaf_io or nullcontext
 
     def read(
         self, identities: tuple[str, ...]
@@ -601,7 +612,10 @@ class _SelectedEvidenceAdmissionSource:
         missing = tuple(identity for identity in identities if identity not in by_id)
         if missing:
             try:
-                hydrated = self._fallback(self._notebook_id, missing)
+                with self._leaf_io():
+                    hydrated = self._fallback(
+                        self._notebook_id, self._actor_id, missing
+                    )
             except Exception:
                 return ()
             if type(hydrated) not in (list, tuple):
@@ -824,10 +838,9 @@ class SelectedSourceGraphContributionCall:
             return (
                 len(result.chunks) == len(baseline)
                 and all(
-                    candidate is original
+                    self._baseline_chunk_is_monotonic(candidate, original)
                     for candidate, original in zip(result.chunks, baseline)
                 )
-                and not result.enrichment_chunks
             )
         if (
             result.status.baseline_preserved is not True
@@ -841,12 +854,7 @@ class SelectedSourceGraphContributionCall:
         tail = result.chunks[len(baseline):]
         return (
             all(
-                self._chunk_baseline_signature(candidate)
-                == self._chunk_baseline_signature(original)
-                and all(
-                    support in candidate.retrieval_supports
-                    for support in original.retrieval_supports
-                )
+                self._baseline_chunk_is_monotonic(candidate, original)
                 for candidate, original in zip(prefix, baseline)
             )
             and all(
@@ -856,6 +864,19 @@ class SelectedSourceGraphContributionCall:
             and not (
                 {chunk.chunk_id for chunk in baseline}
                 & {chunk.chunk_id for chunk in result.enrichment_chunks}
+            )
+        )
+
+    @classmethod
+    def _baseline_chunk_is_monotonic(
+        cls, candidate: RetrievedChunk, original: RetrievedChunk
+    ) -> bool:
+        return (
+            cls._chunk_baseline_signature(candidate)
+            == cls._chunk_baseline_signature(original)
+            and all(
+                support in candidate.retrieval_supports
+                for support in original.retrieval_supports
             )
         )
 
@@ -881,8 +902,9 @@ def selected_source_graph_call_context(
     cancel_event: Any,
     connection_probe: Any,
     admission_hydrate: Callable[
-        [str, Sequence[str]], Sequence[RetrievedChunk]
+        [str, str, Sequence[str]], Sequence[RetrievedChunk]
     ],
+    admission_leaf_io: Callable[[], Any] | None = None,
     max_results: int,
     max_tokens: int,
 ) -> RetrievalContributionCallContext:
@@ -912,7 +934,9 @@ def selected_source_graph_call_context(
         admission_source=_SelectedEvidenceAdmissionSource(
             call if call._service is not None else None,
             call._notebook_id,
+            actor_id,
             admission_hydrate,
+            admission_leaf_io,
         ),
         selected_source_graph_source=(
             call if call._service is not None else None

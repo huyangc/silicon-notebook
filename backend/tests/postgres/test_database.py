@@ -117,6 +117,102 @@ def test_connection_probe_depth_resets_after_nested_and_exceptional_leases(
     assert postgres_database.is_connection_held() is False
 
 
+def test_retrieval_authority_filters_private_memory_in_postgres(
+    postgres_database, postgres_settings
+):
+    from app.models.schemas import NotebookCreate
+    from app.repositories.ports import ChunkWrite
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.identity_store import IdentityStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.notebook_store import NotebookStore
+    from app.repositories.postgres.source_store import SourceStore
+
+    now = "2026-08-21T00:00:00+00:00"
+    PostgresMigrator(postgres_database).migrate()
+    identity = IdentityStore(postgres_database, postgres_settings)
+    alice = identity.create_user("pa00123456", "password-12")
+    bob = identity.create_user("pb00123456", "password-12")
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda _prefix: "nb-contribution-authority",
+        now=lambda: now,
+    )
+    notebook_id = notebooks.create_row(NotebookCreate(name="authority"), alice.id)
+    sources = SourceStore(postgres_database, now=lambda: now)
+    chunks = ChunkStore(postgres_database)
+
+    with postgres_database.write() as connection:
+        for row in (
+            (
+                "memory-pg-alice", notebook_id, alice.id, "external_agent",
+                "confirmed", "Alice", "private", now, now,
+            ),
+            (
+                "memory-pg-bob", notebook_id, bob.id, "external_agent",
+                "confirmed", "Bob", "private", now, now,
+            ),
+        ):
+            connection.execute(
+                "INSERT INTO memory_items "
+                "(id,notebook_id,created_by,origin,status,title,content_md,"
+                "created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                row,
+            )
+    for source_id, source_type, memory_id in (
+        ("source-pg-visible", "markdown", ""),
+        ("source-pg-knowhow", "knowhow", ""),
+        ("source-pg-memory-alice", "memory", "memory-pg-alice"),
+        ("source-pg-memory-bob", "memory", "memory-pg-bob"),
+    ):
+        sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name="",
+            file_path="",
+            file_size=0,
+            file_hash="",
+            summary="",
+            doc_type="",
+            memory_id=memory_id,
+        )
+        chunks.replace_source_chunks(
+            source_id,
+            notebook_id,
+            [ChunkWrite(f"chunk-{source_id}", source_id, "", ())],
+            created_at=now,
+        )
+
+    candidate_ids = tuple(
+        f"chunk-{source_id}" for source_id in (
+            "source-pg-visible",
+            "source-pg-knowhow",
+            "source-pg-memory-alice",
+            "source-pg-memory-bob",
+        )
+    )
+    with postgres_database.connect() as connection:
+        rows = chunks.retrieval_contribution_rows(
+            connection,
+            notebook_id,
+            candidate_ids,
+            actor_id=alice.id,
+            source_mode=None,
+            source_ids=(),
+        )
+
+    assert {row["id"] for row in rows} == {
+        "chunk-source-pg-visible",
+        "chunk-source-pg-knowhow",
+        "chunk-source-pg-memory-alice",
+    }
+
+
 def test_write_commits_and_rows_are_dicts(postgres_database):
     with postgres_database.write() as conn:
         conn.execute("CREATE TABLE commit_probe (id integer PRIMARY KEY, value text)")

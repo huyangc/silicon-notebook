@@ -400,6 +400,7 @@ class ChunkStore:
         notebook_id: str,
         chunk_ids: Sequence[str],
         *,
+        actor_id: str,
         source_mode: str | None,
         source_ids: Sequence[str],
     ):
@@ -415,13 +416,19 @@ class ChunkStore:
             operator = "IN" if source_mode == "include" else "NOT IN"
             source_clause = f" AND c.source_id {operator} ({source_placeholders})"
             params.extend(sources)
+        memory_clause = (
+            " AND (s.source_type <> 'memory' OR EXISTS ("
+            "SELECT 1 FROM memory_items m "
+            "WHERE m.id=s.memory_id AND m.created_by=?))"
+        )
+        params.append(actor_id)
         return db.execute(
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
             "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s "
             "ON s.id=c.source_id AND s.notebook_id=c.notebook_id "
             f"WHERE c.notebook_id=? AND c.id IN ({id_placeholders})"
-            f"{source_clause}",
+            f"{source_clause}{memory_clause}",
             params,
         ).fetchall()
 

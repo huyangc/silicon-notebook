@@ -779,8 +779,6 @@ class RetrievalContributorHost:
             is_set = getattr(cancellation, "is_set", None)
         except Exception as exc:
             raise _MalformedCancellationToken() from exc
-        if callable(raise_cancelled):
-            raise_cancelled()
         if not callable(is_set):
             raise _MalformedCancellationToken()
         try:
@@ -789,8 +787,11 @@ class RetrievalContributorHost:
             raise _MalformedCancellationToken() from exc
         if type(cancelled) is not bool:
             raise _MalformedCancellationToken()
-        if cancelled:
-            raise RetrievalHostCancelled("retrieval request cancelled")
+        if not cancelled:
+            return
+        if callable(raise_cancelled):
+            raise_cancelled()
+        raise RetrievalHostCancelled("retrieval request cancelled")
 
     def _deadline_expired(self, context: RetrievalHostContext) -> bool:
         deadline = context.budget.deadline_monotonic

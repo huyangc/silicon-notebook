@@ -91,7 +91,9 @@ def _wire_ask_graph_host(ask):
     ask.retrieval_connection_probe = SimpleNamespace(
         is_connection_held=lambda: False
     )
-    ask.retrieval_contributor_hydrate = lambda _notebook_id, _ids: ()
+    ask.retrieval_contributor_hydrate = (
+        lambda _notebook_id, _actor_id, _ids: ()
+    )
     ask.current_user_id = lambda: "ask-user"
     ask.settings = SimpleNamespace(
         selected_source_graph_enrichment_tokens=1000,
@@ -107,7 +109,7 @@ def _wire_report_graph_host(report, dependencies):
         is_connection_held=lambda: False
     )
     dependencies.retrieval_contributor_hydrate = (
-        lambda _notebook_id, _ids: ()
+        lambda _notebook_id, _actor_id, _ids: ()
     )
     dependencies.event_log = _Events()
     report.user_id = "report-user"
@@ -461,6 +463,64 @@ def test_shadow_lane_never_changes_visible_chunks(monkeypatch):
     assert result.status.state == "shadow"
     assert result.chunks == tuple(baseline)
     assert [chunk.chunk_id for chunk in result.enrichment_chunks] == ["g"]
+
+
+def test_builtin_plugin_preserves_shadow_status_and_single_graph_event(monkeypatch):
+    legacy_baseline = [_chunk("b", "a")]
+    plugin_baseline = [_chunk("b", "a")]
+    graph_chunk = SimpleNamespace(
+        chunk_id="g", source_id="a", section_path="G", text="graph",
+        element_ids=("eg",),
+    )
+    ppr = SimpleNamespace(
+        hits=(SimpleNamespace(
+            chunk=graph_chunk,
+            score=0.9,
+            support=RetrievalSupport("ppr", "ppr", "", 0.9),
+        ),),
+        cache_hit=False,
+        capability=SimpleNamespace(enabled=True, reason=""),
+    )
+    legacy, legacy_events = _service(
+        snapshot=_snapshot(graph_chunk), ppr=ppr
+    )
+    plugin, plugin_events = _service(
+        snapshot=_snapshot(graph_chunk), ppr=ppr
+    )
+    for service in (legacy, plugin):
+        monkeypatch.setattr(
+            service,
+            "_decision",
+            lambda _nb: SourceGraphRolloutDecision(True, True, "shadow"),
+        )
+
+    ask = object.__new__(AskService)
+    ask.selected_source_graph = plugin
+    ask.source_titles = lambda _ids: {"a": "A"}
+    ask.selected_graph_hydrate = lambda _ids: ()
+    ask.scale_version = lambda _nb: "v"
+    ask.retrieval = SimpleNamespace(
+        unsafe_source_scope_restricted=lambda _nb: True
+    )
+    _wire_ask_graph_host(ask)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        legacy_result = legacy.run(
+            "nb",
+            legacy_baseline,
+            source_titles=lambda _ids: {"a": "A"},
+            max_results=20,
+        )
+        plugin_chunks, plugin_status = ask._activate_selected_source_graph(
+            "nb", plugin_baseline
+        )
+
+    assert plugin_chunks == list(legacy_result.chunks)
+    assert plugin_status == legacy_result.status
+    assert plugin_events.rows == legacy_events.rows
+    assert [row["state"] for row in plugin_events.rows] == ["shadow"]
 
 
 def test_builtin_plugin_preserves_active_chunks_status_and_graph_event(monkeypatch):

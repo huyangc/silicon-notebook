@@ -336,11 +336,89 @@ def test_retrieval_contribution_authority_applies_notebook_and_source_in_sql(
         {"mode": "include", "source_ids": ["source-1"], "narrowed": True},
     ):
         rows = repo.retrieval.hydrate_retrieval_contribution_chunks(
-            notebook.id, ("chunk-1", "chunk-2", "chunk-other")
+            notebook.id, "actor", ("chunk-1", "chunk-2", "chunk-other")
         )
 
     assert [chunk.chunk_id for chunk in rows] == ["chunk-1"]
     assert rows[0].notebook_id == notebook.id
+
+
+def test_retrieval_contribution_authority_filters_private_memory_without_scope(
+    repo,
+):
+    notebook = _seed_original_chunk(repo)
+    alice = repo.create_user("a00123456", "password-12")
+    bob = repo.create_user("b00123456", "password-12")
+    now = _now()
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO memory_items "
+            "(id,notebook_id,created_by,origin,status,title,content_md,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                (
+                    "memory-alice", notebook.id, alice.id, "external_agent",
+                    "confirmed", "Alice", "private", now, now,
+                ),
+                (
+                    "memory-bob", notebook.id, bob.id, "external_agent",
+                    "confirmed", "Bob", "private", now, now,
+                ),
+            ),
+        )
+        db.executemany(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,memory_id,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                (
+                    "source-knowhow", notebook.id, "Knowhow", "knowhow",
+                    "ready", None, now, now,
+                ),
+                (
+                    "source-memory-alice", notebook.id, "Alice", "memory",
+                    "ready", "memory-alice", now, now,
+                ),
+                (
+                    "source-memory-bob", notebook.id, "Bob", "memory",
+                    "ready", "memory-bob", now, now,
+                ),
+            ),
+        )
+        db.executemany(
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                (
+                    "chunk-knowhow", notebook.id, "source-knowhow",
+                    "shared", "", "[]", now,
+                ),
+                (
+                    "chunk-memory-alice", notebook.id,
+                    "source-memory-alice", "alice", "", "[]", now,
+                ),
+                (
+                    "chunk-memory-bob", notebook.id, "source-memory-bob",
+                    "bob", "", "[]", now,
+                ),
+            ),
+        )
+
+    rows = repo.retrieval.hydrate_retrieval_contribution_chunks(
+        notebook.id,
+        alice.id,
+        (
+            "chunk-1",
+            "chunk-knowhow",
+            "chunk-memory-alice",
+            "chunk-memory-bob",
+        ),
+    )
+
+    assert {chunk.chunk_id for chunk in rows} == {
+        "chunk-1", "chunk-knowhow", "chunk-memory-alice",
+    }
 
 
 @pytest.mark.parametrize("mode", ["shadow", "on"])

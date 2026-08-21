@@ -381,11 +381,11 @@ class RetrievalService:
         return self.candidates.hydrate_chunk_candidates(candidate_ids)
 
     def hydrate_retrieval_contribution_chunks(
-        self, notebook_id: str, candidate_ids
+        self, notebook_id: str, actor_id: str, candidate_ids
     ):
         """Hydrate extension proposals under notebook/source SQL ceilings."""
         return self.candidates.hydrate_retrieval_contribution_chunks(
-            notebook_id, candidate_ids
+            notebook_id, actor_id, candidate_ids
         )
 
     def edge_support_map(self, notebook_id):

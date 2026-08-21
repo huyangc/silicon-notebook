@@ -22,31 +22,42 @@ class _RecordingHost:
 def _graph_service_access_violations(text: str) -> list[str]:
     tree = ast.parse(text)
     graph_aliases = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
-            and node.value.func.id == "getattr"
-            and len(node.value.args) >= 2
-            and isinstance(node.value.args[1], ast.Constant)
-            and node.value.args[1].value == "selected_source_graph"
-        ):
-            graph_aliases.update(
-                target.id for target in node.targets if isinstance(target, ast.Name)
+
+    def assigned_names(node) -> tuple[str, ...]:
+        if isinstance(node, ast.Assign):
+            return tuple(
+                target.id for target in node.targets
+                if isinstance(target, ast.Name)
             )
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            return (node.target.id,)
+        return ()
+
+    for node in ast.walk(tree):
+        value = getattr(node, "value", None)
+        if (
+            isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "getattr"
+            and len(value.args) >= 2
+            and isinstance(value.args[1], ast.Constant)
+            and value.args[1].value == "selected_source_graph"
+        ):
+            graph_aliases.update(assigned_names(node))
     changed = True
     while changed:
         changed = False
         for node in ast.walk(tree):
+            value = getattr(node, "value", None)
             if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in graph_aliases
+                isinstance(node, (ast.Assign, ast.AnnAssign))
+                and isinstance(value, ast.Name)
+                and value.id in graph_aliases
             ):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id not in graph_aliases:
-                        graph_aliases.add(target.id)
+                for name in assigned_names(node):
+                    if name not in graph_aliases:
+                        graph_aliases.add(name)
                         changed = True
 
     def graph_value(node) -> bool:
@@ -83,6 +94,10 @@ def _graph_service_access_violations(text: str) -> list[str]:
             for index, argument in enumerate(node.args):
                 if graph_value(argument) and not (bridge_call and index == 0):
                     violations.append("graph_service_forwarded")
+            if not bridge_call:
+                for keyword in node.keywords:
+                    if graph_value(keyword.value):
+                        violations.append("graph_service_forwarded")
     return violations
 
 
@@ -96,7 +111,9 @@ def test_ask_and_report_keep_other_host_output_when_graph_capability_is_absent()
     ask.retrieval_contributors = host
     ask.selected_source_graph = None
     ask.retrieval_connection_probe = connection_probe
-    ask.retrieval_contributor_hydrate = lambda _notebook_id, _ids: ()
+    ask.retrieval_contributor_hydrate = (
+        lambda _notebook_id, _actor_id, _ids: ()
+    )
     ask.current_user_id = lambda: "actor"
     ask.settings = SimpleNamespace(selected_source_graph_enrichment_tokens=1)
     ask_chunks, ask_status = ask._activate_selected_source_graph("notebook", baseline)
@@ -106,7 +123,9 @@ def test_ask_and_report_keep_other_host_output_when_graph_capability_is_absent()
         retrieval_contributors=host,
         selected_source_graph=None,
         retrieval_connection_probe=connection_probe,
-        retrieval_contributor_hydrate=lambda _notebook_id, _ids: (),
+        retrieval_contributor_hydrate=(
+            lambda _notebook_id, _actor_id, _ids: ()
+        ),
     )
     report.settings = SimpleNamespace(
         ppr_top_chunks=1,
@@ -178,6 +197,8 @@ def test_graph_service_direct_call_guard_catches_alias_and_forwarding_mutations(
         "service = getattr(self, 'selected_source_graph'); runner = service.run; runner()",
         "service = getattr(self, 'selected_source_graph'); getattr(service, 'run')()",
         "service = getattr(self, 'selected_source_graph'); helper(service)",
+        "service = getattr(self, 'selected_source_graph'); helper(value=service)",
+        "service: object = getattr(self, 'selected_source_graph'); service.run()",
     )
     assert all(_graph_service_access_violations(text) for text in mutations)
 
@@ -193,7 +214,9 @@ def test_report_runs_selected_evidence_without_graph_service():
         retrieval_connection_probe=SimpleNamespace(
             is_connection_held=lambda: False
         ),
-        retrieval_contributor_hydrate=lambda _notebook_id, _ids: (),
+        retrieval_contributor_hydrate=(
+            lambda _notebook_id, _actor_id, _ids: ()
+        ),
     )
     report.settings = SimpleNamespace(
         ppr_top_chunks=1,

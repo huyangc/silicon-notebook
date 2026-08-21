@@ -348,8 +348,8 @@ class AskService:
         retrieval_contributors=None,
         retrieval_connection_probe=None,
         retrieval_contributor_hydrate: Callable[
-            [str, Any], Any
-        ] = lambda _notebook_id, _ids: (),
+            [str, str, Any], Any
+        ] = lambda _notebook_id, _actor_id, _ids: (),
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
     ) -> None:

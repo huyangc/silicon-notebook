@@ -1403,6 +1403,7 @@ class ChunkStorePort(Protocol):
         notebook_id: str,
         chunk_ids: Sequence[str],
         *,
+        actor_id: str,
         source_mode: str | None,
         source_ids: Sequence[str],
     ) -> list[Any]: ...
@@ -2240,7 +2241,7 @@ class RetrievalPort(Protocol):
         self, candidate_ids: Iterable[str]
     ) -> tuple[list[dict[str, Any]], list[str], Any]: ...
     def hydrate_retrieval_contribution_chunks(
-        self, notebook_id: str, candidate_ids: Iterable[str]
+        self, notebook_id: str, actor_id: str, candidate_ids: Iterable[str]
     ) -> list[RetrievedChunk]: ...
     def community_queries(
         self, settings: Settings | None = None
