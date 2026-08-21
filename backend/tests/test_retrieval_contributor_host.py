@@ -92,6 +92,22 @@ class _Connection:
         return self.held
 
 
+class _CoreCancelled(RuntimeError):
+    pass
+
+
+class _Cancellation:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def is_set(self) -> bool:
+        return self.cancelled
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise _CoreCancelled("core cancellation")
+
+
 def _context(
     reader: _Reader,
     *,
@@ -378,6 +394,31 @@ def test_core_cancellation_propagates_and_stops_later_contributors():
 
     assert first.calls == 1
     assert later.calls == 0
+
+
+def test_core_cancellation_during_availability_propagates_its_native_error():
+    cancellation = _Cancellation()
+    contributor = _Contributor(_result(_candidate("new")))
+
+    def probe(_context):
+        cancellation.cancelled = True
+        return Availability(AvailabilityStatus.UNAVAILABLE, "feature_disabled")
+
+    runtime = build_extension_runtime(
+        (_bundle("cancel", contributor, availability=probe),)
+    )
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda: _context(
+                _Reader({"new"}), cancel=cancellation
+            ),
+            baseline_identity=str,
+        )
+
+    assert contributor.calls == 0
 
 
 def test_connection_held_blocks_contributor_before_io():

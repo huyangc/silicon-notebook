@@ -191,6 +191,7 @@ class RetrievalContributorHost:
                     failure_code="availability_failed",
                 )
                 continue
+            self._raise_if_core_cancelled(context)
             if availability.status is not AvailabilityStatus.AVAILABLE:
                 self._emit(
                     contribution_id,
@@ -256,7 +257,7 @@ class RetrievalContributorHost:
                     result.failure.kind is ExtensionFailureKind.CANCELLED
                     and context.cancellation.is_set()
                 ):
-                    raise RetrievalHostCancelled("retrieval request cancelled")
+                    self._raise_if_core_cancelled(context)
                 self._emit(
                     contribution_id,
                     outcome=result.failure.kind.value,
@@ -290,7 +291,18 @@ class RetrievalContributorHost:
                     tuple(structurally_valid)
                 )
             except Exception:
+                self._raise_if_core_cancelled(context)
                 scope_decisions = ()
+            self._raise_if_core_cancelled(context)
+            if self._deadline_expired(context):
+                self._emit(
+                    contribution_id,
+                    outcome="timeout",
+                    failure_code="contribution_timeout",
+                    dropped_count=len(result.items),
+                    started=started,
+                )
+                continue
             if (
                 not isinstance(scope_decisions, tuple)
                 or len(scope_decisions) != len(structurally_valid)
@@ -326,6 +338,7 @@ class RetrievalContributorHost:
                 started=started,
             )
 
+        self._raise_if_core_cancelled(context)
         if not accepted:
             return baseline
         return tuple((*baseline, *accepted))
