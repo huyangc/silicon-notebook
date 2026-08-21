@@ -491,6 +491,27 @@ def test_reasoning_renders_federated_hits_with_their_owning_schema(
     ]
 
 
+def test_reasoning_retriever_failure_returns_a_final_degraded_answer(monkeypatch):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    def fail_run(self, *args, **kwargs):
+        raise RuntimeError("retriever failed")
+
+    monkeypatch.setattr(ReasoningRetriever, "run", fail_run)
+    service = _minimal_ask_service()
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(question="What happened?", mode="reasoning"),
+        user_id="user",
+    )
+
+    assert response.answer_id == "answer-1"
+    assert response.mode == "reasoning"
+    assert response.llm_mode == "deterministic"
+    assert response.conclusion
+
+
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():
     from app.api.ask_routes import _stream_ask_events
     from app.services.ask_modes import resolve_mode
@@ -523,3 +544,52 @@ def test_stream_route_helper_uses_ask_stream_port_without_runtime():
     assert repo.started == ("nb", "q", "chunk", "user-1")
     assert lines == ['{"type": "started", "job_id": "job-1"}\n']
     assert not hasattr(repo, "_runtime")
+
+
+def test_stream_route_helper_sends_content_free_idle_heartbeat(monkeypatch):
+    from app.api import ask_routes
+    from app.services.ask_modes import resolve_mode
+
+    class IdleThenDone:
+        def __init__(self):
+            self.nonblocking_calls = 0
+
+        def get_nowait(self):
+            self.nonblocking_calls += 1
+            if self.nonblocking_calls == 1:
+                return {
+                    "event": "started",
+                    "job_id": "job-1",
+                    "conversation_id": "conv-1",
+                }
+            if self.nonblocking_calls == 2:
+                raise queue.Empty
+            return None
+
+        def get(self, *_args):
+            raise queue.Empty
+
+    class MinimalAskStream:
+        def current_user(self):
+            return SimpleNamespace(id="user-1")
+
+        def start_ask_stream(self, *_args, **_kwargs):
+            return IdleThenDone()
+
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    ticks = iter((0.0, 0.0, ask_routes.ASK_STREAM_HEARTBEAT_SECONDS))
+    monkeypatch.setattr(ask_routes, "monotonic", lambda: next(ticks))
+
+    async def collect():
+        return [line async for line in ask_routes._stream_ask_events(
+            MinimalAskStream(), "nb", AskRequest(question="q"),
+            resolve_mode("chunk"), Request()
+        )]
+
+    lines = asyncio.run(collect())
+    assert lines[0].startswith('{"event": "started"')
+    assert lines[1] == "\n"
+    assert len(lines) == 2

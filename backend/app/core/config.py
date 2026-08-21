@@ -950,6 +950,12 @@ class Settings(BaseSettings):
     llm_log_enabled: bool = Field(True, validation_alias="LLM_LOG_ENABLED")
     llm_log_path: str = Field(".local/logs/llm.jsonl", validation_alias="LLM_LOG_PATH")
     llm_log_max_chars: int = Field(4000, validation_alias="LLM_LOG_MAX_CHARS")
+    # Strict JSON remains the fast path. Approved interactive workloads may
+    # conservatively recover complete object-shaped responses with quote/comma
+    # defects; shadow measures repairability without changing acceptance.
+    model_json_repair_mode: Literal["off", "shadow", "on"] = Field(
+        "on", validation_alias="MODEL_JSON_REPAIR_MODE"
+    )
 
     # General event logging: HTTP requests, async pipeline stages, status
     # transitions. Written to <event_log_dir>/<channel>.jsonl plus the console.

@@ -297,7 +297,7 @@ def plan_query_intent(
         # important row instead: the server's own finding is inserted first and
         # must survive.
         del ambiguities[8:]
-    if bool(data.get("needs_clarification")) and not ambiguities:
+    if data.get("needs_clarification") is True and not ambiguities:
         ambiguities.append({
             "id": "ambiguity-1",
             "question": "为了准确检索，还需要补充哪项会改变问题方向的关键信息？",

@@ -740,11 +740,22 @@ URL 来源会先下载已经过安全校验的公开 PDF。降级成功的来源
 
 ```text
 LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
+MODEL_JSON_REPAIR_MODE  # off | shadow | on（默认 on）
 EVENT_LOG_ENABLED / EVENT_LOG_DIR
 SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000）
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
 `.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+
+`MODEL_JSON_REPAIR_MODE` 只作用于 `reasoning_agent` 与 `ask_answer`。`off` 保持严格拒绝，
+`shadow` 记录响应是否可安全修复但仍拒绝，`on` 接受保守修复（默认）。它不会补全被截断的
+输出，也不会放松 schema、类型或正文安全校验；修复事件不含业务内容，并用模型调用的安全
+`support_id` 做关联。
+
+同源 `/api/*` rewrite 存在有限的代理 idle timeout，因此 Ask 每 5 秒发送一条不含业务内容的
+空白 NDJSON 心跳并返回禁缓冲 header；ingress 不应缓冲 `application/x-ndjson`。这只能处理
+idle timeout。CDN/负载均衡若设置了总请求时长硬上限，部署者仍须把它调到最长 Ask run 之上，
+或在断连后通过已持久化 job 重新打开完成的会话。
 
 所需 chat workload 未绑定时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
