@@ -581,9 +581,10 @@ class ReportEngine:
         self.settings = dependencies.settings
         self.user_id = user_id            # 发起者身份(审计归属;模型解析走 ContextVar)
         self.cancel_event = cancel_event
+        connection_probe = getattr(dependencies, "retrieval_connection_probe", None)
         self._report_connection_probe = (
-            dependencies.retrieval_connection_probe
-            if dependencies.retrieval_connection_probe is not None
+            connection_probe
+            if connection_probe is not None
             else _NeverHeldConnectionProbe()
         )
 

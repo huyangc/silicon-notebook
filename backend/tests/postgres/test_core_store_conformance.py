@@ -3622,6 +3622,64 @@ def test_report_cancel_cannot_overwrite_a_completed_generation(
     assert row["content_md"] == "durable"
 
 
+def test_report_generation_claim_atomically_refreshes_retry_scope_on_postgres(
+    core_stores: CoreStores,
+):
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00876545", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Report retry scope CAS"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    report_id = reports.create_report(notebook_id, "为什么?", 2)
+    reports.update_report(
+        notebook_id,
+        report_id,
+        status="failed",
+        understanding={
+            "source_scope": {"source_ids": ["old"], "narrowed": False},
+            "credibility": {"anchor_count": 3},
+        },
+        sections=[{"markdown": "stale"}],
+        content_md="stale",
+        references=[{"id": "stale"}],
+    )
+
+    refreshed = {
+        "source_scope": {"source_ids": ["fresh"], "narrowed": True},
+        "credibility": {"anchor_count": 99},
+    }
+    assert reports.claim_report_generation(
+        notebook_id, report_id, refreshed
+    ) is True
+    claimed = reports.get_report(notebook_id, report_id)
+    assert claimed["status"] == "generating"
+    assert claimed["understanding"] == {
+        "source_scope": {"source_ids": ["fresh"], "narrowed": True}
+    }
+    assert claimed["generation_started_at"]
+    assert claimed["sections"] == []
+    assert claimed["content_md"] == ""
+    assert claimed["references"] == []
+
+    assert reports.claim_report_generation(
+        notebook_id,
+        report_id,
+        {"source_scope": {"source_ids": ["must-not-persist"]}},
+    ) is False
+    after_lost_cas = reports.get_report(notebook_id, report_id)
+    assert after_lost_cas["understanding"] == claimed["understanding"]
+    assert after_lost_cas["generation_started_at"] == claimed[
+        "generation_started_at"
+    ]
+
+
 def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
     core_stores: CoreStores,
 ):
