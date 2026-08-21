@@ -59,7 +59,7 @@ def test_fixed_builtin_bundles_partition_the_ordered_public_surface() -> None:
         seen.update(capture.names)
         combined.extend(capture.names)
 
-    assert tuple(combined) == mcp_server.PUBLIC_TOOLS
+    assert tuple(combined) == mcp_server.CORE_TOOLS
     assert len(combined) == len(set(combined))
 
 
@@ -88,6 +88,7 @@ def test_composition_has_one_point_specific_tool_provider_seat() -> None:
     assert tuple(signature.parameters) == (
         "repository_provider",
         "agent_tool_provider_host",
+        "agent_tool_audit_sink",
         "allowed_origins",
         "public_url",
         "require_https",
@@ -147,11 +148,11 @@ def test_each_public_handler_has_one_progress_wrapped_main_body() -> None:
     for path in tools_dir.glob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) and node.name in mcp_server.PUBLIC_TOOLS:
+            if isinstance(node, ast.AsyncFunctionDef) and node.name in mcp_server.CORE_TOOLS:
                 handlers[node.name] = node
 
-    assert tuple(name for name in mcp_server.PUBLIC_TOOLS if name in handlers) == (
-        mcp_server.PUBLIC_TOOLS
+    assert tuple(name for name in mcp_server.CORE_TOOLS if name in handlers) == (
+        mcp_server.CORE_TOOLS
     )
     for name, handler in handlers.items():
         progress_calls = [

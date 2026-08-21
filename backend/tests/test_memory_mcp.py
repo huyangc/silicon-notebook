@@ -28,11 +28,9 @@ from tests.model_testkit import bind_chat_client
 
 # DERIVED from the manifest, deliberately not a third hand-copied list.
 #
-# `mcp_server.PUBLIC_TOOLS` is the default frozen core catalog derived from the
-# same seven registrar captures that the unified host publishes to FastMCP.
-# Deployments with an explicitly trusted provider use their server-local frozen
-# catalog for live discovery/onboarding; this compatibility export remains the
-# exact default 22-tool surface used by docs and smoke checks.
+# `mcp_server.PUBLIC_TOOLS` derives from the same default frozen combined
+# catalog used by live discovery/onboarding. `CORE_TOOLS` names the exact
+# built-in prefix when a test reasons about registrar-owned handlers.
 PUBLIC_TOOLS = set(mcp_server_public_tools)
 MCP_OUTPUT_BUDGET = 12_000
 

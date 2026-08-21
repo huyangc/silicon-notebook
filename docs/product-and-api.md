@@ -715,8 +715,8 @@ machine-readable Markdown handoff that prints `MCP_PUBLIC_URL` verbatim as the e
 configure — never a rewritten variant, since a proxy may publish only that exact route — while
 stating that a backend-direct `POST /mcp` is a 307 to `/mcp/`, so an Agent whose client does not
 preserve method, body and Authorization across a redirect knows the remedy. Its tool list comes
-from the deployed server's frozen catalog; `mcp_server.PUBLIC_TOOLS` is the default-core
-compatibility export. The user gives this link and token to
+from the deployed server's frozen catalog; `mcp_server.PUBLIC_TOOLS` derives from the same
+default frozen combined catalog. The user gives this link and token to
 the Agent separately; the endpoint never accepts, embeds, or reflects a bearer token and is
 available even while repository warm-up is still running.
 Requests carrying any query string or Authorization header are rejected. Startup likewise
@@ -804,7 +804,8 @@ that cannot interpolate persists the raw header instead: use least-privilege sco
 expiry, protect the local config, and revoke/rotate the token after use.
 
 Every new MCP session must call `select_notebook` before a data tool. The default core tool set
-is these 22 tools; `mcp_server.PUBLIC_TOOLS` is derived from that frozen core catalog:
+is these 22 tools; `mcp_server.CORE_TOOLS` derives that prefix and `mcp_server.PUBLIC_TOOLS`
+derives the full default frozen catalog, including any default trusted providers:
 
 | Group | Tools | Scope |
 | --- | --- | --- |
@@ -826,7 +827,10 @@ call repeats live token/scope/allowlist/membership checks, and every provider wr
 through the owner-only notebook gate. Provider arguments are rejected whole when their serialized
 UTF-8 object exceeds 16,384 bytes; descriptors allow at most 16 parameters, a 64-character name,
 and a 1,000-character description. Results must be JSON objects no deeper than 5 levels and at
-most 12,000 UTF-8 bytes. Inputs and results are rejected whole, never silently truncated. The default topology has no
+most 12,000 UTF-8 bytes. The byte/depth rail is enforced while copying, so oversized containers
+are rejected before a second unbounded graph is built. Provider exceptions surface only as stable
+error codes; core audit contains tool/plugin/status only. Inputs and results are rejected whole,
+never silently truncated. The default topology has no
 provider contributions, so the shipped surface remains exactly the 22 tools above.
 
 `list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a

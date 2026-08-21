@@ -6,7 +6,7 @@ tool host; plugins never receive the server, repository, or bearer token.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, cast
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
@@ -28,21 +28,46 @@ from app.api.mcp_tools.memory_context import (
     _validate_proposal_input,
 )
 from app.api.mcp_tools.sources import SOURCE_TITLE_MAX_CHARS
-from app.api.mcp_tool_host import core_public_tool_names, register_agent_tools
+from app.api.mcp_tool_host import (
+    core_public_tool_names,
+    public_agent_tool_names,
+    register_agent_tools,
+)
 from app.core.config import get_settings
 from app.domain.agent_tools import AgentToolProviderHostPort
 
 
-# Default-deployment compatibility snapshot, derived from the same core catalog
-# capture used by the unified registration host. The default extension runtime
-# has no Agent tool provider contributions, so this is its complete surface.
-PUBLIC_TOOLS = core_public_tool_names()
+CORE_TOOLS = core_public_tool_names()
+
+
+class _DefaultAgentToolHost:
+    __slots__ = ()
+
+
+_DEFAULT_AGENT_TOOL_HOST = _DefaultAgentToolHost()
+
+
+def _default_agent_tool_provider_host() -> AgentToolProviderHostPort:
+    # The import stays at the composition boundary so the SDK/registry remain
+    # absent from this transport module. The same process-wide frozen host is
+    # used by app.main, PUBLIC_TOOLS, smoke tests, and direct default servers.
+    from app.bootstrap import application_extension_runtime
+
+    return application_extension_runtime().agent_tools
+
+
+# The public compatibility export is the *combined* default frozen catalog.
+# This makes static docs/smoke guards fail whenever a default provider changes.
+PUBLIC_TOOLS = public_agent_tool_names(_default_agent_tool_provider_host())
 
 
 def create_memory_mcp(
     repository_provider: Callable[[], Any],
     *,
-    agent_tool_provider_host: AgentToolProviderHostPort | None = None,
+    agent_tool_provider_host: (
+        AgentToolProviderHostPort | None | _DefaultAgentToolHost
+    ) = _DEFAULT_AGENT_TOOL_HOST,
+    agent_tool_audit_sink: Callable[[dict[str, object]], None] | None = None,
     allowed_origins: Sequence[str] = (),
     public_url: str = "http://127.0.0.1:8000/mcp",
     require_https: bool = True,
@@ -96,8 +121,19 @@ def create_memory_mcp(
         transport_security=security,
     )
 
+    if agent_tool_provider_host is _DEFAULT_AGENT_TOOL_HOST:
+        resolved_host: AgentToolProviderHostPort | None = (
+            _default_agent_tool_provider_host()
+        )
+    else:
+        resolved_host = cast(
+            AgentToolProviderHostPort | None, agent_tool_provider_host
+        )
     public_tools = register_agent_tools(
-        server, repository_provider, agent_tool_provider_host
+        server,
+        repository_provider,
+        resolved_host,
+        audit_sink=agent_tool_audit_sink,
     )
     setattr(server, "_silicon_notebook_public_tools", public_tools)
 

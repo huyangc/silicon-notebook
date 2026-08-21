@@ -160,7 +160,13 @@ class AgentToolProviderHost:
             validate_agent_tool_arguments(tool, arguments)
         except ValueError as exc:
             raise RuntimeError("invalid_agent_tool_arguments") from exc
-        value = frozen.invoke(tool.name, context, arguments)
+        try:
+            value = frozen.invoke(tool.name, context, arguments)
+        except Exception:
+            # A trusted provider is still an optional public-plane component.
+            # Never expose its exception text, credentials, or implementation
+            # details through FastMCP's error response.
+            raise RuntimeError("agent_tool_failed") from None
         return _validated_result(value)
 
     @staticmethod
@@ -249,27 +255,74 @@ def _validated_result(value: object) -> dict[str, object]:
     if type(value) is not dict:
         raise RuntimeError("invalid_agent_tool_result")
 
-    def copy(item: object, depth: int) -> object:
+    def copy(item: object, depth: int, remaining: int) -> tuple[object, int]:
         if depth > AGENT_TOOL_RESULT_MAX_DEPTH:
             raise RuntimeError("invalid_agent_tool_result")
-        if item is None or type(item) in {str, bool, int}:
-            return item
+        if remaining < 1:
+            raise RuntimeError("invalid_agent_tool_result")
+        if item is None or type(item) in {bool, int}:
+            if type(item) is int and item.bit_length() > remaining * 4:
+                raise RuntimeError("invalid_agent_tool_result")
+            try:
+                size = len(json.dumps(item, separators=(",", ":")))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("invalid_agent_tool_result") from exc
+            if size > remaining:
+                raise RuntimeError("invalid_agent_tool_result")
+            return item, size
+        if type(item) is str:
+            if len(item) > remaining:
+                raise RuntimeError("invalid_agent_tool_result")
+            try:
+                size = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+            except UnicodeError as exc:
+                raise RuntimeError("invalid_agent_tool_result") from exc
+            if size > remaining:
+                raise RuntimeError("invalid_agent_tool_result")
+            return item, size
         if type(item) is float:
             if not math.isfinite(item):
                 raise RuntimeError("invalid_agent_tool_result")
-            return item
+            size = len(json.dumps(item))
+            if size > remaining:
+                raise RuntimeError("invalid_agent_tool_result")
+            return item, size
         if type(item) is list:
-            return [copy(child, depth + 1) for child in item]
+            total = 2 + max(0, len(item) - 1)
+            if total > remaining:
+                raise RuntimeError("invalid_agent_tool_result")
+            result_list: list[object] = []
+            for child in item:
+                copied, size = copy(child, depth + 1, remaining - total)
+                total += size
+                result_list.append(copied)
+            return result_list, total
         if type(item) is dict:
+            total = 2 + max(0, len(item) - 1)
+            if total > remaining:
+                raise RuntimeError("invalid_agent_tool_result")
             result: dict[str, object] = {}
             for key, child in item.items():
                 if type(key) is not str:
                     raise RuntimeError("invalid_agent_tool_result")
-                result[key] = copy(child, depth + 1)
-            return result
+                if len(key) > remaining - total:
+                    raise RuntimeError("invalid_agent_tool_result")
+                try:
+                    key_size = len(
+                        json.dumps(key, ensure_ascii=False).encode("utf-8")
+                    )
+                except UnicodeError as exc:
+                    raise RuntimeError("invalid_agent_tool_result") from exc
+                total += key_size + 1
+                if total > remaining:
+                    raise RuntimeError("invalid_agent_tool_result")
+                copied, size = copy(child, depth + 1, remaining - total)
+                total += size
+                result[key] = copied
+            return result, total
         raise RuntimeError("invalid_agent_tool_result")
 
-    result = copy(value, 0)
+    result, measured_size = copy(value, 0, AGENT_TOOL_RESULT_MAX_BYTES)
     if type(result) is not dict:  # pragma: no cover - guarded by the root check
         raise RuntimeError("invalid_agent_tool_result")
     try:
@@ -278,6 +331,9 @@ def _validated_result(value: object) -> dict[str, object]:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeError) as exc:
         raise RuntimeError("invalid_agent_tool_result") from exc
-    if len(encoded) > AGENT_TOOL_RESULT_MAX_BYTES:
+    if (
+        measured_size != len(encoded)
+        or len(encoded) > AGENT_TOOL_RESULT_MAX_BYTES
+    ):
         raise RuntimeError("invalid_agent_tool_result")
     return result

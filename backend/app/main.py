@@ -189,12 +189,14 @@ def create_app() -> FastAPI:
     }
     validate_mcp_deployment(bind_host, mcp_public_url, require_https=require_https)
     extension_runtime = application_extension_runtime()
+    agent_tool_log = EventLogger(settings, channel="events", per_user=True)
     mcp_server, mcp_app = create_memory_mcp(
         mcp_memory_repository,
         allowed_origins=settings.cors_origins,
         public_url=mcp_public_url,
         require_https=require_https,
         agent_tool_provider_host=extension_runtime.agent_tools,
+        agent_tool_audit_sink=agent_tool_log.emit,
     )
     public_agent_tools = mcp_public_tools(mcp_server)
 

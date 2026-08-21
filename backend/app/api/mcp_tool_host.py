@@ -97,10 +97,29 @@ def core_public_tool_names() -> tuple[str, ...]:
     return tuple(tool.name for tool in capture_core_agent_tools(poison_provider))
 
 
+def public_agent_tool_names(
+    provider_host: AgentToolProviderHostPort | None,
+) -> tuple[str, ...]:
+    """Derive one combined frozen catalog without registering or doing I/O."""
+    core_names = core_public_tool_names()
+    plugin_tools = provider_host.public_tools if provider_host is not None else ()
+    if type(plugin_tools) is not tuple or any(
+        type(tool) is not PublishedAgentTool for tool in plugin_tools
+    ):
+        raise RuntimeError("invalid frozen Agent tool catalog")
+    plugin_names = tuple(tool.name for tool in plugin_tools)
+    combined = (*core_names, *plugin_names)
+    if len(combined) != len(set(combined)):
+        raise RuntimeError("duplicate Agent tool name")
+    return combined
+
+
 def register_agent_tools(
     server: FastMCP,
     repository_provider: Callable[[], Any],
     provider_host: AgentToolProviderHostPort | None,
+    *,
+    audit_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[str, ...]:
     """Register the core prefix and frozen provider suffix exactly once."""
     core_tools = capture_core_agent_tools(repository_provider)
@@ -108,6 +127,7 @@ def register_agent_tools(
     for tool in core_tools:
         server.add_tool(tool.handler, name=tool.name, description=tool.description)
 
+    public_names = public_agent_tool_names(provider_host)
     plugin_tools = provider_host.public_tools if provider_host is not None else ()
     if type(plugin_tools) is not tuple or any(
         type(tool) is not PublishedAgentTool for tool in plugin_tools
@@ -118,35 +138,52 @@ def register_agent_tools(
             raise RuntimeError(f"duplicate Agent tool name {tool.name!r}")
         names.add(tool.name)
         server.add_tool(
-            _plugin_adapter(tool, provider_host, repository_provider),
+            _plugin_adapter(
+                tool,
+                provider_host,
+                repository_provider,
+                audit_sink=audit_sink,
+            ),
             name=tool.name,
             description=tool.description,
         )
-    return tuple(tool.name for tool in core_tools) + tuple(
-        tool.name for tool in plugin_tools
-    )
+    return public_names
 
 
 def _plugin_adapter(
     tool: PublishedAgentTool,
     provider_host: AgentToolProviderHostPort,
     repository_provider: Callable[[], Any],
+    *,
+    audit_sink: Callable[[dict[str, object]], None] | None,
 ) -> Callable[..., object]:
     async def invoke(ctx: Context, **arguments: object) -> dict[str, object]:
-        validate_agent_tool_arguments(tool, arguments)
+        try:
+            validate_agent_tool_arguments(tool, arguments)
+        except Exception:
+            _emit_agent_tool_audit(audit_sink, tool, "invalid")
+            raise
         if not provider_host.available(tool):
+            _emit_agent_tool_audit(audit_sink, tool, "unavailable")
             raise PermissionError("Agent tool is unavailable")
-        repo = repository_provider()
-        if tool.access_policy is AgentToolAccessPolicy.READ:
-            principal, notebook_id = _selected_notebook(
-                ctx, repo, tool.required_scope
-            )
-        elif tool.access_policy is AgentToolAccessPolicy.OWNER_WRITE:
-            principal, notebook_id = _writable_notebook(
-                ctx, repo, tool.required_scope
-            )
-        else:  # pragma: no cover - catalog freeze owns this invariant
-            raise PermissionError("Agent tool policy is unavailable")
+        try:
+            repo = repository_provider()
+            if tool.access_policy is AgentToolAccessPolicy.READ:
+                principal, notebook_id = _selected_notebook(
+                    ctx, repo, tool.required_scope
+                )
+            elif tool.access_policy is AgentToolAccessPolicy.OWNER_WRITE:
+                principal, notebook_id = _writable_notebook(
+                    ctx, repo, tool.required_scope
+                )
+            else:  # pragma: no cover - catalog freeze owns this invariant
+                raise PermissionError("Agent tool policy is unavailable")
+        except PermissionError:
+            _emit_agent_tool_audit(audit_sink, tool, "denied")
+            raise
+        except Exception:
+            _emit_agent_tool_audit(audit_sink, tool, "failed")
+            raise RuntimeError("agent_tool_boundary_failed") from None
         context = AgentExecutionContext(
             actor_id=principal.owner_id,
             notebook_id=notebook_id,
@@ -156,7 +193,13 @@ def _plugin_adapter(
         frozen_arguments = MappingProxyType(dict(arguments))
 
         def run() -> dict[str, object]:
-            return provider_host.invoke(tool, context, frozen_arguments)
+            try:
+                result = provider_host.invoke(tool, context, frozen_arguments)
+            except Exception:
+                _emit_agent_tool_audit(audit_sink, tool, "failed")
+                raise
+            _emit_agent_tool_audit(audit_sink, tool, "ok")
+            return result
 
         result = await _run_with_progress(ctx, run, label=tool.name)
         return _budget_response(result)
@@ -183,3 +226,26 @@ def _plugin_adapter(
         return_annotation=dict[str, object],
     )
     return invoke
+
+
+def _emit_agent_tool_audit(
+    sink: Callable[[dict[str, object]], None] | None,
+    tool: PublishedAgentTool,
+    status: str,
+) -> None:
+    if sink is None:
+        return
+    try:
+        sink(
+            {
+                "kind": "agent_tool_provider",
+                "plugin_id": tool.plugin_id,
+                "contribution_id": tool.contribution_id,
+                "tool": tool.name,
+                "status": status,
+            }
+        )
+    except Exception:
+        # Audit is fail-open and deliberately content-free. It must never make a
+        # completed provider call fail or expose an audit backend to the plugin.
+        return

@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from app.api.mcp_server import PUBLIC_TOOLS, create_memory_mcp, mcp_public_tools
+from app.api.mcp_server import (
+    CORE_TOOLS,
+    PUBLIC_TOOLS,
+    create_memory_mcp,
+    mcp_public_tools,
+)
 from app.domain.agent_tools import (
     AGENT_SCOPES,
     AGENT_TOOL_SCOPE_POLICIES,
@@ -26,7 +32,7 @@ from app.extension_sdk import (
     ExtensionContribution,
     ExtensionManifest,
 )
-from app.extensions import build_extension_runtime
+from app.extensions import build_extension_runtime, default_extension_runtime
 from app.extensions.registry import ExtensionRegistryError
 from tests.test_memory_mcp import OfficialMcpClient, _payload, mcp_env
 
@@ -201,8 +207,8 @@ async def test_combined_catalog_keeps_core_prefix_and_plugin_schema() -> None:
         agent_tool_provider_host=host,
     )
     tools = await server.list_tools()
-    assert tuple(tool.name for tool in tools) == (*PUBLIC_TOOLS, "plugin_echo")
-    assert mcp_public_tools(server) == (*PUBLIC_TOOLS, "plugin_echo")
+    assert tuple(tool.name for tool in tools) == (*CORE_TOOLS, "plugin_echo")
+    assert mcp_public_tools(server) == (*CORE_TOOLS, "plugin_echo")
     plugin = tools[-1]
     assert plugin.inputSchema["required"] == ["message", "count"]
     assert plugin.inputSchema["properties"]["message"]["type"] == "string"
@@ -229,7 +235,14 @@ def test_invalid_provider_results_do_not_cross_the_host_boundary() -> None:
         )
 
 
-def test_provider_failure_preserves_its_exception_identity_and_message() -> None:
+def test_default_public_tools_derive_from_the_default_frozen_runtime() -> None:
+    assert PUBLIC_TOOLS == (
+        *CORE_TOOLS,
+        *(tool.name for tool in default_extension_runtime().agent_tools.public_tools),
+    )
+
+
+def test_provider_failure_is_mapped_without_leaking_its_message() -> None:
     provider = _Provider((_descriptor(),))
     failure = ValueError("safe provider failure")
 
@@ -239,13 +252,121 @@ def test_provider_failure_preserves_its_exception_identity_and_message() -> None
     provider.invoke = fail  # type: ignore[method-assign]
     host = _runtime(provider).agent_tools
     tool = host.public_tools[0]
-    with pytest.raises(ValueError, match="safe provider failure") as raised:
+    with pytest.raises(RuntimeError, match="^agent_tool_failed$") as raised:
         host.invoke(
             tool,
             AgentExecutionContext("actor", "notebook", PLUGIN_ID, tool.name),
             MappingProxyType({"message": "hello", "count": 1}),
         )
-    assert raised.value is failure
+    assert raised.value is not failure
+    assert "safe provider failure" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        {"items": [None] * 20_000},
+        {"text": "x" * 1_000_000},
+        {str(index): None for index in range(20_000)},
+    ),
+)
+def test_provider_result_budget_rejects_huge_shapes_before_copying(result) -> None:
+    provider = _Provider((_descriptor(),))
+    provider.invoke = lambda *_args: result  # type: ignore[method-assign]
+    host = _runtime(provider).agent_tools
+    tool = host.public_tools[0]
+    with pytest.raises(RuntimeError, match="invalid_agent_tool_result"):
+        host.invoke(
+            tool,
+            AgentExecutionContext("actor", "notebook", PLUGIN_ID, tool.name),
+            MappingProxyType({"message": "hello", "count": 1}),
+        )
+
+
+@pytest.mark.anyio
+async def test_provider_adapter_emits_content_free_core_owned_audit(
+    monkeypatch,
+) -> None:
+    from app.api import mcp_tool_host
+
+    provider = _Provider((_descriptor(),))
+    host = _runtime(provider).agent_tools
+    tool = host.public_tools[0]
+    events: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        mcp_tool_host,
+        "_selected_notebook",
+        lambda *_args: (SimpleNamespace(owner_id="actor-1"), "notebook-1"),
+    )
+
+    async def run_once(_ctx, work, *, label):
+        assert label == tool.name
+        return work()
+
+    monkeypatch.setattr(mcp_tool_host, "_run_with_progress", run_once)
+    adapter = mcp_tool_host._plugin_adapter(
+        tool,
+        host,
+        lambda: object(),
+        audit_sink=events.append,
+    )
+    result = await adapter(object(), message="hello", count=1)
+    assert result["echo"] == "hello"
+    assert result["count"] == 2
+    assert events == [
+        {
+            "kind": "agent_tool_provider",
+            "plugin_id": PLUGIN_ID,
+            "contribution_id": CONTRIBUTION_ID,
+            "tool": "plugin_echo",
+            "status": "ok",
+        }
+    ]
+    assert "actor-1" not in repr(events)
+    assert "notebook-1" not in repr(events)
+
+    failing_provider = _Provider((_descriptor(),))
+
+    def fail(*_args):
+        raise ValueError("secret provider detail")
+
+    failing_provider.invoke = fail  # type: ignore[method-assign]
+    failing_host = _runtime(failing_provider).agent_tools
+    failing_tool = failing_host.public_tools[0]
+    failure_events: list[dict[str, object]] = []
+    failing_adapter = mcp_tool_host._plugin_adapter(
+        failing_tool,
+        failing_host,
+        lambda: object(),
+        audit_sink=failure_events.append,
+    )
+    with pytest.raises(RuntimeError, match="^agent_tool_failed$") as raised:
+        await failing_adapter(object(), message="hello", count=1)
+    assert "secret provider detail" not in str(raised.value)
+    assert failure_events == [
+        {
+            "kind": "agent_tool_provider",
+            "plugin_id": PLUGIN_ID,
+            "contribution_id": CONTRIBUTION_ID,
+            "tool": "plugin_echo",
+            "status": "failed",
+        }
+    ]
+
+    def broken_audit(_event):
+        raise RuntimeError("audit backend unavailable")
+
+    fail_open_adapter = mcp_tool_host._plugin_adapter(
+        tool,
+        host,
+        lambda: object(),
+        audit_sink=broken_audit,
+    )
+    fail_open_result = await fail_open_adapter(
+        object(), message="still works", count=1
+    )
+    assert fail_open_result["echo"] == "still works"
 
 
 @pytest.mark.anyio
@@ -302,7 +423,7 @@ async def test_official_client_enforces_live_read_and_owner_write_policies(
         ) as owner:
             listed = await owner.session.list_tools()
             assert tuple(tool.name for tool in listed.tools) == (
-                *PUBLIC_TOOLS,
+                *CORE_TOOLS,
                 "plugin_echo",
                 "plugin_write",
             )

@@ -543,7 +543,7 @@ SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 �
 把 `MCP_PUBLIC_URL` 逐字印成要配置的地址（绝不改写——代理可能只公布这一条精确路由），同时写明
 打到后端的 `POST /mcp` 是 307 指向 `/mcp/`，好让客户端无法在重定向中保留方法、请求体与
 Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目录派生，`mcp_server.PUBLIC_TOOLS`
-是默认 core 兼容导出。用户把链接与 token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token，并且在 repository warm-up
+来自同一默认冻结组合目录。用户把链接与 token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token，并且在 repository warm-up
 尚未完成时也可读取。
 带任意 query string 或 Authorization header 的请求会被拒绝。启动也会拒绝非绝对
 `http(s)`、path 不精确等于 `/mcp`，或含 userinfo、query/fragment、空白/控制符/反引号的
@@ -609,7 +609,7 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
 每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十二个工具如下；
-`mcp_server.PUBLIC_TOOLS` 由这份冻结 core catalog 派生：
+`mcp_server.CORE_TOOLS` 派生这个内建前缀；`mcp_server.PUBLIC_TOOLS` 派生完整默认冻结目录（含默认受信 provider）：
 
 | 分组 | 工具 | Scope |
 | --- | --- | --- |
@@ -629,7 +629,9 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 FastMCP 对象、原始 bearer 或 Memory 审核能力；每次调用都重新检查 live token/scope/allowlist/成员权，
 provider 的所有写 scope 都强制经过 owner-only notebook 闸。provider 参数对象序列化后的 UTF-8
 超过 16,384 bytes 时整次拒绝；descriptor 最多 16 个参数、工具名最多 64 字符、说明最多 1,000 字符，
-结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object。输入和结果都整次拒绝，绝不静默截断。默认 topology 没有 provider contribution，因此发布面
+结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行字节/深度 rail，
+超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 仅含 tool/plugin/status。
+输入和结果都整次拒绝，绝不静默截断。默认 topology 没有 provider contribution，因此发布面
 仍精确等于上表 22 个工具。
 
 `list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在

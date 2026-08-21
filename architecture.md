@@ -100,7 +100,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 
 ### 2.3 API、模型与领域服务
 
-- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供默认二十二个 core 工具（七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理、三个构建与两个库理解）的 scoped Streamable HTTP 面；`PUBLIC_TOOLS` 是默认 core 兼容导出，实际权威清单来自 server-local frozen catalog；`deps.py` 承载访问控制依赖。
+- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供默认二十二个 core 工具（七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理、三个构建与两个库理解）的 scoped Streamable HTTP 面；`CORE_TOOLS` 是默认二十二个内建前缀；`PUBLIC_TOOLS`、静态 guard 与默认 server-local discovery 均来自同一冻结组合目录；`deps.py` 承载访问控制依赖。
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑；`kg/maintenance_jobs.py` 独立拥有 relink/rebuild 的共享单飞槽和后台任务编排，算法仍归 `KnowledgeLifecycleService`。
@@ -303,7 +303,7 @@ run 收尾时，`outline_synthesis.plan_outline_sections` 把终态大纲的证�
 
 ### 3.4 Memory 与 Agent MCP
 
-`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 七个显式 registrar 捕获精确 22-tool core 前缀，再追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor。core handler 的 schema/validation/auth/I/O 顺序不变；provider handler 只收到最小 execution context 和标量参数，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget。插件拿不到 FastMCP/repository/raw bearer，也不能发明 scope 或触达 Memory review。默认 topology 为空，注册与 listing 零 repository/model I/O。
+`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 七个显式 registrar 捕获精确 22-tool core 前缀，再追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor。core handler 的 schema/validation/auth/I/O 顺序不变；provider handler 只收到最小 execution context 和标量参数，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget。插件拿不到 FastMCP/repository/raw bearer，也不能发明 scope 或触达 Memory review；异常只映射稳定公开码，core 只发 tool/plugin/status 的 content-free audit，并在复制结果时即时执行预算。默认 topology 为空，注册与 listing 零 repository/model I/O。
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
 使用确定性 preview。外部 Agent 通过 `propose_memory` 只能写 candidate；同一用户、同一 notebook
@@ -317,7 +317,7 @@ evidence，不提供原始 revision/provenance 浏览。批准前会重新校验
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
 
-默认 core 公开二十二个工具，`mcp_server.PUBLIC_TOOLS` 是由同一 core catalog 派生的兼容导出；实际部署的权威清单是 server-local frozen catalog：Memory/context 七工具
+默认 core 公开二十二个工具，`mcp_server.CORE_TOOLS` 由 registrar 捕获该前缀；`mcp_server.PUBLIC_TOOLS` 是同一默认冻结组合目录（含默认受信 provider）的权威清单：Memory/context 七工具
 `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、
 `get_memory`、`ask_notebook`、`propose_memory`；knowhow 四工具 `list_knowhow_tables`、
 `get_knowhow_discrimination`、`get_knowhow_row` 与 `put_knowhow_cell_code`；引用点查
