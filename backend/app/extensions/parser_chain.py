@@ -1,8 +1,8 @@
-"""Startup-frozen, request-time parser ProviderChain runner.
+"""Startup-frozen, request-time parser ProviderChain production runner.
 
-PR-04 deliberately leaves this host disconnected from production ingestion.
-It establishes the ordering, routing, cancellation and two-phase acceptance
-contract that PR-05 will wire into the legacy parser dispatcher in one switch.
+Application ingestion reaches this host through the narrow domain port. It
+owns ordering, routing, cancellation and two-phase acceptance while the core
+call retains admission, persistence and provider-I/O authority.
 """
 from __future__ import annotations
 
