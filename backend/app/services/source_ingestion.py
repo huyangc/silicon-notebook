@@ -6,7 +6,7 @@ import hashlib
 import json
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, List, Optional
@@ -251,9 +251,9 @@ class SourceIngestionService:
         # 周期:refcount 归零(无活跃 invocation)时一并清除,免得每见一个源就永久留锁。
         # get-or-create 在 _active_sources_lock 下做,但**获取锁本身**在该 meta 锁之外
         # (否则持 meta 锁等 per-source 锁会死锁)。
-        self._source_chunk_locks: dict[str, threading.RLock] = {}
+        self._source_chunk_locks: dict[str, threading.Lock] = {}
 
-    def _source_chunk_lock(self, source_id: str) -> threading.RLock:
+    def _source_chunk_lock(self, source_id: str) -> threading.Lock:
         """取(或懒创建)某源的分块串行锁。仅在 _active_sources_lock 下 get-or-create
         锁对象(快),**不**在这里 acquire——调用方拿到后自行 ``with`` 获取,以免持 meta
         锁阻塞在 per-source 锁上造成死锁。清除在 process_source 的 finally 里,与租约
@@ -261,7 +261,7 @@ class SourceIngestionService:
         with self._active_sources_lock:
             lock = self._source_chunk_locks.get(source_id)
             if lock is None:
-                lock = threading.RLock()
+                lock = threading.Lock()
                 self._source_chunk_locks[source_id] = lock
             return lock
 
@@ -967,7 +967,7 @@ class SourceIngestionService:
         # finally 覆盖所有出口做减。
         with self._active_sources_lock:
             self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
-        source_parse_lock: threading.RLock | None = None
+        source_parse_lock: threading.Lock | None = None
         source_parse_lock_acquired = False
         parser_execution: ParserChainExecution | None = None
         parsed_assets_pending = False
@@ -1032,7 +1032,10 @@ class SourceIngestionService:
             # 否则并发同源 reparse 会交错出「B 代 elements + A 代 chunks + marker 已置」的
             # 假完成。中间的 summarize/paper_meta(LLM)也在锁内——对**罕见**的并发同源
             # reparse 是正确的串行;单写(常见)路径下锁无竞争、零额外开销。
-            with self._source_chunk_lock(source_id):
+            # The same non-reentrant lock was acquired before provider I/O so
+            # asset replacement, elements and chunks are one source generation.
+            # Keep the existing block indentation without reacquiring it.
+            with nullcontext():
                 # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
                 with self.write() as db:
                     self.clear_source_extraction_state(
