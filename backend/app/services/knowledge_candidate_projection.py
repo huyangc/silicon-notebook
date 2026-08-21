@@ -33,8 +33,8 @@ _OWNER_VERSION_MAX = 64
 _HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 
 
-class KnowledgeProjectionBoundaryError(RuntimeError):
-    """Core must not enter persistence after an invalid runtime boundary."""
+class KnowledgeProjectionBoundaryError(BaseException):
+    """Stop all ordinary failure plumbing after an invalid connection boundary."""
 
 
 class _ProjectionCancelled(CoreCancellation):
@@ -219,9 +219,11 @@ def _assert_connection_clear(probe: object, control: object | None) -> None:
                 "invalid knowledge projection connection probe"
             )
         held = check()
-    except CoreCancellation:
+    except CoreCancellation as exc:
         _raise_control_cancelled(control)
-        return
+        raise KnowledgeProjectionBoundaryError(
+            "invalid knowledge projection connection probe"
+        ) from exc
     except KnowledgeProjectionBoundaryError:
         raise
     except Exception as exc:
