@@ -83,7 +83,7 @@ class ParserConnectionLeaseProbe(Protocol):
 class ParserExtensionContext:
     source: ParserSourceRef
     cancellation: CancellationToken
-    access: ParserLinkAccess | None
+    access: ParserLinkAccess
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ class ParserHostContext:
     contribution_id: str
     source: ParserSourceRef
     cancellation: CancellationToken
-    access: ParserLinkAccess
+    access: ParserLinkAccess | None
     connection: ParserConnectionLeaseProbe
 
 

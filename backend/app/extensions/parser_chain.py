@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import time
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar, cast
 
 from app.domain.cancellation import CoreCancellation
 from app.extension_sdk import (
@@ -23,6 +23,7 @@ from app.extension_sdk import (
     ParserAvailabilityContext,
     ParserExtensionContext,
     ParserHostContext,
+    ParserLinkAccess,
     ParserProposal,
     ParserRouteDecision,
     ParserSourceRef,
@@ -301,7 +302,7 @@ class ParserProviderChainHost(Generic[T]):
             plugin_context = ParserExtensionContext(
                 source=source,
                 cancellation=context.cancellation,
-                access=context.access,
+                access=cast(ParserLinkAccess, context.access),
             )
             started = self._started_at()
             try:
