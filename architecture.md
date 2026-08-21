@@ -303,6 +303,8 @@ run 收尾时，`outline_synthesis.plan_outline_sections` 把终态大纲的证�
 
 ### 3.4 Memory 与 Agent MCP
 
+`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware、session manager 与固定组合顺序；22 个内建工具按 session、Memory/context、knowhow、citation、source、maintenance、profile capability 拆到 `app.api.mcp_tools` 的显式 registrar。registrar 构造与 `list_tools` 为零 repository/model I/O，实际 handler 继续在每次调用时走共享 live token/allowlist/membership/notebook gate。当前没有动态 registry、插件 descriptor 或 `agent.tool_provider` seat，PR-12 不得借这些 bundle 绕过独立的授权设计前置条件。
+
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
 使用确定性 preview。外部 Agent 通过 `propose_memory` 只能写 candidate；同一用户、同一 notebook
 下具备 `memory:read_candidates` 的 Agent token 可立即在候选平面召回。网页 Ask、notebook 搜索、

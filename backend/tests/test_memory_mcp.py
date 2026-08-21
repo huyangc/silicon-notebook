@@ -29,8 +29,8 @@ from tests.model_testkit import bind_chat_client
 # DERIVED from the manifest, deliberately not a third hand-copied list.
 #
 # `mcp_server.PUBLIC_TOOLS` is a documentation/test-assertion manifest: it is
-# never consulted by `create_memory_mcp`, which registers through the literal
-# `@server.tool` decorators. So the comparison below still has teeth — it
+# never consulted by `create_memory_mcp`, which explicitly invokes fixed
+# built-in bundle registrars. So the comparison below still has teeth — it
 # proves the manifest matches what the server actually registers, and the
 # architecture-documentation guard proves the docs match the manifest. Three
 # separately maintained copies (here, `scripts/smoke_memory_mcp.py`, and the

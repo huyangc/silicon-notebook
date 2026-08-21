@@ -8,6 +8,8 @@
 
 ## 一、红线
 
+`mcp_server.create_memory_mcp` 仍创建唯一 stateful FastMCP/SSE transport，并按公开顺序显式注册 `app.api.mcp_tools` 下的固定内建 capability bundle；这不是 provider seat。bundle 注册期不得触发 repository/model 工作，也不得缓存 bearer、principal、allowlist、成员权或 selected notebook；每个 handler 仍在调用时走共享 live-authority gate。这里禁止动态发现、registry 参数、插件 descriptor 和 `agent.tool_provider`；工具搬包必须保持 exact schema、权限闸、恰好一次 progress-wrapped 主体、Memory review gate 及 repository/model I/O trace。
+
 不读 `AGENTS.md` 也必须遵守的部分。
 
 ### 工作区

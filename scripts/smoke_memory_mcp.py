@@ -98,8 +98,8 @@ async def run() -> None:
         from app.models.schemas import NotebookCreate
 
         # DERIVED from the manifest rather than hand-copied here. PUBLIC_TOOLS
-        # is never consulted by `create_memory_mcp` (registration happens
-        # through the literal `@server.tool` decorators), so comparing it with
+        # is never consulted by `create_memory_mcp` (registration happens via
+        # fixed built-in bundle registrars), so comparing it with
         # a live `list_tools()` below still proves the manifest matches the
         # real surface — while removing a third independently maintained copy
         # that could quietly agree with a stale peer instead of with reality.
