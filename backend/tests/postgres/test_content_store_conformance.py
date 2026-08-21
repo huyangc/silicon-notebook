@@ -491,13 +491,15 @@ def test_ask_and_report_state_shapes_match_persisted_golden(content_harness):
     assert report["outline"] == [{"title": "State"}]
     assert report["references"] == [{"answer_id": answer_id}]
     assert report["created_at"].startswith("2026-07-23T00:00:00")
-    assert content_harness.report.cancel_report("nb-content", report_id) is True
+    # A published report is terminal: a late cancellation must lose the CAS
+    # instead of reversing ``done`` after completion observers were admitted.
+    assert content_harness.report.cancel_report("nb-content", report_id) is False
     content_harness.report.update_report(
         "nb-content", report_id, status="done", content_md="# too late"
     )
-    cancelled = content_harness.report.get_report("nb-content", report_id)
-    assert cancelled["status"] == "cancelled"
-    assert cancelled["content_md"] == "# State"
+    completed = content_harness.report.get_report("nb-content", report_id)
+    assert completed["status"] == "done"
+    assert completed["content_md"] == "# too late"
 
 
 def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):
