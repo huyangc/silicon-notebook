@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from app.domain.extensions import ParsedSource
+import pytest
+
+from app.domain.extensions import PARSER_CLOUD_PROVIDER, ParsedSource
 from app.extensions import default_extension_runtime
 from app.models.sources import SourceElement
 from app.services import parser_chain_execution as execution_module
@@ -89,10 +91,13 @@ def test_self_hosted_failure_never_opens_public_cloud_and_reuses_one_download(
             downloads.append(url), Path(dest).write_bytes(b"%PDF-1.4")
         )[-1],
     )
+    builtin_names = []
     monkeypatch.setattr(
         execution_module,
         "parse_builtin_source_file",
-        lambda source_id, path, file_name, persist_image=None: [
+        lambda source_id, path, file_name, persist_image=None: builtin_names.append(
+            file_name
+        ) or [
             SourceElement(
                 id="",
                 source_id=source_id,
@@ -117,6 +122,7 @@ def test_self_hosted_failure_never_opens_public_cloud_and_reuses_one_download(
     assert local.file_calls == 1
     assert cloud.url_calls == 0
     assert downloads == ["https://private.example/document"]
+    assert builtin_names == ["document.pdf"]
 
 
 def test_extensionless_pdf_url_uses_cloud_without_downloading(tmp_path, monkeypatch):
@@ -140,6 +146,77 @@ def test_extensionless_pdf_url_uses_cloud_without_downloading(tmp_path, monkeypa
     assert downloads == []
 
 
+def test_extensionless_pdf_url_cloud_failure_uses_pdf_builtin_once(
+    tmp_path, monkeypatch
+):
+    cloud = _Client(configured=True, error=RuntimeError("cloud down"))
+    downloads = []
+    builtin_names = []
+    monkeypatch.setattr(
+        execution_module.remote_sources,
+        "download_pdf",
+        lambda url, dest, **kwargs: (
+            downloads.append(url), Path(dest).write_bytes(b"%PDF-1.4")
+        )[-1],
+    )
+    monkeypatch.setattr(
+        execution_module,
+        "parse_builtin_source_file",
+        lambda source_id, path, file_name, persist_image=None: builtin_names.append(
+            file_name
+        ) or [],
+    )
+
+    result = _run(
+        tmp_path=tmp_path,
+        source_kind="url",
+        file_name="document",
+        cloud=cloud,
+    )
+
+    assert result.elements == ()
+    assert cloud.url_calls == 1
+    assert downloads == ["https://private.example/document"]
+    assert builtin_names == ["document.pdf"]
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "raised"])
+def test_each_provider_probe_performs_at_most_one_external_parse(
+    tmp_path, outcome
+):
+    if outcome == "accepted":
+        client = _Client(configured=True)
+    elif outcome == "rejected":
+        client = _Client(configured=True, result=([], {}))
+    else:
+        client = _Client(configured=True, error=RuntimeError("provider failed"))
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF-1.4")
+    execution = ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id="source-1",
+        source_kind="file",
+        file_path=str(path),
+        file_name="doc.pdf",
+        source_url="",
+        mineru_client=client,
+        cloud_client=_Client(),
+        connection=_Connection(),
+        make_persist_image=lambda: None,
+        delete_source_images=lambda: None,
+        event_sink=lambda _event: None,
+    )
+
+    if outcome == "raised":
+        with pytest.raises(RuntimeError, match="provider failed"):
+            execution.probe("parser.mineru_self_hosted")
+    first_or_cached = execution.probe("parser.mineru_self_hosted")
+    again = execution.probe("parser.mineru_self_hosted")
+
+    assert client.file_calls == 1
+    assert again is first_or_cached
+
+
 def test_provider_io_is_blocked_while_a_database_connection_is_held(
     tmp_path, monkeypatch
 ):
@@ -151,15 +228,86 @@ def test_provider_io_is_blocked_while_a_database_connection_is_held(
         lambda *args, **kwargs: builtin_calls.append(1) or [],
     )
 
-    result = _run(
-        tmp_path=tmp_path,
-        local=local,
-        connection=_Connection(True),
-    )
-
-    assert result.elements == ()
+    with pytest.raises(RuntimeError, match="parser provider chain exhausted"):
+        _run(
+            tmp_path=tmp_path,
+            local=local,
+            connection=_Connection(True),
+        )
     assert local.file_calls == 0
     assert builtin_calls == []
+
+
+def test_raising_builtin_is_a_failed_chain_but_a_real_empty_result_is_valid(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        execution_module,
+        "parse_builtin_source_file",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bad file")),
+    )
+    with pytest.raises(RuntimeError, match="parser provider chain exhausted"):
+        _run(tmp_path=tmp_path)
+
+    monkeypatch.setattr(
+        execution_module,
+        "parse_builtin_source_file",
+        lambda *args, **kwargs: [],
+    )
+    assert _run(tmp_path=tmp_path).elements == ()
+
+
+def test_plugin_gets_only_opaque_identity_and_client_payload_is_frozen(
+    tmp_path
+):
+    raw = [{"type": "text", "text": "trusted"}]
+    cloud = _Client(configured=True, result=(raw, {}))
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF-1.4")
+    execution = ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id="source-1",
+        source_kind="file",
+        file_path=str(path),
+        file_name="doc.pdf",
+        source_url="",
+        mineru_client=_Client(),
+        cloud_client=cloud,
+        connection=_Connection(),
+        make_persist_image=lambda: None,
+        delete_source_images=lambda: None,
+        event_sink=lambda _event: None,
+    )
+
+    proposal = execution.probe(PARSER_CLOUD_PROVIDER)
+    assert proposal.accepted is True
+    assert not hasattr(proposal.value, "content_list")
+    raw[0]["text"] = "plugin-mutated"
+    assert execution.admit(PARSER_CLOUD_PROVIDER, proposal.value).accepted is True
+    result = execution.materialize(PARSER_CLOUD_PROVIDER, proposal.value)
+
+    assert [item.text for item in result.elements] == ["trusted"]
+
+
+def test_non_workbook_remote_output_is_mapped_once(tmp_path, monkeypatch):
+    calls = []
+    real_mapper = execution_module.mineru_content_list_to_elements
+
+    def counted_mapper(*args, **kwargs):
+        calls.append(1)
+        return real_mapper(*args, **kwargs)
+
+    monkeypatch.setattr(
+        execution_module, "mineru_content_list_to_elements", counted_mapper
+    )
+
+    result = _run(
+        tmp_path=tmp_path,
+        cloud=_Client(configured=True),
+    )
+
+    assert [item.text for item in result.elements] == ["remote"]
+    assert calls == [1]
 
 
 def test_rejected_workbook_writes_no_assets_before_builtin_fallback(

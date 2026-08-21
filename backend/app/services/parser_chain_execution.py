@@ -7,6 +7,7 @@ generation.  Services depend on the domain host port, never the Extension SDK.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -78,10 +79,15 @@ class BuiltinParserChainHost:
 
 @dataclass(frozen=True)
 class _Candidate:
-    contribution_id: str
-    elements: tuple[SourceElement, ...]
     content_list: Any = None
     images: Any = None
+
+
+@dataclass(frozen=True)
+class _ProposalToken:
+    """Opaque identity exposed to a plugin; authoritative raw stays private."""
+
+    contribution_id: str
 
 
 class ParserChainExecution:
@@ -142,12 +148,23 @@ class ParserChainExecution:
         self._mineru_error = ""
         self._temp_path: Path | None = None
         self.materialized = False
-        self._proposals: dict[str, _Candidate] = {}
+        self._proposals: dict[str, _ProposalToken] = {}
+        self._payloads: dict[str, _Candidate] = {}
+        self._probe_started: set[str] = set()
+        self._probe_results: dict[str, ParserProbe] = {}
 
     def run(self) -> ParsedSource:
         baseline = ParsedSource((), "", "")
         try:
-            return self.host.run_application(baseline, call=self)
+            result = self.host.run_application(baseline, call=self)
+            if self.materialized is not True:
+                # The built-in link is the guaranteed terminal surface.  Host
+                # fail-open protects extension isolation, but application
+                # ingestion must not relabel an exhausted/blocked/raising
+                # chain as a successful empty document. A genuinely empty
+                # parser result still sets ``materialized`` and remains valid.
+                raise RuntimeError("parser provider chain exhausted")
+            return result
         finally:
             if self._temp_path is not None:
                 try:
@@ -181,10 +198,23 @@ class ParserChainExecution:
         return ParserRoute(False, "local", "unknown_parser_provider")
 
     def probe(self, contribution_id: str) -> ParserProbe:
+        cached = self._probe_results.get(contribution_id)
+        if type(cached) is ParserProbe:
+            return cached
+        if contribution_id in self._probe_started:
+            # Claim the request-local slot before any provider I/O. A buggy or
+            # adversarial link may call its projected access more than once;
+            # neither a recursive call nor a caught first failure may retry the
+            # external parser inside one chain invocation.
+            return ParserProbe(False, reason_code="parser_probe_already_attempted")
+        self._probe_started.add(contribution_id)
         if contribution_id == PARSER_BUILTIN_PROVIDER:
-            candidate = _Candidate(contribution_id, ())
-            self._proposals[contribution_id] = candidate
-            return ParserProbe(True, candidate)
+            token = _ProposalToken(contribution_id)
+            self._proposals[contribution_id] = token
+            self._payloads[contribution_id] = _Candidate()
+            result = ParserProbe(True, token)
+            self._probe_results[contribution_id] = result
+            return result
         try:
             if contribution_id == PARSER_SELF_HOSTED_PROVIDER:
                 self._attempted_self_hosted = True
@@ -192,7 +222,6 @@ class ParserChainExecution:
                 content_list, images = self.mineru_client.parse_with_images(
                     str(path), self.file_name or path.name
                 )
-                mode = getattr(self.mineru_client, "mode", "")
             elif contribution_id == PARSER_CLOUD_PROVIDER:
                 self._attempted_cloud = True
                 if self.source.kind == "url":
@@ -203,20 +232,39 @@ class ParserChainExecution:
                     content_list, images = self.cloud_client.parse_file_with_images(
                         self.file_path, data_id=self.source_id
                     )
-                mode = "mineru_cloud"
             else:
-                return ParserProbe(False, reason_code="unknown_parser_provider")
-            elements = tuple(
-                mineru_content_list_to_elements(
-                    self.source_id,
-                    content_list,
-                    label_prefix=mineru_label_prefix(self.file_name),
+                result = ParserProbe(
+                    False, reason_code="unknown_parser_provider"
                 )
-            )
-            if not elements:
-                self._mineru_error = "MinerU content_list mapped to zero source elements"
-                return ParserProbe(False, reason_code="empty_parser_output")
+                self._probe_results[contribution_id] = result
+                return result
+            # Freeze the authoritative payload before it crosses the probe
+            # boundary. Plugins receive only an opaque token; even a mutable
+            # client return object changed after probe cannot rewrite an
+            # already-admitted workbook or image plan.
+            content_list = copy.deepcopy(content_list)
+            images = copy.deepcopy(images)
             if self.source.suffix in MINERU_WORKBOOK_SUFFIXES:
+                # Workbook acceptance compares the pure, asset-free mapping
+                # with the source sheet before commit. Other formats have no
+                # semantic admission beyond successful materialization, so
+                # they map exactly once below instead of doubling CPU/allocation.
+                elements = tuple(
+                    mineru_content_list_to_elements(
+                        self.source_id,
+                        content_list,
+                        label_prefix=mineru_label_prefix(self.file_name),
+                    )
+                )
+                if not elements:
+                    self._mineru_error = (
+                        "MinerU content_list mapped to zero source elements"
+                    )
+                    result = ParserProbe(
+                        False, reason_code="empty_parser_output"
+                    )
+                    self._probe_results[contribution_id] = result
+                    return result
                 accepted, rows, total_rows, cells, total_cells = (
                     mineru_workbook_reconciliation(
                         self._local_path(), list(elements)
@@ -227,9 +275,11 @@ class ParserChainExecution:
                         f"MinerU workbook output covered {rows}/{total_rows} rows "
                         f"and {cells}/{total_cells} cells; using openpyxl"
                     )
-                    return ParserProbe(
+                    result = ParserProbe(
                         False, reason_code="workbook_coverage_rejected"
                     )
+                    self._probe_results[contribution_id] = result
+                    return result
             self._mineru_error = str(
                 getattr(
                     self.mineru_client
@@ -241,13 +291,15 @@ class ParserChainExecution:
                 or ""
             )
             candidate = _Candidate(
-                contribution_id,
-                elements,
                 content_list=content_list,
                 images=images,
             )
-            self._proposals[contribution_id] = candidate
-            return ParserProbe(True, candidate, reason_code="accepted")
+            token = _ProposalToken(contribution_id)
+            self._proposals[contribution_id] = token
+            self._payloads[contribution_id] = candidate
+            result = ParserProbe(True, token, reason_code="accepted")
+            self._probe_results[contribution_id] = result
+            return result
         except Exception as exc:
             client = (
                 self.mineru_client
@@ -255,11 +307,14 @@ class ParserChainExecution:
                 else self.cloud_client
             )
             self._mineru_error = str(getattr(client, "last_error", "") or exc)
+            self._probe_results[contribution_id] = ParserProbe(
+                False, reason_code="parser_probe_failed"
+            )
             raise
 
     def admit(self, contribution_id: str, value: Any) -> ParserAdmission:
         if (
-            type(value) is not _Candidate
+            type(value) is not _ProposalToken
             or value.contribution_id != contribution_id
             or self._proposals.get(contribution_id) is not value
         ):
@@ -268,19 +323,28 @@ class ParserChainExecution:
 
     def materialize(self, contribution_id: str, value: Any) -> ParsedSource:
         if (
-            type(value) is not _Candidate
+            type(value) is not _ProposalToken
             or value.contribution_id != contribution_id
             or self._proposals.get(contribution_id) is not value
         ):
             raise TypeError("invalid parser candidate")
+        candidate = self._payloads.get(contribution_id)
+        if type(candidate) is not _Candidate:
+            raise TypeError("missing parser candidate payload")
         self.delete_source_images()
         persist_image = self.make_persist_image()
         try:
             if contribution_id == PARSER_BUILTIN_PROVIDER:
+                effective_file_name = self.file_name or ""
+                if (
+                    self.source.kind == "url"
+                    and Path(effective_file_name).suffix.lower() != ".pdf"
+                ):
+                    effective_file_name = f"{effective_file_name or 'source'}.pdf"
                 elements = parse_builtin_source_file(
                     self.source_id,
                     str(self._local_path()),
-                    self.file_name or "source.pdf",
+                    effective_file_name or "source.pdf",
                     persist_image=persist_image,
                 )
                 if self._attempted_cloud:
@@ -300,11 +364,16 @@ class ParserChainExecution:
             else:
                 elements = mineru_content_list_to_elements(
                     self.source_id,
-                    value.content_list,
+                    candidate.content_list,
                     label_prefix=mineru_label_prefix(self.file_name),
-                    images=value.images,
+                    images=candidate.images,
                     persist_image=persist_image,
                 )
+                if not elements:
+                    self._mineru_error = (
+                        "MinerU content_list mapped to zero source elements"
+                    )
+                    raise RuntimeError("empty parser output")
                 parser_mode = (
                     "mineru_cloud"
                     if contribution_id == PARSER_CLOUD_PROVIDER

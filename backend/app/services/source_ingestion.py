@@ -968,6 +968,7 @@ class SourceIngestionService:
         with self._active_sources_lock:
             self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
         source_parse_lock: threading.RLock | None = None
+        source_parse_lock_acquired = False
         parsed_assets_pending = False
         try:
             # 置 'parsing' 放在 try 内首行(不在 try 外):否则这句 DB 写若因磁盘满/
@@ -982,6 +983,7 @@ class SourceIngestionService:
             # final asset generation. Different sources remain fully parallel.
             source_parse_lock = self._source_chunk_lock(source_id)
             source_parse_lock.acquire()
+            source_parse_lock_acquired = True
             t = time.perf_counter()
             stage("parse", "start", t)
             parser_execution = ParserChainExecution(
@@ -1081,6 +1083,7 @@ class SourceIngestionService:
                     self.invalidate_knowledge_counts(notebook_id)
 
             source_parse_lock.release()
+            source_parse_lock_acquired = False
             source_parse_lock = None
 
             # Hints + notebook-meta augmentation do NOT depend on KG extraction
@@ -1225,13 +1228,6 @@ class SourceIngestionService:
             embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
-            if parsed_assets_pending:
-                try:
-                    self.delete_source_images(source_id)
-                except Exception:
-                    self.event_log.logger.exception(
-                        "uncommitted parser assets cleanup failed for %s", source_id
-                    )
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
             self.event_log.logger.exception("process_source failed for %s", source_id)
             self.set_source_status(
@@ -1249,9 +1245,25 @@ class SourceIngestionService:
             # 下面的 maybe_enqueue_scale_fold,后者是独立的空闲收尾、不需要持租约。此处的
             # 分块锁在本方 with 块内已释放,减租约到 0 时可安全 pop(与 backfill 守卫共用
             # _release_source_lease:backfill 也登记租约,故本方持锁的窗口里锁不会被它 pop)。
-            if source_parse_lock is not None:
-                source_parse_lock.release()
-            self._release_source_lease(source_id)
+            # An accepted materializer may have persisted images before a
+            # downstream Exception *or BaseException* interrupts the element
+            # transaction. Never leave that uncommitted asset generation
+            # behind. Once replace_elements commits, the flag is cleared and
+            # the generation becomes authoritative.
+            try:
+                if parsed_assets_pending:
+                    try:
+                        self.delete_source_images(source_id)
+                    except Exception:
+                        self.event_log.logger.exception(
+                            "uncommitted parser assets cleanup failed for %s", source_id
+                        )
+            finally:
+                try:
+                    if source_parse_lock is not None and source_parse_lock_acquired:
+                        source_parse_lock.release()
+                finally:
+                    self._release_source_lease(source_id)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many

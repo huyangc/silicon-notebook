@@ -303,6 +303,31 @@ def test_active_lease_released_on_exception_exit(repo, tmp_path, monkeypatch):
     assert sid not in service._active_sources, "异常出口后租约残留(finally 未释放)"
 
 
+def test_exhausted_guaranteed_parser_chain_marks_source_failed(
+    repo, tmp_path, monkeypatch
+):
+    md = tmp_path / "broken.md"
+    md.write_text("# unreadable", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    import app.services.parser_chain_execution as parser_execution
+
+    monkeypatch.setattr(
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("builtin parser failed")
+        ),
+    )
+
+    repo.process_source(sid)
+
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "failed"
+    assert detail.error_message == "parser provider chain exhausted"
+    assert repo.source_elements(sid) == []
+
+
 def test_active_lease_released_when_setting_parsing_status_fails(
     repo, tmp_path, monkeypatch
 ):
@@ -338,6 +363,108 @@ def test_active_lease_released_when_setting_parsing_status_fails(
 class _HardAbort(BaseException):
     """不是 Exception 子类 → 不被 process_source 的 `except Exception` 兜住,会向上
     传出。只有真正的 `finally`(而非 except 之后的正常流)能在这条出口释放租约。"""
+
+
+def test_interrupted_source_lock_acquire_does_not_release_unowned_lock(
+    repo, tmp_path, monkeypatch
+):
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    service = repo._runtime.source_ingestion
+
+    class InterruptedLock:
+        release_calls = 0
+
+        def acquire(self):
+            raise _HardAbort("interrupted while waiting for source lock")
+
+        def release(self):
+            self.release_calls += 1
+            raise AssertionError("must not release a lock that was not acquired")
+
+    lock = InterruptedLock()
+    monkeypatch.setattr(service, "_source_chunk_lock", lambda _source_id: lock)
+
+    with pytest.raises(_HardAbort, match="interrupted while waiting"):
+        repo.process_source(sid)
+
+    assert lock.release_calls == 0
+    assert sid not in service._active_sources
+
+
+def test_baseexception_after_parser_materialize_cleans_uncommitted_assets(
+    tmp_path, monkeypatch
+):
+    repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
+    service = repo._runtime.source_ingestion
+
+    def hard_abort(*args, **kwargs):
+        raise _HardAbort("element transaction interrupted")
+
+    monkeypatch.setattr(service, "clear_source_extraction_state", hard_abort)
+
+    with pytest.raises(_HardAbort, match="element transaction interrupted"):
+        repo.process_source(sid)
+
+    assert repo.source_asset_ids(sid) == []
+
+
+def test_concurrent_same_source_reparse_serializes_asset_generations(
+    tmp_path, monkeypatch
+):
+    repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    calls_lock = threading.Lock()
+    png = b"\x89PNG\r\n\x1a\n" + b"1" * 32
+
+    def parse_once(path, name):
+        with calls_lock:
+            calls.append(name)
+            first = len(calls) == 1
+        if first:
+            entered.set()
+            assert release.wait(timeout=5)
+        return (
+            [
+                {
+                    "type": "image",
+                    "img_path": "fig.png",
+                    "image_caption": ["Figure."],
+                    "page_idx": 0,
+                }
+            ],
+            {"fig.png": png},
+        )
+
+    monkeypatch.setattr(repo.mineru_client, "parse_with_images", parse_once)
+    errors = []
+
+    def run():
+        try:
+            repo.process_source(sid)
+        except BaseException as exc:  # test thread must report every failure
+            errors.append(exc)
+
+    first = threading.Thread(target=run)
+    second = threading.Thread(target=run)
+    first.start()
+    assert entered.wait(timeout=5)
+    second.start()
+    time.sleep(0.1)
+    assert len(calls) == 1
+    release.set()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert len(calls) == 2
+    assert len(repo.source_asset_ids(sid)) == 1
 
 
 def test_active_lease_released_on_propagating_baseexception(
