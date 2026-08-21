@@ -134,6 +134,11 @@ class ContributionDeclaration:
     id: str
     point: str
     kind: ContributionKind
+    # Declarative ordering for provider chains.  Stable DAG edges are easier
+    # to reason about than a global integer priority and remain deterministic
+    # when bundles are registered in a different order.
+    after: tuple[str, ...] = ()
+    before: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

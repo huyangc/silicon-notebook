@@ -127,7 +127,7 @@ PR 描述必须包含：
 
 #### PR-03：Generated-question supplement adapter
 
-状态：实现中；已完成 host/capability/actor-scoped SQL 接线，待双路 review 与 CI。
+状态：已通过双路 subagent review 与三条 CI，由 PR #544 squash 合入。
 
 范围：
 
@@ -144,6 +144,8 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 ### Phase 2：Parser ProviderChain（2 PR）
 
 #### PR-04：ProviderChain runner + acceptance contract
+
+状态：实现中；已冻结 dormant 三环 DAG、两阶段副作用合同与生产路由物理断线，待双路 review 与 CI。
 
 - 增加稳定 ID/DAG 链序、accept/reject-with-reason、warning、availability、取消和两段式副作用合同；
 - contract kit 覆盖拒收降级、失败降级、禁止路由、验收前零持久化副作用；

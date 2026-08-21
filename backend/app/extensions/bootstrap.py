@@ -8,16 +8,26 @@ from typing import Callable, Mapping
 
 from app.extension_sdk import (
     GENERATED_QUESTION_ACCESS_CAPABILITY,
+    PARSER_BUILTIN_ACCESS_CAPABILITY,
+    PARSER_CLOUD_ACCESS_CAPABILITY,
+    PARSER_SELF_HOSTED_ACCESS_CAPABILITY,
     SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     Availability,
     AvailabilityStatus,
     ExtensionBundle,
+    ParserHostContext,
     RetrievalAdmissionPolicy,
     RetrievalHostContext,
 )
 from app.extensions.builtin import (
     GENERATED_QUESTION_BUNDLE,
     GENERATED_QUESTION_CONTRIBUTION_ID,
+    PARSER_BUILTIN_BUNDLE,
+    PARSER_BUILTIN_CONTRIBUTION_ID,
+    PARSER_CLOUD_BUNDLE,
+    PARSER_CLOUD_CONTRIBUTION_ID,
+    PARSER_SELF_HOSTED_BUNDLE,
+    PARSER_SELF_HOSTED_CONTRIBUTION_ID,
     SELECTED_SOURCE_GRAPH_BUNDLE,
     SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID,
 )
@@ -26,6 +36,7 @@ from app.extensions.capabilities import (
     CapabilityDecisionCatalog,
 )
 from app.extensions.registry import ExtensionRegistry, frozen_registry
+from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
 
 
@@ -33,6 +44,7 @@ from app.extensions.retrieval import RetrievalContributorHost
 class ExtensionRuntime:
     registry: ExtensionRegistry
     retrieval_contributors: RetrievalContributorHost
+    parser_chain: ParserProviderChainHost
 
 
 def build_extension_registry(
@@ -65,6 +77,10 @@ def build_extension_runtime(
             admission_policies=retrieval_admission_policies,
             event_sink=event_sink,
         ),
+        parser_chain=ParserProviderChainHost(
+            registry,
+            event_sink=event_sink,
+        ),
     )
 
 
@@ -94,11 +110,40 @@ def default_extension_runtime() -> ExtensionRuntime:
             "generated_question_access_unavailable",
         )
 
+    def parser_access(
+        context: object | None, expected_contribution_id: str
+    ) -> Availability:
+        if (
+            type(context) is ParserHostContext
+            and context.contribution_id == expected_contribution_id
+            and context.access is not None
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "parser_link_access_unavailable",
+        )
+
     return build_extension_runtime(
-        (GENERATED_QUESTION_BUNDLE, SELECTED_SOURCE_GRAPH_BUNDLE),
+        (
+            PARSER_BUILTIN_BUNDLE,
+            GENERATED_QUESTION_BUNDLE,
+            PARSER_CLOUD_BUNDLE,
+            SELECTED_SOURCE_GRAPH_BUNDLE,
+            PARSER_SELF_HOSTED_BUNDLE,
+        ),
         capability_decisions={
             GENERATED_QUESTION_ACCESS_CAPABILITY: generated_question_access,
             SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,
+            PARSER_SELF_HOSTED_ACCESS_CAPABILITY: lambda context: parser_access(
+                context, PARSER_SELF_HOSTED_CONTRIBUTION_ID
+            ),
+            PARSER_CLOUD_ACCESS_CAPABILITY: lambda context: parser_access(
+                context, PARSER_CLOUD_CONTRIBUTION_ID
+            ),
+            PARSER_BUILTIN_ACCESS_CAPABILITY: lambda context: parser_access(
+                context, PARSER_BUILTIN_CONTRIBUTION_ID
+            ),
         },
         retrieval_admission_policies={
             GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
