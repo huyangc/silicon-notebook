@@ -240,7 +240,7 @@ def test_reused_sqlite_schema_keeps_each_test_database_mutably_isolated(tmp_path
     second.close_local()
 
 
-def test_direct_sqlite_migrator_contracts_bypass_the_schema_template():
+def test_sqlite_migration_contracts_bypass_the_schema_template():
     conftest_source = (ROOT / "backend" / "tests" / "conftest.py").read_text(
         encoding="utf-8"
     )
@@ -249,7 +249,14 @@ def test_direct_sqlite_migrator_contracts_bypass_the_schema_template():
         if path.name == Path(__file__).name:
             continue
         source = path.read_text(encoding="utf-8")
-        if "SqliteMigrator(" not in source or ".migrate(" not in source:
+        directly_owns_migrator = (
+            "SqliteMigrator(" in source and ".migrate(" in source
+        )
+        indirectly_owns_startup_migration = (
+            "def test_run_startup_migrates_warms_and_flips_ready(" in source
+            and "startup_warmup.run_startup(" in source
+        )
+        if not directly_owns_migrator and not indirectly_owns_startup_migration:
             continue
         if f'"{path.name}"' not in conftest_source:
             missing.append(path.name)
