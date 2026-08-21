@@ -659,8 +659,10 @@ class KnowledgeCandidateProjectorHost:
 
     def _connection_clear_for(self, call: KnowledgeProjectionCallContext) -> bool:
         clear = self._connection_clear(call.connection_probe)
+        if not clear:
+            return False
         _raise_if_cancelled(call.cancellation)
-        return clear
+        return True
 
     def _expired_for(self, call: KnowledgeProjectionCallContext) -> bool:
         now = self._safe_clock()

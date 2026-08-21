@@ -788,6 +788,47 @@ def test_forged_probe_cancellation_never_authorizes_core_store():
         )
 
 
+def test_connection_boundary_wins_when_callback_also_sets_authoritative_cancel():
+    probe = _Probe()
+
+    class Control:
+        aborted = False
+
+        def raise_if_aborted(self):
+            if self.aborted:
+                raise _NativeCancelled()
+
+    control = Control()
+
+    class Host:
+        has_contributors = True
+
+        def project_application(self, _call, *, event_sink=None):
+            probe.held = True
+            control.aborted = True
+            return ()
+
+    with pytest.raises(KnowledgeProjectionBoundaryError):
+        project_knowledge_candidates(
+            [],
+            [],
+            source_id="source-1",
+            source_title="Source",
+            source_type="file",
+            elements=_elements(),
+            host=Host(),
+            effective_schemas=lambda _notebook_id: OBJECT_SCHEMAS,
+            notebook_id="notebook-1",
+            control=control,
+            connection_probe=probe,
+            max_objects=8,
+            max_relations=8,
+            max_candidate_bytes=8192,
+            timeout_seconds=60,
+            event_sink=None,
+        )
+
+
 def test_normal_empty_core_baseline_can_accept_grounded_projector_candidates():
     class Projector:
         def project(self, context):

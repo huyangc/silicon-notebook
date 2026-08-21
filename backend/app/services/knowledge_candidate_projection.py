@@ -90,14 +90,11 @@ def project_knowledge_candidates(
     try:
         has_contributors = host.has_contributors
     except CoreCancellation:
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         return objects, relations
     except Exception:
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         return objects, relations
-    _raise_control_cancelled(control)
     _assert_connection_clear(connection_probe, control)
     if has_contributors is not True:
         return objects, relations
@@ -120,20 +117,16 @@ def project_knowledge_candidates(
         return objects, relations
     try:
         schemas_by_type = effective_schemas(notebook_id)
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         schemas = _schema_snapshot(schemas_by_type)
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         if not schemas:
             return objects, relations
         now = clock()
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         if type(now) not in {int, float} or not math.isfinite(float(now)):
             return objects, relations
         element_snapshot = _element_snapshot(elements, source_id)
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         if not element_snapshot:
             return objects, relations
@@ -154,14 +147,11 @@ def project_knowledge_candidates(
     except KnowledgeProjectionBoundaryError:
         raise
     except (_ProjectionCancelled, CoreCancellation):
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         return objects, relations
     except Exception:
-        _raise_control_cancelled(control)
         _assert_connection_clear(connection_probe, control)
         return objects, relations
-    _raise_control_cancelled(control)
     _assert_connection_clear(connection_probe, control)
     if type(patches) is not tuple or not patches:
         return objects, relations
@@ -203,7 +193,6 @@ def project_knowledge_candidates(
         remaining_objects -= len(new_objects)
         remaining_relations -= len(new_relations)
         remaining_bytes -= used_bytes
-    _raise_control_cancelled(control)
     _assert_connection_clear(connection_probe, control)
     if not accepted_objects and not accepted_relations:
         return objects, relations
@@ -227,22 +216,20 @@ def _assert_connection_clear(probe: object, control: object | None) -> None:
             )
         held = check()
     except CoreCancellation as exc:
-        _raise_control_cancelled(control)
         raise KnowledgeProjectionBoundaryError(
             "invalid knowledge projection connection probe"
         ) from exc
     except KnowledgeProjectionBoundaryError:
         raise
     except Exception as exc:
-        _raise_control_cancelled(control)
         raise KnowledgeProjectionBoundaryError(
             "invalid knowledge projection connection probe"
         ) from exc
-    _raise_control_cancelled(control)
     if type(held) is not bool or held:
         raise KnowledgeProjectionBoundaryError(
             "knowledge projection retained a database connection"
         )
+    _raise_control_cancelled(control)
 
 
 def _element_snapshot(
