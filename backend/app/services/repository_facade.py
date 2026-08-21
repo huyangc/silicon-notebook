@@ -18,7 +18,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from uuid import uuid4
 
 from app.core.config import Settings
-from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.extensions import (
+    ParserProviderChainHostPort,
+    RetrievalContributorHostPort,
+)
 from app.core.request_context import (
     _REQUEST_USER,
     get_request_user,
@@ -112,7 +115,7 @@ from app.repositories.bundle import PersistenceBundleFactory
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
 from app.services.source_ingestion import SourcePipelineHooks
 from app.repositories.source_files import safe_filename as _safe_filename  # noqa: F401 — compatibility export
-from app.services.parsers import parse_source_file, mineru_content_list_to_elements
+from app.services.parsers import mineru_content_list_to_elements
 from app.services.knowhow.assets import AssetService
 from app.services.source_image_persist import make_persist_image_factory
 from app.services.prompts import (
@@ -282,6 +285,7 @@ class RepositoryFacade:
         *,
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
+        parser_provider_chain_host: ParserProviderChainHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -312,6 +316,7 @@ class RepositoryFacade:
             persistence_factory=persistence_factory,
             model_provider=model_provider,
             retrieval_contributor_host=retrieval_contributor_host,
+            parser_provider_chain_host=parser_provider_chain_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the
@@ -650,10 +655,9 @@ class RepositoryFacade:
         self._kg_building: set = self._runtime.knowledge_lifecycle.kg_building
         self._kg_building_lock = self._runtime.knowledge_lifecycle.kg_building_lock
         # Task 12→15: the ingestion orchestration rides facade-bound late seams
-        # — the `_write` transaction seat, the parse/summarize/model seams
-        # whose frozen patch targets live on this facade or its module
-        # namespace (repo.source_elements / repo._summarize_source / module
-        # parse_source_file / per-user llm & kg_llm properties) — plus DIRECT
+        # — the `_write` transaction seat and summarize/model seams whose
+        # frozen patch targets live on this facade (repo.source_elements /
+        # repo._summarize_source / per-user llm & kg_llm properties) — plus DIRECT
         # KnowledgeLifecycleService/KgMutationCoordinator dependencies (the
         # Gate-4 store_kg / incremental_fuse_source / invalidate_unified_cache
         # callbacks are gone; wired AFTER wire_knowledge_lifecycle).  The
@@ -668,13 +672,6 @@ class RepositoryFacade:
             ),
             source_type_from_name=lambda file_name: self._source_type_from_name(
                 file_name
-            ),
-            parse_file=lambda source_id, file_path, file_name, client, persist_image=None: (
-                _compatibility_value(
-                    compatibility_module,
-                    "parse_source_file",
-                    parse_source_file,
-                )(source_id, file_path, file_name, client, persist_image)
             ),
             mineru_client=lambda: self.mineru_client,
             mineru_cloud_client=lambda: self.mineru_cloud_client,

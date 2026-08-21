@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
-from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.extensions import (
+    ParserProviderChainHostPort,
+    RetrievalContributorHostPort,
+)
 from app.repositories.ports import NotebookRepository
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -16,12 +19,13 @@ def create_repository(
     settings: Settings,
     *,
     retrieval_contributor_host: RetrievalContributorHostPort | None = None,
+    parser_provider_chain_host: ParserProviderChainHostPort | None = None,
 ) -> NotebookRepository:
-    host_kwargs = (
-        {"retrieval_contributor_host": retrieval_contributor_host}
-        if retrieval_contributor_host is not None
-        else {}
-    )
+    host_kwargs = {}
+    if retrieval_contributor_host is not None:
+        host_kwargs["retrieval_contributor_host"] = retrieval_contributor_host
+    if parser_provider_chain_host is not None:
+        host_kwargs["parser_provider_chain_host"] = parser_provider_chain_host
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
         return SQLiteRepository(settings, **host_kwargs)

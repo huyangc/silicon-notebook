@@ -77,8 +77,12 @@ def _seed_queued_source(repo, notebook_id):
 
 
 def _patch_parse(monkeypatch, elements):
-    import app.services.sqlite_repository as facade_mod
-    monkeypatch.setattr(facade_mod, "parse_source_file", lambda *a, **k: elements)
+    import app.services.parser_chain_execution as parser_execution
+    monkeypatch.setattr(
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda *a, **k: elements,
+    )
 
 
 def test_chunk_failure_does_not_abort_extraction(repo, monkeypatch):

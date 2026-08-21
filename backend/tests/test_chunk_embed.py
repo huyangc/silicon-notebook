@@ -78,9 +78,9 @@ def test_build_chunks_idempotent(repo):
 def test_process_source_builds_chunks(repo, monkeypatch):
     """process_source 解析后应 INLINE 产出 chunks(轻摄取, query 立即可用)。
     chunk 构建是同步的(无网络), 故这里无需等后台 embed 线程即可断言行数。"""
-    import app.services.sqlite_repository as mod
+    import app.services.parser_chain_execution as parser_execution
     # mock 解析: 返回固定 elements(不依赖真实文件/MinerU)
-    monkeypatch.setattr(mod, "parse_source_file",
+    monkeypatch.setattr(parser_execution, "parse_builtin_source_file",
                         lambda *a, **k: [type("E", (), {"element_type": "paragraph",
                                          "location_label": "p1", "text": "chunk content " * 30,
                                          "metadata": {}})()])

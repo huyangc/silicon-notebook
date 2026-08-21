@@ -6,6 +6,8 @@ import pytest
 from docx import Document
 
 from app.api.source_routes import SUPPORTED_SOURCE_SUFFIXES, _validate_source_file
+from app.extensions import default_extension_runtime
+from app.services.parser_chain_execution import ParserChainExecution
 from app.services.parsers import (
     MINERU_CAPABLE_SUFFIXES,
     MINERU_FALLBACK_WARNING_SUFFIXES,
@@ -126,6 +128,42 @@ class FakeMineru:
         return self._content_list, dict(self._images)
 
 
+class _CloudOff:
+    configured = False
+    last_error = ""
+
+
+class _NoConnection:
+    @staticmethod
+    def is_connection_held() -> bool:
+        return False
+
+
+def _parse_via_chain(
+    source_id: str,
+    path: Path,
+    file_name: str,
+    client: FakeMineru,
+    persist_image=None,
+):
+    result = ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id=source_id,
+        source_kind="file",
+        file_path=str(path),
+        file_name=file_name,
+        source_url="",
+        mineru_client=client,
+        cloud_client=_CloudOff(),
+        connection=_NoConnection(),
+        make_persist_image=lambda: persist_image,
+        delete_source_images=lambda: None,
+        event_sink=lambda _event: None,
+    ).run()
+    client.last_error = result.mineru_error
+    return list(result.elements)
+
+
 def _make_docx(path: Path) -> Path:
     doc = Document()
     doc.add_paragraph("Hello from docx.")
@@ -139,7 +177,7 @@ def _make_docx(path: Path) -> Path:
 def test_docx_uses_mineru_when_configured(tmp_path):
     path = _make_docx(tmp_path / "a.docx")
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
-    els = parse_docx("s1", path, "a.docx", client)
+    els = _parse_via_chain("s1", path, "a.docx", client)
     assert any(e.metadata.get("parser") == "mineru" for e in els)
     assert els[0].location_label.startswith("DOCX p.1")
 
@@ -147,7 +185,7 @@ def test_docx_uses_mineru_when_configured(tmp_path):
 def test_docx_falls_back_when_not_configured(tmp_path):
     path = _make_docx(tmp_path / "a.docx")
     client = FakeMineru(configured=False)
-    els = parse_docx("s1", path, "a.docx", client)
+    els = _parse_via_chain("s1", path, "a.docx", client)
     assert all(e.metadata.get("parser") == "mammoth" for e in els)
     assert any("Hello from docx." in e.text for e in els)
 
@@ -155,7 +193,7 @@ def test_docx_falls_back_when_not_configured(tmp_path):
 def test_docx_falls_back_on_mineru_error(tmp_path):
     path = _make_docx(tmp_path / "a.docx")
     client = FakeMineru(raises=RuntimeError("mineru boom"))
-    els = parse_docx("s1", path, "a.docx", client)  # 不应冒泡异常
+    els = _parse_via_chain("s1", path, "a.docx", client)  # 不应冒泡异常
     assert all(e.metadata.get("parser") == "mammoth" for e in els)
     assert client.last_error == "mineru boom"
 
@@ -163,7 +201,7 @@ def test_docx_falls_back_on_mineru_error(tmp_path):
 def test_docx_falls_back_when_mineru_empty(tmp_path):
     path = _make_docx(tmp_path / "a.docx")
     client = FakeMineru(content_list=[])
-    els = parse_docx("s1", path, "a.docx", client)
+    els = _parse_via_chain("s1", path, "a.docx", client)
     assert all(e.metadata.get("parser") == "mammoth" for e in els)
 
 
@@ -189,7 +227,7 @@ def _make_rich_docx(path: Path) -> Path:
 
 def test_docx_fallback_keeps_heading_level_list_and_table(tmp_path):
     path = _make_rich_docx(tmp_path / "rich.docx")
-    els = parse_docx("s1", path, "rich.docx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "rich.docx", FakeMineru(configured=False))
     assert all(e.metadata.get("parser") == "mammoth" for e in els)
 
     headings = [e for e in els if e.element_type == "heading"]
@@ -261,7 +299,7 @@ def test_docx_fallback_never_materialises_inline_image_bytes(tmp_path, monkeypat
         return result
 
     monkeypatch.setattr(mammoth, "convert_to_html", _spy)
-    els = parse_docx("s1", path, "img.docx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "img.docx", FakeMineru(configured=False))
 
     markup = seen["markup"]
     assert "data:image" not in markup                 # 默认 handler 会有 6 处
@@ -281,7 +319,7 @@ def test_docx_fallback_unescapes_entities_in_table_text(tmp_path):
     path = tmp_path / "amp.docx"
     doc.save(str(path))
 
-    els = parse_docx("s1", path, "amp.docx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "amp.docx", FakeMineru(configured=False))
     tables = [e for e in els if e.element_type == "table"]
     assert len(tables) == 1
     assert "R&D" in tables[0].text
@@ -302,7 +340,7 @@ def test_docx_fallback_splits_long_tables_into_bounded_elements(tmp_path):
     path = tmp_path / "long.docx"
     doc.save(str(path))
 
-    els = parse_docx("s1", path, "long.docx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "long.docx", FakeMineru(configured=False))
     tables = [e for e in els if e.element_type == "table"]
     assert len(tables) == 3                                   # 65 行 / 每段 30 行
     assert [e.location_label for e in tables] == [
@@ -355,7 +393,7 @@ def test_split_table_html_defers_the_split_while_a_rowspan_is_active():
 def test_docx_fallback_keeps_small_tables_as_one_element(tmp_path):
     """未超限的表格逐字不变：不加 part 后缀、不加 part metadata。"""
     path = _make_rich_docx(tmp_path / "small.docx")
-    els = parse_docx("s1", path, "small.docx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "small.docx", FakeMineru(configured=False))
     tables = [e for e in els if e.element_type == "table"]
     assert len(tables) == 1
     assert tables[0].location_label == "DOCX table 1"
@@ -381,7 +419,7 @@ def test_docx_falls_back_to_python_docx_when_mammoth_fails(tmp_path, monkeypatch
         raise RuntimeError("mammoth boom")
 
     monkeypatch.setattr(mammoth, "convert_to_html", _boom)
-    els = parse_docx("s1", path, "rich.docx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "rich.docx", FakeMineru(configured=False))
     assert els
     assert all(e.metadata.get("parser") == "docx" for e in els)
     assert any("Body para one." in e.text for e in els)
@@ -390,7 +428,7 @@ def test_docx_falls_back_to_python_docx_when_mammoth_fails(tmp_path, monkeypatch
 def test_parse_source_file_forwards_client_to_docx(tmp_path):
     path = _make_docx(tmp_path / "a.docx")
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
-    els = parse_source_file("s1", str(path), "a.docx", client)
+    els = _parse_via_chain("s1", path, "a.docx", client)
     assert any(e.metadata.get("parser") == "mineru" for e in els)
 
 
@@ -414,7 +452,7 @@ def _make_pptx(path: Path, slide_texts) -> Path:
 def test_pptx_uses_mineru_when_configured(tmp_path):
     path = _make_pptx(tmp_path / "a.pptx", ["Slide one body"])
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
-    els = parse_pptx("s1", path, "a.pptx", client)
+    els = _parse_via_chain("s1", path, "a.pptx", client)
     assert any(e.metadata.get("parser") == "mineru" for e in els)
     assert els[0].location_label.startswith("PPTX p.1")
 
@@ -422,7 +460,7 @@ def test_pptx_uses_mineru_when_configured(tmp_path):
 def test_pptx_falls_back_when_not_configured(tmp_path):
     path = _make_pptx(tmp_path / "a.pptx", ["Slide one body"])
     client = FakeMineru(configured=False)
-    els = parse_pptx("s1", path, "a.pptx", client)
+    els = _parse_via_chain("s1", path, "a.pptx", client)
     assert all(e.metadata.get("parser") == "pptx" for e in els)
     assert any("Slide one body" in e.text for e in els)
 
@@ -430,7 +468,7 @@ def test_pptx_falls_back_when_not_configured(tmp_path):
 def test_pptx_falls_back_on_mineru_error(tmp_path):
     path = _make_pptx(tmp_path / "a.pptx", ["Slide one body"])
     client = FakeMineru(raises=RuntimeError("mineru boom"))
-    els = parse_pptx("s1", path, "a.pptx", client)
+    els = _parse_via_chain("s1", path, "a.pptx", client)
     assert all(e.metadata.get("parser") == "pptx" for e in els)
     assert client.last_error == "mineru boom"
 
@@ -438,7 +476,7 @@ def test_pptx_falls_back_on_mineru_error(tmp_path):
 def test_pptx_falls_back_when_mineru_empty(tmp_path):
     path = _make_pptx(tmp_path / "a.pptx", ["Slide one body"])
     client = FakeMineru(content_list=[])
-    els = parse_pptx("s1", path, "a.pptx", client)
+    els = _parse_via_chain("s1", path, "a.pptx", client)
     assert all(e.metadata.get("parser") == "pptx" for e in els)
 
 
@@ -468,7 +506,7 @@ def _make_real_pptx(path: Path) -> Path:
 
 def test_pptx_fallback_recovers_slide_tables_and_notes(tmp_path):
     path = _make_real_pptx(tmp_path / "real.pptx")
-    els = parse_pptx("s1", path, "real.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "real.pptx", FakeMineru(configured=False))
     assert all(e.metadata.get("parser") == "python-pptx" for e in els)
 
     texts = [e for e in els if e.element_type == "slide_text"]
@@ -499,7 +537,7 @@ def test_pptx_fallback_reads_grouped_shape_text(tmp_path):
     path = tmp_path / "group.pptx"
     presentation.save(str(path))
 
-    els = parse_pptx("s1", path, "group.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "group.pptx", FakeMineru(configured=False))
     assert {"Grouped one", "Grouped two"} <= {e.text for e in els}
 
 
@@ -523,7 +561,7 @@ def test_pptx_fallback_reads_nested_group_shape_text(tmp_path):
     path = tmp_path / "nested.pptx"
     presentation.save(str(path))
 
-    els = parse_pptx("s1", path, "nested.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "nested.pptx", FakeMineru(configured=False))
     assert all(e.metadata.get("parser") == "python-pptx" for e in els)
     texts = {e.text for e in els}
     assert "Depth twenty text" in texts
@@ -559,7 +597,7 @@ def test_pptx_fallback_survives_a_shape_with_unimplemented_shape_type(tmp_path):
     with pytest.raises(NotImplementedError):
         _ = broken.shape_type
 
-    els = parse_pptx("s1", path, "broken.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "broken.pptx", FakeMineru(configured=False))
     assert all(e.metadata.get("parser") == "python-pptx" for e in els)   # 未掉回原始 XML
     assert "Healthy shape text" in {e.text for e in els}
     assert any(e.element_type == "table" for e in els)                   # 表格没被连坐
@@ -576,7 +614,7 @@ def test_pptx_fallback_isolates_a_shape_that_raises_while_being_read(tmp_path, m
         raise RuntimeError("shape boom")
 
     monkeypatch.setattr(parsers_module, "_pptx_table_html", _boom)
-    els = parse_pptx("s1", path, "real.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "real.pptx", FakeMineru(configured=False))
     assert all(e.metadata.get("parser") == "python-pptx" for e in els)   # 未掉回原始 XML
     assert not any(e.element_type == "table" for e in els)               # 坏的那个丢了
     assert any("Slide body text" in e.text for e in els)                 # 同页其他形状还在
@@ -600,7 +638,7 @@ def test_pptx_fallback_keeps_merged_cells_as_spans(tmp_path):
     path = tmp_path / "merged.pptx"
     presentation.save(str(path))
 
-    els = parse_pptx("s1", path, "merged.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "merged.pptx", FakeMineru(configured=False))
     tables = [e for e in els if e.element_type == "table"]
     assert len(tables) == 1
     html = tables[0].metadata["table_html"]
@@ -625,7 +663,7 @@ def test_pptx_fallback_splits_long_tables_into_bounded_elements(tmp_path):
     path = tmp_path / "longtable.pptx"
     presentation.save(str(path))
 
-    els = parse_pptx("s1", path, "longtable.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "longtable.pptx", FakeMineru(configured=False))
     tables = [e for e in els if e.element_type == "table"]
     assert len(tables) == 3
     assert [e.location_label for e in tables] == [
@@ -650,7 +688,7 @@ def test_pptx_fallback_survives_missing_notes_text_frame(tmp_path, monkeypatch):
     monkeypatch.setattr(
         NotesSlide, "notes_text_frame", property(lambda self: None), raising=True
     )
-    els = parse_pptx("s1", path, "real.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "real.pptx", FakeMineru(configured=False))
     assert all(e.metadata.get("parser") == "python-pptx" for e in els)   # 未掉回原始 XML
     assert not any(e.element_type == "speaker_notes" for e in els)
     assert any("Slide body text" in e.text for e in els)
@@ -666,7 +704,7 @@ def test_pptx_falls_back_to_raw_xml_when_python_pptx_fails(tmp_path, monkeypatch
         raise RuntimeError("pptx boom")
 
     monkeypatch.setattr(pptx, "Presentation", _boom)
-    els = parse_pptx("s1", path, "real.pptx", FakeMineru(configured=False))
+    els = _parse_via_chain("s1", path, "real.pptx", FakeMineru(configured=False))
     assert els
     assert all(e.metadata.get("parser") == "pptx" for e in els)
     assert any("Slide body text" in e.text for e in els)
@@ -675,7 +713,7 @@ def test_pptx_falls_back_to_raw_xml_when_python_pptx_fails(tmp_path, monkeypatch
 def test_parse_source_file_forwards_client_to_pptx(tmp_path):
     path = _make_pptx(tmp_path / "a.pptx", ["Slide one body"])
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
-    els = parse_source_file("s1", str(path), "a.pptx", client)
+    els = _parse_via_chain("s1", path, "a.pptx", client)
     assert any(e.metadata.get("parser") == "mineru" for e in els)
 
 
@@ -735,7 +773,7 @@ def test_xlsx_uses_mineru_when_configured(tmp_path):
             }
         ]
     )
-    els = parse_xlsx("s1", path, "a.xlsx", client)
+    els = _parse_via_chain("s1", path, "a.xlsx", client)
     assert all(e.metadata.get("parser") == "mineru" for e in els)
     assert not any(e.metadata.get("parser") == "xlsx" for e in els)  # openpyxl 未被调用
     assert els[0].location_label.startswith("XLSX p.1")
@@ -753,7 +791,7 @@ def test_xlsx_uses_mineru_when_configured(tmp_path):
 def test_xlsx_rejects_mineru_output_that_drops_rows(tmp_path):
     path = _make_xlsx_rows(tmp_path / "big.xlsx", 10)      # 10 行 × 2 列 = 20 格
     client = FakeMineru(content_list=_mineru_table(7))     # 7/10 < ceil(10*0.8)=8
-    els = parse_xlsx("s1", path, "big.xlsx", client)
+    els = _parse_via_chain("s1", path, "big.xlsx", client)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)   # 整份丢弃，回落 openpyxl
     assert len(els) == 10                                          # 全保真：一行不少
     assert client.last_error == (
@@ -769,7 +807,7 @@ def test_xlsx_rejects_mineru_output_that_drops_columns(tmp_path):
     """
     path = _make_xlsx_rows(tmp_path / "wide.xlsx", 10, cols=5)    # 10 行 × 5 列 = 50 格
     client = FakeMineru(content_list=_mineru_table(10, td_per_row=1))
-    els = parse_xlsx("s1", path, "wide.xlsx", client)
+    els = _parse_via_chain("s1", path, "wide.xlsx", client)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)
     assert len(els) == 10
     assert client.last_error == (
@@ -793,7 +831,7 @@ def test_xlsx_rejects_a_structurally_complete_but_value_empty_grid(tmp_path):
         "table_caption": ["Sheet1"],
         "page_idx": 0,
     }])
-    els = parse_xlsx("s1", path, "hollow.xlsx", client)
+    els = _parse_via_chain("s1", path, "hollow.xlsx", client)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)   # 拒收，回落 openpyxl
     assert len(els) == 10
     assert client.last_error == (
@@ -805,7 +843,7 @@ def test_xlsx_accepts_a_wide_table_that_keeps_its_columns(tmp_path):
     """反向护栏：同一张宽表，列没丢就照常采信——格指标不能变成第二把误杀刀。"""
     path = _make_xlsx_rows(tmp_path / "wide.xlsx", 10, cols=5)
     client = FakeMineru(content_list=_mineru_table(10, td_per_row=5))  # 50/50 格
-    els = parse_xlsx("s1", path, "wide.xlsx", client)
+    els = _parse_via_chain("s1", path, "wide.xlsx", client)
     assert all(e.metadata.get("parser") == "mineru" for e in els)
     assert client.last_error == ""
 
@@ -814,7 +852,7 @@ def test_xlsx_accepts_mineru_output_at_the_coverage_threshold(tmp_path):
     path = _make_xlsx_rows(tmp_path / "big.xlsx", 10)
     # 8/10 行 == ceil(10*0.8)，16/20 格 == ceil(20*0.8)：两个维度都恰好压线。
     client = FakeMineru(content_list=_mineru_table(8))
-    els = parse_xlsx("s1", path, "big.xlsx", client)
+    els = _parse_via_chain("s1", path, "big.xlsx", client)
     assert all(e.metadata.get("parser") == "mineru" for e in els)
     assert client.last_error == ""
 
@@ -831,7 +869,7 @@ def test_xlsx_coverage_counts_non_table_elements(tmp_path):
             {"type": "text", "text": f"cell {index}", "page_idx": 0} for index in range(3)
         ]
     )
-    els = parse_xlsx("s1", path, "small.xlsx", client)
+    els = _parse_via_chain("s1", path, "small.xlsx", client)
     assert all(e.metadata.get("parser") == "mineru" for e in els)
 
 
@@ -848,7 +886,7 @@ def test_xlsx_coverage_ignores_image_elements(tmp_path):
         ]
         + [{"type": "text", "text": "Sheet1", "page_idx": 0}]
     )
-    els = parse_xlsx("s1", path, "imgs.xlsx", client)
+    els = _parse_via_chain("s1", path, "imgs.xlsx", client)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)   # 拒收
     assert client.last_error == (
         "MinerU workbook output covered 1/5 rows and 1/5 cells; using openpyxl"
@@ -870,7 +908,7 @@ def test_xlsx_rejected_output_persists_no_images(tmp_path):
         calls.append(name)
         return "asset-1"
 
-    els = parse_xlsx("s1", path, "big.xlsx", client, persist_image=_persist)
+    els = _parse_via_chain("s1", path, "big.xlsx", client, persist_image=_persist)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)   # 拒收
     assert calls == []                                            # 零持久化
 
@@ -889,7 +927,7 @@ def test_xlsx_accepted_output_persists_images(tmp_path):
         calls.append(name)
         return "asset-1"
 
-    els = parse_xlsx("s1", path, "big.xlsx", client, persist_image=_persist)
+    els = _parse_via_chain("s1", path, "big.xlsx", client, persist_image=_persist)
     assert all(e.metadata.get("parser") == "mineru" for e in els)
     assert calls == ["a.png"]
     assert any(e.metadata.get("asset_id") == "asset-1" for e in els)
@@ -900,7 +938,7 @@ def test_xlsx_coverage_is_fail_open_when_the_workbook_cannot_be_read(tmp_path):
     path = tmp_path / "stub.xlsx"
     path.write_bytes(b"PK\x03\x04not-a-real-workbook")
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
-    els = parse_xlsx("s1", path, "stub.xlsx", client)
+    els = _parse_via_chain("s1", path, "stub.xlsx", client)
     assert all(e.metadata.get("parser") == "mineru" for e in els)
     assert client.last_error == ""
 
@@ -908,7 +946,7 @@ def test_xlsx_coverage_is_fail_open_when_the_workbook_cannot_be_read(tmp_path):
 def test_xlsx_falls_back_when_not_configured(tmp_path):
     path = _make_xlsx(tmp_path / "a.xlsx")
     client = FakeMineru(configured=False)
-    els = parse_xlsx("s1", path, "a.xlsx", client)
+    els = _parse_via_chain("s1", path, "a.xlsx", client)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)
     assert any("Hello from xlsx." in e.text for e in els)
 
@@ -916,7 +954,7 @@ def test_xlsx_falls_back_when_not_configured(tmp_path):
 def test_xlsx_falls_back_on_mineru_error(tmp_path):
     path = _make_xlsx(tmp_path / "a.xlsx")
     client = FakeMineru(raises=RuntimeError("mineru boom"))
-    els = parse_xlsx("s1", path, "a.xlsx", client)  # 不应冒泡异常
+    els = _parse_via_chain("s1", path, "a.xlsx", client)  # 不应冒泡异常
     assert all(e.metadata.get("parser") == "xlsx" for e in els)
     assert client.last_error == "mineru boom"
 
@@ -924,7 +962,7 @@ def test_xlsx_falls_back_on_mineru_error(tmp_path):
 def test_xlsx_falls_back_when_mineru_empty(tmp_path):
     path = _make_xlsx(tmp_path / "a.xlsx")
     client = FakeMineru(content_list=[])
-    els = parse_xlsx("s1", path, "a.xlsx", client)
+    els = _parse_via_chain("s1", path, "a.xlsx", client)
     assert all(e.metadata.get("parser") == "xlsx" for e in els)
     assert client.last_error == "MinerU content_list mapped to zero source elements"
 
@@ -932,7 +970,7 @@ def test_xlsx_falls_back_when_mineru_empty(tmp_path):
 def test_parse_source_file_forwards_client_to_xlsx(tmp_path):
     path = _make_xlsx(tmp_path / "a.xlsx")
     client = FakeMineru(content_list=_mineru_table(2))
-    els = parse_source_file("s1", str(path), "a.xlsx", client)
+    els = _parse_via_chain("s1", path, "a.xlsx", client)
     assert any(e.metadata.get("parser") == "mineru" for e in els)
 
 
@@ -940,7 +978,7 @@ def test_parse_source_file_forwards_client_to_xlsm(tmp_path):
     # .xlsm 与 .xlsx 同为 OOXML 工作簿，同样要拿到 client（否则宏工作簿静默退化）。
     path = _make_xlsx(tmp_path / "a.xlsm")
     client = FakeMineru(content_list=_mineru_table(2))
-    els = parse_source_file("s1", str(path), "a.xlsm", client)
+    els = _parse_via_chain("s1", path, "a.xlsm", client)
     assert any(e.metadata.get("parser") == "mineru" for e in els)
 
 
@@ -1100,6 +1138,6 @@ def test_mineru_client_reaches_exactly_the_capable_suffixes(tmp_path, suffix):
     path.write_bytes(_MINIMAL_SOURCE_BYTES.get(suffix, b"PK\x03\x04stub"))
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
 
-    parse_source_file("s1", str(path), path.name, client)
+    _parse_via_chain("s1", path, path.name, client)
 
     assert bool(client.calls) == (suffix in MINERU_CAPABLE_SUFFIXES)

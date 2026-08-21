@@ -807,6 +807,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.add_relations', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.add_url_sources', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_memory_hits', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_observations', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_profile', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_profile_jobs', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.all_visible_source_ids', kind='attribute', target='_runtime'),
@@ -1037,6 +1038,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_unified_kg_rebuild_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.scale_index_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.search_notebook', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.search_profile_jobs', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_conflict_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_edge_review', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_knowhow_anchor_column', kind='attribute', target='_runtime'),
@@ -1211,11 +1213,25 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='agent_observations',
+        owner='RepositoryRuntime.agent_observations',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>.clear_agent_observations', kind='attribute', target='agent_observations'),
+            ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>.get_agent_observations', kind='attribute', target='agent_observations'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.add_observation.run', kind='attribute', target='agent_observations'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='agent_profile',
         owner='RepositoryRuntime.agent_profile',
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>._profile_store', kind='attribute', target='agent_profile'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.add_observation.run', kind='attribute', target='agent_profile'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_notebook_profile.load', kind='attribute', target='agent_profile'),
         ),
         patches=(
         ),
@@ -1655,7 +1671,7 @@ SURFACE_MEMBERS = (
         owner='MemoryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.propose_memory', kind='attribute', target='create_memory_candidate'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.propose_memory.create', kind='attribute', target='create_memory_candidate'),
         ),
         patches=(
         ),
@@ -2275,6 +2291,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='list_agent_profiles',
+        owner='MemoryService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>._observation_agent_names', kind='attribute', target='list_agent_profiles'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='list_conversations',
         owner='AskService',
         kind='method',
@@ -2633,28 +2659,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='parse_source'),
         ),
         patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='parse_source_file',
-        owner='SourceIngestionService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_chunk_embed.py', scope='<module>.test_process_source_builds_chunks', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_failure_boundaries.py', scope='<module>._patch_parse', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_fresh_hooks_preserve_post_construction_component_monkeypatch', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_parsed_source_and_elements_commit_before_chunk_build', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_pipeline_status_and_event_order_equals_transaction_phases', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_upload_dedup.py', scope='<module>._patch_parse', kind='patch', target='parse_source_file'),
-        ),
-        patches=(
-            ConsumerSite(path='backend/tests/test_chunk_embed.py', scope='<module>.test_process_source_builds_chunks', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_failure_boundaries.py', scope='<module>._patch_parse', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_fresh_hooks_preserve_post_construction_component_monkeypatch', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_parsed_source_and_elements_commit_before_chunk_build', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_pipeline_status_and_event_order_equals_transaction_phases', kind='patch', target='parse_source_file'),
-            ConsumerSite(path='backend/tests/test_upload_dedup.py', scope='<module>._patch_parse', kind='patch', target='parse_source_file'),
         ),
     ),
     SurfaceMember(
@@ -3592,6 +3596,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._public_conversation_or_404', kind='attribute', target='user_can_read_notebook'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.add_observation.run', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.list_notebooks.load', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.select_notebook.load', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='user_can_read_notebook'),

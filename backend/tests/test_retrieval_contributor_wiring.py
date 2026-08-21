@@ -150,7 +150,11 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     from app import bootstrap
 
     host = object()
-    runtime = SimpleNamespace(retrieval_contributors=host)
+    parser_host = object()
+    runtime = SimpleNamespace(
+        retrieval_contributors=host,
+        parser_chain=parser_host,
+    )
     captured = {}
 
     def fake_repository(settings, **kwargs):
@@ -165,7 +169,10 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     )
 
     assert created.settings.database_url.startswith("sqlite")
-    assert captured == {"retrieval_contributor_host": host}
+    assert captured == {
+        "retrieval_contributor_host": host,
+        "parser_provider_chain_host": parser_host,
+    }
 
 
 def test_default_topology_registers_two_point_specific_atomic_contributors():

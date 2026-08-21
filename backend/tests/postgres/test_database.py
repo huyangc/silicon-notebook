@@ -5,6 +5,7 @@ import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from app.domain.extensions import (
     RetrievalEvidenceProposal,
 )
 from app.extensions import default_extension_runtime
+from app.services.parser_chain_execution import ParserChainExecution
 
 
 pytestmark = pytest.mark.postgres_integration
@@ -115,6 +117,49 @@ def test_connection_probe_depth_resets_after_nested_and_exceptional_leases(
             assert postgres_database.is_connection_held() is True
             raise RuntimeError("lease failure")
     assert postgres_database.is_connection_held() is False
+
+
+def test_parser_provider_io_runs_without_a_pool_size_one_lease(
+    postgres_database, tmp_path
+):
+    postgres_database._pool.resize(1, 1)
+    source_path = tmp_path / "source.pdf"
+    source_path.write_bytes(b"%PDF-1.4")
+
+    class LocalParser:
+        configured = True
+        mode = "http"
+        last_error = ""
+        calls = 0
+
+        def parse_with_images(self, path, name):
+            self.calls += 1
+            assert postgres_database.is_connection_held() is False
+            with postgres_database.connect() as connection:
+                assert connection.execute("SELECT 1").fetchone() is not None
+            return ([{"type": "text", "text": "provider result"}], {})
+
+    class CloudParser:
+        configured = False
+
+    local = LocalParser()
+    result = ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id="parser-pg-source",
+        source_kind="file",
+        file_path=str(source_path),
+        file_name=source_path.name,
+        source_url="",
+        mineru_client=local,
+        cloud_client=CloudParser(),
+        connection=postgres_database,
+        make_persist_image=lambda: None,
+        delete_source_images=lambda: None,
+        event_sink=lambda _event: None,
+    ).run()
+
+    assert local.calls == 1
+    assert [element.text for element in result.elements] == ["provider result"]
 
 
 def test_retrieval_authority_filters_private_memory_in_postgres(

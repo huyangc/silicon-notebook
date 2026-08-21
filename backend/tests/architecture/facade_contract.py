@@ -106,7 +106,6 @@ MODULE_SURFACE_OWNER_EXCEPTIONS = {
     "_new_id",
     "_now",
     "_remap_json_ids",
-    "parse_source_file",
     "reset_request_user",
     "set_request_user",
 }

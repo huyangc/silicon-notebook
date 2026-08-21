@@ -78,7 +78,6 @@ COMPATIBILITY_EXPORTS = {
     "_now": ("app.services.sqlite_repository", "RepositoryCompatibilitySeams"),
     "_remap_json_ids": ("app.services.sqlite_repository", "NotebookSharingService"),
     "KNOWLEDGE_STATUSES": ("app.services.sqlite_repository", "KnowledgeGovernanceService"),
-    "parse_source_file": ("app.services.sqlite_repository", "SourceIngestionService"),
     "reset_request_user": ("app.services.sqlite_repository", "RequestContext"),
     "set_request_user": ("app.services.sqlite_repository", "RequestContext"),
 }

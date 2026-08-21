@@ -16,4 +16,5 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
     return create_repository(
         settings,
         retrieval_contributor_host=runtime.retrieval_contributors,
+        parser_provider_chain_host=runtime.parser_chain,
     )

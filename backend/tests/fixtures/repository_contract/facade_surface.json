@@ -1338,7 +1338,7 @@
     "owner": "NotebookSharingService",
     "patch_targets": [],
     "scope": "module",
-    "signature": "(value, maps: 'dict')"
+    "signature": "(value: 'Any', maps: 'dict') -> 'Any'"
   },
   "_rule_card": {
     "consumers": [
@@ -2615,6 +2615,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.agent_memory_hits",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.agent_observations",
         "target": "_runtime"
       },
       {
@@ -4000,6 +4006,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.search_profile_jobs",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.set_conflict_status",
         "target": "_runtime"
       },
@@ -4616,12 +4628,51 @@
     "scope": "facade",
     "signature": "(self, user_id: 'str', notebook_id: 'str', query: 'str', include_candidates: 'bool', limit: 'int' = 8) -> 'list'"
   },
+  "agent_observations": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/agent_profile_routes.py",
+        "scope": "<module>.clear_agent_observations",
+        "target": "agent_observations"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/agent_profile_routes.py",
+        "scope": "<module>.get_agent_observations",
+        "target": "agent_observations"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_observation.run",
+        "target": "agent_observations"
+      }
+    ],
+    "kind": "property",
+    "owner": "RepositoryRuntime.agent_observations",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self)"
+  },
   "agent_profile": {
     "consumers": [
       {
         "kind": "attribute",
         "path": "backend/app/api/agent_profile_routes.py",
         "scope": "<module>._profile_store",
+        "target": "agent_profile"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_observation.run",
+        "target": "agent_profile"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.get_notebook_profile.load",
         "target": "agent_profile"
       }
     ],
@@ -5535,7 +5586,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
-        "scope": "<module>.create_memory_mcp.propose_memory",
+        "scope": "<module>.create_memory_mcp.propose_memory.create",
         "target": "create_memory_candidate"
       }
     ],
@@ -6940,6 +6991,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'List[KnowledgeTypeCount]'"
   },
+  "list_agent_profiles": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/agent_profile_routes.py",
+        "scope": "<module>._observation_agent_names",
+        "target": "list_agent_profiles"
+      }
+    ],
+    "kind": "method",
+    "owner": "MemoryService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, owner_id: 'str', offset: 'int' = 0, limit: 'int' = 100) -> 'list[AgentProfile]'"
+  },
   "list_conversations": {
     "consumers": [
       {
@@ -7807,109 +7873,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'SourceSummary'"
-  },
-  "parse_source_file": {
-    "consumers": [
-      {
-        "kind": "compatibility",
-        "path": "app.services.sqlite_repository",
-        "scope": "<module>",
-        "target": "parse_source_file"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_chunk_embed.py",
-        "scope": "<module>.test_process_source_builds_chunks",
-        "target": "parse_source_file"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_failure_boundaries.py",
-        "scope": "<module>._patch_parse",
-        "target": "parse_source_file"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_service.py",
-        "scope": "<module>.test_fresh_hooks_preserve_post_construction_component_monkeypatch",
-        "target": "parse_source_file"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_service.py",
-        "scope": "<module>.test_parsed_source_and_elements_commit_before_chunk_build",
-        "target": "parse_source_file"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_service.py",
-        "scope": "<module>.test_pipeline_status_and_event_order_equals_transaction_phases",
-        "target": "parse_source_file"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_upload_dedup.py",
-        "scope": "<module>._patch_parse",
-        "target": "parse_source_file"
-      }
-    ],
-    "kind": "method",
-    "modules": [
-      "app.services.sqlite_repository"
-    ],
-    "owner": "SourceIngestionService",
-    "patch_targets": [
-      {
-        "base": "mod",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_chunk_embed.py",
-        "scope": "<module>.test_process_source_builds_chunks",
-        "target": "parse_source_file"
-      },
-      {
-        "base": "facade_mod",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_failure_boundaries.py",
-        "scope": "<module>._patch_parse",
-        "target": "parse_source_file"
-      },
-      {
-        "base": "facade_mod",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_service.py",
-        "scope": "<module>.test_fresh_hooks_preserve_post_construction_component_monkeypatch",
-        "target": "parse_source_file"
-      },
-      {
-        "base": "facade_mod",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_service.py",
-        "scope": "<module>.test_parsed_source_and_elements_commit_before_chunk_build",
-        "target": "parse_source_file"
-      },
-      {
-        "base": "facade_mod",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_source_ingestion_service.py",
-        "scope": "<module>.test_pipeline_status_and_event_order_equals_transaction_phases",
-        "target": "parse_source_file"
-      },
-      {
-        "base": "facade_mod",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_upload_dedup.py",
-        "scope": "<module>._patch_parse",
-        "target": "parse_source_file"
-      }
-    ],
-    "scope": "module",
-    "signature": "(source_id: 'str', file_path: 'str', file_name: 'str', mineru_client: 'Any' = None, persist_image: 'Any' = None) -> 'List[SourceElement]'"
   },
   "participant_notebook_ids": {
     "consumers": [
@@ -10074,6 +10037,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._public_conversation_or_404",
+        "target": "user_can_read_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_observation.run",
         "target": "user_can_read_notebook"
       },
       {

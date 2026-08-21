@@ -8,7 +8,10 @@ from typing import Any, Callable
 
 from app.core.config import Settings
 from app.domain.repository import RepositoryCompatibilitySeams
-from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.extensions import (
+    ParserProviderChainHostPort,
+    RetrievalContributorHostPort,
+)
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -79,6 +82,7 @@ from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoor
 from app.services.ask_service import AskService
 from app.services.notebook_scale import NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
+from app.services.parser_chain_execution import BuiltinParserChainHost
 
 _log = logging.getLogger("silicon_notebook.repository_runtime")
 
@@ -93,6 +97,7 @@ class RepositoryRuntime:
         *,
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
+        parser_provider_chain_host: ParserProviderChainHostPort | None = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -104,6 +109,9 @@ class RepositoryRuntime:
         # by app.state, Ask and Report. Direct constructor tests may leave the
         # optional seat empty and retain their exact historical behavior.
         self.retrieval_contributors = retrieval_contributor_host
+        self.parser_provider_chain = (
+            parser_provider_chain_host or BuiltinParserChainHost()
+        )
         if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
             self.event_log.logger.warning(
                 "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
@@ -786,7 +794,6 @@ class RepositoryRuntime:
         source_elements: Callable[[str], list],
         summarize_source: Callable[..., str],
         source_type_from_name: Callable[[str], str],
-        parse_file: Callable[..., list],
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
         normalize_doc_type: Callable[[str], str],
@@ -808,9 +815,9 @@ class RepositoryRuntime:
         facade-bound seams exist.  ``write`` is the facade's ``_write``
         compatibility seat resolved per call (transaction counting / failure
         injection keep observing every ingestion commit boundary);
-        ``source_elements``/``summarize_source``/``parse_file`` stay
-        facade/module late-bound so frozen patch targets (repo.source_elements,
-        repo._summarize_source, module parse_source_file) keep working; model
+        ``source_elements``/``summarize_source`` stay
+        facade late-bound so frozen patch targets (repo.source_elements and
+        repo._summarize_source) keep working; model
         calls use explicit workloads on the process-owned provider;
         ``make_persist_image``/``delete_source_images`` are the per-source
         image-persistence factory and the per-source image cascade-delete
@@ -843,7 +850,8 @@ class RepositoryRuntime:
             source_elements=source_elements,
             summarize_source=summarize_source,
             source_type_from_name=source_type_from_name,
-            parse_file=parse_file,
+            parser_provider_chain=self.parser_provider_chain,
+            parser_connection_probe=self.database,
             mineru_client=mineru_client,
             mineru_cloud_client=mineru_cloud_client,
             model_clients=self.models,
