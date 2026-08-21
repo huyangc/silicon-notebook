@@ -1728,6 +1728,7 @@ class AskService:
                                      retrieval_effort: RetrievalEffort = "standard",
                                      completeness_unavailable: bool = False,
                                      reasoning_trace: "list[TraceStep] | None" = None,
+                                     persist: bool = True,
                                      ) -> AskResponse:
         """系统模型已启用但漏绑问答工作负载时的统一短路响应。
 
@@ -1751,9 +1752,10 @@ class AskService:
         response.model_errors = [
             ModelError(stage="answer", model="", message="missing_config")
         ]
-        response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id, asked_at=asked_at)
+        if persist:
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id,
+                user_id=user_id, job_id=job_id, asked_at=asked_at)
         return response
 
     # ------------------------------------------------------------------
@@ -2174,10 +2176,78 @@ class AskService:
         on_trace=None,
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
-        """Reasoning-mode ask: agentic plan→retrieve→reflect(自由深挖)→answer。
-        检索委托 ReasoningRetriever;答案/证据分档复用 fast 路径口径;响应携带
-        reasoning_trace。任何阶段异常不向用户抛出(逐层容错 + 兜底空候选)。"""
-        from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+        """Compatibility entry for the immutable reasoning application stage."""
+        from app.application.ask_reasoning import (
+            ReasoningRetrievalRuntime,
+        )
+        from app.services.retrieval_run import current_retrieval_run
+        from app.services.source_scope import current_source_scope
+
+        runtime = ReasoningRetrievalRuntime(
+            scope=current_source_scope(),
+            retrieval_run=current_retrieval_run(),
+            cancellation=cancel_event,
+            trace_sink=on_trace,
+            connection_probe=self.retrieval_connection_probe,
+        )
+        prepared = self._prepare_reasoning_ask(
+            notebook_id, payload, user_id=user_id, job_id=job_id,
+            runtime=runtime,
+        )
+        committed = self._run_reasoning_stage(prepared, runtime)
+        return AskResponse.model_validate_json(committed.response_json)
+
+    def _assert_reasoning_runtime(self, runtime, point: str) -> None:
+        from app.application.ask_reasoning import (
+            ReasoningRetrievalRuntime,
+            StageBoundaryError,
+        )
+        from app.services.retrieval_run import current_retrieval_run
+        from app.services.source_scope import current_source_scope
+
+        if type(runtime) is not ReasoningRetrievalRuntime:
+            raise StageBoundaryError(f"invalid Ask reasoning runtime at {point}")
+        if current_source_scope() is not runtime.scope:
+            raise StageBoundaryError(f"Ask reasoning scope changed at {point}")
+        if current_retrieval_run() is not runtime.retrieval_run:
+            raise StageBoundaryError(
+                f"Ask reasoning retrieval run changed at {point}"
+            )
+        checker = getattr(runtime.connection_probe, "is_connection_held", None)
+        if runtime.connection_probe is not None and not callable(checker):
+            raise StageBoundaryError(
+                f"invalid Ask reasoning connection probe at {point}"
+            )
+        if runtime.trace_sink is not None and not callable(runtime.trace_sink):
+            raise StageBoundaryError(
+                f"invalid Ask reasoning trace sink at {point}"
+            )
+        if callable(checker):
+            try:
+                held = checker()
+            except Exception as exc:
+                raise StageBoundaryError(
+                    f"Ask reasoning connection probe failed at {point}"
+                ) from exc
+            if type(held) is not bool:
+                raise StageBoundaryError(
+                    f"invalid Ask reasoning connection state at {point}"
+                )
+            if held:
+                raise StageBoundaryError(
+                    f"Ask reasoning holds a database connection at {point}"
+                )
+
+    def _prepare_reasoning_ask(
+        self, notebook_id, payload, *, user_id, job_id, runtime,
+    ):
+        from app.application.ask_reasoning import (
+            PreparedReasoningAsk,
+            ReasoningIntentProjection,
+        )
+
+        self._assert_reasoning_runtime(runtime, "prepare")
+        cancel_event = runtime.cancellation
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
@@ -2238,23 +2308,24 @@ class AskService:
             )
             if payload.intent is not None else []
         )
+        intent_projection = ReasoningIntentProjection(
+            resolved_question=intent_contract.resolved_question,
+            result_scope=intent_contract.result_scope,
+            completeness_required=intent_contract.completeness_required,
+            retrieval_effort=payload.retrieval_effort,
+            entities=tuple(intent_contract.entities),
+            constraints=tuple(intent_contract.constraints),
+            excluded_topics=tuple(intent_contract.excluded_topics),
+            assumptions=tuple(intent_contract.assumptions),
+            expected_output=intent_contract.expected_output,
+            mandatory_topics=tuple(
+                topic.question for topic in intent_contract.mandatory_topics
+            ),
+        )
         intent_step = TraceStep(
             step_type="intent",
             summary="已按确认后的问题理解开始检索",
-            detail={
-                "resolved_question": intent_contract.resolved_question,
-                "result_scope": intent_contract.result_scope,
-                "completeness_required": intent_contract.completeness_required,
-                "retrieval_effort": payload.retrieval_effort,
-                "entities": intent_contract.entities,
-                "constraints": intent_contract.constraints,
-                "excluded_topics": intent_contract.excluded_topics,
-                "assumptions": intent_contract.assumptions,
-                "expected_output": intent_contract.expected_output,
-                "mandatory_topics": [
-                    topic.question for topic in intent_contract.mandatory_topics
-                ],
-            },
+            detail=dict(intent_projection.as_mapping()),
             # The understanding phase runs entirely in ``/ask/intent``, before
             # this durable job exists, so the server cannot time it.  The UI
             # reports what it measured; without it the replayed trace would
@@ -2263,8 +2334,118 @@ class AskService:
                 payload.intent.understanding_ms if payload.intent is not None else None
             ),
         )
+        return PreparedReasoningAsk(
+            notebook_id=notebook_id,
+            question=question,
+            conversation_id=conversation_id,
+            history=reasoning_history,
+            style_block=style_block,
+            intent_json=intent_contract.model_dump_json(),
+            research_question=research_question,
+            intent_queries=tuple(intent_queries),
+            limits=limits,
+            intent_projection=intent_projection,
+            intent_trace_duration_ms=intent_step.duration_ms,
+            user_id=user_id,
+            job_id=job_id,
+            asked_at=payload.asked_at,
+            retrieval_effort=payload.retrieval_effort,
+        )
+
+    def _commit_reasoning_draft(self, draft, runtime):
+        """The only reasoning answer persistence boundary.
+
+        The cancellation checkpoint is deliberately before the atomic save.
+        Once that save succeeds, the completed answer wins; a late token must
+        not turn a committed job back into a cancelled response.
+        """
+        from app.application.ask_reasoning import (
+            CommittedReasoningAnswer,
+            ReasoningResponseDraft,
+            ReasoningRetrievalRuntime,
+            StageBoundaryError,
+        )
+
+        if type(draft) is not ReasoningResponseDraft:
+            raise StageBoundaryError("invalid reasoning response draft")
+        if type(runtime) is not ReasoningRetrievalRuntime:
+            raise StageBoundaryError("invalid reasoning commit runtime")
+        self._assert_reasoning_runtime(runtime, "before-persist")
+        raise_if_cancelled(runtime.cancellation)
+        response = AskResponse.model_validate_json(draft.response_json)
+        response.answer_id = self._save_answer(
+            draft.notebook_id,
+            draft.question,
+            response,
+            draft.conversation_id,
+            user_id=draft.user_id,
+            job_id=draft.job_id,
+            asked_at=draft.asked_at,
+        )
+        return CommittedReasoningAnswer(
+            response_json=response.model_dump_json(),
+            baseline_manifest=draft.baseline_manifest,
+        )
+
+    def _run_reasoning_stage(self, prepared, runtime):
+        """Retrieve, synthesize, bind and commit one prepared reasoning Ask."""
+        from app.application.ask_reasoning import (
+            CommittedReasoningAnswer,
+            PreparedReasoningAsk,
+            ReasoningResponseDraft,
+            ReasoningRetrievalRuntime,
+            StageBoundaryError,
+        )
+        from app.services.reasoning_retrieval import ReasoningRetriever
+
+        if type(prepared) is not PreparedReasoningAsk:
+            raise StageBoundaryError("invalid prepared Ask reasoning input")
+        if type(runtime) is not ReasoningRetrievalRuntime:
+            raise StageBoundaryError("invalid Ask reasoning runtime")
+        self._assert_reasoning_runtime(runtime, "reasoning-stage-entry")
+        notebook_id = prepared.notebook_id
+        question = prepared.question
+        conversation_id = prepared.conversation_id
+        history = prepared.history
+        reasoning_history = prepared.history
+        style_block = prepared.style_block
+        from app.models.ask import QueryIntentContract
+
+        intent_contract = QueryIntentContract.model_validate_json(
+            prepared.intent_json
+        )
+        research_question = prepared.research_question
+        intent_queries = prepared.intent_queries
+        limits = prepared.limits
+        intent_step = TraceStep(
+            step_type="intent",
+            summary="已按确认后的问题理解开始检索",
+            detail=dict(prepared.intent_projection.as_mapping()),
+            duration_ms=prepared.intent_trace_duration_ms,
+        )
+        user_id = prepared.user_id
+        job_id = prepared.job_id
+        asked_at = prepared.asked_at
+        retrieval_effort = prepared.retrieval_effort
+        on_trace = runtime.trace_sink
+        cancel_event = runtime.cancellation
         pre_trace: list[TraceStep] = [intent_step]
         intent_streamed = False
+
+        def commit_response(response, baseline_manifest=None):
+            return self._commit_reasoning_draft(
+                ReasoningResponseDraft(
+                    notebook_id=notebook_id,
+                    question=question,
+                    response_json=response.model_dump_json(),
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    job_id=job_id,
+                    asked_at=asked_at,
+                    baseline_manifest=baseline_manifest,
+                ),
+                runtime,
+            )
 
         def stream_intent() -> None:
             nonlocal intent_streamed
@@ -2382,17 +2563,12 @@ class AskService:
                 retrieval_query=research_question,
                 reasoning_trace=pre_trace,
                 intent=intent_contract,
-                retrieval_effort=payload.retrieval_effort,
+                retrieval_effort=retrieval_effort,
                 result_sets=structured_batch.result_sets,
                 result_coverage=structured_batch.coverage(),
             )
             response.mode = "reasoning"
-            raise_if_cancelled(cancel_event)
-            response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id,
-                user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
-            )
-            return response
+            return commit_response(response)
 
         # Stream the intent step BEFORE memory retrieval.  Memory hits cost an
         # embedding round trip plus a vector scan, and until this step lands the
@@ -2465,7 +2641,7 @@ class AskService:
                     retrieval_query=research_question,
                     reasoning_trace=pre_trace,
                     intent=intent_contract,
-                    retrieval_effort=payload.retrieval_effort,
+                    retrieval_effort=retrieval_effort,
                     result_sets=structured_batch.result_sets,
                     result_coverage=structured_batch.coverage(),
                     model_errors=[ModelError(
@@ -2473,19 +2649,18 @@ class AskService:
                     )],
                 )
                 response.mode = "reasoning"
-                response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id,
-                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
-                )
-                return response
-            return self._unconfigured_model_response(
+                return commit_response(response)
+            response = self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning",
-                user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
+                user_id=user_id, job_id=job_id, asked_at=asked_at,
                 intent=intent_contract,
                 retrieval_query=research_question,
-                retrieval_effort=payload.retrieval_effort,
+                retrieval_effort=retrieval_effort,
                 completeness_unavailable=completeness_unavailable,
-                reasoning_trace=streamed_pre_trace())
+                reasoning_trace=streamed_pre_trace(),
+                persist=False,
+            )
+            return commit_response(response)
 
         # 无图 ≠ 无法作答。元素/知识对象清单工具在「解析了来源但没建图」的库里
         # 照样能给出精确清单,而自动 KG 抽取默认是关的——那正是常态。所以早退的
@@ -2531,7 +2706,7 @@ class AskService:
                 conversation_id=conversation_id, retrieval_query=research_question,
                 llm_mode="deterministic", kg_required=True,
                 intent=intent_contract,
-                retrieval_effort=payload.retrieval_effort,
+                retrieval_effort=retrieval_effort,
                 result_sets=(structured_batch.result_sets if structured_batch else []),
                 result_coverage=(
                     structured_batch.coverage() if structured_batch else None
@@ -2541,11 +2716,7 @@ class AskService:
                     if structured_batch is not None else streamed_pre_trace()
                 ))
             response.mode = "reasoning"
-            raise_if_cancelled(cancel_event)
-            response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id,
-                user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-            return response
+            return commit_response(response)
 
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
@@ -2570,7 +2741,14 @@ class AskService:
             try:
                 # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
                 # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
-                result = ReasoningRetriever(
+                from app.application.ask_reasoning import (
+                    ReasoningRetrievalRuntime,
+                    ReasoningRunInput,
+                    RetrievedReasoningAsk,
+                    execute_reasoning_retrieval_stage,
+                )
+
+                retriever = ReasoningRetriever(
                     retrieval=self.retrieval,
                     model_clients=self.model_clients,
                     communities=self.communities(),
@@ -2592,20 +2770,35 @@ class AskService:
                     # 各自 fail-open,不共享一次读取(见 _search_profile_style_block
                     # 的模块注释)。
                     identity_store=self.identity_store,
-                ).run(
-                    notebook_id,
-                    research_question,
-                    reasoning_history,
-                    on_step=checked_trace,
-                    intent_queries=intent_queries,
-                    limits=limits,
-                    # 打法库按「这是什么形状的问题」选条目,而那个形状就是这一步
-                    # 已经写进轨迹的意图契约投影。交**同一个** detail(而不是另
-                    # 攒一份结构)保证注入侧与蒸馏侧看到的是同一份东西——两者不
-                    # 同就等于条目永远选不中它自己那个形状。它在检索器里只经
-                    # ``project_run_step`` 收窄,原文字段一个都不读。
-                    intent_detail=intent_step.detail,
                 )
+                retrieval_runtime = ReasoningRetrievalRuntime(
+                    scope=runtime.scope,
+                    retrieval_run=runtime.retrieval_run,
+                    cancellation=runtime.cancellation,
+                    trace_sink=checked_trace,
+                    connection_probe=runtime.connection_probe,
+                )
+                evidence = execute_reasoning_retrieval_stage(
+                    retriever,
+                    ReasoningRunInput(
+                        notebook_id=notebook_id,
+                        question=research_question,
+                        history=reasoning_history,
+                        top_n=None,
+                        max_steps=None,
+                        intent_queries=tuple(intent_queries),
+                        limits=limits,
+                        # 关闭字段投影与 intent trace 同源；检索器只能通过
+                        # ``as_mapping`` 进入既有 project_run_step 收窄点。
+                        intent=prepared.intent_projection,
+                    ),
+                    retrieval_runtime,
+                )
+                retrieved = RetrievedReasoningAsk(
+                    prepared=prepared,
+                    evidence=evidence,
+                )
+                result = retrieved.evidence
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
                     result.chains)
@@ -2628,7 +2821,7 @@ class AskService:
                     top_hits=top_hits,
                     max_results=self.settings.ppr_top_chunks,
                 )
-            except AskCancelled:
+            except (AskCancelled, StageBoundaryError):
                 raise
             except Exception:
                 top_hits, elements, trace, chunks, chains = (
@@ -2932,7 +3125,7 @@ class AskService:
                 build_retrieval_baseline_manifest,
             )
             candidate_manifest = getattr(result, "baseline_manifest", None)
-            result.baseline_manifest = build_retrieval_baseline_manifest(
+            final_baseline_manifest = build_retrieval_baseline_manifest(
                 notebook_id=notebook_id,
                 query=research_question,
                 mode="reasoning",
@@ -3275,7 +3468,7 @@ class AskService:
                 retrieval_query=research_question, top_relevance=top_relevance,
                 reasoning_trace=trace or None,
                 intent=intent_contract,
-                retrieval_effort=payload.retrieval_effort,
+                retrieval_effort=retrieval_effort,
                 # Knowhow 的整表批(kind="knowhow")在前,本轮类型化集合清单
                 # (kind="collection")在后——顺序与 result_sets 判别 union 的
                 # 追加顺序一致(见 app.models.ask.AskResponse.result_sets),T6
@@ -3297,11 +3490,7 @@ class AskService:
             _ASK_EMBED_CACHE.reset(_emb_token)
         response.mode = "reasoning"
         response.model_errors = [ModelError(**e) for e in _err_sink]
-        raise_if_cancelled(cancel_event)
-        response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-        return response
+        return commit_response(response, final_baseline_manifest)
 
     # ------------------------------------------------------------------
     # graph engine

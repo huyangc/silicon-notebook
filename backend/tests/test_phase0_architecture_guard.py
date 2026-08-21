@@ -75,6 +75,20 @@ def test_guard_detects_domain_contract_moved_to_an_adapter(tmp_path):
     ]
 
 
+def test_guard_keeps_application_stage_contracts_out_of_implementations(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        "from app import services\n"
+        "from app.repositories.sqlite import query_store\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app.repositories.sqlite",
+        "app.application.ask imports forbidden implementation app.services",
+    ]
+
+
 def test_facade_freeze_rejects_addition_but_allows_surface_reduction(tmp_path):
     path = tmp_path / "facade.py"
     _write(
@@ -265,3 +279,18 @@ def test_extension_boundary_is_present_in_all_agent_entry_documents():
         assert "capability" in normalized, name
         assert "subagent review" in normalized, name
         assert "ci" in normalized, name
+
+
+def test_ask_application_stage_boundary_is_in_all_agent_entry_documents():
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+        normalized = (
+            (ROOT / name)
+            .read_text(encoding="utf-8")
+            .casefold()
+            .replace("_", " ")
+            .replace("-", " ")
+        )
+        assert "application" in normalized, name
+        assert "stage" in normalized, name
+        assert "retrieval run" in normalized, name
+        assert "connection" in normalized or "连接" in normalized, name
