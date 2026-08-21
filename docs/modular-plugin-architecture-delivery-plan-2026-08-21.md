@@ -191,7 +191,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-09：Ingestion element enricher
 
-状态：实现中；默认空 topology、point-specific batch host 与 parser 后/core element 事务前的唯一接线已落地，正在完成 hostile/等价回归、双路 review 与 CI。
+状态：已完成并由 PR #551 交付；默认空 topology、point-specific batch host、parser 后/core element 事务前的唯一接线、hostile/等价回归、三路 review 与 CI 均已闭合。
 
 - 在解析完成、核心验证之前增加类型化 element contribution；
 - 保持 source 生命周期、parser capability、图片/元素 provenance、失败和重试语义。
