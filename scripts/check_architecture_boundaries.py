@@ -188,6 +188,11 @@ def boundary_violations(app_root: Path) -> list[str]:
                 if module.startswith("app.features.")
                 else ""
             )
+            has_own_feature_target = bool(own_feature) and any(
+                imported == own_feature
+                or imported.startswith(f"{own_feature}.")
+                for imported in imports
+            )
             forbidden = minimal_matching_module_references(
                 imports,
                 lambda imported: imported.startswith("app.")
@@ -200,6 +205,10 @@ def boundary_violations(app_root: Path) -> list[str]:
                         imported == own_feature
                         or imported.startswith(f"{own_feature}.")
                     )
+                )
+                and not (
+                    has_own_feature_target
+                    and own_feature.startswith(f"{imported}.")
                 ),
             )
             for imported in sorted(forbidden):

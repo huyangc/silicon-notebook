@@ -183,6 +183,7 @@ def test_guard_allows_feature_plugin_sdk_and_rejects_other_app_layers(tmp_path):
         app / "features/search/plugin.py",
         "from app.extension_sdk import ExtensionManifest\n"
         "from app.domain import retrieval\n"
+        "from app.features import search\n"
         "from app.features.search import adapter\n",
     )
     assert boundary_violations(app) == []
