@@ -3041,7 +3041,7 @@ GROUP_SHARING_TABLES = {
                   created_by  TEXT REFERENCES users(id),
                   created_at  TEXT NOT NULL,
                   updated_at  TEXT NOT NULL
-                , owner_id TEXT NOT NULL DEFAULT '')""",
+                , owner_id TEXT NOT NULL DEFAULT '', invite_token TEXT, invite_created_at TEXT, invite_created_by TEXT)""",
     "group_members": """CREATE TABLE group_members (
                   group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
                   user_id   TEXT NOT NULL REFERENCES users(id),
@@ -3414,6 +3414,44 @@ MIGRATION_MANIFEST[(55, 56)] = {
     "tables": {},
     "columns": GROUP_OWNER_COLUMNS,
     "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
+# v57: one reusable group invitation capability plus its issue audit. Inactive
+# groups keep all three values NULL; the partial unique index only covers live
+# tokens so one capability can never resolve to two groups.
+GROUP_INVITE_COLUMNS = {
+    "groups": {
+        "invite_token": ("invite_token", "TEXT", 0, None, 0),
+        "invite_created_at": ("invite_created_at", "TEXT", 0, None, 0),
+        "invite_created_by": ("invite_created_by", "TEXT", 0, None, 0),
+    },
+}
+GROUP_INVITE_INDEXES = {
+    "idx_groups_invite_token":
+        "CREATE UNIQUE INDEX idx_groups_invite_token "
+        "ON groups(invite_token) WHERE invite_token IS NOT NULL",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 57, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "groups": {
+                **manifest["columns"].get("groups", {}),
+                **GROUP_INVITE_COLUMNS["groups"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **GROUP_INVITE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(56, 57)] = {
+    "tables": {},
+    "columns": GROUP_INVITE_COLUMNS,
+    "indexes": GROUP_INVITE_INDEXES,
     "triggers": {},
     "views": {},
 }

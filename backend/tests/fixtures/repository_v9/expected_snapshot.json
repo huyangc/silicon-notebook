@@ -1319,6 +1319,11 @@
         "type": "index"
       },
       {
+        "name": "idx_groups_invite_token",
+        "sql_sha256": "22ee8150665e648be5677db99d05fda249443985b0839574699abc94f891b3da",
+        "type": "index"
+      },
+      {
         "name": "idx_kg_build_jobs_nb_created",
         "sql_sha256": "e3a4668ce57736a82a051df215a00b3ccf48b2aeb2d3ccf6f8bd58fccebbe7f1",
         "type": "index"
@@ -1890,7 +1895,7 @@
       },
       {
         "name": "groups",
-        "sql_sha256": "04b023ba83b705aee23c92ee22506c7269890af8bff1ab658f100a7f2454f15d",
+        "sql_sha256": "10eb141e7313e947783f0b23bcce654388e5bf44c83b0f06e9e48b284d9f8d99",
         "type": "table"
       },
       {
@@ -2229,6 +2234,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 56
+    "user_version": 57
   }
 }

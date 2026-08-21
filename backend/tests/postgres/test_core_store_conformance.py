@@ -77,7 +77,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 34
+    assert PostgresMigrator(postgres_database).migrate() == 35
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -873,6 +873,7 @@ def test_group_store_crud_and_membership_mirror_the_sqlite_store(
     owner 保护和转让是否在同一事务里判、成员/群组清单的顺序会不会随 collation 漂。
     """
     from app.repositories.ports import (
+        GroupAdminRequiredError,
         GroupOwnerProtectedError,
         GroupOwnerRequiredError,
         GroupOwnerTransferTargetError,
@@ -950,6 +951,35 @@ def test_group_store_crud_and_membership_mirror_the_sqlite_store(
     assert groups.remove_member(group_id, owner.id) is False
     with pytest.raises(GroupOwnerProtectedError):
         groups.remove_member(group_id, member.id)
+
+    # Invitation capability parity: state reads are side-effect free, issue is
+    # idempotent, rotate/revoke are atomic under the group root lock, and join
+    # adds only a plain member without touching an existing administrator.
+    assert groups.get_invite_state(group_id, actor_id=member.id) == {
+        "active": False, "token": "", "created_at": None,
+    }
+    with pytest.raises(GroupAdminRequiredError):
+        groups.get_invite_state(group_id, actor_id=outsider.id)
+    with pytest.raises(GroupAdminRequiredError):
+        groups.issue_invite(
+            group_id, token="gri-denied", actor_id=outsider.id
+        )
+    invite = groups.issue_invite(
+        group_id, token="gri-first", actor_id=member.id
+    )
+    assert invite["token"] == "gri-first"
+    assert groups.issue_invite(
+        group_id, token="gri-unused", actor_id=member.id
+    )["token"] == "gri-first"
+    joined = groups.join_by_invite("gri-first", user_id=outsider.id)
+    assert joined is not None and joined["my_role"] == "member"
+    rotated = groups.issue_invite(
+        group_id, token="gri-second", actor_id=member.id, rotate=True
+    )
+    assert rotated["token"] == "gri-second"
+    assert groups.join_by_invite("gri-first", user_id=outsider.id) is None
+    assert groups.revoke_invite(group_id, actor_id=member.id) is True
+    assert groups.join_by_invite("gri-second", user_id=outsider.id) is None
 
     assert groups.update_group(group_id, name="改名") is True
     assert groups.get_group(group_id)["name"] == "改名"
@@ -2128,7 +2158,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 34
+    assert PostgresMigrator(postgres_database).migrate() == 35
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2206,7 +2236,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 34
+    assert PostgresMigrator(postgres_database).migrate() == 35
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2271,7 +2301,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 34
+    assert PostgresMigrator(postgres_database).migrate() == 35
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   adminGroups,
+  buildGroupInviteLink,
   canDropManage,
   confersManage,
   creatableGroupKinds,
@@ -17,12 +18,21 @@ import {
   isGroupGranted,
   isPlainMember,
   partitionByGrant,
+  parseGroupInviteToken,
   requestableGroups,
   revocationOrder,
   shareableGroups,
   shareRequestStatusLabel,
   visibleMyShareRequests,
 } from "../../app/group-api.ts";
+
+test("群组邀请链接编码 token，并能在登录前后从 query 中恢复", () => {
+  const link = buildGroupInviteLink("gri-a_b-c", "https://sn.example");
+  assert.equal(link, "https://sn.example/?group_invite=gri-a_b-c");
+  assert.equal(parseGroupInviteToken("?group_invite=gri-a_b-c"), "gri-a_b-c");
+  assert.equal(parseGroupInviteToken("?x=1&group_invite=gri-a%2Fb&y=2"), "gri-a/b");
+  assert.equal(parseGroupInviteToken("?x=1"), null);
+});
 
 test("群组分类与角色都翻成界面词,未知值退中性词而不是吐后端的英文 id", () => {
   assert.equal(groupKindLabel("project"), "项目");

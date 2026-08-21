@@ -3366,6 +3366,34 @@
           "title": "GroupDetail",
           "type": "object"
         },
+        "GroupInviteState": {
+          "description": "Current reusable invitation capability, visible only to group admins.",
+          "properties": {
+            "active": {
+              "default": false,
+              "title": "Active",
+              "type": "boolean"
+            },
+            "created_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created At"
+            },
+            "token": {
+              "default": "",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "title": "GroupInviteState",
+          "type": "object"
+        },
         "GroupMemberItem": {
           "properties": {
             "added_at": {
@@ -12918,6 +12946,46 @@
           "summary": "List Doc Types"
         }
       },
+      "/api/group-invites/{token}/join": {
+        "post": {
+          "description": "Join as a plain member. Unknown/revoked/deleted links share one 404.",
+          "operationId": "join_group_invite_route_api_group_invites__token__join_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token",
+              "required": true,
+              "schema": {
+                "title": "Token",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Join Group Invite Route"
+        }
+      },
       "/api/groups": {
         "get": {
           "description": "我所在的群组;`?scope=all` 是系统管理员的全局管理面。\n\n非法 `scope` 明确 422,**不静默当成 `mine`**:那会让一个拼错的 `?scope=al` 安静地\n返回一份收窄过的清单,调用方看到 200 就以为拿到了全部。",
@@ -13116,6 +13184,154 @@
             }
           },
           "summary": "Update Group Route"
+        }
+      },
+      "/api/groups/{group_id}/invite-link": {
+        "delete": {
+          "operationId": "revoke_group_invite_route_api_groups__group_id__invite_link_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Revoke Group Invite Route"
+        },
+        "get": {
+          "description": "Read the current link without creating one as a side effect.",
+          "operationId": "get_group_invite_route_api_groups__group_id__invite_link_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupInviteState"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Group Invite Route"
+        },
+        "post": {
+          "description": "Create the link once; repeated calls return the same live capability.",
+          "operationId": "create_group_invite_route_api_groups__group_id__invite_link_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupInviteState"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Group Invite Route"
+        }
+      },
+      "/api/groups/{group_id}/invite-link/rotate": {
+        "post": {
+          "description": "Atomically replace the current link, invalidating the old token.",
+          "operationId": "rotate_group_invite_route_api_groups__group_id__invite_link_rotate_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupInviteState"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Rotate Group Invite Route"
         }
       },
       "/api/groups/{group_id}/members/{user_id}": {

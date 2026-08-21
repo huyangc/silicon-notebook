@@ -199,10 +199,12 @@ import { AccountMenu } from "./account-menu";
 import { GroupsPage } from "./groups-page";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
 import {
+  joinGroupInvite,
   grantedViaLabel,
   groupsHash,
   isGroupGranted,
   parseGroupsHash,
+  parseGroupInviteToken,
   partitionByGrant,
   type GroupPageTab,
 } from "./group-api";
@@ -2178,6 +2180,7 @@ export default function Home() {
   const kgGraphRef = useRef<any>(null);
   // 收到分享的 token 缓存 —— 挂载时从 URL 抓到后立即清掉 ?share,故拷贝时从这里取。
   const shareTokenRef = useRef<string | null>(null);
+  const groupInviteClaimedRef = useRef("");
 
   // 启动就绪轮询:挂载即探 /api/ready,未就绪则每 ~1.5s 重探,直到显式 {ready:true}。
   // 探针永不抛错(见 probeReady),故预热期的 503/网络错都只是「继续等」,不会掉进登录态。
@@ -2281,6 +2284,33 @@ export default function Home() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, [authChecked]);
+
+  // A group invitation survives the login/register gate in the query string.
+  // Once authenticated, redeem it exactly once, then remove the bearer token
+  // from browser history before navigating to the joined group workspace.
+  useEffect(() => {
+    if (!authChecked || !currentUser || !getToken()) return;
+    const token = parseGroupInviteToken(window.location.search);
+    if (!token || groupInviteClaimedRef.current === token) return;
+    groupInviteClaimedRef.current = token;
+    const params = new URLSearchParams(window.location.search);
+    params.delete("group_invite");
+    const cleaned = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (cleaned ? `?${cleaned}` : "") + window.location.hash,
+    );
+    joinGroupInvite(token)
+      .then(async (group) => {
+        await loadNotebookCollection();
+        setToast(`已加入群组「${group.name}」`);
+        showGroups({ groupId: group.id, tab: "members" }, "replace");
+      })
+      .catch((error) => {
+        setToast(toUserMessage(error, "加入群组失败，请重新打开邀请链接重试"));
+      });
+  }, [authChecked, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * 别人撤销你的访问权时的复核(codex #529 R3 P1)。

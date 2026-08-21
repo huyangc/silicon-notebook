@@ -251,7 +251,16 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
 test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", () => {
   assert.deepEqual(
     importsFrom(page, "./group-api").map((item) => item.imported).sort(),
-    ["GroupPageTab", "grantedViaLabel", "groupsHash", "isGroupGranted", "parseGroupsHash", "partitionByGrant"],
+    [
+      "GroupPageTab",
+      "grantedViaLabel",
+      "groupsHash",
+      "isGroupGranted",
+      "joinGroupInvite",
+      "parseGroupInviteToken",
+      "parseGroupsHash",
+      "partitionByGrant",
+    ],
   );
   const lists = jsxElements(page, "NotebookList");
   assert.equal(lists.length, 2, "列表视图应当分成两段:自有/只读共享 与 群组");
