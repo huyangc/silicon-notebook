@@ -154,6 +154,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     auditor_host = SimpleNamespace(has_auditors=False)
     observer_host = object()
     element_host = SimpleNamespace(has_contributors=False)
+    knowledge_host = SimpleNamespace(has_contributors=True)
     runtime = SimpleNamespace(
         retrieval_contributors=host,
         parser_chain=parser_host,
@@ -162,6 +163,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         report_auditors=auditor_host,
         report_completed_observers=observer_host,
         element_enrichers=element_host,
+        knowledge_candidate_projectors=knowledge_host,
     )
     captured = {}
 
@@ -185,6 +187,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         "report_auditor_host": None,
         "report_completed_observer_host": observer_host,
         "element_enricher_host": None,
+        "knowledge_candidate_projector_host": knowledge_host,
     }
 
 

@@ -12,6 +12,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.repositories.ports import NotebookRepository
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -30,6 +31,9 @@ def create_repository(
     report_auditor_host: ReportAuditorHostPort | None = None,
     report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
     element_enricher_host: ElementEnricherHostPort | None = None,
+    knowledge_candidate_projector_host: (
+        KnowledgeCandidateProjectorHostPort | None
+    ) = None,
 ) -> NotebookRepository:
     host_kwargs = {}
     if retrieval_contributor_host is not None:
@@ -46,6 +50,10 @@ def create_repository(
         host_kwargs["report_completed_observer_host"] = report_completed_observer_host
     if element_enricher_host is not None:
         host_kwargs["element_enricher_host"] = element_enricher_host
+    if knowledge_candidate_projector_host is not None:
+        host_kwargs["knowledge_candidate_projector_host"] = (
+            knowledge_candidate_projector_host
+        )
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
         return SQLiteRepository(settings, **host_kwargs)

@@ -79,6 +79,18 @@ whole rather than truncating it. The default registry contains no contributor,
 so these settings add no work until one is composed. Exact defaults and ranges
 live only in the product/API contract.
 
+A deployment that registers a knowledge candidate projector configures its
+point-wide cooperative deadline and aggregate object, relation, and serialized
+candidate budgets with `KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS`,
+`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS`,
+`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS`, and
+`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES`. An in-progress synchronous
+contribution is not abandoned; a contribution that exceeds a remaining budget
+is rejected atomically rather than truncated. The default registry contains no
+projector, so these settings add no schema read, event, database, model,
+embedding, or retrieval work until one is composed. Exact defaults and ranges
+live only in the product/API contract.
+
 A chat service may optionally set `top_p = 0.95` (or another finite value from `0` through
 `1`) when its provider requires a fixed nucleus-sampling value. This service-owned value
 overrides every workload's call default and is used by both the outgoing request and the

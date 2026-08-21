@@ -55,6 +55,7 @@ from app.extensions.retrieval import RetrievalContributorHost
 from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
 from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
 from app.extensions.element_enrichment import SourceElementEnricherHost
+from app.extensions.knowledge_projection import KnowledgeCandidateProjectorHost
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class ExtensionRuntime:
     report_auditors: ReportAuditorHost
     report_completed_observers: ReportCompletedObserverHost
     element_enrichers: SourceElementEnricherHost
+    knowledge_candidate_projectors: KnowledgeCandidateProjectorHost
 
 
 def build_extension_registry(
@@ -120,6 +122,10 @@ def build_extension_runtime(
             event_sink=event_sink,
         ),
         element_enrichers=SourceElementEnricherHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        knowledge_candidate_projectors=KnowledgeCandidateProjectorHost(
             registry,
             event_sink=event_sink,
         ),

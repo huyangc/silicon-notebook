@@ -72,6 +72,16 @@ cp model-services.example.toml .local/model-services.toml
 registry 不含 contributor，因此部署未组合插件时这些设置不增加任何工作。精确默认值
 与范围只在 product/API 合同登记。
 
+部署若注册 knowledge candidate projector，使用
+`KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS`、
+`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS`、
+`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS` 与
+`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES` 配置 point-wide
+协作式 deadline 和总 object/relation/序列化 candidate 预算。已经开始的同步
+contribution 不会被遗弃；超过剩余预算的 contribution 整体拒绝而不是截断。默认
+registry 不含 projector，因此显式组合之前不会增加 schema read、event、数据库、
+模型、embedding 或检索工作。精确默认值与范围只在 product/API 合同登记。
+
 如果供应商要求固定的核采样值，chat 服务可选配置 `top_p = 0.95`（或 `0` 到 `1` 的
 其他有限数值）。该服务级值覆盖所有已绑定 workload 的调用默认值，并同时用于真实请求和
 响应缓存键；省略字段则保留历史的逐调用行为。embedding 与 rerank 服务不允许配置

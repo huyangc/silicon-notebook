@@ -201,8 +201,13 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-10：Knowledge candidate projector
 
+状态：实现中；默认空 topology、point-specific batch host、core admission 与唯一事务前接线已落地，等待三路 review 与 CI 闭环。
+
 - 插件只产生候选，核心继续拥有 schema validation、审核、写事务和生命周期；
 - 不允许插件直接写核心表或持有核心事务。
+- hook 固定在旧 core extraction/relink/partial-retry gate 之后、唯一来源代次 `store_kg` 事务之前；无插件路径在 schema/snapshot/clock/probe/event/I/O 前返回；
+- contributor 必须声明 scoped source-element capability，只取得不可变 element/schema view 与 opaque ref；core 重建 evidence、校验 edge/schema、分配 local id，并保留 baseline prefix/order/identity；
+- 默认不注册真实 contributor，Memory/Knowhow hidden source 不进入，当前检索/relink/embedding/model 调用与质量路径不变。
 
 #### PR-11：`create_memory_mcp` capability bundle 拆分
 

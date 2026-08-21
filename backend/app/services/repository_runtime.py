@@ -24,6 +24,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -139,6 +140,9 @@ class RepositoryRuntime:
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        knowledge_candidate_projector_host: (
+            KnowledgeCandidateProjectorHostPort | None
+        ) = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -155,6 +159,7 @@ class RepositoryRuntime:
         self.report_auditors = report_auditor_host
         self.report_completed_observers = report_completed_observer_host
         self.element_enrichers = element_enricher_host
+        self.knowledge_candidate_projectors = knowledge_candidate_projector_host
         self.parser_provider_chain = (
             parser_provider_chain_host or BuiltinParserChainHost()
         )
@@ -960,6 +965,8 @@ class RepositoryRuntime:
             parser_provider_chain=self.parser_provider_chain,
             parser_connection_probe=self.database,
             element_enricher_host=self.element_enrichers,
+            knowledge_candidate_projector_host=self.knowledge_candidate_projectors,
+            effective_knowledge_schemas=self.schema_registry.effective_schemas,
             mineru_client=mineru_client,
             mineru_cloud_client=mineru_cloud_client,
             model_clients=self.models,

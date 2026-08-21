@@ -18,6 +18,7 @@ from app.domain.extensions import (
     ElementEnricherHostPort,
     ParserProviderChainHostPort,
 )
+from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
@@ -44,6 +45,7 @@ from app.services.kg.json_utils import safe_json
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
+from app.services.knowledge_candidate_projection import project_knowledge_candidates
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
@@ -178,6 +180,10 @@ class SourceIngestionService:
         # complete, correct behaviour (it is exactly the kill-switch-off path).
         note_corpus_change: Callable[[str], None] = lambda _notebook_id: None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        knowledge_candidate_projector_host: (
+            KnowledgeCandidateProjectorHostPort | None
+        ) = None,
+        effective_knowledge_schemas: Callable[[str], Any] = lambda _notebook_id: {},
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -195,6 +201,8 @@ class SourceIngestionService:
         self.parser_provider_chain = parser_provider_chain
         self.parser_connection_probe = parser_connection_probe
         self.element_enricher_host = element_enricher_host
+        self.knowledge_candidate_projector_host = knowledge_candidate_projector_host
+        self.effective_knowledge_schemas = effective_knowledge_schemas
         self.make_persist_image = make_persist_image
         self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
@@ -1866,6 +1874,40 @@ class SourceIngestionService:
                 )
                 self.finish_extraction_run(run_id, "completed", message)
                 raise PartialKgRetryIncomplete(message)
+            if control is not None:
+                control.raise_if_aborted()
+            if (
+                self.knowledge_candidate_projector_host is not None
+                and source.type not in HIDDEN_SYNTHETIC_SOURCE_TYPES
+            ):
+                objects, relations = project_knowledge_candidates(
+                    objects,
+                    relations,
+                    source_id=source.id,
+                    source_title=source.title,
+                    source_type=source.type,
+                    elements=elements,
+                    host=self.knowledge_candidate_projector_host,
+                    effective_schemas=self.effective_knowledge_schemas,
+                    notebook_id=source.notebook_id,
+                    control=control,
+                    connection_probe=self.parser_connection_probe,
+                    max_objects=(
+                        self.settings.knowledge_candidate_projector_max_objects
+                    ),
+                    max_relations=(
+                        self.settings.knowledge_candidate_projector_max_relations
+                    ),
+                    max_candidate_bytes=(
+                        self.settings
+                        .knowledge_candidate_projector_max_candidate_bytes
+                    ),
+                    timeout_seconds=(
+                        self.settings
+                        .knowledge_candidate_projector_timeout_seconds
+                    ),
+                    event_sink=self.event_log.emit,
+                )
             if control is not None:
                 control.raise_if_aborted()
             n_obj, n_rel = self.knowledge_lifecycle.store_kg(
