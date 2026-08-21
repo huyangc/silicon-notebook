@@ -327,6 +327,16 @@ def test_cancellation_after_contributor_exception_starts_no_event_or_later_work(
     assert calls == ["first"]
 
 
+def test_contributor_direct_core_cancellation_propagates():
+    class Enricher:
+        def enrich(self, _context):
+            raise _NativeCancelled()
+
+    host = _runtime(_bundle("enrich.native_cancel", Enricher())).element_enrichers
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(_call())
+
+
 def test_cancellation_set_by_event_sink_starts_no_later_contributor():
     cancellation = _MutableCancellation()
     calls = []
@@ -353,6 +363,59 @@ def test_cancellation_set_by_event_sink_starts_no_later_contributor():
             _call(cancellation=cancellation), event_sink=cancel_in_event
         )
     assert calls == ["first", "event"]
+
+
+def test_event_cancellation_wins_over_connection_lease_fail_closed():
+    cancellation = _MutableCancellation()
+    probe = _Probe()
+    probe_calls_at_event = []
+
+    class Enricher:
+        def enrich(self, _context):
+            return _available()
+
+    def cancel_and_hold(_event):
+        probe_calls_at_event.append(probe.calls)
+        cancellation.state = True
+        probe.held = True
+
+    host = _runtime(_bundle("enrich.event_cancel", Enricher())).element_enrichers
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(probe=probe, cancellation=cancellation),
+            event_sink=cancel_and_hold,
+        )
+    assert probe.calls == probe_calls_at_event[0]
+
+
+def test_connection_and_clock_callbacks_cannot_hide_new_native_cancellation():
+    cancellation = _MutableCancellation()
+
+    class CancellingProbe:
+        def is_connection_held(self):
+            cancellation.state = True
+            return True
+
+    class Enricher:
+        def enrich(self, _context):
+            raise AssertionError("cancelled boundary reached plugin")
+
+    host = _runtime(_bundle("enrich.probe_cancel", Enricher())).element_enrichers
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(probe=CancellingProbe(), cancellation=cancellation)
+        )
+
+    cancellation.state = False
+    host = _runtime(_bundle("enrich.clock_cancel", Enricher())).element_enrichers
+
+    def cancelling_clock():
+        cancellation.state = True
+        return time.monotonic()
+
+    host._clock = cancelling_clock
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(_call(cancellation=cancellation))
 
 
 def test_contributor_gets_one_immutable_batch_and_returns_namespaced_patch():

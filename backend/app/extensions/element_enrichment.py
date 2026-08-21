@@ -206,7 +206,7 @@ class SourceElementEnricherHost:
         ):
             return ()
         _raise_if_cancelled(call.cancellation)
-        if not self._connection_clear(call.connection_probe):
+        if not self._connection_clear_for(call):
             return ()
         refs: list[ElementRef] = []
         views: list[ElementView] = []
@@ -251,9 +251,9 @@ class SourceElementEnricherHost:
         remaining_bytes = call.max_metadata_bytes
         for registration in self._registrations:
             _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear(call.connection_probe):
+            if not self._connection_clear_for(call):
                 return ()
-            if self._expired(call.deadline_monotonic):
+            if self._expired_for(call):
                 break
             try:
                 availability = self._registry.availability(
@@ -265,9 +265,9 @@ class SourceElementEnricherHost:
             except Exception:
                 availability = None
             _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear(call.connection_probe):
+            if not self._connection_clear_for(call):
                 return ()
-            if self._expired(call.deadline_monotonic):
+            if self._expired_for(call):
                 break
             if (
                 availability is None
@@ -276,20 +276,25 @@ class SourceElementEnricherHost:
             ):
                 continue
             _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear(call.connection_probe):
+            if not self._connection_clear_for(call):
                 return ()
             started = self._safe_clock()
+            _raise_if_cancelled(call.cancellation)
             try:
                 result = registration.implementation.enrich(context)
+            except CoreCancellation:
+                raise
             except Exception:
                 _raise_if_cancelled(call.cancellation)
                 self._emit(sink, registration, "failed", 0, started)
-                if not self._connection_clear(call.connection_probe):
+                _raise_if_cancelled(call.cancellation)
+                if not self._connection_clear_for(call):
                     return ()
                 continue
             _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear(call.connection_probe):
+            if not self._connection_clear_for(call):
                 self._emit(sink, registration, "invalid", 0, started)
+                _raise_if_cancelled(call.cancellation)
                 return ()
             validated = self._validate_result(
                 result,
@@ -302,6 +307,7 @@ class SourceElementEnricherHost:
             )
             if validated is None:
                 self._emit(sink, registration, "invalid", 0, started)
+                _raise_if_cancelled(call.cancellation)
                 continue
             patches, used_bytes = validated
             accepted.extend(patches)
@@ -313,11 +319,12 @@ class SourceElementEnricherHost:
                 else "unavailable"
             )
             self._emit(sink, registration, event_status, len(patches), started)
+            _raise_if_cancelled(call.cancellation)
             if remaining <= 0:
                 break
-        if not self._connection_clear(call.connection_probe):
-            return ()
         _raise_if_cancelled(call.cancellation)
+        if not self._connection_clear_for(call):
+            return ()
         return tuple(accepted)
 
     def _validate_result(
@@ -402,9 +409,21 @@ class SourceElementEnricherHost:
             if not callable(check):
                 return False
             held = check()
+        except CoreCancellation:
+            raise
         except Exception:
             return False
         return type(held) is bool and held is False
+
+    def _connection_clear_for(self, call: ElementEnrichmentCallContext) -> bool:
+        clear = self._connection_clear(call.connection_probe)
+        _raise_if_cancelled(call.cancellation)
+        return clear
+
+    def _expired_for(self, call: ElementEnrichmentCallContext) -> bool:
+        expired = self._expired(call.deadline_monotonic)
+        _raise_if_cancelled(call.cancellation)
+        return expired
 
     def _expired(self, deadline: float) -> bool:
         now = self._safe_clock()
@@ -413,6 +432,8 @@ class SourceElementEnricherHost:
     def _safe_clock(self) -> float | None:
         try:
             value = self._clock()
+        except CoreCancellation:
+            raise
         except Exception:
             return None
         if type(value) not in {int, float} or not math.isfinite(float(value)):
@@ -447,5 +468,7 @@ class SourceElementEnricherHost:
                     "duration_ms": elapsed,
                 }
             )
+        except CoreCancellation:
+            raise
         except Exception:
             pass
