@@ -78,10 +78,10 @@ class ReportStore:
             args.append(json.dumps(val, ensure_ascii=False) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
-            guard = "" if status == "cancelled" else " AND status <> 'cancelled'"
             db.execute(
                 f"UPDATE reports SET {', '.join(sets)} "
-                f"WHERE id = ? AND notebook_id = ?{guard}",
+                "WHERE id = ? AND notebook_id = ? "
+                "AND status NOT IN ('done','failed','cancelled')",
                 args,
             )
 
@@ -104,20 +104,63 @@ class ReportStore:
             )
         return cursor.rowcount > 0
 
-    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+    def claim_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        understanding: dict | None = None,
+    ) -> bool:
         """Atomically claim an outline-ready or failed report for generation."""
         now = self.now()
+        understanding_sql = (
+            "json_set(json_remove(?, '$.credibility'),"
+            "'$._generation_started_at',?)"
+            if understanding is not None
+            else "json_set(json_remove(understanding_json, '$.credibility'),"
+            "'$._generation_started_at',?)"
+        )
+        understanding_args = (
+            [json.dumps(understanding, ensure_ascii=False), now]
+            if understanding is not None
+            else [now]
+        )
         with self.database.write() as db:
             cursor = db.execute(
                 "UPDATE reports SET status='generating',progress=?,"
                 "error='',content_md='',sections_json='[]',gaps_json='[]',"
                 "references_json='[]',section_status_json='[]',"
-                "understanding_json=json_set(json_remove(understanding_json,"
-                "'$.credibility'),"
-                "'$._generation_started_at',?),updated_at=? "
+                f"understanding_json={understanding_sql},updated_at=? "
                 "WHERE id=? AND notebook_id=? "
                 "AND status IN ('outline_ready','failed')",
-                ("准备生成", now, now, report_id, notebook_id),
+                ("准备生成", *understanding_args, now, report_id, notebook_id),
+            )
+        return cursor.rowcount > 0
+
+    def complete_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        sections: list,
+        content_md: str,
+        gaps: list,
+        references: list,
+    ) -> bool:
+        """Atomically publish one successful generation if it still owns it."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE reports SET sections_json=?,content_md=?,gaps_json=?,"
+                "references_json=?,status='done',progress='完成',updated_at=? "
+                "WHERE id=? AND notebook_id=? AND status='generating'",
+                (
+                    json.dumps(sections, ensure_ascii=False),
+                    content_md,
+                    json.dumps(gaps, ensure_ascii=False),
+                    json.dumps(references, ensure_ascii=False),
+                    self.now(),
+                    report_id,
+                    notebook_id,
+                ),
             )
         return cursor.rowcount > 0
 
@@ -126,7 +169,8 @@ class ReportStore:
         with self.database.write() as db:
             cursor = db.execute(
                 "UPDATE reports SET status='cancelled',progress=?,updated_at=? "
-                "WHERE id=? AND notebook_id=?",
+                "WHERE id=? AND notebook_id=? "
+                "AND status NOT IN ('done','failed','cancelled')",
                 ("已取消", self.now(), report_id, notebook_id),
             )
         return cursor.rowcount > 0

@@ -245,3 +245,67 @@ class AskCompletedObserverHostPort(Protocol):
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None: ...
+
+
+# Deep Report post-terminal contracts mirror Ask's governance but remain
+# point-specific: the report observer needs actor+notebook identity while the
+# auditor sees only counts from an already committed artifact.
+REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
+    "report:agent_profile_completed_access"
+)
+
+
+@dataclass(frozen=True)
+class ReportAuditSnapshot:
+    report_id: str
+    section_count: int
+    successful_section_count: int
+    failed_section_count: int
+    reference_count: int
+    gap_count: int
+    claim_ledgers_available: int
+    claim_ledgers_partial: int
+    unsupported_high_risk_assertions: int
+    content_chars: int
+    synthesis_status: str
+    max_findings: int
+    deadline_monotonic: float
+
+
+@dataclass(frozen=True)
+class CompletedReportNotification:
+    report_id: str
+    actor_id: str
+    notebook_id: str
+    terminal_status: str
+
+
+class AgentProfileReportCompletedPort(Protocol):
+    def notify(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class ReportCompletedObserverCallContext:
+    notification: CompletedReportNotification
+    agent_profile: AgentProfileReportCompletedPort | None
+    connection_probe: Any
+    deadline_monotonic: float
+
+
+class ReportAuditorHostPort(Protocol):
+    def audit_application(
+        self,
+        snapshot: ReportAuditSnapshot,
+        *,
+        connection_probe: Any,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> tuple[Any, ...]: ...
+
+
+class ReportCompletedObserverHostPort(Protocol):
+    def observe_application(
+        self,
+        call_context: ReportCompletedObserverCallContext,
+        *,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None: ...

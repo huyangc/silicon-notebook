@@ -9,6 +9,7 @@
 - 证据上下文经 EvidenceContextPort 且 "(none)" 哨兵归一保持。
 """
 import contextvars
+from dataclasses import replace
 import inspect
 import json
 import threading
@@ -58,6 +59,15 @@ class _Reports:
         if not row or row.get("status") != "outline_ready":
             return False
         row.update(status="generating", generation_started_at="fixture-start")
+        return True
+
+    def complete_report_generation(self, notebook_id, report_id, **fields):
+        row = self.rows.get(report_id)
+        if not row or row.get("status") != "generating":
+            return False
+        self.update_report(
+            notebook_id, report_id, status="done", progress="完成", **fields
+        )
         return True
 
     def list_reports(self, notebook_id, *, created_by):
@@ -245,6 +255,139 @@ def test_engine_constructs_from_narrow_fakes_and_keeps_no_facade():
     assert eng.user_id == "user-x"
 
 
+def test_report_generation_stage_binds_run_actor_cancel_and_connection_authorities(
+    monkeypatch,
+):
+    from app.application.report_pipeline import (
+        ReportGenerationInput,
+        ReportStageBoundaryError,
+        ReportStageRuntime,
+    )
+    from app.services.retrieval_run import retrieval_run
+
+    class Probe:
+        def __init__(self):
+            self.held = False
+            self.boom = False
+
+        def is_connection_held(self):
+            if self.boom:
+                raise RuntimeError("probe exploded")
+            return self.held
+
+    probe = Probe()
+    cancel = __import__("threading").Event()
+    eng = _engine(_deps(retrieval_connection_probe=probe), cancel_event=cancel)
+    monkeypatch.setattr(
+        eng,
+        "_run_sections",
+        lambda *_args, **_kwargs: [{"title": "A", "markdown": "body"}],
+    )
+    stage = ReportGenerationInput.create(
+        notebook_id="nb",
+        report_id="rep",
+        original_question="q",
+        display_question="q",
+        research_question="q",
+        depth=2,
+        actor_id="user-x",
+        understanding={},
+        outline=[{"title": "A"}],
+    )
+    with retrieval_run(
+        run_kind="report_generation",
+        correlation_id="rep",
+        actor_id="user-x",
+        cancel_event=cancel,
+    ) as run:
+        runtime = ReportStageRuntime(None, run, cancel, probe, "user-x")
+        assert eng.run_generation_stage(stage, runtime).successful_count == 1
+        with pytest.raises(ReportStageBoundaryError):
+            eng.run_generation_stage(stage, replace(runtime, actor_id="forged"))
+        with pytest.raises(ReportStageBoundaryError):
+            eng.run_generation_stage(stage, replace(runtime, connection_probe=Probe()))
+        probe.held = True
+        with pytest.raises(ReportStageBoundaryError):
+            eng.run_generation_stage(stage, runtime)
+        probe.held = False
+        probe.boom = True
+        with pytest.raises(ReportStageBoundaryError, match="connection probe"):
+            eng.run_generation_stage(stage, runtime)
+
+
+def test_planning_stage_preserves_normal_cancelled_return_after_core_write(monkeypatch):
+    from app.application.report_pipeline import ReportPlanningInput, ReportStageRuntime
+    from app.services.retrieval_run import retrieval_run
+
+    class Probe:
+        @staticmethod
+        def is_connection_held():
+            return False
+
+    cancel = threading.Event()
+    probe = Probe()
+    eng = _engine(_deps(retrieval_connection_probe=probe), cancel_event=cancel)
+
+    def cancelled_planner(*_args, **_kwargs):
+        cancel.set()
+        return None
+
+    monkeypatch.setattr(eng, "_plan_outline_run", cancelled_planner)
+    stage = ReportPlanningInput.create(
+        notebook_id="nb",
+        report_id="rep",
+        question="q",
+        history="",
+        actor_id="user-x",
+        confirmed_intent=None,
+    )
+    with retrieval_run(
+        run_kind="report_planning",
+        correlation_id="rep",
+        actor_id="user-x",
+        cancel_event=cancel,
+    ) as run:
+        runtime = ReportStageRuntime(None, run, cancel, probe, "user-x")
+        assert eng.run_planning_stage(stage, runtime) is None
+
+
+def test_planning_stage_preserves_pre_entry_cancellation_as_normal_terminal():
+    from app.application.report_pipeline import ReportPlanningInput, ReportStageRuntime
+    from app.services.retrieval_run import retrieval_run
+
+    class Probe:
+        @staticmethod
+        def is_connection_held():
+            return False
+
+    reports = _Reports()
+    reports.seed("nb", "q")
+    cancel = threading.Event()
+    cancel.set()
+    probe = Probe()
+    eng = _engine(
+        _deps(reports=reports, retrieval_connection_probe=probe),
+        cancel_event=cancel,
+    )
+    stage = ReportPlanningInput.create(
+        notebook_id="nb",
+        report_id="rep-1",
+        question="q",
+        history="",
+        actor_id="user-x",
+        confirmed_intent=None,
+    )
+    with retrieval_run(
+        run_kind="report_planning",
+        correlation_id="rep-1",
+        actor_id="user-x",
+        cancel_event=cancel,
+    ) as run:
+        runtime = ReportStageRuntime(None, run, cancel, probe, "user-x")
+        assert eng.run_planning_stage(stage, runtime) is None
+    assert reports.rows["rep-1"]["status"] == "cancelled"
+
+
 def test_report_engine_module_has_no_facade_import():
     from app.services import report_engine
     src = inspect.getsource(report_engine)
@@ -386,6 +529,31 @@ def test_plan_and_generate_statuses_flow_through_reports_port(monkeypatch):
     eng.generate("nb", rid, "why", depth=1)
     statuses = [a.get("status") for _r, a in reports.updates if a.get("status")]
     assert statuses[-2:] == ["generating", "done"]
+
+
+def test_generation_cas_loss_does_not_publish_committed_report(monkeypatch):
+    reports = _Reports()
+    rid = reports.seed(
+        "nb",
+        "why",
+        status="outline_ready",
+        outline=[{"title": "A", "scope": "sa", "sub_queries": ["qa"]}],
+    )
+    eng = _engine(_deps(reports=reports))
+    monkeypatch.setattr(eng, "_deep_dive", lambda *a, **k: ReasoningResult())
+
+    def lose_terminal_cas(*_args, **_kwargs):
+        reports.rows[rid]["status"] = "cancelled"
+        return False
+
+    monkeypatch.setattr(reports, "complete_report_generation", lose_terminal_cas)
+    committed = eng.generate("nb", rid, "why", depth=1)
+
+    assert committed is None
+    assert reports.rows[rid]["status"] == "cancelled"
+    assert not any(
+        fields.get("status") == "done" for _report_id, fields in reports.updates
+    )
 
 
 # ---------------------------------------------------------------------------

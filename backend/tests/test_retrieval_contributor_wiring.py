@@ -158,6 +158,8 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         parser_chain=parser_host,
         answer_auditors=auditor_host,
         ask_completed_observers=observer_host,
+        report_auditors=auditor_host,
+        report_completed_observers=observer_host,
     )
     captured = {}
 
@@ -178,6 +180,8 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         "parser_provider_chain_host": parser_host,
         "answer_auditor_host": None,
         "ask_completed_observer_host": observer_host,
+        "report_auditor_host": None,
+        "report_completed_observer_host": observer_host,
     }
 
 

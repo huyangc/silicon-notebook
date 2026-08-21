@@ -492,49 +492,6 @@ def test_a_report_finishing_while_a_run_is_in_flight_keeps_the_ask_signal(
     assert _job(harness, USER_A)["pending_signal"] == 1 + 3   # ask 1 + 报告满阈 3
 
 
-def test_the_report_engine_signals_the_report_author_and_never_the_request_user():
-    """The engine passes ``self.user_id`` — the report's creator — explicitly.
-
-    Reports run on a background thread where ``current_user()`` falls back to
-    the seeded admin, so a ContextVar-derived owner would consolidate someone
-    else's private notes from this report.
-    """
-    from app.services.report_engine import ReportEngine, ReportEngineDependencies
-
-    calls: list[tuple] = []
-    deps = ReportEngineDependencies(
-        reports=None, retrieval=None, evidence_context=None, model_clients=None,
-        model_errors=None, source_query=None, communities=None, settings=None,
-        event_log=None,
-        agent_profile_jobs=SimpleNamespace(
-            note_report_completed=lambda nb, uid: calls.append((nb, uid))
-        ),
-    )
-    engine = ReportEngine(deps, user_id=USER_B)
-
-    engine._note_report_completed(NOTEBOOK_ID)
-
-    assert calls == [(NOTEBOOK_ID, USER_B)]
-
-
-def test_the_report_engine_swallows_a_failing_notification():
-    from app.services.report_engine import ReportEngine, ReportEngineDependencies
-
-    def _boom(_nb, _uid):
-        raise RuntimeError("scheduler down")
-
-    deps = ReportEngineDependencies(
-        reports=None, retrieval=None, evidence_context=None, model_clients=None,
-        model_errors=None, source_query=None, communities=None, settings=None,
-        event_log=None,
-        agent_profile_jobs=SimpleNamespace(note_report_completed=_boom),
-    )
-
-    # A stored, finished report must not be re-judged "failed" because a
-    # background refresh could not be scheduled.
-    ReportEngine(deps, user_id=USER_A)._note_report_completed(NOTEBOOK_ID)
-
-
 # =====================================================================
 # 4. losing access discards the overlay
 # =====================================================================

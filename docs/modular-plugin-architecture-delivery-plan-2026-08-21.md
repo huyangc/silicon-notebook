@@ -172,7 +172,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-07：Ask auditors/observers
 
-状态：实现中；已建立独立 auditor/observer host，并将三条既有 completion 后处理迁成最小身份的内建 observer，正在完成回归、双路 review 与 CI。
+状态：已完成并合入；独立 auditor/observer host、三条最小身份内建 observer、双路 review 与 CI 已闭合。
 
 - 建立 answer auditor 和 completed observer host；
 - 把现有 Ask completion 后处理迁成内建 observers；
@@ -180,6 +180,8 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - facade 仅保留兼容调用 adapter，不增加插件 seat。
 
 #### PR-08：Report stages + auditors/observers
+
+状态：实现中；阶段 ownership envelope、原子 done CAS 与 report auditor/completed observer 已接线，正在完成等价回归、双路 review 与 CI。
 
 - 拆 planning/generation/final audit 的明确 stage DTO；
 - 保持 intent confirmation、mandatory topics、scope revalidation、all-section retrieval、并行 drafting、claim ledger、final editor 和 retry 语义；

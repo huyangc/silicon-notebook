@@ -367,3 +367,32 @@ def test_ask_application_stage_boundary_is_in_all_agent_entry_documents():
         assert "stage" in normalized, name
         assert "retrieval run" in normalized, name
         assert "connection" in normalized or "连接" in normalized, name
+
+
+def test_report_stage_and_post_terminal_boundary_is_in_all_agent_documents():
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+        normalized = (
+            (ROOT / name)
+            .read_text(encoding="utf-8")
+            .casefold()
+            .replace("_", " ")
+            .replace("-", " ")
+        )
+        assert "report" in normalized, name
+        assert "stage" in normalized, name
+        assert "report.audit" in normalized, name
+        assert "report.completed observer" in normalized, name
+        assert "done" in normalized, name
+
+
+def test_report_completion_has_no_engine_direct_service_path():
+    engine = (ROOT / "backend/app/services/report_engine.py").read_text(
+        encoding="utf-8"
+    )
+    execution = (ROOT / "backend/app/services/report_execution.py").read_text(
+        encoding="utf-8"
+    )
+    assert "note_report_completed" not in engine
+    assert "app.extensions" not in execution
+    assert "app.extension_sdk" not in execution
+    assert "after_completed" in execution

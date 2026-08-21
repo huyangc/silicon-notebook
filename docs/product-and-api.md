@@ -1618,6 +1618,8 @@ whole segment; see "Extraction" above.
 
 Streaming Ask runs post-completion auditors/observers only after the durable answer and browser final event. Each point gets a cooperative wall-clock budget from `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` (default `30`, valid range `>0..300` seconds): a synchronous callback already in progress is allowed to finish safely, but the host starts no later contribution once the deadline has passed. `ANSWER_AUDIT_MAX_FINDINGS` bounds one auditor result (default `32`, valid range `1..256`); an oversized result is rejected as a whole, never silently truncated. These are deployment/internal extension rails and do not alter retrieval, answer text, citations, or the user-visible final event.
 
+Deep Report post-completion uses separate deployment rails. `REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` defaults to `30` and accepts `>0..300` seconds; `REPORT_AUDIT_MAX_FINDINGS` defaults to `32` and accepts `1..256`. The deadline is cooperative and an oversized auditor result is rejected whole. These points run only after the report row atomically commits from `generating` to `done` and every generation execution scope is released; they cannot alter section prose, citations, references, retrieval output, or terminal status.
+
 | Mode | Group | Needs KG | One-liner |
 |------|-------|----------|-----------|
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |

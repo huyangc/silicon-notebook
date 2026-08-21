@@ -15,6 +15,11 @@ from app.domain.extensions import (
     AskCompletedObserverCallContext,
     AskCompletedObserverHostPort,
     CompletedAskNotification,
+    CompletedReportNotification,
+    ReportAuditSnapshot,
+    ReportAuditorHostPort,
+    ReportCompletedObserverCallContext,
+    ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
@@ -105,6 +110,18 @@ class _AskCompletedAccess:
         self.__notify()
 
 
+class _ReportCompletedAccess:
+    """Opaque adapter for the existing report-completed consolidation call."""
+
+    __slots__ = ("__notify",)
+
+    def __init__(self, notify: Callable[[], None]) -> None:
+        self.__notify = notify
+
+    def notify(self) -> None:
+        self.__notify()
+
+
 class RepositoryRuntime:
     def __init__(
         self,
@@ -118,6 +135,8 @@ class RepositoryRuntime:
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         answer_auditor_host: AnswerAuditorHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
+        report_auditor_host: ReportAuditorHostPort | None = None,
+        report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -131,6 +150,8 @@ class RepositoryRuntime:
         self.retrieval_contributors = retrieval_contributor_host
         self.answer_auditors = answer_auditor_host
         self.ask_completed_observers = ask_completed_observer_host
+        self.report_auditors = report_auditor_host
+        self.report_completed_observers = report_completed_observer_host
         self.parser_provider_chain = (
             parser_provider_chain_host or BuiltinParserChainHost()
         )
@@ -1390,6 +1411,69 @@ class RepositoryRuntime:
         )
         return self.sharing
 
+    def _after_report_completed(self, committed) -> None:
+        """Run report hooks after durable done and every execution scope exits."""
+        facts = committed.audit_facts
+        auditor = self.report_auditors
+        if auditor is not None:
+            try:
+                auditor.audit_application(
+                    ReportAuditSnapshot(
+                        report_id=committed.report_id,
+                        section_count=facts.section_count,
+                        successful_section_count=facts.successful_section_count,
+                        failed_section_count=facts.failed_section_count,
+                        reference_count=facts.reference_count,
+                        gap_count=facts.gap_count,
+                        claim_ledgers_available=facts.claim_ledgers_available,
+                        claim_ledgers_partial=facts.claim_ledgers_partial,
+                        unsupported_high_risk_assertions=(
+                            facts.unsupported_high_risk_assertions
+                        ),
+                        content_chars=facts.content_chars,
+                        synthesis_status=facts.synthesis_status,
+                        max_findings=self.settings.report_audit_max_findings,
+                        deadline_monotonic=(
+                            time.monotonic()
+                            + self.settings.report_post_completion_extension_timeout_seconds
+                        ),
+                    ),
+                    connection_probe=self.database,
+                    event_sink=self.event_log.emit,
+                )
+            except Exception:
+                # A concrete host is still an optional post-terminal seam. Its
+                # own failure must not suppress the independent completion
+                # observer or rewrite the already durable report.
+                pass
+        observer = self.report_completed_observers
+        if observer is None:
+            return
+        try:
+            observer.observe_application(
+                ReportCompletedObserverCallContext(
+                    notification=CompletedReportNotification(
+                        report_id=committed.report_id,
+                        actor_id=committed.actor_id,
+                        notebook_id=committed.notebook_id,
+                        terminal_status="done",
+                    ),
+                    agent_profile=_ReportCompletedAccess(
+                        lambda: self.agent_profile_jobs.note_report_completed(
+                            committed.notebook_id, committed.actor_id
+                        )
+                    ),
+                    connection_probe=self.database,
+                    deadline_monotonic=(
+                        time.monotonic()
+                        + self.settings.report_post_completion_extension_timeout_seconds
+                    ),
+                ),
+                event_sink=self.event_log.emit,
+            )
+        except Exception:
+            pass
+
     def wire_report_execution(
         self,
         *,
@@ -1447,8 +1531,6 @@ class RepositoryRuntime:
                 # Agentic Memory P1:逐节深挖的理解注入(§5.2)。报告侧没有任何
                 # 自动贯通的路,必须在这里显式填座位。
                 agent_profile=self.agent_profile,
-                # T5:报告完成 ⇒ 推进**报告创建者**的覆盖层链路(直接达阈)。
-                agent_profile_jobs=self.agent_profile_jobs,
                 # P2-T6:检索打法库的注入座位(注入本身另有默认关闭的开关)。
                 retrieval_experiences=self.retrieval_experiences,
                 selected_source_graph=self.selected_source_graph,
@@ -1473,6 +1555,7 @@ class RepositoryRuntime:
             engine_factory=engine_factory,
             cancellations=self.report_cancellations,
             job_submitter=job_submitter,
+            after_completed=self._after_report_completed,
         )
         return self.report_execution
 

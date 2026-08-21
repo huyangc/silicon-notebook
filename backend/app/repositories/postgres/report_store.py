@@ -71,10 +71,10 @@ class ReportStore:
             args.append(jsonb(val) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
-            guard = "" if status == "cancelled" else " AND status <> 'cancelled'"
             db.execute(
                 f"UPDATE reports SET {', '.join(sets)} "
-                f"WHERE id = %s AND notebook_id = %s{guard}",
+                "WHERE id = %s AND notebook_id = %s "
+                "AND status NOT IN ('done','failed','cancelled')",
                 args,
             )
 
@@ -98,7 +98,12 @@ class ReportStore:
             ).fetchone()
         return row is not None
 
-    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+    def claim_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        understanding: dict | None = None,
+    ) -> bool:
         """Atomically claim an outline-ready or failed report for generation.
 
         A failed report retains its confirmed intent and outline, so retry can
@@ -106,21 +111,61 @@ class ReportStore:
         Prior generated artifacts are cleared in the same CAS transaction.
         """
         now = normalize_timestamp(self.now())
+        understanding_sql = (
+            "jsonb_set(%s::jsonb - 'credibility',"
+            "'{_generation_started_at}',%s,true)"
+            if understanding is not None
+            else "jsonb_set(understanding_json - 'credibility',"
+            "'{_generation_started_at}',%s,true)"
+        )
+        understanding_args = (
+            [jsonb(understanding), jsonb(now.isoformat())]
+            if understanding is not None
+            else [jsonb(now.isoformat())]
+        )
         with self.database.write() as db:
             row = db.execute(
                 "UPDATE reports SET status='generating',progress=%s,"
                 "error='',content_md='',sections_json='[]'::jsonb,"
                 "gaps_json='[]'::jsonb,references_json='[]'::jsonb,"
                 "section_status_json='[]'::jsonb,"
-                "understanding_json=jsonb_set(understanding_json - 'credibility',"
-                "'{_generation_started_at}',%s,true),updated_at=%s "
+                f"understanding_json={understanding_sql},updated_at=%s "
                 "WHERE id=%s AND notebook_id=%s "
                 "AND status IN ('outline_ready','failed') "
                 "RETURNING id",
                 (
                     "准备生成",
-                    jsonb(now.isoformat()),
+                    *understanding_args,
                     now,
+                    report_id,
+                    notebook_id,
+                ),
+            ).fetchone()
+        return row is not None
+
+    def complete_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        sections: list,
+        content_md: str,
+        gaps: list,
+        references: list,
+    ) -> bool:
+        """Atomically publish one successful generation if it still owns it."""
+        with self.database.write() as db:
+            row = db.execute(
+                "UPDATE reports SET sections_json=%s,content_md=%s,gaps_json=%s,"
+                "references_json=%s,status='done',progress='完成',updated_at=%s "
+                "WHERE id=%s AND notebook_id=%s AND status='generating' "
+                "RETURNING id",
+                (
+                    jsonb(sections),
+                    content_md,
+                    jsonb(gaps),
+                    jsonb(references),
+                    normalize_timestamp(self.now()),
                     report_id,
                     notebook_id,
                 ),
@@ -132,7 +177,8 @@ class ReportStore:
         with self.database.write() as db:
             row = db.execute(
                 "UPDATE reports SET status='cancelled',progress=%s,updated_at=%s "
-                "WHERE id=%s AND notebook_id=%s RETURNING id",
+                "WHERE id=%s AND notebook_id=%s "
+                "AND status NOT IN ('done','failed','cancelled') RETURNING id",
                 (
                     "已取消",
                     normalize_timestamp(self.now()),

@@ -287,6 +287,9 @@ def test_ask_and_report_entrypoints_install_their_actor_identity():
     report.settings = SimpleNamespace(report_retrieval_fanout=2)
     report.user_id = "report-actor"
     report.cancel_event = None
+    report._report_connection_probe = SimpleNamespace(
+        is_connection_held=lambda: False
+    )
     report._plan_outline_run = lambda *_args, **_kwargs: observed.append(
         ("plan", current_retrieval_run().actor_id)
     )

@@ -14,14 +14,30 @@ register_cancel/cancel_report/unregister_cancel 是它的显式委托(冻结调�
 from __future__ import annotations
 import contextvars
 import json
-import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app.application.report_pipeline import (
+    CommittedReport,
+    FinalizedReportArtifact,
+    GeneratedReportSections,
+    PlannedReportOutline,
+    ReportAuditFacts,
+    ReportFinalAuditInput,
+    ReportGenerationInput,
+    ReportPlanningInput,
+    ReportStageBoundaryError,
+    ReportStageRuntime,
+    execute_report_final_audit_stage,
+    execute_report_generation_stage,
+    execute_report_planning_stage,
+    thaw_report_control,
+)
 from app.core.ask_retrieval_policy import (
     AskRetrievalLimits, RetrievalEffort, ask_retrieval_limits,
 )
@@ -63,7 +79,11 @@ from app.services.reports.observability import (
     observe_stage,
 )
 from app.services.reports.policy import report_sufficiency_policy
-from app.services.retrieval_run import retrieval_fanout_slot, retrieval_run
+from app.services.retrieval_run import (
+    current_retrieval_run,
+    retrieval_fanout_slot,
+    retrieval_run,
+)
 from app.services.source_graph_activation import (
     SelectedSourceGraphContributionCall,
     selected_source_graph_call_context,
@@ -75,8 +95,6 @@ if TYPE_CHECKING:
         CommunityQueryPort, EvidenceContextPort, ModelClientProvider,
         ModelErrorSink, ReportRepository, ReportSourceQueryPort, RetrievalPort,
     )
-
-_log = logging.getLogger("silicon_notebook.report_engine")
 
 _MARKER = MARKER_RE  # 节内 [k_i]/【k_i】及复合引用标记（全局重编号用）
 _HIGH_RISK_NUMBER = re.compile(
@@ -537,11 +555,6 @@ class ReportEngineDependencies:
     # 端口(集合枚举也刻意不传),没有一条会自动带上它的路。缺省 None ⇒ 与接入前
     # 逐字相同。
     agent_profile: Any = None
-    # T5:巡固服务(``AgentProfileConsolidationService``)。报告**完成**是覆盖层
-    # 链路的第二个触发点,且直接达阈。与上面的 store 座位分开两个字段:一个是
-    # 「读理解」、一个是「排整理」,同一个对象兼两职会让「只接注入、不接触发」
-    # 这种完全合理的部署形态无法表达。
-    agent_profile_jobs: Any = None
     # Agentic Memory P2:部署级全局的检索打法库
     # (``RetrievalExperienceStorePort``)。与上面两个座位同样必须**显式**接线;
     # 注入另有一把默认关闭的开关。缺省 None ⇒ 与接入前逐字相同。
@@ -551,6 +564,16 @@ class ReportEngineDependencies:
     retrieval_experiences: Any = None
 
 
+class _NeverHeldConnectionProbe:
+    """Compatibility probe for direct engine tests without a repository DB."""
+
+    __slots__ = ()
+
+    @staticmethod
+    def is_connection_held() -> bool:
+        return False
+
+
 class ReportEngine:
     def __init__(self, dependencies: ReportEngineDependencies, *,
                  user_id: str, cancel_event: CancelEvent = None):
@@ -558,6 +581,115 @@ class ReportEngine:
         self.settings = dependencies.settings
         self.user_id = user_id            # 发起者身份(审计归属;模型解析走 ContextVar)
         self.cancel_event = cancel_event
+        connection_probe = getattr(dependencies, "retrieval_connection_probe", None)
+        self._report_connection_probe = (
+            connection_probe
+            if connection_probe is not None
+            else _NeverHeldConnectionProbe()
+        )
+
+    def _report_stage_runtime(self) -> ReportStageRuntime:
+        from app.services.source_scope import current_source_scope
+
+        run = current_retrieval_run()
+        if run is None:
+            raise ReportStageBoundaryError("Report stage has no retrieval run")
+        return ReportStageRuntime(
+            scope=current_source_scope(),
+            retrieval_run=run,
+            cancellation=self.cancel_event,
+            connection_probe=self._report_connection_probe,
+            actor_id=self.user_id,
+        )
+
+    def _assert_report_stage_runtime(
+        self,
+        stage: ReportPlanningInput | ReportGenerationInput,
+        runtime: ReportStageRuntime,
+        *,
+        run_kind: str,
+    ) -> None:
+        from app.services.source_scope import current_source_scope
+
+        if type(runtime) is not ReportStageRuntime:
+            raise ReportStageBoundaryError("invalid Report stage runtime")
+        for value, label in (
+            (stage.notebook_id, "notebook"),
+            (stage.report_id, "report"),
+            (stage.actor_id, "actor"),
+        ):
+            if type(value) is not str or not value:
+                raise ReportStageBoundaryError(f"invalid Report {label} identity")
+        question = (
+            stage.question
+            if type(stage) is ReportPlanningInput
+            else stage.original_question
+        )
+        if type(question) is not str:
+            raise ReportStageBoundaryError("invalid Report question")
+        if type(stage) is ReportPlanningInput:
+            if not stage.question or type(stage.history) is not str:
+                raise ReportStageBoundaryError("invalid Report planning text")
+        else:
+            if (
+                not stage.original_question
+                or type(stage.display_question) is not str
+                or not stage.display_question
+                or type(stage.research_question) is not str
+                or not stage.research_question
+                or type(stage.depth) is not int
+                or stage.depth < 1
+            ):
+                raise ReportStageBoundaryError("invalid Report generation contract")
+        if type(runtime.actor_id) is not str or runtime.actor_id != stage.actor_id:
+            raise ReportStageBoundaryError("Report stage actor authority mismatch")
+        if type(self.user_id) is not str or self.user_id != stage.actor_id:
+            raise ReportStageBoundaryError("Report engine actor authority mismatch")
+        if runtime.cancellation is not self.cancel_event:
+            raise ReportStageBoundaryError("Report cancellation authority mismatch")
+        run = runtime.retrieval_run
+        if run is not current_retrieval_run():
+            raise ReportStageBoundaryError("Report retrieval-run authority mismatch")
+        actual_kind = getattr(run, "run_kind", None)
+        if type(actual_kind) is not str or actual_kind != run_kind:
+            raise ReportStageBoundaryError("invalid Report retrieval-run kind")
+        correlation_id = getattr(run, "correlation_id", None)
+        if type(correlation_id) is not str or correlation_id != stage.report_id:
+            raise ReportStageBoundaryError("Report retrieval-run correlation mismatch")
+        actor_id = getattr(run, "actor_id", None)
+        if type(actor_id) is not str or actor_id != stage.actor_id:
+            raise ReportStageBoundaryError("Report retrieval-run actor mismatch")
+        if getattr(run, "cancel_event", object()) is not runtime.cancellation:
+            raise ReportStageBoundaryError("Report retrieval-run cancellation mismatch")
+        scope = current_source_scope()
+        if runtime.scope is not scope:
+            raise ReportStageBoundaryError("Report source-scope authority mismatch")
+        if scope is not None:
+            scope_notebook_id = getattr(scope, "notebook_id", None)
+            if (
+                type(scope_notebook_id) is not str
+                or scope_notebook_id != stage.notebook_id
+            ):
+                raise ReportStageBoundaryError("Report source-scope notebook mismatch")
+        if runtime.connection_probe is not self._report_connection_probe:
+            raise ReportStageBoundaryError("Report connection-probe authority mismatch")
+        try:
+            probe = getattr(runtime.connection_probe, "is_connection_held", None)
+        except Exception as exc:
+            raise ReportStageBoundaryError(
+                "invalid Report connection probe"
+            ) from exc
+        if not callable(probe):
+            raise ReportStageBoundaryError("invalid Report connection probe")
+        try:
+            held = probe()
+        except Exception as exc:
+            raise ReportStageBoundaryError(
+                "invalid Report connection probe"
+            ) from exc
+        if type(held) is not bool or held:
+            raise ReportStageBoundaryError("Report stage crossed a held connection")
+        raise_if_cancelled(runtime.cancellation)
 
     def _activate_selected_source_graph(self, notebook_id: str, result: Any) -> None:
         original = getattr(result, "chunks", None) or []
@@ -1166,7 +1298,7 @@ class ReportEngine:
 
     # --- Stage A 编排:intent → intent probe → map → STORM → Judge → outline_ready ---
     def plan_outline(self, notebook_id, rid, question, history="",
-                     intent_contract=None) -> None:
+                     intent_contract=None) -> PlannedReportOutline | None:
         """Run planning in an isolated memo/fan-out scope."""
         with retrieval_run(
             run_kind="report_planning",
@@ -1180,13 +1312,68 @@ class ReportEngine:
             actor_id=self.user_id,
             cancel_event=self.cancel_event,
         ):
-            return self._plan_outline_run(
-                notebook_id, rid, question, history,
-                intent_contract=intent_contract,
+            stage = ReportPlanningInput.create(
+                notebook_id=notebook_id,
+                report_id=rid,
+                question=question,
+                history=history,
+                actor_id=self.user_id,
+                confirmed_intent=intent_contract,
+            )
+            return execute_report_planning_stage(
+                self, stage, self._report_stage_runtime()
             )
 
+    def run_planning_stage(
+        self,
+        stage: ReportPlanningInput,
+        runtime: ReportStageRuntime,
+    ) -> PlannedReportOutline | None:
+        if type(stage) is not ReportPlanningInput:
+            raise ReportStageBoundaryError("invalid Report planning input")
+        try:
+            self._assert_report_stage_runtime(
+                stage, runtime, run_kind="report_planning"
+            )
+        except AskCancelled:
+            # Planning historically owns normal cancellation as a durable
+            # terminal transition and does not surface it as a failed
+            # background job. Preserve that behavior even in the narrow race
+            # between the coordinator's row check and this stage boundary.
+            self.dependencies.reports.update_report(
+                stage.notebook_id,
+                stage.report_id,
+                status="cancelled",
+                progress="已取消",
+            )
+            return None
+        sections = self._plan_outline_run(
+            stage.notebook_id,
+            stage.report_id,
+            stage.question,
+            stage.history,
+            intent_contract=(
+                thaw_report_control(stage.confirmed_intent)
+                if stage.confirmed_intent is not None
+                else None
+            ),
+        )
+        # The legacy planner owns its normal cancel/failure terminal writes and
+        # returns None. Preserve that control flow instead of reclassifying a
+        # user cancellation as a failed background job in the stage post-check.
+        if sections is None:
+            return None
+        self._assert_report_stage_runtime(
+            stage, runtime, run_kind="report_planning"
+        )
+        return (
+            PlannedReportOutline.create(stage, sections)
+            if sections is not None
+            else None
+        )
+
     def _plan_outline_run(self, notebook_id, rid, question, history="",
-                          intent_contract=None) -> None:
+                          intent_contract=None) -> list[dict] | None:
         reports = self.dependencies.reports
         try:
             reports.update_report(notebook_id, rid, status="planning", progress="按已确认问题规划中")
@@ -1344,11 +1531,14 @@ class ReportEngine:
             reports.update_report(notebook_id, rid, outline=sections,
                                   status="outline_ready",
                                   progress=f"大纲就绪({len(sections)} 节),待确认")
+            return sections
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
+            return None
         except Exception as exc:
             reports.update_report(notebook_id, rid, status="failed",
                                   error=str(exc)[:500], progress="规划失败")
+            return None
         finally:
             # memo 只属于这一次规划:不清掉会让整份探针命中(KG+元素对象)挂在
             # 引擎实例上活过整个 generate 阶段(质量评审 P3-6)。
@@ -2505,7 +2695,9 @@ class ReportEngine:
         return drafted_sections
 
     # --- 入口:Stage B/C/D(生成阶段)——读 outline_json → 深挖 → 汇总 → done ---
-    def generate(self, notebook_id, rid, question, depth: int = 2) -> None:
+    def generate(
+        self, notebook_id, rid, question, depth: int = 2
+    ) -> CommittedReport | None:
         """Run generation in a fresh scope, independent from planning."""
         with retrieval_run(
             run_kind="report_generation",
@@ -2519,9 +2711,123 @@ class ReportEngine:
             actor_id=self.user_id,
             cancel_event=self.cancel_event,
         ):
-            return self._generate_run(notebook_id, rid, question, depth)
+            return self._generate_run(
+                notebook_id,
+                rid,
+                question,
+                depth,
+                runtime=self._report_stage_runtime(),
+            )
 
-    def _generate_run(self, notebook_id, rid, question, depth: int = 2) -> None:
+    def run_generation_stage(
+        self,
+        stage: ReportGenerationInput,
+        runtime: ReportStageRuntime,
+    ) -> GeneratedReportSections:
+        if type(stage) is not ReportGenerationInput:
+            raise ReportStageBoundaryError("invalid Report generation input")
+        self._assert_report_stage_runtime(
+            stage, runtime, run_kind="report_generation"
+        )
+        sections = self._run_sections(
+            stage.notebook_id,
+            stage.report_id,
+            thaw_report_control(stage.outline),
+            stage.research_question,
+            stage.depth,
+        )
+        self._assert_report_stage_runtime(
+            stage, runtime, run_kind="report_generation"
+        )
+        return GeneratedReportSections.create(stage, sections)
+
+    def run_final_audit_stage(
+        self,
+        stage: ReportFinalAuditInput,
+        runtime: ReportStageRuntime,
+    ) -> FinalizedReportArtifact:
+        if type(stage) is not ReportFinalAuditInput:
+            raise ReportStageBoundaryError("invalid Report final-audit input")
+        generated = stage.generated
+        if type(generated) is not GeneratedReportSections:
+            raise ReportStageBoundaryError("invalid generated Report ownership")
+        generation = generated.generation
+        self._assert_report_stage_runtime(
+            generation, runtime, run_kind="report_generation"
+        )
+        sections = [dict(section) for section in generated.sections]
+        body_signature = tuple(
+            str(section.get("markdown") or "") for section in sections
+        )
+        content_md, gaps, references = self._assemble(
+            generation.notebook_id,
+            generation.report_id,
+            generation.research_question,
+            thaw_report_control(generation.outline),
+            sections,
+            display_question=generation.display_question,
+        )
+        if body_signature != tuple(
+            str(section.get("markdown") or "") for section in sections
+        ):
+            raise ReportStageBoundaryError("Report final audit rewrote section prose")
+        self._assert_report_stage_runtime(
+            generation, runtime, run_kind="report_generation"
+        )
+        synthesis_status = generated.synthesis_status
+        unsupported = sum(
+            int(
+                (section.get("citation_audit") or {}).get(
+                    "unsupported", 0
+                )
+                or 0
+            )
+            for section in sections
+            if isinstance(section.get("citation_audit"), dict)
+        )
+        facts = ReportAuditFacts(
+            section_count=len(sections),
+            successful_section_count=generated.successful_count,
+            failed_section_count=len(sections) - generated.successful_count,
+            reference_count=len(references),
+            gap_count=len(gaps),
+            claim_ledgers_available=sum(
+                section.get("claim_ledger_status") in {"available", "partial"}
+                for section in sections
+            ),
+            claim_ledgers_partial=sum(
+                section.get("claim_ledger_status") == "partial"
+                for section in sections
+            ),
+            unsupported_high_risk_assertions=unsupported,
+            content_chars=len(content_md),
+            synthesis_status=synthesis_status,
+        )
+        persisted_sections: list[Mapping[str, object]] = []
+        for section in sections:
+            clean = dict(section)
+            clean.pop("id_map", None)
+            clean.pop("_synthesis_blueprint", None)
+            clean.pop("_synthesis_status", None)
+            persisted_sections.append(MappingProxyType(clean))
+        return FinalizedReportArtifact(
+            generation=generation,
+            sections=tuple(persisted_sections),
+            content_md=content_md,
+            gaps=tuple(gaps),
+            references=tuple(MappingProxyType(dict(row)) for row in references),
+            audit_facts=facts,
+        )
+
+    def _generate_run(
+        self,
+        notebook_id,
+        rid,
+        question,
+        depth: int = 2,
+        *,
+        runtime: ReportStageRuntime,
+    ) -> CommittedReport | None:
         reports = self.dependencies.reports
         try:
             d = reports.get_report(notebook_id, rid)
@@ -2537,6 +2843,17 @@ class ReportEngine:
                 reports.update_report(notebook_id, rid, status="failed",
                                       error="no outline to generate", progress="无大纲")
                 return
+            generation = ReportGenerationInput.create(
+                notebook_id=notebook_id,
+                report_id=rid,
+                original_question=question,
+                display_question=display_question,
+                research_question=research_question,
+                depth=depth,
+                actor_id=self.user_id,
+                understanding=understanding,
+                outline=outline,
+            )
             gate = self.dependencies.generation_gate
 
             def _queued():
@@ -2550,90 +2867,61 @@ class ReportEngine:
                 gate.slot(cancel_event=self.cancel_event, on_wait=_queued)
                 if gate is not None else nullcontext()
             )
-            report_done = False
             with slot:
                 reports.update_report(notebook_id, rid, status="generating",
                                       progress=f"章节 0/{len(outline)} 完成")
-                sections = self._run_sections(
-                    notebook_id, rid, outline, research_question, depth
+                generated = execute_report_generation_stage(
+                    self, generation, runtime
                 )
                 # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
                 reports.update_report(notebook_id, rid, progress="汇总中")
-                content_md, gaps, references = self._assemble(
-                    notebook_id, rid, research_question, outline, sections,
-                    display_question=display_question,
+                artifact = execute_report_final_audit_stage(
+                    self, ReportFinalAuditInput(generated), runtime
                 )
-                successful_sections = [
-                    section for section in sections
-                    if str(section.get("markdown") or "").strip()
-                    and not section.get("failed")
-                ]
-                for s in sections:
-                    s.pop("id_map", None)          # 账目仅供 assemble,不入库
-                    s.pop("_synthesis_blueprint", None)
-                    s.pop("_synthesis_status", None)
-                if not successful_sections:
+                sections = [dict(section) for section in artifact.sections]
+                gaps = list(artifact.gaps)
+                references = [dict(row) for row in artifact.references]
+                if generated.successful_count == 0:
                     reports.update_report(
                         notebook_id, rid, sections=sections,
-                        content_md=content_md, gaps=gaps,
+                        content_md=artifact.content_md, gaps=gaps,
                         references=references, status="failed",
                         error="所有章节均未产出有效正文，可从已确认大纲重试生成",
                         progress="生成失败",
                     )
                     return
-                reports.update_report(
-                    notebook_id, rid, sections=sections,
-                    content_md=content_md, gaps=gaps,
-                    references=references, status="done", progress="完成",
-                )
-                report_done = True
-            # Agentic Memory P1 (T5, repair round):报告完成是覆盖层链路的
-            # 第二个触发点,且**直接达阈**(设计 §5.3:一份报告是天然的高信息
-            # 量结束点——确认过的意图、审阅过的大纲、跨多节的完整检索,全部
-            # 出自同一个人在同一个库里)。挂在 ``status="done"`` 那次写之后,
-            # 只有这一条路;失败/取消的报告说明不了这个人怎么检索。
-            #
-            # 刻意挪到 ``with slot:`` **之外**:这只是「报告已经完成」之后的
-            # 记账,不是生成本身的一部分,继续占着这本笔记本的生成准入闸位
-            # 等它跑完,会让排在后面的下一份报告多等一次写而拿不到任何好处
-            # ——报告行此刻已经落成终态,槽位释放的时刻不改变落库的任何内容,
-            # 只改变下一份排队报告等多久开始。fail-open 在服务内,这里再包
-            # 一层是因为它落在会把异常判成「生成失败」的 except 里——报告
-            # 已经落库完成,不能因为排不上一个后台整理而被改判。
-            if report_done:
-                self._note_report_completed(notebook_id)
+                raise_if_cancelled(self.cancel_event)
+                if not reports.complete_report_generation(
+                    notebook_id,
+                    rid,
+                    sections=sections,
+                    content_md=artifact.content_md,
+                    gaps=gaps,
+                    references=references,
+                ):
+                    return None
+            return CommittedReport(
+                notebook_id=notebook_id,
+                report_id=rid,
+                actor_id=self.user_id,
+                audit_facts=artifact.audit_facts,
+            )
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
+            return None
+        except ReportStageBoundaryError as exc:
+            reports.update_report(
+                notebook_id,
+                rid,
+                status="failed",
+                error=str(exc)[:500],
+                progress="失败",
+            )
+            raise
         except Exception as exc:
             reports.update_report(notebook_id, rid, status="failed",
                                   error=str(exc)[:500], progress="失败")
-
-    def _note_report_completed(self, notebook_id: str) -> None:
-        """Signal the overlay chain of the member who triggered THIS
-        generation run — fail-open, always.
-
-        ``self.user_id`` is that member (see the constructor's own comment:
-        "发起者身份"), explicitly passed in and never read from the request
-        ContextVar — reports run on a background thread where
-        ``current_user()`` falls back to the seeded admin, and that fallback
-        would consolidate someone else's private notes from this report.
-        This is deliberately NOT necessarily "the report's creator": in a
-        shared notebook any writable member can (re)trigger generation of a
-        report someone else created (e.g. retrying from a confirmed outline
-        after the original author left), and the overlay must credit whoever
-        actually ran and watched THIS retrieval, not the row's historical
-        owner.
-        """
-        service = self.dependencies.agent_profile_jobs
-        if service is None or not self.user_id:
-            return
-        try:
-            service.note_report_completed(notebook_id, self.user_id)
-        except Exception:  # noqa: BLE001 — the report is finished and stored
-            _log.exception(
-                "agent profile report notification failed for notebook %s",
-                notebook_id,
-            )
+            return None
 
     def _auto_confirm_intent(self, notebook_id: str, rid: str,
                              contract: dict | None, *,
@@ -2762,7 +3050,7 @@ class ReportEngine:
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
             auto_generate: bool = False, intent_contract=None,
             require_intent_review: bool = False, source_scope=None,
-            base_scope=None, scope_reconfirm=None) -> None:
+            base_scope=None, scope_reconfirm=None) -> CommittedReport | None:
         if require_intent_review and intent_contract is None:
             prepared_contract = self.prepare_intent(
                 notebook_id, rid, question, history,
@@ -2799,7 +3087,7 @@ class ReportEngine:
                     if self.dependencies.reports.claim_report_generation(
                         notebook_id, rid
                     ):
-                        self.generate(notebook_id, rid, question, depth)
+                        return self.generate(notebook_id, rid, question, depth)
                 return
         self.plan_outline(
             notebook_id, rid, question, history,
@@ -2808,7 +3096,8 @@ class ReportEngine:
         if not auto_generate:
             return
         if self.dependencies.reports.claim_report_generation(notebook_id, rid):
-            self.generate(notebook_id, rid, question, depth)
+            return self.generate(notebook_id, rid, question, depth)
+        return None
 
     # --- Stage D:汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
     def _assemble(self, notebook_id, rid, question, outline, sections, *,
