@@ -148,6 +148,7 @@ class ParserChainExecution:
         self._mineru_error = ""
         self._temp_path: Path | None = None
         self.materialized = False
+        self.assets_pending = False
         self._proposals: dict[str, _ProposalToken] = {}
         self._payloads: dict[str, _Candidate] = {}
         self._probe_started: set[str] = set()
@@ -332,6 +333,7 @@ class ParserChainExecution:
         if type(candidate) is not _Candidate:
             raise TypeError("missing parser candidate payload")
         self.delete_source_images()
+        self.assets_pending = True
         persist_image = self.make_persist_image()
         try:
             if contribution_id == PARSER_BUILTIN_PROVIDER:
@@ -389,10 +391,23 @@ class ParserChainExecution:
             )
             self.materialized = True
             return result
-        except Exception:
-            self.delete_source_images()
+        except BaseException:
             self.materialized = False
+            try:
+                self.delete_source_images()
+            except BaseException:
+                # Preserve the provider/cancellation failure. The ingestion
+                # workflow cannot mark this generation committed, and a later
+                # retry starts by deleting the same source generation again.
+                pass
+            else:
+                self.assets_pending = False
             raise
+
+    def mark_assets_committed(self) -> None:
+        """Transfer the accepted generation to the element transaction."""
+
+        self.assets_pending = False
 
     def warning(self, warning_code: str) -> None:
         return None

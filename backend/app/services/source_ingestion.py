@@ -969,6 +969,7 @@ class SourceIngestionService:
             self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
         source_parse_lock: threading.RLock | None = None
         source_parse_lock_acquired = False
+        parser_execution: ParserChainExecution | None = None
         parsed_assets_pending = False
         try:
             # 置 'parsing' 放在 try 内首行(不在 try 外):否则这句 DB 写若因磁盘满/
@@ -1061,6 +1062,7 @@ class SourceIngestionService:
                     # clear_source_extraction_state(后者也被 KG 抽取复用、发生在分块之后)。
                     self.sources.clear_chunked_at(db, source_id)
                 parsed_assets_pending = False
+                parser_execution.mark_assets_committed()
                 # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/
                 # 失败/hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
                 summary = self.summarize_source(source.title, elements)
@@ -1251,10 +1253,13 @@ class SourceIngestionService:
             # behind. Once replace_elements commits, the flag is cleared and
             # the generation becomes authoritative.
             try:
-                if parsed_assets_pending:
+                if parsed_assets_pending or (
+                    parser_execution is not None
+                    and parser_execution.assets_pending
+                ):
                     try:
                         self.delete_source_images(source_id)
-                    except Exception:
+                    except BaseException:
                         self.event_log.logger.exception(
                             "uncommitted parser assets cleanup failed for %s", source_id
                         )

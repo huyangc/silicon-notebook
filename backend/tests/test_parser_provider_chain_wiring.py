@@ -310,6 +310,57 @@ def test_non_workbook_remote_output_is_mapped_once(tmp_path, monkeypatch):
     assert calls == [1]
 
 
+def test_baseexception_during_materialize_cleans_started_asset_generation(
+    tmp_path
+):
+    class HardAbort(BaseException):
+        pass
+
+    cloud = _Client(
+        configured=True,
+        result=(
+            [
+                {
+                    "type": "image",
+                    "img_path": "figure.png",
+                    "image_caption": ["Figure."],
+                }
+            ],
+            {"figure.png": b"PNG"},
+        ),
+    )
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF-1.4")
+    deletes = []
+    execution = ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id="source-1",
+        source_kind="file",
+        file_path=str(path),
+        file_name="doc.pdf",
+        source_url="",
+        mineru_client=_Client(),
+        cloud_client=cloud,
+        connection=_Connection(),
+        make_persist_image=lambda: (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                HardAbort("asset write interrupted")
+            )
+        ),
+        delete_source_images=lambda: deletes.append(1),
+        event_sink=lambda _event: None,
+    )
+
+    proposal = execution.probe(PARSER_CLOUD_PROVIDER)
+    assert proposal.accepted is True
+    with pytest.raises(HardAbort, match="asset write interrupted"):
+        execution.materialize(PARSER_CLOUD_PROVIDER, proposal.value)
+
+    assert execution.materialized is False
+    assert execution.assets_pending is False
+    assert deletes == [1, 1]
+
+
 def test_rejected_workbook_writes_no_assets_before_builtin_fallback(
     tmp_path, monkeypatch
 ):
