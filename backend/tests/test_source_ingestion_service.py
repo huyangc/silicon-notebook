@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 
 from app.core.config import Settings
+from app.extensions import default_extension_runtime
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.source_ingestion import SourceIngestionService, SourcePipelineHooks
@@ -36,13 +37,20 @@ PHASES = (
 )
 
 
+def _repository(settings: Settings) -> SQLiteRepository:
+    return SQLiteRepository(
+        settings,
+        parser_provider_chain_host=default_extension_runtime().parser_chain,
+    )
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings())
+    return _repository(Settings())
 
 
 @pytest.fixture
@@ -51,7 +59,7 @@ def embed_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings())
+    return _repository(Settings())
 
 
 class _FakeLLM:
@@ -149,9 +157,11 @@ def test_upload_without_scheduler_processes_inline(repo, monkeypatch):
 
 
 def test_parsed_source_and_elements_commit_before_chunk_build(repo, monkeypatch):
-    import app.services.sqlite_repository as facade_mod
+    import app.services.parser_chain_execution as parser_execution
     monkeypatch.setattr(
-        facade_mod, "parse_source_file", lambda *a, **k: [_element("chunk body " * 40)]
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda *a, **k: [_element("chunk body " * 40)],
     )
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id)
@@ -572,9 +582,11 @@ def test_background_embedding_overlaps_extraction_and_extracted_gates_on_extract
 def test_fresh_hooks_preserve_post_construction_component_monkeypatch(
     repo, monkeypatch
 ):
-    import app.services.sqlite_repository as facade_mod
+    import app.services.parser_chain_execution as parser_execution
     monkeypatch.setattr(
-        facade_mod, "parse_source_file", lambda *a, **k: [_element("body text")]
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda *a, **k: [_element("body text")],
     )
     repo.settings.kg_auto_extract = True
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -651,9 +663,11 @@ def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeyp
         "enqueue existing-index fold",
     ]
 
-    import app.services.sqlite_repository as facade_mod
+    import app.services.parser_chain_execution as parser_execution
     monkeypatch.setattr(
-        facade_mod, "parse_source_file", lambda *a, **k: [_element("event body")]
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda *a, **k: [_element("event body")],
     )
     repo.settings.kg_auto_extract = True
     monkeypatch.setattr(
@@ -739,7 +753,7 @@ def test_process_source_persists_mineru_local_image_to_source_assets(tmp_path, m
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("MINERU_MODE", "http")
     monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = f"src-{uuid4().hex[:10]}"
@@ -792,7 +806,7 @@ def _seed_source_with_mineru_image(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("MINERU_MODE", "http")
     monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = f"src-{uuid4().hex[:10]}"
@@ -894,7 +908,7 @@ def test_upload_file_uses_cloud_when_only_cloud_configured(tmp_path, monkeypatch
     monkeypatch.delenv("MINERU_MODE", raising=False)          # 本地 off → not configured
     monkeypatch.delenv("MINERU_API_URL", raising=False)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok")             # 云端 configured
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     nb, sid = _seed_queued_pdf(repo, tmp_path)
 
     png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
@@ -924,7 +938,7 @@ def test_upload_file_cloud_error_falls_back_to_local_python(tmp_path, monkeypatc
     monkeypatch.delenv("MINERU_MODE", raising=False)
     monkeypatch.delenv("MINERU_API_URL", raising=False)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok")
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     nb, sid = _seed_queued_pdf(repo, tmp_path)
 
     def _boom(path, data_id=""):
@@ -985,7 +999,7 @@ def test_docx_local_python_fallback_after_mineru_error_warns(tmp_path, monkeypat
     monkeypatch.setenv("MINERU_MODE", "http")                 # 本地 MinerU configured
     monkeypatch.setenv("MINERU_API_URL", "http://mineru.internal")
     monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     docx_path = _write_docx(tmp_path / "real.docx")
     nb, sid = _seed_queued_office(repo, docx_path, "real.docx", "docx")
 
@@ -1012,7 +1026,7 @@ def test_docx_fallback_without_mineru_configured_does_not_warn(tmp_path, monkeyp
     monkeypatch.delenv("MINERU_MODE", raising=False)
     monkeypatch.delenv("MINERU_API_URL", raising=False)
     monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     docx_path = _write_docx(tmp_path / "real.docx")
     nb, sid = _seed_queued_office(repo, docx_path, "real.docx", "docx")
 
@@ -1046,7 +1060,7 @@ def test_xlsx_fallback_to_openpyxl_does_not_warn(tmp_path, monkeypatch):
     monkeypatch.setenv("MINERU_MODE", "http")                 # 本地 MinerU configured
     monkeypatch.setenv("MINERU_API_URL", "http://mineru.internal")
     monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     book = _write_xlsx(tmp_path / "real.xlsx")
     nb, sid = _seed_queued_office(repo, book, "real.xlsx", "xlsx")
 
@@ -1073,7 +1087,7 @@ def test_cloud_only_config_does_not_upload_non_mineru_suffixes(tmp_path, monkeyp
     monkeypatch.delenv("MINERU_MODE", raising=False)          # 本地 off
     monkeypatch.delenv("MINERU_API_URL", raising=False)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok")             # 云端 configured
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     csv_path = tmp_path / "rows.csv"
     csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
     nb, sid = _seed_queued_office(repo, csv_path, "rows.csv", "csv")
@@ -1103,7 +1117,7 @@ def test_cloud_only_config_still_uploads_xlsx(tmp_path, monkeypatch):
     monkeypatch.delenv("MINERU_MODE", raising=False)
     monkeypatch.delenv("MINERU_API_URL", raising=False)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok")
-    repo = SQLiteRepository(Settings())
+    repo = _repository(Settings())
     book = tmp_path / "book.xlsx"
     book.write_bytes(b"PK\x03\x04stub")
     nb, sid = _seed_queued_office(repo, book, "book.xlsx", "xlsx")
@@ -1150,7 +1164,7 @@ def _cloud_only_repo(tmp_path, monkeypatch):
     monkeypatch.delenv("MINERU_MODE", raising=False)           # 本地 off
     monkeypatch.delenv("MINERU_API_URL", raising=False)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok")              # 云端 configured
-    return SQLiteRepository(Settings())
+    return _repository(Settings())
 
 
 def test_cloud_workbook_output_must_clear_the_coverage_reconciliation(tmp_path, monkeypatch):

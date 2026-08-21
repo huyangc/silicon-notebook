@@ -4,8 +4,6 @@ import concurrent.futures
 import contextvars
 import hashlib
 import json
-import os
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -16,6 +14,7 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import cap_kwargs
+from app.domain.extensions import ParserProviderChainHostPort
 from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
@@ -49,13 +48,9 @@ from app.services.paper_meta import (
     paper_meta_prompt,
     verify_paper_meta,
 )
-from app.services.parser_registry import engine_supports_file
-from app.services.parsers import (
-    MINERU_FALLBACK_WARNING_SUFFIXES,
-    MINERU_WORKBOOK_SUFFIXES,
-    mineru_content_list_to_elements,
-    mineru_label_prefix,
-    mineru_workbook_output_accepted,
+from app.services.parser_chain_execution import (
+    PARSER_FALLBACK_WARNING_CODE,
+    ParserChainExecution,
 )
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
@@ -147,7 +142,8 @@ class SourceIngestionService:
         source_elements: Callable[[str], List[SourceElement]],
         summarize_source: Callable[[str, List[SourceElement]], str],
         source_type_from_name: Callable[[str], str],
-        parse_file: Callable[..., List[SourceElement]],
+        parser_provider_chain: ParserProviderChainHostPort,
+        parser_connection_probe: Any,
         make_persist_image: Callable[[str, str, str], Any],
         delete_source_images: Callable[[str], None],
         mineru_client: Callable[[], Any],
@@ -191,7 +187,8 @@ class SourceIngestionService:
         self.source_elements = source_elements
         self.summarize_source = summarize_source
         self.source_type_from_name = source_type_from_name
-        self.parse_file = parse_file
+        self.parser_provider_chain = parser_provider_chain
+        self.parser_connection_probe = parser_connection_probe
         self.make_persist_image = make_persist_image
         self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
@@ -254,9 +251,9 @@ class SourceIngestionService:
         # 周期:refcount 归零(无活跃 invocation)时一并清除,免得每见一个源就永久留锁。
         # get-or-create 在 _active_sources_lock 下做,但**获取锁本身**在该 meta 锁之外
         # (否则持 meta 锁等 per-source 锁会死锁)。
-        self._source_chunk_locks: dict[str, threading.Lock] = {}
+        self._source_chunk_locks: dict[str, threading.RLock] = {}
 
-    def _source_chunk_lock(self, source_id: str) -> threading.Lock:
+    def _source_chunk_lock(self, source_id: str) -> threading.RLock:
         """取(或懒创建)某源的分块串行锁。仅在 _active_sources_lock 下 get-or-create
         锁对象(快),**不**在这里 acquire——调用方拿到后自行 ``with`` 获取,以免持 meta
         锁阻塞在 per-source 锁上造成死锁。清除在 process_source 的 finally 里,与租约
@@ -264,7 +261,7 @@ class SourceIngestionService:
         with self._active_sources_lock:
             lock = self._source_chunk_locks.get(source_id)
             if lock is None:
-                lock = threading.Lock()
+                lock = threading.RLock()
                 self._source_chunk_locks[source_id] = lock
             return lock
 
@@ -932,30 +929,6 @@ class SourceIngestionService:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
 
-    def parse_url_via_local(
-        self, source_id: str, url: str, file_name: str, persist_image: Any = None
-    ) -> List[SourceElement]:
-        """下载 URL 到临时文件，走本地 MinerU/PyMuPDF4LLM 解析（数据不出网）。
-
-        复用 parse_source_file 的「本地 MinerU 失败→Python 兜底」路径，与文件上传一致；
-        全程不触达 mineru.net 云端。解析后无论成败都清理临时文件。`persist_image`
-        (Task 8) 与文件上传路径同款透传给 parse_source_file/parse_pdf。
-        """
-        fd, tmp = tempfile.mkstemp(suffix=".pdf")
-        os.close(fd)
-        tmp_path = Path(tmp)
-        try:
-            remote_sources.download_pdf(url, tmp_path)
-            return self.parse_file(
-                source_id, str(tmp_path), file_name or "source.pdf", self.mineru_client(),
-                persist_image=persist_image,
-            )
-        finally:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -994,6 +967,8 @@ class SourceIngestionService:
         # finally 覆盖所有出口做减。
         with self._active_sources_lock:
             self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
+        source_parse_lock: threading.RLock | None = None
+        parsed_assets_pending = False
         try:
             # 置 'parsing' 放在 try 内首行(不在 try 外):否则这句 DB 写若因磁盘满/
             # 写锁异常/库损坏抛出,会在进 try 前传出、绕过下面 finally 的租约释放,
@@ -1001,134 +976,38 @@ class SourceIngestionService:
             # 落 'failed'、finally 照常 pop。stamp(上一行,锁内 dict 赋值)不抛,留在
             # try 外无妨。
             self.set_source_status(source_id, "parsing")
+            # The accepted parser materializer deletes/replaces image assets.
+            # Serialize that boundary with element/chunk replacement for the
+            # same source so concurrent reparses cannot delete each other's
+            # final asset generation. Different sources remain fully parallel.
+            source_parse_lock = self._source_chunk_lock(source_id)
+            source_parse_lock.acquire()
             t = time.perf_counter()
             stage("parse", "start", t)
-            # Task 9: 清掉这个源之前遗留的 MinerU 图片资产(行+盘)——必须在下面
-            # 任何新图片持久化之前执行,否则会把刚写的新图也一并删掉。首次解析时
-            # 这是无害的空操作(还没有图片);重新解析时清出一个干净的起点,避免
-            # 每次重解析都在 notebook_assets 里累积孤儿行/文件。
-            self.delete_source_images(source_id)
-            # Task 8: per-source 图片持久化闭包(张数/尺寸/mime 护栏由工厂内置，
-            # mineru_return_images 关时为 None——三条解析路径都能安全接受 None)。
-            persist_image = self.make_persist_image(
-                source.notebook_id, source_id, getattr(source, "created_by", "") or ""
+            parser_execution = ParserChainExecution(
+                host=self.parser_provider_chain,
+                source_id=source_id,
+                source_kind="url" if source.source_url else "file",
+                file_path=source.file_path,
+                file_name=source.file_name,
+                source_url=source.source_url,
+                mineru_client=self.mineru_client(),
+                cloud_client=self.mineru_cloud_client(),
+                connection=self.parser_connection_probe,
+                make_persist_image=lambda: self.make_persist_image(
+                    source.notebook_id,
+                    source_id,
+                    getattr(source, "created_by", "") or "",
+                ),
+                delete_source_images=lambda: self.delete_source_images(source_id),
+                event_sink=self.event_log.emit,
             )
-            # URL 来源：本地 MinerU 已配置则优先本地（下载到临时文件，数据不出网），
-            # 否则走 mineru.net 云端；本地文件来源走 MinerU/Python fallback。
-            # 本地优先时绝不静默回落云端——内网部署不能把内部 PDF 外发。
-            if source.source_url:
-                mineru_client = self.mineru_client()
-                if mineru_client.configured:
-                    elements = self.parse_url_via_local(
-                        source_id, source.source_url, source.file_name, persist_image
-                    )
-                    mineru_error = str(getattr(mineru_client, "last_error", "") or "")
-                    parser_mode = f"mineru_local({mineru_client.mode})"
-                else:
-                    cloud_client = self.mineru_cloud_client()
-                    try:
-                        content_list, images = cloud_client.parse_url_with_images(
-                            source.source_url, data_id=source_id
-                        )
-                        elements = mineru_content_list_to_elements(
-                            source_id,
-                            content_list,
-                            label_prefix=mineru_label_prefix(source.file_name or ""),
-                            images=images,
-                            persist_image=persist_image,
-                        )
-                        if not elements:
-                            raise RuntimeError(
-                                "MinerU cloud content_list mapped to zero source elements"
-                            )
-                        mineru_error = str(getattr(cloud_client, "last_error", "") or "")
-                        parser_mode = "mineru_cloud"
-                    except Exception as exc:
-                        # The cloud request has already exhausted the shared retry
-                        # budget. Download the public PDF and parse it locally so a
-                        # transient mineru.net outage does not fail the source.
-                        mineru_error = str(getattr(cloud_client, "last_error", "") or exc)
-                        elements = self.parse_url_via_local(
-                            source_id, source.source_url, source.file_name, persist_image
-                        )
-                        parser_mode = "python_pdf_fallback_after_cloud_error"
-            else:
-                mineru_client = self.mineru_client()
-                cloud_client = self.mineru_cloud_client()
-                # 云端上传只对 mineru_cloud 引擎声明支持的后缀发起（真源=
-                # parser_registry 的引擎扩展名表）。.md/.csv/.txt 这类后缀上传
-                # mineru.net 是把用户内容外发给一个根本解析不了它的第三方，既是
-                # 不必要的隐私暴露，又白付一次网络往返和重试预算——它们直接走
-                # 本地解析（与「两者都没配」同一路径）。
-                # ⚠ 上面的 URL 分支**刻意**没有这道后缀闸，不是遗漏：URL 添加侧的
-                # probe_pdf 已经在入库前挡掉非 PDF，「添加链接」语义上就是 PDF，
-                # 这里再按 file_name 后缀判一次只会误伤没有扩展名的合法 PDF URL。
-                if (
-                    not mineru_client.configured
-                    and cloud_client.configured
-                    and engine_supports_file("mineru_cloud", source.file_name)
-                ):
-                    # 本地 http/cli 未配置 + 云端已配 → 上传文件走云端(对称 URL 分支)；
-                    # 云端任一步失败 → 回落本地 Python 解析，摄取不中断。
-                    try:
-                        content_list, images = cloud_client.parse_file_with_images(
-                            source.file_path, data_id=source_id
-                        )
-                        label_prefix = mineru_label_prefix(source.file_name or "")
-                        suffix = Path(source.file_name or "").suffix.lower()
-                        is_workbook = suffix in MINERU_WORKBOOK_SUFFIXES
-                        # 工作簿先做**不带 persist_image** 的探针映射跑行+格覆盖对账，
-                        # 通过才带完整参数重映射：cloud-only 部署走的是这条路而不是
-                        # parse_xlsx，不在这里对账就等于给云端产出开了个绕过护栏的后门；
-                        # 而一次性带 persist_image 映射会让拒收路径留下孤儿图片资产。
-                        # 非工作簿后缀维持原来的单次映射（PDF/DOCX/PPTX 没有可对账的
-                        # 物理行分母）。
-                        elements = mineru_content_list_to_elements(
-                            source_id,
-                            content_list,
-                            label_prefix=label_prefix,
-                            images=None if is_workbook else images,
-                            persist_image=None if is_workbook else persist_image,
-                        )
-                        if not elements:
-                            raise RuntimeError(
-                                "MinerU cloud content_list mapped to zero source elements"
-                            )
-                        if is_workbook:
-                            if not mineru_workbook_output_accepted(
-                                Path(source.file_path), elements
-                            ):
-                                # 抛给下面的 except：回落 self.parse_file(...)，
-                                # cloud-only 时 parse_xlsx 没有本地 MinerU，自然落到
-                                # 全保真的 openpyxl。
-                                raise RuntimeError(
-                                    "MinerU cloud workbook output failed row/cell coverage "
-                                    "reconciliation"
-                                )
-                            elements = mineru_content_list_to_elements(
-                                source_id,
-                                content_list,
-                                label_prefix=label_prefix,
-                                images=images,
-                                persist_image=persist_image,
-                            )
-                        mineru_error = str(getattr(cloud_client, "last_error", "") or "")
-                        parser_mode = "mineru_cloud"
-                    except Exception as exc:
-                        mineru_error = str(getattr(cloud_client, "last_error", "") or exc)
-                        elements = self.parse_file(
-                            source_id, source.file_path, source.file_name, mineru_client,
-                            persist_image=persist_image,
-                        )
-                        parser_mode = "python_pdf_fallback_after_cloud_error"
-                else:
-                    # 本地已配(http/cli) 或 两者都没配 → 本地 MinerU / Python fallback。
-                    elements = self.parse_file(
-                        source_id, source.file_path, source.file_name, mineru_client,
-                        persist_image=persist_image,
-                    )
-                    mineru_error = str(getattr(mineru_client, "last_error", "") or "")
-                    parser_mode = str(getattr(mineru_client, "mode", ""))
+            parsed = parser_execution.run()
+            parsed_assets_pending = parser_execution.materialized
+            elements = list(parsed.elements)
+            mineru_error = parsed.mineru_error
+            parser_mode = parsed.parser_mode
+            parser_warning_code = parsed.warning_code
             element_parsers = sorted(
                 {
                     str(element.metadata.get("parser", ""))
@@ -1179,6 +1058,7 @@ class SourceIngestionService:
                     # 失败则留 NULL,正是 H3 的损坏信号。刻意就地一条而非折进
                     # clear_source_extraction_state(后者也被 KG 抽取复用、发生在分块之后)。
                     self.sources.clear_chunked_at(db, source_id)
+                parsed_assets_pending = False
                 # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/
                 # 失败/hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
                 summary = self.summarize_source(source.title, elements)
@@ -1200,6 +1080,9 @@ class SourceIngestionService:
                     # chunk/pending memos so the next open recomputes, not serves stale.
                     self.invalidate_knowledge_counts(notebook_id)
 
+            source_parse_lock.release()
+            source_parse_lock = None
+
             # Hints + notebook-meta augmentation do NOT depend on KG extraction
             # output; compute/persist them up front so the terminal 'extracted'
             # mark can be the LAST write. For the KG path that terminal mark is now
@@ -1211,7 +1094,7 @@ class SourceIngestionService:
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             # file_name 在库里可为空(URL 来源/历史行),两处判据共用同一防御形态。
-            suffix = Path(source.file_name or "").suffix.lower()
+            suffix = ".pdf" if source.source_url else Path(source.file_name or "").suffix.lower()
             empty_hint = ""
             if not elements and suffix == ".pdf":
                 empty_hint = (
@@ -1224,12 +1107,7 @@ class SourceIngestionService:
             # 兜底对单元格值全保真,见 MINERU_FALLBACK_WARNING_SUFFIXES。其余两个
             # 条件不变——它们已经保证「MinerU 根本没配置时的正常兜底」不打警告。
             used_python_fallback_after_mineru_error = (
-                suffix in MINERU_FALLBACK_WARNING_SUFFIXES
-                and "mineru" not in element_parsers
-                and (
-                    parser_mode == "python_pdf_fallback_after_cloud_error"
-                    or self.mineru_client().configured
-                )
+                parser_warning_code == PARSER_FALLBACK_WARNING_CODE
             )
             if used_python_fallback_after_mineru_error:
                 # 前缀常量的名字与取值都不可改:四个存储层、shadow parity 与既有
@@ -1347,6 +1225,13 @@ class SourceIngestionService:
             embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
+            if parsed_assets_pending:
+                try:
+                    self.delete_source_images(source_id)
+                except Exception:
+                    self.event_log.logger.exception(
+                        "uncommitted parser assets cleanup failed for %s", source_id
+                    )
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
             self.event_log.logger.exception("process_source failed for %s", source_id)
             self.set_source_status(
@@ -1364,6 +1249,8 @@ class SourceIngestionService:
             # 下面的 maybe_enqueue_scale_fold,后者是独立的空闲收尾、不需要持租约。此处的
             # 分块锁在本方 with 块内已释放,减租约到 0 时可安全 pop(与 backfill 守卫共用
             # _release_source_lease:backfill 也登记租约,故本方持锁的窗口里锁不会被它 pop)。
+            if source_parse_lock is not None:
+                source_parse_lock.release()
             self._release_source_lease(source_id)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source

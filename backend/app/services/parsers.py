@@ -83,6 +83,39 @@ def mineru_label_prefix(file_name: str) -> str:
     return _MINERU_LABEL_PREFIXES.get(Path(file_name or "").suffix.lower(), "PDF")
 
 
+def parse_builtin_source_file(
+    source_id: str,
+    file_path: str,
+    file_name: str,
+    persist_image: Any = None,
+) -> List[SourceElement]:
+    """Dispatch only to the guaranteed local parser surface.
+
+    Optional MinerU selection belongs exclusively to the parser ProviderChain.
+    Keeping this function provider-free prevents a builtin fallback from
+    re-entering an earlier link and issuing a second remote request.
+    """
+    parser_id = builtin_parser_id(file_name)
+    if parser_id == "markdown":
+        return parse_markdown(source_id, Path(file_path), persist_image=persist_image)
+    if parser_id == "docx":
+        return parse_docx_mammoth(source_id, Path(file_path))
+    if parser_id == "pptx":
+        return parse_pptx_pythonpptx(source_id, Path(file_path))
+    if parser_id == "pdf":
+        return parse_pdf_python(source_id, Path(file_path))
+    if parser_id == "csv":
+        return parse_csv(source_id, Path(file_path))
+    if parser_id == "xlsx":
+        return parse_xlsx_basic(source_id, Path(file_path))
+    if parser_id == "xls":
+        # 旧版二进制 Excel（BIFF）。MinerU 不支持该格式，没有优先分支——不进
+        # MINERU_CAPABLE_SUFFIXES，也不传 mineru_client。xlrd 是纯 Python 读取器，
+        # 直接兜底到底。
+        return parse_xls(source_id, Path(file_path))
+    return parse_plain_text(source_id, Path(file_path), "text")
+
+
 def parse_source_file(
     source_id: str,
     file_path: str,
@@ -90,25 +123,11 @@ def parse_source_file(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    parser_id = builtin_parser_id(file_name)
-    if parser_id == "markdown":
-        return parse_markdown(source_id, Path(file_path), persist_image=persist_image)
-    if parser_id == "docx":
-        return parse_docx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if parser_id == "pptx":
-        return parse_pptx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if parser_id == "pdf":
-        return parse_pdf(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if parser_id == "csv":
-        return parse_csv(source_id, Path(file_path))
-    if parser_id == "xlsx":
-        return parse_xlsx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if parser_id == "xls":
-        # 旧版二进制 Excel（BIFF）。MinerU 不支持该格式，没有优先分支——不进
-        # MINERU_CAPABLE_SUFFIXES，也不传 mineru_client。xlrd 是纯 Python 读取器，
-        # 直接兜底到底。
-        return parse_xls(source_id, Path(file_path))
-    return parse_plain_text(source_id, Path(file_path), "text")
+    """Backward-compatible name for the provider-free builtin dispatcher."""
+
+    return parse_builtin_source_file(
+        source_id, file_path, file_name, persist_image=persist_image
+    )
 
 
 def parse_csv(source_id: str, path: Path) -> List[SourceElement]:
@@ -139,62 +158,7 @@ def parse_xlsx(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    """Parse an XLSX/XLSM via MinerU when configured, else fall back to openpyxl.
-
-    MinerU natively parses XLSX (alongside PDF/DOCX/PPTX), keeping table
-    structure as HTML instead of the flat "cell | cell | cell" row dump the
-    openpyxl fallback produces. When MinerU is not configured or fails, we
-    degrade to openpyxl so local/no-GPU dev works.
-
-    A non-empty MinerU result is NOT trusted on sight: MinerU renders the
-    workbook to pages, so print areas / column widths can drop whole columns or
-    sheets without raising. Every accepted result must first clear the
-    deterministic row+cell coverage reconciliation below.
-
-    映射分两段跑：先做一次**不带 persist_image** 的探针映射喂对账，只有对账通过才
-    带完整参数重映射一次并返回。`mineru_content_list_to_elements` 是纯函数（除
-    persist_image 外零 I/O），二次调用没有额外成本；反过来一次性带 persist_image
-    映射会在拒收路径上留下写好的图片资产行/文件而元素被丢弃——孤儿资产。
-    """
-    if mineru_client is not None and getattr(mineru_client, "configured", False):
-        try:
-            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
-            label_prefix = mineru_label_prefix(file_name or path.name)
-            elements = mineru_content_list_to_elements(
-                source_id,
-                content_list,
-                label_prefix=label_prefix,
-            )
-            if elements:
-                accepted, rows, total_rows, cells, total_cells = _mineru_workbook_reconcile(
-                    path, elements
-                )
-                if accepted:
-                    return mineru_content_list_to_elements(
-                        source_id,
-                        content_list,
-                        label_prefix=label_prefix,
-                        images=images,
-                        persist_image=persist_image,
-                    )
-                # 覆盖不足：整份丢弃，回落全保真的 openpyxl。沿用既有 last_error
-                # 语义（只在为空时写），让摄取层把它当作一次 MinerU 侧诊断记录。
-                if hasattr(mineru_client, "last_error") and not getattr(
-                    mineru_client, "last_error", ""
-                ):
-                    mineru_client.last_error = (
-                        f"MinerU workbook output covered {rows}/{total_rows} rows "
-                        f"and {cells}/{total_cells} cells; using openpyxl"
-                    )
-            elif hasattr(mineru_client, "last_error"):
-                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
-        except Exception as exc:
-            if hasattr(mineru_client, "last_error") and not getattr(
-                mineru_client, "last_error", ""
-            ):
-                mineru_client.last_error = str(exc)
-            # Fall through to openpyxl so a MinerU outage never blocks ingestion.
-            pass
+    """Compatibility wrapper for the provider-free openpyxl fallback."""
     return parse_xlsx_basic(source_id, path)
 
 
@@ -446,6 +410,14 @@ def mineru_workbook_output_accepted(path: Path, elements: List[SourceElement]) -
     return _mineru_workbook_reconcile(path, elements)[0]
 
 
+def mineru_workbook_reconciliation(
+    path: Path, elements: List[SourceElement]
+) -> tuple[bool, int, int, int, int]:
+    """Expose the pure reconciliation receipt to the core parser adapter."""
+
+    return _mineru_workbook_reconcile(path, elements)
+
+
 def _persist_markdown_data_uri(src: str, persist_image: Any, ordinal: int) -> str:
     """解析 `data:<mime>;base64,<payload>` 并按 MinerU 同款契约持久化。
 
@@ -631,34 +603,7 @@ def parse_docx(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    """Parse a DOCX via MinerU when configured, else fall back locally.
-
-    MinerU (3.1+) natively parses DOCX with layout/tables/formulas. When it is
-    not configured or fails, we degrade to mammoth, which keeps heading levels,
-    lists and table structure. python-docx stays as the last-resort fallback
-    (missing wheel / mammoth error) so local/no-GPU dev always completes.
-    """
-    if mineru_client is not None and getattr(mineru_client, "configured", False):
-        try:
-            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
-            elements = mineru_content_list_to_elements(
-                source_id,
-                content_list,
-                label_prefix=mineru_label_prefix(file_name or path.name),
-                images=images,
-                persist_image=persist_image,
-            )
-            if elements:
-                return elements
-            if hasattr(mineru_client, "last_error"):
-                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
-        except Exception as exc:
-            if hasattr(mineru_client, "last_error") and not getattr(
-                mineru_client, "last_error", ""
-            ):
-                mineru_client.last_error = str(exc)
-            # Fall through to the local parsers so a MinerU outage never blocks ingestion.
-            pass
+    """Compatibility wrapper for the provider-free DOCX fallback."""
     return parse_docx_mammoth(source_id, path)
 
 
@@ -926,34 +871,7 @@ def parse_pptx(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    """Parse a PPTX via MinerU when configured, else fall back locally.
-
-    MinerU (3.0+) natively parses PPTX. When it is not configured or fails, we
-    degrade to python-pptx, which also recovers slide tables, chart titles and
-    grouped shapes. The raw-XML slide/notes extractor stays as the last-resort
-    fallback (missing wheel / unreadable package) so local/no-GPU dev works.
-    """
-    if mineru_client is not None and getattr(mineru_client, "configured", False):
-        try:
-            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
-            elements = mineru_content_list_to_elements(
-                source_id,
-                content_list,
-                label_prefix=mineru_label_prefix(file_name or path.name),
-                images=images,
-                persist_image=persist_image,
-            )
-            if elements:
-                return elements
-            if hasattr(mineru_client, "last_error"):
-                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
-        except Exception as exc:
-            if hasattr(mineru_client, "last_error") and not getattr(
-                mineru_client, "last_error", ""
-            ):
-                mineru_client.last_error = str(exc)
-            # Fall through to the local parsers so a MinerU outage never blocks ingestion.
-            pass
+    """Compatibility wrapper for the provider-free PPTX fallback."""
     return parse_pptx_pythonpptx(source_id, path)
 
 
@@ -1225,30 +1143,7 @@ def parse_pdf(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    """Parse a PDF via MinerU when configured, else use the Python fallback.
-
-    MinerU (run on the GPU deployment host) recovers formulas (as LaTeX),
-    tables (as HTML), and reading order. When it is not configured or fails,
-    PyMuPDF4LLM produces layout-aware Markdown locally. pypdf remains the final
-    dependency/parser-error fallback so local/no-GPU ingestion still completes.
-    """
-    if mineru_client is not None and getattr(mineru_client, "configured", False):
-        try:
-            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
-            elements = mineru_content_list_to_elements(
-                source_id, content_list, images=images, persist_image=persist_image
-            )
-            if elements:
-                return elements
-            if hasattr(mineru_client, "last_error"):
-                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
-        except Exception as exc:
-            if hasattr(mineru_client, "last_error") and not getattr(
-                mineru_client, "last_error", ""
-            ):
-                mineru_client.last_error = str(exc)
-            # Fall through to the Python parser so MinerU outage never blocks ingestion.
-            pass
+    """Compatibility wrapper for the provider-free Python PDF fallback."""
     return parse_pdf_python(source_id, path)
 
 

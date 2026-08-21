@@ -1,11 +1,21 @@
+from pathlib import Path
+
 import pytest
 from app.core.config import Settings
+from app.extensions import default_extension_runtime
 from app.models.schemas import NotebookCreate
 from app.models.sources import ScopedSourceDetail, SourceElement
 from app.services import remote_sources
 from app.services.remote_sources import PdfProbe
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.sqlite_repository import SQLiteRepository
+
+
+def _repository(settings: Settings) -> SQLiteRepository:
+    return SQLiteRepository(
+        settings,
+        parser_provider_chain_host=default_extension_runtime().parser_chain,
+    )
 
 
 def _base_env(tmp_path, monkeypatch):
@@ -20,7 +30,7 @@ def cloud_repo(tmp_path, monkeypatch):
     _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok-test")
     monkeypatch.setenv("MINERU_MODE", "off")  # 仅云端：本地未配置，URL 走 mineru.net
-    return SQLiteRepository(Settings())
+    return _repository(Settings())
 
 
 @pytest.fixture
@@ -28,7 +38,7 @@ def notoken_repo(tmp_path, monkeypatch):
     _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("MINERU_API_TOKEN", "")
     monkeypatch.setenv("MINERU_MODE", "off")
-    return SQLiteRepository(Settings())
+    return _repository(Settings())
 
 
 @pytest.fixture
@@ -38,7 +48,7 @@ def local_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MINERU_API_TOKEN", "")
     monkeypatch.setenv("MINERU_MODE", "http")
     monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
-    return SQLiteRepository(Settings())
+    return _repository(Settings())
 
 
 def test_add_url_sources_creates_and_rejects(cloud_repo, monkeypatch):
@@ -147,8 +157,8 @@ def test_process_source_url_cloud_failure_uses_python_fallback_and_can_reparse(
     monkeypatch.setattr(cloud_repo.mineru_cloud_client, "parse_url_with_images", boom)
     fallback_calls = []
 
-    def local_python_fallback(source_id, url, file_name, persist_image=None):
-        fallback_calls.append((source_id, url, file_name))
+    def local_python_fallback(source_id, path, file_name, persist_image=None):
+        fallback_calls.append((source_id, "https://a/doc.pdf", file_name))
         return [
             SourceElement(
                 id="",
@@ -161,9 +171,13 @@ def test_process_source_url_cloud_failure_uses_python_fallback_and_can_reparse(
         ]
 
     monkeypatch.setattr(
-        cloud_repo._runtime.source_ingestion,
-        "parse_url_via_local",
-        local_python_fallback,
+        remote_sources,
+        "download_pdf",
+        lambda url, dest, **kw: Path(dest).write_bytes(b"%PDF-"),
+    )
+    import app.services.parser_chain_execution as parser_execution
+    monkeypatch.setattr(
+        parser_execution, "parse_builtin_source_file", local_python_fallback
     )
     cloud_repo.process_source(sid)
     detail = cloud_repo.get_source(sid)
@@ -205,9 +219,13 @@ def test_process_source_url_cloud_failure_empty_fallback_keeps_quality_warning(
         lambda url, **kw: (_ for _ in ()).throw(RuntimeError("cloud unavailable")),
     )
     monkeypatch.setattr(
-        cloud_repo._runtime.source_ingestion,
-        "parse_url_via_local",
-        lambda *args, **kwargs: [],
+        remote_sources,
+        "download_pdf",
+        lambda url, dest, **kw: Path(dest).write_bytes(b"%PDF-"),
+    )
+    import app.services.parser_chain_execution as parser_execution
+    monkeypatch.setattr(
+        parser_execution, "parse_builtin_source_file", lambda *args, **kwargs: []
     )
 
     cloud_repo.process_source(sid)

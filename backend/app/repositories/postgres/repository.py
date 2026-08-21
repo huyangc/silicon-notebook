@@ -4,7 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.config import Settings
-from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.extensions import (
+    ParserProviderChainHostPort,
+    RetrievalContributorHostPort,
+)
 from app.repositories.postgres.bundle import PostgresPersistenceBundleFactory
 from app.services.repository_facade import RepositoryFacade
 
@@ -16,6 +19,7 @@ class PostgresRepository(RepositoryFacade):
         *,
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
+        parser_provider_chain_host: ParserProviderChainHostPort | None = None,
     ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
@@ -24,6 +28,7 @@ class PostgresRepository(RepositoryFacade):
                 factory,
                 model_provider=model_provider,
                 retrieval_contributor_host=retrieval_contributor_host,
+                parser_provider_chain_host=parser_provider_chain_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a

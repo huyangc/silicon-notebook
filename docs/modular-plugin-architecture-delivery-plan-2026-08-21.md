@@ -145,13 +145,15 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-04：ProviderChain runner + acceptance contract
 
-状态：实现中；已冻结 dormant 三环 DAG、两阶段副作用合同与生产路由物理断线，待双路 review 与 CI。
+状态：已完成并合入；冻结 dormant 三环 DAG、两阶段副作用合同与生产路由物理断线，为 PR-05 的一次性切流提供合同。
 
 - 增加稳定 ID/DAG 链序、accept/reject-with-reason、warning、availability、取消和两段式副作用合同；
 - contract kit 覆盖拒收降级、失败降级、禁止路由、验收前零持久化副作用；
 - 组合现有 parser links，但暂不切换生产路由。
 
 #### PR-05：Parser routing 一次性切换
+
+状态：实现中；生产 ingestion 已切到唯一 ProviderChain，旧 dispatcher/facade patch seam 已删除，正在完成双路 review 与 CI。
 
 - 内置解析、MinerU self-hosted、MinerU cloud 全部切到 ProviderChain；
 - 保留 automatic routing、自托管不落公共云、workbook 对账、探针/带图重映射、fallback warning 真源集合；

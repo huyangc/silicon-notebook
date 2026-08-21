@@ -1,0 +1,238 @@
+from pathlib import Path
+
+from app.domain.extensions import ParsedSource
+from app.extensions import default_extension_runtime
+from app.models.sources import SourceElement
+from app.services import parser_chain_execution as execution_module
+from app.services.parser_chain_execution import (
+    PARSER_FALLBACK_WARNING_CODE,
+    ParserChainExecution,
+)
+
+
+class _Connection:
+    def __init__(self, held: bool = False):
+        self.held = held
+
+    def is_connection_held(self) -> bool:
+        return self.held
+
+
+class _Client:
+    def __init__(self, *, configured=False, mode="off", result=None, error=None):
+        self.configured = configured
+        self.mode = mode
+        self.result = result or ([{"type": "text", "text": "remote"}], {})
+        self.error = error
+        self.last_error = ""
+        self.file_calls = 0
+        self.url_calls = 0
+
+    def parse_with_images(self, path, name):
+        self.file_calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
+    def parse_file_with_images(self, path, *, data_id=""):
+        self.file_calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
+    def parse_url_with_images(self, url, *, data_id=""):
+        self.url_calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def _run(
+    *,
+    tmp_path: Path,
+    source_kind="file",
+    file_name="doc.pdf",
+    local=None,
+    cloud=None,
+    connection=None,
+    persist=None,
+    delete=None,
+) -> ParsedSource:
+    path = tmp_path / (file_name or "doc.pdf")
+    path.write_bytes(b"%PDF-1.4")
+    return ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id="source-1",
+        source_kind=source_kind,
+        file_path=str(path),
+        file_name=file_name,
+        source_url="https://private.example/document" if source_kind == "url" else "",
+        mineru_client=local or _Client(),
+        cloud_client=cloud or _Client(),
+        connection=connection or _Connection(),
+        make_persist_image=lambda: persist,
+        delete_source_images=delete or (lambda: None),
+        event_sink=lambda _event: None,
+    ).run()
+
+
+def test_self_hosted_failure_never_opens_public_cloud_and_reuses_one_download(
+    tmp_path, monkeypatch
+):
+    local = _Client(configured=True, mode="http", error=RuntimeError("local down"))
+    cloud = _Client(configured=True)
+    downloads = []
+    monkeypatch.setattr(
+        execution_module.remote_sources,
+        "download_pdf",
+        lambda url, dest, **kwargs: (
+            downloads.append(url), Path(dest).write_bytes(b"%PDF-1.4")
+        )[-1],
+    )
+    monkeypatch.setattr(
+        execution_module,
+        "parse_builtin_source_file",
+        lambda source_id, path, file_name, persist_image=None: [
+            SourceElement(
+                id="",
+                source_id=source_id,
+                element_type="paragraph",
+                location_label="PDF p.1",
+                text="builtin",
+                metadata={"parser": "pypdf"},
+            )
+        ],
+    )
+
+    result = _run(
+        tmp_path=tmp_path,
+        source_kind="url",
+        file_name="document",
+        local=local,
+        cloud=cloud,
+    )
+
+    assert [item.text for item in result.elements] == ["builtin"]
+    assert result.warning_code == PARSER_FALLBACK_WARNING_CODE
+    assert local.file_calls == 1
+    assert cloud.url_calls == 0
+    assert downloads == ["https://private.example/document"]
+
+
+def test_extensionless_pdf_url_uses_cloud_without_downloading(tmp_path, monkeypatch):
+    cloud = _Client(configured=True)
+    downloads = []
+    monkeypatch.setattr(
+        execution_module.remote_sources,
+        "download_pdf",
+        lambda *args, **kwargs: downloads.append(args[0]),
+    )
+
+    result = _run(
+        tmp_path=tmp_path,
+        source_kind="url",
+        file_name="document",
+        cloud=cloud,
+    )
+
+    assert [item.text for item in result.elements] == ["remote"]
+    assert cloud.url_calls == 1
+    assert downloads == []
+
+
+def test_provider_io_is_blocked_while_a_database_connection_is_held(
+    tmp_path, monkeypatch
+):
+    local = _Client(configured=True)
+    builtin_calls = []
+    monkeypatch.setattr(
+        execution_module,
+        "parse_builtin_source_file",
+        lambda *args, **kwargs: builtin_calls.append(1) or [],
+    )
+
+    result = _run(
+        tmp_path=tmp_path,
+        local=local,
+        connection=_Connection(True),
+    )
+
+    assert result.elements == ()
+    assert local.file_calls == 0
+    assert builtin_calls == []
+
+
+def test_rejected_workbook_writes_no_assets_before_builtin_fallback(
+    tmp_path, monkeypatch
+):
+    from openpyxl import Workbook
+
+    workbook = tmp_path / "book.xlsx"
+    book = Workbook()
+    sheet = book.active
+    for index in range(10):
+        sheet.append([f"a{index}", f"b{index}"])
+    book.save(workbook)
+    cloud = _Client(
+        configured=True,
+        result=(
+            [{"type": "table", "table_body": "<table><tr><td>a</td></tr></table>"}],
+            {"a.png": b"PNG"},
+        ),
+    )
+    persisted = []
+    monkeypatch.setattr(
+        execution_module,
+        "parse_builtin_source_file",
+        lambda source_id, path, file_name, persist_image=None: [
+            SourceElement(
+                id="",
+                source_id=source_id,
+                element_type="table_row",
+                location_label="XLSX row 1",
+                text="complete",
+                metadata={"parser": "xlsx"},
+            )
+        ],
+    )
+
+    result = ParserChainExecution(
+        host=default_extension_runtime().parser_chain,
+        source_id="source-1",
+        source_kind="file",
+        file_path=str(workbook),
+        file_name="book.xlsx",
+        source_url="",
+        mineru_client=_Client(),
+        cloud_client=cloud,
+        connection=_Connection(),
+        make_persist_image=lambda: (
+            lambda data, name: persisted.append(name) or "asset-1"
+        ),
+        delete_source_images=lambda: None,
+        event_sink=lambda _event: None,
+    ).run()
+
+    assert cloud.file_calls == 1
+    assert persisted == []
+    assert [item.metadata["parser"] for item in result.elements] == ["xlsx"]
+
+
+def test_production_ingestion_has_one_host_route_and_no_legacy_dispatcher():
+    root = Path(__file__).resolve().parents[2]
+    ingestion = (root / "backend/app/services/source_ingestion.py").read_text()
+    facade = (root / "backend/app/services/repository_facade.py").read_text()
+    sqlite_facade = (root / "backend/app/services/sqlite_repository.py").read_text()
+    bootstrap = (root / "backend/app/bootstrap.py").read_text()
+
+    assert ingestion.count("ParserChainExecution(") == 1
+    for forbidden in (
+        "engine_supports_file(",
+        "mineru_content_list_to_elements(",
+        "parse_url_via_local(",
+        "parse_source_file(",
+    ):
+        assert forbidden not in ingestion
+    assert "parse_source_file" not in facade
+    assert "parse_source_file" not in sqlite_facade
+    assert "parser_provider_chain_host=runtime.parser_chain" in bootstrap

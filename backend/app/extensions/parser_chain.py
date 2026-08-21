@@ -12,6 +12,10 @@ import time
 from typing import Any, Callable, Generic, TypeVar, cast
 
 from app.domain.cancellation import CoreCancellation
+from app.domain.extensions import (
+    ParsedSource,
+    ParserProviderChainCallPort,
+)
 from app.extension_sdk import (
     PARSER_PROVIDER_CHAIN_POINT,
     AvailabilityStatus,
@@ -60,6 +64,37 @@ class _FrozenLink:
     requires: frozenset[str]
 
 
+@dataclass(frozen=True)
+class _ApplicationLinkAccess:
+    contribution_id: str
+    call: ParserProviderChainCallPort
+
+    def probe(self) -> ProviderChainResult[ParserProposal]:
+        result = self.call.probe(self.contribution_id)
+        from app.domain.extensions import ParserProbe
+
+        if type(result) is not ParserProbe:
+            return ProviderChainResult(
+                None,
+                ProviderChainAttempt(
+                    ProviderAcceptance.REJECT,
+                    reason_code="invalid_parser_probe",
+                ),
+            )
+        if not result.accepted:
+            return ProviderChainResult(
+                None,
+                ProviderChainAttempt(
+                    ProviderAcceptance.REJECT,
+                    reason_code=result.reason_code or "parser_probe_rejected",
+                ),
+            )
+        return ProviderChainResult(
+            ParserProposal(self.contribution_id, result.value),
+            ProviderChainAttempt(ProviderAcceptance.ACCEPT),
+        )
+
+
 class ParserProviderChainHost(Generic[T]):
     """Run parser links without exposing admission or persistence to plugins."""
 
@@ -106,6 +141,77 @@ class ParserProviderChainHost(Generic[T]):
                 "parser cancellation exception types must be exact exception classes"
             )
         self._cancellation_exceptions = cancellation_exceptions
+
+    def run_application(
+        self,
+        baseline: ParsedSource,
+        *,
+        call: ParserProviderChainCallPort,
+    ) -> ParsedSource:
+        """Project the stable domain port into the point-specific SDK host."""
+
+        from app.domain.extensions import (
+            ParserAdmission,
+            ParserRoute,
+            ParserSourceDescriptor,
+        )
+
+        if type(call.source) is not ParserSourceDescriptor:
+            return baseline
+        source = ParserSourceRef(call.source.kind, call.source.suffix)
+
+        def route_policy(
+            contribution_id: str, _source: ParserSourceRef
+        ) -> ParserRouteDecision:
+            decision = call.route(contribution_id)
+            if type(decision) is not ParserRoute:
+                raise TypeError("invalid parser route")
+            return ParserRouteDecision(
+                decision.allowed,
+                decision.execution,
+                decision.reason_code,
+                decision.fallback_warning_code,
+            )
+
+        def context_factory(contribution_id: str) -> ParserHostContext:
+            return ParserHostContext(
+                contribution_id,
+                source,
+                call.cancellation,
+                _ApplicationLinkAccess(contribution_id, call),
+                call.connection,
+            )
+
+        def admit(
+            contribution_id: str, proposal: ParserProposal
+        ) -> ParserAdmissionDecision:
+            decision = call.admit(contribution_id, proposal.value)
+            if type(decision) is not ParserAdmission:
+                raise TypeError("invalid parser admission")
+            return ParserAdmissionDecision(
+                decision.accepted, decision.reason_code
+            )
+
+        def materialize(
+            contribution_id: str, proposal: ParserProposal
+        ) -> ParsedSource:
+            value = call.materialize(contribution_id, proposal.value)
+            if type(value) is not ParsedSource:
+                raise TypeError("invalid parsed source")
+            return value
+
+        result = self.run(
+            baseline,
+            source=source,
+            route_policy=route_policy,
+            context_factory=context_factory,
+            admit=admit,
+            materialize=materialize,
+            cancellation=call.cancellation,
+            warning_sink=call.warning,
+            event_sink=call.event,
+        )
+        return result.value if type(result.value) is ParsedSource else baseline
 
     def run(
         self,

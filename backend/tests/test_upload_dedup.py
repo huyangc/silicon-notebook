@@ -80,14 +80,14 @@ def _element(text):
 
 def _patch_parse(monkeypatch, result):
     """把文件解析器换掉：result 是异常类型则抛，否则当作 elements 返回。"""
-    import app.services.sqlite_repository as facade_mod
+    import app.services.parser_chain_execution as parser_execution
 
     def fake(*_args, **_kwargs):
         if isinstance(result, Exception):
             raise result
         return result
 
-    monkeypatch.setattr(facade_mod, "parse_source_file", fake)
+    monkeypatch.setattr(parser_execution, "parse_builtin_source_file", fake)
 
 
 def _seed_source(

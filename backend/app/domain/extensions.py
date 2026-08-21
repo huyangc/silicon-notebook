@@ -80,3 +80,82 @@ class RetrievalContributorHostPort(Protocol):
         event_sink: Callable[[dict[str, object]], None] | None = None,
         disabled_capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[T]: ...
+
+
+ParserSourceKind = Literal["file", "url"]
+ParserExecutionBoundary = Literal["local", "private_service", "public_cloud"]
+PARSER_SELF_HOSTED_PROVIDER = "parser.mineru_self_hosted"
+PARSER_CLOUD_PROVIDER = "parser.mineru_cloud"
+PARSER_BUILTIN_PROVIDER = "parser.builtin"
+
+
+@dataclass(frozen=True)
+class ParserSourceDescriptor:
+    """Content-free source metadata used to freeze parser routing."""
+
+    kind: ParserSourceKind
+    suffix: str
+
+
+@dataclass(frozen=True)
+class ParserRoute:
+    """Core-owned decision made for every frozen link before provider I/O."""
+
+    allowed: bool
+    execution: ParserExecutionBoundary
+    reason_code: str = ""
+    fallback_warning_code: str = ""
+
+
+@dataclass(frozen=True)
+class ParserProbe:
+    """Side-effect-free result of one request-local provider probe."""
+
+    accepted: bool
+    value: Any = None
+    reason_code: str = ""
+
+
+@dataclass(frozen=True)
+class ParserAdmission:
+    accepted: bool
+    reason_code: str = ""
+
+
+@dataclass(frozen=True)
+class ParsedSource:
+    """Application result shared by the parser chain and ingestion workflow."""
+
+    elements: tuple[Any, ...]
+    parser_mode: str
+    mineru_error: str = ""
+    warning_code: str = ""
+
+
+class ParserProviderChainCallPort(Protocol):
+    """One request-local core adapter consumed by the extension host."""
+
+    source: ParserSourceDescriptor
+    cancellation: Any
+    connection: Any
+
+    def route(self, contribution_id: str) -> ParserRoute: ...
+
+    def probe(self, contribution_id: str) -> ParserProbe: ...
+
+    def admit(self, contribution_id: str, value: Any) -> ParserAdmission: ...
+
+    def materialize(self, contribution_id: str, value: Any) -> ParsedSource: ...
+
+    def warning(self, warning_code: str) -> None: ...
+
+    def event(self, receipt: dict[str, object]) -> None: ...
+
+
+class ParserProviderChainHostPort(Protocol):
+    def run_application(
+        self,
+        baseline: ParsedSource,
+        *,
+        call: ParserProviderChainCallPort,
+    ) -> ParsedSource: ...

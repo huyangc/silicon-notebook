@@ -8,7 +8,10 @@ from typing import Any, Iterable, List, Optional
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
-from app.domain.extensions import RetrievalContributorHostPort
+from app.domain.extensions import (
+    ParserProviderChainHostPort,
+    RetrievalContributorHostPort,
+)
 from app.core.request_context import (
     _REQUEST_USER,
     reset_request_user,
@@ -30,7 +33,6 @@ from app.services.checkup import CheckupService, probe_scale_index_integrity
 from app.services.knowledge_lifecycle import _concept_desc_sig, _fast_loads
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
-from app.services.parsers import parse_source_file
 from app.services.repository import UploadedSourceFile
 from app.services.repository_facade import (
     ChunkRetrievalPlan,
@@ -51,12 +53,14 @@ class SQLiteRepository(RepositoryFacade):
         *,
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
+        parser_provider_chain_host: ParserProviderChainHostPort | None = None,
     ) -> None:
         super().__init__(
             settings,
             SqlitePersistenceBundleFactory(),
             model_provider=model_provider,
             retrieval_contributor_host=retrieval_contributor_host,
+            parser_provider_chain_host=parser_provider_chain_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
