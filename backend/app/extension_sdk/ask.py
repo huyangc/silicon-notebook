@@ -57,11 +57,14 @@ class AnswerAuditAvailabilityContext:
     mode_id: str
     grounded: bool
     evidence_level: str
+    deadline_monotonic: float
 
 
 @dataclass(frozen=True, slots=True)
 class AnswerAuditExtensionContext:
     answer: AnswerAuditView
+    max_findings: int
+    deadline_monotonic: float
 
 
 class AnswerAuditor(Protocol):
@@ -79,6 +82,7 @@ class AskCompletedAvailabilityContext:
     contribution_id: str
     mode_id: str
     access_available: bool
+    deadline_monotonic: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +93,7 @@ class AskCompletedExtensionContext:
     actor: ActorRef | None
     notebook: NotebookRef | None
     access: AskCompletedAccess | None
+    deadline_monotonic: float
 
 
 class AskCompletedObserver(Protocol):

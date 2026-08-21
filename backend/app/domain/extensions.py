@@ -173,6 +173,8 @@ ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY = (
 ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
     "ask:search_profile_completed_access"
 )
+ASK_COMPLETION_MODES = frozenset({"chunk", "graph", "reasoning"})
+ANSWER_EVIDENCE_LEVELS = frozenset({"grounded", "overview", "inferred"})
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,8 @@ class AnswerAuditSnapshot:
     model_error_count: int
     answer_chars: int
     conclusion_chars: int
+    max_findings: int
+    deadline_monotonic: float
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,7 @@ class AskCompletedObserverCallContext:
     retrieval_experience: RetrievalExperienceAskCompletedPort | None
     search_profile: SearchProfileAskCompletedPort | None
     connection_probe: Any
+    deadline_monotonic: float
 
 
 class AnswerAuditorHostPort(Protocol):

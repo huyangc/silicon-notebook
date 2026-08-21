@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
 import time
 from typing import Callable
@@ -10,6 +11,8 @@ from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ANSWER_EVIDENCE_LEVELS,
+    ASK_COMPLETION_MODES,
     AgentProfileAskCompletedPort,
     AnswerAuditSnapshot,
     AskCompletedObserverCallContext,
@@ -45,7 +48,6 @@ from app.extensions.registry import (
 
 
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
-_STABLE_MODE = re.compile(r"^[a-z][a-z0-9_]*$")
 _SEVERITIES = frozenset({"info", "warning", "risk"})
 _OBSERVER_ACCESS_CAPABILITIES = frozenset({
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
@@ -65,42 +67,22 @@ class _FrozenObserver:
     access_capability: str | None
 
 
+@dataclass
+class _CoreAccessState:
+    called: bool = False
+    receipt: ObserverReceipt | None = None
+
+
 class _CoreCompletedAccess:
     """Opaque, at-most-once projection over one core notification port."""
 
-    __slots__ = ("__notify_once", "_called", "_receipt")
+    __slots__ = ("__notify_once",)
 
-    def __init__(self, notify_once: Callable[[], None]) -> None:
+    def __init__(self, notify_once: Callable[[], ObserverReceipt]) -> None:
         self.__notify_once = notify_once
-        self._called = False
-        self._receipt: ObserverReceipt | None = None
-
-    @property
-    def called(self) -> bool:
-        return self._called
-
-    @property
-    def receipt(self) -> ObserverReceipt | None:
-        return self._receipt
 
     def notify(self) -> ObserverReceipt:
-        if self._called:
-            assert self._receipt is not None
-            return self._receipt
-        self._called = True
-        try:
-            self.__notify_once()
-            receipt = ObserverReceipt(ExtensionResultStatus.AVAILABLE)
-        except Exception:
-            receipt = ObserverReceipt(
-                ExtensionResultStatus.UNAVAILABLE,
-                ExtensionFailure(
-                    ExtensionFailureKind.FAILED,
-                    "ask_completed_notification_failed",
-                ),
-            )
-        self._receipt = receipt
-        return receipt
+        return self.__notify_once()
 
 
 class AnswerAuditorHost:
@@ -151,17 +133,34 @@ class AnswerAuditorHost:
         if not self._auditors:
             return ()
         view = _answer_view(snapshot)
-        if view is None or not _connection_clear(connection_probe):
+        if (
+            view is None
+            or not _valid_budget(snapshot.max_findings, snapshot.deadline_monotonic)
+            or not _connection_clear(connection_probe)
+        ):
             return ()
         accepted: list[AnswerAudit] = []
         sink = event_sink if event_sink is not None else self._event_sink
         availability_context = AnswerAuditAvailabilityContext(
-            view.mode_id, view.grounded, view.evidence_level
+            view.mode_id,
+            view.grounded,
+            view.evidence_level,
+            snapshot.deadline_monotonic,
         )
         for frozen in self._auditors:
             contribution = frozen.registered.contribution
             contribution_id = contribution.declaration.id
             started = _safe_clock(self._clock)
+            if not _deadline_open(started, snapshot.deadline_monotonic):
+                _emit(
+                    sink,
+                    point=ANSWER_AUDITOR_POINT,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="extension_point_budget_exhausted",
+                    duration_ms=0,
+                )
+                break
             availability = self._registry.availability(
                 contribution_id, availability_context
             )
@@ -177,9 +176,15 @@ class AnswerAuditorHost:
                 continue
             if not _connection_clear(connection_probe):
                 break
+            if not _deadline_open(_safe_clock(self._clock), snapshot.deadline_monotonic):
+                break
             try:
                 result = contribution.implementation.audit(
-                    AnswerAuditExtensionContext(view)
+                    AnswerAuditExtensionContext(
+                        view,
+                        snapshot.max_findings,
+                        snapshot.deadline_monotonic,
+                    )
                 )
             except Exception:
                 result = AuditorResult(
@@ -190,8 +195,10 @@ class AnswerAuditorHost:
                         "answer_auditor_failed",
                     ),
                 )
-            audit = _valid_auditor_result(result)
-            status = "available" if audit is not None else "invalid"
+            valid, audit = _validate_auditor_result(
+                result, max_findings=snapshot.max_findings
+            )
+            status = result.status.value if valid else "invalid"
             if audit is not None:
                 accepted.append(audit)
             _emit(
@@ -200,7 +207,9 @@ class AnswerAuditorHost:
                 contribution_id=contribution_id,
                 status=status,
                 reason_code=(
-                    "" if audit is not None else "invalid_answer_audit_result"
+                    _failure_code(result)
+                    if valid
+                    else "invalid_answer_audit_result"
                 ),
                 duration_ms=_elapsed_ms(self._clock, started),
                 count=len(audit.findings) if audit is not None else 0,
@@ -268,6 +277,8 @@ class AskCompletedObserverHost:
         notification = call_context.notification
         if not _valid_notification(notification):
             return
+        if not _valid_deadline(call_context.deadline_monotonic):
+            return
         if not _connection_clear(call_context.connection_probe):
             return
         sink = event_sink if event_sink is not None else self._event_sink
@@ -275,12 +286,23 @@ class AskCompletedObserverHost:
             contribution = frozen.registered.contribution
             contribution_id = contribution.declaration.id
             port = _observer_port(call_context, frozen.access_capability)
-            notify_once = _core_notify(port)
-            access = _CoreCompletedAccess(notify_once) if notify_once else None
             availability_context = AskCompletedAvailabilityContext(
-                contribution_id, notification.mode_id, access is not None
+                contribution_id,
+                notification.mode_id,
+                port is not None,
+                call_context.deadline_monotonic,
             )
             started = _safe_clock(self._clock)
+            if not _deadline_open(started, call_context.deadline_monotonic):
+                _emit(
+                    sink,
+                    point=ASK_COMPLETED_OBSERVER_POINT,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="extension_point_budget_exhausted",
+                    duration_ms=0,
+                )
+                break
             availability = self._registry.availability(
                 contribution_id, availability_context
             )
@@ -296,6 +318,22 @@ class AskCompletedObserverHost:
                 continue
             if not _connection_clear(call_context.connection_probe):
                 break
+            if not _deadline_open(
+                _safe_clock(self._clock), call_context.deadline_monotonic
+            ):
+                break
+            notify = _core_notify(port)
+            access, access_state = _core_access(notify)
+            if frozen.access_capability is not None and access is None:
+                _emit(
+                    sink,
+                    point=ASK_COMPLETED_OBSERVER_POINT,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="ask_completed_access_unavailable",
+                    duration_ms=_elapsed_ms(self._clock, started),
+                )
+                continue
             actor, notebook = _observer_identities(
                 notification, frozen.access_capability
             )
@@ -306,6 +344,7 @@ class AskCompletedObserverHost:
                         actor,
                         notebook,
                         access,
+                        call_context.deadline_monotonic,
                     )
                 )
             except Exception:
@@ -316,8 +355,8 @@ class AskCompletedObserverHost:
                         "ask_completed_observer_failed",
                     ),
                 )
-            if access is not None and access.called:
-                receipt = access.receipt
+            if access is not None and access_state.called:
+                receipt = access_state.receipt
             elif frozen.access_capability is not None:
                 receipt = ObserverReceipt(
                     ExtensionResultStatus.UNAVAILABLE,
@@ -335,7 +374,9 @@ class AskCompletedObserverHost:
                     receipt.status.value if valid else "invalid"
                 ),
                 reason_code=(
-                    "" if valid else "invalid_observer_receipt"
+                    _failure_code(receipt)
+                    if valid
+                    else "invalid_observer_receipt"
                 ),
                 duration_ms=_elapsed_ms(self._clock, started),
             )
@@ -348,10 +389,10 @@ def _answer_view(snapshot: object) -> AnswerAuditView | None:
         return None
     if (
         type(snapshot.mode_id) is not str
-        or not _STABLE_MODE.fullmatch(snapshot.mode_id)
+        or snapshot.mode_id not in ASK_COMPLETION_MODES
         or type(snapshot.grounded) is not bool
         or type(snapshot.evidence_level) is not str
-        or not _STABLE_CODE.fullmatch(snapshot.evidence_level)
+        or snapshot.evidence_level not in ANSWER_EVIDENCE_LEVELS
     ):
         return None
     counts = (
@@ -379,7 +420,7 @@ def _valid_notification(value: object) -> bool:
         and type(value.notebook_id) is str
         and bool(value.notebook_id)
         and type(value.mode_id) is str
-        and bool(_STABLE_MODE.fullmatch(value.mode_id))
+        and value.mode_id in ASK_COMPLETION_MODES
     )
 
 
@@ -395,7 +436,11 @@ def _observer_port(
     if capability == ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY:
         return context.agent_profile
     if capability == ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY:
-        return context.retrieval_experience
+        return (
+            context.retrieval_experience
+            if context.notification.mode_id == "reasoning"
+            else None
+        )
     if capability == ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY:
         return context.search_profile
     return None
@@ -422,6 +467,35 @@ def _core_notify(port: object) -> Callable[[], None] | None:
     return notify if callable(notify) else None
 
 
+def _core_access(
+    notify: Callable[[], None] | None,
+) -> tuple[_CoreCompletedAccess | None, _CoreAccessState]:
+    state = _CoreAccessState()
+    if notify is None:
+        return None, state
+
+    def notify_once() -> ObserverReceipt:
+        if state.called:
+            assert state.receipt is not None
+            return state.receipt
+        state.called = True
+        try:
+            notify()
+            receipt = ObserverReceipt(ExtensionResultStatus.AVAILABLE)
+        except Exception:
+            receipt = ObserverReceipt(
+                ExtensionResultStatus.UNAVAILABLE,
+                ExtensionFailure(
+                    ExtensionFailureKind.FAILED,
+                    "ask_completed_notification_failed",
+                ),
+            )
+        state.receipt = receipt
+        return receipt
+
+    return _CoreCompletedAccess(notify_once), state
+
+
 def _valid_failure(value: object) -> bool:
     return (
         value is None
@@ -434,23 +508,33 @@ def _valid_failure(value: object) -> bool:
     )
 
 
-def _valid_auditor_result(value: object) -> AnswerAudit | None:
+def _validate_auditor_result(
+    value: object,
+    *,
+    max_findings: int,
+) -> tuple[bool, AnswerAudit | None]:
     if (
         type(value) is not AuditorResult
         or type(value.status) is not ExtensionResultStatus
         or not _valid_failure(value.failure)
-        or value.status not in {
+    ):
+        return False, None
+    if value.status is ExtensionResultStatus.UNAVAILABLE:
+        return value.audit is None and value.failure is not None, None
+    if (
+        value.status not in {
             ExtensionResultStatus.AVAILABLE,
             ExtensionResultStatus.PARTIAL,
         }
         or type(value.audit) is not AnswerAudit
         or type(value.audit.findings) is not tuple
+        or len(value.audit.findings) > max_findings
         or (
             value.status is ExtensionResultStatus.AVAILABLE
             and value.failure is not None
         )
     ):
-        return None
+        return False, None
     for finding in value.audit.findings:
         if (
             type(finding) is not AnswerAuditFinding
@@ -461,8 +545,8 @@ def _valid_auditor_result(value: object) -> AnswerAudit | None:
             or type(finding.count) is not int
             or finding.count < 1
         ):
-            return None
-    return value.audit
+            return False, None
+    return True, value.audit
 
 
 def _valid_observer_receipt(value: object) -> bool:
@@ -479,6 +563,11 @@ def _valid_observer_receipt(value: object) -> bool:
     return True
 
 
+def _failure_code(value: object) -> str:
+    failure = getattr(value, "failure", None)
+    return failure.code if _valid_failure(failure) and failure is not None else ""
+
+
 def _connection_clear(probe: object) -> bool:
     try:
         checker = getattr(probe, "is_connection_held", None)
@@ -493,9 +582,32 @@ def _connection_clear(probe: object) -> bool:
 def _safe_clock(clock: Callable[[], float]) -> float | None:
     try:
         value = clock()
-        return float(value) if type(value) in {int, float} else None
+        normalized = float(value) if type(value) in {int, float} else None
+        return (
+            normalized
+            if normalized is not None and math.isfinite(normalized)
+            else None
+        )
     except Exception:
         return None
+
+
+def _valid_deadline(value: object) -> bool:
+    return type(value) is float and math.isfinite(value) and value > 0
+
+
+def _valid_budget(max_findings: object, deadline: object) -> bool:
+    return (
+        type(max_findings) is int
+        and max_findings > 0
+        and _valid_deadline(deadline)
+    )
+
+
+def _deadline_open(now: float | None, deadline: float) -> bool:
+    # Timing is observability/admission metadata, never a reason to let a
+    # broken injected clock suppress legacy completion behavior.
+    return now is None or now <= deadline
 
 
 def _elapsed_ms(clock: Callable[[], float], started: float | None) -> int:

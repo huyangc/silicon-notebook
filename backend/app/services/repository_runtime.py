@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 import threading
+import time
 import weakref
 from typing import Any, Callable
 
@@ -598,8 +599,12 @@ class RepositoryRuntime:
                 lambda: self.search_profile_jobs.note_ask_completed(user_id)
             ),
             connection_probe=self.database,
+            deadline_monotonic=(
+                time.monotonic()
+                + self.settings.ask_post_completion_extension_timeout_seconds
+            ),
         )
-        host.observe_application(context)
+        host.observe_application(context, event_sink=self.event_log.emit)
 
     def _audit_completed_answer(self, response: Any, mode_id: str) -> None:
         """Run the post-delivery auditor point over a closed structural view."""
@@ -616,8 +621,14 @@ class RepositoryRuntime:
                 model_error_count=len(response.model_errors),
                 answer_chars=len(response.answer),
                 conclusion_chars=len(response.conclusion),
+                max_findings=self.settings.answer_audit_max_findings,
+                deadline_monotonic=(
+                    time.monotonic()
+                    + self.settings.ask_post_completion_extension_timeout_seconds
+                ),
             ),
             connection_probe=self.database,
+            event_sink=self.event_log.emit,
         )
 
     def _note_ask_completed_compat(

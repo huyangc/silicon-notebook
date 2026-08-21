@@ -1157,6 +1157,8 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 `POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。联合范围按路径区分：`chunk` 基线 active-only；可选 KG overlay / PPR 可加入 federated KG 与 base-backed chunk；`graph` / `reasoning` 走 federated KG。`federated_retrieve()` 的知识对象命中不改 score，只在完全平局时以 `base` 为第二排序键；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。这些排序信号不进入接地阈值。
 
+流式 Ask 只在持久答案与浏览器 final 事件之后运行完成后 auditor/observer。每个 point 的协作式墙钟预算来自 `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS`（默认 `30`，有效范围 `>0..300` 秒）：已经进入同步调用的 callback 可安全完成，但 deadline 到达后 host 不再启动后续 contribution。`ANSWER_AUDIT_MAX_FINDINGS` 限制单个 auditor 结果（默认 `32`，有效范围 `1..256`）；超限结果整体拒绝，绝不静默截断。这些只是部署/内部扩展护栏，不改变检索、答案正文、引用或用户已收到的 final 事件。
+
 | 模式 | 分组 | 需 KG | 一句话 |
 |------|------|-------|--------|
 | **`chunk`**（默认） | general | 否 | chunk-native 通用问答：大召回 → 选择 → 长上下文综合 → 引用绑回源 chunk。 |

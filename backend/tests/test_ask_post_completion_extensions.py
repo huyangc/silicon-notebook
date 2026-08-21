@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+import time
 
 from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
@@ -32,6 +34,7 @@ from app.extension_sdk import (
 )
 from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
 from app.extensions.bootstrap import build_extension_runtime, default_extension_runtime
+from app.services.repository_runtime import RepositoryRuntime
 
 
 class _ConnectionProbe:
@@ -89,16 +92,22 @@ def _bundle(
     )
 
 
+def _deadline() -> float:
+    return time.monotonic() + 60.0
+
+
 def _snapshot() -> AnswerAuditSnapshot:
     return AnswerAuditSnapshot(
         mode_id="reasoning",
         grounded=True,
-        evidence_level="high",
+        evidence_level="grounded",
         citation_count=2,
         anchor_count=3,
         model_error_count=0,
         answer_chars=80,
         conclusion_chars=12,
+        max_findings=32,
+        deadline_monotonic=_deadline(),
     )
 
 
@@ -116,6 +125,7 @@ def _call_context(
         ),
         search_profile=_Port("search", calls),
         connection_probe=probe or _ConnectionProbe(),
+        deadline_monotonic=_deadline(),
     )
 
 
@@ -147,8 +157,9 @@ def test_auditor_receives_only_closed_structural_view_and_cannot_replace_answer(
     runtime = build_extension_runtime((
         _bundle("audit.structural", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Auditor()),
     ))
+    snapshot = _snapshot()
     result = runtime.answer_auditors.audit_application(
-        _snapshot(), connection_probe=_ConnectionProbe()
+        snapshot, connection_probe=_ConnectionProbe()
     )
 
     assert result == (
@@ -161,6 +172,8 @@ def test_auditor_receives_only_closed_structural_view_and_cannot_replace_answer(
     assert not hasattr(view, "citations")
     assert not hasattr(view, "repository")
     assert view.citation_count == 2
+    assert seen[0].max_findings == 32
+    assert seen[0].deadline_monotonic == snapshot.deadline_monotonic
 
 
 def test_auditor_failure_and_malformed_result_do_not_stop_later_auditors():
@@ -203,6 +216,31 @@ def test_auditor_failure_and_malformed_result_do_not_stop_later_auditors():
         "kind", "point", "contribution_id", "status", "duration_ms",
         "count", "reason_code",
     } for event in events)
+
+
+def test_auditor_findings_are_rejected_at_the_point_owned_budget():
+    class Auditor:
+        def audit(self, _context):
+            return AuditorResult(
+                AnswerAudit((
+                    AnswerAuditFinding("warning", "first"),
+                    AnswerAuditFinding("warning", "second"),
+                )),
+                ExtensionResultStatus.AVAILABLE,
+            )
+
+    events = []
+    runtime = build_extension_runtime(
+        (_bundle("audit.bounded", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Auditor()),),
+        event_sink=events.append,
+    )
+    snapshot = replace(_snapshot(), max_findings=1)
+
+    assert runtime.answer_auditors.audit_application(
+        snapshot, connection_probe=_ConnectionProbe()
+    ) == ()
+    assert events[-1]["status"] == "invalid"
+    assert events[-1]["reason_code"] == "invalid_answer_audit_result"
 
 
 def test_default_observers_preserve_reasoning_order_and_chunk_filter():
@@ -313,11 +351,55 @@ def test_observer_failures_are_isolated_and_core_access_is_at_most_once():
         None,
         None,
         _ConnectionProbe(),
+        _deadline(),
     )
     runtime.ask_completed_observers.observe_application(context)
 
     assert plugin_calls == ["twice", "raising", "later"]
     assert core_calls == ["core", "core"]
+
+
+def test_observer_cannot_reset_the_host_owned_at_most_once_latch():
+    core_calls = []
+
+    class HostileObserver:
+        def observe(self, context):
+            first = context.access.notify()
+            for name, value in (("_called", False), ("_receipt", None)):
+                try:
+                    setattr(context.access, name, value)
+                except AttributeError:
+                    pass
+            second = context.access.notify()
+            assert first is second
+            return second
+
+    cap = ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY
+    runtime = build_extension_runtime(
+        (_bundle("obs.hostile_latch", ASK_COMPLETED_OBSERVER_POINT, ContributionKind.OBSERVER, HostileObserver(), requires=(cap,)),),
+        capability_decisions={cap: lambda _context: Availability.available()},
+    )
+    runtime.ask_completed_observers.observe_application(
+        AskCompletedObserverCallContext(
+            CompletedAskNotification("user-1", "notebook-1", "reasoning"),
+            _Port("core", core_calls),
+            None,
+            None,
+            _ConnectionProbe(),
+            _deadline(),
+        )
+    )
+    assert core_calls == ["core"]
+
+
+def test_chunk_context_cannot_forge_the_reasoning_only_core_access():
+    calls = []
+    context = _call_context(calls, mode_id="chunk")
+    object.__setattr__(context, "retrieval_experience", _Port("retrieval", calls))
+
+    default_extension_runtime().ask_completed_observers.observe_application(context)
+
+    assert calls == ["agent", "search"]
 
 
 def test_live_unavailable_and_connection_flip_skip_plugin_and_core_io():
@@ -349,6 +431,7 @@ def test_live_unavailable_and_connection_flip_skip_plugin_and_core_io():
         None,
         None,
         probe,
+        _deadline(),
     )
 
     runtime.ask_completed_observers.observe_application(context)
@@ -356,6 +439,68 @@ def test_live_unavailable_and_connection_flip_skip_plugin_and_core_io():
     runtime.ask_completed_observers.observe_application(context)
     assert plugin_calls == []
     assert core_calls == []
+
+
+def test_unavailable_observer_does_not_resolve_the_core_notify_property():
+    touches = []
+
+    class PoisonPort:
+        @property
+        def notify(self):
+            touches.append("getter")
+            raise AssertionError("availability touched execution access")
+
+    class Observer:
+        def observe(self, _context):
+            touches.append("plugin")
+            return ObserverReceipt(ExtensionResultStatus.AVAILABLE)
+
+    cap = ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY
+    runtime = build_extension_runtime(
+        (_bundle("obs.unavailable", ASK_COMPLETED_OBSERVER_POINT, ContributionKind.OBSERVER, Observer(), requires=(cap,)),),
+        capability_decisions={
+            cap: lambda _context: Availability(
+                AvailabilityStatus.UNAVAILABLE, "temporarily_unavailable"
+            )
+        },
+    )
+    runtime.ask_completed_observers.observe_application(
+        AskCompletedObserverCallContext(
+            CompletedAskNotification("user-1", "notebook-1", "reasoning"),
+            PoisonPort(),
+            None,
+            None,
+            _ConnectionProbe(),
+            _deadline(),
+        )
+    )
+    assert touches == []
+
+
+def test_non_finite_clock_cannot_interrupt_later_observers():
+    values = iter((0.0, float("nan"), 1.0, 2.0, 3.0, 4.0, 5.0))
+    runtime = default_extension_runtime()
+    original = runtime.ask_completed_observers._clock
+    calls = []
+    runtime.ask_completed_observers._clock = lambda: next(values)
+    try:
+        runtime.ask_completed_observers.observe_application(_call_context(calls))
+    finally:
+        runtime.ask_completed_observers._clock = original
+    assert calls == ["agent", "retrieval", "search"]
+
+
+def test_observer_point_budget_stops_before_starting_later_core_work():
+    runtime = default_extension_runtime()
+    original = runtime.ask_completed_observers._clock
+    calls = []
+    runtime.ask_completed_observers._clock = lambda: 10.0
+    context = replace(_call_context(calls), deadline_monotonic=5.0)
+    try:
+        runtime.ask_completed_observers.observe_application(context)
+    finally:
+        runtime.ask_completed_observers._clock = original
+    assert calls == []
 
 
 def test_hostile_core_port_shape_and_receipt_fail_open_without_identity_leak():
@@ -389,7 +534,58 @@ def test_hostile_core_port_shape_and_receipt_fail_open_without_identity_leak():
             None,
             None,
             _ConnectionProbe(),
+            _deadline(),
         )
     )
     assert all("user-1" not in repr(event) for event in events)
     assert all("notebook-1" not in repr(event) for event in events)
+
+
+def test_repository_runtime_supplies_its_call_scoped_content_free_event_sink():
+    captured = []
+    emitted = []
+
+    class ObserverHost:
+        def observe_application(self, context, *, event_sink=None):
+            captured.append(("observer", context, event_sink))
+
+    class AuditorHost:
+        def audit_application(
+            self, snapshot, *, connection_probe=None, event_sink=None
+        ):
+            captured.append(("auditor", snapshot, event_sink))
+            return ()
+
+    runtime = object.__new__(RepositoryRuntime)
+    runtime.ask_completed_observers = ObserverHost()
+    runtime.answer_auditors = AuditorHost()
+    runtime.agent_profile_jobs = SimpleNamespace(note_ask_completed=lambda *_: None)
+    runtime.retrieval_experience_jobs = SimpleNamespace(
+        note_ask_completed=lambda: None
+    )
+    runtime.search_profile_jobs = SimpleNamespace(note_ask_completed=lambda *_: None)
+    runtime.database = _ConnectionProbe()
+    runtime.event_log = SimpleNamespace(emit=emitted.append)
+    runtime.settings = SimpleNamespace(
+        ask_post_completion_extension_timeout_seconds=30.0,
+        answer_audit_max_findings=32,
+    )
+
+    runtime._note_ask_completed("notebook-1", "user-1", "reasoning")
+    runtime._audit_completed_answer(
+        SimpleNamespace(
+            grounded=True,
+            evidence_level="high",
+            citations=(),
+            anchors=(),
+            model_errors=(),
+            answer="answer",
+            conclusion="summary",
+        ),
+        "reasoning",
+    )
+
+    assert [kind for kind, *_ in captured] == ["observer", "auditor"]
+    assert captured[0][2] is runtime.event_log.emit
+    assert captured[1][2] is runtime.event_log.emit
+    assert emitted == []

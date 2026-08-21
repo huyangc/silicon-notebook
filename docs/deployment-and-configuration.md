@@ -55,6 +55,12 @@ the secrets named by `api_key_env` in `.env`. Delete the path or set it to an em
 for explicit deterministic offline mode (keyword-only retrieval, no model extraction or
 answers). Users cannot supply or override model credentials, endpoints, models, or capacity.
 
+`ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` and
+`ANSWER_AUDIT_MAX_FINDINGS` govern the internal post-terminal Ask extension
+points. The timeout is cooperative: an in-progress synchronous callback is not
+abandoned, while later contributions are skipped after its deadline. Exact
+defaults and validation ranges live only in the product/API contract.
+
 A chat service may optionally set `top_p = 0.95` (or another finite value from `0` through
 `1`) when its provider requires a fixed nucleus-sampling value. This service-owned value
 overrides every workload's call default and is used by both the outgoing request and the

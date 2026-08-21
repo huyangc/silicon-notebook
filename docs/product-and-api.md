@@ -1616,6 +1616,8 @@ whole segment; see "Extraction" above.
 
 `POST /ask` dispatches on `mode` — the registry `backend/app/services/ask_modes.py` is the single source of truth (default `chunk`). Federation is path-specific: baseline `chunk` is active-notebook-only; its optional KG overlay/PPR can add federated KG context and base-backed chunks; `graph` and `reasoning` use federated KG paths. Knowledge-object hits from `federated_retrieve()` keep tier-blind scores and use `base` only as the secondary key on an exact tie; `federated_retrieve_relations()` remains score-only. These ordering signals never feed grounding thresholds.
 
+Streaming Ask runs post-completion auditors/observers only after the durable answer and browser final event. Each point gets a cooperative wall-clock budget from `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` (default `30`, valid range `>0..300` seconds): a synchronous callback already in progress is allowed to finish safely, but the host starts no later contribution once the deadline has passed. `ANSWER_AUDIT_MAX_FINDINGS` bounds one auditor result (default `32`, valid range `1..256`); an oversized result is rejected as a whole, never silently truncated. These are deployment/internal extension rails and do not alter retrieval, answer text, citations, or the user-visible final event.
+
 | Mode | Group | Needs KG | One-liner |
 |------|-------|----------|-----------|
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |
