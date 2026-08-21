@@ -82,7 +82,7 @@ PR 描述必须包含：
 
 #### PR-01：RetrievalContributorHost + Contract Kit
 
-状态：实现完成，正在闭合双路 subagent review。
+状态：已通过双路 subagent review 与 CI，并由 PR #542 squash 合入。
 
 范围：
 
@@ -109,6 +109,8 @@ PR 描述必须包含：
 不做：selected-source graph 或 generated-question 迁移，不新增用户能力。
 
 #### PR-02：Selected-source graph adapter
+
+状态：实现完成；五轮 subagent P1 已闭合，正在对修订 HEAD 重跑双路 review 与 CI。
 
 范围：
 

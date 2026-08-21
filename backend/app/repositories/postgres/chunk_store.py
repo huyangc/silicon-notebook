@@ -392,6 +392,45 @@ class ChunkStore:
         return [_compat_element_ids(row) for row in rows]
 
     @staticmethod
+    def retrieval_contribution_rows(
+        connection,
+        notebook_id: str,
+        chunk_ids: Sequence[str],
+        *,
+        actor_id: str,
+        source_mode: str | None,
+        source_ids: Sequence[str],
+    ):
+        ids = list(dict.fromkeys(chunk_ids))
+        sources = list(dict.fromkeys(source_ids))
+        if not ids or (source_mode == "include" and not sources):
+            return []
+        source_clause = ""
+        params: list[object] = [notebook_id, *ids]
+        if source_mode in {"include", "exclude"} and sources:
+            operator = "IN" if source_mode == "include" else "NOT IN"
+            source_clause = (
+                f" AND c.source_id {operator} ({placeholders(sources)})"
+            )
+            params.extend(sources)
+        memory_clause = (
+            " AND (s.source_type <> 'memory' OR EXISTS ("
+            "SELECT 1 FROM memory_items m "
+            "WHERE m.id=s.memory_id AND m.created_by=%s))"
+        )
+        params.append(actor_id)
+        rows = connection.execute(
+            "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
+            "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
+            "FROM chunks c JOIN sources s "
+            "ON s.id=c.source_id AND s.notebook_id=c.notebook_id "
+            f"WHERE c.notebook_id=%s AND c.id IN ({placeholders(ids)})"
+            f"{source_clause}{memory_clause} ORDER BY c.ordinal",
+            params,
+        ).fetchall()
+        return [_compat_element_ids(row) for row in rows]
+
+    @staticmethod
     def id_element_rows(connection, notebook_id: str):
         rows = connection.execute(
             "SELECT id,element_ids FROM chunks WHERE notebook_id=%s ORDER BY ordinal",

@@ -64,6 +64,10 @@ from app.services.reports.observability import (
 )
 from app.services.reports.policy import report_sufficiency_policy
 from app.services.retrieval_run import retrieval_fanout_slot, retrieval_run
+from app.services.source_graph_activation import (
+    SelectedSourceGraphContributionCall,
+    selected_source_graph_call_context,
+)
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -524,6 +528,8 @@ class ReportEngineDependencies:
     generation_gate: Any = None
     selected_source_graph: Any = None
     retrieval_contributors: RetrievalContributorHostPort | None = None
+    retrieval_connection_probe: Any = None
+    retrieval_contributor_hydrate: Any = None
     scale_version: Any = None
     selected_graph_hydrate: Any = None
     # Agentic Memory P1:Agent 对该库的已有理解 store(``AgentProfileStorePort``)。
@@ -555,39 +561,38 @@ class ReportEngine:
 
     def _activate_selected_source_graph(self, notebook_id: str, result: Any) -> None:
         original = getattr(result, "chunks", None) or []
-        baseline_input = original
-        retrieval_contributors = getattr(
-            self.dependencies, "retrieval_contributors", None
+        service = getattr(self.dependencies, "selected_source_graph", None)
+        host = getattr(self.dependencies, "retrieval_contributors", None)
+        connection_probe = getattr(
+            self.dependencies, "retrieval_connection_probe", None
         )
-        if retrieval_contributors is not None:
-            baseline_input = retrieval_contributors.run(
-                baseline_input,
-                invocation="selected_evidence",
-                cancellation=getattr(self, "cancel_event", None),
-                event_sink=getattr(
-                    getattr(self.dependencies, "event_log", None), "emit", None
-                ),
-            )
-        service = self.dependencies.selected_source_graph
-        if service is None:
-            if baseline_input is not original:
-                result.baseline_chunks = list(original)
-                result.chunks = list(baseline_input)
+        if host is None or connection_probe is None:
             return
-        baseline = list(baseline_input)
-        object_seeds = {
-            str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
-            for hit in (getattr(result, "top_hits", None) or [])
-            if str(getattr(hit, "object_id", "") or "")
-        }
-        chunk_seeds = {
-            str(chunk.chunk_id): float(getattr(chunk, "relevance", 0.0) or 0.0)
-            for chunk in baseline
-            if str(getattr(chunk, "chunk_id", "") or "")
-        }
-
-        try:
-            activated = service.run(
+        baseline = list(original)
+        if service is None:
+            call = SelectedSourceGraphContributionCall(
+                None,
+                notebook_id,
+                baseline,
+                max_results=self.settings.ppr_top_chunks,
+            )
+        else:
+            object_seeds = {
+                str(hit.object_id): float(
+                    getattr(hit, "relevance", 0.0) or 0.0
+                )
+                for hit in (getattr(result, "top_hits", None) or [])
+                if str(getattr(hit, "object_id", "") or "")
+            }
+            chunk_seeds = {
+                str(chunk.chunk_id): float(
+                    getattr(chunk, "relevance", 0.0) or 0.0
+                )
+                for chunk in baseline
+                if str(getattr(chunk, "chunk_id", "") or "")
+            }
+            call = SelectedSourceGraphContributionCall(
+                service,
                 notebook_id,
                 baseline,
                 object_seeds=object_seeds,
@@ -608,18 +613,45 @@ class ReportEngine:
                 ),
                 leaf_io=retrieval_fanout_slot,
             )
+        try:
+            call_context = selected_source_graph_call_context(
+                call,
+                actor_id=self.user_id,
+                cancel_event=self.cancel_event,
+                connection_probe=connection_probe,
+                admission_hydrate=(
+                    self.dependencies.retrieval_contributor_hydrate
+                    or (lambda _notebook_id, _actor_id, _ids: ())
+                ),
+                admission_leaf_io=retrieval_fanout_slot,
+                max_results=self.settings.ppr_top_chunks,
+                max_tokens=int(
+                    self.settings.selected_source_graph_enrichment_tokens
+                ),
+            )
+            host_chunks = host.run(
+                baseline,
+                invocation="selected_evidence",
+                call_context=call_context,
+                baseline_identity=lambda chunk: chunk.chunk_id,
+                cancellation=call_context.cancellation,
+                event_sink=getattr(
+                    getattr(self.dependencies, "event_log", None), "emit", None
+                ),
+            )
+            visible, status = call.visible_result(host_chunks)
         except AskCancelled:
             raise
         except Exception:
             # Report retrieval has already frozen B.  Graph/version/scope I/O
             # may only degrade the optional enrichment lane.
-            activated = service.fail_closed(
-                notebook_id, baseline, "activation_seam_failed"
-            )
-        if activated.status.state == "historical":
+            visible, status = call.fail_closed_result("activation_seam_failed")
+        if status is None:
+            if visible != baseline:
+                result.chunks = visible
             return
         result.baseline_chunks = baseline
-        result.chunks = list(activated.chunks)
+        result.chunks = visible
 
     @classmethod
     def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):

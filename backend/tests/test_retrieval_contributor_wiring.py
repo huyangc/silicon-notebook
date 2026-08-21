@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.config import Settings
@@ -17,29 +19,130 @@ class _RecordingHost:
         return baseline if self.output is None else self.output
 
 
-def test_ask_and_report_call_same_host_at_selected_evidence_boundary():
-    host = _RecordingHost()
+def _graph_service_access_violations(text: str) -> list[str]:
+    tree = ast.parse(text)
+    graph_aliases = set()
+
+    def assigned_names(node) -> tuple[str, ...]:
+        if isinstance(node, ast.Assign):
+            return tuple(
+                target.id for target in node.targets
+                if isinstance(target, ast.Name)
+            )
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            return (node.target.id,)
+        return ()
+
+    for node in ast.walk(tree):
+        value = getattr(node, "value", None)
+        if (
+            isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "getattr"
+            and len(value.args) >= 2
+            and isinstance(value.args[1], ast.Constant)
+            and value.args[1].value == "selected_source_graph"
+        ):
+            graph_aliases.update(assigned_names(node))
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            value = getattr(node, "value", None)
+            if (
+                isinstance(node, (ast.Assign, ast.AnnAssign))
+                and isinstance(value, ast.Name)
+                and value.id in graph_aliases
+            ):
+                for name in assigned_names(node):
+                    if name not in graph_aliases:
+                        graph_aliases.add(name)
+                        changed = True
+
+    def graph_value(node) -> bool:
+        return (
+            isinstance(node, ast.Name) and node.id in graph_aliases
+        ) or (
+            isinstance(node, ast.Attribute)
+            and node.attr == "selected_source_graph"
+        )
+
+    violations = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in {"run", "fail_closed"}
+            and graph_value(node.value)
+        ):
+            violations.append(node.attr)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and graph_value(node.args[0])
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in {"run", "fail_closed"}
+        ):
+            violations.append(str(node.args[1].value))
+        if isinstance(node, ast.Call):
+            bridge_call = (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "SelectedSourceGraphContributionCall"
+            )
+            for index, argument in enumerate(node.args):
+                if graph_value(argument) and not (bridge_call and index == 0):
+                    violations.append("graph_service_forwarded")
+            if not bridge_call:
+                for keyword in node.keywords:
+                    if graph_value(keyword.value):
+                        violations.append("graph_service_forwarded")
+    return violations
+
+
+def test_ask_and_report_keep_other_host_output_when_graph_capability_is_absent():
     baseline = [SimpleNamespace(chunk_id="base")]
+    appended = [*baseline, SimpleNamespace(chunk_id="plugin")]
+    host = _RecordingHost(output=appended)
+    connection_probe = SimpleNamespace(is_connection_held=lambda: False)
 
     ask = object.__new__(AskService)
     ask.retrieval_contributors = host
     ask.selected_source_graph = None
+    ask.retrieval_connection_probe = connection_probe
+    ask.retrieval_contributor_hydrate = (
+        lambda _notebook_id, _actor_id, _ids: ()
+    )
+    ask.current_user_id = lambda: "actor"
+    ask.settings = SimpleNamespace(selected_source_graph_enrichment_tokens=1)
     ask_chunks, ask_status = ask._activate_selected_source_graph("notebook", baseline)
 
     report = object.__new__(ReportEngine)
     report.dependencies = SimpleNamespace(
         retrieval_contributors=host,
         selected_source_graph=None,
+        retrieval_connection_probe=connection_probe,
+        retrieval_contributor_hydrate=(
+            lambda _notebook_id, _actor_id, _ids: ()
+        ),
     )
+    report.settings = SimpleNamespace(
+        ppr_top_chunks=1,
+        selected_source_graph_enrichment_tokens=1,
+    )
+    report.user_id = "actor"
+    report.cancel_event = None
     result = SimpleNamespace(chunks=baseline)
     report._activate_selected_source_graph("notebook", result)
 
-    assert ask_chunks == baseline
+    assert ask_chunks == appended
     assert ask_status is None
-    assert result.chunks is baseline
-    assert host.calls == [
-        (baseline, "selected_evidence"),
-        (baseline, "selected_evidence"),
+    assert result.chunks == appended
+    assert not hasattr(result, "baseline_chunks")
+    assert [invocation for _baseline, invocation in host.calls] == [
+        "selected_evidence",
+        "selected_evidence",
     ]
 
 
@@ -65,7 +168,42 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     assert captured == {"retrieval_contributor_host": host}
 
 
-def test_report_keeps_host_addition_when_legacy_graph_service_is_absent():
+def test_default_topology_registers_one_atomic_selected_graph_contributor():
+    from app.extensions import default_extension_runtime
+    from app.extensions.builtin import SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID
+
+    runtime = default_extension_runtime()
+    contributions = runtime.registry.contributions("retrieval.contributor")
+
+    assert [item.contribution.declaration.id for item in contributions] == [
+        SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID
+    ]
+    frozen = runtime.retrieval_contributors._registrations
+    assert len(frozen) == 1
+    assert frozen[0].admission == "atomic"
+
+
+def test_ask_and_report_no_longer_call_graph_service_directly():
+    services = Path(__file__).resolve().parents[1] / "app" / "services"
+    for name in ("ask_service.py", "report_engine.py"):
+        text = (services / name).read_text(encoding="utf-8")
+        assert _graph_service_access_violations(text) == []
+
+
+def test_graph_service_direct_call_guard_catches_alias_and_forwarding_mutations():
+    mutations = (
+        "self.selected_source_graph.run()",
+        "service = getattr(self, 'selected_source_graph'); service.fail_closed()",
+        "service = getattr(self, 'selected_source_graph'); runner = service.run; runner()",
+        "service = getattr(self, 'selected_source_graph'); getattr(service, 'run')()",
+        "service = getattr(self, 'selected_source_graph'); helper(service)",
+        "service = getattr(self, 'selected_source_graph'); helper(value=service)",
+        "service: object = getattr(self, 'selected_source_graph'); service.run()",
+    )
+    assert all(_graph_service_access_violations(text) for text in mutations)
+
+
+def test_report_runs_selected_evidence_without_graph_service():
     original = [SimpleNamespace(chunk_id="base")]
     appended = [*original, SimpleNamespace(chunk_id="plugin")]
     host = _RecordingHost(output=appended)
@@ -73,13 +211,26 @@ def test_report_keeps_host_addition_when_legacy_graph_service_is_absent():
     report.dependencies = SimpleNamespace(
         retrieval_contributors=host,
         selected_source_graph=None,
+        retrieval_connection_probe=SimpleNamespace(
+            is_connection_held=lambda: False
+        ),
+        retrieval_contributor_hydrate=(
+            lambda _notebook_id, _actor_id, _ids: ()
+        ),
     )
+    report.settings = SimpleNamespace(
+        ppr_top_chunks=1,
+        selected_source_graph_enrichment_tokens=1,
+    )
+    report.user_id = "actor"
+    report.cancel_event = None
     result = SimpleNamespace(chunks=original)
 
     report._activate_selected_source_graph("notebook", result)
 
-    assert result.baseline_chunks == original
+    assert not hasattr(result, "baseline_chunks")
     assert result.chunks == appended
+    assert host.calls == [(original, "selected_evidence")]
 
 
 def test_repository_factory_accepts_injected_host_without_importing_registry(monkeypatch):
@@ -101,7 +252,7 @@ def test_repository_factory_accepts_injected_host_without_importing_registry(mon
     assert captured == {"retrieval_contributor_host": host}
 
 
-def test_factory_created_ask_and_report_share_empty_host(tmp_path):
+def test_factory_created_ask_and_report_share_builtin_host(tmp_path):
     from app.bootstrap import (
         application_extension_runtime,
         create_application_repository,

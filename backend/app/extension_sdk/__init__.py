@@ -28,6 +28,7 @@ from app.extension_sdk.retrieval import (
     RETRIEVAL_CONTRIBUTOR_POINT,
     RETRIEVAL_SCOPE_READER_CAPABILITY,
     SCHEDULED_MODEL_ACCESS_CAPABILITY,
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     ConnectionLeaseProbe,
     EvidenceCandidate,
     EvidenceProvenance,
@@ -47,6 +48,7 @@ from app.extension_sdk.retrieval import (
     ScheduledModelAccess,
     ScheduledJsonRequest,
     ScheduledModelMessage,
+    SelectedSourceGraphAccess,
     ScopeBoundEvidenceReader,
 )
 
@@ -76,6 +78,7 @@ __all__ = [
     "RETRIEVAL_CONTRIBUTOR_POINT",
     "RETRIEVAL_SCOPE_READER_CAPABILITY",
     "SCHEDULED_MODEL_ACCESS_CAPABILITY",
+    "SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY",
     "ConnectionLeaseProbe",
     "EvidenceCandidate",
     "EvidenceProvenance",
@@ -95,5 +98,6 @@ __all__ = [
     "ScheduledModelAccess",
     "ScheduledJsonRequest",
     "ScheduledModelMessage",
+    "SelectedSourceGraphAccess",
     "ScopeBoundEvidenceReader",
 ]

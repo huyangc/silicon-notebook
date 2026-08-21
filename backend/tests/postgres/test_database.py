@@ -8,8 +8,209 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.domain.extensions import (
+    RetrievalContributionCallContext,
+    RetrievalEvidenceProposal,
+)
+from app.extensions import default_extension_runtime
+
 
 pytestmark = pytest.mark.postgres_integration
+
+
+class _Cancellation:
+    def is_set(self) -> bool:
+        return False
+
+    def raise_if_cancelled(self) -> None:
+        return None
+
+
+class _PoolReadingProposalSource:
+    def __init__(self, database) -> None:
+        self.database = database
+        self.calls = 0
+        self.proposal = RetrievalEvidenceProposal(
+            identity="graph",
+            notebook_id="notebook",
+            source_id="source",
+            provenance_kind="ppr",
+            provenance_reference="graph",
+            value=type("Chunk", (), {"chunk_id": "graph"})(),
+            token_cost=0,
+        )
+
+    def propose(self):
+        self.calls += 1
+        with self.database.connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+        return (self.proposal,)
+
+    def read(self, identities):
+        return (self.proposal,) if identities == ("graph",) else ()
+
+
+def _retrieval_call(source, database):
+    return RetrievalContributionCallContext(
+        actor_id="actor",
+        notebook_id="notebook",
+        scope_id="scope",
+        scope_narrowed=True,
+        run_id="run",
+        run_kind="report_generation",
+        cancellation=_Cancellation(),
+        max_items=1,
+        max_tokens=1,
+        max_proposals=1,
+        admission_source=source,
+        selected_source_graph_source=source,
+        connection_probe=database,
+    )
+
+
+def test_retrieval_host_releases_pool_size_one_before_contributor_fanout(
+    postgres_database,
+):
+    postgres_database._pool.resize(1, 1)
+    source = _PoolReadingProposalSource(postgres_database)
+    context = _retrieval_call(source, postgres_database)
+    host = default_extension_runtime().retrieval_contributors
+    baseline = [type("Chunk", (), {"chunk_id": "base"})()]
+
+    with postgres_database.connect():
+        blocked = host.run(
+            baseline,
+            invocation="selected_evidence",
+            call_context=context,
+            baseline_identity=lambda chunk: chunk.chunk_id,
+            cancellation=context.cancellation,
+        )
+    assert blocked is baseline
+    assert source.calls == 0
+
+    accepted = host.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    assert [chunk.chunk_id for chunk in accepted] == ["base", "graph"]
+    assert source.calls == 1
+
+
+def test_connection_probe_depth_resets_after_nested_and_exceptional_leases(
+    postgres_database,
+):
+    assert postgres_database.is_connection_held() is False
+    with postgres_database.connect():
+        assert postgres_database.is_connection_held() is True
+        with postgres_database.connect():
+            assert postgres_database.is_connection_held() is True
+        assert postgres_database.is_connection_held() is True
+    assert postgres_database.is_connection_held() is False
+
+    with pytest.raises(RuntimeError, match="lease failure"):
+        with postgres_database.connect():
+            assert postgres_database.is_connection_held() is True
+            raise RuntimeError("lease failure")
+    assert postgres_database.is_connection_held() is False
+
+
+def test_retrieval_authority_filters_private_memory_in_postgres(
+    postgres_database, postgres_settings
+):
+    from app.models.schemas import NotebookCreate
+    from app.repositories.ports import ChunkWrite
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.identity_store import IdentityStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.notebook_store import NotebookStore
+    from app.repositories.postgres.source_store import SourceStore
+
+    now = "2026-08-21T00:00:00+00:00"
+    PostgresMigrator(postgres_database).migrate()
+    identity = IdentityStore(postgres_database, postgres_settings)
+    alice = identity.create_user("a00876543", "password-12")
+    bob = identity.create_user("b00876543", "password-12")
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda _prefix: "nb-contribution-authority",
+        now=lambda: now,
+    )
+    notebook_id = notebooks.create_row(NotebookCreate(name="authority"), alice.id)
+    sources = SourceStore(postgres_database, now=lambda: now)
+    chunks = ChunkStore(postgres_database)
+
+    with postgres_database.write() as connection:
+        for row in (
+            (
+                "memory-pg-alice", notebook_id, alice.id, "external_agent",
+                "confirmed", "Alice", "private", now, now,
+            ),
+            (
+                "memory-pg-bob", notebook_id, bob.id, "external_agent",
+                "confirmed", "Bob", "private", now, now,
+            ),
+        ):
+            connection.execute(
+                "INSERT INTO memory_items "
+                "(id,notebook_id,created_by,origin,status,title,content_md,"
+                "created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                row,
+            )
+    for source_id, source_type, memory_id in (
+        ("source-pg-visible", "markdown", ""),
+        ("source-pg-knowhow", "knowhow", ""),
+        ("source-pg-memory-alice", "memory", "memory-pg-alice"),
+        ("source-pg-memory-bob", "memory", "memory-pg-bob"),
+    ):
+        sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name="",
+            file_path="",
+            file_size=0,
+            file_hash="",
+            summary="",
+            doc_type="",
+            memory_id=memory_id,
+        )
+        chunks.replace_source_chunks(
+            source_id,
+            notebook_id,
+            [ChunkWrite(f"chunk-{source_id}", source_id, "", ())],
+            created_at=now,
+        )
+
+    candidate_ids = tuple(
+        f"chunk-{source_id}" for source_id in (
+            "source-pg-visible",
+            "source-pg-knowhow",
+            "source-pg-memory-alice",
+            "source-pg-memory-bob",
+        )
+    )
+    with postgres_database.connect() as connection:
+        rows = chunks.retrieval_contribution_rows(
+            connection,
+            notebook_id,
+            candidate_ids,
+            actor_id=alice.id,
+            source_mode=None,
+            source_ids=(),
+        )
+
+    assert {row["id"] for row in rows} == {
+        "chunk-source-pg-visible",
+        "chunk-source-pg-knowhow",
+        "chunk-source-pg-memory-alice",
+    }
 
 
 def test_write_commits_and_rows_are_dicts(postgres_database):

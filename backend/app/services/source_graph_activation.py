@@ -7,6 +7,7 @@ scope drift, quality-gate failure, or baseline mutation fails closed to B.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from contextlib import nullcontext
@@ -14,13 +15,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from app.domain.extensions import (
+    RetrievalContributionCallContext,
+    RetrievalEvidenceProposal,
+)
 from app.services.cancellation import AskCancelled
-from app.services.retrieval import RetrievedChunk, RetrievalSupport
+from app.services.retrieval import RetrievedChunk, RetrievalSupport, est_tokens
 from app.services.source_graph_rollout import (
     decide_source_graph_rollout,
     load_quality_attestation,
 )
 from app.services.source_scope import current_source_scope
+
+
+_MIN_CONTRIBUTION_EXECUTION_BUDGET = 1
+_HOST_ACCOUNTED_TOKEN_COST = 0
+_SOURCE_GRAPH_STATES = frozenset({
+    "active", "shadow", "off", "historical", "degraded",
+})
 
 
 @dataclass(frozen=True)
@@ -552,3 +564,396 @@ class SelectedSourceGraphActivationService:
         return ActivatedSourceGraphResult(
             tuple(visible), baseline, tuple(protected.enrichment_chunks), status
         )
+
+
+class _AskCancellationToken:
+    """Adapt the production Event to the host's native-cancellation contract."""
+
+    def __init__(self, event: Any) -> None:
+        self._event = event
+
+    def is_set(self) -> bool:
+        if self._event is None:
+            return False
+        cancelled = self._event.is_set()
+        if type(cancelled) is not bool:
+            raise TypeError("malformed cancellation state")
+        return cancelled
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_set():
+            raise AskCancelled()
+
+
+class _SelectedEvidenceAdmissionSource:
+    """Graph in-memory authority plus one scope-bound core fallback batch."""
+
+    def __init__(
+        self,
+        graph: "SelectedSourceGraphContributionCall | None",
+        notebook_id: str,
+        actor_id: str,
+        fallback: Callable[
+            [str, str, Sequence[str]], Sequence[RetrievedChunk]
+        ],
+        leaf_io: Callable[[], Any] | None,
+    ) -> None:
+        self._graph = graph
+        self._notebook_id = notebook_id
+        self._actor_id = actor_id
+        self._fallback = fallback
+        self._leaf_io = leaf_io or nullcontext
+
+    def read(
+        self, identities: tuple[str, ...]
+    ) -> tuple[RetrievalEvidenceProposal, ...]:
+        primary = self._graph.read(identities) if self._graph is not None else ()
+        by_id = {proposal.identity: proposal for proposal in primary}
+        missing = tuple(identity for identity in identities if identity not in by_id)
+        if missing:
+            try:
+                with self._leaf_io():
+                    hydrated = self._fallback(
+                        self._notebook_id, self._actor_id, missing
+                    )
+            except Exception:
+                return ()
+            if type(hydrated) not in (list, tuple):
+                return ()
+            missing_set = set(missing)
+            for chunk in hydrated:
+                if (
+                    type(chunk) is not RetrievedChunk
+                    or type(chunk.chunk_id) is not str
+                    or chunk.chunk_id not in missing_set
+                    or chunk.chunk_id in by_id
+                    or type(chunk.source_id) is not str
+                    or not chunk.source_id
+                    or type(chunk.notebook_id) is not str
+                    or chunk.notebook_id != self._notebook_id
+                    or type(chunk.text) is not str
+                ):
+                    return ()
+                by_id[chunk.chunk_id] = RetrievalEvidenceProposal(
+                    identity=chunk.chunk_id,
+                    notebook_id=self._notebook_id,
+                    source_id=chunk.source_id,
+                    provenance_kind="chunk",
+                    provenance_reference=chunk.chunk_id,
+                    value=chunk,
+                    token_cost=est_tokens(chunk.text),
+                )
+        return tuple(by_id[identity] for identity in identities if identity in by_id)
+
+
+class SelectedSourceGraphContributionCall:
+    """Request-local bridge retaining the legacy activation's stronger result.
+
+    The built-in plugin receives only the proposal/read methods through the
+    host.  Baseline chunks, graph services, status, and rollout details remain
+    core-private here.
+    """
+
+    def __init__(
+        self,
+        service: SelectedSourceGraphActivationService | None,
+        notebook_id: str,
+        baseline_chunks: Sequence[RetrievedChunk],
+        *,
+        object_seeds: Mapping[str, float] | None = None,
+        chunk_seeds: Mapping[str, float] | None = None,
+        source_titles: Callable[[list[str]], Mapping[str, str]] | None = None,
+        hydrate_chunk_ids: Callable[
+            [Sequence[str]], Sequence[RetrievedChunk]
+        ] | None = None,
+        parent_version: Any | Callable[[], Any] = None,
+        max_results: int,
+        unsafe_scope_drift: bool | Callable[[], bool] = False,
+        leaf_io: Callable[[], Any] | None = None,
+    ) -> None:
+        self._service = service
+        self._notebook_id = notebook_id
+        self._baseline = tuple(baseline_chunks)
+        self._kwargs = {
+            "object_seeds": object_seeds,
+            "chunk_seeds": chunk_seeds,
+            "source_titles": source_titles,
+            "hydrate_chunk_ids": hydrate_chunk_ids,
+            "parent_version": parent_version,
+            "max_results": max_results,
+            "unsafe_scope_drift": unsafe_scope_drift,
+            "leaf_io": leaf_io,
+        }
+        self._activated: ActivatedSourceGraphResult | None = None
+        self._attempted = False
+        self._proposals: tuple[RetrievalEvidenceProposal, ...] = ()
+        self._by_id: dict[str, RetrievalEvidenceProposal] = {}
+
+    def propose(self) -> tuple[RetrievalEvidenceProposal, ...]:
+        if self._attempted:
+            return self._proposals
+        self._attempted = True
+        if self._service is None:
+            return ()
+        try:
+            activated = self._service.run(
+                self._notebook_id,
+                self._baseline,
+                **self._kwargs,
+            )
+            if (
+                not self._valid_activation_result(activated)
+                or not self._activation_preserves_frozen_baseline(activated)
+            ):
+                raise TypeError("invalid selected-source graph result")
+        except AskCancelled:
+            raise
+        except Exception:
+            activated = self._fail_closed_activation("activation_seam_failed")
+            if activated is None:
+                return ()
+        self._activated = activated
+        if activated.status.state != "active":
+            return ()
+        try:
+            self._proposals = tuple(
+                RetrievalEvidenceProposal(
+                    identity=chunk.chunk_id,
+                    notebook_id=self._notebook_id,
+                    source_id=chunk.source_id,
+                    provenance_kind="ppr",
+                    provenance_reference=chunk.chunk_id,
+                    value=chunk,
+                    # The legacy activation already enforces its independent
+                    # token budget.  The host must not spend or truncate it a
+                    # second time.
+                    token_cost=_HOST_ACCOUNTED_TOKEN_COST,
+                )
+                for chunk in activated.enrichment_chunks
+            )
+        except Exception:
+            self._activated = self._fail_closed_activation(
+                "activation_seam_failed"
+            )
+            return ()
+        self._by_id = {proposal.identity: proposal for proposal in self._proposals}
+        return self._proposals
+
+    def read(
+        self, identities: tuple[str, ...]
+    ) -> tuple[RetrievalEvidenceProposal, ...]:
+        return tuple(
+            proposal
+            for identity in identities
+            if (proposal := self._by_id.get(identity)) is not None
+        )
+
+    def visible_result(self, host_chunks: Sequence[RetrievedChunk]):
+        """Apply the legacy output only after the generic atomic host accepts G."""
+        activated = self._activated
+        if activated is None:
+            return list(host_chunks), None
+        status = activated.status
+        host_chunks = tuple(host_chunks)
+        host_tail = host_chunks[len(self._baseline):]
+        if status.state == "historical":
+            return list(host_chunks), None
+        expected_ids = tuple(proposal.identity for proposal in self._proposals)
+        accepted_ids = tuple(
+            chunk.chunk_id for chunk in host_tail
+        )
+        expected_set = set(expected_ids)
+        accepted_graph_ids = tuple(
+            identity for identity in accepted_ids if identity in expected_set
+        )
+        if status.state == "active" and accepted_graph_ids != expected_ids:
+            non_graph_tail = tuple(
+                chunk for chunk in host_tail if chunk.chunk_id not in expected_set
+            )
+            failed = self._fail_closed_activation("extension_admission_failed")
+            if failed is None:
+                return [*self._baseline, *non_graph_tail], None
+            return [*self._baseline, *non_graph_tail], failed.status
+        # Use the legacy result rather than rebuilding it: duplicate-support
+        # overlays and its frozen baseline copies are part of the stronger
+        # selected-source graph contract.
+        if status.state == "active":
+            return [*activated.chunks[:len(self._baseline)], *host_tail], status
+        return [*self._baseline, *host_tail], status
+
+    def fail_closed_result(self, reason: str):
+        """Keep workflow callers behind the bridge on seam-level failure."""
+        failed = self._fail_closed_activation(reason)
+        if failed is None:
+            return list(self._baseline), None
+        return list(self._baseline), failed.status
+
+    def _fail_closed_activation(
+        self, reason: str
+    ) -> ActivatedSourceGraphResult | None:
+        if self._service is None:
+            return None
+        try:
+            failed = self._service.fail_closed(
+                self._notebook_id, self._baseline, reason
+            )
+            if (
+                not self._valid_activation_result(failed)
+                or not self._activation_preserves_frozen_baseline(failed)
+            ):
+                return None
+            return failed
+        except Exception:
+            return None
+
+    @staticmethod
+    def _valid_activation_result(result: object) -> bool:
+        try:
+            return (
+                type(result) is ActivatedSourceGraphResult
+                and type(result.status) is SourceGraphStatus
+                and type(result.status.state) is str
+                and result.status.state in _SOURCE_GRAPH_STATES
+                and type(result.status.reason) is str
+                and type(result.chunks) is tuple
+                and type(result.baseline_chunks) is tuple
+                and type(result.enrichment_chunks) is tuple
+            )
+        except Exception:
+            return False
+
+    def _activation_preserves_frozen_baseline(
+        self, result: ActivatedSourceGraphResult
+    ) -> bool:
+        baseline = self._baseline
+        if (
+            len(result.baseline_chunks) != len(baseline)
+            or any(
+                candidate is not original
+                for candidate, original in zip(result.baseline_chunks, baseline)
+            )
+        ):
+            return False
+        if result.status.state != "active":
+            return (
+                len(result.chunks) == len(baseline)
+                and all(
+                    self._baseline_chunk_is_exact(candidate, original)
+                    for candidate, original in zip(result.chunks, baseline)
+                )
+                and (
+                    result.status.state == "shadow"
+                    or not result.enrichment_chunks
+                )
+            )
+        if (
+            result.status.baseline_preserved is not True
+            or type(result.status.baseline_evicted_count) is not int
+            or result.status.baseline_evicted_count != 0
+            or len(result.chunks)
+            != len(baseline) + len(result.enrichment_chunks)
+        ):
+            return False
+        prefix = result.chunks[:len(baseline)]
+        tail = result.chunks[len(baseline):]
+        return (
+            all(
+                self._baseline_chunk_is_monotonic(candidate, original)
+                for candidate, original in zip(prefix, baseline)
+            )
+            and all(
+                candidate is enrichment
+                for candidate, enrichment in zip(tail, result.enrichment_chunks)
+            )
+            and not (
+                {chunk.chunk_id for chunk in baseline}
+                & {chunk.chunk_id for chunk in result.enrichment_chunks}
+            )
+        )
+
+    @classmethod
+    def _baseline_chunk_is_monotonic(
+        cls, candidate: RetrievedChunk, original: RetrievedChunk
+    ) -> bool:
+        return (
+            cls._chunk_baseline_signature(candidate)
+            == cls._chunk_baseline_signature(original)
+            and all(
+                support in candidate.retrieval_supports
+                for support in original.retrieval_supports
+            )
+        )
+
+    @classmethod
+    def _baseline_chunk_is_exact(
+        cls, candidate: RetrievedChunk, original: RetrievedChunk
+    ) -> bool:
+        return (
+            cls._chunk_baseline_signature(candidate)
+            == cls._chunk_baseline_signature(original)
+            and candidate.retrieval_supports == original.retrieval_supports
+        )
+
+    @staticmethod
+    def _chunk_baseline_signature(chunk: RetrievedChunk) -> tuple[object, ...]:
+        return (
+            chunk.chunk_id,
+            chunk.source_id,
+            chunk.source_title,
+            chunk.section_path,
+            chunk.text,
+            tuple(chunk.element_ids),
+            chunk.score,
+            chunk.relevance,
+            chunk.notebook_id,
+        )
+
+
+def selected_source_graph_call_context(
+    call: SelectedSourceGraphContributionCall,
+    *,
+    actor_id: str,
+    cancel_event: Any,
+    connection_probe: Any,
+    admission_hydrate: Callable[
+        [str, str, Sequence[str]], Sequence[RetrievedChunk]
+    ],
+    admission_leaf_io: Callable[[], Any] | None = None,
+    max_results: int,
+    max_tokens: int,
+) -> RetrievalContributionCallContext:
+    """Build a content-free typed invocation envelope without any I/O."""
+    from app.services.retrieval_run import current_retrieval_run
+
+    scope = current_source_scope()
+    run = current_retrieval_run()
+    run_id = str(getattr(run, "run_id", "") or "selected-evidence")
+    # The ref only correlates one already-frozen call; hashing every source id
+    # here would add O(scope size) work to the all-selected hot path.
+    scope_id = hashlib.sha256(
+        f"{run_id}:{id(call)}".encode("ascii")
+    ).hexdigest()
+    execution_limit = max(_MIN_CONTRIBUTION_EXECUTION_BUDGET, int(max_results))
+    return RetrievalContributionCallContext(
+        actor_id=actor_id,
+        notebook_id=call._notebook_id,
+        scope_id=scope_id,
+        scope_narrowed=bool(getattr(scope, "restricted", False)),
+        run_id=run_id,
+        run_kind=str(getattr(run, "run_kind", "") or "ask"),
+        cancellation=_AskCancellationToken(cancel_event),
+        max_items=execution_limit,
+        max_tokens=max(_MIN_CONTRIBUTION_EXECUTION_BUDGET, int(max_tokens)),
+        max_proposals=execution_limit,
+        admission_source=_SelectedEvidenceAdmissionSource(
+            call if call._service is not None else None,
+            call._notebook_id,
+            actor_id,
+            admission_hydrate,
+            admission_leaf_io,
+        ),
+        selected_source_graph_source=(
+            call if call._service is not None else None
+        ),
+        connection_probe=connection_probe,
+    )

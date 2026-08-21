@@ -76,6 +76,10 @@ from app.services.retrieval import (
     merge_retrieval_supports,
 )
 from app.services.search_profile import render_style_block
+from app.services.source_graph_activation import (
+    SelectedSourceGraphContributionCall,
+    selected_source_graph_call_context,
+)
 from app.services.source_scope import source_scope_context, source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
@@ -342,6 +346,10 @@ class AskService:
         identity_store=None,
         selected_source_graph=None,
         retrieval_contributors=None,
+        retrieval_connection_probe=None,
+        retrieval_contributor_hydrate: Callable[
+            [str, str, Any], Any
+        ] = lambda _notebook_id, _actor_id, _ids: (),
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
     ) -> None:
@@ -388,6 +396,8 @@ class AskService:
         self.identity_store = identity_store
         self.selected_source_graph = selected_source_graph
         self.retrieval_contributors = retrieval_contributors
+        self.retrieval_connection_probe = retrieval_connection_probe
+        self.retrieval_contributor_hydrate = retrieval_contributor_hydrate
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
 
@@ -400,34 +410,32 @@ class AskService:
         max_results: int = 20,
     ):
         """Append quality-approved G after frozen B; otherwise return B."""
-        retrieval_contributors = getattr(self, "retrieval_contributors", None)
-        if retrieval_contributors is not None:
-            from app.services.retrieval_run import current_retrieval_run
-
-            run = current_retrieval_run()
-            chunks = retrieval_contributors.run(
-                chunks,
-                invocation="selected_evidence",
-                cancellation=(run.cancel_event if run is not None else None),
-                event_sink=getattr(
-                    getattr(self, "event_log", None), "emit", None
-                ),
-            )
-        if self.selected_source_graph is None:
+        service = getattr(self, "selected_source_graph", None)
+        host = getattr(self, "retrieval_contributors", None)
+        connection_probe = getattr(self, "retrieval_connection_probe", None)
+        if host is None or connection_probe is None:
             return list(chunks), None
-        object_seeds = {
-            str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
-            for hit in top_hits
-            if str(getattr(hit, "object_id", "") or "")
-        }
-        chunk_seeds = {
-            str(chunk.chunk_id): float(getattr(chunk, "relevance", 0.0) or 0.0)
-            for chunk in chunks
-            if str(getattr(chunk, "chunk_id", "") or "")
-        }
-
-        try:
-            result = self.selected_source_graph.run(
+        if service is None:
+            call = SelectedSourceGraphContributionCall(
+                None, notebook_id, chunks, max_results=max_results
+            )
+        else:
+            object_seeds = {
+                str(hit.object_id): float(
+                    getattr(hit, "relevance", 0.0) or 0.0
+                )
+                for hit in top_hits
+                if str(getattr(hit, "object_id", "") or "")
+            }
+            chunk_seeds = {
+                str(chunk.chunk_id): float(
+                    getattr(chunk, "relevance", 0.0) or 0.0
+                )
+                for chunk in chunks
+                if str(getattr(chunk, "chunk_id", "") or "")
+            }
+            call = SelectedSourceGraphContributionCall(
+                service,
                 notebook_id,
                 chunks,
                 object_seeds=object_seeds,
@@ -444,15 +452,37 @@ class AskService:
                     )(notebook_id)
                 ),
             )
-        except Exception:
-            # Scale-version/scope probes are graph-lane I/O too.  They must
-            # never turn a completed chunk/reasoning baseline into an error.
-            result = self.selected_source_graph.fail_closed(
-                notebook_id, chunks, "activation_seam_failed"
+        from app.services.retrieval_run import current_retrieval_run
+
+        run = current_retrieval_run()
+        cancel_event = run.cancel_event if run is not None else None
+        try:
+            call_context = selected_source_graph_call_context(
+                call,
+                actor_id=str(self.current_user_id() or ""),
+                cancel_event=cancel_event,
+                connection_probe=connection_probe,
+                admission_hydrate=self.retrieval_contributor_hydrate,
+                max_results=max_results,
+                max_tokens=int(
+                    self.settings.selected_source_graph_enrichment_tokens
+                ),
             )
-        if result.status.state == "historical":
-            return list(result.chunks), None
-        return list(result.chunks), result.status
+            host_chunks = host.run(
+                chunks,
+                invocation="selected_evidence",
+                call_context=call_context,
+                baseline_identity=lambda chunk: chunk.chunk_id,
+                cancellation=call_context.cancellation,
+                event_sink=getattr(
+                    getattr(self, "event_log", None), "emit", None
+                ),
+            )
+            return call.visible_result(host_chunks)
+        except AskCancelled:
+            raise
+        except Exception:
+            return call.fail_closed_result("activation_seam_failed")
 
     def _graph_source_chunks_with_activation(
         self,
