@@ -78,14 +78,10 @@ class ReportStore:
             args.append(json.dumps(val, ensure_ascii=False) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
-            guard = (
-                " AND status NOT IN ('done','failed','cancelled')"
-                if status == "cancelled"
-                else " AND status <> 'cancelled'"
-            )
             db.execute(
                 f"UPDATE reports SET {', '.join(sets)} "
-                f"WHERE id = ? AND notebook_id = ?{guard}",
+                "WHERE id = ? AND notebook_id = ? "
+                "AND status NOT IN ('done','failed','cancelled')",
                 args,
             )
 

@@ -61,7 +61,12 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     cancelled = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json() == {"status": "done"}
-    assert repo.get_report(nb["id"], rid)["status"] == "done"
+    repo.update_report(
+        nb["id"], rid, status="failed", content_md="# stale terminal rewrite"
+    )
+    terminal = repo.get_report(nb["id"], rid)
+    assert terminal["status"] == "done"
+    assert terminal["content_md"] == ""
     assert client.delete(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 200
     assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 404
 

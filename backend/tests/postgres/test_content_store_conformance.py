@@ -499,7 +499,7 @@ def test_ask_and_report_state_shapes_match_persisted_golden(content_harness):
     )
     completed = content_harness.report.get_report("nb-content", report_id)
     assert completed["status"] == "done"
-    assert completed["content_md"] == "# too late"
+    assert completed["content_md"] == "# State"
 
 
 def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):
