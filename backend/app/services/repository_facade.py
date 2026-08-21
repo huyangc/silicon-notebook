@@ -27,6 +27,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     get_request_user,
@@ -296,6 +297,9 @@ class RepositoryFacade:
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        knowledge_candidate_projector_host: (
+            KnowledgeCandidateProjectorHostPort | None
+        ) = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -332,6 +336,7 @@ class RepositoryFacade:
             report_auditor_host=report_auditor_host,
             report_completed_observer_host=report_completed_observer_host,
             element_enricher_host=element_enricher_host,
+            knowledge_candidate_projector_host=knowledge_candidate_projector_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the

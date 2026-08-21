@@ -30,4 +30,9 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
             if runtime.element_enrichers.has_contributors
             else None
         ),
+        knowledge_candidate_projector_host=(
+            runtime.knowledge_candidate_projectors
+            if runtime.knowledge_candidate_projectors.has_contributors
+            else None
+        ),
     )

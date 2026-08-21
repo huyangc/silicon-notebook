@@ -194,6 +194,32 @@ class Settings(BaseSettings):
         le=32768,
         validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS",
     )
+    # Candidate projectors run after the legacy KG candidate/relink/partial
+    # gates and before the one core-owned source-generation transaction.
+    knowledge_candidate_projector_timeout_seconds: float = Field(
+        10.0,
+        gt=0,
+        le=300,
+        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS",
+    )
+    knowledge_candidate_projector_max_objects: int = Field(
+        512,
+        ge=1,
+        le=25000,
+        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS",
+    )
+    knowledge_candidate_projector_max_relations: int = Field(
+        1024,
+        ge=1,
+        le=50000,
+        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS",
+    )
+    knowledge_candidate_projector_max_candidate_bytes: int = Field(
+        1048576,
+        ge=1024,
+        le=16777216,
+        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES",
+    )
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(

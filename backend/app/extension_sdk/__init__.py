@@ -116,6 +116,23 @@ from app.extension_sdk.element_enrichment import (
     ElementRef,
     ElementView,
 )
+from app.extension_sdk.knowledge_projection import (
+    KNOWLEDGE_EVIDENCE_QUOTE_MAX_CHARS,
+    KNOWLEDGE_CANDIDATE_PROJECTOR_POINT,
+    SCOPED_SOURCE_ELEMENTS_READ_CAPABILITY,
+    KnowledgeCandidateBatch,
+    KnowledgeCandidateProjector,
+    KnowledgeCandidateRef,
+    KnowledgeElementRef,
+    KnowledgeElementView,
+    KnowledgeEvidenceCandidate,
+    KnowledgeObjectCandidate,
+    KnowledgeProjectionAvailabilityContext,
+    KnowledgeProjectionBudget,
+    KnowledgeProjectionContext,
+    KnowledgeRelationCandidate,
+    KnowledgeSchemaView,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -222,4 +239,19 @@ __all__ = [
     "ElementEnrichmentContext",
     "ElementRef",
     "ElementView",
+    "KNOWLEDGE_CANDIDATE_PROJECTOR_POINT",
+    "KNOWLEDGE_EVIDENCE_QUOTE_MAX_CHARS",
+    "SCOPED_SOURCE_ELEMENTS_READ_CAPABILITY",
+    "KnowledgeCandidateBatch",
+    "KnowledgeCandidateProjector",
+    "KnowledgeCandidateRef",
+    "KnowledgeElementRef",
+    "KnowledgeElementView",
+    "KnowledgeEvidenceCandidate",
+    "KnowledgeObjectCandidate",
+    "KnowledgeProjectionAvailabilityContext",
+    "KnowledgeProjectionBudget",
+    "KnowledgeProjectionContext",
+    "KnowledgeRelationCandidate",
+    "KnowledgeSchemaView",
 ]

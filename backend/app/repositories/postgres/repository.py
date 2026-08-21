@@ -13,6 +13,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.repositories.postgres.bundle import PostgresPersistenceBundleFactory
 from app.services.repository_facade import RepositoryFacade
 
@@ -30,6 +31,9 @@ class PostgresRepository(RepositoryFacade):
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        knowledge_candidate_projector_host: (
+            KnowledgeCandidateProjectorHostPort | None
+        ) = None,
     ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
@@ -44,6 +48,7 @@ class PostgresRepository(RepositoryFacade):
                 report_auditor_host=report_auditor_host,
                 report_completed_observer_host=report_completed_observer_host,
                 element_enricher_host=element_enricher_host,
+                knowledge_candidate_projector_host=knowledge_candidate_projector_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a
