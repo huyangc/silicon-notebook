@@ -1,6 +1,6 @@
 # silicon-notebook 架构
 
-更新日期：2026-07-22
+更新日期：2026-08-21
 
 本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署、环境变量全集与产品操作说明以 `README.md`、`README_zh.md` 和 `.env.example` 为准；协作约束以 `AGENTS.md` 为准。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
@@ -33,6 +33,8 @@
 ### 2.2 Repository 组合与兼容 facade
 
 `backend/app/services/repository_facade.py` 中的 `RepositoryFacade` 是后端中立 facade；唯一 factory 根据已验证的 `DATABASE_URL` 构造 `SQLiteRepository` 或 `PostgresRepository`，两者注入同一个 `RepositoryRuntime` 组合边界。公共方法只保留显式兼容 adapter 或单跳委托，不再通过 mixin 继承复用实现。AST guard 会验证每个委托的真实目标与 ownership manifest 一致；依赖方向单向：factory/wrapper → facade → runtime → application services → stores；service/store 不得反向 import facade、判断 SQL dialect 或 import 对侧 adapter。
+
+模块化扩展的 Phase 0 已落地，但尚未迁移任何产品能力。稳定跨层值下沉到 `backend/app/domain`；repository ports 只依赖 domain/models/core，不再反向 import service，当前 backend 静态 import 图为 0 SCC。`backend/app/extension_sdk` 提供 manifest、五类 contribution、最小上下文/结果和脱敏失败合同，`backend/app/extensions` 负责启动期组合并冻结 registry 拓扑；availability 不随拓扑冻结，仍在调用时实时判定。当前 bundle 集为空，且 Ask/Report/摄取/检索 service 都不读取 registry，所以空 registry 下运行控制流保持原路径。`scripts/check_architecture_boundaries.py` 在 G1 contracts lane 直接检查无环、domain/SDK 依赖方向、`ports.py` 反向依赖、空 registry 隔离以及 facade 公开面冻结。后续扩展迁移的顺序和安全下界以 `docs/modular-plugin-architecture-design-2026-08-21.md` 为准。
 
 - **SQLite 持久化**：`backend/app/repositories/sqlite/` 下是 identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / memory / query / index-projection 等领域 store。这些 store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。它们共享唯一的 `SqliteDatabase`（connection factory、WAL/busy_timeout PRAGMA、实例级写锁）。application service 不拼装主业务库 SQL，只保留业务顺序、策略与 transaction seat。`SqliteMigrator` 持有 `SCHEMA_VERSION` 与版本化迁移注册表；启动顺序固定为 migrate → 恢复中断的 merge-review/Ask job → seed 与 admin 原地升级，后两步不进版本闸、每次启动照跑。
 - **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）与 `backend/app/repositories/filesystem/`（scale/viz 索引工件）。

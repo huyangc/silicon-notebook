@@ -1,0 +1,13 @@
+{
+  "facade_public_surface": {
+    "RepositoryFacade": {
+      "count": 317,
+      "sha256": "f9c1f845279fc033123ee854484d4638ba0a8e4815752d8af27465fdd00a034e"
+    },
+    "SQLiteRepository": {
+      "count": 5,
+      "sha256": "110e89ddd76190f7065765487769a1f5e68dd5595082e53c6f448a410390978a"
+    }
+  }
+}
+

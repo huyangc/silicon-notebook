@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.domain.repository import remap_json_ids
+
 
 def _now() -> str:
     return datetime.now().astimezone().replace(microsecond=0).isoformat()
@@ -28,26 +30,8 @@ def _copy_chunk_size() -> int:
 
 
 def _remap_json_ids(value, maps: dict):
-    """Recursively rewrite copied source/element/object references in JSON."""
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key in ("element_id", "source_id", "object_id") and isinstance(item, str):
-                out[key] = maps.get(key, {}).get(item, item)
-            elif key == "element_ids" and isinstance(item, list):
-                mapping = maps.get("element_ids", {})
-                out[key] = [
-                    mapping.get(child, child)
-                    if isinstance(child, str)
-                    else _remap_json_ids(child, maps)
-                    for child in item
-                ]
-            else:
-                out[key] = _remap_json_ids(item, maps)
-        return out
-    if isinstance(value, list):
-        return [_remap_json_ids(item, maps) for item in value]
-    return value
+    """Compatibility spelling for the domain-owned pure remapping value."""
+    return remap_json_ids(value, maps)
 
 
 class SQLiteNotebookSharingMixin:

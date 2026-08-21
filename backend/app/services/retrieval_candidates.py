@@ -11,7 +11,6 @@ import json
 import itertools
 import re
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE
@@ -22,6 +21,7 @@ from app.core.config import (
     DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N,
 )
 from app.models.common import Evidence
+from app.domain.retrieval import ChunkRetrievalPlan
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import (
@@ -107,15 +107,6 @@ def _first_relation_sample(raw: object) -> str:
     if isinstance(samples, list) and samples:
         return str(samples[0])
     return ""
-
-
-@dataclass(frozen=True)
-class ChunkRetrievalPlan:
-    strategy: str
-    overlay_on: bool
-    mmr_k: int
-    mmr_lambda: float
-    fuse_k: int
 
 
 class _RetrievalState:

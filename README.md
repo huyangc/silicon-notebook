@@ -6,7 +6,7 @@
 
 Model evidence markers written as either `[k1]` or localized `【k1】` (including comma-separated groups) bind to the same clickable numbered citations in Ask and Deep Report.
 
-The current target is a local real-team beta: FastAPI with a selectable SQLite or PostgreSQL repository backend, plus Next.js on the frontend. The shipped-default SQLite quick start requires no Docker, GPU, database server, or local model server; selecting PostgreSQL requires an accessible PostgreSQL server. OpenAI-compatible chat, embedding, rerank, and MinerU services are optional URL-based integrations; deterministic fallbacks keep the core pipeline usable when they are not configured.
+The current target is a local real-team beta: FastAPI with a selectable SQLite or PostgreSQL repository backend, plus Next.js on the frontend. The shipped-default SQLite quick start requires no Docker, GPU, database server, or local model server; selecting PostgreSQL requires an accessible PostgreSQL server. OpenAI-compatible chat, embedding, rerank, and MinerU services are optional URL-based integrations; deterministic fallbacks keep the core pipeline usable when they are not configured. The backend now has a dependency-light `domain` contract layer and a startup-frozen, currently empty Extension SDK registry; no product workflow is plugin-driven yet, so the empty registry leaves every existing path unchanged.
 
 ## Highlights
 

@@ -19,117 +19,38 @@ haystack that carries the entire phrase (see `keyword_basis`).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (
     AbstractSet,
     Callable,
     Dict,
     FrozenSet,
     List,
-    Literal,
-    NamedTuple,
     Optional,
     Sequence,
     Set,
 )
 
 from app.core.query_syntax import quoted_phrases, unquoted_remainder
-from app.models.common import Evidence
+from app.domain.retrieval import (
+    GapRelationRow,
+    NeighborExpansion,
+    RetrievedChunk,
+    RetrievedElement,
+    RetrievedKnowledge,
+    RetrievedRelation,
+    RetrievalSupport,
+    W_KEYWORD,
+    W_SEMANTIC,
+)
+from app.models.common import Evidence  # compatibility re-export
 
 
 # --- Tunable scoring constants (kept here so they can be tuned in one place) ---
 # Hybrid fusion weights. Renormalized per object by which signals are active, so
 # keyword-only objects are not unfairly capped (see `score_knowledge`).
-W_KEYWORD = 0.4
-W_SEMANTIC = 0.6
 # Candidates below this fused relevance are dropped as noise.
 RELEVANCE_FLOOR = 0.12
-
-
-@dataclass
-class RetrievedKnowledge:
-    object_id: str
-    object_type: str
-    payload: Dict[str, object]
-    evidence: List[Evidence] = field(default_factory=list)
-    score: float = 0.0
-    # Fused relevance before type weight / scenario boost (0..1).
-    relevance: float = 0.0
-    # Type authority weight, kept separate so it does not pollute relevance
-    # ranking; callers may use it for cross-type tie-breaking / grouping.
-    weight: float = 0.0
-    status: str = "approved"
-    owner: str = ""
-    last_reviewed: str = ""
-    # Two-tier federation tags. Default "" / "personal" so every existing caller
-    # that does not set them keeps working unchanged. federated_retrieve() fills
-    # them in with the hit's source notebook and that notebook's tier.
-    notebook_id: str = ""
-    tier: str = "personal"
-
-
-@dataclass
-class RetrievedElement:
-    element_id: str
-    source_id: str
-    source_title: str
-    location_label: str
-    element_type: str
-    text: str
-    score: float = 0.0
-
-
-@dataclass
-class RetrievedRelation:
-    relation_id: str
-    source_object_id: str
-    target_object_id: str
-    edge_type: str
-    text: str = ""
-    evidence: List[Evidence] = field(default_factory=list)
-    score: float = 0.0
-    relevance: float = 0.0
-    notebook_id: str = ""
-    tier: str = "personal"
-    review_status: str = "pending"
-
-
-class NeighborExpansion(NamedTuple):
-    """一次 1-hop 邻居展开的结果 + 「是否因预算被截断」。
-
-    截断标志跟着结果走而不是记在调用链外的状态里:唯一的消费者(reasoning 的
-    `expand_graph`)必须能把它披露给用户与模型——「这个节点还有更多邻居没展开」
-    与「这个节点就这些邻居」是两件事,静默合并会让模型以为已经看全了。
-    """
-
-    hits: List[RetrievedKnowledge]
-    truncated: bool = False
-
-
-@dataclass(frozen=True)
-class GapRelationRow:
-    """canonical 层里一条**支撑薄弱**的关系(设计文档 §3.3 的 KG 弱支撑边回喂)。
-
-    它不是检索结果、不进证据池、不可 `[k]` 引用 —— 只是喂给模型的一行提示
-    (「这条边只有 1-2 个来源支撑,要不要定向补证」)。所以它刻意**没有** score /
-    relevance / evidence 字段:任何一个都会立刻让人想把它混进候选排序里。
-
-    两端各带 canonical id 与显示名。id 用于 run 级去重账目(名字会因簇换代而变,
-    id 不会);显示名才是喂给模型的东西(canonical id 是 `K-<归一化 seed>` 这种
-    内部形状,模型复述它只会污染答案)。
-
-    ``source_count`` 是撑着这条边的**不同文档**数,不是聚合掉的原始关系行数
-    (`canonical_relations.support_count`)。字段名照这个含义起,是因为提示行对模型
-    说的就是「仅 1-2 源支撑」—— 名字叫 support 而值是行数,下一个读到它的人会照着
-    行数去渲染,而那两个数在别名归一/claim 聚簇的库上经常差好几倍。
-    """
-
-    canonical_src: str
-    canonical_tgt: str
-    src_name: str
-    tgt_name: str
-    edge_type: str
-    source_count: int
 
 
 # KG node-type authority weights: claim/formula are primary knowledge carriers;
@@ -781,24 +702,6 @@ def score_elements(
     return scored[:limit]
 
 
-@dataclass(frozen=True)
-class RetrievalSupport:
-    """One producer's immutable support for a retrieved chunk.
-
-    ``score`` belongs to that producer and never replaces the chunk's fused
-    relevance.  ``support_id`` is a real object/relation/chunk id when one is
-    known; PPR intentionally leaves it empty rather than inventing a relation.
-    """
-
-    origin: Literal[
-        "semantic", "lexical", "generated_question", "kg_source", "ppr", "relation"
-    ]
-    support_kind: Literal["chunk", "object", "relation", "ppr"]
-    support_id: str = ""
-    score: Optional[float] = None
-    review_status_snapshot: str = ""
-
-
 _REVIEW_STRICTNESS = {"": 0, "verified": 1, "pending": 2, "rejected": 3}
 
 
@@ -1085,32 +988,6 @@ def select_with_graph_reserve(
         max_tokens,
         (graph_reserve_rule(reserve, min_graph_score=min_graph_score),),
     )
-
-
-@dataclass
-class RetrievedChunk:
-    chunk_id: str
-    source_id: str
-    source_title: str
-    section_path: str
-    text: str
-    element_ids: List[str] = field(default_factory=list)
-    score: float = 0.0
-    relevance: float = 0.0
-    # Origin notebook, only set by cross-tier retrieval paths (currently
-    # _ppr_retrieve, which can surface chunks from a base notebook while
-    # querying an active/personal one — mirrors RetrievedKnowledge.notebook_id).
-    # "" (default) means "the notebook this ask() call is scoped to" — every
-    # single-notebook chunk path (_retrieve_chunks, _kg_source_chunks, etc.)
-    # leaves this unset and callers fall back to the ask's own notebook_id.
-    notebook_id: str = ""
-    retrieval_supports: tuple[RetrievalSupport, ...] = field(default=(), compare=False)
-
-    @property
-    def object_id(self) -> str:
-        # classify_evidence 读 .object_id;anchors 的 object_id 也=chunk_id,
-        # 两边对齐才能算出 anchored_rel。
-        return self.chunk_id
 
 
 def score_chunks(

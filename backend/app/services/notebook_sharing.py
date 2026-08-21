@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
+from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.ports import (
     AgentObservationStorePort,
     AgentProfileStorePort,
@@ -19,9 +20,6 @@ from app.repositories.ports import (
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.knowhow.ids import cell_chunk_id, element_id
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
-
-if TYPE_CHECKING:  # runtime import would be circular (runtime constructs us)
-    from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 _log = logging.getLogger("silicon_notebook.sharing")
 

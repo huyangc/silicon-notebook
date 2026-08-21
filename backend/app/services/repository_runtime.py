@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 import logging
 import threading
@@ -8,6 +7,7 @@ import weakref
 from typing import Any, Callable
 
 from app.core.config import Settings
+from app.domain.repository import RepositoryCompatibilitySeams
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -80,15 +80,6 @@ from app.services.notebook_scale import NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
 
 _log = logging.getLogger("silicon_notebook.repository_runtime")
-
-
-@dataclass(frozen=True)
-class RepositoryCompatibilitySeams:
-    new_id: Callable[[str], str]
-    now: Callable[[], str]
-    copy_chunk_size: Callable[[], int]
-    remap_json_ids: Callable[[Any, dict], Any]
-    in_chunk_size: Callable[[], int]
 
 
 class RepositoryRuntime:

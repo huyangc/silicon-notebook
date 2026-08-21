@@ -33,6 +33,7 @@ from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.extensions import build_extension_registry
 from app.services.model_provider import validate_process_local_scheduler_deployment
 from app.services.pending_bus import pending_bus
 
@@ -244,6 +245,10 @@ def create_app() -> FastAPI:
         description="Local beta API for semiconductor knowhow notebooks.",
         lifespan=lifespan,
     )
+    # Phase 0: topology exists and is frozen at startup, but no current product
+    # workflow consumes it.  With the empty bundle set every existing path is
+    # therefore the original path, byte-for-byte.
+    app.state.extension_registry = build_extension_registry()
 
     request_log = EventLogger(settings, channel="requests")
 
