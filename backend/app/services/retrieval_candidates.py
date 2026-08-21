@@ -21,8 +21,9 @@ from app.core.config import (
     DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N,
 )
 from app.models.common import Evidence
+from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.retrieval import ChunkRetrievalPlan
-from app.services.cancellation import CancelEvent, raise_if_cancelled
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
@@ -335,6 +336,7 @@ class CandidateRetrievalService(_RetrievalState):
         embedder,
         notebook_languages,
         memory_retriever=None,
+        retrieval_contributors=None,
     ) -> None:
         super().__init__(
             database=database,
@@ -362,6 +364,7 @@ class CandidateRetrievalService(_RetrievalState):
         self.model_error_sink = model_error_sink
         self.database = database
         self.memory_retriever = memory_retriever
+        self.retrieval_contributors = retrieval_contributors
 
     def notebook_memory_hits(
         self, user_id: str, notebook_id: str, query: str, limit: int = 8
@@ -1960,14 +1963,14 @@ class CandidateRetrievalService(_RetrievalState):
             recall,
             allowed_source_ids=allowed_source_ids,
         )
-        return self._generated_question_supplement(
+        return self._run_chunk_candidate_contributors(
             notebook_id,
             query,
             baseline,
             allowed_source_ids=allowed_source_ids,
         )
 
-    def _generated_question_supplement(
+    def _run_chunk_candidate_contributors(
         self,
         notebook_id: str,
         query: str,
@@ -1978,26 +1981,72 @@ class CandidateRetrievalService(_RetrievalState):
         """Bounded low-recall supplement; shadow mode cannot alter results."""
         mode = self.settings.generated_question_index_mode
         scored, _ids, _matrix = baseline
-        if mode == "off" or len(scored) >= self.settings.generated_question_trigger_hits:
+        host = self.retrieval_contributors
+        if host is None:
             return baseline
 
-        try:
-            return self._generated_question_supplement_optional(
+        from app.services.generated_question_contribution import (
+            GeneratedQuestionContributionCall,
+            generated_question_call_context,
+        )
+        from app.services.retrieval_run import current_retrieval_run
+
+        run = current_retrieval_run()
+        actor_id = str(getattr(run, "actor_id", "") or "")
+        generated_enabled = bool(
+            actor_id
+            and mode != "off"
+            and len(scored) < self.settings.generated_question_trigger_hits
+        )
+        call = GeneratedQuestionContributionCall(
+            notebook_id,
+            baseline,
+            mode=mode,
+            evaluate=lambda isolated: self._generated_question_supplement_optional(
                 notebook_id,
                 query,
-                baseline,
+                isolated,
                 mode=mode,
+                actor_id=actor_id,
                 allowed_source_ids=allowed_source_ids,
-            )
-        except Exception:  # noqa: BLE001 — optional recall must preserve baseline
-            self._emit_generated_question_query_event({
+            ),
+            matrix_hydrate=self._hydrate_chunk_candidates,
+            failure_event=lambda: self._emit_generated_question_query_event({
                 "kind": "chunk_question_index_query",
                 "notebook_id": notebook_id,
                 "mode": mode,
                 "status": "failed_open",
                 "baseline_hits": len(scored),
-            })
-            return baseline
+            }),
+        )
+        try:
+            call_context = generated_question_call_context(
+                call,
+                actor_id=actor_id,
+                cancel_event=getattr(run, "cancel_event", None),
+                connection_probe=self.database,
+                admission_hydrate=self.hydrate_retrieval_contribution_chunks,
+                max_results=self.settings.generated_question_recall,
+                generated_question_enabled=generated_enabled,
+            )
+            host_chunks = host.run(
+                scored,
+                invocation="chunk_candidates",
+                call_context=call_context,
+                baseline_identity=lambda chunk: chunk.chunk_id,
+                cancellation=call_context.cancellation,
+                event_sink=getattr(self.event_log, "emit", None),
+                disabled_capabilities=(
+                    frozenset()
+                    if generated_enabled
+                    else frozenset({GENERATED_QUESTION_ACCESS_CAPABILITY})
+                ),
+            )
+            return call.visible_result(host_chunks)
+        except AskCancelled:
+            raise
+        except Exception:  # noqa: BLE001 — optional recall must preserve baseline
+            return call.fail_open_result()
 
     def _emit_generated_question_query_event(self, event: dict) -> None:
         """Question-index observability is itself fail-open and content-free."""
@@ -2016,6 +2065,7 @@ class CandidateRetrievalService(_RetrievalState):
         baseline,
         *,
         mode: str,
+        actor_id: str,
         allowed_source_ids=None,
     ):
         """Evaluate the optional index behind one all-or-nothing boundary."""
@@ -2033,6 +2083,7 @@ class CandidateRetrievalService(_RetrievalState):
         scan_limit = self.settings.generated_question_max_scan_rows
         rows = self.chunks.question_index_rows(
             notebook_id,
+            actor_id=actor_id,
             allowed_source_ids=allowed,
             limit=scan_limit + 1,
         )
@@ -2546,6 +2597,8 @@ class CandidateRetrievalService(_RetrievalState):
             q, ctx = task
             try:
                 return ctx.run(self._retrieve_chunks, notebook_id, q)
+            except AskCancelled:
+                raise
             except Exception:
                 return ([], [], None)
 

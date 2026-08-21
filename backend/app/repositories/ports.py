@@ -1379,6 +1379,7 @@ class ChunkStorePort(Protocol):
         self,
         notebook_id: str,
         *,
+        actor_id: str,
         allowed_source_ids: Sequence[str] | None,
         limit: int,
     ) -> list[dict[str, Any]]: ...

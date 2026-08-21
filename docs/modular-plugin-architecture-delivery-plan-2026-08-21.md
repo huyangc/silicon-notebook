@@ -110,7 +110,7 @@ PR 描述必须包含：
 
 #### PR-02：Selected-source graph adapter
 
-状态：实现完成；五轮 subagent P1 已闭合，正在对修订 HEAD 重跑双路 review 与 CI。
+状态：已通过多轮双路 subagent review 与三条 CI，由 PR #543 squash 合入。
 
 范围：
 
@@ -126,6 +126,8 @@ PR 描述必须包含：
 硬门：通用 host 合同只能是下界，不得把 selected-source graph 的更强合同降级。
 
 #### PR-03：Generated-question supplement adapter
+
+状态：实现中；已完成 host/capability/actor-scoped SQL 接线，待双路 review 与 CI。
 
 范围：
 

@@ -40,10 +40,13 @@ class RetrievalRunState:
 
     def __init__(self, *, run_kind: str, fanout_limit: Optional[int],
                  correlation_id: str = "",
+                 actor_id: str = "",
                  cancel_event: CancelEvent = None) -> None:
         self.run_kind = str(run_kind)
         self.run_id = f"rr-{uuid4().hex[:12]}"
         self.correlation_id = str(correlation_id or "")
+        # Core-only authority identity. It is deliberately absent from event().
+        self.actor_id = str(actor_id or "")
         self.cancel_event = cancel_event
         self.fanout_limit = (
             max(1, int(fanout_limit)) if fanout_limit is not None else None
@@ -173,12 +176,14 @@ def current_retrieval_run() -> Optional[RetrievalRunState]:
 def retrieval_run(*, run_kind: str, event_log: Any = None,
                   fanout_limit: Optional[int] = None,
                   correlation_id: str = "",
+                  actor_id: str = "",
                   cancel_event: CancelEvent = None) -> Iterator[RetrievalRunState]:
     """Install an isolated run and restore an enclosing run exactly on exit."""
     state = RetrievalRunState(
         run_kind=run_kind,
         fanout_limit=fanout_limit,
         correlation_id=correlation_id,
+        actor_id=actor_id,
         cancel_event=cancel_event,
     )
     token = _RETRIEVAL_RUN.set(state)

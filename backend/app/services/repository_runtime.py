@@ -697,6 +697,7 @@ class RepositoryRuntime:
             candidates = CandidateRetrievalService(
                 **common,
                 memory_retriever=self.memory_retriever,
+                retrieval_contributors=self.retrieval_contributors,
             )
             graph = GraphRetrievalService(**common)
             retrieval = RetrievalService(

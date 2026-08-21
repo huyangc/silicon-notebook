@@ -540,6 +540,7 @@ class AskService:
                 run_kind=f"ask_{spec.id}",
                 event_log=getattr(self, "event_log", None),
                 correlation_id=job_id,
+                actor_id=user_id,
                 cancel_event=cancel_event,
             ):
                 if spec.streaming:

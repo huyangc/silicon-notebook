@@ -74,23 +74,29 @@ class ChunkStore:
         self,
         notebook_id: str,
         *,
+        actor_id: str,
         allowed_source_ids: Sequence[str] | None,
         limit: int,
     ) -> list[dict]:
-        params: list[object] = [notebook_id]
+        params: list[object] = [notebook_id, actor_id]
         source_clause = ""
         if allowed_source_ids is not None:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
             placeholders = ",".join("?" for _ in source_ids)
-            source_clause = f"AND source_id IN ({placeholders}) "
+            source_clause = f"AND q.source_id IN ({placeholders}) "
             params.extend(source_ids)
         params.append(int(limit))
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT id,chunk_id,source_id,vector FROM chunk_questions "
-                "WHERE notebook_id=? " + source_clause + "ORDER BY id LIMIT ?",
+                "SELECT q.id,q.chunk_id,q.source_id,q.vector "
+                "FROM chunk_questions q JOIN sources s "
+                "ON s.id=q.source_id AND s.notebook_id=q.notebook_id "
+                "WHERE q.notebook_id=? AND (s.source_type!='memory' OR EXISTS ("
+                "SELECT 1 FROM memory_items m WHERE m.id=s.memory_id "
+                "AND m.notebook_id=q.notebook_id AND m.created_by=?)) "
+                + source_clause + "ORDER BY q.id LIMIT ?",
                 params,
             ).fetchall()
         return [dict(row) for row in rows]

@@ -187,6 +187,13 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
             [ChunkWrite(f"chunk-{source_id}", source_id, "", ())],
             created_at=now,
         )
+        chunks.replace_chunk_questions(
+            f"chunk-{source_id}",
+            notebook_id,
+            source_id,
+            ((f"question-{source_id}", "Question?", [0.25, 0.75]),),
+            created_at=now,
+        )
 
     candidate_ids = tuple(
         f"chunk-{source_id}" for source_id in (
@@ -207,6 +214,17 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
         )
 
     assert {row["id"] for row in rows} == {
+        "chunk-source-pg-visible",
+        "chunk-source-pg-knowhow",
+        "chunk-source-pg-memory-alice",
+    }
+    question_rows = chunks.question_index_rows(
+        notebook_id,
+        actor_id=alice.id,
+        allowed_source_ids=None,
+        limit=20,
+    )
+    assert {row["chunk_id"] for row in question_rows} == {
         "chunk-source-pg-visible",
         "chunk-source-pg-knowhow",
         "chunk-source-pg-memory-alice",

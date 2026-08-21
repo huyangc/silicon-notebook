@@ -235,6 +235,19 @@ def test_retrieval_run_event_does_not_echo_an_unregistered_run_kind():
     assert "SECRET-USER-CONTENT" not in json.dumps(log.events[0])
 
 
+def test_retrieval_run_actor_is_core_only_and_never_emitted():
+    log = _Log()
+    with retrieval_run(
+        run_kind="ask_chunk",
+        actor_id="secret-user-id",
+        event_log=log,
+    ) as state:
+        assert state.actor_id == "secret-user-id"
+
+    assert "actor_id" not in log.events[0]
+    assert "secret-user-id" not in json.dumps(log.events[0])
+
+
 def test_event_log_base_exception_still_restores_contextvar():
     class _InterruptingLog:
         def emit(self, _event):
