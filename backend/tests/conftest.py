@@ -75,6 +75,7 @@ _REAL_SQLITE_MIGRATION_MODULES = {
     "test_agent_profile_store.py",
     "test_catalog_store.py",
     "test_merge_dbs_taxonomy.py",
+    "test_readiness_gate.py",
     "test_repository_snapshot_verifier.py",
     "test_retrieval_experience_store.py",
     "test_search_profile_job.py",
