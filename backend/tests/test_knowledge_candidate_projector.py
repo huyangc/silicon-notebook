@@ -562,6 +562,60 @@ def test_contributor_leaving_connection_held_discards_all_extension_output():
     assert host.project_application(_call(probe=probe)) == ()
 
 
+def test_failing_contributor_cannot_emit_after_leaving_connection_held():
+    probe = _Probe()
+    events = []
+    later_calls = []
+
+    class LeakingFailure:
+        def project(self, _context):
+            probe.held = True
+            raise RuntimeError("plugin failed after retaining lease")
+
+    class Later:
+        def project(self, context):
+            later_calls.append("later")
+            return _single_available(context)
+
+    host = _runtime(
+        _bundle("a.leaking", LeakingFailure()),
+        _bundle("b.later", Later()),
+    ).knowledge_candidate_projectors
+
+    assert host.project_application(
+        _call(probe=probe), event_sink=events.append
+    ) == ()
+    assert events == []
+    assert later_calls == []
+
+
+def test_clock_cannot_leave_connection_held_before_next_collaborator():
+    probe = _Probe()
+    plugin_calls = []
+
+    class Projector:
+        def project(self, _context):
+            plugin_calls.append("plugin")
+            raise AssertionError("leaking clock reached projector")
+
+    host = _runtime(
+        _bundle("knowledge.clock_leak", Projector())
+    ).knowledge_candidate_projectors
+    calls = 0
+
+    def clock():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            probe.held = True
+        return 0.0
+
+    host._clock = clock
+    call = replace(_call(probe=probe), deadline_monotonic=60.0)
+    assert host.project_application(call) == ()
+    assert plugin_calls == []
+
+
 def test_availability_or_event_leaving_connection_held_discards_all_output():
     probe = _Probe()
     plugin_calls = []

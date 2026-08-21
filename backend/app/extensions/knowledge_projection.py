@@ -288,7 +288,10 @@ class KnowledgeCandidateProjectorHost:
             _raise_if_cancelled(call.cancellation)
             if not self._connection_clear_for(call):
                 return ()
-            if self._expired_for(call):
+            expired = self._expired_for(call)
+            if expired is None:
+                return ()
+            if expired:
                 break
             availability_context = KnowledgeProjectionAvailabilityContext(
                 registration.contribution_id,
@@ -307,7 +310,10 @@ class KnowledgeCandidateProjectorHost:
                 _raise_if_cancelled(call.cancellation)
                 if not self._connection_clear_for(call):
                     return ()
-                if self._expired_for(call):
+                expired = self._expired_for(call)
+                if expired is None:
+                    return ()
+                if expired:
                     return tuple(accepted)
                 if (
                     decision is None
@@ -327,7 +333,10 @@ class KnowledgeCandidateProjectorHost:
             _raise_if_cancelled(call.cancellation)
             if not self._connection_clear_for(call):
                 return ()
-            if self._expired_for(call):
+            expired = self._expired_for(call)
+            if expired is None:
+                return ()
+            if expired:
                 return tuple(accepted)
             if (
                 decision is None
@@ -336,7 +345,6 @@ class KnowledgeCandidateProjectorHost:
             ):
                 continue
             started = self._safe_clock()
-            _raise_if_cancelled(call.cancellation)
             if not self._connection_clear_for(call):
                 return ()
             if started is None or started >= call.deadline_monotonic:
@@ -344,14 +352,23 @@ class KnowledgeCandidateProjectorHost:
             try:
                 result = registration.project(context)
             except Exception:
-                _raise_if_cancelled(call.cancellation)
+                if not self._connection_clear_for(call):
+                    return ()
+                expired = self._expired_for(call)
+                if expired is None:
+                    return ()
+                if expired:
+                    return tuple(accepted)
                 self._emit(sink, registration, "failed", 0, 0, started, call)
                 _raise_if_cancelled(call.cancellation)
                 continue
             _raise_if_cancelled(call.cancellation)
             if not self._connection_clear_for(call):
                 return ()
-            if self._expired_for(call):
+            expired = self._expired_for(call)
+            if expired is None:
+                return ()
+            if expired:
                 return tuple(accepted)
             if self._valid_unavailable_result(result):
                 self._emit(
@@ -376,7 +393,10 @@ class KnowledgeCandidateProjectorHost:
                 remaining_bytes,
             )
             _raise_if_cancelled(call.cancellation)
-            if self._expired_for(call):
+            expired = self._expired_for(call)
+            if expired is None:
+                return ()
+            if expired:
                 return tuple(accepted)
             if validated is None:
                 self._emit(sink, registration, "invalid", 0, 0, started, call)
@@ -664,9 +684,10 @@ class KnowledgeCandidateProjectorHost:
         _raise_if_cancelled(call.cancellation)
         return True
 
-    def _expired_for(self, call: KnowledgeProjectionCallContext) -> bool:
+    def _expired_for(self, call: KnowledgeProjectionCallContext) -> bool | None:
         now = self._safe_clock()
-        _raise_if_cancelled(call.cancellation)
+        if not self._connection_clear_for(call):
+            return None
         return now is None or now >= call.deadline_monotonic
 
     def _safe_clock(self) -> float | None:
@@ -691,7 +712,8 @@ class KnowledgeCandidateProjectorHost:
         if sink is None:
             return
         finished = self._safe_clock()
-        _raise_if_cancelled(call.cancellation)
+        if not self._connection_clear_for(call):
+            return
         elapsed = 0
         if started is not None and finished is not None:
             delta = max(0.0, finished - started) * 1000

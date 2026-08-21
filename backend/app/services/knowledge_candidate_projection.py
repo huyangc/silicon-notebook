@@ -30,6 +30,7 @@ _STABLE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SAFE_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 _OWNER_ID_MAX = 128
 _OWNER_VERSION_MAX = 64
+_LOCAL_ID_DIGEST_HEX_CHARS = 32
 _HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 
 
@@ -354,7 +355,7 @@ def _admit_patch(
                 + "\0"
                 + candidate.candidate_key
             ).encode("utf-8")
-        ).hexdigest()[:32]
+        ).hexdigest()[:_LOCAL_ID_DIGEST_HEX_CHARS]
         if local_id in reserved_ids:
             return None
         key_to_local[candidate.candidate_key] = local_id
