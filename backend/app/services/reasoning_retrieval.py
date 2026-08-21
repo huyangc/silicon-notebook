@@ -2333,6 +2333,14 @@ class ReasoningRetriever:
             raise StageBoundaryError(
                 "reasoning retrieval run cancellation authority changed"
             )
+        if runtime.retrieval_run is not None:
+            if getattr(runtime.retrieval_run, "run_kind", None) != "ask_reasoning":
+                raise StageBoundaryError("invalid reasoning retrieval run kind")
+            actor_id = getattr(runtime.retrieval_run, "actor_id", None)
+            if type(actor_id) is not str or not actor_id:
+                raise StageBoundaryError(
+                    "invalid reasoning retrieval actor authority"
+                )
         checker = getattr(runtime.connection_probe, "is_connection_held", None)
         if runtime.connection_probe is not None and not callable(checker):
             raise StageBoundaryError("invalid reasoning retrieval connection probe")

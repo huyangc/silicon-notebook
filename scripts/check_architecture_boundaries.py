@@ -45,7 +45,14 @@ def imports_bare_module(path: Path, module: str) -> bool:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return any(
         isinstance(node, ast.Import)
-        and any(alias.name == module for alias in node.names)
+        and any(
+            alias.name == module
+            or (
+                alias.name.startswith(f"{module}.")
+                and alias.asname is None
+            )
+            for alias in node.names
+        )
         for node in ast.walk(tree)
     )
 

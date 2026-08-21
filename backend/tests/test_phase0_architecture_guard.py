@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD_PATH = ROOT / "scripts" / "check_architecture_boundaries.py"
@@ -116,6 +118,8 @@ def test_application_stage_guard_accepts_only_stable_contract_layers(tmp_path):
         "from app.core.ask_retrieval_policy import AskRetrievalLimits\n"
         "from app.domain.cancellation import CancelEvent\n"
         "from app.models.ask import AskResponse\n"
+        "import app.application as application_contracts\n"
+        "import app.models.ask as ask_models\n"
         "from . import values\n",
     )
     _write(app / "application/values.py", "VALUE = 1\n")
@@ -129,6 +133,28 @@ def test_application_stage_guard_rejects_bare_app_package_escape(tmp_path):
         app / "application/ask.py",
         "import app\n"
         "BAD = app.services\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.application.ask imports forbidden implementation app",
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement,escape",
+    [
+        ("import app.application", "app.services"),
+        ("import app.models.ask", "app.bootstrap"),
+    ],
+)
+def test_application_stage_guard_rejects_unaliased_submodule_root_binding(
+    tmp_path, statement, escape,
+):
+    app = tmp_path / "app"
+    _write(
+        app / "application/ask.py",
+        f"{statement}\n"
+        f"BAD = {escape}\n",
     )
 
     assert boundary_violations(app) == [

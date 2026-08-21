@@ -258,6 +258,39 @@ def test_typed_retrieval_stage_binds_scope_notebook_and_run_cancellation(
     assert called == []
 
 
+@pytest.mark.parametrize(
+    "run_kind,actor_id,error",
+    [
+        ("report_generation", "user", "run kind"),
+        ("ask_reasoning", "", "actor authority"),
+    ],
+)
+def test_typed_retrieval_stage_rejects_wrong_run_kind_or_empty_actor(
+    monkeypatch, run_kind, actor_id, error,
+):
+    cancel_event = threading.Event()
+    retriever = _retriever(cancel_event)
+    called = []
+    monkeypatch.setattr(
+        retriever, "run", lambda *args, **kwargs: called.append(True)
+    )
+    with retrieval_run(
+        run_kind=run_kind,
+        actor_id=actor_id,
+        cancel_event=cancel_event,
+    ) as run:
+        runtime = ReasoningRetrievalRuntime(
+            scope=None,
+            retrieval_run=run,
+            cancellation=cancel_event,
+            trace_sink=None,
+            connection_probe=None,
+        )
+        with pytest.raises(StageBoundaryError, match=error):
+            retriever.run_stage(_run_input(), runtime)
+    assert called == []
+
+
 def test_typed_retrieval_stage_rejects_raising_connection_probe_before_run(
     monkeypatch,
 ):
