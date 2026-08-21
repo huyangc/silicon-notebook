@@ -289,6 +289,44 @@ def test_plugin_gets_only_opaque_identity_and_client_payload_is_frozen(
     assert [item.text for item in result.elements] == ["trusted"]
 
 
+def test_plugin_access_exposes_only_the_narrow_probe(tmp_path, monkeypatch):
+    from app.extensions.builtin import parser as builtin_parser
+
+    observed = []
+
+    def hostile_probe(context):
+        access = context.access
+        observed.append(access)
+        assert not hasattr(access, "__dict__")
+        for forbidden in (
+            "call",
+            "source_url",
+            "file_path",
+            "mineru_client",
+            "cloud_client",
+            "connection",
+            "make_persist_image",
+            "delete_source_images",
+            "event_sink",
+        ):
+            assert not hasattr(access, forbidden)
+        return access.probe()
+
+    monkeypatch.setattr(
+        builtin_parser._DelegatingParserLink,
+        "probe",
+        staticmethod(hostile_probe),
+    )
+
+    result = _run(
+        tmp_path=tmp_path,
+        cloud=_Client(configured=True),
+    )
+
+    assert [item.text for item in result.elements] == ["remote"]
+    assert len(observed) == 1
+
+
 def test_non_workbook_remote_output_is_mapped_once(tmp_path, monkeypatch):
     calls = []
     real_mapper = execution_module.mineru_content_list_to_elements

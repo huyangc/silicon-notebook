@@ -64,35 +64,19 @@ class _FrozenLink:
     requires: frozenset[str]
 
 
-@dataclass(frozen=True)
 class _ApplicationLinkAccess:
-    contribution_id: str
-    call: ParserProviderChainCallPort
+    """Plugin projection containing only one request-local probe closure."""
+
+    __slots__ = ("__probe_once",)
+
+    def __init__(
+        self,
+        probe_once: Callable[[], ProviderChainResult[ParserProposal]],
+    ) -> None:
+        self.__probe_once = probe_once
 
     def probe(self) -> ProviderChainResult[ParserProposal]:
-        result = self.call.probe(self.contribution_id)
-        from app.domain.extensions import ParserProbe
-
-        if type(result) is not ParserProbe:
-            return ProviderChainResult(
-                None,
-                ProviderChainAttempt(
-                    ProviderAcceptance.REJECT,
-                    reason_code="invalid_parser_probe",
-                ),
-            )
-        if not result.accepted:
-            return ProviderChainResult(
-                None,
-                ProviderChainAttempt(
-                    ProviderAcceptance.REJECT,
-                    reason_code=result.reason_code or "parser_probe_rejected",
-                ),
-            )
-        return ProviderChainResult(
-            ParserProposal(self.contribution_id, result.value),
-            ProviderChainAttempt(ProviderAcceptance.ACCEPT),
-        )
+        return self.__probe_once()
 
 
 class ParserProviderChainHost(Generic[T]):
@@ -174,11 +158,38 @@ class ParserProviderChainHost(Generic[T]):
             )
 
         def context_factory(contribution_id: str) -> ParserHostContext:
+            def probe_once() -> ProviderChainResult[ParserProposal]:
+                from app.domain.extensions import ParserProbe
+
+                result = call.probe(contribution_id)
+                if type(result) is not ParserProbe:
+                    return ProviderChainResult(
+                        None,
+                        ProviderChainAttempt(
+                            ProviderAcceptance.REJECT,
+                            reason_code="invalid_parser_probe",
+                        ),
+                    )
+                if not result.accepted:
+                    return ProviderChainResult(
+                        None,
+                        ProviderChainAttempt(
+                            ProviderAcceptance.REJECT,
+                            reason_code=(
+                                result.reason_code or "parser_probe_rejected"
+                            ),
+                        ),
+                    )
+                return ProviderChainResult(
+                    ParserProposal(contribution_id, result.value),
+                    ProviderChainAttempt(ProviderAcceptance.ACCEPT),
+                )
+
             return ParserHostContext(
                 contribution_id,
                 source,
                 call.cancellation,
-                _ApplicationLinkAccess(contribution_id, call),
+                _ApplicationLinkAccess(probe_once),
                 call.connection,
             )
 
