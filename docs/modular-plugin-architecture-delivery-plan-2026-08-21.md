@@ -218,7 +218,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-12：统一 tool host / `agent.tool_provider`
 
-- 状态：实现中；统一冻结 catalog、core-owned scope/write policy、单 progress wrapper 与默认空 provider topology 已接线，待三路 review/CI 闭合；
+- 状态：已完成并由 PR #554 交付；统一冻结 catalog、core-owned scope/write policy、单 progress wrapper、默认空 provider topology、owner-bound content-free audit 与公开工具单一真源均已接线，三路 review 与 CI 已闭合；
 - 仅在 §6.6 的四条前置红线全部可执行后开放；
 - 核心派生公开工具集合，插件不能绕过授权、审阅或数据范围。
 
