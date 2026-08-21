@@ -8,75 +8,22 @@ the live token row, scope, allowlist, and notebook membership.
 from __future__ import annotations
 
 import contextvars
-import hashlib
 import json
 import logging
 import math
-import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 import anyio
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp.server.auth.provider import AccessToken
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.fastmcp import Context
 from starlette.responses import JSONResponse
 
-from app.api.source_routes import (
-    # ⚠ 两个私名是**唯一定义点**,不是便利 import。
-    # `_HIDDEN_SOURCE_TYPES`:memory/knowhow 隐藏合成投影行,浏览器的重解析路由按同一
-    # 个常量跳过它们;来源管理工具再抄一份枚举,两处迟早分叉。
-    # `_document_capacity`:「每笔记本文档数量上限」的计算点。红线写明这道闸在**路由层
-    # 不在服务层**——`upload_sources`/`add_url_sources` 服务本身不查上限,所以 Agent 侧
-    # 的建源入口必须自己执行它,而执行它的正确方式是调用同一个函数(它为此收了一个注入
-    # repository 的参数),不是在这里重写一遍 admin 豁免 + 计数 + 上限三段判据。
-    _HIDDEN_SOURCE_TYPES,
-    _document_capacity,
-    document_capacity_message,
-    source_readable_in_participant_scope,
-)
-# Private on purpose and imported on purpose: `_knowhow_ref` IS the repository's
-# one judgement for "does this element row point at a knowhow cell", and it
-# takes the raw ``source_elements`` row (``metadata`` still stored JSON text) --
-# exactly what ``evidence_elements`` returns here. Its public sibling
-# ``EvidenceContextService.knowhow_refs_for`` cannot be used instead: it runs
-# ``evidence_elements`` itself, so a caller that also needs the element's text
-# would pay that read twice. Restating the rule locally was the alternative and
-# is the thing not to do.
-from app.services.evidence_context import _knowhow_ref
-from app.services import background_jobs
-from app.services.agent_profile_block import (
-    resolve_agent_profile_names,
-    AGENT_PROFILE_VALUE_MAX_CHARS,
-    PROFILE_LABEL_ORDER,
-)
-from app.services.agent_profile_job import BASE_CHAIN_OWNER
-from app.services.kg import scheduler as kg_scheduler
-from app.services.mineru_cloud_client import MinerUCloudNotConfigured
-from app.services.reasoning_retrieval import profile_wiring_active
-from app.services.source_display import source_display_title
-from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentPrincipal, UserProfile
-from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
-from app.models.sources import SourceDetail
-from app.repositories.ports import KgBuildAlreadyRunning, UploadedSourceFile
-from app.repositories.source_files import safe_filename
-from app.core.memory_inputs import (
-    normalize_client_request_id,
-    normalize_content,
-    normalize_evidence_refs,
-    normalize_observation_text,
-    normalize_reason,
-    normalize_tags,
-    normalize_task_context,
-    normalize_text,
-    normalize_title,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -141,12 +88,6 @@ _SELECTED_ATTR = "_silicon_notebook_selected_notebook"
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
 )
-
-
-def _composition_value(name: str, default: Any) -> Any:
-    """Honor legacy overrides on the thin composition module."""
-    composition = sys.modules.get("app.api.mcp_server")
-    return getattr(composition, name, default) if composition is not None else default
 
 
 def _is_loopback(host: str) -> bool:
@@ -591,57 +532,6 @@ def _budget_response(
     return result
 
 
-def _validate_proposal_input(
-    title: str,
-    content_md: str,
-    tags: Sequence[str] | None,
-    reason: str,
-    task_context: Mapping[str, Any],
-    evidence_refs: Sequence[Mapping[str, Any]],
-    client_request_id: str,
-) -> tuple[str, str, list[str], str, dict[str, Any], list[dict[str, Any]], str]:
-    """Validate the MCP write envelope before any repository/service lookup."""
-    clean_title = normalize_title(title)
-    clean_content = normalize_content(content_md)
-    clean_reason = normalize_reason(reason)
-    clean_request_id = normalize_client_request_id(client_request_id)
-    if not clean_reason:
-        raise ValueError("reason must be nonblank")
-
-    clean_tags = normalize_tags(tags or [])
-
-    clean_task_context = normalize_task_context(task_context)
-    if not clean_task_context:
-        raise ValueError("task_context must be nonblank")
-    clean_evidence = normalize_evidence_refs(evidence_refs)
-    return (
-        clean_title,
-        clean_content,
-        clean_tags,
-        clean_reason,
-        clean_task_context,
-        clean_evidence,
-        clean_request_id,
-    )
-
-
-@dataclass(frozen=True)
-class _SourceScopeFacts:
-    """The only two fields ``source_readable_in_participant_scope`` reads.
-
-    The HTTP side hands that predicate a full ``SourceDetail`` because its
-    endpoints return one anyway.  A citation point-read does not: it reads the
-    narrow ``source_metadata`` row (one SQL) precisely to avoid ``get_source``'s
-    fan-out, so it names the two facts the predicate needs and passes those.
-    Deliberately not a stub ``SourceDetail`` -- that model's required fields
-    (``element_count``, ``status``, ...) would have to be invented, and an
-    invented row is exactly what an authorization input must never be.
-    """
-
-    notebook_id: str
-    type: str
-
-
 def _principal() -> AgentPrincipal:
     principal = _MCP_PRINCIPAL.get()
     if principal is None:
@@ -719,11 +609,7 @@ async def _run_with_progress(
     async def heartbeat() -> None:
         started = time.monotonic()
         while True:
-            await anyio.sleep(
-                _composition_value(
-                    "PROGRESS_HEARTBEAT_SECONDS", PROGRESS_HEARTBEAT_SECONDS
-                )
-            )
+            await anyio.sleep(PROGRESS_HEARTBEAT_SECONDS)
             elapsed = time.monotonic() - started
             try:
                 # Deliberately only the tool name and a wall-clock count: this
@@ -831,8 +717,6 @@ def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrinci
         principal, scope, notebook_id
     )
     return principal, notebook_id
-
-
 def _writable_notebook(
     ctx: Context, repo: Any, scope: str
 ) -> tuple[AgentPrincipal, str]:
@@ -922,134 +806,3 @@ def _writable_notebook(
             "owner only has read access here"
         )
     return principal, notebook_id
-
-
-def _own_source(repo: Any, notebook_id: str, source_id: str) -> SourceDetail:
-    """Resolve a source that belongs to the SELECTED notebook itself.
-
-    Deliberately NOT ``get_cited_element``'s participant set. That tool
-    dereferences a citation, and an answer may legitimately quote a mounted
-    reference library; these tools MANAGE documents, and a mounted library's
-    documents belong to another notebook whose owner did not consent to an
-    Agent re-parsing or deleting them. The browser draws the same line: source
-    writes are deliberately not proxied across the mount (source detail renders
-    read-only for reference-library sources).
-
-    Hidden synthetic rows (``memory``/``knowhow`` projections) are equally out
-    of reach, using source_routes' own ``_HIDDEN_SOURCE_TYPES``: they carry no
-    uploaded file and are maintained by their own projection services, so
-    feeding one to the document pipeline only marks it failed, and deleting one
-    would silently destroy a Memory's or a knowhow table's retrieval projection
-    behind that feature's back. The browser's re-parse route skips them for the
-    same reason.
-
-    A source outside the notebook is reported as ``KeyError`` — identical to
-    one that does not exist. No existence disclosure, same as every other tool
-    here.
-    """
-    detail = repo.get_source(source_id)
-    if detail.notebook_id != notebook_id or detail.type in _HIDDEN_SOURCE_TYPES:
-        raise KeyError(source_id)
-    return detail
-
-
-def _reject_when_notebook_is_full(repo: Any, notebook_id: str, adding: int) -> None:
-    """The per-notebook document ceiling, enforced on the Agent surface.
-
-    The ceiling lives in the ROUTER, not in ``upload_sources`` — the service
-    never counts documents — so an Agent-side create path that does not call
-    this simply has no limit. Reuses source_routes' ``_document_capacity``
-    (admin-owned notebooks exempt → None) for the judgement and
-    ``document_capacity_message`` for the wording, restating neither: only the
-    CARRIER differs, because the HTTP twin's 409-through-``user_error`` is a
-    browser mechanism with no meaning on this surface. One condition, one
-    sentence, in whichever interface the user meets it.
-
-    Same non-atomic check-then-insert trade-off as the HTTP side: a concurrent
-    submission can slip one document over, and the next call refuses.
-    """
-    capacity = _document_capacity(notebook_id, repo)
-    if capacity is None:
-        return
-    current, limit = capacity
-    if current + adding > limit:
-        raise ValueError(document_capacity_message(current, limit, adding))
-
-
-def _markdown_source_file_name(title: str) -> str:
-    """``title`` → the stored ``<name>.md`` file name.
-
-    ``safe_filename`` (the ingestion service applies it too) defuses separator
-    smuggling; the byte budget keeps the ``{source_id}_{name}`` component the
-    ingestion service writes inside the filesystem's 255-byte limit (see
-    ``SOURCE_FILE_NAME_MAX_BYTES`` for the derivation). Truncation is on ENCODED
-    bytes and never splits a character.
-
-    Only the DERIVED file name is shortened. The title the caller typed is
-    stored whole in ``sources.title`` (``SOURCE_TITLE_MAX_CHARS`` is the only
-    limit on it, and exceeding that is an explicit refusal, never a silent
-    trim), so this is not user data being quietly truncated.
-
-    Over-long names must be shortened rather than refused because the write
-    happens BEFORE the row is inserted (``upload_sources``:
-    ``write_upload`` → ``insert_source_if_absent``). An ``OSError`` there is a
-    clean failure with no orphan row, but it is still a failure the caller can
-    do nothing about, and its message carries the storage absolute path.
-    """
-    stem = safe_filename(title)
-    encoded = stem.encode("utf-8")
-    if len(encoded) > SOURCE_FILE_NAME_MAX_BYTES:
-        stem = encoded[:SOURCE_FILE_NAME_MAX_BYTES].decode("utf-8", "ignore")
-    # safe_filename's own empty-input fallback is "source.bin"; re-apply the
-    # guard because the byte truncation above can strip a short name down to
-    # nothing (a lone multi-byte character clipped mid-sequence).
-    return f"{stem.strip() or 'source'}.md"
-
-
-def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
-    # Full paged roster via the shared helper — same lookup, by construction,
-    # as `agent_profile_routes._observation_agent_names` (codex #535 R2 P2:
-    # a single fixed page dropped profiles past the first hundred).
-    return resolve_agent_profile_names(service.list_agent_profiles, owner_id)
-
-
-def _profile_projection(rows: list[dict], owner_id: str) -> list[dict[str, Any]]:
-    """``get_notebook_profile``'s ONLY whitelist for one chain's rows —
-    ``{"label", "value", "updated_at"}`` and nothing else.
-
-    Grouping is by the row's OWN ``owner_id`` column, never by inferring
-    which labels "belong" to which chain from ``PROFILE_LABEL_ORDER`` — the
-    same reason ``agent_profile_routes._ordered_blocks`` groups this way: a
-    row's ``owner_id`` is the one authoritative signal for which chain it is
-    in, and it is what the store's own ``read_blocks`` query filtered on.
-
-    ⚠ ``evidence`` (the list of source ids the consolidation job grounded
-    this block in), ``revision``, and ``updated_origin``/``history`` are
-    DELIBERATELY excluded — mirrors the "public sharing projection is a
-    WHITELIST, not redaction" rule elsewhere in this codebase. A token that
-    holds only ``agent_profile:read`` may not hold ``knowledge:read`` at
-    all, so handing back source ids here would let a read-only-understanding
-    credential probe for source ids it otherwise has no way to enumerate.
-    """
-    by_label = {
-        str(row.get("label") or ""): row
-        for row in rows
-        if str(row.get("owner_id") or "") == owner_id
-    }
-    return [
-        {
-            "label": label,
-            "value": str(by_label[label].get("value") or ""),
-            "updated_at": str(by_label[label].get("updated_at") or ""),
-        }
-        for label in PROFILE_LABEL_ORDER
-        if label in by_label
-    ]
-
-
-
-
-# Bundle modules intentionally import this private core helper surface.  Keep
-# the export explicit-by-construction, including underscored authority gates;
-# third-party discovery is not supported here.
-__all__ = [name for name in globals() if not name.startswith("__")]

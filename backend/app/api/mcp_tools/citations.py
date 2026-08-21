@@ -1,6 +1,29 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Citation point-read MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from app.api.source_routes import source_readable_in_participant_scope
+from app.services.evidence_context import _knowhow_ref
+from app.services.source_display import source_display_title
+
+from ._shared import (
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+)
+
+
+@dataclass(frozen=True)
+class _SourceScopeFacts:
+    """The narrow authority facts used by source participant admission."""
+
+    notebook_id: str
+    type: str
 
 
 def register_citation_tools(
@@ -113,5 +136,4 @@ def register_citation_tools(
     #    `delete_source` safe, and it is written ONLY on the insert branch —
     #    an Agent re-uploading bytes a person already added reuses that
     #    person's row and does not inherit delete rights over it.
-
 

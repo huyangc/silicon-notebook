@@ -1,6 +1,70 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Memory recall, formal context, Ask, and Memory proposal MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+from typing import Any, Callable, Mapping, Sequence
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from app.core.memory_inputs import (
+    normalize_client_request_id,
+    normalize_content,
+    normalize_evidence_refs,
+    normalize_reason,
+    normalize_tags,
+    normalize_task_context,
+    normalize_title,
+)
+from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
+from app.services.agent_profile_block import resolve_agent_profile_names
+
+from ._shared import (
+    RESULT_LIMIT,
+    TEXT_LIMIT,
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+)
+
+
+CITATIONS_BUDGET_CHARS = 1_800
+CONVERSATION_ID_MAX_LENGTH = 200
+
+
+def _validate_proposal_input(
+    title: str,
+    content_md: str,
+    tags: Sequence[str] | None,
+    reason: str,
+    task_context: Mapping[str, Any],
+    evidence_refs: Sequence[Mapping[str, Any]],
+    client_request_id: str,
+) -> tuple[str, str, list[str], str, dict[str, Any], list[dict[str, Any]], str]:
+    """Validate the MCP write envelope before any provider lookup."""
+    clean_title = normalize_title(title)
+    clean_content = normalize_content(content_md)
+    clean_reason = normalize_reason(reason)
+    clean_request_id = normalize_client_request_id(client_request_id)
+    if not clean_reason:
+        raise ValueError("reason must be nonblank")
+    clean_tags = normalize_tags(tags or [])
+    clean_task_context = normalize_task_context(task_context)
+    if not clean_task_context:
+        raise ValueError("task_context must be nonblank")
+    clean_evidence = normalize_evidence_refs(evidence_refs)
+    return (
+        clean_title,
+        clean_content,
+        clean_tags,
+        clean_reason,
+        clean_task_context,
+        clean_evidence,
+        clean_request_id,
+    )
+
+
+def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
+    return resolve_agent_profile_names(service.list_agent_profiles, owner_id)
 
 
 def register_memory_context_tools(
@@ -351,9 +415,7 @@ def register_memory_context_tools(
                           "quoted_span": 200, "source_file_name": 300},
             anchors_budget_chars=3_500,
             anchor_provenance_budget_chars=500,
-            citations_budget_chars=_composition_value(
-                "CITATIONS_BUDGET_CHARS", CITATIONS_BUDGET_CHARS
-            ))
+            citations_budget_chars=CITATIONS_BUDGET_CHARS)
 
     @server.tool(
         description=(
@@ -432,4 +494,3 @@ def register_memory_context_tools(
     # ~450 lines above those sites with every guard still green.)
     from app.services.knowhow import api as knowhow_api
     from app.services.knowhow import audit as knowhow_audit
-

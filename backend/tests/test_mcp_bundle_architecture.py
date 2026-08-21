@@ -102,24 +102,21 @@ def test_composition_has_no_generic_tool_provider_or_extension_seat() -> None:
         "require_https",
     )
 
-    source = inspect.getsource(mcp_server)
-    tree = ast.parse(source)
+    tools_dir = Path(mcp_server.__file__).with_name("mcp_tools")
+    paths = (Path(mcp_server.__file__), *sorted(tools_dir.glob("*.py")))
     forbidden = ("extension_sdk", "app.extensions", "tool_provider", "registry")
-    imports = [
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    ]
-    imports.extend(
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    )
-    assert not any(
-        marker in imported for imported in imports for marker in forbidden[:2]
-    )
-    assert "tool_provider" not in source
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported.append(node.module or "")
+                assert all(alias.name != "*" for alias in node.names), path
+            elif isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+        assert not any(
+            marker in target for target in imported for marker in forbidden
+        ), path
 
 
 def test_each_public_handler_has_one_progress_wrapped_main_body() -> None:

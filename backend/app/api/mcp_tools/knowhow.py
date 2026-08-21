@@ -1,8 +1,21 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Knowhow-table MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+from typing import Any, Callable
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
 from app.services.knowhow import api as knowhow_api
 from app.services.knowhow import audit as knowhow_audit
+
+from ._shared import (
+    RESULT_LIMIT,
+    TEXT_LIMIT,
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+)
 
 
 def register_knowhow_tools(
@@ -139,4 +152,3 @@ def register_knowhow_tools(
             ),
             field_limits={"language": 60, "code_text": TEXT_LIMIT, "status": 20},
         )
-

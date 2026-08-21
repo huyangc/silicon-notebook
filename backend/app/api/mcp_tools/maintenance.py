@@ -1,6 +1,20 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Knowledge/retrieval build and status MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+from typing import Any, Callable
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from app.services import background_jobs
+from app.repositories.ports import KgBuildAlreadyRunning
+
+from ._shared import (
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+    _writable_notebook,
+)
 
 
 def register_maintenance_tools(
@@ -158,5 +172,4 @@ def register_maintenance_tools(
     # tool above -- neither goes through `_writable_notebook`'s owner-only
     # gate; see that function's own docstring (updated by this feature) for
     # why `add_observation` specifically does not.
-
 

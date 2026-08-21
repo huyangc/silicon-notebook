@@ -1,6 +1,46 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Notebook-understanding and private observation MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+from typing import Any, Callable
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from app.core.config import get_settings
+from app.core.memory_inputs import (
+    normalize_client_request_id,
+    normalize_observation_text,
+)
+from app.services.agent_profile_block import (
+    AGENT_PROFILE_VALUE_MAX_CHARS,
+    PROFILE_LABEL_ORDER,
+)
+from app.services.agent_profile_job import BASE_CHAIN_OWNER
+from app.services.reasoning_retrieval import profile_wiring_active
+
+from ._shared import (
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+)
+
+
+def _profile_projection(rows: list[dict], owner_id: str) -> list[dict[str, Any]]:
+    """Project the only fields exposed by the profile-read tool."""
+    by_label = {
+        str(row.get("label") or ""): row
+        for row in rows
+        if str(row.get("owner_id") or "") == owner_id
+    }
+    return [
+        {
+            "label": label,
+            "value": str(by_label[label].get("value") or ""),
+            "updated_at": str(by_label[label].get("updated_at") or ""),
+        }
+        for label in PROFILE_LABEL_ORDER
+        if label in by_label
+    ]
 
 
 def register_profile_tools(

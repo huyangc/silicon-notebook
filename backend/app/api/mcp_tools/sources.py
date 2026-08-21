@@ -1,6 +1,65 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Source creation, status, reparse, and deletion MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+import hashlib
+from typing import Any, Callable
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from app.api.source_routes import (
+    _HIDDEN_SOURCE_TYPES,
+    _document_capacity,
+    document_capacity_message,
+)
+from app.core.config import get_settings
+from app.core.memory_inputs import normalize_text
+from app.models.sources import SourceDetail
+from app.repositories.ports import UploadedSourceFile
+from app.repositories.source_files import safe_filename
+from app.services.kg import scheduler as kg_scheduler
+from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+
+from ._shared import (
+    _budget_response,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+    _writable_notebook,
+)
+
+
+SOURCE_TITLE_MAX_CHARS = 200
+SOURCE_FILE_NAME_MAX_BYTES = 200
+SOURCE_BUSY_PROBE_SECONDS = 0.5
+
+
+def _own_source(repo: Any, notebook_id: str, source_id: str) -> SourceDetail:
+    """Resolve a visible source owned by the selected notebook itself."""
+    detail = repo.get_source(source_id)
+    if detail.notebook_id != notebook_id or detail.type in _HIDDEN_SOURCE_TYPES:
+        raise KeyError(source_id)
+    return detail
+
+
+def _reject_when_notebook_is_full(
+    repo: Any, notebook_id: str, adding: int
+) -> None:
+    """Apply the browser route's canonical notebook document ceiling."""
+    capacity = _document_capacity(notebook_id, repo)
+    if capacity is None:
+        return
+    current, limit = capacity
+    if current + adding > limit:
+        raise ValueError(document_capacity_message(current, limit, adding))
+
+
+def _markdown_source_file_name(title: str) -> str:
+    """Derive a filesystem-safe bounded Markdown file name."""
+    stem = safe_filename(title)
+    encoded = stem.encode("utf-8")
+    if len(encoded) > SOURCE_FILE_NAME_MAX_BYTES:
+        stem = encoded[:SOURCE_FILE_NAME_MAX_BYTES].decode("utf-8", "ignore")
+    return f"{stem.strip() or 'source'}.md"
 
 
 def register_source_tools(
@@ -37,7 +96,7 @@ def register_source_tools(
         # (`settings.source_upload_max_bytes`), measured on the bytes that will
         # actually be stored -- a character count would under-count CJK by 3x.
         payload = content_md.encode("utf-8")
-        max_bytes = _composition_value("get_settings", get_settings)().source_upload_max_bytes
+        max_bytes = get_settings().source_upload_max_bytes
         if len(payload) > max_bytes:
             raise ValueError(
                 f"content_md is {len(payload)} bytes, over this deployment's "
@@ -368,4 +427,3 @@ def register_source_tools(
     # is a pure read and stays on `_selected_notebook`, mirroring
     # `index_status`'s HTTP twin using `require_notebook_read` (member-
     # readable) rather than `require_notebook_access` (owner-only).
-

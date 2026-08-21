@@ -12,14 +12,29 @@ from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app.api.mcp_tools._shared import *  # noqa: F403 - compatibility exports
+from app.api.mcp_tools._shared import (
+    AgentBearerMiddleware,
+    PROGRESS_HEARTBEAT_SECONDS,
+    _budget_response,
+    _live_principal,
+    _owner_request_context,
+    _run_with_progress,
+    _selected_notebook,
+    _writable_notebook,
+    validate_mcp_deployment,
+)
 from app.api.mcp_tools.citations import register_citation_tools
 from app.api.mcp_tools.knowhow import register_knowhow_tools
 from app.api.mcp_tools.maintenance import register_maintenance_tools
-from app.api.mcp_tools.memory_context import register_memory_context_tools
+from app.api.mcp_tools.memory_context import (
+    CITATIONS_BUDGET_CHARS,
+    _validate_proposal_input,
+    register_memory_context_tools,
+)
 from app.api.mcp_tools.profiles import register_profile_tools
 from app.api.mcp_tools.session import register_session_tools
-from app.api.mcp_tools.sources import register_source_tools
+from app.api.mcp_tools.sources import SOURCE_TITLE_MAX_CHARS, register_source_tools
+from app.core.config import get_settings
 
 
 # This ordered compatibility manifest documents the fixed built-in surface.
@@ -116,7 +131,7 @@ def create_memory_mcp(
     register_maintenance_tools(server, repository_provider)
     register_profile_tools(server, repository_provider)
 
-    app = AgentBearerMiddleware(  # noqa: F405 - compatibility helper module
+    app = AgentBearerMiddleware(
         server.streamable_http_app(),
         repository_provider,
         require_https=require_https,

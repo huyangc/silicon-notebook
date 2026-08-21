@@ -827,7 +827,7 @@ async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitte
     exactly as the two visible populations differ — never in a way that lets
     the second token solve for 4.
     """
-    from app.api import mcp_server
+    from app.api.mcp_tools import memory_context
 
     service = mcp_env["service"]
     notebook_id = mcp_env["notebook"].id
@@ -838,7 +838,7 @@ async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitte
     # the same counter — masking the ordering bug this test exists to catch.
     # The sub-budget has its own coverage in
     # test_ask_notebook_preserves_answer_text_under_realistic_citation_load.
-    monkeypatch.setattr(mcp_server, "CITATIONS_BUDGET_CHARS", 20_000)
+    monkeypatch.setattr(memory_context, "CITATIONS_BUDGET_CHARS", 20_000)
 
     memory_positions = {2, 7, 13, 22}
 
@@ -2251,12 +2251,12 @@ async def test_add_source_text_rejects_bad_envelopes_before_touching_the_repo(
     them creates a row. The size ceiling is the deployment's own
     ``source_upload_max_bytes``, measured on UTF-8 BYTES — a character count
     would let a CJK body through at three times the configured limit."""
-    from app.api import mcp_server
+    from app.api.mcp_tools import sources
 
     repo = repository()
     notebook_id = mcp_env["notebook"].id
     monkeypatch.setattr(
-        mcp_server, "get_settings",
+        sources, "get_settings",
         lambda: SimpleNamespace(source_upload_max_bytes=64),
     )
     # 30 characters, 90 UTF-8 bytes: under a naive character check, over the
@@ -3357,9 +3357,9 @@ async def test_a_slow_tool_heartbeats_progress_to_the_client(mcp_env, monkeypatc
          (back to a bare `anyio.to_thread.run_sync`) -> zero beats
       3. moving the heartbeat's `report_progress` after the work -> zero beats
     """
-    from app.api import mcp_server
+    from app.api.mcp_tools import _shared
 
-    monkeypatch.setattr(mcp_server, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(_shared, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
     _slow_ask(mcp_env, monkeypatch, 0.45)
 
     beats: list[tuple[float, float, str | None]] = []
@@ -3407,7 +3407,7 @@ async def test_no_progress_is_sent_when_the_client_did_not_ask_for_it(
     """
     from mcp.server.session import ServerSession
 
-    from app.api import mcp_server
+    from app.api.mcp_tools import _shared
 
     sent: list[tuple] = []
     original = ServerSession.send_progress_notification
@@ -3417,7 +3417,7 @@ async def test_no_progress_is_sent_when_the_client_did_not_ask_for_it(
         return await original(self, *args, **kwargs)
 
     monkeypatch.setattr(ServerSession, "send_progress_notification", spy)
-    monkeypatch.setattr(mcp_server, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(_shared, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
     _slow_ask(mcp_env, monkeypatch, 0.3)
 
     async def on_progress(progress, total, message):
@@ -3454,10 +3454,10 @@ async def test_a_tool_error_survives_the_heartbeat_task_group(mcp_env, monkeypat
     group closes. Mutation guard: move the work back into the `async with`
     body and this reads `unhandled errors in a TaskGroup` instead.
     """
-    from app.api import mcp_server
+    from app.api.mcp_tools import _shared
 
     service = mcp_env["service"]
-    monkeypatch.setattr(mcp_server, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(_shared, "PROGRESS_HEARTBEAT_SECONDS", 0.05)
     monkeypatch.setattr(
         service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
     )

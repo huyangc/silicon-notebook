@@ -1,6 +1,18 @@
-"""Fixed built-in MCP tool registrations for this capability bundle."""
+"""Session and notebook-selection MCP tools."""
 
-from ._shared import *  # noqa: F403 - internal frozen helper surface
+from typing import Any, Callable
+
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+
+from ._shared import (
+    RESULT_LIMIT,
+    _SELECTED_ATTR,
+    _budget_response,
+    _live_principal,
+    _owner_request_context,
+    _run_with_progress,
+)
 
 
 def register_session_tools(
@@ -81,5 +93,4 @@ def register_session_tools(
                 "notebook_context": "confirmed only",
             },
         }, field_limits={"name": 200, "purpose": 500})
-
 
