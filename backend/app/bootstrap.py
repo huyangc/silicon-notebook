@@ -17,4 +17,8 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         settings,
         retrieval_contributor_host=runtime.retrieval_contributors,
         parser_provider_chain_host=runtime.parser_chain,
+        answer_auditor_host=(
+            runtime.answer_auditors if runtime.answer_auditors.has_auditors else None
+        ),
+        ask_completed_observer_host=runtime.ask_completed_observers,
     )

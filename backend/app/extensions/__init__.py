@@ -7,6 +7,7 @@ from app.extensions.bootstrap import (
     default_extension_runtime,
 )
 from app.extensions.capabilities import CapabilityDecisionCatalog
+from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost, RetrievalHostCancelled
@@ -16,6 +17,8 @@ __all__ = [
     "ExtensionRegistryError",
     "ExtensionRuntime",
     "CapabilityDecisionCatalog",
+    "AnswerAuditorHost",
+    "AskCompletedObserverHost",
     "ParserChainCancelled",
     "ParserProviderChainHost",
     "RetrievalContributorHost",

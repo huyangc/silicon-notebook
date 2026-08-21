@@ -7,6 +7,9 @@ from functools import lru_cache
 from typing import Callable, Mapping
 
 from app.extension_sdk import (
+    ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     GENERATED_QUESTION_ACCESS_CAPABILITY,
     PARSER_BUILTIN_ACCESS_CAPABILITY,
     PARSER_CLOUD_ACCESS_CAPABILITY,
@@ -14,12 +17,19 @@ from app.extension_sdk import (
     SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     Availability,
     AvailabilityStatus,
+    AskCompletedAvailabilityContext,
     ExtensionBundle,
     ParserHostContext,
     RetrievalAdmissionPolicy,
     RetrievalHostContext,
 )
 from app.extensions.builtin import (
+    ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
+    ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
+    ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
+    ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID,
+    ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
+    ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
     GENERATED_QUESTION_BUNDLE,
     GENERATED_QUESTION_CONTRIBUTION_ID,
     PARSER_BUILTIN_BUNDLE,
@@ -38,6 +48,7 @@ from app.extensions.capabilities import (
 from app.extensions.registry import ExtensionRegistry, frozen_registry
 from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
+from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,8 @@ class ExtensionRuntime:
     registry: ExtensionRegistry
     retrieval_contributors: RetrievalContributorHost
     parser_chain: ParserProviderChainHost
+    answer_auditors: AnswerAuditorHost
+    ask_completed_observers: AskCompletedObserverHost
 
 
 def build_extension_registry(
@@ -78,6 +91,14 @@ def build_extension_runtime(
             event_sink=event_sink,
         ),
         parser_chain=ParserProviderChainHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        answer_auditors=AnswerAuditorHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        ask_completed_observers=AskCompletedObserverHost(
             registry,
             event_sink=event_sink,
         ),
@@ -124,8 +145,25 @@ def default_extension_runtime() -> ExtensionRuntime:
             "parser_link_access_unavailable",
         )
 
+    def ask_completed_access(
+        context: object | None, expected_contribution_id: str
+    ) -> Availability:
+        if (
+            type(context) is AskCompletedAvailabilityContext
+            and context.contribution_id == expected_contribution_id
+            and context.access_available is True
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "ask_completed_access_unavailable",
+        )
+
     return build_extension_runtime(
         (
+            ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
+            ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
+            ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
             PARSER_BUILTIN_BUNDLE,
             GENERATED_QUESTION_BUNDLE,
             PARSER_CLOUD_BUNDLE,
@@ -133,6 +171,24 @@ def default_extension_runtime() -> ExtensionRuntime:
             PARSER_SELF_HOSTED_BUNDLE,
         ),
         capability_decisions={
+            ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
+                ask_completed_access(
+                    context,
+                    ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
+                )
+            ),
+            ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY: (
+                lambda context: ask_completed_access(
+                    context,
+                    ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID,
+                )
+            ),
+            ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
+                ask_completed_access(
+                    context,
+                    ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
+                )
+            ),
             GENERATED_QUESTION_ACCESS_CAPABILITY: generated_question_access,
             SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,
             PARSER_SELF_HOSTED_ACCESS_CAPABILITY: lambda context: parser_access(

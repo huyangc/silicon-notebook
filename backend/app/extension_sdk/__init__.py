@@ -72,6 +72,23 @@ from app.extension_sdk.parser import (
     ParserSourceKind,
     ParserSourceRef,
 )
+from app.extension_sdk.ask import (
+    ANSWER_AUDITOR_POINT,
+    ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_COMPLETED_OBSERVER_POINT,
+    ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    AnswerAudit,
+    AnswerAuditAvailabilityContext,
+    AnswerAuditExtensionContext,
+    AnswerAuditFinding,
+    AnswerAuditor,
+    AnswerAuditView,
+    AskCompletedAccess,
+    AskCompletedAvailabilityContext,
+    AskCompletedExtensionContext,
+    AskCompletedObserver,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -140,4 +157,19 @@ __all__ = [
     "ParserRouteDecision",
     "ParserSourceKind",
     "ParserSourceRef",
+    "ANSWER_AUDITOR_POINT",
+    "ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY",
+    "ASK_COMPLETED_OBSERVER_POINT",
+    "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY",
+    "ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY",
+    "AnswerAudit",
+    "AnswerAuditAvailabilityContext",
+    "AnswerAuditExtensionContext",
+    "AnswerAuditFinding",
+    "AnswerAuditor",
+    "AnswerAuditView",
+    "AskCompletedAccess",
+    "AskCompletedAvailabilityContext",
+    "AskCompletedExtensionContext",
+    "AskCompletedObserver",
 ]

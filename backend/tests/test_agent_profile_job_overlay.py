@@ -1129,7 +1129,7 @@ class _InlineSubmitter:
         return threading.current_thread()
 
 
-def _ask_coordinator(calls, *, runner, noted):
+def _ask_coordinator(calls, *, runner, noted, audited=None):
     service = SimpleNamespace(
         ask=lambda notebook_id, payload, *, user_id, job_id="", on_trace=None,
         cancel_event=None: runner(),
@@ -1140,6 +1140,7 @@ def _ask_coordinator(calls, *, runner, noted):
         job_submitter=_InlineSubmitter(),
         event_log=SimpleNamespace(logger=SimpleNamespace(exception=lambda *a: None)),
         ask=lambda: service,
+        audit_answer_completed=audited,
         note_ask_completed=noted,
     )
 
@@ -1202,6 +1203,52 @@ def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row(
     assert calls == [("finish", "done"), ("put_final",), ("note",)]
 
 
+def test_post_completion_extensions_run_after_final_in_auditor_then_observer_order(
+):
+    import app.services.ask_execution as ask_execution_module
+
+    calls: list = []
+
+    class _RecordingQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            if isinstance(item, dict) and item.get("event") == "final":
+                calls.append(("put_final",))
+            if item is None:
+                calls.append(("sentinel",))
+            return super().put(item, *args, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ask_execution_module.queue, "Queue", _RecordingQueue)
+    try:
+        coordinator = _ask_coordinator(
+            calls,
+            runner=_response,
+            audited=lambda response, mode_id: calls.append(
+                ("audit", response.answer_id, mode_id)
+            ),
+            noted=lambda notebook_id, user_id, mode_id: calls.append(
+                ("observe", notebook_id, user_id, mode_id)
+            ),
+        )
+        delivered = _drain(coordinator.start(
+            "nb-t5",
+            AskRequest(question="Q?", mode="chunk"),
+            ASK_MODES["chunk"],
+            user_id=USER_A,
+        ))
+    finally:
+        monkeypatch.undo()
+
+    assert delivered[-1]["event"] == "final"
+    assert calls == [
+        ("finish", "done"),
+        ("put_final",),
+        ("audit", "ans-t5", "chunk"),
+        ("observe", "nb-t5", USER_A, "chunk"),
+        ("sentinel",),
+    ]
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("engine down")])
 def test_a_failed_ask_never_signals(failure):
     calls: list = []
@@ -1241,6 +1288,27 @@ def test_a_failing_signal_never_turns_a_delivered_answer_into_an_error():
 
     assert [event["event"] for event in delivered][-1] == "final"
     assert calls == [("finish", "done")]
+
+
+def test_a_failing_auditor_never_turns_a_delivered_answer_into_an_error():
+    calls: list = []
+
+    def fail_audit(_response, _mode_id):
+        raise RuntimeError("auditor unavailable")
+
+    delivered = _drain(_ask_coordinator(
+        calls,
+        runner=_response,
+        audited=fail_audit,
+        noted=lambda *_args: calls.append(("note",)),
+    ).start(
+        "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+        user_id=USER_A,
+    ))
+
+    assert [event["event"] for event in delivered][-1] == "final"
+    assert not any(event["event"] == "error" for event in delivered)
+    assert calls == [("finish", "done"), ("note",)]
 
 
 def test_the_sample_size_constant_is_the_one_the_service_uses(harness):
@@ -2046,7 +2114,7 @@ def test_the_runtime_actually_wires_the_access_seat():
     )
 
 
-def test_the_runtime_note_ask_completed_fans_out_to_both_chains():
+def test_direct_constructor_completion_compat_fans_out_to_three_chains():
     """codex 复核(P2-T5 修复轮裁决 9):`_note_ask_completed` 是两条巡固/蒸馏链路
     唯一的触发点。P1 链(agent-profile 覆盖层)按人按库触发、带两个参数;P2 链
     (检索经验蒸馏)是部署级全局计数器、零参数——两次调用必须都在,且必须各自
@@ -2064,7 +2132,10 @@ def test_the_runtime_note_ask_completed_fans_out_to_both_chains():
     tree = ast.parse(source)
     target = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_note_ask_completed":
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_note_ask_completed_compat"
+        ):
             target = node
             break
     assert target is not None, (
@@ -2093,6 +2164,7 @@ def test_the_runtime_note_ask_completed_fans_out_to_both_chains():
             if chain in (
                 "self.agent_profile_jobs.note_ask_completed",
                 "self.retrieval_experience_jobs.note_ask_completed",
+                "self.search_profile_jobs.note_ask_completed",
             ):
                 owning_try.setdefault(chain, block)
                 call_args.setdefault(chain, len(node.args))
@@ -2106,14 +2178,22 @@ def test_the_runtime_note_ask_completed_fans_out_to_both_chains():
         "中丢失——这条链路是部署级全局计数器,一旦这里的调用被删掉,蒸馏永远不会"
         "被触发,且没有任何其它测试会报红。"
     )
+    assert "self.search_profile_jobs.note_ask_completed" in owning_try
     assert (
         owning_try["self.agent_profile_jobs.note_ask_completed"]
         is not owning_try["self.retrieval_experience_jobs.note_ask_completed"]
     ), "两条链路的触发调用必须落在各自独立的 try 块里,不能共用一个 try"
+    assert (
+        owning_try["self.search_profile_jobs.note_ask_completed"]
+        is not owning_try["self.agent_profile_jobs.note_ask_completed"]
+        and owning_try["self.search_profile_jobs.note_ask_completed"]
+        is not owning_try["self.retrieval_experience_jobs.note_ask_completed"]
+    )
     # P1 链带参(notebook_id, user_id),P2 链零参——这条差异本身就是两条链路
     # 触发语义不同的证据(一个按人按库,一个是部署级全局计数器)。
     assert call_args["self.agent_profile_jobs.note_ask_completed"] == 2
     assert call_args["self.retrieval_experience_jobs.note_ask_completed"] == 0
+    assert call_args["self.search_profile_jobs.note_ask_completed"] == 1
 
 
 def test_the_runtime_counts_only_reasoning_asks_toward_distillation():
@@ -2122,7 +2202,7 @@ def test_the_runtime_counts_only_reasoning_asks_toward_distillation():
     from app.services import repository_runtime as rr
 
     source = Path(rr.__file__).read_text(encoding="utf-8")
-    body = source[source.index("def _note_ask_completed"):]
+    body = source[source.index("def _note_ask_completed_compat"):]
     body = body[:body.index("def ", 10)]
     guard_at = body.index('mode_id == "reasoning"')
     p2_call_at = body.index("retrieval_experience_jobs.note_ask_completed")
