@@ -63,6 +63,15 @@ cp model-services.example.toml .local/model-services.toml
 启动后续 report contribution，超限 finding 集整体拒绝；并且只在持久 `done` CAS
 成功后运行。精确默认值与范围只在 product/API 合同登记。
 
+部署注册解析元素 contributor 时，通过
+`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`、
+`SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS`、
+`SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES` 与
+`SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS` 配置。deadline 是 point-wide
+协作式预算；proposal 或字节越界时整条 contribution 拒绝，不做静默截断。默认
+registry 不含 contributor，因此部署未组合插件时这些设置不增加任何工作。精确默认值
+与范围只在 product/API 合同登记。
+
 如果供应商要求固定的核采样值，chat 服务可选配置 `top_p = 0.95`（或 `0` 到 `1` 的
 其他有限数值）。该服务级值覆盖所有已绑定 workload 的调用默认值，并同时用于真实请求和
 响应缓存键；省略字段则保留历史的逐调用行为。embedding 与 rerank 服务不允许配置

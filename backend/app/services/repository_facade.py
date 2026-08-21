@@ -21,6 +21,7 @@ from app.core.config import Settings
 from app.domain.extensions import (
     AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
+    ElementEnricherHostPort,
     ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
@@ -294,6 +295,7 @@ class RepositoryFacade:
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -329,6 +331,7 @@ class RepositoryFacade:
             ask_completed_observer_host=ask_completed_observer_host,
             report_auditor_host=report_auditor_host,
             report_completed_observer_host=report_completed_observer_host,
+            element_enricher_host=element_enricher_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the

@@ -97,7 +97,7 @@
     "failure_boundary": "pipeline errors record failed source state; chunk/embed/dirty hooks fail open",
     "sequence": [
       "set parsing",
-      "parse outside transaction",
+      "parse and optional in-memory element enrichment outside transaction",
       "replace elements and source-derived state in one write",
       "set parsed",
       "best-effort chunk build",

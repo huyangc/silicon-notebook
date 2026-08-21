@@ -105,6 +105,17 @@ from app.extension_sdk.report import (
     ReportCompletedObserver,
     ReportRef,
 )
+from app.extension_sdk.element_enrichment import (
+    SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY,
+    SOURCE_ELEMENT_ENRICHER_POINT,
+    ElementEnricher,
+    ElementEnrichmentAvailabilityContext,
+    ElementEnrichmentBudget,
+    ElementEnrichmentCandidate,
+    ElementEnrichmentContext,
+    ElementRef,
+    ElementView,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -202,4 +213,13 @@ __all__ = [
     "ReportCompletedExtensionContext",
     "ReportCompletedObserver",
     "ReportRef",
+    "SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY",
+    "SOURCE_ELEMENT_ENRICHER_POINT",
+    "ElementEnricher",
+    "ElementEnrichmentAvailabilityContext",
+    "ElementEnrichmentBudget",
+    "ElementEnrichmentCandidate",
+    "ElementEnrichmentContext",
+    "ElementRef",
+    "ElementView",
 ]

@@ -15,6 +15,7 @@ from app.domain.extensions import (
     AskCompletedObserverCallContext,
     AskCompletedObserverHostPort,
     CompletedAskNotification,
+    ElementEnricherHostPort,
     CompletedReportNotification,
     ReportAuditSnapshot,
     ReportAuditorHostPort,
@@ -137,6 +138,7 @@ class RepositoryRuntime:
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -152,6 +154,7 @@ class RepositoryRuntime:
         self.ask_completed_observers = ask_completed_observer_host
         self.report_auditors = report_auditor_host
         self.report_completed_observers = report_completed_observer_host
+        self.element_enrichers = element_enricher_host
         self.parser_provider_chain = (
             parser_provider_chain_host or BuiltinParserChainHost()
         )
@@ -956,6 +959,7 @@ class RepositoryRuntime:
             source_type_from_name=source_type_from_name,
             parser_provider_chain=self.parser_provider_chain,
             parser_connection_probe=self.database,
+            element_enricher_host=self.element_enrichers,
             mineru_client=mineru_client,
             mineru_cloud_client=mineru_cloud_client,
             model_clients=self.models,

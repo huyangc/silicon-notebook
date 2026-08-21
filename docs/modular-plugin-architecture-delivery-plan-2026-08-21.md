@@ -181,7 +181,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-08：Report stages + auditors/observers
 
-状态：实现中；阶段 ownership envelope、原子 done CAS 与 report auditor/completed observer 已接线，正在完成等价回归、双路 review 与 CI。
+状态：已完成并由 PR #550 squash 合入；阶段 ownership envelope、原子 done CAS、report auditor/completed observer、双路 review 与 CI 均已闭合。
 
 - 拆 planning/generation/final audit 的明确 stage DTO；
 - 保持 intent confirmation、mandatory topics、scope revalidation、all-section retrieval、并行 drafting、claim ledger、final editor 和 retry 语义；
@@ -191,8 +191,13 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-09：Ingestion element enricher
 
+状态：已完成并由 PR #551 交付；默认空 topology、point-specific batch host、parser 后/core element 事务前的唯一接线、hostile/等价回归、三路 review 与 CI 均已闭合。
+
 - 在解析完成、核心验证之前增加类型化 element contribution；
 - 保持 source 生命周期、parser capability、图片/元素 provenance、失败和重试语义。
+- 默认不注册真实 contributor；空路径在 snapshot/clock/probe/event/I/O 前保持原 parser baseline；
+- 插件仅按 request-local opaque element ref 返回有界、命名空间 metadata patch，不能增删、重排或改写 text/type/location/identity/asset provenance；
+- hook 固定在 ParserChain materialization 后、`replace_elements` 事务前，留在同源 generation lock 内但不持数据库 lease；Memory/Knowhow direct writer 与图片检索语义不在本 PR 范围。
 
 #### PR-10：Knowledge candidate projector
 

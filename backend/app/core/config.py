@@ -167,6 +167,33 @@ class Settings(BaseSettings):
         le=256,
         validation_alias="REPORT_AUDIT_MAX_FINDINGS",
     )
+    # Parsed-element enrichers run once per contributor and source between
+    # parser materialization and the core-owned element transaction. The
+    # point-wide cooperative budget starts no later contributor after expiry.
+    source_element_enricher_timeout_seconds: float = Field(
+        10.0,
+        gt=0,
+        le=300,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS",
+    )
+    source_element_enricher_max_proposals: int = Field(
+        2048,
+        ge=1,
+        le=25000,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS",
+    )
+    source_element_enricher_max_metadata_bytes: int = Field(
+        1048576,
+        ge=1024,
+        le=16777216,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES",
+    )
+    source_element_enricher_max_caption_chars: int = Field(
+        4096,
+        ge=1,
+        le=32768,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS",
+    )
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(

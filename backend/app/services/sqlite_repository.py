@@ -11,6 +11,7 @@ from app.domain.repository import remap_json_ids as _remap_json_ids
 from app.domain.extensions import (
     AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
+    ElementEnricherHostPort,
     ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
@@ -62,6 +63,7 @@ class SQLiteRepository(RepositoryFacade):
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         super().__init__(
             settings,
@@ -73,6 +75,7 @@ class SQLiteRepository(RepositoryFacade):
             ask_completed_observer_host=ask_completed_observer_host,
             report_auditor_host=report_auditor_host,
             report_completed_observer_host=report_completed_observer_host,
+            element_enricher_host=element_enricher_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)

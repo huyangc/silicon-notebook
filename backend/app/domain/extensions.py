@@ -1,7 +1,7 @@
 """Stable application ports for consuming extension hosts without a registry."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -309,3 +309,57 @@ class ReportCompletedObserverHostPort(Protocol):
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None: ...
+
+
+@dataclass(frozen=True)
+class ParsedElementEnvelope:
+    """Core-owned immutable projection; parser metadata never crosses the SDK."""
+
+    ordinal: int
+    element_type: str
+    location_label: str
+    text: str
+    caption: str
+
+
+@dataclass(frozen=True)
+class ElementEnrichmentPatch:
+    ordinal: int
+    plugin_id: str
+    plugin_version: str
+    contribution_id: str
+    metadata: Mapping[str, Any]
+    caption: str = ""
+
+
+class ElementEnrichmentCancellationPort(Protocol):
+    def is_set(self) -> bool: ...
+
+    def raise_if_cancelled(self) -> None: ...
+
+
+class ElementEnrichmentConnectionProbe(Protocol):
+    def is_connection_held(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class ElementEnrichmentCallContext:
+    elements: tuple[ParsedElementEnvelope, ...]
+    cancellation: ElementEnrichmentCancellationPort
+    connection_probe: ElementEnrichmentConnectionProbe
+    max_proposals: int
+    max_metadata_bytes: int
+    max_caption_chars: int
+    deadline_monotonic: float
+
+
+class ElementEnricherHostPort(Protocol):
+    @property
+    def has_contributors(self) -> bool: ...
+
+    def enrich_application(
+        self,
+        call_context: ElementEnrichmentCallContext,
+        *,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> tuple[ElementEnrichmentPatch, ...]: ...

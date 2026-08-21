@@ -69,6 +69,16 @@ contributions do not start after the deadline, and an oversized finding set is
 rejected whole. These hooks run only after a successful durable `done` CAS.
 Exact defaults and ranges live only in the product/API contract.
 
+A deployment that registers a parsed-element contributor configures it with
+`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`,
+`SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS`,
+`SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES`, and
+`SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS`. The deadline is point-wide and
+cooperative; proposal and byte limits reject an offending contribution as a
+whole rather than truncating it. The default registry contains no contributor,
+so these settings add no work until one is composed. Exact defaults and ranges
+live only in the product/API contract.
+
 A chat service may optionally set `top_p = 0.95` (or another finite value from `0` through
 `1`) when its provider requires a fixed nucleus-sampling value. This service-owned value
 overrides every workload's call default and is used by both the outgoing request and the

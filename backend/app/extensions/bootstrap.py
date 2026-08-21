@@ -54,6 +54,7 @@ from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
 from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
 from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
+from app.extensions.element_enrichment import SourceElementEnricherHost
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class ExtensionRuntime:
     ask_completed_observers: AskCompletedObserverHost
     report_auditors: ReportAuditorHost
     report_completed_observers: ReportCompletedObserverHost
+    element_enrichers: SourceElementEnricherHost
 
 
 def build_extension_registry(
@@ -114,6 +116,10 @@ def build_extension_runtime(
             event_sink=event_sink,
         ),
         report_completed_observers=ReportCompletedObserverHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        element_enrichers=SourceElementEnricherHost(
             registry,
             event_sink=event_sink,
         ),

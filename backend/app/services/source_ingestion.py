@@ -14,7 +14,10 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import cap_kwargs
-from app.domain.extensions import ParserProviderChainHostPort
+from app.domain.extensions import (
+    ElementEnricherHostPort,
+    ParserProviderChainHostPort,
+)
 from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
@@ -55,6 +58,7 @@ from app.services.parser_chain_execution import (
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
+from app.services.source_element_enrichment import enrich_source_elements
 
 
 #: 「改了文档类型 → 只重抽 KG」失败时留给用户的说明。面向用户的文案，不带异常
@@ -173,6 +177,7 @@ class SourceIngestionService:
         # composing this service unchanged, and "no consolidation chain" is a
         # complete, correct behaviour (it is exactly the kill-switch-off path).
         note_corpus_change: Callable[[str], None] = lambda _notebook_id: None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -189,6 +194,7 @@ class SourceIngestionService:
         self.source_type_from_name = source_type_from_name
         self.parser_provider_chain = parser_provider_chain
         self.parser_connection_probe = parser_connection_probe
+        self.element_enricher_host = element_enricher_host
         self.make_persist_image = make_persist_image
         self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
@@ -1027,6 +1033,25 @@ class SourceIngestionService:
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
+            if self.element_enricher_host is not None:
+                elements = enrich_source_elements(
+                    elements,
+                    host=self.element_enricher_host,
+                    connection_probe=self.parser_connection_probe,
+                    max_proposals=(
+                        self.settings.source_element_enricher_max_proposals
+                    ),
+                    max_metadata_bytes=(
+                        self.settings.source_element_enricher_max_metadata_bytes
+                    ),
+                    max_caption_chars=(
+                        self.settings.source_element_enricher_max_caption_chars
+                    ),
+                    timeout_seconds=(
+                        self.settings.source_element_enricher_timeout_seconds
+                    ),
+                    event_sink=self.event_log.emit,
+                )
             # per-source 分块串行锁:把「换 elements → 建 chunks + 置 marker」整段串起来
             # (见 __init__ 说明)。锁必须从 replace_elements 一直持到 build_chunks 之后,
             # 否则并发同源 reparse 会交错出「B 代 elements + A 代 chunks + marker 已置」的
