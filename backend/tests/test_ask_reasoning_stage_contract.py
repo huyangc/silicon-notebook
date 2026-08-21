@@ -338,6 +338,41 @@ def test_run_kind_authority_rejects_hostile_str_subclass(monkeypatch):
     assert saves == []
 
 
+def test_actor_authority_rejects_hostile_str_subclass_before_early_commit(
+    monkeypatch,
+):
+    class EvilActor(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    cancel_event = threading.Event()
+    service = _minimal_ask_service()
+    service.model_clients.primary_unconfigured = lambda: True
+    saves = []
+    monkeypatch.setattr(
+        service,
+        "_save_answer",
+        lambda *args, **kwargs: saves.append(kwargs.get("user_id")),
+    )
+    with retrieval_run(
+        run_kind="ask_reasoning", actor_id="user", cancel_event=cancel_event
+    ) as run:
+        run.actor_id = EvilActor("attacker")
+        with pytest.raises(StageBoundaryError, match="actor authority changed"):
+            service.ask_reasoning(
+                "nb",
+                AskRequest(question="q", mode="reasoning"),
+                user_id="user",
+                cancel_event=cancel_event,
+            )
+    assert saves == []
+
+
 def test_typed_retrieval_stage_rejects_raising_connection_probe_before_run(
     monkeypatch,
 ):

@@ -2320,12 +2320,16 @@ class ReasoningRetriever:
             raise StageBoundaryError(
                 "reasoning retrieval run changed before execution"
             )
-        if runtime.scope is not None and (
-            getattr(runtime.scope, "notebook_id", None) != stage.notebook_id
-        ):
-            raise StageBoundaryError(
-                "reasoning retrieval scope notebook changed before execution"
-            )
+        if runtime.scope is not None:
+            scope_notebook_id = getattr(runtime.scope, "notebook_id", None)
+            if (
+                type(scope_notebook_id) is not str
+                or not scope_notebook_id
+                or scope_notebook_id != stage.notebook_id
+            ):
+                raise StageBoundaryError(
+                    "reasoning retrieval scope notebook changed before execution"
+                )
         if runtime.retrieval_run is not None and (
             getattr(runtime.retrieval_run, "cancel_event", None)
             is not runtime.cancellation

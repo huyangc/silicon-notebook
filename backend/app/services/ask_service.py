@@ -2235,7 +2235,12 @@ class AskService:
                 f"Ask reasoning connection authority changed at {point}"
             )
         if scope is not None:
-            if getattr(scope, "notebook_id", None) != notebook_id:
+            scope_notebook_id = getattr(scope, "notebook_id", None)
+            if (
+                type(scope_notebook_id) is not str
+                or not scope_notebook_id
+                or scope_notebook_id != notebook_id
+            ):
                 raise StageBoundaryError(
                     f"Ask reasoning scope notebook changed at {point}"
                 )
@@ -2249,7 +2254,12 @@ class AskService:
                 raise StageBoundaryError(
                     f"Ask reasoning cancellation authority changed at {point}"
                 )
-            if getattr(run, "actor_id", None) != user_id:
+            actor_id = getattr(run, "actor_id", None)
+            if (
+                type(actor_id) is not str
+                or not actor_id
+                or actor_id != user_id
+            ):
                 raise StageBoundaryError(
                     f"Ask reasoning actor authority changed at {point}"
                 )
