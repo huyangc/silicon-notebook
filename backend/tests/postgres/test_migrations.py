@@ -329,9 +329,10 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "uq_clusters_notebook_type_member" in final_indexes
     assert "idx_source_elements_source_type" in final_indexes
     assert "idx_notebook_object_schemas_status" in final_indexes
+    assert "idx_groups_invite_token" in final_indexes
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
     ]
 
 
