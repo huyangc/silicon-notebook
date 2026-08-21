@@ -97,7 +97,8 @@ class ExtensionRegistry:
             raise ExtensionRegistryError("extension registry is frozen")
         manifest = bundle.manifest
         if (
-            not _STABLE_METADATA_ID.fullmatch(str(manifest.id or ""))
+            type(manifest.id) is not str
+            or not _STABLE_METADATA_ID.fullmatch(manifest.id)
             or not manifest.version
             or not manifest.display_name
         ):
@@ -151,8 +152,10 @@ class ExtensionRegistry:
                 f"contribution {declaration.id!r} differs from its manifest declaration"
             )
         if (
-            not _STABLE_METADATA_ID.fullmatch(str(declaration.id or ""))
-            or not _STABLE_METADATA_ID.fullmatch(str(declaration.point or ""))
+            type(declaration.id) is not str
+            or not _STABLE_METADATA_ID.fullmatch(declaration.id)
+            or type(declaration.point) is not str
+            or not _STABLE_METADATA_ID.fullmatch(declaration.point)
         ):
             raise ExtensionRegistryError(
                 "contribution id and point must be stable metadata identifiers"
@@ -279,7 +282,7 @@ class ExtensionRegistry:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="availability_probe_failed",
             )
-        if not isinstance(result, Availability):
+        if type(result) is not Availability:
             return Availability(
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="invalid_availability_probe",
@@ -289,7 +292,12 @@ class ExtensionRegistry:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="invalid_availability_status",
             )
-        reason = str(result.reason_code or "")
+        if type(result.reason_code) is not str:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_reason",
+            )
+        reason = result.reason_code
         if reason and not _STABLE_REASON.fullmatch(reason):
             return Availability(
                 AvailabilityStatus.UNAVAILABLE,

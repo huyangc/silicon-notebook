@@ -15,6 +15,7 @@ from app.extension_sdk import (
     SCHEDULED_MODEL_ACCESS_CAPABILITY,
     AvailabilityStatus,
     CancellationToken,
+    ContributorResult,
     EvidenceCandidate,
     EvidenceProvenance,
     EvidenceReadRequest,
@@ -37,6 +38,7 @@ from app.extensions.registry import (
 
 T = TypeVar("T")
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
+_STABLE_METADATA_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _PROVENANCE_KINDS = frozenset({
     "chunk", "element", "knowledge_object", "relation", "ppr",
 })
@@ -129,6 +131,7 @@ class RetrievalContributorHost:
         context_factory: Callable[[], RetrievalHostContext] | None = None,
         baseline_identity: Callable[[T], str] | None = None,
         cancellation: CancellationToken | None = None,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> Sequence[T]:
         registrations = self._by_invocation.get(invocation, ())
         if not registrations:
@@ -157,6 +160,7 @@ class RetrievalContributorHost:
                     failure_code=self._stable_code(
                         availability.reason_code, "contribution_unavailable"
                     ),
+                    event_sink=event_sink,
                 )
                 continue
             available.append(registration)
@@ -169,27 +173,31 @@ class RetrievalContributorHost:
                     registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="missing_retrieval_context",
+                    event_sink=event_sink,
                 )
             return baseline
         try:
             context = context_factory()
         except Exception:
+            if cancellation is not None:
+                self._raise_if_token_cancelled(cancellation)
             for registration in available:
                 self._emit(
                     registration.registered.contribution.declaration.id,
                     outcome="invalid_context",
                     failure_code="retrieval_context_failed",
+                    event_sink=event_sink,
                 )
             return baseline
         def emit(contribution_id, **kwargs):
             self._emit(
                 contribution_id,
-                event_sink=getattr(context, "event_sink", None),
+                event_sink=event_sink,
                 **kwargs,
             )
 
         if (
-            not isinstance(context, RetrievalHostContext)
+            type(context) is not RetrievalHostContext
             or context.invocation != invocation
         ):
             for registration in available:
@@ -212,7 +220,9 @@ class RetrievalContributorHost:
         try:
             connection_held = context.connection.is_connection_held()
         except Exception:
+            self._raise_if_core_cancelled(context)
             connection_held = True
+        self._raise_if_core_cancelled(context)
         if connection_held:
             for registration in available:
                 emit(
@@ -238,10 +248,12 @@ class RetrievalContributorHost:
             baseline_ids: set[str] = set()
             for item in baseline:
                 identity = baseline_identity(item)
-                if not isinstance(identity, str) or not identity:
+                self._raise_if_core_cancelled(context)
+                if type(identity) is not str or not identity:
                     raise ValueError("invalid baseline identity")
                 baseline_ids.add(identity)
         except Exception:
+            self._raise_if_core_cancelled(context)
             for registration in available:
                 emit(
                     registration.registered.contribution.declaration.id,
@@ -259,6 +271,7 @@ class RetrievalContributorHost:
             self._raise_if_core_cancelled(context)
             contribution_id = registration.registered.contribution.declaration.id
             granted = self._granted_capabilities(registration, context)
+            self._raise_if_core_cancelled(context)
             if granted is None:
                 emit(
                     contribution_id,
@@ -431,6 +444,7 @@ class RetrievalContributorHost:
             registration.requires | registration.optional_requires
         ):
             decision = self._registry.capability_availability(capability, context)
+            self._raise_if_core_cancelled(context)
             if not isinstance(decision.status, AvailabilityStatus):
                 if capability in registration.requires:
                     return None
@@ -451,7 +465,7 @@ class RetrievalContributorHost:
             context.budget.max_proposals,
         )
         if any(
-            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            type(value) is not int or value < 0
             for value in values
         ):
             return None
@@ -459,8 +473,7 @@ class RetrievalContributorHost:
         if (
             deadline is not None
             and (
-                not isinstance(deadline, (int, float))
-                or isinstance(deadline, bool)
+                type(deadline) not in (int, float)
                 or not math.isfinite(deadline)
             )
         ):
@@ -472,14 +485,15 @@ class RetrievalContributorHost:
         try:
             failure = getattr(result, "failure", None)
             return (
-                type(getattr(result, "items", None)) is tuple
+                type(result) is ContributorResult
+                and type(getattr(result, "items", None)) is tuple
                 and isinstance(getattr(result, "status", None), ExtensionResultStatus)
                 and (
                     failure is None
                     or (
-                        isinstance(failure, ExtensionFailure)
+                        type(failure) is ExtensionFailure
                         and isinstance(failure.kind, ExtensionFailureKind)
-                        and isinstance(failure.code, str)
+                        and type(failure.code) is str
                     )
                 )
             )
@@ -490,21 +504,20 @@ class RetrievalContributorHost:
     def _candidate_structurally_valid(candidate: object) -> bool:
         try:
             return (
-                isinstance(candidate, EvidenceCandidate)
-                and isinstance(candidate.identity, str)
+                type(candidate) is EvidenceCandidate
+                and type(candidate.identity) is str
                 and bool(candidate.identity)
-                and isinstance(candidate.notebook_id, str)
+                and type(candidate.notebook_id) is str
                 and bool(candidate.notebook_id)
-                and isinstance(candidate.source_id, str)
+                and type(candidate.source_id) is str
                 and bool(candidate.source_id)
-                and isinstance(candidate.provenance, EvidenceProvenance)
-                and isinstance(candidate.provenance.kind, str)
+                and type(candidate.provenance) is EvidenceProvenance
+                and type(candidate.provenance.kind) is str
                 and candidate.provenance.kind in _PROVENANCE_KINDS
-                and isinstance(candidate.provenance.reference, str)
+                and type(candidate.provenance.reference) is str
                 and bool(candidate.provenance.reference)
                 and candidate.value is not None
-                and isinstance(candidate.token_cost, int)
-                and not isinstance(candidate.token_cost, bool)
+                and type(candidate.token_cost) is int
                 and candidate.token_cost >= 0
             )
         except Exception:
@@ -514,7 +527,7 @@ class RetrievalContributorHost:
     def _authoritative_by_identity(
         cls, candidates: object, *, expected_limit: int,
     ) -> dict[str, EvidenceCandidate[Any]] | None:
-        if not isinstance(candidates, tuple) or len(candidates) > expected_limit:
+        if type(candidates) is not tuple or len(candidates) > expected_limit:
             return None
         result: dict[str, EvidenceCandidate[Any]] = {}
         for candidate in candidates:
@@ -557,7 +570,7 @@ class RetrievalContributorHost:
     def _stable_code(value: object, fallback: str) -> str:
         return (
             value
-            if isinstance(value, str) and _STABLE_CODE.fullmatch(value)
+            if type(value) is str and _STABLE_CODE.fullmatch(value)
             else fallback
         )
 
@@ -567,7 +580,12 @@ class RetrievalContributorHost:
         failure_code: str = "", started: float | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        sink = event_sink or self._event_sink
+        if (
+            type(contribution_id) is not str
+            or not _STABLE_METADATA_ID.fullmatch(contribution_id)
+        ):
+            contribution_id = "invalid_contribution"
+        sink = event_sink if event_sink is not None else self._event_sink
         if sink is None:
             return
         elapsed_ms = (

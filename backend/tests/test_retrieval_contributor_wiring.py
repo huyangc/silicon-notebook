@@ -99,3 +99,45 @@ def test_repository_factory_accepts_injected_host_without_importing_registry(mon
     )
 
     assert captured == {"retrieval_contributor_host": host}
+
+
+def test_factory_created_ask_and_report_share_empty_host(tmp_path):
+    from app.bootstrap import (
+        application_extension_runtime,
+        create_application_repository,
+    )
+
+    repository = create_application_repository(Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path / 'wiring.db'}",
+        storage_dir=str(tmp_path / "storage"),
+        event_log_enabled=False,
+        llm_log_enabled=False,
+    ))
+    try:
+        host = application_extension_runtime().retrieval_contributors
+        ask = repository._runtime.ask_service()
+        report = repository._runtime.report_execution.engine_factory(
+            user_id="wiring-review"
+        )
+
+        assert repository._runtime.retrieval_contributors is host
+        assert ask.retrieval_contributors is host
+        assert report.dependencies.retrieval_contributors is host
+
+        baseline = [SimpleNamespace(chunk_id="base")]
+        ask.selected_source_graph = None
+        object.__setattr__(
+            report.dependencies, "selected_source_graph", None
+        )
+        ask_chunks, ask_status = ask._activate_selected_source_graph(
+            "notebook", baseline
+        )
+        report_result = SimpleNamespace(chunks=baseline)
+        report._activate_selected_source_graph("notebook", report_result)
+
+        assert ask_chunks == baseline
+        assert ask_status is None
+        assert report_result.chunks is baseline
+    finally:
+        repository.close()

@@ -18,4 +18,5 @@ class RetrievalContributorHostPort(Protocol):
         context_factory: Callable[[], Any] | None = None,
         baseline_identity: Callable[[T], str] | None = None,
         cancellation: Any | None = None,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> Sequence[T]: ...

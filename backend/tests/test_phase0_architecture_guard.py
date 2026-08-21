@@ -170,10 +170,42 @@ def test_guard_rejects_plugin_importing_core_implementations(tmp_path):
     )
 
     assert boundary_violations(app) == [
-        "app.extensions.builtin.unsafe imports forbidden core implementation "
+        "app.extensions.builtin.unsafe imports forbidden plugin dependency "
         "app.repositories.sqlite",
-        "app.extensions.builtin.unsafe imports forbidden core implementation "
-        "app.services.repository_facade",
+        "app.extensions.builtin.unsafe imports forbidden plugin dependency "
+        "app.services",
+    ]
+
+
+def test_guard_allows_feature_plugin_sdk_and_rejects_other_app_layers(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "features/search/plugin.py",
+        "from app.extension_sdk import ExtensionManifest\n"
+        "from app.domain import retrieval\n"
+        "from app.features.search import adapter\n",
+    )
+    assert boundary_violations(app) == []
+
+    _write(
+        app / "features/search/plugin.py",
+        "from app.services import ask_service\n"
+        "from app.features.other import plugin\n",
+    )
+    assert boundary_violations(app) == [
+        "app.features.search.plugin imports forbidden plugin dependency "
+        "app.features.other",
+        "app.features.search.plugin imports forbidden plugin dependency "
+        "app.services",
+    ]
+
+
+def test_guard_rejects_main_importing_extension_runtime_directly(tmp_path):
+    app = tmp_path / "app"
+    _write(app / "main.py", "from app import extensions\n")
+
+    assert boundary_violations(app) == [
+        "app.main imports the extension composition surface outside an approved root"
     ]
 
 

@@ -43,7 +43,7 @@ class CapabilityDecisionCatalog:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="capability_decision_failed",
             )
-        if not isinstance(result, Availability):
+        if type(result) is not Availability:
             return Availability(
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="invalid_capability_decision",
@@ -53,7 +53,12 @@ class CapabilityDecisionCatalog:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="invalid_capability_status",
             )
-        reason = str(result.reason_code or "")
+        if type(result.reason_code) is not str:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_capability_reason",
+            )
+        reason = result.reason_code
         if reason and not _STABLE_REASON.fullmatch(reason):
             return Availability(
                 AvailabilityStatus.UNAVAILABLE,

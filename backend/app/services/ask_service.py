@@ -409,6 +409,9 @@ class AskService:
                 chunks,
                 invocation="selected_evidence",
                 cancellation=(run.cancel_event if run is not None else None),
+                event_sink=getattr(
+                    getattr(self, "event_log", None), "emit", None
+                ),
             )
         if self.selected_source_graph is None:
             return list(chunks), None

@@ -92,11 +92,36 @@ class ScopeBoundEvidenceReader(Protocol):
     ) -> tuple[EvidenceCandidate[Any], ...]: ...
 
 
+@dataclass(frozen=True)
+class ScheduledModelMessage:
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+@dataclass(frozen=True)
+class ScheduledJsonRequest:
+    messages: tuple[ScheduledModelMessage, ...]
+    schema_id: str
+
+
+ModelResultT = TypeVar("ModelResultT")
+
+
 @runtime_checkable
 class ScheduledModelAccess(Protocol):
-    """A point-bound workload handle, never a cached physical client."""
+    """A live point/workload-bound handle whose core adapter owns caching.
 
-    def chat_json(self, *args: Any, **kwargs: Any) -> Any: ...
+    The workload and physical model binding are deliberately absent from the
+    call. The core resolves both for every invocation and applies its shared
+    validator/cache policy; a plugin cannot select or retain a raw client.
+    """
+
+    def complete_json(
+        self,
+        request: ScheduledJsonRequest,
+        *,
+        validate: Callable[[object], ModelResultT],
+    ) -> ModelResultT: ...
 
 
 @runtime_checkable
@@ -143,7 +168,6 @@ class RetrievalHostContext:
     admission_reader: ScopeBoundEvidenceReader
     model_access: ScheduledModelAccess | None
     connection: ConnectionLeaseProbe
-    event_sink: Callable[[dict[str, object]], None] | None = None
 
 
 @runtime_checkable

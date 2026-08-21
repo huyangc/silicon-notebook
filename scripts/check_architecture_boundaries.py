@@ -18,15 +18,6 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
-FORBIDDEN_PLUGIN_IMPLEMENTATION_PREFIXES = (
-    "app.repositories.postgres",
-    "app.repositories.sqlite",
-    "app.services.repository_facade",
-    "app.services.repository_runtime",
-    "app.services.sqlite_repository",
-)
-
-
 def module_name(app_root: Path, path: Path) -> str:
     relative = path.relative_to(app_root.parent).with_suffix("")
     parts = list(relative.parts)
@@ -192,30 +183,55 @@ def boundary_violations(app_root: Path) -> list[str]:
             or (module.startswith("app.features.") and module.endswith(".plugin"))
         )
         if is_plugin_implementation:
+            own_feature = (
+                ".".join(module.split(".")[:3])
+                if module.startswith("app.features.")
+                else ""
+            )
             forbidden = minimal_matching_module_references(
                 imports,
-                lambda imported: imported.startswith(
-                    FORBIDDEN_PLUGIN_IMPLEMENTATION_PREFIXES
+                lambda imported: imported.startswith("app.")
+                and not imported.startswith(
+                    ("app.domain", "app.extension_sdk")
+                )
+                and not (
+                    own_feature
+                    and (
+                        imported == own_feature
+                        or imported.startswith(f"{own_feature}.")
+                    )
                 ),
             )
             for imported in sorted(forbidden):
                 violations.append(
-                    f"{module} imports forbidden core implementation {imported}"
+                    f"{module} imports forbidden plugin dependency {imported}"
                 )
-        imports_extension_surface = any(
-            imported in {"app.extensions", "app.extension_sdk"}
-            or imported.startswith(("app.extensions.", "app.extension_sdk."))
+        imports_extension_runtime = any(
+            imported == "app.extensions"
+            or imported.startswith("app.extensions.")
             for imported in imports
         )
         is_extension_composition = (
-            module == "app.main"
-            or module == "app.bootstrap"
+            module == "app.bootstrap"
             or module == "app.extensions"
             or module.startswith("app.extensions.")
+        )
+        imports_extension_sdk = any(
+            imported == "app.extension_sdk"
+            or imported.startswith("app.extension_sdk.")
+            for imported in imports
+        )
+        is_sdk_consumer = (
+            is_extension_composition
             or module == "app.extension_sdk"
             or module.startswith("app.extension_sdk.")
+            or is_plugin_implementation
         )
-        if imports_extension_surface and not is_extension_composition:
+        if imports_extension_runtime and not is_extension_composition:
+            violations.append(
+                f"{module} imports the extension composition surface outside an approved root"
+            )
+        if imports_extension_sdk and not is_sdk_consumer:
             violations.append(
                 f"{module} imports the extension composition surface outside an approved root"
             )

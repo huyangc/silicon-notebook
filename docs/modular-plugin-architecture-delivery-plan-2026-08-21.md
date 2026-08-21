@@ -116,6 +116,10 @@ PR 描述必须包含：
 - Ask/Report 删除各自直接调用，统一通过 PR-01 host；
 - 原样保留 attestation、rollout、baseline manifest、独立预算、scope drift、eviction 整段丢弃、fail-closed 边界和事件；
 - 增加旧路径/新路径的特征化等价测试和 adapter 专属 contract tests。
+- 首个真实 context factory 同批补 SQLite/PostgreSQL（含 pool-size-1）的连接持有
+  conformance，证明 host 在拿任何 contributor fan-out 前已退出数据库 lease；PR-01
+  只有 core-private probe 合同与 fail-closed mutation，不把尚未存在的 adapter 伪装成
+  生产连接检测。
 
 硬门：通用 host 合同只能是下界，不得把 selected-source graph 的更强合同降级。
 
@@ -127,6 +131,9 @@ PR 描述必须包含：
 - 逐字保留 off/shadow/on；shadow 返回精确 baseline；on 只追加原始 chunk，不驱逐、不重排；
 - 保留 source ceiling、bounded read、offline-only index build、original-chunk provenance；
 - 删除候选检索中的专用插件循环/双路入口。
+- 在原 `_retrieve_chunks` 返回 `(scored, ids, matrix)`、进入 MMR/fusion 之前落
+  `chunk_candidates` 的生产锚点与位置守卫；PR-01 只冻结 invocation 合同，避免在
+  迁移前增加一个无法正确重建 ids/matrix 的假 host seam。
 
 Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通过 contract kit；无插件等价测试继续成立。
 

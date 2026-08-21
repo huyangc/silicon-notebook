@@ -564,6 +564,9 @@ class ReportEngine:
                 baseline_input,
                 invocation="selected_evidence",
                 cancellation=getattr(self, "cancel_event", None),
+                event_sink=getattr(
+                    getattr(self.dependencies, "event_log", None), "emit", None
+                ),
             )
         service = self.dependencies.selected_source_graph
         if service is None:

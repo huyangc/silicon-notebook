@@ -45,6 +45,8 @@ from app.extension_sdk.retrieval import (
     RetrievalInvocation,
     RetrievalRunRef,
     ScheduledModelAccess,
+    ScheduledJsonRequest,
+    ScheduledModelMessage,
     ScopeBoundEvidenceReader,
 )
 
@@ -91,5 +93,7 @@ __all__ = [
     "RetrievalInvocation",
     "RetrievalRunRef",
     "ScheduledModelAccess",
+    "ScheduledJsonRequest",
+    "ScheduledModelMessage",
     "ScopeBoundEvidenceReader",
 ]

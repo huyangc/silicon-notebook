@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import fields
+from concurrent.futures import ThreadPoolExecutor
+import inspect
 import threading
 
 import pytest
@@ -30,6 +32,9 @@ from app.extension_sdk import (
     RetrievalHostContext,
     RetrievalRunRef,
     SCHEDULED_MODEL_ACCESS_CAPABILITY,
+    ScheduledJsonRequest,
+    ScheduledModelAccess,
+    ScheduledModelMessage,
 )
 from app.extensions import build_extension_runtime
 from app.extensions.retrieval import RetrievalHostCancelled
@@ -97,10 +102,13 @@ class _Reader:
 
 
 class _Connection:
-    def __init__(self, held=False) -> None:
+    def __init__(self, held=False, on_call=None) -> None:
         self.held = held
+        self.on_call = on_call
 
     def is_connection_held(self) -> bool:
+        if self.on_call is not None:
+            self.on_call()
         return self.held
 
 
@@ -466,6 +474,101 @@ def test_pre_cancelled_request_skips_availability_and_context():
     assert contributor.calls == 0
 
 
+def test_cancellation_from_context_factory_is_not_mapped_to_invalid_context():
+    cancellation = _Cancellation()
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((_bundle("cancel_context", contributor),))
+
+    def context_factory():
+        cancellation.cancelled = True
+        raise _CoreCancelled("cancel in context factory")
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=context_factory,
+            baseline_identity=str,
+            cancellation=cancellation,
+        )
+    assert contributor.calls == 0
+
+
+def test_cancellation_from_connection_probe_is_not_mapped_to_blocked():
+    cancellation = _Cancellation()
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((_bundle("cancel_connection", contributor),))
+
+    def cancel_probe():
+        cancellation.cancelled = True
+        raise _CoreCancelled("cancel in connection probe")
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda: _context(
+                _Reader({"new"}),
+                cancel=cancellation,
+                connection=_Connection(on_call=cancel_probe),
+            ),
+            baseline_identity=str,
+            cancellation=cancellation,
+        )
+    assert contributor.calls == 0
+
+
+def test_cancellation_from_baseline_identity_is_not_mapped_to_invalid():
+    cancellation = _Cancellation()
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((_bundle("cancel_identity", contributor),))
+
+    def identity(_item):
+        cancellation.cancelled = True
+        raise _CoreCancelled("cancel in baseline identity")
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda: _context(
+                _Reader({"new"}), cancel=cancellation
+            ),
+            baseline_identity=identity,
+            cancellation=cancellation,
+        )
+    assert contributor.calls == 0
+
+
+def test_cancellation_from_capability_decision_stops_before_contributor():
+    cancellation = _Cancellation()
+    contributor = _Contributor(_result(_candidate("new")))
+
+    def decide(_context):
+        cancellation.cancelled = True
+        return Availability.available()
+
+    runtime = build_extension_runtime(
+        (_bundle(
+            "cancel_capability",
+            contributor,
+            requires=(RETRIEVAL_SCOPE_READER_CAPABILITY,),
+        ),),
+        capability_decisions={RETRIEVAL_SCOPE_READER_CAPABILITY: decide},
+    )
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda: _context(
+                _Reader({"new"}), cancel=cancellation
+            ),
+            baseline_identity=str,
+            cancellation=cancellation,
+        )
+    assert contributor.calls == 0
+
+
 def test_connection_held_blocks_contributor_before_io():
     contributor = _Contributor(_result(_candidate("new")))
     runtime = build_extension_runtime((_bundle("blocked", contributor),))
@@ -598,6 +701,56 @@ def test_capability_ports_are_projected_per_manifest_and_live_decision():
     assert contexts["modeled"].models is model
 
 
+def test_scheduled_model_contract_has_fixed_workload_and_no_raw_client_selector():
+    parameters = inspect.signature(ScheduledModelAccess.complete_json).parameters
+
+    assert tuple(parameters) == ("self", "request", "validate")
+    assert parameters["request"].annotation in {
+        ScheduledJsonRequest,
+        "ScheduledJsonRequest",
+    }
+    request = ScheduledJsonRequest(
+        messages=(ScheduledModelMessage("user", "question"),),
+        schema_id="retrieval_hint_v1",
+    )
+    assert request.schema_id == "retrieval_hint_v1"
+
+
+def test_model_handle_is_resolved_from_each_live_host_context():
+    observed = []
+    contributor = _Contributor(
+        _result(_candidate("new")),
+        on_call=lambda context: observed.append(context.models),
+    )
+    runtime = build_extension_runtime(
+        (_bundle(
+            "live_model",
+            contributor,
+            requires=(SCHEDULED_MODEL_ACCESS_CAPABILITY,),
+        ),),
+        capability_decisions={
+            SCHEDULED_MODEL_ACCESS_CAPABILITY: lambda _context: Availability.available()
+        },
+    )
+    reader = _Reader({"new"})
+    first_model = object()
+    second_model = object()
+    first = _context(reader)
+    second = _context(reader)
+    object.__setattr__(first, "model_access", first_model)
+    object.__setattr__(second, "model_access", second_model)
+
+    for context in (first, second):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=lambda context=context: context,
+            baseline_identity=str,
+        )
+
+    assert observed == [first_model, second_model]
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -631,6 +784,35 @@ def test_malformed_candidate_fields_are_total_and_fail_open(candidate):
     ) is baseline
 
 
+def test_hostile_string_subclass_identity_cannot_escape_fail_open():
+    class HostileString(str):
+        def __hash__(self):
+            raise RuntimeError("secret hash")
+
+        def __eq__(self, _other):
+            raise RuntimeError("secret equality")
+
+    candidate = _candidate("safe")
+    candidate = EvidenceCandidate(
+        HostileString("safe"),
+        candidate.notebook_id,
+        candidate.source_id,
+        candidate.provenance,
+        candidate.value,
+        candidate.token_cost,
+    )
+    runtime = build_extension_runtime((
+        _bundle("hostile_identity", _Contributor(_result(candidate))),
+    ))
+    baseline = ["base"]
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: _context(_Reader()),
+        baseline_identity=str,
+    ) is baseline
+
+
 def test_invalid_result_and_availability_enums_are_fail_open():
     bad_result = ContributorResult((), "evil")
     contributor = _Contributor(bad_result)
@@ -647,6 +829,43 @@ def test_invalid_result_and_availability_enums_are_fail_open():
         baseline,
         invocation="selected_evidence",
         context_factory=lambda: _context(_Reader()),
+        baseline_identity=str,
+    ) is baseline
+    assert contributor.calls == 0
+
+
+@pytest.mark.parametrize("surface", ("availability", "capability"))
+def test_hostile_reason_code_is_sanitized_without_calling_dunders(surface):
+    class HostileReason:
+        def __bool__(self):
+            raise RuntimeError("secret bool")
+
+        def __str__(self):
+            raise RuntimeError("secret str")
+
+    contributor = _Contributor(_result(_candidate("new")))
+    kwargs = {}
+    bundle_kwargs = {}
+    if surface == "availability":
+        bundle_kwargs["availability"] = lambda _context: Availability(
+            AvailabilityStatus.DISABLED, HostileReason()
+        )
+    else:
+        bundle_kwargs["requires"] = (RETRIEVAL_SCOPE_READER_CAPABILITY,)
+        kwargs["capability_decisions"] = {
+            RETRIEVAL_SCOPE_READER_CAPABILITY: lambda _context: Availability(
+                AvailabilityStatus.DISABLED, HostileReason()
+            )
+        }
+    runtime = build_extension_runtime(
+        (_bundle("hostile_reason", contributor, **bundle_kwargs),),
+        **kwargs,
+    )
+    baseline = ["base"]
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: _context(_Reader({"new"})),
         baseline_identity=str,
     ) is baseline
     assert contributor.calls == 0
@@ -718,6 +937,67 @@ def test_unavailable_probe_gets_io_free_context_and_skips_full_context():
     assert contributor.calls == 0
 
 
+def test_call_event_sink_observes_pre_context_unavailability():
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((
+        _bundle(
+            "call_event",
+            contributor,
+            availability=lambda _context: Availability(
+                AvailabilityStatus.DISABLED, "feature_disabled"
+            ),
+        ),
+    ))
+    events = []
+    baseline = ["base"]
+
+    assert runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        context_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+        baseline_identity=str,
+        event_sink=events.append,
+    ) is baseline
+    assert events == [{
+        "kind": "retrieval_contribution",
+        "contribution_id": "call_event",
+        "outcome": "disabled",
+        "accepted_count": 0,
+        "dropped_count": 0,
+        "elapsed_ms": 0,
+        "failure_code": "feature_disabled",
+    }]
+
+
+def test_concurrent_call_event_sinks_do_not_cross_talk():
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((
+        _bundle(
+            "isolated_event",
+            contributor,
+            availability=lambda _context: Availability(
+                AvailabilityStatus.DISABLED, "feature_disabled"
+            ),
+        ),
+    ))
+    sinks = ([], [])
+
+    def invoke(events):
+        baseline = ["base"]
+        assert runtime.retrieval_contributors.run(
+            baseline,
+            invocation="selected_evidence",
+            baseline_identity=str,
+            event_sink=events.append,
+        ) is baseline
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(invoke, sinks))
+
+    assert [len(events) for events in sinks] == [1, 1]
+    assert sinks[0][0] is not sinks[1][0]
+
+
 def test_atomic_admission_discards_whole_contribution_on_one_rejection():
     contributor = _Contributor(_result(
         _candidate("accepted"),
@@ -742,3 +1022,24 @@ def test_registry_rejects_content_shaped_metadata_ids():
         build_extension_runtime((
             _bundle("user question source title", _Contributor(_result())),
         ))
+
+
+def test_registry_rejects_non_string_id_and_event_has_defense_in_depth():
+    class ContentId:
+        def __str__(self):
+            return "stable_id"
+
+        def __repr__(self):
+            return "SECRET_USER_QUESTION"
+
+    content_id = ContentId()
+    with pytest.raises(ExtensionRegistryError, match="stable metadata"):
+        build_extension_runtime((
+            _bundle(content_id, _Contributor(_result())),
+        ))
+
+    events = []
+    runtime = build_extension_runtime(event_sink=events.append)
+    runtime.retrieval_contributors._emit(content_id, outcome="failed")
+    assert events[0]["contribution_id"] == "invalid_contribution"
+    assert "SECRET" not in repr(events[0])
