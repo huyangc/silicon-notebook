@@ -486,10 +486,7 @@ class RetrievalContributorHost:
                 )
                 continue
             if result.failure is not None:
-                if (
-                    result.failure.kind is ExtensionFailureKind.CANCELLED
-                    and context.cancellation.is_set()
-                ):
+                if result.failure.kind is ExtensionFailureKind.CANCELLED:
                     self._raise_if_core_cancelled(context)
                 emit(
                     contribution_id, outcome=result.failure.kind.value,

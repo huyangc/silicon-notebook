@@ -24,6 +24,8 @@ from app.extension_sdk import (
     EvidenceCandidate,
     EvidenceProvenance,
     ExtensionContribution,
+    ExtensionFailure,
+    ExtensionFailureKind,
     ExtensionManifest,
     ExtensionResultStatus,
     RetrievalHostContext,
@@ -537,6 +539,50 @@ class _IndependentContributor:
             value=object(),
             token_cost=1,
         ),), ExtensionResultStatus.AVAILABLE)
+
+
+def test_cancelled_result_uses_safe_production_cancellation_check():
+    state = {"contributed": False, "checks_after": 0}
+
+    class _StatefulEvent:
+        def is_set(self):
+            if not state["contributed"]:
+                return False
+            state["checks_after"] += 1
+            if state["checks_after"] == 1:
+                return False
+            return object()
+
+    class _CancelledContributor:
+        invocations = frozenset({"selected_evidence"})
+
+        def contribute(self, _context):
+            state["contributed"] = True
+            return ContributorResult(
+                (),
+                ExtensionResultStatus.UNAVAILABLE,
+                ExtensionFailure(
+                    ExtensionFailureKind.CANCELLED,
+                    "contribution_cancelled",
+                ),
+            )
+
+    contributor = _CancelledContributor()
+    runtime = build_extension_runtime((_IndependentBundle(contributor),))
+    baseline = [_chunk("base")]
+    call = _selected_call(None, baseline)
+    context = _selected_context(call, cancellation=_StatefulEvent())
+
+    result = runtime.retrieval_contributors.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+
+    assert result is baseline
+    assert state == {"contributed": True, "checks_after": 2}
 
 
 class _IndependentBundle:
