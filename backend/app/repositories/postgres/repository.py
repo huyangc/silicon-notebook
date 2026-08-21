@@ -7,6 +7,7 @@ from app.core.config import Settings
 from app.domain.extensions import (
     AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
+    ElementEnricherHostPort,
     ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
@@ -28,6 +29,7 @@ class PostgresRepository(RepositoryFacade):
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
@@ -41,6 +43,7 @@ class PostgresRepository(RepositoryFacade):
                 ask_completed_observer_host=ask_completed_observer_host,
                 report_auditor_host=report_auditor_host,
                 report_completed_observer_host=report_completed_observer_host,
+                element_enricher_host=element_enricher_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a

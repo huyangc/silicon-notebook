@@ -1620,6 +1620,8 @@ Streaming Ask runs post-completion auditors/observers only after the durable ans
 
 Deep Report post-completion uses separate deployment rails. `REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` defaults to `30` and accepts `>0..300` seconds; `REPORT_AUDIT_MAX_FINDINGS` defaults to `32` and accepts `1..256`. The deadline is cooperative and an oversized auditor result is rejected whole. These points run only after the report row atomically commits from `generating` to `done` and every generation execution scope is released; they cannot alter section prose, citations, references, retrieval output, or terminal status.
 
+Parsed-element enrichment is an internal, default-empty extension point. `SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS` defaults to `10` and accepts `>0..300` seconds; `SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS` defaults to `2048` and accepts `1..25000`; `SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES` defaults to `1048576` and accepts `1024..16777216`; `SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS` defaults to `4096` and accepts `1..32768`. Limits are applied before the core element transaction and an over-limit contribution is rejected whole, never truncated. The point cannot change parsed text or retrieval behavior and has no built-in contributor.
+
 | Mode | Group | Needs KG | One-liner |
 |------|-------|----------|-----------|
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |

@@ -25,4 +25,9 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
             runtime.report_auditors if runtime.report_auditors.has_auditors else None
         ),
         report_completed_observer_host=runtime.report_completed_observers,
+        element_enricher_host=(
+            runtime.element_enrichers
+            if runtime.element_enrichers.has_contributors
+            else None
+        ),
     )

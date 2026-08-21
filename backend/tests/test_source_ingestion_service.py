@@ -16,14 +16,17 @@ import json
 import threading
 import time
 import types
+from types import MappingProxyType
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from app.core.config import Settings
+from app.domain.extensions import ElementEnrichmentPatch
 from app.extensions import default_extension_runtime
 from app.models.schemas import NotebookCreate
+from app.models.sources import SourceElement
 from app.repositories.ports import UploadedSourceFile
 from app.services.source_ingestion import SourceIngestionService, SourcePipelineHooks
 from app.services.sqlite_repository import SQLiteRepository, _now
@@ -183,6 +186,78 @@ def test_parsed_source_and_elements_commit_before_chunk_build(repo, monkeypatch)
     )
     repo.process_source(sid)
     assert observed["at_chunk_time"] == (1, "parsed")
+
+
+def test_element_enrichment_runs_once_before_element_transaction_and_chunking(
+    tmp_path, monkeypatch
+):
+    import app.services.parser_chain_execution as parser_execution
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    order = []
+
+    class Host:
+        has_contributors = True
+
+        def enrich_application(self, context, *, event_sink=None):
+            order.append("enrich")
+            assert context.connection_probe.is_connection_held() is False
+            assert len(context.elements) == 1
+            return (
+                ElementEnrichmentPatch(
+                    1,
+                    "plugin-tags",
+                    "1.0.0",
+                    "enrich.tags",
+                    MappingProxyType({"topic": "architecture"}),
+                ),
+            )
+
+    repo = SQLiteRepository(
+        Settings(),
+        parser_provider_chain_host=default_extension_runtime().parser_chain,
+        element_enricher_host=Host(),
+    )
+    monkeypatch.setattr(
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda source_id, *a, **k: [
+            SourceElement(
+                id="",
+                source_id=source_id,
+                element_type="paragraph",
+                location_label="p1",
+                text="chunk body " * 40,
+                metadata={},
+            )
+        ],
+    )
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id)
+    store = repo._runtime.source_store
+    replace = store.replace_elements
+
+    def record_replace(*args, **kwargs):
+        order.append("replace")
+        return replace(*args, **kwargs)
+
+    monkeypatch.setattr(store, "replace_elements", record_replace)
+    monkeypatch.setattr(
+        repo._runtime.source_chunking,
+        "build_chunks_for_source",
+        lambda _source_id: order.append("chunk"),
+    )
+    repo.process_source(sid)
+    assert order == ["enrich", "replace", "chunk"]
+    persisted = repo.source_elements(sid)
+    assert persisted[0].metadata["extensions"]["enrich.tags"] == {
+        "plugin_id": "plugin-tags",
+        "plugin_version": "1.0.0",
+        "metadata": {"topic": "architecture"},
+    }
 
 
 def test_process_source_zeroes_chunked_at_when_writing_new_elements(
@@ -408,6 +483,23 @@ def test_baseexception_after_parser_materialize_cleans_uncommitted_assets(
     with pytest.raises(_HardAbort, match="element transaction interrupted"):
         repo.process_source(sid)
 
+    assert repo.source_asset_ids(sid) == []
+
+
+def test_element_enricher_baseexception_cleans_uncommitted_parser_assets(
+    tmp_path, monkeypatch
+):
+    repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
+
+    class Host:
+        has_contributors = True
+
+        def enrich_application(self, _context, *, event_sink=None):
+            raise _HardAbort("element enricher interrupted")
+
+    repo._runtime.source_ingestion.element_enricher_host = Host()
+    with pytest.raises(_HardAbort, match="element enricher interrupted"):
+        repo.process_source(sid)
     assert repo.source_asset_ids(sid) == []
 
 
@@ -779,7 +871,7 @@ def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeyp
     frozen = json.loads(PHASES.read_text(encoding="utf-8"))["process_source"]
     assert frozen["sequence"] == [
         "set parsing",
-        "parse outside transaction",
+        "parse and optional in-memory element enrichment outside transaction",
         "replace elements and source-derived state in one write",
         "set parsed",
         "best-effort chunk build",

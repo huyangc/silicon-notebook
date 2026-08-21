@@ -1161,6 +1161,8 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 默认 `30`、有效范围 `>0..300` 秒；`REPORT_AUDIT_MAX_FINDINGS` 默认 `32`、有效范围 `1..256`。deadline 是协作式的，超限 auditor 结果整体拒绝。只有报告行从 `generating` 原子提交到 `done` 且全部生成执行上下文释放后才运行这两个 point；它们不能改变章节正文、引用、参考文献、检索输出或终态。
 
+解析元素 enrichment 是内部且默认空拓扑的扩展点。`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS` 默认 `10`、有效范围 `>0..300` 秒；`SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS` 默认 `2048`、有效范围 `1..25000`；`SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES` 默认 `1048576`、有效范围 `1024..16777216`；`SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS` 默认 `4096`、有效范围 `1..32768`。护栏在 core element 事务前应用，越界 contribution 整体拒绝、不静默截断。该 point 不能改变解析文本或检索行为，且没有内建 contributor。
+
 | 模式 | 分组 | 需 KG | 一句话 |
 |------|------|-------|--------|
 | **`chunk`**（默认） | general | 否 | chunk-native 通用问答：大召回 → 选择 → 长上下文综合 → 引用绑回源 chunk。 |

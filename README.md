@@ -12,6 +12,8 @@ Ask post-completion extension points use a cooperative deployment deadline: alre
 
 Report post-completion extension points have their own deployment deadline and finding cap. A cancelled or stale generation cannot fabricate a completion ticket: SQLite and PostgreSQL publish `done` with the same status-guarded atomic compare-and-set, and only a successful commit reaches the auditor/observer hosts.
 
+Source ingestion also has a dormant `source.element_enricher` batch point after parsing and before the core element transaction. The default topology is empty. Future contributors may add only bounded, namespaced metadata grounded in the immutable parsed-element view; they cannot change text, order, identity, parser/asset provenance, write the database, or start retrieval/model work. Invalid or failed contributions return the exact parser baseline.
+
 ## Highlights
 
 - Structured source ingestion with element-level evidence, formulas, tables, and retained document images when MinerU is configured; source detail loads a bounded element window and expands on demand instead of rendering an entire large document at once. Formula evidence is typeset in source details and Knowledge Graph source cards, LaTeX stays visible on render failure, and wide display equations scroll inside their owning panel.
