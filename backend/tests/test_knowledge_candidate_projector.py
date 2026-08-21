@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 
 import pytest
@@ -9,6 +9,8 @@ from app.domain.cancellation import CoreCancellation
 from app.domain.knowledge_projection import (
     KnowledgeProjectionCallContext,
     KnowledgeProjectionElement,
+    KnowledgeProjectionEvidencePatch,
+    KnowledgeProjectionObjectPatch,
     KnowledgeProjectionPatch,
     KnowledgeProjectionSchema,
 )
@@ -36,7 +38,10 @@ from app.extensions.bootstrap import build_extension_runtime, default_extension_
 from app.extensions.registry import ExtensionRegistryError
 from app.models.sources import SourceElement
 from app.services.extraction_profiles import OBJECT_SCHEMAS
-from app.services.knowledge_candidate_projection import project_knowledge_candidates
+from app.services.knowledge_candidate_projection import (
+    KnowledgeProjectionBoundaryError,
+    project_knowledge_candidates,
+)
 
 
 class _Cancellation:
@@ -170,6 +175,32 @@ def _available(context, *, invalid_quote: bool = False):
                         claim, concept, "about", evidence
                     ),
                 ),
+            ),
+        ),
+        ExtensionResultStatus.AVAILABLE,
+    )
+
+
+def _single_available(context, key: str = "alpha"):
+    candidate = KnowledgeCandidateRef(object())
+    return ContributorResult(
+        (
+            KnowledgeCandidateBatch(
+                objects=(
+                    KnowledgeObjectCandidate(
+                        candidate,
+                        key,
+                        "concept",
+                        {"name": key.title(), "section_path": ""},
+                        (
+                            KnowledgeEvidenceCandidate(
+                                context.elements[0].ref,
+                                "Alpha supports Beta.",
+                            ),
+                        ),
+                    ),
+                ),
+                relations=(),
             ),
         ),
         ExtensionResultStatus.AVAILABLE,
@@ -494,3 +525,303 @@ def test_malformed_host_output_returns_exact_baseline():
     )
     assert projected[0] is objects
     assert projected[1] is relations
+
+
+def test_late_contributor_result_is_rejected_before_validation_or_event():
+    class Projector:
+        def project(self, context):
+            host._clock = lambda: context.budget.deadline_monotonic + 1.0
+            return _available(context)
+
+    host = _runtime(
+        _bundle("knowledge.late", Projector())
+    ).knowledge_candidate_projectors
+    events = []
+
+    assert host.project_application(_call(), event_sink=events.append) == ()
+    assert events == []
+
+
+def test_contributor_leaving_connection_held_discards_all_extension_output():
+    probe = _Probe()
+
+    class First:
+        def project(self, context):
+            return _available(context)
+
+    class Leaking:
+        def project(self, context):
+            probe.held = True
+            return _available(context)
+
+    host = _runtime(
+        _bundle("a.first", First()),
+        _bundle("b.leaking", Leaking()),
+    ).knowledge_candidate_projectors
+
+    assert host.project_application(_call(probe=probe)) == ()
+
+
+def test_availability_or_event_leaving_connection_held_discards_all_output():
+    probe = _Probe()
+    plugin_calls = []
+
+    class Projector:
+        def project(self, context):
+            plugin_calls.append("plugin")
+            return _single_available(context)
+
+    def leaking_availability(_context):
+        probe.held = True
+        return Availability.available()
+
+    availability_host = _runtime(
+        _bundle(
+            "knowledge.availability_leak",
+            Projector(),
+            availability=leaking_availability,
+        )
+    ).knowledge_candidate_projectors
+    assert availability_host.project_application(_call(probe=probe)) == ()
+    assert plugin_calls == []
+
+    probe.held = False
+    event_host = _runtime(
+        _bundle("knowledge.event_leak", Projector())
+    ).knowledge_candidate_projectors
+
+    def leaking_event(_event):
+        probe.held = True
+
+    assert event_host.project_application(
+        _call(probe=probe), event_sink=leaking_event
+    ) == ()
+    assert plugin_calls == ["plugin"]
+
+
+def test_point_budgets_reject_one_contribution_without_losing_prior_acceptance():
+    class First:
+        def project(self, context):
+            return _single_available(context, "first")
+
+    class Second:
+        def project(self, context):
+            return _single_available(context, "second")
+
+    host = _runtime(
+        _bundle("a.first", First()),
+        _bundle("b.second", Second()),
+    ).knowledge_candidate_projectors
+    patches = host.project_application(replace(_call(), max_objects=1))
+    assert [patch.contribution_id for patch in patches] == ["a.first"]
+
+    assert host.project_application(
+        replace(_call(), max_candidate_bytes=1)
+    ) == ()
+
+
+def test_application_adapter_refuses_to_enter_store_after_fake_host_leaks_lease():
+    probe = _Probe()
+
+    class LeakingHost:
+        has_contributors = True
+
+        def project_application(self, _call, *, event_sink=None):
+            probe.held = True
+            return ()
+
+    with pytest.raises(KnowledgeProjectionBoundaryError):
+        project_knowledge_candidates(
+            [{"local_id": "baseline-1"}],
+            [],
+            source_id="source-1",
+            source_title="Source",
+            source_type="file",
+            elements=_elements(),
+            host=LeakingHost(),
+            effective_schemas=lambda _notebook_id: OBJECT_SCHEMAS,
+            notebook_id="notebook-1",
+            control=None,
+            connection_probe=probe,
+            max_objects=8,
+            max_relations=8,
+            max_candidate_bytes=8192,
+            timeout_seconds=60,
+            event_sink=None,
+        )
+
+
+def test_application_adapter_checks_lease_before_schema_resolution():
+    probe = _Probe()
+    schema_calls = []
+
+    class LeakingHost:
+        @property
+        def has_contributors(self):
+            probe.held = True
+            return True
+
+    with pytest.raises(KnowledgeProjectionBoundaryError):
+        project_knowledge_candidates(
+            [],
+            [],
+            source_id="source-1",
+            source_title="Source",
+            source_type="file",
+            elements=_elements(),
+            host=LeakingHost(),
+            effective_schemas=lambda _notebook_id: schema_calls.append("schema"),
+            notebook_id="notebook-1",
+            control=None,
+            connection_probe=probe,
+            max_objects=8,
+            max_relations=8,
+            max_candidate_bytes=8192,
+            timeout_seconds=60,
+            event_sink=None,
+        )
+    assert schema_calls == []
+
+
+def test_normal_empty_core_baseline_can_accept_grounded_projector_candidates():
+    class Projector:
+        def project(self, context):
+            return _available(context)
+
+    host = _runtime(
+        _bundle("knowledge.empty_baseline", Projector())
+    ).knowledge_candidate_projectors
+    projected_objects, projected_relations = project_knowledge_candidates(
+        [],
+        [],
+        source_id="source-1",
+        source_title="Source",
+        source_type="file",
+        elements=_elements(),
+        host=host,
+        effective_schemas=lambda _notebook_id: OBJECT_SCHEMAS,
+        notebook_id="notebook-1",
+        control=None,
+        connection_probe=_Probe(),
+        max_objects=8,
+        max_relations=8,
+        max_candidate_bytes=8192,
+        timeout_seconds=60,
+        event_sink=None,
+    )
+    assert [item["payload"]["name"] for item in projected_objects] == [
+        "Alpha",
+        "Beta claim",
+    ]
+    assert len(projected_relations) == 1
+
+
+def test_forged_event_cancellation_is_optional_when_authority_is_false():
+    class Projector:
+        def project(self, context):
+            return _available(context)
+
+    def forged_event(_event):
+        raise _NativeCancelled()
+
+    host = _runtime(
+        _bundle("knowledge.event", Projector())
+    ).knowledge_candidate_projectors
+    assert len(host.project_application(_call(), event_sink=forged_event)) == 1
+
+
+def test_hostile_inner_dto_and_cross_source_element_fail_open_before_plugin():
+    class HostileElement:
+        @property
+        def ordinal(self):
+            raise RuntimeError("hostile element getter")
+
+    class Projector:
+        def project(self, _context):
+            raise AssertionError("invalid DTO reached projector")
+
+    host = _runtime(
+        _bundle("knowledge.dto", Projector())
+    ).knowledge_candidate_projectors
+    malformed = KnowledgeProjectionCallContext(
+        (HostileElement(),),
+        _call().schemas,
+        _Cancellation(),
+        _Probe(),
+        8,
+        8,
+        8192,
+        time.monotonic() + 60,
+    )
+    assert host.project_application(malformed) == ()
+
+    foreign = _elements()
+    foreign[0].source_id = "source-evil"
+    baseline = [{"local_id": "baseline-1"}]
+    projected = project_knowledge_candidates(
+        baseline,
+        [],
+        source_id="source-1",
+        source_title="Source",
+        source_type="file",
+        elements=foreign,
+        host=host,
+        effective_schemas=lambda _notebook_id: OBJECT_SCHEMAS,
+        notebook_id="notebook-1",
+        control=None,
+        connection_probe=_Probe(),
+        max_objects=8,
+        max_relations=8,
+        max_candidate_bytes=8192,
+        timeout_seconds=60,
+        event_sink=None,
+    )
+    assert projected[0] is baseline
+
+
+def test_hostile_application_payload_is_rejected_per_contribution():
+    class HostileMapping(dict):
+        def items(self):
+            raise RuntimeError("hostile payload getter")
+
+    class Host:
+        has_contributors = True
+
+        def project_application(self, _call, *, event_sink=None):
+            return (
+                KnowledgeProjectionPatch(
+                    "plugin-hostile",
+                    "1.0.0",
+                    "knowledge.hostile",
+                    (
+                        KnowledgeProjectionObjectPatch(
+                            "hostile",
+                            "concept",
+                            HostileMapping(name="bad", section_path=""),
+                            (KnowledgeProjectionEvidencePatch(1, "Alpha"),),
+                        ),
+                    ),
+                    (),
+                ),
+            )
+
+    baseline = [{"local_id": "baseline-1"}]
+    projected = project_knowledge_candidates(
+        baseline,
+        [],
+        source_id="source-1",
+        source_title="Source",
+        source_type="file",
+        elements=_elements(),
+        host=Host(),
+        effective_schemas=lambda _notebook_id: OBJECT_SCHEMAS,
+        notebook_id="notebook-1",
+        control=None,
+        connection_probe=_Probe(),
+        max_objects=8,
+        max_relations=8,
+        max_candidate_bytes=8192,
+        timeout_seconds=60,
+        event_sink=None,
+    )
+    assert projected[0] is baseline

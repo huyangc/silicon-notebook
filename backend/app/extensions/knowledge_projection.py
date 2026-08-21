@@ -12,10 +12,12 @@ from typing import Any, Callable, Mapping
 from app.domain.cancellation import CoreCancellation
 from app.domain.knowledge_projection import (
     KnowledgeProjectionCallContext,
+    KnowledgeProjectionElement,
     KnowledgeProjectionEvidencePatch,
     KnowledgeProjectionObjectPatch,
     KnowledgeProjectionPatch,
     KnowledgeProjectionRelationPatch,
+    KnowledgeProjectionSchema,
 )
 from app.extension_sdk import (
     KNOWLEDGE_CANDIDATE_PROJECTOR_POINT,
@@ -222,7 +224,8 @@ class KnowledgeCandidateProjectorHost:
         views: list[KnowledgeElementView] = []
         for expected, element in enumerate(call.elements, start=1):
             if (
-                type(element.ordinal) is not int
+                type(element) is not KnowledgeProjectionElement
+                or type(element.ordinal) is not int
                 or element.ordinal != expected
                 or any(
                     type(value) is not str
@@ -247,7 +250,8 @@ class KnowledgeCandidateProjectorHost:
         schema_by_type: dict[str, KnowledgeSchemaView] = {}
         for schema in call.schemas:
             if (
-                type(schema.object_type) is not str
+                type(schema) is not KnowledgeProjectionSchema
+                or type(schema.object_type) is not str
                 or not schema.object_type
                 or type(schema.fields) is not tuple
                 or type(schema.primary) is not str
@@ -282,7 +286,9 @@ class KnowledgeCandidateProjectorHost:
         remaining_bytes = call.max_candidate_bytes
         for registration in self._registrations:
             _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear_for(call) or self._expired_for(call):
+            if not self._connection_clear_for(call):
+                return ()
+            if self._expired_for(call):
                 break
             availability_context = KnowledgeProjectionAvailabilityContext(
                 registration.contribution_id,
@@ -299,7 +305,9 @@ class KnowledgeCandidateProjectorHost:
                 except Exception:
                     decision = None
                 _raise_if_cancelled(call.cancellation)
-                if not self._connection_clear_for(call) or self._expired_for(call):
+                if not self._connection_clear_for(call):
+                    return ()
+                if self._expired_for(call):
                     return tuple(accepted)
                 if (
                     decision is None
@@ -317,7 +325,9 @@ class KnowledgeCandidateProjectorHost:
             except Exception:
                 decision = None
             _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear_for(call) or self._expired_for(call):
+            if not self._connection_clear_for(call):
+                return ()
+            if self._expired_for(call):
                 return tuple(accepted)
             if (
                 decision is None
@@ -327,11 +337,9 @@ class KnowledgeCandidateProjectorHost:
                 continue
             started = self._safe_clock()
             _raise_if_cancelled(call.cancellation)
-            if (
-                started is None
-                or started >= call.deadline_monotonic
-                or not self._connection_clear_for(call)
-            ):
+            if not self._connection_clear_for(call):
+                return ()
+            if started is None or started >= call.deadline_monotonic:
                 return tuple(accepted)
             try:
                 result = registration.project(context)
@@ -342,6 +350,8 @@ class KnowledgeCandidateProjectorHost:
                 continue
             _raise_if_cancelled(call.cancellation)
             if not self._connection_clear_for(call):
+                return ()
+            if self._expired_for(call):
                 return tuple(accepted)
             if self._valid_unavailable_result(result):
                 self._emit(
@@ -366,6 +376,8 @@ class KnowledgeCandidateProjectorHost:
                 remaining_bytes,
             )
             _raise_if_cancelled(call.cancellation)
+            if self._expired_for(call):
+                return tuple(accepted)
             if validated is None:
                 self._emit(sink, registration, "invalid", 0, 0, started, call)
                 _raise_if_cancelled(call.cancellation)
@@ -641,8 +653,6 @@ class KnowledgeCandidateProjectorHost:
             if not callable(check):
                 return False
             held = check()
-        except CoreCancellation:
-            raise
         except Exception:
             return False
         return type(held) is bool and held is False
@@ -660,8 +670,6 @@ class KnowledgeCandidateProjectorHost:
     def _safe_clock(self) -> float | None:
         try:
             value = self._clock()
-        except CoreCancellation:
-            raise
         except Exception:
             return None
         if type(value) not in {int, float} or not math.isfinite(float(value)):
@@ -700,8 +708,6 @@ class KnowledgeCandidateProjectorHost:
                     "duration_ms": elapsed,
                 }
             )
-        except CoreCancellation:
-            raise
         except Exception:
             pass
         _raise_if_cancelled(call.cancellation)

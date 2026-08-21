@@ -45,7 +45,10 @@ from app.services.kg.json_utils import safe_json
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
-from app.services.knowledge_candidate_projection import project_knowledge_candidates
+from app.services.knowledge_candidate_projection import (
+    KnowledgeProjectionBoundaryError,
+    project_knowledge_candidates,
+)
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
@@ -1969,6 +1972,11 @@ class SourceIngestionService:
                 f"completion_mode={completion_stats.get('mode', 'off')} "
                 f"completion_inserted={completion_stats.get('inserted', 0)}",
             )
+        except KnowledgeProjectionBoundaryError:
+            # A projector callback crossed the no-database-lease boundary.
+            # Any status write here could acquire the same pool again; stop
+            # immediately and let the operator-visible run remain recoverable.
+            raise
         except KgBuildAborted as exc:
             message = f"{exc.failure.code}: {exc.failure.user_message}"
             status = "failed"

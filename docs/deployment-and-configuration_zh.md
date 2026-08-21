@@ -78,7 +78,8 @@ registry 不含 contributor，因此部署未组合插件时这些设置不增�
 `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS` 与
 `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES` 配置 point-wide
 协作式 deadline 和总 object/relation/序列化 candidate 预算。已经开始的同步
-contribution 不会被遗弃；超过剩余预算的 contribution 整体拒绝而不是截断。默认
+contribution 不会被遗弃，但 deadline 后返回的结果不予接纳，也不再启动后续
+contribution；超过剩余预算的 contribution 整体拒绝而不是截断。默认
 registry 不含 projector，因此显式组合之前不会增加 schema read、event、数据库、
 模型、embedding 或检索工作。精确默认值与范围只在 product/API 合同登记。
 

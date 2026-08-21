@@ -14,7 +14,7 @@ Report 完成后扩展点使用独立的部署 deadline 与 finding 上限。取
 
 来源 ingestion 还在解析完成与 core element 事务之间提供休眠的 `source.element_enricher` 批量扩展点，默认拓扑为空。未来 contributor 必须声明且实时通过元素正文 capability 后才能取得不可变解析元素视图，只能补充有界、命名空间隔离的 metadata，持久化字节预算包含插件 owner provenance；不能修改文本、顺序、身份、parser/asset provenance，也不能写数据库或发起检索/模型工作。每个 contribution 独立原子接纳，一条非法 contribution 不会抹掉其他合法 contribution 或 parser baseline。
 
-Knowledge extraction 同样提供休眠的 `knowledge.candidate_projector` 批量扩展点，物理位置在旧 core extraction、relink 与 partial-retry gate 之后、唯一一次 core-owned 来源代次事务之前。Contributor 只取得不可变的来源内元素/schema 视图和 request-local opaque ref，只能提议有界对象与关系；evidence 原文、active schema、edge pair、归属、代次、审核状态及单次原子发布仍由 core 复检和拥有。默认拓扑为空；隐藏 Memory/Knowhow 来源永不进入该 point，无插件路径不增加 snapshot、capability、clock、event、数据库、模型、embedding 或检索工作。
+Knowledge extraction 同样提供休眠的 `knowledge.candidate_projector` 批量扩展点，物理位置在旧 core extraction、relink 与 partial-retry gate 之后、唯一一次 core-owned 来源代次事务之前。Contributor 只取得不可变的来源内元素/schema 视图和 request-local opaque ref，只能提议有界对象与关系；evidence 原文、active schema、edge pair、归属、代次、审核状态及单次原子发布仍由 core 复检和拥有。同步 callback 可安全完成，但 deadline 后返回的结果不予接纳。默认拓扑为空；隐藏 Memory/Knowhow 来源永不进入该 point，无插件路径不增加 snapshot、capability、clock、event、数据库、模型、embedding 或检索工作。
 
 ## 核心能力
 

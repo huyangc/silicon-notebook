@@ -85,8 +85,9 @@ candidate budgets with `KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS`,
 `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS`,
 `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS`, and
 `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES`. An in-progress synchronous
-contribution is not abandoned; a contribution that exceeds a remaining budget
-is rejected atomically rather than truncated. The default registry contains no
+contribution is not abandoned, but a result returned after the deadline is not
+admitted and no later contribution starts. A contribution that exceeds a
+remaining budget is rejected atomically rather than truncated. The default registry contains no
 projector, so these settings add no schema read, event, database, model,
 embedding, or retrieval work until one is composed. Exact defaults and ranges
 live only in the product/API contract.

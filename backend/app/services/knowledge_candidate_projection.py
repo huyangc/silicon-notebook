@@ -33,6 +33,10 @@ _OWNER_VERSION_MAX = 64
 _HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 
 
+class KnowledgeProjectionBoundaryError(RuntimeError):
+    """Core must not enter persistence after an invalid runtime boundary."""
+
+
 class _ProjectionCancelled(CoreCancellation):
     pass
 
@@ -81,15 +85,21 @@ def project_knowledge_candidates(
     objects before schema resolution, clock, probe, event or DTO snapshot work.
     """
 
-    if host is None or source_type in _HIDDEN_SOURCE_TYPES or not objects:
+    if host is None or source_type in _HIDDEN_SOURCE_TYPES:
         return objects, relations
     try:
         if host.has_contributors is not True:
             return objects, relations
     except CoreCancellation:
-        raise
-    except Exception:
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
         return objects, relations
+    except Exception:
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
+        return objects, relations
+    _raise_control_cancelled(control)
+    _assert_connection_clear(connection_probe, control)
     if (
         type(source_id) is not str
         or not source_id
@@ -112,10 +122,12 @@ def project_knowledge_candidates(
         schemas = _schema_snapshot(schemas_by_type)
         if not schemas:
             return objects, relations
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
         now = clock()
         if type(now) not in {int, float} or not math.isfinite(float(now)):
             return objects, relations
-        element_snapshot = _element_snapshot(elements)
+        element_snapshot = _element_snapshot(elements, source_id)
         if not element_snapshot:
             return objects, relations
         cancellation = _ControlCancellation(control)
@@ -132,15 +144,18 @@ def project_knowledge_candidates(
             ),
             event_sink=event_sink,
         )
-    except _ProjectionCancelled:
-        _raise_control_cancelled(control)
+    except KnowledgeProjectionBoundaryError:
         raise
-    except CoreCancellation:
+    except (_ProjectionCancelled, CoreCancellation):
         _raise_control_cancelled(control)
-        raise
+        _assert_connection_clear(connection_probe, control)
+        return objects, relations
     except Exception:
+        _raise_control_cancelled(control)
+        _assert_connection_clear(connection_probe, control)
         return objects, relations
     _raise_control_cancelled(control)
+    _assert_connection_clear(connection_probe, control)
     if type(patches) is not tuple or not patches:
         return objects, relations
     baseline_ids: set[str] = set()
@@ -155,19 +170,22 @@ def project_knowledge_candidates(
     remaining_bytes = max_candidate_bytes
     owners: set[str] = set()
     for patch in patches:
-        admitted = _admit_patch(
-            patch,
-            elements,
-            schemas_by_type,
-            source_id,
-            source_title,
-            baseline_ids | {
-                item["local_id"] for item in accepted_objects
-            },
-            remaining_objects,
-            remaining_relations,
-            remaining_bytes,
-        )
+        try:
+            admitted = _admit_patch(
+                patch,
+                elements,
+                schemas_by_type,
+                source_id,
+                source_title,
+                baseline_ids | {
+                    item["local_id"] for item in accepted_objects
+                },
+                remaining_objects,
+                remaining_relations,
+                remaining_bytes,
+            )
+        except Exception:
+            admitted = None
         _raise_control_cancelled(control)
         if admitted is None or patch.contribution_id in owners:
             continue
@@ -179,6 +197,7 @@ def project_knowledge_candidates(
         remaining_relations -= len(new_relations)
         remaining_bytes -= used_bytes
     _raise_control_cancelled(control)
+    _assert_connection_clear(connection_probe, control)
     if not accepted_objects and not accepted_relations:
         return objects, relations
     return objects + accepted_objects, relations + accepted_relations
@@ -192,8 +211,34 @@ def _raise_control_cancelled(control: object | None) -> None:
         raiser()
 
 
+def _assert_connection_clear(probe: object, control: object | None) -> None:
+    try:
+        check = getattr(probe, "is_connection_held", None)
+        if not callable(check):
+            raise KnowledgeProjectionBoundaryError(
+                "invalid knowledge projection connection probe"
+            )
+        held = check()
+    except CoreCancellation:
+        _raise_control_cancelled(control)
+        return
+    except KnowledgeProjectionBoundaryError:
+        raise
+    except Exception as exc:
+        _raise_control_cancelled(control)
+        raise KnowledgeProjectionBoundaryError(
+            "invalid knowledge projection connection probe"
+        ) from exc
+    _raise_control_cancelled(control)
+    if type(held) is not bool or held:
+        raise KnowledgeProjectionBoundaryError(
+            "knowledge projection retained a database connection"
+        )
+
+
 def _element_snapshot(
     elements: list[SourceElement],
+    source_id: str,
 ) -> tuple[KnowledgeProjectionElement, ...]:
     result: list[KnowledgeProjectionElement] = []
     for ordinal, element in enumerate(elements, start=1):
@@ -204,6 +249,8 @@ def _element_snapshot(
             element.text,
         )
         if any(type(value) is not str for value in values) or not element.id:
+            return ()
+        if type(element.source_id) is not str or element.source_id != source_id:
             return ()
         result.append(KnowledgeProjectionElement(ordinal, *values))
     return tuple(result)
@@ -293,6 +340,8 @@ def _admit_patch(
         ):
             return None
         schema = schemas[candidate.object_type]
+        if type(candidate.payload) is not MappingProxyType:
+            return None
         payload = _thaw_payload(candidate.payload)
         if payload is None or not _payload_matches_schema(payload, schema):
             return None
@@ -385,7 +434,7 @@ def _admit_patch(
 
 
 def _thaw_payload(value: object, *, depth: int = 0) -> dict[str, object] | None:
-    if depth > 12 or not isinstance(value, Mapping):
+    if depth > 12 or type(value) is not MappingProxyType:
         return None
     result: dict[str, object] = {}
     for key, item in value.items():
@@ -416,7 +465,7 @@ def _thaw_value(value: object, *, depth: int) -> object:
                 return _INVALID
             result.append(thawed)
         return result
-    if isinstance(value, (dict, MappingProxyType)):
+    if type(value) is MappingProxyType:
         result_dict: dict[str, object] = {}
         for key, item in value.items():
             if type(key) is not str:
