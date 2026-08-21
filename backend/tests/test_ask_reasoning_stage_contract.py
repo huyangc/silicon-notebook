@@ -291,6 +291,53 @@ def test_typed_retrieval_stage_rejects_wrong_run_kind_or_empty_actor(
     assert called == []
 
 
+def test_run_kind_authority_rejects_hostile_str_subclass(monkeypatch):
+    class EvilKind(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    cancel_event = threading.Event()
+    retriever = _retriever(cancel_event)
+    legacy_calls = []
+    monkeypatch.setattr(
+        retriever, "run", lambda *args, **kwargs: legacy_calls.append(True)
+    )
+    service = _minimal_ask_service()
+    saves = []
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: saves.append(True))
+    with retrieval_run(
+        run_kind="ask_reasoning", actor_id="user", cancel_event=cancel_event
+    ) as run:
+        run.run_kind = EvilKind("report_generation")
+        runtime = ReasoningRetrievalRuntime(
+            scope=None,
+            retrieval_run=run,
+            cancellation=cancel_event,
+            trace_sink=None,
+            connection_probe=None,
+        )
+        with pytest.raises(StageBoundaryError, match="run kind"):
+            retriever.run_stage(_run_input(), runtime)
+        draft = ReasoningResponseDraft(
+            notebook_id="nb",
+            question="q",
+            response=AskResponse(conclusion="ok"),
+            conversation_id="conv",
+            user_id="user",
+            job_id="",
+            asked_at="",
+        )
+        with pytest.raises(StageBoundaryError, match="run kind"):
+            service._commit_reasoning_draft(draft, runtime)
+    assert legacy_calls == []
+    assert saves == []
+
+
 def test_typed_retrieval_stage_rejects_raising_connection_probe_before_run(
     monkeypatch,
 ):

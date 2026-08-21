@@ -2240,7 +2240,8 @@ class AskService:
                     f"Ask reasoning scope notebook changed at {point}"
                 )
         if run is not None:
-            if getattr(run, "run_kind", None) != "ask_reasoning":
+            run_kind = getattr(run, "run_kind", None)
+            if type(run_kind) is not str or run_kind != "ask_reasoning":
                 raise StageBoundaryError(
                     f"Ask reasoning run kind changed at {point}"
                 )

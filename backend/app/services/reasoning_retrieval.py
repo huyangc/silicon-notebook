@@ -2334,7 +2334,8 @@ class ReasoningRetriever:
                 "reasoning retrieval run cancellation authority changed"
             )
         if runtime.retrieval_run is not None:
-            if getattr(runtime.retrieval_run, "run_kind", None) != "ask_reasoning":
+            run_kind = getattr(runtime.retrieval_run, "run_kind", None)
+            if type(run_kind) is not str or run_kind != "ask_reasoning":
                 raise StageBoundaryError("invalid reasoning retrieval run kind")
             actor_id = getattr(runtime.retrieval_run, "actor_id", None)
             if type(actor_id) is not str or not actor_id:
