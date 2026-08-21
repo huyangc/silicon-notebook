@@ -421,12 +421,6 @@ class ExtensionRegistry:
             )
         return result
 
-    def capability_availability(
-        self, capability: str, context: object | None = None
-    ) -> Availability:
-        self._require_frozen()
-        return self._capabilities.availability(capability, context)
-
     def _require_frozen(self) -> None:
         if not self._frozen:
             raise ExtensionRegistryError("extension registry is not frozen")
