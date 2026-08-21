@@ -155,6 +155,18 @@ class Settings(BaseSettings):
         le=256,
         validation_alias="ANSWER_AUDIT_MAX_FINDINGS",
     )
+    report_post_completion_extension_timeout_seconds: float = Field(
+        30.0,
+        gt=0,
+        le=300,
+        validation_alias="REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS",
+    )
+    report_audit_max_findings: int = Field(
+        32,
+        ge=1,
+        le=256,
+        validation_alias="REPORT_AUDIT_MAX_FINDINGS",
+    )
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(

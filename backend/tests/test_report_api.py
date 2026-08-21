@@ -58,7 +58,10 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     assert client.get(f"/api/notebooks/{nb['id']}/reports").json()[0][
         "generation_started_at"
     ] == completed["generation_started_at"]
-    assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel").status_code == 200
+    cancelled = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"status": "done"}
+    assert repo.get_report(nb["id"], rid)["status"] == "done"
     assert client.delete(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 200
     assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 404
 
@@ -102,6 +105,64 @@ def test_terminal_understanding_write_keeps_the_generation_start_stamp(client, m
     # The private key stays private: it is popped into its own field, never
     # surfaced back inside the user-facing contract.
     assert "_generation_started_at" not in done["understanding"]
+
+
+def test_report_done_compare_and_set_cannot_overwrite_a_cancelled_generation(
+    client, monkeypatch
+):
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?"}
+    ).json()["report_id"]
+
+    from app.api.deps import repository
+    repo = repository()
+    repo.update_report(nb["id"], rid, status="outline_ready")
+    assert repo.claim_report_generation(nb["id"], rid)
+    assert repo._runtime.report_store.cancel_report(nb["id"], rid)
+    assert repo._runtime.report_store.complete_report_generation(
+        nb["id"],
+        rid,
+        sections=[{"markdown": "must not persist"}],
+        content_md="must not persist",
+        gaps=[],
+        references=[],
+    ) is False
+    detail = repo.get_report(nb["id"], rid)
+    assert detail["status"] == "cancelled"
+    assert detail["content_md"] == ""
+
+
+def test_report_cancel_cannot_overwrite_a_completed_generation(client, monkeypatch):
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?"}
+    ).json()["report_id"]
+
+    from app.api.deps import repository
+    repo = repository()
+    repo.update_report(nb["id"], rid, status="outline_ready")
+    assert repo.claim_report_generation(nb["id"], rid)
+    assert repo._runtime.report_store.complete_report_generation(
+        nb["id"], rid,
+        sections=[{"markdown": "durable"}],
+        content_md="durable",
+        gaps=[],
+        references=[],
+    )
+
+    response = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
+    assert response.status_code == 200
+    assert response.json() == {"status": "done"}
+    detail = repo.get_report(nb["id"], rid)
+    assert detail["status"] == "done"
+    assert detail["content_md"] == "durable"
 
 
 def test_report_create_rejects_blank_question_and_missing_nb(client, monkeypatch):

@@ -8,6 +8,7 @@ from app.extensions.bootstrap import (
 )
 from app.extensions.capabilities import CapabilityDecisionCatalog
 from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
+from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost, RetrievalHostCancelled
@@ -19,6 +20,8 @@ __all__ = [
     "CapabilityDecisionCatalog",
     "AnswerAuditorHost",
     "AskCompletedObserverHost",
+    "ReportAuditorHost",
+    "ReportCompletedObserverHost",
     "ParserChainCancelled",
     "ParserProviderChainHost",
     "RetrievalContributorHost",

@@ -89,6 +89,22 @@ from app.extension_sdk.ask import (
     AskCompletedExtensionContext,
     AskCompletedObserver,
 )
+from app.extension_sdk.report import (
+    REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    REPORT_AUDITOR_POINT,
+    REPORT_COMPLETED_OBSERVER_POINT,
+    ReportAudit,
+    ReportAuditAvailabilityContext,
+    ReportAuditExtensionContext,
+    ReportAuditFinding,
+    ReportAuditor,
+    ReportAuditView,
+    ReportCompletedAccess,
+    ReportCompletedAvailabilityContext,
+    ReportCompletedExtensionContext,
+    ReportCompletedObserver,
+    ReportRef,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -172,4 +188,18 @@ __all__ = [
     "AskCompletedAvailabilityContext",
     "AskCompletedExtensionContext",
     "AskCompletedObserver",
+    "REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY",
+    "REPORT_AUDITOR_POINT",
+    "REPORT_COMPLETED_OBSERVER_POINT",
+    "ReportAudit",
+    "ReportAuditAvailabilityContext",
+    "ReportAuditExtensionContext",
+    "ReportAuditFinding",
+    "ReportAuditor",
+    "ReportAuditView",
+    "ReportCompletedAccess",
+    "ReportCompletedAvailabilityContext",
+    "ReportCompletedExtensionContext",
+    "ReportCompletedObserver",
+    "ReportRef",
 ]

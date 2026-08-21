@@ -71,7 +71,11 @@ class ReportStore:
             args.append(jsonb(val) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
-            guard = "" if status == "cancelled" else " AND status <> 'cancelled'"
+            guard = (
+                " AND status NOT IN ('done','failed','cancelled')"
+                if status == "cancelled"
+                else " AND status <> 'cancelled'"
+            )
             db.execute(
                 f"UPDATE reports SET {', '.join(sets)} "
                 f"WHERE id = %s AND notebook_id = %s{guard}",
@@ -127,12 +131,42 @@ class ReportStore:
             ).fetchone()
         return row is not None
 
+    def complete_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        sections: list,
+        content_md: str,
+        gaps: list,
+        references: list,
+    ) -> bool:
+        """Atomically publish one successful generation if it still owns it."""
+        with self.database.write() as db:
+            row = db.execute(
+                "UPDATE reports SET sections_json=%s,content_md=%s,gaps_json=%s,"
+                "references_json=%s,status='done',progress='完成',updated_at=%s "
+                "WHERE id=%s AND notebook_id=%s AND status='generating' "
+                "RETURNING id",
+                (
+                    jsonb(sections),
+                    content_md,
+                    jsonb(gaps),
+                    jsonb(references),
+                    normalize_timestamp(self.now()),
+                    report_id,
+                    notebook_id,
+                ),
+            ).fetchone()
+        return row is not None
+
     def cancel_report(self, notebook_id: str, report_id: str) -> bool:
         """Durably publish the sticky terminal state before signalling a worker."""
         with self.database.write() as db:
             row = db.execute(
                 "UPDATE reports SET status='cancelled',progress=%s,updated_at=%s "
-                "WHERE id=%s AND notebook_id=%s RETURNING id",
+                "WHERE id=%s AND notebook_id=%s "
+                "AND status NOT IN ('done','failed','cancelled') RETURNING id",
                 (
                     "已取消",
                     normalize_timestamp(self.now()),

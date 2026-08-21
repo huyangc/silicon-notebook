@@ -721,6 +721,7 @@ class ReportRepository(Protocol):
     def update_report(self, notebook_id: str, report_id: str, *, status=None, progress=None, error=None, outline=None, sections=None, gaps=None, references=None, content_md=None, section_status=None, understanding=None) -> None: ...
     def claim_report_intent(self, notebook_id: str, report_id: str, understanding: dict) -> bool: ...
     def claim_report_generation(self, notebook_id: str, report_id: str) -> bool: ...
+    def complete_report_generation(self, notebook_id: str, report_id: str, *, sections: list, content_md: str, gaps: list, references: list) -> bool: ...
     def get_report(self, notebook_id: str, report_id: str) -> dict: ...
     # `created_by` is keyword-only and required on both listing reads (P1 group
     # sharing): reports inside a shared notebook are private to whoever created
@@ -2803,7 +2804,7 @@ class AskStateStorePort(Protocol):
     # not necessarily the member whose retrieval this run is summarising — in
     # a shared notebook any writable member can (re)trigger generation of a
     # report someone else created (see
-    # ``report_engine._note_report_completed``'s own docstring). The
+    # the report completed-observer's own actor projection). The
     # direction is deliberately the SAFE one: a member who reruns someone
     # else's report triggers their OWN overlay refresh (via
     # ``note_report_completed`` → ``bump_signal``) but that report never

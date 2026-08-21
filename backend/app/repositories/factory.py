@@ -6,6 +6,8 @@ from app.core.database_url import database_identity
 from app.domain.extensions import (
     AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
+    ReportAuditorHostPort,
+    ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
@@ -24,6 +26,8 @@ def create_repository(
     parser_provider_chain_host: ParserProviderChainHostPort | None = None,
     answer_auditor_host: AnswerAuditorHostPort | None = None,
     ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
+    report_auditor_host: ReportAuditorHostPort | None = None,
+    report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
 ) -> NotebookRepository:
     host_kwargs = {}
     if retrieval_contributor_host is not None:
@@ -34,6 +38,10 @@ def create_repository(
         host_kwargs["answer_auditor_host"] = answer_auditor_host
     if ask_completed_observer_host is not None:
         host_kwargs["ask_completed_observer_host"] = ask_completed_observer_host
+    if report_auditor_host is not None:
+        host_kwargs["report_auditor_host"] = report_auditor_host
+    if report_completed_observer_host is not None:
+        host_kwargs["report_completed_observer_host"] = report_completed_observer_host
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
         return SQLiteRepository(settings, **host_kwargs)

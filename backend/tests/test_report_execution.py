@@ -16,6 +16,7 @@ import threading
 
 import pytest
 
+from app.application.report_pipeline import CommittedReport, ReportAuditFacts
 from app.services.report_execution import (
     REPORT_CANCELLATIONS,
     ReportCancellationRegistry,
@@ -390,6 +391,113 @@ def test_coordinator_submits_through_background_jobs_with_copied_context():
     assert seen["ctx"] == "ctx-report"                 # copy_context 传播不回归
     assert seen["model"].priority.value == "report"
     assert seen["model"].parent_id == "rid-ctx"
+
+
+def test_committed_report_hook_runs_before_cancel_unregister_after_scope_exit():
+    registry = ReportCancellationRegistry()
+    seen = []
+    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
+
+    class _CommittedEngine:
+        def generate(self, notebook_id, rid, question, depth=2):
+            return CommittedReport(notebook_id, rid, "actor", facts)
+
+    def after(committed):
+        from app.services import model_work
+        from app.services.retrieval_run import current_retrieval_run
+        from app.services.source_scope import current_source_scope
+        seen.append((
+            committed,
+            registry.cancel("rid-done"),
+            model_work._CURRENT_SCOPE.get(),
+            current_retrieval_run(),
+            current_source_scope(),
+        ))
+
+    coord = ReportExecutionCoordinator(
+        reports=_Reports(),
+        engine_factory=lambda **_kwargs: _CommittedEngine(),
+        cancellations=registry,
+        job_submitter=lambda fn, **_kwargs: fn(),
+        after_completed=after,
+    )
+    assert coord.start_generate("nb", "rid-done", "q", user_id="actor")
+    assert seen[0][0].actor_id == "actor"
+    assert seen[0][1] is True
+    assert seen[0][2] is None
+    assert seen[0][3:] == (None, None)
+    assert registry.cancel("rid-done") is False
+
+
+def test_auto_generate_plan_and_manual_generate_share_one_completion_hook():
+    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
+    calls = []
+
+    class _CommittedEngine:
+        def run(self, notebook_id, rid, *_args, **_kwargs):
+            return CommittedReport(notebook_id, rid, "actor", facts)
+
+        def generate(self, notebook_id, rid, *_args, **_kwargs):
+            return CommittedReport(notebook_id, rid, "actor", facts)
+
+    coord = ReportExecutionCoordinator(
+        reports=_Reports(),
+        engine_factory=lambda **_kwargs: _CommittedEngine(),
+        cancellations=ReportCancellationRegistry(),
+        job_submitter=lambda fn, **_kwargs: fn(),
+        after_completed=lambda committed: calls.append(committed.report_id),
+    )
+    assert coord.start_plan(
+        "nb", "rep-auto", "q", auto_generate=True, user_id="actor"
+    )
+    assert coord.start_generate("nb", "rep-manual", "q", user_id="actor")
+    assert calls == ["rep-auto", "rep-manual"]
+
+
+def test_completion_hook_runs_after_generation_gate_is_released():
+    gate = ReportGenerationGate(1)
+    hook_entered = threading.Event()
+    release_hook = threading.Event()
+    second_entered = threading.Event()
+    threads = []
+    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
+
+    class _GatedEngine:
+        def generate(self, notebook_id, rid, _question, depth=2):
+            with gate.slot():
+                pass
+            return CommittedReport(notebook_id, rid, "actor", facts)
+
+    def submitter(fn, **_kwargs):
+        thread = threading.Thread(target=fn)
+        threads.append(thread)
+        thread.start()
+        return thread
+
+    def after(_committed):
+        hook_entered.set()
+        assert release_hook.wait(3)
+
+    coord = ReportExecutionCoordinator(
+        reports=_Reports(),
+        engine_factory=lambda **_kwargs: _GatedEngine(),
+        cancellations=ReportCancellationRegistry(),
+        job_submitter=submitter,
+        after_completed=after,
+    )
+    assert coord.start_generate("nb", "rep-gate", "q", user_id="actor")
+    assert hook_entered.wait(3)
+
+    def enter_second():
+        with gate.slot():
+            second_entered.set()
+
+    second = threading.Thread(target=enter_second)
+    second.start()
+    assert second_entered.wait(1)
+    release_hook.set()
+    threads[0].join(3)
+    second.join(3)
 
 
 def test_no_restart_recovery_surface_is_added():

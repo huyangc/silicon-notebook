@@ -78,7 +78,11 @@ class ReportStore:
             args.append(json.dumps(val, ensure_ascii=False) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
-            guard = "" if status == "cancelled" else " AND status <> 'cancelled'"
+            guard = (
+                " AND status NOT IN ('done','failed','cancelled')"
+                if status == "cancelled"
+                else " AND status <> 'cancelled'"
+            )
             db.execute(
                 f"UPDATE reports SET {', '.join(sets)} "
                 f"WHERE id = ? AND notebook_id = ?{guard}",
@@ -121,12 +125,41 @@ class ReportStore:
             )
         return cursor.rowcount > 0
 
+    def complete_report_generation(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        sections: list,
+        content_md: str,
+        gaps: list,
+        references: list,
+    ) -> bool:
+        """Atomically publish one successful generation if it still owns it."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE reports SET sections_json=?,content_md=?,gaps_json=?,"
+                "references_json=?,status='done',progress='完成',updated_at=? "
+                "WHERE id=? AND notebook_id=? AND status='generating'",
+                (
+                    json.dumps(sections, ensure_ascii=False),
+                    content_md,
+                    json.dumps(gaps, ensure_ascii=False),
+                    json.dumps(references, ensure_ascii=False),
+                    self.now(),
+                    report_id,
+                    notebook_id,
+                ),
+            )
+        return cursor.rowcount > 0
+
     def cancel_report(self, notebook_id: str, report_id: str) -> bool:
         """Durably publish the sticky terminal state before signalling a worker."""
         with self.database.write() as db:
             cursor = db.execute(
                 "UPDATE reports SET status='cancelled',progress=?,updated_at=? "
-                "WHERE id=? AND notebook_id=?",
+                "WHERE id=? AND notebook_id=? "
+                "AND status NOT IN ('done','failed','cancelled')",
                 ("已取消", self.now(), report_id, notebook_id),
             )
         return cursor.rowcount > 0

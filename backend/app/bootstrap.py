@@ -21,4 +21,8 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
             runtime.answer_auditors if runtime.answer_auditors.has_auditors else None
         ),
         ask_completed_observer_host=runtime.ask_completed_observers,
+        report_auditor_host=(
+            runtime.report_auditors if runtime.report_auditors.has_auditors else None
+        ),
+        report_completed_observer_host=runtime.report_completed_observers,
     )

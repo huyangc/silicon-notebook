@@ -21,6 +21,7 @@ import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from app.application.report_pipeline import CommittedReport
 from app.services.cancellation import AskCancelled
 from app.services.model_work import ModelPriority, model_work_scope
 
@@ -117,11 +118,24 @@ class ReportGenerationGate:
 class ReportExecutionCoordinator:
     def __init__(self, *, reports, engine_factory: ReportEngineFactory,
                  cancellations: ReportCancellationRegistry,
-                 job_submitter: BackgroundJobSubmitter) -> None:
+                 job_submitter: BackgroundJobSubmitter,
+                 after_completed: Callable[[CommittedReport], None] | None = None,
+                 ) -> None:
         self.reports = reports
         self.engine_factory = engine_factory
         self.cancellations = cancellations
         self.job_submitter = job_submitter
+        self.after_completed = after_completed
+
+    def _after_completed(self, committed: CommittedReport | None) -> None:
+        if type(committed) is not CommittedReport or self.after_completed is None:
+            return
+        try:
+            self.after_completed(committed)
+        except Exception:
+            # The durable report already won its terminal CAS. Optional
+            # post-terminal work can never rewrite that outcome.
+            return
 
     def start_plan(self, notebook_id: str, report_id: str, question: str,
                    history: str = "", auto_generate: bool = False, *,
@@ -140,6 +154,7 @@ class ReportExecutionCoordinator:
             return False
 
         def worker():
+            committed = None
             try:
                 depth = 2
                 try:
@@ -165,16 +180,20 @@ class ReportExecutionCoordinator:
                         notebook_id, effective_scope, effective_base_scope
                     ):
                         if intent_contract is None:
-                            engine.run(
+                            committed = engine.run(
                                 notebook_id, report_id, question, history, depth=depth,
                                 auto_generate=auto_generate,
                                 require_intent_review=True,
                                 scope_reconfirm=scope_reconfirm)
                         else:
-                            engine.run(
+                            committed = engine.run(
                                 notebook_id, report_id, question, history, depth=depth,
                                 auto_generate=auto_generate,
                                 intent_contract=intent_contract)
+                # Preserve the historical active-job window: completion work
+                # runs after model/source/retrieval scopes exit, but before the
+                # coordinator removes this exact cancellation registration.
+                self._after_completed(committed)
             finally:
                 self.cancellations.unregister(report_id, cancel)
 
@@ -202,6 +221,7 @@ class ReportExecutionCoordinator:
             return False
 
         def worker():
+            committed = None
             try:
                 effective_scope = source_scope
                 effective_base_scope = base_scope
@@ -235,8 +255,9 @@ class ReportExecutionCoordinator:
                     with source_scope_context(
                         notebook_id, effective_scope, effective_base_scope
                     ):
-                        self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
+                        committed = self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
                             notebook_id, report_id, question, depth=depth)
+                self._after_completed(committed)
             finally:
                 self.cancellations.unregister(report_id, cancel)
 

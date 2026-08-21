@@ -61,6 +61,14 @@ points. The timeout is cooperative: an in-progress synchronous callback is not
 abandoned, while later contributions are skipped after its deadline. Exact
 defaults and validation ranges live only in the product/API contract.
 
+`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` and
+`REPORT_AUDIT_MAX_FINDINGS` independently govern Deep Report's post-terminal
+auditor/observer points. They use the same cooperative semantics but never
+share an Ask budget: a callback already started completes safely, later report
+contributions do not start after the deadline, and an oversized finding set is
+rejected whole. These hooks run only after a successful durable `done` CAS.
+Exact defaults and ranges live only in the product/API contract.
+
 A chat service may optionally set `top_p = 0.95` (or another finite value from `0` through
 `1`) when its provider requires a fixed nucleus-sampling value. This service-owned value
 overrides every workload's call default and is used by both the outgoing request and the

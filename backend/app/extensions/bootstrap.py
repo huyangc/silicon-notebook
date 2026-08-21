@@ -10,6 +10,7 @@ from app.extension_sdk import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     GENERATED_QUESTION_ACCESS_CAPABILITY,
     PARSER_BUILTIN_ACCESS_CAPABILITY,
     PARSER_CLOUD_ACCESS_CAPABILITY,
@@ -18,6 +19,7 @@ from app.extension_sdk import (
     Availability,
     AvailabilityStatus,
     AskCompletedAvailabilityContext,
+    ReportCompletedAvailabilityContext,
     ExtensionBundle,
     ParserHostContext,
     RetrievalAdmissionPolicy,
@@ -30,6 +32,8 @@ from app.extensions.builtin import (
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID,
     ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
     ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
+    REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
+    REPORT_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
     GENERATED_QUESTION_BUNDLE,
     GENERATED_QUESTION_CONTRIBUTION_ID,
     PARSER_BUILTIN_BUNDLE,
@@ -49,6 +53,7 @@ from app.extensions.registry import ExtensionRegistry, frozen_registry
 from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
 from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
+from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,8 @@ class ExtensionRuntime:
     parser_chain: ParserProviderChainHost
     answer_auditors: AnswerAuditorHost
     ask_completed_observers: AskCompletedObserverHost
+    report_auditors: ReportAuditorHost
+    report_completed_observers: ReportCompletedObserverHost
 
 
 def build_extension_registry(
@@ -99,6 +106,14 @@ def build_extension_runtime(
             event_sink=event_sink,
         ),
         ask_completed_observers=AskCompletedObserverHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        report_auditors=ReportAuditorHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        report_completed_observers=ReportCompletedObserverHost(
             registry,
             event_sink=event_sink,
         ),
@@ -159,11 +174,25 @@ def default_extension_runtime() -> ExtensionRuntime:
             "ask_completed_access_unavailable",
         )
 
+    def report_completed_access(context: object | None) -> Availability:
+        if (
+            type(context) is ReportCompletedAvailabilityContext
+            and context.contribution_id
+            == REPORT_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID
+            and context.access_available is True
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "report_completed_access_unavailable",
+        )
+
     return build_extension_runtime(
         (
             ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
             ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
             ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
+            REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
             PARSER_BUILTIN_BUNDLE,
             GENERATED_QUESTION_BUNDLE,
             PARSER_CLOUD_BUNDLE,
@@ -188,6 +217,9 @@ def default_extension_runtime() -> ExtensionRuntime:
                     context,
                     ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
                 )
+            ),
+            REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: (
+                report_completed_access
             ),
             GENERATED_QUESTION_ACCESS_CAPABILITY: generated_question_access,
             SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,

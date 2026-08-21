@@ -57,6 +57,12 @@ cp model-services.example.toml .local/model-services.toml
 进入同步 callback 的工作不会被遗弃，deadline 之后的后续 contribution 则不再启动。
 精确默认值与校验范围只在 product/API 合同登记。
 
+`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 与
+`REPORT_AUDIT_MAX_FINDINGS` 独立治理 Deep Report 的终态后 auditor/observer，
+不借用 Ask 预算。其语义同样是协作式：已开始 callback 安全完成，deadline 后不再
+启动后续 report contribution，超限 finding 集整体拒绝；并且只在持久 `done` CAS
+成功后运行。精确默认值与范围只在 product/API 合同登记。
+
 如果供应商要求固定的核采样值，chat 服务可选配置 `top_p = 0.95`（或 `0` 到 `1` 的
 其他有限数值）。该服务级值覆盖所有已绑定 workload 的调用默认值，并同时用于真实请求和
 响应缓存键；省略字段则保留历史的逐调用行为。embedding 与 rerank 服务不允许配置

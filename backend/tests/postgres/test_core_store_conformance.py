@@ -3558,6 +3558,70 @@ def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(
     assert never_claimed["understanding"] == {"objective": "q2"}
 
 
+def test_report_completion_cas_cannot_overwrite_a_cancelled_generation(
+    core_stores: CoreStores,
+):
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00876543", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Report CAS"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    report_id = reports.create_report(notebook_id, "为什么?", 2)
+    reports.update_report(notebook_id, report_id, status="outline_ready")
+    assert reports.claim_report_generation(notebook_id, report_id)
+    assert reports.cancel_report(notebook_id, report_id)
+    assert reports.complete_report_generation(
+        notebook_id,
+        report_id,
+        sections=[{"markdown": "must not persist"}],
+        content_md="must not persist",
+        gaps=[],
+        references=[],
+    ) is False
+    row = reports.get_report(notebook_id, report_id)
+    assert row["status"] == "cancelled"
+    assert row["content_md"] == ""
+
+
+def test_report_cancel_cannot_overwrite_a_completed_generation(
+    core_stores: CoreStores,
+):
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00876544", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Report reverse CAS"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    report_id = reports.create_report(notebook_id, "为什么?", 2)
+    reports.update_report(notebook_id, report_id, status="outline_ready")
+    assert reports.claim_report_generation(notebook_id, report_id)
+    assert reports.complete_report_generation(
+        notebook_id,
+        report_id,
+        sections=[{"markdown": "durable"}],
+        content_md="durable",
+        gaps=[],
+        references=[],
+    )
+    assert reports.cancel_report(notebook_id, report_id) is False
+    row = reports.get_report(notebook_id, report_id)
+    assert row["status"] == "done"
+    assert row["content_md"] == "durable"
+
+
 def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
     core_stores: CoreStores,
 ):

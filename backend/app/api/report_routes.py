@@ -550,6 +550,12 @@ def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
     repo.update_report(
         notebook_id, report_id, status="cancelled", progress="已取消"
     )
+    terminal = repo.get_report(notebook_id, report_id)
+    if terminal.get("status") != "cancelled":
+        # Preserve the endpoint's historical idempotent 200 while reporting
+        # the actual sticky terminal state. A completed report is not relabelled
+        # or signalled as cancelled merely because this request arrived late.
+        return {"status": terminal.get("status")}
     # Durable state wins first; the event only stops an active worker promptly.
     _cancel(report_id)
     return {"status": "cancelled"}
