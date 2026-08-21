@@ -18,6 +18,8 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
+
+
 def module_name(app_root: Path, path: Path) -> str:
     relative = path.relative_to(app_root.parent).with_suffix("")
     parts = list(relative.parts)
