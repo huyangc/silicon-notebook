@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from uuid import uuid4
 
 from app.core.config import Settings
+from app.domain.extensions import RetrievalContributorHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     get_request_user,
@@ -280,6 +281,7 @@ class RepositoryFacade:
         persistence_factory: PersistenceBundleFactory,
         *,
         model_provider: Any | None = None,
+        retrieval_contributor_host: RetrievalContributorHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -309,6 +311,7 @@ class RepositoryFacade:
             ),
             persistence_factory=persistence_factory,
             model_provider=model_provider,
+            retrieval_contributor_host=retrieval_contributor_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the

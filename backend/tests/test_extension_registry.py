@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -129,8 +129,88 @@ def test_unknown_dependencies_and_dependency_cycles_fail_at_startup():
 
 
 def test_capability_requirements_are_not_treated_as_plugin_dependencies():
+    calls = []
     registry = build_extension_registry(
-        (_Bundle(_manifest("a", requires=("model:scheduled_access",))),)
+        (_Bundle(_manifest("a", requires=("model:scheduled_access",))),),
+        capability_decisions={
+            "model:scheduled_access": lambda context: (
+                calls.append(context) or Availability.available()
+            )
+        },
     )
 
     assert registry.manifests()[0].requires == ("model:scheduled_access",)
+    assert calls == []
+    assert registry.capability_availability("model:scheduled_access").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert calls == [None]
+
+
+def test_missing_required_capability_decision_fails_freeze_but_optional_does_not():
+    with pytest.raises(ExtensionRegistryError, match="decision entries"):
+        build_extension_registry(
+            (_Bundle(_manifest("required", requires=("missing",))),)
+        )
+
+    manifest = _manifest("optional")
+    manifest = replace(manifest, optional_requires=("missing",))
+    registry = build_extension_registry((_Bundle(manifest),))
+    assert registry.manifests() == (manifest,)
+
+
+def test_required_capability_availability_is_live_and_failure_is_sanitized():
+    state = {"available": False, "raise": False}
+    declaration = ContributionDeclaration(
+        "probe", "retrieval.enrichment", ContributionKind.CONTRIBUTOR
+    )
+
+    def decide(_context):
+        if state["raise"]:
+            raise RuntimeError("secret endpoint")
+        if state["available"]:
+            return Availability.available()
+        return Availability(AvailabilityStatus.DISABLED, "feature_disabled")
+
+    registry = build_extension_registry(
+        (_Bundle(_manifest("plugin", declaration, requires=("live",)), (object(),)),),
+        capability_decisions={"live": decide},
+    )
+
+    assert registry.availability("probe").status is AvailabilityStatus.DISABLED
+    state["available"] = True
+    assert registry.availability("probe").status is AvailabilityStatus.AVAILABLE
+    state["raise"] = True
+    unavailable = registry.availability("probe")
+    assert unavailable.status is AvailabilityStatus.UNAVAILABLE
+    assert unavailable.reason_code == "capability_decision_failed"
+
+
+def test_contribution_availability_failure_and_content_reason_are_sanitized():
+    declaration = ContributionDeclaration(
+        "probe", "retrieval.enrichment", ContributionKind.CONTRIBUTOR
+    )
+
+    raising = build_extension_registry((
+        _Bundle(
+            _manifest("raising", declaration),
+            (object(),),
+            lambda _context: (_ for _ in ()).throw(RuntimeError("secret")),
+        ),
+    ))
+    result = raising.availability("probe")
+    assert result.status is AvailabilityStatus.UNAVAILABLE
+    assert result.reason_code == "availability_probe_failed"
+
+    unsafe_reason = build_extension_registry((
+        _Bundle(
+            _manifest("unsafe", declaration),
+            (object(),),
+            lambda _context: Availability(
+                AvailabilityStatus.UNAVAILABLE, "source title leaked"
+            ),
+        ),
+    ))
+    result = unsafe_reason.availability("probe")
+    assert result.status is AvailabilityStatus.UNAVAILABLE
+    assert result.reason_code == "invalid_availability_reason"

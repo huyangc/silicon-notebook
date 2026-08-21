@@ -18,8 +18,6 @@ FORBIDDEN_DOMAIN_PREFIXES = (
     "app.repositories",
     "app.services",
 )
-
-
 def module_name(app_root: Path, path: Path) -> str:
     relative = path.relative_to(app_root.parent).with_suffix("")
     parts = list(relative.parts)
@@ -179,21 +177,72 @@ def boundary_violations(app_root: Path) -> list[str]:
             )
             for imported in sorted(forbidden):
                 violations.append(f"{module} imports forbidden {imported}")
-        imports_extension_surface = any(
-            imported in {"app.extensions", "app.extension_sdk"}
-            or imported.startswith(("app.extensions.", "app.extension_sdk."))
+        is_plugin_implementation = (
+            module.startswith("app.extensions.builtin.")
+            or module.startswith("app.extensions.plugins.")
+            or (module.startswith("app.features.") and module.endswith(".plugin"))
+        )
+        if is_plugin_implementation:
+            own_feature = (
+                ".".join(module.split(".")[:3])
+                if module.startswith("app.features.")
+                else ""
+            )
+            has_own_feature_target = bool(own_feature) and any(
+                imported == own_feature
+                or imported.startswith(f"{own_feature}.")
+                for imported in imports
+            )
+            forbidden = minimal_matching_module_references(
+                imports,
+                lambda imported: imported.startswith("app.")
+                and not imported.startswith(
+                    ("app.domain", "app.extension_sdk")
+                )
+                and not (
+                    own_feature
+                    and (
+                        imported == own_feature
+                        or imported.startswith(f"{own_feature}.")
+                    )
+                )
+                and not (
+                    has_own_feature_target
+                    and own_feature.startswith(f"{imported}.")
+                ),
+            )
+            for imported in sorted(forbidden):
+                violations.append(
+                    f"{module} imports forbidden plugin dependency {imported}"
+                )
+        imports_extension_runtime = any(
+            imported == "app.extensions"
+            or imported.startswith("app.extensions.")
             for imported in imports
         )
         is_extension_composition = (
-            module == "app.main"
+            module == "app.bootstrap"
             or module == "app.extensions"
             or module.startswith("app.extensions.")
+        )
+        imports_extension_sdk = any(
+            imported == "app.extension_sdk"
+            or imported.startswith("app.extension_sdk.")
+            for imported in imports
+        )
+        is_sdk_consumer = (
+            is_extension_composition
             or module == "app.extension_sdk"
             or module.startswith("app.extension_sdk.")
+            or is_plugin_implementation
         )
-        if imports_extension_surface and not is_extension_composition:
+        if imports_extension_runtime and not is_extension_composition:
             violations.append(
-                f"{module} consumes the Phase-0 empty registry; existing workflows must stay untouched"
+                f"{module} imports the extension composition surface outside an approved root"
+            )
+        if imports_extension_sdk and not is_sdk_consumer:
+            violations.append(
+                f"{module} imports the extension composition surface outside an approved root"
             )
     return violations
 

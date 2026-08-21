@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.core.config import Settings
 from app.domain.repository import RepositoryCompatibilitySeams
+from app.domain.extensions import RetrievalContributorHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -91,6 +92,7 @@ class RepositoryRuntime:
         persistence_factory: PersistenceBundleFactory,
         *,
         model_provider: Any | None = None,
+        retrieval_contributor_host: RetrievalContributorHostPort | None = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -98,6 +100,10 @@ class RepositoryRuntime:
         self.seams = seams
         self._closed = False
         self.event_log = EventLogger(settings, channel="events", per_user=True)
+        # Production factory injection supplies the process-shared host used
+        # by app.state, Ask and Report. Direct constructor tests may leave the
+        # optional seat empty and retain their exact historical behavior.
+        self.retrieval_contributors = retrieval_contributor_host
         if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
             self.event_log.logger.warning(
                 "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
@@ -1354,6 +1360,7 @@ class RepositoryRuntime:
                 # P2-T6:检索打法库的注入座位(注入本身另有默认关闭的开关)。
                 retrieval_experiences=self.retrieval_experiences,
                 selected_source_graph=self.selected_source_graph,
+                retrieval_contributors=self.retrieval_contributors,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
                     hydrate_selected_graph_chunk_rows(
@@ -1457,6 +1464,7 @@ class RepositoryRuntime:
                 # 它)。提问者身份同样由 ask 侧显式传入,不经这里。
                 identity_store=self.identity,
                 selected_source_graph=self.selected_source_graph,
+                retrieval_contributors=self.retrieval_contributors,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
                     hydrate_selected_graph_chunk_rows(

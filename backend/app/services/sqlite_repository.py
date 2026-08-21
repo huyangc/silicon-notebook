@@ -8,6 +8,7 @@ from typing import Any, Iterable, List, Optional
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
+from app.domain.extensions import RetrievalContributorHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     reset_request_user,
@@ -45,12 +46,17 @@ class SQLiteRepository(RepositoryFacade):
     """Preserve the historical SQLite API while isolating backend concerns."""
 
     def __init__(
-        self, settings: Settings, *, model_provider: Any | None = None
+        self,
+        settings: Settings,
+        *,
+        model_provider: Any | None = None,
+        retrieval_contributor_host: RetrievalContributorHostPort | None = None,
     ) -> None:
         super().__init__(
             settings,
             SqlitePersistenceBundleFactory(),
             model_provider=model_provider,
+            retrieval_contributor_host=retrieval_contributor_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)

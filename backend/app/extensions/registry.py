@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import re
 from types import MappingProxyType
 from typing import Iterable
 
@@ -10,15 +11,26 @@ from app.extension_sdk import (
     EXTENSION_API_VERSION,
     Availability,
     AvailabilityStatus,
+    ContributionDeclaration,
     ContributionKind,
     ExtensionBundle,
     ExtensionContribution,
     ExtensionManifest,
 )
+from app.extensions.capabilities import (
+    EMPTY_CAPABILITY_CATALOG,
+    CapabilityDecisionCatalog,
+)
 
 
 class ExtensionRegistryError(ValueError):
     """Invalid extension topology discovered during startup."""
+
+
+_STABLE_REASON = re.compile(r"^[a-z][a-z0-9_]*$")
+_STABLE_METADATA_ID = re.compile(
+    r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+)
 
 
 @dataclass(frozen=True)
@@ -68,8 +80,11 @@ class ExtensionRegistry:
     configuration, or other request-time state.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, capability_catalog: CapabilityDecisionCatalog | None = None
+    ) -> None:
         self._frozen = False
+        self._capabilities = capability_catalog or EMPTY_CAPABILITY_CATALOG
         self._manifests: dict[str, ExtensionManifest] = {}
         self._contributions: dict[str, RegisteredContribution] = {}
         self._points: dict[str, list[RegisteredContribution]] = defaultdict(list)
@@ -82,7 +97,12 @@ class ExtensionRegistry:
         if self._frozen:
             raise ExtensionRegistryError("extension registry is frozen")
         manifest = bundle.manifest
-        if not manifest.id or not manifest.version or not manifest.display_name:
+        if (
+            type(manifest.id) is not str
+            or not _STABLE_METADATA_ID.fullmatch(manifest.id)
+            or not manifest.version
+            or not manifest.display_name
+        ):
             raise ExtensionRegistryError("extension manifest identifiers must be non-empty")
         if manifest.api_version != EXTENSION_API_VERSION:
             raise ExtensionRegistryError(
@@ -94,7 +114,20 @@ class ExtensionRegistry:
             )
         if manifest.id in self._manifests:
             raise ExtensionRegistryError(f"duplicate extension id {manifest.id!r}")
-        declaration_ids = [item.id for item in manifest.contributions]
+        declaration_ids: list[str] = []
+        for declaration in manifest.contributions:
+            if (
+                type(declaration) is not ContributionDeclaration
+                or type(declaration.id) is not str
+                or not _STABLE_METADATA_ID.fullmatch(declaration.id)
+                or type(declaration.point) is not str
+                or not _STABLE_METADATA_ID.fullmatch(declaration.point)
+                or type(declaration.kind) is not ContributionKind
+            ):
+                raise ExtensionRegistryError(
+                    "contribution declaration must use stable metadata identifiers and kind"
+                )
+            declaration_ids.append(declaration.id)
         if len(declaration_ids) != len(set(declaration_ids)):
             raise ExtensionRegistryError(
                 f"extension {manifest.id!r} declares duplicate contribution ids"
@@ -127,13 +160,22 @@ class ExtensionRegistry:
         if self._frozen:
             raise ExtensionRegistryError("extension registry is frozen")
         declaration = contribution.declaration
+        if (
+            type(declaration) is not ContributionDeclaration
+            or type(declaration.id) is not str
+            or not _STABLE_METADATA_ID.fullmatch(declaration.id)
+            or type(declaration.point) is not str
+            or not _STABLE_METADATA_ID.fullmatch(declaration.point)
+            or type(declaration.kind) is not ContributionKind
+        ):
+            raise ExtensionRegistryError(
+                "contribution declaration must use stable metadata identifiers and kind"
+            )
         declared = {item.id: item for item in manifest.contributions}
         if declared.get(declaration.id) != declaration:
             raise ExtensionRegistryError(
                 f"contribution {declaration.id!r} differs from its manifest declaration"
             )
-        if not declaration.id or not declaration.point:
-            raise ExtensionRegistryError("contribution id and point must be non-empty")
         if declaration.id in self._contributions:
             raise ExtensionRegistryError(
                 f"duplicate contribution id {declaration.id!r}"
@@ -146,6 +188,7 @@ class ExtensionRegistry:
         if self._frozen:
             return self
         self._validate_dependencies()
+        self._validate_required_capabilities()
         for point, registrations in self._points.items():
             providers = [
                 item
@@ -195,6 +238,19 @@ class ExtensionRegistry:
         for plugin_id in graph:
             visit(plugin_id)
 
+    def _validate_required_capabilities(self) -> None:
+        for plugin_id, manifest in self._manifests.items():
+            missing = sorted(
+                capability
+                for capability in manifest.requires
+                if not self._capabilities.has(capability)
+            )
+            if missing:
+                raise ExtensionRegistryError(
+                    f"extension {plugin_id!r} requires capabilities without "
+                    f"decision entries {missing!r}"
+                )
+
     def manifests(self) -> tuple[ExtensionManifest, ...]:
         self._require_frozen()
         return tuple(self._manifests.values())
@@ -213,18 +269,75 @@ class ExtensionRegistry:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="unknown_contribution",
             )
+        manifest = self._manifests[registered.plugin_id]
+        for capability in manifest.requires:
+            decision = self._capabilities.availability(capability, context)
+            if decision.status is not AvailabilityStatus.AVAILABLE:
+                return decision
+        return self.contribution_availability(contribution_id, context)
+
+    def contribution_availability(
+        self, contribution_id: str, context: object | None = None
+    ) -> Availability:
+        """Evaluate only the contribution's I/O-free live probe."""
+
+        self._require_frozen()
+        registered = self._contributions.get(contribution_id)
+        if registered is None:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="unknown_contribution",
+            )
         probe = registered.contribution.availability
         if probe is None:
             return Availability.available()
-        return probe(context)
+        try:
+            result = probe(context)
+        except Exception:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="availability_probe_failed",
+            )
+        if type(result) is not Availability:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_probe",
+            )
+        if not isinstance(result.status, AvailabilityStatus):
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_status",
+            )
+        if type(result.reason_code) is not str:
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_reason",
+            )
+        reason = result.reason_code
+        if reason and not _STABLE_REASON.fullmatch(reason):
+            return Availability(
+                AvailabilityStatus.UNAVAILABLE,
+                reason_code="invalid_availability_reason",
+            )
+        return result
+
+    def capability_availability(
+        self, capability: str, context: object | None = None
+    ) -> Availability:
+        self._require_frozen()
+        return self._capabilities.availability(capability, context)
 
     def _require_frozen(self) -> None:
         if not self._frozen:
             raise ExtensionRegistryError("extension registry is not frozen")
 
 
-def frozen_registry(bundles: Iterable[ExtensionBundle] = ()) -> ExtensionRegistry:
-    registry = ExtensionRegistry()
+def frozen_registry(
+    bundles: Iterable[ExtensionBundle] = (),
+    *,
+    capability_catalog: CapabilityDecisionCatalog | None = None,
+) -> ExtensionRegistry:
+    registry = ExtensionRegistry(capability_catalog)
     for bundle in bundles:
         registry.register(bundle)
     return registry.freeze()

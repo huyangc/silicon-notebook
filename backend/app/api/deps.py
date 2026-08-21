@@ -9,13 +9,13 @@ from app.core.config import get_settings
 from app.core.audit_actor import session_audit_principal
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.identity import UserProfile
-from app.repositories.factory import create_repository
+from app.bootstrap import create_application_repository
 from app.repositories.ports import AdminQueryRepository, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
 
 
 @lru_cache
 def repository() -> NotebookRepository:
-    return create_repository(get_settings())
+    return create_application_repository(get_settings())
 
 def identity_repository() -> IdentityRepository:
     return repository()._runtime.identity  # type: ignore[attr-defined]

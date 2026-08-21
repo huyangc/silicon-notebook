@@ -6,8 +6,11 @@ from typing import Iterator, Literal
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
-from app.repositories.factory import create_repository
+from app.bootstrap import create_application_repository
 from app.repositories.ports import NotebookRepository, OfflineMaintenanceBusyError
+
+
+create_repository = create_application_repository
 
 
 class MaintenanceCliError(RuntimeError):
@@ -46,7 +49,7 @@ def open_maintenance_cli_repository(
 ) -> Iterator[NotebookRepository]:
     """Open a write-capable maintenance repository under its operator lock.
 
-    The confirmation check intentionally precedes ``create_repository``.  A
+    The confirmation check intentionally precedes repository composition.  A
     PostgreSQL repository initializes a connection pool, so opening it before
     rejecting an unsafe command would violate the stopped-service boundary and
     make a missing confirmation observable as database activity.

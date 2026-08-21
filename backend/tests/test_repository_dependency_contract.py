@@ -160,7 +160,7 @@ def test_api_repository_dependency_uses_the_cached_backend_factory():
 
     source = inspect.getsource(deps.repository)
     assert hasattr(deps.repository, "cache_clear")
-    assert "create_repository(get_settings())" in source
+    assert "create_application_repository(get_settings())" in source
     assert "SQLiteRepository" not in source
 
 

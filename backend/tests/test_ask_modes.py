@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from app.services.ask_modes import (
     ASK_MODES, DEFAULT_MODE, AskMode, UnknownAskMode,
@@ -78,17 +80,23 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
         def handler(notebook_id, payload, *, user_id,
                     on_trace=None, cancel_event=None, seed_ids=None,
                     job_id=None):
+            from app.services.retrieval_run import current_retrieval_run
+
             calls["hit"] = (mid, user_id)
+            calls["run_cancel"] = current_retrieval_run().cancel_event
             return AskResponse(conclusion=mid)
         return handler
 
     for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
         monkeypatch.setattr(service, mid, make(mid), raising=False)
 
+    cancel_event = threading.Event()
     assert service.ask(
-        "nb", AskRequest(question="q"), user_id="u1", job_id="job-safe-id"
+        "nb", AskRequest(question="q"), user_id="u1", job_id="job-safe-id",
+        cancel_event=cancel_event,
     ).conclusion == "ask_chunk"
     assert calls["hit"] == ("ask_chunk", "u1")
+    assert calls["run_cancel"] is cancel_event
     assert events[0]["kind"] == "retrieval_run_stats"
     assert events[0]["correlation_id"] == "job-safe-id"
     assert service.ask("nb", AskRequest(question="q", mode="graph"), user_id="u1").conclusion == "ask_graph"

@@ -64,6 +64,8 @@ class NotebookRef:
 class CancellationToken(Protocol):
     def is_set(self) -> bool: ...
 
+    def raise_if_cancelled(self) -> None: ...
+
 
 @dataclass(frozen=True)
 class Availability:

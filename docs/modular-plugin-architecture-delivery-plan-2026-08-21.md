@@ -65,9 +65,9 @@ PR 描述必须包含：
 
 ## 4. PR 分解
 
-### PR-00：Phase 0 架构底座（当前）
+### PR-00：Phase 0 架构底座（已合入）
 
-状态：已实现，等待按新流水开 PR。
+状态：已通过两路 subagent review 与 CI，PR #541 squash merge。
 
 范围：
 
@@ -82,6 +82,8 @@ PR 描述必须包含：
 
 #### PR-01：RetrievalContributorHost + Contract Kit
 
+状态：实现完成，正在闭合双路 subagent review。
+
 范围：
 
 - 定义 point-specific context/result/budget/cancellation/provenance 合同；
@@ -89,6 +91,19 @@ PR 描述必须包含：
 - 建立 baseline-preserving host、request-time availability、脱敏 failure/event；
 - host 在零 contribution 时短路返回原 baseline，不走降级 adapter；
 - Ask/Report 只接同一个共享 host 入口，不注册真实 contributor；
+- 共享 host 通过 `selected_evidence` / `chunk_candidates` 两个类型化 invocation
+  保留真实能力原有的不同物理时点，不把 generated-question 移到 MMR/fusion 后，
+  也不把 selected-source graph 移到其 attestation/baseline guard 前；
+- scope/provenance 复检必须 batch 化，禁止按 candidate 产生 N+1；核心 request
+  cancellation 传播，插件自己的失败、超时或 local cancellation 才 fail-open；
+- `app.bootstrap` 是把扩展 runtime 与 repository adapter 接起来的唯一外层组合根，
+  workflow 只依赖 domain host port；availability probe 不得获得 reader/model/connection，
+  执行 context 在确认至少一个 contribution available 后才构造；
+- manifest 声明与实时 capability decision 共同裁剪每个 contribution 可见的窄端口；
+  invocation 路由和 core-owned admission policy 随拓扑冻结，implementation 运行期改字段
+  不得改写路由；强合同 contribution 可登记 atomic admission；
+- proposal 在 core-owned deployment limit 后才进入一次权威 batch hydrate；插件提交的 value
+  不得直接进入结果，畸形 enum/identity/provenance/token 必须完整 fail-open；
 - contract kit 覆盖 no-op、异常、超时、取消、越 scope、非法 provenance、驱逐/重排 baseline、连接持有与 content-free event。
 
 不做：selected-source graph 或 generated-question 迁移，不新增用户能力。
@@ -101,6 +116,10 @@ PR 描述必须包含：
 - Ask/Report 删除各自直接调用，统一通过 PR-01 host；
 - 原样保留 attestation、rollout、baseline manifest、独立预算、scope drift、eviction 整段丢弃、fail-closed 边界和事件；
 - 增加旧路径/新路径的特征化等价测试和 adapter 专属 contract tests。
+- 首个真实 context factory 同批补 SQLite/PostgreSQL（含 pool-size-1）的连接持有
+  conformance，证明 host 在拿任何 contributor fan-out 前已退出数据库 lease；PR-01
+  只有 core-private probe 合同与 fail-closed mutation，不把尚未存在的 adapter 伪装成
+  生产连接检测。
 
 硬门：通用 host 合同只能是下界，不得把 selected-source graph 的更强合同降级。
 
@@ -112,6 +131,9 @@ PR 描述必须包含：
 - 逐字保留 off/shadow/on；shadow 返回精确 baseline；on 只追加原始 chunk，不驱逐、不重排；
 - 保留 source ceiling、bounded read、offline-only index build、original-chunk provenance；
 - 删除候选检索中的专用插件循环/双路入口。
+- 在原 `_retrieve_chunks` 返回 `(scored, ids, matrix)`、进入 MMR/fusion 之前落
+  `chunk_candidates` 的生产锚点与位置守卫；PR-01 只冻结 invocation 合同，避免在
+  迁移前增加一个无法正确重建 ids/matrix 的假 host seam。
 
 Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通过 contract kit；无插件等价测试继续成立。
 

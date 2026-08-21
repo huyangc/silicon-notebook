@@ -141,23 +141,86 @@ def test_repository_service_reverse_import_ceiling_only_allows_reduction(tmp_pat
     ]
 
 
-def test_empty_registry_is_statically_isolated_from_existing_workflows():
+def test_extension_composition_is_statically_isolated_from_workflows():
     violations = boundary_violations(ROOT / "backend/app")
 
-    assert not [item for item in violations if "empty registry" in item]
+    assert not [item for item in violations if "extension composition" in item]
     for path in (ROOT / "backend/app/services").rglob("*.py"):
         source = path.read_text(encoding="utf-8")
         assert "app.extensions" not in source
         assert "app.extension_sdk" not in source
 
 
-def test_guard_rejects_existing_workflow_consuming_empty_registry(tmp_path):
+def test_guard_rejects_workflow_consuming_extension_composition(tmp_path):
     app = tmp_path / "app"
     _write(app / "services/workflow.py", "from app import extensions\n")
 
     assert boundary_violations(app) == [
-        "app.services.workflow consumes the Phase-0 empty registry; "
-        "existing workflows must stay untouched"
+        "app.services.workflow imports the extension composition surface "
+        "outside an approved root"
+    ]
+
+
+def test_guard_rejects_plugin_importing_core_implementations(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "extensions/builtin/unsafe.py",
+        "from app.services import repository_facade\n"
+        "from app.repositories.sqlite import query_store\n",
+    )
+
+    assert boundary_violations(app) == [
+        "app.extensions.builtin.unsafe imports forbidden plugin dependency "
+        "app.repositories.sqlite",
+        "app.extensions.builtin.unsafe imports forbidden plugin dependency "
+        "app.services",
+    ]
+
+
+def test_guard_allows_feature_plugin_sdk_and_rejects_other_app_layers(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "features/search/plugin.py",
+        "from app.extension_sdk import ExtensionManifest\n"
+        "from app.domain import retrieval\n"
+        "from app.features import search\n"
+        "from app.features.search import adapter\n",
+    )
+    assert boundary_violations(app) == []
+
+    _write(
+        app / "features/search/plugin.py",
+        "from app.services import ask_service\n"
+        "from app.features.other import plugin\n",
+    )
+    assert boundary_violations(app) == [
+        "app.features.search.plugin imports forbidden plugin dependency "
+        "app.features.other",
+        "app.features.search.plugin imports forbidden plugin dependency "
+        "app.services",
+    ]
+
+
+def test_guard_rejects_main_importing_extension_runtime_directly(tmp_path):
+    app = tmp_path / "app"
+    _write(app / "main.py", "from app import extensions\n")
+
+    assert boundary_violations(app) == [
+        "app.main imports the extension composition surface outside an approved root"
+    ]
+
+
+def test_guard_allows_only_named_application_composition_root(tmp_path):
+    app = tmp_path / "app"
+    _write(app / "bootstrap.py", "from app import extensions\n")
+    _write(app / "repositories/factory.py", "from app import extensions\n")
+    _write(app / "repositories/other_factory.py", "from app import extensions\n")
+
+    assert boundary_violations(app) == [
+        "app.repositories.factory imports the extension composition "
+        "surface outside an approved root",
+        "app.repositories.other_factory imports the extension composition "
+        "surface outside an approved root"
     ]
 
 
@@ -166,7 +229,11 @@ def test_registry_composition_does_not_change_route_topology(monkeypatch):
 
     baseline = app_main.create_app()
     sentinel = object()
-    monkeypatch.setattr(app_main, "build_extension_registry", lambda: sentinel)
+    monkeypatch.setattr(
+        app_main,
+        "application_extension_runtime",
+        lambda: type("Runtime", (), {"registry": sentinel})(),
+    )
     composed = app_main.create_app()
 
     def route_signature(app):
@@ -183,7 +250,7 @@ def test_registry_composition_does_not_change_route_topology(monkeypatch):
     assert route_signature(composed) == route_signature(baseline)
 
 
-def test_phase0_boundary_is_present_in_all_agent_entry_documents():
+def test_extension_boundary_is_present_in_all_agent_entry_documents():
     for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
         normalized = (
             (ROOT / name)
@@ -192,7 +259,9 @@ def test_phase0_boundary_is_present_in_all_agent_entry_documents():
             .replace("_", " ")
             .replace("-", " ")
         )
-        assert "phase 0" in normalized, name
         assert "extension sdk" in normalized, name
+        assert "retrieval" in normalized, name
+        assert "host" in normalized, name
+        assert "capability" in normalized, name
         assert "subagent review" in normalized, name
         assert "ci" in normalized, name

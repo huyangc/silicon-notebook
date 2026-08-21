@@ -4,15 +4,27 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.config import Settings
+from app.domain.extensions import RetrievalContributorHostPort
 from app.repositories.postgres.bundle import PostgresPersistenceBundleFactory
 from app.services.repository_facade import RepositoryFacade
 
 
 class PostgresRepository(RepositoryFacade):
-    def __init__(self, settings: Settings, *, model_provider: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        model_provider: Any | None = None,
+        retrieval_contributor_host: RetrievalContributorHostPort | None = None,
+    ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
-            super().__init__(settings, factory, model_provider=model_provider)
+            super().__init__(
+                settings,
+                factory,
+                model_provider=model_provider,
+                retrieval_contributor_host=retrieval_contributor_host,
+            )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a
             # usable runtime (service/cache/file composition included).
