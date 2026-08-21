@@ -31,11 +31,24 @@ from typing import (
 
 if TYPE_CHECKING:
     import numpy as np
-    from app.services.ask_modes import AskMode
-    from app.services.kg.scale_index import ScaleIndex
-    from app.services.retrieval_candidates import ChunkRetrievalPlan
 
 from app.core.config import Settings
+from app.domain.ask import AskMode
+from app.domain.cancellation import CancelEvent
+from app.domain.graph import FollowChainResult
+from app.domain.notebook_scale import NotebookScaleFacts
+from app.domain.scale import ScaleIndexView
+from app.domain.retrieval import (
+    ChunkRetrievalPlan,
+    GapRelationRow,
+    NeighborExpansion,
+    RetrievedChunk,
+    RetrievedElement,
+    RetrievedKnowledge,
+    RetrievedRelation,
+    W_KEYWORD,
+    W_SEMANTIC,
+)
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
@@ -71,15 +84,6 @@ from app.models.knowledge import (
     DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
     ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate, PaginatedKnowledge,
 )
-from app.services.cancellation import CancelEvent
-from app.services.notebook_scale import NotebookScaleFacts
-from app.services.retrieval import (
-    GapRelationRow, NeighborExpansion, RetrievedChunk, RetrievedElement,
-    RetrievedKnowledge, RetrievedRelation, W_KEYWORD, W_SEMANTIC,
-)
-from app.services.kg.follow_chain import FollowChainResult
-
-
 KNOWHOW_COLUMN_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
 
 
@@ -2536,7 +2540,7 @@ class SQLiteMaintenancePort(
     def mark_unified_kg_dirty(self, notebook_id: str) -> None: ...
     def relations_with_names(self, notebook_id: str, relation_ids: list[str] | None = None) -> list[dict[str, object]]: ...
     def knowledge_context(self, notebook_id: str, hits: Sequence[RetrievedKnowledge]) -> tuple[str, dict[str, dict[str, object]]]: ...
-    def load_scale_index(self, notebook_id: str, allow_stale: bool = False) -> "ScaleIndex | None": ...
+    def load_scale_index(self, notebook_id: str, allow_stale: bool = False) -> ScaleIndexView | None: ...
     def has_scale_index(self, notebook_id: str) -> bool: ...
     def gold_knowledge_object_rows(self, notebook_id: str) -> list[dict[str, object]]: ...
     def kg_object_counts_by_notebook(self) -> dict[str, int]: ...

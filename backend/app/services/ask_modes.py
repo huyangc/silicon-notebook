@@ -8,7 +8,7 @@ list (frontend/app/ask-modes.ts) in lock-step.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from app.domain.ask import AskMode
 
 
 class UnknownAskMode(ValueError):
@@ -18,16 +18,6 @@ class UnknownAskMode(ValueError):
     def __init__(self, mode: str) -> None:
         super().__init__(mode)
         self.mode = mode
-
-
-@dataclass(frozen=True)
-class AskMode:
-    id: str
-    handler: str        # method name on SQLiteRepository
-    group: str          # "general" | "strict" | "legacy" | "global"
-    streaming: bool     # handler accepts on_trace + emits progress over the stream
-    requires_kg: bool
-    user_facing: bool
 
 
 # Insertion order = display order for user_facing modes.

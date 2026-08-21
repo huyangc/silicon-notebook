@@ -12,7 +12,6 @@ import threading
 import time
 import weakref
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -83,6 +82,7 @@ from app.models.knowledge import (
     MergeRequest,
     PaginatedKnowledge,
 )
+from app.domain.retrieval import ChunkRetrievalPlan
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
@@ -271,29 +271,6 @@ def _make_persist_image(
     return make_persist_image_factory(
         repo.settings, lambda: AssetService(repo)
     )(notebook_id, source_id, created_by)
-
-
-@dataclass(frozen=True)
-class ChunkRetrievalPlan:
-    """ask_chunk 编排层的检索决策一次性只读快照（W2.2）。
-
-    由 `_build_chunk_retrieval_plan` 一次读齐 self.settings + KG 存在探测 + rerank 配置
-    产出，供 ask_chunk 从「就地内联算 overlay_on / 三分支 / 就地读 self.settings.X」改为
-    「读 plan.X」——不改控制流形状，只把散落的**编排决策**收到一处、一次。
-
-    **只收编排层的「决策」**：strategy 由 overlay_on ∧ 子查询数算出；mmr/fuse knob。
-    刻意**不收**候选生成层的全局直读 flag（chunk_ann_enabled / chunk_bruteforce_max_chunks /
-    scale_search_include_delta / graph_ppr_enabled）——它们在所有上下文读同一个 settings 值、
-    非 per-query 决策，且 _retrieve_chunks 有多个非 ask_chunk 调用者（无此 plan），穿进去只会
-    造成同一 flag 两种读法长期并存，收益边际而风险落在有生产假死史的候选级联上。
-    也不收共享 flag（rrf / canonical_fold / relation_retrieval / top_n）——它们在共享
-    _retrieve_scored / graph 路径，收进来即改变 reasoning/graph 语义。
-    """
-    strategy: str            # "mix" | "multi" | "single"（复刻 overlay_on / 子查询数三分支）
-    overlay_on: bool         # chunk_kg_overlay_enabled ∧ rerank.configured ∧ (has_kg ∨ base_has_kg)
-    mmr_k: int               # chunk_mmr_k（single 分支 MMR）
-    mmr_lambda: float        # chunk_mmr_lambda（single 分支 MMR）
-    fuse_k: int              # == chunk_mmr_k（复刻 multi 分支 quota_fuse 复用同一 knob）
 
 
 class RepositoryFacade:

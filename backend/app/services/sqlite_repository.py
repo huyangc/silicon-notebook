@@ -7,6 +7,7 @@ from typing import Any, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
+from app.domain.repository import remap_json_ids as _remap_json_ids
 from app.core.request_context import (
     _REQUEST_USER,
     reset_request_user,
@@ -38,7 +39,6 @@ from app.services.repository_facade import (
     _now,
 )
 from app.services.retrieval import RetrievedKnowledge
-from app.services.sqlite_notebook_sharing import _remap_json_ids
 
 
 class SQLiteRepository(RepositoryFacade):

@@ -14,9 +14,14 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional, Sequence
 
+from app.domain.graph import (
+    ChainHop,
+    FollowChainResult,
+    InferredChain,
+    evidence_quote as _evidence_quote,
+)
 from app.services.kg.edge_schema import (
     EDGE_SPECS,
     TRANSITIVE_EDGE_TYPES as REGISTERED_TRANSITIVE_EDGE_TYPES,
@@ -56,102 +61,6 @@ _REVIEW_FACTOR = {"verified": 1.0, "pending": 0.9}
 _TIER_FACTOR = {"base": 1.0, "personal": 0.85}
 _CHAIN_HOP_PENALTY = 0.9
 _MIN_CHAIN_TRUST = 0.5
-
-
-@dataclass
-class ChainHop:
-    """One directly stored, evidence-bearing relation in a composed path."""
-
-    relation_id: str
-    notebook_id: str
-    tier: str
-    source_object_id: str
-    target_object_id: str
-    edge_type: str
-    source_name: str
-    target_name: str
-    evidence: list[dict] = field(default_factory=list)
-    review_status: str = "pending"
-    source_title: str = ""
-    trust: float = 0.0
-
-    @property
-    def primary_evidence(self) -> dict:
-        """First non-empty quoted evidence entry, or an empty mapping."""
-        for item in self.evidence:
-            if isinstance(item, dict) and _evidence_quote(item):
-                return item
-        return {}
-
-    @property
-    def quote(self) -> str:
-        return _evidence_quote(self.primary_evidence)
-
-    @property
-    def location_label(self) -> str:
-        ev = self.primary_evidence
-        return str(ev.get("location_label") or ev.get("section_path") or "").strip()
-
-    @property
-    def object_id(self) -> str:
-        """Evidence-classifier identity; matches relation AnswerAnchor.object_id."""
-        return self.relation_id
-
-@dataclass
-class InferredChain:
-    """A transient ``A -> C`` inference backed by two direct relation hops."""
-
-    source_object_id: str
-    via_object_id: str
-    target_object_id: str
-    source_name: str
-    via_name: str
-    target_name: str
-    inferred_edge_type: str
-    hops: tuple[ChainHop, ChainHop]
-    validity_scope: dict = field(default_factory=dict)
-    chain_trust: float = 0.0
-    notebook_id: str = ""
-    tier: str = "personal"
-    # Relevance of the *candidate that authorized this action*.  The repository
-    # cannot know query relevance, so the reasoning orchestrator sets it only
-    # after confirming start_object_id is in the current candidate pool.  It is
-    # deliberately separate from chain_trust (evidence/review/tier quality).
-    query_relevance: float = 0.0
-    # Records how the caller reached the path.  The path itself and both hops
-    # above always remain normalised to stored source -> target order.
-    search_direction: str = "out"
-
-    @property
-    def edge_type(self) -> str:
-        """Compatibility alias for consumers that call the inferred type ``edge_type``."""
-        return self.inferred_edge_type
-
-    @property
-    def intermediate_object_id(self) -> str:
-        return self.via_object_id
-
-    # Short aliases keep the orchestration/repository call sites readable while
-    # the explicit ``*_object_id`` fields document what the ids represent.
-    @property
-    def source_id(self) -> str:
-        return self.source_object_id
-
-    @property
-    def via_id(self) -> str:
-        return self.via_object_id
-
-    @property
-    def target_id(self) -> str:
-        return self.target_object_id
-
-
-@dataclass
-class FollowChainResult:
-    """Repository/service result shape used by the reasoning orchestrator."""
-
-    inferences: list[InferredChain] = field(default_factory=list)
-    nodes: list[dict] = field(default_factory=list)
 
 
 def _normalise_text(value: object) -> str:
@@ -196,12 +105,6 @@ def _decode_evidence(raw: object) -> list[dict]:
     if not isinstance(raw, list):
         return []
     return [dict(item) for item in raw if isinstance(item, Mapping)]
-
-
-def _evidence_quote(evidence: Mapping[str, object]) -> str:
-    # New relation rows use ``quote``.  ``quoted_span`` is accepted for older
-    # manually curated/test data, but a genuinely empty quote still fails.
-    return str(evidence.get("quote") or evidence.get("quoted_span") or "").strip()
 
 
 def _evidence_confidence(evidence: Sequence[Mapping[str, object]]) -> float:

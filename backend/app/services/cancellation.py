@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import threading
 import time
-from typing import Optional
+
+from app.domain.cancellation import CancelEvent
 
 
 class AskCancelled(Exception):
     """Raised when an in-flight Ask request is cancelled by the client."""
-
-
-CancelEvent = Optional[threading.Event]
 
 
 def raise_if_cancelled(cancel_event: CancelEvent) -> None:
