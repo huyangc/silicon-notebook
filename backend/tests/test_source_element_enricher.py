@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from app.domain.cancellation import CoreCancellation
 from app.domain.extensions import (
     ElementEnrichmentCallContext,
     ElementEnrichmentPatch,
@@ -39,6 +40,24 @@ class _Cancellation:
 
     def raise_if_cancelled(self) -> None:
         return None
+
+
+class _NativeCancelled(CoreCancellation):
+    pass
+
+
+class _MutableCancellation:
+    def __init__(self, state: bool = False, *, hostile_raiser: bool = False) -> None:
+        self.state = state
+        self.hostile_raiser = hostile_raiser
+
+    def is_set(self) -> bool:
+        return self.state
+
+    def raise_if_cancelled(self) -> None:
+        if self.hostile_raiser:
+            raise RuntimeError("private cancellation failure")
+        raise _NativeCancelled()
 
 
 class _Probe:
@@ -187,6 +206,17 @@ def test_element_enricher_rejects_unsafe_or_unbounded_owner_version(version):
         _runtime(_bundle("enrich.version", Enricher(), version=version))
 
 
+def test_element_enricher_accepts_owner_version_at_structural_boundary():
+    class Enricher:
+        def enrich(self, _context):
+            return _available()
+
+    runtime = _runtime(
+        _bundle("enrich.version_boundary", Enricher(), version="v" * 64)
+    )
+    assert runtime.element_enrichers.has_contributors is True
+
+
 def test_empty_registry_returns_before_context_clock_probe_or_event():
     runtime = _runtime()
 
@@ -219,6 +249,110 @@ def test_hostile_cancellation_and_connection_getters_fail_open():
         _call(cancellation=HostileCancellation())
     ) == ()
     assert host.enrich_application(_call(probe=HostileProbe())) == ()
+
+
+def test_hostile_cancellation_raiser_fails_open_but_native_cancel_propagates():
+    class Enricher:
+        def enrich(self, _context):
+            raise AssertionError("cancelled request reached plugin")
+
+    host = _runtime(_bundle("enrich.cancel", Enricher())).element_enrichers
+    assert host.enrich_application(
+        _call(cancellation=_MutableCancellation(True, hostile_raiser=True))
+    ) == ()
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(cancellation=_MutableCancellation(True))
+        )
+
+
+def test_cancellation_after_availability_starts_no_later_callback():
+    cancellation = _MutableCancellation()
+    calls = []
+
+    def cancel_in_availability(_context):
+        calls.append("first_availability")
+        cancellation.state = True
+        return Availability(AvailabilityStatus.UNAVAILABLE, "not_ready")
+
+    def later_availability(_context):
+        calls.append("later_availability")
+        return Availability.available()
+
+    class Enricher:
+        def enrich(self, _context):
+            calls.append("plugin")
+            return _available()
+
+    host = _runtime(
+        _bundle(
+            "a.cancel",
+            Enricher(),
+            availability=cancel_in_availability,
+        ),
+        _bundle(
+            "b.later",
+            Enricher(),
+            availability=later_availability,
+        ),
+    ).element_enrichers
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(_call(cancellation=cancellation))
+    assert calls == ["first_availability"]
+
+
+def test_cancellation_after_contributor_exception_starts_no_event_or_later_work():
+    cancellation = _MutableCancellation()
+    calls = []
+
+    class First:
+        def enrich(self, _context):
+            calls.append("first")
+            cancellation.state = True
+            raise RuntimeError("optional contributor failure")
+
+    class Later:
+        def enrich(self, _context):
+            calls.append("later")
+            return _available()
+
+    host = _runtime(
+        _bundle("a.first", First()), _bundle("b.later", Later())
+    ).element_enrichers
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(cancellation=cancellation),
+            event_sink=lambda _event: calls.append("event"),
+        )
+    assert calls == ["first"]
+
+
+def test_cancellation_set_by_event_sink_starts_no_later_contributor():
+    cancellation = _MutableCancellation()
+    calls = []
+
+    class First:
+        def enrich(self, _context):
+            calls.append("first")
+            return _available()
+
+    class Later:
+        def enrich(self, _context):
+            calls.append("later")
+            return _available()
+
+    def cancel_in_event(_event):
+        calls.append("event")
+        cancellation.state = True
+
+    host = _runtime(
+        _bundle("a.first", First()), _bundle("b.later", Later())
+    ).element_enrichers
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(cancellation=cancellation), event_sink=cancel_in_event
+        )
+    assert calls == ["first", "event"]
 
 
 def test_contributor_gets_one_immutable_batch_and_returns_namespaced_patch():

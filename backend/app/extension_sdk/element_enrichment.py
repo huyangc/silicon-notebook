@@ -62,7 +62,9 @@ class ElementEnricher(Protocol):
 
     ``PARTIAL`` and ``UNAVAILABLE`` cannot carry candidates at this point: core
     admission isolates contributors and never persists a partially validated
-    contribution.
+    contribution.  This point accepts stable plugin/contribution identifiers of
+    at most 128 characters and a safe manifest version of at most 64 characters;
+    the full persisted owner envelope counts against the metadata-byte budget.
     """
 
     def enrich(

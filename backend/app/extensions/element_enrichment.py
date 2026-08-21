@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+from app.domain.cancellation import CoreCancellation
 from app.domain.extensions import (
     ElementEnrichmentCallContext,
     ElementEnrichmentPatch,
@@ -77,7 +78,12 @@ def _raise_if_cancelled(token: object) -> None:
         raise _MalformedCancellation from exc
     if not callable(raiser):
         raise _MalformedCancellation
-    raiser()
+    try:
+        raiser()
+    except CoreCancellation:
+        raise
+    except Exception as exc:
+        raise _MalformedCancellation from exc
     raise _MalformedCancellation
 
 
@@ -199,9 +205,9 @@ class SourceElementEnricherHost:
             or not math.isfinite(call.deadline_monotonic)
         ):
             return ()
+        _raise_if_cancelled(call.cancellation)
         if not self._connection_clear(call.connection_probe):
             return ()
-        _raise_if_cancelled(call.cancellation)
         refs: list[ElementRef] = []
         views: list[ElementView] = []
         for expected, item in enumerate(call.elements, start=1):
@@ -244,6 +250,7 @@ class SourceElementEnricherHost:
         remaining = call.max_proposals
         remaining_bytes = call.max_metadata_bytes
         for registration in self._registrations:
+            _raise_if_cancelled(call.cancellation)
             if not self._connection_clear(call.connection_probe):
                 return ()
             if self._expired(call.deadline_monotonic):
@@ -257,6 +264,7 @@ class SourceElementEnricherHost:
                 )
             except Exception:
                 availability = None
+            _raise_if_cancelled(call.cancellation)
             if not self._connection_clear(call.connection_probe):
                 return ()
             if self._expired(call.deadline_monotonic):
@@ -274,6 +282,7 @@ class SourceElementEnricherHost:
             try:
                 result = registration.implementation.enrich(context)
             except Exception:
+                _raise_if_cancelled(call.cancellation)
                 self._emit(sink, registration, "failed", 0, started)
                 if not self._connection_clear(call.connection_probe):
                     return ()
