@@ -11,8 +11,6 @@ from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
-    ANSWER_EVIDENCE_LEVELS,
-    ASK_COMPLETION_MODES,
     AgentProfileAskCompletedPort,
     AnswerAuditSnapshot,
     AskCompletedObserverCallContext,
@@ -150,11 +148,13 @@ class AnswerAuditorHost:
         for frozen in self._auditors:
             contribution = frozen.registered.contribution
             contribution_id = contribution.declaration.id
+            plugin_id = frozen.registered.plugin_id
             started = _safe_clock(self._clock)
             if not _deadline_open(started, snapshot.deadline_monotonic):
                 _emit(
                     sink,
                     point=ANSWER_AUDITOR_POINT,
+                    plugin_id=plugin_id,
                     contribution_id=contribution_id,
                     status="unavailable",
                     reason_code="extension_point_budget_exhausted",
@@ -164,18 +164,28 @@ class AnswerAuditorHost:
             availability = self._registry.availability(
                 contribution_id, availability_context
             )
+            if not _connection_clear(connection_probe):
+                _emit(
+                    sink,
+                    point=ANSWER_AUDITOR_POINT,
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="connection_lease_held",
+                    duration_ms=_elapsed_ms(self._clock, started),
+                )
+                break
             if availability.status is not AvailabilityStatus.AVAILABLE:
                 _emit(
                     sink,
                     point=ANSWER_AUDITOR_POINT,
+                    plugin_id=plugin_id,
                     contribution_id=contribution_id,
                     status="unavailable",
                     reason_code=availability.reason_code,
                     duration_ms=_elapsed_ms(self._clock, started),
                 )
                 continue
-            if not _connection_clear(connection_probe):
-                break
             if not _deadline_open(_safe_clock(self._clock), snapshot.deadline_monotonic):
                 break
             try:
@@ -204,6 +214,7 @@ class AnswerAuditorHost:
             _emit(
                 sink,
                 point=ANSWER_AUDITOR_POINT,
+                plugin_id=plugin_id,
                 contribution_id=contribution_id,
                 status=status,
                 reason_code=(
@@ -285,6 +296,7 @@ class AskCompletedObserverHost:
         for frozen in self._observers:
             contribution = frozen.registered.contribution
             contribution_id = contribution.declaration.id
+            plugin_id = frozen.registered.plugin_id
             port = _observer_port(call_context, frozen.access_capability)
             availability_context = AskCompletedAvailabilityContext(
                 contribution_id,
@@ -297,6 +309,7 @@ class AskCompletedObserverHost:
                 _emit(
                     sink,
                     point=ASK_COMPLETED_OBSERVER_POINT,
+                    plugin_id=plugin_id,
                     contribution_id=contribution_id,
                     status="unavailable",
                     reason_code="extension_point_budget_exhausted",
@@ -306,28 +319,66 @@ class AskCompletedObserverHost:
             availability = self._registry.availability(
                 contribution_id, availability_context
             )
+            if not _connection_clear(call_context.connection_probe):
+                _emit(
+                    sink,
+                    point=ASK_COMPLETED_OBSERVER_POINT,
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="connection_lease_held",
+                    duration_ms=_elapsed_ms(self._clock, started),
+                )
+                break
             if availability.status is not AvailabilityStatus.AVAILABLE:
                 _emit(
                     sink,
                     point=ASK_COMPLETED_OBSERVER_POINT,
+                    plugin_id=plugin_id,
                     contribution_id=contribution_id,
                     status="unavailable",
                     reason_code=availability.reason_code,
                     duration_ms=_elapsed_ms(self._clock, started),
                 )
                 continue
-            if not _connection_clear(call_context.connection_probe):
-                break
             if not _deadline_open(
                 _safe_clock(self._clock), call_context.deadline_monotonic
             ):
                 break
             notify = _core_notify(port)
+            # Resolving a core port is still a boundary operation: a hostile or
+            # accidentally lazy property must not smuggle a newly-held lease or
+            # consume the remaining point budget before plugin execution.
+            if not _connection_clear(call_context.connection_probe):
+                _emit(
+                    sink,
+                    point=ASK_COMPLETED_OBSERVER_POINT,
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="connection_lease_held",
+                    duration_ms=_elapsed_ms(self._clock, started),
+                )
+                break
+            if not _deadline_open(
+                _safe_clock(self._clock), call_context.deadline_monotonic
+            ):
+                _emit(
+                    sink,
+                    point=ASK_COMPLETED_OBSERVER_POINT,
+                    plugin_id=plugin_id,
+                    contribution_id=contribution_id,
+                    status="unavailable",
+                    reason_code="extension_point_budget_exhausted",
+                    duration_ms=_elapsed_ms(self._clock, started),
+                )
+                break
             access, access_state = _core_access(notify)
             if frozen.access_capability is not None and access is None:
                 _emit(
                     sink,
                     point=ASK_COMPLETED_OBSERVER_POINT,
+                    plugin_id=plugin_id,
                     contribution_id=contribution_id,
                     status="unavailable",
                     reason_code="ask_completed_access_unavailable",
@@ -369,6 +420,7 @@ class AskCompletedObserverHost:
             _emit(
                 sink,
                 point=ASK_COMPLETED_OBSERVER_POINT,
+                plugin_id=plugin_id,
                 contribution_id=contribution_id,
                 status=(
                     receipt.status.value if valid else "invalid"
@@ -389,10 +441,10 @@ def _answer_view(snapshot: object) -> AnswerAuditView | None:
         return None
     if (
         type(snapshot.mode_id) is not str
-        or snapshot.mode_id not in ASK_COMPLETION_MODES
+        or not _STABLE_CODE.fullmatch(snapshot.mode_id)
         or type(snapshot.grounded) is not bool
         or type(snapshot.evidence_level) is not str
-        or snapshot.evidence_level not in ANSWER_EVIDENCE_LEVELS
+        or not _STABLE_CODE.fullmatch(snapshot.evidence_level)
     ):
         return None
     counts = (
@@ -420,7 +472,7 @@ def _valid_notification(value: object) -> bool:
         and type(value.notebook_id) is str
         and bool(value.notebook_id)
         and type(value.mode_id) is str
-        and value.mode_id in ASK_COMPLETION_MODES
+        and bool(_STABLE_CODE.fullmatch(value.mode_id))
     )
 
 
@@ -616,13 +668,21 @@ def _elapsed_ms(clock: Callable[[], float], started: float | None) -> int:
     ended = _safe_clock(clock)
     if ended is None:
         return 0
-    return max(0, int((ended - started) * 1000))
+    try:
+        delta = ended - started
+        milliseconds = delta * 1000
+        if not math.isfinite(delta) or not math.isfinite(milliseconds):
+            return 0
+        return max(0, int(milliseconds))
+    except (OverflowError, ValueError):
+        return 0
 
 
 def _emit(
     sink: Callable[[dict[str, object]], None] | None,
     *,
     point: str,
+    plugin_id: str,
     contribution_id: str,
     status: str,
     reason_code: str,
@@ -634,6 +694,7 @@ def _emit(
     event: dict[str, object] = {
         "kind": "ask_extension",
         "point": point,
+        "plugin_id": plugin_id,
         "contribution_id": contribution_id,
         "status": status,
         "duration_ms": duration_ms,

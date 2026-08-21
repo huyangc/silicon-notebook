@@ -173,8 +173,6 @@ ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY = (
 ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
     "ask:search_profile_completed_access"
 )
-ASK_COMPLETION_MODES = frozenset({"chunk", "graph", "reasoning"})
-ANSWER_EVIDENCE_LEVELS = frozenset({"grounded", "overview", "inferred"})
 
 
 @dataclass(frozen=True)

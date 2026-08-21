@@ -213,9 +213,12 @@ def test_auditor_failure_and_malformed_result_do_not_stop_later_auditors():
     assert calls == ["invalid", "raise", "valid"]
     assert all("secret" not in repr(event) for event in events)
     assert all(set(event) <= {
-        "kind", "point", "contribution_id", "status", "duration_ms",
+        "kind", "point", "plugin_id", "contribution_id", "status", "duration_ms",
         "count", "reason_code",
     } for event in events)
+    assert {event["plugin_id"] for event in events} == {
+        "audit.b_invalid", "audit.c_raise", "audit.d_valid",
+    }
 
 
 def test_auditor_findings_are_rejected_at_the_point_owned_budget():
@@ -441,6 +444,46 @@ def test_live_unavailable_and_connection_flip_skip_plugin_and_core_io():
     assert core_calls == []
 
 
+def test_unavailable_decision_cannot_leave_a_lease_for_later_observers():
+    touches = []
+    probe = _ConnectionProbe()
+
+    class Observer:
+        def observe(self, _context):
+            touches.append("plugin")
+            return ObserverReceipt(ExtensionResultStatus.AVAILABLE)
+
+    def decision(_context):
+        probe.held = True
+        return Availability(AvailabilityStatus.UNAVAILABLE, "temporarily_unavailable")
+
+    capability = ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY
+    runtime = build_extension_runtime(
+        (
+            _bundle(
+                "obs.availability_changes_connection",
+                ASK_COMPLETED_OBSERVER_POINT,
+                ContributionKind.OBSERVER,
+                Observer(),
+                requires=(capability,),
+            ),
+            _bundle(
+                "obs.later",
+                ASK_COMPLETED_OBSERVER_POINT,
+                ContributionKind.OBSERVER,
+                Observer(),
+            ),
+        ),
+        capability_decisions={capability: decision},
+    )
+
+    runtime.ask_completed_observers.observe_application(
+        replace(_call_context(touches), connection_probe=probe)
+    )
+
+    assert touches == []
+
+
 def test_unavailable_observer_does_not_resolve_the_core_notify_property():
     touches = []
 
@@ -477,6 +520,68 @@ def test_unavailable_observer_does_not_resolve_the_core_notify_property():
     assert touches == []
 
 
+def test_core_notify_resolution_cannot_cross_the_connection_boundary():
+    for raises in (False, True):
+        touches = []
+        probe = _ConnectionProbe()
+
+        class BoundaryChangingPort:
+            @property
+            def notify(self):
+                touches.append("getter")
+                probe.held = True
+                if raises:
+                    raise RuntimeError("private lazy port failure")
+                return lambda: touches.append("core")
+
+        class Observer:
+            def observe(self, _context):
+                touches.append("plugin")
+                return ObserverReceipt(ExtensionResultStatus.AVAILABLE)
+
+        class Later:
+            def observe(self, _context):
+                touches.append("later")
+                return ObserverReceipt(ExtensionResultStatus.AVAILABLE)
+
+        capability = ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY
+        events = []
+        runtime = build_extension_runtime(
+            (
+                _bundle(
+                    "obs.boundary_changing",
+                    ASK_COMPLETED_OBSERVER_POINT,
+                    ContributionKind.OBSERVER,
+                    Observer(),
+                    requires=(capability,),
+                ),
+                _bundle(
+                    "obs.later",
+                    ASK_COMPLETED_OBSERVER_POINT,
+                    ContributionKind.OBSERVER,
+                    Later(),
+                ),
+            ),
+            capability_decisions={
+                capability: lambda _context: Availability.available()
+            },
+            event_sink=events.append,
+        )
+        runtime.ask_completed_observers.observe_application(
+            AskCompletedObserverCallContext(
+                CompletedAskNotification("user-1", "notebook-1", "reasoning"),
+                BoundaryChangingPort(),
+                None,
+                None,
+                probe,
+                _deadline(),
+            )
+        )
+
+        assert touches == ["getter"]
+        assert events[-1]["reason_code"] == "connection_lease_held"
+
+
 def test_non_finite_clock_cannot_interrupt_later_observers():
     values = iter((0.0, float("nan"), 1.0, 2.0, 3.0, 4.0, 5.0))
     runtime = default_extension_runtime()
@@ -488,6 +593,32 @@ def test_non_finite_clock_cannot_interrupt_later_observers():
     finally:
         runtime.ask_completed_observers._clock = original
     assert calls == ["agent", "retrieval", "search"]
+
+
+def test_finite_clock_subtraction_overflow_cannot_interrupt_later_observers():
+    values = iter((
+        -1e308, 0.0, 0.0, 1e308,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    ))
+    runtime = default_extension_runtime()
+    original = runtime.ask_completed_observers._clock
+    calls = []
+    runtime.ask_completed_observers._clock = lambda: next(values)
+    try:
+        runtime.ask_completed_observers.observe_application(_call_context(calls))
+    finally:
+        runtime.ask_completed_observers._clock = original
+    assert calls == ["agent", "retrieval", "search"]
+
+
+def test_future_stable_mode_keeps_mode_agnostic_completion_observers_active():
+    calls = []
+    context = _call_context(calls, mode_id="future_mode")
+
+    default_extension_runtime().ask_completed_observers.observe_application(context)
+
+    assert calls == ["agent", "search"]
 
 
 def test_observer_point_budget_stops_before_starting_later_core_work():
