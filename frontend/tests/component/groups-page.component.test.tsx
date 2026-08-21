@@ -8,6 +8,8 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     ...actual,
     listGroups: vi.fn(),
     getGroup: vi.fn(),
+    getGroupInvite: vi.fn(),
+    createGroupInvite: vi.fn(),
     listGroupSharedNotebooks: vi.fn(),
     listGroupShareRequests: vi.fn(),
     listMyPendingShareRequests: vi.fn(),
@@ -18,7 +20,9 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
 });
 
 import {
+  createGroupInvite,
   getGroup,
+  getGroupInvite,
   listGroupShareRequests,
   listGroupSharedNotebooks,
   listGroups,
@@ -72,6 +76,7 @@ const NOTEBOOKS: NotebookSummary[] = [
 beforeEach(() => {
   vi.mocked(listGroups).mockResolvedValue([OWNER_DETAIL]);
   vi.mocked(getGroup).mockResolvedValue(OWNER_DETAIL);
+  vi.mocked(getGroupInvite).mockResolvedValue({ active: false, token: "", created_at: null });
   vi.mocked(listGroupSharedNotebooks).mockResolvedValue([
     { notebook_id: "nb-shared", name: "共享可靠性资料", owner_username: "carol", roles: ["viewer"] },
   ]);
@@ -137,6 +142,23 @@ test("owner 转让需要二次确认，新 owner 由服务端返回且旧 owner 
 
   await waitFor(() => expect(transferGroupOwner).toHaveBeenCalledWith("g1", "u2"));
   expect(await screen.findByText("群组所有权已转让，你仍是组管理员。")).toBeInTheDocument();
+});
+
+test("组管理员可在成员页生成邀请链接", async () => {
+  const user = userEvent.setup();
+  vi.mocked(createGroupInvite).mockResolvedValue({
+    active: true,
+    token: "gri_test-token",
+    created_at: "2026-08-21T00:00:00+00:00",
+  });
+  renderPage();
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+  await user.click(screen.getByRole("button", { name: "生成邀请链接" }));
+
+  await waitFor(() => expect(createGroupInvite).toHaveBeenCalledWith("g1"));
+  expect(screen.getByDisplayValue(/group_invite=gri_test-token/)).toBeInTheDocument();
 });
 
 test("普通成员仍可查看群组知识库，但不加载审批队列且设置中只能退出", async () => {

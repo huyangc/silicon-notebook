@@ -285,6 +285,80 @@ def test_unknown_group_role_is_rejected(tmp_path, monkeypatch):
     ).status_code == 422
 
 
+def test_group_invite_link_is_admin_managed_revocable_and_idempotent(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner, "邀请测试组")
+    visitor, visitor_id, _ = _new_user(client)
+    second, _second_id, _ = _new_user(client)
+
+    # A read-only state check has no side effect; non-admins cannot inspect or
+    # mint the bearer capability even when they know the group id.
+    empty = client.get(f"/api/groups/{group_id}/invite-link", headers=owner)
+    assert empty.status_code == 200
+    assert empty.json() == {"active": False, "token": "", "created_at": None}
+    assert client.post(
+        f"/api/groups/{group_id}/invite-link", headers=visitor
+    ).status_code == 404
+
+    issued = client.post(f"/api/groups/{group_id}/invite-link", headers=owner)
+    assert issued.status_code == 200
+    token = issued.json()["token"]
+    assert token.startswith("gri-")
+    # Ordinary POST is idempotent: reopening the workspace can copy the same
+    # link instead of silently invalidating one already sent to people.
+    assert client.post(
+        f"/api/groups/{group_id}/invite-link", headers=owner
+    ).json()["token"] == token
+
+    joined = client.post(f"/api/group-invites/{token}/join", headers=visitor)
+    assert joined.status_code == 200
+    assert joined.json()["id"] == group_id
+    assert joined.json()["my_role"] == "member"
+    assert {m["id"]: m["role"] for m in joined.json()["members"]}[visitor_id] == "member"
+    # Reusing the link preserves existing role and membership rather than
+    # inserting twice or rewriting the row.
+    again = client.post(f"/api/group-invites/{token}/join", headers=visitor)
+    assert again.status_code == 200
+    assert again.json()["member_count"] == 2
+
+    rotated = client.post(
+        f"/api/groups/{group_id}/invite-link/rotate", headers=owner
+    ).json()["token"]
+    assert rotated != token
+    assert client.post(f"/api/group-invites/{token}/join", headers=second).status_code == 404
+    assert client.post(f"/api/group-invites/{rotated}/join", headers=second).status_code == 200
+    assert client.get(f"/api/groups/{group_id}", headers=second).json()["my_role"] == "member"
+
+    assert client.delete(
+        f"/api/groups/{group_id}/invite-link", headers=owner
+    ).status_code == 204
+    third, _third_id, _ = _new_user(client)
+    assert client.post(f"/api/group-invites/{rotated}/join", headers=third).status_code == 404
+    assert client.get("/api/groups", headers=third).json() == []
+
+
+def test_group_invite_never_demotes_an_existing_admin(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    admin, admin_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{admin_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    token = client.post(
+        f"/api/groups/{group_id}/invite-link", headers=owner
+    ).json()["token"]
+    joined = client.post(f"/api/group-invites/{token}/join", headers=admin)
+    assert joined.status_code == 200
+    assert joined.json()["my_role"] == "admin"
+    assert {m["id"]: m["role"] for m in joined.json()["members"]}[admin_id] == "admin"
+
+
 def test_group_owner_must_transfer_before_leaving_and_old_owner_stays_admin(
     tmp_path, monkeypatch
 ):

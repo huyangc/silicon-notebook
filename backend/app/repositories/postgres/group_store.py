@@ -516,6 +516,122 @@ class GroupStore:
             )
         return True
 
+    # ---------------------------------------------------------- 邀请链接
+    def get_invite_state(
+        self,
+        group_id: str,
+        *,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> dict:
+        with self.database.write() as connection:
+            self._lock_group_on(connection, group_id)
+            if (
+                not actor_is_system_admin
+                and self._role_on(connection, group_id, actor_id) != "admin"
+            ):
+                raise GroupAdminRequiredError(group_id)
+            row = connection.execute(
+                "SELECT invite_token,invite_created_at FROM groups WHERE id=%s",
+                (group_id,),
+            ).fetchone()
+        token = row["invite_token"] or ""
+        return {
+            "active": bool(token),
+            "token": token,
+            "created_at": (
+                iso_timestamp(row["invite_created_at"]) or None
+            ) if token else None,
+        }
+
+    def issue_invite(
+        self,
+        group_id: str,
+        *,
+        token: str,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+        rotate: bool = False,
+    ) -> dict:
+        with self.database.write() as connection:
+            self._lock_group_on(connection, group_id)
+            if (
+                not actor_is_system_admin
+                and self._role_on(connection, group_id, actor_id) != "admin"
+            ):
+                raise GroupAdminRequiredError(group_id)
+            current = connection.execute(
+                "SELECT invite_token,invite_created_at FROM groups WHERE id=%s",
+                (group_id,),
+            ).fetchone()
+            chosen = (current["invite_token"] or "") if not rotate else ""
+            if chosen:
+                return {
+                    "active": True,
+                    "token": chosen,
+                    "created_at": iso_timestamp(current["invite_created_at"]) or None,
+                }
+            stamp = self.now()
+            connection.execute(
+                "UPDATE groups SET invite_token=%s,invite_created_at=%s,"
+                "invite_created_by=%s,updated_at=%s WHERE id=%s",
+                (token, stamp, actor_id, stamp, group_id),
+            )
+        return {
+            "active": True,
+            "token": token,
+            "created_at": iso_timestamp(stamp) or str(stamp),
+        }
+
+    def revoke_invite(
+        self,
+        group_id: str,
+        *,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> bool:
+        with self.database.write() as connection:
+            self._lock_group_on(connection, group_id)
+            if (
+                not actor_is_system_admin
+                and self._role_on(connection, group_id, actor_id) != "admin"
+            ):
+                raise GroupAdminRequiredError(group_id)
+            connection.execute(
+                "UPDATE groups SET invite_token=NULL,invite_created_at=NULL,"
+                "invite_created_by=NULL,updated_at=%s WHERE id=%s",
+                (self.now(), group_id),
+            )
+        return True
+
+    def join_by_invite(self, token: str, *, user_id: str) -> "dict | None":
+        """Lock the group row before inserting membership or observing revoke."""
+        with self.database.write() as connection:
+            row = connection.execute(
+                "SELECT * FROM groups WHERE invite_token=%s FOR UPDATE",
+                (token,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._role_on(connection, row["id"], user_id)
+            if current is None:
+                connection.execute(
+                    "INSERT INTO group_members "
+                    "(group_id,user_id,role,added_at,added_by) "
+                    "VALUES (%s,%s,'member',%s,%s)",
+                    (row["id"], user_id, self.now(), user_id),
+                )
+                current = "member"
+            member_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS c FROM group_members WHERE group_id=%s",
+                    (row["id"],),
+                ).fetchone()["c"]
+            )
+            return self._group_row(
+                row, my_role=current, member_count=member_count
+            )
+
     def find_user_by_username(self, username: str) -> "dict | None":
         return self._user_lookup(
             "SELECT id, username, display_name FROM users WHERE username=%s", username

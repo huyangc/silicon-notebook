@@ -29,8 +29,8 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 56. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v56 and remains readable. Those migrations
+The current schema version is 57. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v57 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -358,6 +358,17 @@ removed, or used for self-leave until transfer completes. This adds no table,
 index, foreign key, or unique surface, so the forward-shadow invariants remain
 82 business tables, 112 unique surfaces, and 12 row slots. The current pairing
 is SQLite 56 / PostgreSQL 34 / epoch 1.
+
+SQLite v57 / PostgreSQL v35 adds the group's reusable invitation capability on
+the aggregate root: nullable `invite_token`, `invite_created_at`, and
+`invite_created_by`, plus partial unique index `idx_groups_invite_token WHERE
+invite_token IS NOT NULL`. Keeping the token on `groups` lets an authorized
+administrator reopen and copy the same live link; rotating or revoking clears
+the previous authority atomically, and deleting the group removes it with the
+root row. The timestamp is SQL NULL or an ISO instant, never an empty string.
+No table or foreign key is added; the forward-shadow invariants are 82 business
+tables, 113 unique surfaces, and 12 row slots. The current pairing is SQLite 57
+/ PostgreSQL 35 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

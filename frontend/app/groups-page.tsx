@@ -5,6 +5,7 @@ import {
   BookOpen,
   ChevronRight,
   Inbox,
+  Link,
   Plus,
   Search,
   Settings,
@@ -14,13 +15,17 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { toUserMessage } from "./errors.ts";
+import { copyTextSafely } from "./copy-text.ts";
 import {
   approveShareRequest,
   createGroup,
+  createGroupInvite,
+  buildGroupInviteLink,
   creatableGroupKinds,
   deleteGroup,
   foldGroupShares,
   getGroup,
+  getGroupInvite,
   grantGroupAdminsManage,
   GROUP_INPUT_LIMITS,
   groupKindLabel,
@@ -36,14 +41,17 @@ import {
   putGroupMember,
   rejectShareRequest,
   removeGroupMember,
+  revokeGroupInvite,
   resolveUser,
   revokeGroupSharedNotebook,
   revokeNotebookGrant,
   shareNotebookToGroup,
+  rotateGroupInvite,
   transferGroupOwner,
   updateGroup,
   withdrawShareRequest,
   type GroupDetail,
+  type GroupInviteState,
   type GroupSharedNotebook,
   type GroupSummary,
   type GroupPageTab,
@@ -102,6 +110,7 @@ export function GroupsPage({
   const [detail, setDetail] = useState<GroupDetail | null>(null);
   const [shared, setShared] = useState<GroupSharedNotebook[] | null>(null);
   const [requests, setRequests] = useState<ShareRequest[] | null>(null);
+  const [invite, setInvite] = useState<GroupInviteState | null>(null);
   const [myRequests, setMyRequests] = useState<ShareRequest[]>([]);
   const [tab, setTab] = useState<GroupPageTab>(initialTab);
   const [busy, setBusy] = useState("");
@@ -138,6 +147,7 @@ export function GroupsPage({
     setNotice("");
     setShared(null);
     setRequests(null);
+    setInvite(null);
     setPickedNotebooks(new Set());
     setConfirming("");
     try {
@@ -147,19 +157,22 @@ export function GroupsPage({
       setRenameDraft(group.name);
       setDescriptionDraft(group.description);
       const manageable = isGroupAdmin(group) || isSystemAdmin;
-      const [inventory, queue] = await Promise.all([
+      const [inventory, queue, invitation] = await Promise.all([
         listGroupSharedNotebooks(groupId),
         manageable ? listGroupShareRequests(groupId) : Promise.resolve([]),
+        manageable ? getGroupInvite(groupId) : Promise.resolve(null),
       ]);
       if (epoch !== loadEpoch.current) return;
       setShared(inventory);
       setRequests(queue);
+      setInvite(invitation);
       if (nextTab) setTab(nextTab);
     } catch (err) {
       if (epoch === loadEpoch.current) {
         setDetail(null);
         setShared([]);
         setRequests([]);
+        setInvite(null);
         setError(toUserMessage(err, "群组详情加载失败"));
       }
     }
@@ -457,6 +470,22 @@ export function GroupsPage({
               {tab === "members" && (<>
                 <div className="group-page-section-head"><div><span className="eyebrow">MEMBERS</span><h3>成员与角色</h3>
                   <p>Owner 唯一且不可被降级或移出；管理员负责日常成员与知识库管理。</p></div></div>
+                {canManage && <section className="group-settings-card group-invite-card">
+                  <div className="group-invite-title"><span className="group-page-empty-icon"><Link size={20} /></span><div><h4>邀请链接</h4><p>拿到链接的登录用户会自动以普通成员身份加入。链接可重复使用，撤销或重新生成后旧链接立即失效。</p></div></div>
+                  {invite === null ? <p className="tool-hint">邀请链接加载中…</p> : invite.active ? <>
+                    <label>当前邀请链接<div className="group-invite-link"><input readOnly value={buildGroupInviteLink(invite.token, window.location.origin)} onFocus={(event) => event.currentTarget.select()} /><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run("copy-invite", async () => {
+                      const copied = await copyTextSafely(buildGroupInviteLink(invite.token, window.location.origin));
+                      setNotice(copied ? "邀请链接已复制。" : "复制失败，请手动选择链接。");
+                    }, "复制邀请链接失败"); }}>复制</button></div></label>
+                    {confirming === "rotate-invite" ? <div className="group-inline-confirm"><span>重新生成后，旧链接会立即失效。</span><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run("rotate-invite", async () => {
+                      setInvite(await rotateGroupInvite(detail.id)); setConfirming(""); setNotice("已重新生成邀请链接，旧链接已失效。");
+                    }, "重新生成邀请链接失败"); }}>确认重新生成</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div> : <div className="group-invite-actions"><button className="sort-button" disabled={Boolean(busy)} onClick={() => setConfirming("rotate-invite")}>重新生成</button><button className="sort-button danger-text" disabled={Boolean(busy)} onClick={() => { void run("revoke-invite", async () => {
+                      await revokeGroupInvite(detail.id); setInvite({ active: false, token: "", created_at: null }); setNotice("邀请链接已撤销。");
+                    }, "撤销邀请链接失败"); }}>撤销链接</button></div>}
+                  </> : <div className="group-invite-actions"><span className="tool-hint">当前没有生效中的邀请链接。</span><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run("create-invite", async () => {
+                    setInvite(await createGroupInvite(detail.id)); setNotice("邀请链接已生成。");
+                  }, "生成邀请链接失败"); }}>生成邀请链接</button></div>}
+                </section>}
                 <div className="group-member-list">{detail.members.map((member) => {
                   const owner = member.id === detail.owner_id;
                   return <div className="group-member-row" key={member.id}>

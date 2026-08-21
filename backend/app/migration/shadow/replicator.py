@@ -102,6 +102,10 @@ _UNIQUE_PREDICATES = {
         "status = 'running'",
         ("status", "=", "'running'"),
     ),
+    "idx_groups_invite_token": (
+        "invite_token IS NOT NULL",
+        ("invite_token", "is", "not", "null"),
+    ),
     "idx_memory_answer_once": (
         "source_answer_id IS NOT NULL",
         ("source_answer_id", "is", "not", "null"),

@@ -216,12 +216,16 @@ owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆�
 头像菜单里的「群组」打开集合层的独立页面，而不是弹窗。左侧选择群组，右侧按「知识库／
 成员／共享申请／设置」四个页签组织工作。每个成员只能查看并打开其当前组角色实际授予读权的
 Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与组管理员可把自己有管理权的 Notebook 加入本组、撤销本组可见性，并可选授予组管理员
-内容管理权。owner 转让与删除群组放在设置页的独立确认区。页面复用集合页的壳层、字体、控件、
+内容管理权。「成员」页还允许他们生成或重新打开一条可重复使用的邀请链接、复制、换新（原子
+作废旧链接）或撤销。链接里的 bearer token 会跨登录/注册门保留；认证完成后浏览器先从 URL
+历史中移除 token，服务端再原子地把调用者加入为普通成员。重复打开幂等，既有管理员不会被
+降级；未知、已撤销、已换新或群组已删除的 token 都返回相同的 404。链接不会自动过期，因此
+管理员必须把它当作 bearer 凭据，并在受邀范围变化时主动撤销或换新。owner 转让与删除群组放在设置页的独立确认区。页面复用集合页的壳层、字体、控件、
 间距、颜色与响应式断点，不引入另一套视觉系统；当前群组和页签可通过 URL hash 定位与返回。
 
 ### 端点面
 
-`group_routes.py` 里 22 个端点（含 P2 审批流 7 个），另加笔记本 router 上一个只读端点。
+`group_routes.py` 里 27 个端点（含 P2 审批流 7 个），另加笔记本 router 上一个只读端点。
 
 | 端点 | 谁可以调 | 说明 |
 | --- | --- | --- |
@@ -234,6 +238,9 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 | `PUT /groups/{id}/members/{user_id}` | 组管理员 | 加人与改角色同一个端点 |
 | `DELETE /groups/{id}/members/{user_id}` | 组管理员 | owner 必须先转让；移除最后一名管理员也返回 409 |
 | `DELETE /groups/{id}/membership` | 成员本人 | 自助退出；owner 必须先转让，最后一名管理员返回 409 |
+| `GET` / `POST` / `DELETE /groups/{id}/invite-link` | 组管理员（系统管理员恢复旁路） | 无副作用查看、创建/复用或撤销本组当前的 bearer 邀请链接 |
+| `POST /groups/{id}/invite-link/rotate` | 组管理员（系统管理员恢复旁路） | 原子换新 token，旧链接立即停止解析 |
+| `POST /group-invites/{token}/join` | 已登录 | 原子加入为 `member`；已有角色幂等保留；无效/已撤销/组已删除统一 404 |
 | `GET /users/resolve?username=` | 任何登录用户 | 按用户名**精确**查，只返回 id/用户名/显示名 |
 | `GET /notebooks/{id}/grants` | `notebook:manage` | 该库全部授权边，四类主体如实返回 |
 | `POST /notebooks/{id}/grants` | `notebook:manage` **且**目标组组管理员 | 只收 `group` / `group_admins` 两个主体 |
@@ -1675,7 +1682,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 可发布为公共知识库，personal = 默认用户笔记）；`base` notebook 只有在被其它笔记本显式挂载后才参与该笔记本的检索（`GET`/`PUT /api/notebooks/{id}/bases`，候选列表见 `GET /api/notebooks/{id}/mountable`）。
 - 参考库挂载：`GET /api/notebooks/{id}/bases` → `MountedBase[]`（本 notebook 的挂载边，含置灰的失效边）；`PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → 全量替换，返回更新后的 `MountedBase[]`（含不可挂载的 id 时 400；仅 owner 可写）；`GET /api/notebooks/{id}/mountable` → `MountableNotebook[]`（可挂候选：所有公共知识库、本 notebook 自己同 owner 的库，以及群组知识共享之后本 notebook owner 读得到的每一本库——受借入挂载的未共享门约束；每个候选带 `origin ∈ {base, mine, shared}`，供选择器如实分组）。
-- 群组与授权边：`POST`/`GET /api/groups`、`GET`/`PATCH`/`DELETE /api/groups/{id}`、`POST /api/groups/{id}/transfer`、`PUT`/`DELETE /api/groups/{id}/members/{user_id}`、`DELETE /api/groups/{id}/membership`、`GET /api/users/resolve?username=`、`GET`/`POST /api/notebooks/{id}/grants`、`DELETE /api/notebooks/{id}/grants/{grant_id}`、`GET`/`DELETE /api/groups/{id}/shared-notebooks[/{notebook_id}]`，另加只读的 `GET /api/notebooks/{id}/share`。角色、唯一 owner、可见性口径（404 而非 403）、创建授权边的双重条件、不对称撤销与已登记的上限全部见上文「群组工作台」章。
+- 群组与授权边：`POST`/`GET /api/groups`、`GET`/`PATCH`/`DELETE /api/groups/{id}`、`POST /api/groups/{id}/transfer`、`PUT`/`DELETE /api/groups/{id}/members/{user_id}`、`DELETE /api/groups/{id}/membership`、`GET`/`POST`/`DELETE /api/groups/{id}/invite-link`、`POST /api/groups/{id}/invite-link/rotate`、`POST /api/group-invites/{token}/join`、`GET /api/users/resolve?username=`、`GET`/`POST /api/notebooks/{id}/grants`、`DELETE /api/notebooks/{id}/grants/{grant_id}`、`GET`/`DELETE /api/groups/{id}/shared-notebooks[/{notebook_id}]`，另加只读的 `GET /api/notebooks/{id}/share`。角色、唯一 owner、邀请链接生命周期、可见性口径（404 而非 403）、创建授权边的双重条件、不对称撤销与已登记的上限全部见上文「群组工作台」章。
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
 - 深度报告（两阶段）：`POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`；先做不接触语料的问题理解，并停在 `status=intent_ready` 等人工确认，除非请求带 `auto_generate=true` 且问题清晰（无阻断性歧义）——此时意图同样通过同一份确定性冻结自动确认（不二次调用理解模型）后再进入规划。`GET .../reports/{rid}` 会返回持久化的 `understanding` 与状态/进度。`POST .../reports/{rid}/intent` body `{resolved_question, answers:[{id,answer}]}` 校验所有必填歧义，并原子认领进入语料规划的唯一转换，返回 `{status:"planning"}`；重复或过期确认返回 409 且不会启动第二个任务。规划完成后停在 `outline_ready`；若原始请求含 `auto_generate=true`，则意图阶段同样自动确认（仅当无阻断性歧义）之后自动进入生成。富 `outline` 含每节 `intent_ids`、`intent_questions`、可编辑 `sub_queries`、客观 `coverage`、视角/张力/充分性，详情继续包含 `content_md` 与实时 `section_status`。`PATCH .../reports/{rid}/outline` body `{sections}` 仅在 `outline_ready` 编辑草案；服务端保留 intent catalog，最多接受 `REPORT_MAX_SECTIONS` 节，每节最多接受 `REPORT_MAX_SUBQUERIES_PER_SECTION` 条非空检索方向。浏览器从 `/api/system/config` 同步这两项护栏并阻止超限提交；直接 API 客户端的章节或检索方向超限时收到 422，不再被静默截断。没有有效节或某个必答主题失去最后一个章节绑定时也返回 422。`POST .../reports/{rid}/generate` body `{depth?}` 可从 `outline_ready` 或仍保有大纲的 `failed` 报告原子启动**阶段2 生成**，其他状态返回 409；重试在认领事务内保留确认意图/大纲并清空旧生成产物。生成章节含后端重算的 `evidence_level`/`grounded`；引用可携带精确 `source_id`/`element_id`。另 `GET /reports`（列表）、`POST .../cancel`、`DELETE`、`POST .../reports/export` `{report_ids}` → `reports.zip`。节级并发采用上文报告专用的数据库保护护栏，不再复用 `KG_JOB_CONCURRENCY`。

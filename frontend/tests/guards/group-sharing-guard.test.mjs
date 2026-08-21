@@ -251,7 +251,16 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
 test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", () => {
   assert.deepEqual(
     importsFrom(page, "./group-api").map((item) => item.imported).sort(),
-    ["GroupPageTab", "grantedViaLabel", "groupsHash", "isGroupGranted", "parseGroupsHash", "partitionByGrant"],
+    [
+      "GroupPageTab",
+      "grantedViaLabel",
+      "groupsHash",
+      "isGroupGranted",
+      "joinGroupInvite",
+      "parseGroupInviteToken",
+      "parseGroupsHash",
+      "partitionByGrant",
+    ],
   );
   const lists = jsxElements(page, "NotebookList");
   assert.equal(lists.length, 2, "列表视图应当分成两段:自有/只读共享 与 群组");
@@ -260,6 +269,27 @@ test("笔记本列表有独立的「群组」分区,且那一区的角色列不�
   assert.ok(entries.includes("notebookPartition.group"));
   const groupList = lists.find((element) => element.bindings.entries === "notebookPartition.group");
   assert.equal(groupList.attributes.roleText, "群组成员");
+});
+
+test("邀请兑换成功后集合刷新失败也必须进入群组,不能误报兑换失败", () => {
+  const start = pageText.indexOf("joinGroupInvite(token)");
+  const end = pageText.indexOf("}, [authChecked, currentUser]", start);
+  assert.ok(start >= 0 && end > start, "缺邀请兑换 effect");
+  const redemption = pageText.slice(start, end);
+
+  assert.match(redemption, /\.then\(\(group\) => \{/);
+  assert.match(redemption, /setToast\(`已加入群组/);
+  assert.match(redemption, /showGroups\(\{ groupId: group\.id, tab: "members" \}, "replace"\)/);
+  assert.match(
+    redemption,
+    /void loadNotebookCollection\(\)\.catch\(\(\) => \{\}\)/,
+    "兑换后的集合刷新必须独立 fail-open，不能落入 joinGroupInvite 的失败提示",
+  );
+  assert.doesNotMatch(
+    redemption,
+    /await loadNotebookCollection\(\)/,
+    "集合刷新失败会冒泡到外层 catch，并把已成功入组误报为失败",
+  );
 });
 
 // P1-T2 规格评审登记的那条事实错误的标签:mountable 现在含别人 owner 的库,只按

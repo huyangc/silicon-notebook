@@ -3275,6 +3275,44 @@ class GroupStorePort(Protocol):
         self, group_id: str, user_id: str, *, role: str, added_by: str
     ) -> str: ...
     def remove_member(self, group_id: str, user_id: str) -> bool: ...
+    def get_invite_state(
+        self,
+        group_id: str,
+        *,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> dict: ...
+    def issue_invite(
+        self,
+        group_id: str,
+        *,
+        token: str,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+        rotate: bool = False,
+    ) -> dict:
+        """Issue/reuse a link under the group root lock.
+
+        The store rechecks that the actor is still a group admin in the same
+        transaction that publishes the bearer capability. ``rotate`` replaces
+        an existing token atomically; otherwise an existing token is reused.
+        """
+        ...
+    def revoke_invite(
+        self,
+        group_id: str,
+        *,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> bool: ...
+    def join_by_invite(self, token: str, *, user_id: str) -> "dict | None":
+        """Atomically resolve a live token and add ``user_id`` as a member.
+
+        Existing membership is preserved byte-for-byte, making repeated link
+        visits idempotent and preventing a link from demoting an administrator.
+        ``None`` deliberately conflates unknown, revoked, and deleted links.
+        """
+        ...
     def find_user_by_username(self, username: str) -> "dict | None": ...
     def find_user_by_id(self, user_id: str) -> "dict | None": ...
     def list_grants(self, notebook_id: str) -> list[dict]: ...

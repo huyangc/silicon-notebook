@@ -522,6 +522,117 @@ class GroupStore:
             )
         return True
 
+    # ---------------------------------------------------------- 邀请链接
+    def get_invite_state(
+        self,
+        group_id: str,
+        *,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> dict:
+        with self.database.write() as db:
+            self._require_group_on(db, group_id)
+            if (
+                not actor_is_system_admin
+                and self._role_on(db, group_id, actor_id) != "admin"
+            ):
+                raise GroupAdminRequiredError(group_id)
+            row = db.execute(
+                "SELECT invite_token,invite_created_at FROM groups WHERE id=?",
+                (group_id,),
+            ).fetchone()
+        token = row["invite_token"] or ""
+        return {
+            "active": bool(token),
+            "token": token,
+            "created_at": row["invite_created_at"] if token else None,
+        }
+
+    def issue_invite(
+        self,
+        group_id: str,
+        *,
+        token: str,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+        rotate: bool = False,
+    ) -> dict:
+        """Publish/reuse the capability under the same serialized group write."""
+        with self.database.write() as db:
+            self._require_group_on(db, group_id)
+            if (
+                not actor_is_system_admin
+                and self._role_on(db, group_id, actor_id) != "admin"
+            ):
+                raise GroupAdminRequiredError(group_id)
+            current = db.execute(
+                "SELECT invite_token,invite_created_at FROM groups WHERE id=?",
+                (group_id,),
+            ).fetchone()
+            chosen = (current["invite_token"] or "") if not rotate else ""
+            if chosen:
+                return {
+                    "active": True,
+                    "token": chosen,
+                    "created_at": current["invite_created_at"],
+                }
+            stamp = self.now()
+            db.execute(
+                "UPDATE groups SET invite_token=?,invite_created_at=?,"
+                "invite_created_by=?,updated_at=? WHERE id=?",
+                (token, stamp, actor_id, stamp, group_id),
+            )
+        return {"active": True, "token": token, "created_at": stamp}
+
+    def revoke_invite(
+        self,
+        group_id: str,
+        *,
+        actor_id: str,
+        actor_is_system_admin: bool = False,
+    ) -> bool:
+        with self.database.write() as db:
+            self._require_group_on(db, group_id)
+            if (
+                not actor_is_system_admin
+                and self._role_on(db, group_id, actor_id) != "admin"
+            ):
+                raise GroupAdminRequiredError(group_id)
+            db.execute(
+                "UPDATE groups SET invite_token=NULL,invite_created_at=NULL,"
+                "invite_created_by=NULL,updated_at=? WHERE id=?",
+                (self.now(), group_id),
+            )
+        return True
+
+    def join_by_invite(self, token: str, *, user_id: str) -> "dict | None":
+        """Resolve and join in one write so revocation cannot race the insert."""
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT * FROM groups WHERE invite_token=?",
+                (token,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._role_on(db, row["id"], user_id)
+            if current is None:
+                db.execute(
+                    "INSERT INTO group_members "
+                    "(group_id,user_id,role,added_at,added_by) "
+                    "VALUES (?,?,'member',?,?)",
+                    (row["id"], user_id, self.now(), user_id),
+                )
+                current = "member"
+            member_count = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM group_members WHERE group_id=?",
+                    (row["id"],),
+                ).fetchone()["c"]
+            )
+            return self._group_row(
+                row, my_role=current, member_count=member_count
+            )
+
     def find_user_by_username(self, username: str) -> "dict | None":
         """按用户名**精确**查一个用户。
 

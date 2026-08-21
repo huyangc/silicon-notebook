@@ -48,6 +48,7 @@ from app.api.deps import (
     require_notebook_capability,
     user_error,
 )
+from app.core.capability_tokens import new_capability_token
 from app.models.groups import (
     GRANT_ROLES,
     GRANTABLE_PRINCIPAL_TYPES,
@@ -58,6 +59,7 @@ from app.models.groups import (
     GrantCreate,
     GroupCreate,
     GroupDetail,
+    GroupInviteState,
     GroupMemberItem,
     GroupMemberRoleRequest,
     GroupOwnerTransferRequest,
@@ -265,6 +267,24 @@ def list_groups_route(
     return [GroupSummary(**g) for g in group_repository().list_groups_for_user(user.id)]
 
 
+# This static prefix must be registered before ``/groups/{group_id}``: an
+# invitation token is a bearer capability, not a group id and not a route that
+# requires pre-existing group visibility.
+@router.post("/group-invites/{token}/join", response_model=GroupDetail)
+def join_group_invite_route(
+    token: str, user: UserProfile = Depends(get_current_user)
+) -> GroupDetail:
+    """Join as a plain member. Unknown/revoked/deleted links share one 404."""
+    groups = group_repository()
+    joined = groups.join_by_invite(token, user_id=user.id)
+    if joined is None:
+        raise user_error(404, "群组邀请链接无效或已撤销")
+    return GroupDetail(
+        **joined,
+        members=[GroupMemberItem(**m) for m in groups.list_members(joined["id"])],
+    )
+
+
 # 静态段路由必须在 /users/{...} 形态之前;此处没有同前缀的动态路由,但保持与
 # notebook_routes 一致的写法顺序,免得日后新增 /users/{id} 时被静默抢匹配。
 @router.get("/users/resolve", response_model=UserRef)
@@ -387,6 +407,72 @@ def transfer_group_owner_route(
 
 
 # ------------------------------------------------------------------- 组成员
+
+
+@router.get("/groups/{group_id}/invite-link", response_model=GroupInviteState)
+def get_group_invite_route(
+    group_id: str, user: UserProfile = Depends(get_current_user)
+) -> GroupInviteState:
+    """Read the current link without creating one as a side effect."""
+    _require_group_admin(group_id, user)
+    try:
+        return GroupInviteState(**group_repository().get_invite_state(
+            group_id,
+            actor_id=user.id,
+            actor_is_system_admin=_is_system_admin(user),
+        ))
+    except (GroupNotFoundError, GroupAdminRequiredError):
+        raise _group_not_found()
+
+
+def _issue_group_invite(
+    group_id: str, user: UserProfile, *, rotate: bool
+) -> GroupInviteState:
+    _require_group_admin(group_id, user)
+    try:
+        state = group_repository().issue_invite(
+            group_id,
+            token=new_capability_token("gri"),
+            actor_id=user.id,
+            actor_is_system_admin=_is_system_admin(user),
+            rotate=rotate,
+        )
+    except (GroupNotFoundError, GroupAdminRequiredError):
+        # The group may have disappeared, or the actor may have been demoted,
+        # between the friendly preflight and the authoritative write lock.
+        raise _group_not_found()
+    return GroupInviteState(**state)
+
+
+@router.post("/groups/{group_id}/invite-link", response_model=GroupInviteState)
+def create_group_invite_route(
+    group_id: str, user: UserProfile = Depends(get_current_user)
+) -> GroupInviteState:
+    """Create the link once; repeated calls return the same live capability."""
+    return _issue_group_invite(group_id, user, rotate=False)
+
+
+@router.post("/groups/{group_id}/invite-link/rotate", response_model=GroupInviteState)
+def rotate_group_invite_route(
+    group_id: str, user: UserProfile = Depends(get_current_user)
+) -> GroupInviteState:
+    """Atomically replace the current link, invalidating the old token."""
+    return _issue_group_invite(group_id, user, rotate=True)
+
+
+@router.delete("/groups/{group_id}/invite-link", status_code=204)
+def revoke_group_invite_route(
+    group_id: str, user: UserProfile = Depends(get_current_user)
+) -> None:
+    _require_group_admin(group_id, user)
+    try:
+        group_repository().revoke_invite(
+            group_id,
+            actor_id=user.id,
+            actor_is_system_admin=_is_system_admin(user),
+        )
+    except (GroupNotFoundError, GroupAdminRequiredError):
+        raise _group_not_found()
 
 
 @router.put("/groups/{group_id}/members/{user_id}", response_model=GroupDetail)

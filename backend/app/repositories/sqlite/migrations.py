@@ -67,7 +67,10 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # yet.
 # v56 adds groups.owner_id. created_by remains immutable creation audit;
 # owner_id is the live, transferable authority and is backfilled from it.
-SCHEMA_VERSION = 56
+# v57 adds one revocable group invitation capability to each group. The token
+# is nullable (no active link), unique while present, and deleted with the
+# group because it lives on the aggregate root.
+SCHEMA_VERSION = 57
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3096,6 +3099,30 @@ class SqliteMigrator:
             )
             db.execute(
                 "UPDATE groups SET owner_id=created_by WHERE owner_id=''"
+            )
+
+    def _migration_57(self) -> None:
+        """Add one reusable, revocable invitation capability per group.
+
+        The raw token is intentionally stored on ``groups`` just like the
+        existing notebook/report/conversation share capabilities: authorized
+        admins must be able to reopen the workspace and copy the same live
+        link. ``NULL`` means no active link. The partial unique index keeps a
+        capability from ever resolving to two groups without making inactive
+        rows collide with each other.
+
+        ``invite_created_at`` is either SQL NULL or an ISO timestamp; never an
+        empty string, so PostgreSQL's paired ``timestamptz`` remains lossless.
+        ``invite_created_by`` is audit metadata, not an authorization pointer,
+        and therefore deliberately has no foreign key.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "groups", "invite_token", "TEXT")
+            self.add_column_if_missing(db, "groups", "invite_created_at", "TEXT")
+            self.add_column_if_missing(db, "groups", "invite_created_by", "TEXT")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_invite_token "
+                "ON groups(invite_token) WHERE invite_token IS NOT NULL"
             )
 
     def _recover_interrupted_jobs(self) -> None:

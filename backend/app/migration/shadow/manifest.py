@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=56, postgres_version=34, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=57, postgres_version=35, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -615,9 +615,11 @@ _TABLES = (
     # key (see migrations.py _migration_49) — so it is FK-consistent at any
     # rank above 15 and is placed last for reading order alongside its
     # sibling tables.
-    # SQLite v56 / PostgreSQL v34 adds groups.owner_id. It is plain identity
-    # text, joins no unique surface, and therefore needs no new transform or
-    # replication-key treatment here.
+    # SQLite v56 / PostgreSQL v34 adds groups.owner_id. SQLite v57 / PostgreSQL
+    # v35 then adds the nullable invite capability and its timestamp/audit
+    # columns. They stay on the existing aggregate row; the table's timestamp
+    # transform already covers invite_created_at and the replication key stays
+    # the declared group id.
     _table("groups", ("id",), ReplicationKeyKind.DECLARED_PK, 80, "timestamptz"),
     _table(
         "group_members",

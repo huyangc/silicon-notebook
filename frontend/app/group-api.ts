@@ -45,6 +45,12 @@ export type GroupSummary = {
 
 export type GroupDetail = GroupSummary & { members: GroupMember[] };
 
+export type GroupInviteState = {
+  active: boolean;
+  token: string;
+  created_at?: string | null;
+};
+
 /** 一条授权边的只读投影。`principal_kind === "missing"` 是孤儿边(组已不存在)。 */
 export type NotebookGrant = {
   id: string;
@@ -174,6 +180,25 @@ export const removeGroupMember = (groupId: string, userId: string): Promise<void
 /** 自助退出。唯一的组管理员退出会被后端 409 挡住,文案直接上屏。 */
 export const leaveGroup = (groupId: string): Promise<void> =>
   requestVoid(`/groups/${groupId}/membership`, { method: "DELETE", tag: TAG });
+
+export const getGroupInvite = (groupId: string): Promise<GroupInviteState> =>
+  requestJson(`/groups/${groupId}/invite-link`, { tag: TAG });
+
+export const createGroupInvite = (groupId: string): Promise<GroupInviteState> =>
+  requestJson(`/groups/${groupId}/invite-link`, { method: "POST", tag: TAG });
+
+export const rotateGroupInvite = (groupId: string): Promise<GroupInviteState> =>
+  requestJson(`/groups/${groupId}/invite-link/rotate`, { method: "POST", tag: TAG });
+
+export const revokeGroupInvite = (groupId: string): Promise<void> =>
+  requestVoid(`/groups/${groupId}/invite-link`, { method: "DELETE", tag: TAG });
+
+/** Redeem is intentionally outside the group-id namespace: the token itself is authority. */
+export const joinGroupInvite = (token: string): Promise<GroupDetail> =>
+  requestJson(`/group-invites/${encodeURIComponent(token)}/join`, {
+    method: "POST",
+    tag: TAG,
+  });
 
 /** 按用户名**精确**查人。查不到是 404,由错误层翻成后端写好的文案。 */
 export const resolveUser = (username: string): Promise<UserRef> =>
@@ -335,6 +360,14 @@ export const groupLengthHint = (value: string, max: number): string => {
 };
 
 // --- 纯 helper(单测) --------------------------------------------------------
+
+export const buildGroupInviteLink = (token: string, origin: string): string =>
+  `${origin}/?group_invite=${encodeURIComponent(token)}`;
+
+export const parseGroupInviteToken = (search: string): string | null => {
+  const value = new URLSearchParams((search ?? "").replace(/^\?/, "")).get("group_invite");
+  return value || null;
+};
 
 /** 群组分类的界面词。未知分类退成中性词,绝不把后端的英文 id 吐给用户。 */
 export const groupKindLabel = (kind: string): string => label(GROUP_KIND, kind, "群组");

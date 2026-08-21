@@ -104,6 +104,14 @@ class GroupDetail(GroupSummary):
     members: List[GroupMemberItem] = Field(default_factory=list)
 
 
+class GroupInviteState(BaseModel):
+    """Current reusable invitation capability, visible only to group admins."""
+
+    active: bool = False
+    token: str = ""
+    created_at: Optional[str] = None
+
+
 class GrantedGroupRef(BaseModel):
     """`NotebookSummary.granted_via` 的元素:这本笔记本是**经哪个群组**共享给我的。"""
 

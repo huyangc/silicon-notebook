@@ -10691,6 +10691,14 @@ select.group-input {
 .group-request-row > div { display: flex; gap: 7px; }
 .group-add-member { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 18px; }
 .group-add-member input { flex: 1; }
+.group-invite-card { background: #f8faff; }
+.group-invite-title { display: flex; align-items: flex-start; gap: 11px; }
+.group-invite-title > div { min-width: 0; display: grid; gap: 6px; }
+.group-invite-title p { margin: 0; }
+.group-invite-link { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.group-invite-link input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.group-invite-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.group-invite-actions .tool-hint { margin: 0 auto 0 0; }
 .group-inline-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--muted); font-size: 12px; }
 .group-my-requests { border-top: 1px solid var(--line); padding-top: 18px; }
 .group-my-requests h3 { margin: 0 0 2px; font-size: 15px; }
@@ -10729,4 +10737,6 @@ select.group-input {
   .group-page-section-head { align-items: flex-start; }
   .group-add-actions,
   .group-add-member { align-items: stretch; flex-direction: column; }
+  .group-invite-link { align-items: stretch; flex-direction: column; }
+  .group-invite-actions { align-items: stretch; flex-direction: column; }
 }
