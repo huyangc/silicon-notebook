@@ -132,7 +132,6 @@ class ContributionDeclaration:
     id: str
     point: str
     kind: ContributionKind
-    order: int = 0
 
 
 @dataclass(frozen=True)
@@ -143,8 +142,12 @@ class ExtensionManifest:
     display_name: str
     trust: Literal["builtin", "isolated"]
     contributions: tuple[ContributionDeclaration, ...]
+    # Capability requirements.  The Phase-1 capability catalog will validate
+    # that each named capability has a decision entry; these are not plugin ids.
     requires: tuple[str, ...] = ()
     optional_requires: tuple[str, ...] = ()
+    # Explicit plugin-to-plugin topology, kept separate from capabilities.
+    depends_on: tuple[str, ...] = ()
 
 
 AvailabilityProbe = Callable[[object | None], Availability]

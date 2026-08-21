@@ -231,16 +231,17 @@ class ExtensionManifest:
     contributions: tuple[str, ...]
     requires: tuple[str, ...]
     optional_requires: tuple[str, ...] = ()
+    depends_on: tuple[str, ...] = ()
 ```
 
-manifest 只声明能力和兼容性，不包含密钥、endpoint、文件路径或任意异常文本。
+`requires` / `optional_requires` 声明 capability，`depends_on` 才声明插件 ID；两者不得混用。manifest 只声明能力、插件拓扑和兼容性，不包含密钥、endpoint、文件路径或任意异常文本。
 
 启动时必须校验：
 
 - 插件 ID 和 contribution ID 唯一；
 - Extension API 版本兼容；
 - required capability 的**判定入口存在**（不校验此刻可用，见 §2.5）；
-- 插件依赖无环；
+- `depends_on` 指向已注册插件且插件依赖无环；
 - 一个 single-provider 扩展点没有多个同时生效的 provider；ProviderChain 的链序确定且无重复环节；
 - 配置 schema 可解析、数据库 schema 版本满足该插件声明的最低版本；
 - 后端启用的用户能力具有对应前端 contribution，反之亦然（Full-Stack Parity 的启动侧检查）。
@@ -966,4 +967,3 @@ frontend/tests/unit/terminology-evidence-logic.test.mjs
 - `agent.tool_provider` 正式开放时 `PUBLIC_TOOLS` 组合派生的具体实现与守卫改造；
 - 状态型插件模板表形状之外的形状是否值得开第二个模板；
 - Extension API 从 `experimental` 到 `stable` 的判据。
-

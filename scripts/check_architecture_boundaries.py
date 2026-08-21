@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import json
 from pathlib import Path
-from typing import Iterable
 
 
 FORBIDDEN_DOMAIN_PREFIXES = (
@@ -159,6 +157,46 @@ def boundary_violations(app_root: Path) -> list[str]:
     return violations
 
 
+def repository_service_import_counts(app_root: Path) -> dict[str, int]:
+    """Count existing adapter-to-service import statements by backend.
+
+    This is an intentional debt ceiling rather than a desired dependency: the
+    count may fall as ports are extracted, but any new reverse edge is rejected.
+    Counting statements (not imported symbols) keeps the baseline stable under
+    harmless changes to a multi-symbol import.
+    """
+
+    counts: dict[str, int] = {}
+    for backend in ("sqlite", "postgres"):
+        count = 0
+        for path in sorted((app_root / "repositories" / backend).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports_service = any(
+                        alias.name.startswith("app.services") for alias in node.names
+                    )
+                elif isinstance(node, ast.ImportFrom):
+                    imports_service = (node.module or "").startswith("app.services")
+                else:
+                    continue
+                if imports_service:
+                    count += 1
+        counts[backend] = count
+    return counts
+
+
+def repository_service_import_violations(
+    app_root: Path, ceilings: dict[str, int]
+) -> list[str]:
+    actual = repository_service_import_counts(app_root)
+    return [
+        f"repositories/{backend} service imports grew: {count} > {ceilings[backend]}"
+        for backend, count in sorted(actual.items())
+        if count > ceilings[backend]
+    ]
+
+
 def public_class_surface(path: Path, class_name: str) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     class_node = next(
@@ -187,8 +225,10 @@ def public_class_surface(path: Path, class_name: str) -> set[str]:
     return names
 
 
-def surface_digest(names: Iterable[str]) -> str:
-    return hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()
+def facade_surface_additions(
+    path: Path, class_name: str, allowed_names: set[str]
+) -> list[str]:
+    return sorted(public_class_surface(path, class_name) - allowed_names)
 
 
 def facade_violations(root: Path) -> list[str]:
@@ -200,19 +240,28 @@ def facade_violations(root: Path) -> list[str]:
     }
     violations: list[str] = []
     for class_name, path in targets.items():
-        names = public_class_surface(path, class_name)
-        expected = baseline["facade_public_surface"][class_name]
-        actual_digest = surface_digest(names)
-        if len(names) != expected["count"] or actual_digest != expected["sha256"]:
+        allowed = set(baseline["facade_public_surface"][class_name]["allowed_names"])
+        additions = facade_surface_additions(path, class_name, allowed)
+        if additions:
             violations.append(
-                f"{class_name} public surface changed: count={len(names)} sha256={actual_digest}"
+                f"{class_name} gained public facade seats: {', '.join(additions)}"
             )
     return violations
 
 
 def check(root: Path) -> list[str]:
     app_root = root / "backend/app"
+    baseline = json.loads(
+        (root / "scripts" / "architecture_boundary_baseline.json").read_text(
+            encoding="utf-8"
+        )
+    )
     violations = boundary_violations(app_root)
+    violations.extend(
+        repository_service_import_violations(
+            app_root, baseline["repository_service_import_ceiling"]
+        )
+    )
     components = strongly_connected_components(import_graph(app_root))
     violations.extend(f"static import SCC: {', '.join(item)}" for item in components)
     violations.extend(facade_violations(root))
@@ -230,7 +279,10 @@ def main() -> int:
         for violation in violations:
             print(f"architecture guard: {violation}")
         return 1
-    print("architecture guard: OK (0 SCCs; boundaries and facade frozen)")
+    print(
+        "architecture guard: OK "
+        "(0 SCCs; boundaries frozen; reverse imports capped; facade may only shrink)"
+    )
     return 0
 
 

@@ -156,12 +156,7 @@ class ExtensionRegistry:
                 raise ExtensionRegistryError(
                     f"extension point {point!r} has multiple single providers"
                 )
-            registrations.sort(
-                key=lambda item: (
-                    item.contribution.declaration.order,
-                    item.contribution.declaration.id,
-                )
-            )
+            registrations.sort(key=lambda item: item.contribution.declaration.id)
         self._manifests = MappingProxyType(dict(self._manifests))  # type: ignore[assignment]
         self._contributions = MappingProxyType(  # type: ignore[assignment]
             dict(self._contributions)
@@ -176,12 +171,12 @@ class ExtensionRegistry:
         known = set(self._manifests)
         graph: dict[str, set[str]] = {}
         for plugin_id, manifest in self._manifests.items():
-            missing = set(manifest.requires) - known
+            missing = set(manifest.depends_on) - known
             if missing:
                 raise ExtensionRegistryError(
-                    f"extension {plugin_id!r} requires unknown extensions {sorted(missing)!r}"
+                    f"extension {plugin_id!r} depends on unknown extensions {sorted(missing)!r}"
                 )
-            graph[plugin_id] = set(manifest.requires)
+            graph[plugin_id] = set(manifest.depends_on)
 
         visiting: set[str] = set()
         visited: set[str] = set()

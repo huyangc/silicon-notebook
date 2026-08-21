@@ -40,6 +40,7 @@ def _manifest(
     plugin_id: str,
     *declarations: ContributionDeclaration,
     requires: tuple[str, ...] = (),
+    depends_on: tuple[str, ...] = (),
 ) -> ExtensionManifest:
     return ExtensionManifest(
         id=plugin_id,
@@ -49,6 +50,7 @@ def _manifest(
         trust="builtin",
         contributions=tuple(declarations),
         requires=requires,
+        depends_on=depends_on,
     )
 
 
@@ -86,7 +88,7 @@ def test_topology_is_frozen_but_availability_is_resolved_live():
     assert registry.availability("probe").status is AvailabilityStatus.AVAILABLE
 
 
-def test_single_provider_conflict_is_rejected_but_chain_is_ordered():
+def test_single_provider_conflict_is_rejected_but_chain_has_stable_id_order():
     provider_a = ContributionDeclaration(
         "provider-a", "export", ContributionKind.PROVIDER
     )
@@ -101,12 +103,8 @@ def test_single_provider_conflict_is_rejected_but_chain_is_ordered():
             )
         )
 
-    late = ContributionDeclaration(
-        "late", "parser", ContributionKind.PROVIDER_CHAIN, order=20
-    )
-    early = ContributionDeclaration(
-        "early", "parser", ContributionKind.PROVIDER_CHAIN, order=10
-    )
+    late = ContributionDeclaration("late", "parser", ContributionKind.PROVIDER_CHAIN)
+    early = ContributionDeclaration("early", "parser", ContributionKind.PROVIDER_CHAIN)
     registry = build_extension_registry(
         (
             _Bundle(_manifest("late-plugin", late), (object(),)),
@@ -121,10 +119,18 @@ def test_single_provider_conflict_is_rejected_but_chain_is_ordered():
 
 def test_unknown_dependencies_and_dependency_cycles_fail_at_startup():
     with pytest.raises(ExtensionRegistryError, match="unknown"):
-        build_extension_registry((_Bundle(_manifest("a", requires=("missing",))),))
+        build_extension_registry((_Bundle(_manifest("a", depends_on=("missing",))),))
 
     registry = ExtensionRegistry()
-    registry.register(_Bundle(_manifest("a", requires=("b",))))
-    registry.register(_Bundle(_manifest("b", requires=("a",))))
+    registry.register(_Bundle(_manifest("a", depends_on=("b",))))
+    registry.register(_Bundle(_manifest("b", depends_on=("a",))))
     with pytest.raises(ExtensionRegistryError, match="cycle"):
         registry.freeze()
+
+
+def test_capability_requirements_are_not_treated_as_plugin_dependencies():
+    registry = build_extension_registry(
+        (_Bundle(_manifest("a", requires=("model:scheduled_access",))),)
+    )
+
+    assert registry.manifests()[0].requires == ("model:scheduled_access",)

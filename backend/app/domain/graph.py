@@ -28,6 +28,7 @@ class ChainHop:
 
     @property
     def primary_evidence(self) -> dict:
+        """First non-empty quoted evidence entry, or an empty mapping."""
         for item in self.evidence:
             if isinstance(item, dict) and evidence_quote(item):
                 return item
@@ -44,12 +45,13 @@ class ChainHop:
 
     @property
     def object_id(self) -> str:
+        """Evidence-classifier identity matching relation AnswerAnchor ids."""
         return self.relation_id
 
 
 @dataclass
 class InferredChain:
-    """A transient inference backed by two direct relation hops."""
+    """A transient ``A -> C`` inference backed by two direct relation hops."""
 
     source_object_id: str
     via_object_id: str
@@ -63,17 +65,26 @@ class InferredChain:
     chain_trust: float = 0.0
     notebook_id: str = ""
     tier: str = "personal"
+    # Relevance of the candidate that authorized this action. The repository
+    # cannot know query relevance, so orchestration sets it only after verifying
+    # that the start object is in the current candidate pool. It is deliberately
+    # separate from chain_trust (evidence/review/tier quality).
     query_relevance: float = 0.0
+    # How the caller reached the path. The path and both hops remain normalized
+    # to stored source -> target order.
     search_direction: str = "out"
 
     @property
     def edge_type(self) -> str:
+        """Compatibility alias for consumers naming the inferred type edge_type."""
         return self.inferred_edge_type
 
     @property
     def intermediate_object_id(self) -> str:
         return self.via_object_id
 
+    # Short aliases keep call sites readable while the explicit fields document
+    # that all three values are object ids.
     @property
     def source_id(self) -> str:
         return self.source_object_id
@@ -93,4 +104,3 @@ class FollowChainResult:
 
     inferences: list[InferredChain] = field(default_factory=list)
     nodes: list[dict] = field(default_factory=list)
-
