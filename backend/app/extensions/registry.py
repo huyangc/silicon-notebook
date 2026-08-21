@@ -11,6 +11,7 @@ from app.extension_sdk import (
     EXTENSION_API_VERSION,
     Availability,
     AvailabilityStatus,
+    ContributionDeclaration,
     ContributionKind,
     ExtensionBundle,
     ExtensionContribution,
@@ -113,7 +114,19 @@ class ExtensionRegistry:
             )
         if manifest.id in self._manifests:
             raise ExtensionRegistryError(f"duplicate extension id {manifest.id!r}")
-        declaration_ids = [item.id for item in manifest.contributions]
+        declaration_ids: list[str] = []
+        for declaration in manifest.contributions:
+            if (
+                type(declaration) is not ContributionDeclaration
+                or type(declaration.id) is not str
+                or not _STABLE_METADATA_ID.fullmatch(declaration.id)
+                or type(declaration.point) is not str
+                or not _STABLE_METADATA_ID.fullmatch(declaration.point)
+            ):
+                raise ExtensionRegistryError(
+                    "contribution id and point must be stable metadata identifiers"
+                )
+            declaration_ids.append(declaration.id)
         if len(declaration_ids) != len(set(declaration_ids)):
             raise ExtensionRegistryError(
                 f"extension {manifest.id!r} declares duplicate contribution ids"
@@ -146,19 +159,20 @@ class ExtensionRegistry:
         if self._frozen:
             raise ExtensionRegistryError("extension registry is frozen")
         declaration = contribution.declaration
-        declared = {item.id: item for item in manifest.contributions}
-        if declared.get(declaration.id) != declaration:
-            raise ExtensionRegistryError(
-                f"contribution {declaration.id!r} differs from its manifest declaration"
-            )
         if (
-            type(declaration.id) is not str
+            type(declaration) is not ContributionDeclaration
+            or type(declaration.id) is not str
             or not _STABLE_METADATA_ID.fullmatch(declaration.id)
             or type(declaration.point) is not str
             or not _STABLE_METADATA_ID.fullmatch(declaration.point)
         ):
             raise ExtensionRegistryError(
                 "contribution id and point must be stable metadata identifiers"
+            )
+        declared = {item.id: item for item in manifest.contributions}
+        if declared.get(declaration.id) != declaration:
+            raise ExtensionRegistryError(
+                f"contribution {declaration.id!r} differs from its manifest declaration"
             )
         if declaration.id in self._contributions:
             raise ExtensionRegistryError(

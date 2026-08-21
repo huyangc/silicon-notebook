@@ -494,6 +494,26 @@ def test_cancellation_from_context_factory_is_not_mapped_to_invalid_context():
     assert contributor.calls == 0
 
 
+def test_cancellation_after_context_factory_precedes_context_validation():
+    cancellation = _Cancellation()
+    contributor = _Contributor(_result(_candidate("new")))
+    runtime = build_extension_runtime((_bundle("cancel_invalid_context", contributor),))
+
+    def context_factory():
+        cancellation.cancelled = True
+        return object()
+
+    with pytest.raises(_CoreCancelled):
+        runtime.retrieval_contributors.run(
+            ["base"],
+            invocation="selected_evidence",
+            context_factory=context_factory,
+            baseline_identity=str,
+            cancellation=cancellation,
+        )
+    assert contributor.calls == 0
+
+
 def test_cancellation_from_connection_probe_is_not_mapped_to_blocked():
     cancellation = _Cancellation()
     contributor = _Contributor(_result(_candidate("new")))
@@ -1043,3 +1063,30 @@ def test_registry_rejects_non_string_id_and_event_has_defense_in_depth():
     runtime.retrieval_contributors._emit(content_id, outcome="failed")
     assert events[0]["contribution_id"] == "invalid_contribution"
     assert "SECRET" not in repr(events[0])
+
+
+def test_registry_validates_declaration_ids_before_hashing_them():
+    class HostileString(str):
+        def __hash__(self):
+            raise RuntimeError("SECRET_HASH")
+
+    hostile_id = HostileString("hostile")
+    declaration = ContributionDeclaration(
+        hostile_id,
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        ContributionKind.CONTRIBUTOR,
+    )
+    bundle = _Bundle(
+        ExtensionManifest(
+            id="plugin-hostile",
+            version="1.0.0",
+            api_version=EXTENSION_API_VERSION,
+            display_name="hostile",
+            trust="builtin",
+            contributions=(declaration,),
+        ),
+        _Contributor(_result()),
+    )
+
+    with pytest.raises(ExtensionRegistryError, match="stable metadata"):
+        build_extension_runtime((bundle,))

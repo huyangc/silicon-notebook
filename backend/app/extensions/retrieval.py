@@ -189,6 +189,9 @@ class RetrievalContributorHost:
                     event_sink=event_sink,
                 )
             return baseline
+        if cancellation is not None:
+            self._raise_if_token_cancelled(cancellation)
+
         def emit(contribution_id, **kwargs):
             self._emit(
                 contribution_id,
@@ -207,6 +210,7 @@ class RetrievalContributorHost:
                     failure_code="retrieval_invocation_mismatch",
                 )
             return baseline
+        self._raise_if_core_cancelled(context)
         if baseline_identity is None:
             for registration in available:
                 emit(
@@ -216,7 +220,6 @@ class RetrievalContributorHost:
                 )
             return baseline
 
-        self._raise_if_core_cancelled(context)
         try:
             connection_held = context.connection.is_connection_held()
         except Exception:
