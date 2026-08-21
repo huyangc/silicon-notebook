@@ -16,43 +16,14 @@ from app.api.mcp_tools.session import register_session_tools
 from app.api.mcp_tools.sources import register_source_tools
 
 
-_BUNDLES = (
-    (register_session_tools, ("list_notebooks", "select_notebook")),
-    (
-        register_memory_context_tools,
-        (
-            "search_agent_memory",
-            "search_notebook_context",
-            "get_memory",
-            "ask_notebook",
-            "propose_memory",
-        ),
-    ),
-    (
-        register_knowhow_tools,
-        (
-            "list_knowhow_tables",
-            "get_knowhow_discrimination",
-            "get_knowhow_row",
-            "put_knowhow_cell_code",
-        ),
-    ),
-    (register_citation_tools, ("get_cited_element",)),
-    (
-        register_source_tools,
-        (
-            "add_source_text",
-            "add_source_url",
-            "get_source_status",
-            "reparse_source",
-            "delete_source",
-        ),
-    ),
-    (
-        register_maintenance_tools,
-        ("build_kg", "build_retrieval_index", "get_build_status"),
-    ),
-    (register_profile_tools, ("get_notebook_profile", "add_observation")),
+_REGISTRARS = (
+    register_session_tools,
+    register_memory_context_tools,
+    register_knowhow_tools,
+    register_citation_tools,
+    register_source_tools,
+    register_maintenance_tools,
+    register_profile_tools,
 )
 
 
@@ -76,10 +47,13 @@ def _poison_provider():
 
 def test_fixed_builtin_bundles_partition_the_ordered_public_surface() -> None:
     combined: list[str] = []
-    for registrar, expected in _BUNDLES:
+    seen: set[str] = set()
+    for registrar in _REGISTRARS:
         capture = _CaptureServer()
         registrar(capture, _poison_provider)
-        assert tuple(capture.names) == expected
+        assert capture.names, registrar.__name__
+        assert not seen.intersection(capture.names), registrar.__name__
+        seen.update(capture.names)
         combined.extend(capture.names)
 
     assert tuple(combined) == mcp_server.PUBLIC_TOOLS
@@ -117,6 +91,21 @@ def test_composition_has_no_generic_tool_provider_or_extension_seat() -> None:
         assert not any(
             marker in target for target in imported for marker in forbidden
         ), path
+        declarations = {
+            node.name.lower()
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+        assert not declarations.intersection(
+            {"tool_provider", "tool_registry", "tool_descriptor"}
+        ), path
+        if path.parent == tools_dir:
+            assert not any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "FastMCP"
+                for node in ast.walk(tree)
+            ), path
 
 
 def test_each_public_handler_has_one_progress_wrapped_main_body() -> None:

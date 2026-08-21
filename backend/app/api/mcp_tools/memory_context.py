@@ -27,7 +27,11 @@ from ._shared import (
 )
 
 
+# Citations have no per-item cap of their own. Pre-fitting them keeps the shared
+# output-budget convergence loop from halving the answer text first under a
+# realistic CJK citation payload.
 CITATIONS_BUDGET_CHARS = 1_800
+# Mirrors AskIntentPreviewRequest.conversation_id.
 CONVERSATION_ID_MAX_LENGTH = 200
 
 

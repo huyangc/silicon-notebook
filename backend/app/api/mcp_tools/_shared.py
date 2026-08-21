@@ -37,47 +37,6 @@ OUTPUT_KEY_LIMIT = 120
 OUTPUT_MAPPING_LIMIT = 20
 OUTPUT_DEPTH_LIMIT = 5
 OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
-# citations has no per-item cap on its own (unlike anchors, which the answer's
-# [k] markers bound to RESULT_LIMIT distinct keys); a chunk-mode answer can
-# carry one citation per retrieved chunk (chunk_mmr_k defaults to 16). Without
-# a dedicated sub-budget, the shared _budget_response convergence loop treats
-# "answer" as just another string to keep halving — and being pure-CJK text,
-# TOTAL_TEXT_LIMIT (UTF-8 bytes) makes it the loop's preferred victim long
-# before citations is even touched. Pre-fitting citations to this char budget
-# (tuned against realistic CJK payloads; see
-# test_ask_notebook_preserves_answer_text_under_realistic_citation_load)
-# keeps the answer text itself out of that loop's reach in the common case.
-CITATIONS_BUDGET_CHARS = 1_800
-CONVERSATION_ID_MAX_LENGTH = 200  # mirrors AskIntentPreviewRequest.conversation_id
-# add_source_text's title. Deliberately NOT MEMORY_TITLE_MAX_CHARS (80): this
-# names a DOCUMENT. The full value is stored in `sources.title`; only the
-# DERIVED file name below is shortened, so nothing the user typed is lost.
-SOURCE_TITLE_MAX_CHARS = 200
-# Byte budget for the file-name stem, DERIVED from the name actually written to
-# disk rather than guessed. `SourceFileStore.write_upload` stores
-#     f"{source_id}_{safe_filename(file_name)}"
-# and `source_id` is `_new_id("src")` = "src-" + uuid4().hex, i.e. 4 + 32 = 36
-# ASCII bytes, plus the "_" separator and this module's ".md" suffix:
-#     255 - (4 + 32 + 1) - len(".md") = 215
-# 200 keeps a margin under that. The limit is 255 BYTES per path component on
-# ext4/XFS/NTFS, so the budget is spent in UTF-8 bytes, not characters — a
-# 200-character CJK title is 600 bytes. Getting this wrong is a Linux-only
-# production failure that cannot reproduce on a dev Mac: APFS/HFS+ count 255
-# UTF-16 units instead, so an over-long name writes fine here and raises
-# `OSError: File name too long` there — after the row has been named, with the
-# storage absolute path inside the error text.
-# `stored_upload_name` now enforces the 255-byte bound inside the store itself
-# (browser uploads hand it raw client names, which reach 255 bytes on their
-# own), so this pre-clamp is no longer the only line of defense. It stays
-# because the derived name ALSO becomes `sources.file_name`, which the store's
-# disk-only clamp never touches.
-SOURCE_FILE_NAME_MAX_BYTES = 200
-# reparse_source's bounded wait on the per-source parse lock. Effectively a
-# non-blocking probe: that lock is held by process_source from replace_elements
-# through build_chunks, with two LLM calls in between, so a parse that is
-# genuinely in flight will still be in flight a second from now. Waiting longer
-# buys the caller nothing but latency on the way to the same refusal.
-SOURCE_BUSY_PROBE_SECONDS = 0.5
 # Heartbeat interval for the MCP progress notifications emitted while a tool's
 # blocking body runs. See `_run_with_progress` for why they exist at all; the
 # value only has to be comfortably under the SHORTEST idle timeout any client

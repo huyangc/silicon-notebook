@@ -28,8 +28,13 @@ from ._shared import (
 )
 
 
+# This names a document rather than a Memory item. The full title is stored;
+# only the derived file name below is shortened.
 SOURCE_TITLE_MAX_CHARS = 200
+# Keep ``{source_id}_{name}.md`` within a 255-byte path component on Linux. The
+# budget is UTF-8 bytes, not characters, and applies only to the derived name.
 SOURCE_FILE_NAME_MAX_BYTES = 200
+# This is a bounded probe of the per-source parse lock, not a parse timeout.
 SOURCE_BUSY_PROBE_SECONDS = 0.5
 
 
