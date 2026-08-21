@@ -164,13 +164,15 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-06：Ask reasoning/retrieval stage DTO
 
-状态：实现中；已建立 prepare → retrieval evidence → response draft → committed answer 的不可变应用合同，正在完成双路 review 与 CI。
+状态：已完成并合入；prepare → retrieval evidence → response draft → committed answer 的不可变应用合同、权威绑定与双路 review/CI 均已闭合。
 
 - 先拆 `reasoning_retrieval.run` / `ask_reasoning` 的不可变 stage input/output；
 - 显式标注 scope、retrieval run、leaf slot、连接持有区间、取消点；
 - 纯重构，回答、引用、trace、持久化和终态顺序不变。
 
 #### PR-07：Ask auditors/observers
+
+状态：实现中；已建立独立 auditor/observer host，并将三条既有 completion 后处理迁成最小身份的内建 observer，正在完成回归、双路 review 与 CI。
 
 - 建立 answer auditor 和 completed observer host；
 - 把现有 Ask completion 后处理迁成内建 observers；

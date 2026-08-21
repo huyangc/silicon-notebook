@@ -140,6 +140,21 @@ class Settings(BaseSettings):
         16384,
         validation_alias="ANSWER_MAX_TOKENS",
     )
+    # Post-terminal extension work is cooperative and synchronous: a callback
+    # already inside core I/O may finish, but the host starts no later
+    # contribution after this point-owned wall-clock budget is exhausted.
+    ask_post_completion_extension_timeout_seconds: float = Field(
+        30.0,
+        gt=0,
+        le=300,
+        validation_alias="ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS",
+    )
+    answer_audit_max_findings: int = Field(
+        32,
+        ge=1,
+        le=256,
+        validation_alias="ANSWER_AUDIT_MAX_FINDINGS",
+    )
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(

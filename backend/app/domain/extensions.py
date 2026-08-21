@@ -159,3 +159,89 @@ class ParserProviderChainHostPort(Protocol):
         *,
         call: ParserProviderChainCallPort,
     ) -> ParsedSource: ...
+
+
+# Ask post-completion contracts deliberately live below the SDK/runtime.  The
+# durable workflow can therefore invoke a frozen host without importing the
+# extension registry, and plugins never receive repository/service objects.
+ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
+    "ask:agent_profile_completed_access"
+)
+ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY = (
+    "ask:retrieval_experience_completed_access"
+)
+ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
+    "ask:search_profile_completed_access"
+)
+
+
+@dataclass(frozen=True)
+class AnswerAuditSnapshot:
+    """Content-free, immutable facts about an already persisted answer.
+
+    PR-07 intentionally exposes no answer/question/evidence text.  A future
+    content auditor needs a separate privacy and full-stack delivery review;
+    the first contract can still identify structural grounding risks without
+    handing a plugin the mutable ``AskResponse`` graph.
+    """
+
+    mode_id: str
+    grounded: bool
+    evidence_level: str
+    citation_count: int
+    anchor_count: int
+    model_error_count: int
+    answer_chars: int
+    conclusion_chars: int
+    max_findings: int
+    deadline_monotonic: float
+
+
+@dataclass(frozen=True)
+class CompletedAskNotification:
+    """The smallest core notification needed by the three built-in observers."""
+
+    actor_id: str
+    notebook_id: str
+    mode_id: str
+
+
+class AgentProfileAskCompletedPort(Protocol):
+    def notify(self) -> None: ...
+
+
+class RetrievalExperienceAskCompletedPort(Protocol):
+    def notify(self) -> None: ...
+
+
+class SearchProfileAskCompletedPort(Protocol):
+    def notify(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class AskCompletedObserverCallContext:
+    notification: CompletedAskNotification
+    agent_profile: AgentProfileAskCompletedPort | None
+    retrieval_experience: RetrievalExperienceAskCompletedPort | None
+    search_profile: SearchProfileAskCompletedPort | None
+    connection_probe: Any
+    deadline_monotonic: float
+
+
+class AnswerAuditorHostPort(Protocol):
+    def audit_application(
+        self,
+        snapshot: AnswerAuditSnapshot,
+        *,
+        connection_probe: Any,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> tuple[Any, ...]: ...
+
+
+class AskCompletedObserverHostPort(Protocol):
+    def observe_application(
+        self,
+        call_context: AskCompletedObserverCallContext,
+        *,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None: ...

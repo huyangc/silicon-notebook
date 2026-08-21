@@ -151,9 +151,13 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
 
     host = object()
     parser_host = object()
+    auditor_host = SimpleNamespace(has_auditors=False)
+    observer_host = object()
     runtime = SimpleNamespace(
         retrieval_contributors=host,
         parser_chain=parser_host,
+        answer_auditors=auditor_host,
+        ask_completed_observers=observer_host,
     )
     captured = {}
 
@@ -172,6 +176,8 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     assert captured == {
         "retrieval_contributor_host": host,
         "parser_provider_chain_host": parser_host,
+        "answer_auditor_host": None,
+        "ask_completed_observer_host": observer_host,
     }
 
 

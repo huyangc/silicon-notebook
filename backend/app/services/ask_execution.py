@@ -20,8 +20,10 @@ Owns the streaming-ask EXECUTION orchestration that previously lived inline in
   append_ask_trace) → the engine saves the answer → finish-job transaction →
   unregister the cancel event → (failed/cancelled) empty-conversation cleanup
   in a LATER transaction → terminal ``final``/``cancelled``/``error`` event →
-  sentinel.  No terminal event is ever put on the delivery queue while its job
-  remains registered.
+  successful-path structural auditors and completion observers → sentinel.
+  No terminal event is ever put on the delivery queue while its job remains
+  registered; post-completion hooks cannot rewrite the response or reverse
+  the already committed ``done`` state.
 
 Composition rules (Gate 8): identity is EXPLICIT — ``user_id`` comes from the
 caller per start; this module never reads request ContextVars and must not
@@ -127,6 +129,9 @@ class AskExecutionCoordinator:
         job_submitter: BackgroundJobSubmitter,
         event_log: "EventLogger",
         ask: "Callable[[], AskServicePort]",
+        audit_answer_completed: (
+            "Callable[[AskResponse, str], None] | None"
+        ) = None,
         note_ask_completed: "Callable[[str, str, str], None] | None" = None,
     ) -> None:
         self.ask_state = ask_state
@@ -134,6 +139,7 @@ class AskExecutionCoordinator:
         self.job_submitter = job_submitter
         self.event_log = event_log
         self.ask = ask
+        self.audit_answer_completed = audit_answer_completed
         # Agentic Memory P1 (T5): "this member finished an ask in this
         # notebook", the overlay chain's threshold signal. A late-bound
         # callable rather than the service object because this coordinator is
@@ -212,6 +218,7 @@ class AskExecutionCoordinator:
                 )
                 self._finish(job_id, "done", answer_id=response.answer_id)
                 events.put({"event": "final", "response": response.model_dump()})
+                self._audit_answer_completed(response, mode.id)
                 # Agentic Memory P1 (T5, repair round): AFTER the terminal job
                 # row AND after the "final" event is queued for the browser —
                 # never inside ``_finish`` (frozen sequence) and never ahead
@@ -243,7 +250,7 @@ class AskExecutionCoordinator:
     def _note_ask_completed(
         self, notebook_id: str, user_id: str, mode_id: str
     ) -> None:
-        """Signal the member's overlay chain — fail-open, always.
+        """Signal the startup-frozen completed-observer host — fail-open.
 
         ⚠ This runs INSIDE the worker's ``try``, whose ``except Exception``
         finishes the job as *failed* and delivers an error event. An exception
@@ -253,8 +260,8 @@ class AskExecutionCoordinator:
         depend on the collaborator it was handed being well-behaved.
 
         ``self.note_ask_completed`` (when wired — see ``repository_runtime.py
-        ::RepositoryRuntime._note_ask_completed``) is actually THREE chained
-        notifications, and their costs are not the same shape. T9 fix round:
+        ::RepositoryRuntime._note_ask_completed``) runs THREE ordered
+        contributions, and their costs are not the same shape. T9 fix round:
         this docstring previously described only the first of the three
         (P1's agent-profile consolidation): one bounded indexed membership
         read (P2-T3's ``_member_can_read`` — see its COST note) plus one
@@ -280,6 +287,17 @@ class AskExecutionCoordinator:
         except Exception:  # noqa: BLE001 — an answer was delivered; keep it that way
             self.event_log.logger.exception(
                 "agent profile ask notification failed for notebook %s", notebook_id
+            )
+
+    def _audit_answer_completed(self, response: "AskResponse", mode_id: str) -> None:
+        """Run post-delivery auditors without changing the delivered response."""
+        if self.audit_answer_completed is None:
+            return
+        try:
+            self.audit_answer_completed(response, mode_id)
+        except Exception:  # noqa: BLE001 — final is already durable and queued
+            self.event_log.logger.exception(
+                "answer completion audit failed for mode %s", mode_id
             )
 
     def _finish(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:

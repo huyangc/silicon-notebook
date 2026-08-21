@@ -3,12 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 import threading
+import time
 import weakref
 from typing import Any, Callable
 
 from app.core.config import Settings
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.domain.extensions import (
+    AnswerAuditSnapshot,
+    AnswerAuditorHostPort,
+    AskCompletedObserverCallContext,
+    AskCompletedObserverHostPort,
+    CompletedAskNotification,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
@@ -87,6 +93,18 @@ from app.services.parser_chain_execution import BuiltinParserChainHost
 _log = logging.getLogger("silicon_notebook.repository_runtime")
 
 
+class _AskCompletedAccess:
+    """Core-only, request-local adapter behind one observer capability."""
+
+    __slots__ = ("__notify",)
+
+    def __init__(self, notify: Callable[[], None]) -> None:
+        self.__notify = notify
+
+    def notify(self) -> None:
+        self.__notify()
+
+
 class RepositoryRuntime:
     def __init__(
         self,
@@ -98,6 +116,8 @@ class RepositoryRuntime:
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
+        answer_auditor_host: AnswerAuditorHostPort | None = None,
+        ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -109,6 +129,8 @@ class RepositoryRuntime:
         # by app.state, Ask and Report. Direct constructor tests may leave the
         # optional seat empty and retain their exact historical behavior.
         self.retrieval_contributors = retrieval_contributor_host
+        self.answer_auditors = answer_auditor_host
+        self.ask_completed_observers = ask_completed_observer_host
         self.parser_provider_chain = (
             parser_provider_chain_host or BuiltinParserChainHost()
         )
@@ -383,6 +405,11 @@ class RepositoryRuntime:
             job_submitter=background_jobs,
             event_log=self.event_log,
             ask=self.ask_service,
+            audit_answer_completed=(
+                lambda response, mode_id: self._audit_completed_answer(
+                    response, mode_id
+                )
+            ),
             # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
             # 计数。late-bound lambda 而不是直接传方法:巡固服务在本构造函数里
             # 更靠后才建出来(与上面 ``ask`` 同一个理由)。
@@ -546,22 +573,78 @@ class RepositoryRuntime:
         整个方法同样 fail-open:它挂在一个**答案已经交付之后**的钩子上。
         ``KeyboardInterrupt``/``SystemExit`` 不是「错误」,继续上抛。
         """
+        host = self.ask_completed_observers
+        if host is None:
+            self._note_ask_completed_compat(notebook_id, user_id, mode_id)
+            return
+        context = AskCompletedObserverCallContext(
+            notification=CompletedAskNotification(
+                actor_id=user_id,
+                notebook_id=notebook_id,
+                mode_id=mode_id,
+            ),
+            agent_profile=_AskCompletedAccess(
+                lambda: self.agent_profile_jobs.note_ask_completed(
+                    notebook_id, user_id
+                )
+            ),
+            retrieval_experience=(
+                _AskCompletedAccess(
+                    self.retrieval_experience_jobs.note_ask_completed
+                )
+                if mode_id == "reasoning"
+                else None
+            ),
+            search_profile=_AskCompletedAccess(
+                lambda: self.search_profile_jobs.note_ask_completed(user_id)
+            ),
+            connection_probe=self.database,
+            deadline_monotonic=(
+                time.monotonic()
+                + self.settings.ask_post_completion_extension_timeout_seconds
+            ),
+        )
+        host.observe_application(context, event_sink=self.event_log.emit)
+
+    def _audit_completed_answer(self, response: Any, mode_id: str) -> None:
+        """Run the post-delivery auditor point over a closed structural view."""
+        host = self.answer_auditors
+        if host is None:
+            return
+        host.audit_application(
+            AnswerAuditSnapshot(
+                mode_id=mode_id,
+                grounded=bool(response.grounded),
+                evidence_level=str(response.evidence_level),
+                citation_count=len(response.citations),
+                anchor_count=len(response.anchors),
+                model_error_count=len(response.model_errors),
+                answer_chars=len(response.answer),
+                conclusion_chars=len(response.conclusion),
+                max_findings=self.settings.answer_audit_max_findings,
+                deadline_monotonic=(
+                    time.monotonic()
+                    + self.settings.ask_post_completion_extension_timeout_seconds
+                ),
+            ),
+            connection_probe=self.database,
+            event_sink=self.event_log.emit,
+        )
+
+    def _note_ask_completed_compat(
+        self, notebook_id: str, user_id: str, mode_id: str
+    ) -> None:
+        """Direct-constructor compatibility until every non-app root injects a host."""
         try:
             self.agent_profile_jobs.note_ask_completed(notebook_id, user_id)
         except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
             _log.exception("agent profile ask-completed notification failed")
         try:
-            # codex #524 R4 P2:计数与采样必须同谓词——采样只取
-            # mode='reasoning'(R3),计数器若对每种模式都 +1,chunk/graph 流量
-            # 会每 40 次拿同一批旧 reasoning run 反复付一次蒸馏模型钱。
             if mode_id == "reasoning":
                 self.retrieval_experience_jobs.note_ask_completed()
         except Exception:  # noqa: BLE001 — 同上
             _log.exception("retrieval experience ask-completed notification failed")
         try:
-            # Agentic Memory P3(T7):语言归纳不按 mode 过滤——它读的是问题文本
-            # 本身的字符形状,与检索走哪条引擎无关,chunk/graph/reasoning 三种
-            # 模式的提问都是这个人真实语言的证据。
             self.search_profile_jobs.note_ask_completed(user_id)
         except Exception:  # noqa: BLE001 — 同上
             _log.exception("search profile ask-completed notification failed")

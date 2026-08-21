@@ -5,6 +5,8 @@ from typing import Any
 
 from app.core.config import Settings
 from app.domain.extensions import (
+    AnswerAuditorHostPort,
+    AskCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
@@ -20,6 +22,8 @@ class PostgresRepository(RepositoryFacade):
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
+        answer_auditor_host: AnswerAuditorHostPort | None = None,
+        ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
     ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
@@ -29,6 +33,8 @@ class PostgresRepository(RepositoryFacade):
                 model_provider=model_provider,
                 retrieval_contributor_host=retrieval_contributor_host,
                 parser_provider_chain_host=parser_provider_chain_host,
+                answer_auditor_host=answer_auditor_host,
+                ask_completed_observer_host=ask_completed_observer_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a
