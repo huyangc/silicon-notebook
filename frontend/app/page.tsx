@@ -2302,10 +2302,14 @@ export default function Home() {
       window.location.pathname + (cleaned ? `?${cleaned}` : "") + window.location.hash,
     );
     joinGroupInvite(token)
-      .then(async (group) => {
-        await loadNotebookCollection();
+      .then((group) => {
         setToast(`已加入群组「${group.name}」`);
         showGroups({ groupId: group.id, tab: "members" }, "replace");
+        // The membership commit is already durable at this point. Refreshing
+        // the collection is follow-up reconciliation only: a transient health
+        // or notebook-list failure must not turn a successful redemption into
+        // an error, nor strand the user after the bearer token was scrubbed.
+        void loadNotebookCollection().catch(() => {});
       })
       .catch((error) => {
         setToast(toUserMessage(error, "加入群组失败，请重新打开邀请链接重试"));
