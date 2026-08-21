@@ -6,7 +6,18 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Mapping
 
-from app.extension_sdk import ExtensionBundle, RetrievalAdmissionPolicy
+from app.extension_sdk import (
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
+    Availability,
+    AvailabilityStatus,
+    ExtensionBundle,
+    RetrievalAdmissionPolicy,
+    RetrievalHostContext,
+)
+from app.extensions.builtin import (
+    SELECTED_SOURCE_GRAPH_BUNDLE,
+    SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID,
+)
 from app.extensions.capabilities import (
     CapabilityDecision,
     CapabilityDecisionCatalog,
@@ -58,4 +69,23 @@ def build_extension_runtime(
 def default_extension_runtime() -> ExtensionRuntime:
     """The process-wide frozen topology shared by HTTP, CLI and workers."""
 
-    return build_extension_runtime()
+    def selected_graph_access(context: object | None) -> Availability:
+        if (
+            type(context) is RetrievalHostContext
+            and context.selected_source_graph_access is not None
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "selected_source_graph_access_unavailable",
+        )
+
+    return build_extension_runtime(
+        (SELECTED_SOURCE_GRAPH_BUNDLE,),
+        capability_decisions={
+            SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,
+        },
+        retrieval_admission_policies={
+            SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
+        },
+    )

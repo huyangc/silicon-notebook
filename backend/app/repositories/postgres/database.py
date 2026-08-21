@@ -39,6 +39,9 @@ class PostgresPoolTimeout(PostgresDatabaseError, PoolTimeout):
 
 
 _WRITE_ACTIVE: ContextVar[bool] = ContextVar("postgres_write_active", default=False)
+_CONNECTION_DEPTH: ContextVar[int] = ContextVar(
+    "postgres_connection_depth", default=0
+)
 _ISOLATION_LEVELS = {
     "read committed": IsolationLevel.READ_COMMITTED,
     "repeatable read": IsolationLevel.REPEATABLE_READ,
@@ -305,19 +308,27 @@ class PostgresDatabase:
             manager.__exit__(*sys.exc_info())
             raise self._safe_error("client-state reset") from None
 
+        token = _CONNECTION_DEPTH.set(_CONNECTION_DEPTH.get() + 1)
         try:
-            yield conn
-        except BaseException:
-            manager.__exit__(*sys.exc_info())
-            raise
-        else:
-            manager.__exit__(None, None, None)
+            try:
+                yield conn
+            except BaseException:
+                manager.__exit__(*sys.exc_info())
+                raise
+            else:
+                manager.__exit__(None, None, None)
+        finally:
+            _CONNECTION_DEPTH.reset(token)
 
     @contextmanager
     def connect(self) -> Iterator[psycopg.Connection[PostgresRow]]:
         """Acquire one healthy dict-row connection and return it transactionally."""
         with self._acquire() as conn:
             yield conn
+
+    def is_connection_held(self) -> bool:
+        """Whether this execution currently owns any pooled connection."""
+        return _CONNECTION_DEPTH.get() > 0
 
     @property
     def in_write_transaction(self) -> bool:

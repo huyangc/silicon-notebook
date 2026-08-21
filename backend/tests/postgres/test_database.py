@@ -8,8 +8,94 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.domain.extensions import (
+    RetrievalContributionCallContext,
+    RetrievalEvidenceProposal,
+)
+from app.extensions import default_extension_runtime
+
 
 pytestmark = pytest.mark.postgres_integration
+
+
+class _Cancellation:
+    def is_set(self) -> bool:
+        return False
+
+    def raise_if_cancelled(self) -> None:
+        return None
+
+
+class _PoolReadingProposalSource:
+    def __init__(self, database) -> None:
+        self.database = database
+        self.calls = 0
+        self.proposal = RetrievalEvidenceProposal(
+            identity="graph",
+            notebook_id="notebook",
+            source_id="source",
+            provenance_kind="ppr",
+            provenance_reference="graph",
+            value=type("Chunk", (), {"chunk_id": "graph"})(),
+            token_cost=0,
+        )
+
+    def propose(self):
+        self.calls += 1
+        with self.database.connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+        return (self.proposal,)
+
+    def read(self, identities):
+        return (self.proposal,) if identities == ("graph",) else ()
+
+
+def _retrieval_call(source, database):
+    return RetrievalContributionCallContext(
+        actor_id="actor",
+        notebook_id="notebook",
+        scope_id="scope",
+        scope_narrowed=True,
+        run_id="run",
+        run_kind="report_generation",
+        cancellation=_Cancellation(),
+        max_items=1,
+        max_tokens=1,
+        max_proposals=1,
+        proposal_source=source,
+        connection_probe=database,
+    )
+
+
+def test_retrieval_host_releases_pool_size_one_before_contributor_fanout(
+    postgres_database,
+):
+    postgres_database._pool.resize(1, 1)
+    source = _PoolReadingProposalSource(postgres_database)
+    context = _retrieval_call(source, postgres_database)
+    host = default_extension_runtime().retrieval_contributors
+    baseline = [type("Chunk", (), {"chunk_id": "base"})()]
+
+    with postgres_database.connect():
+        blocked = host.run(
+            baseline,
+            invocation="selected_evidence",
+            call_context=context,
+            baseline_identity=lambda chunk: chunk.chunk_id,
+            cancellation=context.cancellation,
+        )
+    assert blocked is baseline
+    assert source.calls == 0
+
+    accepted = host.run(
+        baseline,
+        invocation="selected_evidence",
+        call_context=context,
+        baseline_identity=lambda chunk: chunk.chunk_id,
+        cancellation=context.cancellation,
+    )
+    assert [chunk.chunk_id for chunk in accepted] == ["base", "graph"]
+    assert source.calls == 1
 
 
 def test_write_commits_and_rows_are_dicts(postgres_database):

@@ -25,6 +25,9 @@ from app.extension_sdk.contracts import (
 RETRIEVAL_CONTRIBUTOR_POINT = "retrieval.contributor"
 RETRIEVAL_SCOPE_READER_CAPABILITY = "retrieval:scope_bound_evidence"
 SCHEDULED_MODEL_ACCESS_CAPABILITY = "model:scheduled_access"
+SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY = (
+    "retrieval:selected_source_graph_access"
+)
 RetrievalAdmissionPolicy = Literal["additive", "atomic"]
 EvidenceProvenanceKind = Literal[
     "chunk", "element", "knowledge_object", "relation", "ppr"
@@ -131,6 +134,13 @@ class ConnectionLeaseProbe(Protocol):
     def is_connection_held(self) -> bool: ...
 
 
+@runtime_checkable
+class SelectedSourceGraphAccess(Protocol):
+    """Request-bound core adapter; the plugin never receives baseline or DB."""
+
+    def contribute(self) -> ContributorResult[EvidenceCandidate[Any]]: ...
+
+
 @dataclass(frozen=True)
 class RetrievalExtensionContext:
     invocation: RetrievalInvocation
@@ -142,6 +152,7 @@ class RetrievalExtensionContext:
     budget: RetrievalContributionBudget
     reader: ScopeBoundEvidenceReader | None
     models: ScheduledModelAccess | None
+    selected_source_graph: SelectedSourceGraphAccess | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +179,7 @@ class RetrievalHostContext:
     admission_reader: ScopeBoundEvidenceReader
     model_access: ScheduledModelAccess | None
     connection: ConnectionLeaseProbe
+    selected_source_graph_access: SelectedSourceGraphAccess | None = None
 
 
 @runtime_checkable

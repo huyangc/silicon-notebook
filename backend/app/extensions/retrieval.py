@@ -9,10 +9,16 @@ import time
 from types import MappingProxyType
 from typing import Any, TypeVar
 
+from app.domain.extensions import (
+    RetrievalContributionCallContext,
+    RetrievalEvidenceProposal,
+)
 from app.extension_sdk import (
     RETRIEVAL_CONTRIBUTOR_POINT,
     RETRIEVAL_SCOPE_READER_CAPABILITY,
     SCHEDULED_MODEL_ACCESS_CAPABILITY,
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
+    ActorRef,
     AvailabilityStatus,
     CancellationToken,
     ContributorResult,
@@ -22,12 +28,16 @@ from app.extension_sdk import (
     ExtensionFailure,
     ExtensionFailureKind,
     ExtensionResultStatus,
+    FrozenRetrievalScopeRef,
+    NotebookRef,
     RetrievalAdmissionPolicy,
     RetrievalAvailabilityContext,
     RetrievalContributionEvent,
+    RetrievalContributionBudget,
     RetrievalExtensionContext,
     RetrievalHostContext,
     RetrievalInvocation,
+    RetrievalRunRef,
 )
 from app.extensions.registry import (
     ExtensionRegistry,
@@ -44,6 +54,74 @@ _PROVENANCE_KINDS = frozenset({
 })
 _INVOCATIONS = frozenset({"selected_evidence", "chunk_candidates"})
 _ADMISSION_POLICIES = frozenset({"additive", "atomic"})
+
+
+def _candidate_from_domain(
+    proposal: object,
+) -> EvidenceCandidate[Any] | None:
+    if type(proposal) is not RetrievalEvidenceProposal:
+        return None
+    try:
+        return EvidenceCandidate(
+            identity=proposal.identity,
+            notebook_id=proposal.notebook_id,
+            source_id=proposal.source_id,
+            provenance=EvidenceProvenance(
+                proposal.provenance_kind,
+                proposal.provenance_reference,
+            ),
+            value=proposal.value,
+            token_cost=proposal.token_cost,
+        )
+    except Exception:
+        return None
+
+
+class _CallEvidenceReader:
+    def __init__(self, source: object) -> None:
+        self._source = source
+
+    def read(
+        self, request: EvidenceReadRequest
+    ) -> tuple[EvidenceCandidate[Any], ...]:
+        raw = self._source.read(request.identities)
+        if type(raw) is not tuple:
+            return ()
+        converted = tuple(_candidate_from_domain(item) for item in raw)
+        if any(item is None for item in converted):
+            return ()
+        return converted  # type: ignore[return-value]
+
+
+class _SelectedSourceGraphAccess:
+    def __init__(self, source: object) -> None:
+        self._source = source
+
+    def contribute(self) -> ContributorResult[EvidenceCandidate[Any]]:
+        raw = self._source.propose()
+        if type(raw) is not tuple:
+            return ContributorResult(
+                (),
+                ExtensionResultStatus.UNAVAILABLE,
+                ExtensionFailure(
+                    ExtensionFailureKind.INVALID_RESULT,
+                    "invalid_core_proposal",
+                ),
+            )
+        converted = tuple(_candidate_from_domain(item) for item in raw)
+        if any(item is None for item in converted):
+            return ContributorResult(
+                (),
+                ExtensionResultStatus.UNAVAILABLE,
+                ExtensionFailure(
+                    ExtensionFailureKind.INVALID_RESULT,
+                    "invalid_core_proposal",
+                ),
+            )
+        return ContributorResult(
+            converted,  # type: ignore[arg-type]
+            ExtensionResultStatus.AVAILABLE,
+        )
 
 
 class RetrievalHostCancelled(RuntimeError):
@@ -129,6 +207,7 @@ class RetrievalContributorHost:
         *,
         invocation: RetrievalInvocation,
         context_factory: Callable[[], RetrievalHostContext] | None = None,
+        call_context: RetrievalContributionCallContext | None = None,
         baseline_identity: Callable[[T], str] | None = None,
         cancellation: CancellationToken | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
@@ -136,6 +215,13 @@ class RetrievalContributorHost:
         registrations = self._by_invocation.get(invocation, ())
         if not registrations:
             return baseline
+
+        if context_factory is not None and call_context is not None:
+            context_factory = None
+        elif call_context is not None:
+            context_factory = lambda: self._context_from_call(
+                invocation, call_context
+            )
 
         available: list[_FrozenRegistration] = []
         for registration in registrations:
@@ -312,6 +398,11 @@ class RetrievalContributorHost:
                     if SCHEDULED_MODEL_ACCESS_CAPABILITY in granted
                     else None
                 ),
+                selected_source_graph=(
+                    context.selected_source_graph_access
+                    if SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY in granted
+                    else None
+                ),
             )
             started = self._clock()
             try:
@@ -443,6 +534,48 @@ class RetrievalContributorHost:
         if not accepted:
             return baseline
         return tuple((*baseline, *accepted))
+
+    @staticmethod
+    def _context_from_call(
+        invocation: RetrievalInvocation,
+        call: RetrievalContributionCallContext,
+    ) -> RetrievalHostContext | None:
+        if (
+            type(call) is not RetrievalContributionCallContext
+            or type(call.actor_id) is not str
+            or type(call.notebook_id) is not str
+            or not call.notebook_id
+            or type(call.scope_id) is not str
+            or not call.scope_id
+            or type(call.scope_narrowed) is not bool
+            or type(call.run_id) is not str
+            or type(call.run_kind) is not str
+            or not callable(getattr(call.proposal_source, "propose", None))
+            or not callable(getattr(call.proposal_source, "read", None))
+            or not callable(
+                getattr(call.connection_probe, "is_connection_held", None)
+            )
+        ):
+            return None
+        access = _SelectedSourceGraphAccess(call.proposal_source)
+        return RetrievalHostContext(
+            invocation=invocation,
+            actor=ActorRef(call.actor_id),
+            notebook=NotebookRef(call.notebook_id),
+            scope=FrozenRetrievalScopeRef(call.scope_id, call.scope_narrowed),
+            run=RetrievalRunRef(call.run_id, call.run_kind),
+            cancellation=call.cancellation,
+            budget=RetrievalContributionBudget(
+                call.max_items,
+                call.max_tokens,
+                call.max_proposals,
+                call.deadline_monotonic,
+            ),
+            admission_reader=_CallEvidenceReader(call.proposal_source),
+            model_access=None,
+            selected_source_graph_access=access,
+            connection=call.connection_probe,
+        )
 
     def _granted_capabilities(
         self, registration: _FrozenRegistration, context: RetrievalHostContext,

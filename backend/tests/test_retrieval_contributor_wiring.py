@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.config import Settings
@@ -17,7 +18,7 @@ class _RecordingHost:
         return baseline if self.output is None else self.output
 
 
-def test_ask_and_report_call_same_host_at_selected_evidence_boundary():
+def test_ask_and_report_skip_host_when_graph_capability_is_absent():
     host = _RecordingHost()
     baseline = [SimpleNamespace(chunk_id="base")]
 
@@ -37,10 +38,7 @@ def test_ask_and_report_call_same_host_at_selected_evidence_boundary():
     assert ask_chunks == baseline
     assert ask_status is None
     assert result.chunks is baseline
-    assert host.calls == [
-        (baseline, "selected_evidence"),
-        (baseline, "selected_evidence"),
-    ]
+    assert host.calls == []
 
 
 def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch):
@@ -65,7 +63,30 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     assert captured == {"retrieval_contributor_host": host}
 
 
-def test_report_keeps_host_addition_when_legacy_graph_service_is_absent():
+def test_default_topology_registers_one_atomic_selected_graph_contributor():
+    from app.extensions import default_extension_runtime
+    from app.extensions.builtin import SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID
+
+    runtime = default_extension_runtime()
+    contributions = runtime.registry.contributions("retrieval.contributor")
+
+    assert [item.contribution.declaration.id for item in contributions] == [
+        SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID
+    ]
+    frozen = runtime.retrieval_contributors._registrations
+    assert len(frozen) == 1
+    assert frozen[0].admission == "atomic"
+
+
+def test_ask_and_report_no_longer_call_graph_service_directly():
+    services = Path(__file__).resolve().parents[1] / "app" / "services"
+    for name in ("ask_service.py", "report_engine.py"):
+        text = (services / name).read_text(encoding="utf-8")
+        assert "selected_source_graph.run(" not in text
+        assert "selected_source_graph.fail_closed(" not in text
+
+
+def test_report_does_not_run_selected_evidence_without_graph_service():
     original = [SimpleNamespace(chunk_id="base")]
     appended = [*original, SimpleNamespace(chunk_id="plugin")]
     host = _RecordingHost(output=appended)
@@ -78,8 +99,9 @@ def test_report_keeps_host_addition_when_legacy_graph_service_is_absent():
 
     report._activate_selected_source_graph("notebook", result)
 
-    assert result.baseline_chunks == original
-    assert result.chunks == appended
+    assert not hasattr(result, "baseline_chunks")
+    assert result.chunks == original
+    assert host.calls == []
 
 
 def test_repository_factory_accepts_injected_host_without_importing_registry(monkeypatch):
@@ -101,7 +123,7 @@ def test_repository_factory_accepts_injected_host_without_importing_registry(mon
     assert captured == {"retrieval_contributor_host": host}
 
 
-def test_factory_created_ask_and_report_share_empty_host(tmp_path):
+def test_factory_created_ask_and_report_share_builtin_host(tmp_path):
     from app.bootstrap import (
         application_extension_runtime,
         create_application_repository,

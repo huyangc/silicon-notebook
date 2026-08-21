@@ -391,6 +391,14 @@ class SqliteDatabase:
             self._local.conn = conn
         return conn
 
+    def is_connection_held(self) -> bool:
+        """Whether this execution is inside a live read/write DB boundary."""
+        conn = getattr(self._local, "conn", None)
+        return bool(
+            getattr(self._local, "write_depth", 0) > 0
+            or (conn is not None and getattr(conn, "_txn_depth", 0) > 0)
+        )
+
     @property
     def in_write_transaction(self) -> bool:
         """本线程此刻是否处在 ``write()`` 块内(含嵌套)。

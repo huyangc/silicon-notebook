@@ -224,6 +224,7 @@ def test_retrieval_context_exposes_only_point_specific_capabilities():
         "budget",
         "reader",
         "models",
+        "selected_source_graph",
     }
 
 

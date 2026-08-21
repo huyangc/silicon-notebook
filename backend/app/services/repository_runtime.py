@@ -1361,6 +1361,7 @@ class RepositoryRuntime:
                 retrieval_experiences=self.retrieval_experiences,
                 selected_source_graph=self.selected_source_graph,
                 retrieval_contributors=self.retrieval_contributors,
+                retrieval_connection_probe=self.database,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
                     hydrate_selected_graph_chunk_rows(
@@ -1465,6 +1466,7 @@ class RepositoryRuntime:
                 identity_store=self.identity,
                 selected_source_graph=self.selected_source_graph,
                 retrieval_contributors=self.retrieval_contributors,
+                retrieval_connection_probe=self.database,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
                     hydrate_selected_graph_chunk_rows(
