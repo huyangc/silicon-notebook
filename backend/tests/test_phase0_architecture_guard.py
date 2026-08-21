@@ -319,7 +319,11 @@ def test_registry_composition_does_not_change_route_topology(monkeypatch):
     monkeypatch.setattr(
         app_main,
         "application_extension_runtime",
-        lambda: type("Runtime", (), {"registry": sentinel})(),
+        lambda: type(
+            "Runtime",
+            (),
+            {"registry": sentinel, "agent_tools": None},
+        )(),
     )
     composed = app_main.create_app()
 

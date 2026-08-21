@@ -28,15 +28,11 @@ from tests.model_testkit import bind_chat_client
 
 # DERIVED from the manifest, deliberately not a third hand-copied list.
 #
-# `mcp_server.PUBLIC_TOOLS` is a documentation/test-assertion manifest: it is
-# never consulted by `create_memory_mcp`, which explicitly invokes fixed
-# built-in bundle registrars. So the comparison below still has teeth — it
-# proves the manifest matches what the server actually registers, and the
-# architecture-documentation guard proves the docs match the manifest. Three
-# separately maintained copies (here, `scripts/smoke_memory_mcp.py`, and the
-# docs guard) could each agree with a stale peer while the real surface moved;
-# one manifest with two derived consumers cannot. Per-group commentary lives
-# next to `PUBLIC_TOOLS` itself.
+# `mcp_server.PUBLIC_TOOLS` is the default frozen core catalog derived from the
+# same seven registrar captures that the unified host publishes to FastMCP.
+# Deployments with an explicitly trusted provider use their server-local frozen
+# catalog for live discovery/onboarding; this compatibility export remains the
+# exact default 22-tool surface used by docs and smoke checks.
 PUBLIC_TOOLS = set(mcp_server_public_tools)
 MCP_OUTPUT_BUDGET = 12_000
 

@@ -1,8 +1,8 @@
-"""Scoped Streamable HTTP MCP composition for fixed built-in tool bundles.
+"""Scoped Streamable HTTP MCP composition for the frozen Agent tool catalog.
 
 The transport, bearer middleware, session manager, and ordered public surface
-remain core-owned. Capability registrars are explicit built-ins; this module
-does not expose a dynamic tool provider or extension registry.
+remain core-owned. Provider descriptors reach FastMCP only through the core
+tool host; plugins never receive the server, repository, or bearer token.
 """
 from __future__ import annotations
 
@@ -23,56 +23,31 @@ from app.api.mcp_tools._shared import (
     _writable_notebook,
     validate_mcp_deployment,
 )
-from app.api.mcp_tools.citations import register_citation_tools
-from app.api.mcp_tools.knowhow import register_knowhow_tools
-from app.api.mcp_tools.maintenance import register_maintenance_tools
 from app.api.mcp_tools.memory_context import (
     CITATIONS_BUDGET_CHARS,
     _validate_proposal_input,
-    register_memory_context_tools,
 )
-from app.api.mcp_tools.profiles import register_profile_tools
-from app.api.mcp_tools.session import register_session_tools
-from app.api.mcp_tools.sources import SOURCE_TITLE_MAX_CHARS, register_source_tools
+from app.api.mcp_tools.sources import SOURCE_TITLE_MAX_CHARS
+from app.api.mcp_tool_host import core_public_tool_names, register_agent_tools
 from app.core.config import get_settings
+from app.domain.agent_tools import AgentToolProviderHostPort
 
 
-# This ordered compatibility manifest documents the fixed built-in surface.
-# It is intentionally not consulted to drive registration.
-PUBLIC_TOOLS = (
-    "list_notebooks",
-    "select_notebook",
-    "search_agent_memory",
-    "search_notebook_context",
-    "get_memory",
-    "ask_notebook",
-    "propose_memory",
-    "list_knowhow_tables",
-    "get_knowhow_discrimination",
-    "get_knowhow_row",
-    "put_knowhow_cell_code",
-    "get_cited_element",
-    "add_source_text",
-    "add_source_url",
-    "get_source_status",
-    "reparse_source",
-    "delete_source",
-    "build_kg",
-    "build_retrieval_index",
-    "get_build_status",
-    "get_notebook_profile",
-    "add_observation",
-)
+# Default-deployment compatibility snapshot, derived from the same core catalog
+# capture used by the unified registration host. The default extension runtime
+# has no Agent tool provider contributions, so this is its complete surface.
+PUBLIC_TOOLS = core_public_tool_names()
 
 
 def create_memory_mcp(
     repository_provider: Callable[[], Any],
     *,
+    agent_tool_provider_host: AgentToolProviderHostPort | None = None,
     allowed_origins: Sequence[str] = (),
     public_url: str = "http://127.0.0.1:8000/mcp",
     require_https: bool = True,
 ) -> tuple[FastMCP, Any]:
-    """Build one fixed FastMCP/session-manager instance per application."""
+    """Build one frozen FastMCP/session-manager instance per application."""
     parsed_public = urlparse(public_url)
     public_host = parsed_public.netloc
     public_origin = (
@@ -121,15 +96,10 @@ def create_memory_mcp(
         transport_security=security,
     )
 
-    # Fixed core composition. Do not replace this with registry discovery:
-    # PR-11 establishes module boundaries, not a third-party provider seat.
-    register_session_tools(server, repository_provider)
-    register_memory_context_tools(server, repository_provider)
-    register_knowhow_tools(server, repository_provider)
-    register_citation_tools(server, repository_provider)
-    register_source_tools(server, repository_provider)
-    register_maintenance_tools(server, repository_provider)
-    register_profile_tools(server, repository_provider)
+    public_tools = register_agent_tools(
+        server, repository_provider, agent_tool_provider_host
+    )
+    setattr(server, "_silicon_notebook_public_tools", public_tools)
 
     app = AgentBearerMiddleware(
         server.streamable_http_app(),
@@ -137,3 +107,15 @@ def create_memory_mcp(
         require_https=require_https,
     )
     return server, app
+
+
+def mcp_public_tools(server: FastMCP) -> tuple[str, ...]:
+    value = getattr(server, "_silicon_notebook_public_tools", ())
+    if (
+        type(value) is not tuple
+        or not value
+        or not all(type(item) is str and item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise RuntimeError("invalid frozen MCP tool catalog")
+    return value

@@ -4,7 +4,7 @@
 
 This document preserves the contributor-facing architecture summary, verification gate, workflow, test architecture, and documentation-maintenance contract. [AGENTS.md](../AGENTS.md) remains the full agent/developer contract and [architecture.md](../architecture.md) the detailed runtime architecture.
 
-The external-Agent MCP surface is composed from fixed built-in capability bundles under `app.api.mcp_tools`. `app.api.mcp_server` remains the only FastMCP transport/session composition root and explicitly invokes the registrars in the 22-tool public order. Registrars do no provider work; handlers reuse one live bearer/principal/notebook authority implementation and one output/progress implementation. This boundary is deliberately not dynamic discovery or `agent.tool_provider`; no bundle may import extensions/SDK/registry or cache request authority at registration time.
+The external-Agent MCP surface has one API-owned registration host and a startup-frozen catalog. It captures the fixed bundles under `app.api.mcp_tools` as the exact 22-tool core prefix, then may append scalar descriptors from explicitly trusted in-process `agent.tool_provider` contributors. Core handlers preserve their validation/auth/I/O order; provider handlers use the same live authority, owner-write, progress, and output boundaries without receiving FastMCP, repositories, raw credentials, or a generic service locator. The default provider topology is empty, and registration/listing performs zero repository/model work.
 
 ## Numeric limits and truncation
 

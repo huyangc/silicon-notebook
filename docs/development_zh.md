@@ -4,7 +4,7 @@
 
 本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。完整 Agent/开发约束仍以 [AGENTS.md](../AGENTS.md) 为准，详细运行时架构以 [architecture.md](../architecture.md) 为准。
 
-外部 Agent MCP 面由 `app.api.mcp_tools` 下的固定内建 capability bundle 组合；`app.api.mcp_server` 仍是唯一 FastMCP transport/session 组合根，并按 22 工具公开顺序显式调用 registrar。registrar 不触发 provider 工作，handler 复用唯一的实时 bearer/principal/notebook 权威实现及统一 output/progress 实现。该边界刻意不是动态发现或 `agent.tool_provider`；bundle 不得 import extensions/SDK/registry，也不得在注册期缓存请求权威。
+外部 Agent MCP 面由一个 API-owned registration host 和启动期冻结目录组成。它先把 `app.api.mcp_tools` 的固定 bundle 捕获为精确 22-tool core 前缀，再追加显式信任的进程内 `agent.tool_provider` contributor 标量 descriptor。core handler 保持既有 validation/auth/I/O 顺序；provider handler 复用实时权威、owner-write、progress 与 output 边界，拿不到 FastMCP、repository、原始凭据或通用 service locator。默认 provider topology 为空，注册/listing 为零 repository/model 工作。
 
 ## 数值上限与截断
 

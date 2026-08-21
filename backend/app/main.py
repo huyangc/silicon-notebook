@@ -27,7 +27,11 @@ from app.api.deps import (
 from app.api.ask_routes import public_router as public_conversation_router
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.report_routes import public_router as public_report_router
-from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
+from app.api.mcp_server import (
+    create_memory_mcp,
+    mcp_public_tools,
+    validate_mcp_deployment,
+)
 from app.api.routes import router
 from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
@@ -184,12 +188,15 @@ def create_app() -> FastAPI:
         "1", "true", "yes", "on",
     }
     validate_mcp_deployment(bind_host, mcp_public_url, require_https=require_https)
+    extension_runtime = application_extension_runtime()
     mcp_server, mcp_app = create_memory_mcp(
         mcp_memory_repository,
         allowed_origins=settings.cors_origins,
         public_url=mcp_public_url,
         require_https=require_https,
+        agent_tool_provider_host=extension_runtime.agent_tools,
     )
+    public_agent_tools = mcp_public_tools(mcp_server)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -245,10 +252,7 @@ def create_app() -> FastAPI:
         description="Local beta API for semiconductor knowhow notebooks.",
         lifespan=lifespan,
     )
-    # Phase 0: topology exists and is frozen at startup, but no current product
-    # workflow consumes it.  With the empty bundle set every existing path is
-    # therefore the original path, byte-for-byte.
-    app.state.extension_registry = application_extension_runtime().registry
+    app.state.extension_registry = extension_runtime.registry
 
     request_log = EventLogger(settings, channel="requests")
 
@@ -359,7 +363,10 @@ def create_app() -> FastAPI:
     # 机器可读的接入说明不含 token，也不要求先有浏览器 session。用户把这条
     # URL 与另行签发的一次性明文 token 一起交给 Agent，Agent 才能在尚未接通
     # MCP 的前提下先读取配置步骤。MCP_PUBLIC_URL 是说明里唯一的服务地址真源。
-    app.include_router(agent_mcp_onboarding_router(mcp_public_url), prefix="/api")
+    app.include_router(
+        agent_mcp_onboarding_router(mcp_public_url, public_agent_tools),
+        prefix="/api",
+    )
     app.include_router(
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
