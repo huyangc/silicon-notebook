@@ -327,14 +327,24 @@ def test_cancellation_after_contributor_exception_starts_no_event_or_later_work(
     assert calls == ["first"]
 
 
-def test_contributor_direct_core_cancellation_propagates():
-    class Enricher:
+def test_contributor_cannot_forge_core_cancellation_when_token_is_false():
+    calls = []
+
+    class Forged:
         def enrich(self, _context):
+            calls.append("forged")
             raise _NativeCancelled()
 
-    host = _runtime(_bundle("enrich.native_cancel", Enricher())).element_enrichers
-    with pytest.raises(_NativeCancelled):
-        host.enrich_application(_call())
+    class Later:
+        def enrich(self, _context):
+            calls.append("later")
+            return _available()
+
+    host = _runtime(
+        _bundle("a.forged", Forged()), _bundle("b.later", Later())
+    ).element_enrichers
+    assert host.enrich_application(_call()) == ()
+    assert calls == ["forged", "later"]
 
 
 def test_cancellation_set_by_event_sink_starts_no_later_contributor():
@@ -416,6 +426,95 @@ def test_connection_and_clock_callbacks_cannot_hide_new_native_cancellation():
     host._clock = cancelling_clock
     with pytest.raises(_NativeCancelled):
         host.enrich_application(_call(cancellation=cancellation))
+
+
+def test_capability_cancellation_starts_no_contribution_availability():
+    cancellation = _MutableCancellation()
+    calls = []
+
+    def cancel_in_capability(_context):
+        calls.append("capability")
+        cancellation.state = True
+        return Availability.available()
+
+    def contribution_availability(_context):
+        calls.append("contribution_availability")
+        return Availability.available()
+
+    class Enricher:
+        def enrich(self, _context):
+            calls.append("plugin")
+            return _available()
+
+    runtime = build_extension_runtime(
+        (
+            _bundle(
+                "enrich.capability_cancel",
+                Enricher(),
+                availability=contribution_availability,
+            ),
+        ),
+        capability_decisions={
+            SOURCE_ELEMENT_CONTENT_ACCESS_CAPABILITY: cancel_in_capability
+        },
+    )
+    with pytest.raises(_NativeCancelled):
+        runtime.element_enrichers.enrich_application(
+            _call(cancellation=cancellation)
+        )
+    assert calls == ["capability"]
+
+
+def test_event_duration_clock_cancellation_prevents_event_sink():
+    cancellation = _MutableCancellation()
+    state = {"plugin_done": False}
+    calls = []
+
+    class Enricher:
+        def enrich(self, _context):
+            calls.append("plugin")
+            state["plugin_done"] = True
+            return _available()
+
+    def clock():
+        if state["plugin_done"]:
+            cancellation.state = True
+        return time.monotonic()
+
+    host = _runtime(_bundle("enrich.clock_event", Enricher())).element_enrichers
+    host._clock = clock
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(cancellation=cancellation),
+            event_sink=lambda _event: calls.append("event"),
+        )
+    assert calls == ["plugin"]
+
+
+def test_cancellation_after_batch_validation_prevents_acceptance_event():
+    cancellation = _MutableCancellation()
+    events = []
+
+    class Enricher:
+        def enrich(self, context):
+            return _available(
+                ElementEnrichmentCandidate(context.elements[0].ref, {"ok": True})
+            )
+
+    host = _runtime(_bundle("enrich.validate_cancel", Enricher())).element_enrichers
+    original = host._validate_result
+
+    def cancel_after_validation(*args, **kwargs):
+        result = original(*args, **kwargs)
+        cancellation.state = True
+        return result
+
+    host._validate_result = cancel_after_validation
+    with pytest.raises(_NativeCancelled):
+        host.enrich_application(
+            _call(cancellation=cancellation), event_sink=events.append
+        )
+    assert events == []
 
 
 def test_contributor_gets_one_immutable_batch_and_returns_namespaced_patch():
@@ -805,6 +904,28 @@ def test_core_adapter_treats_ordinary_host_failure_as_exact_baseline():
         timeout_seconds=10.0,
         event_sink=None,
     ) is baseline
+
+
+def test_core_adapter_propagates_host_core_cancellation():
+    baseline = [_element()]
+
+    class CancellingHost:
+        has_contributors = True
+
+        def enrich_application(self, _context, *, event_sink=None):
+            raise _NativeCancelled()
+
+    with pytest.raises(_NativeCancelled):
+        enrich_source_elements(
+            baseline,
+            host=CancellingHost(),
+            connection_probe=_Probe(),
+            max_proposals=8,
+            max_metadata_bytes=4096,
+            max_caption_chars=128,
+            timeout_seconds=10.0,
+            event_sink=None,
+        )
 
 
 def test_core_adapter_hostile_baseline_metadata_fails_open():

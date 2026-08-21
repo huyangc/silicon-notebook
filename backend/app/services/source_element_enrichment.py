@@ -8,6 +8,7 @@ from copy import deepcopy
 from types import MappingProxyType
 from typing import Callable
 
+from app.domain.cancellation import CoreCancellation
 from app.domain.extensions import (
     ElementEnrichmentCallContext,
     ElementEnrichmentPatch,
@@ -60,10 +61,14 @@ def enrich_source_elements(
     try:
         if host.has_contributors is not True:
             return elements
+    except CoreCancellation:
+        raise
     except Exception:
         return elements
     try:
         now = clock()
+    except CoreCancellation:
+        raise
     except Exception:
         return elements
     if type(now) not in {int, float} or not math.isfinite(float(now)):
@@ -101,6 +106,8 @@ def enrich_source_elements(
             ),
             event_sink=event_sink,
         )
+    except CoreCancellation:
+        raise
     except Exception:
         return elements
     if type(patches) is not tuple:

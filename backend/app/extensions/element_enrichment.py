@@ -46,7 +46,8 @@ class _Frozen:
     plugin_id: str
     plugin_version: str
     contribution_id: str
-    implementation: object
+    enrich: Callable[[ElementEnrichmentContext], object]
+    requires: tuple[str, ...]
 
 
 class _MalformedCancellation(RuntimeError):
@@ -130,6 +131,12 @@ class SourceElementEnricherHost:
             implementation = registered.contribution.implementation
             declaration = registered.contribution.declaration
             manifest = manifests[registered.plugin_id]
+            try:
+                enrich = getattr(implementation, "enrich", None)
+            except Exception as exc:
+                raise ExtensionRegistryError(
+                    "invalid source element enricher"
+                ) from exc
             if (
                 declaration.kind is not ContributionKind.CONTRIBUTOR
                 or type(registered.plugin_id) is not str
@@ -145,7 +152,7 @@ class SourceElementEnricherHost:
                     manifest.version,
                     declaration.id,
                 )
-                or not callable(getattr(implementation, "enrich", None))
+                or not callable(enrich)
             ):
                 raise ExtensionRegistryError("invalid source element enricher")
             frozen.append(
@@ -153,7 +160,8 @@ class SourceElementEnricherHost:
                     registered.plugin_id,
                     manifest.version,
                     registered.contribution.declaration.id,
-                    implementation,
+                    enrich,
+                    manifest.requires,
                 )
             )
         self._registry = registry
@@ -255,20 +263,41 @@ class SourceElementEnricherHost:
                 return ()
             if self._expired_for(call):
                 break
-            try:
-                availability = self._registry.availability(
-                    registration.contribution_id,
-                    ElementEnrichmentAvailabilityContext(
-                        registration.contribution_id, len(views), budget
-                    ),
-                )
-            except Exception:
-                availability = None
-            _raise_if_cancelled(call.cancellation)
-            if not self._connection_clear_for(call):
-                return ()
-            if self._expired_for(call):
-                break
+            availability_context = ElementEnrichmentAvailabilityContext(
+                registration.contribution_id, len(views), budget
+            )
+            availability = None
+            for capability in registration.requires:
+                try:
+                    availability = self._registry.capability_availability(
+                        capability, availability_context
+                    )
+                except Exception:
+                    availability = None
+                _raise_if_cancelled(call.cancellation)
+                if not self._connection_clear_for(call):
+                    return ()
+                if self._expired_for(call):
+                    availability = None
+                    break
+                if (
+                    availability is None
+                    or type(availability.status) is not AvailabilityStatus
+                    or availability.status is not AvailabilityStatus.AVAILABLE
+                ):
+                    break
+            else:
+                try:
+                    availability = self._registry.contribution_availability(
+                        registration.contribution_id, availability_context
+                    )
+                except Exception:
+                    availability = None
+                _raise_if_cancelled(call.cancellation)
+                if not self._connection_clear_for(call):
+                    return ()
+                if self._expired_for(call):
+                    break
             if (
                 availability is None
                 or type(availability.status) is not AvailabilityStatus
@@ -281,19 +310,21 @@ class SourceElementEnricherHost:
             started = self._safe_clock()
             _raise_if_cancelled(call.cancellation)
             try:
-                result = registration.implementation.enrich(context)
-            except CoreCancellation:
-                raise
+                result = registration.enrich(context)
             except Exception:
                 _raise_if_cancelled(call.cancellation)
-                self._emit(sink, registration, "failed", 0, started)
+                self._emit(
+                    sink, registration, "failed", 0, started, call.cancellation
+                )
                 _raise_if_cancelled(call.cancellation)
                 if not self._connection_clear_for(call):
                     return ()
                 continue
             _raise_if_cancelled(call.cancellation)
             if not self._connection_clear_for(call):
-                self._emit(sink, registration, "invalid", 0, started)
+                self._emit(
+                    sink, registration, "invalid", 0, started, call.cancellation
+                )
                 _raise_if_cancelled(call.cancellation)
                 return ()
             validated = self._validate_result(
@@ -305,8 +336,11 @@ class SourceElementEnricherHost:
                 call.max_caption_chars,
                 views,
             )
+            _raise_if_cancelled(call.cancellation)
             if validated is None:
-                self._emit(sink, registration, "invalid", 0, started)
+                self._emit(
+                    sink, registration, "invalid", 0, started, call.cancellation
+                )
                 _raise_if_cancelled(call.cancellation)
                 continue
             patches, used_bytes = validated
@@ -318,7 +352,14 @@ class SourceElementEnricherHost:
                 if result.status is ExtensionResultStatus.AVAILABLE
                 else "unavailable"
             )
-            self._emit(sink, registration, event_status, len(patches), started)
+            self._emit(
+                sink,
+                registration,
+                event_status,
+                len(patches),
+                started,
+                call.cancellation,
+            )
             _raise_if_cancelled(call.cancellation)
             if remaining <= 0:
                 break
@@ -447,11 +488,13 @@ class SourceElementEnricherHost:
         status: str,
         count: int,
         started: float | None,
+        cancellation: object,
     ) -> None:
         if sink is None:
             return
         elapsed = 0
         finished = self._safe_clock()
+        _raise_if_cancelled(cancellation)
         if started is not None and finished is not None:
             delta = max(0.0, finished - started) * 1000
             if math.isfinite(delta):

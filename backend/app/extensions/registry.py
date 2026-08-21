@@ -368,6 +368,14 @@ class ExtensionRegistry:
                 return decision
         return self.contribution_availability(contribution_id, context)
 
+    def capability_availability(
+        self, capability: str, context: object | None = None
+    ) -> Availability:
+        """Evaluate one frozen capability decision without a contribution probe."""
+
+        self._require_frozen()
+        return self._capabilities.availability(capability, context)
+
     def contribution_availability(
         self, contribution_id: str, context: object | None = None
     ) -> Availability:
