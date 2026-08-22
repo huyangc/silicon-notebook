@@ -149,6 +149,16 @@ from app.extension_sdk.agent_tools import (
     AgentToolProvider,
     AgentToolValueKind,
 )
+from app.extension_sdk.report_export import (
+    REPORT_EXPORTER_POINT,
+    REPORT_EXPORT_FORMAT_MARKDOWN,
+    ReportExportedItem,
+    ReportExporterAvailabilityContext,
+    ReportExporterContext,
+    ReportExporterProvider,
+    ReportExportItemRef,
+    ReportExportView,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -284,4 +294,12 @@ __all__ = [
     "AgentToolParameter",
     "AgentToolProvider",
     "AgentToolValueKind",
+    "REPORT_EXPORTER_POINT",
+    "REPORT_EXPORT_FORMAT_MARKDOWN",
+    "ReportExportedItem",
+    "ReportExporterAvailabilityContext",
+    "ReportExporterContext",
+    "ReportExporterProvider",
+    "ReportExportItemRef",
+    "ReportExportView",
 ]

@@ -10,6 +10,8 @@
 
 `mcp_server.create_memory_mcp` 仍创建唯一 stateful FastMCP/SSE transport；唯一 API-owned tool host 从七个固定 registrar 捕获精确 22-tool core 前缀，并可按冻结 contribution 顺序追加显式信任的进程内 `agent.tool_provider` descriptor。插件拿不到 FastMCP、repository、raw bearer/token、settings 或 service locator；scope 只能取既有前后端真源，core policy table 强制插件写 scope 走 owner-only，既有两个 scope-only core 写例外不外借，Memory confirm/reject/update 也不开放。注册/listing 零 repository/model I/O，每次调用仍 live 复核并恰好一次 progress wrapper；这是 trusted in-process 扩展，不是恶意 Python 沙箱。
 
+深度报告的已认证后端批量导出只有一个启动冻结的 `report.exporter` Provider。Repository SQL 先按 notebook、creator、done 与非空正文收窄并释放连接，provider 只取得不可变 opaque export view；默认 topology 只有内建 Markdown provider，不存在 host fallback 或第二套 backend formatter。Provider 输出按完整有序批次接纳，文件名净化、重复后缀、MIME/格式 policy 与 ZIP 外壳仍归 core。浏览器单篇 Markdown Blob 是已授权详情的本地呈现，不属于该 backend seat；新增用户可见格式必须同 PR 做 frontend/API parity。
+
 不读 `AGENTS.md` 也必须遵守的部分。
 
 ### 工作区

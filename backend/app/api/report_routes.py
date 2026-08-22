@@ -7,9 +7,11 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
     repository,
+    report_exporter_host,
     require_notebook_read,
     user_error,
 )
+from app.domain.report_export import ReportExportError, ReportExporterHostPort
 from app.models.reports import (
     PublicReport,
     ReportCreate,
@@ -22,6 +24,7 @@ from app.models.reports import (
     ReportSummary,
 )
 from app.services.report_public_view import public_report_payload
+from app.services.report_export import export_completed_reports
 from app.services.reports.intent_confirmation import (
     ReportIntentConfirmationError,
     confirmed_understanding,
@@ -332,21 +335,35 @@ def list_reports(notebook_id: str) -> List[ReportSummary]:
 
 @router.post("/notebooks/{notebook_id}/reports/export",
              dependencies=[Depends(require_notebook_read)])
-def export_reports_endpoint(notebook_id: str, payload: ReportExportRequest) -> StreamingResponse:
+def export_reports_endpoint(
+    notebook_id: str,
+    payload: ReportExportRequest,
+    exporter: ReportExporterHostPort = Depends(report_exporter_host),
+) -> StreamingResponse:
     # owner∪成员可下(require_notebook_read);只导出该 notebook 下 status='done' 且
     # content_md 非空**且本人创建**的报告,非 done/空/跨 notebook/别人的 id 一律
     # 静默跳过(repo 层已过滤——跳过而不是 404,免得导出成为「这个 id 存不存在」
     # 的探针)。全部被跳过时仍走下面既有的 422。
     repo = repository()
-    rows = repo.export_reports(
+    sources = repo.export_reports(
         notebook_id, payload.report_ids, created_by=repo.current_user().id
     )
-    if not rows:                                 # 空 report_ids 或全部无效
+    if not sources:                              # 空 report_ids 或全部无效
         raise HTTPException(status_code=422, detail="no exportable reports")
+    try:
+        artifacts = export_completed_reports(
+            tuple(sources),
+            host=exporter,
+            connection_probe=repo._runtime.database,
+        )
+    except ReportExportError:
+        raise HTTPException(
+            status_code=503, detail="report exporter unavailable"
+        ) from None
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, md in rows:
-            z.writestr(name, md)
+        for artifact in artifacts:
+            z.writestr(artifact.filename, artifact.content)
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]),

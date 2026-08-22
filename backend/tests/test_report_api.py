@@ -304,6 +304,33 @@ def test_report_export_zip_only_done(client, monkeypatch):
     assert "# R1" in blob and "# R2" in blob
 
 
+def test_report_export_zip_preserves_legacy_filename_order_and_duplicate_bytes(
+    client, monkeypatch
+):
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    report_id = _mk_report(
+        client,
+        monkeypatch,
+        nb["id"],
+        ' A/B:*?"<>|\n ',
+        done=True,
+        content_md="# CRLF\r\n正文🙂\n",
+    )
+    response = client.post(
+        f"/api/notebooks/{nb['id']}/reports/export",
+        json={"report_ids": [report_id, report_id]},
+    )
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == [
+            f"A_B_______-{report_id}.md",
+            f"A_B_______-{report_id}-1.md",
+        ]
+        assert archive.getinfo(archive.namelist()[0]).compress_type == zipfile.ZIP_DEFLATED
+        assert archive.read(archive.namelist()[0]) == "# CRLF\r\n正文🙂\n".encode()
+        assert archive.read(archive.namelist()[1]) == "# CRLF\r\n正文🙂\n".encode()
+
+
 def test_report_export_empty_ids_rejected(client, monkeypatch):
     nb = client.post("/api/notebooks", json={"name": "t"}).json()
     resp = client.post(f"/api/notebooks/{nb['id']}/reports/export",

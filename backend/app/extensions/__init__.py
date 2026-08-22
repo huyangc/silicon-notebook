@@ -12,6 +12,7 @@ from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
 from app.extensions.element_enrichment import SourceElementEnricherHost
 from app.extensions.knowledge_projection import KnowledgeCandidateProjectorHost
 from app.extensions.agent_tools import AgentToolProviderHost
+from app.extensions.report_export import ReportExporterHost
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost, RetrievalHostCancelled
@@ -28,6 +29,7 @@ __all__ = [
     "SourceElementEnricherHost",
     "KnowledgeCandidateProjectorHost",
     "AgentToolProviderHost",
+    "ReportExporterHost",
     "ParserChainCancelled",
     "ParserProviderChainHost",
     "RetrievalContributorHost",
