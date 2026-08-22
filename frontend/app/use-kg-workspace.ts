@@ -357,7 +357,7 @@ export function useKgWorkspace({
     forceOwnerRender((value) => value + 1);
     if (policyRef.current.canWriteKg) {
       void fetchMergeReviewJob(notebookId).then((job) => {
-        if (!owns(owner)) return;
+        if (!owns(owner) || !policyRef.current.canWriteKg) return;
         if (shouldResumeReviewAll(job)) {
           setReviewAllJob(job);
           setReviewAllRunning(true);
@@ -411,7 +411,6 @@ export function useKgWorkspace({
   const loadKnowledgeFor = async (
     owner: KgWorkspaceOwner,
     request: KnowledgeRequest,
-    options: { surface?: boolean } = {},
   ): Promise<KnowledgeItem[] | null> => {
     const requestId = ++knowledgeRequestRef.current;
     const status = request.status === "all" ? "" : request.status;
@@ -430,7 +429,9 @@ export function useKgWorkspace({
       setKnowledgePage((current) => ({ ...current, [request.kind]: request.page }));
       return items;
     } catch (error) {
-      if (options.surface !== false) publishError(owner, error);
+      if (owns(owner) && requestId === knowledgeRequestRef.current) {
+        effectsRef.current.reportError(error);
+      }
       return null;
     }
   };
@@ -443,7 +444,9 @@ export function useKgWorkspace({
       setKnowledgeTypes(types);
       return types;
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && requestId === typeRequestRef.current) {
+        effectsRef.current.reportError(error);
+      }
       return null;
     }
   };
@@ -528,10 +531,12 @@ export function useKgWorkspace({
       await updateKnowledgeRecord(owner.notebookId, id, patch);
       if (!owns(owner) || !ownsOperation("knowledge", operation)
         || !policyRef.current.canGovernKnowledge) return;
-      await loadKnowledgeFor(owner, { kind, status, page: 0 }, { surface: false });
+      const rows = await loadKnowledgeFor(owner, { kind, status, page: 0 });
+      if (rows === null) return;
       if (!owns(owner) || !ownsOperation("knowledge", operation)
         || !policyRef.current.canGovernKnowledge) return;
-      await loadTypesFor(owner);
+      const types = await loadTypesFor(owner);
+      if (types === null) return;
       if (!owns(owner) || !ownsOperation("knowledge", operation)
         || !policyRef.current.canGovernKnowledge) return;
       await effectsRef.current.refreshCollection(
@@ -548,7 +553,10 @@ export function useKgWorkspace({
       if (owns(owner) && ownsOperation("knowledge", operation)
         && policyRef.current.canGovernKnowledge) effectsRef.current.notify("知识已更新");
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("knowledge", operation)
+        && policyRef.current.canGovernKnowledge) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && ownsOperation("knowledge", operation)) setKnowledgeBusy(null);
     }
@@ -565,7 +573,10 @@ export function useKgWorkspace({
         setDuplicates(rows);
       }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && requestId === duplicateRequestRef.current
+        && knowledgeKindRef.current === kind) {
+        effectsRef.current.reportError(error);
+      }
     }
   };
 
@@ -582,10 +593,12 @@ export function useKgWorkspace({
         || !policyRef.current.canGovernKnowledge) return;
       knowledgeRequestRef.current += 1;
       duplicateRequestRef.current += 1;
-      await loadKnowledgeFor(owner, { kind, status, page: 0 }, { surface: false });
+      const refreshed = await loadKnowledgeFor(owner, { kind, status, page: 0 });
+      if (refreshed === null) return;
       if (!owns(owner) || !ownsOperation("knowledge", operation)
         || !policyRef.current.canGovernKnowledge) return;
-      await loadTypesFor(owner);
+      const types = await loadTypesFor(owner);
+      if (types === null) return;
       if (!owns(owner) || !ownsOperation("knowledge", operation)
         || !policyRef.current.canGovernKnowledge) return;
       const rows = await findKnowledgeDuplicates(owner.notebookId, kind);
@@ -595,7 +608,10 @@ export function useKgWorkspace({
         effectsRef.current.notify("已合并，原条目已弃用");
       }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("knowledge", operation)
+        && policyRef.current.canGovernKnowledge) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && ownsOperation("knowledge", operation)) setKnowledgeBusy(null);
     }
@@ -629,7 +645,7 @@ export function useKgWorkspace({
     }
   };
 
-  const loadSchemasFor = async (owner: KgWorkspaceOwner, view: SchemaView) => {
+  const loadSchemasFor = async (owner: KgWorkspaceOwner, view: SchemaView): Promise<boolean> => {
     const requestId = ++schemaRequestRef.current;
     try {
       const rows = view === "global"
@@ -637,10 +653,14 @@ export function useKgWorkspace({
         : await listNotebookObjectSchemas(owner.notebookId);
       if (owns(owner) && requestId === schemaRequestRef.current && schemaViewRef.current === view) {
         setSchemas(rows);
+        return true;
       }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && requestId === schemaRequestRef.current && schemaViewRef.current === view) {
+        effectsRef.current.reportError(error);
+      }
     }
+    return false;
   };
 
   const openSchemas = () => {
@@ -685,10 +705,17 @@ export function useKgWorkspace({
       if (!owns(owner) || !ownsOperation("schema", operation)
         || schemaViewRef.current !== view || !canWriteSchema(view)) return;
       schemaRequestRef.current += 1;
-      await loadSchemasFor(owner, view);
-      if (owns(owner) && schemaViewRef.current === view) effectsRef.current.notify(success(view));
+      const reloaded = await loadSchemasFor(owner, view);
+      if (owns(owner) && ownsOperation("schema", operation)
+        && reloaded
+        && schemaViewRef.current === view && canWriteSchema(view)) {
+        effectsRef.current.notify(success(view));
+      }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("schema", operation)
+        && schemaViewRef.current === view && canWriteSchema(view)) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && ownsOperation("schema", operation)) setSchemaBusy(false);
     }
@@ -728,14 +755,21 @@ export function useKgWorkspace({
       if (!owns(owner) || !ownsOperation("schema", operation)
         || schemaViewRef.current !== "notebook" || !policyRef.current.canManageNotebookSchemas) return;
       schemaRequestRef.current += 1;
-      await loadSchemasFor(owner, "notebook");
-      if (owns(owner)) effectsRef.current.notify(
+      const reloaded = await loadSchemasFor(owner, "notebook");
+      if (owns(owner) && ownsOperation("schema", operation)
+        && reloaded
+        && schemaViewRef.current === "notebook" && policyRef.current.canManageNotebookSchemas) {
+        effectsRef.current.notify(
         proposals.length
           ? `归纳出 ${proposals.length} 个候选类型`
           : "未发现可补充的新类型（或模型服务暂不可用）",
-      );
+        );
+      }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("schema", operation)
+        && schemaViewRef.current === "notebook" && policyRef.current.canManageNotebookSchemas) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && ownsOperation("schema", operation)) setSchemaBusy(false);
     }
@@ -819,7 +853,9 @@ export function useKgWorkspace({
         effectsRef.current.notify("知识图谱已打开，但引用节点定位失败，请重试");
       }
     } catch (error) {
-      publishError(graphOwner, error);
+      if (owns(graphOwner) && requestId === graphOpenRequestRef.current && graphOpenRef.current) {
+        effectsRef.current.reportError(error);
+      }
     }
   };
 
@@ -882,7 +918,9 @@ export function useKgWorkspace({
         setVizBuilding(Boolean(graph.viz_building));
       }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && graphOpenRef.current && requestId === graphRangeRequestRef.current) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && requestId === graphRangeRequestRef.current) setRangeBusy(false);
     }
@@ -1009,11 +1047,11 @@ export function useKgWorkspace({
     let stopped = false;
     let inFlight = false;
     const timer = window.setInterval(async () => {
-      if (stopped || inFlight || !owns(owner)) return;
+      if (stopped || inFlight || !owns(owner) || !policyRef.current.canWriteKg) return;
       inFlight = true;
       try {
         const job = await fetchMergeReviewJob(owner.notebookId);
-        if (!owns(owner) || stopped) return;
+        if (!owns(owner) || stopped || !policyRef.current.canWriteKg) return;
         setReviewAllJob(job);
         if (job.status !== "running") {
           stopped = true;
@@ -1023,7 +1061,7 @@ export function useKgWorkspace({
             fetchPendingMerges(owner.notebookId),
             fetchUnifiedKgStatus(owner.notebookId),
           ]);
-          if (!owns(owner)) return;
+          if (!owns(owner) || !policyRef.current.canWriteKg) return;
           setPendingMerges(filterPendingMerges(owner, merges));
           setUnifiedStatus(status);
           effectsRef.current.notify(job.status === "failed"
@@ -1034,7 +1072,7 @@ export function useKgWorkspace({
       finally { inFlight = false; }
     }, KG_BACKGROUND_POLL_MS);
     const cap = window.setTimeout(() => {
-      if (!stopped && owns(owner)) {
+      if (!stopped && owns(owner) && policyRef.current.canWriteKg) {
         stopped = true;
         window.clearInterval(timer);
         setReviewAllRunning(false);
@@ -1046,7 +1084,7 @@ export function useKgWorkspace({
       window.clearInterval(timer);
       window.clearTimeout(cap);
     };
-  }, [reviewAllRunning]);
+  }, [reviewAllRunning, ownerVersion, policy.canWriteKg]);
 
   const reviewPendingMerges = async () => {
     const owner = currentOwner();
@@ -1063,12 +1101,14 @@ export function useKgWorkspace({
         fetchPendingMerges(owner.notebookId),
         fetchUnifiedKgStatus(owner.notebookId),
       ]);
-      if (owns(owner)) {
+      if (owns(owner) && ownsOperation("review", operation) && policyRef.current.canWriteKg) {
         setPendingMerges(filterPendingMerges(owner, merges));
         setUnifiedStatus(status);
       }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("review", operation) && policyRef.current.canWriteKg) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && ownsOperation("review", operation)) setReviewBusy(false);
     }
@@ -1086,7 +1126,9 @@ export function useKgWorkspace({
       setReviewAllJob({ status: "running", total: pendingMerges.length, done: 0, error: "" });
       setReviewAllRunning(true);
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("review-all", operation) && policyRef.current.canWriteKg) {
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (owns(owner) && ownsOperation("review-all", operation)) setReviewAllStarting(false);
     }
@@ -1128,7 +1170,8 @@ export function useKgWorkspace({
       }
       if (!selected) setNodeContext(null);
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("merge-decision", operation)
+        && policyRef.current.canWriteKg) effectsRef.current.reportError(error);
     } finally {
       if (owns(owner) && ownsOperation("merge-decision", operation)) setDecidingMerge(null);
     }
@@ -1243,6 +1286,10 @@ export function useKgWorkspace({
         return;
       } catch (error) {
         if (httpErrorStatus(error) === 409) {
+          if (!owns(owner) || !policyRef.current.canWriteKg) {
+            setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
+            return;
+          }
           const verdict = await adoptRunningMaintenance(owner);
           if (verdict !== "idle") return;
           if (attempt === 0) continue;
@@ -1298,6 +1345,10 @@ export function useKgWorkspace({
           // Do not add the two adoption-status reads used by a fresh command;
           // that would change the established retry request budget.
           if (options.pendingRetry) return "waiting";
+          if (!owns(owner) || !policyRef.current.canWriteKg) {
+            setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
+            return "denied";
+          }
           const verdict = await adoptRunningMaintenance(owner);
           if (options.decision && verdict !== "idle") {
             setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
@@ -1481,7 +1532,9 @@ export function useKgWorkspace({
         if (message) effectsRef.current.notify(message);
       }
     } catch (error) {
-      publishError(owner, error);
+      if (owns(owner) && ownsOperation("kg-build", operation)) {
+        effectsRef.current.reportError(error);
+      }
       if (owns(owner) && ownsOperation("kg-build", operation)) setBuildingKg(false);
     }
   };

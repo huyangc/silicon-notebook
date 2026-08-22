@@ -65,9 +65,10 @@ const writablePolicy: HookOptions["policy"] = {
 };
 
 const refreshNotebook = vi.fn();
+const notify = vi.fn<(message: string) => void>();
 
 const effects: HookOptions["effects"] = {
-  notify: vi.fn(),
+  notify,
   reportError: vi.fn(),
   refreshCollection: vi.fn().mockResolvedValue(undefined),
   refreshNotebook,
@@ -307,6 +308,33 @@ test("opening the graph does not invalidate an in-flight Knowledge write owner",
   expect(value!.knowledge.busyId).toBeNull();
 });
 
+test("opening the graph does not stop the existing KG build poll", async () => {
+  vi.useFakeTimers();
+  refreshNotebook.mockResolvedValue(notebook("notebook-a", "build-a"));
+  render(<Harness />);
+  await act(async () => value!.startKgBuild());
+  expect(value!.graph.buildingKg).toBe(true);
+  expect(refreshNotebook).toHaveBeenCalledTimes(1);
+
+  await act(async () => value!.openGraph());
+  await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+  expect(refreshNotebook).toHaveBeenCalledTimes(2);
+  expect(value!.graph.buildingKg).toBe(true);
+});
+
+test("a closed graph suppresses the stale open request error", async () => {
+  const pending = deferred<UnifiedGraphResp>();
+  kgApi.fetchUnifiedGraph.mockReturnValueOnce(pending.promise);
+  render(<Harness />);
+
+  let opening!: Promise<void>;
+  act(() => { opening = value!.openGraph(); });
+  act(() => value!.closeGraph());
+  await act(async () => pending.reject(new Error("stale graph read")));
+  await opening;
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
 test("read-only policy neither restores review work nor admits write commands", async () => {
   const readOnly: HookOptions["policy"] = {
     canGovernKnowledge: false,
@@ -333,6 +361,20 @@ test("read-only policy neither restores review work nor admits write commands", 
   expect(kgApi.rebuildUnifiedKg).not.toHaveBeenCalled();
   expect(kgApi.buildKg).not.toHaveBeenCalled();
   expect(knowledgeApi.updateKnowledge).not.toHaveBeenCalled();
+});
+
+test("live permission loss stops review-job polling without another read", async () => {
+  kgApi.fetchMergeReviewJob.mockResolvedValue({
+    status: "running", total: 4, done: 1, error: "",
+  });
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(value!.graph.reviewAllRunning).toBe(true));
+  expect(kgApi.fetchMergeReviewJob).toHaveBeenCalledOnce();
+
+  vi.useFakeTimers();
+  rerender(<Harness policy={{ ...writablePolicy, canWriteKg: false }} />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+  expect(kgApi.fetchMergeReviewJob).toHaveBeenCalledOnce();
 });
 
 test("maintenance submission suppresses stale terminal polls and rechecks permission before a 409 retry", async () => {
@@ -371,6 +413,49 @@ test("maintenance submission suppresses stale terminal polls and rechecks permis
   await act(async () => rebuildPending.reject(httpConflict()));
   await rebuilding;
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
+});
+
+test("pending rebuild retries spend one POST per poll tick without adoption reads or repeated toast", async () => {
+  const merge = candidate();
+  kgApi.fetchPendingMerges.mockResolvedValue([merge]);
+  kgApi.fetchUnifiedKgRebuildStatus
+    .mockResolvedValueOnce({
+      job_id: "", notebook_id: "notebook-a", status: "idle", running: false, clusters: 0,
+    })
+    .mockResolvedValueOnce({
+      job_id: "occupied", notebook_id: "notebook-a", status: "running", running: true, clusters: 0,
+    })
+    .mockResolvedValue({
+      job_id: "occupied", notebook_id: "notebook-a", status: "succeeded", running: false, clusters: 1,
+    });
+  kgApi.rebuildUnifiedKg
+    .mockRejectedValueOnce(httpConflict())
+    .mockRejectedValueOnce(httpConflict())
+    .mockResolvedValueOnce({ status: "running", notebook_id: "notebook-a", job_id: "replacement" });
+
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  await act(async () => value!.openGraph());
+  vi.useFakeTimers();
+  await act(async () => value!.decideMerge(merge, true));
+
+  const pendingNotice = "合并已记录，将在当前任务完成后自动重新合并";
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
+  expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledTimes(2);
+  expect(kgApi.fetchRelinkStatus).toHaveBeenCalledTimes(2);
+  expect(notify.mock.calls.filter(([message]) => message === pendingNotice)).toHaveLength(1);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
+  expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledTimes(3);
+  expect(kgApi.fetchRelinkStatus).toHaveBeenCalledTimes(2);
+  expect(notify.mock.calls.filter(([message]) => message === pendingNotice)).toHaveLength(1);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(3);
+  expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledTimes(4);
+  expect(kgApi.fetchRelinkStatus).toHaveBeenCalledTimes(2);
+  expect(notify.mock.calls.filter(([message]) => message === pendingNotice)).toHaveLength(1);
 });
 
 test("graph opening preserves parallel core reads and rejects stale search results", async () => {
