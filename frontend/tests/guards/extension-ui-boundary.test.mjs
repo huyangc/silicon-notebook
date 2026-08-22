@@ -20,20 +20,92 @@ test("page composes one availability owner and exactly the two canonical outlets
   const sourceOutlet = text.indexOf('slot="source.detail_section"');
   const sourceWindowEnd = text.indexOf("</SourceDetailWindow>", sourceWindowStart);
   assert.ok(sourceWindowStart < sourceOutlet && sourceOutlet < sourceWindowEnd);
-  const sourceWriteInitializers = [];
+
+  let workspacePermissions;
+  const contexts = new Map();
   function visit(node) {
     if (
-      ts.isPropertyAssignment(node)
-      && node.name.getText(page) === "sourceWrite"
-    ) sourceWriteInitializers.push(node.initializer.getText(page));
+      ts.isVariableDeclaration(node)
+      && node.name.getText(page) === "workspaceExtensionPermissions"
+      && node.initializer
+    ) {
+      const initializer = ts.isAsExpression(node.initializer)
+        ? node.initializer.expression
+        : node.initializer;
+      if (ts.isObjectLiteralExpression(initializer)) workspacePermissions = initializer;
+    }
+    if (
+      ts.isJsxSelfClosingElement(node)
+      && node.tagName.getText(page) === "WorkspaceExtensionOutlet"
+    ) {
+      const attributes = new Map(node.attributes.properties
+        .filter(ts.isJsxAttribute)
+        .map((attribute) => [attribute.name.getText(page), attribute]));
+      const slot = attributes.get("slot")?.initializer;
+      const context = attributes.get("context")?.initializer;
+      if (
+        slot && ts.isStringLiteral(slot)
+        && context && ts.isJsxExpression(context)
+        && context.expression && ts.isObjectLiteralExpression(context.expression)
+      ) contexts.set(slot.text, context.expression);
+    }
     ts.forEachChild(node, visit);
   }
   visit(page);
-  assert.deepEqual(
-    sourceWriteInitializers.sort(),
-    ["!sourceDetailBaseId && capabilities.canWriteNotebook", "false"].sort(),
-    "source:write must be false by default and require both local-source ownership and live core write authority",
+
+  function property(object, name) {
+    return object?.properties.find((entry) => (
+      (ts.isPropertyAssignment(entry) || ts.isShorthandPropertyAssignment(entry))
+      && entry.name.getText(page) === name
+    ));
+  }
+
+  assert.ok(workspacePermissions, "workspace extension permission snapshot must remain explicit");
+  assert.deepEqual(Object.fromEntries(workspacePermissions.properties
+    .filter(ts.isPropertyAssignment)
+    .map((entry) => [entry.name.getText(page), entry.initializer.getText(page)])), {
+    notebookRead: "Boolean(currentNotebookId && currentNotebook)",
+    notebookWrite: "capabilities.canWriteNotebook",
+    notebookConfigure: "capabilities.canConfigureNotebook",
+    sourceRead: "false",
+    sourceWrite: "false",
+    systemAdmin: 'currentUser?.role === "admin"',
+  });
+  for (const slot of ["workspace.side_panel", "source.detail_section"]) {
+    const context = contexts.get(slot);
+    assert.ok(context, `missing semantic context for ${slot}`);
+    const mode = property(context, "uiMode");
+    assert.ok(
+      mode && ts.isShorthandPropertyAssignment(mode) && mode.name.getText(page) === "uiMode",
+      `${slot} must receive the shell's normalized uiMode identifier`,
+    );
+  }
+  const sidePermissions = property(contexts.get("workspace.side_panel"), "permissions");
+  assert.ok(
+    sidePermissions
+    && ts.isPropertyAssignment(sidePermissions)
+    && sidePermissions.initializer.getText(page) === "workspaceExtensionPermissions",
+    "workspace slot must consume the core-owned permission snapshot",
   );
+  const sourcePermissions = property(contexts.get("source.detail_section"), "permissions");
+  assert.ok(
+    sourcePermissions
+    && ts.isPropertyAssignment(sourcePermissions)
+    && ts.isObjectLiteralExpression(sourcePermissions.initializer),
+    "source slot must narrow the core-owned permission snapshot explicitly",
+  );
+  const sourcePermissionObject = sourcePermissions.initializer;
+  assert.deepEqual(sourcePermissionObject.properties.map((entry) => {
+    if (ts.isSpreadAssignment(entry)) return `...${entry.expression.getText(page)}`;
+    if (ts.isPropertyAssignment(entry)) {
+      return `${entry.name.getText(page)}:${entry.initializer.getText(page)}`;
+    }
+    return entry.getText(page);
+  }), [
+    "...workspaceExtensionPermissions",
+    "sourceRead:true",
+    "sourceWrite:!sourceDetailBaseId && capabilities.canWriteNotebook",
+  ]);
 });
 
 
