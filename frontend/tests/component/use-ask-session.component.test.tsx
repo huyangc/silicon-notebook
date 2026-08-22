@@ -40,7 +40,6 @@ const DEFAULT_POLICY: AskPolicy = {
   kgAvailable: true,
   sourceScope: { mode: "exclude", source_ids: [] },
   baseScope: { mode: "exclude", notebook_ids: [] },
-  cancelRequestTimeoutMs: 35_000,
 };
 
 const effects: HookOptions["effects"] = {
@@ -335,7 +334,6 @@ test("abort before started waits for the durable job id, cancels once, then abor
   expect(api.cancelAskJob).toHaveBeenCalledWith(
     "notebook-a",
     "job-late",
-    expect.any(AbortSignal),
   );
   expect(signal?.aborted).toBe(false);
   act(() => value!.abort());
@@ -397,7 +395,6 @@ test("failed pre-start cancellation keeps transport alive and only refreshes sam
   expect(api.cancelAskJob).toHaveBeenCalledWith(
     "notebook-a",
     "job-background",
-    expect.any(AbortSignal),
   );
   expect(signal?.aborted).toBe(false);
   expect(effects.notify).toHaveBeenCalledWith(
@@ -463,7 +460,6 @@ test("abort after started cancels exactly once and aborts the local stream", asy
   expect(api.cancelAskJob).toHaveBeenCalledWith(
     "notebook-a",
     "job-started",
-    expect.any(AbortSignal),
   );
   expect(signal?.aborted).toBe(false);
   act(() => value!.abort());
@@ -524,7 +520,6 @@ test("a failed started cancellation keeps the stream and Stop retry alive", asyn
     2,
     "notebook-a",
     "job-started-retry",
-    expect.any(AbortSignal),
   );
   expect(signal?.aborted).toBe(false);
   secondCancel.resolve(undefined);
@@ -532,17 +527,10 @@ test("a failed started cancellation keeps the stream and Stop retry alive", asyn
   expect(signal?.aborted).toBe(true);
 });
 
-test("a stalled started cancellation times out without aborting and permits retry", async () => {
+test("a stalled started cancellation stays single-flight until authority answers", async () => {
   vi.useFakeTimers();
-  const stalledCancel = deferred<undefined>();
-  const retryCancel = deferred<undefined>();
-  let cancelRequestSignal: AbortSignal | undefined;
-  api.cancelAskJob
-    .mockImplementationOnce((_notebookId, _jobId, requestSignal) => {
-      cancelRequestSignal = requestSignal;
-      return stalledCancel.promise;
-    })
-    .mockReturnValueOnce(retryCancel.promise);
+  const cancellation = deferred<undefined>();
+  api.cancelAskJob.mockReturnValueOnce(cancellation.promise);
   let signal: AbortSignal | undefined;
   let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
   api.runAskStream.mockImplementation((
@@ -564,32 +552,21 @@ test("a stalled started cancellation times out without aborting and permits retr
   beginOwnedNotebook();
   let submitting!: Promise<void>;
   act(() => {
-    submitting = value!.submit("bounded Stop question");
+    submitting = value!.submit("authoritative Stop question");
   });
   await act(async () => {
-    await onStart!("job-stalled-cancel", "conversation-stalled-cancel");
+    await onStart!("job-authoritative-cancel", "conversation-authoritative-cancel");
   });
 
   act(() => value!.abort());
   expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
   expect(signal?.aborted).toBe(false);
-  act(() => vi.advanceTimersByTime(34_999));
-  expect(signal?.aborted).toBe(false);
-  expect(cancelRequestSignal?.aborted).toBe(false);
+  act(() => vi.advanceTimersByTime(60 * 60 * 1000));
   act(() => value!.abort());
   expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
-  await act(async () => {
-    vi.advanceTimersByTime(1);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
   expect(signal?.aborted).toBe(false);
-  expect(cancelRequestSignal?.aborted).toBe(true);
-  expect(effects.notify).toHaveBeenCalledWith("取消失败，请重试");
 
-  act(() => value!.abort());
-  expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
-  retryCancel.resolve(undefined);
+  cancellation.resolve(undefined);
   await act(async () => submitting);
   expect(signal?.aborted).toBe(true);
 });
@@ -625,7 +602,6 @@ test("reconnect cancellation deduplicates while pending and retries after contro
   expect(api.cancelAskJob).toHaveBeenCalledWith(
     "notebook-a",
     "job-reconnect-cancel",
-    expect.any(AbortSignal),
   );
 
   firstCancel.reject(new Error("cancel failed"));
@@ -643,7 +619,6 @@ test("reconnect cancellation deduplicates while pending and retries after contro
     2,
     "notebook-a",
     "job-reconnect-cancel",
-    expect.any(AbortSignal),
   );
 
   secondCancel.resolve(undefined);

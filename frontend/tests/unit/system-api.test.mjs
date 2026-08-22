@@ -27,7 +27,6 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       }],
       report_max_sections: 7,
       report_max_subqueries_per_section: 6,
-      ask_cancel_request_timeout_ms: 35_000,
       user_activity_view_enabled: false,
       source_image_max_bytes: 5 * 1024 * 1024,
       source_image_max_per_source: 200,
@@ -57,7 +56,6 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       }],
       report_max_sections: 7,
       report_max_subqueries_per_section: 6,
-      ask_cancel_request_timeout_ms: 35_000,
       user_activity_view_enabled: false,
       source_image_max_bytes: 5 * 1024 * 1024,
       source_image_max_per_source: 200,
@@ -91,7 +89,6 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
     assert.equal(config.user_activity_view_enabled, false);
     assert.equal(config.report_max_sections, 6);
     assert.equal(config.report_max_subqueries_per_section, 4);
-    assert.equal(config.ask_cancel_request_timeout_ms, null);
     assert.deepEqual(config.supported_source_extensions, [
       "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
     ]);

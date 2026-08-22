@@ -31,12 +31,6 @@ _ENV_FILE = (
 # the value from /api/system/config so its staging behavior stays in lockstep.
 SOURCE_UPLOAD_MAX_FILES_PER_BATCH = 20
 
-# A browser-side Ask cancel request may legitimately wait for the database busy
-# timeout before the server can publish the cancellation. This named protocol
-# grace covers transport/scheduling after that deployment-owned wait; the browser
-# receives the derived total and never invents a shorter independent timeout.
-ASK_CANCEL_TRANSPORT_GRACE_MS = 5_000
-
 # Canonical defaults also used by narrow compatibility adapters that are
 # intentionally duck-typed in offline tools. Normal application composition
 # always supplies ``Settings``; keeping these names here prevents those
@@ -481,14 +475,7 @@ class Settings(BaseSettings):
     embed_rate_limit_retries: int = Field(5, validation_alias="EMBED_RATE_LIMIT_RETRIES")
     embed_rate_limit_base_delay: float = Field(2.0, validation_alias="EMBED_RATE_LIMIT_BASE_DELAY")
     # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
-    db_busy_timeout_ms: int = Field(
-        30000, ge=0, validation_alias="DB_BUSY_TIMEOUT_MS"
-    )
-
-    @property
-    def ask_cancel_request_timeout_ms(self) -> int:
-        """Browser wait bound that cannot undercut a legal DB lock wait."""
-        return self.db_busy_timeout_ms + ASK_CANCEL_TRANSPORT_GRACE_MS
+    db_busy_timeout_ms: int = Field(30000, validation_alias="DB_BUSY_TIMEOUT_MS")
     # 写锁观测(wait/hold per 调用点):详见 write_lock_stats.py。默认开,警戒线 200ms,
     # 每 site 每刷新窗口最多报一条违规(flush_interval_s)。
     db_write_lock_stats_enabled: bool = Field(

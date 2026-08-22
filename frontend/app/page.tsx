@@ -889,9 +889,6 @@ export default function Home() {
   const [reportMaxSubqueriesPerSection, setReportMaxSubqueriesPerSection] = useState(
     DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   );
-  // Server-derived database busy wait plus transport grace. A missing value is
-  // an old backend and deliberately does not become a guessed shorter timeout.
-  const [askCancelRequestTimeoutMs, setAskCancelRequestTimeoutMs] = useState<number | null>(null);
   // 「AI 对这个库的理解」的部署总闸。默认 false:配置还没读回来、或后端根本没有这项
   // 能力(旧后端缺字段,`system-api.ts` 同样解析成 false)时不给入口——那颗按钮打开的
   // 每个端点在关闸时都是 409 / enabled=false。
@@ -1416,7 +1413,6 @@ export default function Home() {
           setParserEngines(config.parser_engines);
           setReportMaxSections(config.report_max_sections);
           setReportMaxSubqueriesPerSection(config.report_max_subqueries_per_section);
-          setAskCancelRequestTimeoutMs(config.ask_cancel_request_timeout_ms);
           setSourceImageMaxBytes(config.source_image_max_bytes);
           setSourceImageMaxPerSource(config.source_image_max_per_source);
           setSourceImagesEnabled(config.source_images_enabled);
@@ -2512,7 +2508,6 @@ export default function Home() {
       kgAvailable,
       sourceScope: currentSourceScope,
       baseScope: currentBaseScope,
-      cancelRequestTimeoutMs: askCancelRequestTimeoutMs,
     },
     effects: {
       notify: setToast,
@@ -2934,7 +2929,6 @@ export default function Home() {
       setReportMaxSubqueriesPerSection(
         systemConfiguration.report_max_subqueries_per_section,
       );
-      setAskCancelRequestTimeoutMs(systemConfiguration.ask_cancel_request_timeout_ms);
       setSourceImageMaxBytes(systemConfiguration.source_image_max_bytes);
       setSourceImageMaxPerSource(systemConfiguration.source_image_max_per_source);
       setSourceImagesEnabled(systemConfiguration.source_images_enabled);

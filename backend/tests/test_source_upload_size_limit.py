@@ -24,14 +24,6 @@ def test_source_upload_limit_must_be_a_positive_supported_whole_megabyte_value()
     )
 
 
-def test_ask_cancel_request_timeout_tracks_the_database_busy_wait():
-    settings = Settings(_env_file=None, DB_BUSY_TIMEOUT_MS="1234")
-    assert settings.ask_cancel_request_timeout_ms == 6234
-
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, DB_BUSY_TIMEOUT_MS="-1")
-
-
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/upload-limit.db")
@@ -70,7 +62,6 @@ def test_authenticated_system_config_exposes_upload_guards(client):
             "source_upload_max_files_per_batch",
             "report_max_sections",
             "report_max_subqueries_per_section",
-            "ask_cancel_request_timeout_ms",
             "user_activity_view_enabled",
             "source_image_max_bytes",
             "source_image_max_per_source",
@@ -81,7 +72,6 @@ def test_authenticated_system_config_exposes_upload_guards(client):
         "source_upload_max_files_per_batch": 20,
         "report_max_sections": 6,
         "report_max_subqueries_per_section": 4,
-        "ask_cancel_request_timeout_ms": 35000,
         "user_activity_view_enabled": True,
         "source_image_max_bytes": 5 * 1024 * 1024,
         "source_image_max_per_source": 200,

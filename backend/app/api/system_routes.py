@@ -149,7 +149,6 @@ def system_configuration(
         report_max_subqueries_per_section=(
             settings.report_max_subqueries_per_section
         ),
-        ask_cancel_request_timeout_ms=settings.ask_cancel_request_timeout_ms,
         user_activity_view_enabled=settings.user_activity_view_enabled,
         source_image_max_bytes=settings.mineru_max_image_bytes,
         source_image_max_per_source=settings.mineru_max_images_per_source,
