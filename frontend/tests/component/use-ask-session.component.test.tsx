@@ -489,6 +489,79 @@ test("restored cancellation authority wins a late onStart and releases after fai
   expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
 });
 
+test("failed pre-start cancellation releases restored authority for one retry", async () => {
+  const stream = deferred<AskResponse>();
+  const firstCancellation = deferred<undefined>();
+  const secondCancellation = deferred<undefined>();
+  api.cancelAskJob
+    .mockReturnValueOnce(firstCancellation.promise)
+    .mockReturnValueOnce(secondCancellation.promise);
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.getConversation.mockResolvedValue(detail(
+    "conversation-pre-start-retry",
+    "notebook-a",
+    {
+      activeJob: {
+        job_id: "job-pre-start-retry",
+        question: "pre-start retry question",
+        asked_at: "2026-08-22T00:00:00Z",
+        mode: "reasoning",
+        trace: [],
+      },
+    },
+  ));
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("pre-start retry question");
+  });
+  act(() => value!.abort());
+  let starting!: void | Promise<void>;
+  act(() => {
+    starting = onStart!("job-pre-start-retry", "conversation-pre-start-retry");
+  });
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
+
+  act(() => value!.startNewSession(2));
+  await act(async () => {
+    await value!.openSession("conversation-pre-start-retry", 3);
+  });
+  act(() => value!.abort());
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
+
+  firstCancellation.reject(new Error("cancel unavailable"));
+  await act(async () => {
+    await starting;
+    await Promise.resolve();
+  });
+  act(() => value!.abort());
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
+  act(() => value!.abort());
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
+
+  secondCancellation.resolve(undefined);
+  await act(async () => {
+    await secondCancellation.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  stream.reject(new DOMException("cancelled", "AbortError"));
+  await act(async () => submitting);
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
+});
+
 test("failed pre-start cancellation keeps transport alive and only refreshes same-identity history", async () => {
   const stream = deferred<AskResponse>();
   let signal: AbortSignal | undefined;
