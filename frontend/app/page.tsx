@@ -2187,6 +2187,7 @@ export default function Home() {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then(async (u) => {
+        sourceLibrary.activateActor(u.id);
         setCurrentUser(u);
         await loadNotebookCollection();
         const groupTarget = parseGroupsHash(window.location.hash);
@@ -2202,7 +2203,7 @@ export default function Home() {
         } else if (target?.scope === "notebook" && target.notebookId) {
           await openMemoryDeepLink(
             target.notebookId,
-            openNotebookMemory,
+            (notebookId) => openNotebookMemory(notebookId, u.id),
             () => {
             showCollection();
             setToast("该记忆链接不可用或已失效");
@@ -2213,7 +2214,7 @@ export default function Home() {
           const workspace = parseWorkspaceHash(window.location.hash);
           if (workspace) {
             try {
-              await openNotebook(workspace.notebookId, "none");
+              await openNotebook(workspace.notebookId, "none", u.id);
             } catch {
               showCollection();
               setToast("笔记本链接不可用或已失效");
@@ -3101,7 +3102,11 @@ export default function Home() {
     await sourceLibrary.loadSourcesPage({ notebookId, ...opts });
   }
 
-  async function openNotebook(notebookId: string, history: "push" | "none" = "push"): Promise<boolean> {
+  async function openNotebook(
+    notebookId: string,
+    history: "push" | "none" = "push",
+    actorIdOverride?: string,
+  ): Promise<boolean> {
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
@@ -3158,7 +3163,7 @@ export default function Home() {
     setCurrentNotebook(notebook);
     setTitleDraft(notebook.name);
     sourceLibrary.commitNotebookSnapshot({
-      actorId: currentUser?.id ?? "",
+      actorId: actorIdOverride ?? currentUser?.id ?? "",
       notebookId,
       workspaceEpoch,
       page: sourcesPage,
@@ -3214,10 +3219,10 @@ export default function Home() {
     }
   }
 
-  async function openNotebookMemory(notebookId: string) {
+  async function openNotebookMemory(notebookId: string, actorIdOverride?: string) {
     // 传 "none" 让 openNotebook 别写 history,自己下面这次 replaceState 独占写入——
     // 与本函数改动前的净效果逐字一致(旧代码是 replace 再 replace)。
-    if (!await openNotebook(notebookId, "none")) return;
+    if (!await openNotebook(notebookId, "none", actorIdOverride)) return;
     setChatMode("memory");
     window.history.replaceState(null, "", memoryHash(notebookId));
   }
