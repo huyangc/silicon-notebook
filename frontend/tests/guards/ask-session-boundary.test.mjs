@@ -41,7 +41,6 @@ test("page composes one Ask-session owner and no longer retains its state machin
   assert.deepEqual(askImports, [
     "askQuestionLimitHint",
     "fetchAnswerMemoryLinks",
-    "searchNotebooksBounded",
   ]);
 });
 

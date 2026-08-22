@@ -22,8 +22,15 @@ import type {
   ConversationDetail,
   ConversationShareResponse,
   ConversationSummary,
-  SearchHit,
 } from "./workspace-model.ts";
+
+// Compatibility exports: collection search is no longer owned by the Ask API,
+// but existing external imports keep the same public surface during F5.
+export {
+  SEARCH_FANOUT_LIMIT,
+  searchNotebook,
+  searchNotebooksBounded,
+} from "./collection-search.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
@@ -94,95 +101,6 @@ export const conversationTitleLimitHint = (title: string): string | null => {
   if (used > max) return `标题超出 ${max} 字上限（当前 ${used} 字），请精简后再保存`;
   return null;
 };
-
-// The collection search box answers "which notebook contains X", so it calls
-// `searchNotebook` once per visible notebook — and one of those may be a
-// reference library with millions of knowledge objects.  Firing the whole fan-out
-// at once put every one of those queries in the connection pool simultaneously.
-export const SEARCH_FANOUT_LIMIT = 4;
-
-// The permit pool is MODULE level, not per fan-out, and a permit is held for as
-// long as the SERVER is busy — both halves are load-bearing, and each was a
-// separate review finding.
-//
-// `search_notebook` is a synchronous FastAPI route running blocking SQL in a
-// threadpool: it never observes a client disconnect, so `AbortController.abort()`
-// stops the browser waiting but not the query or the connection it holds.
-//
-//   * Per-fan-out permits let rapid typing stack four more LIVE queries per
-//     keystroke generation against a pool of ten (codex #460 round-1 P1).
-//   * Module-level permits released on `abort` are barely better: the client
-//     promise rejects at once, the permit comes back at once, and the next
-//     generation takes it while the previous query is still executing — the
-//     permit counted browser waits, not database work (round-2 P1).
-//
-// Hence the deliberate non-abort below.  Cancelling a fetch we cannot cancel
-// server-side only buys the illusion of stopping; making the new generation wait
-// for the permit is the honest version, because the server really is still busy.
-let searchPermitsHeld = 0;
-const searchPermitWaiters: (() => void)[] = [];
-
-async function acquireSearchPermit(): Promise<void> {
-  if (searchPermitsHeld < SEARCH_FANOUT_LIMIT) {
-    searchPermitsHeld += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => searchPermitWaiters.push(resolve));
-  // The permit was handed over by `releaseSearchPermit`, which deliberately
-  // leaves the count alone: transferring rather than re-incrementing is what
-  // stops two waiters from both claiming the same freed slot.
-}
-
-function releaseSearchPermit(): void {
-  const next = searchPermitWaiters.shift();
-  if (next) next();
-  else searchPermitsHeld -= 1;
-}
-
-// No `signal` parameter, deliberately: see the permit-pool note above.  Handing
-// one to `fetch` would let a superseded generation return its permit while the
-// query it started keeps running, which is exactly the bound this module claims
-// to enforce and would not.
-export const searchNotebook = (id: string, query: string) =>
-  requestJson<{ hits: SearchHit[] }>(
-    `/notebooks/${id}/search?q=${encodeURIComponent(query)}`,
-    options,
-  );
-
-/** Search every notebook for `query`, with at most `SEARCH_FANOUT_LIMIT`
- * searches running ON THE SERVER — counted across every live fan-out.
- *
- * `signal` is a gate on ISSUING a request, never a cancellation of one already
- * issued.  A superseded generation therefore stops sending anything within a
- * microtask, while whatever it already handed the server keeps its permit until
- * the server answers.  The next generation waits for those permits, and that
- * wait is the honest behaviour: the database really is still busy, and letting
- * a fresh fan-out start four more would just queue them inside a ten-connection
- * pool instead of here.
- *
- * `search` is injected so the concurrency bound is testable without a network.
- */
-export async function searchNotebooksBounded(
-  notebookIds: readonly string[],
-  query: string,
-  signal?: AbortSignal,
-  search: (id: string, query: string) => Promise<{ hits: SearchHit[] }> = searchNotebook,
-): Promise<Record<string, SearchHit[]>> {
-  const hits: Record<string, SearchHit[]> = {};
-  await Promise.all(notebookIds.map(async (id) => {
-    await acquireSearchPermit();
-    try {
-      // Checked AFTER the wait, not before it: the abort almost always lands
-      // while this task sits in the queue, and this is the last moment at which
-      // skipping is still free — one line later the server owns the work.
-      signal?.throwIfAborted();
-      hits[id] = (await search(id, query)).hits;
-    } finally {
-      releaseSearchPermit();
-    }
-  }));
-  return hits;
-}
 
 export const previewAskIntent = (
   notebookId: string,

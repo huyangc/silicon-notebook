@@ -231,7 +231,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 状态型插件 migration/conformance 模板不单独预建；等第一个真实带表插件出现时，作为该插件的前置 PR 按 §10.1/§10.2 落地，避免无消费者抽象。
 
-### 并行轨道 F：`page.tsx` 状态所有权（预计 5 PR）
+### 并行轨道 F：`page.tsx` 状态所有权（预计 6 PR）
 
 这些 PR 不依赖 Extension SDK，可在核心 Phase 1–4 期间流水推进，但彼此串行：
 
@@ -243,7 +243,10 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
   - 状态：已完成并由 PR #558 交付；报告列表/详情、按需首读、互斥轮询、intent/outline mutation、分享/导出与删除 tombstone 已迁入 exact actor+notebook+view owner，零隐藏页 I/O、冻结 scope、live 权限复核、迟到下载隔离与请求数/轮询节奏保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F4**：KG workspace hook；
   - 状态：已完成并由 PR #559 交付；Knowledge/Schema/统一图/合并审阅与 KG build/relink/rebuild 状态已迁入 exact actor+notebook+generation owner，惰性读取、请求数、轮询节奏、权限复核与 A→B→A 收敛均保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
-- **PR-F5**：collection state + modal manager；若 diff 无法在一次 review 中完整验证，自动拆成 F5/F6，不为保持 PR 数量强行合并。
+- **PR-F5**：notebook collection hook；
+  - 状态：实现完成，待三路 review / G1 / CI；actor-scoped rows、有界搜索、筛选/排序/视图/菜单、issued/published 清单水位、访问权对账、editor/delete、默认创建 single-flight 与删除 tombstone 已迁入 `use-notebook-collection.ts`，壳层 composite bundle、打开 notebook 请求数与 A→B→A 收敛保持；
+- **PR-F6**：typed root-modal coordinator；
+  - 状态：由原 F5 自动拆出，待 F5 交付后串行实施；只协调 scoped root presentation slots、关闭/焦点/叠层冲突，不接管 Source/Ask/Report/KG/collection/sharing 等领域数据、busy、HTTP 或 timer，不引入单一全局 `activeModal` 或 command bus。
 
 每个 hook 都必须显式处理 notebook/user identity、cleanup/cancellation、权限重验、删除 tombstone、轮询终止；不引入新全局状态库，不直接读取其他 hook 的内部 setter。
 

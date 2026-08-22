@@ -9,7 +9,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  assignmentsIn,
   callsIn,
   controlFlowIn,
   findFunction,
@@ -21,6 +20,7 @@ import {
 } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
+const collectionHook = await parseModule("use-notebook-collection.ts");
 const pageText = page.getFullText();
 
 test("独立群组页面与「共享给群组」都真的挂在 page 上,不是只写了组件", () => {
@@ -96,23 +96,27 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   assert.match(JSON.stringify(attempt.catch ?? []), /showCollection/,
     "兜底导航失败后没有退回集合页");
 
-  const groupPath = findFunction(page, "refreshAfterAccessChange");
+  const groupPath = findFunction(collectionHook, "refreshAfterAccessChange");
   assert.ok(groupPath, "缺群组侧的收口 refreshAfterAccessChange");
   const insideGroup = callsIn(groupPath);
   assert.ok(insideGroup.includes("listNotebooks"), "没重取清单");
-  assert.ok(insideGroup.includes("reconcileOpenNotebook"), "重取了清单却不对账当前工作区");
+  assert.ok(
+    insideGroup.some((call) => /effectsRef\.current\.reconcileAccess/.test(call)),
+    "重取了清单却不通过窄 effect 对账当前工作区",
+  );
   // 两次复核会叠在一起(切回标签页一次、弹窗里的动作又一次),而先发的那次可以后回。
   // 没有请求世代闸,旧响应会把撤销前的清单盖回去——工作区已经跳走了,列表里那本读不到
   // 的库却又活过来(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个。
   assert.ok(
-    ifConditionsIn(groupPath).some((condition) => /notebookListSeqRef/.test(condition)),
+    ifConditionsIn(groupPath).some((condition) => /listIssuedRef/.test(condition)),
     "重取清单没有过期结果闸,旧响应会把撤销前的快照盖回去",
   );
   // 发布闸必须比的是**已发布水位**而不是「发起序号是不是还等于最新」:后者「发起即占位」,
   // 一次**失败**的复核会连并发的成功加载一起作废(它自己什么都没发布),初次加载因此可能
   // 永远停在空清单上(codex #529 R13 P2)。
   assert.ok(
-    ifConditionsIn(groupPath).some((condition) => /notebookListPublishedRef/.test(condition)),
+    ifConditionsIn(findFunction(collectionHook, "commitListSnapshot"))
+      .some((condition) => /listPublishedRef/.test(condition)),
     "发布闸不是按已发布水位判的,一次失败的复核会吞掉并发的成功加载",
   );
 
@@ -122,7 +126,8 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   const collection = findFunction(page, "loadNotebookCollection");
   assert.ok(collection, "缺 loadNotebookCollection");
   assert.ok(
-    ifConditionsIn(collection).some((condition) => /notebookListPublishedRef/.test(condition)),
+    callsIn(collection).includes("notebookCollection.beginListRead")
+      && callsIn(collection).includes("notebookCollection.commitListSnapshot"),
     "集合刷新绕过了清单发布闸,旧响应会复活已撤销的卡片",
   );
 
@@ -235,7 +240,14 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
     ["NotebookMenuActions", "ReaderNotebookBadge"],
   );
   assert.equal(jsxElements(page, "ReaderNotebookBadge").length, 1);
-  assert.equal(jsxElements(page, "NotebookMenuActions").length, 1);
+  const menuActions = jsxElements(page, "NotebookMenuActions");
+  assert.equal(menuActions.length, 1);
+  assert.match(menuActions[0].bindings.onLeave ?? "", /leaveNotebook\(target\.id\)/);
+  assert.match(
+    menuActions[0].bindings.onLeave ?? "",
+    /loadNotebookCollection\(\)/,
+    "集合卡片退出共享必须保留既有 composite 刷新，不能降成 access-only list",
+  );
 
   // 反向:page.tsx 里不该再出现自己渲染的「退出共享」按钮。
   const strays = jsxElements(page, "button").filter((element) =>
@@ -310,13 +322,13 @@ test("挂载选择器分三档,第三档是「共享给我的」", () => {
 // 可见时复用**同一条**对账路径。这条钉的正是「同一条」——另开一个只刷列表的旁路,
 // 用户照样被留在那本库里。
 test("远端撤销:标签页重新可见时复用同一条对账路径", () => {
-  const revalidator = findFunction(page, "revalidate");
+  const revalidator = findFunction(collectionHook, "revalidate");
   assert.ok(revalidator, "缺 visibilitychange 复核入口 revalidate");
 
-  // 走 live ref 而不是直接捕获:那个 effect 只挂载一次,直接捕获会读到挂载时的旧闭包。
+  // 由 hook 内部直接调用同一个 actor-owned 对账命令，页面不再保存陈旧 closure。
   assert.ok(
-    callsIn(revalidator).some((call) => /revalidateAccessRef\.current/.test(call)),
-    "复核没有走 live ref",
+    callsIn(revalidator).includes("refreshAfterAccessChange"),
+    "复核没有走同一个 refreshAfterAccessChange",
   );
   // 节流:密集 alt-tab 不该每切回一次就发一次 listNotebooks()。
   assert.ok(
@@ -326,24 +338,12 @@ test("远端撤销:标签页重新可见时复用同一条对账路径", () => {
     "复核没有节流",
   );
 
-  const home = findFunction(page, "Home");
-  assert.ok(home, "找不到页面组件 Home");
-  assert.ok(
-    assignmentsIn(home).some(
-      (assignment) => assignment.target.includes("revalidateAccessRef.current")
-        && /refreshAfterAccessChange/.test(assignment.value),
-    ),
-    "live ref 没有接到 refreshAfterAccessChange——复核成了只刷列表的旁路",
-  );
-
   // ⚠ 监听必须只装在**已登录**的页面上。没存过 token 时 `authChecked` 照样会被置真而
   // `currentUser` 仍是 null:只看 authChecked 的话,监听会装在登录页上,用户切回标签页就
   // 发一次 listNotebooks(),而它是 `unauthorized: "clear-and-reload"`——401 把整页重载,
   // 未登录用户每切回来一次就被刷一次(codex #529 R8 P2)。
   assert.ok(
-    ifConditionsIn(page).some(
-      (condition) => /authChecked/.test(condition) && /currentUser/.test(condition),
-    ),
+    ifConditionsIn(collectionHook).some((condition) => /!actorId/.test(condition)),
     "访问权复核的监听没有同时门控已登录用户,会装在登录页上并触发 401 重载",
   );
 });

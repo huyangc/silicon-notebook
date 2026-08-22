@@ -17,7 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SEARCH_FANOUT_LIMIT, searchNotebooksBounded } from "../../app/ask-api.ts";
+import { SEARCH_FANOUT_LIMIT, searchNotebooksBounded } from "../../app/collection-search.ts";
 
 /** 记录并发峰值与每次调用收到的 signal 的假 search。
  *

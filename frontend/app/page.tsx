@@ -70,16 +70,12 @@ import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
   groupMountable,
   listBases,
-  listMountable,
   mergeMountCandidates,
   mountCostHint,
-  mountedByCount,
   resolvePromotionTarget,
-  setBases,
   shouldShowBorrowedBaseHint,
   toMountedBases,
   type MountedBase,
-  type NotebookRef,
 } from "./notebook-bases";
 import {
   describeScaleIndex, latestScaleIndexDoneKey, queuedScaleIndexImmediateOp, queuedScheduleHint, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
@@ -104,8 +100,6 @@ import {
 } from "./notebook-share";
 import { parseUrlLines } from "./url-sources";
 import {
-  defaultNotebookPayload,
-  namedNotebookPayload,
   normalizedNotebookName,
 } from "./notebook-creation";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
@@ -116,13 +110,14 @@ import { useSourceLibrary } from "./use-source-library.ts";
 import { useAskSession } from "./use-ask-session.ts";
 import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
+import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
 import { KG_RANGE_DEFAULT, KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
-import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
+import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks } from "./notebook-api";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { sourceKgBadge } from "./source-kg-badge.ts";
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
@@ -141,7 +136,7 @@ import {
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
-import { askQuestionLimitHint, fetchAnswerMemoryLinks, searchNotebooksBounded } from "./ask-api";
+import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import {
@@ -270,7 +265,6 @@ import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, 
  * 复核本身是尽力而为的——没有推送通道,一直停在前台不动的标签页仍然要等下一次交互
  * 撞上 403(见 page.tsx 里那个 visibilitychange effect 的说明)。
  */
-const ACCESS_REVALIDATE_MIN_INTERVAL_MS = 30_000;
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -332,11 +326,6 @@ type InfoModal = {
     danger?: boolean;
     action: () => void;
   }>;
-};
-
-type NotebookMenuPosition = {
-  top: number;
-  left: number;
 };
 
 // Domain-agnostic fallback prompts. Used when a notebook has no expected
@@ -733,8 +722,6 @@ export default function Home() {
   const uiMode: UiMode = normalizeUiMode(currentUser?.ui_mode);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<Health | null>(null);
-  const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
-  const [searchHits, setSearchHits] = useState<Record<string, SearchHit[]>>({});
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
   const [outerView, setOuterView] = useState<"notebooks" | "memory" | "groups">("notebooks");
@@ -747,35 +734,14 @@ export default function Home() {
   const [baseScopeSelection, setBaseScopeSelection] = useState<BaseScopeSelection>(
     defaultBaseScopeSelection,
   );
-  const [filter, setFilter] = useState("mine");
-  const [viewMode, setViewMode] = useState("grid");
-  const [sortMode, setSortMode] = useState("recent");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [sortOpen, setSortOpen] = useState(false);
-  const [menuNotebookId, setMenuNotebookId] = useState<string | null>(null);
-  const [menuPosition, setMenuPosition] = useState<NotebookMenuPosition | null>(null);
-  const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
-  // 多领域基准库:编辑弹窗里的参考库多选(mountable=候选,mountedIds=当前勾选,
-  // mountEdges=拉取时的挂载边快照,用于渲染失效边置灰)。三者只在打开编辑弹窗时
-  // (openNotebookEditor)拉取——bases/mountable 两个端点是 owner-only,访客 404。
-  const [mountable, setMountable] = useState<NotebookRef[]>([]);
-  const [mountedIds, setMountedIds] = useState<string[]>([]);
-  const [mountEdges, setMountEdges] = useState<MountedBase[]>([]);
-  const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [searchProfileModalOpen, setSearchProfileModalOpen] = useState(false);
-  // 必办 4(spec §6):删除确认弹窗要显示"N 个笔记本正在把它作为参考库"—— CASCADE
-  // 会连同这些边一起清空且不可撤销。只在打开删除确认弹窗时才拉取(openDeleteConfirm)。
-  const [deleteMountedByCount, setDeleteMountedByCount] = useState(0);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [linkSectionOpen, setLinkSectionOpen] = useState(false);
   const [urlText, setUrlText] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
   const urlRequestOwnerRef = useRef<object | null>(null);
   const [urlRejected, setUrlRejected] = useState<Array<{ url: string; reason: string }>>([]);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createName, setCreateName] = useState("");
-  const [createDesc, setCreateDesc] = useState("");
   const [docTypeOptions, setDocTypeOptions] = useState<Array<{ id: string; label: string }>>([]);
   // Authenticated system configuration is the browser mirror of Settings. Null is
   // only the short initial fetch window; the server remains the final 413 guard.
@@ -950,6 +916,47 @@ export default function Home() {
     highlightedElementId,
   } = sourceLibrary;
   const loadSourceElementPage = sourceLibrary.loadSourceElementPage;
+  const notebookCollection = useNotebookCollection({
+    actorId: currentUser?.id ?? null,
+    effects: {
+      reportError,
+      notify: (message) => setToast(message),
+      refreshComposite: async (guard) => loadNotebookCollection({ guard }),
+      onNotebookCreated: async (notebook) => {
+        if (!await openNotebook(notebook.id)) return;
+        resetStagedIntake();
+        openSourceModal();
+      },
+      onNotebookUpdated: (notebook, bases) => {
+        if (activeNotebookIdRef.current !== notebook.id) return;
+        setCurrentNotebook((current) => current?.id === notebook.id ? notebook : current);
+        setTitleDraft(notebook.name);
+        setCurrentNotebookBases(bases);
+      },
+      onNotebookDeleted: (notebookId) => {
+        if (activeNotebookIdRef.current === notebookId) showCollection();
+      },
+      captureNavigationEpoch: () => workspaceEpochRef.current,
+      reconcileAccess: (rows, navigationEpoch) => reconcileOpenNotebook(rows, navigationEpoch),
+    },
+  });
+  const notebooks = notebookCollection.rows;
+  const visibleNotebooks = notebookCollection.visibleRows;
+  const filter = notebookCollection.filter;
+  const viewMode = notebookCollection.viewMode;
+  const sortMode = notebookCollection.sortMode;
+  const searchQuery = notebookCollection.searchQuery;
+  const sortOpen = notebookCollection.sortOpen;
+  const menuNotebook = notebookCollection.menu.notebook;
+  const menuPosition = notebookCollection.menu.position;
+  const notebookMenuRef = notebookCollection.menu.ref;
+  const editingNotebook = notebookCollection.editor?.target ?? null;
+  const mountable = notebookCollection.editor?.mountable ?? [];
+  const mountedIds = notebookCollection.editor?.mountedIds ?? [];
+  const mountEdges = notebookCollection.editor?.mountEdges ?? [];
+  const deleteNotebook = notebookCollection.deletion?.target ?? null;
+  const deleteMountedByCount = notebookCollection.deletion?.mountedByCount ?? 0;
+  const refreshAfterAccessChange = notebookCollection.refreshAfterAccessChange;
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
@@ -987,6 +994,7 @@ export default function Home() {
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
+  const titleSaveOperationRef = useRef<object | null>(null);
   const [memoryAnswerId, setMemoryAnswerId] = useState<string | null>(null);
   const [memorySavedAnswers, setMemorySavedAnswers] = useState<Record<string, boolean>>({});
   // 会话公开分享弹窗：null=未打开，否则是正在分享的那条会话（按 id 作 key 重挂，
@@ -1575,30 +1583,9 @@ export default function Home() {
     } catch (e) { reportError(e); return false; }
   };
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
-  const revalidateAccessRef = useRef<() => void>(() => {});
-  /**
-   * 笔记本清单的**写入世代**:每个会 `setNotebooks` 的路径都必须先 bump、写之前再 check,
-   * 只有最新一次发出的结果算数。
-   *
-   * 光管住访问权复核那一条不够:`loadNotebookCollection` 也写这份清单,而它把
-   * `listNotebooks()` 和更慢的 health/config 放在同一个 `Promise.all` 里——它的清单可能在
-   * 撤销**之前**就取回来了,却被慢请求拖到撤销之后才落地,把那张已经读不到的卡片复活
-   * (codex #529 R5 P2)。与本文件既有的 `sourcePageRequestRef` 等过期结果 guard 同一形状。
-   */
-  const notebookListSeqRef = useRef(0);
-  /**
-   * 已经**发布**出去的那次清单结果的发起序号。
-   *
-   * 与上面那个「发起序号」分开,是因为「谁在跑」和「谁落了地」是两件事:发起即占位的
-   * 写法会让一次**失败**的复核把并发的成功加载一起作废(它自己什么都没发布,而那一次
-   * 成功的结果被序号检查丢掉),初次加载因此可能永远停在空清单上(codex #529 R13 P2)。
-   * 失败的请求不推进这个水位,所以它谁也吞不掉。
-   */
-  const notebookListPublishedRef = useRef(0);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
-  const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
@@ -1630,6 +1617,7 @@ export default function Home() {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then(async (u) => {
+        notebookCollection.activateActor(u.id);
         kgWorkspace.activateActor(u.id);
         reportWorkspace.activateActor(u.id);
         askSession.activateActor(u.id);
@@ -1749,48 +1737,6 @@ export default function Home() {
       });
   }, [authChecked, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /**
-   * 别人撤销你的访问权时的复核(codex #529 R3 P1)。
-   *
-   * `refreshAfterAccessChange` 只挂在独立群组页的 `onChanged` 上,覆盖的是**在这台浏览器上
-   * 发起**的改动(自己退出群组、自己删组、自己撤销共享)。而「被移出群组」「组被别的管理员
-   * 删掉」「库主撤销共享」都发生在别处,本浏览器收不到任何事件——人会继续坐在一本已经读不到
-   * 的库里,直到某次交互撞上 403。
-   *
-   * 没有推送通道,所以这里退而求其次:在标签页**重新可见**时复用同一条对账路径。那正是用户
-   * 会重新看这一屏的时刻,也是撤销后最可能被察觉的时刻。
-   *
-   * 三点刻意如此:
-   * - **不是保证**。一直停在前台不动的标签页仍要等下一次交互报错;文档里按这个口径写。
-   * - **节流**。alt-tab 密集时不该每次切回都发一次请求。
-   * - **失败不动人**。`listNotebooks()` 抛出时整条对账不执行(`reconcileOpenNotebook` 根本
-   *   走不到),一次网络抖动绝不会把用户从他还有权限的库里赶出去。
-   * 竞态由 `refreshAfterAccessChange` 自己的世代闸挡住,与本地那条完全同路。
-   */
-  useEffect(() => {
-    // ⚠ 闸必须同时看 `currentUser`,只看 `authChecked` 不够:没有存过 token 时
-    // `authChecked` 照样会被置真而 `currentUser` 仍是 null——监听于是装在**登录页**上,
-    // 用户切回这个标签页就发一次 `listNotebooks()`,而它是 `unauthorized:
-    // "clear-and-reload"`,401 会把页面整个重载,未登录用户每切回来一次就被刷一次
-    // (codex #529 R8 P2)。
-    if (!authChecked || !currentUser) return;
-    let lastAt = 0;
-    function revalidate() {
-      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-      const now = Date.now();
-      if (now - lastAt < ACCESS_REVALIDATE_MIN_INTERVAL_MS) return;
-      lastAt = now;
-      // 走 ref 读**当前那一份**闭包:这个 effect 只挂载一次,直接捕获会读到挂载时的旧状态。
-      revalidateAccessRef.current();
-    }
-    document.addEventListener("visibilitychange", revalidate);
-    window.addEventListener("focus", revalidate);
-    return () => {
-      document.removeEventListener("visibilitychange", revalidate);
-      window.removeEventListener("focus", revalidate);
-    };
-  }, [authChecked, currentUser]);
-
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
   useEffect(() => {
@@ -1815,97 +1761,10 @@ export default function Home() {
   }, [authChecked]);
 
   useEffect(() => {
-    if (!searchQuery.trim()) {
-      setSearchHits({});
-      return;
-    }
-    // 这个搜索框答的是「哪个笔记本里有 X」,所以对**每个**可见笔记本各发一次请求——
-    // 其中可能有百万级对象的参考库。旧写法一次性 map 出全部请求,并且只在前端用
-    // `cancelled` 忽略被取代那一轮的结果:请求本身还在服务端跑完、还占着连接池。
-    // 敲一个词就是 N × 击键次数 条查询在飞。两处界定:并发上限 + 真正 abort。
-    const controller = new AbortController();
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      searchNotebooksBounded(
-        notebooks.map((notebook) => notebook.id), searchQuery, controller.signal,
-      )
-        .then((hits) => {
-          if (!cancelled) setSearchHits(hits);
-        })
-        .catch((error) => {
-          // 中止是本组件自己发起的(输入又变了),不是故障——报出来只会是假告警。
-          if (!controller.signal.aborted) reportError(error);
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      controller.abort();
-      window.clearTimeout(timer);
-    };
-  }, [notebooks, searchQuery]);
-
-  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 2200);
     return () => window.clearTimeout(timer);
   }, [toast]);
-
-  useEffect(() => {
-    if (!menuNotebookId) return;
-
-    function closeMenu() {
-      setMenuNotebookId(null);
-      setMenuPosition(null);
-    }
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        notebookMenuRef.current?.contains(target)
-      ) {
-        return;
-      }
-      closeMenu();
-    }
-
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") closeMenu();
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("resize", closeMenu);
-    window.addEventListener("scroll", closeMenu, true);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("resize", closeMenu);
-      window.removeEventListener("scroll", closeMenu, true);
-    };
-  }, [menuNotebookId]);
-
-  // 同上:长驻的 visibilitychange 监听只能读到挂载那一刻的闭包,用 live ref 顶替。
-  revalidateAccessRef.current = () => { refreshAfterAccessChange().catch(reportError); };
-
-  const visibleNotebooks = useMemo(() => {
-    const query = searchQuery.trim();
-    const enriched = notebooks
-      .map((notebook, index) => ({ notebook, index, hits: searchHits[notebook.id] ?? [] }))
-      .filter(({ notebook, hits }) => {
-        if (filter === "featured") {
-          const featured = Object.values(notebook.counts ?? {}).some((n) => (n ?? 0) > 0);
-          if (!featured) return false;
-        }
-        return !query || hits.length > 0;
-      });
-    enriched.sort((left, right) => {
-      if (sortMode === "name") return left.notebook.name.localeCompare(right.notebook.name, "zh-Hans-CN");
-      if (sortMode === "sources") return (right.notebook.counts.sources ?? 0) - (left.notebook.counts.sources ?? 0);
-      return left.index - right.index;
-    });
-    return enriched;
-  }, [filter, notebooks, searchHits, searchQuery, sortMode]);
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
@@ -2526,10 +2385,10 @@ export default function Home() {
   }, [modelPanelOpen]);
 
   async function loadNotebookCollection(opts: { guard?: () => boolean } = {}) {
-    // 清单写入世代:这条路径也写 `setNotebooks`,所以同样要 bump-then-check。它的
-    // `listNotebooks()` 和更慢的 health/config 同在一个 `Promise.all` 里,清单可能在撤销
-    // 之前就取回、却被慢请求拖到撤销之后才落地(codex #529 R5 P2)。
-    const listSeq = ++notebookListSeqRef.current;
+    // The collection hook owns the issued/published watermarks.  The shell keeps
+    // this composite read so notebook rows still publish only after the health
+    // and configuration sidecars have settled, preserving the existing bundle.
+    const listRead = notebookCollection.beginListRead();
     // The model status request reads only the persisted local snapshot. It is
     // deliberately detached so a missing status endpoint cannot hide notebooks.
     void refreshModelStatus();
@@ -2552,12 +2411,7 @@ export default function Home() {
         ? "服务正常"
           : "服务正常 · 模型服务不可用",
     );
-    // 同一道发布闸:比已发布的那次更晚发起才落地。health/statusText 不进这道闸
-    // (新旧都无害,而漏掉它们会让一次落后的刷新连服务状态都不更新)。
-    if (listSeq > notebookListPublishedRef.current) {
-      notebookListPublishedRef.current = listSeq;
-      setNotebooks(notebookResponse);
-    }
+    notebookCollection.commitListSnapshot(listRead, notebookResponse);
     if (systemConfiguration) {
       setSourceUploadMaxBytes(systemConfiguration.source_upload_max_bytes);
       setSourceUploadMaxFilesPerBatch(systemConfiguration.source_upload_max_files_per_batch);
@@ -2582,23 +2436,6 @@ export default function Home() {
     }
   }
 
-  async function openCreate() {
-    const notebook = await createNotebook(defaultNotebookPayload());
-    await loadNotebookCollection();
-    await openNotebook(notebook.id);
-    resetStagedIntake();
-    openSourceModal();
-  }
-
-  async function submitCreate() {
-    const notebook = await createNotebook(namedNotebookPayload(createName, createDesc));
-    setCreateOpen(false);
-    await loadNotebookCollection();
-    await openNotebook(notebook.id);
-    resetStagedIntake();
-    openSourceModal();
-  }
-
   async function loadSourcesPage(
     notebookId: string,
     opts: { page?: number; q?: string; guard?: () => boolean } = {},
@@ -2614,6 +2451,8 @@ export default function Home() {
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
+    titleSaveOperationRef.current = null;
+    setTitleSaveInFlight(false);
     closeAnalytics();
     closeKnowhow();
     setInfoModal(null);
@@ -2760,6 +2599,8 @@ export default function Home() {
     activeNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
+    titleSaveOperationRef.current = null;
+    setTitleSaveInFlight(false);
     setBaseScopeSelection(defaultBaseScopeSelection());
     setTitleDraft("");
     setMemoryAnswerId(null);
@@ -2812,83 +2653,51 @@ export default function Home() {
 
   async function saveInlineNotebookName() {
     if (!currentNotebook || titleSaveInFlight) return;
+    const notebookId = currentNotebook.id;
+    const workspaceEpoch = workspaceEpochRef.current;
     const nextName = normalizedNotebookName(titleDraft);
     setTitleDraft(nextName);
     if (nextName === currentNotebook.name) return;
+    const operation = {};
+    titleSaveOperationRef.current = operation;
     setTitleSaveInFlight(true);
     try {
-      const updated = await updateNotebook(currentNotebook.id, { name: nextName });
+      const updated = await notebookCollection.renameNotebook(notebookId, nextName);
+      if (!updated || workspaceEpochRef.current !== workspaceEpoch
+        || activeNotebookIdRef.current !== notebookId) return;
       setCurrentNotebook(updated);
       setTitleDraft(updated.name);
-      await loadNotebookCollection();
-      setToast("笔记本名称已更新");
     } catch (error) {
-      setTitleDraft(currentNotebook.name);
-      reportError(error);
+      if (workspaceEpochRef.current === workspaceEpoch
+        && activeNotebookIdRef.current === notebookId) {
+        setTitleDraft(currentNotebook.name);
+        reportError(error);
+      }
     } finally {
-      setTitleSaveInFlight(false);
+      if (titleSaveOperationRef.current === operation
+        && workspaceEpochRef.current === workspaceEpoch
+        && activeNotebookIdRef.current === notebookId) setTitleSaveInFlight(false);
+      if (titleSaveOperationRef.current === operation) titleSaveOperationRef.current = null;
     }
   }
 
-  // 打开编辑弹窗:先拉可挂候选 + 当前挂载边,弹窗渲染时已有数据,不会先空白闪一下。
-  // listMountable/listBases 是 owner-only 端点(访客 404)——编辑弹窗本身就是 owner-only
-  // 界面,在这里(而非打开笔记本时)才拉取是安全的边界。
-  const openNotebookEditor = async (nb: NotebookSummary) => {
-    const [cands, edges] = await Promise.all([listMountable(nb.id), listBases(nb.id)]);
-    setMountable(cands);
-    setMountEdges(edges);
-    setMountedIds(edges.map((e) => e.id));
-    setEditingNotebook(nb);
-  };
-
-  async function saveNotebookEdit(event: FormEvent<HTMLFormElement>) {
+  function submitNotebookEditor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editingNotebook) return;
     const formData = new FormData(event.currentTarget);
     const splitLines = (value: string) =>
       value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
-    await updateNotebook(editingNotebook.id, {
-        name: formData.get("name"),
-        purpose: formData.get("purpose"),
-        primary_domain: formData.get("primary_domain"),
-        target_users: String(formData.get("target_users") || ""),
-        access_scope: String(formData.get("access_scope") || ""),
-        expected_questions: splitLines(String(formData.get("expected_questions") || "")),
-        source_types: splitLines(String(formData.get("source_types") || "")),
-        taxonomy: splitLines(String(formData.get("taxonomy") || ""))
-      });
-    // 参考库挂载在同一次保存里一并写(全量替换);随后重新拉一次 notebook——PATCH 的
-    // 响应是挂载写之前的快照,base_notebooks/base_kg_available 要靠这次重拉才最新。
-    const bases = await setBases(editingNotebook.id, mountedIds);
-    const updated = await getNotebook(editingNotebook.id);
-    setEditingNotebook(null);
-    if (currentNotebookId === updated.id) {
-      setCurrentNotebook(updated);
-      setTitleDraft(updated.name);
-      setCurrentNotebookBases(bases);
-    }
-    await loadNotebookCollection();
-    setToast("笔记本信息已更新");
-  }
-
-  // 打开删除确认弹窗前先查"有多少笔记本正在把它作为参考库"(spec §6)——CASCADE
-  // 不可逆,用户点删除前必须看到影响面。镜像 openNotebookEditor 的"先拉数据再开
-  // 弹窗"惯例,避免弹窗先显示 0 再跳成真实数字的那一下闪烁。
-  const openDeleteConfirm = async (nb: NotebookSummary) => {
-    const { count } = await mountedByCount(nb.id);
-    setDeleteMountedByCount(count);
-    setDeleteNotebook(nb);
-  };
-
-  async function confirmDeleteNotebook() {
-    if (!deleteNotebook) return;
-    await deleteNotebookRequest(deleteNotebook.id);
-    if (currentNotebookId === deleteNotebook.id) {
-      showCollection();
-    }
-    setDeleteNotebook(null);
-    await loadNotebookCollection();
-    setToast("笔记本已删除");
+    const patch: NotebookEditorPatch = {
+      name: formData.get("name"),
+      purpose: formData.get("purpose"),
+      primary_domain: formData.get("primary_domain"),
+      target_users: String(formData.get("target_users") || ""),
+      access_scope: String(formData.get("access_scope") || ""),
+      expected_questions: splitLines(String(formData.get("expected_questions") || "")),
+      source_types: splitLines(String(formData.get("source_types") || "")),
+      taxonomy: splitLines(String(formData.get("taxonomy") || "")),
+    };
+    void notebookCollection.saveEditor(patch);
   }
 
   // Stage selected files so the user can pick a document type per file before
@@ -4058,44 +3867,6 @@ export default function Home() {
     }
   }
 
-  /**
-   * 独立群组页里任何改变访问权的动作之后的收口(退出/移出/删组/撤销共享)。
-   *
-   * 刻意不走 `loadNotebookCollection()`:那一份还会顺带重取健康状态与系统配置,而群组
-   * 改的只是「我能看到哪些库」。这里一次 `listNotebooks()` 既刷清单、又喂给上面的对账,
-   * 不为同一件事发两次同样的请求。
-   */
-  async function refreshAfterAccessChange(
-    // 「这次对账发起时用户在哪」的快照。默认参数在**第一个 await 之前**求值,所以直接
-    // 调用是对的;`handleLeaveShared` 传自己更早取的那一份(它在 await 撤销请求之前)。
-    navEpoch: number = workspaceEpochRef.current,
-    /** 输掉清单写入竞态时是否重来一次(只重来一次,见下)。 */
-    retry: boolean = true,
-  ) {
-    // ⚠ 两次复核可以叠在一起(切回标签页触发一次,用户紧接着在弹窗里退出群组又触发一次),
-    // 而**先发的那次可以后回**。没有这道请求世代闸,旧响应会用 `setNotebooks` 把撤销前的
-    // 快照盖回去——工作区已经正确跳走了,列表里那本读不到的库却又活了过来,要等下一次刷新
-    // 才消失(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个:那是两回事。
-    const issueSeq = ++notebookListSeqRef.current;
-    const remaining = await listNotebooks();
-    // 发布闸:只有比**已发布**的那次更晚发起的结果才落地。先发后回的旧响应因此进不来,
-    // 而失败的请求什么也不发布——所以它绝不会顺手吞掉一次并发的成功加载(codex #529 R13:
-    // 「发起即占位」的写法会让一次瞬时失败把初次加载的清单永远压在空态上)。
-    if (issueSeq > notebookListPublishedRef.current) {
-      notebookListPublishedRef.current = issueSeq;
-      setNotebooks(remaining);
-    }
-    // 对账闸,与发布闸问的**不是同一件事**:这里问「期间有没有更晚发起的清单请求」。
-    // 有的话就让它负责对账——它带回来的授权更新。而它可能是 `loadNotebookCollection`,
-    // 那条只刷列表、**不做访问权对账**,所以这里必须再来一次,否则「被撤销后仍留在那本
-    // 库里」正好从这条竞态里漏掉。只重来一次:与持续不断的集合刷新互相追着跑没有意义。
-    if (issueSeq !== notebookListSeqRef.current) {
-      if (retry) await refreshAfterAccessChange(navEpoch, false);
-      return;
-    }
-    await reconcileOpenNotebook(remaining, navEpoch);
-  }
-
   async function handleLeaveShared() {
     if (!currentNotebook) return;
     const leftId = currentNotebook.id;
@@ -4268,6 +4039,9 @@ export default function Home() {
 
   async function handleLogout() {
     workspaceEpochRef.current += 1;
+    notebookCollection.leaveActor();
+    titleSaveOperationRef.current = null;
+    setTitleSaveInFlight(false);
     sourceLibrary.beginTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
@@ -4339,20 +4113,7 @@ export default function Home() {
 
   function openNotebookMenu(notebookId: string, event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const menuWidth = 180;
-    const menuHeight = 116;
-    setMenuPosition({
-      left: Math.min(
-        window.innerWidth - menuWidth - 12,
-        Math.max(12, rect.right - menuWidth),
-      ),
-      top: Math.min(
-        window.innerHeight - menuHeight - 12,
-        rect.bottom + 8,
-      ),
-    });
-    setMenuNotebookId(notebookId);
+    notebookCollection.openMenu(notebookId, event.currentTarget.getBoundingClientRect());
   }
 
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
@@ -4419,9 +4180,6 @@ export default function Home() {
   const readOnlyWorkspace = !capabilities.canWriteNotebook;
   // 挂了几个公共知识库决定「提交晋升」按钮的行为(none=禁用/auto=直接用/choose=弹选择器)。
   const promotionTarget = resolvePromotionTarget(currentNotebookBases);
-  const menuNotebook = menuNotebookId
-    ? notebooks.find((item) => item.id === menuNotebookId) ?? null
-    : null;
   const modelSummaryView = deriveModelServiceSummaryView({
     apiStatus: health?.status ?? null,
     statusText,
@@ -4488,6 +4246,7 @@ export default function Home() {
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
+      notebookCollection.activateActor(u.id);
       kgWorkspace.activateActor(u.id);
       reportWorkspace.activateActor(u.id);
       askSession.activateActor(u.id);
@@ -4576,7 +4335,7 @@ export default function Home() {
                 ["mine", "我的笔记本"],
                 ["featured", "精选笔记本"]
               ].map(([id, label]) => (
-                <button key={id} className={`tab ${filter === id ? "active" : ""}`} onClick={() => setFilter(id)}>
+                <button key={id} className={`tab ${filter === id ? "active" : ""}`} onClick={() => notebookCollection.selectFilter(id)}>
                   {label}
                 </button>
               ))}
@@ -4584,20 +4343,20 @@ export default function Home() {
             <div className="library-actions">
               <div className={`collection-search ${searchQuery ? "search-open" : ""}`}>
                 <button className="icon-button" title="Search">⌕</button>
-                <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
+                <input value={searchQuery} onChange={(event) => notebookCollection.updateSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
               </div>
               <div className="segmented" aria-label="View mode">
                 {[
                   { id: "grid", icon: <LayoutGrid size={16} />, title: "卡片视图" },
                   { id: "list", icon: <ListIcon size={16} />, title: "列表视图" },
                 ].map(({ id, icon, title }) => (
-                  <button key={id} className={viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => setViewMode(id)}>
+                  <button key={id} className={viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => notebookCollection.selectView(id)}>
                     {icon}
                   </button>
                 ))}
               </div>
               <div className="sort-menu-wrap">
-                <button className="sort-button" onClick={() => setSortOpen((value) => !value)}>
+                <button className="sort-button" onClick={notebookCollection.toggleSort}>
                   {sortMode === "name" ? "名称 ▾" : sortMode === "sources" ? "来源 ▾" : "最近 ▾"}
                 </button>
                 <div className={`popover sort-menu ${sortOpen ? "" : "hidden"}`}>
@@ -4606,14 +4365,14 @@ export default function Home() {
                     ["name", "名称"],
                     ["sources", "来源数量"]
                   ].map(([id, label]) => (
-                    <button key={id} onClick={() => { setSortMode(id); setSortOpen(false); }}>{label}</button>
+                    <button key={id} onClick={() => notebookCollection.selectSort(id)}>{label}</button>
                   ))}
                 </div>
               </div>
               <button className="sort-button" title="查看我分享出去的笔记本及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
                 <Share2 size={15} /> 已分享
               </button>
-              <button className="new-pill" onClick={() => openCreate().catch(reportError)}>＋ 新建</button>
+              <button className="new-pill" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>＋ 新建</button>
             </div>
           </section>
 
@@ -4633,7 +4392,7 @@ export default function Home() {
             ) : (
               <>
                 {!searchQuery && filter !== "featured" && (
-                  <button className="notebook-card create-card" onClick={() => openCreate().catch(reportError)}>
+                  <button className="notebook-card create-card" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>
                     <div className="create-circle">＋</div>
                     <h2>新建笔记本</h2>
                   </button>
@@ -4751,7 +4510,7 @@ export default function Home() {
               </div>
             </div>
             <div className="workspace-toolbar" aria-label="笔记本操作">
-              <button className="workspace-primary-action" onClick={() => openCreate().catch(reportError)}>
+              <button className="workspace-primary-action" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>
                 <Plus size={18} strokeWidth={2.8} />
                 <span>创建笔记本</span>
               </button>
@@ -4810,7 +4569,7 @@ export default function Home() {
                     (含组管理员)退回一句说明,不打开编辑器(打开就会在 listMountable 上 404)。 */}
                 <button className="workspace-nav-button" onClick={() => {
                   if (capabilities.canConfigureNotebook) {
-                    openNotebookEditor(currentNotebook).catch(reportError);
+                    void notebookCollection.openEditor(currentNotebook.id);
                   } else {
                     setInfoModal({
                       title: "设置",
@@ -5629,45 +5388,16 @@ export default function Home() {
             notebook={menuNotebook}
             onLeave={() => {
               const target = menuNotebook;
-              setMenuNotebookId(null);
-              setMenuPosition(null);
+              notebookCollection.closeMenu();
               leaveNotebook(target.id)
                 .then(() => loadNotebookCollection())
                 .then(() => setToast("已退出只读共享"))
                 .catch(reportError);
             }}
-            onEdit={() => { openNotebookEditor(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}
-            onDelete={() => { openDeleteConfirm(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}
+            onEdit={() => { void notebookCollection.openEditor(menuNotebook.id); notebookCollection.closeMenu(); }}
+            onDelete={() => { void notebookCollection.openDelete(menuNotebook.id); notebookCollection.closeMenu(); }}
           />
         </div>
-      )}
-
-      {createOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setCreateOpen(false); }}>
-          <FloatingModalCard storageKey="notebook.create.window" className="utility-modal-card">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>新建笔记本</h2>
-                <p>只需名称与描述。描述留空时会在你添加首批来源后自动生成。文档类型在上传每个文件时选择。</p>
-              </div>
-              <button className="icon-button" onClick={() => setCreateOpen(false)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              <label>名称
-                <input value={createName} autoFocus placeholder="例如 模拟封装 Knowhow" onChange={(event) => setCreateName(event.target.value)} />
-              </label>
-              <label>描述（可选）
-                <textarea rows={3} value={createDesc} placeholder="留空则根据首批来源自动生成" onChange={(event) => setCreateDesc(event.target.value)} />
-              </label>
-              <div className="tag-row">
-                <button className="new-pill" onClick={() => submitCreate().catch(reportError)}>创建并添加来源</button>
-                <button className="sort-button" onClick={() => setCreateOpen(false)}>取消</button>
-              </div>
-            </div>
-            </>)}
-          </FloatingModalCard>
-        </section>
       )}
 
       {shareModal && currentNotebook && (
@@ -6086,9 +5816,9 @@ export default function Home() {
                 <h2>笔记本设置</h2>
                 <p>编辑当前笔记本的信息与参考库。模型服务由系统统一管理。</p>
               </div>
-              <button className="icon-button" onClick={() => setEditingNotebook(null)} title="Close">×</button>
+              <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={notebookCollection.closeEditor} title="Close">×</button>
             </div>
-            <form className="edit-form notebook-settings-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
+            <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
                 <div className="settings-section-head"><h3>基本信息</h3></div>
                 <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
@@ -6119,13 +5849,8 @@ export default function Home() {
                               <input
                                 type="checkbox"
                                 checked={mountedIds.includes(n.id)}
-                                onChange={(e) =>
-                                  setMountedIds((prev) =>
-                                    e.target.checked
-                                      ? [...prev, n.id]
-                                      : prev.filter((id) => id !== n.id)
-                                  )
-                                }
+                                disabled={notebookCollection.editor?.busy}
+                                onChange={(e) => notebookCollection.toggleMountedBase(n.id, e.target.checked)}
                               />
                               {/* 审查 M3:失效原因文案挪到库名正下方(而不是网格最后一列被推到行最右)——
                                   同一个 wrapper 里纵向堆叠,让原因读起来明显是在注解上面那个库名。 */}
@@ -6168,8 +5893,8 @@ export default function Home() {
                 <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
               </section>
               <div className="modal-actions settings-footer">
-                <button type="button" className="sort-button" onClick={() => setEditingNotebook(null)}>取消</button>
-                <button type="submit" className="new-pill">保存</button>
+                <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={notebookCollection.closeEditor}>取消</button>
+                <button type="submit" className="new-pill" disabled={notebookCollection.editor?.busy}>{notebookCollection.editor?.busy ? "保存中…" : "保存"}</button>
               </div>
             </form>
             </>)}
@@ -6191,11 +5916,11 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              <button className="icon-button" onClick={() => setDeleteNotebook(null)} title="Close">×</button>
+              <button className="icon-button" disabled={notebookCollection.deletion?.busy} onClick={notebookCollection.closeDelete} title="Close">×</button>
             </div>
             <div className="modal-actions padded">
-              <button className="sort-button" onClick={() => setDeleteNotebook(null)}>取消</button>
-              <button className="new-pill danger-pill" onClick={() => confirmDeleteNotebook().catch(reportError)}>确认</button>
+              <button className="sort-button" disabled={notebookCollection.deletion?.busy} onClick={notebookCollection.closeDelete}>取消</button>
+              <button className="new-pill danger-pill" disabled={notebookCollection.deletion?.busy} onClick={() => { void notebookCollection.confirmDelete(); }}>{notebookCollection.deletion?.busy ? "删除中…" : "确认"}</button>
             </div>
             </>)}
           </FloatingModalCard>
