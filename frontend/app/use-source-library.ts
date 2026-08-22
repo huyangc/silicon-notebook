@@ -7,7 +7,6 @@ import {
   getNotebookSource,
   getNotebookSourceElementsPage,
   getSource,
-  getSourceElementsPage,
   listSources,
   parseSource,
 } from "./source-api.ts";
@@ -117,6 +116,7 @@ export function useSourceLibrary({
   const pageRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const deletingIdsRef = useRef<Set<string>>(new Set());
+  const deletingIdsByOwnerRef = useRef<Map<string, Set<string>>>(new Map());
   const deleteRefreshGenerationsRef = useRef<Map<string, number>>(new Map());
   const deletedIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const pollCountRef = useRef(0);
@@ -205,7 +205,9 @@ export function useSourceLibrary({
     setSourcesPage(0);
     setSourceQueryState("");
     setSourceDetail(null);
-    setDeletingSourceIds(new Set());
+    setDeletingSourceIds(new Set(
+      deletingIdsByOwnerRef.current.get(ownerKey(input.actorId, input.notebookId)) ?? [],
+    ));
     setSourceElements([]);
     setSourceElementsTotal(0);
     setSourceElementStartOffset(0);
@@ -452,7 +454,11 @@ export function useSourceLibrary({
       || !canWriteRef.current
     ) return;
     const actorAtStart = ownerAtStart.actorId;
+    const pendingKey = ownerKey(ownerAtStart.actorId, ownerAtStart.notebookId);
     deletingIdsRef.current.add(source.id);
+    const pendingForOwner = deletingIdsByOwnerRef.current.get(pendingKey) ?? new Set<string>();
+    pendingForOwner.add(source.id);
+    deletingIdsByOwnerRef.current.set(pendingKey, pendingForOwner);
     setDeletingSourceIds((previous) => new Set(previous).add(source.id));
     try {
       await deleteSourceRequest(source.id);
@@ -508,12 +514,13 @@ export function useSourceLibrary({
       }
     } finally {
       deletingIdsRef.current.delete(source.id);
-      setDeletingSourceIds((previous) => {
-        if (!previous.has(source.id)) return previous;
-        const next = new Set(previous);
-        next.delete(source.id);
-        return next;
-      });
+      const pending = deletingIdsByOwnerRef.current.get(pendingKey);
+      pending?.delete(source.id);
+      if (pending && pending.size === 0) deletingIdsByOwnerRef.current.delete(pendingKey);
+      const activeOwner = currentOwner();
+      if (activeOwner && ownerKey(activeOwner.actorId, activeOwner.notebookId) === pendingKey) {
+        setDeletingSourceIds(new Set(pending ?? []));
+      }
     }
   }
 

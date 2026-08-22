@@ -142,6 +142,53 @@ test("delete requires the current owner and an exact source notebook", async () 
   expect(api.deleteSource).toHaveBeenCalledWith("owned");
 });
 
+test("an in-flight delete remains visibly busy across A to B to A", async () => {
+  const deletion = deferred<undefined>();
+  api.deleteSource.mockReturnValueOnce(deletion.promise);
+  render(<Harness />);
+  const pageA: Parameters<HookValue["commitNotebookSnapshot"]>[0] = {
+    actorId: "user-a",
+    notebookId: "notebook-a",
+    workspaceEpoch: 1,
+    page: {
+      items: [source("deleting", "notebook-a")],
+      total_count: 1,
+      offset: 0,
+      limit: 50,
+    },
+  };
+  act(() => {
+    value!.commitNotebookSnapshot(pageA);
+  });
+  let deleting!: Promise<void>;
+  act(() => {
+    deleting = value!.deleteSource(source("deleting", "notebook-a"));
+  });
+  expect(value!.deletingSourceIds.has("deleting")).toBe(true);
+
+  act(() => {
+    value!.beginTransition();
+    value!.commitNotebookSnapshot({
+      ...pageA,
+      notebookId: "notebook-b",
+      workspaceEpoch: 2,
+      page: { ...pageA.page, items: [] },
+    });
+  });
+  expect(value!.deletingSourceIds.has("deleting")).toBe(false);
+  act(() => {
+    value!.beginTransition();
+    value!.commitNotebookSnapshot({ ...pageA, workspaceEpoch: 3 });
+  });
+  expect(value!.deletingSourceIds.has("deleting")).toBe(true);
+  await act(async () => value!.deleteSource(source("deleting", "notebook-a")));
+  expect(api.deleteSource).toHaveBeenCalledTimes(1);
+
+  deletion.resolve(undefined);
+  await act(async () => deleting);
+  expect(value!.deletingSourceIds.has("deleting")).toBe(false);
+});
+
 test("a slow or failing checkup refresh does not delay terminal poll scheduling", async () => {
   vi.useFakeTimers();
   const checkup = deferred<undefined>();
