@@ -7,23 +7,16 @@ import { appSourceModules, findFunction, importsIn, jsxElements, parseModule } f
 
 test("page composes one availability owner and exactly the two canonical outlets", async () => {
   const page = await parseModule("page.tsx");
-  const text = page.getText(page);
-  assert.equal((text.match(/useWorkspaceExtensions\(/g) ?? []).length, 1);
   const outlets = jsxElements(page, "WorkspaceExtensionOutlet");
   assert.equal(outlets.length, 2);
   assert.deepEqual(outlets.map((row) => row.attributes.slot).sort(), [
     "source.detail_section", "workspace.side_panel",
   ]);
-  assert.equal(text.includes("source_detail_section"), false);
-  assert.equal(text.includes('slot="side_panel"'), false);
-  const sourceWindowStart = text.indexOf("<SourceDetailWindow");
-  const sourceOutlet = text.indexOf('slot="source.detail_section"');
-  const sourceWindowEnd = text.indexOf("</SourceDetailWindow>", sourceWindowStart);
-  assert.ok(sourceWindowStart < sourceOutlet && sourceOutlet < sourceWindowEnd);
 
   let workspacePermissions;
   let sourceDetailWindow;
   const contexts = new Map();
+  const outletNodes = new Map();
   const ownerCalls = [];
   function visit(node) {
     if (
@@ -57,7 +50,10 @@ test("page composes one availability owner and exactly the two canonical outlets
         slot && ts.isStringLiteral(slot)
         && context && ts.isJsxExpression(context)
         && context.expression && ts.isObjectLiteralExpression(context.expression)
-      ) contexts.set(slot.text, context.expression);
+      ) {
+        contexts.set(slot.text, context.expression);
+        outletNodes.set(slot.text, node);
+      }
     }
     ts.forEachChild(node, visit);
   }
@@ -70,6 +66,15 @@ test("page composes one availability owner and exactly the two canonical outlets
   );
 
   assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
+  let sourceOutletAncestor = outletNodes.get("source.detail_section")?.parent;
+  while (sourceOutletAncestor && sourceOutletAncestor !== sourceDetailWindow) {
+    sourceOutletAncestor = sourceOutletAncestor.parent;
+  }
+  assert.equal(
+    sourceOutletAncestor,
+    sourceDetailWindow,
+    "source extension slot must remain a semantic descendant of SourceDetailWindow",
+  );
   const sourceDetailGate = sourceDetailWindow.parent?.parent;
   assert.ok(
     sourceDetailGate
@@ -194,23 +199,29 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   const owner = modules.find((row) => row.path === "use-workspace-extensions.ts");
   assert.ok(owner);
   const ownerFunction = findFunction(owner.module, "useWorkspaceExtensions");
-  let emptyGuard = -1;
-  const controllers = [];
+  const effectBodies = [];
   function visitOwner(node) {
     if (
-      ts.isIfStatement(node)
-      && node.expression.getText(owner.module) === "registry.length === 0 || !actorId"
-    ) emptyGuard = node.getStart(owner.module);
-    if (
-      ts.isNewExpression(node)
-      && node.expression.getText(owner.module) === "AbortController"
-    ) controllers.push(node.getStart(owner.module));
+      ts.isCallExpression(node)
+      && node.expression.getText(owner.module) === "useEffect"
+    ) {
+      const callback = node.arguments[0];
+      if (
+        callback
+        && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+        && ts.isBlock(callback.body)
+      ) effectBodies.push(callback.body);
+    }
     ts.forEachChild(node, visitOwner);
   }
   visitOwner(ownerFunction);
-  assert.ok(emptyGuard >= 0, "empty registry must retain an explicit zero-side-effect return");
+  assert.equal(effectBodies.length, 1, "availability owner must retain one explicit effect");
+  const emptyGuard = effectBodies[0].statements[0];
   assert.ok(
-    controllers.every((position) => emptyGuard < position),
-    "empty registry must return before constructing an AbortController",
+    emptyGuard
+    && ts.isIfStatement(emptyGuard)
+    && emptyGuard.expression.getText(owner.module) === "registry.length === 0 || !actorId"
+    && ts.isReturnStatement(emptyGuard.thenStatement),
+    "empty registry must be the effect's first semantic statement and return before side effects",
   );
 });
