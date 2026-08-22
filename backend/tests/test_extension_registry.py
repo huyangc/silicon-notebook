@@ -155,6 +155,45 @@ def test_runtime_and_ui_contributions_cannot_reuse_one_global_id():
         )
 
 
+def test_contribution_ids_are_globally_unique_across_plugin_boundaries():
+    runtime = ContributionDeclaration(
+        "same", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    ui = UiContributionDeclaration(
+        "same", "workspace.side_panel", "ui.good"
+    )
+    decision = {"ui.good": lambda _context: Availability.available()}
+    cases = (
+        (
+            (
+                _Bundle(_manifest("ui-a", ui_contributions=(ui,))),
+                _Bundle(_manifest("ui-b", ui_contributions=(ui,))),
+            ),
+            "duplicate UI contribution",
+        ),
+        (
+            (
+                _Bundle(_manifest("runtime-a", runtime), (object(),)),
+                _Bundle(_manifest("ui-b", ui_contributions=(ui,))),
+            ),
+            "duplicate UI contribution",
+        ),
+        (
+            (
+                _Bundle(_manifest("ui-a", ui_contributions=(ui,))),
+                _Bundle(_manifest("runtime-b", runtime), (object(),)),
+            ),
+            "duplicate contribution",
+        ),
+    )
+    for bundles, message in cases:
+        with pytest.raises(ExtensionRegistryError, match=message):
+            build_extension_registry(
+                bundles,
+                capability_decisions=decision,
+            )
+
+
 def test_topology_is_frozen_but_availability_is_resolved_live():
     state = {"available": False}
     declaration = ContributionDeclaration(
