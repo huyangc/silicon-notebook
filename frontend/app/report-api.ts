@@ -112,19 +112,13 @@ export const generateReport = (nb: string, id: string, depth?: number) =>
     body: JSON.stringify(depth != null ? { depth } : {}),
   });
 
-export async function downloadReportsZip(
+export async function fetchReportsZip(
   nb: string,
   reportIds: string[],
-): Promise<void> {
-  const blob = await requestBlob(`/notebooks/${nb}/reports/export`, {
+): Promise<Blob> {
+  return requestBlob(`/notebooks/${nb}/reports/export`, {
     ...options,
     method: "POST",
     body: JSON.stringify({ report_ids: reportIds }),
   });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = "reports.zip";
-  anchor.click();
-  URL.revokeObjectURL(url);
 }

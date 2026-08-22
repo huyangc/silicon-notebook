@@ -116,12 +116,12 @@ export const REPORT_STATUS: Record<string, string> = {
 };
 
 // reports.depth 的取值 → 「研究深度」档名。五档名与 EffortPicker 的档位表同名
-// (概览/标准/深入/详尽/穷尽),取值集是 report-view.tsx 的 DEPTHS=[1,2,4,8,16]。
+// (概览/标准/深入/详尽/穷尽),取值集的真源是 report-model.ts 的 REPORT_DEPTHS。
 //
-// 为什么放在这里而不是留在 report-view.tsx:那边的 DEPTH_LABELS 是**按下标**的
+// 为什么放在这里而不是留在 report-view.tsx:展示层的 DEPTH_LABELS 是**按下标**的
 // 有序档位表(喂给滑块控件),而只拿到 reports.depth 数值的消费方(dev/logs 活动流)
 // 需要的是**按取值**反查。两种形状各写一份就会漂移,所以档名收敛到这张表,
-// report-view.tsx 的有序表由它派生。
+// report-view.tsx 的有序展示表由它派生。
 export const REPORT_DEPTH: Record<string, string> = {
   "1": "概览",
   "2": "标准",

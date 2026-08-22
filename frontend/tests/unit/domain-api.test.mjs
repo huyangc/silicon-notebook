@@ -245,22 +245,15 @@ test("source APIs preserve multipart inference and return asset blobs without ob
   assert.deepEqual(objectUrls, []);
 });
 
-test("report ZIP downloads with the fixed filename and revokes its URL", async () => {
+test("report ZIP API returns the authenticated blob without browser side effects", async () => {
   installWindow();
   globalThis.fetch = async () => new Response("zip", { status: 200 });
   const created = [];
-  const revoked = [];
-  const clicks = [];
   URL.createObjectURL = (blob) => { created.push(blob); return "blob:reports"; };
-  URL.revokeObjectURL = (url) => revoked.push(url);
-  globalThis.document = {
-    createElement: () => ({ click() { clicks.push(this); } }),
-  };
 
-  await report.downloadReportsZip("nb-1", ["r-1"]);
-  assert.equal(clicks[0].href, "blob:reports");
-  assert.equal(clicks[0].download, "reports.zip");
-  assert.deepEqual(revoked, ["blob:reports"]);
+  const blob = await report.fetchReportsZip("nb-1", ["r-1"]);
+  assert.equal(await blob.text(), "zip");
+  assert.deepEqual(created, []);
 });
 
 test("domain clients preserve representative queries, JSON bodies, and clear-session 401 policy", async () => {

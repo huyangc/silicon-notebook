@@ -8,7 +8,7 @@ const api = vi.hoisted(() => ({
   confirmReportIntent: vi.fn(),
   createReport: vi.fn(),
   deleteReport: vi.fn(),
-  downloadReportsZip: vi.fn(),
+  fetchReportsZip: vi.fn(),
   generateReport: vi.fn(),
   getReport: vi.fn(),
   getReportShare: vi.fn(),
@@ -39,6 +39,7 @@ const defaultPolicy: HookOptions["policy"] = {
 const effects: HookOptions["effects"] = {
   notify: vi.fn(),
   downloadMarkdown: vi.fn(),
+  downloadArchive: vi.fn(),
   announceShareLink: vi.fn(),
 };
 
@@ -109,7 +110,7 @@ beforeEach(() => {
   api.shareReport.mockResolvedValue({ share_token: "token" });
   api.getReportShare.mockResolvedValue({ share_token: "token" });
   api.unshareReport.mockResolvedValue(undefined);
-  api.downloadReportsZip.mockResolvedValue(undefined);
+  api.fetchReportsZip.mockResolvedValue(new Blob(["zip"]));
 });
 
 afterEach(() => {
@@ -178,6 +179,27 @@ test("actor replacement rejects a deferred detail commit", async () => {
   await act(async () => pendingDetail.resolve(detail("report-old")));
   await opening;
   expect(value!.active).toBeNull();
+});
+
+test("actor replacement rejects a deferred archive browser effect", async () => {
+  const pendingArchive = deferred<Blob>();
+  api.listReports.mockResolvedValue([summary("report-a")]);
+  api.fetchReportsZip.mockReturnValueOnce(pendingArchive.promise);
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(api.listReports).toHaveBeenCalledOnce());
+
+  act(() => {
+    value!.toggleSelectMode();
+    value!.toggleSelected("report-a");
+  });
+  let downloading!: Promise<void>;
+  act(() => { downloading = value!.downloadSelected(); });
+  expect(api.fetchReportsZip).toHaveBeenCalledWith("notebook-a", ["report-a"]);
+
+  rerender(<Harness actorId="user-b" notebookId="notebook-b" />);
+  await act(async () => pendingArchive.resolve(new Blob(["private-a"])));
+  await downloading;
+  expect(effects.downloadArchive).not.toHaveBeenCalled();
 });
 
 test("auto creation freezes current scopes and forces the default depth", async () => {

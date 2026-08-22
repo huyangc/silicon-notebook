@@ -1,14 +1,8 @@
 /**
  * report-view.tsx
  *
- * 「深度报告」tab:生成 / 列表 / 进度轮询 / 查看 / 取消 / 下载 .md。
- * page.tsx 已过大,面板逻辑集中在这里;page.tsx 只负责接线
- * (类型化 api 函数 + chat-body 里的 <ReportsPanel …/> 分支)。
- *
- * 轮询约定(镜像 page.tsx 的索引构建轮询写法):
- * - 列表视图:存在非终态(pending/running)报告时每 6s 刷一次列表,终态即停;
- * - 详情视图:打开的报告非终态时每 6s 刷一次详情,到终态后再同步一次列表;
- * - 组件卸载/依赖变化时清理 interval。
+ * 「深度报告」tab 的纯展示层。报告状态、类型化 API 调用、权限复核与轮询都由
+ * use-report-workspace.ts 单一拥有；page.tsx 只组合 owner 与跨域 presentation effects。
  */
 "use client";
 
@@ -111,6 +105,15 @@ export function downloadReportMarkdown(r: ReportDetailT) {
   a.href = url;
   a.download = `report-${r.id}.md`;
   a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function downloadReportArchive(blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "reports.zip";
+  anchor.click();
   URL.revokeObjectURL(url);
 }
 
