@@ -52,6 +52,10 @@ vi.mock("../../features/kg-maintenance/kg-api.ts", async (importOriginal) => ({
 }));
 
 import { useKgWorkspace } from "../../app/use-kg-workspace";
+import {
+  REBUILD_POLL_MAX_ATTEMPTS,
+  REBUILD_POLL_TIMED_OUT,
+} from "../../features/kg-maintenance/kg-rebuild-status";
 
 type HookValue = ReturnType<typeof useKgWorkspace>;
 type HookOptions = Parameters<typeof useKgWorkspace>[0];
@@ -440,22 +444,58 @@ test("pending rebuild retries spend one POST per poll tick without adoption read
   await act(async () => value!.decideMerge(merge, true));
 
   const pendingNotice = "合并已记录，将在当前任务完成后自动重新合并";
+  const terminalNotice = "已重新合并，现有 1 组概念";
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
   expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledTimes(2);
   expect(kgApi.fetchRelinkStatus).toHaveBeenCalledTimes(2);
   expect(notify.mock.calls.filter(([message]) => message === pendingNotice)).toHaveLength(1);
+  expect(notify.mock.calls.filter(([message]) => message === terminalNotice)).toHaveLength(0);
 
   await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
   expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledTimes(3);
   expect(kgApi.fetchRelinkStatus).toHaveBeenCalledTimes(2);
   expect(notify.mock.calls.filter(([message]) => message === pendingNotice)).toHaveLength(1);
+  expect(notify.mock.calls.filter(([message]) => message === terminalNotice)).toHaveLength(1);
 
   await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(3);
   expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledTimes(4);
   expect(kgApi.fetchRelinkStatus).toHaveBeenCalledTimes(2);
   expect(notify.mock.calls.filter(([message]) => message === pendingNotice)).toHaveLength(1);
+  expect(notify.mock.calls.filter(([message]) => message === terminalNotice)).toHaveLength(1);
+});
+
+test("pending rebuild retries remain bounded when every replacement POST stays occupied", async () => {
+  const merge = candidate();
+  kgApi.fetchPendingMerges.mockResolvedValue([merge]);
+  kgApi.fetchUnifiedKgRebuildStatus
+    .mockResolvedValueOnce({
+      job_id: "", notebook_id: "notebook-a", status: "idle", running: false, clusters: 0,
+    })
+    .mockResolvedValueOnce({
+      job_id: "occupied", notebook_id: "notebook-a", status: "running", running: true, clusters: 0,
+    })
+    .mockResolvedValue({
+      job_id: "occupied", notebook_id: "notebook-a", status: "succeeded", running: false, clusters: 1,
+    });
+  kgApi.rebuildUnifiedKg.mockRejectedValue(httpConflict());
+
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  await act(async () => value!.openGraph());
+  vi.useFakeTimers();
+  await act(async () => value!.decideMerge(merge, true));
+  expect(value!.graph.rebuilding).toBe(true);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync((REBUILD_POLL_MAX_ATTEMPTS + 1) * 3_000);
+  });
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(REBUILD_POLL_MAX_ATTEMPTS + 1);
+  expect(value!.graph.rebuilding).toBe(false);
+  expect(notify.mock.calls.filter(
+    ([message]) => message === REBUILD_POLL_TIMED_OUT.toast,
+  )).toHaveLength(1);
 });
 
 test("graph opening preserves parallel core reads and rejects stale search results", async () => {

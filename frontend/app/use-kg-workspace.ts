@@ -153,6 +153,7 @@ export function useKgWorkspace({
   const knowledgeRequestRef = useRef(0);
   const typeRequestRef = useRef(0);
   const duplicateRequestRef = useRef(0);
+  const knowledgeContextRequestsRef = useRef(new Map<string, object>());
   const schemaRequestRef = useRef(0);
   const graphOpenRequestRef = useRef(0);
   const graphRangeRequestRef = useRef(0);
@@ -283,6 +284,7 @@ export function useKgWorkspace({
     setKnowledgePage({});
     setDuplicates(null);
     setKnowledgeContexts({});
+    knowledgeContextRequestsRef.current.clear();
     setKnowledgeBusy(null);
     setSchemaModalOpen(false);
     setSchemas(null);
@@ -464,6 +466,7 @@ export function useKgWorkspace({
       setKnowledgeStatusFilter("all");
       setDuplicates(null);
       setKnowledgeContexts({});
+      knowledgeContextRequestsRef.current.clear();
       await loadKnowledgeFor(owner, { kind: nextKind, status: "all", page: 0 });
     } else if (knowledgeRef.current[currentKind] == null) {
       await loadKnowledgeFor(owner, { kind: currentKind, status: "all", page: 0 });
@@ -477,6 +480,7 @@ export function useKgWorkspace({
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
     setKnowledgeContexts({});
+    knowledgeContextRequestsRef.current.clear();
     void loadKnowledgeFor(owner, { kind, status: "all", page: 0 });
   };
 
@@ -518,6 +522,7 @@ export function useKgWorkspace({
     setKnowledgePage({});
     setDuplicates(null);
     setKnowledgeContexts({});
+    knowledgeContextRequestsRef.current.clear();
   };
 
   const updateKnowledge = async (id: string, patch: { status?: string; owner?: string }) => {
@@ -621,14 +626,18 @@ export function useKgWorkspace({
     const owner = currentOwner();
     if (!owner || knowledgeContexts[itemId]) return;
     const kind = knowledgeKindRef.current;
+    const request = {};
+    knowledgeContextRequestsRef.current.set(itemId, request);
     try {
       const context = await fetchNodeContext(owner.notebookId, itemId);
-      if (owns(owner) && knowledgeKindRef.current === kind) {
+      if (owns(owner) && knowledgeKindRef.current === kind
+        && knowledgeContextRequestsRef.current.get(itemId) === request) {
         setKnowledgeContexts((current) => ({ ...current, [itemId]: context }));
       }
     } catch {
-      if (owns(owner)) {
-        const item = knowledgeRef.current[knowledgeKindRef.current]?.find((row) => row.id === itemId);
+      if (owns(owner) && knowledgeKindRef.current === kind
+        && knowledgeContextRequestsRef.current.get(itemId) === request) {
+        const item = knowledgeRef.current[kind]?.find((row) => row.id === itemId);
         setKnowledgeContexts((current) => ({
           ...current,
           [itemId]: {
@@ -1269,9 +1278,10 @@ export function useKgWorkspace({
     const owner = currentOwner();
     if (!owner || !policyRef.current.canWriteKg) return;
     const key = maintenanceOwnerKey(owner);
-    if (relinkingNotebookIds.has(key) || rebuildingNotebookIds.has(key) || buildingKg) return;
-    setRelinkingNotebookIds((current) => claimNotebookSlot(current, key));
     const jobKey = maintenanceJobKey(owner, "relink");
+    if (relinkingNotebookIds.has(key) || rebuildingNotebookIds.has(key) || buildingKg
+      || submittingMaintenanceRef.current.has(jobKey)) return;
+    setRelinkingNotebookIds((current) => claimNotebookSlot(current, key));
     expectedMaintenanceJobRef.current.delete(jobKey);
     for (const attempt of [0, 1]) {
       if (!owns(owner) || !policyRef.current.canWriteKg) {
@@ -1297,7 +1307,7 @@ export function useKgWorkspace({
           setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
           return;
         }
-        publishError(owner, error);
+        if (owns(owner) && policyRef.current.canWriteKg) effectsRef.current.reportError(error);
         setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
         return;
       } finally {
@@ -1312,10 +1322,11 @@ export function useKgWorkspace({
   ): Promise<"started" | "adopted" | "waiting" | "denied" | "failed"> => {
     if (!owns(owner) || !policyRef.current.canWriteKg) return "denied";
     const key = maintenanceOwnerKey(owner);
-    if (!options.allowClaimed
-      && (rebuildingNotebookIds.has(key) || relinkingNotebookIds.has(key) || buildingKg)) return "failed";
-    setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
     const jobKey = maintenanceJobKey(owner, "rebuild");
+    if (!options.allowClaimed
+      && (rebuildingNotebookIds.has(key) || relinkingNotebookIds.has(key) || buildingKg
+        || submittingMaintenanceRef.current.has(jobKey))) return "failed";
+    setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
     expectedMaintenanceJobRef.current.delete(jobKey);
     for (const attempt of [0, 1]) {
       if (!owns(owner) || !policyRef.current.canWriteKg) {
@@ -1359,7 +1370,7 @@ export function useKgWorkspace({
           setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
           return "failed";
         }
-        publishError(owner, error);
+        if (owns(owner) && policyRef.current.canWriteKg) effectsRef.current.reportError(error);
         if (options.pendingRetry) return "waiting";
         setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
         return "failed";
@@ -1433,8 +1444,15 @@ export function useKgWorkspace({
     let inFlight = false;
     let attempts = 0;
     let mismatchStreak = 0;
-    const settle = async (outcome: ReturnType<typeof rebuildPollOutcome>) => {
-      if (outcome.toast && owns(owner)) effectsRef.current.notify(outcome.toast);
+    let lastTerminalToastReceipt: string | null = null;
+    const settle = async (
+      outcome: ReturnType<typeof rebuildPollOutcome>,
+      terminalReceipt: string,
+    ) => {
+      if (outcome.toast && owns(owner) && lastTerminalToastReceipt !== terminalReceipt) {
+        lastTerminalToastReceipt = terminalReceipt;
+        effectsRef.current.notify(outcome.toast);
+      }
       if (pendingRebuildRef.current.has(key) && attempts <= REBUILD_POLL_MAX_ATTEMPTS) {
         try {
           const launch = await launchRebuild(owner, {
@@ -1461,7 +1479,7 @@ export function useKgWorkspace({
       if (attempts > REBUILD_POLL_MAX_ATTEMPTS) {
         settled = true;
         window.clearInterval(timer);
-        await settle(REBUILD_POLL_TIMED_OUT);
+        await settle(REBUILD_POLL_TIMED_OUT, "timeout");
         return;
       }
       inFlight = true;
@@ -1478,7 +1496,7 @@ export function useKgWorkspace({
           if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
         }
         settled = true;
-        const finished = await settle(outcome);
+        const finished = await settle(outcome, `${status.job_id}\0${status.status}`);
         if (finished) window.clearInterval(timer);
       } catch { /* transient status error; retain the claim */ }
       finally { inFlight = false; }

@@ -262,38 +262,6 @@ import {
 } from "./workspace-model";
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
-// codex R13:「补上关联」/「重新合并」两条轮询按 job_id 配对(codex R11)防住了陈旧终态
-// 被误当真——但按「不匹配就无限拒收」实现时,有两种场景会让这次追踪**永远**等不到匹配
-// 的终态:①后端重启(expectedMaintenanceJobRef 只在浏览器内存,重启后服务端记着的
-// job_id 已经不存在,status 查询只会回显 idle 或别的任务);②共享的按笔记本单飞维护槽
-// 被另一次提交/领养认领(服务端此后只如实回显最新占槽的那个 job_id,这次追踪的 job_id
-// 再也不会出现)。两种场景下轮询都会一路拒收到约 30 分钟的尝试上限才靠超时兜底——按钮
-// 锁死、图谱不刷。
-//
-// 修法:job_id 不匹配的终态不再无限拒收,而是按**连续观测次数**收敛。轮询 tick 里维护
-// 一个局部 mismatchStreak:同一个 tick 只要观测到「终态但 job_id 不匹配」就
-// mismatchStreak += 1;连续达到这个阈值就当作已经可以确证专属这次追踪的匹配终态不会
-// 再出现,直接按终态收工(settle+刷新+清 expectation——这次追踪已不可观测,刷新是安全
-// 且必要的:图可能已经变了)。观测到 running,或观测到匹配的终态,都会把计数清零——
-// 只有**连续**不匹配才累计,中间夹一次 running/匹配就从头数。
-//
-// 为什么连续两次就能确证,而不是像 R11 之前那样第一次不匹配就当真(那正是 R11 要修的
-// 竞态本身)？expectation 只在 POST **返回之后**才写进 expectedMaintenanceJobRef——写入
-// 那一刻,服务端早已经在提交任务槽之后才回的包,所以 expectation 一旦存在,服务端此刻
-// 的权威状态必然就是这次追踪的任务。此后唯一还能读到「旧 job_id / 旧 idle」的途径,只
-// 剩一种:一个更早发出、此刻才姗姗来迟的响应。而轮询在同一个 tick 序列里**串行**执行
-// ——下一次真正发出的请求,一定发生在上一次响应已经被 await 解析**之后**(每个 tick
-// 开头都先检查 settled,不会有两个 tick 的请求同时在飞、乱序回来)。换句话说:连续观测
-// 到的第二次不匹配,不可能仍是"POST 返回前"在飞的旧响应——它必然是 POST 已经返回之后、
-// 服务端此刻状态确实不是这次追踪的任务的真实回显。两次即可确证,把等待收敛到 ≤2 个
-// tick(约 6 秒),不必再靠约 30 分钟的尝试上限兜底。
-//
-// 与既有两套机制的分工(缺一不可,谁也不能顶替谁):submittingMaintenanceRef 防的是
-// POST **还没返回**那段窗口(此时还没有新 job_id 可比,提交期无条件继续轮询,不进入
-// mismatchStreak 计数);generation(仅 rebuild 侧)防的是补发重试跨代际的乱序响应。
-// mismatchStreak 防的是"POST 已经返回、expectation 已经写好,但这个 job_id 从此再也
-// 不会出现"这种死等——三层各管一段窗口,合起来才是完整的时序覆盖。
-const MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK = 2;
 
 /**
  * 标签页重新可见时,两次「访问权复核」之间至少隔这么久。
