@@ -24,6 +24,11 @@ def test_source_upload_limit_must_be_a_positive_supported_whole_megabyte_value()
     )
 
 
+def test_database_busy_timeout_rejects_negative_values():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, DB_BUSY_TIMEOUT_MS="-1")
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/upload-limit.db")
