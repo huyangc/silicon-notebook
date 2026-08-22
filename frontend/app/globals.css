@@ -1080,50 +1080,43 @@ button {
   transition: grid-template-columns 200ms ease;
 }
 
-/* A real side-panel contribution adds a third, explicit grid column. The host
-   returns exact null when no contribution is visible, so denied/unavailable
-   rows retain the original two-column workspace byte-for-byte. */
-.workspace-grid:has(> .workspace-extension-outlet-workspace-side_panel) {
-  grid-template-columns: minmax(270px, 25%) minmax(190px, 18%) minmax(0, 1fr);
-}
-
-.workspace-grid.sources-collapsed:has(> .workspace-extension-outlet-workspace-side_panel) {
-  grid-template-columns: 0 minmax(190px, 18%) minmax(0, 1fr);
-}
-
+/* workspace.side_panel 的落点在**来源栏内部**(见 page.tsx 挂载点注释),不再给
+   工作区加第三列:那一列宽 190px、只放一个入口,其余整列空白,还把问答面板挤窄。
+   容器本身只负责纵向堆叠(将来多个 contribution 时不互相贴住),布局归来源栏的
+   flex 列所有。 */
 .workspace-extension-outlet-workspace-side_panel {
+  display: grid;
+  gap: 8px;
   min-width: 0;
 }
 
+/* 一行式入口:视觉全部由 `.button.secondary` 提供(系统边框/圆角/字重),这里只补
+   排版。刻意不写任何颜色字面量——需要颜色时取 :root 的 token。 */
 .agent-profile-workspace-plugin {
-  height: fit-content;
-  display: grid;
-  gap: 10px;
-  padding: 16px;
-  border: 1px solid rgba(34, 48, 68, 0.12);
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 16px 40px rgba(31, 42, 58, 0.08);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-size: 13px;
+  text-align: left;
 }
 
-.agent-profile-workspace-plugin-icon {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 10px;
-  color: #0f6d7a;
-  background: #e8f5f6;
+.agent-profile-workspace-plugin > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
 }
 
-.agent-profile-workspace-plugin strong { font-size: 14px; }
-.agent-profile-workspace-plugin p {
-  margin: 5px 0 0;
-  color: #667085;
-  font-size: 12px;
-  line-height: 1.55;
+/* 来源栏最窄到 270px,长文案必须能省略而不是把按钮撑破。 */
+.agent-profile-workspace-plugin > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.agent-profile-workspace-plugin .button { width: 100%; }
+
+.agent-profile-workspace-plugin:hover {
+  background: var(--soft);
+}
 
 .workspace-panel {
   background: #fff;
@@ -7491,14 +7484,6 @@ button.tag:hover {
     grid-template-columns: 280px minmax(0, 1fr);
   }
 
-  .workspace-grid:has(> .workspace-extension-outlet-workspace-side_panel) {
-    grid-template-columns: 250px 180px minmax(0, 1fr);
-  }
-
-  .workspace-grid.sources-collapsed:has(> .workspace-extension-outlet-workspace-side_panel) {
-    grid-template-columns: 0 180px minmax(0, 1fr);
-  }
-
   .workspace-toolbar {
     justify-content: flex-start;
     overflow-x: auto;
@@ -7635,10 +7620,6 @@ button.tag:hover {
   }
 
   .workspace-grid.sources-collapsed { grid-template-columns: 1fr; }
-  .workspace-grid:has(> .workspace-extension-outlet-workspace-side_panel),
-  .workspace-grid.sources-collapsed:has(> .workspace-extension-outlet-workspace-side_panel) {
-    grid-template-columns: 1fr;
-  }
   .workspace-grid.sources-collapsed .sources-panel {
     width: auto;
     min-width: 0;

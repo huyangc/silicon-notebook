@@ -5128,6 +5128,40 @@ export default function Home() {
                     </p>
                   );
                 })()}
+                {/* workspace.side_panel 扩展点的落点。三条理由:
+                    ① **不再是工作区的第三列**——一整列只放一个入口,其余整列空白,
+                       还把问答面板挤窄;这里它与「添加来源」「整理知识图谱」同属
+                       笔记本级动作,视觉上本来就是一排。
+                    ② **落在 .sources-body 的固定区**(`.source-list` 之前):那个
+                       列表靠 flex:1 1 auto / overflow:auto 自己滚,插在它之后会让
+                       入口跟着来源列表滚走。
+                    ③ **排在检索范围之上**:从 .source-scope-toolbar 往下(检索范围 →
+                       参考库 → 本库来源)是一整组「范围」,插进中间会把它切断。
+                    只读成员同样看得见——后端四个端点都走 require_notebook_read,
+                    「本人那一份」恰是只读成员唯一能写的东西(可见性判据仍在 host
+                    的 permission/availability 门里,不在这里)。来源栏收起时入口随
+                    整栏一起隐藏:这是收起来源栏本来的语义,已登记接受。 */}
+                {currentUser && currentNotebook && workspaceExtensions.ownerKey && (
+                  <WorkspaceExtensionOutlet
+                    slot="workspace.side_panel"
+                    registry={WORKSPACE_UI_CONTRIBUTIONS}
+                    projection={workspaceExtensionProjection}
+                    ownerKey={workspaceExtensions.ownerKey}
+                    actions={workspaceExtensionActions}
+                    context={{
+                      slot: "workspace.side_panel",
+                      actor: {
+                        id: currentUser.id,
+                        username: currentUser.username,
+                        displayName: currentUser.display_name,
+                      },
+                      notebook: { id: currentNotebook.id, name: currentNotebook.name },
+                      source: null,
+                      uiMode,
+                      permissions: workspaceExtensionPermissions,
+                    }}
+                  />
+                )}
                 <div className="source-scope-toolbar" role="group" aria-label="问答与深度报告检索范围">
                   {/* title 带上完整计数：窄面板下这行会被省略号截断，不重复一遍就没处看。 */}
                   <span
@@ -5342,28 +5376,6 @@ export default function Home() {
               >
                 <PanelLeftOpen size={18} />
               </button>
-            )}
-
-            {currentUser && currentNotebook && workspaceExtensions.ownerKey && (
-              <WorkspaceExtensionOutlet
-                slot="workspace.side_panel"
-                registry={WORKSPACE_UI_CONTRIBUTIONS}
-                projection={workspaceExtensionProjection}
-                ownerKey={workspaceExtensions.ownerKey}
-                actions={workspaceExtensionActions}
-                context={{
-                  slot: "workspace.side_panel",
-                  actor: {
-                    id: currentUser.id,
-                    username: currentUser.username,
-                    displayName: currentUser.display_name,
-                  },
-                  notebook: { id: currentNotebook.id, name: currentNotebook.name },
-                  source: null,
-                  uiMode,
-                  permissions: workspaceExtensionPermissions,
-                }}
-              />
             )}
 
             <section className="workspace-panel chat-panel">
