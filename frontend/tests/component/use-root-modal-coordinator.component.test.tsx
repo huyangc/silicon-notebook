@@ -163,6 +163,22 @@ test("workspace navigation closes collection dialogs but keeps actor-global sett
   expect(value!.view("password-change").open).toBe(true);
 });
 
+test("a deferred collection ticket cannot publish after a workspace transition", () => {
+  render(<Harness />);
+  enterWorkspace("notebook-a", 1);
+  const actor = value!.captureActorOwner();
+  const editor = value!.issue("notebook-editor", actor);
+  const deletion = value!.issue("notebook-delete", actor);
+  const transition = value!.beginWorkspaceTransition();
+  act(() => value!.finishWorkspaceTransition(transition, {
+    actorId: "user-a",
+    notebookId: "notebook-b",
+    workspaceEpoch: 2,
+  }));
+  expect(value!.publish(editor)).toBe(false);
+  expect(value!.publish(deletion)).toBe(false);
+});
+
 test("primary slots conflict while the info layer remains a legal child overlay", () => {
   render(<Harness />);
   enterWorkspace();

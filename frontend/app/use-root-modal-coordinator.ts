@@ -63,6 +63,7 @@ export type RootModalLease<S extends RootModalSlot = RootModalSlot> = Readonly<{
   slot: S;
   issue: number;
   conflictIssue: number | null;
+  workspaceIssue: number | null;
   owner: RootModalOwner;
   returnFocus: HTMLElement | null;
 }>;
@@ -386,10 +387,13 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     const conflictIssue = policy.conflictGroup === "primary"
       ? ++primaryIssueRef.current
       : null;
+    const workspaceIssue = policy.workspaceSensitive
+      ? workspaceGenerationRef.current
+      : null;
     const returnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    return Object.freeze({ slot, issue: nextIssue, conflictIssue, owner, returnFocus });
+    return Object.freeze({ slot, issue: nextIssue, conflictIssue, workspaceIssue, owner, returnFocus });
   }
 
   // Async openers need an authority check before the presentation lease is
@@ -404,6 +408,10 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
       && (
         lease.conflictIssue === null
         || primaryIssueRef.current === lease.conflictIssue
+      )
+      && (
+        lease.workspaceIssue === null
+        || workspaceGenerationRef.current === lease.workspaceIssue
       )
       && ownerIsCurrent(lease.owner),
     );
@@ -448,6 +456,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
         slot,
         issue: active.issue,
         conflictIssue: active.conflictIssue,
+        workspaceIssue: active.workspaceIssue,
         owner: active.owner,
         returnFocus: active.returnFocus,
       })

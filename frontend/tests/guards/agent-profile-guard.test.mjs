@@ -227,6 +227,7 @@ test("从知识图谱打开理解弹窗时先关闭全屏图谱", () => {
   const pageText = page.text ?? page.source ?? "";
   assert.match(
     pageText,
-    /<UnderstandingEntryButton[\s\S]*?onOpen=\{\(\) => \{[\s\S]*?kgWorkspace\.closeGraph\(\);[\s\S]*?rootModals\.open\("understanding", rootModals\.captureWorkspaceOwner\(\)\)/,
+    /<UnderstandingEntryButton[\s\S]*?onOpen=\{\(\) => \{[\s\S]*?closeKgView\(\);[\s\S]*?rootModals\.open\("understanding", rootModals\.captureWorkspaceOwner\(\)\)/,
   );
+  assert.match(pageText, /function closeKgView\(\)[\s\S]*?kgWorkspace\.closeGraph\(\)/);
 });
