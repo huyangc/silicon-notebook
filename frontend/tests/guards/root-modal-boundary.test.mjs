@@ -52,6 +52,11 @@ test("workspace transitions invalidate root slots before old-domain work and clo
   const closeCalls = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed")).map(({ target }) => target);
   assert.ok(closeCalls.includes("resetStagedIntake"));
   assert.ok(closeCalls.includes("setLinkSectionOpen"));
+  const closeText = findFunctionIn(page, "Home", "handleRootModalClosed").getText(page);
+  assert.match(
+    closeText,
+    /case "source-add":[\s\S]*?resetStagedIntake\(\);[\s\S]*?setLinkSectionOpen\(false\);[\s\S]*?sourceModalDismissedRef\.current = true;[\s\S]*?return;/,
+  );
 });
 
 test("authenticated bootstrap activates modal authority before publishing the user", () => {
