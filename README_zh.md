@@ -18,6 +18,8 @@ Knowledge extraction 同样提供休眠的 `knowledge.candidate_projector` 批�
 
 外部 Agent MCP 现由一个 API-owned tool host 发布启动期冻结目录。默认 core 前缀仍是七个固定 capability bundle 的精确 22 个内建工具，schema、实时 token/成员权复核、owner-only 写闸、Memory candidate 审核边界、repository/model I/O 与「恰好一次 progress wrapper」不变量均保持不变。显式信任的进程内 `agent.tool_provider` contributor 可追加标量 schema 工具；插件拿不到 FastMCP、repository、原始 bearer，也不能发明 scope、放宽写策略或确认/拒绝 Memory。Provider 故障只映射稳定公开码，core 仅发按 token owner 归属的 tool/plugin/status content-free audit 事件。
 
+已认证的深度报告批量导出现由启动冻结的 single `report.exporter` Provider 执行。默认内建 Markdown provider 只在 repository 连接释放后取得不可变、已完成授权收窄的报告视图；文件名和 `reports.zip` 外壳仍由 core 拥有，畸形批次整体拒绝。浏览器既有单篇 Markdown 下载仍只是对已授权详情的本地呈现，因此不增加请求。未来新增用户可见格式必须在同一个 PR 同步交付 backend provider 与 frontend/API parity。
+
 ## 核心能力
 
 - 结构化来源摄取；MinerU 配置后可保留元素级证据、公式、表格和文档内图片；来源详情只加载一页有界元素并按需继续展开，不再一次渲染整篇大文档。公式证据会在来源详情与知识图谱出处卡中排版，LaTeX 渲染失败时仍显示原文，宽块级公式只在所属面板内横向滚动。

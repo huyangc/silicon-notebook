@@ -6,6 +6,8 @@
 
 外部 Agent MCP 面由一个 API-owned registration host 和启动期冻结目录组成。它先把 `app.api.mcp_tools` 的固定 bundle 捕获为精确 22-tool core 前缀，再追加显式信任的进程内 `agent.tool_provider` contributor 标量 descriptor。core handler 保持既有 validation/auth/I/O 顺序；provider handler 复用实时权威、owner-write、progress 与 output 边界，拿不到 FastMCP、repository、原始凭据或通用 service locator。插件异常只映射稳定公开码，core 在已认证 token owner 的 request/log context 下只发 content-free 的 tool/plugin/status audit，结果 rail 在递归复制过程中执行。默认 provider topology 为空，注册/listing 为零 repository/model 工作。
 
+深度报告后端批量导出是首个真实 single Provider 消费者。Repository 负责授权和已完成行收窄，释放连接后才把最小不可变批次交给启动冻结的 `report.exporter` host。默认内建 Markdown provider 是默认 topology 的唯一 provider，不存在 fallback formatter；core 校验完整有序结果并继续拥有文件名冲突策略与 ZIP 构造。浏览器既有单篇 Markdown 本地下载刻意保持不变，不属于后端 provider 路径。
+
 ## 数值上限与截断
 
 生产代码不得在调用点隐藏会改变结果的数字切片或上限。不可调的 wire/storage

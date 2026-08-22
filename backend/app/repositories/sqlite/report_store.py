@@ -5,16 +5,16 @@ service, engine orchestration lives in ``report_engine`` and detached execution
 in ``report_execution``. Bodies are
 moved verbatim from the frozen facade methods: zero-row UPDATE/DELETE stay
 silent no-ops, ``get_report`` raises KeyError, list order is
-``created_at DESC, id`` and export keeps the done-only/input-order/
-suffix-dedup/IN-batched semantics.
+``created_at DESC, id`` and export selection keeps the done-only/input-order/
+IN-batched semantics; the connection-free core exporter owns filenames.
 """
 from __future__ import annotations
 
 import json
-import re
 from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
+from app.domain.report_export import ReportExportSource
 from app.repositories.sqlite.database import SqliteDatabase
 from app.core.internal_observability import public_report_sections
 
@@ -335,9 +335,11 @@ class ReportStore:
 
     def export_reports(self, notebook_id: str, report_ids: list, *,
                        created_by: str | None) -> list:
-        """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
-        notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
-        id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+        """读取批量导出的最小授权视图，按传入 report_ids 顺序回放。
+
+        只取该 notebook 下 status='done'、content_md 非空且匹配 creator 的报告；
+        非 done/空/跨 notebook/其他 creator 的 id 静默跳过。格式选择和文件命名在
+        连接释放后的 core export service 中完成，provider 永远看不到未授权 id。
 
         ``created_by`` 与 ``list_reports`` 同一条契约:keyword-only 且必填,
         非 None 时作为 **SQL 谓词**下推(不做结果侧过滤),别人的报告 id 混进
@@ -346,14 +348,10 @@ class ReportStore:
         只读走 connect()。report_ids 数量通常极小(用户勾选的几份报告),直接构造
         占位符即可;但仍按 _in_batches 分批以防罕见的大批量超 SQLite 变量上限
         (3.32+ 上限 32,766),批间用 dict 汇总后按原顺序回放。"""
-        def _safe(name: str) -> str:
-            s = re.sub(r'[/\\:*?"<>|\r\n]', "_", name or "").strip()
-            return s or ""
-
         ids = [r for r in (report_ids or []) if r]
         if not ids:
             return []
-        found: dict = {}                         # rid -> (question, content_md)
+        found: dict[str, ReportExportSource] = {}
         creator_clause = "" if created_by is None else "AND created_by = ? "
         creator_args: tuple = () if created_by is None else (created_by,)
         with self.database.connect() as db:
@@ -367,21 +365,14 @@ class ReportStore:
                     f"AND id IN ({placeholders})",
                     (notebook_id, *creator_args, *batch)).fetchall()
                 for row in rows:
-                    found[row["id"]] = (row["question"], row["content_md"])
-        out: list = []
-        seen: dict = {}                          # 文件名去重(极端同名 → 加 -N 后缀)
+                    found[row["id"]] = ReportExportSource(
+                        row["id"], row["question"], row["content_md"]
+                    )
+        out: list[ReportExportSource] = []
         for rid in ids:                          # 保持传入顺序
-            if rid not in found:
-                continue
-            question, content_md = found[rid]
-            stem = _safe(question)[:40] or rid
-            fname = f"{stem}-{rid}.md"
-            if fname in seen:
-                seen[fname] += 1
-                fname = f"{stem}-{rid}-{seen[fname]}.md"
-            else:
-                seen[fname] = 0
-            out.append((fname, content_md))
+            source = found.get(rid)
+            if source is not None:
+                out.append(source)
         return out
 
 

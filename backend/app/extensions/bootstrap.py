@@ -34,6 +34,8 @@ from app.extensions.builtin import (
     ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
     REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
     REPORT_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
+    REPORT_MARKDOWN_EXPORTER_BUNDLE,
+    REPORT_MARKDOWN_EXPORTER_PLUGIN_ID,
     GENERATED_QUESTION_BUNDLE,
     GENERATED_QUESTION_CONTRIBUTION_ID,
     PARSER_BUILTIN_BUNDLE,
@@ -57,6 +59,7 @@ from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
 from app.extensions.element_enrichment import SourceElementEnricherHost
 from app.extensions.knowledge_projection import KnowledgeCandidateProjectorHost
 from app.extensions.agent_tools import AgentToolProviderHost
+from app.extensions.report_export import ReportExporterHost
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ class ExtensionRuntime:
     element_enrichers: SourceElementEnricherHost
     knowledge_candidate_projectors: KnowledgeCandidateProjectorHost
     agent_tools: AgentToolProviderHost
+    report_exporter: ReportExporterHost
 
 
 def build_extension_registry(
@@ -93,6 +97,7 @@ def build_extension_runtime(
     ] | None = None,
     event_sink: Callable[[dict[str, object]], None] | None = None,
     trusted_agent_tool_plugins: frozenset[str] = frozenset(),
+    trusted_report_exporter_plugins: frozenset[str] = frozenset(),
 ) -> ExtensionRuntime:
     registry = build_extension_registry(
         bundles, capability_decisions=capability_decisions
@@ -135,6 +140,10 @@ def build_extension_runtime(
         agent_tools=AgentToolProviderHost(
             registry,
             trusted_plugin_ids=trusted_agent_tool_plugins,
+        ),
+        report_exporter=ReportExporterHost(
+            registry,
+            trusted_plugin_ids=trusted_report_exporter_plugins,
         ),
     )
 
@@ -212,6 +221,7 @@ def default_extension_runtime() -> ExtensionRuntime:
             ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
             ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
             REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
+            REPORT_MARKDOWN_EXPORTER_BUNDLE,
             PARSER_BUILTIN_BUNDLE,
             GENERATED_QUESTION_BUNDLE,
             PARSER_CLOUD_BUNDLE,
@@ -256,4 +266,7 @@ def default_extension_runtime() -> ExtensionRuntime:
             GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
             SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
         },
+        trusted_report_exporter_plugins=frozenset(
+            {REPORT_MARKDOWN_EXPORTER_PLUGIN_ID}
+        ),
     )

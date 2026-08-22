@@ -6,6 +6,8 @@ This document preserves the contributor-facing architecture summary, verificatio
 
 The external-Agent MCP surface has one API-owned registration host and a startup-frozen catalog. It captures the fixed bundles under `app.api.mcp_tools` as the exact 22-tool core prefix, then may append scalar descriptors from explicitly trusted in-process `agent.tool_provider` contributors. Core handlers preserve their validation/auth/I/O order; provider handlers use the same live authority, owner-write, progress, and output boundaries without receiving FastMCP, repositories, raw credentials, or a generic service locator. Provider exceptions map to stable public codes; the core emits content-free tool/plugin/status audit events under the authenticated token-owner request/log context, and result limits are enforced during recursive copying. The default provider topology is empty, and registration/listing performs zero repository/model work.
 
+Deep Report backend batch export is the first real single-Provider consumer. The repository owns authorization and completed-row selection, releases its connection, and passes a minimal immutable batch to the startup-frozen `report.exporter` host. The default built-in Markdown provider is the only default provider; there is no fallback formatter. Core validates the complete ordered result and retains filename collision policy and ZIP construction. The existing browser-only single-report Markdown download is deliberately unchanged and is not a backend provider path.
+
 ## Numeric limits and truncation
 
 Production code must not hide result-changing literal slices or limits at a

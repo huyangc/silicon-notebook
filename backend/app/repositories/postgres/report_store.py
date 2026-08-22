@@ -1,7 +1,6 @@
 """PostgreSQL reports-table row persistence."""
 from __future__ import annotations
 
-import re
 from typing import Callable, Iterator
 
 from app.repositories.postgres._store_utils import (
@@ -11,6 +10,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.core.capability_tokens import new_capability_token
+from app.domain.report_export import ReportExportSource
 from app.repositories.postgres.database import PostgresDatabase
 from app.core.internal_observability import public_report_sections
 
@@ -336,23 +336,20 @@ class ReportStore:
 
     def export_reports(self, notebook_id: str, report_ids: list, *,
                        created_by: str | None) -> list:
-        """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
-        notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
-        id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+        """读取批量导出的最小授权视图，按传入 report_ids 顺序回放。
+
+        SQL 在 provider 之前完成 notebook/done/nonempty/creator 收窄，provider 只在
+        本连接上下文退出后运行。
 
         ``created_by`` 与 ``list_reports`` 同一条契约:keyword-only 且必填,
         非 None 时作为 **SQL 谓词**下推(不做结果侧过滤)。
 
         只读走 connect()。report_ids 数量通常极小；仍按 _in_batches 分批以限制
         单条语句的参数与内存占用，批间用 dict 汇总后按原顺序回放。"""
-        def _safe(name: str) -> str:
-            s = re.sub(r'[/\\:*?"<>|\r\n]', "_", name or "").strip()
-            return s or ""
-
         ids = [r for r in (report_ids or []) if r]
         if not ids:
             return []
-        found: dict = {}                         # rid -> (question, content_md)
+        found: dict[str, ReportExportSource] = {}
         creator_clause = "" if created_by is None else "AND created_by = %s "
         creator_args: tuple = () if created_by is None else (created_by,)
         with self.database.connect() as db:
@@ -366,21 +363,14 @@ class ReportStore:
                     f"AND id IN ({placeholders})",
                     (notebook_id, *creator_args, *batch)).fetchall()
                 for row in rows:
-                    found[row["id"]] = (row["question"], row["content_md"])
-        out: list = []
-        seen: dict = {}                          # 文件名去重(极端同名 → 加 -N 后缀)
+                    found[row["id"]] = ReportExportSource(
+                        row["id"], row["question"], row["content_md"]
+                    )
+        out: list[ReportExportSource] = []
         for rid in ids:                          # 保持传入顺序
-            if rid not in found:
-                continue
-            question, content_md = found[rid]
-            stem = _safe(question)[:40] or rid
-            fname = f"{stem}-{rid}.md"
-            if fname in seen:
-                seen[fname] += 1
-                fname = f"{stem}-{rid}-{seen[fname]}.md"
-            else:
-                seen[fname] = 0
-            out.append((fname, content_md))
+            source = found.get(rid)
+            if source is not None:
+                out.append(source)
         return out
 
 

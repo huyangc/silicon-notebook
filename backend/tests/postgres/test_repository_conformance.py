@@ -5,6 +5,7 @@ import threading
 import pytest
 
 from app.core.request_context import reset_request_user, set_request_user
+from app.domain.report_export import ReportExportSource
 from app.models.ask import AskRequest
 from app.models.notebooks import NotebookCreate
 from app.models.sources import SourceImportFile, SourceImportRequest
@@ -278,9 +279,12 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
             notebook.id, created_by=owner.id
         )] == [report_id]
         assert repository.list_reports(notebook.id, created_by=reader.id) == []
-        assert len(repository.export_reports(
-            notebook.id, [report_id], created_by=owner.id
-        )) == 1
+        assert repository.export_reports(
+            notebook.id, [report_id, report_id], created_by=owner.id
+        ) == [
+            ReportExportSource(report_id, "Boot report", "# PostgreSQL report"),
+            ReportExportSource(report_id, "Boot report", "# PostgreSQL report"),
+        ]
         assert repository.export_reports(
             notebook.id, [report_id], created_by=reader.id
         ) == []
