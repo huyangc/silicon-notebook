@@ -44,9 +44,6 @@ class SystemConfiguration(BaseModel):
     # override never turns into a surprising 422 after the user finishes editing.
     report_max_sections: int = Field(gt=0)
     report_max_subqueries_per_section: int = Field(gt=0)
-    # Derived from the deployment's DB busy wait plus a fixed transport grace.
-    # The browser must not time out an authoritative Ask cancellation sooner.
-    ask_cancel_request_timeout_ms: int = Field(gt=0)
     # /dev/logs「活动」tab 的能力位，直接反映 Settings.user_activity_view_enabled——
     # 关闭时前端不应默认进一个会全部 404 的视图（见 dev/logs/page.tsx 与 system-api.ts
     # 的消费逻辑）。

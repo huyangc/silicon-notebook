@@ -68,9 +68,6 @@ type AskPolicy = Readonly<{
   kgAvailable: boolean;
   sourceScope: SourceScopePayload;
   baseScope: BaseScopePayload;
-  // Authenticated server config: DB busy wait + transport grace. Null means an
-  // older backend, where guessing a shorter timeout would be unsafe.
-  cancelRequestTimeoutMs: number | null;
 }>;
 
 type AskEffects = Readonly<{
@@ -162,31 +159,12 @@ function sameNotebookIdentity(
   );
 }
 
-async function requestAskCancellation(
-  notebookId: string,
-  jobId: string,
-  timeoutMs: number | null,
-): Promise<void> {
-  if (timeoutMs === null) {
-    await cancelAskJob(notebookId, jobId);
-    return;
-  }
-  const requestController = new AbortController();
-  let timeout = 0;
-  const timedOut = new Promise<never>((_resolve, reject) => {
-    timeout = window.setTimeout(() => {
-      requestController.abort();
-      reject(new DOMException("Ask cancellation timed out", "AbortError"));
-    }, timeoutMs);
-  });
-  try {
-    await Promise.race([
-      cancelAskJob(notebookId, jobId, requestController.signal),
-      timedOut,
-    ]);
-  } finally {
-    window.clearTimeout(timeout);
-  }
+async function requestAskCancellation(notebookId: string, jobId: string): Promise<void> {
+  // The synchronous endpoint has no enforceable end-to-end database deadline:
+  // it can cross more than one transaction and may wait on a process-local lock.
+  // Keep this one request authoritative until the server answers; a client timer
+  // would release retry authority while the original handler can still be alive.
+  await cancelAskJob(notebookId, jobId);
 }
 
 export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSessionOptions) {
@@ -631,11 +609,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           startedConversationId = durableConversationId;
           if (cancelRequestedControllersRef.current.delete(controller)) {
             try {
-              await requestAskCancellation(
-                runOwner.notebookId,
-                jobId,
-                policyRef.current.cancelRequestTimeoutMs,
-              );
+              await requestAskCancellation(runOwner.notebookId, jobId);
             } catch {
               if (sameNotebookIdentity(ownerRef.current, runOwner)) {
                 effectsRef.current.notify("未能中断后台任务；任务将继续完成，可稍后重开查看");
@@ -912,11 +886,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const cancelKey = `${activeNotebook}\u0000${jobId}`;
       if (cancelRequestsInFlightRef.current.has(cancelKey)) return;
       cancelRequestsInFlightRef.current.add(cancelKey);
-      requestAskCancellation(
-        activeNotebook,
-        jobId,
-        policyRef.current.cancelRequestTimeoutMs,
-      )
+      requestAskCancellation(activeNotebook, jobId)
         .then(() => {
           // A durable Ask job is not cancelled merely because its transport is
           // disconnected. Keep reading until the authoritative cancel request

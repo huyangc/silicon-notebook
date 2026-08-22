@@ -525,10 +525,11 @@ DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
 
-The authenticated system configuration derives the browser's Ask-cancellation
-request wait from `DB_BUSY_TIMEOUT_MS` plus a fixed protocol transport grace.
-Changing the database wait therefore moves the client boundary with it; there is
-no independent front-end timeout that can expire during a legitimate lock wait.
+The synchronous Ask-cancellation endpoint may cross more than one database
+transaction and can also wait on process-local or backend-specific connection
+locks. Because no deployment setting provides an enforceable whole-request
+deadline, the browser keeps one cancellation request in flight until the server
+answers instead of applying a guessed client timeout.
 
 **Source uploads:**
 
