@@ -18,6 +18,7 @@ import { parseModule } from "../../test-support/semantic-source.mjs";
 
 
 const page = await parseModule("page.tsx");
+const askSession = await parseModule("use-ask-session.ts");
 
 
 /**
@@ -26,7 +27,7 @@ const page = await parseModule("page.tsx");
  * 走 AST 而不是文本，是因为要钉的是**结构**：这个值由谁算出来、第一个实参是谁。
  * 文本匹配对「把调用挪到旁边一个新变量、原表达式恢复」这类移动变异是全绿的。
  */
-function initializerOf(name) {
+function initializerOf(name, module = page) {
   const found = [];
   function visit(node) {
     if (
@@ -39,11 +40,40 @@ function initializerOf(name) {
     }
     ts.forEachChild(node, visit);
   }
-  visit(page);
+  visit(module);
   assert.equal(found.length, 1, `找不到唯一的 ${name} 定义（实际 ${found.length} 处）`);
   let expression = found[0];
   while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
   return expression;
+}
+
+
+function askPolicyProperty(name) {
+  const matches = [];
+  function visit(node) {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "useAskSession"
+    ) matches.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(page);
+  assert.equal(matches.length, 1, `期望恰好一处 useAskSession 调用，实际 ${matches.length}`);
+  const options = matches[0].arguments[0];
+  assert.ok(options && ts.isObjectLiteralExpression(options), "useAskSession 必须接收 options 对象");
+  const policy = options.properties.find((property) => (
+    ts.isPropertyAssignment(property) && property.name.getText(page) === "policy"
+  ));
+  assert.ok(
+    policy && ts.isPropertyAssignment(policy) && ts.isObjectLiteralExpression(policy.initializer),
+    "useAskSession options 必须带 policy 对象",
+  );
+  const property = policy.initializer.properties.find((item) => (
+    ts.isPropertyAssignment(item) && item.name.getText(page) === name
+  ));
+  assert.ok(property && ts.isPropertyAssignment(property), `Ask policy 缺少 ${name}`);
+  return property.initializer.getText(page);
 }
 
 
@@ -161,7 +191,7 @@ function askStreamPayloadObject() {
     }
     ts.forEachChild(node, findCalls);
   }
-  findCalls(page);
+  findCalls(askSession);
   assert.equal(calls.length, 1, `期望恰好一处 runAskStream 调用，实际 ${calls.length}`);
 
   const argument = calls[0].arguments[1];
@@ -190,19 +220,25 @@ function askStreamPayloadObject() {
 }
 
 
-test("问答请求体的 retrieval_effort 必须按 isAdvanced(uiMode) 分叉，不能直接发原始档位", () => {
+test("问答请求体的 retrieval_effort 必须沿 page→policy→payload 强制自动模式默认档", () => {
+  assert.equal(
+    askPolicyProperty("advanced"),
+    "isAdvanced(uiMode)",
+    "页面必须把唯一 UI mode 判据直接交给 Ask owner",
+  );
   const payload = askStreamPayloadObject();
   const property = payload.properties.find((prop) => (
-    ts.isPropertyAssignment(prop) && prop.name.getText(page) === "retrieval_effort"
+    ts.isPropertyAssignment(prop) && prop.name.getText(askSession) === "retrieval_effort"
   ));
   assert.ok(property, "payload 顶层必须有 retrieval_effort 字段");
-  const text = property.initializer.getText(page);
+  const text = property.initializer.getText(askSession);
   assert.match(
     text,
-    /isAdvanced\(/,
-    "retrieval_effort 必须含 isAdvanced(...) 分叉——自动模式下控件不渲染，"
+    /currentPolicy\.advanced/,
+    "retrieval_effort 必须读取 page 交来的 policy.advanced 分叉——自动模式下控件不渲染，"
       + `state 却可能残留高级模式下选过的档位，发请求必须强制回默认档：${text}`,
   );
+  assert.match(text, /DEFAULT_ASK_RETRIEVAL_EFFORT/);
 });
 
 
@@ -273,19 +309,20 @@ test("ReportsPanel 的 createReport 包装里 auto_generate 实参必须是 !isA
   );
 });
 
-test("runAsk 的 submitMode 必须在提交汇聚点按 isAdvanced 收敛 graph（不能只靠被动 effect）", () => {
+test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 收敛 graph", () => {
   // codex R1 P2：把 graph 收回 reasoning 的 useEffect 在 render 之后才跑；用户从
   // 高级模式拨回自动后抢先提交，state 残留的 graph 仍会被发出去。与 scope/档位同一
   // 原则：被隐藏的控件由请求侧强制默认值。钉住 submitMode 初始化式的三个语义要素。
-  const initializer = initializerOf("submitMode");
-  const text = initializer.getText(page);
-  assert.ok(text.includes("isAdvanced("), `submitMode 初始化式必须按 isAdvanced 分叉：${text}`);
+  assert.equal(askPolicyProperty("advanced"), "isAdvanced(uiMode)");
+  const initializer = initializerOf("submitMode", askSession);
+  const text = initializer.getText(askSession);
+  assert.ok(text.includes("currentPolicy.advanced"), `submitMode 初始化式必须按 policy.advanced 分叉：${text}`);
   assert.ok(text.includes('"graph"'), `submitMode 初始化式必须识别 graph 残留：${text}`);
   assert.ok(text.includes('"reasoning"'), `submitMode 初始化式必须收敛到 reasoning：${text}`);
 
   // 移动变异防线：光有 submitMode 定义不够，executeAsk 的模式实参不许再直接用
-  // askMode（否则定义成了摆设）。全文件扫 executeAsk(...) 调用，第二实参不得是
-  // 裸 askMode 标识符。
+  // mode（否则定义成了摆设）。全 hook 扫 executeAsk(...) 调用，第二实参不得是
+  // 裸 mode 标识符。
   const offenders = [];
   function visitCalls(node) {
     if (
@@ -294,12 +331,12 @@ test("runAsk 的 submitMode 必须在提交汇聚点按 isAdvanced 收敛 graph�
       && node.expression.text === "executeAsk"
       && node.arguments.length >= 2
       && ts.isIdentifier(node.arguments[1])
-      && node.arguments[1].text === "askMode"
+      && node.arguments[1].text === "mode"
     ) {
-      offenders.push(node.getText(page));
+      offenders.push(node.getText(askSession));
     }
     ts.forEachChild(node, visitCalls);
   }
-  visitCalls(page);
-  assert.deepEqual(offenders, [], "executeAsk 的模式实参不得绕过 submitMode 直接用 askMode");
+  visitCalls(askSession);
+  assert.deepEqual(offenders, [], "executeAsk 的模式实参不得绕过 submitMode 直接用 mode");
 });

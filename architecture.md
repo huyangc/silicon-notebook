@@ -119,6 +119,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 - `frontend/app/api-client.ts` is the shared transport，负责 base URL、认证 header、JSON/empty/Blob、trusted error、网络失败与 AbortSignal mechanics；七个 domain API module 仍拥有 endpoint path、body、response type 与产品策略。
 - `frontend/app/use-source-library.ts` 是来源库状态的唯一 owner：列表/检索范围、分页、详情元素、重解析、删除 tombstone 与解析轮询都在 hook 内按 user + notebook + workspace generation 归属；`page.tsx` 只提交成对稳定的 notebook/source 首屏快照并消费 readonly view、具名 command 与窄刷新事件。文件/URL 写请求可以在服务端安全完成，但旧 owner 的迟到结果不得写入新工作区。
+- `frontend/app/use-ask-session.ts` 是 Ask 状态的唯一 owner：草稿/对话、意图确认、持久 stream/reconnect、会话历史/tombstone 与会话 mutation 都按 actor + notebook + workspace owner 收口。导航只 detach durable job；显式 Stop 在 `started` 前保持 transport 读到 job id，再执行一次 cancel 后 abort。`page.tsx` 仍拥有 notebook/source paired snapshot、Memory answer-link 批次和跨域展示，只显式触发一次历史恢复并消费 readonly view/具名 command。
 - `frontend/features/kg-maintenance` 拥有 KG 维护 API 与轮询/忙碌状态纯逻辑，`page.tsx` 只编排这个 feature。
 - `frontend/tests/{unit,component,guards}` 是测试入口的唯一位置，`frontend/test-support` 保存 setup 和语义源码 adapter；位置守卫禁止测试回流到 `app`/`features`。
 

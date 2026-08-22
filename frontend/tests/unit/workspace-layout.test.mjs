@@ -40,8 +40,8 @@ test("workspace composes executable Ask and account components", () => {
   assert.deepEqual(sessionHeaders[0].bindings, {
     sessionCount: "sessions.length",
     sessionPanelOpen: "sessionPanelOpen",
-    onToggleSessionPanel: "() => setSessionPanelOpen(open => !open)",
-    onStartNewSession: "startNewSession",
+    onToggleSessionPanel: "askSession.toggleSessionPanel",
+    onStartNewSession: "startNewAskSession",
   });
   const pageFunctions = new Set(
     declarations(page)

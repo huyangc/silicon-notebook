@@ -33,7 +33,6 @@ import {
   findFunction,
   jsxElements,
   parseModule,
-  variableInitializersIn,
 } from "../../test-support/semantic-source.mjs";
 
 
@@ -99,17 +98,21 @@ test("确认卡确实高到会压到面板中线,遮挡不是假想", () => {
 
 test("在途 turn 有刻度可跳:导航的判据与渲染它的判据一致", async () => {
   const page = await parseModule("page.tsx");
+  const askSession = await parseModule("use-ask-session.ts");
   // 渲染在途 turn 与喂给导航的问题列表必须同源;只按 asking 算会漏掉理解阶段
   // 那一轮——它同样在 DOM 里、同样带 chatTurnDomId,却没有刻度可跳。
   const [nav] = jsxElements(page, "ChatTurnNav");
   assert.ok(nav, "ChatTurnNav 不见了");
   assert.match(nav.bindings.questions, /^askInFlight && pendingQuestion \?/);
   // askInFlight 本身要覆盖理解阶段的两个状态,否则上面那条对齐是空的。
-  const inFlight = variableInitializersIn(page)
-    .find((item) => item.name === "askInFlight");
-  assert.ok(inFlight, "askInFlight 不见了");
+  const owner = findFunction(askSession, "useAskSession").getText(askSession);
   for (const state of ["intentChecking", "askIntentReview"]) {
-    assert.match(inFlight.initializer, new RegExp(state), `askInFlight 漏了 ${state}`);
+    const hookState = state === "askIntentReview" ? "intentReview" : state;
+    assert.match(
+      owner,
+      new RegExp(`inFlight:[^,]+${hookState}`),
+      `Ask owner 的 inFlight 漏了 ${hookState}`,
+    );
   }
-  assert.ok(callsIn(findFunction(page, "runAsk")).includes("setPendingQuestion"));
+  assert.ok(callsIn(findFunction(askSession, "submit")).includes("setPendingQuestion"));
 });

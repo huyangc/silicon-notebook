@@ -50,9 +50,9 @@ test("historical effort restores safely", () => {
 
 
 test("reasoning submit carries effort and opening a conversation restores it", async () => {
-  const page = await parseModule("page.tsx");
-  const execute = callsIn(findFunction(page, "executeAsk"));
-  const applyDetail = callsIn(findFunction(page, "applySessionDetail"));
+  const askSession = await parseModule("use-ask-session.ts");
+  const execute = callsIn(findFunction(askSession, "executeAsk"));
+  const applyDetail = callsIn(findFunction(askSession, "applySessionDetail"));
   assert.ok(execute.includes("runAskStream"));
   assert.ok(applyDetail.includes("retrievalEffortFromTurn"));
 });
