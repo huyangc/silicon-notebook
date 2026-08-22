@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
 
-import { appSourceModules, importsIn, jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, findFunction, importsIn, jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
 
 
 test("page composes one availability owner and exactly the two canonical outlets", async () => {
@@ -49,4 +49,26 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   const registry = modules.find((row) => row.path === "features/extension-sdk/registry.ts");
   assert.ok(registry);
   assert.deepEqual(importsIn(registry.module).map((row) => row.module), ["./contracts.ts"]);
+  const owner = modules.find((row) => row.path === "use-workspace-extensions.ts");
+  assert.ok(owner);
+  const ownerFunction = findFunction(owner.module, "useWorkspaceExtensions");
+  let emptyGuard = -1;
+  const controllers = [];
+  function visitOwner(node) {
+    if (
+      ts.isIfStatement(node)
+      && node.expression.getText(owner.module) === "registry.length === 0 || !actorId"
+    ) emptyGuard = node.getStart(owner.module);
+    if (
+      ts.isNewExpression(node)
+      && node.expression.getText(owner.module) === "AbortController"
+    ) controllers.push(node.getStart(owner.module));
+    ts.forEachChild(node, visitOwner);
+  }
+  visitOwner(ownerFunction);
+  assert.ok(emptyGuard >= 0, "empty registry must retain an explicit zero-side-effect return");
+  assert.ok(
+    controllers.every((position) => emptyGuard < position),
+    "empty registry must return before constructing an AbortController",
+  );
 });

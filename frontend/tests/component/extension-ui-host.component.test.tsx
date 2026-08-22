@@ -77,16 +77,22 @@ function Harness({
   />;
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 test("empty build registry returns exact null and performs no capability request in StrictMode", () => {
   const load = vi.fn<() => Promise<SystemExtensionProjection>>();
+  const abortController = vi.fn();
+  vi.stubGlobal("AbortController", abortController);
   const { container } = render(<StrictMode><Harness
     actorId="user-a"
     entries={defineWorkspaceUiRegistry([])}
     load={load}
   /></StrictMode>);
   expect(load).not.toHaveBeenCalled();
+  expect(abortController).not.toHaveBeenCalled();
   expect(container.innerHTML).toBe("");
 });
 
