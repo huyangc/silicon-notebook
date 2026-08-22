@@ -104,7 +104,6 @@ export function useSourceLibrary({
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
   const actorIdRef = useRef(actorId);
-  actorIdRef.current = actorId;
   const canWriteRef = useRef(canWriteSources);
   canWriteRef.current = canWriteSources;
   const ownerRef = useRef<SourceLibraryOwner | null>(null);
@@ -121,18 +120,29 @@ export function useSourceLibrary({
   const deletedIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const pollCountRef = useRef(0);
   const previousActorIdRef = useRef(actorId);
+  const pendingActorIdRef = useRef<string | null>(null);
   const inactiveScopeSelectionRef = useRef(defaultSourceScopeSelection());
   const inactiveDeletingIdsRef = useRef(new Set<string>());
 
   // Actor changes are an authority boundary, not a later cleanup concern. Invalidate
   // the owner synchronously during render so a continuation that resolves before the
   // normal effect phase cannot commit the previous user's source state.
+  if (pendingActorIdRef.current === actorId) pendingActorIdRef.current = null;
   if (previousActorIdRef.current !== actorId) {
-    previousActorIdRef.current = actorId;
-    generationRef.current += 1;
-    ownerRef.current = null;
-    pageRequestRef.current += 1;
-    detailRequestRef.current += 1;
+    // During authenticated bootstrap, activateActor binds the fetched principal
+    // before React publishes currentUser. A render with the still-null prop must not
+    // roll that authority back; any non-null conflicting prop remains authoritative.
+    if (!(pendingActorIdRef.current && actorId === null)) {
+      pendingActorIdRef.current = null;
+      previousActorIdRef.current = actorId;
+      actorIdRef.current = actorId;
+      generationRef.current += 1;
+      ownerRef.current = null;
+      pageRequestRef.current += 1;
+      detailRequestRef.current += 1;
+    }
+  } else if (!pendingActorIdRef.current) {
+    actorIdRef.current = actorId;
   }
 
   sourcesRef.current = sources;
@@ -176,6 +186,21 @@ export function useSourceLibrary({
     detailRequestRef.current += 1;
     setOwnerSerial((value) => value + 1);
     resetVisibleState();
+  }
+
+  function activateActor(nextActorId: string) {
+    if (
+      !nextActorId
+      || actorIdRef.current === nextActorId
+      || actorIdRef.current !== null
+    ) return;
+    actorIdRef.current = nextActorId;
+    previousActorIdRef.current = nextActorId;
+    pendingActorIdRef.current = nextActorId;
+    generationRef.current += 1;
+    ownerRef.current = null;
+    pageRequestRef.current += 1;
+    detailRequestRef.current += 1;
   }
 
   function commitNotebookSnapshot(input: {
@@ -660,6 +685,7 @@ export function useSourceLibrary({
     sourceElementsLoading: ownerIsActive ? sourceElementsLoading : false,
     highlightedElementId: ownerIsActive ? highlightedElementId : "",
     hasPending,
+    activateActor,
     beginTransition,
     commitNotebookSnapshot,
     captureOwner,

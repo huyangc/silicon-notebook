@@ -32,6 +32,13 @@ test("page composes one source-library owner and does not retain source CRUD/det
   ]) {
     assert.equal(sourceImports.includes(hookOwned), false, `page imports hook-owned ${hookOwned}`);
   }
+  assert.match(
+    text,
+    /sourceLibrary\.activateActor\(u\.id\);\s*setCurrentUser\(u\)/,
+    "authenticated restoration must activate source identity before opening a hash target",
+  );
+  assert.match(text, /openNotebook\(workspace\.notebookId, "none", u\.id\)/);
+  assert.match(text, /openNotebookMemory\(notebookId, u\.id\)/);
 });
 
 

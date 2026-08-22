@@ -115,6 +115,31 @@ test("late upload and URL results cannot commit across notebook or actor transit
   expect(value!.captureOwner()).toBeNull();
 });
 
+test("authenticated bootstrap can activate the actor before the React user state rerenders", () => {
+  const view = render(<Harness actorId={null} />);
+  act(() => {
+    value!.activateActor("user-a");
+  });
+  let owner = null as ReturnType<HookValue["commitNotebookSnapshot"]>;
+  act(() => {
+    owner = value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: {
+        items: [source("restored", "notebook-a")],
+        total_count: 1,
+        offset: 0,
+        limit: 50,
+      },
+    });
+  });
+  expect(owner?.actorId).toBe("user-a");
+  expect(value!.sources.map((item) => item.id)).toEqual(["restored"]);
+  view.rerender(<Harness actorId="user-a" />);
+  expect(value!.captureOwner()).toBe(owner);
+});
+
 test("delete requires the current owner and an exact source notebook", async () => {
   api.deleteSource.mockResolvedValue(undefined);
   render(<Harness />);
