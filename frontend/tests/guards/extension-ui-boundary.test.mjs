@@ -69,8 +69,11 @@ test("page composes one availability owner and exactly the two canonical outlets
   // The side outlet is an entry row inside the source panel's **non-scrolling**
   // area, not a third workspace column (that column left an empty 190px strip and
   // squeezed the chat panel). Its direct JSX parent must therefore stay the
-  // sources body: `.source-list` below it owns `flex:1 1 auto/overflow:auto`, so a
-  // sibling placed after the list would scroll away with the source rows.
+  // sources body. `.source-list` is the only scrolling container (it owns
+  // `flex:1 1 auto/overflow:auto`), so nesting the outlet *inside* it would make the
+  // entry scroll away with the source rows; pinning the direct parent to the sources
+  // body is the load-bearing half of that invariant (the layout guard only pins the
+  // `.sources-panel` subtree and rejects the old `.workspace-grid` direct child).
   let workspaceOutletParent = outletNodes.get("workspace.side_panel")?.parent;
   while (workspaceOutletParent && !ts.isJsxElement(workspaceOutletParent)) {
     workspaceOutletParent = workspaceOutletParent.parent;

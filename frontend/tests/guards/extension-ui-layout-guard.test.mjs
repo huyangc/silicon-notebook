@@ -16,6 +16,11 @@
 //      `var(--…)` / `inherit` / `transparent` / `currentColor` / `none`;
 //   ③ page.tsx 里 slot 为 `workspace.side_panel` 的 outlet 位于 `.sources-panel`
 //      的 JSX 子树内(它现在是来源栏里的一行入口,不是工作区网格的直接子级)。
+//      「固定区、不在滚动的 .source-list 里」那一半由 extension-ui-boundary.test.mjs
+//      的直接父级断言(`div.workspace-panel-body.sources-body`)承重,本条只钉子树与
+//      「不是网格直接子级」两个方向;
+//   ④ 插件组件本身(features/*/workspace-plugin.ts)不带内联 `style`、字符串里没有
+//      颜色字面量——否则 ② 可以被绕开(把颜色从 CSS 搬进 createElement 的 props)。
 //
 // 覆盖边界:①②③ 都是形态判据,不证明像素结果——真正的排版由浏览器决定,jsdom 量
 // 不到。运行时可见性(能力/权限/切库失效)由 extension-ui-host.component.test.tsx
@@ -26,7 +31,7 @@ import { readFile } from "node:fs/promises";
 import postcss from "postcss";
 import ts from "typescript";
 
-import { parseModule } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, parseModule } from "../../test-support/semantic-source.mjs";
 
 const css = await readFile(new URL("../../app/globals.css", import.meta.url), "utf8");
 const stylesheet = postcss.parse(css);
@@ -74,7 +79,9 @@ test("理解入口的样式只用系统 token，没有颜色字面量", () => {
   for (const rule of rules) {
     for (const node of rule.nodes ?? []) {
       if (node.type !== "decl") continue;
-      if (COLOR_LITERAL.test(node.value)) {
+      // 先剥掉 token 引用再判:`var(--blue)` / `var(--red)` 是 :root 合法 token,
+      // 具名色那一支不能把它们当成字面量误报(否则守卫会逼人放宽正则)。
+      if (COLOR_LITERAL.test(node.value.replace(/var\(--[^)]*\)/g, ""))) {
         offenders.push(`${rule.selector} { ${node.prop}: ${node.value} }`);
       }
     }
@@ -120,9 +127,7 @@ test("理解入口挂在来源栏内，不是工作区网格的直接子级", as
   const ancestorClasses = [];
   let cursor = outlet.parent;
   while (cursor) {
-    if (ts.isJsxElement(cursor) || ts.isJsxSelfClosingElement(cursor)) {
-      ancestorClasses.push(classNameOf(cursor));
-    }
+    if (ts.isJsxElement(cursor)) ancestorClasses.push(classNameOf(cursor));
     cursor = cursor.parent;
   }
 
@@ -136,4 +141,29 @@ test("理解入口挂在来源栏内，不是工作区网格的直接子级", as
     !directParentClass.includes("workspace-grid"),
     "workspace.side_panel 不得直接挂在 .workspace-grid 下（那会重新变成独立一列）",
   );
+});
+
+
+test("插件组件不带内联 style，字符串里没有颜色字面量", async () => {
+  const plugins = (await appSourceModules()).filter((row) => (
+    /^features\/[^/]+\/workspace-plugin\.tsx?$/.test(row.path)
+  ));
+  // 空转保护:registry 至少登记了一个真实插件,扫不到文件就是路径约定变了。
+  assert.ok(plugins.length > 0, "没找到 features/*/workspace-plugin.ts(路径约定变了？守卫失效)");
+  const offenders = [];
+  for (const { path, module } of plugins) {
+    function visit(node) {
+      // createElement(tag, { style: … }) / JSX style={…}:颜色从 CSS 搬进 props 同样越线。
+      if (
+        (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node) || ts.isJsxAttribute(node))
+        && node.name.getText(module) === "style"
+      ) offenders.push(`${path}: inline style`);
+      if (ts.isStringLiteralLike(node) && COLOR_LITERAL.test(node.text)) {
+        offenders.push(`${path}: ${JSON.stringify(node.text)}`);
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(module);
+  }
+  assert.deepEqual(offenders, [], "插件组件的视觉只能来自系统类与 :root token,不得内联颜色");
 });
