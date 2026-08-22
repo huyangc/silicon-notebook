@@ -30,16 +30,16 @@ function callsWith(node, target, argument) {
 
 
 test("opening the knowledge-graph view resets the analysis modal", async () => {
-  const page = await parseModule("page.tsx");
-  const openKgView = findFunction(page, "openKgView");
+  const hook = await parseModule("use-kg-workspace.ts");
+  const openKgView = findFunction(hook, "openGraph");
 
-  assert.equal(callsWith(openKgView, "setKgViewOpen", "true"), true);
+  assert.equal(callsWith(openKgView, "setGraphOpen", "true"), true);
 
   // 顶层语句,而不是 try / await 之后的某个分支 —— 复位必须与打开同步发生,
   // 否则首帧仍会带着上次的弹窗渲染出来。
   const topLevelResets = controlFlowIn(openKgView).filter(
     (statement) => (statement.calls ?? []).some(
-      (call) => call.target === "setKgAnalysisOpen" && call.arguments[0] === "false",
+      (call) => call.target === "setAnalysisOpen" && call.arguments[0] === "false",
     ),
   );
   assert.equal(topLevelResets.length, 1);
@@ -47,25 +47,26 @@ test("opening the knowledge-graph view resets the analysis modal", async () => {
 
 
 test("closing the knowledge-graph view closes the analysis modal with it", async () => {
-  const page = await parseModule("page.tsx");
-  const closeKgView = findFunction(page, "closeKgView");
+  const hook = await parseModule("use-kg-workspace.ts");
+  const closeKgView = findFunction(hook, "closeGraph");
 
-  assert.equal(callsWith(closeKgView, "setKgViewOpen", "false"), true);
-  assert.equal(callsWith(closeKgView, "setKgAnalysisOpen", "false"), true);
+  assert.equal(callsWith(closeKgView, "setGraphOpen", "false"), true);
+  assert.equal(callsWith(closeKgView, "setAnalysisOpen", "false"), true);
 });
 
 
 test("the knowledge-graph view toggles only through openKgView / closeKgView", async () => {
-  const page = await parseModule("page.tsx");
+  const hook = await parseModule("use-kg-workspace.ts");
   // JSX 属性里的箭头函数不是具名声明, 它的 scope 会落在外层组件(`<module>.Home`)上 ——
   // 所以一条内联的 `onClick={() => setKgViewOpen(false)}` 在这里是看得见的。
-  const scopes = scopedCalls(page)
-    .filter((call) => call.target === "setKgViewOpen")
+  const scopes = scopedCalls(hook)
+    .filter((call) => call.target === "setGraphOpen")
     .map((call) => call.scope)
     .sort();
 
   assert.deepEqual(scopes, [
-    "<module>.Home.closeKgView",
-    "<module>.Home.openKgView",
+    "<module>.useKgWorkspace.clearVisibleState",
+    "<module>.useKgWorkspace.closeGraph",
+    "<module>.useKgWorkspace.openGraph",
   ]);
 });

@@ -221,17 +221,12 @@ test("AgentProfilePanel 随 currentNotebookId 整体重挂（key，不只靠关�
 });
 
 
-test("理解弹窗渲染在知识关系图弹窗之后(同层 z-60,DOM 序即层叠序)", () => {
-  // codex #520 R9 P1:两者同为 .utility-modal(z-index 60),同层 fixed 兄弟按
-  // DOM 序作画——理解弹窗排在 graphOpen 之前时,后开的图谱弹窗整层拦截输入,
-  // 唯一入口点开的是一个摸不到的面板。入口 onOpen 里的 setGraphOpen(false)
-  // 是第二层保险,这里钉结构那一半。
+test("从知识图谱打开理解弹窗时先关闭全屏图谱", () => {
+  // F4 删除了死的第二套 relation-graph modal。统一图谱是全屏层且 DOM 在理解弹窗
+  // 之后，因此唯一安全入口必须先交给 KG owner 关闭图谱，再打开理解弹窗。
   const pageText = page.text ?? page.source ?? "";
-  const graphAt = pageText.indexOf("{graphOpen && (");
-  const understandingAt = pageText.indexOf("{understandingOpen && currentNotebookId && (");
-  assert.ok(graphAt > 0 && understandingAt > 0, "两个弹层块都必须存在");
-  assert.ok(
-    understandingAt > graphAt,
-    "understanding 弹窗块必须排在 graphOpen 块之后(同层 z-60 靠 DOM 序压住它)",
+  assert.match(
+    pageText,
+    /<UnderstandingEntryButton[\s\S]*?onOpen=\{\(\) => \{[\s\S]*?kgWorkspace\.closeGraph\(\);[\s\S]*?setUnderstandingOpen\(true\)/,
   );
 });

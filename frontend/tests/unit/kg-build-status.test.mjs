@@ -181,12 +181,12 @@ test("KG start callbacks are owned by notebook, workspace, and request epoch", (
 });
 
 test("durable KG polling never synthesizes completion after a time cap", async () => {
-  const page = await parseModule("page.tsx");
-  const home = findFunction(page, "Home");
-  const kgPoll = callbackFlowsIn(home, "useEffect").find(
+  const hook = await parseModule("use-kg-workspace.ts");
+  const owner = findFunction(hook, "useKgWorkspace");
+  const kgPoll = callbackFlowsIn(owner, "useEffect").find(
     ({ otherArguments }) => (
       otherArguments[0]
-      === "[buildingKg, currentNotebookId, analytics, trackedKgJobId]"
+      === "[buildingKg, ownerVersion, policy.externalBuildPolling]"
     ),
   );
 
@@ -194,7 +194,7 @@ test("durable KG polling never synthesizes completion after a time cap", async (
   assert.match(JSON.stringify(kgPoll), /window\.setInterval/);
   assert.doesNotMatch(JSON.stringify(kgPoll), /setTimeout/);
   assert.equal(
-    stringLiterals(page).includes("仍在后台进行，请稍后刷新"),
+    stringLiterals(hook).includes("仍在后台进行，请稍后刷新"),
     false,
   );
 });

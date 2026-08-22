@@ -115,9 +115,9 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 2,
     reason: "background source failures pass through toUserMessage",
   },
-  "page.tsx|<module>.Home|diagnostic|error": {
+  "use-kg-workspace.ts|<module>.useKgWorkspace|diagnostic|error": {
     count: 2,
-    reason: "workspace job diagnostics are logged or passed through toUserMessage",
+    reason: "KG review/build job diagnostics pass through toUserMessage or fixed terminal copy",
   },
   "page.tsx|<module>.Home|diagnostic|error_message": {
     count: 1,
