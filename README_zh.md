@@ -222,7 +222,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
-前端 workspace 正按状态所有权拆分且不改变产品行为：`use-source-library.ts` 独占来源列表/范围、详情、删除 tombstone、重解析与解析轮询，`use-ask-session.ts` 独占 Ask 草稿、对话、意图确认、持久流、重连和会话历史。两个 hook 都使用显式 user/notebook/workspace owner；`page.tsx` 继续作为壳层编排器并保持既有请求次数。
+前端 workspace 正按状态所有权拆分且不改变产品行为：`use-source-library.ts` 独占来源列表/范围、详情、删除 tombstone、重解析与解析轮询，`use-ask-session.ts` 独占 Ask 草稿、对话、意图确认、持久流、重连和会话历史。两个 hook 都使用显式 user/notebook/workspace owner；`page.tsx` 继续作为壳层编排器并保持既有请求次数。Ask 显式停止等待服务端派生的取消上界（数据库忙等待加传输余量），浏览器不会在一次合法锁等待结束前先行超时。
 
 贡献者安全约束：凡任务会写入仓库代码、测试、文档或配置，都必须先新建隔离的 linked git worktree 和分支；该任务期间主 checkout 只读。纯调研、状态汇报和只读审查除外。所有改动都经 PR 合入，PR 必须经 codex 评审且每一轮原始输出逐字贴回 PR；只有在评审非阻塞、CI 全绿、且 PR 上能看到针对 **PR 远端 head 提交**的评审这三条同时成立时才可合入——评审静默没触发，和它跑完判了通过，在外部看起来一模一样，所以本地状态不算证据。后端的 notebook 授权谓词只有每后端一个唯一定义点（`repositories/*/access_sql.py`），API 写端点一律按能力守卫归类；完整契约见[开发与仓库契约](./docs/development_zh.md)。
 

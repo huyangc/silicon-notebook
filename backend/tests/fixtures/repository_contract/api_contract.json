@@ -10012,6 +10012,11 @@
               "title": "Agent Profile Enabled",
               "type": "boolean"
             },
+            "ask_cancel_request_timeout_ms": {
+              "exclusiveMinimum": 0.0,
+              "title": "Ask Cancel Request Timeout Ms",
+              "type": "integer"
+            },
             "parser_engines": {
               "items": {
                 "$ref": "#/components/schemas/ParserEngineCapability"
@@ -10074,6 +10079,7 @@
             "parser_engines",
             "report_max_sections",
             "report_max_subqueries_per_section",
+            "ask_cancel_request_timeout_ms",
             "user_activity_view_enabled",
             "source_image_max_bytes",
             "source_image_max_per_source",

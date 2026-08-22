@@ -525,6 +525,11 @@ DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
 
+The authenticated system configuration derives the browser's Ask-cancellation
+request wait from `DB_BUSY_TIMEOUT_MS` plus a fixed protocol transport grace.
+Changing the database wait therefore moves the client boundary with it; there is
+no independent front-end timeout that can expire during a legitimate lock wait.
+
 **Source uploads:**
 
 ```text
