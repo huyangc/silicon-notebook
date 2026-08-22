@@ -7,6 +7,8 @@ an authenticated browser session first.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
@@ -16,8 +18,11 @@ from app.api.mcp_server import PUBLIC_TOOLS
 AGENT_MCP_ONBOARDING_PATH = "/api/agent-mcp/onboarding"
 
 
-def render_agent_mcp_onboarding(mcp_public_url: str) -> str:
-    tools = "\n".join(f"- `{name}`" for name in PUBLIC_TOOLS)
+def render_agent_mcp_onboarding(
+    mcp_public_url: str,
+    public_tools: Sequence[str] = PUBLIC_TOOLS,
+) -> str:
+    tools = "\n".join(f"- `{name}`" for name in public_tools)
     return f"""# silicon-notebook Agent MCP onboarding
 
 This document is intended to be read and acted on by an Agent.
@@ -92,7 +97,10 @@ If the current client uses a different MCP configuration format, create one Stre
 """
 
 
-def agent_mcp_onboarding_router(mcp_public_url: str) -> APIRouter:
+def agent_mcp_onboarding_router(
+    mcp_public_url: str,
+    public_tools: Sequence[str] = PUBLIC_TOOLS,
+) -> APIRouter:
     router = APIRouter()
 
     @router.get(
@@ -115,7 +123,7 @@ def agent_mcp_onboarding_router(mcp_public_url: str) -> APIRouter:
                 },
             )
         return Response(
-            content=render_agent_mcp_onboarding(mcp_public_url),
+            content=render_agent_mcp_onboarding(mcp_public_url, public_tools),
             media_type="text/markdown",
             headers={
                 "Cache-Control": "no-store",

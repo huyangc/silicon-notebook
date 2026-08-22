@@ -542,8 +542,8 @@ SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 �
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
 把 `MCP_PUBLIC_URL` 逐字印成要配置的地址（绝不改写——代理可能只公布这一条精确路由），同时写明
 打到后端的 `POST /mcp` 是 307 指向 `/mcp/`，好让客户端无法在重定向中保留方法、请求体与
-Authorization 的 Agent 知道解法；工具清单从 `mcp_server.PUBLIC_TOOLS` 派生。用户把链接与
-token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token，并且在 repository warm-up
+Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目录派生，`mcp_server.PUBLIC_TOOLS`
+来自同一默认冻结组合目录。用户把链接与 token 分开交给 Agent；该端点绝不接收、嵌入或回显 bearer token，并且在 repository warm-up
 尚未完成时也可读取。
 带任意 query string 或 Authorization header 的请求会被拒绝。启动也会拒绝非绝对
 `http(s)`、path 不精确等于 `/mcp`，或含 userinfo、query/fragment、空白/控制符/反引号的
@@ -556,7 +556,7 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
 检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 20 个工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 22 个 core 工具及每个 provider 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -608,8 +608,8 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 `-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的二十二个工具如下，
-权威清单是 `mcp_server.PUBLIC_TOOLS`：
+每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十二个工具如下；
+`mcp_server.CORE_TOOLS` 派生这个内建前缀；`mcp_server.PUBLIC_TOOLS` 派生完整默认冻结目录（含默认受信 provider）：
 
 | 分组 | 工具 | Scope |
 | --- | --- | --- |
@@ -623,6 +623,16 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
 | 构建状态读取 | `get_build_status` | `knowledge:read` |
 | 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
+
+实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单；它可在 core 前缀后
+追加显式信任的进程内 `agent.tool_provider` contributor 标量 schema 工具。这些工具拿不到 repository、
+FastMCP 对象、原始 bearer 或 Memory 审核能力；每次调用都重新检查 live token/scope/allowlist/成员权，
+provider 的所有写 scope 都强制经过 owner-only notebook 闸。provider 参数对象序列化后的 UTF-8
+超过 16,384 bytes 时整次拒绝；descriptor 最多 16 个参数、工具名最多 64 字符、说明最多 1,000 字符，
+结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行字节/深度 rail，
+超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 按 token owner 归属且仅含 tool/plugin/status。FastMCP schema 错误发生在 provider host 之前，归 transport/request audit；provider audit 的 `invalid` 表示 schema 合法但未通过 host 的额外 wire admission。
+输入和结果都整次拒绝，绝不静默截断。默认 topology 没有 provider contribution，因此发布面
+仍精确等于上表 22 个工具。
 
 `list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。

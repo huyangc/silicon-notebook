@@ -133,6 +133,22 @@ from app.extension_sdk.knowledge_projection import (
     KnowledgeRelationCandidate,
     KnowledgeSchemaView,
 )
+from app.extension_sdk.agent_tools import (
+    AGENT_TOOL_DESCRIPTION_MAX_CHARS,
+    AGENT_TOOL_NAME_MAX_CHARS,
+    AGENT_TOOL_PARAMETERS_MAX,
+    AGENT_TOOL_ARGUMENTS_MAX_BYTES,
+    AGENT_TOOL_RESULT_MAX_BYTES,
+    AGENT_TOOL_RESULT_MAX_DEPTH,
+    AGENT_TOOL_PROVIDER_POINT,
+    AgentExecutionContext,
+    AgentToolAccessPolicy,
+    AgentToolAvailabilityContext,
+    AgentToolDescriptor,
+    AgentToolParameter,
+    AgentToolProvider,
+    AgentToolValueKind,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -254,4 +270,18 @@ __all__ = [
     "KnowledgeProjectionContext",
     "KnowledgeRelationCandidate",
     "KnowledgeSchemaView",
+    "AGENT_TOOL_DESCRIPTION_MAX_CHARS",
+    "AGENT_TOOL_NAME_MAX_CHARS",
+    "AGENT_TOOL_PARAMETERS_MAX",
+    "AGENT_TOOL_ARGUMENTS_MAX_BYTES",
+    "AGENT_TOOL_RESULT_MAX_BYTES",
+    "AGENT_TOOL_RESULT_MAX_DEPTH",
+    "AGENT_TOOL_PROVIDER_POINT",
+    "AgentExecutionContext",
+    "AgentToolAccessPolicy",
+    "AgentToolAvailabilityContext",
+    "AgentToolDescriptor",
+    "AgentToolParameter",
+    "AgentToolProvider",
+    "AgentToolValueKind",
 ]

@@ -714,8 +714,9 @@ The one-time token receipt also links to anonymous `GET /api/agent-mcp/onboardin
 machine-readable Markdown handoff that prints `MCP_PUBLIC_URL` verbatim as the endpoint to
 configure — never a rewritten variant, since a proxy may publish only that exact route — while
 stating that a backend-direct `POST /mcp` is a 307 to `/mcp/`, so an Agent whose client does not
-preserve method, body and Authorization across a redirect knows the remedy. Its tool list is
-derived from `mcp_server.PUBLIC_TOOLS`. The user gives this link and token to
+preserve method, body and Authorization across a redirect knows the remedy. Its tool list comes
+from the deployed server's frozen catalog; `mcp_server.PUBLIC_TOOLS` derives from the same
+default frozen combined catalog. The user gives this link and token to
 the Agent separately; the endpoint never accepts, embeds, or reflects a bearer token and is
 available even while repository warm-up is still running.
 Requests carrying any query string or Authorization header are rejected. Startup likewise
@@ -734,7 +735,7 @@ other clients apply a flat per-call ceiling instead. `ask_notebook` in `reasonin
 routinely runs for minutes (plan, federated retrieval, reflect loop, synthesis) and
 `build_kg` can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 20 tools therefore runs its blocking body
+answer was about to arrive. Every one of the 22 core tools and every provider tool therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -802,8 +803,9 @@ resolved. Without `-s user` the entry is registered for the current directory on
 that cannot interpolate persists the raw header instead: use least-privilege scopes, a short
 expiry, protect the local config, and revoke/rotate the token after use.
 
-Every new MCP session must call `select_notebook` before a data tool. The exact tool set is
-these 22 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
+Every new MCP session must call `select_notebook` before a data tool. The default core tool set
+is these 22 tools; `mcp_server.CORE_TOOLS` derives that prefix and `mcp_server.PUBLIC_TOOLS`
+derives the full default frozen catalog, including any default trusted providers:
 
 | Group | Tools | Scope |
 | --- | --- | --- |
@@ -817,6 +819,19 @@ these 22 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
 | Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
 | Build read | `get_build_status` | `knowledge:read` |
 | Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `agent_profile:read` / `agent_observation:write` |
+
+The deployed server-local frozen catalog is authoritative for discovery and onboarding. It may
+append scalar-schema tools from explicitly trusted in-process `agent.tool_provider` contributors.
+Those tools receive no repository, FastMCP object, raw bearer, or Memory-review capability; every
+call repeats live token/scope/allowlist/membership checks, and every provider write scope is forced
+through the owner-only notebook gate. Provider arguments are rejected whole when their serialized
+UTF-8 object exceeds 16,384 bytes; descriptors allow at most 16 parameters, a 64-character name,
+and a 1,000-character description. Results must be JSON objects no deeper than 5 levels and at
+most 12,000 UTF-8 bytes. The byte/depth rail is enforced while copying, so oversized containers
+are rejected before a second unbounded graph is built. Provider exceptions surface only as stable
+error codes; core audit is token-owner-scoped and contains tool/plugin/status only. FastMCP schema errors occur before the provider host and remain transport/request audit events; `invalid` provider audit means a schema-valid call failed the host's additional wire admission. Inputs and results are rejected whole,
+never silently truncated. The default topology has no
+provider contributions, so the shipped surface remains exactly the 22 tools above.
 
 `list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a
 live token, a notebook inside its allowlist, and read access to that notebook. Every session

@@ -97,12 +97,10 @@ async def run() -> None:
         from app.main import create_app
         from app.models.schemas import NotebookCreate
 
-        # DERIVED from the manifest rather than hand-copied here. PUBLIC_TOOLS
-        # is never consulted by `create_memory_mcp` (registration happens via
-        # fixed built-in bundle registrars), so comparing it with
-        # a live `list_tools()` below still proves the manifest matches the
-        # real surface — while removing a third independently maintained copy
-        # that could quietly agree with a stale peer instead of with reality.
+        # PUBLIC_TOOLS and create_memory_mcp both derive from the same default
+        # frozen combined catalog. Comparing the export with live list_tools()
+        # therefore catches a stale core or provider manifest instead of
+        # allowing two hand-maintained lists to agree with each other.
         #
         # The import belongs HERE, not at module scope, with the other `app.*`
         # imports: they are deliberately deferred until after `os.environ` is

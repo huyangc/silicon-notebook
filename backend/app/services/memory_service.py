@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from app.core.event_logging import EventLogger
+from app.domain.agent_tools import AGENT_SCOPES
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
@@ -47,60 +48,6 @@ class MemoryEmbeddingJob:
     revision: int
 
 
-AGENT_SCOPES = frozenset(
-    {
-        "knowledge:read",
-        "memory:read",
-        "memory:read_candidates",
-        "memory:propose",
-        "ask:execute",
-        # PR-2+3 Task 10: knowhow-tables agent surface — writes a cell-level
-        # code attachment (design doc §⑥-4). Reads of the same surface use
-        # the pre-existing "knowledge:read" scope; this scope gates ONLY
-        # PUT/DELETE .../cells/{col}/code, never a read.
-        "knowhow:code",
-        # Per-source content writes: add a source (upload text / add a URL) and
-        # re-parse one. Re-parse belongs here rather than under
-        # "maintenance:execute" because it operates on ONE source's content and
-        # replaces its elements — the same class of act as adding it. Reads of
-        # a source's state stay on "knowledge:read"; this scope gates writes
-        # only. The user-facing label is 「添加/重新解析来源」.
-        "sources:write",
-        # Remove a source. Deliberately separate from "sources:write": the
-        # permission check still additionally requires that the Agent itself
-        # added the row (v48 sources.agent_profile_id), so a person's source is
-        # never removable no matter which scopes a token carries.
-        "sources:delete",
-        # Notebook-level maintenance the UI already exposes: knowledge-graph and
-        # retrieval-index builds. NOT per-source re-parse (that is
-        # "sources:write" above). No new capability, just the Agent-side door to
-        # an existing one.
-        "maintenance:execute",
-        # Agentic Memory P3 (T3): read-only access to this notebook's "AI
-        # understanding" blocks — the shared base chain plus, when this
-        # token's holder has one, their own overlay. Deliberately its own
-        # scope rather than folded into "knowledge:read": the blocks are
-        # prompt scaffolding the product itself marks as
-        # content_is_untrusted_evidence/non-citable, a different trust class
-        # from the notebook's actual knowledge that scope gates, and a token
-        # minted before this feature existed should not silently gain access
-        # to it.
-        "agent_profile:read",
-        # Agentic Memory P3 (T3): append one short line to this notebook's
-        # per-(notebook, owner) observation log — raw material for a LATER,
-        # untrusted-marked consolidation pass into the caller's own overlay
-        # (see agent_profile_job.py), never evidence and never executed
-        # itself. Deliberately does NOT pass through
-        # `mcp_server._writable_notebook`'s owner-only gate — see that
-        # function's own docstring for the full argument (mirrors
-        # "knowhow:code", the first such exception): the blast radius here is
-        # structurally capped at the token holder's own overlay, not the
-        # whole notebook's retrieval, so requiring notebook OWNERSHIP would
-        # deny a read-only member's own Agent the ability to write into that
-        # member's own private overlay.
-        "agent_observation:write",
-    }
-)
 _AGENT_TOKEN_RE = re.compile(r"^snm_([^.]+)\.(.+)$")
 _TOKEN_TOUCH_SECONDS = 300
 
