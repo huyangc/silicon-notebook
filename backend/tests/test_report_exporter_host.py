@@ -57,6 +57,10 @@ class _Provider:
         )
 
 
+class _HardAbort(BaseException):
+    pass
+
+
 @dataclass(frozen=True)
 class _Bundle:
     provider: object
@@ -199,6 +203,22 @@ def test_availability_cannot_leave_a_connection_for_provider_or_core():
     assert provider.calls == []
 
 
+def test_availability_baseexception_rechecks_connection_and_hides_text():
+    provider = _Provider()
+    probe = _Probe()
+
+    def availability(_context):
+        probe.held = True
+        raise _HardAbort("secret availability failure")
+
+    with pytest.raises(ReportExportBoundaryError, match="connection_held") as caught:
+        _host(_Bundle(provider, availability=availability)).export_application(
+            ReportExporterCall(_sources()[:1], "markdown", probe)
+        )
+    assert "secret" not in str(caught.value)
+    assert provider.calls == []
+
+
 @pytest.mark.parametrize("mutation", ["missing", "reordered", "clone", "changed"])
 def test_malformed_provider_result_rejects_the_whole_batch(mutation):
     class Bad(_Provider):
@@ -234,6 +254,70 @@ def test_provider_failure_is_stable_and_never_leaks_exception_text():
         )
     assert str(caught.value) == "report_exporter_failed"
     assert "secret" not in str(caught.value)
+
+
+def test_provider_baseexception_rechecks_connection_and_hides_text():
+    probe = _Probe()
+
+    class Failing(_Provider):
+        def export(self, _context):
+            probe.held = True
+            raise _HardAbort("secret hard abort")
+
+    with pytest.raises(ReportExportBoundaryError, match="connection_held") as caught:
+        _host(_Bundle(Failing())).export_application(
+            ReportExporterCall(_sources()[:1], "markdown", probe)
+        )
+    assert "secret" not in str(caught.value)
+
+
+def test_clear_connection_baseexceptions_map_to_stable_host_and_service_errors():
+    class Failing(_Provider):
+        def export(self, _context):
+            raise _HardAbort("secret hard abort")
+
+    with pytest.raises(ReportExportError) as host_error:
+        _host(_Bundle(Failing())).export_application(
+            ReportExporterCall(_sources()[:1], "markdown", _Probe())
+        )
+    assert str(host_error.value) == "report_exporter_failed"
+
+    class ForgedHost:
+        def export_application(self, _call):
+            raise _HardAbort("secret forged host abort")
+
+    with pytest.raises(ReportExportError) as service_error:
+        export_completed_reports(
+            _sources()[:1], host=ForgedHost(), connection_probe=_Probe()
+        )
+    assert str(service_error.value) == "report_exporter_failed"
+
+
+@pytest.mark.parametrize("signal", [KeyboardInterrupt, SystemExit])
+def test_system_control_exceptions_propagate_when_connection_is_clear(signal):
+    class Stopping(_Provider):
+        def export(self, _context):
+            raise signal()
+
+    with pytest.raises(signal):
+        _host(_Bundle(Stopping())).export_application(
+            ReportExporterCall(_sources()[:1], "markdown", _Probe())
+        )
+
+
+def test_provider_cannot_mutate_frozen_view_to_rewrite_markdown():
+    class Mutating(_Provider):
+        def export(self, context):
+            object.__setattr__(context.reports[0], "content_md", "REWRITTEN")
+            return ProviderResult(
+                (ReportExportedItem(context.reports[0].ref, "REWRITTEN"),),
+                ExtensionResultStatus.AVAILABLE,
+            )
+
+    with pytest.raises(ReportExportError, match="invalid_report_export_result"):
+        _host(_Bundle(Mutating())).export_application(
+            ReportExporterCall(_sources()[:1], "markdown", _Probe())
+        )
 
 
 def test_connection_must_be_clear_before_and_after_provider():
@@ -273,6 +357,38 @@ def test_service_rechecks_connection_after_a_forged_host():
     with pytest.raises(ReportExportBoundaryError, match="connection_held"):
         export_completed_reports(
             _sources()[:1], host=ForgedHost(), connection_probe=probe
+        )
+
+
+def test_service_rechecks_connection_after_forged_host_baseexception():
+    probe = _Probe()
+
+    class ForgedHost:
+        def export_application(self, _call):
+            probe.held = True
+            raise _HardAbort("secret forged host abort")
+
+    with pytest.raises(ReportExportBoundaryError, match="connection_held") as caught:
+        export_completed_reports(
+            _sources()[:1], host=ForgedHost(), connection_probe=probe
+        )
+    assert "secret" not in str(caught.value)
+
+
+def test_service_rejects_forged_host_markdown_rewrite_and_source_mutation():
+    from app.domain.report_export import ReportExportRendered
+
+    sources = _sources()[:1]
+
+    class ForgedHost:
+        def export_application(self, call):
+            object.__setattr__(call.sources[0], "question", "forged-name")
+            object.__setattr__(call.sources[0], "content_md", "FORGED")
+            return (ReportExportRendered("FORGED"),)
+
+    with pytest.raises(ReportExportError, match="invalid_report_export_result"):
+        export_completed_reports(
+            sources, host=ForgedHost(), connection_probe=_Probe()
         )
 
 

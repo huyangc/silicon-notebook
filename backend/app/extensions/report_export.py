@@ -75,7 +75,9 @@ class ReportExporterHost:
         try:
             formats = getattr(implementation, "formats", None)
             export = getattr(implementation, "export", None)
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise ExtensionRegistryError("invalid report exporter") from exc
         if (
             not callable(formats)
@@ -86,7 +88,9 @@ class ReportExporterHost:
             raise ExtensionRegistryError("invalid report exporter")
         try:
             declared_formats = formats()
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise ExtensionRegistryError("report exporter discovery failed") from exc
         if (
             type(declared_formats) is not tuple
@@ -110,14 +114,20 @@ class ReportExporterHost:
             raise ReportExportError("report_exporter_unavailable")
         self._validate_call(call)
         self._assert_connection_clear(call.connection_probe)
-        availability = self._registry.availability(
-            provider.contribution_id,
-            ReportExporterAvailabilityContext(
-                provider.plugin_id,
+        try:
+            availability = self._registry.availability(
                 provider.contribution_id,
-                call.format_id,
-            ),
-        )
+                ReportExporterAvailabilityContext(
+                    provider.plugin_id,
+                    provider.contribution_id,
+                    call.format_id,
+                ),
+            )
+        except BaseException as exc:
+            self._assert_connection_clear(call.connection_probe)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise ReportExportError("report_exporter_unavailable") from None
         self._assert_connection_clear(call.connection_probe)
         if availability.status is not AvailabilityStatus.AVAILABLE:
             raise ReportExportError("report_exporter_unavailable")
@@ -127,15 +137,18 @@ class ReportExporterHost:
             ReportExportView(ref, source.content_md)
             for ref, source in zip(refs, call.sources, strict=True)
         )
+        source_contents = tuple(source.content_md for source in call.sources)
         context = ReportExporterContext(call.format_id, views)
         self._assert_connection_clear(call.connection_probe)
         try:
             result = provider.export(context)
-        except Exception:
+        except BaseException as exc:
             self._assert_connection_clear(call.connection_probe)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise ReportExportError("report_exporter_failed") from None
         self._assert_connection_clear(call.connection_probe)
-        return self._validate_result(result, refs, views, call.format_id)
+        return self._validate_result(result, refs, source_contents, call.format_id)
 
     @staticmethod
     def _validate_call(call: object) -> None:
@@ -162,7 +175,7 @@ class ReportExporterHost:
     def _validate_result(
         result: object,
         refs: tuple[ReportExportItemRef, ...],
-        views: tuple[ReportExportView, ...],
+        source_contents: tuple[str, ...],
         format_id: str,
     ) -> tuple[ReportExportRendered, ...]:
         if (
@@ -184,7 +197,7 @@ class ReportExporterHost:
             if type(content) not in {str, bytes}:
                 raise ReportExportError("invalid_report_export_result")
             if format_id == REPORT_EXPORT_FORMAT_MARKDOWN and (
-                type(content) is not str or content != views[index].content_md
+                type(content) is not str or content != source_contents[index]
             ):
                 raise ReportExportError("invalid_report_export_result")
             rendered.append(ReportExportRendered(content))

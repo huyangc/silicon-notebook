@@ -8,6 +8,7 @@ from app.domain.report_export import (
     REPORT_EXPORT_FORMAT_MARKDOWN,
     ReportExportArtifact,
     ReportExportBoundaryError,
+    ReportExportConnectionProbe,
     ReportExportError,
     ReportExporterCall,
     ReportExporterHostPort,
@@ -23,34 +24,69 @@ def export_completed_reports(
     sources: tuple[ReportExportSource, ...],
     *,
     host: ReportExporterHostPort,
-    connection_probe: object,
+    connection_probe: ReportExportConnectionProbe,
     format_id: str = REPORT_EXPORT_FORMAT_MARKDOWN,
 ) -> tuple[ReportExportArtifact, ...]:
     """Render one authorized batch once; core retains filename authority."""
 
+    snapshots = _snapshot_sources(sources)
     _assert_connection_clear(connection_probe)
-    rendered = host.export_application(
-        ReportExporterCall(sources, format_id, connection_probe)
-    )
+    try:
+        rendered = host.export_application(
+            ReportExporterCall(sources, format_id, connection_probe)
+        )
+    except BaseException as exc:
+        _assert_connection_clear(connection_probe)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(exc, ReportExportError):
+            raise
+        raise ReportExportError("report_exporter_failed") from None
     _assert_connection_clear(connection_probe)
-    if type(rendered) is not tuple or len(rendered) != len(sources):
+    if type(rendered) is not tuple or len(rendered) != len(snapshots):
         raise ReportExportError("invalid_report_export_result")
     seen: dict[str, int] = {}
     artifacts: list[ReportExportArtifact] = []
-    for source, output in zip(sources, rendered, strict=True):
-        if type(source) is not ReportExportSource or type(output) is not ReportExportRendered:
+    for snapshot, output in zip(snapshots, rendered, strict=True):
+        if type(output) is not ReportExportRendered:
+            raise ReportExportError("invalid_report_export_result")
+        if (
+            format_id == REPORT_EXPORT_FORMAT_MARKDOWN
+            and (type(output.content) is not str or output.content != snapshot[2])
+        ):
             raise ReportExportError("invalid_report_export_result")
         if type(output.content) not in {str, bytes}:
             raise ReportExportError("invalid_report_export_result")
-        stem = _UNSAFE_FILENAME.sub("_", source.question or "").strip()
-        stem = stem[:REPORT_EXPORT_FILENAME_STEM_MAX_CHARS] or source.report_id
-        filename = f"{stem}-{source.report_id}.md"
+        report_id, question, _content_md = snapshot
+        stem = _UNSAFE_FILENAME.sub("_", question or "").strip()
+        stem = stem[:REPORT_EXPORT_FILENAME_STEM_MAX_CHARS] or report_id
+        filename = f"{stem}-{report_id}.md"
         collision = seen.get(filename, 0)
         if collision:
-            filename = f"{stem}-{source.report_id}-{collision}.md"
-        seen[f"{stem}-{source.report_id}.md"] = collision + 1
+            filename = f"{stem}-{report_id}-{collision}.md"
+        seen[f"{stem}-{report_id}.md"] = collision + 1
         artifacts.append(ReportExportArtifact(filename, output.content))
     return tuple(artifacts)
+
+
+def _snapshot_sources(
+    sources: object,
+) -> tuple[tuple[str, str, str], ...]:
+    if type(sources) is not tuple or not sources:
+        raise ReportExportError("invalid_report_export_call")
+    snapshots: list[tuple[str, str, str]] = []
+    for source in sources:
+        if (
+            type(source) is not ReportExportSource
+            or type(source.report_id) is not str
+            or not source.report_id
+            or type(source.question) is not str
+            or type(source.content_md) is not str
+            or not source.content_md
+        ):
+            raise ReportExportError("invalid_report_export_call")
+        snapshots.append((source.report_id, source.question, source.content_md))
+    return tuple(snapshots)
 
 
 def _assert_connection_clear(probe: object) -> None:
