@@ -71,11 +71,18 @@ test("presentation close never releases an in-flight domain operation", () => {
   const text = close.getText(page);
   assert.doesNotMatch(text, /OperationRef\.current\s*=\s*null/);
   assert.doesNotMatch(text, /set(?:Share|Promo|Edge)Busy\(false\)/);
-  assert.ok(
-    ifConditionsIn(findFunctionIn(page, "Home", "openShareModal"))
-      .some((condition) => condition.includes("shareOperationRef.current")),
-    "reopening the share presentation must not replace an in-flight share operation",
-  );
+  for (const [name, operation] of [
+    ["openShareModal", "shareOperationRef.current"],
+    ["openSharedByMe", "shareOperationRef.current"],
+    ["openPromoQueue", "promoOperationRef.current"],
+    ["openEdgeReviewQueue", "edgeOperationRef.current"],
+  ]) {
+    assert.ok(
+      ifConditionsIn(findFunctionIn(page, "Home", name))
+        .some((condition) => condition.includes(operation)),
+      `${name} must not replace an in-flight domain operation`,
+    );
+  }
 });
 
 test("modal mutations suppress errors after their frozen lease becomes stale", () => {

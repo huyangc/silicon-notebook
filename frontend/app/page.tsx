@@ -3961,6 +3961,7 @@ export default function Home() {
 
   // E. owner「已分享总览」:拉取所有我 owner 且已分享的库 → 打开 modal
   async function openSharedByMe() {
+    if (shareOperationRef.current) return;
     const modalLease = rootModals.issue("shared-by-me", rootModals.captureActorOwner());
     if (!modalLease) return;
     setSharedByMeList(null);
@@ -4000,6 +4001,7 @@ export default function Home() {
 
   // --- Governance: promotion queue (Track F) ---------------------------
   async function openPromoQueue() {
+    if (promoOperationRef.current) return;
     const modalLease = rootModals.issue("promotion-queue", rootModals.captureActorOwner());
     if (!modalLease) return;
     try {
@@ -4067,7 +4069,7 @@ export default function Home() {
 
   // --- Track E: edge review queue ----------------------------------------
   async function openEdgeReviewQueue(notebookId: string | null = currentNotebookId) {
-    if (!notebookId) return;
+    if (!notebookId || edgeOperationRef.current) return;
     const modalLease = rootModals.issue("edge-review", rootModals.captureWorkspaceOwner());
     if (!modalLease || modalLease.owner.kind !== "workspace" || modalLease.owner.notebookId !== notebookId) return;
     try {
