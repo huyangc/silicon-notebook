@@ -20,7 +20,20 @@ function Harness({
   sourceId?: string | null;
 }) {
   value = useRootModalCoordinator({ actorId, sourceId, onClosed: closed });
-  return <div>{value.view("info").open ? "info" : "none"}</div>;
+  const analytics = value.view("analytics");
+  const info = value.view("info");
+  return <div>
+    {analytics.open ? (
+      <section
+        data-testid="analytics-surface"
+        inert={analytics.topmost ? undefined : true}
+        aria-hidden={!analytics.topmost}
+      >
+        <button data-testid="analytics-action">analytics</button>
+      </section>
+    ) : null}
+    {info.open ? <section data-testid="info-surface">info</section> : null}
+  </div>;
 }
 
 function enterWorkspace(notebookId = "notebook-a", workspaceEpoch = 1) {
@@ -265,12 +278,40 @@ test("focus returns only for a user close of the topmost connected opener", () =
   document.body.appendChild(inside);
   inside.focus();
   act(() => value!.open("info", workspace));
-  expect(value!.requestClose("info", "button")).toBe(true);
+  act(() => {
+    expect(value!.requestClose("info", "button")).toBe(true);
+  });
   expect(document.activeElement).toBe(inside);
   inside.remove();
-  expect(value!.requestClose("analytics", "button")).toBe(true);
+  act(() => {
+    expect(value!.requestClose("analytics", "button")).toBe(true);
+  });
   expect(document.activeElement).toBe(opener);
   opener.remove();
+});
+
+test("overlay focus return waits until the underlying primary is no longer inert", () => {
+  const screen = render(<Harness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  act(() => value!.open("analytics", workspace));
+  const analyticsAction = screen.getByTestId("analytics-action");
+  analyticsAction.focus();
+  act(() => value!.open("info", workspace));
+  expect(screen.getByTestId("analytics-surface")).toHaveAttribute("inert");
+
+  const observedInertAncestors: Array<Element | null> = [];
+  const nativeFocus = analyticsAction.focus.bind(analyticsAction);
+  const focus = vi.spyOn(analyticsAction, "focus").mockImplementation(() => {
+    observedInertAncestors.push(analyticsAction.closest("[inert]"));
+    nativeFocus();
+  });
+  act(() => {
+    expect(value!.requestClose("info", "button")).toBe(true);
+  });
+  expect(focus).toHaveBeenCalledTimes(1);
+  expect(observedInertAncestors).toEqual([null]);
+  expect(document.activeElement).toBe(analyticsAction);
 });
 
 test("the coordinator creates no timer or I/O work", () => {

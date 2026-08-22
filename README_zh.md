@@ -224,7 +224,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 
 前端 workspace 已按状态所有权拆分且不改变产品行为：`use-notebook-collection.ts` 独占 actor-scoped 集合清单、有界搜索、筛选/排序/视图/菜单、清单发布水位、访问权对账、编辑/删除态、创建 single-flight 与删除 tombstone；`use-source-library.ts` 独占来源列表/范围、详情、删除 tombstone、重解析与解析轮询；`use-ask-session.ts` 独占 Ask 草稿、对话、意图确认、持久流、重连和会话历史；`use-report-workspace.ts` 独占报告列表/详情、轮询、意图/大纲提交、分享、导出选择和报告删除 tombstone；`use-kg-workspace.ts` 独占 Knowledge 浏览、Schema 状态、统一图读取、合并审阅及持久 KG 构建/维护追踪。`use-root-modal-coordinator.ts` 另行独占根层弹窗的 typed presentation lease、actor/workspace/source scope、层级策略与焦点归还；它不拥有领域 payload、API、busy 或 timer。各 hook 都使用显式 user/notebook/workspace owner；`page.tsx` 继续作为壳层编排器并保持既有集合 composite bundle、惰性读取、请求次数和轮询节奏。Report 与 Knowledge/KG 内容仍按需读取，打开 notebook 时只保留既有维护状态恢复探针。Ask 显式停止只保留一条权威取消请求，直到服务端明确响应；浏览器不会按猜测的计时器提前释放重试权。
 
-来源详情也进入同一 frozen primary-dialog 水位。兼容的来源目录审阅或 info 层位于顶层时，被覆盖的详情及任何其它被覆盖 dialog 都进入 inert，并从无障碍树隐藏。
+来源详情也进入同一 frozen primary-dialog 水位。兼容的来源目录审阅或 info 层位于顶层时，被覆盖的详情及任何其它被覆盖 dialog 都进入 inert，并从无障碍树隐藏；只有 React 提交并移除这层 inert 后才归还焦点。
 
 贡献者安全约束：凡任务会写入仓库代码、测试、文档或配置，都必须先新建隔离的 linked git worktree 和分支；该任务期间主 checkout 只读。纯调研、状态汇报和只读审查除外。所有改动都经 PR 合入，PR 必须经 codex 评审且每一轮原始输出逐字贴回 PR；只有在评审非阻塞、CI 全绿、且 PR 上能看到针对 **PR 远端 head 提交**的评审这三条同时成立时才可合入——评审静默没触发，和它跑完判了通过，在外部看起来一模一样，所以本地状态不算证据。后端的 notebook 授权谓词只有每后端一个唯一定义点（`repositories/*/access_sql.py`），API 写端点一律按能力守卫归类；完整契约见[开发与仓库契约](./docs/development_zh.md)。
 

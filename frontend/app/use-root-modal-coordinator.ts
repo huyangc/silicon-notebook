@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export type RootModalSlot =
   | "password-change"
@@ -120,6 +120,12 @@ function primarySlotsMayCoexist(left: RootModalSlot, right: RootModalSlot): bool
 
 type ActiveLease = RootModalLease & Readonly<{ order: number }>;
 
+type PendingFocusReturn = Readonly<{
+  element: HTMLElement;
+  expectedSlot: RootModalSlot | null;
+  expectedIssue: number | null;
+}>;
+
 export type RootModalTransition = Readonly<{
   serial: number;
 }>;
@@ -169,7 +175,8 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
   const activeRef = useRef(new Map<RootModalSlot, ActiveLease>());
   const orderRef = useRef(0);
   const pendingInvalidationsRef = useRef<Array<[RootModalSlot, RootModalCloseReason]>>([]);
-  const [, setVersion] = useState(0);
+  const pendingFocusReturnRef = useRef<PendingFocusReturn | null>(null);
+  const [version, setVersion] = useState(0);
 
   const ownerIsCurrent = (owner: RootModalOwner): boolean => {
     if (
@@ -273,6 +280,26 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     }
     return winner;
   };
+
+  // A covered primary is still inert in the DOM during requestClose itself.
+  // Restore focus only after React has committed the version that removes that
+  // inert attribute, and only if the same underlying layer is still topmost.
+  useLayoutEffect(() => {
+    const pending = pendingFocusReturnRef.current;
+    if (!pending) return;
+    pendingFocusReturnRef.current = null;
+    const current = topmost();
+    if (
+      (pending.expectedSlot === null && current !== null)
+      || (
+        pending.expectedSlot !== null
+        && (current?.slot !== pending.expectedSlot || current.issue !== pending.expectedIssue)
+      )
+      || !connected(pending.element)
+      || pending.element.closest("[inert]")
+    ) return;
+    pending.element.focus();
+  }, [version]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function activateActor(nextActorId: string) {
     if (!nextActorId || actorIdRef.current === nextActorId || actorIdRef.current !== null) return;
@@ -483,8 +510,15 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     if ((reason === "backdrop" || reason === "escape") && topmost()?.slot !== slot) return false;
     const wasTopmost = topmost()?.slot === slot;
     removeWithoutRender(slot, reason, true);
+    const revealed = topmost();
+    pendingFocusReturnRef.current = wasTopmost && connected(active.returnFocus)
+      ? Object.freeze({
+        element: active.returnFocus,
+        expectedSlot: revealed?.slot ?? null,
+        expectedIssue: revealed?.issue ?? null,
+      })
+      : null;
     setVersion((value) => value + 1);
-    if (wasTopmost && connected(active.returnFocus)) active.returnFocus.focus();
     return true;
   }
 
