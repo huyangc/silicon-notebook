@@ -122,7 +122,7 @@ test("workspace transition and both authentication paths bind KG authority", () 
   assert.match(text, /kgWorkspace\.activateActor\(u\.id\);[\s\S]{0,220}setCurrentUser\(u\)/);
   assert.match(
     text,
-    /listBases\(notebookId\)[\s\S]{0,260}workspaceActorIdRef\.current === actorId[\s\S]{0,160}activeNotebookIdRef\.current === notebookId/,
+    /listBases\(notebookId\)[\s\S]{0,300}workspaceActorIdRef\.current === actorId[\s\S]{0,180}activeNotebookIdRef\.current === notebookId[\s\S]{0,180}workspaceEpochRef\.current === workspaceEpoch/,
   );
 });
 
@@ -145,6 +145,8 @@ test("visible commits compare live actor and notebook before exact owner generat
   );
   assert.match(text, /pendingNotebookSnapshotRef/);
   assert.match(text, /notebookSnapshot\?\.id === notebookId/);
+  const openGraph = text.slice(text.indexOf("const openGraph"), text.indexOf("const closeGraph"));
+  assert.equal(openGraph.includes("ownerRef.current ="), false);
 });
 
 test("read-only review recovery and every provider-side write are policy gated", () => {

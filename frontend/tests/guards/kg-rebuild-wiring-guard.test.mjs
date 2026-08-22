@@ -104,7 +104,8 @@ test("terminal observation stops duplicate ticks before refresh and releases onl
 test("pending rebuild retry stays claimed and reuses the same durable poll", () => {
   const poll = rebuildPollBody();
   assert.match(poll, /pendingRebuildRef\.current\.has\(key\)/);
-  assert.match(poll, /await launchRebuild\(owner, \{ allowClaimed: true, decision: true \}\)/);
+  assert.match(poll, /const launch = await launchRebuild\(owner, \{[\s\S]*pendingRetry: true/);
+  assert.match(poll, /launch === "started" \|\| launch === "adopted" \|\| launch === "waiting"/);
   assert.match(poll, /settled = false/);
   assert.match(poll, /attempts = 0/);
   assert.match(poll, /mismatchStreak = 0/);

@@ -1094,10 +1094,10 @@ export default function Home() {
     effects: {
       notify: setToast,
       reportError,
-      refreshCollection: async () => loadNotebookCollection(),
-      refreshNotebook: async (targetNotebookId) => {
+      refreshCollection: async (guard) => loadNotebookCollection({ guard }),
+      refreshNotebook: async (targetNotebookId, guard) => {
         const refreshed = await getNotebook(targetNotebookId);
-        if (activeNotebookIdRef.current === targetNotebookId) {
+        if (guard() && activeNotebookIdRef.current === targetNotebookId) {
           setCurrentNotebook((current) => current?.id === targetNotebookId ? refreshed : current);
         }
         return refreshed;
@@ -4266,11 +4266,13 @@ export default function Home() {
       if (currentNotebookId && capabilities.canGovernKnowledge) {
         const notebookId = currentNotebookId;
         const actorId = currentUser?.id ?? null;
+        const workspaceEpoch = workspaceEpochRef.current;
         listBases(notebookId).then((bases) => {
           if (
             actorId
             && workspaceActorIdRef.current === actorId
             && activeNotebookIdRef.current === notebookId
+            && workspaceEpochRef.current === workspaceEpoch
           ) {
             setCurrentNotebookBases(bases);
           }
@@ -4279,6 +4281,7 @@ export default function Home() {
             actorId
             && workspaceActorIdRef.current === actorId
             && activeNotebookIdRef.current === notebookId
+            && workspaceEpochRef.current === workspaceEpoch
           ) {
             reportError(error);
           }

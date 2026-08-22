@@ -66,7 +66,7 @@ test("relink polling is bounded, single-flight, identity-aware, and range-stable
 
 test("submission windows and stale job ids cannot settle relink early", () => {
   const poll = relinkPollBody();
-  assert.match(poll, /status\.status === "idle" && submittingMaintenanceRef\.current\.has\(jobKey\)/);
+  assert.match(poll, /if \(submittingMaintenanceRef\.current\.has\(jobKey\)\) return/);
   assert.match(poll, /expected && status\.job_id !== expected/);
   assert.match(poll, /mismatchStreak \+= 1/);
   assert.match(poll, /mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK/);

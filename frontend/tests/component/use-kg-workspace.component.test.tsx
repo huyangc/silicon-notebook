@@ -105,6 +105,14 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function httpConflict(): Error {
+  const error = new Error("busy");
+  Object.defineProperty(error, Symbol.for("silicon-notebook.errors.httpStatus"), {
+    value: 409,
+  });
+  return error;
+}
+
 function graph(vizBuilding = false): UnifiedGraphResp {
   return { nodes: [], edges: [], viz_building: vizBuilding };
 }
@@ -284,6 +292,21 @@ test("schema mutation rechecks live authority before its derived reload", async 
   expect(effects.notify).not.toHaveBeenCalledWith("类型已更新");
 });
 
+test("opening the graph does not invalidate an in-flight Knowledge write owner", async () => {
+  const pending = deferred<void>();
+  knowledgeApi.updateKnowledge.mockReturnValueOnce(pending.promise);
+  render(<Harness />);
+
+  let updating!: Promise<void>;
+  act(() => { updating = value!.updateKnowledge("knowledge-a", { status: "approved" }); });
+  await waitFor(() => expect(value!.knowledge.busyId).toBe("knowledge-a"));
+  await act(async () => value!.openGraph());
+  await act(async () => pending.resolve());
+  await updating;
+
+  expect(value!.knowledge.busyId).toBeNull();
+});
+
 test("read-only policy neither restores review work nor admits write commands", async () => {
   const readOnly: HookOptions["policy"] = {
     canGovernKnowledge: false,
@@ -310,6 +333,44 @@ test("read-only policy neither restores review work nor admits write commands", 
   expect(kgApi.rebuildUnifiedKg).not.toHaveBeenCalled();
   expect(kgApi.buildKg).not.toHaveBeenCalled();
   expect(knowledgeApi.updateKnowledge).not.toHaveBeenCalled();
+});
+
+test("maintenance submission suppresses stale terminal polls and rechecks permission before a 409 retry", async () => {
+  const relinkPending = deferred<Awaited<ReturnType<typeof kgApi.relinkKg>>>();
+  kgApi.relinkKg.mockReturnValueOnce(relinkPending.promise);
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  kgApi.fetchRelinkStatus.mockResolvedValue({
+    job_id: "stale-relink",
+    notebook_id: "notebook-a",
+    status: "succeeded",
+    running: false,
+    linked: 1,
+  });
+
+  let relinking!: Promise<void>;
+  act(() => { relinking = value!.startRelink(); });
+  expect(kgApi.relinkKg).toHaveBeenCalledOnce();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.relinking).toBe(true);
+
+  const readOnly = { ...writablePolicy, canWriteKg: false };
+  rerender(<Harness policy={readOnly} />);
+  await act(async () => relinkPending.reject(httpConflict()));
+  await relinking;
+  expect(kgApi.relinkKg).toHaveBeenCalledTimes(1);
+
+  rerender(<Harness policy={writablePolicy} />);
+  const rebuildPending = deferred<Awaited<ReturnType<typeof kgApi.rebuildUnifiedKg>>>();
+  kgApi.rebuildUnifiedKg.mockReturnValueOnce(rebuildPending.promise);
+  let rebuilding!: Promise<void>;
+  act(() => { rebuilding = value!.startRebuild(); });
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledOnce();
+  rerender(<Harness policy={readOnly} />);
+  await act(async () => rebuildPending.reject(httpConflict()));
+  await rebuilding;
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
 });
 
 test("graph opening preserves parallel core reads and rejects stale search results", async () => {
