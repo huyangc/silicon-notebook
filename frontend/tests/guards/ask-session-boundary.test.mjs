@@ -152,4 +152,9 @@ test("workspace transitions delegate Ask ownership and authenticated bootstrap a
     /askSession\.activateActor\(u\.id\);\s*sourceLibrary\.activateActor\(u\.id\);\s*setCurrentUser\(u\)/,
     "authenticated bootstrap must activate hook identities before publishing currentUser",
   );
+  assert.match(
+    page.getText(page),
+    /window\.addEventListener\("popstate", onPopState\)[\s\S]*?\}, \[authChecked, currentUser\?\.id\]\);/,
+    "browser-history navigation must rebind after the authenticated actor changes",
+  );
 });

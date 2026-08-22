@@ -419,6 +419,8 @@ test("failed pre-start cancellation keeps transport alive and only refreshes sam
 
 test("abort after started cancels exactly once and aborts the local stream", async () => {
   const started = deferred<undefined>();
+  const cancellation = deferred<undefined>();
+  api.cancelAskJob.mockReturnValueOnce(cancellation.promise);
   let signal: AbortSignal | undefined;
   api.runAskStream.mockImplementation(async (
     _notebookId: string,
@@ -450,10 +452,70 @@ test("abort after started cancels exactly once and aborts the local stream", asy
   act(() => value!.abort());
   expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
   expect(api.cancelAskJob).toHaveBeenCalledWith("notebook-a", "job-started");
-  expect(signal?.aborted).toBe(true);
+  expect(signal?.aborted).toBe(false);
   act(() => value!.abort());
   expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
+  cancellation.resolve(undefined);
   await act(async () => submitting);
+  expect(signal?.aborted).toBe(true);
+});
+
+test("a failed started cancellation keeps the stream and Stop retry alive", async () => {
+  const started = deferred<undefined>();
+  const firstCancel = deferred<undefined>();
+  const secondCancel = deferred<undefined>();
+  api.cancelAskJob
+    .mockReturnValueOnce(firstCancel.promise)
+    .mockReturnValueOnce(secondCancel.promise);
+  let signal: AbortSignal | undefined;
+  api.runAskStream.mockImplementation(async (
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    nextSignal?: AbortSignal,
+    onStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    signal = nextSignal;
+    await onStart!("job-started-retry", "conversation-started-retry");
+    started.resolve(undefined);
+    return await new Promise<AskResponse>((_resolve, reject) => {
+      nextSignal?.addEventListener("abort", () => {
+        reject(new DOMException("cancelled", "AbortError"));
+      }, { once: true });
+    });
+  });
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("retry Stop question");
+  });
+  await act(async () => started.promise);
+
+  act(() => value!.abort());
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
+  expect(signal?.aborted).toBe(false);
+  firstCancel.reject(new Error("cancel unavailable"));
+  await act(async () => {
+    await firstCancel.promise.catch(() => undefined);
+    await Promise.resolve();
+  });
+  expect(signal?.aborted).toBe(false);
+  expect(effects.notify).toHaveBeenCalledWith("取消失败，请重试");
+
+  act(() => value!.abort());
+  act(() => value!.abort());
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
+  expect(api.cancelAskJob).toHaveBeenNthCalledWith(
+    2,
+    "notebook-a",
+    "job-started-retry",
+  );
+  expect(signal?.aborted).toBe(false);
+  secondCancel.resolve(undefined);
+  await act(async () => submitting);
+  expect(signal?.aborted).toBe(true);
 });
 
 test("reconnect cancellation deduplicates while pending and retries after controller-less failure", async () => {
@@ -896,6 +958,55 @@ test.each(["delete", "bulk"] as const)(
       expect(api.bulkDeleteConversations).toHaveBeenCalledWith("notebook-a", 7);
       expect(api.deleteConversation).not.toHaveBeenCalled();
     }
+  },
+);
+
+test.each(["delete", "bulk"] as const)(
+  "%s failure from notebook A/G1 is silent after B -> A/G3 replaces its view owner",
+  async (operation) => {
+    const deletion = deferred<undefined>();
+    const cleanupResult = deferred<{ deleted: number; deleted_ids: string[] }>();
+    api.deleteConversation.mockReturnValueOnce(deletion.promise);
+    api.bulkDeleteConversations.mockReturnValueOnce(cleanupResult.promise);
+    const view = render(<Harness />);
+    const ownerA1 = beginOwnedNotebook(1);
+    let mutating!: Promise<void>;
+    act(() => {
+      mutating = operation === "delete"
+        ? value!.deleteSession("conversation-old")
+        : value!.bulkCleanup(7);
+    });
+
+    let ownerB: ReturnType<HookValue["beginNotebookTransition"]> = null;
+    act(() => {
+      ownerB = value!.beginNotebookTransition({
+        actorId: "user-a",
+        notebookId: "notebook-b",
+        workspaceEpoch: 2,
+      });
+    });
+    view.rerender(<Harness notebookId="notebook-b" />);
+    act(() => value!.finishNotebookTransition(ownerB!));
+
+    let ownerA3: ReturnType<HookValue["beginNotebookTransition"]> = null;
+    act(() => {
+      ownerA3 = value!.beginNotebookTransition({
+        actorId: "user-a",
+        notebookId: "notebook-a",
+        workspaceEpoch: 3,
+      });
+    });
+    view.rerender(<Harness notebookId="notebook-a" />);
+    act(() => value!.finishNotebookTransition(ownerA3!));
+    expect(ownerA3!.notebookGeneration).not.toBe(ownerA1.notebookGeneration);
+
+    const staleError = new Error("stale mutation failed");
+    if (operation === "delete") deletion.reject(staleError);
+    else cleanupResult.reject(staleError);
+    await act(async () => {
+      await expect(mutating).resolves.toBeUndefined();
+    });
+    expect(effects.reportError).not.toHaveBeenCalled();
   },
 );
 

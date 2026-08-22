@@ -2079,7 +2079,11 @@ export default function Home() {
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [authChecked]);
+  // The handler calls openNotebook, whose Ask/source owner must use the live
+  // authenticated actor. Rebind after an in-page login/logout; otherwise the
+  // listener installed while currentUser was null retains an empty actor and
+  // Back/Forward can leave the URL and visible workspace out of sync.
+  }, [authChecked, currentUser?.id]);
 
   // A group invitation survives the login/register gate in the query string.
   // Once authenticated, redeem it exactly once, then remove the bearer token
@@ -5696,6 +5700,8 @@ export default function Home() {
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
+      askSession.activateActor(u.id);
+      sourceLibrary.activateActor(u.id);
       setCurrentUser(u);
       setStatusText("");
       loadNotebookCollection().catch(reportError);

@@ -880,6 +880,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       cancelRequestsInFlightRef.current.add(cancelKey);
       cancelAskJob(activeNotebook, jobId)
         .then(() => {
+          // A durable Ask job is not cancelled merely because its transport is
+          // disconnected. Keep reading until the authoritative cancel request
+          // succeeds; otherwise a transient cancel failure would strand a
+          // still-running backend job while also throwing away the only local
+          // controller that can retry Stop.
+          controller?.abort();
           if (askJobIdRef.current === jobId) askJobIdRef.current = null;
           if (askNotebookIdRef.current === activeNotebook) askNotebookIdRef.current = null;
           if (askAbortRef.current === controller) askAbortRef.current = null;
@@ -890,12 +896,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           return null;
         })
         .catch(() => {
-          if (!controller && owner && sameViewOwner(ownerRef.current, owner)) {
+          const stillActive = askJobIdRef.current === jobId || askAbortRef.current === controller;
+          if (stillActive && owner && sameViewOwner(ownerRef.current, owner)) {
             effectsRef.current.notify("取消失败，请重试");
           }
         })
         .finally(() => { cancelRequestsInFlightRef.current.delete(cancelKey); });
-      controller?.abort();
     } else if (controller) {
       cancelRequestedControllersRef.current.add(controller);
       viewGenerationRef.current += 1;
@@ -1088,7 +1094,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     try {
       await deleteConversation(id);
     } catch (error) {
-      if (sameNotebookIdentity(ownerRef.current, owner)) throw error;
+      if (sameViewOwner(ownerRef.current, owner)) throw error;
       return;
     }
     const key = ownerKey(owner);
@@ -1114,7 +1120,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     try {
       result = await bulkDeleteConversations(owner.notebookId, days);
     } catch (error) {
-      if (sameNotebookIdentity(ownerRef.current, owner)) throw error;
+      if (sameViewOwner(ownerRef.current, owner)) throw error;
       return;
     }
     const key = ownerKey(owner);
