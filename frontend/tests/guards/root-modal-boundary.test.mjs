@@ -180,4 +180,10 @@ test("modal mutations suppress errors after their frozen lease becomes stale", (
   assert.match(promotion, /const workspaceEpoch = workspaceEpochRef\.current/);
   assert.match(promotion, /if \(isCurrent\(\)\) setToast/);
   assert.match(promotion, /catch \(error\)[\s\S]*if \(isCurrent\(\)\) throw error/);
+  assert.match(pageText, /const \[catalogReviewLease, setCatalogReviewLease\] = useState<RootModalLease<"catalog-review"> \| null>/);
+  assert.match(pageText, /<CommandCatalogReview[\s\S]{0,700}isCurrent=\{\(\) => rootModals\.owns\(catalogReviewLease\)\}/);
+  const catalogText = catalogPanel.getText(catalogPanel);
+  assert.match(catalogText, /const operationIsCurrent = \(\) => reviewAliveRef\.current && isCurrent\(\)/);
+  assert.match(catalogText, /const result = await applyCommandCatalog[\s\S]{0,180}if \(!operationIsCurrent\(\)\) return/);
+  assert.match(catalogText, /const result = await dismissCommandCatalog[\s\S]{0,180}if \(!operationIsCurrent\(\)\) return/);
 });

@@ -105,6 +105,9 @@ const onOpenTable = vi.fn();
 const onToast = vi.fn();
 
 type SectionProps = Parameters<typeof CommandCatalogSection>[0];
+type HarnessProps = Partial<SectionProps> & {
+  reviewIsCurrent?: () => boolean;
+};
 
 /**
  * P0 修复后,审阅弹窗(`CommandCatalogReview`)不再是 `CommandCatalogSection` 自己
@@ -113,7 +116,7 @@ type SectionProps = Parameters<typeof CommandCatalogSection>[0];
  * 「持有开关状态 + 根层渲染 CommandCatalogReview」的接线,好让既有的「点开审阅弹窗
  * 再操作」用例不用改断言逻辑,只需换一个更贴近生产接线形状的挂载点。
  */
-function Harness(props: Partial<SectionProps> = {}) {
+function Harness({ reviewIsCurrent, ...props }: HarnessProps = {}) {
   const [review, setReview] = useState<CatalogReviewRequest | null>(null);
   // R8:page.tsx 那条 reviewSeq/onReviewed 接线也复刻进来——它是「确认完最后一条
   // 候选、关掉弹窗,重新识别就该可点」的唯一实现路径,harness 少接这一根线,那条
@@ -142,6 +145,7 @@ function Harness(props: Partial<SectionProps> = {}) {
           onClose={() => setReview(null)}
           onOpenTable={onOpenTable}
           onToast={onToast}
+          isCurrent={reviewIsCurrent}
           onReviewed={() => setReviewSeq((seq) => seq + 1)}
         />
       )}
@@ -149,7 +153,7 @@ function Harness(props: Partial<SectionProps> = {}) {
   );
 }
 
-function mount(props: Partial<SectionProps> = {}) {
+function mount(props: HarnessProps = {}) {
   return render(<Harness {...props} />);
 }
 
@@ -1047,6 +1051,49 @@ test("确认所选：报出新增/冲突/剩余三件事，剩余可以接着确
   expect(onOpenTable).toHaveBeenCalledWith("t-9");
 });
 
+test("确认响应迟到且来源弹窗 lease 已失效时，不向替代工作区 toast 或触发入口刷新", async () => {
+  const user = userEvent.setup();
+  let leaseCurrent = true;
+  let settleApply!: (value: CommandCatalogApplyResult) => void;
+  vi.mocked(fetchCommandCatalogJob).mockResolvedValue({
+    job: job({ status: "succeeded", progress: { sections_total: 1, sections_done: 1, entries: 1 } }),
+  });
+  vi.mocked(fetchCommandCatalogCandidates).mockResolvedValue({
+    items: [candidate()],
+    next_cursor: 1,
+    has_more: false,
+    counts: { candidate: 1, rejected: 0, applied: 0, dismissed: 0 },
+  });
+  vi.mocked(applyCommandCatalog).mockReturnValue(new Promise((resolve) => { settleApply = resolve; }));
+  mount({ reviewIsCurrent: () => leaseCurrent });
+
+  await user.click(await screen.findByRole("button", { name: "查看识别结果" }));
+  const dialog = await screen.findByRole("dialog", { name: "命令目录识别结果" });
+  await within(dialog).findByText("set_db");
+  await user.click(within(dialog).getByRole("checkbox", { name: "选择 set_db" }));
+  await user.click(within(dialog).getByRole("button", { name: "确认所选" }));
+  await waitFor(() => expect(applyCommandCatalog).toHaveBeenCalledTimes(1));
+  const candidateReads = vi.mocked(fetchCommandCatalogCandidates).mock.calls.length;
+  const jobReads = vi.mocked(fetchCommandCatalogJob).mock.calls.length;
+
+  await act(async () => {
+    leaseCurrent = false;
+    settleApply({
+      table_id: "t-late",
+      table_title: "旧来源目录",
+      created: true,
+      applied: ["c1"],
+      rows_added: 1,
+      conflicts: [],
+      pending_remaining: 0,
+    });
+  });
+
+  expect(onToast).not.toHaveBeenCalled();
+  expect(fetchCommandCatalogCandidates).toHaveBeenCalledTimes(candidateReads);
+  expect(fetchCommandCatalogJob).toHaveBeenCalledTimes(jobReads);
+});
+
 // R7:显式跳过——「重新识别」被待审阅候选拦住时唯一的放弃出口(apply 只在候选
 // 与目标表冲突时才自动 dismiss)。
 test("跳过所选：报出跳过了几条与还剩几条待审阅，跳过后从头重拉列表", async () => {
@@ -1085,6 +1132,40 @@ test("跳过所选：报出跳过了几条与还剩几条待审阅，跳过后�
   expect(onToast).toHaveBeenCalledWith("已跳过 1 条候选");
   // 跳过从不写表——不该出现「去看这张表」入口。
   expect(within(dialog).queryByRole("button", { name: "去看这张表" })).not.toBeInTheDocument();
+});
+
+test("跳过请求在审阅弹窗关闭后落地时，不向新界面 toast 或触发入口刷新", async () => {
+  const user = userEvent.setup();
+  let settleDismiss!: (value: CommandCatalogDismissResult) => void;
+  vi.mocked(fetchCommandCatalogJob).mockResolvedValue({
+    job: job({ status: "succeeded", progress: { sections_total: 1, sections_done: 1, entries: 1 } }),
+  });
+  vi.mocked(fetchCommandCatalogCandidates).mockResolvedValue({
+    items: [candidate()],
+    next_cursor: 1,
+    has_more: false,
+    counts: { candidate: 1, rejected: 0, applied: 0, dismissed: 0 },
+  });
+  vi.mocked(dismissCommandCatalog).mockReturnValue(new Promise((resolve) => { settleDismiss = resolve; }));
+  mount();
+
+  await user.click(await screen.findByRole("button", { name: "查看识别结果" }));
+  const dialog = await screen.findByRole("dialog", { name: "命令目录识别结果" });
+  await within(dialog).findByText("set_db");
+  await user.click(within(dialog).getByRole("checkbox", { name: "选择 set_db" }));
+  await user.click(within(dialog).getByRole("button", { name: "跳过所选" }));
+  await waitFor(() => expect(dismissCommandCatalog).toHaveBeenCalledTimes(1));
+  const candidateReads = vi.mocked(fetchCommandCatalogCandidates).mock.calls.length;
+  const jobReads = vi.mocked(fetchCommandCatalogJob).mock.calls.length;
+  await user.click(within(dialog).getByRole("button", { name: "关闭识别结果" }));
+
+  await act(async () => {
+    settleDismiss({ dismissed: ["c1"], pending_remaining: 0 });
+  });
+
+  expect(onToast).not.toHaveBeenCalled();
+  expect(fetchCommandCatalogCandidates).toHaveBeenCalledTimes(candidateReads);
+  expect(fetchCommandCatalogJob).toHaveBeenCalledTimes(jobReads);
 });
 
 test("跳过所选/跳过全部待审阅在飞时立刻禁用并换成「跳过中…」，且与确认互斥", async () => {

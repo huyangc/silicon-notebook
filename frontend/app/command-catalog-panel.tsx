@@ -547,6 +547,12 @@ type ReviewProps = {
   onClose: () => void;
   onOpenTable: (tableId: string) => void;
   onToast: (message: string) => void;
+  /**
+   * The review write is durable, but its browser effects belong to the exact
+   * source-modal lease that started it. Closing the modal or changing owner
+   * must not let a late response toast or refresh a replacement workspace.
+   */
+  isCurrent?: () => boolean;
   interactive?: boolean;
   zIndex?: number;
   /**
@@ -591,6 +597,7 @@ export function CommandCatalogReview({
   onClose,
   onOpenTable,
   onToast,
+  isCurrent = () => true,
   onReviewed,
   interactive = true,
   zIndex,
@@ -615,9 +622,15 @@ export function CommandCatalogReview({
   const [outcome, setOutcome] = useState<CatalogApplyOutcome | null>(null);
   const [appliedTableId, setAppliedTableId] = useState("");
   const [error, setError] = useState("");
+  const reviewAliveRef = useRef(true);
+  useEffect(() => {
+    reviewAliveRef.current = true;
+    return () => { reviewAliveRef.current = false; };
+  }, []);
   // 每次「重新从头加载」都换一代,让上一代迟到的分页响应认得出自己已经作废
   // (确认会改候选 state,旧游标指向的集合已经变了,append 上去就是错行)。
   const epochRef = useRef(0);
+  const operationIsCurrent = () => reviewAliveRef.current && isCurrent();
 
   const loadPage = useCallback(
     async (state: CandidateState, from: number, append: boolean) => {
@@ -705,6 +718,7 @@ export function CommandCatalogReview({
     setError("");
     try {
       const result = await applyCommandCatalog(notebookId, sourceId, body, jobId);
+      if (!operationIsCurrent()) return;
       const summary = catalogApplyOutcome(result);
       setOutcome(summary);
       setAppliedTableId(result.table_id);
@@ -714,13 +728,14 @@ export function CommandCatalogReview({
       setSelected(new Set());
       await loadPage(tab, 0, false);
     } catch (err) {
-      setError(toUserMessage(err, "确认失败"));
+      if (operationIsCurrent()) setError(toUserMessage(err, "确认失败"));
     } finally {
-      setApplying(false);
+      const current = operationIsCurrent();
+      if (current) setApplying(false);
       // R8:无论成败都通知入口卡片重读 job——见 onReviewed 的声明(失败路径里
       // 有一种服务端状态确实变了的情况)。放在 finally 而不是两个分支各写一遍,
       // 是因为这正是「这次动作结束了」的唯一一处。
-      onReviewed?.();
+      if (current) onReviewed?.();
     }
   }
 
@@ -741,16 +756,20 @@ export function CommandCatalogReview({
     setError("");
     try {
       const result = await dismissCommandCatalog(notebookId, sourceId, body, jobId);
+      if (!operationIsCurrent()) return;
       const summary = catalogDismissOutcome(result);
       setOutcome(summary);
       if (result.dismissed.length > 0) onToast(summary.headline);
       setSelected(new Set());
       await loadPage(tab, 0, false);
     } catch (err) {
-      setError(toUserMessage(err, "跳过失败"));
+      if (operationIsCurrent()) setError(toUserMessage(err, "跳过失败"));
     } finally {
-      setDismissing(false);
-      onReviewed?.();  // 同 runApply,理由见 onReviewed 的声明。
+      const current = operationIsCurrent();
+      if (current) {
+        setDismissing(false);
+        onReviewed?.();  // 同 runApply,理由见 onReviewed 的声明。
+      }
     }
   }
 

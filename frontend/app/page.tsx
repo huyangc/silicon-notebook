@@ -966,6 +966,7 @@ export default function Home() {
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
   // 开关状态与渲染都在这里,与成本预告 `infoModal`/`confirmCommandCatalog` 同构。
   const [catalogReview, setCatalogReview] = useState<CatalogReviewRequest | null>(null);
+  const [catalogReviewLease, setCatalogReviewLease] = useState<RootModalLease<"catalog-review"> | null>(null);
   // R8(codex PR #412 评审 P1):审阅弹窗每完成一次确认/跳过就 +1,入口卡片据此
   // 重新读一次 job。两者之间没有共享状态(弹窗在根层、卡片在来源详情里),而
   // 卡片手里的 job 快照带着「重新识别」的拦截判据 pending_candidates —— 候选全
@@ -4273,6 +4274,7 @@ export default function Home() {
         return;
       case "catalog-review":
         setCatalogReview(null);
+        setCatalogReviewLease(null);
         return;
       case "conversation-share":
         setSharingSession(null);
@@ -4319,7 +4321,9 @@ export default function Home() {
   }
 
   function openCatalogReview(request: CatalogReviewRequest) {
-    if (rootModals.open("catalog-review", rootModals.captureSourceOwner())) {
+    const lease = rootModals.open("catalog-review", rootModals.captureSourceOwner());
+    if (lease) {
+      setCatalogReviewLease(lease);
       setCatalogReview(request);
     }
   }
@@ -6518,6 +6522,7 @@ export default function Home() {
           onClose={() => rootModals.requestClose("catalog-review", "button")}
           onOpenTable={openKnowhowTable}
           onToast={setToast}
+          isCurrent={() => rootModals.owns(catalogReviewLease)}
           onReviewed={() => setCatalogReviewSeq((seq) => seq + 1)}
           interactive={catalogReviewModal.topmost}
           zIndex={catalogReviewModal.zIndex}
