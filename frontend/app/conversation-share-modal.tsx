@@ -91,6 +91,8 @@ export function ConversationShareModal({
   title,
   throughAnswerId = "",
   onClose,
+  interactive = true,
+  zIndex,
 }: {
   notebookId: string;
   conversationId: string;
@@ -100,6 +102,8 @@ export function ConversationShareModal({
    *  与接入前逐字相同（`resolveShareBoundary` 原样返回 turns，两个 ahead 位恒 false）。 */
   throughAnswerId?: string;
   onClose: () => void;
+  interactive?: boolean;
+  zIndex?: number;
 }) {
   const aliveRef = useRef(true);
   useEffect(() => {
@@ -355,7 +359,7 @@ export function ConversationShareModal({
   }
 
   return (
-    <section className="utility-modal" role="dialog" aria-modal="true">
+    <section className="utility-modal" role="dialog" aria-modal={interactive} aria-hidden={!interactive} inert={interactive ? undefined : true} style={{ zIndex }}>
       <FloatingModalCard storageKey="conversation-share.window" className="utility-modal-card narrow">
         {(floating) => (<>
           <div className="source-modal-header" {...floating.dragHandleProps}>

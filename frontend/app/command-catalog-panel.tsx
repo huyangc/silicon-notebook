@@ -547,6 +547,8 @@ type ReviewProps = {
   onClose: () => void;
   onOpenTable: (tableId: string) => void;
   onToast: (message: string) => void;
+  interactive?: boolean;
+  zIndex?: number;
   /**
    * R8:一次确认/跳过已经落地,请调用方让入口卡片重新读一次 job(见
    * `CommandCatalogSection` 的 `reviewSeq`)。
@@ -590,6 +592,8 @@ export function CommandCatalogReview({
   onOpenTable,
   onToast,
   onReviewed,
+  interactive = true,
+  zIndex,
 }: ReviewProps) {
   const [tab, setTab] = useState<CandidateState>("candidate");
   const [items, setItems] = useState<CommandCatalogCandidate[]>([]);
@@ -765,8 +769,11 @@ export function CommandCatalogReview({
     <section
       className="utility-modal utility-modal-top"
       role="dialog"
-      aria-modal="true"
+      aria-modal={interactive}
+      aria-hidden={!interactive}
+      inert={interactive ? undefined : true}
       aria-label="命令目录识别结果"
+      style={{ zIndex }}
       onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}
     >
       <FloatingModalCard storageKey="command-catalog.window" className="utility-modal-card catalog-review-card">

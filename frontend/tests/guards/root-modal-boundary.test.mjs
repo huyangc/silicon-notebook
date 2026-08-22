@@ -12,6 +12,11 @@ import {
 const page = await parseModule("page.tsx");
 const hook = await parseModule("use-root-modal-coordinator.ts");
 const modelPanel = await parseModule("model-service-panel.tsx");
+const passwordModal = await parseModule("password-change-modal.tsx");
+const searchProfileModal = await parseModule("search-profile-modal.tsx");
+const memoryPanel = await parseModule("memory-panel.tsx");
+const catalogPanel = await parseModule("command-catalog-panel.tsx");
+const conversationShare = await parseModule("conversation-share-modal.tsx");
 const pageText = page.getText(page);
 const hookText = hook.getText(hook);
 
@@ -101,6 +106,43 @@ test("only the coordinator top layer drives the model focus trap", () => {
   assert.match(pageText, /interactive=\{modelPanel\.topmost\}/);
   assert.match(modelPanel.getText(modelPanel), /if \(!interactive\) return;/);
   assert.match(modelPanel.getText(modelPanel), /onClose\("escape"\)/);
+});
+
+test("every coordinated root surface leaves the interaction tree when it is covered", () => {
+  const inlineViews = [
+    "notebookShareModal", "sharedPreviewModal", "sharedByMeModal", "sourceModal",
+    "notebookEditorModal", "notebookDeleteModal", "infoModalView", "analyticsModal",
+    "kgSchemaModal", "understandingModal", "promotionQueueModal", "promotionTargetModal",
+    "edgeReviewModal",
+  ];
+  for (const view of inlineViews) {
+    assert.match(
+      pageText,
+      new RegExp(`aria-modal=\\{${view}\\.topmost\\}[\\s\\S]{0,180}aria-hidden=\\{!${view}\\.topmost\\}[\\s\\S]{0,180}inert=\\{${view}\\.topmost \\? undefined : true\\}`),
+      view,
+    );
+  }
+  const componentBindings = [
+    ["PasswordChangeModal", "passwordModal"],
+    ["SearchProfileModal", "searchProfileModal"],
+    ["MemorySaveDialog", "memorySaveModal"],
+    ["CommandCatalogReview", "catalogReviewModal"],
+    ["ConversationShareModal", "conversationShareModal"],
+    ["SourceDetailWindow", "sourceDetailModal"],
+    ["KgAnalysisView", "kgAnalysisModal"],
+  ];
+  for (const [component, view] of componentBindings) {
+    assert.match(
+      pageText,
+      new RegExp(`<${component}[\\s\\S]{0,700}interactive=\\{${view}\\.topmost\\}[\\s\\S]{0,160}zIndex=\\{${view}\\.zIndex\\}`),
+      component,
+    );
+  }
+  for (const source of [passwordModal, searchProfileModal, memoryPanel, catalogPanel, conversationShare]) {
+    const text = source.getText(source);
+    assert.match(text, /aria-hidden=\{!interactive\}/);
+    assert.match(text, /inert=\{interactive \? undefined : true\}/);
+  }
 });
 
 test("presentation close never releases an in-flight domain operation", () => {

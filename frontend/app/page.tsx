@@ -5710,7 +5710,7 @@ export default function Home() {
       )}
 
       {notebookShareModal.open && shareModal && currentNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal={notebookShareModal.topmost} style={{ zIndex: notebookShareModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>
+        <section className="utility-modal" role="dialog" aria-modal={notebookShareModal.topmost} aria-hidden={!notebookShareModal.topmost} inert={notebookShareModal.topmost ? undefined : true} style={{ zIndex: notebookShareModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.share.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5778,7 +5778,7 @@ export default function Home() {
       )}
 
       {sharedPreviewModal.open && sharedPreview && (
-        <section className="utility-modal" role="dialog" aria-modal={sharedPreviewModal.topmost} style={{ zIndex: sharedPreviewModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-preview", "backdrop"); }}>
+        <section className="utility-modal" role="dialog" aria-modal={sharedPreviewModal.topmost} aria-hidden={!sharedPreviewModal.topmost} inert={sharedPreviewModal.topmost ? undefined : true} style={{ zIndex: sharedPreviewModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-preview", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.sharedPreview.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5837,7 +5837,7 @@ export default function Home() {
       )}
 
       {sharedByMeModal.open && (
-        <section className="utility-modal" role="dialog" aria-modal={sharedByMeModal.topmost} style={{ zIndex: sharedByMeModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-by-me", "backdrop"); }}>
+        <section className="utility-modal" role="dialog" aria-modal={sharedByMeModal.topmost} aria-hidden={!sharedByMeModal.topmost} inert={sharedByMeModal.topmost ? undefined : true} style={{ zIndex: sharedByMeModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-by-me", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5933,7 +5933,7 @@ export default function Home() {
       )}
 
       {sourceModal.open && (
-        <section className="source-modal" role="dialog" aria-modal={sourceModal.topmost} style={{ zIndex: sourceModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal("backdrop"); }}>
+        <section className="source-modal" role="dialog" aria-modal={sourceModal.topmost} aria-hidden={!sourceModal.topmost} inert={sourceModal.topmost ? undefined : true} style={{ zIndex: sourceModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal("backdrop"); }}>
           <FloatingModalCard storageKey="source.add.window" className="source-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6113,11 +6113,13 @@ export default function Home() {
           sessionSignal={memorySessionAbortRef.current.signal}
           onClose={() => rootModals.requestClose("memory-save", "button")}
           onSaved={(memory) => handleMemorySaved(memory).catch(reportError)}
+          interactive={memorySaveModal.topmost}
+          zIndex={memorySaveModal.zIndex}
         />
       )}
 
       {notebookEditorModal.open && editingNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal={notebookEditorModal.topmost} style={{ zIndex: notebookEditorModal.zIndex }}>
+        <section className="utility-modal" role="dialog" aria-modal={notebookEditorModal.topmost} aria-hidden={!notebookEditorModal.topmost} inert={notebookEditorModal.topmost ? undefined : true} style={{ zIndex: notebookEditorModal.zIndex }}>
           <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6212,7 +6214,7 @@ export default function Home() {
       )}
 
       {notebookDeleteModal.open && deleteNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal={notebookDeleteModal.topmost} style={{ zIndex: notebookDeleteModal.zIndex }}>
+        <section className="utility-modal" role="dialog" aria-modal={notebookDeleteModal.topmost} aria-hidden={!notebookDeleteModal.topmost} inert={notebookDeleteModal.topmost ? undefined : true} style={{ zIndex: notebookDeleteModal.zIndex }}>
           <FloatingModalCard storageKey="notebook.delete.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6237,7 +6239,11 @@ export default function Home() {
       )}
 
       {passwordModal.open && (
-        <PasswordChangeModal onClose={() => rootModals.requestClose("password-change", "button")} />
+        <PasswordChangeModal
+          onClose={() => rootModals.requestClose("password-change", "button")}
+          interactive={passwordModal.topmost}
+          zIndex={passwordModal.zIndex}
+        />
       )}
 
       {searchProfileModal.open && currentUser && (
@@ -6245,11 +6251,13 @@ export default function Home() {
           currentUser={currentUser}
           onSaved={setCurrentUser}
           onClose={() => rootModals.requestClose("search-profile", "button")}
+          interactive={searchProfileModal.topmost}
+          zIndex={searchProfileModal.zIndex}
         />
       )}
 
       {infoModalView.open && infoModal && (
-        <section className="utility-modal utility-modal-top" role="dialog" aria-modal={infoModalView.topmost} style={{ zIndex: infoModalView.zIndex }}>
+        <section className="utility-modal utility-modal-top" role="dialog" aria-modal={infoModalView.topmost} aria-hidden={!infoModalView.topmost} inert={infoModalView.topmost ? undefined : true} style={{ zIndex: infoModalView.zIndex }}>
           <FloatingModalCard storageKey="info.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6511,6 +6519,8 @@ export default function Home() {
           onOpenTable={openKnowhowTable}
           onToast={setToast}
           onReviewed={() => setCatalogReviewSeq((seq) => seq + 1)}
+          interactive={catalogReviewModal.topmost}
+          zIndex={catalogReviewModal.zIndex}
         />
       )}
 
@@ -6524,11 +6534,13 @@ export default function Home() {
           title={sharingSession.title || ""}
           throughAnswerId={sharingSession.throughAnswerId}
           onClose={() => rootModals.requestClose("conversation-share", "button")}
+          interactive={conversationShareModal.topmost}
+          zIndex={conversationShareModal.zIndex}
         />
       )}
 
       {analyticsModal.open && analytics && (
-        <section className="utility-modal" role="dialog" aria-modal={analyticsModal.topmost} style={{ zIndex: analyticsModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics("backdrop"); }}>
+        <section className="utility-modal" role="dialog" aria-modal={analyticsModal.topmost} aria-hidden={!analyticsModal.topmost} inert={analyticsModal.topmost ? undefined : true} style={{ zIndex: analyticsModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics("backdrop"); }}>
           <FloatingModalCard storageKey="analytics.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6912,7 +6924,7 @@ export default function Home() {
       )}
 
       {kgSchemaModal.open && schemaModalOpen && (
-        <section className="utility-modal" role="dialog" aria-modal={kgSchemaModal.topmost} style={{ zIndex: kgSchemaModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
+        <section className="utility-modal" role="dialog" aria-modal={kgSchemaModal.topmost} aria-hidden={!kgSchemaModal.topmost} inert={kgSchemaModal.topmost ? undefined : true} style={{ zIndex: kgSchemaModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
           <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6943,7 +6955,7 @@ export default function Home() {
 
       {/* Agent Profile remains an independent presentation modal. */}
       {understandingModal.open && currentNotebookId && (
-        <section className="utility-modal" role="dialog" aria-modal={understandingModal.topmost} style={{ zIndex: understandingModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("understanding", "backdrop"); }}>
+        <section className="utility-modal" role="dialog" aria-modal={understandingModal.topmost} aria-hidden={!understandingModal.topmost} inert={understandingModal.topmost ? undefined : true} style={{ zIndex: understandingModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("understanding", "backdrop"); }}>
           <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -7369,6 +7381,8 @@ export default function Home() {
           className="utility-modal"
           role="dialog"
           aria-modal={promotionQueueModal.topmost}
+          aria-hidden={!promotionQueueModal.topmost}
+          inert={promotionQueueModal.topmost ? undefined : true}
           style={{ zIndex: promotionQueueModal.zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-queue", "backdrop"); }}
         >
@@ -7479,6 +7493,8 @@ export default function Home() {
           className="utility-modal"
           role="dialog"
           aria-modal={promotionTargetModal.topmost}
+          aria-hidden={!promotionTargetModal.topmost}
+          inert={promotionTargetModal.topmost ? undefined : true}
           style={{ zIndex: promotionTargetModal.zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-target", "backdrop"); }}
         >
@@ -7518,6 +7534,8 @@ export default function Home() {
           className="utility-modal"
           role="dialog"
           aria-modal={edgeReviewModal.topmost}
+          aria-hidden={!edgeReviewModal.topmost}
+          inert={edgeReviewModal.topmost ? undefined : true}
           style={{ zIndex: edgeReviewModal.zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("edge-review", "backdrop"); }}
         >

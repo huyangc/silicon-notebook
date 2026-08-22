@@ -121,6 +121,8 @@ test("修改密码弹窗在 page 接线:菜单回调打开、内置管理员隐�
   assert.equal(modals.length, 1);
   assert.deepEqual(modals[0].bindings, {
     onClose: '() => rootModals.requestClose("password-change", "button")',
+    interactive: "passwordModal.topmost",
+    zIndex: "passwordModal.zIndex",
   });
   const menus = jsxElements(page, "AccountMenu");
   assert.equal(menus.length, 1);

@@ -1451,12 +1451,16 @@ export function MemorySaveDialog({
   onClose,
   onSaved,
   sessionSignal,
+  interactive = true,
+  zIndex,
 }: {
   answerId: string;
   notebookId: string;
   onClose: () => void;
   onSaved: (memory: MemoryRecord) => void;
   sessionSignal: AbortSignal;
+  interactive?: boolean;
+  zIndex?: number;
 }) {
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
   const [provenance, setProvenance] = useState<Record<string, unknown>>({});
@@ -1556,7 +1560,7 @@ export function MemorySaveDialog({
   }
 
   return (
-    <section className="utility-modal memory-save-modal" role="dialog" aria-modal="true" aria-label="保存回答到记忆">
+    <section className="utility-modal memory-save-modal" role="dialog" aria-modal={interactive} aria-hidden={!interactive} inert={interactive ? undefined : true} aria-label="保存回答到记忆" style={{ zIndex }}>
       <div ref={floating.cardRef} className="utility-modal-card memory-save-card" style={floating.style}>
         <header {...floating.dragHandleProps}>
           <div className="memory-save-title">
