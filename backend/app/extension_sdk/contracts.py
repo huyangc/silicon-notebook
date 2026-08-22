@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
+from app.extension_sdk.ui import UiContributionDeclaration
+
 
 EXTENSION_API_VERSION = "1"
 
@@ -155,6 +157,9 @@ class ExtensionManifest:
     optional_requires: tuple[str, ...] = ()
     # Explicit plugin-to-plugin topology, kept separate from capabilities.
     depends_on: tuple[str, ...] = ()
+    # Metadata-only workspace UI declarations.  Browser implementations stay
+    # in the static frontend registry and must pass the cross-stack parity gate.
+    ui_contributions: tuple[UiContributionDeclaration, ...] = ()
 
 
 AvailabilityProbe = Callable[[object | None], Availability]

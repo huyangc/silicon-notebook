@@ -12,6 +12,7 @@ from app.extension_sdk import (
     ContributionKind,
     ExtensionContribution,
     ExtensionManifest,
+    UiContributionDeclaration,
 )
 from app.extensions import build_extension_registry
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
@@ -41,6 +42,7 @@ def _manifest(
     *declarations: ContributionDeclaration,
     requires: tuple[str, ...] = (),
     depends_on: tuple[str, ...] = (),
+    ui_contributions: tuple[UiContributionDeclaration, ...] = (),
 ) -> ExtensionManifest:
     return ExtensionManifest(
         id=plugin_id,
@@ -51,6 +53,7 @@ def _manifest(
         contributions=tuple(declarations),
         requires=requires,
         depends_on=depends_on,
+        ui_contributions=ui_contributions,
     )
 
 
@@ -60,9 +63,135 @@ def test_empty_registry_is_frozen_and_has_no_contributions():
     assert registry.frozen is True
     assert registry.manifests() == ()
     assert registry.contributions("retrieval.enrichment") == ()
+    assert registry.ui_contributions() == ()
 
     with pytest.raises(ExtensionRegistryError, match="frozen"):
         registry.register(_Bundle(_manifest("late")))
+
+
+def test_ui_contribution_topology_is_frozen_ordered_and_live():
+    state = {"enabled": False}
+
+    def decision(_context):
+        return (
+            Availability.available()
+            if state["enabled"]
+            else Availability(AvailabilityStatus.DISABLED, "disabled_by_test")
+        )
+
+    registry = build_extension_registry(
+        (
+            _Bundle(_manifest(
+                "plugin-z",
+                ui_contributions=(UiContributionDeclaration(
+                    "z-panel", "workspace.side_panel", "ui.z"
+                ),),
+            )),
+            _Bundle(_manifest(
+                "plugin-a",
+                ui_contributions=(UiContributionDeclaration(
+                    "a-detail", "source.detail_section", "ui.a"
+                ),),
+            )),
+        ),
+        capability_decisions={"ui.z": decision, "ui.a": decision},
+    )
+
+    assert [row.id for _manifest_row, row in registry.ui_contributions()] == [
+        "a-detail", "z-panel"
+    ]
+    assert registry.capability_availability("ui.z").status is AvailabilityStatus.DISABLED
+    state["enabled"] = True
+    assert registry.capability_availability("ui.z").status is AvailabilityStatus.AVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("ui_contributions", "capabilities", "message"),
+    [
+        (
+            (UiContributionDeclaration("bad", "side_panel", "ui.good"),),
+            {"ui.good": lambda _context: Availability.available()},
+            "canonical slots",
+        ),
+        (
+            (UiContributionDeclaration("good", "workspace.side_panel", "ui.missing"),),
+            {},
+            "without a decision entry",
+        ),
+        (
+            (
+                UiContributionDeclaration("same", "workspace.side_panel", "ui.good"),
+                UiContributionDeclaration("same", "source.detail_section", "ui.good"),
+            ),
+            {"ui.good": lambda _context: Availability.available()},
+            "duplicate UI contribution",
+        ),
+    ],
+)
+def test_ui_contributions_reject_alias_missing_decision_and_duplicates(
+    ui_contributions, capabilities, message
+):
+    with pytest.raises(ExtensionRegistryError, match=message):
+        build_extension_registry(
+            (_Bundle(_manifest("plugin", ui_contributions=ui_contributions)),),
+            capability_decisions=capabilities,
+        )
+
+
+def test_runtime_and_ui_contributions_cannot_reuse_one_global_id():
+    runtime = ContributionDeclaration(
+        "same", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    with pytest.raises(ExtensionRegistryError, match="reuses one id"):
+        build_extension_registry(
+            (_Bundle(_manifest(
+                "plugin",
+                runtime,
+                ui_contributions=(UiContributionDeclaration(
+                    "same", "workspace.side_panel", "ui.good"
+                ),),
+            ), (object(),)),),
+            capability_decisions={"ui.good": lambda _context: Availability.available()},
+        )
+
+
+def test_contribution_ids_are_globally_unique_across_plugin_boundaries():
+    runtime = ContributionDeclaration(
+        "same", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    ui = UiContributionDeclaration(
+        "same", "workspace.side_panel", "ui.good"
+    )
+    decision = {"ui.good": lambda _context: Availability.available()}
+    cases = (
+        (
+            (
+                _Bundle(_manifest("ui-a", ui_contributions=(ui,))),
+                _Bundle(_manifest("ui-b", ui_contributions=(ui,))),
+            ),
+            "duplicate UI contribution",
+        ),
+        (
+            (
+                _Bundle(_manifest("runtime-a", runtime), (object(),)),
+                _Bundle(_manifest("ui-b", ui_contributions=(ui,))),
+            ),
+            "duplicate UI contribution",
+        ),
+        (
+            (
+                _Bundle(_manifest("ui-a", ui_contributions=(ui,))),
+                _Bundle(_manifest("runtime-b", runtime), (object(),)),
+            ),
+            "duplicate contribution",
+        ),
+    )
+    for bundles, message in cases:
+        with pytest.raises(ExtensionRegistryError, match=message):
+            build_extension_registry(
+                bundles,
+                capability_decisions=decision,
+            )
 
 
 def test_topology_is_frozen_but_availability_is_resolved_live():

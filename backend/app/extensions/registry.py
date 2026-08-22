@@ -16,6 +16,7 @@ from app.extension_sdk import (
     ExtensionBundle,
     ExtensionContribution,
     ExtensionManifest,
+    UiContributionDeclaration,
 )
 from app.extensions.capabilities import (
     EMPTY_CAPABILITY_CATALOG,
@@ -31,6 +32,10 @@ _STABLE_REASON = re.compile(r"^[a-z][a-z0-9_]*$")
 _STABLE_METADATA_ID = re.compile(
     r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
 )
+_WORKSPACE_UI_SLOTS = frozenset({
+    "workspace.side_panel",
+    "source.detail_section",
+})
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,7 @@ class ExtensionRegistry:
         self._manifests: dict[str, ExtensionManifest] = {}
         self._contributions: dict[str, RegisteredContribution] = {}
         self._points: dict[str, list[RegisteredContribution]] = defaultdict(list)
+        self._ui_contributions: dict[str, tuple[str, UiContributionDeclaration]] = {}
 
     @property
     def frozen(self) -> bool:
@@ -138,7 +144,38 @@ class ExtensionRegistry:
             raise ExtensionRegistryError(
                 f"extension {manifest.id!r} declares duplicate contribution ids"
             )
+        if type(manifest.ui_contributions) is not tuple:
+            raise ExtensionRegistryError("UI contributions must be an immutable tuple")
+        ui_ids: list[str] = []
+        for declaration in manifest.ui_contributions:
+            if (
+                type(declaration) is not UiContributionDeclaration
+                or type(declaration.id) is not str
+                or not _STABLE_METADATA_ID.fullmatch(declaration.id)
+                or type(declaration.slot) is not str
+                or declaration.slot not in _WORKSPACE_UI_SLOTS
+                or type(declaration.capability) is not str
+                or not _STABLE_METADATA_ID.fullmatch(declaration.capability)
+            ):
+                raise ExtensionRegistryError(
+                    "UI contribution declarations require stable ids, capabilities, and canonical slots"
+                )
+            if declaration.id in self._ui_contributions or declaration.id in self._contributions:
+                raise ExtensionRegistryError(
+                    f"duplicate UI contribution id {declaration.id!r}"
+                )
+            ui_ids.append(declaration.id)
+        if len(ui_ids) != len(set(ui_ids)):
+            raise ExtensionRegistryError(
+                f"extension {manifest.id!r} declares duplicate UI contribution ids"
+            )
+        if set(ui_ids) & set(declaration_ids):
+            raise ExtensionRegistryError(
+                f"extension {manifest.id!r} reuses one id across runtime and UI contributions"
+            )
         self._manifests[manifest.id] = manifest
+        for declaration in manifest.ui_contributions:
+            self._ui_contributions[declaration.id] = (manifest.id, declaration)
         before = set(self._contributions)
         try:
             bundle.register(_BundleRegistrar(self, manifest))
@@ -153,6 +190,11 @@ class ExtensionRegistry:
 
     def _rollback_manifest(self, plugin_id: str, prior_ids: set[str]) -> None:
         self._manifests.pop(plugin_id, None)
+        self._ui_contributions = {
+            contribution_id: registered
+            for contribution_id, registered in self._ui_contributions.items()
+            if registered[0] != plugin_id
+        }
         for contribution_id in set(self._contributions) - prior_ids:
             registered = self._contributions.pop(contribution_id)
             point = registered.contribution.declaration.point
@@ -188,7 +230,7 @@ class ExtensionRegistry:
             raise ExtensionRegistryError(
                 f"contribution {declaration.id!r} differs from its manifest declaration"
             )
-        if declaration.id in self._contributions:
+        if declaration.id in self._contributions or declaration.id in self._ui_contributions:
             raise ExtensionRegistryError(
                 f"duplicate contribution id {declaration.id!r}"
             )
@@ -201,6 +243,7 @@ class ExtensionRegistry:
             return self
         self._validate_dependencies()
         self._validate_required_capabilities()
+        self._validate_ui_capabilities()
         for point, registrations in self._points.items():
             kinds = {
                 item.contribution.declaration.kind for item in registrations
@@ -236,6 +279,9 @@ class ExtensionRegistry:
         )
         self._points = MappingProxyType(  # type: ignore[assignment]
             {point: tuple(items) for point, items in self._points.items()}
+        )
+        self._ui_contributions = MappingProxyType(  # type: ignore[assignment]
+            dict(sorted(self._ui_contributions.items()))
         )
         self._frozen = True
         return self
@@ -279,6 +325,13 @@ class ExtensionRegistry:
                 raise ExtensionRegistryError(
                     f"extension {plugin_id!r} requires capabilities without "
                     f"decision entries {missing!r}"
+                )
+
+    def _validate_ui_capabilities(self) -> None:
+        for contribution_id, (_plugin_id, declaration) in self._ui_contributions.items():
+            if not self._capabilities.has(declaration.capability):
+                raise ExtensionRegistryError(
+                    f"UI contribution {contribution_id!r} references a capability without a decision entry"
                 )
 
     @staticmethod
@@ -350,6 +403,17 @@ class ExtensionRegistry:
     def contributions(self, point: str) -> tuple[RegisteredContribution, ...]:
         self._require_frozen()
         return tuple(self._points.get(point, ()))
+
+    def ui_contributions(
+        self,
+    ) -> tuple[tuple[ExtensionManifest, UiContributionDeclaration], ...]:
+        """Return the frozen metadata-only UI topology in stable id order."""
+
+        self._require_frozen()
+        return tuple(
+            (self._manifests[plugin_id], declaration)
+            for plugin_id, declaration in self._ui_contributions.values()
+        )
 
     def availability(
         self, contribution_id: str, context: object | None = None

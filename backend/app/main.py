@@ -37,7 +37,10 @@ from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
-from app.bootstrap import application_extension_runtime
+from app.bootstrap import (
+    application_extension_runtime,
+    application_extension_ui_projection,
+)
 from app.services.model_provider import validate_process_local_scheduler_deployment
 from app.services.pending_bus import pending_bus
 
@@ -255,6 +258,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.extension_registry = extension_runtime.registry
+    # API routes receive only this sanitized projection seam, never the registry
+    # or SDK topology as a service locator.
+    app.state.extension_ui_projection = application_extension_ui_projection(
+        extension_runtime
+    )
 
     request_log = EventLogger(settings, channel="requests")
 

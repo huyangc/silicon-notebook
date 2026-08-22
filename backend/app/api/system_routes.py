@@ -30,7 +30,11 @@ from app.repositories.identity_errors import (
 from app.models.model_services import ModelServicesStatus
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
-from app.models.system import SystemConfiguration
+from app.models.system import (
+    SystemConfiguration,
+    SystemExtensionContribution,
+    SystemExtensionsResponse,
+)
 from app.services.model_status import ModelStatusService
 from app.services.parser_registry import (
     SUPPORTED_SOURCE_EXTENSIONS,
@@ -155,6 +159,29 @@ def system_configuration(
         source_images_enabled=settings.mineru_return_images,
         agent_profile_enabled=settings.agent_profile_enabled,
         user_search_profile_enabled=settings.user_search_profile_enabled,
+    )
+
+
+@router.get("/system/extensions", response_model=SystemExtensionsResponse)
+def system_extensions(
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+) -> SystemExtensionsResponse:
+    """Return live, metadata-only UI capability availability.
+
+    The registry topology is startup-frozen, while each capability decision is
+    evaluated for this request.  Internal capability names, reasons, paths,
+    endpoints, credentials, and exception text never cross this boundary.
+    """
+
+    projection = request.app.state.extension_ui_projection
+    if not callable(projection):
+        raise RuntimeError("application extension UI projection is unavailable")
+    return SystemExtensionsResponse(
+        extensions=[
+            SystemExtensionContribution(**row.__dict__)
+            for row in projection(user)
+        ]
     )
 
 

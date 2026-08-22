@@ -21,6 +21,9 @@ const POLICY_ROOTS = [
 const DIRECT_READ_ALLOWLIST = new Set([
   // Reads committed cross-language golden data, never production source text.
   "tests/unit/knowhow-normalize.test.mjs",
+  // Reads the committed backend/frontend UI-contribution parity fixture; the
+  // production registry itself is imported as a module, not scanned as text.
+  "tests/guards/extension-ui-parity.test.mjs",
   // Central semantic AST helper: callers consume nodes, never text positions.
   "test-support/semantic-source.mjs",
   // Synthetic module names used by this guard's mutation tests.

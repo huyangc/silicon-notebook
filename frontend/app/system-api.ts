@@ -1,6 +1,7 @@
 import { performApiRequest, requestJson } from "./api-client.ts";
 import { logDiagnostic } from "./errors.ts";
 import type { Health } from "./workspace-model.ts";
+import type { SystemExtensionProjection } from "../features/extension-sdk/contracts.ts";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
@@ -83,6 +84,60 @@ export type ParserEngineCapability = {
 export const DEFAULT_SUPPORTED_SOURCE_EXTENSIONS = [
   "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
 ];
+
+const EXTENSION_UNAVAILABLE_REASONS = new Set(["disabled", "unavailable"]);
+const STABLE_EXTENSION_ID = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+
+export function parseSystemExtensions(value: unknown): SystemExtensionProjection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("系统扩展能力格式无效");
+  }
+  const response = value as Record<string, unknown>;
+  if (
+    Object.keys(response).some((key) => !["api_version", "extensions"].includes(key))
+    || response.api_version !== "1"
+    || !Array.isArray(response.extensions)
+  ) {
+    throw new TypeError("系统扩展能力格式无效");
+  }
+  const rows: SystemExtensionProjection["extensions"][number][] = [];
+  const exactKeys = new Set<string>();
+  for (const item of response.extensions) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError("系统扩展能力格式无效");
+    }
+    const row = item as Record<string, unknown>;
+    const reason = row.unavailable_reason;
+    const knownKeys = [
+      "plugin_id", "display_name", "version", "contribution_id",
+      "available", "unavailable_reason",
+    ];
+    if (
+      Object.keys(row).some((key) => !knownKeys.includes(key))
+      || typeof row.plugin_id !== "string" || !STABLE_EXTENSION_ID.test(row.plugin_id)
+      || typeof row.display_name !== "string" || row.display_name.length === 0
+      || typeof row.version !== "string" || row.version.length === 0
+      || typeof row.contribution_id !== "string" || !STABLE_EXTENSION_ID.test(row.contribution_id)
+      || typeof row.available !== "boolean"
+      || !(reason === null || (
+        typeof reason === "string" && EXTENSION_UNAVAILABLE_REASONS.has(reason)
+      ))
+      || (row.available ? reason !== null : reason === null)
+    ) throw new TypeError("系统扩展能力格式无效");
+    const exactKey = `${row.plugin_id}\0${row.version}\0${row.contribution_id}`;
+    if (exactKeys.has(exactKey)) throw new TypeError("系统扩展能力格式无效");
+    exactKeys.add(exactKey);
+    rows.push({
+      pluginId: row.plugin_id,
+      displayName: row.display_name,
+      version: row.version,
+      contributionId: row.contribution_id,
+      available: row.available,
+      unavailableReason: reason as "disabled" | "unavailable" | null,
+    });
+  }
+  return { apiVersion: "1", extensions: rows };
+}
 
 const PARSER_IDS = new Set(["mineru_self_hosted", "mineru_cloud", "builtin"]);
 const PARSER_EXECUTIONS = new Set(["local", "private_service", "public_cloud"]);
@@ -233,6 +288,9 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
 /** Authenticated, deliberately small mirror of browser-relevant backend Settings. */
 export const fetchSystemConfiguration = async (): Promise<SystemConfiguration> =>
   parseSystemConfiguration(await requestJson<unknown>("/system/config", options));
+
+export const fetchSystemExtensions = async (): Promise<SystemExtensionProjection> =>
+  parseSystemExtensions(await requestJson<unknown>("/system/extensions", options));
 
 export async function probeReady(): Promise<ReadySnapshot | null> {
   try {
