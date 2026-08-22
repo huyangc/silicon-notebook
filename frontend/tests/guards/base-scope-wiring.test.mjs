@@ -29,6 +29,7 @@ import {
 
 const page = await parseModule("page.tsx");
 const askSession = await parseModule("use-ask-session.ts");
+const reportWorkspace = await parseModule("use-report-workspace.ts");
 
 
 /** 字面量 className;拼接/条件表达式一律返回 null(它们不是稳定身份)。 */
@@ -284,11 +285,30 @@ test("参考库勾选框在回答进行中被禁用", () => {
 
 // 三个发送点少接一个,那条路径就退回「参考库全量参与」—— 而且静默。
 test("base_scope 送达问答预检、问答流式与深度报告创建三处", () => {
-  const pageCalls = callSitesIn(page);
-  const report = pageCalls.filter((call) => call.target === "createReport");
-  assert.equal(report.length, 1, "期望恰好一处 createReport 调用");
-  assert.ok(report[0].arguments.includes("currentSourceScope"));
-  assert.ok(report[0].arguments.includes("currentBaseScope"));
+  const reportHookCalls = [];
+  function findReportHookCalls(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === "useReportWorkspace") reportHookCalls.push(node);
+    ts.forEachChild(node, findReportHookCalls);
+  }
+  findReportHookCalls(page);
+  assert.equal(reportHookCalls.length, 1, "期望恰好一处 useReportWorkspace 调用");
+  const reportOptions = reportHookCalls[0].arguments[0];
+  assert.ok(reportOptions && ts.isObjectLiteralExpression(reportOptions));
+  const reportPolicyProperty = reportOptions.properties.find((property) => (
+    ts.isPropertyAssignment(property) && property.name.getText(page) === "policy"
+  ));
+  assert.ok(reportPolicyProperty && ts.isPropertyAssignment(reportPolicyProperty)
+    && ts.isObjectLiteralExpression(reportPolicyProperty.initializer));
+  const reportPolicy = new Map(reportPolicyProperty.initializer.properties
+    .filter(ts.isPropertyAssignment)
+    .map((property) => [property.name.getText(page), property.initializer.getText(page)]));
+  assert.equal(reportPolicy.get("sourceScope"), "currentSourceScope");
+  assert.equal(reportPolicy.get("baseScope"), "currentBaseScope");
+  const reportCalls = callSitesIn(reportWorkspace).filter((call) => call.target === "createReport");
+  assert.equal(reportCalls.length, 1, "Report owner 应恰好调用一次 createReport");
+  assert.ok(reportCalls[0].arguments.includes("sourceScope"));
+  assert.ok(reportCalls[0].arguments.includes("baseScope"));
 
   // Ask 多了一层 owner，但不能因此把 page→hook 这一跳变成盲区。先从真正的
   // useAskSession 调用点取 policy，逐项确认它直接消费页面算出的两份有效范围。

@@ -19,6 +19,7 @@ import { parseModule } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
 const askSession = await parseModule("use-ask-session.ts");
+const reportWorkspace = await parseModule("use-report-workspace.ts");
 
 
 /**
@@ -242,71 +243,20 @@ test("问答请求体的 retrieval_effort 必须沿 page→policy→payload 强�
 });
 
 
-/** ReportsPanel 开标签上 `createReport` 属性的初始化表达式节点（去掉外层 JsxExpression）。 */
-function reportsPanelCreateReportAttribute() {
-  const openings = [];
+test("Report owner 在请求汇聚点按 policy.advanced 固定 auto_generate", () => {
+  const createCalls = [];
   function visit(node) {
-    if (
-      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node))
-      && node.tagName.getText(page) === "ReportsPanel"
-    ) {
-      openings.push(node);
-    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === "createReport") createCalls.push(node);
     ts.forEachChild(node, visit);
   }
-  visit(page);
-  assert.equal(openings.length, 1, `期望恰好一个 ReportsPanel，实际 ${openings.length}`);
-
-  for (const attribute of openings[0].attributes.properties) {
-    if (!ts.isJsxAttribute(attribute)) continue;
-    if (attribute.name.getText(page) !== "createReport") continue;
-    const initializer = attribute.initializer;
-    assert.ok(
-      initializer && ts.isJsxExpression(initializer) && initializer.expression,
-      "ReportsPanel 的 createReport 属性必须是一个表达式绑定",
-    );
-    return initializer.expression;
-  }
-  assert.fail("ReportsPanel 必须绑定 createReport 属性");
-}
-
-
-test("ReportsPanel 的 createReport 包装里 auto_generate 实参必须是 !isAdvanced(uiMode)", () => {
-  const wrapper = reportsPanelCreateReportAttribute();
-  assert.ok(
-    ts.isArrowFunction(wrapper),
-    `createReport 属性必须绑定一个箭头函数：${wrapper.getText(page)}`,
-  );
-
-  // 箭头函数体是对外层 createReport(...) 的内层调用（同名函数：外层是 JSX 属性/参数名，
-  // 内层是从 props 解构出来的真正调用；用「实参个数最多的那一处 createReport 调用」
-  // 消歧，不按源码位置。）
-  const innerCalls = [];
-  function visit(node) {
-    if (
-      ts.isCallExpression(node)
-      && ts.isIdentifier(node.expression)
-      && node.expression.text === "createReport"
-    ) {
-      innerCalls.push(node);
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(wrapper.body);
-  assert.equal(innerCalls.length, 1, `期望箭头函数体内恰好一处 createReport(...) 调用，实际 ${innerCalls.length}`);
-
-  const args = innerCalls[0].arguments;
-  assert.ok(
-    args.length >= 6,
-    `createReport(...) 内层调用实参数不足，期望至少 6 个（含 auto_generate）：${innerCalls[0].getText(page)}`,
-  );
-  const autoGenerateArgument = args[5].getText(page);
-  assert.equal(
-    autoGenerateArgument,
-    "!isAdvanced(uiMode)",
-    "auto_generate 实参（第 6 个）必须**直接**是 !isAdvanced(uiMode)——高级模式沿用既有手动"
-      + `确认流程，自动模式问题清晰时才自动确认+接受默认大纲直接生成：${autoGenerateArgument}`,
-  );
+  visit(reportWorkspace);
+  assert.equal(createCalls.length, 1);
+  const args = createCalls[0].arguments;
+  assert.equal(args[5].getText(reportWorkspace), "!currentPolicy.advanced");
+  const depth = initializerOf("depth", reportWorkspace);
+  assert.match(depth.getText(reportWorkspace), /currentPolicy\.advanced/);
+  assert.match(depth.getText(reportWorkspace), /REPORT_DEFAULT_DEPTH_INDEX/);
 });
 
 test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 收敛 graph", () => {

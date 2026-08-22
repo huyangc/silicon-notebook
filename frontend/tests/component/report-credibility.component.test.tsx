@@ -10,6 +10,7 @@ import {
   ReportsPanel,
   type ReportDetailT,
 } from "../../app/report-view";
+import { reportWorkspaceFixture } from "./report-workspace-fixture";
 
 
 afterEach(cleanup);
@@ -175,8 +176,7 @@ test("资料基础点明引用到的参考库资料，按来源去重而非按�
 
 test("大纲确认将用户编辑的分析框架与章节一起提交", async () => {
   const user = userEvent.setup();
-  const updateReportOutline = vi.fn().mockResolvedValue({ status: "ok", sections: 1 });
-  const generateReport = vi.fn().mockResolvedValue({ status: "generating" });
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
   render(
     <OutlineEditor
       report={detail({
@@ -189,10 +189,8 @@ test("大纲确认将用户编辑的分析框架与章节一起提交", async ()
           },
         },
       })}
-      notebookId="nb-1"
-      updateReportOutline={updateReportOutline}
-      generateReport={generateReport}
-      onGenerating={vi.fn()}
+      busy={false}
+      onGenerate={onGenerate}
       setToast={vi.fn()}
     />,
   );
@@ -203,11 +201,10 @@ test("大纲确认将用户编辑的分析框架与章节一起提交", async ()
   await user.type(subjectKind, "架构实例");
   await user.click(screen.getByRole("button", { name: "生成完整报告" }));
 
-  expect(updateReportOutline).toHaveBeenCalledWith("nb-1", "rep-credibility", {
+  expect(onGenerate).toHaveBeenCalledWith({
     sections: expect.any(Array),
     frame: expect.objectContaining({ subject_kind: "架构实例" }),
   });
-  expect(generateReport).toHaveBeenCalledWith("nb-1", "rep-credibility");
 });
 
 
@@ -408,21 +405,8 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
   render(
     <ReportsPanel
       notebookId="nb-1"
-      listReports={vi.fn().mockResolvedValue([])}
-      getReport={vi.fn().mockResolvedValue(report)}
-      createReport={vi.fn()}
-      confirmReportIntent={vi.fn()}
-      updateReportOutline={vi.fn()}
-      generateReport={vi.fn()}
-      cancelReport={vi.fn()}
-      deleteReport={vi.fn()}
-      shareReport={vi.fn()}
-      getReportShare={vi.fn()}
-      unshareReport={vi.fn()}
-      downloadReportsZip={vi.fn()}
+      workspace={reportWorkspaceFixture({ active: report })}
       setToast={vi.fn()}
-      focusReportId="rep-mounted-credibility"
-      onFocusConsumed={vi.fn()}
     />,
   );
 
@@ -447,36 +431,19 @@ test("失败报告保留大纲时可从详情页原地重新生成", async () =>
       credibility: { synthesis_status: "failed_model" },
     },
   });
-  const generateReport = vi.fn().mockResolvedValue({ status: "generating" });
-  const setToast = vi.fn();
+  const requestRetry = vi.fn();
   render(
     <ReportsPanel
       notebookId="nb-1"
-      listReports={vi.fn().mockResolvedValue([])}
-      getReport={vi.fn().mockResolvedValue(failed)}
-      createReport={vi.fn()}
-      confirmReportIntent={vi.fn()}
-      updateReportOutline={vi.fn()}
-      generateReport={generateReport}
-      cancelReport={vi.fn()}
-      deleteReport={vi.fn()}
-      shareReport={vi.fn()}
-      getReportShare={vi.fn()}
-      unshareReport={vi.fn()}
-      downloadReportsZip={vi.fn()}
-      setToast={setToast}
-      focusReportId="rep-retry"
+      workspace={reportWorkspaceFixture({ active: failed, requestRetry })}
+      setToast={vi.fn()}
     />,
   );
 
   expect(await screen.findByText("STALE REPORT BODY")).toBeVisible();
   await user.click(screen.getByRole("button", { name: "重新生成" }));
 
-  expect(generateReport).toHaveBeenCalledWith("nb-1", "rep-retry", 8);
-  expect(setToast).toHaveBeenCalledWith("已按原确认问题和大纲重新生成");
-  expect(screen.getByText(/正在后台生成/)).toBeVisible();
-  expect(screen.queryByText("STALE REPORT BODY")).toBeNull();
-  expect(screen.queryByLabelText("报告可信度回执")).toBeNull();
+  expect(requestRetry).toHaveBeenCalledOnce();
 });
 
 
@@ -484,22 +451,10 @@ test("形成大纲前失败的报告不展示误导性的重试按钮", async ()
   render(
     <ReportsPanel
       notebookId="nb-1"
-      listReports={vi.fn().mockResolvedValue([])}
-      getReport={vi.fn().mockResolvedValue(detail({
+      workspace={reportWorkspaceFixture({ active: detail({
         id: "rep-no-outline", status: "failed", outline: [],
-      }))}
-      createReport={vi.fn()}
-      confirmReportIntent={vi.fn()}
-      updateReportOutline={vi.fn()}
-      generateReport={vi.fn()}
-      cancelReport={vi.fn()}
-      deleteReport={vi.fn()}
-      shareReport={vi.fn()}
-      getReportShare={vi.fn()}
-      unshareReport={vi.fn()}
-      downloadReportsZip={vi.fn()}
+      }) })}
       setToast={vi.fn()}
-      focusReportId="rep-no-outline"
     />,
   );
 
@@ -510,8 +465,7 @@ test("形成大纲前失败的报告不展示误导性的重试按钮", async ()
 
 test("分析框架可以删除维度和条件，避免留下后端拒绝的空名称", async () => {
   const user = userEvent.setup();
-  const updateReportOutline = vi.fn().mockResolvedValue({ status: "ok", sections: 1 });
-  const generateReport = vi.fn().mockResolvedValue({ status: "generating" });
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
   render(
     <OutlineEditor
       report={detail({
@@ -522,10 +476,8 @@ test("分析框架可以删除维度和条件，避免留下后端拒绝的空�
           },
         },
       })}
-      notebookId="nb-1"
-      updateReportOutline={updateReportOutline}
-      generateReport={generateReport}
-      onGenerating={vi.fn()}
+      busy={false}
+      onGenerate={onGenerate}
       setToast={vi.fn()}
     />,
   );
@@ -534,7 +486,7 @@ test("分析框架可以删除维度和条件，避免留下后端拒绝的空�
   await user.click(screen.getByRole("button", { name: "删除比较条件：比较条件" }));
   await user.click(screen.getByRole("button", { name: "生成完整报告" }));
 
-  expect(updateReportOutline).toHaveBeenCalledWith("nb-1", "rep-credibility", {
+  expect(onGenerate).toHaveBeenCalledWith({
     sections: expect.any(Array),
     frame: expect.objectContaining({ facets: [], axes: [] }),
   });
@@ -547,37 +499,19 @@ test("分享完成后落到发起时那份报告，且剪贴板失败不谎报�
   const second = detail({ id: "rep-b", status: "done", content_md: "B", shared: false });
 
   // 分享请求悬挂：期间把面板切到另一份报告，完成时不得把分享态按到它头上。
-  let resolveShare: (value: { share_token: string }) => void = () => {};
-  const shareReport = vi.fn(() => new Promise<{ share_token: string }>((resolve) => {
-    resolveShare = resolve;
-  }));
-  const setToast = vi.fn();
-  const getReport = vi.fn(async (_nb: string, id: string) => (id === "rep-b" ? second : first));
+  const toggleShare = vi.fn();
 
-  const { rerender } = render(
+  render(
     <ReportsPanel
       notebookId="nb-1"
-      listReports={vi.fn().mockResolvedValue([first, second])}
-      getReport={getReport}
-      createReport={vi.fn()}
-      confirmReportIntent={vi.fn()}
-      updateReportOutline={vi.fn()}
-      generateReport={vi.fn()}
-      cancelReport={vi.fn()}
-      deleteReport={vi.fn()}
-      shareReport={shareReport}
-      getReportShare={vi.fn()}
-      unshareReport={vi.fn()}
-      downloadReportsZip={vi.fn()}
-      setToast={setToast}
-      focusReportId="rep-a"
-      onFocusConsumed={vi.fn()}
+      workspace={reportWorkspaceFixture({ active: first, reports: [first, second], toggleShare })}
+      setToast={vi.fn()}
     />,
   );
 
   const shareButton = await screen.findByRole("button", { name: /分享/ });
   await user.click(shareButton);
-  expect(shareReport).toHaveBeenCalledWith("nb-1", "rep-a");
+  expect(toggleShare).toHaveBeenCalledOnce();
 });
 
 

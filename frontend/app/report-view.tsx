@@ -23,15 +23,10 @@ import { normalizeMathMarkdown } from "./math-markdown";
 import { remarkCitations } from "./answer-citations";
 import {
   computeSourceTierCounts, referenceByAnchorKey, type AnswerReference,
-  type CitationImageLike,
 } from "./answer-formatting";
 import { API_BASE } from "./api-config";
 import { AuthedImage } from "./authed-image";
-import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
-import { buildPublicReportLink } from "./public-report";
-// report-api 只 `import type` 回本文件(类型导入会被完全擦除),所以这条值导入不成环。
-import { reportQuestionLimitHint } from "./report-api";
 import { quotedPhraseHint } from "./query-syntax";
 import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
@@ -40,215 +35,46 @@ import {
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   formatReportCoverage,
   parseReportSubQueries,
-  type ReportCoverage,
 } from "./report-outline-model";
+import type {
+  ReportCitationAuditT,
+  ReportCorpusProfileT,
+  ReportCredibilityT,
+  ReportDetailT,
+  ReportDistributionT,
+  ReportFrameAxisT,
+  ReportFrameFacetT,
+  ReportFrameT,
+  ReportOutlineSectionT,
+  ReportSufficiency,
+  ReportSummaryT,
+  ReportUnderstandingT,
+} from "./report-model";
+import { REPORT_DEPTHS, isReportActive, reportQuestionLimitHint } from "./report-model";
 import { formatReportTiming } from "./report-time";
+import type { ReportWorkspace } from "./use-report-workspace";
 import { label, REPORT_DEPTH, REPORT_STATUS } from "./vocabulary";
 
-// ---------------------------------------------------------------------------
-// 类型(与 backend/app/models/schemas.py 的 ReportSummary/ReportDetail 对齐)
-// ---------------------------------------------------------------------------
-
-export type ReportSummaryT = {
-  id: string;
-  question: string;
-  // planning | outline_ready | generating(两阶段新增)| pending | running | done | failed | cancelled
-  status: string;
-  progress: string;
-  section_count: number;
-  created_at: string;
-  generation_started_at?: string;
-  updated_at?: string;
-  created_by: string;
-  depth?: number;
-};
-
-// 大纲富对象:STORM 预写作产物 + 充分性 Judge 判定;title/scope 用户可在编辑器改。
-export type ReportSufficiency = "充足" | "薄弱" | "缺失";
-export type ReportOutlineSectionT = {
-  title: string;
-  scope: string;
-  sub_queries: string[];
-  perspectives?: string[]; // 哪些视角挖出该节
-  tensions?: string[]; // 与其他节/视角的张力(v1 纯文字)
-  sufficiency?: ReportSufficiency; // 语料充分性:充足/薄弱/缺失
-  gap_note?: string; // 缺口一句话说明
-  action?: string; // keep | supplement | external
-  intent_ids?: string[];
-  intent_questions?: string[];
-  intent_catalog?: { id: string; title: string; question: string; retrieval_queries: string[] }[];
-  intent_contract?: {
-    objective: string;
-    mandatory_topics: { id: string; title: string; question: string; retrieval_queries: string[] }[];
-    comparison_axes?: string[];
-    constraints?: string[];
-    excluded_topics?: string[];
-    expected_output?: string;
-  };
-  coverage?: ReportCoverage;
-};
-
-export type ReportUnderstandingT = {
-  objective?: string;
-  resolved_question?: string;
-  intent_type?: string;
-  entities?: string[];
-  mandatory_topics?: { id: string; title: string; question: string; retrieval_queries: string[] }[];
-  comparison_axes?: string[];
-  constraints?: string[];
-  excluded_topics?: string[];
-  expected_output?: string;
-  assumptions?: string[];
-  ambiguities?: {
-    id: string;
-    question: string;
-    reason?: string;
-    required?: boolean;
-    options?: string[];
-  }[];
-  confidence?: number;
-  needs_clarification?: boolean;
-  confirmed?: boolean;
-  /** 检索口径由共享问题理解合同给出；旧报告没有这两个字段。 */
-  result_scope?: "ranked" | "complete" | "aggregate" | "hybrid";
-  completeness_required?: boolean;
-  corpus_profile?: ReportCorpusProfileT;
-  report_frame?: ReportFrameT;
-  credibility?: ReportCredibilityT;
-};
-
-export type ReportDistributionT = {
-  label?: string;
-  name?: string;
-  value?: string | number;
-  type?: string;
-  year?: string | number;
-  count?: number;
-};
-
-/** 报告所依据资料的可见摘要。所有字段可选，以兼容历史报告和 fail-open 后端。 */
-export type ReportCorpusProfileT = {
-  total_sources?: number;
-  displayed_sources?: number;
-  representative_count?: number;
-  independent_documents?: number;
-  independent_families?: number;
-  duplicate_inflation?: number;
-  identified_duplicate_lower_bound?: number;
-  identity_uncertain_sources?: number;
-  type_distribution?: ReportDistributionT[] | Record<string, number>;
-  year_distribution?: ReportDistributionT[] | Record<string, number>;
-  representatives?: { title?: string; label?: string; source_title?: string }[];
-  metadata_coverage?: number;
-  metadata_sources?: number;
-  unknown_year?: number;
-  completeness_disclosure?: string;
-  /**
-   * 只有缺统计时才出现。`scope_restricted` = 本次限定了资料范围所以有意不统计，
-   * `failed` = 聚合真的出错。历史报告两种情况都存成空对象，无法区分。
-   */
-  unavailable_reason?: string;
-};
-
-export type ReportFrameFacetT = {
-  id: string;
-  name: string;
-  values: string[];
-  exclusive?: boolean;
-};
-
-export type ReportFrameAxisT = {
-  id: string;
-  name: string;
-  condition_fields: string[];
-};
-
-/** 仅在比较/分类报告中出现；缺失时按历史大纲流程退化。 */
-export type ReportFrameT = {
-  subject_kind?: string;
-  facets?: ReportFrameFacetT[];
-  axes?: ReportFrameAxisT[];
-  instance_policy?: string;
-};
-
-export type ReportCredibilityT = {
-  independent_documents?: number;
-  independent_source_families?: number;
-  independent_sources?: number;
-  anchor_count?: number;
-  top1_share?: number;
-  top1_concentration?: number;
-  /** 全篇综合的执行结果；旧报告缺失时不渲染状态。 */
-  synthesis_status?: "not_requested" | "available" | "skipped_no_evidence" | "failed_model" | "failed_validation";
-  /** 有可用主张账本的章节数（含部分账本）及本次报告总章节数。 */
-  claim_ledgers_available?: number;
-  /** claim_ledgers_available 中账本被丢弃了部分条目的章节数。 */
-  claim_ledgers_partial?: number;
-  claim_ledgers_total?: number;
-};
-
-export type ReportCitationAuditT = {
-  support_rate?: number;
-  supported_claims?: number;
-  total_claims?: number;
-  high_risk_uncited_count?: number;
-  /** 当前确定性审计的命名；保留上面的 UI 别名以兼容后续演进。 */
-  unsupported?: number;
-  high_risk_assertions?: number;
-};
-
-export type ReportDetailT = ReportSummaryT & {
-  outline: ReportOutlineSectionT[];
-  sections: {
-    title: string;
-    markdown: string;
-    grounded: boolean;
-    evidence_level?: string;
-    failed?: boolean;
-    citation_audit?: ReportCitationAuditT;
-  }[];
-  section_status?: { title: string; phase: string; step: number }[];
-  gaps: string[];
-  content_md: string;
-  /** 是否正在公开分享。**不含 token**——那是匿名访问凭据，只从写权限端点取。 */
-  shared?: boolean;
-  references: {
-    key: string;
-    label: string;
-    name?: string;
-    source_title?: string;
-    source_file_name?: string;
-    location_label?: string;
-    object_id?: string;
-    object_type?: string;
-    source_id?: string;
-    element_id?: string;
-    snippet?: string;
-    tier?: string;
-    /** 证据是否来自已挂载参考库（按归属 notebook 判定，不是 tier）。 */
-    from_reference_library?: boolean;
-    /** 同一可区分资料可能有多个锚点；仅用于统计，不改引用跳转。 */
-    family_key?: string;
-    /**
-     * 本段附图（T6）：绑定证据里带图注的图片，与 Ask 侧的
-     * `AnswerAnchorLike.images`/`CitationLike.images` 同一惯例——只在命中时
-     * 非空，旧报告/无图引用整体缺席这个字段。真源：后端
-     * `EvidenceContextService.attach_reference_images`。
-     */
-    images?: CitationImageLike[];
-  }[];
-  understanding: ReportUnderstandingT;
-  error: string;
-};
+export type {
+  ReportCitationAuditT,
+  ReportCorpusProfileT,
+  ReportCredibilityT,
+  ReportDetailT,
+  ReportDistributionT,
+  ReportFrameAxisT,
+  ReportFrameFacetT,
+  ReportFrameT,
+  ReportOutlineSectionT,
+  ReportSufficiency,
+  ReportSummaryT,
+  ReportUnderstandingT,
+} from "./report-model";
 
 // 非终态判定:轮询用。两阶段里 planning/generating 是活跃阶段,与 pending/running 同样需要轮询;
 // outline_ready 是稳定的「等用户确认」态,不轮询(用户编辑大纲期间不该被刷新覆盖)。
-const isReportActive = (status: string) =>
-  status === "pending" || status === "running" || status === "planning" || status === "generating";
-
 // 研究深度:五档命名,index 0→4 一一对应 DEPTHS(每节 reflect 步上限)。
 // 各档都算深入,区别在充分程度;后端 create_report 会 clamp 到 [1,16]。
-const DEPTHS = [1, 2, 4, 8, 16];
+const DEPTHS = REPORT_DEPTHS;
 // 档名从 vocabulary.ts::REPORT_DEPTH 派生:那张按 depth 取值索引的表还要服务
 // 只拿得到 reports.depth 数值的消费方(dev/logs 活动流)。两处各写一份档名必然漂移,
 // 所以这里只保留「顺序」这一份本地信息,文字本身来自共享表。
@@ -278,7 +104,7 @@ const sectionPhaseIcon = (phase: string): SectionPhaseIcon =>
 // dev/logs/activity/format.ts 同样消费它)。
 
 // 计划指定的导出方式:Blob → 临时 URL → 触发下载。
-function downloadMd(r: ReportDetailT) {
+export function downloadReportMarkdown(r: ReportDetailT) {
   const blob = new Blob([r.content_md], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -499,20 +325,17 @@ const INTENT_TYPE_LABELS: Record<string, string> = {
 
 export function IntentReview({
   report,
-  notebookId,
-  confirmReportIntent,
-  onPlanning,
+  busy,
+  onConfirm,
   setToast,
   readOnly,
 }: {
   report: ReportDetailT;
-  notebookId: string;
-  confirmReportIntent: (
-    nb: string,
-    rid: string,
-    payload: { resolved_question: string; answers: { id: string; answer: string }[] },
-  ) => Promise<{ status: string }>;
-  onPlanning: (detail: ReportDetailT) => void;
+  busy: boolean;
+  onConfirm: (payload: {
+    resolved_question: string;
+    answers: { id: string; answer: string }[];
+  }) => Promise<void>;
   setToast: (message: string) => void;
   readOnly: boolean;
 }) {
@@ -522,8 +345,6 @@ export function IntentReview({
     understanding.resolved_question || report.question,
   );
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
-
   useEffect(() => {
     setResolvedQuestion(understanding.resolved_question || report.question);
     setAnswers({});
@@ -546,21 +367,12 @@ export function IntentReview({
       setToast("请先回答所有必填澄清问题");
       return;
     }
-    setBusy(true);
-    try {
-      await confirmReportIntent(notebookId, report.id, {
-        resolved_question: resolvedQuestion.trim(),
-        answers: ambiguities
-          .map((item) => ({ id: item.id, answer: (answers[item.id] || "").trim() }))
-          .filter((item) => item.answer),
-      });
-      setToast("问题理解已确认，开始检查语料并规划大纲");
-      onPlanning({ ...report, status: "planning", progress: "按已确认问题规划中" });
-    } catch (error) {
-      setToast(toUserMessage(error, "问题确认没能提交，请稍后重试"));
-    } finally {
-      setBusy(false);
-    }
+    await onConfirm({
+      resolved_question: resolvedQuestion.trim(),
+      answers: ambiguities
+        .map((item) => ({ id: item.id, answer: (answers[item.id] || "").trim() }))
+        .filter((item) => item.answer),
+    });
   }
 
   const answered = (id: string) => Boolean((answers[id] || "").trim());
@@ -1090,23 +902,18 @@ const toEditSections = (outline: ReportOutlineSectionT[]): EditSection[] =>
 
 export function OutlineEditor({
   report,
-  notebookId,
-  updateReportOutline,
-  generateReport,
-  onGenerating,
+  busy,
+  onGenerate,
   setToast,
   maxSections = DEFAULT_REPORT_MAX_SECTIONS,
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 }: {
   report: ReportDetailT;
-  notebookId: string;
-  updateReportOutline: (
-    nb: string,
-    rid: string,
-    payload: { sections: unknown[]; frame?: ReportFrameT },
-  ) => Promise<{ status: string; sections: number }>;
-  generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
-  onGenerating: (detail: ReportDetailT) => void;
+  busy: boolean;
+  onGenerate: (payload: {
+    sections: ReportOutlineSectionT[];
+    frame?: ReportFrameT;
+  }) => Promise<void>;
   setToast: (message: string) => void;
   maxSections?: number;
   maxSubqueriesPerSection?: number;
@@ -1122,8 +929,6 @@ export function OutlineEditor({
       setFrame(report.understanding?.report_frame);
     }
   }, [report.id, report.outline, report.understanding?.report_frame]);
-
-  const [busy, setBusy] = useState(false);
 
   const patchSection = (key: string, patch: Partial<EditSection>) =>
     setSections((prev) => prev.map((s) => (s._key === key ? { ...s, ...patch } : s)));
@@ -1180,21 +985,7 @@ export function OutlineEditor({
       setToast("请至少保留一个有标题的章节");
       return;
     }
-    setBusy(true);
-    try {
-      await updateReportOutline(notebookId, report.id, { sections: cleaned, frame });
-      await generateReport(notebookId, report.id);
-      setToast("已确认大纲，开始生成完整报告");
-      // 乐观切到生成态,让父层立刻进 section_status 进度视图并恢复轮询。
-      onGenerating({ ...report, status: "generating", progress: "章节 0/" + cleaned.length + " 完成" });
-    } catch (error) {
-      // 同 surfaceError:fetch 层的译文(没权限 / 已删除 / 冲突)比「可以重试」
-      // 有用,别压平;非 HTTP 异常才退兜底。原始值的诊断由 toUserMessage 统一
-      // 记(见下方 surfaceError 的注释:这里不再补裸 console.error)。
-      setToast(toUserMessage(error, "报告没能生成完，可以重试"));
-    } finally {
-      setBusy(false);
-    }
+    await onGenerate({ sections: cleaned, frame });
   }
 
   return (
@@ -1370,60 +1161,20 @@ export function OutlineEditor({
 
 export interface ReportsPanelProps {
   notebookId: string;
-  listReports: (nb: string) => Promise<ReportSummaryT[]>;
-  getReport: (nb: string, rid: string) => Promise<ReportDetailT>;
-  createReport: (nb: string, question: string, depth: number) => Promise<{ report_id: string }>;
-  confirmReportIntent: (
-    nb: string,
-    rid: string,
-    payload: { resolved_question: string; answers: { id: string; answer: string }[] },
-  ) => Promise<{ status: string }>;
-  updateReportOutline: (
-    nb: string,
-    rid: string,
-    payload: { sections: unknown[]; frame?: ReportFrameT },
-  ) => Promise<{ status: string; sections: number }>;
-  generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
-  cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
-  deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
-  shareReport: (nb: string, rid: string) => Promise<{ share_token: string }>;
-  getReportShare: (nb: string, rid: string) => Promise<{ share_token: string }>;
-  unshareReport: (nb: string, rid: string) => Promise<void>;
-  downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
+  workspace: ReportWorkspace;
   setToast: (message: string) => void;
-  /** 「待确认中心」深链:指定报告 id 后自动拉详情并打开大纲编辑器,消费后由父组件清空。 */
-  focusReportId?: string | null;
-  onFocusConsumed?: () => void;
   readOnly?: boolean;
   creationDisabled?: boolean;
   creationDisabledReason?: string;
   maxSections?: number;
   maxSubqueriesPerSection?: number;
-  /**
-   * 自动/高级界面模式。auto 下不渲染「研究深度」档位控件，创建请求固定用默认档
-   * （DEPTHS[1]="标准"）——不读 depthIdx state，避免沿用一份用户已经看不到、
-   * 改不了的高级模式遗留选择。缺省按 "advanced" 兜底，保持既有调用点行为不变。
-   */
   uiMode?: UiMode;
 }
 
 export function ReportsPanel({
   notebookId,
-  listReports,
-  getReport,
-  createReport,
-  confirmReportIntent,
-  updateReportOutline,
-  generateReport,
-  cancelReport,
-  deleteReport,
-  shareReport,
-  getReportShare,
-  unshareReport,
-  downloadReportsZip,
+  workspace,
   setToast,
-  focusReportId,
-  onFocusConsumed,
   readOnly = false,
   creationDisabled = false,
   creationDisabledReason = "",
@@ -1431,361 +1182,44 @@ export function ReportsPanel({
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   uiMode = "advanced",
 }: ReportsPanelProps) {
-  const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
-  const [active, setActive] = useState<ReportDetailT | null>(null);
+  const {
+    reports,
+    active,
+    question,
+    depthIndex: depthIdx,
+    creating,
+    actionBusy,
+    intentBusy,
+    outlineBusy,
+    shareBusy,
+    shared,
+    confirmDelete,
+    confirmDeleteId,
+    deletingId,
+    downloadingId,
+    selectMode,
+    selectedIds,
+    zipBusy,
+    updateQuestion: setQuestion,
+    selectDepth: setDepthIdx,
+    submitCreate,
+    openReport,
+    backToList,
+    requestCancel,
+    requestRetry,
+    confirmIntent,
+    confirmOutline,
+    toggleShare,
+    copyShareLink,
+    requestDelete,
+    deleteById: deleteFromList,
+    chooseDeleteConfirmation: setConfirmDeleteId,
+    downloadOne,
+    toggleSelectMode,
+    toggleSelected,
+    downloadSelected: downloadSelectedZip,
+  } = workspace;
   const [copied, setCopied] = useState(false);
-  // 分享态只存布尔：token 是匿名访问凭据，不进只需 read 权限的详情响应，
-  // 需要链接时才向写权限端点要。
-  const [shared, setShared] = useState(false);
-  // 分享请求是异步的，而 `shared` 是面板级状态：完成时必须确认用户还停在发起
-  // 时那份报告上，否则会把上一份的分享态按到新打开的报告头上。
-  const activeIdRef = useRef<string>("");
-  const [shareBusy, setShareBusy] = useState(false);
-  const [question, setQuestion] = useState("");
-  const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
-  const [creating, setCreating] = useState(false);
-  const [actionBusy, setActionBusy] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  // 列表单篇下载:记录正在下载的 rid,禁用该行按钮防重复点击。
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  // 列表内删除:两步确认——记录待确认删除的 rid + 正在删除的 rid。
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  // 多选批量下载:是否处于多选模式 + 已选 rid 集合 + zip 下载中标志。
-  const [selectMode, setSelectMode] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [zipBusy, setZipBusy] = useState(false);
-
-  const surfaceError = (error: unknown) => {
-    // ⚠这里**不要**再补 `console.error(error)`。原始值已经由 toUserMessage 送进
-    // errors.ts 的受限诊断出口(压单行 + 统一截断到 500 字符)。补一条裸日志既是
-    // 重复打印,又绕过那个上限——一个整页 HTML 错误页 / 超长堆栈能刷爆控制台,
-    // 正是本轮「HTTP 与非 HTTP 共用同一截断上限」整改要堵的。(第四轮评审阻塞 3)
-    //
-    // fetch 层已按状态码译过(401/403/404/409 各不相同),直接展示译文——别再压平
-    // 成一句通用文案,否则用户分不清「登录失效 / 没权限 / 已删除 / 冲突」,还会
-    // 对权限和已删除这类重试也没用的问题反复点。非 HTTP 异常(如断网的
-    // "Failed to fetch")才用兜底文案。
-    setToast(toUserMessage(error, "报告操作没成功，请稍后重试"));
-  };
-
-  // 进 tab / 切换 notebook:重置视图并拉一次列表。
-  useEffect(() => {
-    let cancelled = false;
-    setReports(null);
-    setActive(null);
-    setQuestion("");
-    setConfirmDelete(false);
-    setSelectMode(false);
-    setSelectedIds(new Set());
-    listReports(notebookId)
-      .then((rows) => { if (!cancelled) setReports(rows); })
-      .catch((error) => { if (!cancelled) { setReports([]); surfaceError(error); } });
-    return () => { cancelled = true; };
-    // surfaceError 仅包装 setToast,不入依赖。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notebookId, listReports]);
-
-  // 「待确认中心」深链:focusReportId 就绪且列表已拉取后,拉该报告详情并打开大纲编辑器;
-  // 无论成败都要消费掉 focusReportId,避免重复触发。
-  useEffect(() => {
-    if (!focusReportId || reports === null) return;
-    (async () => {
-      try {
-        const detail = await getReport(notebookId, focusReportId);
-        setActive(detail);
-      } catch (error) {
-        surfaceError(error);
-      } finally {
-        onFocusConsumed?.();
-      }
-    })();
-    // surfaceError 仅包装 setToast,不入依赖。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusReportId, reports, notebookId, getReport, onFocusConsumed]);
-
-  // 列表轮询:列表视图下存在非终态报告时每 6s 刷新;终态即停,卸载清理。
-  const hasLiveReports = (reports ?? []).some((r) => isReportActive(r.status));
-  const detailOpen = active !== null;
-  useEffect(() => {
-    if (!hasLiveReports || detailOpen) return;
-    let cancelled = false;
-    const poll = window.setInterval(async () => {
-      try {
-        const rows = await listReports(notebookId);
-        if (!cancelled) setReports(rows);
-      } catch { /* 瞬时失败:下一轮继续 */ }
-    }, 6000);
-    return () => { cancelled = true; window.clearInterval(poll); };
-  }, [hasLiveReports, detailOpen, notebookId, listReports]);
-
-  // 详情轮询:打开的报告非终态时每 6s 刷新;到终态再同步一次列表徽章。
-  const activeId = active?.id ?? null;
-  const activeLive = active ? isReportActive(active.status) : false;
-  useEffect(() => {
-    if (!activeId || !activeLive) return;
-    let cancelled = false;
-    const poll = window.setInterval(async () => {
-      try {
-        const detail = await getReport(notebookId, activeId);
-        if (cancelled) return;
-        setActive((cur) => (cur && cur.id === activeId ? detail : cur));
-        if (!isReportActive(detail.status)) {
-          listReports(notebookId)
-            .then((rows) => { if (!cancelled) setReports(rows); })
-            .catch(() => {});
-        }
-      } catch { /* 瞬时失败:下一轮继续 */ }
-    }, 6000);
-    return () => { cancelled = true; window.clearInterval(poll); };
-  }, [activeId, activeLive, notebookId, getReport, listReports]);
-
-  // 报告失败的原始异常串(services/report_execution.py 写的
-  // `f"{type(exc).__name__}: {exc}"`)不上屏——界面给稳定文案,原文只进 console。
-  // 放 useEffect 而不是渲染期:后者会随每次重渲染刷屏。
-  const activeError = active?.status === "failed" ? active.error : null;
-  useEffect(() => {
-    if (activeError) logDiagnostic("report", activeError);
-  }, [activeError]);
-
-  // 删除二次确认 4s 后自动复位,避免按钮长期停在危险态。
-  useEffect(() => {
-    if (!confirmDelete) return;
-    const timer = window.setTimeout(() => setConfirmDelete(false), 4000);
-    return () => window.clearTimeout(timer);
-  }, [confirmDelete]);
-
-  async function submitCreate() {
-    const q = question.trim();
-    if (!q || creating || creationDisabled) return;
-    setCreating(true);
-    try {
-      // 自动模式下档位控件不渲染，depthIdx 可能还停在用户切回自动模式前在高级
-      // 模式下选过的值——固定回默认档「标准」，不沿用一份用户看不到、改不了的选择。
-      await createReport(notebookId, q, isAdvanced(uiMode) ? DEPTHS[depthIdx] : DEPTHS[1]);
-      setQuestion("");
-      // 高级模式沿用既有的手动确认/大纲编辑流程；自动模式下问题清晰时服务端会
-      // 自动确认意图并接受默认大纲直接生成，只有存在阻断性歧义才停下来等用户
-      // 补充——文案不能预设「一定要你来确认」，那对自动模式下多数会直接跑完的
-      // 报告是一句不成立的承诺。
-      setToast(isAdvanced(uiMode)
-        ? "正在理解研究问题，完成后请先确认或补充关键信息"
-        : "正在理解研究问题；若存在需要补充的关键信息会先请你确认，否则将自动完成大纲并生成报告");
-      setReports(await listReports(notebookId));
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function openReport(rid: string) {
-    try {
-      setConfirmDelete(false);
-      setActive(await getReport(notebookId, rid));
-    } catch (error) {
-      surfaceError(error);
-    }
-  }
-
-  function backToList() {
-    setActive(null);
-    setConfirmDelete(false);
-    listReports(notebookId).then(setReports).catch(() => {});
-  }
-
-  async function requestCancel() {
-    if (!active || actionBusy) return;
-    setActionBusy(true);
-    try {
-      await cancelReport(notebookId, active.id);
-      setToast("已请求取消，报告将停在当前进度");
-      const detail = await getReport(notebookId, active.id);
-      setActive((cur) => (cur && cur.id === detail.id ? detail : cur));
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setActionBusy(false);
-    }
-  }
-
-  async function requestRetry() {
-    if (!active || actionBusy || active.status !== "failed" || active.outline.length === 0) return;
-    setActionBusy(true);
-    try {
-      await generateReport(notebookId, active.id, active.depth);
-      const next: ReportDetailT = {
-        ...active,
-        status: "generating",
-        progress: "准备生成",
-        error: "",
-        sections: [],
-        section_status: [],
-        gaps: [],
-        content_md: "",
-        references: [],
-        understanding: { ...active.understanding, credibility: undefined },
-      };
-      setActive(next);
-      setToast("已按原确认问题和大纲重新生成");
-      listReports(notebookId).then(setReports).catch(() => {});
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setActionBusy(false);
-    }
-  }
-
-  // 分享态跟着详情走：切报告、轮询刷新都会带来新的 share_token，本地态必须
-  // 同步，否则会把上一份报告的链接显示在这一份上。
-  useEffect(() => {
-    activeIdRef.current = active?.id || "";
-    setShared(Boolean(active?.shared));
-  }, [active?.id, active?.shared]);
-
-  /**
-   * 发布/撤销公开链接。撤销即刻生效——公开页对已撤销 token 与从未存在的 token
-   * 给出同一个「链接不可用」，不区分两者。
-   */
-  async function toggleShare() {
-    if (!active || shareBusy) return;
-    const originId = active.id;
-    setShareBusy(true);
-    try {
-      if (shared) {
-        await unshareReport(notebookId, originId);
-        if (activeIdRef.current !== originId) return;
-        setShared(false);
-        setToast("已取消分享，原链接立即失效");
-      } else {
-        const { share_token: token } = await shareReport(notebookId, originId);
-        if (activeIdRef.current !== originId) return;
-        setShared(true);
-        announceShareLink(buildPublicReportLink(token, window.location.origin));
-      }
-    } catch (error) {
-      if (activeIdRef.current !== originId) return;
-      setToast(toUserMessage(error, "分享操作失败"));
-    } finally {
-      setShareBusy(false);
-    }
-  }
-
-  /**
-   * 把链接送到用户手上：能进剪贴板就说已复制，进不去就把链接本身显示出来。
-   * 复制失败时仍说「已复制」是纯粹的谎报——非安全上下文里这恰恰是常态。
-   */
-  async function announceShareLink(link: string) {
-    try {
-      await copyReportContent(link);
-      setToast(`分享链接已复制：${link}`);
-    } catch {
-      setToast(`分享链接：${link}（自动复制失败，请手动复制）`);
-    }
-  }
-
-  /** 取回既有链接。token 只经写权限端点，不随详情下发。 */
-  async function copyShareLink() {
-    if (!active || shareBusy) return;
-    const originId = active.id;
-    setShareBusy(true);
-    try {
-      const { share_token: token } = await getReportShare(notebookId, originId);
-      if (activeIdRef.current !== originId) return;
-      announceShareLink(buildPublicReportLink(token, window.location.origin));
-    } catch (error) {
-      if (activeIdRef.current !== originId) return;
-      setToast(toUserMessage(error, "取回分享链接失败"));
-    } finally {
-      setShareBusy(false);
-    }
-  }
-
-  async function requestDelete() {
-    if (!active || actionBusy) return;
-    if (!confirmDelete) { setConfirmDelete(true); return; }
-    setActionBusy(true);
-    try {
-      await deleteReport(notebookId, active.id);
-      setToast("报告已删除");
-      setActive(null);
-      setConfirmDelete(false);
-      setReports(await listReports(notebookId));
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setActionBusy(false);
-    }
-  }
-
-  // 列表内单篇下载:拉详情拿 content_md,复用 downloadMd;瞬时禁用防重复点击。
-  async function downloadOne(rid: string) {
-    if (downloadingId) return;
-    setDownloadingId(rid);
-    try {
-      const detail = await getReport(notebookId, rid);
-      if (!detail.content_md) {
-        setToast("该报告没有正文内容，无法下载");
-        return;
-      }
-      downloadMd(detail);
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setDownloadingId(null);
-    }
-  }
-
-  // 列表内删除:第一次点亮出确认,确认后才真删;删完刷新列表。
-  async function deleteFromList(rid: string) {
-    if (deletingId) return;
-    setDeletingId(rid);
-    try {
-      await deleteReport(notebookId, rid);
-      setToast("报告已删除");
-      setConfirmDeleteId(null);
-      if (active && active.id === rid) setActive(null);
-      setReports(await listReports(notebookId));
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setDeletingId(null);
-    }
-  }
-
-  // 进入/退出多选模式;退出时清空已选。
-  function toggleSelectMode() {
-    setSelectMode((on) => {
-      if (on) setSelectedIds(new Set());
-      return !on;
-    });
-  }
-
-  // 勾选/取消勾选单行(仅 done 行会调用)。
-  function toggleSelected(rid: string) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(rid)) next.delete(rid);
-      else next.add(rid);
-      return next;
-    });
-  }
-
-  // 批量下载:导出选中报告为 reports.zip;成功后退出多选并清空。
-  async function downloadSelectedZip() {
-    if (zipBusy || selectedIds.size === 0) return;
-    setZipBusy(true);
-    try {
-      await downloadReportsZip(notebookId, Array.from(selectedIds));
-      setSelectMode(false);
-      setSelectedIds(new Set());
-    } catch (error) {
-      surfaceError(error);
-    } finally {
-      setZipBusy(false);
-    }
-  }
-
   // ---- 详情视图 ----
   if (active) {
     const displayQuestion = active.understanding?.confirmed
@@ -1822,7 +1256,7 @@ export function ReportsPanel({
               </button>
             )}
             {active.content_md && (
-              <button className="report-action" type="button" onClick={() => downloadMd(active)}>
+              <button className="report-action" type="button" onClick={() => downloadReportMarkdown(active)}>
                 <Download size={14} /> 下载 .md
               </button>
             )}
@@ -1898,26 +1332,17 @@ export function ReportsPanel({
         {active.status === "intent_ready" && (
           <IntentReview
             report={active}
-            notebookId={notebookId}
-            confirmReportIntent={confirmReportIntent}
+            busy={intentBusy}
+            onConfirm={confirmIntent}
             readOnly={readOnly}
-            onPlanning={(detail) => {
-              setActive((current) => current?.id === detail.id ? detail : current);
-              listReports(notebookId).then(setReports).catch(() => {});
-            }}
             setToast={setToast}
           />
         )}
         {active.status === "outline_ready" && !readOnly && (
           <OutlineEditor
             report={active}
-            notebookId={notebookId}
-            updateReportOutline={updateReportOutline}
-            generateReport={generateReport}
-            onGenerating={(detail) => {
-              setActive((cur) => (cur && cur.id === detail.id ? detail : cur));
-              listReports(notebookId).then(setReports).catch(() => {});
-            }}
+            busy={outlineBusy}
+            onGenerate={confirmOutline}
             setToast={setToast}
             maxSections={maxSections}
             maxSubqueriesPerSection={maxSubqueriesPerSection}

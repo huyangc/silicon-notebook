@@ -49,16 +49,14 @@ function detail(): ReportDetailT {
 
 
 test("blocks retrieval planning until required clarification is answered", async () => {
-  const confirmReportIntent = vi.fn().mockResolvedValue({ status: "planning" });
-  const onPlanning = vi.fn();
+  const onConfirm = vi.fn().mockResolvedValue(undefined);
   const user = userEvent.setup();
 
   render(
     <IntentReview
       report={detail()}
-      notebookId="nb-1"
-      confirmReportIntent={confirmReportIntent}
-      onPlanning={onPlanning}
+      busy={false}
+      onConfirm={onConfirm}
       setToast={vi.fn()}
       readOnly={false}
     />,
@@ -74,14 +72,10 @@ test("blocks retrieval planning until required clarification is answered", async
   expect(submit).toBeEnabled();
   await user.click(submit);
 
-  expect(confirmReportIntent).toHaveBeenCalledWith("nb-1", "rep-1", {
+  expect(onConfirm).toHaveBeenCalledWith({
     resolved_question: "分析这个问题",
     answers: [{ id: "ambiguity-input", answer: "电荷泵 PLL" }],
   });
-  expect(onPlanning).toHaveBeenCalledWith(expect.objectContaining({
-    status: "planning",
-    progress: "按已确认问题规划中",
-  }));
 });
 
 
@@ -92,9 +86,8 @@ test("read-only members still see the question and clarifications, just disabled
   render(
     <IntentReview
       report={detail()}
-      notebookId="nb-1"
-      confirmReportIntent={vi.fn()}
-      onPlanning={vi.fn()}
+      busy={false}
+      onConfirm={vi.fn()}
       setToast={vi.fn()}
       readOnly
     />,
