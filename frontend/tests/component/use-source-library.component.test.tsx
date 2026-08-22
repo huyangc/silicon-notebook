@@ -104,8 +104,77 @@ test("late upload and URL results cannot commit across notebook or actor transit
   expect(value!.commitUrlSources(ownerA, [source("old-url", "notebook-a")])).toBe(false);
   expect(value!.sources).toEqual([]);
 
+  const currentOwner = value!.captureOwner();
+  expect(currentOwner?.notebookId).toBe("notebook-b");
   view.rerender(<Harness actorId="user-b" />);
-  expect(value!.commitUploadedSources(ownerA, [source("old-user", "notebook-a")], 1)).toBe(false);
+  expect(value!.captureOwner()).toBeNull();
+  expect(value!.sources).toEqual([]);
+  expect(
+    value!.commitUploadedSources(currentOwner, [source("old-user", "notebook-b")], 1),
+  ).toBe(false);
+  view.rerender(<Harness actorId="user-a" />);
+  expect(value!.captureOwner()).toBeNull();
+});
+
+test("delete requires the current owner and an exact source notebook", async () => {
+  api.deleteSource.mockResolvedValue(undefined);
+  render(<Harness />);
+  await act(async () => value!.deleteSource(source("no-owner", "notebook-a")));
+  expect(api.deleteSource).not.toHaveBeenCalled();
+
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: {
+        items: [source("owned", "notebook-a")],
+        total_count: 1,
+        offset: 0,
+        limit: 50,
+      },
+    });
+  });
+  await act(async () => value!.deleteSource(source("foreign", "notebook-b")));
+  expect(api.deleteSource).not.toHaveBeenCalled();
+  await act(async () => value!.deleteSource(source("owned", "notebook-a")));
+  expect(api.deleteSource).toHaveBeenCalledTimes(1);
+  expect(api.deleteSource).toHaveBeenCalledWith("owned");
+});
+
+test("a slow or failing checkup refresh does not delay terminal poll scheduling", async () => {
+  vi.useFakeTimers();
+  const checkup = deferred<undefined>();
+  effects.refreshCheckup.mockReturnValueOnce(checkup.promise);
+  api.getSource
+    .mockResolvedValueOnce(source("pending", "notebook-a", "extracted"))
+    .mockResolvedValueOnce(source("pending-2", "notebook-a", "parsing"))
+    .mockResolvedValue(source("pending-2", "notebook-a", "parsing"));
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: {
+        items: [
+          source("pending", "notebook-a", "parsing"),
+          source("pending-2", "notebook-a", "parsing"),
+        ],
+        total_count: 2,
+        offset: 0,
+        limit: 50,
+      },
+    });
+  });
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(effects.refreshCheckup).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(api.getSource).toHaveBeenCalledTimes(3);
+  checkup.reject(new Error("transient checkup"));
+  await act(async () => Promise.resolve());
+  expect(effects.reportError).not.toHaveBeenCalled();
 });
 
 test("terminal polling refresh survives the hasPending cleanup but remains owner-bound", async () => {

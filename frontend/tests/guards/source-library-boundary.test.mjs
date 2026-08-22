@@ -38,13 +38,21 @@ test("page composes one source-library owner and does not retain source CRUD/det
 test("source-library hook is narrow and does not depend on other workspace domains", async () => {
   const hook = await parseModule("use-source-library.ts");
   const modules = importsIn(hook).map((item) => item.module);
-  for (const forbidden of [
-    "./ask-api.ts",
-    "./report-api.ts",
-    "./knowledge-api.ts",
-    "./notebook-api.ts",
-  ]) {
-    assert.equal(modules.includes(forbidden), false, `source hook imports ${forbidden}`);
-  }
+  const allowed = new Set([
+    "react",
+    "./errors.ts",
+    "./source-api.ts",
+    "./source-delete-state.ts",
+    "./source-detail-state.ts",
+    "./source-page-state.ts",
+    "./source-scope.ts",
+    "./workspace-model.ts",
+  ]);
+  assert.deepEqual(modules.filter((module) => !allowed.has(module)), []);
   assert.doesNotMatch(hook.getText(hook), /\b(setCurrentNotebook|setKnowledge|setCheckup)\b/);
+  assert.match(
+    hook.getText(hook),
+    /source\.notebook_id !== ownerAtStart\.notebookId/,
+    "delete must revalidate source ownership inside the hook",
+  );
 });

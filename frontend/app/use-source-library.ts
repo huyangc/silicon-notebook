@@ -120,14 +120,32 @@ export function useSourceLibrary({
   const deleteRefreshGenerationsRef = useRef<Map<string, number>>(new Map());
   const deletedIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const pollCountRef = useRef(0);
+  const previousActorIdRef = useRef(actorId);
+  const inactiveScopeSelectionRef = useRef(defaultSourceScopeSelection());
+  const inactiveDeletingIdsRef = useRef(new Set<string>());
+
+  // Actor changes are an authority boundary, not a later cleanup concern. Invalidate
+  // the owner synchronously during render so a continuation that resolves before the
+  // normal effect phase cannot commit the previous user's source state.
+  if (previousActorIdRef.current !== actorId) {
+    previousActorIdRef.current = actorId;
+    generationRef.current += 1;
+    ownerRef.current = null;
+    pageRequestRef.current += 1;
+    detailRequestRef.current += 1;
+  }
 
   sourcesRef.current = sources;
   sourceDetailRef.current = sourceDetail;
   sourcesPageRef.current = sourcesPage;
   sourceQueryRef.current = sourceQuery;
 
-  const currentOwner = () => ownerRef.current;
-  const owns = (owner: SourceLibraryOwner) => sameOwner(ownerRef.current, owner);
+  const currentOwner = () => (
+    ownerRef.current?.actorId === actorIdRef.current ? ownerRef.current : null
+  );
+  const owns = (owner: SourceLibraryOwner) => (
+    actorIdRef.current === owner.actorId && sameOwner(ownerRef.current, owner)
+  );
   const currentDeleteKey = (notebookId: string) => {
     const currentActor = actorIdRef.current;
     return currentActor ? ownerKey(currentActor, notebookId) : "";
@@ -141,6 +159,7 @@ export function useSourceLibrary({
     setSourcesPage(0);
     setSourceQueryState("");
     setSourceDetail(null);
+    setDeletingSourceIds(new Set());
     setSourceElements([]);
     setSourceElementsTotal(0);
     setSourceElementStartOffset(0);
@@ -186,6 +205,7 @@ export function useSourceLibrary({
     setSourcesPage(0);
     setSourceQueryState("");
     setSourceDetail(null);
+    setDeletingSourceIds(new Set());
     setSourceElements([]);
     setSourceElementsTotal(0);
     setSourceElementStartOffset(0);
@@ -197,11 +217,13 @@ export function useSourceLibrary({
   }
 
   function captureOwner(): SourceLibraryOwner | null {
-    return ownerRef.current;
+    return currentOwner();
   }
 
   function currentPageRequest(): { page: number; q: string } {
-    return { page: sourcesPageRef.current, q: sourceQueryRef.current };
+    return currentOwner()
+      ? { page: sourcesPageRef.current, q: sourceQueryRef.current }
+      : { page: 0, q: "" };
   }
 
   function deleteGeneration(notebookId: string): number {
@@ -421,9 +443,15 @@ export function useSourceLibrary({
   }
 
   async function deleteSource(source: SourceSummary) {
-    if (!source.notebook_id || deletingIdsRef.current.has(source.id) || !canWriteRef.current) return;
-    const actorAtStart = actorIdRef.current;
-    if (!actorAtStart) return;
+    const ownerAtStart = currentOwner();
+    if (
+      !ownerAtStart
+      || !owns(ownerAtStart)
+      || source.notebook_id !== ownerAtStart.notebookId
+      || deletingIdsRef.current.has(source.id)
+      || !canWriteRef.current
+    ) return;
+    const actorAtStart = ownerAtStart.actorId;
     deletingIdsRef.current.add(source.id);
     setDeletingSourceIds((previous) => new Set(previous).add(source.id));
     try {
@@ -502,7 +530,9 @@ export function useSourceLibrary({
     };
   }, [highlightedElementId, sourceDetail, sourceElements]);
 
-  const hasPending = sources.some(
+  const ownerIsActive = currentOwner() !== null;
+  const visibleSources = ownerIsActive ? sources : [];
+  const hasPending = visibleSources.some(
     (source) => !["extracted", "failed"].includes(source.parse_status),
   );
 
@@ -580,7 +610,13 @@ export function useSourceLibrary({
           await effectsRef.current.refreshCollection(guard);
           await effectsRef.current.refreshNotebook(owner.notebookId, guard);
           if (owns(owner)) {
-            await effectsRef.current.refreshCheckup(owner.notebookId, guard);
+            try {
+              void Promise.resolve(
+                effectsRef.current.refreshCheckup(owner.notebookId, guard),
+              ).catch(() => undefined);
+            } catch {
+              // Checkup is a fail-open derived refresh and must not delay polling.
+            }
           }
         }
       } catch (error) {
@@ -599,21 +635,23 @@ export function useSourceLibrary({
   }, [hasPending, ownerSerial]);
 
   return {
-    sources,
-    sourceScopeSelection,
-    sourcesTotal,
-    notebookSourceTotal,
-    sourcesPage,
+    sources: visibleSources,
+    sourceScopeSelection: ownerIsActive
+      ? sourceScopeSelection
+      : inactiveScopeSelectionRef.current,
+    sourcesTotal: ownerIsActive ? sourcesTotal : 0,
+    notebookSourceTotal: ownerIsActive ? notebookSourceTotal : 0,
+    sourcesPage: ownerIsActive ? sourcesPage : 0,
     sourcesCollapsed,
-    sourceQuery,
-    sourceDetail,
-    deletingSourceIds,
-    reparsingSource,
-    sourceElements,
-    sourceElementsTotal,
-    sourceElementStartOffset,
-    sourceElementsLoading,
-    highlightedElementId,
+    sourceQuery: ownerIsActive ? sourceQuery : "",
+    sourceDetail: ownerIsActive ? sourceDetail : null,
+    deletingSourceIds: ownerIsActive ? deletingSourceIds : inactiveDeletingIdsRef.current,
+    reparsingSource: ownerIsActive ? reparsingSource : false,
+    sourceElements: ownerIsActive ? sourceElements : [],
+    sourceElementsTotal: ownerIsActive ? sourceElementsTotal : 0,
+    sourceElementStartOffset: ownerIsActive ? sourceElementStartOffset : 0,
+    sourceElementsLoading: ownerIsActive ? sourceElementsLoading : false,
+    highlightedElementId: ownerIsActive ? highlightedElementId : "",
     hasPending,
     beginTransition,
     commitNotebookSnapshot,
