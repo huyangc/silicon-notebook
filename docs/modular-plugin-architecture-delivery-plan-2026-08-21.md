@@ -238,7 +238,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - **PR-F1**：source library hook（建议首个样板）；
   - 状态：已完成并由 PR #556 交付；来源列表/范围、详情与分页、删除 tombstone、重解析和轮询已迁入 exact user+notebook owner，首屏 paired snapshot、请求数与轮询节奏保持，三路独立 review、G1 与 CI 均已闭合；
 - **PR-F2**：Ask session hook；
-  - 状态：实现中；Ask 草稿/对话、意图确认、durable stream/reconnect、会话历史/tombstone 与 mutation 已迁入 exact actor+notebook+workspace owner，正在完成 hostile 竞态回归、三路 review 与 G1/CI；
+  - 状态：已完成并由 PR #557 交付；Ask 草稿/对话、意图确认、durable stream/reconnect、会话历史/tombstone 与 mutation 已迁入 exact actor+notebook+workspace owner，导航 detach、显式取消 authority、冻结 scope 与请求数/轮询节奏保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F3**：report workspace hook；
 - **PR-F4**：KG workspace hook；
 - **PR-F5**：collection state + modal manager；若 diff 无法在一次 review 中完整验证，自动拆成 F5/F6，不为保持 PR 数量强行合并。
