@@ -419,6 +419,91 @@ test("maintenance submission suppresses stale terminal polls and rechecks permis
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
 });
 
+test("synchronous relink commands stay single-flight and release authority after failure", async () => {
+  const relinkPending = deferred<Awaited<ReturnType<typeof kgApi.relinkKg>>>();
+  kgApi.relinkKg.mockReturnValueOnce(relinkPending.promise);
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+
+  let firstRelink!: Promise<void>;
+  act(() => {
+    firstRelink = value!.startRelink();
+    void value!.startRelink();
+  });
+  expect(kgApi.relinkKg).toHaveBeenCalledOnce();
+  await act(async () => relinkPending.reject(new Error("relink failed")));
+  await firstRelink;
+  await waitFor(() => expect(value!.graph.relinking).toBe(false));
+  await act(async () => value!.startRelink());
+  expect(kgApi.relinkKg).toHaveBeenCalledTimes(2);
+});
+
+test("synchronous rebuild commands stay single-flight and release authority after failure", async () => {
+  const rebuildPending = deferred<Awaited<ReturnType<typeof kgApi.rebuildUnifiedKg>>>();
+  kgApi.rebuildUnifiedKg.mockReturnValueOnce(rebuildPending.promise);
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+
+  let firstRebuild!: Promise<void>;
+  act(() => {
+    firstRebuild = value!.startRebuild();
+    void value!.startRebuild();
+  });
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledOnce();
+  await act(async () => rebuildPending.reject(new Error("rebuild failed")));
+  await firstRebuild;
+  await waitFor(() => expect(value!.graph.rebuilding).toBe(false));
+  await act(async () => value!.startRebuild());
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
+});
+
+test("Knowledge context reads are latest-wins and invalidated by a kind change", async () => {
+  const first = deferred<Awaited<ReturnType<typeof kgApi.fetchNodeContext>>>();
+  const second = deferred<Awaited<ReturnType<typeof kgApi.fetchNodeContext>>>();
+  kgApi.fetchNodeContext
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(second.promise);
+  render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+
+  let firstRead!: Promise<void>;
+  let secondRead!: Promise<void>;
+  act(() => {
+    firstRead = value!.loadKnowledgeContext("knowledge-a");
+    secondRead = value!.loadKnowledgeContext("knowledge-a");
+  });
+  await act(async () => second.resolve({
+    id: "knowledge-a",
+    object_type: "concept",
+    name: "newer",
+    section_path: "",
+    occurrences: [],
+    definition: null,
+    steps: null,
+  }));
+  await secondRead;
+  await act(async () => first.resolve({
+    id: "knowledge-a",
+    object_type: "concept",
+    name: "older",
+    section_path: "",
+    occurrences: [],
+    definition: null,
+    steps: null,
+  }));
+  await firstRead;
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("newer");
+
+  const stale = deferred<Awaited<ReturnType<typeof kgApi.fetchNodeContext>>>();
+  kgApi.fetchNodeContext.mockReturnValueOnce(stale.promise);
+  let staleRead!: Promise<void>;
+  act(() => { staleRead = value!.loadKnowledgeContext("knowledge-b"); });
+  act(() => value!.selectKnowledgeKind("claim"));
+  await act(async () => stale.reject(new Error("stale context")));
+  await staleRead;
+  expect(value!.knowledge.contexts["knowledge-b"]).toBeUndefined();
+});
+
 test("pending rebuild retries spend one POST per poll tick without adoption reads or repeated toast", async () => {
   const merge = candidate();
   kgApi.fetchPendingMerges.mockResolvedValue([merge]);

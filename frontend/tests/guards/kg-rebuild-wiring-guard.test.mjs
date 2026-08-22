@@ -92,8 +92,13 @@ test("submission windows and stale job ids cannot settle the rebuild early", () 
 test("terminal observation stops duplicate ticks before refresh and releases only after refresh", () => {
   const poll = rebuildPollBody();
   const settledAt = poll.indexOf("settled = true");
-  const settleAt = poll.indexOf("await settle(outcome)", settledAt);
+  const settleAt = poll.indexOf("await settle(outcome,", settledAt);
   assert.ok(settledAt >= 0 && settleAt > settledAt);
+  assert.match(
+    poll.slice(settleAt, settleAt + 120),
+    /status\.job_id[\s\S]*status\.status/,
+    "the terminal receipt must remain tied to the observed job and status",
+  );
   const settle = poll.slice(poll.indexOf("const settle = async"), poll.indexOf("const timer ="));
   const refreshAt = settle.indexOf("await refreshAfterRebuild()");
   const releaseAt = settle.indexOf("releaseNotebookClaim(current, key)");
