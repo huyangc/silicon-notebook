@@ -141,6 +141,19 @@ test("a notebook transition suspends report reads and a failed transition resume
   expect(api.listReports).toHaveBeenLastCalledWith("notebook-a");
 });
 
+test("a successful transition stays suspended until finish then loads only the new notebook", async () => {
+  const { rerender } = render(<Harness active={false} />);
+  let transition!: ReturnType<HookValue["beginNotebookTransition"]>;
+  act(() => { transition = value!.beginNotebookTransition(); });
+  rerender(<Harness notebookId="notebook-b" active />);
+  await act(async () => Promise.resolve());
+  expect(api.listReports).not.toHaveBeenCalled();
+
+  act(() => value!.finishNotebookTransition(transition, true));
+  await waitFor(() => expect(api.listReports).toHaveBeenCalledTimes(1));
+  expect(api.listReports).toHaveBeenCalledWith("notebook-b");
+});
+
 test("focus waits for the single entry list and then reads exactly one detail", async () => {
   const pendingList = deferred<ReportSummaryT[]>();
   api.listReports.mockReturnValueOnce(pendingList.promise);
@@ -256,6 +269,33 @@ test("list and detail polling are mutually exclusive and stop on terminal state"
   expect(api.getReport).not.toHaveBeenCalled();
 });
 
+test("a slow list poll stays single-flight and cannot overwrite a newer manual refresh", async () => {
+  vi.useFakeTimers();
+  const stalePoll = deferred<ReportSummaryT[]>();
+  api.listReports
+    .mockResolvedValueOnce([summary("running", "generating")])
+    .mockReturnValueOnce(stalePoll.promise)
+    .mockResolvedValueOnce([summary("fresh", "generating")])
+    .mockResolvedValueOnce([summary("next", "generating")]);
+  render(<Harness />);
+  await act(async () => Promise.resolve());
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(api.listReports).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(12000); });
+  expect(api.listReports).toHaveBeenCalledTimes(2);
+
+  act(() => value!.backToList());
+  await act(async () => Promise.resolve());
+  expect(value!.reports?.map((row) => row.id)).toEqual(["fresh"]);
+  await act(async () => stalePoll.resolve([summary("stale", "generating")]));
+  expect(value!.reports?.map((row) => row.id)).toEqual(["fresh"]);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(api.listReports).toHaveBeenCalledTimes(4);
+  expect(value!.reports?.map((row) => row.id)).toEqual(["next"]);
+});
+
 test("navigation detaches active jobs without calling cancel", async () => {
   api.listReports.mockResolvedValue([summary("running", "generating")]);
   const { rerender } = render(<Harness />);
@@ -283,4 +323,52 @@ test("intent and outline commands preserve the existing request sequence", async
   expect(api.generateReport).toHaveBeenCalledTimes(1);
   expect(api.updateReportOutline.mock.invocationCallOrder[0])
     .toBeLessThan(api.generateReport.mock.invocationCallOrder[0]);
+});
+
+test("outline confirmation rechecks owner and live permission between PATCH and generate", async () => {
+  const pendingPatch = deferred<{ status: string; sections: number }>();
+  api.listReports.mockResolvedValue([summary("report-a", "outline_ready")]);
+  api.getReport.mockResolvedValue(detail("report-a", "outline_ready"));
+  api.updateReportOutline.mockReturnValueOnce(pendingPatch.promise);
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(api.listReports).toHaveBeenCalledOnce());
+  await act(async () => value!.openReport("report-a"));
+
+  let confirming!: Promise<void>;
+  act(() => {
+    confirming = value!.confirmOutline({
+      sections: [{ title: "one", scope: "scope", sub_queries: ["query"] }],
+    });
+  });
+  rerender(<Harness policy={{ ...defaultPolicy, canManageReports: false }} />);
+  await act(async () => pendingPatch.resolve({ status: "ok", sections: 1 }));
+  await confirming;
+  expect(api.generateReport).not.toHaveBeenCalled();
+});
+
+test("a successful create keeps the existing list when its derived refresh fails", async () => {
+  api.listReports
+    .mockResolvedValueOnce([summary("existing")])
+    .mockRejectedValueOnce(new Error("refresh failed"));
+  render(<Harness />);
+  await waitFor(() => expect(value!.reports?.map((row) => row.id)).toEqual(["existing"]));
+  act(() => value!.updateQuestion("new report"));
+  await act(async () => value!.submitCreate());
+
+  expect(value!.reports?.map((row) => row.id)).toEqual(["existing"]);
+  expect(effects.notify).toHaveBeenCalledTimes(1);
+  expect(effects.notify).toHaveBeenCalledWith(expect.stringContaining("正在理解"));
+});
+
+test("cancel reports a sticky terminal response instead of claiming cancellation", async () => {
+  api.listReports.mockResolvedValue([summary("report-a", "generating")]);
+  api.getReport.mockResolvedValue(detail("report-a", "done"));
+  api.cancelReport.mockResolvedValueOnce({ status: "done" });
+  render(<Harness />);
+  await waitFor(() => expect(api.listReports).toHaveBeenCalledOnce());
+  await act(async () => value!.openReport("report-a"));
+  await act(async () => value!.requestCancel());
+
+  expect(effects.notify).toHaveBeenCalledWith("报告已进入终态，无需再取消");
+  expect(effects.notify).not.toHaveBeenCalledWith(expect.stringContaining("已请求取消"));
 });

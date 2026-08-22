@@ -171,6 +171,19 @@ export function useReportWorkspace({
     return owner;
   };
 
+  const owns = (owner: ReportOwner): boolean => Boolean(
+    tabActiveRef.current
+    && actorIdRef.current === owner.actorId
+    && notebookIdRef.current === owner.notebookId
+    && sameOwner(ownerRef.current, owner),
+  );
+
+  const ownsIdentity = (owner: Pick<ReportOwner, "actorId" | "notebookId">): boolean => Boolean(
+    actorIdRef.current === owner.actorId
+    && notebookIdRef.current === owner.notebookId
+    && sameIdentity(ownerRef.current, owner),
+  );
+
   const deletedIds = (owner: Pick<ReportOwner, "actorId" | "notebookId">): Set<string> =>
     tombstonesRef.current.get(ownerKey(owner)) ?? new Set<string>();
 
@@ -217,17 +230,20 @@ export function useReportWorkspace({
     forceOwnerRender((value) => value + 1);
   };
 
-  const loadReportsFor = async (owner: ReportOwner): Promise<ReportSummaryT[] | null> => {
+  const loadReportsFor = async (
+    owner: ReportOwner,
+    options: { surface?: boolean; clearOnError?: boolean } = {},
+  ): Promise<ReportSummaryT[] | null> => {
     const requestId = ++listRequestRef.current;
     try {
       const rows = filterReports(owner, await listReports(owner.notebookId));
-      if (!sameOwner(ownerRef.current, owner) || requestId !== listRequestRef.current) return null;
+      if (!owns(owner) || requestId !== listRequestRef.current) return null;
       setReports(rows);
       return rows;
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner) && requestId === listRequestRef.current) {
-        setReports([]);
-        surfaceError(error);
+      if (owns(owner) && requestId === listRequestRef.current) {
+        if (options.clearOnError !== false) setReports([]);
+        if (options.surface !== false) surfaceError(error);
       }
       return null;
     }
@@ -241,19 +257,18 @@ export function useReportWorkspace({
     const requestId = ++detailRequestRef.current;
     try {
       const detail = await getReport(owner.notebookId, reportId);
-      if (!sameOwner(ownerRef.current, owner) || requestId !== detailRequestRef.current) return null;
+      if (!owns(owner) || requestId !== detailRequestRef.current) return null;
       if (deletedIds(owner).has(detail.id) || detail.id !== reportId) return null;
       setActiveReport(detail);
       return detail;
     } catch (error) {
-      if (options.surface !== false && sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (options.surface !== false && owns(owner)) surfaceError(error);
       return null;
     }
   };
 
   useEffect(() => {
     if (!reportTabActive || !actorId || !notebookId) {
-      transitionSuspendedRef.current = false;
       if (ownerRef.current) invalidate();
       return;
     }
@@ -289,11 +304,15 @@ export function useReportWorkspace({
     const owner = currentOwner();
     if (!owner || !hasLiveReports || activeReport !== null) return;
     let stopped = false;
+    let inFlight = false;
     const timer = window.setInterval(async () => {
-      if (stopped || !sameOwner(ownerRef.current, owner)) return;
-      const rows = await listReports(owner.notebookId).catch(() => null);
-      if (!rows || stopped || !sameOwner(ownerRef.current, owner)) return;
-      setReports(filterReports(owner, rows));
+      if (stopped || inFlight || !owns(owner)) return;
+      inFlight = true;
+      try {
+        await loadReportsFor(owner, { surface: false, clearOnError: false });
+      } finally {
+        inFlight = false;
+      }
     }, REPORT_POLL_INTERVAL_MS);
     return () => { stopped = true; window.clearInterval(timer); };
   }, [hasLiveReports, activeReport]);
@@ -304,17 +323,17 @@ export function useReportWorkspace({
     const owner = currentOwner();
     if (!owner || !activeId || !activeLive) return;
     let stopped = false;
+    let inFlight = false;
     const timer = window.setInterval(async () => {
-      if (stopped || !sameOwner(ownerRef.current, owner)) return;
-      const detail = await getReport(owner.notebookId, activeId).catch(() => null);
-      if (!detail || stopped || !sameOwner(ownerRef.current, owner)) return;
-      if (deletedIds(owner).has(detail.id) || detail.id !== activeId) return;
-      setActiveReport((current) => current?.id === activeId ? detail : current);
-      if (!isReportActive(detail.status)) {
-        const rows = await listReports(owner.notebookId).catch(() => null);
-        if (rows && !stopped && sameOwner(ownerRef.current, owner)) {
-          setReports(filterReports(owner, rows));
+      if (stopped || inFlight || !owns(owner)) return;
+      inFlight = true;
+      try {
+        const detail = await loadDetailFor(owner, activeId, { surface: false });
+        if (detail && !isReportActive(detail.status)) {
+          await loadReportsFor(owner, { surface: false, clearOnError: false });
         }
+      } finally {
+        inFlight = false;
       }
     }, REPORT_POLL_INTERVAL_MS);
     return () => { stopped = true; window.clearInterval(timer); };
@@ -344,10 +363,9 @@ export function useReportWorkspace({
   };
   const finishNotebookTransition = (
     transition: ReportWorkspaceTransition,
-    succeeded: boolean,
+    _succeeded: boolean,
   ) => {
     if (transition.generation !== transitionGenerationRef.current) return;
-    if (succeeded) return;
     transitionSuspendedRef.current = false;
     forceOwnerRender((value) => value + 1);
   };
@@ -390,16 +408,16 @@ export function useReportWorkspace({
         ? REPORT_DEPTHS[depthIndex]
         : REPORT_DEPTHS[REPORT_DEFAULT_DEPTH_INDEX];
       await createReport(owner.notebookId, trimmed, depth, sourceScope, baseScope, !currentPolicy.advanced);
-      if (!sameOwner(ownerRef.current, owner) || !ownsOperation("create", operation)) return;
+      if (!owns(owner) || !ownsOperation("create", operation)) return;
       setQuestionState("");
       effectsRef.current.notify(currentPolicy.advanced
         ? "正在理解研究问题，完成后请先确认或补充关键信息"
         : "正在理解研究问题；若存在需要补充的关键信息会先请你确认，否则将自动完成大纲并生成报告");
-      await loadReportsFor(owner);
+      await loadReportsFor(owner, { surface: false, clearOnError: false });
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (owns(owner)) surfaceError(error);
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("create", operation)) setCreating(false);
+      if (owns(owner) && ownsOperation("create", operation)) setCreating(false);
     }
   };
 
@@ -426,14 +444,16 @@ export function useReportWorkspace({
     const operation = beginOperation("action");
     setActionBusy(true);
     try {
-      await cancelReport(owner.notebookId, report.id);
-      if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
-      effectsRef.current.notify("已请求取消，报告将停在当前进度");
-      await loadDetailFor(owner, report.id);
+      const result = await cancelReport(owner.notebookId, report.id);
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
+      effectsRef.current.notify(result.status === "cancelled"
+        ? "已请求取消，报告将停在当前进度"
+        : "报告已进入终态，无需再取消");
+      await loadDetailFor(owner, report.id, { surface: false });
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (owns(owner)) surfaceError(error);
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("action", operation)) setActionBusy(false);
+      if (owns(owner) && ownsOperation("action", operation)) setActionBusy(false);
     }
   };
 
@@ -446,14 +466,14 @@ export function useReportWorkspace({
     setActionBusy(true);
     try {
       await generateReport(owner.notebookId, report.id, report.depth);
-      if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
       setActiveReport(optimisticGenerating(report, "准备生成"));
       effectsRef.current.notify("已按原确认问题和大纲重新生成");
-      void loadReportsFor(owner);
+      void loadReportsFor(owner, { surface: false, clearOnError: false });
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (owns(owner)) surfaceError(error);
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("action", operation)) setActionBusy(false);
+      if (owns(owner) && ownsOperation("action", operation)) setActionBusy(false);
     }
   };
 
@@ -468,14 +488,14 @@ export function useReportWorkspace({
     setIntentBusy(true);
     try {
       await confirmReportIntent(owner.notebookId, report.id, payload);
-      if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
       setActiveReport({ ...report, status: "planning", progress: "按已确认问题规划中" });
       effectsRef.current.notify("问题理解已确认，开始检查语料并规划大纲");
-      void loadReportsFor(owner);
+      void loadReportsFor(owner, { surface: false, clearOnError: false });
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error, "问题确认没能提交，请稍后重试");
+      if (owns(owner)) surfaceError(error, "问题确认没能提交，请稍后重试");
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("intent", operation)) setIntentBusy(false);
+      if (owns(owner) && ownsOperation("intent", operation)) setIntentBusy(false);
     }
   };
 
@@ -490,15 +510,17 @@ export function useReportWorkspace({
     setOutlineBusy(true);
     try {
       await updateReportOutline(owner.notebookId, report.id, payload);
+      if (!owns(owner) || !policyRef.current.canManageReports
+        || activeReportRef.current?.id !== report.id) return;
       await generateReport(owner.notebookId, report.id);
-      if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
       setActiveReport(optimisticGenerating(report, `章节 0/${payload.sections.length} 完成`));
       effectsRef.current.notify("已确认大纲，开始生成完整报告");
-      void loadReportsFor(owner);
+      void loadReportsFor(owner, { surface: false, clearOnError: false });
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error, "报告没能生成完，可以重试");
+      if (owns(owner)) surfaceError(error, "报告没能生成完，可以重试");
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("outline", operation)) setOutlineBusy(false);
+      if (owns(owner) && ownsOperation("outline", operation)) setOutlineBusy(false);
     }
   };
 
@@ -512,21 +534,21 @@ export function useReportWorkspace({
     try {
       if (wasShared) {
         await unshareReport(owner.notebookId, report.id);
-        if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
+        if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
         setShared(false);
         effectsRef.current.notify("已取消分享，原链接立即失效");
       } else {
         const { share_token: token } = await shareReport(owner.notebookId, report.id);
-        if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
+        if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
         setShared(true);
         await effectsRef.current.announceShareLink(token);
       }
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner) && activeReportRef.current?.id === report.id) {
+      if (owns(owner) && activeReportRef.current?.id === report.id) {
         surfaceError(error, "分享操作失败");
       }
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("share", operation)) setShareBusy(false);
+      if (owns(owner) && ownsOperation("share", operation)) setShareBusy(false);
     }
   };
 
@@ -538,14 +560,14 @@ export function useReportWorkspace({
     setShareBusy(true);
     try {
       const { share_token: token } = await getReportShare(owner.notebookId, report.id);
-      if (!sameOwner(ownerRef.current, owner) || activeReportRef.current?.id !== report.id) return;
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
       await effectsRef.current.announceShareLink(token);
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner) && activeReportRef.current?.id === report.id) {
+      if (owns(owner) && activeReportRef.current?.id === report.id) {
         surfaceError(error, "取回分享链接失败");
       }
     } finally {
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("share", operation)) setShareBusy(false);
+      if (owns(owner) && ownsOperation("share", operation)) setShareBusy(false);
     }
   };
 
@@ -554,7 +576,7 @@ export function useReportWorkspace({
     const next = new Set(tombstonesRef.current.get(key) ?? []);
     next.add(reportId);
     tombstonesRef.current.set(key, next);
-    if (!sameIdentity(ownerRef.current, owner)) return;
+    if (!ownsIdentity(owner)) return;
     setReports((rows) => rows?.filter((row) => row.id !== reportId) ?? rows);
     setSelectedIds((ids) => {
       const copy = new Set(ids);
@@ -578,23 +600,23 @@ export function useReportWorkspace({
     try {
       await deleteReport(owner.notebookId, reportId);
       recordDelete(owner, reportId);
-      if (sameOwner(ownerRef.current, owner)) {
+      if (owns(owner)) {
         setConfirmDelete(false);
         setConfirmDeleteIdState(null);
         effectsRef.current.notify("报告已删除");
-        void loadReportsFor(owner);
+        void loadReportsFor(owner, { surface: false, clearOnError: false });
       }
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (owns(owner)) surfaceError(error);
     } finally {
       const remaining = new Set(pendingDeletesRef.current.get(key) ?? []);
       remaining.delete(reportId);
       if (remaining.size === 0) pendingDeletesRef.current.delete(key);
       else pendingDeletesRef.current.set(key, remaining);
-      if (sameIdentity(ownerRef.current, owner)) {
+      if (ownsIdentity(owner)) {
         setDeletingId(remaining.values().next().value ?? null);
       }
-      if (sameOwner(ownerRef.current, owner) && ownsOperation("delete", operation)) {
+      if (owns(owner) && ownsOperation("delete", operation)) {
         setActionBusy(false);
       }
     }
@@ -617,16 +639,16 @@ export function useReportWorkspace({
     setDownloadingId(reportId);
     try {
       const detail = await getReport(owner.notebookId, reportId);
-      if (!sameOwner(ownerRef.current, owner) || detail.id !== reportId) return;
+      if (!owns(owner) || detail.id !== reportId) return;
       if (!detail.content_md) {
         effectsRef.current.notify("该报告没有正文内容，无法下载");
         return;
       }
       effectsRef.current.downloadMarkdown(detail);
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (owns(owner)) surfaceError(error);
     } finally {
-      if (sameOwner(ownerRef.current, owner)) setDownloadingId(null);
+      if (owns(owner)) setDownloadingId(null);
     }
   };
 
@@ -653,13 +675,13 @@ export function useReportWorkspace({
     setZipBusy(true);
     try {
       await downloadReportsZip(owner.notebookId, Array.from(selectedIds));
-      if (!sameOwner(ownerRef.current, owner)) return;
+      if (!owns(owner)) return;
       setSelectMode(false);
       setSelectedIds(new Set());
     } catch (error) {
-      if (sameOwner(ownerRef.current, owner)) surfaceError(error);
+      if (owns(owner)) surfaceError(error);
     } finally {
-      if (sameOwner(ownerRef.current, owner)) setZipBusy(false);
+      if (owns(owner)) setZipBusy(false);
     }
   };
 
