@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import ts from "typescript";
 
 import { appSourceModules, importsIn, jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
 
@@ -19,14 +20,19 @@ test("page composes one availability owner and exactly the two canonical outlets
   const sourceOutlet = text.indexOf('slot="source.detail_section"');
   const sourceWindowEnd = text.indexOf("</SourceDetailWindow>", sourceWindowStart);
   assert.ok(sourceWindowStart < sourceOutlet && sourceOutlet < sourceWindowEnd);
-  const sourceOutletElement = outlets.find((row) => (
-    row.attributes.slot === "source.detail_section"
-  ));
-  assert.ok(sourceOutletElement);
-  assert.match(
-    sourceOutletElement.bindings.context,
-    /sourceWrite:\s*!sourceDetailBaseId\s*&&\s*capabilities\.canWriteNotebook/,
-    "reference-library sources must never receive source:write UI authority",
+  const sourceWriteInitializers = [];
+  function visit(node) {
+    if (
+      ts.isPropertyAssignment(node)
+      && node.name.getText(page) === "sourceWrite"
+    ) sourceWriteInitializers.push(node.initializer.getText(page));
+    ts.forEachChild(node, visit);
+  }
+  visit(page);
+  assert.deepEqual(
+    sourceWriteInitializers.sort(),
+    ["!sourceDetailBaseId && capabilities.canWriteNotebook", "false"].sort(),
+    "source:write must be false by default and require both local-source ownership and live core write authority",
   );
 });
 
