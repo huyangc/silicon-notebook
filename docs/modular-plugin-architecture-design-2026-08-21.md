@@ -21,7 +21,7 @@
 7. **测试落点钉死在既有测试根**：后端 `backend/tests`、前端 `frontend/tests/{unit,component,guards}`；feature/插件目录内不放测试（初稿 §15 样例会让插件测试静默逃出 G1 收集）（§13.3、§15）。
 8. **目录边界对齐生产目录红线**：前端 SDK 落 `frontend/features/extension-sdk/`；后端每个新顶层包的引入必须同批 rebaseline 语义架构守卫，并确认用户文案守卫覆盖面（§3.2）。
 9. **前端拆分为并行轨道**：state-owner hooks 抽取不依赖 Extension SDK，Phase 0 完成后即可启动并行推进；Phase 5 只保留 build-time registry 与 contribution 渲染（§14）。
-10. **前端首批 slot 收窄**为 `side_panel` + `source.detail_section`；`toolbar_action`、`main_tab` 推迟（§6.7）。
+10. **前端首批 slot 收窄**为 `workspace.side_panel` + `source.detail_section`；`toolbar_action`、`main_tab` 推迟（§6.7）。
 11. **插件错误文案、界面词、长任务按钮忙碌态等前端红线**进入"必须遵守"清单（§8.4、§16）。
 12. **LLM 响应缓存政策归内核**：插件经 `ScheduledModelAccess` 使用统一的 validator/缓存机制，不得自建响应缓存（§5.3、§7.3）。
 13. **facade 新增面冻结与 SDK 解耦**：它是评审报告 A1 的独立整改项，Phase 0 即执行，不等插件机制（§14）。
@@ -836,7 +836,7 @@ PR gate 至少检查：
 前置：并行轨道 F 已完成核心状态域抽取。
 
 - 建立 build-time workspace registry；
-- 由 shell 渲染 `side_panel` / `source.detail_section` contribution（首批只这两个 slot）；
+- 由 shell 渲染 `workspace.side_panel` / `source.detail_section` contribution（首批只这两个 slot）；
 - 选择一个真实插件完成全栈样板；
 - 禁止插件直接接触 shell 全部 state setters。
 
@@ -961,7 +961,7 @@ frontend/tests/unit/terminology-evidence-logic.test.mjs
 | 3 | 接受 facade 新增面冻结作为前置约束？ | **接受**，且与 SDK 解耦、Phase 0 即执行 |
 | 4 | `ask.mode_provider` 首期开放？ | **不开放**，且 `synthesis.guidance` 一并推迟；两者前置条件见 §6.4 |
 | 5 | 状态型插件一律双后端；单后端实验仅限 dev/eval？ | **接受**，并叠加 §10.1 完整登记义务与 §10.2 模板表形状快速通道 |
-| 6 | 前端首批开放哪些 slot？ | **side_panel + source.detail_section**；toolbar_action/main_tab 推迟（理由见 §6.7） |
+| 6 | 前端首批开放哪些 slot？ | **workspace.side_panel + source.detail_section**；toolbar_action/main_tab 推迟（理由见 §6.7） |
 | 7 | 是否预期不可信第三方插件？ | **近期不预期**。isolated host 仅文档预留 |
 
 遗留待后续单独决策：
