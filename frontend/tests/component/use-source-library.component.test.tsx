@@ -9,7 +9,6 @@ const api = vi.hoisted(() => ({
   listSources: vi.fn(),
   getNotebookSource: vi.fn(),
   getNotebookSourceElementsPage: vi.fn(),
-  getSourceElementsPage: vi.fn(),
   parseSource: vi.fn(),
   deleteSource: vi.fn(),
 }));
