@@ -244,9 +244,9 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - **PR-F4**：KG workspace hook；
   - 状态：已完成并由 PR #559 交付；Knowledge/Schema/统一图/合并审阅与 KG build/relink/rebuild 状态已迁入 exact actor+notebook+generation owner，惰性读取、请求数、轮询节奏、权限复核与 A→B→A 收敛均保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F5**：notebook collection hook；
-  - 状态：PR #560 的实现候选已通过三路独立 review、G1 与 CI，最终合入即完成本项交付；actor-scoped rows、有界搜索、筛选/排序/视图/菜单、issued/published 清单水位、访问权对账、editor/delete、默认创建 single-flight 与删除 tombstone 已迁入 `use-notebook-collection.ts`，壳层 composite bundle、打开 notebook 请求数与 A→B→A 收敛保持；
+  - 状态：已由 PR #560 交付；三路独立 review、G1 与 CI 均已闭合。actor-scoped rows、有界搜索、筛选/排序/视图/菜单、issued/published 清单水位、访问权对账、editor/delete、默认创建 single-flight 与删除 tombstone 已迁入 `use-notebook-collection.ts`，壳层 composite bundle、打开 notebook 请求数与 A→B→A 收敛保持；
 - **PR-F6**：typed root-modal coordinator；
-  - 状态：由原 F5 自动拆出，待 F5 交付后串行实施；只协调 scoped root presentation slots、关闭/焦点/叠层冲突，不接管 Source/Ask/Report/KG/collection/sharing 等领域数据、busy、HTTP 或 timer，不引入单一全局 `activeModal` 或 command bus。
+  - 状态：实现中；root dialog 的 typed presentation lease、actor/workspace/source scope、layer/conflict/topmost 与 focus return 正迁入 `use-root-modal-coordinator.ts`；只协调 scoped root presentation slots、关闭/焦点/叠层冲突，领域 payload/API/busy/timer 保持原 owner，请求数与轮询不变，不引入单一全局 `activeModal` 或 command bus。
 
 每个 hook 都必须显式处理 notebook/user identity、cleanup/cancellation、权限重验、删除 tombstone、轮询终止；不引入新全局状态库，不直接读取其他 hook 的内部 setter。
 

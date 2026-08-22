@@ -128,13 +128,13 @@ test("copies support id without exposing raw diagnostics", async () => {
 });
 
 
-test("focuses the highlighted service, traps focus, closes, and restores opener", async () => {
+test("focuses the highlighted service, traps focus, and closes", async () => {
   const opener = document.createElement("button");
   document.body.append(opener);
   opener.focus();
   const onClose = vi.fn();
   const user = userEvent.setup();
-  const panel = renderPanel({ highlightedServiceId: "reasoner-next", onClose, returnFocusTo: opener });
+  const panel = renderPanel({ highlightedServiceId: "reasoner-next", onClose });
   const card = screen.getByRole("group", { name: "推理服务" });
   expect(card).toHaveClass("is-highlighted");
   expect(card).toHaveFocus();
@@ -147,7 +147,6 @@ test("focuses the highlighted service, traps focus, closes, and restores opener"
   expect(onClose).toHaveBeenCalledTimes(1);
 
   panel.unmount();
-  expect(opener).toHaveFocus();
   opener.remove();
 });
 

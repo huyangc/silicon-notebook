@@ -142,17 +142,19 @@ export function ModelServicePanel({
   onClose,
   testingServiceIds,
   allTesting,
-  returnFocusTo = null,
+  interactive = true,
+  zIndex,
 }: {
   status: ModelServicesStatus | null;
   highlightedServiceId: string | null;
   isAdmin: boolean;
   onTestOne: (serviceId: string) => Promise<void>;
   onTestAll: () => Promise<void>;
-  onClose: () => void;
+  onClose: (reason?: "button" | "backdrop" | "escape") => void;
   testingServiceIds: Record<string, boolean>;
   allTesting: boolean;
-  returnFocusTo?: HTMLElement | null;
+  interactive?: boolean;
+  zIndex?: number;
 }) {
   const serviceRefs = useRef<Record<string, HTMLElement | null>>({});
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -167,6 +169,7 @@ export function ModelServicePanel({
   // on `status` would re-steal keyboard focus / reset scroll on every poll.
   const statusLoaded = status !== null;
   useEffect(() => {
+    if (!interactive) return;
     const highlighted = highlightedServiceId ? serviceRefs.current[highlightedServiceId] : null;
     if (highlighted) {
       highlighted.focus();
@@ -174,11 +177,12 @@ export function ModelServicePanel({
     } else {
       closeButtonRef.current?.focus();
     }
-  }, [highlightedServiceId, statusLoaded]);
+  }, [highlightedServiceId, statusLoaded, interactive]);
 
   useEffect(() => {
+    if (!interactive) return;
     function onKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onClose("escape");
       if (event.key !== "Tab") return;
       const dialog = dialogRef.current;
       if (!dialog) return;
@@ -208,9 +212,7 @@ export function ModelServicePanel({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-
-  useEffect(() => () => { returnFocusTo?.focus(); }, [returnFocusTo]);
+  }, [onClose, interactive]);
 
   async function runOne(serviceId: string) {
     if (allTesting || testingServiceIds[serviceId]) return;
@@ -228,9 +230,12 @@ export function ModelServicePanel({
       className="utility-modal model-service-modal"
       role="dialog"
       tabIndex={-1}
-      aria-modal="true"
+      aria-modal={interactive}
+      aria-hidden={!interactive}
+      inert={interactive ? undefined : true}
       aria-labelledby="model-service-title"
-      onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}
+      style={{ zIndex }}
+      onClick={(event) => { if (event.currentTarget === event.target) onClose("backdrop"); }}
     >
       <div ref={floating.cardRef} className="utility-modal-card model-service-card" style={floating.style}>
         <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -249,7 +254,7 @@ export function ModelServicePanel({
                 {allTesting ? "测试全部中…" : "测试全部"}
               </button>
             )}
-            <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭模型服务" onClick={onClose}>×</button>
+            <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭模型服务" onClick={() => onClose("button")}>×</button>
           </div>
         </div>
         <div className="source-detail-body model-service-body">
