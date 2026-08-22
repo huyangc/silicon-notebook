@@ -86,6 +86,19 @@ test("page composes one availability owner and exactly the two canonical outlets
     ));
   }
 
+  function exactObjectProperty(object, name, expected) {
+    const entry = property(object, name);
+    assert.ok(
+      entry
+      && ts.isPropertyAssignment(entry)
+      && ts.isObjectLiteralExpression(entry.initializer),
+      `${name} must remain an explicit readonly summary object`,
+    );
+    assert.deepEqual(Object.fromEntries(entry.initializer.properties
+      .filter(ts.isPropertyAssignment)
+      .map((item) => [item.name.getText(page), item.initializer.getText(page)])), expected);
+  }
+
   assert.ok(workspacePermissions, "workspace extension permission snapshot must remain explicit");
   assert.deepEqual(Object.fromEntries(workspacePermissions.properties
     .filter(ts.isPropertyAssignment)
@@ -105,7 +118,28 @@ test("page composes one availability owner and exactly the two canonical outlets
       mode && ts.isShorthandPropertyAssignment(mode) && mode.name.getText(page) === "uiMode",
       `${slot} must receive the shell's normalized uiMode identifier`,
     );
+    exactObjectProperty(context, "actor", {
+      id: "currentUser.id",
+      username: "currentUser.username",
+      displayName: "currentUser.display_name",
+    });
+    exactObjectProperty(context, "notebook", {
+      id: "currentNotebook.id",
+      name: "currentNotebook.name",
+    });
   }
+  const workspaceSource = property(contexts.get("workspace.side_panel"), "source");
+  assert.ok(
+    workspaceSource
+    && ts.isPropertyAssignment(workspaceSource)
+    && workspaceSource.initializer.kind === ts.SyntaxKind.NullKeyword,
+    "workspace slot must receive no source identity",
+  );
+  exactObjectProperty(contexts.get("source.detail_section"), "source", {
+    id: "sourceDetail.id",
+    notebookId: "sourceDetail.notebook_id",
+    title: "sourceDetail.title",
+  });
   const sidePermissions = property(contexts.get("workspace.side_panel"), "permissions");
   assert.ok(
     sidePermissions
