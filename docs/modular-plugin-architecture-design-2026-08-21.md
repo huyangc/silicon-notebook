@@ -840,6 +840,13 @@ PR gate 至少检查：
 - 选择一个真实插件完成全栈样板；
 - 禁止插件直接接触 shell 全部 state setters。
 
+首个样板选择既有 `builtin.ask_agent_profile`：manifest 声明
+`builtin.ask_agent_profile.workspace_panel` 到 `workspace.side_panel`，前端静态组件只展示入口，
+并通过 exact actor/notebook/workspace generation 校验后的 `openUnderstanding` action 打开既有
+根层面板。availability projection 每 actor generation 共享一次；同 actor 切库不重取，
+transition 起点同步隐藏旧入口。组件点击前不读取理解数据，Agent Profile 的 API、busy、轮询和
+root-modal payload 仍由原 owner 持有。这个样板不新增 slot，也不把通用 host 变成 command bus。
+
 ### Phase 6：按真实需求决定外部插件
 
 只有出现独立团队、第三方发布、不同信任级别或独立升级需求时，再设计：isolated plugin host、RPC/streaming protocol adapter、包签名/allowlist/安装回滚、资源配额、进程级超时和健康检查、外部插件自己的存储与数据导出/删除协议。

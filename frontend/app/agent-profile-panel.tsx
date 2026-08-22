@@ -2,15 +2,10 @@
 //
 // 形态选择与理由:
 //
-// · **入口是知识图谱视图头部的第三颗按钮,不是笔记本设置里的一项。** 设置页整体是
-//   一个 `<form onSubmit>`,往里塞五个独立保存的文本框会让回车键落到别人的提交上;
-//   而图谱视图的头部本来就是无条件的顶层导航(打开它不受「有没有图谱」门控),只读
-//   成员同样进得去——这一档里「本人那一份」恰恰是只读成员唯一能写的东西。
-//
-// · **入口按钮单独导出成组件**(`UnderstandingEntryButton`),而不是在 page.tsx 里
-//   内联一个 `{flag && <button …>}`。总闸关掉时「入口不渲染」是这条特性的可见契约
-//   之一,而 page.tsx 是九千行的客户端组件、在测试里渲染不动;把这颗按钮抽出来,
-//   那条契约就能被真正渲染一遍来证明,而不是只靠读源码的守卫。
+// · 入口由 build-time workspace UI registry 的首个真实 contribution 提供。插件只
+//   委托 exact-owner `openUnderstanding` action；本文件仍是理解数据、busy 与轮询的
+//   唯一 owner，入口本身在点击前不发领域请求。只读成员同样可见，因为后端四个端点
+//   都走 notebook read，而“本人那一份”本来就允许读者维护。
 //
 // · **两档共用一个 `UnderstandingChain` 子组件**。两档的差别只有三处(标题、能不能
 //   编辑、写哪个 scope),复制两份的唯一后果是下次改保存逻辑时改漏一边。
@@ -25,7 +20,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
-import { ChevronDown, Sparkles } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
 import {
@@ -65,34 +60,6 @@ import {
   type UnderstandingResponse,
   type UnderstandingScope,
 } from "../features/agent-profile/profile-model.ts";
-
-/**
- * 知识图谱视图头部的入口按钮。
- *
- * `enabled` 关掉时**一个节点都不渲染**:后端此时四个端点写路径全部 409、GET 回
- * `enabled=false`,给一颗必然打不开的按钮只会让人以为坏了。判据来自系统配置的
- * `agent_profile_enabled`,`system-api.ts` 对缺失字段按 false 解析(旧后端没有这
- * 项能力)。
- */
-export function UnderstandingEntryButton({
-  enabled,
-  onOpen,
-}: {
-  enabled: boolean;
-  onOpen: () => void;
-}) {
-  if (!enabled) return null;
-  return (
-    <button
-      type="button"
-      className="sort-button kg-schema-button"
-      onClick={onOpen}
-      title="查看并修改 AI 对这个库形成的理解与你的检索心得"
-    >
-      <Sparkles size={16} /> AI 对这个库的理解
-    </button>
-  );
-}
 
 /**
  * 「这段话凭什么这么说」——一块的依据行。

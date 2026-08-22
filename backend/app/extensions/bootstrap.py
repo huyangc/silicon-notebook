@@ -26,6 +26,7 @@ from app.extension_sdk import (
     RetrievalHostContext,
 )
 from app.extensions.builtin import (
+    AGENT_PROFILE_WORKSPACE_UI_CAPABILITY,
     ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
     ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
@@ -60,6 +61,9 @@ from app.extensions.element_enrichment import SourceElementEnricherHost
 from app.extensions.knowledge_projection import KnowledgeCandidateProjectorHost
 from app.extensions.agent_tools import AgentToolProviderHost
 from app.extensions.report_export import ReportExporterHost
+
+
+_BOUND_AGENT_PROFILE_UI_PORT = object()
 
 
 @dataclass(frozen=True)
@@ -215,6 +219,21 @@ def default_extension_runtime() -> ExtensionRuntime:
             "report_completed_access_unavailable",
         )
 
+    def agent_profile_ui_access(_context: object | None) -> Availability:
+        # The default repository always binds the Agent Profile port.  Reuse the
+        # feature's single deployment predicate here instead of restating its
+        # Settings flag in the UI projection.  No store method, database query,
+        # model call, or user data is touched by this live decision.
+        from app.core.config import get_settings
+        from app.services.reasoning_retrieval import profile_wiring_active
+
+        if profile_wiring_active(get_settings(), _BOUND_AGENT_PROFILE_UI_PORT):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.DISABLED,
+            "agent_profile_disabled",
+        )
+
     return build_extension_runtime(
         (
             ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
@@ -229,6 +248,7 @@ def default_extension_runtime() -> ExtensionRuntime:
             PARSER_SELF_HOSTED_BUNDLE,
         ),
         capability_decisions={
+            AGENT_PROFILE_WORKSPACE_UI_CAPABILITY: agent_profile_ui_access,
             ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
                 ask_completed_access(
                     context,

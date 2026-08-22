@@ -63,6 +63,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // AST,jsdom 又不做布局(量出来的 rect 恒为 0),文本是唯一诚实的输入;组件那侧的结构前提
   // 由 tests/component/notebook-reader-actions.component.test.tsx 真渲染断言。
   "tests/guards/reader-badge-layout-guard.test.mjs",
+  // 同上，只读 globals.css：首个真实 workspace side-panel contribution 需要条件
+  // 第三列、来源栏收起态与移动端单列。jsdom 不执行 grid 布局，样式表文本是唯一
+  // 可验证输入；组件测试另行证明无可见 contribution 时 host 返回 exact null。
+  "tests/guards/extension-ui-layout-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

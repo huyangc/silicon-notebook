@@ -61,11 +61,28 @@ test("page composes one availability owner and exactly the two canonical outlets
 
   assert.deepEqual(
     ownerCalls,
-    [["currentUser?.id ?? null"]],
-    "the availability owner must bind the live authenticated actor exactly once",
+    [["currentUser?.id ?? null", "currentNotebookId"]],
+    "the availability owner must bind the live actor and visible notebook exactly once",
   );
 
   assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
+  let workspaceOutletParent = outletNodes.get("workspace.side_panel")?.parent;
+  while (workspaceOutletParent && !ts.isJsxElement(workspaceOutletParent)) {
+    workspaceOutletParent = workspaceOutletParent.parent;
+  }
+  assert.ok(
+    workspaceOutletParent
+    && workspaceOutletParent.openingElement.tagName.getText(page) === "section",
+    "workspace side outlet must remain a direct JSX child of the workspace section",
+  );
+  const workspaceClass = workspaceOutletParent.openingElement.attributes.properties.find((attribute) => (
+    ts.isJsxAttribute(attribute) && attribute.name.getText(page) === "className"
+  ));
+  assert.ok(
+    workspaceClass
+    && workspaceClass.initializer?.getText(page) === '{`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}`}',
+    "workspace side outlet direct parent must be the CSS-gated workspace grid",
+  );
   let sourceOutletAncestor = outletNodes.get("source.detail_section")?.parent;
   while (sourceOutletAncestor && sourceOutletAncestor !== sourceDetailWindow) {
     sourceOutletAncestor = sourceOutletAncestor.parent;
@@ -187,6 +204,7 @@ test("page composes one availability owner and exactly the two canonical outlets
 test("extension SDK remains static, narrow, and free of domain owners or remote loaders", async () => {
   const modules = (await appSourceModules()).filter((row) => (
     row.path.startsWith("features/extension-sdk/")
+    || row.path === "features/agent-profile/workspace-plugin.ts"
     || row.path === "use-workspace-extensions.ts"
   ));
   const forbidden = /\b(fetch\s*\(|import\s*\(|setInterval\s*\(|setTimeout\s*\(|WebSocket\b|EventSource\b|page\.tsx|useSourceLibrary|useAskSession|useReportWorkspace|useKgWorkspace|useNotebookCollection)\b/;
@@ -195,7 +213,17 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   }
   const registry = modules.find((row) => row.path === "features/extension-sdk/registry.ts");
   assert.ok(registry);
-  assert.deepEqual(importsIn(registry.module).map((row) => row.module), ["./contracts.ts"]);
+  assert.deepEqual(importsIn(registry.module).map((row) => row.module), [
+    "../agent-profile/workspace-plugin.ts",
+    "./contracts.ts",
+  ]);
+  const plugin = modules.find((row) => row.path === "features/agent-profile/workspace-plugin.ts");
+  assert.ok(plugin);
+  assert.deepEqual(importsIn(plugin.module).map((row) => row.module), [
+    "../extension-sdk/contracts.ts",
+    "lucide-react",
+    "react",
+  ]);
   const owner = modules.find((row) => row.path === "use-workspace-extensions.ts");
   assert.ok(owner);
   const ownerFunction = findFunction(owner.module, "useWorkspaceExtensions");
@@ -220,8 +248,53 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   assert.ok(
     emptyGuard
     && ts.isIfStatement(emptyGuard)
-    && emptyGuard.expression.getText(owner.module) === "registry.length === 0 || !actorId"
+    && emptyGuard.expression.getText(owner.module) === "registry.length === 0 || !actorId || !visibleOwner"
     && ts.isReturnStatement(emptyGuard.thenStatement),
     "empty registry must be the effect's first semantic statement and return before side effects",
   );
+});
+
+
+test("extension owner is wired into authentication and workspace transitions", async () => {
+  const page = await parseModule("page.tsx");
+  const calls = [];
+  function visit(node) {
+    if (ts.isCallExpression(node)) {
+      const target = node.expression.getText(page);
+      if (target.startsWith("workspaceExtensions.")) {
+        calls.push({ target, arguments: node.arguments.map((argument) => argument.getText(page)) });
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(page);
+  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.activateActor").length, 2);
+  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.beginNotebookTransition").length, 1);
+  assert.ok(calls.some((row) => row.target === "workspaceExtensions.finishNotebookTransition"
+    && row.arguments.join("|") === "workspaceExtensionTransition|opened"));
+  assert.ok(calls.filter((row) => row.target === "workspaceExtensions.leaveWorkspace").length >= 2);
+  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.owns").length, 0);
+  const actions = [];
+  function visitActions(node) {
+    if (
+      ts.isVariableDeclaration(node)
+      && node.name.getText(page) === "workspaceExtensionActions"
+      && node.initializer
+      && ts.isCallExpression(node.initializer)
+    ) actions.push(node.initializer);
+    ts.forEachChild(node, visitActions);
+  }
+  visitActions(page);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].expression.getText(page), "createOwnedWorkspaceExtensionActions");
+  assert.deepEqual(actions[0].arguments.map((argument) => argument.getText(page)), [
+    "workspaceExtensions.owner",
+    "workspaceExtensions.owns",
+    '() => {\n      rootModals.open("understanding", rootModals.captureWorkspaceOwner());\n    }',
+  ]);
+  const outlets = jsxElements(page, "WorkspaceExtensionOutlet");
+  for (const outlet of outlets) {
+    assert.equal(outlet.bindings.ownerKey, "workspaceExtensions.ownerKey");
+    assert.equal(outlet.bindings.actions, "workspaceExtensionActions");
+  }
 });

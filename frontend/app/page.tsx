@@ -45,7 +45,7 @@ import {
 } from "./knowhow-navigation";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { KgAnalysisView } from "./kg-analysis-view";
-import { AgentProfilePanel, UnderstandingEntryButton } from "./agent-profile-panel";
+import { AgentProfilePanel } from "./agent-profile-panel";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import { withoutDecidedMerge } from "./kg-merge-model";
 import {
@@ -208,6 +208,7 @@ import {
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
 import { useWorkspaceExtensions } from "./use-workspace-extensions";
+import { createOwnedWorkspaceExtensionActions } from "../features/extension-sdk/actions";
 import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/registry";
 import { sourceElementDomId } from "./source-detail-state";
@@ -788,10 +789,6 @@ export default function Home() {
   const [reportMaxSubqueriesPerSection, setReportMaxSubqueriesPerSection] = useState(
     DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   );
-  // 「AI 对这个库的理解」的部署总闸。默认 false:配置还没读回来、或后端根本没有这项
-  // 能力(旧后端缺字段,`system-api.ts` 同样解析成 false)时不给入口——那颗按钮打开的
-  // 每个端点在关闸时都是 409 / enabled=false。
-  const [agentProfileEnabled, setAgentProfileEnabled] = useState(false);
   // 「我的回答偏好」入口的部署总闸(账户菜单)。默认 true——反方向:配置还没读回来、
   // 或后端是没升级到这一批的旧版本时仍给入口(system-api.ts 同样把字段缺失解析成
   // true);真正的写路径仍由 PATCH /me/search-profile 的 409 兜底。
@@ -882,7 +879,11 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
   ).canWriteNotebook;
-  const workspaceExtensionProjection = useWorkspaceExtensions(currentUser?.id ?? null);
+  const workspaceExtensions = useWorkspaceExtensions(
+    currentUser?.id ?? null,
+    currentNotebookId,
+  );
+  const workspaceExtensionProjection = workspaceExtensions.projection;
   const sourceLibrary = useSourceLibrary({
     actorId: currentUser?.id ?? null,
     canWriteSources,
@@ -1110,8 +1111,8 @@ export default function Home() {
   const trackedKgJobId = kgWorkspace.graph.trackedKgJobId;
   const kgRefreshBusy = kgWorkspace.graph.rebuilding;
   const relinkingKg = kgWorkspace.graph.relinking;
-  // 「AI 对这个库的理解」弹窗(P1-T7)。入口在知识图谱视图头部,弹窗本身与「图谱
-  // Schema」一样渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
+  // 「AI 对这个库的理解」弹窗(P1-T7)。入口由 workspace side-panel 插件提供，
+  // 弹窗本身仍渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
   // 它的业务数据仍由 AgentProfilePanel 自持；根层是否呈现及切库同步失效由
   // useRootModalCoordinator 的 workspace lease 负责。
   const rootModals = useRootModalCoordinator({
@@ -1663,6 +1664,7 @@ export default function Home() {
     fetchMe()
       .then(async (u) => {
         notebookCollection.activateActor(u.id);
+        workspaceExtensions.activateActor(u.id);
         rootModals.activateActor(u.id);
         kgWorkspace.activateActor(u.id);
         reportWorkspace.activateActor(u.id);
@@ -2476,7 +2478,6 @@ export default function Home() {
       setSourceImageMaxBytes(systemConfiguration.source_image_max_bytes);
       setSourceImageMaxPerSource(systemConfiguration.source_image_max_per_source);
       setSourceImagesEnabled(systemConfiguration.source_images_enabled);
-      setAgentProfileEnabled(systemConfiguration.agent_profile_enabled);
       setUserSearchProfileEnabled(systemConfiguration.user_search_profile_enabled);
     }
     if (docTypeOptions.length === 0) {
@@ -2509,6 +2510,11 @@ export default function Home() {
     closeKnowhow();
     const workspaceEpoch = ++workspaceEpochRef.current;
     const askActorId = actorIdOverride ?? currentUser?.id ?? "";
+    const workspaceExtensionTransition = workspaceExtensions.beginNotebookTransition({
+      actorId: askActorId,
+      notebookId,
+      workspaceEpoch,
+    });
     sourceLibrary.beginTransition();
     const reportTransition = reportWorkspace.beginNotebookTransition();
     const kgTransition = kgWorkspace.beginNotebookTransition();
@@ -2524,7 +2530,11 @@ export default function Home() {
       notebookId,
       workspaceEpoch,
     });
-    if (!askTransition) {
+    if (!askTransition || !workspaceExtensionTransition) {
+      if (askTransition) askSession.finishNotebookTransition(askTransition);
+      if (workspaceExtensionTransition) {
+        workspaceExtensions.finishNotebookTransition(workspaceExtensionTransition, false);
+      }
       rootModals.finishWorkspaceTransition(rootModalTransition, null);
       reportWorkspace.finishNotebookTransition(reportTransition, false);
       kgWorkspace.finishNotebookTransition(kgTransition);
@@ -2581,6 +2591,7 @@ export default function Home() {
       return true;
     } finally {
       askSession.finishNotebookTransition(askTransition);
+      workspaceExtensions.finishNotebookTransition(workspaceExtensionTransition, opened);
       reportWorkspace.finishNotebookTransition(reportTransition, opened);
       kgWorkspace.finishNotebookTransition(kgTransition, opened ? openedNotebook : null);
       rootModals.finishWorkspaceTransition(
@@ -2632,6 +2643,7 @@ export default function Home() {
 
   function showCollection() {
     rootModals.leaveWorkspace();
+    workspaceExtensions.leaveWorkspace();
     closeKnowhow();
     workspaceEpochRef.current += 1;
     sourceLibrary.beginTransition();
@@ -4356,6 +4368,7 @@ export default function Home() {
     workspaceEpochRef.current += 1;
     notebookCollection.leaveActor();
     rootModals.leaveActor();
+    workspaceExtensions.leaveWorkspace();
     titleSaveOperationRef.current = null;
     setTitleSaveInFlight(false);
     sourceLibrary.beginTransition();
@@ -4493,6 +4506,13 @@ export default function Home() {
     sourceWrite: false,
     systemAdmin: capabilities.canManageGlobalSchemas,
   } as const;
+  const workspaceExtensionActions = createOwnedWorkspaceExtensionActions(
+    workspaceExtensions.owner,
+    workspaceExtensions.owns,
+    () => {
+      rootModals.open("understanding", rootModals.captureWorkspaceOwner());
+    },
+  );
   // 内容管理入口的**唯一**判据(群组知识共享 P2)。此前这些入口写的是 `!isReader`,
   // 而 P2 把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」——再按 access 判
   // 就会让组管理员看到一个 API 全部允许、界面却全部藏起来的只读工作区。
@@ -4567,6 +4587,7 @@ export default function Home() {
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
       notebookCollection.activateActor(u.id);
+      workspaceExtensions.activateActor(u.id);
       rootModals.activateActor(u.id);
       kgWorkspace.activateActor(u.id);
       reportWorkspace.activateActor(u.id);
@@ -5323,11 +5344,13 @@ export default function Home() {
               </button>
             )}
 
-            {currentUser && currentNotebook && (
+            {currentUser && currentNotebook && workspaceExtensions.ownerKey && (
               <WorkspaceExtensionOutlet
                 slot="workspace.side_panel"
                 registry={WORKSPACE_UI_CONTRIBUTIONS}
                 projection={workspaceExtensionProjection}
+                ownerKey={workspaceExtensions.ownerKey}
+                actions={workspaceExtensionActions}
                 context={{
                   slot: "workspace.side_panel",
                   actor: {
@@ -6492,11 +6515,13 @@ export default function Home() {
                   reviewSeq={catalogReviewSeq}
                 />
               )}
-              {currentUser && currentNotebook && sourceDetail && (
+              {currentUser && currentNotebook && sourceDetail && workspaceExtensions.ownerKey && (
                 <WorkspaceExtensionOutlet
                   slot="source.detail_section"
                   registry={WORKSPACE_UI_CONTRIBUTIONS}
                   projection={workspaceExtensionProjection}
+                  ownerKey={workspaceExtensions.ownerKey}
+                  actions={workspaceExtensionActions}
                   context={{
                     slot: "source.detail_section",
                     actor: {
@@ -7075,18 +7100,6 @@ export default function Home() {
               >
                 <Database size={16} /> 图谱 Schema
               </button>
-              {/* 「AI 对这个库的理解」(P1-T7)。后端四个端点都走 require_notebook_read,
-                  只读成员也能看、也能改属于自己的那一份,所以这里同样不做 admin 门控;
-                  部署总闸关掉时按钮整个不渲染(判据在组件内部)。 */}
-              <UnderstandingEntryButton
-                enabled={agentProfileEnabled}
-                onOpen={() => {
-                  // 关掉可能还开着的知识关系图弹窗(同层 z-60):它若压在本弹窗
-                  // 之上,唯一入口点开的就是一个摸不到的面板(codex R9 P1)。
-                  closeKgView();
-                  rootModals.open("understanding", rootModals.captureWorkspaceOwner());
-                }}
-              />
               <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
             </div>
           </div>

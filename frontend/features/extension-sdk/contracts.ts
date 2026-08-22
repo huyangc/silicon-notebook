@@ -46,8 +46,13 @@ export type WorkspaceExtensionContext = Readonly<{
   permissions: WorkspaceExtensionPermissionSnapshot;
 }>;
 
+export type WorkspaceExtensionActions = Readonly<{
+  openUnderstanding(): void;
+}>;
+
 export type WorkspaceExtensionProps = Readonly<{
   context: WorkspaceExtensionContext;
+  actions: WorkspaceExtensionActions;
 }>;
 
 export type WorkspaceUiContribution = Readonly<{

@@ -1,4 +1,5 @@
 import type { WorkspaceUiContribution } from "./contracts.ts";
+import { AgentProfileWorkspacePanel } from "../agent-profile/workspace-plugin.ts";
 
 
 const STABLE_ID = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -41,6 +42,13 @@ export function defineWorkspaceUiRegistry(
 }
 
 
-// PR-14 deliberately ships no real UI plugin.  PR-15 will add the first
-// full-stack contribution and must update the cross-stack parity contract.
-export const WORKSPACE_UI_CONTRIBUTIONS = defineWorkspaceUiRegistry([]);
+export const WORKSPACE_UI_CONTRIBUTIONS = defineWorkspaceUiRegistry([{
+  id: "builtin.ask_agent_profile.workspace_panel",
+  pluginId: "builtin.ask_agent_profile",
+  pluginVersion: "1.0.0",
+  capability: "ui.agent_profile.available",
+  slot: "workspace.side_panel",
+  permission: "notebook:read",
+  mode: "all",
+  Component: AgentProfileWorkspacePanel,
+}]);

@@ -19,10 +19,15 @@ from app.extension_sdk import (
     ExtensionRegistrar,
     ExtensionResultStatus,
     ObserverReceipt,
+    UiContributionDeclaration,
 )
 
 
 ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID = "builtin.ask_agent_profile"
+AGENT_PROFILE_WORKSPACE_UI_CAPABILITY = "ui.agent_profile.available"
+AGENT_PROFILE_WORKSPACE_UI_CONTRIBUTION_ID = (
+    "builtin.ask_agent_profile.workspace_panel"
+)
 ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID = (
     "builtin.ask_retrieval_experience"
 )
@@ -68,6 +73,11 @@ class AgentProfileCompletedBundle:
         trust="builtin",
         contributions=(_AGENT_PROFILE,),
         requires=(ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,),
+        ui_contributions=(UiContributionDeclaration(
+            id=AGENT_PROFILE_WORKSPACE_UI_CONTRIBUTION_ID,
+            slot="workspace.side_panel",
+            capability=AGENT_PROFILE_WORKSPACE_UI_CAPABILITY,
+        ),),
     )
 
     @staticmethod
@@ -127,6 +137,8 @@ ASK_SEARCH_PROFILE_COMPLETED_BUNDLE = SearchProfileCompletedBundle()
 __all__ = [
     "ASK_AGENT_PROFILE_COMPLETED_BUNDLE",
     "ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID",
+    "AGENT_PROFILE_WORKSPACE_UI_CAPABILITY",
+    "AGENT_PROFILE_WORKSPACE_UI_CONTRIBUTION_ID",
     "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE",
     "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID",
     "ASK_SEARCH_PROFILE_COMPLETED_BUNDLE",
