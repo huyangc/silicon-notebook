@@ -5132,15 +5132,17 @@ export default function Home() {
                     ① **不再是工作区的第三列**——一整列只放一个入口,其余整列空白,
                        还把问答面板挤窄;这里它与「添加来源」「整理知识图谱」同属
                        笔记本级动作,视觉上本来就是一排。
-                    ② **落在 .sources-body 的固定区**(`.source-list` 之前):那个
-                       列表靠 flex:1 1 auto / overflow:auto 自己滚,插在它之后会让
-                       入口跟着来源列表滚走。
+                    ② **落在 .sources-body 的固定区、且排在 `.source-list` 之前**:
+                       唯一会滚的容器是 `.source-list` 自己(flex:1 1 auto / overflow:auto),
+                       只有放进它内部才会跟着来源行滚走;排在它之前是为了与「添加来源」
+                       同排、短视口下也不会先被裁掉(列表才是让位的那个)。
                     ③ **排在检索范围之上**:从 .source-scope-toolbar 往下(检索范围 →
                        参考库 → 本库来源)是一整组「范围」,插进中间会把它切断。
                     只读成员同样看得见——后端四个端点都走 require_notebook_read,
                     「本人那一份」恰是只读成员唯一能写的东西(可见性判据仍在 host
                     的 permission/availability 门里,不在这里)。来源栏收起时入口随
-                    整栏一起隐藏:这是收起来源栏本来的语义,已登记接受。 */}
+                    整栏一起隐藏(视觉隐藏、仍可 Tab 聚焦——与整个来源栏既有机制一致):
+                    这是收起来源栏本来的语义,已登记接受。 */}
                 {currentUser && currentNotebook && workspaceExtensions.ownerKey && (
                   <WorkspaceExtensionOutlet
                     slot="workspace.side_panel"

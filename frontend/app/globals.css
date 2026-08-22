@@ -1090,13 +1090,18 @@ button {
   min-width: 0;
 }
 
-/* 一行式入口:视觉全部由 `.button.secondary` 提供(系统边框/圆角/字重),这里只补
-   排版。刻意不写任何颜色字面量——需要颜色时取 :root 的 token。 */
+/* 一行式入口:视觉全部由 `.button.secondary` 提供(系统边框/圆角/字重/背景),这里
+   **只补排版**。刻意不写任何颜色字面量——需要颜色时取 :root 的 token。也刻意不写
+   :hover:系统 secondary 按钮本来就没有单独的悬停态,而且 `.agent-profile-workspace-plugin:hover`
+   与 `.button.secondary` 特异度相同(0,2,0)、源序在前,写了也会被盖掉(评审实测)。
+   `min-width: 0` 是因为它是 outlet(grid)的 item:不解开 `min-width:auto`,长文案会
+   把按钮撑出 outlet 而不是让 span 省略。 */
 .agent-profile-workspace-plugin {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   font-size: 13px;
   text-align: left;
 }
@@ -1112,10 +1117,6 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.agent-profile-workspace-plugin:hover {
-  background: var(--soft);
 }
 
 .workspace-panel {
