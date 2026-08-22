@@ -221,13 +221,9 @@ test("AgentProfilePanel 随 currentNotebookId 整体重挂（key，不只靠关�
 });
 
 
-test("从知识图谱打开理解弹窗时先关闭全屏图谱", () => {
-  // F4 删除了死的第二套 relation-graph modal。统一图谱是全屏层且 DOM 在理解弹窗
-  // 之后，因此唯一安全入口必须先交给 KG owner 关闭图谱，再打开理解弹窗。
-  const pageText = page.text ?? page.source ?? "";
-  assert.match(
-    pageText,
-    /<UnderstandingEntryButton[\s\S]*?onOpen=\{\(\) => \{[\s\S]*?closeKgView\(\);[\s\S]*?rootModals\.open\("understanding", rootModals\.captureWorkspaceOwner\(\)\)/,
-  );
-  assert.match(pageText, /function closeKgView\(\)[\s\S]*?kgWorkspace\.closeGraph\(\)/);
+test("理解入口只由 workspace 插件提供，旧知识图谱入口已移除", async () => {
+  assert.equal(jsxElements(page, "UnderstandingEntryButton").length, 0);
+  const plugin = await parseModule("../features/agent-profile/workspace-plugin.ts");
+  assert.ok(stringLiterals(plugin).includes("AI 对这个库的理解"));
+  assert.ok(callsIn(plugin).includes("actions.openUnderstanding"));
 });

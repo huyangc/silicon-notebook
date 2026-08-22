@@ -30,10 +30,7 @@ import {
   rebuildUnderstanding,
   saveUnderstandingBlock,
 } from "../../features/agent-profile/profile-api.ts";
-import {
-  AgentProfilePanel,
-  UnderstandingEntryButton,
-} from "../../app/agent-profile-panel.tsx";
+import { AgentProfilePanel } from "../../app/agent-profile-panel.tsx";
 import { humanizedError } from "../../app/errors.ts";
 import type {
   UnderstandingBlock,
@@ -493,25 +490,6 @@ test("依据只属于 AI 整理出来的块：人自己写的那段不挂来源"
   expect(await screen.findByRole("heading", { name: "AI 对这个库的理解" })).toBeInTheDocument();
   // 人写的那段话,依据是他自己;再挂一排来源会让人以为那是系统给他的论据。
   expect(screen.queryByRole("button", { name: "src-a" })).not.toBeInTheDocument();
-});
-
-test("总闸关掉：入口按钮一个节点都不渲染", () => {
-  const { container, rerender } = render(
-    <UnderstandingEntryButton enabled={false} onOpen={vi.fn()} />,
-  );
-  expect(container).toBeEmptyDOMElement();
-
-  rerender(<UnderstandingEntryButton enabled onOpen={vi.fn()} />);
-  expect(screen.getByRole("button", { name: /AI 对这个库的理解/ })).toBeInTheDocument();
-});
-
-test("入口按钮点开时把开关交回调用方（弹窗由工作区在根层渲染）", async () => {
-  const user = userEvent.setup();
-  const onOpen = vi.fn();
-  render(<UnderstandingEntryButton enabled onOpen={onOpen} />);
-
-  await user.click(screen.getByRole("button", { name: /AI 对这个库的理解/ }));
-  expect(onOpen).toHaveBeenCalledOnce();
 });
 
 // ---------------------------------------------------------- 「Agent 记录」(P3-T5)

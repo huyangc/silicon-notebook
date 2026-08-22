@@ -12,7 +12,6 @@ from typing import Literal
 
 WorkspaceUiSlot = Literal["workspace.side_panel", "source.detail_section"]
 
-
 @dataclass(frozen=True)
 class UiContributionDeclaration:
     id: str

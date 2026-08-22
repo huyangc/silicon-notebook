@@ -1,4 +1,12 @@
 {
   "api_version": "1",
-  "contributions": []
+  "contributions": [
+    {
+      "plugin_id": "builtin.ask_agent_profile",
+      "version": "1.0.0",
+      "contribution_id": "builtin.ask_agent_profile.workspace_panel",
+      "slot": "workspace.side_panel",
+      "capability": "ui.agent_profile.available"
+    }
+  ]
 }

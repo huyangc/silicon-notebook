@@ -2,6 +2,7 @@
 
 import type {
   SystemExtensionProjection,
+  WorkspaceExtensionActions,
   WorkspaceExtensionContext,
   WorkspaceExtensionSlot,
   WorkspaceUiContribution,
@@ -14,6 +15,8 @@ type WorkspaceExtensionOutletProps = Readonly<{
   registry: readonly WorkspaceUiContribution[];
   projection: SystemExtensionProjection | null;
   context: WorkspaceExtensionContext;
+  actions: WorkspaceExtensionActions;
+  ownerKey: string;
 }>;
 
 
@@ -22,6 +25,8 @@ export function WorkspaceExtensionOutlet({
   registry,
   projection,
   context,
+  actions,
+  ownerKey,
 }: WorkspaceExtensionOutletProps) {
   const visible = visibleWorkspaceUiContributions(registry, projection, {
     slot,
@@ -29,10 +34,15 @@ export function WorkspaceExtensionOutlet({
     permissions: context.permissions,
   });
   if (visible.length === 0) return null;
-  return <>{visible.map((contribution) => (
-    <contribution.Component
-      key={`${context.actor.id}:${context.notebook.id}:${context.source?.id ?? ""}:${contribution.id}`}
-      context={context}
-    />
-  ))}</>;
+  return (
+    <aside className={`workspace-extension-outlet workspace-extension-outlet-${slot.replace(".", "-")}`}>
+      {visible.map((contribution) => (
+        <contribution.Component
+          key={`${ownerKey}:${context.source?.id ?? ""}:${contribution.id}`}
+          context={context}
+          actions={actions}
+        />
+      ))}
+    </aside>
+  );
 }

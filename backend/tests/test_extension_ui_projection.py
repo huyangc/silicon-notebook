@@ -136,11 +136,42 @@ def _auth(client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
-def test_system_extensions_is_authenticated_and_default_registry_is_empty(client):
+def test_system_extensions_is_authenticated_and_projects_agent_profile_ui(client):
     assert client.get("/api/system/extensions").status_code == 401
     response = client.get("/api/system/extensions", headers=_auth(client))
     assert response.status_code == 200
-    assert response.json() == {"api_version": "1", "extensions": []}
+    assert response.json() == {
+        "api_version": "1",
+        "extensions": [{
+            "plugin_id": "builtin.ask_agent_profile",
+            "display_name": "Ask agent-profile completion",
+            "version": "1.0.0",
+            "contribution_id": "builtin.ask_agent_profile.workspace_panel",
+            "available": True,
+            "unavailable_reason": None,
+        }],
+    }
+
+
+def test_agent_profile_ui_projection_reuses_live_wiring_predicate(client, monkeypatch):
+    from app.services import reasoning_retrieval
+
+    headers = _auth(client)
+    monkeypatch.setattr(
+        reasoning_retrieval,
+        "profile_wiring_active",
+        lambda _settings, _store: False,
+    )
+    response = client.get("/api/system/extensions", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["extensions"] == [{
+        "plugin_id": "builtin.ask_agent_profile",
+        "display_name": "Ask agent-profile completion",
+        "version": "1.0.0",
+        "contribution_id": "builtin.ask_agent_profile.workspace_panel",
+        "available": False,
+        "unavailable_reason": "disabled",
+    }]
 
 
 def test_system_extensions_reads_exact_app_registry_and_live_decision(client):

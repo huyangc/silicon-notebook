@@ -266,6 +266,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - 同 PR 提供 backend capability/API 与 frontend contribution；
 - 插件组件只拿窄 API/navigation/context，不能拿 workspace 全部 setters；
 - 完成后再评估是否需要新的 slot，不预建 `main_tab` / `toolbar_action`。
+- 状态：实现中。选择既有 `builtin.ask_agent_profile`，把原知识图谱头部的“AI 对这个库的理解”入口迁到 `workspace.side_panel`；使用独立实时 UI capability、每 actor generation 一次的 metadata projection、exact actor/notebook/workspace owner 与窄 `openUnderstanding` action。插件点击前零领域 I/O，仍由既有 Agent Profile owner/modal 执行读取与轮询；不新增 slot、endpoint、依赖或全局 store。
 
 ## 5. Subagent review 组织
 
