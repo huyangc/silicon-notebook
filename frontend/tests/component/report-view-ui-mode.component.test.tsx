@@ -1,10 +1,32 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
-import { ReportsPanel } from "../../app/report-view";
+import { downloadReportArchive, ReportsPanel } from "../../app/report-view";
 import { reportWorkspaceFixture } from "./report-workspace-fixture";
 
 afterEach(cleanup);
+
+test("归档下载保留固定文件名并回收临时 URL", () => {
+  const createObjectURL = vi.fn(() => "blob:reports");
+  const revokeObjectURL = vi.fn();
+  Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+  const anchor = document.createElement("a");
+  const click = vi.spyOn(anchor, "click").mockImplementation(() => undefined);
+  const createElement = vi.spyOn(document, "createElement").mockReturnValue(anchor);
+
+  const blob = new Blob(["zip"]);
+  downloadReportArchive(blob);
+
+  expect(createObjectURL).toHaveBeenCalledWith(blob);
+  expect(anchor.download).toBe("reports.zip");
+  expect(anchor.href).toBe("blob:reports");
+  expect(click).toHaveBeenCalledOnce();
+  expect(revokeObjectURL).toHaveBeenCalledWith("blob:reports");
+  createElement.mockRestore();
+  Reflect.deleteProperty(URL, "createObjectURL");
+  Reflect.deleteProperty(URL, "revokeObjectURL");
+});
 
 function renderPanel(uiMode?: "auto" | "advanced") {
   render(

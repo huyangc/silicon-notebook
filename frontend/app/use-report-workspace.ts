@@ -7,7 +7,7 @@ import {
   confirmReportIntent,
   createReport,
   deleteReport,
-  downloadReportsZip,
+  fetchReportsZip,
   generateReport,
   getReport,
   getReportShare,
@@ -48,6 +48,7 @@ type ReportPolicy = {
 type ReportEffects = {
   notify: (message: string) => void;
   downloadMarkdown: (report: ReportDetailT) => void;
+  downloadArchive: (blob: Blob) => void;
   announceShareLink: (token: string) => Promise<void> | void;
 };
 
@@ -674,8 +675,9 @@ export function useReportWorkspace({
     if (!owner || zipBusy || selectedIds.size === 0) return;
     setZipBusy(true);
     try {
-      await downloadReportsZip(owner.notebookId, Array.from(selectedIds));
+      const blob = await fetchReportsZip(owner.notebookId, Array.from(selectedIds));
       if (!owns(owner)) return;
+      effectsRef.current.downloadArchive(blob);
       setSelectMode(false);
       setSelectedIds(new Set());
     } catch (error) {

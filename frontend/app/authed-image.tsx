@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchInternalAssetBlob } from "./source-api";
 
 // 图片来源资产需鉴权(GET /assets/{id} 走 require_notebook_read),裸 <img src> 会 401;
-// 走 fetch→blob→objectURL(与 downloadReportsZip 同款鉴权 fetch 惯用法),卸载时 revoke 避免泄漏。
+// 走 fetch→blob→objectURL(与报告归档下载同款鉴权 fetch 惯用法),卸载时 revoke 避免泄漏。
 //
 // 原本只内联在 page.tsx 的来源详情里；PR-2 T6 把它拆成共享组件，供 Ask 清单结果卡
 // （answer-panel.tsx 的 CollectionResultCard，图片元素条目）复用同一套鉴权取图逻辑,

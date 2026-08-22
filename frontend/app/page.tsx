@@ -217,7 +217,7 @@ import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
 import { Pagination } from "./Pagination";
-import { downloadReportMarkdown, ReportsPanel } from "./report-view";
+import { downloadReportArchive, downloadReportMarkdown, ReportsPanel } from "./report-view";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
@@ -2534,6 +2534,7 @@ export default function Home() {
     effects: {
       notify: setToast,
       downloadMarkdown: downloadReportMarkdown,
+      downloadArchive: downloadReportArchive,
       announceShareLink: async (token) => {
         const link = buildPublicReportLink(token, window.location.origin);
         const copied = await copyTextSafely(link);
