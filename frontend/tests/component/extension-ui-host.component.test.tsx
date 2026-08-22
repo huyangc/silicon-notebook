@@ -93,7 +93,7 @@ test("real production contribution is lazy, mode-all and reader-visible, with on
   const view = render(<StrictMode><Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} onOpen={onOpen} /></StrictMode>);
   expect(load).not.toHaveBeenCalled();
   act(() => commit(ref, "user-a", "notebook-a", 1));
-  expect(await screen.findByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "AI 对这个库的理解" })).toBeInTheDocument();
   expect(load).toHaveBeenCalledTimes(1);
   expect(onOpen).not.toHaveBeenCalled();
   expect(screen.getAllByLabelText("AI 对这个库的理解")).toHaveLength(1);
@@ -101,7 +101,7 @@ test("real production contribution is lazy, mode-all and reader-visible, with on
   expect(screen.getByLabelText("AI 对这个库的理解").closest("aside")).toBe(sidePanel);
   expect(view.container.querySelectorAll(".workspace-extension-outlet-workspace-side_panel")).toHaveLength(1);
   expect(sidePanel?.parentElement).toBe(view.container);
-  await user.click(screen.getByRole("button", { name: "打开理解面板" }));
+  await user.click(screen.getByRole("button", { name: "AI 对这个库的理解" }));
   expect(onOpen).toHaveBeenCalledOnce();
 });
 
@@ -132,9 +132,9 @@ test("permission denial unmounts the real plugin without refetching", async () =
   const ref = { current: null as WorkspaceExtensions | null };
   const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => commit(ref, "user-a", "notebook-a", 1));
-  await screen.findByRole("button", { name: "打开理解面板" });
+  await screen.findByRole("button", { name: "AI 对这个库的理解" });
   view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} notebookRead={false} />);
-  expect(screen.queryByRole("button", { name: "打开理解面板" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "AI 对这个库的理解" })).toBeNull();
   expect(view.container.querySelector(".workspace-extension-outlet-workspace-side_panel")).toBeNull();
   expect(load).toHaveBeenCalledTimes(1);
 });
@@ -157,7 +157,7 @@ test.each([
   const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => commit(ref, "user-a", "notebook-a", 1));
   await act(async () => { await Promise.resolve(); });
-  expect(screen.queryByRole("button", { name: "打开理解面板" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "AI 对这个库的理解" })).toBeNull();
   expect(view.container.querySelector(".workspace-extension-outlet-workspace-side_panel")).toBeNull();
   expect(view.container).toBeEmptyDOMElement();
   expect(load).toHaveBeenCalledTimes(1);
@@ -168,20 +168,20 @@ test("same-actor A-B-A transitions hide synchronously, reuse projection and reje
   const ref = { current: null as WorkspaceExtensions | null };
   const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => commit(ref, "user-a", "notebook-a", 1));
-  await screen.findByRole("button", { name: "打开理解面板" });
+  await screen.findByRole("button", { name: "AI 对这个库的理解" });
   const oldOwner = ref.current!.owner!;
   let next: ReturnType<WorkspaceExtensions["beginNotebookTransition"]>;
   act(() => { next = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-b", workspaceEpoch: 2 }); });
-  expect(screen.queryByRole("button", { name: "打开理解面板" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "AI 对这个库的理解" })).toBeNull();
   expect(ref.current!.owns(oldOwner)).toBe(false);
   view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-b" load={load} />);
   act(() => ref.current!.finishNotebookTransition(next!, true));
-  expect(await screen.findByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "AI 对这个库的理解" })).toBeInTheDocument();
   let returned!: ReturnType<WorkspaceExtensions["beginNotebookTransition"]>;
   act(() => { returned = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 3 }); });
   view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => ref.current!.finishNotebookTransition(returned!, true));
-  expect(await screen.findByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "AI 对这个库的理解" })).toBeInTheDocument();
   expect(ref.current!.owns(oldOwner)).toBe(false);
   expect(load).toHaveBeenCalledTimes(1);
 });
@@ -191,7 +191,7 @@ test("a late older workspace finish cannot replace the latest successful transit
   const ref = { current: null as WorkspaceExtensions | null };
   const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => commit(ref, "user-a", "notebook-a", 1));
-  await screen.findByRole("button", { name: "打开理解面板" });
+  await screen.findByRole("button", { name: "AI 对这个库的理解" });
 
   let older!: ReturnType<WorkspaceExtensions["beginNotebookTransition"]>;
   act(() => { older = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-b", workspaceEpoch: 2 }); });
@@ -200,11 +200,11 @@ test("a late older workspace finish cannot replace the latest successful transit
   act(() => { latest = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 3 }); });
   view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => ref.current!.finishNotebookTransition(latest!, true));
-  expect(await screen.findByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "AI 对这个库的理解" })).toBeInTheDocument();
   const currentOwner = ref.current!.owner!;
 
   act(() => ref.current!.finishNotebookTransition(older!, true));
-  expect(screen.getByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "AI 对这个库的理解" })).toBeInTheDocument();
   expect(ref.current!.owner).toBe(currentOwner);
   expect(ref.current!.owns(currentOwner)).toBe(true);
   expect(ref.current!.owns(older!)).toBe(false);
@@ -216,12 +216,12 @@ test("failed transition remains suspended", async () => {
   const ref = { current: null as WorkspaceExtensions | null };
   render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
   act(() => commit(ref, "user-a", "notebook-a", 1));
-  await screen.findByRole("button", { name: "打开理解面板" });
+  await screen.findByRole("button", { name: "AI 对这个库的理解" });
   act(() => {
     const transition = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-b", workspaceEpoch: 2 });
     ref.current!.finishNotebookTransition(transition!, false);
   });
-  expect(screen.queryByRole("button", { name: "打开理解面板" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "AI 对这个库的理解" })).toBeNull();
 });
 
 test("actor A-B-A rejects the first actor response and issues one request per generation", async () => {

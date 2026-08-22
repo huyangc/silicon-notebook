@@ -66,22 +66,27 @@ test("page composes one availability owner and exactly the two canonical outlets
   );
 
   assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
+  // The side outlet is an entry row inside the source panel's **non-scrolling**
+  // area, not a third workspace column (that column left an empty 190px strip and
+  // squeezed the chat panel). Its direct JSX parent must therefore stay the
+  // sources body: `.source-list` below it owns `flex:1 1 auto/overflow:auto`, so a
+  // sibling placed after the list would scroll away with the source rows.
   let workspaceOutletParent = outletNodes.get("workspace.side_panel")?.parent;
   while (workspaceOutletParent && !ts.isJsxElement(workspaceOutletParent)) {
     workspaceOutletParent = workspaceOutletParent.parent;
   }
   assert.ok(
     workspaceOutletParent
-    && workspaceOutletParent.openingElement.tagName.getText(page) === "section",
-    "workspace side outlet must remain a direct JSX child of the workspace section",
+    && workspaceOutletParent.openingElement.tagName.getText(page) === "div",
+    "workspace side outlet must remain a direct JSX child of the sources body",
   );
   const workspaceClass = workspaceOutletParent.openingElement.attributes.properties.find((attribute) => (
     ts.isJsxAttribute(attribute) && attribute.name.getText(page) === "className"
   ));
   assert.ok(
     workspaceClass
-    && workspaceClass.initializer?.getText(page) === '{`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}`}',
-    "workspace side outlet direct parent must be the CSS-gated workspace grid",
+    && workspaceClass.initializer?.getText(page) === '"workspace-panel-body sources-body"',
+    "workspace side outlet direct parent must be the fixed sources body, above the scrolling source list",
   );
   let sourceOutletAncestor = outletNodes.get("source.detail_section")?.parent;
   while (sourceOutletAncestor && sourceOutletAncestor !== sourceDetailWindow) {
