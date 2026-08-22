@@ -66,6 +66,23 @@ test("page composes one availability owner and exactly the two canonical outlets
   );
 
   assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
+  let workspaceOutletParent = outletNodes.get("workspace.side_panel")?.parent;
+  while (workspaceOutletParent && !ts.isJsxElement(workspaceOutletParent)) {
+    workspaceOutletParent = workspaceOutletParent.parent;
+  }
+  assert.ok(
+    workspaceOutletParent
+    && workspaceOutletParent.openingElement.tagName.getText(page) === "section",
+    "workspace side outlet must remain a direct JSX child of the workspace section",
+  );
+  const workspaceClass = workspaceOutletParent.openingElement.attributes.properties.find((attribute) => (
+    ts.isJsxAttribute(attribute) && attribute.name.getText(page) === "className"
+  ));
+  assert.ok(
+    workspaceClass
+    && workspaceClass.initializer?.getText(page) === '{`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}`}',
+    "workspace side outlet direct parent must be the CSS-gated workspace grid",
+  );
   let sourceOutletAncestor = outletNodes.get("source.detail_section")?.parent;
   while (sourceOutletAncestor && sourceOutletAncestor !== sourceDetailWindow) {
     sourceOutletAncestor = sourceOutletAncestor.parent;
@@ -256,7 +273,25 @@ test("extension owner is wired into authentication and workspace transitions", a
   assert.ok(calls.some((row) => row.target === "workspaceExtensions.finishNotebookTransition"
     && row.arguments.join("|") === "workspaceExtensionTransition|opened"));
   assert.ok(calls.filter((row) => row.target === "workspaceExtensions.leaveWorkspace").length >= 2);
-  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.owns").length, 1);
+  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.owns").length, 0);
+  const actions = [];
+  function visitActions(node) {
+    if (
+      ts.isVariableDeclaration(node)
+      && node.name.getText(page) === "workspaceExtensionActions"
+      && node.initializer
+      && ts.isCallExpression(node.initializer)
+    ) actions.push(node.initializer);
+    ts.forEachChild(node, visitActions);
+  }
+  visitActions(page);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].expression.getText(page), "createOwnedWorkspaceExtensionActions");
+  assert.deepEqual(actions[0].arguments.map((argument) => argument.getText(page)), [
+    "workspaceExtensions.owner",
+    "workspaceExtensions.owns",
+    '() => {\n      rootModals.open("understanding", rootModals.captureWorkspaceOwner());\n    }',
+  ]);
   const outlets = jsxElements(page, "WorkspaceExtensionOutlet");
   for (const outlet of outlets) {
     assert.equal(outlet.bindings.ownerKey, "workspaceExtensions.ownerKey");

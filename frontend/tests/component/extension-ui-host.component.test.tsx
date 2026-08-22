@@ -5,6 +5,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { useWorkspaceExtensions, type WorkspaceExtensions } from "../../app/use-workspace-extensions";
 import { WorkspaceExtensionOutlet } from "../../features/extension-sdk/host";
+import { createOwnedWorkspaceExtensionActions } from "../../features/extension-sdk/actions";
 import { WORKSPACE_UI_CONTRIBUTIONS, defineWorkspaceUiRegistry } from "../../features/extension-sdk/registry";
 import type { SystemExtensionProjection } from "../../features/extension-sdk/contracts";
 
@@ -96,12 +97,34 @@ test("real production contribution is lazy, mode-all and reader-visible, with on
   expect(load).toHaveBeenCalledTimes(1);
   expect(onOpen).not.toHaveBeenCalled();
   expect(screen.getAllByLabelText("AI 对这个库的理解")).toHaveLength(1);
-  expect(screen.getByLabelText("AI 对这个库的理解").closest("aside")).toBe(
-    view.container.querySelector(".workspace-extension-outlet-workspace-side_panel"),
-  );
+  const sidePanel = view.container.querySelector(".workspace-extension-outlet-workspace-side_panel");
+  expect(screen.getByLabelText("AI 对这个库的理解").closest("aside")).toBe(sidePanel);
   expect(view.container.querySelectorAll(".workspace-extension-outlet-workspace-side_panel")).toHaveLength(1);
+  expect(sidePanel?.parentElement).toBe(view.container);
   await user.click(screen.getByRole("button", { name: "打开理解面板" }));
   expect(onOpen).toHaveBeenCalledOnce();
+});
+
+test("owned actions reject an A-G1 callback after A-B-A and admit the current A-G3 callback", () => {
+  const openUnderstanding = vi.fn();
+  const generation = { current: 1 };
+  const oldAction = createOwnedWorkspaceExtensionActions(
+    { actorId: "user-a", notebookId: "notebook-a", generation: 1 },
+    (owner) => owner.generation === generation.current,
+    openUnderstanding,
+  );
+  generation.current = 2;
+  generation.current = 3;
+  oldAction.openUnderstanding();
+  expect(openUnderstanding).not.toHaveBeenCalled();
+
+  const currentAction = createOwnedWorkspaceExtensionActions(
+    { actorId: "user-a", notebookId: "notebook-a", generation: 3 },
+    (owner) => owner.generation === generation.current,
+    openUnderstanding,
+  );
+  currentAction.openUnderstanding();
+  expect(openUnderstanding).toHaveBeenCalledOnce();
 });
 
 test("permission denial unmounts the real plugin without refetching", async () => {
