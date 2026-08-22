@@ -137,15 +137,20 @@ def _report_view_source() -> str:
             / "frontend" / "app" / "report-view.tsx").read_text(encoding="utf-8")
 
 
+def _report_model_source() -> str:
+    return (Path(__file__).resolve().parents[2]
+            / "frontend" / "app" / "report-model.ts").read_text(encoding="utf-8")
+
+
 def test_the_depth_table_matches_the_slider_in_the_frontend():
     """档位下标必须与前端滑块的 DEPTHS 逐档对应。
 
     这两张表是同一件事的两半:前端按下标发 depth 值,后端按 depth 值选档位。
     只改一侧的话,用户选的第 5 档会在后端解析成第 4 档,而两边各自的测试都绿。
     """
-    source = _report_view_source()
-    match = re.search(r"const DEPTHS = \[([^\]]+)\];", source)
-    assert match, "前端 report-view.tsx 的 DEPTHS 表找不到了"
+    source = _report_model_source()
+    match = re.search(r"REPORT_DEPTHS = \[([^\]]+)\]", source)
+    assert match, "前端 report-model.ts 的 REPORT_DEPTHS 表找不到了"
     depths = [int(value.strip()) for value in match.group(1).split(",")]
 
     assert depths == [threshold for threshold, _ in REPORT_DEPTH_EFFORTS]

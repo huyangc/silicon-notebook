@@ -114,6 +114,7 @@ import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
 import { useSourceLibrary } from "./use-source-library.ts";
 import { useAskSession } from "./use-ask-session.ts";
+import { useReportWorkspace } from "./use-report-workspace.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -140,7 +141,7 @@ import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks, searchNotebooksBounded } from "./ask-api";
 import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
-import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
+import { buildPublicReportLink } from "./public-report";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import { prepareKgFocus } from "./kg-focus";
 import {
@@ -216,7 +217,7 @@ import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
 import { Pagination } from "./Pagination";
-import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
+import { downloadReportMarkdown, ReportsPanel } from "./report-view";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
@@ -1240,7 +1241,6 @@ export default function Home() {
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
   const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
-  const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   const latestScaleIndexDoneEventKey = latestScaleIndexDoneKey(
     pending.doneItems,
@@ -1999,6 +1999,7 @@ export default function Home() {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then(async (u) => {
+        reportWorkspace.activateActor(u.id);
         askSession.activateActor(u.id);
         sourceLibrary.activateActor(u.id);
         setCurrentUser(u);
@@ -2515,6 +2516,33 @@ export default function Home() {
       ensureAskVisible: () => setChatMode("ask"),
     },
   });
+  const reportWorkspace = useReportWorkspace({
+    actorId: currentUser?.id ?? null,
+    notebookId: currentNotebookId,
+    active: chatMode === "reports",
+    policy: {
+      advanced: isAdvanced(uiMode),
+      canManageReports: workspaceCapabilities(
+        currentNotebook?.access,
+        currentUser?.role ?? "",
+        currentNotebook?.can_manage_content ?? false,
+      ).canManageReports,
+      creationDisabled: sourceScopeBlocked,
+      sourceScope: currentSourceScope,
+      baseScope: currentBaseScope,
+    },
+    effects: {
+      notify: setToast,
+      downloadMarkdown: downloadReportMarkdown,
+      announceShareLink: async (token) => {
+        const link = buildPublicReportLink(token, window.location.origin);
+        const copied = await copyTextSafely(link);
+        setToast(copied
+          ? `分享链接已复制：${link}`
+          : `分享链接：${link}（自动复制失败，请手动复制）`);
+      },
+    },
+  });
   const {
     question,
     turns,
@@ -2981,6 +3009,7 @@ export default function Home() {
     setInfoModal(null);
     const workspaceEpoch = ++workspaceEpochRef.current;
     sourceLibrary.beginTransition();
+    const reportTransition = reportWorkspace.beginNotebookTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
     setUploadBusy(false);
@@ -3001,7 +3030,11 @@ export default function Home() {
       notebookId,
       workspaceEpoch,
     });
-    if (!askTransition) return false;
+    if (!askTransition) {
+      reportWorkspace.finishNotebookTransition(reportTransition, false);
+      return false;
+    }
+    let opened = false;
     try {
       memoryLinksAbortRef.current?.abort();
       memoryLinksAbortRef.current = null;
@@ -3056,9 +3089,11 @@ export default function Home() {
       window.history.replaceState(null, "", notebookHash(notebookId));
     }
       window.scrollTo(0, 0);
+      opened = true;
       return true;
     } finally {
       askSession.finishNotebookTransition(askTransition);
+      reportWorkspace.finishNotebookTransition(reportTransition, opened);
     }
   }
 
@@ -3081,7 +3116,7 @@ export default function Home() {
     if (!item.notebook_id || !await openNotebook(item.notebook_id)) return;
     if (item.type === "report_outline") {
       switchChatMode("reports");
-      if (item.report_id) setPendingReportFocusId(item.report_id);
+      if (item.report_id) reportWorkspace.focusReport(item.report_id);
     } else if (item.type === "governance") {
       if (item.subtype === "edge") { await openEdgeReviewQueue(item.notebook_id); }
       else if (item.subtype === "promotion") { await openPromoQueue(); }
@@ -3113,6 +3148,7 @@ export default function Home() {
     setUploadBusy(false);
     setUrlBusy(false);
     askSession.leaveWorkspace();
+    reportWorkspace.leaveWorkspace();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -5487,6 +5523,7 @@ export default function Home() {
     urlRequestOwnerRef.current = null;
     activeNotebookIdRef.current = null;
     askSession.abortForLogout();
+    reportWorkspace.leaveWorkspace();
     memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -5700,6 +5737,7 @@ export default function Home() {
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
+      reportWorkspace.activateActor(u.id);
       askSession.activateActor(u.id);
       sourceLibrary.activateActor(u.id);
       setCurrentUser(u);
@@ -6669,28 +6707,9 @@ export default function Home() {
                 {chatMode === "reports" && currentNotebookId && (
                   <ReportsPanel
                     notebookId={currentNotebookId}
-                    listReports={listReports}
-                    getReport={getReport}
-                    createReport={(nb, reportQuestion, depth) => createReport(
-                      nb, reportQuestion, depth, currentSourceScope, currentBaseScope,
-                      // 高级模式恒 false（沿用既有的手动确认/大纲编辑流程）；自动模式下
-                      // 问题清晰时服务端自动确认意图 + 自动接受默认大纲直接生成，有歧义
-                      // 仍停在 intent_ready，前端照常显示补充问题信息卡。
-                      !isAdvanced(uiMode),
-                    )}
+                    workspace={reportWorkspace}
                     uiMode={uiMode}
-                    confirmReportIntent={confirmReportIntent}
-                    updateReportOutline={updateReportOutline}
-                    generateReport={generateReport}
-                    cancelReport={cancelReport}
-                    deleteReport={deleteReport}
-                    shareReport={shareReport}
-                    getReportShare={getReportShare}
-                    unshareReport={unshareReport}
-                    downloadReportsZip={downloadReportsZip}
                     setToast={setToast}
-                    focusReportId={pendingReportFocusId}
-                    onFocusConsumed={() => setPendingReportFocusId(null)}
                     readOnly={!capabilities.canManageReports}
                     creationDisabled={sourceScopeBlocked}
                     creationDisabledReason={isAdvanced(uiMode)

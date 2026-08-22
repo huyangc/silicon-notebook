@@ -135,8 +135,8 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 2,
     reason: "reconnected Ask job diagnostics pass through toUserMessage before fixed user copy",
   },
-  "report-view.tsx|<module>.ReportsPanel|diagnostic|error": {
-    count: 1,
+  "use-report-workspace.ts|<module>.useReportWorkspace|diagnostic|error": {
+    count: 3,
     reason: "report failure detail is condition-only and bounded-log-only",
   },
 });
@@ -401,7 +401,7 @@ test("migrated clients use the shared transport boundary", async () => {
 
 test("model and report clients retain bounded diagnostics and scenario copy", async () => {
   const modelServices = await parseModule("model-services.ts");
-  const report = await parseModule("report-view.tsx");
+  const report = await parseModule("use-report-workspace.ts");
   const guardedModelClients = [
     "fetchModelServiceStatus",
     "testSystemModelService",

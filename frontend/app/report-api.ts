@@ -1,6 +1,5 @@
 import { requestBlob, requestJson, requestVoid } from "./api-client.ts";
-import { countCodePoints } from "./input-limits.ts";
-import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
+import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-model.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
@@ -16,14 +15,11 @@ const options = { tag: "api", unauthorized: "clear-and-reload" as const };
  * 这条对报告尤其承重：公开分享页把 `reports.question` **原样**发给匿名访客，所以
  * 「不截断」只有在创建那一刻就挡住超长问题时才成立。
  */
-export const REPORT_INPUT_LIMITS = {
-  questionMaxChars: 4000,
-} as const;
-
 // 尺子搬到了 `input-limits.ts`（问答那半护栏要用同一把，而让 `ask-api` import
 // `report-api` 只为借一个纯函数会造出一条假的模块依赖）。这里继续导出，既有
 // 引用方与单测无需改动。
-export { countCodePoints };
+export { countCodePoints } from "./input-limits.ts";
+export { REPORT_INPUT_LIMITS, reportQuestionLimitHint } from "./report-model.ts";
 
 /**
  * 超限时的提示文案；没超返回 `null`。
@@ -33,13 +29,6 @@ export { countCodePoints };
  * 说一声，正是「用户编辑的数据不得静默截断」要防的（codex #525 R3）。留着原文，
  * 用户自己精简，或者去别处取回被他放弃的那段。
  */
-export const reportQuestionLimitHint = (question: string): string | null => {
-  const used = countCodePoints(question);
-  const max = REPORT_INPUT_LIMITS.questionMaxChars;
-  if (used > max) return `研究问题超出 ${max} 字上限（当前 ${used} 字），请精简后再开始`;
-  return null;
-};
-
 export const createReport = (
   nb: string,
   question: string,
