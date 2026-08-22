@@ -172,6 +172,44 @@ def test_empty_wrong_kind_untrusted_and_multiple_provider_topologies_fail_closed
         build_extension_registry((bundle, second))
 
 
+def test_discovery_magic_methods_are_normalized_before_shape_comparison():
+    class PoisonCallable:
+        def __call__(self, *_args):
+            return (REPORT_EXPORT_FORMAT_MARKDOWN,)
+
+        @property
+        def __name__(self):
+            raise _HardAbort("secret inspect getter")
+
+    class PoisonInspectProvider:
+        formats = PoisonCallable()
+
+        def export(self, _context):
+            raise AssertionError("not reached")
+
+    with pytest.raises(ExtensionRegistryError) as inspect_error:
+        _host(_Bundle(PoisonInspectProvider()))
+    assert str(inspect_error.value) == "invalid report exporter"
+    assert "secret" not in str(inspect_error.value)
+
+    class PoisonString(str):
+        def __eq__(self, _other):
+            raise _HardAbort("secret format equality")
+
+        def __ne__(self, _other):
+            raise _HardAbort("secret format inequality")
+
+    class PoisonFormatProvider(_Provider):
+        @staticmethod
+        def formats():
+            return (PoisonString(REPORT_EXPORT_FORMAT_MARKDOWN),)
+
+    with pytest.raises(ExtensionRegistryError) as format_error:
+        _host(_Bundle(PoisonFormatProvider()))
+    assert str(format_error.value) == "invalid report exporter formats"
+    assert "secret" not in str(format_error.value)
+
+
 def test_unavailable_provider_is_not_invoked():
     provider = _Provider()
     bundle = _Bundle(
@@ -217,6 +255,23 @@ def test_availability_baseexception_rechecks_connection_and_hides_text():
         )
     assert "secret" not in str(caught.value)
     assert provider.calls == []
+
+
+def test_availability_cannot_rewrite_the_host_source_snapshot():
+    provider = _Provider()
+    source = _sources()[0]
+
+    def availability(_context):
+        object.__setattr__(source, "content_md", "AVAILABILITY-REWRITE")
+        return Availability.available()
+
+    rendered = _host(
+        _Bundle(provider, availability=availability)
+    ).export_application(
+        ReportExporterCall((source,), "markdown", _Probe())
+    )
+    assert rendered[0].content == "第一份\r\n[k1]\n"
+    assert provider.calls[0].reports[0].content_md == "第一份\r\n[k1]\n"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "reordered", "clone", "changed"])

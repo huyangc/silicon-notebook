@@ -75,16 +75,16 @@ class ReportExporterHost:
         try:
             formats = getattr(implementation, "formats", None)
             export = getattr(implementation, "export", None)
+            valid_callables = callable(formats) and callable(export)
+            coroutine_callable = (
+                inspect.iscoroutinefunction(formats)
+                or inspect.iscoroutinefunction(export)
+            )
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             raise ExtensionRegistryError("invalid report exporter") from exc
-        if (
-            not callable(formats)
-            or not callable(export)
-            or inspect.iscoroutinefunction(formats)
-            or inspect.iscoroutinefunction(export)
-        ):
+        if not valid_callables or coroutine_callable:
             raise ExtensionRegistryError("invalid report exporter")
         try:
             declared_formats = formats()
@@ -94,8 +94,8 @@ class ReportExporterHost:
             raise ExtensionRegistryError("report exporter discovery failed") from exc
         if (
             type(declared_formats) is not tuple
-            or declared_formats != REPORT_EXPORT_FORMATS
             or any(type(value) is not str for value in declared_formats)
+            or declared_formats != REPORT_EXPORT_FORMATS
         ):
             raise ExtensionRegistryError("invalid report exporter formats")
         self._provider = _FrozenProvider(
@@ -113,42 +113,48 @@ class ReportExporterHost:
         if provider is None:
             raise ReportExportError("report_exporter_unavailable")
         self._validate_call(call)
-        self._assert_connection_clear(call.connection_probe)
+        sources = tuple(
+            (source.report_id, source.question, source.content_md)
+            for source in call.sources
+        )
+        format_id = call.format_id
+        connection_probe = call.connection_probe
+        self._assert_connection_clear(connection_probe)
         try:
             availability = self._registry.availability(
                 provider.contribution_id,
                 ReportExporterAvailabilityContext(
                     provider.plugin_id,
                     provider.contribution_id,
-                    call.format_id,
+                    format_id,
                 ),
             )
         except BaseException as exc:
-            self._assert_connection_clear(call.connection_probe)
+            self._assert_connection_clear(connection_probe)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             raise ReportExportError("report_exporter_unavailable") from None
-        self._assert_connection_clear(call.connection_probe)
+        self._assert_connection_clear(connection_probe)
         if availability.status is not AvailabilityStatus.AVAILABLE:
             raise ReportExportError("report_exporter_unavailable")
 
-        refs = tuple(ReportExportItemRef() for _ in call.sources)
+        refs = tuple(ReportExportItemRef() for _ in sources)
         views = tuple(
-            ReportExportView(ref, source.content_md)
-            for ref, source in zip(refs, call.sources, strict=True)
+            ReportExportView(ref, source[2])
+            for ref, source in zip(refs, sources, strict=True)
         )
-        source_contents = tuple(source.content_md for source in call.sources)
-        context = ReportExporterContext(call.format_id, views)
-        self._assert_connection_clear(call.connection_probe)
+        source_contents = tuple(source[2] for source in sources)
+        context = ReportExporterContext(format_id, views)
+        self._assert_connection_clear(connection_probe)
         try:
             result = provider.export(context)
         except BaseException as exc:
-            self._assert_connection_clear(call.connection_probe)
+            self._assert_connection_clear(connection_probe)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             raise ReportExportError("report_exporter_failed") from None
-        self._assert_connection_clear(call.connection_probe)
-        return self._validate_result(result, refs, source_contents, call.format_id)
+        self._assert_connection_clear(connection_probe)
+        return self._validate_result(result, refs, source_contents, format_id)
 
     @staticmethod
     def _validate_call(call: object) -> None:
