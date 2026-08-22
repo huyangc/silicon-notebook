@@ -69,7 +69,7 @@ test("page composes one availability owner and exactly the two canonical outlets
     notebookConfigure: "capabilities.canConfigureNotebook",
     sourceRead: "false",
     sourceWrite: "false",
-    systemAdmin: 'currentUser?.role === "admin"',
+    systemAdmin: "capabilities.canManageGlobalSchemas",
   });
   for (const slot of ["workspace.side_panel", "source.detail_section"]) {
     const context = contexts.get(slot);

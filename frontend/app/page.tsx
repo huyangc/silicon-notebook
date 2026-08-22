@@ -4491,7 +4491,7 @@ export default function Home() {
     notebookConfigure: capabilities.canConfigureNotebook,
     sourceRead: false,
     sourceWrite: false,
-    systemAdmin: currentUser?.role === "admin",
+    systemAdmin: capabilities.canManageGlobalSchemas,
   } as const;
   // 内容管理入口的**唯一**判据(群组知识共享 P2)。此前这些入口写的是 `!isReader`,
   // 而 P2 把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」——再按 access 判
