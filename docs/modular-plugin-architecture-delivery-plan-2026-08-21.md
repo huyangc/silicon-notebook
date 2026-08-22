@@ -246,7 +246,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - **PR-F5**：notebook collection hook；
   - 状态：已由 PR #560 交付；三路独立 review、G1 与 CI 均已闭合。actor-scoped rows、有界搜索、筛选/排序/视图/菜单、issued/published 清单水位、访问权对账、editor/delete、默认创建 single-flight 与删除 tombstone 已迁入 `use-notebook-collection.ts`，壳层 composite bundle、打开 notebook 请求数与 A→B→A 收敛保持；
 - **PR-F6**：typed root-modal coordinator；
-  - 状态：实现中；root dialog 的 typed presentation lease、actor/workspace/source scope、layer/conflict/topmost 与 focus return 正迁入 `use-root-modal-coordinator.ts`；只协调 scoped root presentation slots、关闭/焦点/叠层冲突，领域 payload/API/busy/timer 保持原 owner，请求数与轮询不变，不引入单一全局 `activeModal` 或 command bus。
+  - 状态：已由 PR #561 交付；root dialog 的 typed presentation lease、actor/workspace/source scope、layer/conflict/topmost、covered inert/ARIA 与 post-commit focus return 已迁入 `use-root-modal-coordinator.ts`，领域 payload/API/busy/timer 仍归原 owner，请求数与轮询保持且未引入单一全局 `activeModal` 或 command bus；三路独立 review、hostile mutation、G1 与首轮 CI 均已闭合。
 
 每个 hook 都必须显式处理 notebook/user identity、cleanup/cancellation、权限重验、删除 tombstone、轮询终止；不引入新全局状态库，不直接读取其他 hook 的内部 setter。
 
