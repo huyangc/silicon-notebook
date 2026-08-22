@@ -4255,7 +4255,7 @@ export default function Home() {
         sourceLibrary.closeSourceDetail();
         return;
       case "info":
-        closeInfoModal();
+        setInfoModal(null);
         return;
       case "model-service":
         setHighlightedModelServiceId(null);

@@ -57,6 +57,8 @@ test("workspace transitions invalidate root slots before old-domain work and clo
     closeText,
     /case "source-add":[\s\S]*?resetStagedIntake\(\);[\s\S]*?setLinkSectionOpen\(false\);[\s\S]*?sourceModalDismissedRef\.current = true;[\s\S]*?return;/,
   );
+  assert.match(closeText, /case "info":[\s\S]*?setInfoModal\(null\);[\s\S]*?return;/);
+  assert.doesNotMatch(closeText, /case "info":[\s\S]*?closeInfoModal\(\);[\s\S]*?return;/);
 });
 
 test("authenticated bootstrap activates modal authority before publishing the user", () => {
