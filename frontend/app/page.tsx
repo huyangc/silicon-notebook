@@ -8307,7 +8307,7 @@ export default function Home() {
                   >
                     {sourceDetailBaseLabel}
                   </span>
-                ) : (
+                ) : !readOnlyWorkspace ? (
                 <div className="source-detail-actions">
                   <button
                     className="icon-button subtle-icon"
@@ -8332,7 +8332,7 @@ export default function Home() {
                       : <Trash2 size={20} />}
                   </button>
                 </div>
-                )}
+                ) : null}
               </div>
               <section className="source-guide-card">
                 <div className="source-guide-heading">
