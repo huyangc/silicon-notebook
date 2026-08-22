@@ -499,9 +499,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     }
   }
 
-  async function openEditor(notebookId: string): Promise<void> {
+  async function openEditor(notebookId: string): Promise<boolean> {
     const owner = captureOwner();
-    if (!owner || !rowIsOwner(notebookId)) return;
+    if (!owner || !rowIsOwner(notebookId)) return false;
     const operation = {};
     editorOperationRef.current = operation;
     try {
@@ -509,9 +509,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         listMountable(notebookId),
         listBases(notebookId),
       ]);
-      if (!owns(owner) || editorOperationRef.current !== operation || !rowIsOwner(notebookId)) return;
+      if (!owns(owner) || editorOperationRef.current !== operation || !rowIsOwner(notebookId)) return false;
       const target = currentRow(notebookId);
-      if (!target) return;
+      if (!target) return false;
       setEditor({
         owner,
         target,
@@ -521,8 +521,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         busy: false,
       });
       closeMenu();
+      return true;
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
+      return false;
     }
   }
 
@@ -573,20 +575,22 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     }
   }
 
-  async function openDelete(notebookId: string): Promise<void> {
+  async function openDelete(notebookId: string): Promise<boolean> {
     const owner = captureOwner();
-    if (!owner || !rowIsOwner(notebookId)) return;
+    if (!owner || !rowIsOwner(notebookId)) return false;
     const operation = {};
     deleteOperationRef.current = operation;
     try {
       const { count } = await mountedByCount(notebookId);
-      if (!owns(owner) || deleteOperationRef.current !== operation || !rowIsOwner(notebookId)) return;
+      if (!owns(owner) || deleteOperationRef.current !== operation || !rowIsOwner(notebookId)) return false;
       const target = currentRow(notebookId);
-      if (!target) return;
+      if (!target) return false;
       setDeletion({ owner, target, mountedByCount: count, busy: false });
       closeMenu();
+      return true;
     } catch (error) {
       if (owns(owner) && deleteOperationRef.current === operation) effectsRef.current.reportError(error);
+      return false;
     }
   }
 

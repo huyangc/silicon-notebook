@@ -239,8 +239,15 @@ test("弹窗的两个关闭入口（× 与点遮罩）走同一个 handler，且
   );
   const close = findFunctionIn(page, "Home", "closeSourceModal");
   const targets = callSitesIn(close).map((call) => call.target);
-  assert.ok(targets.includes("cancelBundleChoice"), "closeSourceModal 必须结清挂起的勾选 resolver");
-  assert.ok(targets.includes("resetStagedIntake"), "closeSourceModal 必须清空暂存态");
+  assert.ok(targets.includes("rootModals.requestClose"), "closeSourceModal 必须交给唯一 modal close sink");
+  const sink = findFunctionIn(page, "Home", "handleRootModalClosed");
+  const sinkTargets = callSitesIn(sink).map((call) => call.target);
+  assert.ok(sinkTargets.includes("resetStagedIntake"), "source-add close sink 必须清空暂存态");
+  const reset = findFunctionIn(page, "Home", "resetStagedIntake");
+  assert.ok(
+    callSitesIn(reset).some((call) => call.target === "cancelBundleChoice"),
+    "统一清空点必须结清挂起的勾选 resolver",
+  );
 });
 
 // 评审 F2：用户关弹窗（resetStagedIntake）或切库（openNotebook）之后，还在飞的
@@ -248,7 +255,7 @@ test("弹窗的两个关闭入口（× 与点遮罩）走同一个 handler，且
 // 暂存列表。bundleIntakeGenerationRef 是这条契约的世代计数器——两个清理路径各自
 // 递增，每条异步链在自己起跑那一刻捕获当前世代，落盘前重新比对。
 
-test("世代计数器在两个清理路径（关弹窗/清空/上传成功、切库）各自递增", () => {
+test("世代计数器由统一 close sink 递增，切库同步撤销 source-add lease", () => {
   const reset = findFunctionIn(page, "Home", "resetStagedIntake");
   assert.ok(
     assignmentsIn(reset).some(
@@ -258,29 +265,26 @@ test("世代计数器在两个清理路径（关弹窗/清空/上传成功、切
       + "新建笔记本共用的统一清空点，不递增就等于让这条契约名存实亡",
   );
 
-  const open = findFunctionIn(page, "Home", "openNotebook");
-  assert.ok(
-    assignmentsIn(open).some(
-      (a) => a.target === "bundleIntakeGenerationRef.current" && a.operator === "+=",
-    ),
-    "openNotebook（切库）同样是暂存批次的清理路径，必须递增同一个世代计数器，"
-      + "否则旧库还在飞的解包链完成时会把结果写进新库打开的弹窗",
-  );
+  const openTargets = callSitesIn(findFunctionIn(page, "Home", "openNotebook")).map((call) => call.target);
+  assert.ok(openTargets.includes("rootModals.beginWorkspaceTransition"));
+  const sinkTargets = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
+    .map((call) => call.target);
+  assert.ok(sinkTargets.includes("resetStagedIntake"));
 });
 
-test("openNotebook 结清挂起的 bundleChoice 勾选（不只是递增世代）", () => {
+test("openNotebook 经 root transition 进入统一 close sink，结清 bundleChoice", () => {
   // codex #518 R3 P2：世代递增只挡了迟到落盘——挂起的 bundleChoice 面板、它的
   // resolver 与忙碌栈帧不会因此自动消失。深链/浏览器导航切库时弹窗未必被
   // closeSourceModal 关过，旧笔记本的勾选面板会悬在新笔记本上，把「添加来源」
   // 入口一直锁死到用户手动确认/取消一个已经不指向当前笔记本的面板。
-  const open = findFunctionIn(page, "Home", "openNotebook");
-  const targets = callSitesIn(open).map((call) => call.target);
-  assert.ok(
-    targets.includes("cancelBundleChoice"),
-    "openNotebook 必须调用 cancelBundleChoice（与关闭弹窗同一条结清路径：resolve"
-      + " 挂起 resolver、清空 bundleChoice、把忙碌文案同步回当前栈顶），否则切库后"
-      + "「添加来源」的文件选择器会被上一个笔记本的勾选面板永久锁死",
-  );
+  const openTargets = callSitesIn(findFunctionIn(page, "Home", "openNotebook")).map((call) => call.target);
+  assert.ok(openTargets.includes("rootModals.beginWorkspaceTransition"));
+  const sinkTargets = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
+    .map((call) => call.target);
+  assert.ok(sinkTargets.includes("resetStagedIntake"));
+  const resetTargets = callSitesIn(findFunctionIn(page, "Home", "resetStagedIntake"))
+    .map((call) => call.target);
+  assert.ok(resetTargets.includes("cancelBundleChoice"));
 });
 
 test("resetStagedIntake 结清挂起的 bundleChoice 勾选（不只是递增世代）", () => {
@@ -288,8 +292,8 @@ test("resetStagedIntake 结清挂起的 bundleChoice 勾选（不只是递增世
   // 统一清空点（不像 openNotebook 有自己单独的 cancelBundleChoice 调用）。只递增
   // 世代同样挡不住已经挂起的勾选面板——用户点确认时 stageBundleCandidates 会拿它
   // 捕获的旧世代去比对，把这次确认静默丢弃，面板却还悬在弹窗里看不出发生了什么。
-  // 结构性不变量：两个递增 bundleIntakeGenerationRef 的路径（本函数、openNotebook）
-  // 都必须调用 cancelBundleChoice。
+  // 结构性不变量：所有 source-add 清理（含切库的 root transition）都收口到本函数，
+  // 所以世代递增与 cancelBundleChoice 只能成对发生。
   const reset = findFunctionIn(page, "Home", "resetStagedIntake");
   const targets = callSitesIn(reset).map((call) => call.target);
   assert.ok(

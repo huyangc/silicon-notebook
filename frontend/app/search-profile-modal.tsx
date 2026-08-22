@@ -33,6 +33,8 @@ type SearchProfileModalProps = {
   currentUser: AuthUser;
   onSaved: (user: AuthUser) => void;
   onClose: () => void;
+  interactive?: boolean;
+  zIndex?: number;
 };
 
 const DEFAULT_LANGUAGE: AnswerLanguage = "auto";
@@ -51,7 +53,7 @@ const DEFAULT_DETAIL: AnswerDetail = "auto";
  * 交还给后续的自动归纳）；两者对后端语义不同，草稿状态因此必须分开表达，不能
  * 用「当前显示值 == 默认值」反推用户有没有碰过这个字段。
  */
-export function SearchProfileModal({ currentUser, onSaved, onClose }: SearchProfileModalProps) {
+export function SearchProfileModal({ currentUser, onSaved, onClose, interactive = true, zIndex }: SearchProfileModalProps) {
   const parsed = parseSearchProfile(currentUser.search_profile);
 
   const [drafts, setDrafts] = useState<SearchProfileDrafts>(emptyDrafts());
@@ -175,7 +177,7 @@ export function SearchProfileModal({ currentUser, onSaved, onClose }: SearchProf
   }
 
   return (
-    <section className="utility-modal" role="dialog" aria-modal="true">
+    <section className="utility-modal" role="dialog" aria-modal={interactive} aria-hidden={!interactive} inert={interactive ? undefined : true} style={{ zIndex }}>
       <FloatingModalCard storageKey="searchProfile.window" className="utility-modal-card narrow search-profile-modal">
         {(floating) => (<>
         <div className="source-modal-header" {...floating.dragHandleProps}>

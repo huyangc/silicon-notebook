@@ -8,6 +8,8 @@ import { FloatingModalCard } from "./floating-modal-card.tsx";
 
 type PasswordChangeModalProps = {
   onClose: () => void;
+  interactive?: boolean;
+  zIndex?: number;
 };
 
 /**
@@ -15,7 +17,7 @@ type PasswordChangeModalProps = {
  * FloatingModalCard.utility-modal-card.narrow > source-modal-header + 拖动手柄)。
  * 自持表单状态,不依赖外部 page 上下文。
  */
-export function PasswordChangeModal({ onClose }: PasswordChangeModalProps) {
+export function PasswordChangeModal({ onClose, interactive = true, zIndex }: PasswordChangeModalProps) {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -49,7 +51,7 @@ export function PasswordChangeModal({ onClose }: PasswordChangeModalProps) {
   }
 
   return (
-    <section className="utility-modal" role="dialog" aria-modal="true">
+    <section className="utility-modal" role="dialog" aria-modal={interactive} aria-hidden={!interactive} inert={interactive ? undefined : true} style={{ zIndex }}>
       <FloatingModalCard storageKey="passwordChange.window" className="utility-modal-card narrow">
         {(floating) => (<>
         <div className="source-modal-header" {...floating.dragHandleProps}>

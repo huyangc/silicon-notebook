@@ -41,6 +41,32 @@ test("uses a conventional accessible close control", async () => {
 });
 
 
+test("removes a covered source dialog from the interactive accessibility tree", () => {
+  const { container, rerender } = render(
+    <SourceDetailWindow onClose={() => undefined} interactive={false} zIndex={61}>
+      <p>详情正文</p>
+    </SourceDetailWindow>,
+  );
+
+  const covered = container.querySelector<HTMLElement>('[role="dialog"]');
+  expect(covered).not.toBeNull();
+  expect(covered).toHaveAttribute("aria-hidden", "true");
+  expect(covered).toHaveAttribute("inert");
+  expect(covered).toHaveAttribute("aria-modal", "false");
+  expect(covered).toHaveStyle({ zIndex: "61" });
+
+  rerender(
+    <SourceDetailWindow onClose={() => undefined} interactive>
+      <p>详情正文</p>
+    </SourceDetailWindow>,
+  );
+  const active = screen.getByRole("dialog", { name: "来源" });
+  expect(active).not.toHaveAttribute("aria-hidden", "true");
+  expect(active).not.toHaveAttribute("inert");
+  expect(active).toHaveAttribute("aria-modal", "true");
+});
+
+
 test("drags the dialog card from its header", () => {
   vi.stubGlobal("PointerEvent", TestPointerEvent);
   let pendingFrame: FrameRequestCallback | null = null;

@@ -365,7 +365,7 @@ export function useSourceLibrary({
 
   async function openSourceById(sourceId: string, elementId = "") {
     const owner = ownerRef.current;
-    if (!owner) return;
+    if (!owner) return false;
     const requestGeneration = ++detailRequestRef.current;
     setSourceElementsLoading(false);
     let detail: SourceSummary;
@@ -383,20 +383,21 @@ export function useSourceLibrary({
       ]);
     } catch (error) {
       if (owns(owner)) throw error;
-      return;
+      return false;
     }
     const deleted = deletedIdsRef.current.get(ownerKey(owner.actorId, detail.notebook_id));
     if (
       detailRequestRef.current !== requestGeneration
       || !owns(owner)
       || deleted?.has(sourceId)
-    ) return;
+    ) return false;
     setSourceDetail(detail);
     setSourceElements(elementPage.items);
     setSourceElementsTotal(elementPage.total_count);
     setSourceElementStartOffset(elementPage.offset);
     setSourceElementsLoading(false);
     setHighlightedElementId(elementId);
+    return true;
   }
 
   function closeSourceDetail() {

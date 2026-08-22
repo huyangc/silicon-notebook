@@ -111,6 +111,13 @@ import { useAskSession } from "./use-ask-session.ts";
 import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
 import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
+import {
+  useRootModalCoordinator,
+  type RootModalCloseReason,
+  type RootModalLease,
+  type RootModalOwner,
+  type RootModalSlot,
+} from "./use-root-modal-coordinator.ts";
 import { KG_RANGE_DEFAULT, KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
@@ -734,9 +741,6 @@ export default function Home() {
   const [baseScopeSelection, setBaseScopeSelection] = useState<BaseScopeSelection>(
     defaultBaseScopeSelection,
   );
-  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
-  const [searchProfileModalOpen, setSearchProfileModalOpen] = useState(false);
-  const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [linkSectionOpen, setLinkSectionOpen] = useState(false);
   const [urlText, setUrlText] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
@@ -962,6 +966,7 @@ export default function Home() {
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
   // 开关状态与渲染都在这里,与成本预告 `infoModal`/`confirmCommandCatalog` 同构。
   const [catalogReview, setCatalogReview] = useState<CatalogReviewRequest | null>(null);
+  const [catalogReviewLease, setCatalogReviewLease] = useState<RootModalLease<"catalog-review"> | null>(null);
   // R8(codex PR #412 评审 P1):审阅弹窗每完成一次确认/跳过就 +1,入口卡片据此
   // 重新读一次 job。两者之间没有共享状态(弹窗在根层、卡片在来源详情里),而
   // 卡片手里的 job 快照带着「重新识别」的拦截判据 pending_candidates —— 候选全
@@ -976,11 +981,9 @@ export default function Home() {
   // 次数对新来源没有意义。归零也走 CommandCatalogSection 的 `reviewSeq <= 0`
   // 提前 return,不会给刚切过去的来源白发一次请求。
   useEffect(() => {
-    setCatalogReview(null);
     setCatalogReviewSeq(0);
   }, [sourceDetail?.id, currentNotebookId]);
   const [toast, setToast] = useState("");
-  const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [modelStatusState, setModelStatusState] = useState({
     status: null as ModelServicesStatus | null,
     unavailable: false,
@@ -1008,8 +1011,8 @@ export default function Home() {
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
   // Promotion queue modal (Track F governance)
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
-  const [promoOpen, setPromoOpen] = useState(false);
   const [promoBusy, setPromoBusy] = useState(false);
+  const promoOperationRef = useRef<object | null>(null);
   // 多领域基准库:提交晋升前需要知道本笔记本挂了几个公共知识库(resolvePromotionTarget:
   // 0 个禁用按钮/1 个直接用/>1 个弹选择器)。只在进入「Rules」知识浏览 tab 时按 owner
   // 门控拉取(switchChatMode),不在打开笔记本时无条件调用。
@@ -1017,8 +1020,8 @@ export default function Home() {
   // 挂了 >1 个公共知识库时,点「提交晋升」先记下待定的知识对象 id,弹选择器要求选一个。
   const [pendingPromotionObjectId, setPendingPromotionObjectId] = useState<string | null>(null);
   const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
-  const [edgeReviewOpen, setEdgeReviewOpen] = useState(false);
   const [edgeBusy, setEdgeBusy] = useState(false);
+  const edgeOperationRef = useRef<object | null>(null);
   // 分享(owner 侧):shareModal 存**当前**分享状态并驱动分享弹窗。它现在由
   // `GET .../share` 填充(只读),而不是打开弹窗就 POST 一条链接出来——弹窗里还有
   // 「共享给群组」一节,只想共享给群组的用户不该顺带被发一条分享链接(P1-T4)。
@@ -1026,13 +1029,13 @@ export default function Home() {
   // shareBusy 覆盖开启/取消分享请求。
   const [shareModal, setShareModal] = useState<ShareState | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
+  const shareOperationRef = useRef<object | null>(null);
   // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
   const [copyBusy, setCopyBusy] = useState(false);
   // 只读共享(Phase 2):退出共享请求覆盖;已分享总览 modal 的数据与开关
   const [leaveBusy, setLeaveBusy] = useState(false);
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
-  const [sharedByMeOpen, setSharedByMeOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [contentOverview, setContentOverview] = useState<NotebookContentOverview | null>(null);
   const [contentOverviewLoading, setContentOverviewLoading] = useState(false);
@@ -1103,17 +1106,56 @@ export default function Home() {
   const trackedKgJobId = kgWorkspace.graph.trackedKgJobId;
   const kgRefreshBusy = kgWorkspace.graph.rebuilding;
   const relinkingKg = kgWorkspace.graph.relinking;
-  // 会话分享弹窗也随切库关闭：它渲染时用 currentNotebookId 作 notebookId，而
-  // sharingSession 是旧库的会话。KG Schema 自身的 owner/reset 由 useKgWorkspace 持有。
-  useEffect(() => {
-    setSharingSession(null);
-  }, [currentNotebookId]);
   // 「AI 对这个库的理解」弹窗(P1-T7)。入口在知识图谱视图头部,弹窗本身与「图谱
   // Schema」一样渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
-  const [understandingOpen, setUnderstandingOpen] = useState(false);
-  // 但切库必须收:面板持有的是**某一个库**的内容与忙碌位,留着它会把 A 库的理解
-  // 挂在 B 库上(与上面类型面板的切库复位同一条理由)。
-  useEffect(() => { setUnderstandingOpen(false); }, [currentNotebookId]);
+  // 它的业务数据仍由 AgentProfilePanel 自持；根层是否呈现及切库同步失效由
+  // useRootModalCoordinator 的 workspace lease 负责。
+  const rootModals = useRootModalCoordinator({
+    actorId: currentUser?.id ?? null,
+    sourceId: sourceDetail?.id ?? null,
+    onClosed: handleRootModalClosed,
+  });
+  const passwordModal = rootModals.view("password-change");
+  const searchProfileModal = rootModals.view("search-profile");
+  const notebookEditorModal = rootModals.view("notebook-editor");
+  const notebookDeleteModal = rootModals.view("notebook-delete");
+  const sourceModal = rootModals.view("source-add");
+  const sourceDetailModal = rootModals.view("source-detail");
+  const infoModalView = rootModals.view("info");
+  const modelPanel = rootModals.view("model-service");
+  const notebookShareModal = rootModals.view("notebook-share");
+  const sharedPreviewModal = rootModals.view("shared-preview");
+  const sharedByMeModal = rootModals.view("shared-by-me");
+  const memorySaveModal = rootModals.view("memory-save");
+  const catalogReviewModal = rootModals.view("catalog-review");
+  const conversationShareModal = rootModals.view("conversation-share");
+  const analyticsModal = rootModals.view("analytics");
+  const kgSchemaModal = rootModals.view("kg-schema");
+  const kgAnalysisModal = rootModals.view("kg-analysis");
+  const understandingModal = rootModals.view("understanding");
+  const promotionQueueModal = rootModals.view("promotion-queue");
+  const promotionTargetModal = rootModals.view("promotion-target");
+  const edgeReviewModal = rootModals.view("edge-review");
+  // Domain owners may clear their payload after a successful write, permission
+  // downgrade, or workspace transition.  Mirror that close into the
+  // presentation coordinator so a hidden lease never remains topmost.
+  useEffect(() => {
+    if (!editingNotebook && rootModals.activeLease("notebook-editor")) {
+      rootModals.requestClose("notebook-editor", "button");
+    }
+    if (!deleteNotebook && rootModals.activeLease("notebook-delete")) {
+      rootModals.requestClose("notebook-delete", "button");
+    }
+    if (!sourceDetail && rootModals.activeLease("source-detail")) {
+      rootModals.requestClose("source-detail", "button");
+    }
+    if (!schemaModalOpen && rootModals.activeLease("kg-schema")) {
+      rootModals.requestClose("kg-schema", "button");
+    }
+    if (!kgAnalysisOpen && rootModals.activeLease("kg-analysis")) {
+      rootModals.requestClose("kg-analysis", "button");
+    }
+  }, [editingNotebook?.id, deleteNotebook?.id, sourceDetail?.id, schemaModalOpen, kgAnalysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -1139,7 +1181,6 @@ export default function Home() {
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
-  const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   const latestScaleIndexDoneEventKey = latestScaleIndexDoneKey(
     pending.doneItems,
@@ -1181,7 +1222,7 @@ export default function Home() {
     const splitAt = message.indexOf("\n\n");
     const title = splitAt >= 0 ? message.slice(0, splitAt).replace(/[？?]$/, "") : "确认操作";
     const body = splitAt >= 0 ? message.slice(splitAt + 2) : message;
-    setInfoModal({
+    openInfoModal({
       title,
       message: body,
       actions: [
@@ -1216,7 +1257,7 @@ export default function Home() {
   // arrives. URL import has a separate server-side size contract and stays usable.
   useEffect(() => {
     if (
-      !sourceModalOpen
+      !sourceModal.open
       || (sourceUploadMaxBytes !== null && sourceUploadMaxFilesPerBatch !== null)
     ) return;
     let cancelled = false;
@@ -1241,7 +1282,7 @@ export default function Home() {
     };
     void loadUploadLimit();
     return () => { cancelled = true; window.clearTimeout(retryTimer); };
-  }, [sourceModalOpen, sourceUploadMaxBytes, sourceUploadMaxFilesPerBatch]);
+  }, [sourceModal.open, sourceUploadMaxBytes, sourceUploadMaxFilesPerBatch]);
   // Relink isolated nodes: additive/background, no confirm needed.
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView + 它下面那条 relink/status 轮询，
   // 终态时按当前范围重拉）。
@@ -1618,6 +1659,7 @@ export default function Home() {
     fetchMe()
       .then(async (u) => {
         notebookCollection.activateActor(u.id);
+        rootModals.activateActor(u.id);
         kgWorkspace.activateActor(u.id);
         reportWorkspace.activateActor(u.id);
         askSession.activateActor(u.id);
@@ -1740,9 +1782,11 @@ export default function Home() {
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
   useEffect(() => {
-    if (!authChecked || !getToken()) return;
+    if (!authChecked || !currentUser?.id || !getToken()) return;
     const token = parseShareToken(window.location.search);
     if (!token) return;
+    const modalLease = rootModals.issue("shared-preview", rootModals.captureActorOwner());
+    if (!modalLease) return;
     shareTokenRef.current = token;
     // 立即清掉 ?share,保留其余 query 与 hash(避免刷新重复弹窗)。
     const cleaned = window.location.search
@@ -1756,9 +1800,13 @@ export default function Home() {
       window.location.pathname + (cleaned ? `?${cleaned}` : "") + window.location.hash
     );
     previewShared(token)
-      .then((preview) => setSharedPreview(preview))
-      .catch(() => setToast("分享链接无效或已取消"));
-  }, [authChecked]);
+      .then((preview) => {
+        if (rootModals.publish(modalLease)) setSharedPreview(preview);
+      })
+      .catch(() => {
+        if (rootModals.leaseIsCurrent(modalLease)) setToast("分享链接无效或已取消");
+      });
+  }, [authChecked, currentUser?.id]);
 
   useEffect(() => {
     if (!toast) return;
@@ -2369,7 +2417,7 @@ export default function Home() {
   // which, because refreshModelStatus bumps modelStatusRequestRef at request start, would
   // otherwise keep discarding every response and never update under sustained latency.
   useEffect(() => {
-    if (!modelPanelOpen) return;
+    if (!modelPanel.open) return;
     let cancelled = false;
     let timer = 0;
     const scheduleNext = () => {
@@ -2382,7 +2430,7 @@ export default function Home() {
     return () => { cancelled = true; window.clearTimeout(timer); };
     // refreshModelStatus only touches refs + setState (stable); gate solely on open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelPanelOpen]);
+  }, [modelPanel.open]);
 
   async function loadNotebookCollection(opts: { guard?: () => boolean } = {}) {
     // The collection hook owns the issued/published watermarks.  The shell keeps
@@ -2451,12 +2499,12 @@ export default function Home() {
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
+    const rootModalTransition = rootModals.beginWorkspaceTransition();
     titleSaveOperationRef.current = null;
     setTitleSaveInFlight(false);
-    closeAnalytics();
     closeKnowhow();
-    setInfoModal(null);
     const workspaceEpoch = ++workspaceEpochRef.current;
+    const askActorId = actorIdOverride ?? currentUser?.id ?? "";
     sourceLibrary.beginTransition();
     const reportTransition = reportWorkspace.beginNotebookTransition();
     const kgTransition = kgWorkspace.beginNotebookTransition();
@@ -2464,23 +2512,16 @@ export default function Home() {
     urlRequestOwnerRef.current = null;
     setUploadBusy(false);
     setUrlBusy(false);
-    // 切库同样是暂存批次的清理路径:上一个库里还在飞的 zip/文件夹解包链落盘时
-    // 必须整条丢弃,不能把它的结果写进(可能已经属于)新库的「添加来源」弹窗。
-    bundleIntakeGenerationRef.current += 1;
-    // 世代递增只挡了迟到落盘——挂起的 bundleChoice 勾选面板、它的 resolver 与忙碌
-    // 栈帧不会因此自动消失。深链/浏览器导航切库时弹窗未必被 closeSourceModal 关过，
-    // 不结清就会让上一个笔记本的勾选面板悬在新笔记本上，把「添加来源」入口一直锁死
-    // 到用户手动确认/取消一个已经不指向当前笔记本的面板（评审 F2）。走与关闭弹窗
-    // 同一条路径：resolve 挂起 resolver（unblock 还在 await 的解包链，让它自己的
-    // finally 释放忙碌栈帧）、清空 bundleChoice、把忙碌文案同步回当前栈顶。
-    cancelBundleChoice();
-    const askActorId = actorIdOverride ?? currentUser?.id ?? "";
+    // Root-modal transition synchronously closes the old source-add lease and
+    // its close sink runs resetStagedIntake. This is the single cleanup path
+    // for staged files, bundle-choice resolvers and late unpack generations.
     const askTransition = askSession.beginNotebookTransition({
       actorId: askActorId,
       notebookId,
       workspaceEpoch,
     });
     if (!askTransition) {
+      rootModals.finishWorkspaceTransition(rootModalTransition, null);
       reportWorkspace.finishNotebookTransition(reportTransition, false);
       kgWorkspace.finishNotebookTransition(kgTransition);
       return false;
@@ -2538,6 +2579,10 @@ export default function Home() {
       askSession.finishNotebookTransition(askTransition);
       reportWorkspace.finishNotebookTransition(reportTransition, opened);
       kgWorkspace.finishNotebookTransition(kgTransition, opened ? openedNotebook : null);
+      rootModals.finishWorkspaceTransition(
+        rootModalTransition,
+        opened ? { actorId: askActorId, notebookId, workspaceEpoch } : null,
+      );
     }
   }
 
@@ -2582,9 +2627,8 @@ export default function Home() {
   }
 
   function showCollection() {
-    closeAnalytics();
+    rootModals.leaveWorkspace();
     closeKnowhow();
-    setInfoModal(null);
     workspaceEpochRef.current += 1;
     sourceLibrary.beginTransition();
     uploadRequestOwnerRef.current = null;
@@ -2642,7 +2686,7 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setMemorySavedAnswers((previous) => ({ ...previous, [savedAnswerId]: true }));
-    setMemoryAnswerId(null);
+    rootModals.requestClose("memory-save", "button");
     setToast("已保存到记忆");
     await loadNotebookCollection();
     if (currentNotebookId) {
@@ -2700,6 +2744,18 @@ export default function Home() {
     void notebookCollection.saveEditor(patch);
   }
 
+  async function presentNotebookEditor(notebookId: string) {
+    const lease = rootModals.issue("notebook-editor", rootModals.captureActorOwner());
+    if (!lease) return;
+    if (await notebookCollection.openEditor(notebookId)) rootModals.publish(lease);
+  }
+
+  async function presentNotebookDelete(notebookId: string) {
+    const lease = rootModals.issue("notebook-delete", rootModals.captureActorOwner());
+    if (!lease) return;
+    if (await notebookCollection.openDelete(notebookId)) rootModals.publish(lease);
+  }
+
   // Stage selected files so the user can pick a document type per file before
   // uploading (auto-detect by default).
   function stageFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -2710,8 +2766,8 @@ export default function Home() {
 
   /** 打开「添加来源」弹窗：清掉「用户已主动关闭」的标记，让后续入列可以正常揭示弹窗。 */
   function openSourceModal() {
+    if (!rootModals.open("source-add", rootModals.captureWorkspaceOwner())) return;
     sourceModalDismissedRef.current = false;
-    setSourceModalOpen(true);
   }
 
   /** 弹窗内所有暂存态的统一清空点（新建笔记本 / 关闭弹窗 / 清空 / 上传成功共用）。
@@ -2720,8 +2776,9 @@ export default function Home() {
    *  世代递增只挡了迟到落盘，挂起的勾选面板、它的 resolver 与忙碌栈帧不会因此
    *  自动消失；不结清就会让「清空」「上传成功」这类直接调用本函数的入口，让用户
    *  已经点了确认的勾选被 stageBundleCandidates 的世代比对静默丢弃
-   *  （codex #518 R4 P2）。这样一来，凡是递增 bundleIntakeGenerationRef 的路径
-   *  （本函数、openNotebook）都必然结清 bundleChoice，是结构性不变量。 */
+   *  （codex #518 R4 P2）。切库先由 root-modal transition 同步撤销 source-add
+   *  lease，再经同一个 close sink 调本函数；所有清理因此共用这一处世代递增与
+   *  bundleChoice 结清，是结构性不变量。 */
   function resetStagedIntake() {
     bundleIntakeGenerationRef.current += 1;
     updateStaged(emptyStagedList());
@@ -2730,16 +2787,10 @@ export default function Home() {
     cancelBundleChoice();
   }
 
-  /** 关闭「添加来源」弹窗。× 按钮与点遮罩必须走**同一个** handler：遮罩那条路此前
-   *  只 setSourceModalOpen(false)，不结清 bundleChoice——等勾选的那条链的 resolver
-   *  就永远不会被调用，它持有的忙碌位再也不释放，重开弹窗后添加入口是灰的。 */
-  function closeSourceModal() {
-    resetStagedIntake();
-    cancelBundleChoice();
-    setLinkSectionOpen(false);
-    // 记住「是用户主动关的」：还在飞的解包链完成时不得把弹窗强行弹回来。
-    sourceModalDismissedRef.current = true;
-    setSourceModalOpen(false);
+  /** 关闭「添加来源」弹窗。× 与遮罩都经 coordinator 的同一 close sink，
+   *  因而必定结清 bundle choice、暂存批次和迟到解包 generation。 */
+  function closeSourceModal(reason: "button" | "backdrop" = "button") {
+    rootModals.requestClose("source-add", reason);
   }
 
   // 选择器与拖放共用的入列逻辑（**同步**部分）。被跳过的文件（类型不支持/超大小/
@@ -2778,7 +2829,9 @@ export default function Home() {
     }
     updateStaged(merge.next);
     // 用户已经主动关掉弹窗时不再弹回来（异步解包链完成得比用户慢是常态）。
-    if (!sourceModalDismissedRef.current) setSourceModalOpen(true);
+    if (!sourceModalDismissedRef.current) {
+      rootModals.open("source-add", rootModals.captureWorkspaceOwner());
+    }
     // 对新增的文本类文件做内容检测，预填类型下拉（异步，不阻塞 UI；用户仍可改）。
     void detectStagedTypes(merge.added);
     return { added: merge.added, skipped: allSkipped, duplicates: merge.duplicates, bundles };
@@ -3299,8 +3352,7 @@ export default function Home() {
     // 重拉解禁;仍在解析中的慢路径由处理轮询覆盖。
     revalidateAskAvailability();
     reloadCheckup(owner.notebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
-    resetStagedIntake();
-    setSourceModalOpen(false);
+    rootModals.requestClose("source-add", "button");
     setToast(outcome.toast);
   }
 
@@ -3352,12 +3404,20 @@ export default function Home() {
     }
   }
 
+  async function openSourceDetailById(sourceId: string, elementId = "") {
+    const lease = rootModals.issue("source-detail", rootModals.captureWorkspaceOwner());
+    if (!lease) return;
+    const opened = await sourceLibrary.openSourceById(sourceId, elementId);
+    if (!opened) return;
+    if (!rootModals.publish(lease)) sourceLibrary.closeSourceDetail();
+  }
+
   async function openSourceDetail(source: SourceSummary) {
-    await sourceLibrary.openSourceById(source.id);
+    await openSourceDetailById(source.id);
   }
 
   function onOpenSourceElement(sourceId: string, elementId?: string) {
-    sourceLibrary.openSourceById(sourceId, elementId || "").catch(reportError);
+    openSourceDetailById(sourceId, elementId || "").catch(reportError);
   }
 
   async function reparseSource() {
@@ -3367,7 +3427,13 @@ export default function Home() {
   function confirmDeleteSource(source: SourceSummary) {
     if (crossLibrarySourceNotebookId(source.notebook_id, currentNotebookId)) return;
     if (deletingSourceIds.has(source.id)) return;
-    setInfoModal({
+    // The list-card action has no source detail open, so it must remain a
+    // workspace-owned confirmation.  Detail actions use the narrower source
+    // lease so a source switch also invalidates the prompt.
+    const modalOwner = sourceDetail?.id === source.id
+      ? rootModals.captureSourceOwner()
+      : rootModals.captureWorkspaceOwner();
+    openInfoModal({
       title: "删除来源",
       message: `确定删除“${source.title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`,
       actions: [
@@ -3378,28 +3444,43 @@ export default function Home() {
           action: () => sourceLibrary.deleteSource(source).catch(reportError),
         },
       ],
-    });
+    }, modalOwner);
   }
 
   async function openAskSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
+    const rootTransition = rootModals.beginWorkspaceTransition();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
-    setMemoryAnswerId(null);
-    await askSession.openSession(id, workspaceEpoch);
+    try {
+      await askSession.openSession(id, workspaceEpoch);
+    } finally {
+      const actorId = currentUser?.id ?? "";
+      const notebookId = activeNotebookIdRef.current;
+      rootModals.finishWorkspaceTransition(
+        rootTransition,
+        actorId && notebookId ? { actorId, notebookId, workspaceEpoch } : null,
+      );
+    }
   }
 
   function startNewAskSession() {
     const workspaceEpoch = ++workspaceEpochRef.current;
+    const rootTransition = rootModals.beginWorkspaceTransition();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
-    setMemoryAnswerId(null);
     setMemorySavedAnswers({});
     askSession.startNewSession(workspaceEpoch);
+    const actorId = currentUser?.id ?? "";
+    const notebookId = activeNotebookIdRef.current;
+    rootModals.finishWorkspaceTransition(
+      rootTransition,
+      actorId && notebookId ? { actorId, notebookId, workspaceEpoch } : null,
+    );
   }
 
   function requestDeleteSession(session: ConversationSummary) {
-    setInfoModal({
+    openInfoModal({
       title: "删除会话",
       message: `确定删除“${session.title || "未命名会话"}”吗？对应的历史问答会一起移除。`,
       actions: [
@@ -3416,7 +3497,7 @@ export default function Home() {
   function requestBulkCleanup(days: number) {
     const victims = conversationsOlderThan(sessions, days);
     if (victims.length === 0) return;
-    setInfoModal({
+    openInfoModal({
       title: "批量清理会话",
       message: `将删除 ${victims.length} 条最近 ${days} 天内无活动的会话，对应的历史问答会一起移除。`,
       actions: [
@@ -3429,12 +3510,16 @@ export default function Home() {
       ],
     });
   }
-  function closeAnalytics() {
+  function clearAnalyticsData() {
     analyticsLoadScopeRef.current.cancel();
     setAnalytics(null);
     setContentOverview(null);
     setContentOverviewError("");
     setContentOverviewLoading(false);
+  }
+
+  function closeAnalytics(reason: "button" | "backdrop" = "button") {
+    rootModals.requestClose("analytics", reason);
   }
 
   function closeKnowhow() {
@@ -3446,9 +3531,14 @@ export default function Home() {
 
   async function openAnalytics() {
     if (!currentNotebookId) return;
+    const modalLease = rootModals.issue("analytics", rootModals.captureWorkspaceOwner());
+    if (!modalLease) return;
     const nb = currentNotebookId;
     const owner = analyticsLoadScopeRef.current.begin(nb);
-    const isCurrent = () => analyticsLoadScopeRef.current.isCurrent(owner, activeNotebookIdRef.current);
+    const isCurrent = () => (
+      analyticsLoadScopeRef.current.isCurrent(owner, activeNotebookIdRef.current)
+      && rootModals.leaseIsCurrent(modalLease)
+    );
     setContentOverview(null);
     setContentOverviewLoading(true);
     setContentOverviewError("");
@@ -3487,7 +3577,7 @@ export default function Home() {
     });
     try {
       const response = await loads.analytics;
-      if (isCurrent()) setAnalytics(response);
+      if (isCurrent() && rootModals.publish(modalLease)) setAnalytics(response);
     } catch (error) {
       if (isCurrent()) throw error;
     }
@@ -3524,14 +3614,14 @@ export default function Home() {
   // 命令目录确认落库后的「去看这张表」落点：只定位到表，不指定行（刚写入的是一批
   // 行，挑其中任意一行当落点都是随意的）。KnowhowJumpTarget.rowId 本就允许 null。
   function openKnowhowTable(tableId: string) {
-    sourceLibrary.closeSourceDetail();
+    rootModals.requestClose("source-detail", "button");
     setKnowhowNavigation(openKnowhowNavigation({ jumpTarget: { tableId, rowId: null } }));
   }
 
   // 命令目录入口的成本预告确认：复用本文件既有的 infoModal（已经是可拖动的
   // FloatingModalCard），不让面板自己再造一套居中确认框。
   function confirmCommandCatalog(request: CatalogConfirmRequest) {
-    setInfoModal({
+    openInfoModal({
       title: request.title,
       message: request.body,
       sections: request.sections,
@@ -3539,7 +3629,7 @@ export default function Home() {
         { label: "取消", action: () => {} },
         { label: request.confirmLabel, primary: true, action: request.onConfirm },
       ],
-    });
+    }, rootModals.captureSourceOwner());
   }
 
   async function openKgView(
@@ -3555,7 +3645,27 @@ export default function Home() {
   // 视图内还挂着「图谱分析」弹窗的开关,它必须和父视图一起归零(见 kgAnalysisOpen 声明处),
   // 而"关闭时要一起做的事"散在内联箭头里就迟早会漏掉一条。
   function closeKgView() {
+    rootModals.requestClose("kg-schema", "button");
+    rootModals.requestClose("kg-analysis", "button");
     kgWorkspace.closeGraph();
+  }
+
+  function openKgSchemas() {
+    if (!rootModals.open("kg-schema", rootModals.captureWorkspaceOwner())) return;
+    kgWorkspace.openSchemas();
+  }
+
+  function closeKgSchemas(reason: "button" | "backdrop" = "button") {
+    rootModals.requestClose("kg-schema", reason);
+  }
+
+  function openKgAnalysis() {
+    if (!rootModals.open("kg-analysis", rootModals.captureWorkspaceOwner())) return;
+    kgWorkspace.openAnalysis();
+  }
+
+  function closeKgAnalysis() {
+    rootModals.requestClose("kg-analysis", "button");
   }
 
   // 服务端搜索：输入词变化时防抖触发 /kg/search；清空词时还原为核心子图。
@@ -3703,32 +3813,54 @@ export default function Home() {
   // 铸出一条分享链接——一次纯查看的动作产生了持久副作用,只想共享给群组的用户会
   // 莫名其妙多出一条链接。链接改由用户显式点「开启链接分享」时才发 POST。
   async function openShareModal() {
-    if (!currentNotebook) return;
+    if (!currentNotebook || shareOperationRef.current) return;
+    const modalLease = rootModals.issue("notebook-share", rootModals.captureWorkspaceOwner());
+    if (!modalLease || modalLease.owner.kind !== "workspace") return;
     // 链接分享(GET/POST/DELETE /share)是 notebook:configure(**恒 owner**,P2-T2 评审
     // P0)。组管理员只到「共享给群组」一节(授权边管理 = notebook:manage),不该也不能
     // 读链接态——`getShareState` 对他会 404。所以非 owner 直接渲染空链接态(不发 GET),
     // 弹窗里的链接分享区另由 canConfigureNotebook 收起,只留群组授权区(它自己拉 grants)。
     if (!capabilities.canConfigureNotebook) {
-      setShareModal({ share_token: "", copyable: false, size: {} });
+      if (rootModals.publish(modalLease)) {
+        setShareModal({ share_token: "", copyable: false, size: {} });
+      }
       return;
     }
+    const operation = {};
+    shareOperationRef.current = operation;
     setShareBusy(true);
     try {
-      setShareModal(await getShareState(currentNotebook.id));
+      const state = await getShareState(modalLease.owner.notebookId);
+      if (rootModals.publish(modalLease)) setShareModal(state);
+    } catch (error) {
+      if (rootModals.leaseIsCurrent(modalLease)) throw error;
     } finally {
-      setShareBusy(false);
+      if (shareOperationRef.current === operation) {
+        shareOperationRef.current = null;
+        setShareBusy(false);
+      }
     }
   }
 
   // 显式开启链接分享。后端幂等(已有 token 原样返回),所以重复点不会换链接。
   async function enableShareLink() {
-    if (!currentNotebook) return;
+    const modalLease = rootModals.activeLease("notebook-share");
+    if (!modalLease || modalLease.owner.kind !== "workspace" || shareOperationRef.current) return;
+    const operation = {};
+    shareOperationRef.current = operation;
     setShareBusy(true);
     try {
-      setShareModal(await shareNotebook(currentNotebook.id));
+      const state = await shareNotebook(modalLease.owner.notebookId);
+      if (!rootModals.owns(modalLease)) return;
+      setShareModal(state);
       await handleSharingChanged();
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
-      setShareBusy(false);
+      if (shareOperationRef.current === operation) {
+        shareOperationRef.current = null;
+        setShareBusy(false);
+      }
     }
   }
 
@@ -3747,15 +3879,25 @@ export default function Home() {
   // 界面,而取消链接对群组授权是空操作,关掉整个弹窗会让用户以为群组共享也没了。
   // 只把链接态清空,链接区回到「开启链接分享」。
   async function handleUnshare() {
-    if (!currentNotebook) return;
+    const modalLease = rootModals.activeLease("notebook-share");
+    if (!modalLease || modalLease.owner.kind !== "workspace" || shareOperationRef.current) return;
+    const operation = {};
+    shareOperationRef.current = operation;
     setShareBusy(true);
     try {
-      await unshareNotebook(currentNotebook.id);
+      await unshareNotebook(modalLease.owner.notebookId);
+      if (!rootModals.owns(modalLease)) return;
       setShareModal({ share_token: "", copyable: false, size: {} });
       await handleSharingChanged();
+      if (!rootModals.owns(modalLease)) return;
       setToast("已取消链接分享，链接立即失效");
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
-      setShareBusy(false);
+      if (shareOperationRef.current === operation) {
+        shareOperationRef.current = null;
+        setShareBusy(false);
+      }
     }
   }
 
@@ -3766,7 +3908,7 @@ export default function Home() {
       const created = await copyShared(token);
       await loadNotebookCollection();
       await openNotebook(String(created.id));
-      setSharedPreview(null);
+      rootModals.requestClose("shared-preview", "button");
       setToast("已拷贝到你的空间");
     } finally {
       setCopyBusy(false);
@@ -3781,7 +3923,7 @@ export default function Home() {
       const joined = await joinShared(token);
       await loadNotebookCollection();
       await openNotebook(String(joined.id));
-      setSharedPreview(null);
+      rootModals.requestClose("shared-preview", "button");
       setToast("已加入只读共享");
     } finally {
       setCopyBusy(false);
@@ -3885,92 +4027,155 @@ export default function Home() {
 
   // E. owner「已分享总览」:拉取所有我 owner 且已分享的库 → 打开 modal
   async function openSharedByMe() {
+    if (shareOperationRef.current) return;
+    const modalLease = rootModals.issue("shared-by-me", rootModals.captureActorOwner());
+    if (!modalLease) return;
     setSharedByMeList(null);
-    setSharedByMeOpen(true);
-    const items = await sharedByMe();
-    setSharedByMeList(items);
+    try {
+      const items = await sharedByMe();
+      if (rootModals.publish(modalLease)) setSharedByMeList(items);
+    } catch (error) {
+      if (rootModals.leaseIsCurrent(modalLease)) throw error;
+    }
   }
 
   // 总览里「取消分享」:撤销 token(踢全员)→ 重拉总览刷新
   async function handleUnshareFromOverview(notebookId: string) {
+    const modalLease = rootModals.activeLease("shared-by-me");
+    if (!modalLease || shareOperationRef.current) return;
+    const operation = {};
+    shareOperationRef.current = operation;
     setShareBusy(true);
     try {
       await unshareNotebook(notebookId);
+      if (!rootModals.owns(modalLease)) return;
       const items = await sharedByMe();
+      if (!rootModals.owns(modalLease)) return;
       setSharedByMeList(items);
       await loadNotebookCollection();
+      if (!rootModals.owns(modalLease)) return;
       setToast("已取消链接分享，链接立即失效");
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
-      setShareBusy(false);
+      if (shareOperationRef.current === operation) {
+        shareOperationRef.current = null;
+        setShareBusy(false);
+      }
     }
   }
 
   // --- Governance: promotion queue (Track F) ---------------------------
   async function openPromoQueue() {
-    const queue = await fetchPromotionQueue();
-    setPromoQueue(queue);
-    setPromoOpen(true);
+    if (promoOperationRef.current) return;
+    const modalLease = rootModals.issue("promotion-queue", rootModals.captureActorOwner());
+    if (!modalLease) return;
+    try {
+      const queue = await fetchPromotionQueue();
+      if (rootModals.publish(modalLease)) setPromoQueue(queue);
+    } catch (error) {
+      if (rootModals.leaseIsCurrent(modalLease)) throw error;
+    }
   }
 
   // targetBaseId 未传时按 promotionTarget(渲染时用 currentNotebookBases 算出)三态分派:
   // none(0 个公共库挂载)拒绝、auto(1 个)直接用、choose(>1 个)转去弹选择器,选好后
   // 选择器自己会带着 targetBaseId 回调本函数——这一次不再重新分派,直接提交。
   async function submitPromotion(objectId: string, targetBaseId?: string) {
-    if (!currentNotebookId) return;
+    const actorId = currentUser?.id ?? "";
+    const notebookId = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
+    if (!actorId || !notebookId) return;
+    const isCurrent = () => currentUser?.id === actorId
+      && activeNotebookIdRef.current === notebookId
+      && workspaceEpochRef.current === workspaceEpoch;
     if (!targetBaseId) {
       if (promotionTarget.kind === "none") {
         setToast("需先挂载一个公共知识库，才能贡献内容");
         return;
       }
       if (promotionTarget.kind === "choose") {
-        setPendingPromotionObjectId(objectId);
+        if (rootModals.open("promotion-target", rootModals.captureWorkspaceOwner())) {
+          setPendingPromotionObjectId(objectId);
+        }
         return;
       }
       targetBaseId = promotionTarget.baseId;
     }
-    await proposePromotion(currentNotebookId, objectId, targetBaseId);
-    setToast("已提交贡献申请");
+    try {
+      await proposePromotion(notebookId, objectId, targetBaseId);
+      if (isCurrent()) setToast("已提交贡献申请");
+    } catch (error) {
+      if (isCurrent()) throw error;
+    }
   }
 
   async function decidePromotion(candidateId: string, decision: "approve" | "reject", reason = "") {
+    const modalLease = rootModals.activeLease("promotion-queue");
+    if (!modalLease || promoOperationRef.current) return;
+    const operation = {};
+    promoOperationRef.current = operation;
     setPromoBusy(true);
     try {
       if (decision === "approve") {
         const result = await approvePromotion(candidateId);
+        if (!rootModals.owns(modalLease)) return;
         const merged = result.merged_into ? `（与 ${result.merged_into.slice(0, 8)} 合并）` : "";
         setToast(`已批准收录${merged}，内容已加入公共知识库`);
       } else {
         await rejectPromotion(candidateId, reason);
+        if (!rootModals.owns(modalLease)) return;
         setToast("贡献未采纳，个人内容保持不变");
       }
+      if (!rootModals.owns(modalLease)) return;
       // Refresh queue, then any loaded notebook collection / knowledge list.
       const queue = await fetchPromotionQueue();
+      if (!rootModals.owns(modalLease)) return;
       setPromoQueue(queue);
       await loadNotebookCollection();
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
-      setPromoBusy(false);
+      if (promoOperationRef.current === operation) {
+        promoOperationRef.current = null;
+        setPromoBusy(false);
+      }
     }
   }
 
   // --- Track E: edge review queue ----------------------------------------
   async function openEdgeReviewQueue(notebookId: string | null = currentNotebookId) {
-    if (!notebookId) return;
-    const queue = await fetchEdgeReviewQueue(notebookId);
-    if (activeNotebookIdRef.current !== notebookId) return;
-    setEdgeQueue(queue);
-    setEdgeReviewOpen(true);
+    if (!notebookId || edgeOperationRef.current) return;
+    const modalLease = rootModals.issue("edge-review", rootModals.captureWorkspaceOwner());
+    if (!modalLease || modalLease.owner.kind !== "workspace" || modalLease.owner.notebookId !== notebookId) return;
+    try {
+      const queue = await fetchEdgeReviewQueue(notebookId);
+      if (rootModals.publish(modalLease)) setEdgeQueue(queue);
+    } catch (error) {
+      if (rootModals.leaseIsCurrent(modalLease)) throw error;
+    }
   }
 
   async function decideEdge(relId: string, status: "verified" | "rejected") {
-    if (!currentNotebookId) return;
+    const modalLease = rootModals.activeLease("edge-review");
+    if (!modalLease || modalLease.owner.kind !== "workspace" || edgeOperationRef.current) return;
+    const operation = {};
+    edgeOperationRef.current = operation;
     setEdgeBusy(true);
     try {
-      await reviewRelation(currentNotebookId, relId, status);
+      await reviewRelation(modalLease.owner.notebookId, relId, status);
+      if (!rootModals.owns(modalLease)) return;
       setToast(status === "verified" ? "关系已确认" : "关系已拒绝，后续图推理将忽略它");
-      const queue = await fetchEdgeReviewQueue(currentNotebookId);
+      const queue = await fetchEdgeReviewQueue(modalLease.owner.notebookId);
+      if (!rootModals.owns(modalLease)) return;
       setEdgeQueue(queue);
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
-      setEdgeBusy(false);
+      if (edgeOperationRef.current === operation) {
+        edgeOperationRef.current = null;
+        setEdgeBusy(false);
+      }
     }
   }
 
@@ -4023,6 +4228,112 @@ export default function Home() {
     setStatusText(toUserMessage(error, "服务出了点问题，请稍后重试"));
   }
 
+  /**
+   * Root-modal coordinator owns only presentation leases.  Domain payload and
+   * cleanup remain here (or in their existing hook/component owner), and this
+   * exhaustive close sink is deliberately forbidden from issuing HTTP or
+   * executing a business command.
+   */
+  function handleRootModalClosed(slot: RootModalSlot, _reason: RootModalCloseReason) {
+    switch (slot) {
+      case "password-change":
+      case "search-profile":
+      case "understanding":
+        return;
+      case "notebook-editor":
+        notebookCollection.closeEditor();
+        return;
+      case "notebook-delete":
+        notebookCollection.closeDelete();
+        return;
+      case "source-add":
+        resetStagedIntake();
+        setLinkSectionOpen(false);
+        sourceModalDismissedRef.current = true;
+        return;
+      case "source-detail":
+        sourceLibrary.closeSourceDetail();
+        return;
+      case "info":
+        setInfoModal(null);
+        return;
+      case "model-service":
+        setHighlightedModelServiceId(null);
+        return;
+      case "notebook-share":
+        setShareModal(null);
+        return;
+      case "shared-preview":
+        setSharedPreview(null);
+        return;
+      case "shared-by-me":
+        setSharedByMeList(null);
+        return;
+      case "memory-save":
+        setMemoryAnswerId(null);
+        return;
+      case "catalog-review":
+        setCatalogReview(null);
+        setCatalogReviewLease(null);
+        return;
+      case "conversation-share":
+        setSharingSession(null);
+        return;
+      case "analytics":
+        clearAnalyticsData();
+        return;
+      case "kg-schema":
+        kgWorkspace.closeSchemas();
+        return;
+      case "kg-analysis":
+        kgWorkspace.closeAnalysis();
+        return;
+      case "promotion-queue":
+        setPromoQueue(null);
+        return;
+      case "promotion-target":
+        setPendingPromotionObjectId(null);
+        return;
+      case "edge-review":
+        setEdgeQueue(null);
+        return;
+    }
+  }
+
+  function openInfoModal(
+    modal: InfoModal,
+    owner: RootModalOwner | null = rootModals.captureWorkspaceOwner() ?? rootModals.captureActorOwner(),
+  ): RootModalLease<"info"> | null {
+    const lease = rootModals.open("info", owner);
+    if (!lease) return null;
+    setInfoModal(modal);
+    return lease;
+  }
+
+  function closeInfoModal() {
+    rootModals.requestClose("info", "button");
+  }
+
+  function openMemorySave(answerId: string) {
+    if (rootModals.open("memory-save", rootModals.captureWorkspaceOwner())) {
+      setMemoryAnswerId(answerId);
+    }
+  }
+
+  function openCatalogReview(request: CatalogReviewRequest) {
+    const lease = rootModals.open("catalog-review", rootModals.captureSourceOwner());
+    if (lease) {
+      setCatalogReviewLease(lease);
+      setCatalogReview(request);
+    }
+  }
+
+  function openConversationShare(target: { id: string; title: string; throughAnswerId: string }) {
+    if (rootModals.open("conversation-share", rootModals.captureWorkspaceOwner())) {
+      setSharingSession(target);
+    }
+  }
+
   // 头像菜单「高级模式」开关：调 PATCH /me/ui-mode 切换，成功后用返回的完整用户
   // 档案覆盖本地态(normalizeUiMode 已在 auth.ts 里做过，这里不必再判)；失败保持
   // 原态不切、走既有 toast 错误通道——绝不能让界面显示的开关态与服务端不一致。
@@ -4040,6 +4351,7 @@ export default function Home() {
   async function handleLogout() {
     workspaceEpochRef.current += 1;
     notebookCollection.leaveActor();
+    rootModals.leaveActor();
     titleSaveOperationRef.current = null;
     setTitleSaveInFlight(false);
     sourceLibrary.beginTransition();
@@ -4059,17 +4371,13 @@ export default function Home() {
   }
 
   function openModelPanel(serviceId: string | null = null) {
-    modelPanelReturnFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
+    if (!rootModals.open("model-service", rootModals.captureActorOwner())) return;
     setHighlightedModelServiceId(serviceId);
-    setModelPanelOpen(true);
     void refreshModelStatus();
   }
 
-  function closeModelPanel() {
-    setModelPanelOpen(false);
-    setHighlightedModelServiceId(null);
+  function closeModelPanel(reason: "button" | "backdrop" | "escape" = "button") {
+    rootModals.requestClose("model-service", reason);
   }
 
   async function runSystemModelTest(serviceId: string): Promise<ModelServiceStatusItem | null> {
@@ -4247,6 +4555,7 @@ export default function Home() {
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
       notebookCollection.activateActor(u.id);
+      rootModals.activateActor(u.id);
       kgWorkspace.activateActor(u.id);
       reportWorkspace.activateActor(u.id);
       askSession.activateActor(u.id);
@@ -4315,12 +4624,16 @@ export default function Home() {
               // 会让用户在慢网络下基于陈旧值完成「设为你的选择」,把旧推断值
               // 以 user 来源写回,或让迟到的刷新盖掉 PATCH 刚返回的本地态。
               // 刷新失败照常打开(fail-open,设置入口不依赖一次网络往返成功)。
+              const lease = rootModals.issue("search-profile", rootModals.captureActorOwner());
+              if (!lease) return;
               void fetchMe()
-                .then(setCurrentUser)
+                .then((user) => {
+                  if (rootModals.leaseIsCurrent(lease)) setCurrentUser(user);
+                })
                 .catch(() => undefined)
-                .finally(() => setSearchProfileModalOpen(true));
+                .finally(() => { rootModals.publish(lease); });
             }}
-            onChangePassword={() => setPasswordModalOpen(true)}
+            onChangePassword={() => { rootModals.open("password-change", rootModals.captureActorOwner()); }}
             onLogout={() => handleLogout().catch(reportError)}
           />
         </div>
@@ -4521,7 +4834,7 @@ export default function Home() {
                     // 参考库列表随 NotebookSummary.base_notebooks 一起返回(owner/reader 都能看到,
                     // 权威只读)。弹窗顶部只读展示本笔记本挂了哪些参考库;没挂时不显示该段落。
                     const baseNames = (currentNotebook?.base_notebooks ?? []).map((b) => b.name);
-                    setInfoModal({
+                    openInfoModal({
                     title: "分析",
                     message: "对当前笔记本的知识图谱与参考库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
                     sections: baseNames.length ? [["本笔记本的参考库", baseNames] as [string, string[]]] : undefined,
@@ -4569,9 +4882,9 @@ export default function Home() {
                     (含组管理员)退回一句说明,不打开编辑器(打开就会在 listMountable 上 404)。 */}
                 <button className="workspace-nav-button" onClick={() => {
                   if (capabilities.canConfigureNotebook) {
-                    void notebookCollection.openEditor(currentNotebook.id);
+                    void presentNotebookEditor(currentNotebook.id);
                   } else {
-                    setInfoModal({
+                    openInfoModal({
                       title: "设置",
                       message: capabilities.canWriteNotebook
                         ? "参考库挂载与笔记本信息由库主配置；你可以管理来源与图谱内容。"
@@ -5106,7 +5419,7 @@ export default function Home() {
                               </small>
                             </button>
                             <div className="chat-session-card-actions">
-                              <button type="button" title="分享" onClick={() => setSharingSession({ id: session.id, title: session.title || "", throughAnswerId: "" })}><Share2 size={14} /></button>
+                              <button type="button" title="分享" onClick={() => openConversationShare({ id: session.id, title: session.title || "", throughAnswerId: "" })}><Share2 size={14} /></button>
                               <button type="button" title="重命名" onClick={() => askSession.beginRenameSession(session)}><Edit3 size={14} /></button>
                               <button type="button" title="删除" onClick={() => requestDeleteSession(session)}><Trash2 size={14} /></button>
                             </div>
@@ -5153,11 +5466,11 @@ export default function Home() {
                             onBuildScaleIndex={() => runScaleIndexOp("build")}
                             buildingScaleIndex={buildingScaleIndex}
                             scaleIndexStatus={scaleIndexStatus}
-                            onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
+                            onSaveMemory={openMemorySave}
                             // 分享到这条回答为止。会话 id 是弹窗的寻址依据,还没落库的
                             // 新会话(conversationId 为 null)不给按钮——那种情形连
                             // `answer_id` 都还没有,弹窗打开也只能 404。
-                            onShare={conversationId ? ((answerId) => setSharingSession({
+                            onShare={conversationId ? ((answerId) => openConversationShare({
                               id: conversationId,
                               title: sessions.find((session) => session.id === conversationId)?.title || "",
                               throughAnswerId: answerId,
@@ -5394,14 +5707,14 @@ export default function Home() {
                 .then(() => setToast("已退出只读共享"))
                 .catch(reportError);
             }}
-            onEdit={() => { void notebookCollection.openEditor(menuNotebook.id); notebookCollection.closeMenu(); }}
-            onDelete={() => { void notebookCollection.openDelete(menuNotebook.id); notebookCollection.closeMenu(); }}
+            onEdit={() => { void presentNotebookEditor(menuNotebook.id); notebookCollection.closeMenu(); }}
+            onDelete={() => { void presentNotebookDelete(menuNotebook.id); notebookCollection.closeMenu(); }}
           />
         </div>
       )}
 
-      {shareModal && currentNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setShareModal(null); }}>
+      {notebookShareModal.open && shareModal && currentNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal={notebookShareModal.topmost} aria-hidden={!notebookShareModal.topmost} inert={notebookShareModal.topmost ? undefined : true} style={{ zIndex: notebookShareModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.share.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5411,7 +5724,7 @@ export default function Home() {
                   ? "两种方式：发一条链接给具体的人，或者共享给一个群组（随成员进出自动生效与失效）。"
                   : "共享给一个群组（随成员进出自动生效与失效）。链接分享由库主管理。"}</p>
               </div>
-              <button className="icon-button" onClick={() => setShareModal(null)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-share", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {/* 链接分享区只对 owner 渲染(notebook:configure,恒 owner,P2-T2 评审 P0):
@@ -5460,7 +5773,7 @@ export default function Home() {
                 onChanged={() => { handleSharingChanged().catch(reportError); }}
               />
               <div className="tag-row">
-                <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>
+                <button className="new-pill" onClick={() => rootModals.requestClose("notebook-share", "button")}>完成</button>
               </div>
             </div>
             </>)}
@@ -5468,8 +5781,8 @@ export default function Home() {
         </section>
       )}
 
-      {sharedPreview && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedPreview(null); }}>
+      {sharedPreviewModal.open && sharedPreview && (
+        <section className="utility-modal" role="dialog" aria-modal={sharedPreviewModal.topmost} aria-hidden={!sharedPreviewModal.topmost} inert={sharedPreviewModal.topmost ? undefined : true} style={{ zIndex: sharedPreviewModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-preview", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.sharedPreview.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5477,7 +5790,7 @@ export default function Home() {
                 <h2>{sharedPreview.name}</h2>
                 <p>由 {sharedPreview.owner_display} 分享 · {sharedPreview.source_count} 来源 · {sharedPreview.node_count} 节点 · {sharedPreview.edge_count} 边</p>
               </div>
-              <button className="icon-button" onClick={() => setSharedPreview(null)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("shared-preview", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {sharedPreview.source_titles.length > 0 && (
@@ -5519,7 +5832,7 @@ export default function Home() {
                     {copyBusy ? "加入中…" : "加入(只读)"}
                   </button>
                 )}
-                <button className="sort-button" onClick={() => setSharedPreview(null)}>取消</button>
+                <button className="sort-button" onClick={() => rootModals.requestClose("shared-preview", "button")}>取消</button>
               </div>
             </div>
             </>)}
@@ -5527,8 +5840,8 @@ export default function Home() {
         </section>
       )}
 
-      {sharedByMeOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedByMeOpen(false); }}>
+      {sharedByMeModal.open && (
+        <section className="utility-modal" role="dialog" aria-modal={sharedByMeModal.topmost} aria-hidden={!sharedByMeModal.topmost} inert={sharedByMeModal.topmost ? undefined : true} style={{ zIndex: sharedByMeModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-by-me", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5536,7 +5849,7 @@ export default function Home() {
                 <h2>已分享</h2>
                 <p>你分享出去的笔记本：经链接分享的（较小的可被拷贝为独立副本，较大的以只读方式加入，下方列出已加入的只读成员），以及共享给群组的。</p>
               </div>
-              <button className="icon-button" onClick={() => setSharedByMeOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("shared-by-me", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {sharedByMeList === null ? (
@@ -5615,7 +5928,7 @@ export default function Home() {
                 </div>
               )}
               <div className="tag-row">
-                <button className="new-pill" onClick={() => setSharedByMeOpen(false)}>完成</button>
+                <button className="new-pill" onClick={() => rootModals.requestClose("shared-by-me", "button")}>完成</button>
               </div>
             </div>
             </>)}
@@ -5623,8 +5936,8 @@ export default function Home() {
         </section>
       )}
 
-      {sourceModalOpen && (
-        <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal(); }}>
+      {sourceModal.open && (
+        <section className="source-modal" role="dialog" aria-modal={sourceModal.topmost} aria-hidden={!sourceModal.topmost} inert={sourceModal.topmost ? undefined : true} style={{ zIndex: sourceModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal("backdrop"); }}>
           <FloatingModalCard storageKey="source.add.window" className="source-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5632,7 +5945,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={closeSourceModal} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeSourceModal("button")} title="Close">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -5797,18 +6110,20 @@ export default function Home() {
         </section>
       )}
 
-      {memoryAnswerId && currentNotebookId && (
+      {memorySaveModal.open && memoryAnswerId && currentNotebookId && (
         <MemorySaveDialog
           answerId={memoryAnswerId}
           notebookId={currentNotebookId}
           sessionSignal={memorySessionAbortRef.current.signal}
-          onClose={() => setMemoryAnswerId(null)}
+          onClose={() => rootModals.requestClose("memory-save", "button")}
           onSaved={(memory) => handleMemorySaved(memory).catch(reportError)}
+          interactive={memorySaveModal.topmost}
+          zIndex={memorySaveModal.zIndex}
         />
       )}
 
-      {editingNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal="true">
+      {notebookEditorModal.open && editingNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal={notebookEditorModal.topmost} aria-hidden={!notebookEditorModal.topmost} inert={notebookEditorModal.topmost ? undefined : true} style={{ zIndex: notebookEditorModal.zIndex }}>
           <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5816,7 +6131,7 @@ export default function Home() {
                 <h2>笔记本设置</h2>
                 <p>编辑当前笔记本的信息与参考库。模型服务由系统统一管理。</p>
               </div>
-              <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={notebookCollection.closeEditor} title="Close">×</button>
+              <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")} title="Close">×</button>
             </div>
             <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
@@ -5893,7 +6208,7 @@ export default function Home() {
                 <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
               </section>
               <div className="modal-actions settings-footer">
-                <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={notebookCollection.closeEditor}>取消</button>
+                <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")}>取消</button>
                 <button type="submit" className="new-pill" disabled={notebookCollection.editor?.busy}>{notebookCollection.editor?.busy ? "保存中…" : "保存"}</button>
               </div>
             </form>
@@ -5902,8 +6217,8 @@ export default function Home() {
         </section>
       )}
 
-      {deleteNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal="true">
+      {notebookDeleteModal.open && deleteNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal={notebookDeleteModal.topmost} aria-hidden={!notebookDeleteModal.topmost} inert={notebookDeleteModal.topmost ? undefined : true} style={{ zIndex: notebookDeleteModal.zIndex }}>
           <FloatingModalCard storageKey="notebook.delete.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5916,10 +6231,10 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              <button className="icon-button" disabled={notebookCollection.deletion?.busy} onClick={notebookCollection.closeDelete} title="Close">×</button>
+              <button className="icon-button" disabled={notebookCollection.deletion?.busy} onClick={() => rootModals.requestClose("notebook-delete", "button")} title="Close">×</button>
             </div>
             <div className="modal-actions padded">
-              <button className="sort-button" disabled={notebookCollection.deletion?.busy} onClick={notebookCollection.closeDelete}>取消</button>
+              <button className="sort-button" disabled={notebookCollection.deletion?.busy} onClick={() => rootModals.requestClose("notebook-delete", "button")}>取消</button>
               <button className="new-pill danger-pill" disabled={notebookCollection.deletion?.busy} onClick={() => { void notebookCollection.confirmDelete(); }}>{notebookCollection.deletion?.busy ? "删除中…" : "确认"}</button>
             </div>
             </>)}
@@ -5927,20 +6242,26 @@ export default function Home() {
         </section>
       )}
 
-      {passwordModalOpen && (
-        <PasswordChangeModal onClose={() => setPasswordModalOpen(false)} />
-      )}
-
-      {searchProfileModalOpen && currentUser && (
-        <SearchProfileModal
-          currentUser={currentUser}
-          onSaved={setCurrentUser}
-          onClose={() => setSearchProfileModalOpen(false)}
+      {passwordModal.open && (
+        <PasswordChangeModal
+          onClose={() => rootModals.requestClose("password-change", "button")}
+          interactive={passwordModal.topmost}
+          zIndex={passwordModal.zIndex}
         />
       )}
 
-      {infoModal && (
-        <section className="utility-modal utility-modal-top" role="dialog" aria-modal="true">
+      {searchProfileModal.open && currentUser && (
+        <SearchProfileModal
+          currentUser={currentUser}
+          onSaved={setCurrentUser}
+          onClose={() => rootModals.requestClose("search-profile", "button")}
+          interactive={searchProfileModal.topmost}
+          zIndex={searchProfileModal.zIndex}
+        />
+      )}
+
+      {infoModalView.open && infoModal && (
+        <section className="utility-modal utility-modal-top" role="dialog" aria-modal={infoModalView.topmost} aria-hidden={!infoModalView.topmost} inert={infoModalView.topmost ? undefined : true} style={{ zIndex: infoModalView.zIndex }}>
           <FloatingModalCard storageKey="info.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5948,7 +6269,7 @@ export default function Home() {
                 <h2>{infoModal.title}</h2>
                 <p>{infoModal.message}</p>
               </div>
-              <button className="icon-button" onClick={() => setInfoModal(null)} title="Close">×</button>
+              <button className="icon-button" onClick={closeInfoModal} title="Close">×</button>
             </div>
             <div className="info-body">
               {infoModal.sections && (
@@ -5968,7 +6289,7 @@ export default function Home() {
                     <Fragment key={action.label}>
                       <button
                         className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
-                        onClick={() => { setInfoModal(null); action.action(); }}
+                        onClick={() => { if (rootModals.requestClose("info", "button")) action.action(); }}
                       >
                         {action.label}
                       </button>
@@ -5984,7 +6305,7 @@ export default function Home() {
                   <button
                     key={action.label}
                     className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
-                    onClick={() => { setInfoModal(null); action.action(); }}
+                    onClick={() => { if (rootModals.requestClose("info", "button")) action.action(); }}
                   >
                     {action.label}
                   </button>
@@ -5996,8 +6317,12 @@ export default function Home() {
         </section>
       )}
 
-      {sourceDetail && (
-        <SourceDetailWindow onClose={sourceLibrary.closeSourceDetail}>
+      {sourceDetailModal.open && sourceDetail && (
+        <SourceDetailWindow
+          onClose={() => rootModals.requestClose("source-detail", "button")}
+          interactive={sourceDetailModal.topmost}
+          zIndex={sourceDetailModal.zIndex}
+        >
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 {sourceDetailBaseId ? (
@@ -6131,7 +6456,7 @@ export default function Home() {
                   sourceTitle={sourceDetail.title}
                   canEdit={!readOnlyWorkspace}
                   onConfirm={confirmCommandCatalog}
-                  onOpenReview={setCatalogReview}
+                  onOpenReview={openCatalogReview}
                   reviewSeq={catalogReviewSeq}
                 />
               )}
@@ -6187,21 +6512,24 @@ export default function Home() {
           是 fixed 后代的包含块,920px 宽的审阅弹窗塞进 740px 的来源详情卡片会被
           overflow:hidden 裁掉(P0,两次评审独立确认)。与 infoModal/MemorySaveDialog
           同一种「调用方持有开关状态、根层渲染」形状。 */}
-      {catalogReview && (
+      {catalogReviewModal.open && catalogReview && (
         <CommandCatalogReview
           notebookId={catalogReview.notebookId}
           sourceId={catalogReview.sourceId}
           sourceTitle={catalogReview.sourceTitle}
           jobId={catalogReview.jobId}
           canEdit={!readOnlyWorkspace}
-          onClose={() => setCatalogReview(null)}
+          onClose={() => rootModals.requestClose("catalog-review", "button")}
           onOpenTable={openKnowhowTable}
           onToast={setToast}
+          isCurrent={() => rootModals.owns(catalogReviewLease)}
           onReviewed={() => setCatalogReviewSeq((seq) => seq + 1)}
+          interactive={catalogReviewModal.topmost}
+          zIndex={catalogReviewModal.zIndex}
         />
       )}
 
-      {sharingSession && currentNotebookId && (
+      {conversationShareModal.open && sharingSession && currentNotebookId && (
         <ConversationShareModal
           // key 含边界:同一条会话里换一条回答再点分享,必须整块重挂,否则弹窗会带着
           // 上一次的 notice/error 与已加载态,把「已生成分享链接」按到新的边界上。
@@ -6210,12 +6538,14 @@ export default function Home() {
           conversationId={sharingSession.id}
           title={sharingSession.title || ""}
           throughAnswerId={sharingSession.throughAnswerId}
-          onClose={() => setSharingSession(null)}
+          onClose={() => rootModals.requestClose("conversation-share", "button")}
+          interactive={conversationShareModal.topmost}
+          zIndex={conversationShareModal.zIndex}
         />
       )}
 
-      {analytics && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics(); }}>
+      {analyticsModal.open && analytics && (
+        <section className="utility-modal" role="dialog" aria-modal={analyticsModal.topmost} aria-hidden={!analyticsModal.topmost} inert={analyticsModal.topmost ? undefined : true} style={{ zIndex: analyticsModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics("backdrop"); }}>
           <FloatingModalCard storageKey="analytics.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6223,7 +6553,7 @@ export default function Home() {
                 <h2>知识分析看板</h2>
                 <p>回答质量、审核进度、知识覆盖、来源状态与索引构建状态的本机统计。</p>
               </div>
-              <button className="icon-button" onClick={closeAnalytics} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeAnalytics("button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               <p className="section-title">回答质量</p>
@@ -6598,8 +6928,8 @@ export default function Home() {
         </section>
       )}
 
-      {schemaModalOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) kgWorkspace.closeSchemas(); }}>
+      {kgSchemaModal.open && schemaModalOpen && (
+        <section className="utility-modal" role="dialog" aria-modal={kgSchemaModal.topmost} aria-hidden={!kgSchemaModal.topmost} inert={kgSchemaModal.topmost ? undefined : true} style={{ zIndex: kgSchemaModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
           <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6607,7 +6937,7 @@ export default function Home() {
                 <h2>图谱 Schema</h2>
                 <p>查看当前笔记本实际采用的类型。所有者可改写继承类型或新增本库类型；管理员可切换到全局基线。</p>
               </div>
-              <button className="icon-button" onClick={kgWorkspace.closeSchemas} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeKgSchemas("button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               <SchemaManager
@@ -6629,8 +6959,8 @@ export default function Home() {
       )}
 
       {/* Agent Profile remains an independent presentation modal. */}
-      {understandingOpen && currentNotebookId && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUnderstandingOpen(false); }}>
+      {understandingModal.open && currentNotebookId && (
+        <section className="utility-modal" role="dialog" aria-modal={understandingModal.topmost} aria-hidden={!understandingModal.topmost} inert={understandingModal.topmost ? undefined : true} style={{ zIndex: understandingModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("understanding", "backdrop"); }}>
           <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6638,7 +6968,7 @@ export default function Home() {
                 <h2>AI 对这个库的理解</h2>
                 <p>AI 读过这个库之后形成的印象，以及你自己的检索心得。提问时会一并带上，可以随时改。</p>
               </div>
-              <button className="icon-button" onClick={() => setUnderstandingOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("understanding", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {/* key=当前笔记本:切库那一刻整个面板重挂而不是靠 prop 变化自己刷新——
@@ -6673,7 +7003,7 @@ export default function Home() {
               <button
                 type="button"
                 className="sort-button kg-schema-button"
-                onClick={kgWorkspace.openAnalysis}
+                onClick={openKgAnalysis}
                 title="查看这个知识库的构成、合并收敛与主题板块分布"
               >
                 <BarChart3 size={16} /> 图谱分析
@@ -6681,7 +7011,7 @@ export default function Home() {
               <button
                 type="button"
                 className="sort-button kg-schema-button"
-                onClick={kgWorkspace.openSchemas}
+                onClick={openKgSchemas}
                 title="查看当前笔记本采用的知识对象类型与字段"
               >
                 <Database size={16} /> 图谱 Schema
@@ -6694,8 +7024,8 @@ export default function Home() {
                 onOpen={() => {
                   // 关掉可能还开着的知识关系图弹窗(同层 z-60):它若压在本弹窗
                   // 之上,唯一入口点开的就是一个摸不到的面板(codex R9 P1)。
-                  kgWorkspace.closeGraph();
-                  setUnderstandingOpen(true);
+                  closeKgView();
+                  rootModals.open("understanding", rootModals.captureWorkspaceOwner());
                 }}
               />
               <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
@@ -7024,14 +7354,16 @@ export default function Home() {
               </div>
             </aside>
           </div>
-          {kgAnalysisOpen && currentNotebookId && (
+          {kgAnalysisModal.open && kgAnalysisOpen && currentNotebookId && (
             <KgAnalysisView
               notebookId={currentNotebookId}
               canAnalyze={!readOnlyWorkspace}
               analysisRunning={kgRefreshBusy}
               analysisBlocked={relinkingKg || buildingKg}
+              interactive={kgAnalysisModal.topmost}
+              zIndex={kgAnalysisModal.zIndex}
               onAnalyze={confirmGenerateKgAnalysis}
-              onClose={kgWorkspace.closeAnalysis}
+              onClose={closeKgAnalysis}
             />
           )}
         </section>
@@ -7049,12 +7381,15 @@ export default function Home() {
         />
       )}
 
-      {promoOpen && (
+      {promotionQueueModal.open && (
         <section
           className="utility-modal"
           role="dialog"
-          aria-modal="true"
-          onClick={(event) => { if (event.currentTarget === event.target) setPromoOpen(false); }}
+          aria-modal={promotionQueueModal.topmost}
+          aria-hidden={!promotionQueueModal.topmost}
+          inert={promotionQueueModal.topmost ? undefined : true}
+          style={{ zIndex: promotionQueueModal.zIndex }}
+          onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-queue", "backdrop"); }}
         >
           <FloatingModalCard storageKey="promotion.window" className="utility-modal-card">
             {(floating) => (<>
@@ -7063,7 +7398,7 @@ export default function Home() {
                 <h2>内容审核</h2>
                 <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入所选的目标公共知识库。</p>
               </div>
-              <button className="icon-button" onClick={() => setPromoOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("promotion-queue", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {(promoQueue ?? []).length === 0 ? (
@@ -7158,12 +7493,15 @@ export default function Home() {
         </section>
       )}
 
-      {pendingPromotionObjectId && (
+      {promotionTargetModal.open && pendingPromotionObjectId && (
         <section
           className="utility-modal"
           role="dialog"
-          aria-modal="true"
-          onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionObjectId(null); }}
+          aria-modal={promotionTargetModal.topmost}
+          aria-hidden={!promotionTargetModal.topmost}
+          inert={promotionTargetModal.topmost ? undefined : true}
+          style={{ zIndex: promotionTargetModal.zIndex }}
+          onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-target", "backdrop"); }}
         >
           <FloatingModalCard storageKey="promotionTarget.window" className="utility-modal-card narrow">
             {(floating) => (<>
@@ -7172,7 +7510,7 @@ export default function Home() {
                 <h2>选择贡献目标</h2>
                 <p>本笔记本挂载了多个公共知识库，请选择这条知识要进入哪一个。</p>
               </div>
-              <button className="icon-button" onClick={() => setPendingPromotionObjectId(null)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("promotion-target", "button")} title="Close">×</button>
             </div>
             <div className="promotion-target-list">
               {(promotionTarget.kind === "choose" ? promotionTarget.options : []).map((base) => (
@@ -7182,8 +7520,9 @@ export default function Home() {
                   className="sort-button promotion-target-option"
                   onClick={() => {
                     const objectId = pendingPromotionObjectId;
-                    setPendingPromotionObjectId(null);
-                    if (objectId) submitPromotion(objectId, base.id).catch(reportError);
+                    if (objectId && rootModals.requestClose("promotion-target", "button")) {
+                      submitPromotion(objectId, base.id).catch(reportError);
+                    }
                   }}
                 >
                   <span className="promotion-target-name" title={base.name}>{base.name}</span>
@@ -7195,12 +7534,15 @@ export default function Home() {
         </section>
       )}
 
-      {edgeReviewOpen && (
+      {edgeReviewModal.open && (
         <section
           className="utility-modal"
           role="dialog"
-          aria-modal="true"
-          onClick={(event) => { if (event.currentTarget === event.target) setEdgeReviewOpen(false); }}
+          aria-modal={edgeReviewModal.topmost}
+          aria-hidden={!edgeReviewModal.topmost}
+          inert={edgeReviewModal.topmost ? undefined : true}
+          style={{ zIndex: edgeReviewModal.zIndex }}
+          onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("edge-review", "backdrop"); }}
         >
           <FloatingModalCard storageKey="edgeReview.window" className="utility-modal-card">
             {(floating) => (<>
@@ -7209,7 +7551,7 @@ export default function Home() {
                 <h2>关系审核队列</h2>
                 <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
               </div>
-              <button className="icon-button" onClick={() => setEdgeReviewOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={() => rootModals.requestClose("edge-review", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {(edgeQueue ?? []).length === 0 ? (
@@ -7257,7 +7599,7 @@ export default function Home() {
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
-      {modelPanelOpen && (
+      {modelPanel.open && (
         <ModelServicePanel
           status={modelStatus}
           highlightedServiceId={highlightedModelServiceId}
@@ -7267,7 +7609,8 @@ export default function Home() {
           onClose={closeModelPanel}
           testingServiceIds={modelTestActivity.services}
           allTesting={modelTestActivity.all}
-          returnFocusTo={modelPanelReturnFocusRef.current}
+          interactive={modelPanel.topmost}
+          zIndex={modelPanel.zIndex}
         />
       )}
     </div>
