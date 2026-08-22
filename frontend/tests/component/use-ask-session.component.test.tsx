@@ -40,6 +40,7 @@ const DEFAULT_POLICY: AskPolicy = {
   kgAvailable: true,
   sourceScope: { mode: "exclude", source_ids: [] },
   baseScope: { mode: "exclude", notebook_ids: [] },
+  cancelRequestTimeoutMs: 35_000,
 };
 
 const effects: HookOptions["effects"] = {
@@ -535,8 +536,12 @@ test("a stalled started cancellation times out without aborting and permits retr
   vi.useFakeTimers();
   const stalledCancel = deferred<undefined>();
   const retryCancel = deferred<undefined>();
+  let cancelRequestSignal: AbortSignal | undefined;
   api.cancelAskJob
-    .mockReturnValueOnce(stalledCancel.promise)
+    .mockImplementationOnce((_notebookId, _jobId, requestSignal) => {
+      cancelRequestSignal = requestSignal;
+      return stalledCancel.promise;
+    })
     .mockReturnValueOnce(retryCancel.promise);
   let signal: AbortSignal | undefined;
   let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
@@ -568,8 +573,9 @@ test("a stalled started cancellation times out without aborting and permits retr
   act(() => value!.abort());
   expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
   expect(signal?.aborted).toBe(false);
-  act(() => vi.advanceTimersByTime(9_999));
+  act(() => vi.advanceTimersByTime(34_999));
   expect(signal?.aborted).toBe(false);
+  expect(cancelRequestSignal?.aborted).toBe(false);
   act(() => value!.abort());
   expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
   await act(async () => {
@@ -578,6 +584,7 @@ test("a stalled started cancellation times out without aborting and permits retr
     await Promise.resolve();
   });
   expect(signal?.aborted).toBe(false);
+  expect(cancelRequestSignal?.aborted).toBe(true);
   expect(effects.notify).toHaveBeenCalledWith("取消失败，请重试");
 
   act(() => value!.abort());

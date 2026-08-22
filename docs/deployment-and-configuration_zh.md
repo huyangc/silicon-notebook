@@ -440,6 +440,10 @@ DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
 
+已认证系统配置按 `DB_BUSY_TIMEOUT_MS` 加固定协议传输余量派生浏览器的 Ask 取消请求
+等待上界。调整数据库等待会同步移动客户端边界；不存在一条会在合法锁等待期间先到期的
+独立前端超时。
+
 **来源文件上传：**
 
 ```text

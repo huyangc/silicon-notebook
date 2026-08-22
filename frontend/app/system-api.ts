@@ -35,6 +35,8 @@ export type SystemConfiguration = {
   /** Backend/API rail for editable retrieval directions in one report section. */
   report_max_sections: number;
   report_max_subqueries_per_section: number;
+  /** Server-derived DB busy wait plus transport grace for authoritative Ask cancel. */
+  ask_cancel_request_timeout_ms: number | null;
   /** /dev/logs 的能力位:后端 USER_ACTIVITY_VIEW_ENABLED 是否开启「活动」tab。
    *  旧后端可能不下发这个字段——缺失或类型不对时按 `true` 处理(后端默认就是开
    *  的,不该在新前端 + 旧后端组合下把一个其实可用的视图藏掉)。 */
@@ -172,6 +174,7 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   const batchFiles = record.source_upload_max_files_per_batch;
   const reportSections = record.report_max_sections;
   const reportSubqueries = record.report_max_subqueries_per_section;
+  const askCancelRequestTimeout = record.ask_cancel_request_timeout_ms;
   if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) {
     throw new TypeError("系统上传配置格式无效");
   }
@@ -188,6 +191,13 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     && Number.isSafeInteger(reportSubqueries)
     && reportSubqueries > 0
   ) ? reportSubqueries : DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION;
+  // Older backends omit this field. In that case do not guess a shorter client
+  // timeout: awaiting authority is safer than inviting an overlapping retry.
+  const askCancelRequestTimeoutMs = (
+    typeof askCancelRequestTimeout === "number"
+    && Number.isSafeInteger(askCancelRequestTimeout)
+    && askCancelRequestTimeout > 0
+  ) ? askCancelRequestTimeout : null;
   // 缺失(旧后端)或类型不符一律按 **false** 处理:这是能力位不是配置项,所以是安全
   // 默认而非校验失败,不走前两个字段那样的抛错路径。
   //
@@ -221,6 +231,7 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     parser_engines: parseParserEngines(record.parser_engines),
     report_max_sections: reportMaxSections,
     report_max_subqueries_per_section: reportMaxSubqueries,
+    ask_cancel_request_timeout_ms: askCancelRequestTimeoutMs,
     user_activity_view_enabled: activityViewEnabled === true,
     source_image_max_bytes: imageMaxBytes,
     source_image_max_per_source: imageMaxPerSource,
