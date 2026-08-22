@@ -22,8 +22,13 @@ test("page composes one availability owner and exactly the two canonical outlets
   assert.ok(sourceWindowStart < sourceOutlet && sourceOutlet < sourceWindowEnd);
 
   let workspacePermissions;
+  let sourceDetailWindow;
   const contexts = new Map();
   function visit(node) {
+    if (
+      ts.isJsxElement(node)
+      && node.openingElement.tagName.getText(page) === "SourceDetailWindow"
+    ) sourceDetailWindow = node;
     if (
       ts.isVariableDeclaration(node)
       && node.name.getText(page) === "workspaceExtensionPermissions"
@@ -52,6 +57,16 @@ test("page composes one availability owner and exactly the two canonical outlets
     ts.forEachChild(node, visit);
   }
   visit(page);
+
+  assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
+  const sourceDetailGate = sourceDetailWindow.parent?.parent;
+  assert.ok(
+    sourceDetailGate
+    && ts.isBinaryExpression(sourceDetailGate)
+    && sourceDetailGate.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+    && sourceDetailGate.left.getText(page) === "sourceDetailModal.open && sourceDetail",
+    "source detail and its extension slot must be synchronously hidden by the coordinator open lease",
+  );
 
   function property(object, name) {
     return object?.properties.find((entry) => (
