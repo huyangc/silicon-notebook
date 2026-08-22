@@ -111,7 +111,7 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
       + "({code,path,actual,limit,method}), not a caught exception; it is only ever "
       + "passed through bundleErrorMessage's fixed Chinese copy, never shown raw",
   },
-  "page.tsx|<module>.Home.tick|diagnostic|error_message": {
+  "use-source-library.ts|<module>.useSourceLibrary.tick|diagnostic|error_message": {
     count: 2,
     reason: "background source failures pass through toUserMessage",
   },

@@ -118,6 +118,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 - `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 - `frontend/app/api-client.ts` is the shared transport，负责 base URL、认证 header、JSON/empty/Blob、trusted error、网络失败与 AbortSignal mechanics；七个 domain API module 仍拥有 endpoint path、body、response type 与产品策略。
+- `frontend/app/use-source-library.ts` 是来源库状态的唯一 owner：列表/检索范围、分页、详情元素、重解析、删除 tombstone 与解析轮询都在 hook 内按 user + notebook + workspace generation 归属；`page.tsx` 只提交成对稳定的 notebook/source 首屏快照并消费 readonly view、具名 command 与窄刷新事件。文件/URL 写请求可以在服务端安全完成，但旧 owner 的迟到结果不得写入新工作区。
 - `frontend/features/kg-maintenance` 拥有 KG 维护 API 与轮询/忙碌状态纯逻辑，`page.tsx` 只编排这个 feature。
 - `frontend/tests/{unit,component,guards}` 是测试入口的唯一位置，`frontend/test-support` 保存 setup 和语义源码 adapter；位置守卫禁止测试回流到 `app`/`features`。
 
@@ -438,7 +439,7 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 | Knowhow 表 | `backend/app/services/knowhow/`（`projection.py`、`api.py`、`grid_parser.py`、`textops.py`、`assets.py`）+ `repositories/sqlite/knowhow_store.py` + `api/knowhow_agent_routes.py` | 5+1 表 schema 域；唯一零 LLM KG 写入方；变更统一走 `ProjectionScheduler`；代码附件与检索/KG 严格隔离；会话与 Agent 面共享服务核心。 |
 | Frontend workspace | `frontend/app/page.tsx`、`frontend/features/`、`frontend/tests/`、`frontend/test-support/` | `page.tsx` 负责编排，feature 纵切片拥有生产策略；测试与 production 物理分离并由 guard 强制。 |
 
-Repository 侧的 persistence 与业务编排已按上表分层完成；应用边界已完成 router、model facade 与 shared transport 的领域分工。当前主要耦合点是 `page.tsx` 仍承担大量 workspace 异步状态，以及 FastAPI lifespan/application lifecycle composition 尚未独立；后续整改继续以现有 facade 和测试为保护层逐域迁移。
+Repository 侧的 persistence 与业务编排已按上表分层完成；应用边界已完成 router、model facade 与 shared transport 的领域分工。来源库状态已迁入独立 owner hook；`page.tsx` 仍承担其余 workspace 异步状态，FastAPI lifespan/application lifecycle composition 也尚未独立，后续整改继续以现有 facade 和测试为保护层逐域迁移。
 
 ## 6. 已知架构债务与整改顺序
 
@@ -447,7 +448,7 @@ Repository 侧的 persistence 与业务编排已按上表分层完成；应用�
 1. **2026-07-10 历史记录——行为契约与文档对齐**（已完成）：当时修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。当前 workspace 已扩展为四 tab，见上文实时边界。
 2. **Notebook 规模策略与 Repository ports**（已随 composition refactor 交付）：中性 `NotebookScaleProfile` 让 copy 与 retrieval 分别消费自己的策略；巨型 repository Protocol 拆成 `app/repositories/ports.py` 的领域小 Protocol，保留兼容组合类型。
 3. **2026-07-21 历史记录——application boundary foundation**（已完成）：领域 FastAPI router 由 `app/api/routes.py` 组合，领域 Pydantic model 以 `schemas.py` compatibility facade 保持旧 import，七个前端 domain API module 共用 `api-client.ts` transport；public/domain seam 与等价性测试替代 aggregate-private coupling。完整 warm gate 已验证三 lane 均不超过 60 秒。
-4. **前端 workspace 状态拆分**（计划项）：先增加可迁移的 helper/hook 行为测试，再抽 `useAskSession`、`useSourceLibrary`、`useKnowledgeGraphWorkspace` 与对应 panel；不引入新全局状态库，不改轮询节奏。
+4. **前端 workspace 状态拆分**（进行中）：`useSourceLibrary` 已作为首个 owner hook 落地；后续先增加可迁移的行为测试，再串行抽 `useAskSession`、report/KG workspace 与 modal/collection owner；不引入新全局状态库，不改请求数量或轮询节奏。
 5. **FastAPI application lifecycle**（计划项）：repository 内部 runtime 组合、retrieval/Ask/report service 与取消/重连 characterization test 已交付；FastAPI lifespan 管理的 application runtime、executor shutdown 与统一应用生命周期仍延后为独立工作。
 
 非目标包括一次性 clean-architecture 重写、在本轮引入 SQLAlchemy/容器/新模型服务、实现应用内 dual-write/shadow replication，或借整改改变公开 API、检索排序、Ask 持久化、断连/取消语义和 UI 布局。

@@ -236,6 +236,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 这些 PR 不依赖 Extension SDK，可在核心 Phase 1–4 期间流水推进，但彼此串行：
 
 - **PR-F1**：source library hook（建议首个样板）；
+  - 状态：实现完成；来源列表/范围、详情与分页、删除 tombstone、重解析和轮询已迁入 exact user+notebook owner，首屏 paired snapshot、请求数与轮询节奏保持，G1 三 lane 均在 60 秒内，待三路独立 review 与 CI 闭合；
 - **PR-F2**：Ask session hook；
 - **PR-F3**：report workspace hook；
 - **PR-F4**：KG workspace hook；

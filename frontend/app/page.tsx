@@ -20,16 +20,13 @@ import {
   defaultBaseScopeSelection,
   defaultSourceScopeSelection,
   localScopeIsEmpty,
-  removeSourceFromSelection,
   retrievalScopeSummary,
   selectedBaseIds,
   selectedSourceCount,
   sourceIsSelected,
   sourceScopePayload,
   toggleBaseSelection,
-  toggleSourceSelection,
   type BaseScopeSelection,
-  type SourceScopeSelection,
 } from "./source-scope";
 import { AnomalyBadge } from "./anomaly-badge";
 import {
@@ -124,13 +121,14 @@ import {
 } from "./conversation-cleanup";
 import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
+import { useSourceLibrary } from "./use-source-library.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
-import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
+import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { sourceKgBadge } from "./source-kg-badge.ts";
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
 import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
@@ -247,6 +245,7 @@ import {
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
+import { sourceElementDomId } from "./source-detail-state";
 import { SchemaManager, type SchemaView } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
@@ -263,12 +262,8 @@ import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import { crossLibrarySourceNotebookId } from "./source-scope";
 import {
-  claimSourceDeleteRefresh,
-  filterDeletedSourceItems,
-  ownsSourceDeleteRefresh,
   readStableSourceSnapshot,
 } from "./source-delete-state";
-import { clampSourcePage, sourcePageRequestIsCurrent } from "./source-page-state";
 import {
   doneItemDestination,
   followLatestNotebookRequest,
@@ -323,7 +318,6 @@ import {
   type NotebookSummary,
   type ObjectSchema,
   type PaginatedKnowledge,
-  type PaginatedSources,
   type PendingMerge,
   type SearchHit,
   type SourceElement,
@@ -335,7 +329,6 @@ import {
 } from "./workspace-model";
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
-const SOURCE_ELEMENT_PAGE_SIZE = 40;
 // codex R13:「补上关联」/「重新合并」两条轮询按 job_id 配对(codex R11)防住了陈旧终态
 // 被误当真——但按「不匹配就无限拒收」实现时,有两种场景会让这次追踪**永远**等不到匹配
 // 的终态:①后端重启(expectedMaintenanceJobRef 只在浏览器内存,重启后服务端记着的
@@ -685,10 +678,6 @@ function sourceTypeLabel(source: SourceSummary): string {
   return source.type || source.file_name.split(".").pop()?.toLowerCase() || "source";
 }
 
-function sourceElementDomId(elementId: string): string {
-  return `source-element-${elementId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-}
-
 function kgNodeName(node: UnifiedConceptNode): string {
   const name = typeof node.payload.name === "string" ? node.payload.name.trim() : "";
   return name || node.id.replace(/^K-/, "");
@@ -859,26 +848,11 @@ export default function Home() {
     groupId: "",
     tab: "notebooks",
   });
-  const [sources, setSources] = useState<SourceSummary[]>([]);
-  const [sourceScopeSelection, setSourceScopeSelection] = useState<SourceScopeSelection>(
-    defaultSourceScopeSelection,
-  );
   // 挂载参考库的检索范围。与来源那一维**分开**存：粒度不同（整个库 vs 单篇来源）、
   // 生命周期也不同（挂载边在设置里改，来源在这个页签改），后端也是分开校验的。
   const [baseScopeSelection, setBaseScopeSelection] = useState<BaseScopeSelection>(
     defaultBaseScopeSelection,
   );
-  const [sourcesTotal, setSourcesTotal] = useState(0);
-  // sourcesTotal follows the source-list filter (it holds the search-matched count
-  // while a source search is active, which pagination needs). The Ask composer / welcome
-  // copy instead want the notebook's imported-source total regardless of that filter, so
-  // track it separately: updated only on unfiltered loads and on source mutations.
-  // 文档上限门控也复用它：notebookSourceTotal 是不受来源搜索过滤影响的可见文档真实
-  // 总数（与后端 list_sources_page 无过滤时的 total_count 同口径，排除 memory/knowhow）。
-  const [notebookSourceTotal, setNotebookSourceTotal] = useState(0);
-  const [sourcesPage, setSourcesPage] = useState(0);
-  const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
-  const [sourceQuery, setSourceQuery] = useState("");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -922,6 +896,7 @@ export default function Home() {
   const [linkSectionOpen, setLinkSectionOpen] = useState(false);
   const [urlText, setUrlText] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
+  const urlRequestOwnerRef = useRef<object | null>(null);
   const [urlRejected, setUrlRejected] = useState<Array<{ url: string; reason: string }>>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
@@ -1048,20 +1023,59 @@ export default function Home() {
   // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
   // 内容哈希在同 notebook 内去重,重复提交不会建出重复来源,但会白传一遍并再跑一次解析。
   const [uploadBusy, setUploadBusy] = useState(false);
-  const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
-  // 删除是一个可能触发大量级联清理的同步请求。按 source id 记录进行态，让列表与详情
-  // 共用同一把锁；ref 在 React 提交 state 前就同步占位，防住确认框/两个入口的连点竞态。
-  const [deletingSourceIds, setDeletingSourceIds] = useState<Set<string>>(() => new Set());
-  const deletingSourceIdsRef = useRef<Set<string>>(new Set());
-  // 来源详情的「重新解析」是**同步等完**的整篇重解析(走 MinerU/解析器,大 PDF 可能数分钟),
-  // 不是后台 job——期间图标按钮必须禁用并换成转圈,否则用户只看到一个毫无反应的按钮、
-  // 反复点就会把同一篇重复解析若干遍。
-  const [reparsingSource, setReparsingSource] = useState(false);
-  const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
-  const [sourceElementsTotal, setSourceElementsTotal] = useState(0);
-  const [sourceElementStartOffset, setSourceElementStartOffset] = useState(0);
-  const [sourceElementsLoading, setSourceElementsLoading] = useState(false);
-  const sourceDetailRequestGenerationRef = useRef(0);
+  const uploadRequestOwnerRef = useRef<object | null>(null);
+  // Workspace identity remains shell-owned. The source hook receives explicit
+  // prepare/commit transitions so opening a notebook can keep the existing stable
+  // getNotebook + listSources snapshot instead of adding an effect-driven request.
+  const activeNotebookIdRef = useRef<string | null>(null);
+  const workspaceEpochRef = useRef(0);
+  const canWriteSources = workspaceCapabilities(
+    currentNotebook?.access,
+    currentUser?.role ?? "",
+    currentNotebook?.can_manage_content ?? false,
+  ).canWriteNotebook;
+  const sourceLibrary = useSourceLibrary({
+    actorId: currentUser?.id ?? null,
+    canWriteSources,
+    effects: {
+      setStatusText: (message) => setStatusText(message),
+      reportError,
+      setToast: (message) => setToast(message),
+      invalidateKnowledge: () => {
+        setKnowledge(EMPTY_KNOWLEDGE);
+        setDuplicates(null);
+      },
+      refreshCollection: async (guard) => loadNotebookCollection({ guard }),
+      refreshNotebook: async (notebookId, guard) => {
+        const refreshed = await getNotebook(notebookId);
+        if (guard()) {
+          setCurrentNotebook((current) => current?.id === notebookId ? refreshed : current);
+        }
+      },
+      refreshCheckup: async (notebookId, guard) => {
+        const refreshed = await fetchCheckup(notebookId);
+        if (guard()) setCheckup(refreshed);
+      },
+    },
+  });
+  const {
+    sources,
+    sourceScopeSelection,
+    sourcesTotal,
+    notebookSourceTotal,
+    sourcesPage,
+    sourcesCollapsed,
+    sourceQuery,
+    sourceDetail,
+    deletingSourceIds,
+    reparsingSource,
+    sourceElements,
+    sourceElementsTotal,
+    sourceElementStartOffset,
+    sourceElementsLoading,
+    highlightedElementId,
+  } = sourceLibrary;
+  const loadSourceElementPage = sourceLibrary.loadSourceElementPage;
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
@@ -1440,7 +1454,7 @@ export default function Home() {
   // 侧栏收起状态持久化(localStorage;隐私模式等读写失败静默降级)
   useEffect(() => {
     try {
-      if (window.localStorage.getItem("sn.sourcesCollapsed") === "1") setSourcesCollapsed(true);
+      if (window.localStorage.getItem("sn.sourcesCollapsed") === "1") sourceLibrary.setSourcesCollapsed(true);
     } catch { /* ignore */ }
   }, []);
   useEffect(() => {
@@ -1536,8 +1550,7 @@ export default function Home() {
           // cancelled 只拦「尚未发起」,拦不住已在途的请求回来后落状态,故按房内
           // workspaceEpoch 约定再加一道 guard(见 workspaceEpochRef 处注释)。
           loadSourcesPage(nb, {
-            page: sourcesPageRef.current,
-            q: sourceQueryRef.current,
+            ...sourceLibrary.currentPageRequest(),
             guard: () => workspaceRequestIsCurrent(
               cancelled,
               workspaceEpoch,
@@ -1700,8 +1713,7 @@ export default function Home() {
             setBackfillingMeta(false);
             // 同独立 backfill poll:cancelled 拦不住已在途的请求,补 epoch guard。
             loadSourcesPage(nb, {
-              page: sourcesPageRef.current,
-              q: sourceQueryRef.current,
+              ...sourceLibrary.currentPageRequest(),
               guard: () => workspaceRequestIsCurrent(
                 cancelled,
                 workspaceEpoch,
@@ -1901,14 +1913,14 @@ export default function Home() {
       if (r.scheduled.length === 0) {
         setToast("这些来源已不在或无需重新解析；已刷新状态");
         reloadCheckup(nb);
-        loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+        loadSourcesPage(nb, sourceLibrary.currentPageRequest()).catch(() => {});
         return false;
       }
       setToast(`已开始重新解析 ${r.scheduled.length} 篇来源；完成后会自动更新`);
       bumpCheckupRepairPoll();
       reloadCheckup(nb);
       // 让来源列表的状态标签也及时反映(分析中/已就绪)。
-      loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+      loadSourcesPage(nb, sourceLibrary.currentPageRequest()).catch(() => {});
       return true;
     } catch (e) { reportError(e); return false; }
   };
@@ -1996,14 +2008,6 @@ export default function Home() {
   const [kgSearch, setKgSearch] = useState("");
   const [kgSelectedTypes, setKgSelectedTypes] = useState<string[]>([]);
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
-  const [highlightedElementId, setHighlightedElementId] = useState("");
-  const pollCountRef = useRef(0);
-  const sourcesRef = useRef<SourceSummary[]>([]);
-  const sourceDetailRef = useRef<SourceSummary | null>(null);
-  // Live ref of currentNotebookId so async continuations (来源轮询的解析完成刷新)
-  // can distinguish「用户切库了」from「本 effect 恰好被清理了」——两者都会让闭包里
-  // 的 cancelled 变 true,但只有前者需要放弃刷新。同 sourcesRef 的既有轻量方案。
-  const currentNotebookIdRef = useRef<string | null>(null);
   const revalidateAccessRef = useRef<() => void>(() => {});
   /**
    * 笔记本清单的**写入世代**:每个会 `setNotebooks` 的路径都必须先 bump、写之前再 check,
@@ -2024,16 +2028,6 @@ export default function Home() {
    * 失败的请求不推进这个水位,所以它谁也吞不掉。
    */
   const notebookListPublishedRef = useRef(0);
-  // Live refs for source paging/query so long-lived poll effects (paper-meta
-  // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
-  // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
-  // 相对于「最后一次翻页」而非「补抽启动」),用 ref 是同 sourcesRef 的既有
-  // 轻量方案。
-  const sourcesPageRef = useRef(0);
-  const sourceQueryRef = useRef("");
-  // 所有来源分页/搜索/删除后重拉共享一个 latest-wins generation。删除成功会启动一个
-  // 新请求并立刻作废删除前仍在途的旧翻页/搜索，避免旧响应把已删来源重新塞回列表。
-  const sourcePageRequestRef = useRef(0);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const askIntentAbortRef = useRef<AbortController | null>(null);
@@ -2055,22 +2049,10 @@ export default function Home() {
   const memorySessionAbortRef = useRef(new AbortController());
   const askJobIdRef = useRef<string | null>(null);
   const askNotebookIdRef = useRef<string | null>(null);
-  // Every notebook/session transition advances the workspace epoch. Async
-  // callbacks may update UI only while both their run and workspace epochs
-  // still match, preventing cross-user/notebook/conversation state bleed.
-  const activeNotebookIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef<string | null>(conversationId);
   const activeAskModeRef = useRef<AskModeId>(askMode);
   activeConversationIdRef.current = conversationId;
   activeAskModeRef.current = askMode;
-  const workspaceEpochRef = useRef(0);
-  // notebook scoped：同库并发删除各自都会启动 collection/detail/checkup 校准，只有
-  // 最后一个成功响应对应的 generation 可以落状态，防慢的旧快照盖掉新的删除结果。
-  const sourceDeleteRefreshGenerationRef = useRef<Map<string, number>>(new Map());
-  // A successful DELETE may return while its notebook is between navigation
-  // epochs (active id is temporarily null). Keep notebook-scoped tombstones so
-  // an older direct list response can never resurrect that source.
-  const deletedSourceIdsByNotebookRef = useRef<Map<string, Set<string>>>(new Map());
   const kgBuildRequestEpochRef = useRef(0);
   const kgOpenRequestRef = useRef(0);
   const kgNodeNotebookRef = useRef<Map<string, string>>(new Map());
@@ -2447,23 +2429,6 @@ export default function Home() {
   }, [toast]);
 
   useEffect(() => {
-    if (!sourceDetail || !highlightedElementId) return;
-    // 找不到目标元素(如后端返回的 element_id 已不在当前 sourceElements 里)时
-    // ?.scrollIntoView 静默 no-op——这是既有行为,不新增报错/提示。
-    const scrollTimer = window.setTimeout(() => {
-      document
-        .getElementById(sourceElementDomId(highlightedElementId))
-        ?.scrollIntoView({ block: "center" });
-    }, 80);
-    // 一次性高亮(双评审 P2-7):目标卡片的高亮态由 element.id === highlightedElementId
-    // 驱动(见下方 source-element-card 的 className),这里只负责几秒后自动清空,
-    // 让高亮态"消失"而不是无限期挂着——关闭来源详情窗口(onClose)是另一条清空
-    // 路径,两条中的任意一条先发生都行。
-    const clearTimer = window.setTimeout(() => setHighlightedElementId(""), 2600);
-    return () => { window.clearTimeout(scrollTimer); window.clearTimeout(clearTimer); };
-  }, [highlightedElementId, sourceDetail, sourceElements]);
-
-  useEffect(() => {
     if (!menuNotebookId) return;
 
     function closeMenu() {
@@ -2529,114 +2494,8 @@ export default function Home() {
     };
   }, [sessionPanelOpen]);
 
-  // Keep a live ref of `sources` so the poll loop below reads the latest without
-  // re-subscribing (its effect is keyed on the boolean `hasPending`, not the array).
-  sourcesRef.current = sources;
-  sourceDetailRef.current = sourceDetail;
-  sourcesPageRef.current = sourcesPage;
-  sourceQueryRef.current = sourceQuery;
-  currentNotebookIdRef.current = currentNotebookId;
   // 同上:长驻的 visibilitychange 监听只能读到挂载那一刻的闭包,用 live ref 顶替。
   revalidateAccessRef.current = () => { refreshAfterAccessChange().catch(reportError); };
-  const hasPending = sources.some(
-    (source) => !["extracted", "failed"].includes(source.parse_status)
-  );
-
-  // Poll non-terminal sources so the UI reflects queued→parsing→…→extracted live.
-  // Keyed on the boolean `hasPending` (not the whole `sources` array) and
-  // self-scheduling with backoff, so a stuck/slow source does NOT re-run this
-  // effect — nor re-render the whole app — on every tick. setSources returns the
-  // previous array unchanged when no parse_status actually moved, so an unchanged
-  // poll costs zero re-renders (the old code always built a new array → the KB
-  // list re-rendered every 1.5s for up to 3min, which is what made it "卡").
-  useEffect(() => {
-    if (!currentNotebookId || !hasPending) {
-      pollCountRef.current = 0;
-      return;
-    }
-    let cancelled = false;
-    let timer: number | undefined;
-    let delay = 1500;
-    // Immediate feedback (the first fetch is one `delay` away).
-    const first = sourcesRef.current.filter((s) => !["extracted", "failed"].includes(s.parse_status));
-    if (first.length) {
-      setStatusText(`正在处理来源（已 ${Math.round((pollCountRef.current * 1500) / 1000)}s · ${first.length} 个）`);
-    }
-    const tick = async () => {
-      if (cancelled) return;
-      const pending = sourcesRef.current.filter(
-        (source) => !["extracted", "failed"].includes(source.parse_status)
-      );
-      if (pending.length === 0) {
-        pollCountRef.current = 0;
-        return; // done — nothing to poll
-      }
-      if (pollCountRef.current > 120) {
-        setStatusText("处理超时：部分来源长时间未完成，请稍后重试");
-        return; // ~3min safety cap
-      }
-      pollCountRef.current += 1;
-      const elapsedSec = Math.round((pollCountRef.current * 1500) / 1000);
-      setStatusText(`正在处理来源（已 ${elapsedSec}s · ${pending.length} 个）`);
-      try {
-        const updated = await Promise.all(
-          pending.map((source) => getSource(source.id))
-        );
-        if (cancelled) return;
-        const reachedExtracted = updated.some((item) => {
-          const previous = pending.find((source) => source.id === item.id);
-          return previous && previous.parse_status !== "extracted" && item.parse_status === "extracted";
-        });
-        const justFailed = updated.find((item) => {
-          const previous = pending.find((source) => source.id === item.id);
-          return previous && previous.parse_status !== "failed" && item.parse_status === "failed";
-        });
-        let changed = false;
-        setSources((previous) => {
-          const next = previous.map((source) => {
-            const item = updated.find((u) => u.id === source.id);
-            if (item && item.parse_status !== source.parse_status) changed = true;
-            return item ?? source;
-          });
-          return changed ? next : previous; // no re-render when nothing moved
-        });
-        if (justFailed && !cancelled) {
-          // source.error_message 由后端写成 `ValueError: ...` / MinerU 的英文
-          // 提示(见 source_ingestion.py),是给日志和 MCP 看的。只有它本身就是
-          // 中文可展示文案时才附给用户;否则原文只进 console(兜底传空串)。
-          const failureHint = justFailed.error_message
-            ? toUserMessage(new Error(justFailed.error_message), "")
-            : "";
-          setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${failureHint ? ` — ${failureHint}` : ""}`);
-        }
-        if (reachedExtracted && currentNotebookId) {
-          // ⚠ 这段刷新不能用 `cancelled` 做闸:最后一个 pending 源翻到 extracted 时,
-          // 上面的 setSources 会让 hasPending 变 false → 本 effect 先被清理
-          // (cancelled=true),网络响应才回来。按 cancelled 判会恰好在「新建库上传
-          // 首个文档解析完成」这条路上跳过 ask_available 的重拉,输入框保持禁用直到
-          // 手动刷新。真正要守的只有「用户没切库」:按 live ref 比对 notebook id。
-          const stillOnNotebook = () => currentNotebookIdRef.current === currentNotebookId;
-          await loadNotebookCollection();
-          const refreshed = await getNotebook(currentNotebookId);
-          if (stillOnNotebook()) setCurrentNotebook(refreshed);
-          // 源达终态(extracted/failed)可能新增 H2–H6:刷新体检,新损坏才会冒进铃铛而非等用户手动
-          // 打开看板(codex 第5轮 P2:proactive fetch 只在 notebook ID 变时跑,漏了上传后 parse 完成)。
-          if (stillOnNotebook()) reloadCheckup(currentNotebookId);
-        }
-      } catch (error) {
-        reportError(error);
-      }
-      if (!cancelled) {
-        delay = Math.min(Math.round(delay * 1.5), 15000); // backoff 1.5s→…→15s
-        timer = window.setTimeout(tick, delay);
-      }
-    };
-    timer = window.setTimeout(tick, delay);
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [currentNotebookId, hasPending]);
 
   const visibleNotebooks = useMemo(() => {
     const query = searchQuery.trim();
@@ -3239,43 +3098,7 @@ export default function Home() {
     notebookId: string,
     opts: { page?: number; q?: string; guard?: () => boolean } = {},
   ) {
-    const requestId = ++sourcePageRequestRef.current;
-    let pageNum = opts.page ?? 0;
-    const q = opts.q ?? sourceQuery;
-    const isCurrent = () => sourcePageRequestIsCurrent(
-      requestId,
-      sourcePageRequestRef.current,
-      notebookId,
-      activeNotebookIdRef.current,
-      !opts.guard || opts.guard(),
-    );
-    let result = await listSources(notebookId, pageNum * SOURCES_PAGE_SIZE, SOURCES_PAGE_SIZE, q);
-    // 后台轮询发起的刷新可能在途期间用户已切库/切会话——那时落状态会把新库的
-    // 来源列表覆盖成旧库的。除此之外，所有来源读取共用 request generation：一个
-    // 删除后权威重拉或更新的搜索/翻页一启动，更旧的响应就没有资格复活旧行。
-    if (!isCurrent()) return;
-    const clampedPage = clampSourcePage(pageNum, result.total_count, SOURCES_PAGE_SIZE);
-    if (clampedPage !== pageNum) {
-      pageNum = clampedPage;
-      result = await listSources(
-        notebookId,
-        pageNum * SOURCES_PAGE_SIZE,
-        SOURCES_PAGE_SIZE,
-        q,
-      );
-      if (!isCurrent()) return;
-    }
-    const filtered = filterDeletedSourceItems(
-      result.items,
-      deletedSourceIdsByNotebookRef.current.get(notebookId),
-    );
-    const visibleTotal = Math.max(0, result.total_count - filtered.removedCount);
-    setSourcesTotal(visibleTotal);
-    // Only an unfiltered page reflects the notebook's true source total; a search query
-    // returns the matched subset, which must not become the Ask surfaces' count.
-    if (!q) setNotebookSourceTotal(visibleTotal);
-    setSources(filtered.items);
-    setSourcesPage(pageNum);
+    await sourceLibrary.loadSourcesPage({ notebookId, ...opts });
   }
 
   async function openNotebook(notebookId: string, history: "push" | "none" = "push"): Promise<boolean> {
@@ -3285,11 +3108,12 @@ export default function Home() {
     closeAnalytics();
     closeKnowhow();
     setInfoModal(null);
-    setSourceDetail(null);
-    setSourceElements([]);
-    setHighlightedElementId("");
     const workspaceEpoch = ++workspaceEpochRef.current;
-    sourcePageRequestRef.current += 1;
+    sourceLibrary.beginTransition();
+    uploadRequestOwnerRef.current = null;
+    urlRequestOwnerRef.current = null;
+    setUploadBusy(false);
+    setUrlBusy(false);
     // 切库同样是暂存批次的清理路径:上一个库里还在飞的 zip/文件夹解包链落盘时
     // 必须整条丢弃,不能把它的结果写进(可能已经属于)新库的「添加来源」弹窗。
     bundleIntakeGenerationRef.current += 1;
@@ -3322,7 +3146,7 @@ export default function Home() {
     // notebook id at null. Keep reading both snapshots until one full read sees
     // a stable delete generation; tombstones alone cannot repair ask_available.
     const [notebook, sourcesPage] = await readStableSourceSnapshot(
-      () => sourceDeleteRefreshGenerationRef.current.get(notebookId) ?? 0,
+      () => sourceLibrary.deleteGeneration(notebookId),
       () => Promise.all([
         getNotebook(notebookId),
         listSources(notebookId, 0, SOURCES_PAGE_SIZE),
@@ -3333,23 +3157,15 @@ export default function Home() {
     setCurrentNotebookId(notebookId);
     setCurrentNotebook(notebook);
     setTitleDraft(notebook.name);
-    const filteredSourcesPage = filterDeletedSourceItems(
-      sourcesPage.items,
-      deletedSourceIdsByNotebookRef.current.get(notebookId),
-    );
-    const visibleSourcesTotal = Math.max(
-      0,
-      sourcesPage.total_count - filteredSourcesPage.removedCount,
-    );
-    setSources(filteredSourcesPage.items);
-    setSourceScopeSelection(defaultSourceScopeSelection());
+    sourceLibrary.commitNotebookSnapshot({
+      actorId: currentUser?.id ?? "",
+      notebookId,
+      workspaceEpoch,
+      page: sourcesPage,
+    });
     // 参考库的选择状态挂在**上一个**笔记本的挂载集上，不一起重置就会把旧库 id 带进
     // 新笔记本的请求（422），或反过来悄悄沿用旧的排除项。
     setBaseScopeSelection(defaultBaseScopeSelection());
-    setSourcesTotal(visibleSourcesTotal);
-    setNotebookSourceTotal(visibleSourcesTotal);
-    setSourcesPage(0);
-    setSourceQuery("");
     setBuildingKg(shouldResumeKgBuild(notebook));
     setTrackedKgJobId(
       notebook.kg_build?.status === "running"
@@ -3374,7 +3190,6 @@ export default function Home() {
     setDuplicates(null);
     setCurrentNotebookBases([]);
     setSessions([]);
-    pollCountRef.current = 0;
     const sessionList = await loadSessions(notebookId);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
     // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
@@ -3450,11 +3265,12 @@ export default function Home() {
     closeAnalytics();
     closeKnowhow();
     setInfoModal(null);
-    setSourceDetail(null);
-    setSourceElements([]);
-    setHighlightedElementId("");
     workspaceEpochRef.current += 1;
-    sourcePageRequestRef.current += 1;
+    sourceLibrary.beginTransition();
+    uploadRequestOwnerRef.current = null;
+    urlRequestOwnerRef.current = null;
+    setUploadBusy(false);
+    setUrlBusy(false);
     askRunEpochRef.current += 1;
     abortIntentPreview();
     memoryLinksAbortRef.current?.abort();
@@ -3466,8 +3282,6 @@ export default function Home() {
     askNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
-    setSources([]);
-    setSourceScopeSelection(defaultSourceScopeSelection());
     setBaseScopeSelection(defaultBaseScopeSelection());
     setTitleDraft("");
     setTurns([]);
@@ -4164,15 +3978,23 @@ export default function Home() {
       return;
     }
     setUploadBusy(true);
+    const requestOwner = {};
+    uploadRequestOwnerRef.current = requestOwner;
     try {
       await confirmUploadInner();
+    } catch (error) {
+      if (uploadRequestOwnerRef.current === requestOwner) reportError(error);
     } finally {
-      setUploadBusy(false);
+      if (uploadRequestOwnerRef.current === requestOwner) {
+        uploadRequestOwnerRef.current = null;
+        setUploadBusy(false);
+      }
     }
   }
 
   async function confirmUploadInner() {
-    if (!currentNotebookId || stagedFiles.length === 0) return;
+    const owner = sourceLibrary.captureOwner();
+    if (!owner || stagedFiles.length === 0) return;
     const formData = new FormData();
     stagedFiles.forEach((file) => formData.append("files", file));
     // 每个文件发两个并列字段：doc_types（原值，"" = 自动检测）+ doc_type_explicit
@@ -4185,44 +4007,41 @@ export default function Home() {
     // 上传前各来源的文档类型：内容判重会沿用既有来源，但用户新选的类型仍会写进
     // 去并触发按新类型重抽——只有对着上传前的值才看得出这次到底改没改。
     const docTypesBefore = new Map(sources.map((source) => [source.id, source.doc_type ?? ""]));
-    const uploaded = await uploadSources(currentNotebookId, formData);
+    const uploaded = await uploadSources(owner.notebookId, formData);
     const outcome = summarizeUpload(uploaded, docTypesBefore);
     // 用折叠去重后的 outcome.sources，不是原始 uploaded：一次上传里两个内容相同的
     // 文件会让后端对同一个 id 返回两条（新建 + 命中它的 reused），直接铺进 state 会
     // 渲染出重复卡片，直到重开笔记本才消失。
-    setSources((previous) => [...previous.filter((source) => !outcome.sources.some((item) => item.id === source.id)), ...outcome.sources]);
-    // 只加新建的那些：沿用的既有来源本来就已经在总数里了，重复计入会让
-    //「N 个来源」和分页总数一直偏大到重新打开笔记本为止。outcome.added 已按 id 去重，
-    // 批内重复的回声也只计一次。
-    setSourcesTotal((t) => t + outcome.added.length);
-    setNotebookSourceTotal((t) => t + outcome.added.length);
-    await loadNotebookCollection();
+    if (!sourceLibrary.commitUploadedSources(owner, outcome.sources, outcome.added.length)) return;
+    const stillOwned = () => sourceLibrary.captureOwner() === owner;
+    await loadNotebookCollection({ guard: stillOwned });
+    if (!stillOwned()) return;
     // P1(codex PR#334 第9轮):快传小文件可能后台已解析完(返回即 extracted),hasPending 保持
     // false → 处理轮询的 reachedExtracted 分支不触发 → ask_available 陈旧为假、对话框空锁。显式
     // 重拉解禁;仍在解析中的慢路径由处理轮询覆盖。
     revalidateAskAvailability();
-    reloadCheckup(currentNotebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
+    reloadCheckup(owner.notebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
     resetStagedIntake();
     setSourceModalOpen(false);
     setToast(outcome.toast);
   }
 
   async function submitUrlSources() {
-    if (!currentNotebookId) return;
+    const owner = sourceLibrary.captureOwner();
+    if (!owner) return;
     const urls = parseUrlLines(urlText);
     if (urls.length === 0) {
       setToast("请粘贴至少一个 http/https 链接");
       return;
     }
     setUrlBusy(true);
+    const requestOwner = {};
+    urlRequestOwnerRef.current = requestOwner;
     setUrlRejected([]);
     try {
-      const result = await importUrlSources(currentNotebookId, urls);
+      const result = await importUrlSources(owner.notebookId, urls);
       if (result.created.length > 0) {
-        setSources((previous) => [
-          ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
-          ...result.created,
-        ]);
+        if (!sourceLibrary.commitUrlSources(owner, result.created)) return;
         // Maintain only the Ask surfaces' count (notebookSourceTotal, unfiltered) optimistically.
         // sourcesTotal (source-list pagination + Source Stack header) is deliberately left to
         // re-sync on the next source-page fetch: it tracks the *applied* source-search filter, and
@@ -4232,11 +4051,13 @@ export default function Home() {
         // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
         // bump is pre-existing and out of scope here. 文档上限门控也读 notebookSourceTotal，
         // 故链接导入 +N 后满额判定同步跟进。
-        setNotebookSourceTotal((t) => t + result.created.length);
-        await loadNotebookCollection();
+        const stillOwned = () => sourceLibrary.captureOwner() === owner;
+        await loadNotebookCollection({ guard: stillOwned });
+        if (!stillOwned()) return;
         revalidateAskAvailability(); // P1:导入即产出可检索证据时解禁对话框(同 confirmUpload)
-        reloadCheckup(currentNotebookId);  // 同理刷新体检铃铛(codex 第5轮 P2)
+        reloadCheckup(owner.notebookId);  // 同理刷新体检铃铛(codex 第5轮 P2)
       }
+      if (sourceLibrary.captureOwner() !== owner) return;
       setUrlRejected(result.rejected);
       setToast(`已添加 ${result.created.length} 个，被拒 ${result.rejected.length} 个`);
       if (result.rejected.length === 0) {
@@ -4244,206 +4065,44 @@ export default function Home() {
         setLinkSectionOpen(false);
       }
     } catch (error) {
-      reportError(error);
+      if (urlRequestOwnerRef.current === requestOwner) reportError(error);
     } finally {
-      setUrlBusy(false);
+      if (urlRequestOwnerRef.current === requestOwner) {
+        urlRequestOwnerRef.current = null;
+        setUrlBusy(false);
+      }
     }
   }
 
   async function openSourceDetail(source: SourceSummary) {
-    await openSourceById(source.id, "");
+    await sourceLibrary.openSourceById(source.id);
   }
 
-  // 供来源列表(openSourceDetail,不带目标元素)与 Ask 清单结果卡「查看来源」跳转
-  // (onOpenSourceElement,带目标元素 id)共用同一条打开路径。elementId 喂给上面
-  // 已声明但此前从未被真正置位的 highlightedElementId 高亮/滚动效果——PR-2 T6 是
-  // 它第一次真正被点亮。空字符串代表「打开来源、不指向具体元素」,与既有
-  // openSourceDetail 的行为逐字一致。
-  // 走 active 笔记本维度的代理读取端点(getNotebookSource/-Elements):路径里的
-  // notebook 是当前 active 库、权限按它判,来源本身可以属于它有效挂载的任一参考库
-  // ——挂载参考库不等于该库的直接成员权限(红线),浏览器因此绝不直连另一个库。参与集
-  // 首项恒为 active 自身,本库来源与跨库来源共用这一条路径,不分叉。currentNotebookId
-  // 缺席(理论上打不开任何来源)时退回旧的 owner∪member 端点,保持既有行为。
-  async function openSourceById(sourceId: string, elementId: string) {
-    const requestGeneration = ++sourceDetailRequestGenerationRef.current;
-    setSourceElementsLoading(false);
-    const notebookId = currentNotebookId;
-    const workspaceEpoch = workspaceEpochRef.current;
-    const [detail, elementPage] = await Promise.all([
-      notebookId ? getNotebookSource(notebookId, sourceId) : getSource(sourceId),
-      notebookId
-        ? getNotebookSourceElementsPage(notebookId, sourceId, 0, SOURCE_ELEMENT_PAGE_SIZE, elementId)
-        : getSourceElementsPage(sourceId, 0, SOURCE_ELEMENT_PAGE_SIZE, elementId)
-    ]);
-    if (
-      sourceDetailRequestGenerationRef.current !== requestGeneration
-      || (notebookId && activeNotebookIdRef.current !== notebookId)
-      || workspaceEpochRef.current !== workspaceEpoch
-      || deletedSourceIdsByNotebookRef.current.get(detail.notebook_id)?.has(sourceId)
-    ) return;
-    setSourceDetail(detail);
-    setSourceElements(elementPage.items);
-    setSourceElementsTotal(elementPage.total_count);
-    setSourceElementStartOffset(elementPage.offset);
-    setSourceElementsLoading(false);
-    setHighlightedElementId(elementId);
-  }
-
-  async function loadSourceElementPage(direction: "previous" | "next") {
-    const detail = sourceDetail;
-    if (!detail || sourceElementsLoading) return;
-    const offset = direction === "previous"
-      ? Math.max(0, sourceElementStartOffset - SOURCE_ELEMENT_PAGE_SIZE)
-      : sourceElementStartOffset + sourceElements.length;
-    const notebookId = currentNotebookId;
-    const workspaceEpoch = workspaceEpochRef.current;
-    const requestGeneration = sourceDetailRequestGenerationRef.current;
-    setSourceElementsLoading(true);
-    try {
-      const page = notebookId
-        ? await getNotebookSourceElementsPage(notebookId, detail.id, offset, SOURCE_ELEMENT_PAGE_SIZE)
-        : await getSourceElementsPage(detail.id, offset, SOURCE_ELEMENT_PAGE_SIZE);
-      if (
-        sourceDetailRequestGenerationRef.current !== requestGeneration
-        || sourceDetailRef.current?.id !== detail.id
-        || workspaceEpochRef.current !== workspaceEpoch
-        || (notebookId && activeNotebookIdRef.current !== notebookId)
-      ) return;
-      setSourceElements((current) => direction === "previous"
-        ? [...page.items, ...current]
-        : [...current, ...page.items]);
-      if (direction === "previous") setSourceElementStartOffset(page.offset);
-      setSourceElementsTotal(page.total_count);
-    } finally {
-      if (
-        sourceDetailRequestGenerationRef.current === requestGeneration
-        && sourceDetailRef.current?.id === detail.id
-      ) setSourceElementsLoading(false);
-    }
-  }
-
-  // Ask 清单结果卡(answer-panel.tsx CollectionResultCard)元素条目「查看来源」/
-  // 「在来源详情查看完整表格」按钮的回调:elementId 缺省时只打开来源、不高亮任何
-  // 元素；KG 知识对象清单在有原文 citation 时同样用它精确跳转。
   function onOpenSourceElement(sourceId: string, elementId?: string) {
-    openSourceById(sourceId, elementId || "").catch(reportError);
+    sourceLibrary.openSourceById(sourceId, elementId || "").catch(reportError);
   }
 
   async function reparseSource() {
-    if (!sourceDetail || reparsingSource) return;
-    // 防御性复检:参考库来源是只读的(按钮本就不渲染),重新解析是 owner-only 的写入。
-    if (crossLibrarySourceNotebookId(sourceDetail.notebook_id, currentNotebookId)) return;
-    const notebookId = currentNotebookId ?? sourceDetail.notebook_id;
-    setReparsingSource(true);
-    try {
-      await reparseSourceInner(sourceDetail.id, notebookId);
-    } finally {
-      setReparsingSource(false);
-    }
-  }
-
-  async function reparseSourceInner(sourceId: string, notebookId: string | null) {
-    const updated = await parseSource(sourceId);
-    setSources((previous) => previous.map((source) => source.id === updated.id ? updated : source));
-    await openSourceDetail(updated);
-    await loadNotebookCollection();
-    // 重新解析可能**改变可检索证据**:唯一来源重解析成 0 chunk(如扫描版 PDF 无文字)会把
-    // ask_available 由真转假。此路径是同步终态、不经处理轮询,故须显式重拉 notebook 快照,
-    // 否则对话框陈旧为可用、能向空库提问(codex PR#334 第7轮 P2)。
-    if (notebookId) {
-      const refreshed = await getNotebook(notebookId);
-      if (activeNotebookIdRef.current === notebookId) setCurrentNotebook(refreshed);
-    }
-    setToast("Source 已重新解析");
+    await sourceLibrary.reparseSource();
   }
 
   function confirmDeleteSource(source: SourceSummary) {
-    // 同上:参考库来源只读,删除是 owner-only 的写入,连确认框都不该弹。
     if (crossLibrarySourceNotebookId(source.notebook_id, currentNotebookId)) return;
-    if (deletingSourceIdsRef.current.has(source.id)) return;
+    if (deletingSourceIds.has(source.id)) return;
     setInfoModal({
       title: "删除来源",
       message: `确定删除“${source.title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`,
       actions: [
         { label: "取消", action: () => {} },
-        { label: "删除来源", danger: true, action: () => deleteSource(source).catch(reportError) }
-      ]
+        {
+          label: "删除来源",
+          danger: true,
+          action: () => sourceLibrary.deleteSource(source).catch(reportError),
+        },
+      ],
     });
   }
 
-  async function deleteSource(source: SourceSummary) {
-    const notebookId = source.notebook_id;
-    if (!notebookId || deletingSourceIdsRef.current.has(source.id)) return;
-    deletingSourceIdsRef.current.add(source.id);
-    setDeletingSourceIds((previous) => new Set(previous).add(source.id));
-    try {
-      await deleteSourceRequest(source.id);
-      const deletedIds = deletedSourceIdsByNotebookRef.current.get(notebookId)
-        ?? new Set<string>();
-      deletedIds.add(source.id);
-      deletedSourceIdsByNotebookRef.current.set(notebookId, deletedIds);
-      // Detail ownership is source-scoped rather than workspace-scoped. Close
-      // it even if navigation temporarily made activeNotebookId null; otherwise
-      // a successful delete can leave an actionable 404-only detail behind.
-      if (sourceDetailRef.current?.id === source.id) {
-        setSourceDetail(null);
-        setSourceElements([]);
-        setHighlightedElementId("");
-      }
-      const refreshGeneration = (sourceDeleteRefreshGenerationRef.current.get(notebookId) ?? 0) + 1;
-      sourceDeleteRefreshGenerationRef.current.set(notebookId, refreshGeneration);
-      const refreshOwner = claimSourceDeleteRefresh(
-        notebookId,
-        activeNotebookIdRef.current,
-        workspaceEpochRef.current,
-        refreshGeneration,
-      );
-      if (!refreshOwner) return;
-      const isCurrent = () => ownsSourceDeleteRefresh(
-        refreshOwner,
-        activeNotebookIdRef.current,
-        workspaceEpochRef.current,
-        sourceDeleteRefreshGenerationRef.current.get(notebookId) ?? 0,
-      );
-      // DELETE 成功就是用户等待的终点：先同步提交当前 notebook 的列表、计数与详情，
-      // collection/notebook/checkup 的权威校准随后并行进行，不再把网络瀑布算进“删除中”。
-      const wasVisible = sourcesRef.current.some((item) => item.id === source.id);
-      setSources((previous) => previous.filter((item) => item.id !== source.id));
-      setSourceScopeSelection((previous) => removeSourceFromSelection(previous, source.id));
-      if (wasVisible) setSourcesTotal((total) => Math.max(0, total - 1));
-      setNotebookSourceTotal((total) => Math.max(0, total - 1));
-      setKnowledge(EMPTY_KNOWLEDGE);
-      setDuplicates(null);
-      setToast("来源已删除");
-
-      void Promise.allSettled([
-        loadSourcesPage(notebookId, {
-          page: sourcesPageRef.current,
-          q: sourceQueryRef.current,
-          guard: isCurrent,
-        }),
-        loadNotebookCollection({ guard: isCurrent }),
-        getNotebook(notebookId).then((refreshed) => {
-          if (isCurrent()) {
-            setCurrentNotebook((current) => current?.id === notebookId ? refreshed : current);
-          }
-        }),
-        fetchCheckup(notebookId).then((refreshedCheckup) => {
-          if (isCurrent()) setCheckup(refreshedCheckup);
-        }),
-      ]);
-    } finally {
-      deletingSourceIdsRef.current.delete(source.id);
-      setDeletingSourceIds((previous) => {
-        if (!previous.has(source.id)) return previous;
-        const next = new Set(previous);
-        next.delete(source.id);
-        return next;
-      });
-    }
-  }
-
-  // 收起在途 turn(问题气泡 + 轨迹面板)。
   function clearPendingTurn() {
     setPendingQuestion("");
     setPendingAskedAt("");
@@ -5350,7 +5009,7 @@ export default function Home() {
   // 命令目录确认落库后的「去看这张表」落点：只定位到表，不指定行（刚写入的是一批
   // 行，挑其中任意一行当落点都是随意的）。KnowhowJumpTarget.rowId 本就允许 null。
   function openKnowhowTable(tableId: string) {
-    setSourceDetail(null);
+    sourceLibrary.closeSourceDetail();
     setKnowhowNavigation(openKnowhowNavigation({ jumpTarget: { tableId, rowId: null } }));
   }
 
@@ -6617,7 +6276,9 @@ export default function Home() {
 
   async function handleLogout() {
     workspaceEpochRef.current += 1;
-    sourcePageRequestRef.current += 1;
+    sourceLibrary.beginTransition();
+    uploadRequestOwnerRef.current = null;
+    urlRequestOwnerRef.current = null;
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
     abortIntentPreview();
@@ -7182,7 +6843,7 @@ export default function Home() {
                     className="sources-collapse-handle"
                     aria-label="收起来源栏"
                     title="收起来源栏"
-                    onClick={() => setSourcesCollapsed(true)}
+                    onClick={() => sourceLibrary.setSourcesCollapsed(true)}
                   >
                     <PanelLeftClose size={18} />
                   </button>
@@ -7243,8 +6904,7 @@ export default function Home() {
                             setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
                           }).catch(() => {});
                           loadSourcesPage(nb, {
-                            page: sourcesPageRef.current,
-                            q: sourceQueryRef.current,
+                            ...sourceLibrary.currentPageRequest(),
                             guard: stillCurrent,
                           }).catch(() => {});
                         } else {
@@ -7384,7 +7044,7 @@ export default function Home() {
                         type="button"
                         disabled={askInFlight || (notebookSourceTotal === 0 && !hasMountedBase)}
                         onClick={() => {
-                          setSourceScopeSelection(defaultSourceScopeSelection());
+                          sourceLibrary.selectAllSources();
                           setBaseScopeSelection(defaultBaseScopeSelection());
                         }}
                       >全选</button>
@@ -7396,7 +7056,7 @@ export default function Home() {
                           selectedLocalSourceCount === 0 && selectedBaseNotebookCount === 0
                         )}
                         onClick={() => {
-                          setSourceScopeSelection({ allSelected: false, ids: new Set() });
+                          sourceLibrary.clearSourceSelection();
                           setBaseScopeSelection({ allSelected: false, ids: new Set() });
                         }}
                       >清空</button>
@@ -7449,7 +7109,7 @@ export default function Home() {
                     type="search"
                     placeholder="搜索来源（标题/作者/文件名）"
                     value={sourceQuery}
-                    onChange={(e) => setSourceQuery(e.target.value)}
+                    onChange={(e) => sourceLibrary.setSourceQuery(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && currentNotebookId) {
                         loadSourcesPage(currentNotebookId, { page: 0, q: sourceQuery }).catch(reportError);
@@ -7490,9 +7150,7 @@ export default function Home() {
                               checked={sourceIsSelected(sourceScopeSelection, source.id)}
                               disabled={deletingSource || askInFlight}
                               aria-label={`检索来源：${source.title}`}
-                              onChange={() => setSourceScopeSelection((previous) => (
-                                toggleSourceSelection(previous, source.id)
-                              ))}
+                              onChange={() => sourceLibrary.toggleSource(source.id)}
                             />
                           </label>
                         )}
@@ -7579,7 +7237,7 @@ export default function Home() {
                 className="sources-reveal-rail"
                 aria-label="展开来源栏"
                 title="展开来源栏"
-                onClick={() => setSourcesCollapsed(false)}
+                onClick={() => sourceLibrary.setSourcesCollapsed(false)}
               >
                 <PanelLeftOpen size={18} />
               </button>
@@ -8639,7 +8297,7 @@ export default function Home() {
       )}
 
       {sourceDetail && (
-        <SourceDetailWindow onClose={() => { sourceDetailRequestGenerationRef.current += 1; setSourceDetail(null); setHighlightedElementId(""); setSourceElementsLoading(false); }}>
+        <SourceDetailWindow onClose={sourceLibrary.closeSourceDetail}>
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 {sourceDetailBaseId ? (
