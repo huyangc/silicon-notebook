@@ -108,6 +108,31 @@ test("permission denial unmounts the real plugin without refetching", async () =
   await screen.findByRole("button", { name: "打开理解面板" });
   view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} notebookRead={false} />);
   expect(screen.queryByRole("button", { name: "打开理解面板" })).toBeNull();
+  expect(view.container.querySelector(".workspace-extension-outlet-workspace-side_panel")).toBeNull();
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+  ["missing", { apiVersion: "1", extensions: [] } satisfies SystemExtensionProjection],
+  ["disabled", {
+    apiVersion: "1", extensions: [{
+      ...realProjection.extensions[0], available: false, unavailableReason: "disabled" as const,
+    }],
+  } satisfies SystemExtensionProjection],
+  ["unavailable", {
+    apiVersion: "1", extensions: [{
+      ...realProjection.extensions[0], available: false, unavailableReason: "unavailable" as const,
+    }],
+  } satisfies SystemExtensionProjection],
+])("a %s real server contribution leaves no side-panel wrapper", async (_case, projection) => {
+  const load = vi.fn(async () => projection);
+  const ref = { current: null as WorkspaceExtensions | null };
+  const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
+  act(() => commit(ref, "user-a", "notebook-a", 1));
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.queryByRole("button", { name: "打开理解面板" })).toBeNull();
+  expect(view.container.querySelector(".workspace-extension-outlet-workspace-side_panel")).toBeNull();
+  expect(view.container).toBeEmptyDOMElement();
   expect(load).toHaveBeenCalledTimes(1);
 });
 

@@ -1110,8 +1110,8 @@ export default function Home() {
   const trackedKgJobId = kgWorkspace.graph.trackedKgJobId;
   const kgRefreshBusy = kgWorkspace.graph.rebuilding;
   const relinkingKg = kgWorkspace.graph.relinking;
-  // 「AI 对这个库的理解」弹窗(P1-T7)。入口在知识图谱视图头部,弹窗本身与「图谱
-  // Schema」一样渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
+  // 「AI 对这个库的理解」弹窗(P1-T7)。入口由 workspace side-panel 插件提供，
+  // 弹窗本身仍渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
   // 它的业务数据仍由 AgentProfilePanel 自持；根层是否呈现及切库同步失效由
   // useRootModalCoordinator 的 workspace lease 负责。
   const rootModals = useRootModalCoordinator({
