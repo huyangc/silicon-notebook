@@ -71,8 +71,8 @@ test("Enter 与保存键两条提交路都读同一个超限判据", async () =>
 });
 
 test("commitRenameSession 自己也复查，且绝不裁短", async () => {
-  const page = await parseModule("page.tsx");
-  const body = findFunction(page, "commitRenameSession").getText(page);
+  const askSession = await parseModule("use-ask-session.ts");
+  const body = findFunction(askSession, "commitRenameSession").getText(askSession);
 
   assert.ok(
     body.includes("conversationTitleLimitHint"),

@@ -4,7 +4,6 @@ import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, Keyboard
 import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
-import type { ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
 import { FormulaView } from "./formula-view";
@@ -50,14 +49,12 @@ import { AgentProfilePanel, UnderstandingEntryButton } from "./agent-profile-pan
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import { withoutDecidedMerge } from "./kg-merge-model";
 import {
-  ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
-  groupOf, groupLabel, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
+  ASK_MODE_GROUPS,
+  groupOf, groupLabel, modesInGroup, defaultModeForGroup,
   streamsTrace,
 } from "./ask-modes";
 import {
   ASK_RETRIEVAL_EFFORT_OPTIONS,
-  DEFAULT_ASK_RETRIEVAL_EFFORT,
-  retrievalEffortFromTurn,
   type AskRetrievalEffortId,
 } from "./ask-retrieval-effort";
 import { EffortPicker } from "./effort-picker";
@@ -112,16 +109,11 @@ import {
   normalizedNotebookName,
 } from "./notebook-creation";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
-import {
-  conversationCleanupToast,
-  conversationsOlderThan,
-  CLEANUP_PRESETS,
-  reconcileConversationCleanup,
-  runOwnedConversationCleanup,
-} from "./conversation-cleanup";
+import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
 import { useSourceLibrary } from "./use-source-library.ts";
+import { useAskSession } from "./use-ask-session.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -146,7 +138,7 @@ import {
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
-import { askQuestionLimitHint, bulkDeleteConversations, cancelAskJob, conversationTitleLimitHint, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
+import { askQuestionLimitHint, fetchAnswerMemoryLinks, searchNotebooksBounded } from "./ask-api";
 import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -213,20 +205,6 @@ import { AskComposer } from "./ask-composer";
 import { quotedPhraseHint } from "./query-syntax";
 import { AskIntentReview } from "./ask-intent-review";
 import {
-  buildAskIntentConfirmation,
-  type AskIntentConfirmation,
-  type QueryIntentContract,
-} from "./ask-intent-model";
-import {
-  elapsedMs,
-  handOffIntentTrace,
-  intentClarifyStep,
-  intentConfirmedStep,
-  intentUnderstandingStep,
-  intentUnderstoodStep,
-  replaceLastIntentStep,
-} from "./ask-intent-trace";
-import {
   borrowedKgBaseNames,
   hasLocalEvidence,
   isAskBlocked,
@@ -234,7 +212,6 @@ import {
   kgBlockedByBaseScope,
 } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
-import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
@@ -258,7 +235,6 @@ import {
   kgBuildPresentation,
   kgBuildTerminalToast,
 } from "./kg-build-status";
-import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import { crossLibrarySourceNotebookId } from "./source-scope";
 import {
@@ -266,15 +242,10 @@ import {
 } from "./source-delete-state";
 import {
   doneItemDestination,
-  followLatestNotebookRequest,
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
-  notebookIsActive,
   notebookRoleText,
   openMemoryDeepLink,
-  ownsWorkspaceRun,
-  restoreLatestConversation,
-  sessionListRequestIsCurrent,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
 } from "./workspace-transitions";
@@ -284,11 +255,8 @@ import {
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
   showPaperMetaBackfill,
-  type AskResponse,
   type ChatMode,
-  type ChatTurn,
   type ConceptDetailResp,
-  type ConversationDetail,
   type ConversationSummary,
   type DuplicateGroup,
   type Evidence,
@@ -853,25 +821,6 @@ export default function Home() {
   const [baseScopeSelection, setBaseScopeSelection] = useState<BaseScopeSelection>(
     defaultBaseScopeSelection,
   );
-  const [question, setQuestion] = useState("");
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const [conversationId, setConversationId] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<ConversationSummary[]>([]);
-  const [asking, setAsking] = useState(false);
-  const [intentChecking, setIntentChecking] = useState(false);
-  const [askIntentReview, setAskIntentReview] = useState<{
-    notebookId: string;
-    conversationId: string | null;
-    question: string;
-    contract: QueryIntentContract;
-    understandingMs: number;
-    askedAt: string;
-  } | null>(null);
-  const [sessionLoading, setSessionLoading] = useState(false);
-  const [pendingQuestion, setPendingQuestion] = useState("");
-  const [pendingAskedAt, setPendingAskedAt] = useState("");
-  const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
-  const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
   const [filter, setFilter] = useState("mine");
   const [viewMode, setViewMode] = useState("grid");
   const [sortMode, setSortMode] = useState("recent");
@@ -1113,12 +1062,8 @@ export default function Home() {
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
-  const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
   const [memoryAnswerId, setMemoryAnswerId] = useState<string | null>(null);
   const [memorySavedAnswers, setMemorySavedAnswers] = useState<Record<string, boolean>>({});
-  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
-  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
-  const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   // 会话公开分享弹窗：null=未打开，否则是正在分享的那条会话（按 id 作 key 重挂，
   // 切会话即重置弹窗态，避免把上一条的分享态按到新会话头上）。
   // 会话分享弹窗的目标。**不是**裸 ConversationSummary:每条回答下面的分享按钮要求把
@@ -1128,19 +1073,6 @@ export default function Home() {
     { id: string; title: string; throughAnswerId: string } | null
   >(null);
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
-  const [askMode, setAskMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
-  const [askRetrievalEffort, setAskRetrievalEffort] = useState<AskRetrievalEffortId>(
-    DEFAULT_ASK_RETRIEVAL_EFFORT,
-  );
-  // 自动模式下深入分析固定走「逐步推理」。点击 Tab 时已用 defaultModeForGroup
-  // ("strict")==="reasoning" 兑现；这条效应补上反向路径——用户在高级模式下切到
-  // 「关联追溯」，随后(不刷新页面)把开关拨回自动模式，UI 隐藏了切换按钮，但
-  // state 仍停在 graph，必须显式收回，否则发出去的仍是 graph 请求。
-  useEffect(() => {
-    if (uiMode === "auto" && askMode === "graph") {
-      setAskMode("reasoning");
-    }
-  }, [uiMode, askMode]);
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
@@ -2029,132 +1961,12 @@ export default function Home() {
    */
   const notebookListPublishedRef = useRef(0);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
-  const askAbortRef = useRef<AbortController | null>(null);
-  const askIntentAbortRef = useRef<AbortController | null>(null);
-  const askIntentFlowRef = useRef<"idle" | "preview" | "review" | "submitting">("idle");
-  // 问题理解阶段合成的轨迹前缀(理解中→已理解/待澄清→已确认)。它先于持久 job
-  // 存在,后端无从产出,所以由前端拼在后端流下来的步骤之前。用 ref 而不是只读
-  // pendingTrace:提交时要把这段前缀原样交给 executeAsk,闭包里读 state 会拿到旧值。
-  const askIntentTraceRef = useRef<ReasoningTraceStep[]>([]);
-  // 理解阶段会清空输入框(问题改以在途 turn 的形式先显示出来)。这里留一份草稿,
-  // 供「停止」「返回修改」「预检失败」「提交被守卫拦下」几条留在原地的路径原样
-  // 还给输入框。
-  const askIntentDraftRef = useRef("");
-  // 上面那个草稿槽是全局共享的,而清理发生在 `await executeAsk` 之后 —— 期间用户
-  // 完全可能切会话(那会把 flow 置回 idle、放行新一轮 preview)。没有归属令牌的话,
-  // 旧 run 返回时会把**新一轮**的草稿抹掉,新一轮再取消就无从退回。令牌只由发起
-  // 那一轮持有,谁持有谁才有权清理。
-  const askIntentDraftOwnerRef = useRef<object | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
-  const askJobIdRef = useRef<string | null>(null);
-  const askNotebookIdRef = useRef<string | null>(null);
-  const activeConversationIdRef = useRef<string | null>(conversationId);
-  const activeAskModeRef = useRef<AskModeId>(askMode);
-  activeConversationIdRef.current = conversationId;
-  activeAskModeRef.current = askMode;
   const kgBuildRequestEpochRef = useRef(0);
   const kgOpenRequestRef = useRef(0);
   const kgNodeNotebookRef = useRef<Map<string, string>>(new Map());
   const kgNodeContextObjectRef = useRef<Map<string, string>>(new Map());
-  const askRunEpochRef = useRef(0);
-  const sessionListRequestRef = useRef(0);
-  const latestSessionListRef = useRef<{
-    notebookId: string;
-    requestId: number;
-    promise: Promise<ConversationSummary[]>;
-  } | null>(null);
-  const optimisticConversationIdsRef = useRef<Set<string>>(new Set());
-  // started 事件落地前(jobId 尚未知晓)点了「停止」:保留该 run 的 controller，
-  // 继续读到 started 拿到 jobId 后补打 cancel，再中止本地流。Set 而非单一
-  // boolean：切会话后可能又启动新 run，取消意图不能串台。
-  const cancelRequestedControllersRef = useRef<Set<AbortController>>(new Set());
-  useEffect(() => {
-    abortIntentPreview();
-    setAskIntentReview(null);
-  }, [currentNotebookId, conversationId, askMode]);
-  // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
-  // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
-  const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
-  const reconnectConvIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    memoryLinksAbortRef.current?.abort();
-    const notebookId = currentNotebookId;
-    const batches = answerIdBatches(turns.map((turn) => turn.response.answer_id));
-    if (!notebookId || batches.length === 0) {
-      setMemorySavedAnswers({});
-      return;
-    }
-    const workspaceEpoch = workspaceEpochRef.current;
-    const controller = new AbortController();
-    memoryLinksAbortRef.current = controller;
-    collectSavedAnswerFlags(
-      batches,
-      (batch) => fetchAnswerMemoryLinks(notebookId, batch, controller.signal),
-      controller.signal,
-    )
-      .then((savedFlags) => {
-        if (
-          savedFlags === null
-          || controller.signal.aborted
-          || activeNotebookIdRef.current !== notebookId
-          || workspaceEpochRef.current !== workspaceEpoch
-        ) return;
-        setMemorySavedAnswers(savedFlags);
-      })
-      .catch((error) => {
-        if (!isAbortError(error)) reportError(error);
-      })
-      .finally(() => {
-        if (memoryLinksAbortRef.current === controller) memoryLinksAbortRef.current = null;
-      });
-    return () => controller.abort();
-  }, [currentNotebookId, turns]);
-  // 重连轮询:重开一个仍在跑的会话时,每 1.5s 拉 ask_job 详情,增量追加轨迹;
-  // 跑完则重载会话显示最终答案,取消/中断则提示并收起在途 turn。
-  useEffect(() => {
-    if (!reconnectJob || !currentNotebookId) return;
-    const nb = currentNotebookId;
-    const jobId = reconnectJob.jobId;
-    let cancelled = false;
-    let seen = reconnectJob.seen;
-    const poll = window.setInterval(async () => {
-      try {
-        const d = await getAskJob(nb, jobId);
-        if (cancelled) return;
-        const fresh = newTraceSteps(d.trace ?? [], seen);
-        if (fresh.length) { seen += fresh.length; setPendingTrace((prev) => [...prev, ...fresh]); }
-        if (jobPollDone(d.status)) {
-          window.clearInterval(poll);
-          setReconnectJob(null);
-          setAsking(false);
-          setPendingQuestion(""); setPendingMode(DEFAULT_ASK_MODE); setPendingTrace([]);
-          askJobIdRef.current = null;
-          if (d.status === "done") {
-            await openSession(reconnectConvIdRef.current ?? "");   // 见注: 重载拿最终答案
-            await loadSessions(nb);                                // 同步终态轮数/reasoning 摘要
-          } else if (d.status === "cancelled") {
-            setToast("该问答已被取消");
-            await loadSessions(nb);   // 后端对取消的首轮会话做了空会话清理,刷新列表去掉幽灵项
-          } else {
-            // d.error 是后端持久化的英文技术串(供日志 / MCP),不直出给用户;
-            // 后端写成中文的失败原因才透传。原始值进 console。
-            setToast(d.status === "interrupted"
-              ? "该问答因服务重启中断"
-              : toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));
-            await loadSessions(nb);   // 同上:失败/中断的首轮会话也可能已被后端清理
-          }
-        }
-      } catch { /* transient; keep polling */ }
-    }, 1500);
-    const cap = window.setTimeout(() => {
-      if (!cancelled) { window.clearInterval(poll); setReconnectJob(null); setAsking(false);
-        setPendingQuestion(""); setPendingTrace([]); askJobIdRef.current = null;
-        setToast("该问答仍在后台进行，请稍后重开查看"); }
-    }, 20 * 60 * 1000);
-    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
-  }, [reconnectJob, currentNotebookId]);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
@@ -2187,6 +1999,7 @@ export default function Home() {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then(async (u) => {
+        askSession.activateActor(u.id);
         sourceLibrary.activateActor(u.id);
         setCurrentUser(u);
         await loadNotebookCollection();
@@ -2365,12 +2178,6 @@ export default function Home() {
   }, [authChecked]);
 
   useEffect(() => {
-    const element = chatBodyRef.current;
-    if (!element) return;
-    element.scrollTop = element.scrollHeight;
-  }, [turns.length, asking]);
-
-  useEffect(() => {
     if (!kgViewOpen) return;
     const element = kgCanvasRef.current;
     if (!element) return;
@@ -2463,37 +2270,6 @@ export default function Home() {
       window.removeEventListener("scroll", closeMenu, true);
     };
   }, [menuNotebookId]);
-
-  // 会话历史面板:点面板外部(或按 Esc)关闭。历史切换按钮排除在外——
-  // 交给按钮自己的 onClick 切换,否则 pointerdown 先关、click 再开会「关了又开」。
-  useEffect(() => {
-    if (!sessionPanelOpen) return;
-
-    function closePanel() {
-      setSessionPanelOpen(false);
-    }
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (sessionPopoverRef.current?.contains(target)) return;
-      if (target instanceof Element && target.closest(".chat-session-toggle")) {
-        return;
-      }
-      closePanel();
-    }
-
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") closePanel();
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [sessionPanelOpen]);
 
   // 同上:长驻的 visibilitychange 监听只能读到挂载那一刻的闭包,用 live ref 顶替。
   revalidateAccessRef.current = () => { refreshAfterAccessChange().catch(reportError); };
@@ -2624,34 +2400,6 @@ export default function Home() {
       ? { selected: selectedBaseNotebookCount, total: mountedBases.length }
       : null,
   );
-  // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
-  // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
-  const askQuotedPhraseHint = useMemo(() => quotedPhraseHint(question), [question]);
-  // 超限只拦提交,不动用户已经敲进去的字(codex #525 R3):按码点数,与后端 422 同一把尺。
-  // 这句提示优先于引号回执——它是此刻唯一挡着发送键的东西,被引号回执盖住的话用户
-  // 只会看到按钮变灰而不知道为什么。
-  //
-  // 量的是 `question.trim()` 而不是原文:runAsk 发出去的就是 trim 过的那一份,后端也
-  // 只校验它。按原文量会在「正好满额 + 一个尾随换行」时把按钮灰掉,而那个请求其实
-  // 收得下 —— 护栏要与 API 严格同界,不能自己更严一点。
-  const askQuestionOverLimit = useMemo(
-    () => askQuestionLimitHint(question.trim()),
-    [question],
-  );
-  // 会话重命名的同一条护栏。量的同样是 `trim()` 后的那一份——commitRenameSession
-  // 发出去的就是它,按原文量会在「正好满额 + 一个尾随空格」时把保存键灰掉,而那个
-  // PATCH 其实收得下。
-  const sessionTitleOverLimit = useMemo(
-    () => conversationTitleLimitHint(sessionTitleDraft.trim()),
-    [sessionTitleDraft],
-  );
-  // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)、等用户补充澄清、以及
-  // 真正在跑的 ask 都算。在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方
-  // 落;只看 asking 会让用户在整段问题理解里对着空会话等待。
-  // 待澄清也必须算在内:预检返回后 intentChecking 就复位了,若不认 askIntentReview,
-  // 轨迹会恰好在「等待你补充」这一步上消失(空会话还会退回欢迎页),而下方的确认
-  // 卡片仍然摆在那里 —— 这正是本次改动要消除的那种割裂。
-  const askInFlight = asking || intentChecking || Boolean(askIntentReview);
   // ask_available 是 get_notebook 的快照;在别的页签/覆盖层增删证据不会刷新它。以下把它
   // 在"重新看到问答框"时与后端对齐,且**双向**——证据增则解禁、证据减则重新禁用(codex
   // PR#334 第5轮 P1:此前只在被禁时重拉,漏了 true→false)。来源增删这条路已各自覆盖
@@ -2746,6 +2494,120 @@ export default function Home() {
   // 知识图谱可用性闸早已按库维度收窄,界面不能比它宽。判据只有 kgAvailableForScope
   // 一处实现,别在这里另写一份。
   const kgAvailable = kgAvailableForScope(currentNotebook, selectedBaseNotebookIds);
+  const askSession = useAskSession({
+    actorId: currentUser?.id ?? null,
+    notebookId: currentNotebookId,
+    policy: {
+      advanced: isAdvanced(uiMode),
+      askUnavailable: isAskBlocked(currentNotebook),
+      scopeBlocked: sourceScopeBlocked,
+      kgAvailable,
+      sourceScope: currentSourceScope,
+      baseScope: currentBaseScope,
+    },
+    effects: {
+      notify: setToast,
+      reportError,
+      ensureAskVisible: () => setChatMode("ask"),
+    },
+  });
+  const {
+    question,
+    turns,
+    conversationId,
+    sessions,
+    asking,
+    intentChecking,
+    intentReview: askIntentReview,
+    sessionLoading,
+    pendingQuestion,
+    pendingAskedAt,
+    pendingMode,
+    pendingTrace,
+    mode: askMode,
+    retrievalEffort: askRetrievalEffort,
+    sessionPanelOpen,
+    renamingSessionId,
+    sessionTitleDraft,
+    sessionTitleOverLimit,
+    feedbackSent,
+    inFlight: askInFlight,
+  } = askSession;
+  // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
+  // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
+  const askQuotedPhraseHint = useMemo(() => quotedPhraseHint(question), [question]);
+  // 前后端都按 trim 后的 Unicode 码点计数；这里只禁用提交，不截断草稿。
+  const askQuestionOverLimit = useMemo(
+    () => askQuestionLimitHint(question.trim()),
+    [question],
+  );
+
+  // Answer→Memory 的批量派生仍由跨域 shell 拥有。Ask hook 只发布 turns，不取得
+  // Memory API/状态；切用户、切库或切会话时沿用 workspace epoch 丢弃迟到结果。
+  useEffect(() => {
+    memoryLinksAbortRef.current?.abort();
+    const activeNotebook = currentNotebookId;
+    const batches = answerIdBatches(turns.map((turn) => turn.response.answer_id));
+    if (!activeNotebook || batches.length === 0) {
+      setMemorySavedAnswers({});
+      return;
+    }
+    const workspaceEpoch = workspaceEpochRef.current;
+    const controller = new AbortController();
+    memoryLinksAbortRef.current = controller;
+    collectSavedAnswerFlags(
+      batches,
+      (batch) => fetchAnswerMemoryLinks(activeNotebook, batch, controller.signal),
+      controller.signal,
+    )
+      .then((savedFlags) => {
+        if (
+          savedFlags === null
+          || controller.signal.aborted
+          || activeNotebookIdRef.current !== activeNotebook
+          || workspaceEpochRef.current !== workspaceEpoch
+        ) return;
+        setMemorySavedAnswers(savedFlags);
+      })
+      .catch((error) => {
+        if (!isAbortError(error)) reportError(error);
+      })
+      .finally(() => {
+        if (memoryLinksAbortRef.current === controller) memoryLinksAbortRef.current = null;
+      });
+    return () => controller.abort();
+  }, [currentNotebookId, turns]);
+
+  useEffect(() => {
+    const element = chatBodyRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [turns.length, asking]);
+
+  // 会话历史面板:点面板外部(或按 Esc)关闭。历史切换按钮排除在外——
+  // 交给按钮自己的 onClick 切换,否则 pointerdown 先关、click 再开会「关了又开」。
+  useEffect(() => {
+    if (!sessionPanelOpen) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (sessionPopoverRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest(".chat-session-toggle")) return;
+      askSession.closeSessionPanel();
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") askSession.closeSessionPanel();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [sessionPanelOpen]);
   // 「将借用参考库「…」推理」该点名谁:同一条判据的名称版。过去这里 join 的是**全部
   // 挂载库名**,会当着用户的面点名一个这次不参与、或压根没建图的库。
   const borrowedBaseNames = useMemo(
@@ -3129,45 +2991,40 @@ export default function Home() {
     // 同一条路径：resolve 挂起 resolver（unblock 还在 await 的解包链，让它自己的
     // finally 释放忙碌栈帧）、清空 bundleChoice、把忙碌文案同步回当前栈顶。
     cancelBundleChoice();
-    setSessionLoading(true);
-    try {
-      askRunEpochRef.current += 1;
-    abortIntentPreview();
-    memoryLinksAbortRef.current?.abort();
-    memoryLinksAbortRef.current = null;
-    activeNotebookIdRef.current = null;
-    optimisticConversationIdsRef.current.clear();
-    askAbortRef.current = null;
-    askJobIdRef.current = null;
-    askNotebookIdRef.current = null;
-    setAsking(false);
-    setPendingQuestion("");
-    setPendingMode(DEFAULT_ASK_MODE);
-    setPendingTrace([]);
-    setReconnectJob(null);
-    setMemoryAnswerId(null);
-    setMemorySavedAnswers({});
-    // A DELETE may complete while this transition deliberately holds the active
-    // notebook id at null. Keep reading both snapshots until one full read sees
-    // a stable delete generation; tombstones alone cannot repair ask_available.
-    const [notebook, sourcesPage] = await readStableSourceSnapshot(
-      () => sourceLibrary.deleteGeneration(notebookId),
-      () => Promise.all([
-        getNotebook(notebookId),
-        listSources(notebookId, 0, SOURCES_PAGE_SIZE),
-      ]),
-    );
-    if (workspaceEpochRef.current !== workspaceEpoch) return false;
-    activeNotebookIdRef.current = notebookId;
-    setCurrentNotebookId(notebookId);
-    setCurrentNotebook(notebook);
-    setTitleDraft(notebook.name);
-    sourceLibrary.commitNotebookSnapshot({
-      actorId: actorIdOverride ?? currentUser?.id ?? "",
+    const askActorId = actorIdOverride ?? currentUser?.id ?? "";
+    const askTransition = askSession.beginNotebookTransition({
+      actorId: askActorId,
       notebookId,
       workspaceEpoch,
-      page: sourcesPage,
     });
+    if (!askTransition) return false;
+    try {
+      memoryLinksAbortRef.current?.abort();
+      memoryLinksAbortRef.current = null;
+      activeNotebookIdRef.current = null;
+      setMemoryAnswerId(null);
+      setMemorySavedAnswers({});
+      // A DELETE may complete while this transition deliberately holds the active
+      // notebook id at null. Keep reading both snapshots until one full read sees
+      // a stable delete generation; tombstones alone cannot repair ask_available.
+      const [notebook, sourcesPage] = await readStableSourceSnapshot(
+        () => sourceLibrary.deleteGeneration(notebookId),
+        () => Promise.all([
+          getNotebook(notebookId),
+          listSources(notebookId, 0, SOURCES_PAGE_SIZE),
+        ]),
+      );
+      if (workspaceEpochRef.current !== workspaceEpoch) return false;
+      activeNotebookIdRef.current = notebookId;
+      setCurrentNotebookId(notebookId);
+      setCurrentNotebook(notebook);
+      setTitleDraft(notebook.name);
+      sourceLibrary.commitNotebookSnapshot({
+        actorId: askActorId,
+        notebookId,
+        workspaceEpoch,
+        page: sourcesPage,
+      });
     // 参考库的选择状态挂在**上一个**笔记本的挂载集上，不一起重置就会把旧库 id 带进
     // 新笔记本的请求（422），或反过来悄悄沿用旧的排除项。
     setBaseScopeSelection(defaultBaseScopeSelection());
@@ -3178,15 +3035,6 @@ export default function Home() {
         : null,
     );
     setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
-    setTurns([]);
-    setConversationId(null);
-    setAsking(false);
-    setPendingQuestion("");
-    setReconnectJob(null);
-    setFeedbackSent({});
-    setSessionPanelOpen(false);
-    setRenamingSessionId(null);
-    setSessionTitleDraft("");
     setChatMode("ask");
     setOuterView("notebooks");
     setKnowledge(EMPTY_KNOWLEDGE);
@@ -3194,16 +3042,7 @@ export default function Home() {
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
     setCurrentNotebookBases([]);
-    setSessions([]);
-    const sessionList = await loadSessions(notebookId);
-    if (workspaceEpochRef.current !== workspaceEpoch) return false;
-    // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
-    // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
-    // 那会让下面的守卫立刻失配。零对话的库自然跳过,维持新会话现状。
-    await restoreLatestConversation(
-      sessionList ?? [],
-      (id) => applySessionDetail(id, workspaceEpoch),
-    );
+    await askSession.restoreNotebook(askTransition);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
     // "none" = 挂载还原 / popstate:浏览器已经把 URL 摆对了,再写一次只会多一个
     // 死条目(用户按返回没反应)。默认 "push" 让返回键能退出 notebook。
@@ -3215,7 +3054,7 @@ export default function Home() {
       window.scrollTo(0, 0);
       return true;
     } finally {
-      if (workspaceEpochRef.current === workspaceEpoch) setSessionLoading(false);
+      askSession.finishNotebookTransition(askTransition);
     }
   }
 
@@ -3259,13 +3098,6 @@ export default function Home() {
     }
   }
 
-  async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
-    if (!answerId) return;
-    await submitAnswerFeedback(answerId, rating, comment);
-    setFeedbackSent((prev) => ({ ...prev, [answerId]: rating }));
-    setToast("感谢反馈");
-  }
-
   function showCollection() {
     closeAnalytics();
     closeKnowhow();
@@ -3276,28 +3108,14 @@ export default function Home() {
     urlRequestOwnerRef.current = null;
     setUploadBusy(false);
     setUrlBusy(false);
-    askRunEpochRef.current += 1;
-    abortIntentPreview();
+    askSession.leaveWorkspace();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
-    optimisticConversationIdsRef.current.clear();
-    askAbortRef.current = null;
-    askJobIdRef.current = null;
-    askNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
     setBaseScopeSelection(defaultBaseScopeSelection());
     setTitleDraft("");
-    setTurns([]);
-    setConversationId(null);
-    setSessions([]);
-    setAsking(false);
-    setSessionLoading(false);
-    setPendingQuestion("");
-    setPendingMode(DEFAULT_ASK_MODE);
-    setPendingTrace([]);
-    setReconnectJob(null);
     setMemoryAnswerId(null);
     setMemorySavedAnswers({});
     setOuterView("notebooks");
@@ -4108,582 +3926,21 @@ export default function Home() {
     });
   }
 
-  function clearPendingTurn() {
-    setPendingQuestion("");
-    setPendingAskedAt("");
-    setPendingMode(DEFAULT_ASK_MODE);
-    setPendingTrace([]);
-  }
-
-  // 问题理解阶段的统一收尾:中止在途预检、退出「理解中」占位态、收起在途 turn。
-  // 切库/切会话/新建会话/登出都必须走这里 —— 只 abort controller 而不复位
-  // intentChecking 会让占位态永久卡住(runAsk 的 finally 按 controller 身份认领,
-  // 别人抢先置空 ref 后它就不再代劳),此后 Ask 输入区一直禁用、runAsk 直接早退。
-  function abortIntentPreview() {
-    // 阶段判据必须是流程状态,不能是「草稿 ref 还非空」:草稿要留到 executeAsk
-    // 确认接下这次运行为止,而新会话第一轮的 started 回调会 setConversationId、
-    // 触发上面那个 effect —— 用草稿当标记就会在整轮生成期间把问题气泡和轨迹
-    // 一起清掉。submitting 之后已经不是理解阶段,那时的在途 turn 归 executeAsk。
-    const wasIntentPhase = askIntentFlowRef.current === "preview"
-      || askIntentFlowRef.current === "review";
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
-    askIntentTraceRef.current = [];
-    askIntentDraftRef.current = "";
-    askIntentDraftOwnerRef.current = null;
-    setIntentChecking(false);
-    // 只收自己那半边:真正在跑的 ask 有自己的在途 turn,不能被理解阶段的收尾误清。
-    if (wasIntentPhase) clearPendingTurn();
-  }
-
-  // 释放草稿槽,并回报本轮是否真的持有它。清理点分散在 `await executeAsk` 之后与
-  // catch 之中,逐点手写条件极易漏一处 —— 第 9 轮那个「旧 run 抹掉新一轮草稿」的
-  // 竞态就是这么来的。统一收敛到这里,守卫据此禁止在 runAsk/confirmAskIntent 里
-  // 裸清草稿槽。
-  function releaseIntentDraft(token: object): boolean {
-    if (askIntentDraftOwnerRef.current !== token) return false;
-    askIntentDraftRef.current = "";
-    askIntentDraftOwnerRef.current = null;
-    return true;
-  }
-
-  async function runAsk(nextQuestion = question) {
-    if (
-      !currentNotebookId || asking || intentChecking || sessionLoading
-      || askIntentReview || askIntentFlowRef.current !== "idle"
-    ) return;
-    const q = nextQuestion.trim();
-    if (!q) return;
-    // 防御性复查:可见的闸是发送键与 Enter(两者都读 submitBlocked),这里兜住任何
-    // 绕过它们的调用路径,免得一个必被 422 的请求白跑一趟并留下一条失败会话。
-    if (askQuestionLimitHint(q)) return;
-    if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
-      // 自动模式没有勾选框——范围为空只能是笔记本本身无证据，落「添加来源」口径。
-      setToast(sourceScopeBlocked && isAdvanced(uiMode)
-        ? "当前检索范围为空，请至少选择一个来源或参考库。"
-        : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
-      return;
-    }
-    // 自动模式的引擎收敛必须在提交汇聚点强制:把 graph 收回 reasoning 的被动
-    // effect 在 render 之后才跑,用户从高级模式拨回自动后抢先提交,state 里残留的
-    // graph 仍会被发出去(codex R1 P2)。与 scope/检索档位同一原则——被隐藏的控件
-    // 由请求侧强制默认值,不依赖 state 已经收敛。
-    const submitMode: AskModeId =
-      !isAdvanced(uiMode) && askMode === "graph" ? "reasoning" : askMode;
-    if (requiresKg(submitMode) && !kgAvailable) {
-      setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
-      return;
-    }
-    const askedAt = new Date().toISOString();
-    if (submitMode !== "reasoning") {
-      await executeAsk(q, submitMode, undefined, [], askedAt);
-      return;
-    }
-
-    const notebookId = currentNotebookId;
-    const conversationIdAtStart = conversationId;
-    const workspaceEpoch = workspaceEpochRef.current;
-    const controller = new AbortController();
-    askIntentFlowRef.current = "preview";
-    askIntentAbortRef.current = controller;
-    // 理解阶段就把问题挂上会话流,并以轨迹的第一步显示「正在理解问题」——
-    // 用户在这段(一次不读语料的模型调用)看到的是同一条轨迹在推进,而不是
-    // 一条与轨迹无关的灰色提示条,也不用猜检索到底开始了没有。
-    const draftToken = {};
-    askIntentDraftRef.current = q;
-    askIntentDraftOwnerRef.current = draftToken;
-    askIntentTraceRef.current = [intentUnderstandingStep()];
-    setQuestion("");
-    setPendingQuestion(q);
-    setPendingAskedAt(askedAt);
-    setPendingMode("reasoning");
-    setPendingTrace(askIntentTraceRef.current);
-    setIntentChecking(true);
-    const understandingStartedAt = Date.now();
-    try {
-      const contract = await previewAskIntent(
-        notebookId, q, conversationIdAtStart, controller.signal,
-        currentSourceScope, currentBaseScope,
-      );
-      if (
-        controller.signal.aborted
-        || workspaceEpochRef.current !== workspaceEpoch
-        || activeNotebookIdRef.current !== notebookId
-        || activeConversationIdRef.current !== conversationIdAtStart
-        || activeAskModeRef.current !== "reasoning"
-      ) return;
-      const understandingMs = elapsedMs(understandingStartedAt, Date.now());
-      if (contract.needs_clarification) {
-        askIntentTraceRef.current = replaceLastIntentStep(
-          askIntentTraceRef.current, intentClarifyStep(contract, understandingMs),
-        );
-        setPendingTrace(askIntentTraceRef.current);
-        askIntentFlowRef.current = "review";
-        setAskIntentReview({
-          notebookId,
-          conversationId: conversationIdAtStart,
-          question: q,
-          contract,
-          understandingMs,
-          askedAt,
-        });
-        setToast("问题存在会改变检索方向的歧义，请先补充确认");
-        return;
-      }
-      askIntentTraceRef.current = replaceLastIntentStep(
-        askIntentTraceRef.current, intentUnderstoodStep(contract, understandingMs),
-      );
-      askIntentAbortRef.current = null;
-      setIntentChecking(false);
-      askIntentFlowRef.current = "submitting";
-      // 草稿留到 executeAsk 真的接下这次运行为止:理解跑完的这段时间里证据/图谱
-      // 状态可能已经变化,被它的可用性守卫拦下时输入框已空、在途 turn 也已隐藏,
-      // 不退回就等于把用户打的问题悄悄吞掉。
-      const started = await executeAsk(
-        q,
-        "reasoning",
-        buildAskIntentConfirmation(
-          contract, contract.resolved_question, {}, understandingMs,
-        ),
-        handOffIntentTrace(askIntentTraceRef.current),
-        askedAt,
-      );
-      // 只有仍持有草稿槽的那一轮才有权清理:期间用户可能已经切会话并开了新一轮
-      // 预检,那份草稿不归本轮处置(codex 第 9 轮 P2)。
-      if (releaseIntentDraft(draftToken) && !started) {
-        setQuestion(q);
-        askIntentTraceRef.current = [];
-        clearPendingTurn();
-      }
-    } catch (error) {
-      if (!isAbortError(error)) reportError(error);
-      // 预检失败/被中止:收起在途 turn 并把草稿还给输入框。别人已经接管(切库、
-      // 切会话)时 ref 已不是本 controller,由接管方负责清理,这里不越权。
-      // 同上,草稿槽的归属也要认令牌:抛错前若已切会话并开了新一轮预检,那份草稿
-      // 不归本轮处置。
-      const draft = askIntentDraftRef.current;
-      if (askIntentAbortRef.current === controller && releaseIntentDraft(draftToken)) {
-        setQuestion(draft || q);
-        askIntentTraceRef.current = [];
-        clearPendingTurn();
-      }
-    } finally {
-      if (askIntentAbortRef.current === controller) {
-        askIntentAbortRef.current = null;
-        setIntentChecking(false);
-      }
-      if (askIntentFlowRef.current !== "review") {
-        askIntentFlowRef.current = "idle";
-      }
-    }
-  }
-
-  async function executeAsk(
-    nextQuestion: string,
-    selectedMode: AskModeId,
-    intent?: AskIntentConfirmation,
-    // 理解阶段合成的轨迹前缀。后端流下来的步骤追加在它后面,用户看到的是一条
-    // 从「理解问题」一路走到「作答」的连续轨迹,而不是从中途冒出来的半截。
-    traceSeed: ReasoningTraceStep[] = [],
-    askedAt = new Date().toISOString(),
-    // 返回「本次运行有没有被真正接下」。下面这几道守卫可能在问题理解跑完之后
-    // 才拦下来(那段时间里证据/图谱状态会变),调用方要据此把草稿退回输入框 ——
-    // 否则输入框已清空、在途 turn 也已隐藏,用户的问题就此无声消失。
-  ): Promise<boolean> {
-    if (!currentNotebookId) return false;
-    if (asking || sessionLoading) return false;
-    const q = nextQuestion.trim();
-    if (!q) return false;
-    // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
-    if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
-      // 自动模式没有勾选框——范围为空只能是笔记本本身无证据，落「添加来源」口径。
-      setToast(sourceScopeBlocked && isAdvanced(uiMode)
-        ? "当前检索范围为空，请至少选择一个来源或参考库。"
-        : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
-      return false;
-    }
-    if (requiresKg(selectedMode) && !kgAvailable) {
-      setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
-      return false;
-    }
-    const notebookId = currentNotebookId;
-    const conversationIdAtStart = conversationId;
-    let startedConversationId = conversationIdAtStart;
-    const workspaceEpoch = workspaceEpochRef.current;
-    const runEpoch = ++askRunEpochRef.current;
-    const ownsRun = () => ownsWorkspaceRun(
-      runEpoch,
-      askRunEpochRef.current,
-      workspaceEpoch,
-      workspaceEpochRef.current,
-      notebookId,
-      activeNotebookIdRef.current,
-    );
-    setChatMode("ask");
-    setQuestion("");
-    setPendingQuestion(q);
-    setPendingAskedAt(askedAt);
-    setPendingMode(selectedMode);
-    setPendingTrace(traceSeed);
-    setAsking(true);
-    const controller = new AbortController();
-    // Bind this controller to a not-yet-started run. A job id from a detached
-    // previous notebook/session must never be paired with the new transport.
-    askJobIdRef.current = null;
-    askAbortRef.current = controller;
-    askNotebookIdRef.current = notebookId;
-    try {
-      const payload = {
-        question: q,
-        asked_at: askedAt,
-        conversation_id: conversationId ?? undefined,
-        mode: selectedMode,
-        // 自动模式下控件不渲染，state 却可能还留着高级模式下选过的档位——发请求
-        // 时强制回默认档，不能沿用一份用户已经看不到、改不了的选择。
-        retrieval_effort: isAdvanced(uiMode) ? askRetrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
-        source_scope: currentSourceScope,
-        // ⚠ 必须留在**顶层**。挪进下面那个条件展开里，字段还在、值也没变，但非
-        // reasoning 模式（intent 为 undefined）下整个 base_scope 消失，参考库静默
-        // 恢复全量参与 —— 正是本次事故本身，而且不报错。
-        base_scope: currentBaseScope,
-        ...(intent ? { intent } : {}),
-      };
-      const response = await runAskStream<AskResponse>(
-        notebookId,
-        payload,
-        (step) => {
-          if (ownsRun()) setPendingTrace((previous) => [...previous, step]);
-        },
-        controller.signal,
-        async (jobId, durableConversationId) => {
-          startedConversationId = durableConversationId;
-          if (cancelRequestedControllersRef.current.delete(controller)) {
-            // 不能在 jobId 出现前 abort，否则 started 永远无法被读取，后端 detached
-            // worker 也就无法被显式取消。runAskStream 会 await 此回调，所以取消完成前
-            // 不会继续消费 progress/final。
-            await cancelAskJob(notebookId, jobId).catch(() => {});
-            controller.abort();
-            await refreshActiveSessions(notebookId).catch(() => {});
-            return;
-          }
-
-          const ownsVisibleRun = ownsRun();
-          if (ownsVisibleRun) {
-            askJobIdRef.current = jobId;
-            setConversationId(durableConversationId);
-          }
-          if (notebookIsActive(notebookId, activeNotebookIdRef.current)) {
-            optimisticConversationIdsRef.current.add(durableConversationId);
-            setSessions((current) => recordStartedConversation(current, {
-              conversationId: durableConversationId,
-              question: q,
-              startedAt: new Date().toISOString(),
-            }));
-            // 历史归属于 notebook，不归属于当前展示的 run。即使 started 前已切到
-            // 同库旧会话，也必须发布这条可重开的 durable conversation。
-            loadSessions(notebookId).catch(() => {
-              // 乐观历史项已可用，短暂列表失败不终止 Ask stream。
-            });
-          }
-          if (!ownsVisibleRun) return;
-        },
-      );
-      if (!ownsRun()) {
-        await refreshActiveSessions(notebookId).catch(() => {});
-        return true;
-      }
-      setTurns((prev) => [...prev, { question: q, response, askedAt }]);
-      setConversationId(response.conversation_id);
-    } catch (error) {
-      if (!ownsRun()) {
-        await refreshActiveSessions(notebookId).catch(() => {});
-        return true;
-      }
-      setQuestion(q);
-      if (startedConversationId !== conversationIdAtStart) {
-        setConversationId(conversationIdAtStart);
-      }
-      if (isAbortError(error)) {
-        setToast("已中断回答");
-        return true;
-      }
-      reportError(error);
-    } finally {
-      if (ownsRun()) {
-        if (askAbortRef.current === controller) askAbortRef.current = null;
-        askJobIdRef.current = null;
-        askNotebookIdRef.current = null;
-        askIntentTraceRef.current = [];
-        clearPendingTurn();
-        setAsking(false);
-      }
-      cancelRequestedControllersRef.current.delete(controller);
-    }
-    if (ownsRun()) await loadSessions(notebookId);
-    // 走到这里本次运行已经被接下(不论最终成功、失败还是被中断)——那几条路径都
-    // 自己处理过草稿,调用方不该再退回一次。
-    return true;
-  }
-
-  async function confirmAskIntent(confirmation: AskIntentConfirmation) {
-    const review = askIntentReview;
-    if (!review || askIntentFlowRef.current !== "review") return;
-    // 定稿这一轮接手草稿槽的归属(预检那一轮的令牌到此为止)。
-    const draftToken = askIntentDraftOwnerRef.current ?? {};
-    askIntentDraftOwnerRef.current = draftToken;
-    if (
-      review.notebookId !== currentNotebookId
-      || review.conversationId !== conversationId
-      || askMode !== "reasoning"
-    ) {
-      setAskIntentReview(null);
-      askIntentTraceRef.current = [];
-      releaseIntentDraft(draftToken);
-      clearPendingTurn();
-      setToast("问题上下文已经变化，请重新提交");
-      return;
-    }
-    askIntentFlowRef.current = "submitting";
-    setAskIntentReview(null);
-    // 定稿也是理解阶段的一步:让轨迹如实记下最终问题与用户补充了几条说明。
-    const traceSeed = [
-      ...askIntentTraceRef.current,
-      intentConfirmedStep(confirmation.resolved_question, confirmation.answers.length),
-    ];
-    askIntentTraceRef.current = traceSeed;
-    try {
-      // 同 runAsk:草稿留到 executeAsk 真的接下这次运行为止,且只有仍持有草稿槽的
-      // 那一轮才有权清理(codex 第 9 轮 P2)。
-      const started = await executeAsk(
-        review.question,
-        "reasoning",
-        confirmation,
-        handOffIntentTrace(traceSeed),
-        review.askedAt,
-      );
-      if (releaseIntentDraft(draftToken) && !started) {
-        setQuestion(review.question);
-        askIntentTraceRef.current = [];
-        clearPendingTurn();
-      }
-    } finally {
-      askIntentFlowRef.current = "idle";
-    }
-  }
-
-  function cancelAskIntentReview() {
-    askIntentFlowRef.current = "idle";
-    setAskIntentReview(null);
-    // 用户要回去改问题:把草稿还给输入框,并收起理解阶段的在途 turn。
-    setQuestion(askIntentDraftRef.current || askIntentReview?.question || "");
-    askIntentDraftRef.current = "";
-    askIntentDraftOwnerRef.current = null;
-    askIntentTraceRef.current = [];
-    clearPendingTurn();
-    setToast("已返回修改问题");
-  }
-
-  function abortAsk() {
-    if (intentChecking) {
-      const draft = askIntentDraftRef.current;
-      abortIntentPreview();
-      if (draft) setQuestion(draft);   // 停在理解阶段:原样退回草稿,不丢用户输入
-      setToast("已取消问题理解");
-      return;
-    }
-    const jobId = askJobIdRef.current;
-    const nb = askNotebookIdRef.current;
-    const controller = askAbortRef.current;
-    // 显式取消 = 打 cancel 端点(真取消后端 worker),再 abort 本地流(立即停读)。
-    // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
-    if (jobId && nb) {
-      cancelAskJob(nb, jobId)
-        .then(() => refreshActiveSessions(nb))
-        .catch(() => {});
-      controller?.abort();
-    } else if (controller) {
-      // 先不 abort：继续读取第一条 started，回调中补打后端 cancel 后再 abort。
-      // 否则请求已到后端但首 chunk 未达时，worker 会脱离客户端继续执行。
-      cancelRequestedControllersRef.current.add(controller);
-      // UI 立即退出占用态并恢复草稿；后台 stream 仍由该 controller 的闭包继续
-      // 读到 started 完成取消握手。递增 run epoch 防止旧 final 回写回答区。
-      askRunEpochRef.current += 1;
-      if (askAbortRef.current === controller) askAbortRef.current = null;
-      askJobIdRef.current = null;
-      askNotebookIdRef.current = null;
-      setQuestion(pendingQuestion);
-      setPendingQuestion("");
-      setPendingMode(DEFAULT_ASK_MODE);
-      setPendingTrace([]);
-      setAsking(false);
-      setToast("正在中断回答");
-    }
-  }
-
-  function refreshActiveSessions(notebookId: string): Promise<ConversationSummary[] | null> {
-    if (!notebookIsActive(notebookId, activeNotebookIdRef.current)) {
-      return Promise.resolve(null);
-    }
-    return loadSessions(notebookId);
-  }
-
-  async function loadSessions(
-    notebookId: string | null = currentNotebookId,
-  ): Promise<ConversationSummary[] | null> {
-    if (!notebookId) return null;
-    // 历史列表是 notebook 级状态，同库切会话不应使有效响应过期；旧 notebook
-    // 的延迟刷新则不应发请求，也不能递增 generation。
-    if (!notebookIsActive(notebookId, activeNotebookIdRef.current)) return null;
-    const requestId = ++sessionListRequestRef.current;
-    const request = {
-      notebookId,
-      requestId,
-      promise: listConversations(notebookId),
-    };
-    latestSessionListRef.current = request;
-    const resolved = await followLatestNotebookRequest(
-      request,
-      () => latestSessionListRef.current,
-      () => notebookIsActive(notebookId, activeNotebookIdRef.current),
-    );
-    if (!resolved) return null;
-    if (sessionListRequestIsCurrent(
-      resolved.generationId,
-      sessionListRequestRef.current,
-      notebookId,
-      activeNotebookIdRef.current,
-    )) {
-      if (resolved.requestId === resolved.generationId) {
-        optimisticConversationIdsRef.current.clear();
-        setSessions(resolved.value);
-      } else {
-        setSessions((current) => mergeSessionListFallback(
-          current,
-          resolved.value,
-          optimisticConversationIdsRef.current,
-        ));
-      }
-    }
-    // Even when a superseding request failed, orchestration callers can use
-    // this valid same-notebook fallback; stale data is never published here.
-    return resolved.value;
-  }
-
-  // 会话详情 → state 的灌入内核。刻意不碰 workspaceEpochRef:调用方各自持有
-  // 自己的 epoch(openSession 新推一个、openNotebook 沿用自己的),内核只做校验。
-  // 这是 openNotebook 能复用它而不自撞守卫的唯一原因。
-  async function applySessionDetail(id: string, expectedWorkspaceEpoch: number) {
-    const detail = await getConversation(id);
-    if (workspaceEpochRef.current !== expectedWorkspaceEpoch) return;
-    const summary: ConversationSummary = {
-      id: detail.id,
-      title: detail.title,
-      updated_at: detail.updated_at,
-      turn_count: detail.turn_count,
-      used_reasoning: detail.used_reasoning ?? Boolean(
-        detail.turns[detail.turns.length - 1]?.response.reasoning_trace?.length,
-      ),
-    };
-    setSessions((current) => current.some((session) => session.id === detail.id)
-      ? current.map((session) => session.id === detail.id ? summary : session)
-      : [summary, ...current]);
-    setTurns(detail.turns.map((turn) => ({
-      question: turn.question,
-      response: turn.response,
-      askedAt: turn.asked_at,
-    })));
-    setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
-    setAskRetrievalEffort(retrievalEffortFromTurn(detail.turns[detail.turns.length - 1]));
-    setConversationId(id);
-    setPendingQuestion("");
-    setPendingAskedAt("");
-    setPendingMode(DEFAULT_ASK_MODE);
-    setPendingTrace([]);
-    setChatMode("ask");
-    setSessionPanelOpen(false);
-    setRenamingSessionId(null);
-    // Reconnected jobs do not own a local fetch controller. Drop any detached
-    // stream controller from a previously viewed run so cancel cannot pair B's
-    // job id with A's transport; A's closure/Set still owns its own controller.
-    askAbortRef.current = null;
-    const active = detail.active_job;
-    if (active) {
-      // 把在途 turn 渲染成「生成中」并接回实时轨迹(仿正在 ask 的 UI)。
-      setPendingQuestion(active.question);
-      setPendingAskedAt(active.asked_at);
-      setPendingMode(modeFromTurn({ response: { mode: active.mode } }));
-      setPendingTrace(active.trace ?? []);
-      setAsking(true);
-      askJobIdRef.current = active.job_id;                  // 「停止」可作用于重连的 job
-      askNotebookIdRef.current = activeNotebookIdRef.current;
-      reconnectConvIdRef.current = id;
-      setReconnectJob({ jobId: active.job_id, seen: (active.trace ?? []).length });
-    } else {
-      setReconnectJob(null);
-      setAsking(false);
-      askJobIdRef.current = null;
-      askNotebookIdRef.current = null;
-    }
-  }
-
-  async function openSession(id: string) {
+  async function openAskSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
-    askRunEpochRef.current += 1;
-    abortIntentPreview();
-    setSessionLoading(true);
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
-    setAsking(false);
-    setReconnectJob(null);
     setMemoryAnswerId(null);
-    askAbortRef.current = null;
-    askJobIdRef.current = null;
-    askNotebookIdRef.current = null;
-    try {
-      await applySessionDetail(id, workspaceEpoch);
-    } finally {
-      if (workspaceEpochRef.current === workspaceEpoch) setSessionLoading(false);
-    }
+    await askSession.openSession(id, workspaceEpoch);
   }
 
-  function startNewSession() {
-    workspaceEpochRef.current += 1;
-    askRunEpochRef.current += 1;
-    abortIntentPreview();
+  function startNewAskSession() {
+    const workspaceEpoch = ++workspaceEpochRef.current;
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
-    setAsking(false);
-    setSessionLoading(false);
-    setReconnectJob(null);
     setMemoryAnswerId(null);
-    askAbortRef.current = null;
-    askJobIdRef.current = null;
-    askNotebookIdRef.current = null;
-    setTurns([]);
     setMemorySavedAnswers({});
-    setConversationId(null);
-    setAskMode(DEFAULT_ASK_MODE);
-    setAskRetrievalEffort(DEFAULT_ASK_RETRIEVAL_EFFORT);
-    setPendingQuestion("");
-    setPendingMode(DEFAULT_ASK_MODE);
-    setPendingTrace([]);
-    setChatMode("ask");
-    setSessionPanelOpen(false);
-    setRenamingSessionId(null);
-  }
-
-  async function deleteSession(id: string) {
-    await deleteConversation(id);
-    if (id === conversationId) {
-      setTurns([]);
-      setConversationId(null);
-      setPendingQuestion("");
-      setPendingMode(DEFAULT_ASK_MODE);
-      setPendingTrace([]);
-    }
-    await loadSessions(currentNotebookId);
-    setToast("会话已删除");
+    askSession.startNewSession(workspaceEpoch);
   }
 
   function requestDeleteSession(session: ConversationSummary) {
@@ -4692,7 +3949,11 @@ export default function Home() {
       message: `确定删除“${session.title || "未命名会话"}”吗？对应的历史问答会一起移除。`,
       actions: [
         { label: "取消", action: () => undefined },
-        { label: "删除", danger: true, action: () => { deleteSession(session.id).catch(reportError); } },
+        {
+          label: "删除",
+          danger: true,
+          action: () => { askSession.deleteSession(session.id).catch(reportError); },
+        },
       ],
     });
   }
@@ -4705,78 +3966,14 @@ export default function Home() {
       message: `将删除 ${victims.length} 条最近 ${days} 天内无活动的会话，对应的历史问答会一起移除。`,
       actions: [
         { label: "取消", action: () => undefined },
-        { label: "删除", danger: true, action: () => { bulkCleanup(days).catch(reportError); } },
+        {
+          label: "删除",
+          danger: true,
+          action: () => { askSession.bulkCleanup(days).catch(reportError); },
+        },
       ],
     });
   }
-
-  async function bulkCleanup(days: number) {
-    const notebookId = currentNotebookId;
-    if (!notebookId) return;
-    const workspaceEpoch = workspaceEpochRef.current;
-    const conversationIdAtStart = conversationId;
-    const isCurrent = () => workspaceRequestIsCurrent(
-      false,
-      workspaceEpoch,
-      workspaceEpochRef.current,
-      notebookId,
-      activeNotebookIdRef.current,
-    );
-    await runOwnedConversationCleanup(
-      bulkDeleteConversations(notebookId, days),
-      isCurrent,
-      ({ deleted_ids: deletedIds }) => {
-        setSessions((currentSessions) => reconcileConversationCleanup(
-          currentSessions,
-          conversationIdAtStart,
-          deletedIds,
-        ).sessions);
-        const { currentDeleted } = reconcileConversationCleanup(
-          [],
-          conversationIdAtStart,
-          deletedIds,
-        );
-        if (currentDeleted) {
-          setTurns([]);
-          setConversationId(null);
-          setPendingQuestion("");
-          setPendingMode(DEFAULT_ASK_MODE);
-          setPendingTrace([]);
-        }
-      },
-      async () => {
-        await loadSessions(notebookId);
-      },
-      ({ deleted }) => {
-        setToast(conversationCleanupToast(deleted));
-      },
-    );
-  }
-
-  function beginRenameSession(session: ConversationSummary) {
-    setRenamingSessionId(session.id);
-    setSessionTitleDraft(session.title || "未命名会话");
-    setSessionPanelOpen(true);
-  }
-
-  async function commitRenameSession(sessionId: string) {
-    const next = sessionTitleDraft.trim();
-    const current = sessions.find((session) => session.id === sessionId);
-    if (!next || next === current?.title) {
-      setRenamingSessionId(null);
-      return;
-    }
-    // 防御性复查:可见的闸是保存键与 Enter(两者都读 sessionTitleOverLimit),这里兜住
-    // 任何绕过它们的调用路径,免得发一个必被 422 的 PATCH。刻意**不**在这里裁短——
-    // 护栏是拦住保存,不是替用户改标题(codex #525 R3)。
-    if (conversationTitleLimitHint(next)) return;
-    await renameConversation(sessionId, next);
-    await loadSessions(currentNotebookId);
-    setRenamingSessionId(null);
-    setToast("会话已重命名");
-  }
-
-
   async function loadKnowledge(kind: KnowledgeKind, opts: { status?: string; page?: number } = {}) {
     if (!currentNotebookId) return;
     const pageNum = opts.page ?? 0;
@@ -6284,10 +5481,8 @@ export default function Home() {
     sourceLibrary.beginTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
-    askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
-    abortIntentPreview();
-    askAbortRef.current?.abort();
+    askSession.abortForLogout();
     memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -7268,8 +6463,8 @@ export default function Home() {
                     <AskSessionHeaderActions
                       sessionCount={sessions.length}
                       sessionPanelOpen={sessionPanelOpen}
-                      onToggleSessionPanel={() => setSessionPanelOpen(open => !open)}
-                      onStartNewSession={startNewSession}
+                      onToggleSessionPanel={askSession.toggleSessionPanel}
+                      onStartNewSession={startNewAskSession}
                     />
                   )}
                 </div>
@@ -7288,7 +6483,7 @@ export default function Home() {
                         <strong>会话</strong>
                         <small>切换历史问答，不压缩当前回答区域。</small>
                       </div>
-                      <button className="icon-button compact" type="button" onClick={() => setSessionPanelOpen(false)} title="关闭">
+                      <button className="icon-button compact" type="button" onClick={askSession.closeSessionPanel} title="关闭">
                         <X size={15} />
                       </button>
                     </div>
@@ -7314,7 +6509,7 @@ export default function Home() {
                     )}
                   </div>
                   <div className="chat-session-list">
-                    <button className={`chat-session-card new ${conversationId == null ? "active" : ""}`} type="button" onClick={startNewSession}>
+                    <button className={`chat-session-card new ${conversationId == null ? "active" : ""}`} type="button" onClick={startNewAskSession}>
                       <Plus size={16} />
                       <span>新会话</span>
                       <small>从一个新的问题开始</small>
@@ -7333,14 +6528,14 @@ export default function Home() {
                               autoFocus
                               value={sessionTitleDraft}
                               aria-invalid={sessionTitleOverLimit !== null}
-                              onChange={(event) => setSessionTitleDraft(event.target.value)}
+                              onChange={(event) => askSession.updateSessionTitleDraft(event.target.value)}
                               onKeyDown={(event) => {
-                                if (event.key === "Enter" && !sessionTitleOverLimit) commitRenameSession(session.id).catch(reportError);
-                                if (event.key === "Escape") setRenamingSessionId(null);
+                                if (event.key === "Enter" && !sessionTitleOverLimit) askSession.commitRenameSession(session.id).catch(reportError);
+                                if (event.key === "Escape") askSession.cancelRenameSession();
                               }}
                             />
-                            <button type="button" title="保存" disabled={sessionTitleOverLimit !== null} onClick={() => commitRenameSession(session.id).catch(reportError)}><Check size={15} /></button>
-                            <button type="button" title="取消" onClick={() => setRenamingSessionId(null)}><X size={15} /></button>
+                            <button type="button" title="保存" disabled={sessionTitleOverLimit !== null} onClick={() => askSession.commitRenameSession(session.id).catch(reportError)}><Check size={15} /></button>
+                            <button type="button" title="取消" onClick={askSession.cancelRenameSession}><X size={15} /></button>
                             {/* 此刻唯一挡着保存键的东西,不写出来用户只看到按钮变灰。 */}
                             {sessionTitleOverLimit && (
                               <span className="chat-session-rename-hint">{sessionTitleOverLimit}</span>
@@ -7348,7 +6543,7 @@ export default function Home() {
                           </div>
                         ) : (
                           <>
-                            <button className="chat-session-card-main" type="button" onClick={() => openSession(session.id).catch(reportError)}>
+                            <button className="chat-session-card-main" type="button" onClick={() => openAskSession(session.id).catch(reportError)}>
                               <span>{session.title || "未命名会话"}</span>
                               <small>
                                 {formatRelativeTime(session.updated_at)} · {session.turn_count} 轮
@@ -7357,7 +6552,7 @@ export default function Home() {
                             </button>
                             <div className="chat-session-card-actions">
                               <button type="button" title="分享" onClick={() => setSharingSession({ id: session.id, title: session.title || "", throughAnswerId: "" })}><Share2 size={14} /></button>
-                              <button type="button" title="重命名" onClick={() => beginRenameSession(session)}><Edit3 size={14} /></button>
+                              <button type="button" title="重命名" onClick={() => askSession.beginRenameSession(session)}><Edit3 size={14} /></button>
                               <button type="button" title="删除" onClick={() => requestDeleteSession(session)}><Trash2 size={14} /></button>
                             </div>
                           </>
@@ -7376,7 +6571,7 @@ export default function Home() {
                     {welcomeCopy.prompts.length > 0 && (
                       <div className="prompt-chips">
                         {welcomeCopy.prompts.map(([label, prompt]) => (
-                          <button key={label} onClick={() => runAsk(prompt).catch(reportError)}>{label}</button>
+                          <button key={label} onClick={() => askSession.submit(prompt).catch(reportError)}>{label}</button>
                         ))}
                       </div>
                     )}
@@ -7390,7 +6585,7 @@ export default function Home() {
                           <AnswerView
                             answer={turn.response}
                             feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
-                            onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
+                            onFeedback={(rating) => askSession.submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
                             onOpenKnowledgeGraph={(objectId, sourceNotebookId) => openKgView(
                               objectId,
                               currentNotebookId,
@@ -7518,16 +6713,16 @@ export default function Home() {
                     <AskIntentReview
                       contract={askIntentReview.contract}
                       understandingMs={askIntentReview.understandingMs}
-                      onConfirm={(confirmation) => confirmAskIntent(confirmation)}
-                      onCancel={cancelAskIntentReview}
+                      onConfirm={(confirmation) => askSession.confirmIntent(confirmation)}
+                      onCancel={askSession.cancelIntent}
                     />
                   )}
                 <AskComposer
                   value={question}
                   placeholder={askPlaceholderText}
-                  onChange={setQuestion}
-                  onSubmit={() => runAsk().catch(reportError)}
-                  onAbort={abortAsk}
+                  onChange={askSession.releaseQuestion}
+                  onSubmit={() => askSession.submit().catch(reportError)}
+                  onAbort={askSession.abort}
                   running={asking || intentChecking}
                   abortLabel={intentChecking ? "取消问题理解" : "中断生成"}
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
@@ -7553,7 +6748,7 @@ export default function Home() {
                         type="button"
                         className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
                         disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
-                        onClick={() => setAskMode(defaultModeForGroup(g.id))}
+                        onClick={() => askSession.selectMode(defaultModeForGroup(g.id))}
                       >
                         {g.label}
                       </button>
@@ -7569,7 +6764,7 @@ export default function Home() {
                             className={`mode-engine${askMode === m.id ? " active" : ""}`}
                             title={m.desc}
                             disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
-                            onClick={() => setAskMode(m.id)}
+                            onClick={() => askSession.selectMode(m.id)}
                           >
                             {m.label}
                           </button>
@@ -7585,7 +6780,7 @@ export default function Home() {
                           title="检索档位"
                           options={ASK_RETRIEVAL_EFFORT_OPTIONS}
                           value={askRetrievalEffort}
-                          onChange={(id) => setAskRetrievalEffort(id as AskRetrievalEffortId)}
+                          onChange={(id) => askSession.selectRetrievalEffort(id as AskRetrievalEffortId)}
                           disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
                           compact
                         />

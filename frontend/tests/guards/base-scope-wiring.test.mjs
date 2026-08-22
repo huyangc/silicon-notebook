@@ -28,6 +28,7 @@ import {
 
 
 const page = await parseModule("page.tsx");
+const askSession = await parseModule("use-ask-session.ts");
 
 
 /** 字面量 className;拼接/条件表达式一律返回 null(它们不是稳定身份)。 */
@@ -283,19 +284,47 @@ test("参考库勾选框在回答进行中被禁用", () => {
 
 // 三个发送点少接一个,那条路径就退回「参考库全量参与」—— 而且静默。
 test("base_scope 送达问答预检、问答流式与深度报告创建三处", () => {
-  const calls = callSitesIn(page);
-  for (const target of ["previewAskIntent", "createReport"]) {
-    const site = calls.filter((call) => call.target === target);
-    assert.equal(site.length, 1, `期望恰好一处 ${target} 调用`);
-    assert.ok(
-      site[0].arguments.includes("currentSourceScope"),
-      `${target} 必须带上 currentSourceScope`,
-    );
-    assert.ok(
-      site[0].arguments.includes("currentBaseScope"),
-      `${target} 必须带上 currentBaseScope`,
-    );
+  const pageCalls = callSitesIn(page);
+  const report = pageCalls.filter((call) => call.target === "createReport");
+  assert.equal(report.length, 1, "期望恰好一处 createReport 调用");
+  assert.ok(report[0].arguments.includes("currentSourceScope"));
+  assert.ok(report[0].arguments.includes("currentBaseScope"));
+
+  // Ask 多了一层 owner，但不能因此把 page→hook 这一跳变成盲区。先从真正的
+  // useAskSession 调用点取 policy，逐项确认它直接消费页面算出的两份有效范围。
+  const hookCalls = [];
+  function findHookCalls(node) {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "useAskSession"
+    ) hookCalls.push(node);
+    ts.forEachChild(node, findHookCalls);
   }
+  findHookCalls(page);
+  assert.equal(hookCalls.length, 1, `期望恰好一处 useAskSession 调用,实际 ${hookCalls.length}`);
+  const options = hookCalls[0].arguments[0];
+  assert.ok(options && ts.isObjectLiteralExpression(options), "useAskSession 必须接收具名 options 对象");
+  const policyProperty = options.properties.find((property) => (
+    ts.isPropertyAssignment(property) && property.name.getText(page) === "policy"
+  ));
+  assert.ok(
+    policyProperty
+      && ts.isPropertyAssignment(policyProperty)
+      && ts.isObjectLiteralExpression(policyProperty.initializer),
+    "useAskSession options 必须包含 policy 对象",
+  );
+  const policy = new Map(policyProperty.initializer.properties
+    .filter(ts.isPropertyAssignment)
+    .map((property) => [property.name.getText(page), property.initializer.getText(page)]));
+  assert.equal(policy.get("sourceScope"), "currentSourceScope");
+  assert.equal(policy.get("baseScope"), "currentBaseScope");
+
+  // 再钉 hook→API：预检读取本次 submit 冻结的同一份 snapshot，而不是重新读 policy。
+  const preview = callSitesIn(askSession).filter((call) => call.target === "previewAskIntent");
+  assert.equal(preview.length, 1, "Ask owner 应恰好调用一次 previewAskIntent");
+  assert.ok(preview[0].arguments.includes("scopeSnapshot.sourceScope"));
+  assert.ok(preview[0].arguments.includes("scopeSnapshot.baseScope"));
 
   // ⚠ 这里必须解析出 runAskStream **自己那个** payload 对象、只看它的**顶层**属性。
   // 全文件数一遍名为 base_scope 的属性对**移动**变异全绿:把它挪进
@@ -305,21 +334,21 @@ test("base_scope 送达问答预检、问答流式与深度报告创建三处", 
   const properties = new Map();
   for (const property of payload.properties) {
     if (ts.isPropertyAssignment(property)) {
-      properties.set(property.name.getText(page), property.initializer.getText(page));
+      properties.set(property.name.getText(askSession), property.initializer.getText(askSession));
     } else if (ts.isShorthandPropertyAssignment(property)) {
-      properties.set(property.name.getText(page), property.name.getText(page));
+      properties.set(property.name.getText(askSession), property.name.getText(askSession));
     }
   }
   assert.equal(
     properties.get("base_scope"),
-    "currentBaseScope",
-    "/ask/stream 的 payload **顶层**必须带 base_scope: currentBaseScope;"
+    "scopeSnapshot.baseScope",
+    "/ask/stream 的 payload **顶层**必须带 base_scope: scopeSnapshot.baseScope;"
       + "藏进条件展开等于在非 reasoning 模式下整个丢掉它",
   );
   assert.equal(
     properties.get("source_scope"),
-    "currentSourceScope",
-    "/ask/stream 的 payload **顶层**必须带 source_scope: currentSourceScope",
+    "scopeSnapshot.sourceScope",
+    "/ask/stream 的 payload **顶层**必须带 source_scope: scopeSnapshot.sourceScope",
   );
 });
 
@@ -342,7 +371,7 @@ function askStreamPayloadObject() {
     }
     ts.forEachChild(node, findCalls);
   }
-  findCalls(page);
+  findCalls(askSession);
   assert.equal(calls.length, 1, `期望恰好一处 runAskStream 调用,实际 ${calls.length}`);
 
   const argument = calls[0].arguments[1];

@@ -116,7 +116,7 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     reason: "background source failures pass through toUserMessage",
   },
   "page.tsx|<module>.Home|diagnostic|error": {
-    count: 4,
+    count: 2,
     reason: "workspace job diagnostics are logged or passed through toUserMessage",
   },
   "page.tsx|<module>.Home|diagnostic|error_message": {
@@ -130,6 +130,10 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
   "ask-api.ts|<module>.runAskStream.consumeLine|diagnostic|error": {
     count: 1,
     reason: "stream diagnostics are logged before a branded scenario error",
+  },
+  "use-ask-session.ts|<module>.useAskSession.tick|diagnostic|error": {
+    count: 2,
+    reason: "reconnected Ask job diagnostics pass through toUserMessage before fixed user copy",
   },
   "report-view.tsx|<module>.ReportsPanel|diagnostic|error": {
     count: 1,
