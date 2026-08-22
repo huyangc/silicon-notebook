@@ -499,7 +499,16 @@ test("Knowledge context reads are latest-wins and invalidated by a kind change",
   let staleRead!: Promise<void>;
   act(() => { staleRead = value!.loadKnowledgeContext("knowledge-b"); });
   act(() => value!.selectKnowledgeKind("claim"));
-  await act(async () => stale.reject(new Error("stale context")));
+  act(() => value!.selectKnowledgeKind("concept"));
+  await act(async () => stale.resolve({
+    id: "knowledge-b",
+    object_type: "concept",
+    name: "stale after kind round-trip",
+    section_path: "",
+    occurrences: [],
+    definition: null,
+    steps: null,
+  }));
   await staleRead;
   expect(value!.knowledge.contexts["knowledge-b"]).toBeUndefined();
 });

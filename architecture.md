@@ -442,7 +442,7 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 | Knowhow 表 | `backend/app/services/knowhow/`（`projection.py`、`api.py`、`grid_parser.py`、`textops.py`、`assets.py`）+ `repositories/sqlite/knowhow_store.py` + `api/knowhow_agent_routes.py` | 5+1 表 schema 域；唯一零 LLM KG 写入方；变更统一走 `ProjectionScheduler`；代码附件与检索/KG 严格隔离；会话与 Agent 面共享服务核心。 |
 | Frontend workspace | `frontend/app/page.tsx`、`frontend/features/`、`frontend/tests/`、`frontend/test-support/` | `page.tsx` 负责编排，feature 纵切片拥有生产策略；测试与 production 物理分离并由 guard 强制。 |
 
-Repository 侧的 persistence 与业务编排已按上表分层完成；应用边界已完成 router、model facade 与 shared transport 的领域分工。来源库状态已迁入独立 owner hook；`page.tsx` 仍承担其余 workspace 异步状态，FastAPI lifespan/application lifecycle composition 也尚未独立，后续整改继续以现有 facade 和测试为保护层逐域迁移。
+Repository 侧的 persistence 与业务编排已按上表分层完成；应用边界已完成 router、model facade 与 shared transport 的领域分工。来源、Ask、Report 与 KG workspace 状态已分别迁入独立 owner hook；`page.tsx` 仍承担 modal/collection 等 shell 组合状态，FastAPI lifespan/application lifecycle composition 也尚未独立，后续整改继续以现有 facade 和测试为保护层逐域迁移。
 
 ## 6. 已知架构债务与整改顺序
 
@@ -451,7 +451,7 @@ Repository 侧的 persistence 与业务编排已按上表分层完成；应用�
 1. **2026-07-10 历史记录——行为契约与文档对齐**（已完成）：当时修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。当前 workspace 已扩展为四 tab，见上文实时边界。
 2. **Notebook 规模策略与 Repository ports**（已随 composition refactor 交付）：中性 `NotebookScaleProfile` 让 copy 与 retrieval 分别消费自己的策略；巨型 repository Protocol 拆成 `app/repositories/ports.py` 的领域小 Protocol，保留兼容组合类型。
 3. **2026-07-21 历史记录——application boundary foundation**（已完成）：领域 FastAPI router 由 `app/api/routes.py` 组合，领域 Pydantic model 以 `schemas.py` compatibility facade 保持旧 import，七个前端 domain API module 共用 `api-client.ts` transport；public/domain seam 与等价性测试替代 aggregate-private coupling。完整 warm gate 已验证三 lane 均不超过 60 秒。
-4. **前端 workspace 状态拆分**（进行中）：`useSourceLibrary`、`useAskSession` 与 `useReportWorkspace` 已各自成为领域 owner；后续串行抽 KG workspace 与 modal/collection owner。不引入新全局状态库，不改请求数量或轮询节奏。
+4. **前端 workspace 状态拆分**（进行中）：`useSourceLibrary`、`useAskSession`、`useReportWorkspace` 与 `useKgWorkspace` 已各自成为领域 owner；后续仅串行抽 modal/collection owner。不引入新全局状态库，不改请求数量或轮询节奏。
 5. **FastAPI application lifecycle**（计划项）：repository 内部 runtime 组合、retrieval/Ask/report service 与取消/重连 characterization test 已交付；FastAPI lifespan 管理的 application runtime、executor shutdown 与统一应用生命周期仍延后为独立工作。
 
 非目标包括一次性 clean-architecture 重写、在本轮引入 SQLAlchemy/容器/新模型服务、实现应用内 dual-write/shadow replication，或借整改改变公开 API、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
