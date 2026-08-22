@@ -89,13 +89,17 @@ test("real production contribution is lazy, mode-all and reader-visible, with on
   const load = vi.fn(async () => realProjection);
   const onOpen = vi.fn();
   const ref = { current: null as WorkspaceExtensions | null };
-  render(<StrictMode><Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} onOpen={onOpen} /></StrictMode>);
+  const view = render(<StrictMode><Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} onOpen={onOpen} /></StrictMode>);
   expect(load).not.toHaveBeenCalled();
   act(() => commit(ref, "user-a", "notebook-a", 1));
   expect(await screen.findByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
   expect(load).toHaveBeenCalledTimes(1);
   expect(onOpen).not.toHaveBeenCalled();
   expect(screen.getAllByLabelText("AI 对这个库的理解")).toHaveLength(1);
+  expect(screen.getByLabelText("AI 对这个库的理解").closest("aside")).toBe(
+    view.container.querySelector(".workspace-extension-outlet-workspace-side_panel"),
+  );
+  expect(view.container.querySelectorAll(".workspace-extension-outlet-workspace-side_panel")).toHaveLength(1);
   await user.click(screen.getByRole("button", { name: "打开理解面板" }));
   expect(onOpen).toHaveBeenCalledOnce();
 });
