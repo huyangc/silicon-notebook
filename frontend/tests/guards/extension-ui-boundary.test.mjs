@@ -24,7 +24,12 @@ test("page composes one availability owner and exactly the two canonical outlets
   let workspacePermissions;
   let sourceDetailWindow;
   const contexts = new Map();
+  const ownerCalls = [];
   function visit(node) {
+    if (
+      ts.isCallExpression(node)
+      && node.expression.getText(page) === "useWorkspaceExtensions"
+    ) ownerCalls.push(node.arguments.map((argument) => argument.getText(page)));
     if (
       ts.isJsxElement(node)
       && node.openingElement.tagName.getText(page) === "SourceDetailWindow"
@@ -57,6 +62,12 @@ test("page composes one availability owner and exactly the two canonical outlets
     ts.forEachChild(node, visit);
   }
   visit(page);
+
+  assert.deepEqual(
+    ownerCalls,
+    [["currentUser?.id ?? null"]],
+    "the availability owner must bind the live authenticated actor exactly once",
+  );
 
   assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
   const sourceDetailGate = sourceDetailWindow.parent?.parent;
