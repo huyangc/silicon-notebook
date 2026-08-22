@@ -149,6 +149,22 @@ test("collection and KG presentation slots participate in the same primary water
   expect(value!.view("kg-analysis").open).toBe(true);
 });
 
+test("source detail invalidates older primary opens while its catalog review remains a legal overlay", () => {
+  const screen = render(<Harness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  const deferredAnalytics = value!.issue("analytics", workspace);
+  expect(value!.open("source-detail", workspace)).not.toBeNull();
+  expect(value!.publish(deferredAnalytics)).toBe(false);
+  expect(value!.view("source-detail").open).toBe(true);
+
+  screen.rerender(<Harness sourceId="source-a" />);
+  expect(value!.open("catalog-review", value!.captureSourceOwner())).not.toBeNull();
+  expect(value!.view("source-detail").open).toBe(true);
+  expect(value!.view("source-detail").topmost).toBe(false);
+  expect(value!.view("catalog-review").topmost).toBe(true);
+});
+
 test("workspace navigation closes collection dialogs but keeps actor-global settings", () => {
   render(<Harness />);
   enterWorkspace();

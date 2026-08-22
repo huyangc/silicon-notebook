@@ -9,10 +9,17 @@ import { useFloatingWindow } from "./use-floating-window";
 type SourceDetailWindowProps = {
   children: ReactNode;
   onClose: () => void;
+  interactive?: boolean;
+  zIndex?: number;
 };
 
 
-export function SourceDetailWindow({ children, onClose }: SourceDetailWindowProps) {
+export function SourceDetailWindow({
+  children,
+  onClose,
+  interactive = true,
+  zIndex,
+}: SourceDetailWindowProps) {
   const floating = useFloatingWindow({
     storageKey: "source.detail.window",
     resizable: false,
@@ -22,8 +29,11 @@ export function SourceDetailWindow({ children, onClose }: SourceDetailWindowProp
     <section
       className="utility-modal"
       role="dialog"
-      aria-modal="true"
+      aria-modal={interactive}
+      aria-hidden={!interactive}
+      inert={interactive ? undefined : true}
       aria-labelledby="source-detail-window-title"
+      style={{ zIndex }}
     >
       <div
         ref={floating.cardRef}

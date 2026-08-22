@@ -1119,6 +1119,7 @@ export default function Home() {
   const notebookEditorModal = rootModals.view("notebook-editor");
   const notebookDeleteModal = rootModals.view("notebook-delete");
   const sourceModal = rootModals.view("source-add");
+  const sourceDetailModal = rootModals.view("source-detail");
   const infoModalView = rootModals.view("info");
   const modelPanel = rootModals.view("model-service");
   const notebookShareModal = rootModals.view("notebook-share");
@@ -1144,13 +1145,16 @@ export default function Home() {
     if (!deleteNotebook && rootModals.activeLease("notebook-delete")) {
       rootModals.requestClose("notebook-delete", "button");
     }
+    if (!sourceDetail && rootModals.activeLease("source-detail")) {
+      rootModals.requestClose("source-detail", "button");
+    }
     if (!schemaModalOpen && rootModals.activeLease("kg-schema")) {
       rootModals.requestClose("kg-schema", "button");
     }
     if (!kgAnalysisOpen && rootModals.activeLease("kg-analysis")) {
       rootModals.requestClose("kg-analysis", "button");
     }
-  }, [editingNotebook?.id, deleteNotebook?.id, schemaModalOpen, kgAnalysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [editingNotebook?.id, deleteNotebook?.id, sourceDetail?.id, schemaModalOpen, kgAnalysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -3399,12 +3403,20 @@ export default function Home() {
     }
   }
 
+  async function openSourceDetailById(sourceId: string, elementId = "") {
+    const lease = rootModals.issue("source-detail", rootModals.captureWorkspaceOwner());
+    if (!lease) return;
+    const opened = await sourceLibrary.openSourceById(sourceId, elementId);
+    if (!opened) return;
+    if (!rootModals.publish(lease)) sourceLibrary.closeSourceDetail();
+  }
+
   async function openSourceDetail(source: SourceSummary) {
-    await sourceLibrary.openSourceById(source.id);
+    await openSourceDetailById(source.id);
   }
 
   function onOpenSourceElement(sourceId: string, elementId?: string) {
-    sourceLibrary.openSourceById(sourceId, elementId || "").catch(reportError);
+    openSourceDetailById(sourceId, elementId || "").catch(reportError);
   }
 
   async function reparseSource() {
@@ -3601,7 +3613,7 @@ export default function Home() {
   // 命令目录确认落库后的「去看这张表」落点：只定位到表，不指定行（刚写入的是一批
   // 行，挑其中任意一行当落点都是随意的）。KnowhowJumpTarget.rowId 本就允许 null。
   function openKnowhowTable(tableId: string) {
-    sourceLibrary.closeSourceDetail();
+    rootModals.requestClose("source-detail", "button");
     setKnowhowNavigation(openKnowhowNavigation({ jumpTarget: { tableId, rowId: null } }));
   }
 
@@ -4237,6 +4249,9 @@ export default function Home() {
         resetStagedIntake();
         setLinkSectionOpen(false);
         sourceModalDismissedRef.current = true;
+        return;
+      case "source-detail":
+        sourceLibrary.closeSourceDetail();
         return;
       case "info":
         closeInfoModal();
@@ -6290,8 +6305,12 @@ export default function Home() {
         </section>
       )}
 
-      {sourceDetail && (
-        <SourceDetailWindow onClose={sourceLibrary.closeSourceDetail}>
+      {sourceDetailModal.open && sourceDetail && (
+        <SourceDetailWindow
+          onClose={() => rootModals.requestClose("source-detail", "button")}
+          interactive={sourceDetailModal.topmost}
+          zIndex={sourceDetailModal.zIndex}
+        >
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 {sourceDetailBaseId ? (

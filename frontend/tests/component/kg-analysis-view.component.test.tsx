@@ -288,6 +288,24 @@ function renderView() {
   return render(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);
 }
 
+test("上层确认框出现时从交互树退出，回到顶层后恢复模态语义", () => {
+  const { container, rerender } = render(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} interactive={false} zIndex={61} />,
+  );
+  const covered = container.querySelector<HTMLElement>('[role="dialog"]');
+  expect(covered).not.toBeNull();
+  expect(covered).toHaveAttribute("aria-hidden", "true");
+  expect(covered).toHaveAttribute("inert");
+  expect(covered).toHaveAttribute("aria-modal", "false");
+  expect(covered).toHaveStyle({ zIndex: "61" });
+
+  rerender(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} interactive />);
+  const active = screen.getByRole("dialog", { name: "图谱分析" });
+  expect(active).not.toHaveAttribute("aria-hidden", "true");
+  expect(active).not.toHaveAttribute("inert");
+  expect(active).toHaveAttribute("aria-modal", "true");
+});
+
 function blockByTitle(title: string): HTMLElement {
   const heading = screen.getByRole("heading", { name: title, level: 3 });
   const block = heading.closest(".kg-analysis-block");

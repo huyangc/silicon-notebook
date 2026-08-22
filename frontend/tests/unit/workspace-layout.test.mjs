@@ -140,11 +140,12 @@ test("source detail uses the dedicated draggable window shell", () => {
   const windows = jsxElements(page, "SourceDetailWindow");
   assert.equal(windows.length, 1);
   assert.deepEqual(windows[0].bindings, {
-    // PR-2 T6: 关闭来源详情也要清掉 highlightedElementId——否则 Ask 清单卡「查看
-    // 来源」跳转设置的高亮目标会残留到下一次经普通来源列表打开的、无关的来源上
-    // （该状态与目标元素同一个 getElementById 效果消费，参见 highlightedElementId
-    // 声明处的效果与 openSourceById 的注释）。
-    onClose: "sourceLibrary.closeSourceDetail",
+    // 关闭经 root coordinator 的 source-detail close sink 回到 source owner，仍由
+    // sourceLibrary.closeSourceDetail 清 highlightedElementId；同时 topmost 决定
+    // aria-modal/inert，防止上层确认框出现时后台详情继续接收键盘输入。
+    onClose: '() => rootModals.requestClose("source-detail", "button")',
+    interactive: "sourceDetailModal.topmost",
+    zIndex: "sourceDetailModal.zIndex",
   });
   assert.equal(
     importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),

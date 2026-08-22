@@ -8,6 +8,7 @@ export type RootModalSlot =
   | "notebook-editor"
   | "notebook-delete"
   | "source-add"
+  | "source-detail"
   | "info"
   | "model-service"
   | "notebook-share"
@@ -94,6 +95,7 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "notebook-editor": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "notebook-delete": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "source-add": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 20, backdrop: true, escape: false },
+  "source-detail": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   info: { ownerKinds: ["actor", "workspace", "source"], conflictGroup: null, layer: 80, backdrop: false, escape: false },
   "model-service": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: true },
   "notebook-share": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
@@ -110,6 +112,11 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "promotion-target": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "edge-review": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
 };
+
+function primarySlotsMayCoexist(left: RootModalSlot, right: RootModalSlot): boolean {
+  return (left === "source-detail" && right === "catalog-review")
+    || (left === "catalog-review" && right === "source-detail");
+}
 
 type ActiveLease = RootModalLease & Readonly<{ order: number }>;
 
@@ -423,7 +430,11 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     for (const [slot, active] of [...activeRef.current.entries()]) {
       if (
         slot === lease.slot
-        || (policy.conflictGroup && ROOT_MODAL_POLICIES[slot].conflictGroup === policy.conflictGroup)
+        || (
+          policy.conflictGroup
+          && ROOT_MODAL_POLICIES[slot].conflictGroup === policy.conflictGroup
+          && !primarySlotsMayCoexist(slot, lease.slot)
+        )
       ) {
         removeWithoutRender(slot, "conflict", true);
       }

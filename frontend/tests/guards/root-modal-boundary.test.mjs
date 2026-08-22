@@ -22,12 +22,14 @@ test("page composes one typed root-modal coordinator and has no legacy modal boo
     "modelPanelOpen", "sharedByMeOpen", "promoOpen", "edgeReviewOpen",
     "understandingOpen",
   ]) assert.equal(pageText.includes(legacy), false, legacy);
-  for (const slot of ["notebook-editor", "notebook-delete", "kg-schema", "kg-analysis"]) {
+  for (const slot of ["notebook-editor", "notebook-delete", "source-detail", "kg-schema", "kg-analysis"]) {
     assert.match(pageText, new RegExp(`rootModals\\.view\\(\\"${slot}\\"\\)`), slot);
   }
   assert.doesNotMatch(pageText, /\{editingNotebook && \([\s\S]{0,120}aria-modal="true"/);
   assert.doesNotMatch(pageText, /\{deleteNotebook && \([\s\S]{0,120}aria-modal="true"/);
   assert.doesNotMatch(pageText, /\{schemaModalOpen && \([\s\S]{0,120}aria-modal="true"/);
+  assert.match(pageText, /<SourceDetailWindow[\s\S]{0,240}interactive=\{sourceDetailModal\.topmost\}/);
+  assert.match(pageText, /<KgAnalysisView[\s\S]{0,300}interactive=\{kgAnalysisModal\.topmost\}/);
 });
 
 test("coordinator is presentation-only: React is its sole dependency and it owns no I/O or timer", () => {
@@ -69,6 +71,9 @@ test("deferred root openers publish frozen tickets instead of opening from live 
     assert.ok(calls.includes("rootModals.issue"), name);
     assert.ok(calls.includes("rootModals.publish"), name);
   }
+  const sourceCalls = callSitesIn(findFunctionIn(page, "Home", "openSourceDetailById")).map(({ target }) => target);
+  assert.ok(sourceCalls.includes("rootModals.issue"));
+  assert.ok(sourceCalls.includes("rootModals.publish"));
 });
 
 test("collection and KG payload owners are coordinated only through typed presentation adapters", () => {
