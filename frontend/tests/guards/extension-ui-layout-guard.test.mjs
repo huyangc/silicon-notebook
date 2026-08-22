@@ -42,10 +42,9 @@ function declarationMap(rule) {
 function sidePanelMedia(maxWidth) {
   const matches = [];
   stylesheet.walkAtRules("media", (atRule) => {
-    let containsVisibleSelector = false;
-    atRule.walkRules((rule) => {
-      if (rule.selectors.includes(visibleSelector)) containsVisibleSelector = true;
-    });
+    const containsVisibleSelector = (atRule.nodes ?? []).some((node) => (
+      node.type === "rule" && node.selectors.includes(visibleSelector)
+    ));
     if (atRule.params === `(max-width: ${maxWidth}px)` && containsVisibleSelector) {
       matches.push(atRule);
     }
@@ -65,17 +64,17 @@ test("visible side contribution gets an explicit third desktop column", () => {
 
 test("mobile contribution layout collapses both exact selectors back to one column", () => {
   const mobile = sidePanelMedia(760);
-  assert.deepEqual(declarationMap(exactRule(mobile, [visibleSelector, collapsedSelector])), {
+  assert.deepEqual(declarationMap(exactRule(mobile, [visibleSelector, collapsedSelector], true)), {
     "grid-template-columns": "1fr",
   });
 });
 
 test("medium workspace preserves all three visible and collapsed columns", () => {
   const medium = sidePanelMedia(1100);
-  assert.deepEqual(declarationMap(exactRule(medium, [visibleSelector])), {
+  assert.deepEqual(declarationMap(exactRule(medium, [visibleSelector], true)), {
     "grid-template-columns": "250px 180px minmax(0, 1fr)",
   });
-  assert.deepEqual(declarationMap(exactRule(medium, [collapsedSelector])), {
+  assert.deepEqual(declarationMap(exactRule(medium, [collapsedSelector], true)), {
     "grid-template-columns": "0 180px minmax(0, 1fr)",
   });
 });
