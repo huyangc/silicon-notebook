@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   callSitesIn,
   findFunctionIn,
+  ifConditionsIn,
   importsIn,
   parseModule,
 } from "../../test-support/semantic-source.mjs";
@@ -63,4 +64,29 @@ test("only the coordinator top layer drives the model focus trap", () => {
   assert.match(pageText, /interactive=\{modelPanel\.topmost\}/);
   assert.match(modelPanel.getText(modelPanel), /if \(!interactive\) return;/);
   assert.match(modelPanel.getText(modelPanel), /onClose\("escape"\)/);
+});
+
+test("presentation close never releases an in-flight domain operation", () => {
+  const close = findFunctionIn(page, "Home", "handleRootModalClosed");
+  const text = close.getText(page);
+  assert.doesNotMatch(text, /OperationRef\.current\s*=\s*null/);
+  assert.doesNotMatch(text, /set(?:Share|Promo|Edge)Busy\(false\)/);
+  assert.ok(
+    ifConditionsIn(findFunctionIn(page, "Home", "openShareModal"))
+      .some((condition) => condition.includes("shareOperationRef.current")),
+    "reopening the share presentation must not replace an in-flight share operation",
+  );
+});
+
+test("modal mutations suppress errors after their frozen lease becomes stale", () => {
+  for (const name of [
+    "enableShareLink",
+    "handleUnshare",
+    "handleUnshareFromOverview",
+    "decidePromotion",
+    "decideEdge",
+  ]) {
+    const text = findFunctionIn(page, "Home", name).getText(page);
+    assert.match(text, /catch \(error\)[\s\S]*rootModals\.owns\(modalLease\)[\s\S]*throw error/, name);
+  }
 });

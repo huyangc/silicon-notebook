@@ -3747,7 +3747,7 @@ export default function Home() {
   // 铸出一条分享链接——一次纯查看的动作产生了持久副作用,只想共享给群组的用户会
   // 莫名其妙多出一条链接。链接改由用户显式点「开启链接分享」时才发 POST。
   async function openShareModal() {
-    if (!currentNotebook) return;
+    if (!currentNotebook || shareOperationRef.current) return;
     const modalLease = rootModals.issue("notebook-share", rootModals.captureWorkspaceOwner());
     if (!modalLease || modalLease.owner.kind !== "workspace") return;
     // 链接分享(GET/POST/DELETE /share)是 notebook:configure(**恒 owner**,P2-T2 评审
@@ -3788,6 +3788,8 @@ export default function Home() {
       if (!rootModals.owns(modalLease)) return;
       setShareModal(state);
       await handleSharingChanged();
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
       if (shareOperationRef.current === operation) {
         shareOperationRef.current = null;
@@ -3823,6 +3825,8 @@ export default function Home() {
       await handleSharingChanged();
       if (!rootModals.owns(modalLease)) return;
       setToast("已取消链接分享，链接立即失效");
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
       if (shareOperationRef.current === operation) {
         shareOperationRef.current = null;
@@ -3984,6 +3988,8 @@ export default function Home() {
       await loadNotebookCollection();
       if (!rootModals.owns(modalLease)) return;
       setToast("已取消链接分享，链接立即失效");
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
       if (shareOperationRef.current === operation) {
         shareOperationRef.current = null;
@@ -4049,6 +4055,8 @@ export default function Home() {
       if (!rootModals.owns(modalLease)) return;
       setPromoQueue(queue);
       await loadNotebookCollection();
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
       if (promoOperationRef.current === operation) {
         promoOperationRef.current = null;
@@ -4083,6 +4091,8 @@ export default function Home() {
       const queue = await fetchEdgeReviewQueue(modalLease.owner.notebookId);
       if (!rootModals.owns(modalLease)) return;
       setEdgeQueue(queue);
+    } catch (error) {
+      if (rootModals.owns(modalLease)) throw error;
     } finally {
       if (edgeOperationRef.current === operation) {
         edgeOperationRef.current = null;
@@ -4164,16 +4174,12 @@ export default function Home() {
         setHighlightedModelServiceId(null);
         return;
       case "notebook-share":
-        shareOperationRef.current = null;
-        setShareBusy(false);
         setShareModal(null);
         return;
       case "shared-preview":
         setSharedPreview(null);
         return;
       case "shared-by-me":
-        shareOperationRef.current = null;
-        setShareBusy(false);
         setSharedByMeList(null);
         return;
       case "memory-save":
@@ -4189,16 +4195,12 @@ export default function Home() {
         clearAnalyticsData();
         return;
       case "promotion-queue":
-        promoOperationRef.current = null;
-        setPromoBusy(false);
         setPromoQueue(null);
         return;
       case "promotion-target":
         setPendingPromotionObjectId(null);
         return;
       case "edge-review":
-        edgeOperationRef.current = null;
-        setEdgeBusy(false);
         setEdgeQueue(null);
         return;
     }
