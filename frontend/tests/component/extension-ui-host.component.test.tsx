@@ -186,6 +186,31 @@ test("same-actor A-B-A transitions hide synchronously, reuse projection and reje
   expect(load).toHaveBeenCalledTimes(1);
 });
 
+test("a late older workspace finish cannot replace the latest successful transition", async () => {
+  const load = vi.fn(async () => realProjection);
+  const ref = { current: null as WorkspaceExtensions | null };
+  const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
+  act(() => commit(ref, "user-a", "notebook-a", 1));
+  await screen.findByRole("button", { name: "打开理解面板" });
+
+  let older!: ReturnType<WorkspaceExtensions["beginNotebookTransition"]>;
+  act(() => { older = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-b", workspaceEpoch: 2 }); });
+  view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-b" load={load} />);
+  let latest!: ReturnType<WorkspaceExtensions["beginNotebookTransition"]>;
+  act(() => { latest = ref.current!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 3 }); });
+  view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" load={load} />);
+  act(() => ref.current!.finishNotebookTransition(latest!, true));
+  expect(await screen.findByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  const currentOwner = ref.current!.owner!;
+
+  act(() => ref.current!.finishNotebookTransition(older!, true));
+  expect(screen.getByRole("button", { name: "打开理解面板" })).toBeInTheDocument();
+  expect(ref.current!.owner).toBe(currentOwner);
+  expect(ref.current!.owns(currentOwner)).toBe(true);
+  expect(ref.current!.owns(older!)).toBe(false);
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
 test("failed transition remains suspended", async () => {
   const load = vi.fn(async () => realProjection);
   const ref = { current: null as WorkspaceExtensions | null };
