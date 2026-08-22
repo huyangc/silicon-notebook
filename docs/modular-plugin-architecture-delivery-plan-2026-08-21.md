@@ -224,7 +224,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-13：Report exporter Provider
 
-- 状态：实现中；后端批量 ZIP 的授权 SQL、single Provider、默认 Markdown builtin 与 core-owned archive 边界已接线，等待三路 review 与 CI 闭环；
+- 状态：已完成并由 PR #555 交付；后端批量 ZIP 的授权 SQL、single Provider、默认 Markdown builtin、core-owned archive、hostile/等价回归、三路 review 与 CI 均已闭合；
 - 作为 single Provider 的首个真实消费者；
 - 只读取完成报告的 public/export view；
 - 原有导出格式和 UI 保持，新增用户格式时必须同 PR 做前后端 parity。
