@@ -258,7 +258,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - `/system/extensions` 只投影脱敏实时 availability；
 - build-time contribution、server capability、permission、UI mode 四门同时成立才展示；
 - 先只定义 `workspace.side_panel` / `source.detail_section`，零真实 UI 插件时页面逐字等价。
-- 状态：实现中；已冻结 canonical slot、metadata-only 后端声明/实时脱敏投影、静态空 registry、四门 resolver 与 non-vacuous synthetic parity guard，待三路 review、G1 与 CI 闭合后交付。
+- 状态：已由 PR #562 交付；已冻结 canonical slot、metadata-only 后端声明/实时脱敏投影、静态空 registry、四门 resolver 与 non-vacuous synthetic parity guard，零真实 UI 插件时保持零请求/零副作用；三路独立 review、hostile mutation、G1 与首轮 CI 均已闭合。
 
 #### PR-15：首个全栈 UI 插件样板
 
