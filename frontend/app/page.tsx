@@ -207,6 +207,9 @@ import {
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
+import { useWorkspaceExtensions } from "./use-workspace-extensions";
+import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
+import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/registry";
 import { sourceElementDomId } from "./source-detail-state";
 import { SchemaManager, type SchemaView } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
@@ -879,6 +882,7 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
   ).canWriteNotebook;
+  const workspaceExtensionProjection = useWorkspaceExtensions(currentUser?.id ?? null);
   const sourceLibrary = useSourceLibrary({
     actorId: currentUser?.id ?? null,
     canWriteSources,
@@ -4481,6 +4485,14 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
   );
+  const workspaceExtensionPermissions = {
+    notebookRead: Boolean(currentNotebookId && currentNotebook),
+    notebookWrite: capabilities.canWriteNotebook,
+    notebookConfigure: capabilities.canConfigureNotebook,
+    sourceRead: false,
+    sourceWrite: false,
+    systemAdmin: currentUser?.role === "admin",
+  } as const;
   // 内容管理入口的**唯一**判据(群组知识共享 P2)。此前这些入口写的是 `!isReader`,
   // 而 P2 把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」——再按 access 判
   // 就会让组管理员看到一个 API 全部允许、界面却全部藏起来的只读工作区。
@@ -5309,6 +5321,26 @@ export default function Home() {
               >
                 <PanelLeftOpen size={18} />
               </button>
+            )}
+
+            {currentUser && currentNotebook && (
+              <WorkspaceExtensionOutlet
+                slot="workspace.side_panel"
+                registry={WORKSPACE_UI_CONTRIBUTIONS}
+                projection={workspaceExtensionProjection}
+                context={{
+                  slot: "workspace.side_panel",
+                  actor: {
+                    id: currentUser.id,
+                    username: currentUser.username,
+                    displayName: currentUser.display_name,
+                  },
+                  notebook: { id: currentNotebook.id, name: currentNotebook.name },
+                  source: null,
+                  uiMode,
+                  permissions: workspaceExtensionPermissions,
+                }}
+              />
             )}
 
             <section className="workspace-panel chat-panel">
@@ -6458,6 +6490,33 @@ export default function Home() {
                   onConfirm={confirmCommandCatalog}
                   onOpenReview={openCatalogReview}
                   reviewSeq={catalogReviewSeq}
+                />
+              )}
+              {currentUser && currentNotebook && sourceDetail && (
+                <WorkspaceExtensionOutlet
+                  slot="source.detail_section"
+                  registry={WORKSPACE_UI_CONTRIBUTIONS}
+                  projection={workspaceExtensionProjection}
+                  context={{
+                    slot: "source.detail_section",
+                    actor: {
+                      id: currentUser.id,
+                      username: currentUser.username,
+                      displayName: currentUser.display_name,
+                    },
+                    notebook: { id: currentNotebook.id, name: currentNotebook.name },
+                    source: {
+                      id: sourceDetail.id,
+                      notebookId: sourceDetail.notebook_id,
+                      title: sourceDetail.title,
+                    },
+                    uiMode,
+                    permissions: {
+                      ...workspaceExtensionPermissions,
+                      sourceRead: true,
+                      sourceWrite: !sourceDetailBaseId && capabilities.canWriteNotebook,
+                    },
+                  }}
                 />
               )}
               <div className="source-element-stack">

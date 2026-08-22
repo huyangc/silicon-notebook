@@ -74,3 +74,23 @@ class SystemConfiguration(BaseModel):
     # 旧后端缺这个字段不该把入口隐藏成一个「看起来关闭了」的状态；真正的写路径
     # 仍由 PATCH /me/search-profile 的 409 兜底。
     user_search_profile_enabled: bool
+
+
+class SystemExtensionContribution(BaseModel):
+    """Closed, sanitized live availability for one build-time UI contribution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plugin_id: str
+    display_name: str
+    version: str
+    contribution_id: str
+    available: bool
+    unavailable_reason: Literal["disabled", "unavailable"] | None = None
+
+
+class SystemExtensionsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_version: Literal["1"] = "1"
+    extensions: list[SystemExtensionContribution]

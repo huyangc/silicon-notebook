@@ -24,6 +24,7 @@ from app.extension_sdk.contracts import (
     ProviderChainResult,
     ProviderResult,
 )
+from app.extension_sdk.ui import UiContributionDeclaration, WorkspaceUiSlot
 from app.extension_sdk.retrieval import (
     RETRIEVAL_CONTRIBUTOR_POINT,
     RETRIEVAL_SCOPE_READER_CAPABILITY,

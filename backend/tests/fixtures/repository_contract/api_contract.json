@@ -10084,6 +10084,79 @@
           "title": "SystemConfiguration",
           "type": "object"
         },
+        "SystemExtensionContribution": {
+          "additionalProperties": false,
+          "description": "Closed, sanitized live availability for one build-time UI contribution.",
+          "properties": {
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "contribution_id": {
+              "title": "Contribution Id",
+              "type": "string"
+            },
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
+            },
+            "plugin_id": {
+              "title": "Plugin Id",
+              "type": "string"
+            },
+            "unavailable_reason": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "disabled",
+                    "unavailable"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Unavailable Reason"
+            },
+            "version": {
+              "title": "Version",
+              "type": "string"
+            }
+          },
+          "required": [
+            "plugin_id",
+            "display_name",
+            "version",
+            "contribution_id",
+            "available"
+          ],
+          "title": "SystemExtensionContribution",
+          "type": "object"
+        },
+        "SystemExtensionsResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "api_version": {
+              "const": "1",
+              "default": "1",
+              "title": "Api Version",
+              "type": "string"
+            },
+            "extensions": {
+              "items": {
+                "$ref": "#/components/schemas/SystemExtensionContribution"
+              },
+              "title": "Extensions",
+              "type": "array"
+            }
+          },
+          "required": [
+            "extensions"
+          ],
+          "title": "SystemExtensionsResponse",
+          "type": "object"
+        },
         "TraceStep": {
           "description": "推理模式 agent 的一步轨迹(供前端折叠展示)。",
           "properties": {
@@ -22941,6 +23014,25 @@
             }
           },
           "summary": "System Configuration"
+        }
+      },
+      "/api/system/extensions": {
+        "get": {
+          "description": "Return live, metadata-only UI capability availability.\n\nThe registry topology is startup-frozen, while each capability decision is\nevaluated for this request.  Internal capability names, reasons, paths,\nendpoints, credentials, and exception text never cross this boundary.",
+          "operationId": "system_extensions_api_system_extensions_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SystemExtensionsResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "System Extensions"
         }
       },
       "/api/users/resolve": {

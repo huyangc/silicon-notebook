@@ -19,4 +19,9 @@ export const STATIC_SOURCE_CONTRACTS = Object.freeze({
     reason: "prevents unlabelled backend enum values from rendering",
     roots: ["."],
   }),
+  workspaceUiExtensionParity: Object.freeze({
+    category: "cross-language-protocol",
+    reason: "keeps build-time UI contributions identical to the frozen backend declaration contract",
+    roots: ["features/extension-sdk/registry.ts", "../backend/tests/fixtures/ui_extension_contract.json"],
+  }),
 });

@@ -482,12 +482,13 @@ prepare durable turn
 ```ts
 export type WorkspaceContribution = {
   id: string;
-  slot: "side_panel" | "source_detail_section";
+  slot: "workspace.side_panel" | "source.detail_section";
   capability: string;
   Component: React.ComponentType<WorkspaceFeatureProps>;
-  useFeature?: (context: WorkspaceFeatureContext) => WorkspaceFeatureState;
 };
 ```
+
+Slot wire names只接受上面的 canonical 值，不接受 `side_panel`、`source_detail_section` 等别名。Registry 登记 component 而非可选 hook；只有四门全部通过后才挂载 component，避免动态列表改变 Hook 调用顺序或让隐藏 contribution 先产生 effect/I/O。
 
 宿主只传递：当前 user/notebook 摘要、server capability、受控 navigation/action 和领域 API client。插件组件不能接触 `page.tsx` 的全部 setter，也不能修改其他 feature 的内部状态。
 
