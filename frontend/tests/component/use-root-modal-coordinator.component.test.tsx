@@ -131,6 +131,38 @@ test("a deferred primary opener cannot replace a newer primary slot", () => {
   expect(closed).not.toHaveBeenCalledWith("password-change", "conflict");
 });
 
+test("collection and KG presentation slots participate in the same primary watermark", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const actor = value!.captureActorOwner();
+  const workspace = value!.captureWorkspaceOwner();
+  const deferredAnalytics = value!.issue("analytics", workspace);
+  expect(value!.open("notebook-editor", actor)).not.toBeNull();
+  expect(value!.publish(deferredAnalytics)).toBe(false);
+  expect(value!.view("notebook-editor").open).toBe(true);
+
+  expect(value!.open("kg-schema", workspace)).not.toBeNull();
+  expect(value!.view("notebook-editor").open).toBe(false);
+  expect(value!.view("kg-schema").open).toBe(true);
+  expect(value!.open("kg-analysis", workspace)).not.toBeNull();
+  expect(value!.view("kg-schema").open).toBe(false);
+  expect(value!.view("kg-analysis").open).toBe(true);
+});
+
+test("workspace navigation closes collection dialogs but keeps actor-global settings", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const actor = value!.captureActorOwner();
+  expect(value!.open("notebook-editor", actor)).not.toBeNull();
+  value!.beginWorkspaceTransition();
+  expect(value!.view("notebook-editor").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("notebook-editor", "owner-invalidated");
+
+  expect(value!.open("password-change", actor)).not.toBeNull();
+  value!.beginWorkspaceTransition();
+  expect(value!.view("password-change").open).toBe(true);
+});
+
 test("primary slots conflict while the info layer remains a legal child overlay", () => {
   render(<Harness />);
   enterWorkspace();

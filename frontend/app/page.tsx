@@ -1116,6 +1116,8 @@ export default function Home() {
   });
   const passwordModal = rootModals.view("password-change");
   const searchProfileModal = rootModals.view("search-profile");
+  const notebookEditorModal = rootModals.view("notebook-editor");
+  const notebookDeleteModal = rootModals.view("notebook-delete");
   const sourceModal = rootModals.view("source-add");
   const infoModalView = rootModals.view("info");
   const modelPanel = rootModals.view("model-service");
@@ -1126,10 +1128,29 @@ export default function Home() {
   const catalogReviewModal = rootModals.view("catalog-review");
   const conversationShareModal = rootModals.view("conversation-share");
   const analyticsModal = rootModals.view("analytics");
+  const kgSchemaModal = rootModals.view("kg-schema");
+  const kgAnalysisModal = rootModals.view("kg-analysis");
   const understandingModal = rootModals.view("understanding");
   const promotionQueueModal = rootModals.view("promotion-queue");
   const promotionTargetModal = rootModals.view("promotion-target");
   const edgeReviewModal = rootModals.view("edge-review");
+  // Domain owners may clear their payload after a successful write, permission
+  // downgrade, or workspace transition.  Mirror that close into the
+  // presentation coordinator so a hidden lease never remains topmost.
+  useEffect(() => {
+    if (!editingNotebook && rootModals.activeLease("notebook-editor")) {
+      rootModals.requestClose("notebook-editor", "button");
+    }
+    if (!deleteNotebook && rootModals.activeLease("notebook-delete")) {
+      rootModals.requestClose("notebook-delete", "button");
+    }
+    if (!schemaModalOpen && rootModals.activeLease("kg-schema")) {
+      rootModals.requestClose("kg-schema", "button");
+    }
+    if (!kgAnalysisOpen && rootModals.activeLease("kg-analysis")) {
+      rootModals.requestClose("kg-analysis", "button");
+    }
+  }, [editingNotebook?.id, deleteNotebook?.id, schemaModalOpen, kgAnalysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -2718,6 +2739,18 @@ export default function Home() {
     void notebookCollection.saveEditor(patch);
   }
 
+  async function presentNotebookEditor(notebookId: string) {
+    const lease = rootModals.issue("notebook-editor", rootModals.captureActorOwner());
+    if (!lease) return;
+    if (await notebookCollection.openEditor(notebookId)) rootModals.publish(lease);
+  }
+
+  async function presentNotebookDelete(notebookId: string) {
+    const lease = rootModals.issue("notebook-delete", rootModals.captureActorOwner());
+    if (!lease) return;
+    if (await notebookCollection.openDelete(notebookId)) rootModals.publish(lease);
+  }
+
   // Stage selected files so the user can pick a document type per file before
   // uploading (auto-detect by default).
   function stageFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -3599,7 +3632,27 @@ export default function Home() {
   // 视图内还挂着「图谱分析」弹窗的开关,它必须和父视图一起归零(见 kgAnalysisOpen 声明处),
   // 而"关闭时要一起做的事"散在内联箭头里就迟早会漏掉一条。
   function closeKgView() {
+    rootModals.requestClose("kg-schema", "button");
+    rootModals.requestClose("kg-analysis", "button");
     kgWorkspace.closeGraph();
+  }
+
+  function openKgSchemas() {
+    if (!rootModals.open("kg-schema", rootModals.captureWorkspaceOwner())) return;
+    kgWorkspace.openSchemas();
+  }
+
+  function closeKgSchemas(reason: "button" | "backdrop" = "button") {
+    rootModals.requestClose("kg-schema", reason);
+  }
+
+  function openKgAnalysis() {
+    if (!rootModals.open("kg-analysis", rootModals.captureWorkspaceOwner())) return;
+    kgWorkspace.openAnalysis();
+  }
+
+  function closeKgAnalysis() {
+    rootModals.requestClose("kg-analysis", "button");
   }
 
   // 服务端搜索：输入词变化时防抖触发 /kg/search；清空词时还原为核心子图。
@@ -4016,7 +4069,13 @@ export default function Home() {
   // none(0 个公共库挂载)拒绝、auto(1 个)直接用、choose(>1 个)转去弹选择器,选好后
   // 选择器自己会带着 targetBaseId 回调本函数——这一次不再重新分派,直接提交。
   async function submitPromotion(objectId: string, targetBaseId?: string) {
-    if (!currentNotebookId) return;
+    const actorId = currentUser?.id ?? "";
+    const notebookId = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
+    if (!actorId || !notebookId) return;
+    const isCurrent = () => currentUser?.id === actorId
+      && activeNotebookIdRef.current === notebookId
+      && workspaceEpochRef.current === workspaceEpoch;
     if (!targetBaseId) {
       if (promotionTarget.kind === "none") {
         setToast("需先挂载一个公共知识库，才能贡献内容");
@@ -4030,8 +4089,12 @@ export default function Home() {
       }
       targetBaseId = promotionTarget.baseId;
     }
-    await proposePromotion(currentNotebookId, objectId, targetBaseId);
-    setToast("已提交贡献申请");
+    try {
+      await proposePromotion(notebookId, objectId, targetBaseId);
+      if (isCurrent()) setToast("已提交贡献申请");
+    } catch (error) {
+      if (isCurrent()) throw error;
+    }
   }
 
   async function decidePromotion(candidateId: string, decision: "approve" | "reject", reason = "") {
@@ -4164,6 +4227,12 @@ export default function Home() {
       case "search-profile":
       case "understanding":
         return;
+      case "notebook-editor":
+        notebookCollection.closeEditor();
+        return;
+      case "notebook-delete":
+        notebookCollection.closeDelete();
+        return;
       case "source-add":
         resetStagedIntake();
         setLinkSectionOpen(false);
@@ -4195,6 +4264,12 @@ export default function Home() {
         return;
       case "analytics":
         clearAnalyticsData();
+        return;
+      case "kg-schema":
+        kgWorkspace.closeSchemas();
+        return;
+      case "kg-analysis":
+        kgWorkspace.closeAnalysis();
         return;
       case "promotion-queue":
         setPromoQueue(null);
@@ -4788,7 +4863,7 @@ export default function Home() {
                     (含组管理员)退回一句说明,不打开编辑器(打开就会在 listMountable 上 404)。 */}
                 <button className="workspace-nav-button" onClick={() => {
                   if (capabilities.canConfigureNotebook) {
-                    void notebookCollection.openEditor(currentNotebook.id);
+                    void presentNotebookEditor(currentNotebook.id);
                   } else {
                     openInfoModal({
                       title: "设置",
@@ -5613,8 +5688,8 @@ export default function Home() {
                 .then(() => setToast("已退出只读共享"))
                 .catch(reportError);
             }}
-            onEdit={() => { void notebookCollection.openEditor(menuNotebook.id); notebookCollection.closeMenu(); }}
-            onDelete={() => { void notebookCollection.openDelete(menuNotebook.id); notebookCollection.closeMenu(); }}
+            onEdit={() => { void presentNotebookEditor(menuNotebook.id); notebookCollection.closeMenu(); }}
+            onDelete={() => { void presentNotebookDelete(menuNotebook.id); notebookCollection.closeMenu(); }}
           />
         </div>
       )}
@@ -6026,8 +6101,8 @@ export default function Home() {
         />
       )}
 
-      {editingNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal="true">
+      {notebookEditorModal.open && editingNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal={notebookEditorModal.topmost} style={{ zIndex: notebookEditorModal.zIndex }}>
           <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6035,7 +6110,7 @@ export default function Home() {
                 <h2>笔记本设置</h2>
                 <p>编辑当前笔记本的信息与参考库。模型服务由系统统一管理。</p>
               </div>
-              <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={notebookCollection.closeEditor} title="Close">×</button>
+              <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")} title="Close">×</button>
             </div>
             <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
@@ -6112,7 +6187,7 @@ export default function Home() {
                 <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
               </section>
               <div className="modal-actions settings-footer">
-                <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={notebookCollection.closeEditor}>取消</button>
+                <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")}>取消</button>
                 <button type="submit" className="new-pill" disabled={notebookCollection.editor?.busy}>{notebookCollection.editor?.busy ? "保存中…" : "保存"}</button>
               </div>
             </form>
@@ -6121,8 +6196,8 @@ export default function Home() {
         </section>
       )}
 
-      {deleteNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal="true">
+      {notebookDeleteModal.open && deleteNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal={notebookDeleteModal.topmost} style={{ zIndex: notebookDeleteModal.zIndex }}>
           <FloatingModalCard storageKey="notebook.delete.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6135,10 +6210,10 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              <button className="icon-button" disabled={notebookCollection.deletion?.busy} onClick={notebookCollection.closeDelete} title="Close">×</button>
+              <button className="icon-button" disabled={notebookCollection.deletion?.busy} onClick={() => rootModals.requestClose("notebook-delete", "button")} title="Close">×</button>
             </div>
             <div className="modal-actions padded">
-              <button className="sort-button" disabled={notebookCollection.deletion?.busy} onClick={notebookCollection.closeDelete}>取消</button>
+              <button className="sort-button" disabled={notebookCollection.deletion?.busy} onClick={() => rootModals.requestClose("notebook-delete", "button")}>取消</button>
               <button className="new-pill danger-pill" disabled={notebookCollection.deletion?.busy} onClick={() => { void notebookCollection.confirmDelete(); }}>{notebookCollection.deletion?.busy ? "删除中…" : "确认"}</button>
             </div>
             </>)}
@@ -6817,8 +6892,8 @@ export default function Home() {
         </section>
       )}
 
-      {schemaModalOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) kgWorkspace.closeSchemas(); }}>
+      {kgSchemaModal.open && schemaModalOpen && (
+        <section className="utility-modal" role="dialog" aria-modal={kgSchemaModal.topmost} style={{ zIndex: kgSchemaModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
           <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6826,7 +6901,7 @@ export default function Home() {
                 <h2>图谱 Schema</h2>
                 <p>查看当前笔记本实际采用的类型。所有者可改写继承类型或新增本库类型；管理员可切换到全局基线。</p>
               </div>
-              <button className="icon-button" onClick={kgWorkspace.closeSchemas} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeKgSchemas("button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               <SchemaManager
@@ -6892,7 +6967,7 @@ export default function Home() {
               <button
                 type="button"
                 className="sort-button kg-schema-button"
-                onClick={kgWorkspace.openAnalysis}
+                onClick={openKgAnalysis}
                 title="查看这个知识库的构成、合并收敛与主题板块分布"
               >
                 <BarChart3 size={16} /> 图谱分析
@@ -6900,7 +6975,7 @@ export default function Home() {
               <button
                 type="button"
                 className="sort-button kg-schema-button"
-                onClick={kgWorkspace.openSchemas}
+                onClick={openKgSchemas}
                 title="查看当前笔记本采用的知识对象类型与字段"
               >
                 <Database size={16} /> 图谱 Schema
@@ -6913,7 +6988,7 @@ export default function Home() {
                 onOpen={() => {
                   // 关掉可能还开着的知识关系图弹窗(同层 z-60):它若压在本弹窗
                   // 之上,唯一入口点开的就是一个摸不到的面板(codex R9 P1)。
-                  kgWorkspace.closeGraph();
+                  closeKgView();
                   rootModals.open("understanding", rootModals.captureWorkspaceOwner());
                 }}
               />
@@ -7243,14 +7318,16 @@ export default function Home() {
               </div>
             </aside>
           </div>
-          {kgAnalysisOpen && currentNotebookId && (
+          {kgAnalysisModal.open && kgAnalysisOpen && currentNotebookId && (
             <KgAnalysisView
               notebookId={currentNotebookId}
               canAnalyze={!readOnlyWorkspace}
               analysisRunning={kgRefreshBusy}
               analysisBlocked={relinkingKg || buildingKg}
+              interactive={kgAnalysisModal.topmost}
+              zIndex={kgAnalysisModal.zIndex}
               onAnalyze={confirmGenerateKgAnalysis}
-              onClose={kgWorkspace.closeAnalysis}
+              onClose={closeKgAnalysis}
             />
           )}
         </section>

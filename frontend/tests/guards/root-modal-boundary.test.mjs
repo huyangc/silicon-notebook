@@ -22,6 +22,12 @@ test("page composes one typed root-modal coordinator and has no legacy modal boo
     "modelPanelOpen", "sharedByMeOpen", "promoOpen", "edgeReviewOpen",
     "understandingOpen",
   ]) assert.equal(pageText.includes(legacy), false, legacy);
+  for (const slot of ["notebook-editor", "notebook-delete", "kg-schema", "kg-analysis"]) {
+    assert.match(pageText, new RegExp(`rootModals\\.view\\(\\"${slot}\\"\\)`), slot);
+  }
+  assert.doesNotMatch(pageText, /\{editingNotebook && \([\s\S]{0,120}aria-modal="true"/);
+  assert.doesNotMatch(pageText, /\{deleteNotebook && \([\s\S]{0,120}aria-modal="true"/);
+  assert.doesNotMatch(pageText, /\{schemaModalOpen && \([\s\S]{0,120}aria-modal="true"/);
 });
 
 test("coordinator is presentation-only: React is its sole dependency and it owns no I/O or timer", () => {
@@ -58,6 +64,32 @@ test("deferred root openers publish frozen tickets instead of opening from live 
     assert.ok(calls.includes("rootModals.publish"), name);
   }
   assert.match(pageText, /previewShared\(token\)[\s\S]*rootModals\.publish\(modalLease\)/);
+  for (const name of ["presentNotebookEditor", "presentNotebookDelete"]) {
+    const calls = callSitesIn(findFunctionIn(page, "Home", name)).map(({ target }) => target);
+    assert.ok(calls.includes("rootModals.issue"), name);
+    assert.ok(calls.includes("rootModals.publish"), name);
+  }
+});
+
+test("collection and KG payload owners are coordinated only through typed presentation adapters", () => {
+  const expected = new Map([
+    ["openKgSchemas", ["rootModals.open", "kgWorkspace.openSchemas"]],
+    ["openKgAnalysis", ["rootModals.open", "kgWorkspace.openAnalysis"]],
+    ["closeKgSchemas", ["rootModals.requestClose"]],
+    ["closeKgAnalysis", ["rootModals.requestClose"]],
+  ]);
+  for (const [name, targets] of expected) {
+    const calls = callSitesIn(findFunctionIn(page, "Home", name)).map(({ target }) => target);
+    for (const target of targets) assert.ok(calls.includes(target), `${name}: ${target}`);
+  }
+  const closeCalls = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
+    .map(({ target }) => target);
+  for (const target of [
+    "notebookCollection.closeEditor",
+    "notebookCollection.closeDelete",
+    "kgWorkspace.closeSchemas",
+    "kgWorkspace.closeAnalysis",
+  ]) assert.ok(closeCalls.includes(target), target);
 });
 
 test("only the coordinator top layer drives the model focus trap", () => {
@@ -96,4 +128,9 @@ test("modal mutations suppress errors after their frozen lease becomes stale", (
     const text = findFunctionIn(page, "Home", name).getText(page);
     assert.match(text, /catch \(error\)[\s\S]*rootModals\.owns\(modalLease\)[\s\S]*throw error/, name);
   }
+  const promotion = findFunctionIn(page, "Home", "submitPromotion").getText(page);
+  assert.match(promotion, /const actorId = currentUser\?\.id/);
+  assert.match(promotion, /const workspaceEpoch = workspaceEpochRef\.current/);
+  assert.match(promotion, /if \(isCurrent\(\)\) setToast/);
+  assert.match(promotion, /catch \(error\)[\s\S]*if \(isCurrent\(\)\) throw error/);
 });

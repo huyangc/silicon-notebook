@@ -169,6 +169,8 @@ export function KgAnalysisView({
   canAnalyze = false,
   analysisRunning = false,
   analysisBlocked = false,
+  interactive = true,
+  zIndex,
   onAnalyze,
 }: {
   notebookId: string;
@@ -176,6 +178,8 @@ export function KgAnalysisView({
   canAnalyze?: boolean;
   analysisRunning?: boolean;
   analysisBlocked?: boolean;
+  interactive?: boolean;
+  zIndex?: number;
   onAnalyze?: () => void;
 }) {
   const [report, setReport] = useState<KgAnalysisReport | null>(null);
@@ -345,8 +349,11 @@ export function KgAnalysisView({
     <section
       className="utility-modal"
       role="dialog"
-      aria-modal="true"
+      aria-modal={interactive}
+      aria-hidden={!interactive}
+      inert={interactive ? undefined : true}
       aria-label="图谱分析"
+      style={{ zIndex }}
       onClick={(event) => {
         if (event.currentTarget === event.target) onClose();
       }}

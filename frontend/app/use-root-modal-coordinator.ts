@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 export type RootModalSlot =
   | "password-change"
   | "search-profile"
+  | "notebook-editor"
+  | "notebook-delete"
   | "source-add"
   | "info"
   | "model-service"
@@ -15,6 +17,8 @@ export type RootModalSlot =
   | "catalog-review"
   | "conversation-share"
   | "analytics"
+  | "kg-schema"
+  | "kg-analysis"
   | "understanding"
   | "promotion-queue"
   | "promotion-target"
@@ -75,6 +79,7 @@ type ModalPolicy = Readonly<{
   layer: 20 | 60 | 80 | 84;
   backdrop: boolean;
   escape: boolean;
+  workspaceSensitive?: boolean;
 }>;
 
 // This table is the presentation policy's only source of truth.  It deliberately
@@ -85,6 +90,8 @@ type ModalPolicy = Readonly<{
 export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> = {
   "password-change": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   "search-profile": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
+  "notebook-editor": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
+  "notebook-delete": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "source-add": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 20, backdrop: true, escape: false },
   info: { ownerKinds: ["actor", "workspace", "source"], conflictGroup: null, layer: 80, backdrop: false, escape: false },
   "model-service": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: true },
@@ -95,6 +102,8 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "catalog-review": { ownerKinds: ["source"], conflictGroup: "primary", layer: 80, backdrop: true, escape: false },
   "conversation-share": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   analytics: { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
+  "kg-schema": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
+  "kg-analysis": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   understanding: { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "promotion-queue": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "promotion-target": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
@@ -323,7 +332,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     sourceGenerationRef.current += 1;
     workspaceOwnerRef.current = null;
     for (const [slot, active] of [...activeRef.current.entries()]) {
-      if (active.owner.kind !== "actor") {
+      if (active.owner.kind !== "actor" || ROOT_MODAL_POLICIES[slot].workspaceSensitive) {
         removeWithoutRender(slot, "owner-invalidated", true);
       }
     }
@@ -359,7 +368,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     sourceGenerationRef.current += 1;
     workspaceOwnerRef.current = null;
     for (const [slot, active] of [...activeRef.current.entries()]) {
-      if (active.owner.kind !== "actor") {
+      if (active.owner.kind !== "actor" || ROOT_MODAL_POLICIES[slot].workspaceSensitive) {
         removeWithoutRender(slot, "owner-invalidated", true);
       }
     }

@@ -328,7 +328,7 @@ test("editor open is latest-wins and a permission downgrade blocks the second wr
   render(<Harness />);
   publish([notebook("a"), notebook("b")]);
 
-  let openingA!: Promise<void>;
+  let openingA!: Promise<boolean>;
   act(() => { openingA = value!.openEditor("a"); });
   await act(async () => value!.openEditor("b"));
   expect(value!.editor?.target.id).toBe("b");
