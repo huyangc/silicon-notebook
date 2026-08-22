@@ -167,3 +167,15 @@ test("source list and detail expose an accessible deleting state", () => {
   )));
   assert.equal(jsxElements(page, "Loader2").length >= 3, true);
 });
+
+
+test("list deletion uses workspace authority while detail deletion narrows to the source", () => {
+  const confirm = findFunctionIn(page, "Home", "confirmDeleteSource");
+  const calls = callSitesIn(confirm).map(({ target }) => target);
+  const text = confirm.getText(page);
+
+  assert.ok(calls.includes("rootModals.captureWorkspaceOwner"));
+  assert.ok(calls.includes("rootModals.captureSourceOwner"));
+  assert.match(text, /sourceDetail\?\.id === source\.id/);
+  assert.match(text, /openInfoModal\([\s\S]*modalOwner\)/);
+});

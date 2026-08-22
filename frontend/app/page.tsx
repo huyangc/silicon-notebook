@@ -3381,6 +3381,12 @@ export default function Home() {
   function confirmDeleteSource(source: SourceSummary) {
     if (crossLibrarySourceNotebookId(source.notebook_id, currentNotebookId)) return;
     if (deletingSourceIds.has(source.id)) return;
+    // The list-card action has no source detail open, so it must remain a
+    // workspace-owned confirmation.  Detail actions use the narrower source
+    // lease so a source switch also invalidates the prompt.
+    const modalOwner = sourceDetail?.id === source.id
+      ? rootModals.captureSourceOwner()
+      : rootModals.captureWorkspaceOwner();
     openInfoModal({
       title: "删除来源",
       message: `确定删除“${source.title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`,
@@ -3392,7 +3398,7 @@ export default function Home() {
           action: () => sourceLibrary.deleteSource(source).catch(reportError),
         },
       ],
-    }, rootModals.captureSourceOwner());
+    }, modalOwner);
   }
 
   async function openAskSession(id: string) {
