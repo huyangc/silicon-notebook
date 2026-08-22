@@ -608,6 +608,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         async (jobId, durableConversationId) => {
           startedConversationId = durableConversationId;
           if (cancelRequestedControllersRef.current.delete(controller)) {
+            const cancelKey = `${runOwner.notebookId}\u0000${jobId}`;
+            // A detached pre-start Stop and a restored active-job Stop share the
+            // same authority key. Whichever observes `started` first owns the one
+            // cancellation request; the other keeps consuming the durable stream.
+            if (cancelRequestsInFlightRef.current.has(cancelKey)) return;
+            cancelRequestsInFlightRef.current.add(cancelKey);
             try {
               await requestAskCancellation(runOwner.notebookId, jobId);
             } catch {
@@ -615,6 +621,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
                 effectsRef.current.notify("未能中断后台任务；任务将继续完成，可稍后重开查看");
               }
               return;
+            } finally {
+              cancelRequestsInFlightRef.current.delete(cancelKey);
             }
             controller.abort();
             return;
