@@ -624,6 +624,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
             } finally {
               cancelRequestsInFlightRef.current.delete(cancelKey);
             }
+            // A history restore may have projected this same durable job while
+            // the pre-start cancellation was waiting. Retire only the exact
+            // matching refs; a replacement job remains authoritative.
+            if (
+              askJobIdRef.current === jobId
+              && askNotebookIdRef.current === runOwner.notebookId
+            ) {
+              askJobIdRef.current = null;
+              askNotebookIdRef.current = null;
+            }
             controller.abort();
             return;
           }
