@@ -1,72 +1,81 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import postcss from "postcss";
 
 const css = await readFile(new URL("../../app/globals.css", import.meta.url), "utf8");
+const stylesheet = postcss.parse(css);
 
-function declarationsFor(selector, source = css) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const matches = [...source.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "g"))];
-  return matches.map((match) => match[1].replace(/\s+/g, " ").trim());
-}
+const visibleSelector = ".workspace-grid:has(> .workspace-extension-outlet-workspace-side_panel)";
+const collapsedSelector = ".workspace-grid.sources-collapsed:has(> .workspace-extension-outlet-workspace-side_panel)";
 
-function mediaBodies(maxWidth) {
-  const marker = `@media (max-width: ${maxWidth}px)`;
-  const bodies = [];
-  let cursor = 0;
-  while (cursor < css.length) {
-    const markerAt = css.indexOf(marker, cursor);
-    if (markerAt === -1) break;
-    const openAt = css.indexOf("{", markerAt + marker.length);
-    assert.notEqual(openAt, -1, `missing body for ${marker}`);
-    let depth = 1;
-    for (let index = openAt + 1; index < css.length; index += 1) {
-      if (css[index] === "{") depth += 1;
-      if (css[index] === "}") depth -= 1;
-      if (depth === 0) {
-        bodies.push(css.slice(openAt + 1, index));
-        cursor = index + 1;
-        break;
-      }
+function exactRules(container, selectors, direct = false) {
+  const rules = [];
+  const consider = (rule) => {
+    if (
+      rule.selectors.length === selectors.length
+      && rule.selectors.every((selector, index) => selector === selectors[index])
+    ) rules.push(rule);
+  };
+  if (direct) {
+    for (const node of container.nodes ?? []) {
+      if (node.type === "rule") consider(node);
     }
-    assert.equal(depth, 0, `unterminated ${marker}`);
+  } else {
+    container.walkRules(consider);
   }
-  assert.ok(bodies.length > 0, `missing ${marker}`);
-  return bodies;
+  return rules;
 }
 
-function sidePanelMediaBody(maxWidth) {
-  const bodies = mediaBodies(maxWidth).filter((body) => (
-    body.includes("workspace-extension-outlet-workspace-side_panel")
-  ));
-  assert.equal(bodies.length, 1, `expected one side-panel layout block at ${maxWidth}px`);
-  return bodies[0];
+function exactRule(container, selectors, direct = false) {
+  const matches = exactRules(container, selectors, direct);
+  assert.equal(matches.length, 1, `expected one exact CSS rule for ${selectors.join(", ")}`);
+  return matches[0];
+}
+
+function declarationMap(rule) {
+  const declarations = rule.nodes?.filter((node) => node.type === "decl") ?? [];
+  assert.equal(declarations.length, rule.nodes?.length ?? 0, "layout rule must contain declarations only");
+  return Object.fromEntries(declarations.map((declaration) => [declaration.prop, declaration.value]));
+}
+
+function sidePanelMedia(maxWidth) {
+  const matches = [];
+  stylesheet.walkAtRules("media", (atRule) => {
+    let containsVisibleSelector = false;
+    atRule.walkRules((rule) => {
+      if (rule.selectors.includes(visibleSelector)) containsVisibleSelector = true;
+    });
+    if (atRule.params === `(max-width: ${maxWidth}px)` && containsVisibleSelector) {
+      matches.push(atRule);
+    }
+  });
+  assert.equal(matches.length, 1, `expected one side-panel media block at ${maxWidth}px`);
+  return matches[0];
 }
 
 test("visible side contribution gets an explicit third desktop column", () => {
-  const visible = declarationsFor(
-    ".workspace-grid:has(> .workspace-extension-outlet-workspace-side_panel)",
-  );
-  assert.ok(visible.some((body) => /grid-template-columns:[^;]*25%[^;]*18%[^;]*1fr/.test(body)));
-  const collapsed = declarationsFor(
-    ".workspace-grid.sources-collapsed:has(> .workspace-extension-outlet-workspace-side_panel)",
-  );
-  assert.ok(collapsed.some((body) => /grid-template-columns:\s*0[^;]*18%[^;]*1fr/.test(body)));
+  assert.deepEqual(declarationMap(exactRule(stylesheet, [visibleSelector], true)), {
+    "grid-template-columns": "minmax(270px, 25%) minmax(190px, 18%) minmax(0, 1fr)",
+  });
+  assert.deepEqual(declarationMap(exactRule(stylesheet, [collapsedSelector], true)), {
+    "grid-template-columns": "0 minmax(190px, 18%) minmax(0, 1fr)",
+  });
 });
 
-test("mobile contribution layout collapses back to one column", () => {
-  const mobile = sidePanelMediaBody(760);
-  assert.match(mobile, /workspace-extension-outlet-workspace-side_panel[\s\S]*grid-template-columns:\s*1fr/);
+test("mobile contribution layout collapses both exact selectors back to one column", () => {
+  const mobile = sidePanelMedia(760);
+  assert.deepEqual(declarationMap(exactRule(mobile, [visibleSelector, collapsedSelector])), {
+    "grid-template-columns": "1fr",
+  });
 });
 
 test("medium workspace preserves all three visible and collapsed columns", () => {
-  const medium = sidePanelMediaBody(1100);
-  assert.deepEqual(declarationsFor(
-    ".workspace-grid:has(> .workspace-extension-outlet-workspace-side_panel)",
-    medium,
-  ), ["grid-template-columns: 250px 180px minmax(0, 1fr);"]);
-  assert.deepEqual(declarationsFor(
-    ".workspace-grid.sources-collapsed:has(> .workspace-extension-outlet-workspace-side_panel)",
-    medium,
-  ), ["grid-template-columns: 0 180px minmax(0, 1fr);"]);
+  const medium = sidePanelMedia(1100);
+  assert.deepEqual(declarationMap(exactRule(medium, [visibleSelector])), {
+    "grid-template-columns": "250px 180px minmax(0, 1fr)",
+  });
+  assert.deepEqual(declarationMap(exactRule(medium, [collapsedSelector])), {
+    "grid-template-columns": "0 180px minmax(0, 1fr)",
+  });
 });
