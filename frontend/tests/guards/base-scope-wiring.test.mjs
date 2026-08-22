@@ -213,11 +213,12 @@ test("本库来源列表没有被包进新分组", () => {
 // 「清空」会把参考库恢复成全选 —— 用户点完以为范围空了,`selectedBaseNotebookCount`
 // 却大于 0,`sourceScopeBlocked` 放行,84 篇论文的参考库整份参与。那就是这次事故本身。
 const CLEARED_BASE = /setBaseScopeSelection\(\{ allSelected: false, ids: new Set\(\) \}\)/;
-const CLEARED_SOURCE = /setSourceScopeSelection\(\{ allSelected: false, ids: new Set\(\) \}\)/;
+const CLEARED_SOURCE = /sourceLibrary\.clearSourceSelection\(\)/;
 
 test("「全选」与「清空」两维成对,且成对发生在同一颗按钮里", () => {
   const toolbarButtons = jsxElements(page, "button").filter((element) => (
-    String(element.bindings?.onClick ?? "").includes("setSourceScopeSelection")
+    String(element.bindings?.onClick ?? "").includes("sourceLibrary.selectAllSources()")
+      || String(element.bindings?.onClick ?? "").includes("sourceLibrary.clearSourceSelection()")
   ));
   assert.equal(toolbarButtons.length, 2, "检索范围工具条应有「全选」「清空」两颗按钮");
 
@@ -225,7 +226,7 @@ test("「全选」与「清空」两维成对,且成对发生在同一颗按钮�
   // 按**本库来源那一维做了什么**认出这两颗按钮 —— 它是按钮语义的锚,
   // 参考库那一维正是这里要验的被测项,不能反过来拿它认按钮。
   const selectAll = handlers.filter(
-    (h) => h.includes("setSourceScopeSelection(defaultSourceScopeSelection())"),
+    (h) => h.includes("sourceLibrary.selectAllSources()"),
   );
   const clear = handlers.filter((h) => CLEARED_SOURCE.test(h));
   assert.equal(selectAll.length, 1, "应恰好一颗按钮把本库来源恢复成全选(「全选」)");
@@ -257,24 +258,15 @@ test("「全选」与「清空」两维成对,且成对发生在同一颗按钮�
 // 切换/退出笔记本时两维必须一起重置:参考库的选择状态挂在上一个笔记本的挂载集上,
 // 留着它会把旧库 id 带进新笔记本的请求,或反过来悄悄沿用旧的排除项。
 test("参考库选择与来源选择在同样多的地方被重置", () => {
-  const calls = callSitesIn(page);
-  const sourceResets = calls.filter((call) => (
-    call.target === "setSourceScopeSelection"
-    && call.arguments.join() === "defaultSourceScopeSelection()"
-  )).length;
-  const baseResets = calls.filter((call) => (
-    call.target === "setBaseScopeSelection"
-    && call.arguments.join() === "defaultBaseScopeSelection()"
-  )).length;
-  assert.ok(
-    sourceResets >= 3,
-    `来源重置点应至少 3 处(打开笔记本 / 退出笔记本 / 全选),实际 ${sourceResets}`,
-  );
-  assert.equal(
-    baseResets,
-    sourceResets,
-    "参考库的重置点必须与来源一一对应,漏一处就会把上一个笔记本的选择带过去",
-  );
+  const text = page.getText(page);
+  assert.match(text, /sourceLibrary\.commitNotebookSnapshot\([\s\S]*setBaseScopeSelection\(defaultBaseScopeSelection\(\)\)/);
+  assert.match(text, /function showCollection\(\)[\s\S]*sourceLibrary\.beginTransition\(\)[\s\S]*setBaseScopeSelection\(defaultBaseScopeSelection\(\)\)/);
+  const pairedButtons = jsxElements(page, "button").filter((element) => {
+    const handler = String(element.bindings?.onClick ?? "");
+    return handler.includes("sourceLibrary.selectAllSources()")
+      && handler.includes("setBaseScopeSelection(defaultBaseScopeSelection())");
+  });
+  assert.equal(pairedButtons.length, 1, "全选按钮必须同时重置来源与参考库范围");
 });
 
 

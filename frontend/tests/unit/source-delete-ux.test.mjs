@@ -21,39 +21,39 @@ import {
 
 
 const page = await parseModule("page.tsx");
+const sourceLibrary = await parseModule("use-source-library.ts");
 
 
 test("source deletion is single-flight and releases its busy state on every exit", () => {
-  const remove = findFunctionIn(page, "Home", "deleteSource");
+  const remove = findFunctionIn(sourceLibrary, "useSourceLibrary", "deleteSource");
   const conditions = ifConditionsIn(remove);
   const calls = callSitesIn(remove);
 
   assert.ok(
-    conditions.includes("!notebookId || deletingSourceIdsRef.current.has(source.id)"),
+    conditions.some((condition) => condition.includes("deletingIdsRef.current.has(source.id)")),
     "the delete request must reject duplicate clicks before awaiting the network",
   );
-  assert.ok(calls.some((call) => call.target === "deletingSourceIdsRef.current.add"));
-  assert.ok(calls.some((call) => call.target === "deletingSourceIdsRef.current.delete"));
+  assert.ok(calls.some((call) => call.target === "deletingIdsRef.current.add"));
+  assert.ok(calls.some((call) => call.target === "deletingIdsRef.current.delete"));
   assert.ok(calls.some((call) => call.target === "setDeletingSourceIds"));
 });
 
 
 test("successful deletion commits locally before guarded parallel reconciliation", () => {
-  const remove = findFunctionIn(page, "Home", "deleteSource");
+  const remove = findFunctionIn(sourceLibrary, "useSourceLibrary", "deleteSource");
   const calls = callSitesIn(remove);
   const parallelRefresh = calls.find((call) => call.target === "Promise.allSettled");
 
   assert.ok(calls.some((call) => call.target === "setSources"));
   assert.ok(calls.some((call) => call.target === "setNotebookSourceTotal"));
-  assert.ok(calls.some((call) => call.target === "setSourceDetail"));
-  assert.ok(calls.some((call) => call.target === "sourceDeleteRefreshGenerationRef.current.get"));
-  assert.ok(calls.some((call) => call.target === "sourceDeleteRefreshGenerationRef.current.set"));
+  assert.ok(calls.some((call) => call.target === "closeSourceDetail"));
+  assert.ok(calls.some((call) => call.target === "deleteRefreshGenerationsRef.current.get"));
+  assert.ok(calls.some((call) => call.target === "deleteRefreshGenerationsRef.current.set"));
   assert.ok(parallelRefresh, "collection, notebook and checkup refreshes must not form a serial waterfall");
-  assert.match(parallelRefresh.arguments[0], /loadNotebookCollection\(\{ guard: isCurrent \}\)/);
-  assert.match(parallelRefresh.arguments[0], /loadSourcesPage\(notebookId/);
-  assert.match(parallelRefresh.arguments[0], /getNotebook\(notebookId\)/);
-  assert.match(parallelRefresh.arguments[0], /fetchCheckup\(notebookId\)/);
-  assert.match(parallelRefresh.arguments[0], /if \(isCurrent\(\)\)/);
+  assert.match(parallelRefresh.arguments[0], /loadSourcesPage\(\{/);
+  assert.match(parallelRefresh.arguments[0], /refreshCollection\(isCurrent\)/);
+  assert.match(parallelRefresh.arguments[0], /refreshNotebook\(source\.notebook_id, isCurrent\)/);
+  assert.match(parallelRefresh.arguments[0], /refreshCheckup\(source\.notebook_id, isCurrent\)/);
 });
 
 
@@ -96,7 +96,7 @@ test("source page requests reject stale responses and clamp an emptied last page
   assert.equal(clampSourcePage(2, 20, 10), 1);
   assert.equal(clampSourcePage(1, 0, 10), 0);
 
-  const loadPage = findFunctionIn(page, "Home", "loadSourcesPage");
+  const loadPage = findFunctionIn(sourceLibrary, "useSourceLibrary", "loadSourcesPage");
   const calls = callSitesIn(loadPage);
   assert.ok(calls.some((call) => call.target === "sourcePageRequestIsCurrent"));
   assert.ok(calls.some((call) => call.target === "clampSourcePage"));
@@ -111,15 +111,16 @@ test("delete tombstones suppress stale rows and snapshot reads converge across t
   );
   assert.deepEqual(result, { items: [{ id: "keep" }], removedCount: 1 });
 
-  const remove = findFunctionIn(page, "Home", "deleteSource");
-  const removeText = remove.getText(page);
-  assert.match(removeText, /const notebookId = source\.notebook_id/);
-  assert.match(removeText, /deletedSourceIdsByNotebookRef\.current\.set/);
+  const remove = findFunctionIn(sourceLibrary, "useSourceLibrary", "deleteSource");
+  const removeText = remove.getText(sourceLibrary);
+  assert.match(removeText, /const key = ownerKey\(actorAtStart, source\.notebook_id\)/);
+  assert.match(removeText, /deletedIdsRef\.current\.set/);
 
   const open = findFunctionIn(page, "Home", "openNotebook");
-  assert.ok(callSitesIn(open).some((call) => call.target === "filterDeletedSourceItems"));
   const openText = open.getText(page);
   assert.match(openText, /readStableSourceSnapshot/);
+  const commit = findFunctionIn(sourceLibrary, "useSourceLibrary", "commitNotebookSnapshot");
+  assert.ok(callSitesIn(commit).some((call) => call.target === "filterDeletedSourceItems"));
 
   let generation = 0;
   let reads = 0;
@@ -133,17 +134,17 @@ test("delete tombstones suppress stale rows and snapshot reads converge across t
   );
   assert.deepEqual(snapshot, { reads: 3, generation: 2 });
 
-  const openDetail = findFunctionIn(page, "Home", "openSourceById");
-  const detailText = openDetail.getText(page);
-  assert.match(detailText, /const requestGeneration = \+\+sourceDetailRequestGenerationRef\.current/);
-  assert.match(detailText, /sourceDetailRequestGenerationRef\.current !== requestGeneration/);
-  assert.match(detailText, /workspaceEpochRef\.current !== workspaceEpoch/);
-  assert.match(detailText, /deletedSourceIdsByNotebookRef\.current\.get\(detail\.notebook_id\)/);
-  const loadPage = findFunctionIn(page, "Home", "loadSourceElementPage");
-  const loadPageText = loadPage.getText(page);
-  assert.match(loadPageText, /const requestGeneration = sourceDetailRequestGenerationRef\.current/);
-  assert.match(loadPageText, /sourceDetailRequestGenerationRef\.current !== requestGeneration/);
-  assert.match(removeText, /if \(sourceDetailRef\.current\?\.id === source\.id\)/);
+  const openDetail = findFunctionIn(sourceLibrary, "useSourceLibrary", "openSourceById");
+  const detailText = openDetail.getText(sourceLibrary);
+  assert.match(detailText, /const requestGeneration = \+\+detailRequestRef\.current/);
+  assert.match(detailText, /detailRequestRef\.current !== requestGeneration/);
+  assert.match(detailText, /!owns\(owner\)/);
+  assert.match(detailText, /deletedIdsRef\.current\.get/);
+  const loadElementPage = findFunctionIn(sourceLibrary, "useSourceLibrary", "loadSourceElementPage");
+  const loadPageText = loadElementPage.getText(sourceLibrary);
+  assert.match(loadPageText, /const requestGeneration = detailRequestRef\.current/);
+  assert.match(loadPageText, /detailRequestRef\.current !== requestGeneration/);
+  assert.match(removeText, /if \(sourceDetailRef\.current\?\.id === source\.id\) closeSourceDetail\(\)/);
 });
 
 

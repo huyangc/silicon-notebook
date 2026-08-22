@@ -64,6 +64,10 @@ Generated-question retrieval is a deployment-only optional supplement, never a u
 
 ## Full-Stack Parity (Backend ⇄ Frontend)
 
+### Frontend Workspace State Ownership
+
+`frontend/app/use-source-library.ts` is the sole owner of source rows and local retrieval selection, paging/search, source detail elements, reparse/delete busy state, delete tombstones, and parse polling. `page.tsx` must preserve the paired stable notebook + first-source-page opening read and commit that snapshot explicitly; it must not add an effect-driven duplicate source read. Source writes already sent to the backend may finish, but their UI commit is admitted only while the exact user/notebook/workspace owner token is still current. Notebook/user transitions synchronously invalidate old list/detail/poll owners and timers. The hook exposes readonly views, named commands, and narrow refresh effects only—never raw setters, repository/service-locator context, or setters from Ask, Report, KG, collection, or modal owners. Keep current request counts, delete A→B→A convergence, tombstone suppression, proxy detail reads, and parse-poll cadence unchanged, and do not introduce a global state library.
+
 **No half-features.** In this product, every user-facing backend capability MUST ship with a corresponding frontend UI in the same change. It is not allowed to implement only one side.
 
 - If you add a backend endpoint or data type that produces something a user should see or act on (a new knowledge type, list, action, status, field, analytics view, etc.), you MUST also add the frontend surface to view/use it — and vice versa (no frontend control that calls a missing endpoint).

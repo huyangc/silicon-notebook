@@ -33,7 +33,7 @@ const printer = ts.createPrinter({
   removeComments: true,
 });
 
-/** page.tsx 里条件含 reachedExtracted 的 if 分支(去注释后的语义文本)。 */
+/** source-library hook 里条件含 reachedExtracted 的 if 分支。 */
 function reachedExtractedBranches(sourceFile) {
   const branches = [];
   const visit = (node) => {
@@ -51,14 +51,14 @@ function reachedExtractedBranches(sourceFile) {
 }
 
 test("reachedExtracted 分支重拉 currentNotebook,且不被 effect 清理位挡住", async () => {
-  const page = await parseModule("page.tsx");
-  const branches = reachedExtractedBranches(page);
+  const hook = await parseModule("use-source-library.ts");
+  const branches = reachedExtractedBranches(hook);
 
   // ① anti-vacuous:分支必须存在且承担解禁职责。
-  assert.equal(branches.length, 1, "page.tsx 应恰有一个 reachedExtracted 分支");
+  assert.equal(branches.length, 1, "source library hook 应恰有一个 reachedExtracted 分支");
   const branch = branches[0];
-  assert.ok(branch.includes("setCurrentNotebook("), "分支内必须重拉并写回 currentNotebook");
-  assert.ok(branch.includes("reloadCheckup("), "分支内必须刷新体检");
+  assert.ok(branch.includes("refreshNotebook("), "分支内必须重拉并写回 currentNotebook");
+  assert.ok(branch.includes("refreshCheckup("), "分支内必须刷新体检");
 
   // ② 不得用 cancelled 做闸:hasPending 翻 false 会先清理 effect,网络响应后到,
   //    按 cancelled 判就会在「新库首个文档解析完成」时跳过解禁。
@@ -67,27 +67,17 @@ test("reachedExtracted 分支重拉 currentNotebook,且不被 effect 清理位�
     "reachedExtracted 分支不得读 cancelled——effect 清理≠用户切库,按它做闸会跳过 ask_available 刷新",
   );
 
-  // ③ 切库守卫按 live ref 比对 notebook id。
+  // ③ 切库守卫按 hook 的 exact owner 判定。
   assert.ok(
-    branch.includes("currentNotebookIdRef.current"),
-    "分支必须按 currentNotebookIdRef.current 判「用户没切库」",
+    branch.includes("owns(owner)"),
+    "分支必须按 hook owner 判「用户没切库/换用户」",
   );
 });
 
-test("currentNotebookIdRef 在渲染期被赋值(否则守卫③恒假、刷新永远被跳过)", async () => {
-  const page = await parseModule("page.tsx");
-  let assigned = false;
-  const visit = (node) => {
-    if (
-      ts.isBinaryExpression(node)
-      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-      && node.left.getText(page) === "currentNotebookIdRef.current"
-      && node.right.getText(page) === "currentNotebookId"
-    ) {
-      assigned = true;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(page);
-  assert.ok(assigned, "page.tsx 必须有 `currentNotebookIdRef.current = currentNotebookId` 的渲染期赋值");
+test("hook live refs 在渲染期赋值，轮询不因 callback identity 重启", async () => {
+  const hook = await parseModule("use-source-library.ts");
+  const text = hook.getText(hook);
+  assert.match(text, /sourcesRef\.current = sources/);
+  assert.match(text, /effectsRef\.current = effects/);
+  assert.match(text, /\[hasPending, ownerSerial\]/);
 });

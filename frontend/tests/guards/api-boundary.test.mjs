@@ -23,9 +23,9 @@ test("production HTTP calls are owned by api-client", async () => {
 // 直连另一个库(挂载参考库 ≠ 该库的直接成员权限,红线)。把「工作区导入了这两个
 // 代理读取函数」钉成语义断言——改回只导入裸 getSource/getSourceElements 就报红。
 test("source detail is opened through the active-notebook proxy readers", async () => {
-  const page = await parseModule("page.tsx");
-  const imported = importsIn(page)
-    .filter((item) => item.module === "./source-api")
+  const sourceLibrary = await parseModule("use-source-library.ts");
+  const imported = importsIn(sourceLibrary)
+    .filter((item) => item.module === "./source-api.ts")
     .map((item) => item.imported);
   assert.ok(imported.includes("getNotebookSource"), "缺 getNotebookSource");
   assert.ok(imported.includes("getNotebookSourceElementsPage"), "缺 getNotebookSourceElementsPage");

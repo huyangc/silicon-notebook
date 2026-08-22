@@ -141,7 +141,7 @@ test("source detail uses the dedicated draggable window shell", () => {
     // 来源」跳转设置的高亮目标会残留到下一次经普通来源列表打开的、无关的来源上
     // （该状态与目标元素同一个 getElementById 效果消费，参见 highlightedElementId
     // 声明处的效果与 openSourceById 的注释）。
-    onClose: '() => { sourceDetailRequestGenerationRef.current += 1; setSourceDetail(null); setHighlightedElementId(""); setSourceElementsLoading(false); }',
+    onClose: "sourceLibrary.closeSourceDetail",
   });
   assert.equal(
     importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),
@@ -156,7 +156,8 @@ test("source detail uses the dedicated draggable window shell", () => {
 // 两处绑到一起:元素卡必须把 id 设成 sourceElementDomId(element.id),滚动 effect
 // 必须用同一个函数把 highlightedElementId 变换成同一种 id 去 getElementById。
 // 任一处被删除或被"移动"(换成不调用 sourceElementDomId 的等价写法)都会报红。
-test("来源详情的元素卡片 DOM id 与滚动 effect 消费同一个 sourceElementDomId(...)", () => {
+test("来源详情的元素卡片 DOM id 与滚动 effect 消费同一个 sourceElementDomId(...)", async () => {
+  const hook = await parseModule("use-source-library.ts");
   const sourceCards = jsxElements(page, "article").filter(
     (element) => element.bindings?.id === "sourceElementDomId(element.id)",
   );
@@ -166,7 +167,7 @@ test("来源详情的元素卡片 DOM id 与滚动 effect 消费同一个 source
     "元素卡片未绑定 id={sourceElementDomId(element.id)}(被删除,或改了绑定表达式)",
   );
 
-  const scrollEffect = callSitesIn(page).find(
+  const scrollEffect = callSitesIn(hook).find(
     (call) => call.target === "useEffect"
       && call.arguments[1] === "[highlightedElementId, sourceDetail, sourceElements]",
   );
