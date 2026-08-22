@@ -116,6 +116,21 @@ test("a deferred opener publishes only for its frozen owner and latest issue", (
   expect(value!.publish(newer)).toBe(false);
 });
 
+test("a deferred primary opener cannot replace a newer primary slot", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const actor = value!.captureActorOwner();
+  const deferredSearch = value!.issue("search-profile", actor);
+  const password = value!.open("password-change", actor);
+  expect(password).not.toBeNull();
+  expect(value!.view("password-change").open).toBe(true);
+
+  expect(value!.publish(deferredSearch)).toBe(false);
+  expect(value!.view("search-profile").open).toBe(false);
+  expect(value!.view("password-change").open).toBe(true);
+  expect(closed).not.toHaveBeenCalledWith("password-change", "conflict");
+});
+
 test("primary slots conflict while the info layer remains a legal child overlay", () => {
   render(<Harness />);
   enterWorkspace();

@@ -58,6 +58,7 @@ export type RootModalOwner = ActorModalOwner | WorkspaceModalOwner | SourceModal
 export type RootModalLease<S extends RootModalSlot = RootModalSlot> = Readonly<{
   slot: S;
   issue: number;
+  conflictIssue: number | null;
   owner: RootModalOwner;
   returnFocus: HTMLElement | null;
 }>;
@@ -147,6 +148,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
   const sourceGenerationRef = useRef(0);
   const previousSourceIdRef = useRef(sourceId);
   const issueRef = useRef(new Map<RootModalSlot, number>());
+  const primaryIssueRef = useRef(0);
   const activeRef = useRef(new Map<RootModalSlot, ActiveLease>());
   const orderRef = useRef(0);
   const pendingInvalidationsRef = useRef<Array<[RootModalSlot, RootModalCloseReason]>>([]);
@@ -372,10 +374,13 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     if (!owner || !policy.ownerKinds.includes(owner.kind) || !ownerIsCurrent(owner)) return null;
     const nextIssue = (issueRef.current.get(slot) ?? 0) + 1;
     issueRef.current.set(slot, nextIssue);
+    const conflictIssue = policy.conflictGroup === "primary"
+      ? ++primaryIssueRef.current
+      : null;
     const returnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    return Object.freeze({ slot, issue: nextIssue, owner, returnFocus });
+    return Object.freeze({ slot, issue: nextIssue, conflictIssue, owner, returnFocus });
   }
 
   // Async openers need an authority check before the presentation lease is
@@ -387,6 +392,10 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     return Boolean(
       lease
       && issueRef.current.get(lease.slot) === lease.issue
+      && (
+        lease.conflictIssue === null
+        || primaryIssueRef.current === lease.conflictIssue
+      )
       && ownerIsCurrent(lease.owner),
     );
   }
@@ -429,6 +438,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
       ? Object.freeze({
         slot,
         issue: active.issue,
+        conflictIssue: active.conflictIssue,
         owner: active.owner,
         returnFocus: active.returnFocus,
       })
