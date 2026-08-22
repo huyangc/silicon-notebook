@@ -242,6 +242,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - **PR-F3**：report workspace hook；
   - 状态：已完成并由 PR #558 交付；报告列表/详情、按需首读、互斥轮询、intent/outline mutation、分享/导出与删除 tombstone 已迁入 exact actor+notebook+view owner，零隐藏页 I/O、冻结 scope、live 权限复核、迟到下载隔离与请求数/轮询节奏保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F4**：KG workspace hook；
+  - 状态：已完成并由 PR #559 交付；Knowledge/Schema/统一图/合并审阅与 KG build/relink/rebuild 状态已迁入 exact actor+notebook+generation owner，惰性读取、请求数、轮询节奏、权限复核与 A→B→A 收敛均保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F5**：collection state + modal manager；若 diff 无法在一次 review 中完整验证，自动拆成 F5/F6，不为保持 PR 数量强行合并。
 
 每个 hook 都必须显式处理 notebook/user identity、cleanup/cancellation、权限重验、删除 tombstone、轮询终止；不引入新全局状态库，不直接读取其他 hook 的内部 setter。

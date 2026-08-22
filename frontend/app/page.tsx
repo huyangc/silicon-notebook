@@ -115,6 +115,8 @@ import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from
 import { useSourceLibrary } from "./use-source-library.ts";
 import { useAskSession } from "./use-ask-session.ts";
 import { useReportWorkspace } from "./use-report-workspace.ts";
+import { useKgWorkspace } from "./use-kg-workspace.ts";
+import { KG_RANGE_DEFAULT, KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -140,28 +142,8 @@ import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from 
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks, searchNotebooksBounded } from "./ask-api";
-import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
 import { buildPublicReportLink } from "./public-report";
-import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
-import { prepareKgFocus } from "./kg-focus";
-import {
-  REBUILD_POLL_MAX_ATTEMPTS,
-  REBUILD_POLL_TIMED_OUT,
-  busyForNotebook,
-  claimNotebookSlot,
-  rebuildPollOutcome,
-  releaseNotebookClaim,
-  type RebuildPollOutcome,
-} from "../features/kg-maintenance/kg-rebuild-status";
-import {
-  RELINK_POLL_MAX_ATTEMPTS,
-  RELINK_POLL_TIMED_OUT,
-  claimRelinkSlot,
-  relinkBusyFor,
-  releaseRelinkClaim,
-  relinkPollOutcome,
-  type RelinkPollOutcome,
-} from "../features/kg-maintenance/kg-relink-status";
+import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -227,14 +209,10 @@ import { sourceElementDomId } from "./source-detail-state";
 import { SchemaManager, type SchemaView } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
-import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
+import { shouldResumeScaleIndex } from "./in-progress-resume";
 import {
   canContinueKgBuild,
-  isTrackedKgTerminal,
-  reconcileTrackedKgPoll,
-  ownsKgBuildRequest,
   kgBuildPresentation,
-  kgBuildTerminalToast,
 } from "./kg-build-status";
 import { sourceImageAssetUrl } from "./source-image";
 import { crossLibrarySourceNotebookId } from "./source-scope";
@@ -252,12 +230,10 @@ import {
 } from "./workspace-transitions";
 import {
   CHAT_MODES,
-  EMPTY_KNOWLEDGE,
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
   showPaperMetaBackfill,
   type ChatMode,
-  type ConceptDetailResp,
   type ConversationSummary,
   type DuplicateGroup,
   type Evidence,
@@ -265,71 +241,27 @@ import {
   type FgLink,
   type FgNode,
   type Health,
-  type KgNeighborsResp,
   type KgBuildJobStatus,
   type KgObject,
   type KgOccurrence,
   type KgProcedureStep,
-  type KgSearchHit,
-  type KgSearchResp,
-  type KnowledgeGraph,
   type KnowledgeItem,
   type KnowledgeKind,
-  type KnowledgeRecord,
   type KnowledgeTypeCount,
-  type MergeReviewJob,
-  type MergeReviewSummary,
   type MemoryRecord,
   type NodeContext,
   type CheckupResponse,
   type NotebookAnalytics,
   type NotebookContentOverview,
   type NotebookSummary,
-  type ObjectSchema,
-  type PaginatedKnowledge,
   type PendingMerge,
   type SearchHit,
   type SourceElement,
   type SourceSummary,
   type UnifiedConceptNode,
-  type UnifiedEdge,
-  type UnifiedGraphResp,
-  type UnifiedKgStatus,
 } from "./workspace-model";
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
-// codex R13:「补上关联」/「重新合并」两条轮询按 job_id 配对(codex R11)防住了陈旧终态
-// 被误当真——但按「不匹配就无限拒收」实现时,有两种场景会让这次追踪**永远**等不到匹配
-// 的终态:①后端重启(expectedMaintenanceJobRef 只在浏览器内存,重启后服务端记着的
-// job_id 已经不存在,status 查询只会回显 idle 或别的任务);②共享的按笔记本单飞维护槽
-// 被另一次提交/领养认领(服务端此后只如实回显最新占槽的那个 job_id,这次追踪的 job_id
-// 再也不会出现)。两种场景下轮询都会一路拒收到约 30 分钟的尝试上限才靠超时兜底——按钮
-// 锁死、图谱不刷。
-//
-// 修法:job_id 不匹配的终态不再无限拒收,而是按**连续观测次数**收敛。轮询 tick 里维护
-// 一个局部 mismatchStreak:同一个 tick 只要观测到「终态但 job_id 不匹配」就
-// mismatchStreak += 1;连续达到这个阈值就当作已经可以确证专属这次追踪的匹配终态不会
-// 再出现,直接按终态收工(settle+刷新+清 expectation——这次追踪已不可观测,刷新是安全
-// 且必要的:图可能已经变了)。观测到 running,或观测到匹配的终态,都会把计数清零——
-// 只有**连续**不匹配才累计,中间夹一次 running/匹配就从头数。
-//
-// 为什么连续两次就能确证,而不是像 R11 之前那样第一次不匹配就当真(那正是 R11 要修的
-// 竞态本身)？expectation 只在 POST **返回之后**才写进 expectedMaintenanceJobRef——写入
-// 那一刻,服务端早已经在提交任务槽之后才回的包,所以 expectation 一旦存在,服务端此刻
-// 的权威状态必然就是这次追踪的任务。此后唯一还能读到「旧 job_id / 旧 idle」的途径,只
-// 剩一种:一个更早发出、此刻才姗姗来迟的响应。而轮询在同一个 tick 序列里**串行**执行
-// ——下一次真正发出的请求,一定发生在上一次响应已经被 await 解析**之后**(每个 tick
-// 开头都先检查 settled,不会有两个 tick 的请求同时在飞、乱序回来)。换句话说:连续观测
-// 到的第二次不匹配,不可能仍是"POST 返回前"在飞的旧响应——它必然是 POST 已经返回之后、
-// 服务端此刻状态确实不是这次追踪的任务的真实回显。两次即可确证,把等待收敛到 ≤2 个
-// tick(约 6 秒),不必再靠约 30 分钟的尝试上限兜底。
-//
-// 与既有两套机制的分工(缺一不可,谁也不能顶替谁):submittingMaintenanceRef 防的是
-// POST **还没返回**那段窗口(此时还没有新 job_id 可比,提交期无条件继续轮询,不进入
-// mismatchStreak 计数);generation(仅 rebuild 侧)防的是补发重试跨代际的乱序响应。
-// mismatchStreak 防的是"POST 已经返回、expectation 已经写好,但这个 job_id 从此再也
-// 不会出现"这种死等——三层各管一段窗口,合起来才是完整的时序覆盖。
-const MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK = 2;
 
 /**
  * 标签页重新可见时,两次「访问权复核」之间至少隔这么久。
@@ -618,15 +550,6 @@ function formatRelativeTime(iso: string): string {
   if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
   return new Date(then).toLocaleDateString();
 }
-// limit>0 只取连接度最高的前 N 个节点(核心子图，避免大图卡顿)；limit=0 取全量。
-// 图谱范围档位：核心 80 / 160 / 320 / 全部(0)。打开图谱默认从核心 80 起。
-const KG_RANGE_DEFAULT = 80;
-const KG_RANGE_STEPS: Array<{ value: number; label: string }> = [
-  { value: 80, label: "核心 80" },
-  { value: 160, label: "核心 160" },
-  { value: 320, label: "核心 320" },
-  { value: 0, label: "全部" },
-];
 // 服务端搜索：FTS5 + ANN 混合，返回命中列表（不再客户端拉全量图）。命中数由服务端 k 参数控制。
 // 逐跳展开：返回指定节点的邻居节点+边（bounded）。
 
@@ -803,6 +726,8 @@ export default function Home() {
   const [readySnapshot, setReadySnapshot] = useState<ReadySnapshot | null>(null);
   const [readyRetry, setReadyRetry] = useState(0);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const workspaceActorIdRef = useRef<string | null>(currentUser?.id ?? null);
+  workspaceActorIdRef.current = currentUser?.id ?? null;
   // 自动/高级界面模式的唯一判据——所有隐藏/显示分支与请求侧 scope 强制都读这
   // 一个值(ui-mode.ts)，不散落第二份布尔。未登录/字段缺失时归一成 "auto"。
   const uiMode: UiMode = normalizeUiMode(currentUser?.ui_mode);
@@ -992,8 +917,7 @@ export default function Home() {
       reportError,
       setToast: (message) => setToast(message),
       invalidateKnowledge: () => {
-        setKnowledge(EMPTY_KNOWLEDGE);
-        setDuplicates(null);
+        kgWorkspace.invalidateKnowledge();
       },
       refreshCollection: async (guard) => loadNotebookCollection({ guard }),
       refreshNotebook: async (notebookId, guard) => {
@@ -1074,13 +998,6 @@ export default function Home() {
     { id: string; title: string; throughAnswerId: string } | null
   >(null);
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
-  const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
-  const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
-  const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
-  const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
-  const [knowledgeTotal, setKnowledgeTotal] = useState<Record<string, number>>({});
-  const [knowledgePage, setKnowledgePage] = useState<Record<string, number>>({});
-  const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   // Promotion queue modal (Track F governance)
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
   const [promoOpen, setPromoOpen] = useState(false);
@@ -1113,34 +1030,76 @@ export default function Home() {
   const [contentOverviewLoading, setContentOverviewLoading] = useState(false);
   const [contentOverviewError, setContentOverviewError] = useState("");
   const [memoryNavigationTarget, setMemoryNavigationTarget] = useState<MemoryNavigationTarget>({});
-  const [schemaModalOpen, setSchemaModalOpen] = useState(false);
-  const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
-  const [schemaBusy, setSchemaBusy] = useState(false);
-  const [schemaView, setSchemaView] = useState<SchemaView>("notebook");
-  const schemaLoadEpochRef = useRef(0);
-  // 切库时关闭旧库的类型面板，并使所有在飞响应失效，避免把 A 库的有效类型盖到 B 库。
+  const kgWorkspaceCapabilities = workspaceCapabilities(
+    currentNotebook?.access,
+    currentUser?.role ?? "",
+    currentNotebook?.can_manage_content ?? false,
+  );
+  const kgWorkspace = useKgWorkspace({
+    actorId: currentUser?.id ?? null,
+    notebookId: currentNotebookId,
+    policy: {
+      canGovernKnowledge: kgWorkspaceCapabilities.canGovernKnowledge,
+      canManageNotebookSchemas: kgWorkspaceCapabilities.canManageNotebookSchemas,
+      canManageGlobalSchemas: kgWorkspaceCapabilities.canManageGlobalSchemas,
+      canWriteKg: kgWorkspaceCapabilities.canWriteNotebook,
+      externalBuildPolling: analytics !== null,
+    },
+    effects: {
+      notify: setToast,
+      reportError,
+      refreshCollection: async (guard) => loadNotebookCollection({ guard }),
+      refreshNotebook: async (targetNotebookId, guard) => {
+        const refreshed = await getNotebook(targetNotebookId);
+        if (guard() && activeNotebookIdRef.current === targetNotebookId) {
+          setCurrentNotebook((current) => current?.id === targetNotebookId ? refreshed : current);
+        }
+        return refreshed;
+      },
+      focusGraphNode: (nodeId) => focusKgGraphNode(nodeId),
+    },
+  });
+  const knowledgeKind = kgWorkspace.knowledge.kind;
+  const knowledgeItems = kgWorkspace.knowledge.items;
+  const knowledgeTypes = kgWorkspace.knowledge.types;
+  const knowledgeStatusFilter = kgWorkspace.knowledge.statusFilter;
+  const knowledgeTotalForKind = kgWorkspace.knowledge.total;
+  const knowledgePageForKind = kgWorkspace.knowledge.page;
+  const duplicates = kgWorkspace.knowledge.duplicates;
+  const schemaModalOpen = kgWorkspace.schema.open;
+  const schemas = kgWorkspace.schema.schemas;
+  const schemaBusy = kgWorkspace.schema.busy;
+  const schemaView = kgWorkspace.schema.view;
+  const kgViewOpen = kgWorkspace.graph.open;
+  const kgAnalysisOpen = kgWorkspace.graph.analysisOpen;
+  const uGraph = kgWorkspace.graph.graph;
+  const uGraphMerged = kgWorkspace.graph.merged;
+  const vizBuilding = kgWorkspace.graph.vizBuilding;
+  const kgSearch = kgWorkspace.graph.search;
+  const kgSearchHits = kgWorkspace.graph.searchHits;
+  const kgSearchBusy = kgWorkspace.graph.searchBusy;
+  const kgLimit = kgWorkspace.graph.rangeLimit;
+  const kgRangeBusy = kgWorkspace.graph.rangeBusy;
+  const kgSelectedTypes = kgWorkspace.graph.selectedTypes;
+  const pendingMerges = kgWorkspace.graph.pendingMerges;
+  const unifiedKgStatus = kgWorkspace.graph.status;
+  const selectedKgNodeId = kgWorkspace.graph.selectedNodeId;
+  const conceptDetail = kgWorkspace.graph.conceptDetail;
+  const nodeCtx = kgWorkspace.graph.nodeContext;
+  const kgReviewBusy = kgWorkspace.graph.reviewBusy;
+  const decidingMerge = kgWorkspace.graph.decidingMerge;
+  const reviewAllJob = kgWorkspace.graph.reviewAllJob;
+  const reviewAllStarting = kgWorkspace.graph.reviewAllStarting;
+  const reviewAllRunning = kgWorkspace.graph.reviewAllRunning;
+  const buildingKg = kgWorkspace.graph.buildingKg;
+  const trackedKgJobId = kgWorkspace.graph.trackedKgJobId;
+  const kgRefreshBusy = kgWorkspace.graph.rebuilding;
+  const relinkingKg = kgWorkspace.graph.relinking;
+  // 会话分享弹窗也随切库关闭：它渲染时用 currentNotebookId 作 notebookId，而
+  // sharingSession 是旧库的会话。KG Schema 自身的 owner/reset 由 useKgWorkspace 持有。
   useEffect(() => {
-    schemaLoadEpochRef.current += 1;
-    setSchemaModalOpen(false);
-    setSchemas(null);
-    setSchemaBusy(false);
-    setSchemaView("notebook");
-    // 会话分享弹窗也随切库关闭：它渲染时用 currentNotebookId 作 notebookId,而
-    // sharingSession 是旧库的会话——不关的话弹窗会用「新库 id + 旧会话 id」重载,
-    // 打到 share 端点必然 404(codex T5 评审 P2-4)。会话属于它所在的库,换库后
-    // 展示它的分享弹窗本就无意义。
     setSharingSession(null);
   }, [currentNotebookId]);
-  const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
-  const [graphOpen, setGraphOpen] = useState(false);
-  const [kgViewOpen, setKgViewOpen] = useState(false);
-  // 「图谱分析」只读报告(kg-analysis-view.tsx)。渲染在知识图谱视图内部,但**卸载不等于
-  // 复位** —— 这个 state 挂在父层,子组件被卸载后它仍是 true。所以父视图的开与关都必须
-  // 显式把它推回 false,否则下次打开知识图谱会立刻自弹一次分析窗,而且 notebookId 取的是
-  // 当时的 currentNotebookId —— 中间换过库的话,弹出来的是**另一个库**的报告。
-  // 复位点恰好两处:openKgView(打开/重开)与 closeKgView(关闭),由
-  // kg-analysis-view-toggle.test.mjs 钉住。
-  const [kgAnalysisOpen, setKgAnalysisOpen] = useState(false);
   // 「AI 对这个库的理解」弹窗(P1-T7)。入口在知识图谱视图头部,弹窗本身与「图谱
   // Schema」一样渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
   const [understandingOpen, setUnderstandingOpen] = useState(false);
@@ -1150,75 +1109,7 @@ export default function Home() {
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
-  const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
-  // 大库首次可视化索引在后台构建时，GET /unified-kg 返回占位 viz_building:true；
-  // 这里驱动图区「构建中」提示 + 轮询，直到索引建好后自动换真图。
-  const [vizBuilding, setVizBuilding] = useState(false);
-  // 服务端搜索结果 — 搜索时用这个叠加层，不再懒加载全量图
-  const [kgSearchHits, setKgSearchHits] = useState<KgSearchHit[]>([]);
-  const [kgSearchBusy, setKgSearchBusy] = useState(false);
-  // 用户点击展开的邻居节点/边（叠加到 uGraph 上）
-  const [kgExpandedNodes, setKgExpandedNodes] = useState<UnifiedConceptNode[]>([]);
-  const [kgExpandedEdges, setKgExpandedEdges] = useState<UnifiedEdge[]>([]);
-  const [kgLimit, setKgLimit] = useState(KG_RANGE_DEFAULT);
-  // 「补上关联」的轮询要按**当前**范围重拉,但范围换了不该重启轮询(那会重置尝试计数、
-  // 多跑一次立刻的请求),所以它经 ref 读而不进 effect 依赖。
-  const kgLimitRef = useRef(kgLimit);
-  kgLimitRef.current = kgLimit;
-  const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
-  const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
-  // 「重新合并」的忙碌位与「补上关联」同形:后台任务、按笔记本单飞,所以存的是**哪些库
-  // 在重新合并**的一个集合(理由见 notebook-busy-set.ts)。派生成布尔只是为了让既有的
-  // kgRefreshBusy 消费点(两颗按钮、状态标签、看板轮询依赖)一个字都不用改——判据仍是
-  // 「当前这个库在不在集合里」。
-  const [rebuildingNotebookIds, setRebuildingNotebookIds] = useState<Set<string>>(new Set());
-  const [kgRangeBusy, setKgRangeBusy] = useState(false);
-  const [buildingKg, setBuildingKg] = useState(false);
-  const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const [backfillingMeta, setBackfillingMeta] = useState(false);
-  // 「补上关联」的忙碌位存的是**哪些笔记本**在补,是一个集合而不是一个裸布尔、也不是只能
-  // 记一个库的裸字符串。任务是按笔记本单飞的后台任务,用户完全可以点完 A 就切到 B 再点一
-  // 次——单值形态会让后一次认领覆盖前一次:A 的追踪被冲掉,回 A 不再显示忙碌、完成也不再
-  // 刷新,再点一次还会被服务端 409 误导成"没在跑"。集合让两次认领都活着,互不干扰。
-  const [relinkingNotebookIds, setRelinkingNotebookIds] = useState<Set<string>>(new Set());
-  // 按钮消费的是「**当前这个库**在不在补」——切到别的库，那边的按钮照常可点。
-  const relinkingKg = relinkBusyFor(relinkingNotebookIds, currentNotebookId);
-  const kgRefreshBusy = busyForNotebook(rebuildingNotebookIds, currentNotebookId);
-  // decideMerge 落一条确认合并决定时若撞上 409(共槽已有整理任务在跑)：决定本身已经落库，
-  // 但没能触发一次能看见它的重新合并。这里记一个「待补发」标记——与忙碌位同数据结构
-  // 风格(按笔记本的一个集合,只加/只清自己那一格,复用同一套 claimNotebookSlot /
-  // releaseNotebookClaim)，由下面「重新合并」轮询的终态收尾消费：占槽任务结束后自动
-  // 补发一次 rebuildUnifiedKg，让图谱真正跟上这条决定。
-  const [pendingRebuildNotebookIds, setPendingRebuildNotebookIds] = useState<Set<string>>(new Set());
-  // 轮询 effect 的闭包在挂载时就固定了；标记可能在 effect 已经在跑之后才被 decideMerge
-  // 置上，消费点必须经 ref 读最新值,不能用效果创建时捕获的那份。
-  const pendingRebuildNotebookIdsRef = useRef(pendingRebuildNotebookIds);
-  pendingRebuildNotebookIdsRef.current = pendingRebuildNotebookIds;
-  // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端**旧的** idle 并当终态
-  // 收工——随后 POST 才成功,没有人再轮询,任务完成不会刷新。这个集合记「正在提交(POST
-  // 还没落地)的任务」,两条轮询 tick 撞到 idle 终态时如果自己这次追踪的键还在这个集合
-  // 里,那就是提交还在飞、服务端还没看到新任务,不能当真终态收工。模块级 Set,直接
-  // mutate——不是 state,不触发渲染(只在轮询 tick 的同步分支里读一次性瞬时状态,不需要
-  // 驱动 UI)。
-  // codex R12:键必须按 kind 分开(`${nb}:relink` / `${nb}:rebuild`,与
-  // expectedMaintenanceJobRef 同风格)——同一个库的 relink 与 rebuild 提交窗口可以
-  // 重叠(relink POST 还没返回时,用户确认合并触发的是 rebuild POST):旧代码只用裸 nb
-  // 当键,先落地的那次 POST 在自己的 finally 里删掉这唯一的条目,另一次仍在飞的提交就此
-  // 失去保护,轮询可能把服务端的陈旧 idle 当真终态提前收工。
-  const submittingMaintenanceRef = useRef<Set<string>>(new Set());
-  // codex R11:submittingMaintenanceRef 只压制了提交期的陈旧 idle——同库再次点击时,
-  // 服务端共享的维护槽在这次 POST 落地**前**仍会如实回显**上一个任务**的
-  // succeeded/failed(不止 idle);POST 落地、finally 摘掉提交标记之后,也可能有一次
-  // 陈旧终态(槽被另一次提交/领养挪走)在真正对应这次追踪的终态之前先被读到。唯一站得
-  // 住的判据是按 job_id 配对:POST 成功后把响应里的 job_id 记在这里(键
-  // `${nb}:rebuild` / `${nb}:relink`),轮询终态只在 status.job_id 与这里记的一致时
-  // 才接受(succeeded/failed/idle 一视同仁)——不一致就是陈旧终态,继续轮询。没有走过
-  // 本页 POST 的追踪(409 领养、打开笔记本时从服务端恢复的忙碌位)从不写这张表,天然
-  // 保留"接受任意终态"的历史行为。settle/释放(含尝试上限耗尽)时清掉对应键。与
-  // submittingMaintenanceRef 分工不同、缺一不可:submitting 防的是 POST **还没**返回
-  // 那段窗口(此时还没有新 job_id 可比),expectation 防的是 POST **已经**返回之后的
-  // 错配。模块级 Map,直接 mutate——不是 state,不触发渲染。
-  const expectedMaintenanceJobRef = useRef<Map<string, string>>(new Map());
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -1293,94 +1184,13 @@ export default function Home() {
   }
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
-    const owner = {
-      notebookId: nb,
-      workspaceEpoch: workspaceEpochRef.current,
-      requestEpoch: ++kgBuildRequestEpochRef.current,
-    };
-    const stillOwned = () => ownsKgBuildRequest(
-      owner,
-      activeNotebookIdRef.current,
-      workspaceEpochRef.current,
-      kgBuildRequestEpochRef.current,
-    );
-    setBuildingKg(true);
-    buildKg(nb)
-      .then((started) => {
-        if (!stillOwned()) return;
-        setTrackedKgJobId(started.job_id);
-        setToast("已开始整理知识图谱；完成后会自动更新");
-        getNotebook(nb)
-          .then((refreshed) => {
-            if (stillOwned()) {
-              setCurrentNotebook(refreshed);
-              if (
-                isTrackedKgTerminal(started.job_id, refreshed.kg_build)
-              ) {
-                setBuildingKg(false);
-                setTrackedKgJobId(null);
-                const message = kgBuildTerminalToast(refreshed.kg_build);
-                if (message) setToast(message);
-              } else {
-                setBuildingKg(shouldResumeKgBuild(refreshed));
-              }
-            }
-          })
-          .catch(() => {});
-      })
-      .catch((e) => {
-        if (!stillOwned()) return;
-        reportError(e);
-        setBuildingKg(false);
-      });
+    if (activeNotebookIdRef.current === nb) void kgWorkspace.startKgBuild(false);
   };
   // Trigger full re-extract: clears existing KG and rebuilds from all sources.
   // 破坏性(清空重抽)——统一确认(与概念合并/检索索引三系统一致的确认机制+文案模板)。
   const startKgRebuild = (nb: string) => {
     confirmIndexAction("全部重新分析？\n\n将清空现有知识图谱并重新分析全部来源。后台进行，完成后自动更新。", () => {
-      if (activeNotebookIdRef.current !== nb) return;
-      const owner = {
-        notebookId: nb,
-        workspaceEpoch: workspaceEpochRef.current,
-        requestEpoch: ++kgBuildRequestEpochRef.current,
-      };
-      const stillOwned = () => ownsKgBuildRequest(
-        owner,
-        activeNotebookIdRef.current,
-        workspaceEpochRef.current,
-        kgBuildRequestEpochRef.current,
-      );
-      setBuildingKg(true);
-      rebuildKg(nb)
-        .then((started) => {
-          if (!stillOwned()) return;
-          setTrackedKgJobId(started.job_id);
-          setToast("已开始全部重新分析；完成后会自动更新");
-          getNotebook(nb)
-            .then((refreshed) => {
-              if (stillOwned()) {
-                setCurrentNotebook(refreshed);
-                if (
-                  isTrackedKgTerminal(started.job_id, refreshed.kg_build)
-                ) {
-                  setBuildingKg(false);
-                  setTrackedKgJobId(null);
-                  const message = kgBuildTerminalToast(
-                    refreshed.kg_build,
-                  );
-                  if (message) setToast(message);
-                } else {
-                  setBuildingKg(shouldResumeKgBuild(refreshed));
-                }
-              }
-            })
-            .catch(() => {});
-        })
-        .catch((e) => {
-          if (!stillOwned()) return;
-          reportError(e);
-          setBuildingKg(false);
-        });
+      if (activeNotebookIdRef.current === nb) void kgWorkspace.startKgBuild(true);
     });
   };
   // 侧栏收起状态持久化(localStorage;隐私模式等读写失败静默降级)
@@ -1427,39 +1237,6 @@ export default function Home() {
   // Relink isolated nodes: additive/background, no confirm needed.
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView + 它下面那条 relink/status 轮询，
   // 终态时按当前范围重拉）。
-  // While a build runs, poll the notebook until kg_ready flips — the build can
-  // take minutes, so the button reflects real progress instead of a fixed guess.
-  // 面板(analytics/「索引与构建」看板)打开时让位给下方聚合轮询 effect 独占轮询——否则
-  // 同一构建期间两条 effect 各自 6s 打一次 /notebooks 与 /index-status,服务端开销加倍。
-  // 完工检测(flag 复位 + toast)相应搬进聚合 effect;面板关闭后本 effect 照常接管到底。
-  useEffect(() => {
-    if (!buildingKg || !currentNotebookId || analytics) return;
-    const nb = currentNotebookId;
-    let cancelled = false;
-    const poll = window.setInterval(async () => {
-      try {
-        const refreshed = await getNotebook(nb);
-        if (cancelled) return;
-        setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
-        const tracked = reconcileTrackedKgPoll(
-          trackedKgJobId,
-          refreshed.kg_build,
-        );
-        if (tracked.terminal) {
-          setBuildingKg(false);
-          setTrackedKgJobId(null);
-          const message = kgBuildTerminalToast(refreshed.kg_build);
-          if (message) setToast(message);
-        } else if (tracked.trackedJobId !== trackedKgJobId) {
-          setTrackedKgJobId(tracked.trackedJobId);
-        } else if (!refreshed.kg_build && kgBuildFinished(refreshed)) {
-          setBuildingKg(false);
-          setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
-        }
-      } catch { /* transient error; keep polling */ }
-    }, 6000);
-    return () => { cancelled = true; window.clearInterval(poll); };
-  }, [buildingKg, currentNotebookId, analytics, trackedKgJobId]);
   // Backfill completion polling: same shape as the buildingKg poll above, for the
   // "补全论文信息"后台任务(paper-meta backfill)。同样在「索引与构建」面板打开时让位
   // (该面板本就不覆盖 paper_meta,不存在重复轮询的问题——只是保持与既有三条 legacy
@@ -1511,41 +1288,6 @@ export default function Home() {
       setScaleIndexStatus(s);
       if (shouldResumeScaleIndex(s)) setBuildingScaleIndex(true);  // 刷新后接回构建中
     }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [currentNotebookId]);
-  // codex R4 P2(A):「重新合并」「补上关联」都是共槽后台任务,忙碌位是纯前端 state——
-  // 页面刷新、或另一个会话/标签页发起的任务,这里的两个 Set 一开始什么都不知道。不认领
-  // 就不会挂上下面两条按笔记本忙碌位建键的轮询 effect,长任务因此显示空闲、完成不刷新、
-  // 按钮可点却只会撞服务端 409。切换/打开笔记本时各查一次服务端真相,running 就认领
-  // 对应忙碌位,交给下面那两条已经按 [rebuildingNotebookIds/relinkingNotebookIds,
-  // currentNotebookId] 建键的轮询 effect 自然接管(忙碌位一变它们就会重新挂载)。
-  // idle/终态**不**释放本地位——那可能是本地正处在 pendingRebuildNotebookIds 之类的
-  // 中间态,这条 effect 无权替它收尾,只做「认领」这一件事。
-  useEffect(() => {
-    const nb = currentNotebookId;
-    if (!nb) return;
-    let cancelled = false;
-    Promise.all([
-      fetchUnifiedKgRebuildStatus(nb).catch(() => null),
-      fetchRelinkStatus(nb).catch(() => null),
-    ]).then(([rebuild, relink]) => {
-      if (cancelled) return;
-      const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
-      const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
-      if (rebuildRunning) {
-        setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
-      }
-      if (relinkRunning) {
-        setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
-      }
-      // codex R17(推翻 R10 的重载恢复推断):不能从「dirty && 有维护任务在跑」推断
-      // 「有待补发的合并决定」——relink 自己每写一条边就推进 kg_mutation_seq,而它是
-      // _cluster_input_version 的一部分,所以普通补连期间重载页面,dirty 恒为真;按它
-      // 认领待补发会在 relink 收工后自动发起一次**用户没有请求过的**重新合并,且因为
-      // 输入版本确实变了,那不是毫秒级空转而是可能数小时的全量重聚(还可能带 LLM 调用)。
-      // 已记录而未兑现的合并决定,重载后的兜底是既有「待重建」标签+手动点击(契约文档
-      // 已登记该边界);跨重载的自动补发需要服务端持久的决定级信号,列为后续独立立项。
-    });
     return () => { cancelled = true; };
   }, [currentNotebookId]);
   // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
@@ -1605,24 +1347,7 @@ export default function Home() {
               setCurrentNotebook((cur) => (
                 cur && cur.id === nb ? refreshed : cur
               ));
-              const tracked = reconcileTrackedKgPoll(
-                trackedKgJobId,
-                refreshed.kg_build,
-              );
-              if (tracked.terminal) {
-                setBuildingKg(false);
-                setTrackedKgJobId(null);
-                const message = kgBuildTerminalToast(refreshed.kg_build);
-                if (message) setToast(message);
-              } else if (tracked.trackedJobId !== trackedKgJobId) {
-                setTrackedKgJobId(tracked.trackedJobId);
-              } else if (
-                !refreshed.kg_build
-                && kgBuildFinished(refreshed)
-              ) {
-                setBuildingKg(false);
-                setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
-              }
+              kgWorkspace.observeNotebook(refreshed);
             })
             .catch(() => {});
         }
@@ -1722,29 +1447,6 @@ export default function Home() {
     }, 8000);
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [analytics, currentNotebookId, checkupRepairPollUntil]);
-  // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
-  // building for a large notebook, poll every 6s until it flips false, then swap in the
-  // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
-  // so closing the view (or switching notebooks) cancels the poll.
-  useEffect(() => {
-    if (!vizBuilding || !kgViewOpen || !currentNotebookId) return;
-    const nb = currentNotebookId;
-    let cancelled = false;
-    const poll = window.setInterval(async () => {
-      try {
-        const g = await fetchUnifiedGraph(nb, kgLimit);
-        if (cancelled) return;
-        if (g.viz_building) return;
-        setUGraph(g);
-        setVizBuilding(false);
-        fetchUnifiedKgStatus(nb).then((status) => { if (!cancelled) setUnifiedKgStatus(status); }).catch(() => {});
-      } catch { /* transient error; keep polling */ }
-    }, 6000);
-    const cap = window.setTimeout(() => {
-      if (!cancelled) { setVizBuilding(false); setToast("图谱索引仍在后台构建，请稍后重新打开查看"); }
-    }, 20 * 60 * 1000);
-    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
-  }, [vizBuilding, kgViewOpen, currentNotebookId, kgLimit]);
   // Kick off a scale-index rebuild; the effect above then polls until it's ready.
   const startScaleIndexRebuild = async (nb: string, when: "now" | "idle" = "now", mode: "auto" | "fold" | "full" = "auto") => {
     setBuildingScaleIndex(true);
@@ -1872,73 +1574,6 @@ export default function Home() {
       return true;
     } catch (e) { reportError(e); return false; }
   };
-  const [kgReviewBusy, setKgReviewBusy] = useState(false);
-  // 正在处理的单条待确认合并(候选 id + 这次点的是合并还是拒绝)。确认分支会顺带跑一次
-  // rebuildUnifiedKg + 重拉整张图；拒绝分支虽不重建，也仍要防重复提交同一决定。处理期
-  // 整列一起禁用(不只是被点的那行)。
-  const [decidingMerge, setDecidingMerge] = useState<{ id: string; confirm: boolean } | null>(null);
-  const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
-  // 「全部自动判重」的 POST 在飞(还没拿到 job)。见 reviewAllMerges 里的注释。
-  const [reviewAllStarting, setReviewAllStarting] = useState(false);
-  const [reviewAllRunning, setReviewAllRunning] = useState(false);
-  // 切库/刷新：先查后端预审 job 真相，仍 running 就把进度接回（后端 job 不因前端刷新而停），
-  // 否则才清空。避免「后台在跑、前端却显示未运行」。
-  useEffect(() => {
-    const nb = currentNotebookId;
-    if (!nb) { setReviewAllJob(null); setReviewAllRunning(false); return; }
-    let cancelled = false;
-    fetchMergeReviewJob(nb).then((job) => {
-      if (cancelled) return;
-      if (shouldResumeReviewAll(job)) { setReviewAllJob(job); setReviewAllRunning(true); }
-      else { setReviewAllJob(null); setReviewAllRunning(false); }
-    }).catch(() => { if (!cancelled) { setReviewAllJob(null); setReviewAllRunning(false); } });
-    return () => { cancelled = true; };
-  }, [currentNotebookId]);
-  // Mirror the buildingKg poll: while an "全部预审" job runs, poll status every 6s until it
-  // leaves "running", with a 20min safety cap. Keying on currentNotebookId (captured as `nb`)
-  // means switching notebooks or unmounting cancels this poll instead of clobbering the
-  // now-selected notebook's pendingMerges/unifiedKgStatus with stale data.
-  useEffect(() => {
-    if (!reviewAllRunning || !currentNotebookId) return;
-    const nb = currentNotebookId;
-    let cancelled = false;
-    const poll = window.setInterval(async () => {
-      try {
-        const job = await fetchMergeReviewJob(nb);
-        if (cancelled) return;
-        setReviewAllJob(job);
-        if (job.status !== "running") {
-          window.clearInterval(poll);
-          setReviewAllRunning(false);
-          const [pend, status] = await Promise.all([
-            fetchPendingMerges(nb),
-            fetchUnifiedKgStatus(nb),
-          ]);
-          if (cancelled) return;
-          setPendingMerges(pend);
-          setUnifiedKgStatus(status);
-          setToast(job.status === "failed"
-            // job.error 是后端的 `f"{type(exc).__name__}: {exc}"`
-            // (services/knowledge_governance.py),不直出;原文进 console。
-            ? `全部自动判重中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`
-            : `全部自动判重完成：已处理 ${job.done} 项`);        }
-      } catch { /* transient error; keep polling */ }
-    }, 6000);
-    const cap = window.setTimeout(() => {
-      if (!cancelled) { setReviewAllRunning(false); setToast("自动判重仍在后台进行，请稍后查看"); }
-    }, 20 * 60 * 1000);
-    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
-  }, [reviewAllRunning, currentNotebookId]);
-  const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
-  // 后台重建的终态重对账要读「此刻」的选中节点,而不是轮询 effect 绑定那一刻闭包
-  // 捕获的旧值(codex R6):镜像 kgLimitRef 的每次渲染赋值形态。
-  const selectedKgNodeIdRef = useRef<string | null>(null);
-  selectedKgNodeIdRef.current = selectedKgNodeId;
-  const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
-  const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
-  const [nodeCtx, setNodeCtx] = useState<NodeContext | null>(null);
-  const [kgSearch, setKgSearch] = useState("");
-  const [kgSelectedTypes, setKgSelectedTypes] = useState<string[]>([]);
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const revalidateAccessRef = useRef<() => void>(() => {});
   /**
@@ -1963,10 +1598,6 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
-  const kgBuildRequestEpochRef = useRef(0);
-  const kgOpenRequestRef = useRef(0);
-  const kgNodeNotebookRef = useRef<Map<string, string>>(new Map());
-  const kgNodeContextObjectRef = useRef<Map<string, string>>(new Map());
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
@@ -1999,6 +1630,7 @@ export default function Home() {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then(async (u) => {
+        kgWorkspace.activateActor(u.id);
         reportWorkspace.activateActor(u.id);
         askSession.activateActor(u.id);
         sourceLibrary.activateActor(u.id);
@@ -2181,29 +1813,6 @@ export default function Home() {
       .then((preview) => setSharedPreview(preview))
       .catch(() => setToast("分享链接无效或已取消"));
   }, [authChecked]);
-
-  useEffect(() => {
-    if (!kgViewOpen) return;
-    const element = kgCanvasRef.current;
-    if (!element) return;
-
-    const updateSize = () => {
-      const rect = element.getBoundingClientRect();
-      setKgSize({
-        width: Math.max(320, Math.floor(rect.width)),
-        height: Math.max(360, Math.floor(rect.height))
-      });
-    };
-
-    updateSize();
-    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateSize) : null;
-    observer?.observe(element);
-    window.addEventListener("resize", updateSize);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", updateSize);
-    };
-  }, [kgViewOpen]);
 
   useEffect(() => {
     if (!searchQuery.trim()) {
@@ -2544,6 +2153,26 @@ export default function Home() {
       },
     },
   });
+  useEffect(() => {
+    if (!kgViewOpen) return;
+    const element = kgCanvasRef.current;
+    if (!element) return;
+    const updateSize = () => {
+      const rect = element.getBoundingClientRect();
+      setKgSize({
+        width: Math.max(320, Math.floor(rect.width)),
+        height: Math.max(360, Math.floor(rect.height)),
+      });
+    };
+    updateSize();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateSize) : null;
+    observer?.observe(element);
+    window.addEventListener("resize", updateSize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateSize);
+    };
+  }, [kgViewOpen]);
   const {
     question,
     turns,
@@ -2687,17 +2316,6 @@ export default function Home() {
     for (const nb of notebooks) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
     return map;
   }, [notebooks]);
-  // 合并视图：核心子图 + 用户展开的邻居节点/边（去重）。搜索时改用服务端命中叠加层。
-  const uGraphMerged = useMemo((): UnifiedGraphResp | null => {
-    if (!uGraph) return null;
-    if (kgExpandedNodes.length === 0 && kgExpandedEdges.length === 0) return uGraph;
-    const existingNodeIds = new Set(uGraph.nodes.map((n) => n.id));
-    const existingEdgeKeys = new Set(uGraph.edges.map((e) => `${e.source_object_id}→${e.target_object_id}→${e.edge_type}`));
-    const newNodes = kgExpandedNodes.filter((n) => !existingNodeIds.has(n.id));
-    const newEdges = kgExpandedEdges.filter((e) => !existingEdgeKeys.has(`${e.source_object_id}→${e.target_object_id}→${e.edge_type}`));
-    return { ...uGraph, nodes: [...uGraph.nodes, ...newNodes], edges: [...uGraph.edges, ...newEdges] };
-  }, [uGraph, kgExpandedNodes, kgExpandedEdges]);
-
   const fgData = useMemo(() => {
     const q = kgSearch.trim();
     if (!uGraphMerged) return { nodes: [] as FgNode[], links: [] as FgLink[], searchHitCount: 0 };
@@ -2827,12 +2445,11 @@ export default function Home() {
   function toggleKgType(type: string) {
     const allTypes = kgTypeCounts.map((item) => item.type);
     if (allTypes.length === 0) return;
-    setKgSelectedTypes((previous) => {
-      const current = previous;
-      const next = current.includes(type) ? current.filter((item) => item !== type) : [...current, type];
-      if (next.length === allTypes.length) return [];
-      return next;
-    });
+    if (!kgSelectedTypes.includes(type) && kgSelectedTypes.length + 1 === allTypes.length) {
+      kgWorkspace.clearTypes();
+      return;
+    }
+    kgWorkspace.toggleType(type);
   }
 
   function fitKgGraphView(duration = 450) {
@@ -2868,14 +2485,6 @@ export default function Home() {
     }, 700);
     return () => window.clearTimeout(timer);
   }, [fgData.nodes.length, fgData.links.length, kgDenseView, kgSelectedTypes, kgSize.height, kgSize.width, kgViewOpen]);
-
-  useEffect(() => {
-    if (!kgViewOpen || !pendingKgFocusId || !fgData.nodes.some((node) => node.id === pendingKgFocusId)) return;
-    const nodeId = pendingKgFocusId;
-    setPendingKgFocusId(null);
-    selectKgNode(nodeId).catch(reportError);
-    window.setTimeout(() => focusKgGraphNode(nodeId), 900);
-  }, [fgData.nodes, kgViewOpen, pendingKgFocusId]);
 
   async function refreshModelStatus(): Promise<ModelServicesStatus | null> {
     const requestId = ++modelStatusRequestRef.current;
@@ -3011,6 +2620,7 @@ export default function Home() {
     const workspaceEpoch = ++workspaceEpochRef.current;
     sourceLibrary.beginTransition();
     const reportTransition = reportWorkspace.beginNotebookTransition();
+    const kgTransition = kgWorkspace.beginNotebookTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
     setUploadBusy(false);
@@ -3033,9 +2643,11 @@ export default function Home() {
     });
     if (!askTransition) {
       reportWorkspace.finishNotebookTransition(reportTransition, false);
+      kgWorkspace.finishNotebookTransition(kgTransition);
       return false;
     }
     let opened = false;
+    let openedNotebook: NotebookSummary | null = null;
     try {
       memoryLinksAbortRef.current?.abort();
       memoryLinksAbortRef.current = null;
@@ -3056,6 +2668,7 @@ export default function Home() {
       activeNotebookIdRef.current = notebookId;
       setCurrentNotebookId(notebookId);
       setCurrentNotebook(notebook);
+      openedNotebook = notebook;
       setTitleDraft(notebook.name);
       sourceLibrary.commitNotebookSnapshot({
         actorId: askActorId,
@@ -3066,19 +2679,9 @@ export default function Home() {
     // 参考库的选择状态挂在**上一个**笔记本的挂载集上，不一起重置就会把旧库 id 带进
     // 新笔记本的请求（422），或反过来悄悄沿用旧的排除项。
     setBaseScopeSelection(defaultBaseScopeSelection());
-    setBuildingKg(shouldResumeKgBuild(notebook));
-    setTrackedKgJobId(
-      notebook.kg_build?.status === "running"
-        ? notebook.kg_build.job_id
-        : null,
-    );
     setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
     setChatMode("ask");
     setOuterView("notebooks");
-    setKnowledge(EMPTY_KNOWLEDGE);
-    setKnowledgeKind("concept");
-    setKnowledgeStatusFilter("all");
-    setDuplicates(null);
     setCurrentNotebookBases([]);
     await askSession.restoreNotebook(askTransition);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
@@ -3095,6 +2698,7 @@ export default function Home() {
     } finally {
       askSession.finishNotebookTransition(askTransition);
       reportWorkspace.finishNotebookTransition(reportTransition, opened);
+      kgWorkspace.finishNotebookTransition(kgTransition, opened ? openedNotebook : null);
     }
   }
 
@@ -3150,6 +2754,7 @@ export default function Home() {
     setUrlBusy(false);
     askSession.leaveWorkspace();
     reportWorkspace.leaveWorkspace();
+    kgWorkspace.leaveWorkspace();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -4015,67 +3620,6 @@ export default function Home() {
       ],
     });
   }
-  async function loadKnowledge(kind: KnowledgeKind, opts: { status?: string; page?: number } = {}) {
-    if (!currentNotebookId) return;
-    const pageNum = opts.page ?? 0;
-    const statusParam = (opts.status && opts.status !== "all") ? opts.status : "";
-    const result = await listKnowledge(currentNotebookId, kind, statusParam, pageNum * 50, 50);
-    const items: KnowledgeItem[] = result.items.map((record) => ({
-      id: record.id,
-      status: record.status,
-      owner: record.owner,
-      last_reviewed: record.last_reviewed,
-      evidence: record.evidence,
-      headline: record.headline,
-      object_type: record.object_type,
-      fields: record.fields
-    }));
-    setKnowledge((prev) => ({ ...prev, [kind]: items }));
-    setKnowledgeTotal((prev) => ({ ...prev, [kind]: result.total_count }));
-    setKnowledgePage((prev) => ({ ...prev, [kind]: pageNum }));
-  }
-
-  async function loadKnowledgeTypes() {
-    if (!currentNotebookId) return;
-    const types = await listKnowledgeTypes(currentNotebookId);
-    setKnowledgeTypes(types);
-    return types;
-  }
-
-  async function updateKnowledge(id: string, patch: { status?: string; owner?: string }) {
-    if (!currentNotebookId) return;
-    await updateKnowledgeRecord(currentNotebookId, id, patch);
-    await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
-    await loadKnowledgeTypes();
-    await loadNotebookCollection();
-    const refreshed = await getNotebook(currentNotebookId);
-    setCurrentNotebook(refreshed);
-    setToast("知识已更新");
-  }
-
-  function switchKnowledgeKind(kind: KnowledgeKind) {
-    setKnowledgeKind(kind);
-    setKnowledgeStatusFilter("all");
-    setDuplicates(null);
-    loadKnowledge(kind, { status: "all", page: 0 }).catch(reportError);
-  }
-
-  async function findDuplicates(kind: KnowledgeKind) {
-    if (!currentNotebookId) return;
-    const response = await findKnowledgeDuplicates(currentNotebookId, kind);
-    setDuplicates(response);
-  }
-
-  async function mergeKnowledge(sourceId: string, intoId: string) {
-    if (!currentNotebookId) return;
-    await mergeKnowledgeRecords(currentNotebookId, sourceId, intoId);
-    await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
-    await loadKnowledgeTypes();
-    await findDuplicates(knowledgeKind);
-    setToast("已合并，原条目已弃用");
-  }
-
-
   function closeAnalytics() {
     analyticsLoadScopeRef.current.cancel();
     setAnalytics(null);
@@ -4118,10 +3662,7 @@ export default function Home() {
       const status = result.value;
       setIndexStatus(status);
       setScaleIndexStatus(status.scale_index);
-      if (status.kg.job?.status === "running") {
-        setTrackedKgJobId(status.kg.job.job_id);
-      }
-      if (status.kg.building) setBuildingKg(true);
+      kgWorkspace.observeKgBuild(status.kg.job, status.kg.building);
       if (shouldResumeScaleIndex(status.scale_index)) setBuildingScaleIndex(true);
     });
     void loads.contentOverview.then((result) => {
@@ -4164,84 +3705,6 @@ export default function Home() {
     }));
   }
 
-  async function loadSchemas(view = schemaView, notebookId = currentNotebookId) {
-    const requestEpoch = ++schemaLoadEpochRef.current;
-    const response = view === "global"
-      ? await listObjectSchemas()
-      : notebookId
-        ? await listNotebookObjectSchemas(notebookId)
-        : [];
-    // 不让切换笔记本/视图前启动的请求覆盖现在正在看的有效类型。
-    if (requestEpoch === schemaLoadEpochRef.current) setSchemas(response);
-  }
-
-  function openSchemas() {
-    const initialView: SchemaView = "notebook";
-    setSchemaView(initialView);
-    setSchemas(null);
-    setSchemaModalOpen(true);
-    loadSchemas(initialView).catch(reportError);
-  }
-
-  function switchSchemaView(view: SchemaView) {
-    if (view === "global" && !capabilities.canManageGlobalSchemas) return;
-    setSchemaView(view);
-    setSchemas(null);
-    loadSchemas(view).catch(reportError);
-  }
-
-  async function patchSchema(objectType: string, patch: Partial<ObjectSchema> & { status?: string }) {
-    const view = schemaView;
-    const notebookId = currentNotebookId;
-    if (view === "notebook" && !notebookId) return;
-    setSchemaBusy(true);
-    try {
-      if (view === "global") await updateObjectSchema(objectType, patch);
-      else await updateNotebookObjectSchema(notebookId!, objectType, patch);
-      await loadSchemas(view, notebookId);
-      setToast("类型已更新");
-    } finally {
-      setSchemaBusy(false);
-    }
-  }
-
-  async function createSchema(payload: { object_type: string; plural: string; label: string; fields: string[]; primary: string; list_fields: string[]; description: string }) {
-    const view = schemaView;
-    const notebookId = currentNotebookId;
-    if (view === "notebook" && !notebookId) return;
-    setSchemaBusy(true);
-    try {
-      if (view === "global") await createObjectSchema(payload);
-      else await createNotebookObjectSchema(notebookId!, payload);
-      await loadSchemas(view, notebookId);
-      setToast("已新增类型");
-    } finally {
-      setSchemaBusy(false);
-    }
-  }
-
-  async function deleteSchema(objectType: string) {
-    const view = schemaView;
-    const notebookId = currentNotebookId;
-    if (view === "notebook" && !notebookId) return;
-    setSchemaBusy(true);
-    try {
-      if (view === "global") await deleteObjectSchema(objectType);
-      else await deleteNotebookObjectSchema(notebookId!, objectType);
-      await loadSchemas(view, notebookId);
-      setToast(view === "notebook" ? "类型已更新" : "类型已删除");
-    } finally {
-      setSchemaBusy(false);
-    }
-  }
-
-  async function openGraph() {
-    if (!currentNotebookId) return;
-    setGraphOpen(true);
-    const response = await getKnowledgeGraph(currentNotebookId);
-    setGraph(response);
-  }
-
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时「在表格中查看」的落点——
   // 打开 Knowhow 面板并记下目标表/行，KnowhowPanel 自己负责挂载后定位到该
   // 行的抽屉（含目标表/行已被删除时的兜底提示，见 knowhow-panel.tsx）。
@@ -4275,111 +3738,25 @@ export default function Home() {
     notebookId: string | null = currentNotebookId,
     sourceNotebookId: string | null = notebookId,
   ) {
-    if (!notebookId) return;
-    const requestId = ++kgOpenRequestRef.current;
-    const workspaceEpoch = workspaceEpochRef.current;
-    setKgViewOpen(true);
-    setKgAnalysisOpen(false);                     // 上次留下的分析窗不得跟着重开(见 state 声明处)
-    setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
-    setKgSearch(""); setKgSearchHits([]); setKgSearchBusy(false);
-    setKgExpandedNodes([]); setKgExpandedEdges([]);
-    setKgSelectedTypes([]);
-    setKgLimit(KG_RANGE_DEFAULT);                 // 每次打开从核心范围起，避免一上来渲染全量
-    try {
-      const [g, [pend, status]] = await Promise.all([
-        fetchUnifiedGraph(notebookId, KG_RANGE_DEFAULT),
-        Promise.all([
-          fetchPendingMerges(notebookId),
-          fetchUnifiedKgStatus(notebookId),
-        ]),
-      ]);
-      // 引用携带的是原始 knowledge_object id，而图中 Concept 可能已经折叠为
-      // canonical K-* id；同时大库核心图只含高连接度节点。定向拉一跳邻域既把
-      // 核心范围外的目标补进来，也由后端返回真正应选中的 canonical id。
-      let neighborhood: KgNeighborsResp | null = null;
-      if (targetNodeId) {
-        try {
-          neighborhood = await fetchKgNeighbors(
-            notebookId,
-            targetNodeId,
-            50,
-            sourceNotebookId || notebookId,
-          );
-        } catch { /* 核心图仍可展示；下面按 focus 是否可达给出定位提示。 */ }
-      }
-      if (
-        requestId !== kgOpenRequestRef.current
-        || activeNotebookIdRef.current !== notebookId
-        || workspaceEpochRef.current !== workspaceEpoch
-      ) return;
-      const focus = prepareKgFocus(g, targetNodeId, neighborhood);
-      const nodeNotebookIds = new Map<string, string>();
-      const resolvedSourceNotebookId = neighborhood?.source_notebook_id
-        || sourceNotebookId
-        || notebookId;
-      if (targetNodeId) {
-        for (const node of neighborhood?.nodes ?? []) {
-          nodeNotebookIds.set(node.id, resolvedSourceNotebookId);
-        }
-        if (focus.focusId) nodeNotebookIds.set(focus.focusId, resolvedSourceNotebookId);
-      }
-      kgNodeNotebookRef.current = nodeNotebookIds;
-      const nodeContextObjectIds = new Map<string, string>();
-      if (focus.focusId && focus.contextObjectId) {
-        nodeContextObjectIds.set(focus.focusId, focus.contextObjectId);
-      }
-      kgNodeContextObjectRef.current = nodeContextObjectIds;
-      setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
-      setKgExpandedNodes(focus.expandedNodes);
-      setKgExpandedEdges(focus.expandedEdges);
-      setPendingKgFocusId(focus.focusId);
-      setVizBuilding(Boolean(g.viz_building));
-      if (targetNodeId && neighborhood?.locating_unavailable) {
-        setToast("图谱索引正在构建，暂时无法定位该引用节点；完成后请重试");
-      } else if (targetNodeId && !focus.focusId) {
-        setToast("知识图谱已打开，但引用节点定位失败，请重试");
-      }
-    } catch (err) { reportError(err); }
+    if (!notebookId || notebookId !== currentNotebookId) return;
+    await kgWorkspace.openGraph(targetNodeId, sourceNotebookId || notebookId);
   }
 
   // 关闭知识图谱视图。刻意做成具名函数而不是内联 `() => setKgViewOpen(false)`:
   // 视图内还挂着「图谱分析」弹窗的开关,它必须和父视图一起归零(见 kgAnalysisOpen 声明处),
   // 而"关闭时要一起做的事"散在内联箭头里就迟早会漏掉一条。
   function closeKgView() {
-    setKgViewOpen(false);
-    setKgAnalysisOpen(false);
+    kgWorkspace.closeGraph();
   }
-
-  // 防抖定时器 ref — 搜索词变化后延迟 300ms 再发请求。
-  const kgSearchTimerRef = useRef<number | null>(null);
 
   // 服务端搜索：输入词变化时防抖触发 /kg/search；清空词时还原为核心子图。
   function handleKgSearchChange(value: string) {
-    setKgSearch(value);
-    if (kgSearchTimerRef.current !== null) clearTimeout(kgSearchTimerRef.current);
-    if (!value.trim()) { setKgSearchHits([]); setKgSearchBusy(false); return; }
-    setKgSearchBusy(true);
-    kgSearchTimerRef.current = window.setTimeout(async () => {
-      if (!currentNotebookId) { setKgSearchBusy(false); return; }
-      try {
-        const resp = await fetchKgSearch(currentNotebookId, value.trim());
-        setKgSearchHits(resp.hits);
-      } catch (err) { reportError(err); setKgSearchHits([]); }
-      finally { setKgSearchBusy(false); }
-    }, 300);
+    kgWorkspace.updateGraphSearch(value);
   }
 
   // 切换图谱范围档位：按新 limit 重拉子图（核心 N / 全部）。
   async function changeKgRange(limit: number) {
-    if (!currentNotebookId) return;
-    setKgLimit(limit);
-    setKgRangeBusy(true);
-    try {
-      const g = await fetchUnifiedGraph(currentNotebookId, limit);
-      setUGraph(g);
-      setVizBuilding(Boolean(g.viz_building));
-    } catch (err) { reportError(err); }
-    finally { setKgRangeBusy(false); }
+    await kgWorkspace.changeRange(limit);
   }
 
   // KG 视图内补连孤立节点：后台任务。POST 只认领任务槽（服务端按笔记本单飞，重复点回
@@ -4407,211 +3784,9 @@ export default function Home() {
   // running 就是 "adopted"(哪怕另一侧探测失败,那一侧的忙碌位也已经按上面的规则原样
   // 保留,不需要靠 verdict 补救);否则只要还有一侧探测失败就是 "unknown"(调用方据此
   // 保留自己的位、不做进一步判断);两侧都成功且都没在跑才是 "idle"。
-  async function adoptRunningMaintenance(
-    nb: string,
-  ): Promise<"adopted" | "idle" | "unknown"> {
-    const [rebuildResult, relinkResult] = await Promise.allSettled([
-      fetchUnifiedKgRebuildStatus(nb),
-      fetchRelinkStatus(nb),
-    ]);
-    let rebuildRunning = false;
-    if (rebuildResult.status === "fulfilled") {
-      const rebuild = rebuildResult.value;
-      rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
-      setRebuildingNotebookIds((prev) => (
-        rebuildRunning ? claimNotebookSlot(prev, nb) : releaseNotebookClaim(prev, nb)
-      ));
-    }
-    let relinkRunning = false;
-    if (relinkResult.status === "fulfilled") {
-      const relink = relinkResult.value;
-      relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
-      setRelinkingNotebookIds((prev) => (
-        relinkRunning ? claimRelinkSlot(prev, nb) : releaseRelinkClaim(prev, nb)
-      ));
-    }
-    if (rebuildRunning || relinkRunning) return "adopted";
-    if (rebuildResult.status === "rejected" || relinkResult.status === "rejected") {
-      return "unknown";
-    }
-    return "idle";
-  }
-
   async function relinkFromKgView() {
-    if (!currentNotebookId || relinkingKg || kgRefreshBusy) return;
-    const nb = currentNotebookId;
-    setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
-    // codex R16:409 之后领养判 idle 只证明"服务端此刻确认没有任务在跑",不证明"用户这次
-    // 点击已经生效"——占槽任务完全可能恰好在领养的两次探测 await 期间收尾:槽已空,但这次
-    // 点击对应的 POST 从没有真正发出去过。旧写法在 idle 时直接 return,UI 也不会再刷新,
-    // 等于用户点了一次却什么都没发生。改成有界重试一次:槽刚空出来,立刻重发这次本该发出
-    // 的 POST,大概率成功;仍然 409+idle 才是真正反常的双重竞态(两次独立探测窗口内又冒出
-    // 第三个任务),这时才兜底提示用户、如实释放自己的位。
-    for (const attempt of [0, 1]) {
-      // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
-      // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
-      // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
-      // codex R12:键按 kind 分开(`${nb}:relink`)——同库的 rebuild 提交若与这次窗口重叠,
-      // 不能共用一个键互相冲掉对方的保护。codex R16:重试的第二次尝试同样要重新标记——
-      // 每次尝试各自是一段独立的提交期,不能只标记第一次就假设第二次也被覆盖。
-      submittingMaintenanceRef.current.add(`${nb}:relink`);
-      try {
-        const started = await relinkKg(nb);
-        // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
-        // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
-        expectedMaintenanceJobRef.current.set(`${nb}:relink`, started.job_id);
-        setToast("已开始补上关联；完成后会自动更新");
-        return;
-      } catch (err) {
-        // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
-        // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「补上关联」自己(同种),
-        // 提前清掉的位没有任何东西会把它补回来(adoptRunningMaintenance 当时只会"认领"，不
-        // 会撤销)。改成先不动、把决定权交给 adoptRunningMaintenance:它按服务端真相双向
-        // 归位,同种保留、异种释放、探测失败原样不动。
-        if (httpErrorStatus(err) === 409) {
-          const verdict = await adoptRunningMaintenance(nb);
-          // codex R16:adopted(领养到了确实在跑的任务,同种或异种)与 unknown(探测本身
-          // 失败,不碰任何忙碌位)都沿用既有语义直接收工,调用方不需要(也无法在不重复
-          // 探测的前提下)自己再判断一次——只有 idle(占槽任务在探测期间恰好收尾,服务端
-          // 此刻真的没有任何任务在跑)才需要这里新增的重试判断。
-          if (verdict !== "idle") return;
-          if (attempt === 0) continue;
-          // 第二次仍是 409+idle:两次独立探测窗口内又冒出第三个任务,是真正反常的竞态,
-          // 不再重试——如实释放自己的位并提示用户手动再点一次。
-          setToast("当前有其他整理任务刚结束，请再点一次");
-          setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
-          return;
-        }
-        reportError(err);
-        // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
-        setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
-        return;
-      } finally {
-        submittingMaintenanceRef.current.delete(`${nb}:relink`);
-      }
-    }
+    await kgWorkspace.startRelink();
   }
-
-  // 补上关联的完成信号：有界轮询 relink/status，终态时解除忙碌位并**按当前范围**重拉
-  // 图谱与状态（保留后台化之前的既有语义）。服务端把 idle 也当终态回报，所以进程重启
-  // 之后这条轮询会收工而不是空转到天荒地老；进程还活着但任务卡住那一种由尝试上限兜底。
-  // 轮询只在「在补的那个库正是当前打开的库」时跑：切走就停（A 的忙碌位保留），切回来
-  // 再接着轮，绝不拿 A 的终态去刷 B 的图谱或清 B 的展开节点。多个库可以同时挂在
-  // relinkingNotebookIds 集合里——这条 effect 每次只为**当前**这一个开一条轮询,其余库
-  // 的认领原样留在集合里,不会被这里的收尾动到。
-  useEffect(() => {
-    if (!relinkBusyFor(relinkingNotebookIds, currentNotebookId)) return;
-    const nb = currentNotebookId as string;
-    let cancelled = false;
-    let attempts = 0;
-    // 终态一旦观测到必须**先停轮询、再刷新**：interval 还在跑,若刷新耗时超过一个
-    // 3s 周期,下一 tick 会再读到同一个终态、再调一次 finish(),让图谱重拉并发跑两份
-    // (codex R1 P2)。settled 在两处 finish 调用点之前都同步置位并 clearInterval,
-    // 拦住这条重入路径；每次 tick 开头也检查它,拦住 clearInterval 生效前已经排队的
-    // 迟到 tick。
-    let settled = false;
-    // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
-    // 取消自己:release 改了 relinkingNotebookIds,这条 effect 的依赖跟着变,React 立刻
-    // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
-    // setState 整段丢掉（jsdom 实测 fetch ≥5ms 恒 CANCELLED；生产网络请求远超 5ms，
-    // 图谱/状态因此永远刷不出来，「已重新合并」toast 弹了但画布纹丝不动，#478 同型 bug）。
-    // 刷新期间按钮多 disabled 一会——正确且无害。守卫也从局部 cancelled 改成
-    // activeNotebookIdRef：cleanup 只该取消**轮询**本身，不该取消这次已经在飞的终态刷新。
-    // codex R13:job_id 连续不匹配次数(完整论证见文件顶部 MAINTENANCE_JOB_MISMATCH_
-    // SETTLE_STREAK 常量注释)。观测到 running 或匹配的终态都会清零,只有连续不匹配才
-    // 累计到阈值。
-    let mismatchStreak = 0;
-    const finish = (outcome: RelinkPollOutcome) => {
-      if (outcome.toast) setToast(outcome.toast);
-      if (!outcome.refresh) {
-        // codex R11:释放忙碌位的同时清掉这次追踪的期望 job_id——留着不清不算错(下次
-        // 提交会覆盖它),但清掉能避免这张表随通知本无限攒旧键。
-        expectedMaintenanceJobRef.current.delete(`${nb}:relink`);
-        setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
-        return;
-      }
-      void (async () => {
-        try {
-          const [g, status] = await Promise.all([
-            fetchUnifiedGraph(nb, kgLimitRef.current),
-            fetchUnifiedKgStatus(nb),
-          ]);
-          if (activeNotebookIdRef.current !== nb) return;
-          setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
-          setVizBuilding(Boolean(g.viz_building));
-        } catch (err) { reportError(err); }
-        finally {
-          expectedMaintenanceJobRef.current.delete(`${nb}:relink`);
-          setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
-        }
-      })();
-    };
-    // codex R15:setInterval 不等上一次请求返回——慢响应下同代际会有多个在飞请求,
-    // 两个「都发于 POST 完成前」的陈旧响应可以各自 +1 mismatchStreak,把阈值 2 打穿。
-    // streak 论证(「第二次观察必然发于第一次解析之后」)依赖串行化,这里补上:一次只允许
-    // 一个在飞状态请求,上一个没回来就跳过本 tick(attempts 照常累计,上限语义不变)。
-    let inFlight = false;
-    const poll = window.setInterval(async () => {
-      if (settled || inFlight) return;
-      // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限永远
-      // 到不了，正好是上限要兜的那种卡死。
-      attempts += 1;
-      if (attempts > RELINK_POLL_MAX_ATTEMPTS) {
-        if (!cancelled && activeNotebookIdRef.current === nb) {
-          settled = true;
-          window.clearInterval(poll);
-          finish(RELINK_POLL_TIMED_OUT);
-        }
-        return;
-      }
-      let outcome;
-      let status;
-      inFlight = true;
-      try {
-        status = await fetchRelinkStatus(nb);
-      } catch { return; }          // 瞬时错误：继续轮询
-      finally { inFlight = false; }
-      outcome = relinkPollOutcome(status);
-      if (cancelled || settled || activeNotebookIdRef.current !== nb) return;
-      if (!outcome.done) {
-        // codex R13:观测到 running 说明服务端确认这个库上有任务在跑——running 不
-        // 校验 job_id,只要还在跑就把连续不匹配计数归零,重新从 0 开始累计。
-        mismatchStreak = 0;
-        return;
-      }
-      // codex R9:POST 比首个 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工——随后
-      // POST 才成功,没人再轮询,任务完成不刷新。idle 且提交还在飞(submittingMaintenanceRef
-      // 记着这个键)时不能当真终态,继续等下一个 tick;提交落地后服务端会回真实
-      // running/succeeded/failed。codex R12:键按 kind 分开查`${nb}:relink`——同库若还有
-      // 一次 rebuild 提交在飞,不该被那次不相干的提交拖住这条 relink 轮询。
-      if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:relink`)) return;
-      // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST 落地前,仍可能
-      // 如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都不可信,且提交
-      // 期无条件继续轮询,不进入下面的 mismatchStreak 计数。
-      if (submittingMaintenanceRef.current.has(`${nb}:relink`)) return;
-      // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才是
-      // 这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养占用)
-      // 一律视为陈旧。没有走过本页 POST 的追踪(409 领养、打开笔记本时从服务端恢复)
-      // 从未写过这张表,天然保留"接受任意终态"的历史行为(expectedRelinkJobId 为空,
-      // relinkJobMismatch 恒为 false,直接收工)。codex R13:不匹配不再无限拒收——连续
-      // 达到 MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK 次才真收工,完整论证见文件顶部
-      // 该常量的注释。
-      const expectedRelinkJobId = expectedMaintenanceJobRef.current.get(`${nb}:relink`);
-      const relinkJobMismatch = Boolean(
-        expectedRelinkJobId && status.job_id !== expectedRelinkJobId,
-      );
-      if (relinkJobMismatch) {
-        mismatchStreak += 1;
-        if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
-      } else {
-        mismatchStreak = 0;
-      }
-      settled = true;
-      window.clearInterval(poll);
-      finish(outcome);
-    }, 3000);
-    return () => { cancelled = true; window.clearInterval(poll); };
-  }, [relinkingNotebookIds, currentNotebookId]);
 
   // 「重新合并」：后台任务。POST 只认领任务槽（服务端与「补上关联」共用同一把按笔记本
   // 的单飞锁，重复点或另一件在跑都回 409），聚类数要等下面那条轮询读到终态才有——所以
@@ -4621,317 +3796,8 @@ export default function Home() {
   // codex R4 P2(B):早退必须认「任一忙碌位为真即忙」（kgRefreshBusy || relinkingKg）——
   // 「补上关联」在跑时占的是同一把服务端锁，只看自己那一位仍会发出请求、白撞一次 409。
   async function refreshUnifiedKg() {
-    if (!currentNotebookId || kgRefreshBusy || relinkingKg) return;
-    const nb = currentNotebookId;
-    setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
-    // codex R16:见 relinkFromKgView 同名注释——409 之后领养判 idle 只证明"服务端此刻
-    // 确认没有任务在跑",不证明"用户这次点击已经生效"——占槽任务完全可能恰好在领养的两次
-    // 探测 await 期间收尾:槽已空,但这次点击对应的 POST 从没有真正发出去过。旧写法在
-    // idle 时直接 return,UI 也不会再刷新,等于用户点了一次却什么都没发生。改成有界重试
-    // 一次:槽刚空出来,立刻重发这次本该发出的 POST,大概率成功;仍然 409+idle 才是真正
-    // 反常的双重竞态(两次独立探测窗口内又冒出第三个任务),这时才兜底提示用户、如实释放
-    // 自己的位。
-    for (const attempt of [0, 1]) {
-      // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
-      // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
-      // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
-      // codex R12:键按 kind 分开(`${nb}:rebuild`)——同库的 relink 提交若与这次窗口重叠,
-      // 不能共用一个键互相冲掉对方的保护。codex R16:重试的第二次尝试同样要重新标记——
-      // 每次尝试各自是一段独立的提交期,不能只标记第一次就假设第二次也被覆盖。
-      submittingMaintenanceRef.current.add(`${nb}:rebuild`);
-      try {
-        const started = await rebuildUnifiedKg(nb);
-        // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
-        // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
-        expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
-        // codex R7:手动重建真的起来了,就消费掉可能残留的待补发标记——否则这次
-        // 重建的终态会被当成「还有决定没兑现」,先跳过刷新再白发一次可能数小时的
-        // 重建。手动这一次已经覆盖了那条决定(重建读取的是此刻的全部已决定对)。
-        setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-        setToast("已开始重新合并；完成后会自动更新");
-        return;
-      } catch (err) {
-        // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
-        // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「重新合并」自己(同种),
-        // 提前清掉的位没有任何东西会把它补回来。改成先不动、把决定权交给
-        // adoptRunningMaintenance:它按服务端真相双向归位,同种保留、异种释放、探测失败
-        // 原样不动。
-        if (httpErrorStatus(err) === 409) {
-          const verdict = await adoptRunningMaintenance(nb);
-          // codex R16:adopted(领养到了确实在跑的任务,同种或异种)与 unknown(探测本身
-          // 失败,不碰任何忙碌位)都沿用既有语义直接收工,调用方不需要(也无法在不重复
-          // 探测的前提下)自己再判断一次——只有 idle(占槽任务在探测期间恰好收尾,服务端
-          // 此刻真的没有任何任务在跑)才需要这里新增的重试判断。
-          if (verdict !== "idle") return;
-          if (attempt === 0) continue;
-          // 第二次仍是 409+idle:两次独立探测窗口内又冒出第三个任务,是真正反常的竞态,
-          // 不再重试——如实释放自己的位并提示用户手动再点一次。
-          setToast("当前有其他整理任务刚结束，请再点一次");
-          setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-          return;
-        }
-        reportError(err);
-        // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
-        setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-        return;
-      } finally {
-        submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
-      }
-    }
+    await kgWorkspace.startRebuild();
   }
-
-  // 重新合并的完成信号：有界轮询 unified-kg/rebuild/status，终态时解除忙碌位并**按当前
-  // 范围**重拉图谱、待确认合并与概念合并状态（保留后台化之前的既有语义）。服务端把 idle
-  // 也当终态回报，所以进程重启之后这条轮询会收工而不是空转到天荒地老；进程还活着但任务
-  // 卡住那一种由尝试上限兜底。轮询只在「在重新合并的那个库正是当前打开的库」时跑：切走
-  // 就停（A 的忙碌位保留），切回来再接着轮，绝不拿 A 的终态去刷 B 的图谱。
-  useEffect(() => {
-    if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;
-    const nb = currentNotebookId as string;
-    let cancelled = false;
-    let attempts = 0;
-    // 终态一旦观测到必须**先停轮询、再刷新(或补发重试)**：interval 还在跑,若那之后
-    // 的异步工作耗时超过一个 3s 周期,下一 tick 会再读到同一个终态、再调一次 finish(),
-    // 让图谱重拉(乃至下面的补发重试)并发跑两份(codex R1 P2)。settled 在每个 finish
-    // 调用点之前都同步置位并 clearInterval,拦住这条重入路径；每次 tick 开头也检查它,
-    // 拦住 clearInterval 生效前已经排队的迟到 tick。补发重试成功后会复位它、经
-    // startPolling 重新起一轮轮询追新任务。
-    let settled = false;
-    let poll = 0;
-    // codex R13:job_id 连续不匹配次数(完整论证见文件顶部 MAINTENANCE_JOB_MISMATCH_
-    // SETTLE_STREAK 常量注释)。观测到 running 或匹配的终态都会清零,只有连续不匹配才
-    // 累计到阈值;每次 startPolling() 开启新代际也会归零(与 generation 同步重置)。
-    let mismatchStreak = 0;
-    // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
-    // 取消自己:release 改了 rebuildingNotebookIds,这条 effect 的依赖跟着变,React 立刻
-    // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
-    // setState 整段丢掉（jsdom 实测 fetch ≥5ms 恒 CANCELLED；生产网络请求远超 5ms，
-    // 图谱/待确认合并/状态因此永远刷不出来，「已重新合并」toast 弹了但画布纹丝不动）。
-    // 刷新期间按钮多 disabled 一会——正确且无害。守卫也从局部 cancelled 改成
-    // activeNotebookIdRef：cleanup 只该取消**轮询**本身，不该取消这次已经在飞的终态刷新。
-    const finish = (outcome: RebuildPollOutcome) => {
-      if (outcome.toast) setToast(outcome.toast);
-      // 待补发标记优先于刷新(codex R3 P2)：relink 占槽期间,rebuild status 每个 3s
-      // tick 都回终态 idle(refresh:true)——旧顺序是"先 Promise.all 整图刷新、
-      // finally 里才试补发",标记已经在等的场景下这份刷新纯属浪费:补发多半立刻撞
-      // 409(占槽任务还没收工),下一 tick 还会再刷新一次,最多陪跑到 REBUILD_POLL_
-      // MAX_ATTEMPTS,慢的图读取还会推迟真正的补发。这里把标记检查提到刷新 IIFE
-      // 之前:命中标记就直接交给 settleOrRetryRebuild 决定(补发成功→续轮询新任务;
-      // 再撞 409→续轮询等槽),两条路都跳过本轮刷新——旧那次真 rebuild 的成功结果
-      // 延后到补发的那次 rebuild 终态一并刷新,这是刻意接受的取舍。只有真的没有
-      // 待补发标记的终态才走下面的刷新+释放。
-      if (!outcome.refresh || pendingRebuildNotebookIdsRef.current.has(nb)) {
-        void settleOrRetryRebuild();
-        return;
-      }
-      void (async () => {
-        try {
-          const [g, pend, status] = await Promise.all([
-            fetchUnifiedGraph(nb, kgLimitRef.current),
-            fetchPendingMerges(nb),
-            fetchUnifiedKgStatus(nb),
-          ]);
-          if (activeNotebookIdRef.current !== nb) return;
-          setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]);
-          setPendingMerges(pend); setUnifiedKgStatus(status);
-          setVizBuilding(Boolean(g.viz_building));
-          // codex R5 P2(B):新图替换旧图之后必须重对账当前选中的概念——镜像后台化之前
-          // refreshUnifiedKg 同步版收尾时的这段重查(旧图里选中的节点，重新合并之后可能
-          // 已被折进另一个聚类、也可能压根消失，conceptDetail/nodeCtx 原样保留就会绑着
-          // 一份不再对应任何可见节点的旧详情)。按新图 g.nodes 重新定位：找不到就两侧都
-          // 清空；还在且仍是概念就用新图给出的 id 重新拉一次详情。
-          // codex R6:选中 id 必须从 ref 读此刻的值(effect 闭包里的 state 是轮询
-          // 开始那一刻的旧值,长重建期间用户可能已换选);详情取回后再校验一次选中
-          // 未变,变了就不发布(新选中的点击处理器自己会拉自己的详情)。
-          const currentSelection = selectedKgNodeIdRef.current;
-          const selected = currentSelection ? g.nodes.find((node) => node.id === currentSelection) : null;
-          if (selected?.object_type === "concept") {
-            const detail = await fetchConceptDetail(nb, selected.id).catch(() => null);
-            if (selectedKgNodeIdRef.current !== currentSelection) return;
-            setConceptDetail(detail);
-          } else {
-            setConceptDetail(null);
-          }
-          if (!selected) setNodeCtx(null);
-        } catch (err) { reportError(err); }
-        finally {
-          await settleOrRetryRebuild();
-        }
-      })();
-    };
-    // decideMerge 撞 409 时会在 pendingRebuildNotebookIds 给这个库留一个「待补发」标记：
-    // 那条决定已经落库,但占槽的是另一个任务,没能触发一次能看见它的重新合并。这里在
-    // 终态收尾时尝试补发一次——但标记只在补发 POST **真正成功后**才消费(codex R2 P1:
-    // 旧代码在发请求前就无条件消费掉标记,补发再撞 409 时——占槽的另一个任务,比如
-    // 「补上关联」,还没跑完,rebuild status 对它恒回 idle 终态——标记已经被提前吃掉、
-    // 忙碌位却按原样释放,这条决定就再也没有人会去补发它,直到用户自己想起来手动点
-    // 「重新合并」)。补发成功就**不释放忙碌位**,复位轮询状态继续追这次新任务;补发
-    // 撞 409 则保留标记 + 保留忙碌位 + 重启轮询——下一 tick rebuild status 对占槽者
-    // 依旧回 idle,等效于每 3s 重试一次补发,直到占槽任务收工、槽空、POST 真正成功。
-    // attempts 刻意不因这类重试复位(只在补发成功后复位):共享的轮询尝试上限(约 30
-    // 分钟)就是整段等待的界,防止占槽任务本身卡死时无限重试——上限耗尽走既有释放
-    // 路径,只是把 toast 换成提示用户手动重试(decideMerge 落 409 时已经 toast 过一次,
-    // 这里的提示只在自动补发彻底放弃时才出现,不会重复刷屏)。
-    async function settleOrRetryRebuild() {
-      const hasPendingRebuild = pendingRebuildNotebookIdsRef.current.has(nb);
-      if (hasPendingRebuild && attempts <= REBUILD_POLL_MAX_ATTEMPTS) {
-        // codex R9:这次补发也是一次真正的 POST 提交,同样会撞「POST 比首个 tick 慢」的
-        // 陈旧 idle 竞态——统一包上 submittingMaintenanceRef,原因同 refreshUnifiedKg。
-        // codex R12:键按 kind 分开(`${nb}:rebuild`),同库若有一次 relink 提交在飞不受
-        // 影响。
-        submittingMaintenanceRef.current.add(`${nb}:rebuild`);
-        try {
-          const started = await rebuildUnifiedKg(nb);
-          // codex R11:补发同样是一次真正的 POST 提交,拿到的是一个**新** job_id——
-          // 记下它,轮询终态必须等 status.job_id 与它一致才接受这次追踪的完成。
-          expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
-          // 补发真正成功才消费标记——见上方函数注释。
-          setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-          if (!cancelled && activeNotebookIdRef.current === nb) {
-            attempts = 0;
-            settled = false;
-            startPolling();
-            return;
-          }
-          return; // 已切库/effect 已收尾:忙碌位留给下次重挂的 effect 接着轮
-        } catch (err) {
-          if (httpErrorStatus(err) === 409) {
-            // 占槽任务还没结束:标记与忙碌位原样保留、重启轮询等它收工再重试。
-            if (!cancelled && activeNotebookIdRef.current === nb) {
-              settled = false;
-              startPolling();
-              return;
-            }
-            return; // 已切库/effect 已收尾:标记与忙碌位都留给下次重挂的 effect 接着轮
-          }
-          reportError(err);
-          // codex R14:非 409 失败(网络错误/5xx 等瞬时故障)不能落到下面的正常释放——
-          // 唯一还能再调 settleOrRetryRebuild 的只有这条轮询 effect 的终态收尾,忙碌位
-          // 在这里一旦释放,已经落库的合并决定就再也没有人会去补发它了,只能等用户自己
-          // 想起来手动点「重新合并」(旧注释"标记仍不消费,留给下次终态再试"是一句兑现不了
-          // 的承诺——没有忙碌位,压根不会再有"下次终态")。修法与上面的 409 分支同型:
-          // 标记与忙碌位原样保留、重启轮询,让下一 tick 再试一次补发。attempts 依旧不在
-          // 这里复位(只有补发真正成功才复位)——共享的轮询尝试上限兜住占槽/网络双重
-          // 卡死的场景:耗尽后下一次 settleOrRetryRebuild 会经上面的 attempts 校验落进
-          // else-if 分支,走既有释放 + 手动提示路径,不会无限重试。
-          if (!cancelled && activeNotebookIdRef.current === nb) {
-            settled = false;
-            startPolling();
-            return;
-          }
-          return; // 已切库/effect 已收尾:标记与忙碌位都留给下次重挂的 effect 接着轮
-        } finally {
-          submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
-        }
-      } else if (hasPendingRebuild) {
-        // 轮询尝试上限已耗尽,这条合并决定始终没能触发一次看得见它的重新合并:不再
-        // 自动重试,提示用户手动点一次。
-        setToast("重新合并长时间未能自动完成，请稍后手动点击「重新合并」");
-      }
-      // codex R11:释放忙碌位的同时清掉这次追踪的期望 job_id——留着不清不算错(下次
-      // 提交会覆盖它),但清掉能避免这张表随笔记本无限攒旧键。补发成功重启轮询的
-      // 分支不会走到这里(已经 return),因此不会误清刚刚为新任务设下的期望值。
-      expectedMaintenanceJobRef.current.delete(`${nb}:rebuild`);
-      setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-    }
-    // codex R5 P2(A):status 请求慢于 3s 轮询间隔时,同一个 interval 会连续派发多个
-    // pollTick——前一个还没等到响应,后一个已经发出去了,多份 fetchUnifiedKgRebuildStatus
-    // 并飞。补发重试(settleOrRetryRebuild 成功分支)会复位 settled 并调 startPolling()
-    // 开一轮新的代际;此时如果一个属于**上一代际**、迟迟才回来的响应命中终态,它看到的
-    // settled 已经被新代际复位成 false,会照样穿过下面的守卫——提前 clearInterval(此刻
-    // poll 已经指向新代际的 interval id,这一下等于把新代际也停了)、提前触发刷新、提前
-    // 释放忙碌位,而真正对应新代际的那次 rebuild 还在后端跑。修法是给每一代轮询发一个
-    // 代际号:startPolling 时自增 generation,每个 pollTick 在起飞那一刻(await 之前,
-    // 与 interval 触发同一个同步段内)捕获当时的 generation;响应回来后先比对
-    // generation === myGeneration 再决定是否收工——不匹配就是上一代际的迟到响应,直接
-    // 丢弃,把轮询完整地交给当前代际。
-    let generation = 0;
-    // codex R15:代际号防的是「跨代际」迟到响应;同一代际内 setInterval 也不等上一次
-    // 请求返回——两个都发于补发 POST 完成前的陈旧响应可以各自 +1 mismatchStreak,把
-    // 阈值 2 打穿。streak 论证依赖串行化:一次只允许一个在飞状态请求。
-    let inFlight = false;
-    function pollTick() {
-      void (async () => {
-        if (settled || inFlight) return;
-        // 与上面的 settled 检查同一个同步段内捕获,等价于「在 interval 触发的那一刻」
-        // 捕获——分派之后、await 之前没有任何代码能让 generation 变化。
-        const myGeneration = generation;
-        // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限
-        // 永远到不了，正好是上限要兜的那种卡死。
-        attempts += 1;
-        if (attempts > REBUILD_POLL_MAX_ATTEMPTS) {
-          if (!cancelled && activeNotebookIdRef.current === nb) {
-            settled = true;
-            window.clearInterval(poll);
-            finish(REBUILD_POLL_TIMED_OUT);
-          }
-          return;
-        }
-        let outcome;
-        let status;
-        inFlight = true;
-        try {
-          status = await fetchUnifiedKgRebuildStatus(nb);
-        } catch { return; }          // 瞬时错误：继续轮询
-        finally { inFlight = false; }
-        outcome = rebuildPollOutcome(status);
-        if (
-          cancelled
-          || settled
-          || activeNotebookIdRef.current !== nb
-          || generation !== myGeneration
-        ) return;
-        if (!outcome.done) {
-          // codex R13:观测到 running 说明服务端确认这个库上有任务在跑——running 不
-          // 校验 job_id,只要还在跑就把连续不匹配计数归零,重新从 0 开始累计。
-          mismatchStreak = 0;
-          return;
-        }
-        // codex R9:POST(含 settleOrRetryRebuild 的补发)比首个 tick 慢时,轮询会先读到
-        // 服务端旧的 idle 并当终态收工——随后 POST 才成功,没人再轮询,任务完成不刷新。
-        // idle 且提交还在飞(submittingMaintenanceRef 记着这个键)时不能当真终态,继续等
-        // 下一个 tick;提交落地后服务端会回真实 running/succeeded/failed。codex R12:键
-        // 按 kind 分开查`${nb}:rebuild`——同库若还有一次 relink 提交在飞,不该被那次不
-        // 相干的提交拖住这条 rebuild 轮询。
-        if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;
-        // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST(含补发)落地
-        // 前,仍可能如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都
-        // 不可信,不止 idle 这一种终态,且提交期无条件继续轮询,不进入下面的
-        // mismatchStreak 计数。
-        if (submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;
-        // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才
-        // 是这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养
-        // 占用)一律视为陈旧。没有走过本页 POST 的追踪(409 领养、打开笔记本时从服务端
-        // 恢复)从未写过这张表,天然保留"接受任意终态"的历史行为(expectedRebuildJobId
-        // 为空,rebuildJobMismatch 恒为 false,直接收工)。codex R13:不匹配不再无限
-        // 拒收——连续达到 MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK 次才真收工,完整论证
-        // 见文件顶部该常量的注释。
-        const expectedRebuildJobId = expectedMaintenanceJobRef.current.get(`${nb}:rebuild`);
-        const rebuildJobMismatch = Boolean(
-          expectedRebuildJobId && status.job_id !== expectedRebuildJobId,
-        );
-        if (rebuildJobMismatch) {
-          mismatchStreak += 1;
-          if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
-        } else {
-          mismatchStreak = 0;
-        }
-        settled = true;
-        window.clearInterval(poll);
-        finish(outcome);
-      })();
-    }
-    function startPolling() {
-      generation += 1;
-      // codex R13:每次开启新代际都归零连续不匹配计数——补发重试(settleOrRetryRebuild
-      // 的成功分支)会带着一个**新** job_id 复位 settled 并调这里重启轮询,上一代际
-      // 遗留的 mismatchStreak 对这一代毫无意义,必须与 generation 一起重置。
-      mismatchStreak = 0;
-      poll = window.setInterval(pollTick, 3000);
-    }
-    startPolling();
-    return () => { cancelled = true; window.clearInterval(poll); };
-  }, [rebuildingNotebookIds, currentNotebookId]);
 
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   // codex R4 P2(B):同样认「任一忙碌位为真即忙」，与 refreshUnifiedKg 的早退同口径。
@@ -4951,36 +3817,11 @@ export default function Home() {
   }
 
   async function reviewPendingMerges() {
-    if (!currentNotebookId) return;
-    setKgReviewBusy(true);
-    setToast("正在自动判重（约 1 分钟，请稍候）…");
-    try {
-      const summary = await reviewMerges(currentNotebookId);
-      setToast(`已判重 ${summary.reviewed} 项：合并 ${summary.confirmed}，分开 ${summary.rejected}，保留 ${summary.unsure}`);
-      const [pend, status] = await Promise.all([
-        fetchPendingMerges(currentNotebookId),
-        fetchUnifiedKgStatus(currentNotebookId),
-      ]);
-      setPendingMerges(pend);
-      setUnifiedKgStatus(status);
-    } catch (err) { reportError(err); }
-    finally { setKgReviewBusy(false); }
+    await kgWorkspace.reviewPendingMerges();
   }
 
   async function reviewAllMerges() {
-    if (!currentNotebookId || reviewAllStarting) return;
-    const nb = currentNotebookId;
-    // 忙碌位必须在 await **之前**置(对齐 reviewPendingMerges 的 setKgReviewBusy):
-    // 按钮原本只看 reviewAllJob?.status,而那个要等 POST 回来才写,中间这段窗口按钮
-    // 仍可点、点几下就排几个全量预审 job。不复用 reviewAllRunning 是为了不让轮询
-    // effect 去追一个还不存在的 job。
-    setReviewAllStarting(true);
-    try {
-      await reviewAllMergesRequest(nb);
-      setReviewAllJob({ status: "running", total: pendingMerges.length, done: 0, error: "" });
-      setReviewAllRunning(true);
-    } catch (err) { reportError(err); }
-    finally { setReviewAllStarting(false); }
+    await kgWorkspace.reviewAllMerges();
   }
 
   function focusKgGraphNode(nodeId: string) {
@@ -4997,60 +3838,10 @@ export default function Home() {
   }
 
   async function selectKgNode(nodeId: string) {
-    if (!currentNotebookId) return;
-    const nodeNotebookId = kgNodeNotebookRef.current.get(nodeId) || currentNotebookId;
-    setSelectedKgNodeId(nodeId);
-    setNodeCtx(null);
-    focusKgGraphNode(nodeId);
     window.setTimeout(() => {
       kgDetailRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     }, 0);
-    let resolvedNodeNotebookId = nodeNotebookId;
-    // 逐跳展开：拉取邻居节点/边并合并进视图（去重由 uGraphMerged 处理）。
-    try {
-      const neighbors = await fetchKgNeighbors(
-        currentNotebookId,
-        nodeId,
-        50,
-        nodeNotebookId,
-      );
-      resolvedNodeNotebookId = neighbors.source_notebook_id || nodeNotebookId;
-      if (
-        neighbors.focus_id
-        && neighbors.focus_object_id
-        && (
-          !kgNodeContextObjectRef.current.has(neighbors.focus_id)
-          || neighbors.focus_object_id !== neighbors.focus_id
-        )
-      ) {
-        kgNodeContextObjectRef.current.set(
-          neighbors.focus_id,
-          neighbors.focus_object_id,
-        );
-      }
-      if (neighbors.nodes.length > 0 || neighbors.edges.length > 0) {
-        for (const node of neighbors.nodes) {
-          if (!kgNodeNotebookRef.current.has(node.id)) {
-            kgNodeNotebookRef.current.set(node.id, resolvedNodeNotebookId);
-          }
-        }
-        setKgExpandedNodes((prev) => {
-          const existing = new Set(prev.map((n) => n.id));
-          const fresh = neighbors.nodes.filter((n) => !existing.has(n.id));
-          return fresh.length > 0 ? [...prev, ...fresh] : prev;
-        });
-        setKgExpandedEdges((prev) => {
-          const existing = new Set(prev.map((e) => `${e.source_object_id}→${e.target_object_id}→${e.edge_type}`));
-          const fresh = neighbors.edges.filter((e) => !existing.has(`${e.source_object_id}→${e.target_object_id}→${e.edge_type}`));
-          return fresh.length > 0 ? [...prev, ...fresh] : prev;
-        });
-      }
-    } catch { /* 邻居展开 best-effort，不阻断主流程 */ }
-    const node = uGraphMerged?.nodes.find((item) => item.id === nodeId);
-    if (node?.object_type !== "concept") setConceptDetail(null);
-    else { try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId, resolvedNodeNotebookId)); } catch (err) { setConceptDetail(null); reportError(err); } }
-    const contextObjectId = kgNodeContextObjectRef.current.get(nodeId) || nodeId;
-    try { setNodeCtx(await fetchNodeContext(currentNotebookId, contextObjectId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
+    await kgWorkspace.selectNode(nodeId);
   }
 
   // 落一条合并决定。只有「合并」会启动重新合并让图谱跟上；「分开」只写入
@@ -5078,62 +3869,7 @@ export default function Home() {
   // 不做(超出这一批的范围,且值不值得为这条边界换一套持久化基础设施还需要真实发生频率
   // 的数据支撑)。
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
-    if (!currentNotebookId || decidingMerge || kgRefreshBusy) return;
-    const nb = currentNotebookId;
-    setDecidingMerge({ id: candidate.id, confirm });
-    try {
-      if (confirm) await confirmMerge(nb, candidate.id);
-      else await rejectMerge(nb, candidate.id);
-      setPendingMerges((items) => withoutDecidedMerge(items, candidate));
-      if (confirm) setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
-      // codex R10:这次 POST 与 refreshUnifiedKg/settleOrRetryRebuild 的补发同样会撞
-      // 「POST 比首个 3s 轮询 tick 慢」的陈旧 idle 竞态——轮询会先读到服务端旧的 idle
-      // 并当终态收工,随后这次 POST 才成功,没人再轮询,决定生效不会被看见。统一包上
-      // submittingMaintenanceRef,finally 里清理(不管成功/409/非 409 失败都不能让标记
-      // 永久卡住),与另两处提交期标记同一形态。
-      // codex R12:键按 kind 分开(`${nb}:rebuild`)——同库若有一次 relink POST 还没返回
-      // (用户在它落地前就确认了合并、触发这次 rebuild POST),两次提交的保护窗口重叠;
-      // 旧代码共用裸 nb 键时,先落地的那次在自己的 finally 里把唯一条目删掉,仍在飞的
-      // 另一次就此失去保护。
-      if (confirm) {
-        submittingMaintenanceRef.current.add(`${nb}:rebuild`);
-        try {
-          const started = await rebuildUnifiedKg(nb);
-          // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
-          // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
-          expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
-        } catch (err) {
-          if (httpErrorStatus(err) !== 409) {
-            setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-            throw err;
-          }
-          setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
-          setToast("合并已记录，将在当前任务完成后自动重新合并");
-        } finally {
-          submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
-        }
-      }
-      const pend = await fetchPendingMerges(nb);
-      setPendingMerges(withoutDecidedMerge(pend, candidate));
-      const selected = selectedKgNodeId ? uGraphMerged?.nodes.find((node) => node.id === selectedKgNodeId) : null;
-      if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(nb, selected.id).catch(() => null));
-      else setConceptDetail(null);
-      if (!selected) setNodeCtx(null);
-    } catch (err) { reportError(err); }
-    finally { setDecidingMerge(null); }
-  }
-
-  async function induceSchemas() {
-    const notebookId = currentNotebookId;
-    if (!notebookId) return;
-    setSchemaBusy(true);
-    try {
-      const proposals = await proposeObjectSchemas(notebookId);
-      await loadSchemas("notebook", notebookId);
-      setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或模型服务暂不可用）");
-    } finally {
-      setSchemaBusy(false);
-    }
+    await kgWorkspace.decideMerge(candidate, confirm);
   }
 
   // --- Two-tier federation: mark notebook base / personal -----------------
@@ -5477,20 +4213,33 @@ export default function Home() {
       );
     }
     if (mode === "rules") {
-      loadKnowledgeTypes().then((types) => {
-        if (!types || types.length === 0) return;
-        const available = types.map((t) => t.object_type);
-        if (!available.includes(knowledgeKind)) {
-          switchKnowledgeKind(types[0].object_type);
-        } else if (knowledge[knowledgeKind] == null) {
-          loadKnowledge(knowledgeKind, { status: "all", page: 0 }).catch(reportError);
-        }
-      }).catch(reportError);
+      void kgWorkspace.enterKnowledge();
       // 提交晋升要知道本笔记本挂了几个公共知识库(resolvePromotionTarget)。/bases
       // 是 owner-only 端点,非 owner 404(见 notebook-bases.ts 顶部注释)——不能像
       // loadKnowledgeTypes 那样对所有访客无条件调用,这里显式门控 canGovernKnowledge。
       if (currentNotebookId && capabilities.canGovernKnowledge) {
-        listBases(currentNotebookId).then(setCurrentNotebookBases).catch(reportError);
+        const notebookId = currentNotebookId;
+        const actorId = currentUser?.id ?? null;
+        const workspaceEpoch = workspaceEpochRef.current;
+        listBases(notebookId).then((bases) => {
+          if (
+            actorId
+            && workspaceActorIdRef.current === actorId
+            && activeNotebookIdRef.current === notebookId
+            && workspaceEpochRef.current === workspaceEpoch
+          ) {
+            setCurrentNotebookBases(bases);
+          }
+        }).catch((error) => {
+          if (
+            actorId
+            && workspaceActorIdRef.current === actorId
+            && activeNotebookIdRef.current === notebookId
+            && workspaceEpochRef.current === workspaceEpoch
+          ) {
+            reportError(error);
+          }
+        });
       }
     }
   }
@@ -5525,6 +4274,7 @@ export default function Home() {
     activeNotebookIdRef.current = null;
     askSession.abortForLogout();
     reportWorkspace.leaveWorkspace();
+    kgWorkspace.leaveWorkspace();
     memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -5738,6 +4488,7 @@ export default function Home() {
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
+      kgWorkspace.activateActor(u.id);
       reportWorkspace.activateActor(u.id);
       askSession.activateActor(u.id);
       sourceLibrary.activateActor(u.id);
@@ -6680,27 +5431,25 @@ export default function Home() {
                 {chatMode === "rules" && (
                   <KnowledgeBrowser
                     kind={knowledgeKind}
-                    items={knowledge[knowledgeKind] ?? null}
+                    items={knowledgeItems}
                     types={knowledgeTypes}
                     statusFilter={knowledgeStatusFilter}
                     duplicates={duplicates}
-                    notebookId={currentNotebookId ?? ""}
-                    onKind={switchKnowledgeKind}
-                    onStatus={(id, status) => updateKnowledge(id, { status }).catch(reportError)}
-                    onOwner={(id, owner) => updateKnowledge(id, { owner }).catch(reportError)}
-                    onFindDuplicates={() => findDuplicates(knowledgeKind).catch(reportError)}
-                    onMerge={(sourceId, intoId) => mergeKnowledge(sourceId, intoId).catch(reportError)}
-                    reload={() => loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 }).catch(reportError)}
+                    contexts={kgWorkspace.knowledge.contexts}
+                    onLoadContext={kgWorkspace.loadKnowledgeContext}
+                    onKind={kgWorkspace.selectKnowledgeKind}
+                    onStatus={(id, status) => kgWorkspace.updateKnowledge(id, { status })}
+                    onOwner={(id, owner) => kgWorkspace.updateKnowledge(id, { owner })}
+                    onFindDuplicates={kgWorkspace.findDuplicates}
+                    onMerge={kgWorkspace.mergeKnowledge}
+                    reload={kgWorkspace.refreshKnowledge}
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
                     proposeDisabledReason={promotionTarget.kind === "none" ? "需先挂载一个公共知识库" : undefined}
-                    total={knowledgeTotal[knowledgeKind] ?? 0}
-                    page={knowledgePage[knowledgeKind] ?? 0}
-                    onPage={(p) => loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: p }).catch(reportError)}
-                    onStatusFilter={(s) => {
-                      setKnowledgeStatusFilter(s);
-                      loadKnowledge(knowledgeKind, { status: s, page: 0 }).catch(reportError);
-                    }}
+                    total={knowledgeTotalForKind}
+                    page={knowledgePageForKind}
+                    onPage={kgWorkspace.goToKnowledgePage}
+                    onStatusFilter={kgWorkspace.selectKnowledgeStatus}
                     readOnly={!capabilities.canGovernKnowledge}
                   />
                 )}
@@ -8125,7 +6874,7 @@ export default function Home() {
       )}
 
       {schemaModalOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSchemaModalOpen(false); }}>
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) kgWorkspace.closeSchemas(); }}>
           <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -8133,7 +6882,7 @@ export default function Home() {
                 <h2>图谱 Schema</h2>
                 <p>查看当前笔记本实际采用的类型。所有者可改写继承类型或新增本库类型；管理员可切换到全局基线。</p>
               </div>
-              <button className="icon-button" onClick={() => setSchemaModalOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={kgWorkspace.closeSchemas} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               <SchemaManager
@@ -8142,11 +6891,11 @@ export default function Home() {
                 view={schemaView}
                 canEdit={schemaView === "global" ? capabilities.canManageGlobalSchemas : capabilities.canManageNotebookSchemas}
                 canManageGlobal={capabilities.canManageGlobalSchemas}
-                onView={switchSchemaView}
-                onPatch={(t, p) => patchSchema(t, p).catch(reportError)}
-                onCreate={(p) => createSchema(p).catch(reportError)}
-                onDelete={(t) => deleteSchema(t).catch(reportError)}
-                onInduce={() => induceSchemas().catch(reportError)}
+                onView={kgWorkspace.selectSchemaView}
+                onPatch={kgWorkspace.patchSchema}
+                onCreate={kgWorkspace.createSchema}
+                onDelete={kgWorkspace.deleteSchema}
+                onInduce={kgWorkspace.induceSchemas}
               />
             </div>
             </>)}
@@ -8154,48 +6903,7 @@ export default function Home() {
         </section>
       )}
 
-      {graphOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setGraphOpen(false); }}>
-          <FloatingModalCard storageKey="graph.window" className="utility-modal-card">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>知识关系图</h2>
-                <p>由各知识对象的关系字段（related_concepts / claims / formulas / procedures）解析出的关联，供蕴含分析与冲突检测使用。</p>
-              </div>
-              <button className="icon-button" onClick={() => setGraphOpen(false)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              {graph === null ? (
-                <p className="tool-hint">加载中…</p>
-              ) : graph.edges.length === 0 ? (
-                <p className="tool-hint">暂无关联。当分析/审核的对象在 related_* 字段引用了同一笔记本的其它对象时，这里会出现连线。</p>
-              ) : (
-                <div className="stack">
-                  <div className="tag-row"><span className="tag">节点 {graph.nodes.length}</span><span className="tag">边 {graph.edges.length}</span></div>
-                  {graph.edges.map((edge, index) => {
-                    const from = graph.nodes.find((n) => n.id === edge.from_id);
-                    const to = graph.nodes.find((n) => n.id === edge.to_id);
-                    return (
-                      <div className="checklist-row" key={`edge-${index}`}>
-                        <strong><LatexText text={from?.headline ?? edge.from_id} isFormula={from?.object_type === "formula"} /></strong>
-                        <span className="tag">{relationLabel(edge.relation)}</span>
-                        → <strong><LatexText text={to?.headline ?? edge.to_id} isFormula={to?.object_type === "formula"} /></strong>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            </>)}
-          </FloatingModalCard>
-        </section>
-      )}
-
-      {/* codex #520 R9 P1:本弹窗必须渲染在 graphOpen(知识关系图,同为
-          .utility-modal z-60)**之后**——同层 fixed 兄弟按 DOM 序作画,排在前面
-          会被后开的图谱弹窗整层盖住输入。入口处还会顺手关掉图谱弹窗(双保险),
-          这里的 DOM 序是结构性那一半。 */}
+      {/* Agent Profile remains an independent presentation modal. */}
       {understandingOpen && currentNotebookId && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUnderstandingOpen(false); }}>
           <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
@@ -8240,7 +6948,7 @@ export default function Home() {
               <button
                 type="button"
                 className="sort-button kg-schema-button"
-                onClick={() => setKgAnalysisOpen(true)}
+                onClick={kgWorkspace.openAnalysis}
                 title="查看这个知识库的构成、合并收敛与主题板块分布"
               >
                 <BarChart3 size={16} /> 图谱分析
@@ -8248,7 +6956,7 @@ export default function Home() {
               <button
                 type="button"
                 className="sort-button kg-schema-button"
-                onClick={openSchemas}
+                onClick={kgWorkspace.openSchemas}
                 title="查看当前笔记本采用的知识对象类型与字段"
               >
                 <Database size={16} /> 图谱 Schema
@@ -8261,7 +6969,7 @@ export default function Home() {
                 onOpen={() => {
                   // 关掉可能还开着的知识关系图弹窗(同层 z-60):它若压在本弹窗
                   // 之上,唯一入口点开的就是一个摸不到的面板(codex R9 P1)。
-                  setGraphOpen(false);
+                  kgWorkspace.closeGraph();
                   setUnderstandingOpen(true);
                 }}
               />
@@ -8392,7 +7100,7 @@ export default function Home() {
                   <button
                     aria-pressed={kgSelectedTypes.length === 0}
                     className={kgSelectedTypes.length === 0 ? "active" : ""}
-                    onClick={() => setKgSelectedTypes([])}
+                    onClick={kgWorkspace.clearTypes}
                   >
                     <span className="kg-shape-stack">
                       {kgTypeCounts.slice(0, 4).map((item) => <KgTypeMark key={item.type} type={item.type} />)}
@@ -8416,24 +7124,28 @@ export default function Home() {
               </div>
               <div className="kg-rail-section">
                 <h3>待确认合并 ({pendingMerges.length})</h3>
-                <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
-                  {kgReviewBusy ? "判重中…" : "自动判重"}
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={reviewAllMerges}
-                  disabled={!pendingMerges.length || reviewAllStarting || reviewAllJob?.status === "running"}
-                >
-                  {reviewAllJob?.status === "running"
-                    ? `全部判重中… ${reviewAllJob.done}/${reviewAllJob.total}`
-                    : reviewAllStarting
-                      ? "全部判重中…"
-                      : "全部自动判重"}
-                </button>
+                {!readOnlyWorkspace && (
+                  <>
+                    <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
+                      {kgReviewBusy ? "判重中…" : "自动判重"}
+                    </button>
+                    <button
+                      className="ghost-button"
+                      onClick={reviewAllMerges}
+                      disabled={!pendingMerges.length || reviewAllStarting || reviewAllJob?.status === "running"}
+                    >
+                      {reviewAllJob?.status === "running"
+                        ? `全部判重中… ${reviewAllJob.done}/${reviewAllJob.total}`
+                        : reviewAllStarting
+                          ? "全部判重中…"
+                          : "全部自动判重"}
+                    </button>
+                  </>
+                )}
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
                     <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
-                    <span className="kg-merge-actions">
+                    {!readOnlyWorkspace && <span className="kg-merge-actions">
                       {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
                           与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
                       <button disabled={decidingMerge !== null || kgRefreshBusy} onClick={() => decideMerge(m, true)}>
@@ -8442,7 +7154,7 @@ export default function Home() {
                       <button disabled={decidingMerge !== null || kgRefreshBusy} onClick={() => decideMerge(m, false)}>
                         {decidingMerge?.id === m.id && !decidingMerge.confirm ? "分开中…" : "拒绝"}
                       </button>
-                    </span>
+                    </span>}
                   </div>
                 ))}
               </div>
@@ -8594,7 +7306,7 @@ export default function Home() {
               analysisRunning={kgRefreshBusy}
               analysisBlocked={relinkingKg || buildingKg}
               onAnalyze={confirmGenerateKgAnalysis}
-              onClose={() => setKgAnalysisOpen(false)}
+              onClose={kgWorkspace.closeAnalysis}
             />
           )}
         </section>
@@ -9113,7 +7825,8 @@ function KnowledgeBrowser({
   types,
   statusFilter,
   duplicates,
-  notebookId,
+  contexts,
+  onLoadContext,
   onKind,
   onStatusFilter,
   onStatus,
@@ -9134,7 +7847,8 @@ function KnowledgeBrowser({
   types: KnowledgeTypeCount[];
   statusFilter: string;
   duplicates: DuplicateGroup[] | null;
-  notebookId: string;
+  contexts: Record<string, NodeContext>;
+  onLoadContext: (id: string) => void;
   onKind: (kind: KnowledgeKind) => void;
   onStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
@@ -9153,12 +7867,10 @@ function KnowledgeBrowser({
   onPage: (p: number) => void;
   readOnly?: boolean;
 }) {
-  const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   const [dupBusy, setDupBusy] = useState(false);
   // 正在合并的重复条目 id。onMerge 会连着重拉知识列表、类型统计并**重跑一次查重**,
   // 是这个面板里最慢的一步;不锁住的话在几个重复组上连点会并发排出若干次全量重扫。
   const [mergingId, setMergingId] = useState<string | null>(null);
-  useEffect(() => { setCtx({}); }, [kind]);
   const runFindDuplicates = async () => {
     if (dupBusy) return;
     setDupBusy(true);
@@ -9283,20 +7995,18 @@ function KnowledgeBrowser({
                 )}
               </div>
               <EvidenceLine evidence={item.evidence} />
-              {notebookId && !ctx[item.id] && (
-                <button className="sort-button" onClick={() => {
-                  fetchNodeContext(notebookId, item.id).then((result) => setCtx((previous) => ({ ...previous, [item.id]: result }))).catch(() => { setCtx((m) => ({ ...m, [item.id]: { id: item.id, object_type: item.object_type ?? "", name: "", section_path: "", occurrences: [], definition: null, steps: null } })); });
-                }}>展开原文</button>
+              {!contexts[item.id] && (
+                <button className="sort-button" onClick={() => onLoadContext(item.id)}>展开原文</button>
               )}
-              {ctx[item.id] && (
+              {contexts[item.id] && (
                 <>
-                  {ctx[item.id].object_type === "procedure" && ctx[item.id].steps && (ctx[item.id].steps ?? []).length > 0 && (
-                    <><p className="section-title">流程步骤</p>{(ctx[item.id].steps ?? []).map((s, i) => (
+                  {contexts[item.id].object_type === "procedure" && contexts[item.id].steps && (contexts[item.id].steps ?? []).length > 0 && (
+                    <><p className="section-title">流程步骤</p>{(contexts[item.id].steps ?? []).map((s, i) => (
                       <KgProcedureStepCard step={s} index={i} key={`${s.name}-${i}`} />
                     ))}</>
                   )}
-                  {(ctx[item.id].occurrences ?? []).length > 0 && (
-                    <><p className="section-title">原文出处</p>{(ctx[item.id].occurrences ?? []).slice(0, 5).map((o, i) => (
+                  {(contexts[item.id].occurrences ?? []).length > 0 && (
+                    <><p className="section-title">原文出处</p>{(contexts[item.id].occurrences ?? []).slice(0, 5).map((o, i) => (
                       <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
                     ))}</>
                   )}
