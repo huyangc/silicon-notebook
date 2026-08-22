@@ -268,10 +268,11 @@ export async function runAskStream<TResponse = AskResponse>(
   return finalResponse;
 }
 
-export const cancelAskJob = (nb: string, id: string) =>
+export const cancelAskJob = (nb: string, id: string, signal?: AbortSignal) =>
   requestVoid(`/notebooks/${nb}/ask/jobs/${id}/cancel`, {
     ...options,
     method: "POST",
+    signal,
   });
 
 export const getAskJob = (nb: string, id: string) =>

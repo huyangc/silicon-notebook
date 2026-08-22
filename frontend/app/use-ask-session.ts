@@ -60,6 +60,10 @@ import {
 
 const RECONNECT_POLL_MS = 1500;
 const RECONNECT_CAP_MS = 20 * 60 * 1000;
+// A stalled cancel request must not permanently consume the single-flight key
+// and disable Stop. Timing out only releases retry authority; it never aborts
+// the durable Ask transport unless the server cancellation actually succeeds.
+const ASK_CANCEL_REQUEST_TIMEOUT_MS = 10_000;
 
 type AskPolicy = Readonly<{
   advanced: boolean;
@@ -157,6 +161,25 @@ function sameNotebookIdentity(
     && current.actorId === expected.actorId
     && current.notebookId === expected.notebookId,
   );
+}
+
+async function requestAskCancellation(notebookId: string, jobId: string): Promise<void> {
+  const requestController = new AbortController();
+  let timeout = 0;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timeout = window.setTimeout(() => {
+      requestController.abort();
+      reject(new DOMException("Ask cancellation timed out", "AbortError"));
+    }, ASK_CANCEL_REQUEST_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([
+      cancelAskJob(notebookId, jobId, requestController.signal),
+      timedOut,
+    ]);
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSessionOptions) {
@@ -601,7 +624,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           startedConversationId = durableConversationId;
           if (cancelRequestedControllersRef.current.delete(controller)) {
             try {
-              await cancelAskJob(runOwner.notebookId, jobId);
+              await requestAskCancellation(runOwner.notebookId, jobId);
             } catch {
               if (sameNotebookIdentity(ownerRef.current, runOwner)) {
                 effectsRef.current.notify("未能中断后台任务；任务将继续完成，可稍后重开查看");
@@ -878,7 +901,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const cancelKey = `${activeNotebook}\u0000${jobId}`;
       if (cancelRequestsInFlightRef.current.has(cancelKey)) return;
       cancelRequestsInFlightRef.current.add(cancelKey);
-      cancelAskJob(activeNotebook, jobId)
+      requestAskCancellation(activeNotebook, jobId)
         .then(() => {
           // A durable Ask job is not cancelled merely because its transport is
           // disconnected. Keep reading until the authoritative cancel request
