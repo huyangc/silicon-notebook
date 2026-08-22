@@ -16,6 +16,12 @@ const valid = {
   }],
 };
 
+function withoutField(row, field) {
+  const copy = { ...row };
+  delete copy[field];
+  return copy;
+}
+
 
 test("system extension projection parser accepts only the closed wire shape", () => {
   assert.deepEqual(parseSystemExtensions(valid), {
@@ -32,6 +38,8 @@ test("system extension projection parser accepts only the closed wire shape", ()
   for (const malformed of [
     null,
     { ...valid, api_version: "2" },
+    { ...valid, extensions: [withoutField(valid.extensions[0], "available")] },
+    { ...valid, extensions: [withoutField(valid.extensions[0], "unavailable_reason")] },
     { ...valid, extensions: [{ ...valid.extensions[0], available: "yes" }] },
     { ...valid, extensions: [{ ...valid.extensions[0], unavailable_reason: "raw_error" }] },
     { ...valid, extensions: [{ ...valid.extensions[0], secret_endpoint: "https://secret" }] },
