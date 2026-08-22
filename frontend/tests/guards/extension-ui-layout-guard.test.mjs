@@ -41,14 +41,15 @@ function declarationMap(rule) {
 
 function sidePanelMedia(maxWidth) {
   const matches = [];
-  stylesheet.walkAtRules("media", (atRule) => {
+  for (const atRule of stylesheet.nodes ?? []) {
+    if (atRule.type !== "atrule" || atRule.name !== "media") continue;
     const containsVisibleSelector = (atRule.nodes ?? []).some((node) => (
       node.type === "rule" && node.selectors.includes(visibleSelector)
     ));
     if (atRule.params === `(max-width: ${maxWidth}px)` && containsVisibleSelector) {
       matches.push(atRule);
     }
-  });
+  }
   assert.equal(matches.length, 1, `expected one side-panel media block at ${maxWidth}px`);
   return matches[0];
 }
