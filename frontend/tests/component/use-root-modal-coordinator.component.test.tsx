@@ -29,7 +29,9 @@ function Harness({
         inert={analytics.topmost ? undefined : true}
         aria-hidden={!analytics.topmost}
       >
-        <button data-testid="analytics-action">analytics</button>
+        <span data-testid="analytics-action-owner">
+          <button data-testid="analytics-action">analytics</button>
+        </span>
       </section>
     ) : null}
     {info.open ? <section data-testid="info-surface">info</section> : null}
@@ -312,6 +314,46 @@ test("overlay focus return waits until the underlying primary is no longer inert
   expect(focus).toHaveBeenCalledTimes(1);
   expect(observedInertAncestors).toEqual([null]);
   expect(document.activeElement).toBe(analyticsAction);
+});
+
+test("focus return is dropped when a newer overlay becomes topmost in the same commit", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  const opener = document.createElement("button");
+  document.body.appendChild(opener);
+  opener.focus();
+  act(() => value!.open("analytics", workspace));
+  act(() => value!.open("info", workspace));
+  const focus = vi.spyOn(opener, "focus");
+
+  act(() => {
+    expect(value!.requestClose("info", "button")).toBe(true);
+    expect(value!.open("info", workspace)).not.toBeNull();
+  });
+  expect(value!.view("info").topmost).toBe(true);
+  expect(focus).not.toHaveBeenCalled();
+  opener.remove();
+});
+
+test("focus return is dropped while the opener remains inside any inert ancestor", () => {
+  const screen = render(<Harness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  act(() => value!.open("analytics", workspace));
+  const analyticsAction = screen.getByTestId("analytics-action");
+  analyticsAction.focus();
+  act(() => value!.open("info", workspace));
+  const owner = screen.getByTestId("analytics-action-owner");
+  owner.setAttribute("inert", "");
+  const focus = vi.spyOn(analyticsAction, "focus");
+
+  act(() => {
+    expect(value!.requestClose("info", "button")).toBe(true);
+  });
+  expect(value!.view("analytics").topmost).toBe(true);
+  expect(owner).toHaveAttribute("inert");
+  expect(focus).not.toHaveBeenCalled();
 });
 
 test("the coordinator creates no timer or I/O work", () => {
