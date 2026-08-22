@@ -94,14 +94,19 @@ test("page composes one availability owner and exactly the two canonical outlets
       && ts.isObjectLiteralExpression(entry.initializer),
       `${name} must remain an explicit readonly summary object`,
     );
+    assert.equal(entry.initializer.properties.length, Object.keys(expected).length);
+    assert.ok(
+      entry.initializer.properties.every(ts.isPropertyAssignment),
+      `${name} must not spread or shorthand any wider domain object`,
+    );
     assert.deepEqual(Object.fromEntries(entry.initializer.properties
-      .filter(ts.isPropertyAssignment)
       .map((item) => [item.name.getText(page), item.initializer.getText(page)])), expected);
   }
 
   assert.ok(workspacePermissions, "workspace extension permission snapshot must remain explicit");
+  assert.equal(workspacePermissions.properties.length, 6);
+  assert.ok(workspacePermissions.properties.every(ts.isPropertyAssignment));
   assert.deepEqual(Object.fromEntries(workspacePermissions.properties
-    .filter(ts.isPropertyAssignment)
     .map((entry) => [entry.name.getText(page), entry.initializer.getText(page)])), {
     notebookRead: "Boolean(currentNotebookId && currentNotebook)",
     notebookWrite: "capabilities.canWriteNotebook",
@@ -113,6 +118,11 @@ test("page composes one availability owner and exactly the two canonical outlets
   for (const slot of ["workspace.side_panel", "source.detail_section"]) {
     const context = contexts.get(slot);
     assert.ok(context, `missing semantic context for ${slot}`);
+    assert.deepEqual(context.properties.map((entry) => {
+      if (ts.isPropertyAssignment(entry)) return entry.name.getText(page);
+      if (ts.isShorthandPropertyAssignment(entry)) return `shorthand:${entry.name.getText(page)}`;
+      return `forbidden:${ts.SyntaxKind[entry.kind]}`;
+    }), ["slot", "actor", "notebook", "source", "shorthand:uiMode", "permissions"]);
     const mode = property(context, "uiMode");
     assert.ok(
       mode && ts.isShorthandPropertyAssignment(mode) && mode.name.getText(page) === "uiMode",
