@@ -240,7 +240,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 - **PR-F2**：Ask session hook；
   - 状态：已完成并由 PR #557 交付；Ask 草稿/对话、意图确认、durable stream/reconnect、会话历史/tombstone 与 mutation 已迁入 exact actor+notebook+workspace owner，导航 detach、显式取消 authority、冻结 scope 与请求数/轮询节奏保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F3**：report workspace hook；
-  - 状态：实现中；报告列表/详情、按需首读、互斥轮询、intent/outline mutation、分享/导出与删除 tombstone 正迁入 exact actor+notebook+view owner，等待三路 review、G1 与 CI 闭合；
+  - 状态：已完成并由 PR #558 交付；报告列表/详情、按需首读、互斥轮询、intent/outline mutation、分享/导出与删除 tombstone 已迁入 exact actor+notebook+view owner，零隐藏页 I/O、冻结 scope、live 权限复核、迟到下载隔离与请求数/轮询节奏保持，三路独立 review、原生 Codex review、G1 与 CI 均已闭合；
 - **PR-F4**：KG workspace hook；
 - **PR-F5**：collection state + modal manager；若 diff 无法在一次 review 中完整验证，自动拆成 F5/F6，不为保持 PR 数量强行合并。
 
