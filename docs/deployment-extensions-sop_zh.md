@@ -141,6 +141,8 @@ class CorpSearchBundle:
 
 密钥按环境变量名引用（镜像 `model-services.toml` 的 `api_key_env`），不要内嵌。core 从不打印任何 settings 值，但配置文件里的明文密钥离一次 `cat` 进聊天记录只差一步。
 
+*带 alias 的字段只认 alias。* 写 `api_key: str = Field("", alias="token")`，可接受的键就是 `token` 而**不是** `api_key`。这是照着 pydantic 自己的行为来的：默认情况下它只按 alias 给这个字段赋值、直接忽略字段名，所以 TOML 里写 `api_key` 会被静默丢掉，你的插件拿到的是字段默认值。core 因此把它报成 `plugin_settings_unknown_key`——这正是「自己算可接受键集合」要防的那类失败。想两种写法都收，就在模型上显式打开：`model_config = ConfigDict(populate_by_name=True)`（pydantic 2.11+ 也叫 `validate_by_name`，设任意一个两个都会开），core 跟随。
+
 *已登记的限制：* pydantic 的 `AliasChoices`/`AliasPath` 形式的 alias **不**会被收进可接受键集合。只匹配这类 alias 的 settings 键会被报成 `plugin_settings_unknown_key` 而不是被接受——方向是 fail-closed，刻意如此。
 
 ### 3.3 capability（可选）
@@ -244,7 +246,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 - **按端口授权。** `url_sources.import_urls` 对**请求自己的那个用户**核对 `sources:write`——用户从 core 的请求上下文解析，绝不从你传进去的任何东西解析——不通过就用与 core 端点相同的 404 拒绝（不泄露存在性）。过了这一关，它就是 core 自己那个 URL 导入函数本人：同样的容量记账、管理员豁免、未配置解析器映射与后台解析调度。
 - **拒绝阻塞事件循环。** `url_sources.import_urls` 是阻塞的——数据库写入，外加每个 URL 一次串行远端探测。`def` handler 本来就跑在 FastAPI 的线程池里，直接调它即可；`async def` handler 跑在事件循环线程上，必须 `await url_sources.import_urls_async(...)`，它把同一份活挪进线程池。用反了会在运行期被**拒绝**而不只是被劝阻：`import_urls` 发现自己这条线程上有正在运行的事件循环就抛 `RuntimeError`，且发生在动任何东西之前，文案直接点名该 await 哪个方法。因此不会导入一半；失败是一个普通 `500` 加 traceback，而不是面向用户的文案——这是插件自己的代码缺陷，不是终端用户做错了什么。
 - **对 `{notebook_id}` 路由的结构性守卫。** 路径里含这个字面子串的路由必须跑 core 自己的一道门（任一能力守卫，或读权门）。这是**纵深防御，不是边界**：把参数改名 `{nb}`、或从请求体里取 id，这道检查就看不见了——而端口照样拒绝。拿掉端口那道检查会开一个洞，拿掉这道不会。
-- **401 翻译。** 你的 handler **抛出**（`fastapi.HTTPException` 或 `starlette.exceptions.HTTPException` 皆可——前者是后者的子类，两者被接住的方式完全一样）**或返回**的 401 都会变成 `424`（把上游服务自己的 401 原样搬到你自己构造的 `Response`/`JSONResponse` 上再返回是很正常的写法，不是抛出，同样会被接住），带 core 自己的文案，并记一条 `plugin_upstream_unauthorized` 事件。在 core 里 401 对浏览器只有一个含义——清 token 并重载——所以某个插件路由里一张过期的上游凭据，否则会把用户从整个产品里登出。core 自己 router 级会话门产生的真 401 仍然原样是 401。
+- **401 翻译。** 你的 handler **抛出**（`fastapi.HTTPException` 或 `starlette.exceptions.HTTPException` 皆可——前者是后者的子类，两者被接住的方式完全一样）**或返回**的 401 都会变成 `424`（把上游服务自己的 401 原样搬到你自己构造的 `Response`/`JSONResponse` 上再返回是很正常的写法，不是抛出，同样会被接住），带 core 自己的文案，并记一条 `plugin_upstream_unauthorized` 事件。在 core 里 401 对浏览器只有一个含义——清 token 并重载——所以某个插件路由里一张过期的上游凭据，否则会把用户从整个产品里登出。**覆盖面是 handler 与你自己的 `Depends(...)` 依赖，两者一视同仁**，嵌套多少层都算：把上游检查写进依赖至少和写进 handler 一样常见，而 FastAPI 在调 endpoint **之前**就把依赖解完了，所以依赖里抛的 401 否则会原样漏出去。依赖只覆盖「抛出」那一半——依赖的返回值是作为参数注入的，永远不会变成响应。**core 自己的依赖被排除在外**（按对象身份**加**定义所在模块双判），所以 core 会话门产生的真 401 仍然原样是 401、仍然把用户登出——那正是它存在的意义。生成器（`yield`）依赖与 security scheme 不动。
 - **事件脱敏。** `emit_event` 只收四个字段——`event`、`outcome`、`count`、`elapsed_ms`——出现别的键就**整条**丢弃。`kind` 与 `plugin_id` 由 core 补。它永远不会反向抛回你的 handler。
 
 *你不能：* 在 router 上挂 startup/shutdown 钩子；加非 `APIRoute` 的路由（挂载子应用、裸 websocket、裸 Starlette route）；声明第二个 router；返回不是 `APIRouter` 的东西。每一条都是启动失败，各有自己的码（见第 9 节）。
@@ -359,7 +361,7 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 
 *core 替你做的：* 注入一份按**本条 contribution 的** `pluginId` 绑定的 `actions.api`，因此每次请求都限定在 `/api/extensions/<plugin id>/` 之下、你设的 `authorization`/`cookie` 头会被剥掉、`tag`/`auth`/`unauthorized` 由 core 写死。`ExtensionModal` 白送系统弹窗外壳、标题栏拖动，以及一格按插件分段的窗口位置记忆。
 
-*弹窗归 core 管。* 你手上没有一个 `open` 布尔：`actions.openDialog()` 只是向 core 的 root-dialog 协调器**申请**那唯一一格通用 `extension` slot，`context.dialog` 是答复，`ExtensionModal` 在 `context.dialog.open` 为真之前什么都不渲染。另一个 primary 弹窗打开、用户切库、登出，core 都会替你关掉它；`actions.closeDialog()` 是**你**关它的唯一途径。两条要知道的后果：同一时刻只有一个插件弹窗可见（那一格按 **contribution** 认领，所以同一个插件的两条 contribution 不会一起开），而被更高层盖住的弹窗会变成 `inert`/`aria-hidden`，不会在背后继续可聚焦。自己留一个 `useState` 只会与这一切分叉——它关不掉一个协调器已经收回去的弹窗。
+*弹窗归 core 管。* 你手上没有一个 `open` 布尔：`actions.openDialog()` 只是向 core 的 root-dialog 协调器**申请**那唯一一格通用 `extension` slot，`context.dialog` 是答复，`ExtensionModal` 在 `context.dialog.open` 为真之前什么都不渲染。另一个 primary 弹窗打开、用户切库、登出，core 都会替你关掉它；`actions.closeDialog()` 是**你**关它的唯一途径。两条要知道的后果：同一时刻只有一个插件弹窗可见（那一格按 **contribution** 认领，所以同一个插件的两条 contribution 不会一起开），而被更高层盖住的弹窗会变成 `inert`/`aria-hidden`，不会在背后继续可聚焦。**另一条 contribution 调 `openDialog()` 会先关掉当前持有者的弹窗，再把那一格重新登记给它**——焦点归还目标也随之换成新持有者自己的触发按钮，而不是旧持有者的（codex #578 R7 P2）。自己留一个 `useState` 只会与这一切分叉——它关不掉一个协调器已经收回去的弹窗。
 
 *你不能：*
 
@@ -642,7 +644,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 | 信号 | 含义 |
 | --- | --- |
-| `plugin_upstream_unauthorized` 事件，客户端看到 `424` | 你的 handler 抛出了（FastAPI 或 Starlette 的）`HTTPException` 或返回了 401 响应。core 翻译了它，免得浏览器把用户登出。想要自己的措辞，就自己翻译上游 401。 |
+| `plugin_upstream_unauthorized` 事件，客户端看到 `424` | 你的 handler **或你自己的某个依赖**抛出了（FastAPI 或 Starlette 的）`HTTPException`，或 handler 返回了 401 响应。core 翻译了它，免得浏览器把用户登出。想要自己的措辞，就自己翻译上游 401。 |
 | `url_sources.import_urls` / `import_urls_async` 返回 404 | 调用用户对该笔记本没有 `sources:write`——或者该笔记本不存在。两者刻意不可区分。 |
 | `RuntimeError: url_sources.import_urls must not be called from an async handler…`，客户端看到 `500` | 某个 `async def` handler 调了阻塞版本，那会让进程里其余所有在飞请求跟着卡住。改成 `await url_sources.import_urls_async(...)`；同步 `def` handler 仍然调 `import_urls`。这一次什么都没有导入。 |
 | 你的事件在日志里静默消失 | 载荷带了 `event`/`outcome`/`count`/`elapsed_ms` 之外的字段、稳定码超过 64 字符或不匹配 `^[a-z][a-z0-9_]{0,63}$`、或 `count`/`elapsed_ms` 不是 `0..1e9` 区间的整数（`True` 不算 `1`）。整条记录被丢弃，而不是写一半。 |
