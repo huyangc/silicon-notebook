@@ -4629,9 +4629,9 @@ export default function Home() {
     },
     // 只用 sourceLibrary 自己的具名 command，不顺带 loadNotebookCollection /
     // revalidateAskAvailability / reloadCheckup——一个插件新增来源后 parse_status
-    // 未到 extracted 时，use-source-library.ts:582 的 hasPending 轮询会接手，并在
-    // reachedExtracted（634-650）里跑那三个刷新；这里再塞一遍会让插件一次动作
-    // 变成四个请求，还与 source-poll-refresh-guard 钉的既有节奏重复。
+    // 未到 extracted 时，use-source-library.ts 里由 `hasPending` 门控的解析轮询
+    // effect 会接手，并在它的 `reachedExtracted` 分支里跑那三个刷新；这里再塞一遍
+    // 会让插件一次动作变成四个请求，还与 source-poll-refresh-guard 钉的既有节奏重复。
     () => sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest()),
   );
   // 内容管理入口的**唯一**判据(群组知识共享 P2)。此前这些入口写的是 `!isReader`,

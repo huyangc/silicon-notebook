@@ -265,6 +265,17 @@ export async function syncUiPlugins({ frontendDir, roots }) // { packages, rows 
 3. `CLAUDE.md:339`「Workspace UI registry」bullet 追加一段（构建期注入链、`registry.ts` 保持 `.ts`、插件 import 白名单与 `api.ts` 禁令、不写 CSS/不内联颜色/不读 `error.message`、`refreshSources` 同为 exact-owner 窄 action、仍禁远程 JS 与运行时注册）。
 4. `AGENTS.md:81` 同上英文。
 5. 插件作者文档另写明**验收口径**：基座的 `npm run test` 只是**公网仓库（零插件）**的验收，装了私有插件的树跑它必然红——`tests/component/extension-ui-host.component.test.tsx` 钉「零插件时合并 registry 与内建目录逐字相同、长度为 1」，那正是拆 registry 模块唯一要证明的性质，不得为了容纳插件把它放宽成 `>= 1`。私有部署的验收是：`frontend/.local/ui-extension-contract.json` 与后端 `GET /api/system/extensions` 投影对账，加 `npm run build`（它做全量类型检查，覆盖 `features/ext-*/`）。
+6. 插件作者契约另补三条（T3/T4 评审提出，实现已就位、文档待写）：
+   - **插件路由除真正的会话失效外绝不返回 401**。端口固定 `unauthorized: "clear-and-reload"`（插件改不了，见 `api.ts::coreOptions`），
+     所以插件后端把上游的 401 原样透传回来，会让核心 api 客户端清掉用户 token 并整页刷新——用户莫名其妙被登出，
+     而失效的其实是插件自己那个第三方凭据。上游 401 一律翻成 `502`/`424` 再返回。
+   - **无正文响应用 `requestVoid`**。`requestJson` 会对响应体调 `.json()`，`204`/空体当场抛解析错误；那不是插件写错了参数，
+     是端口三个动词各自对应一种响应形状。
+   - **`refreshSources()` 只在自己的动作完成之后调一次**。它重触发的是宿主 `use-source-library.ts` 的 `loadSourcesPage`，
+     该 command 用 `pageRequestRef` 单调请求号判「谁是当前请求」——插件多调一次就会把用户**正在飞**的翻页/搜索请求作废掉
+     （旧响应回来时不是当前请求，直接丢弃）。它还会 reject（见 `contracts.ts` 的 doc），插件必须 catch 并用
+     `api.userMessage(error, fallback)` 出文案，不得读 `error.message`。
+
 验证：`python3 ../scripts/check_ui_vocabulary.py`；中英逐条对应。
 
 ## 3. `page.tsx` 接触面

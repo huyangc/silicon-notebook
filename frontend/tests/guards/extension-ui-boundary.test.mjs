@@ -593,6 +593,28 @@ test("extension owner is wired into authentication and workspace transitions", a
   // （`loadSourcesPage(currentPageRequest())`）——不是页面级重新派生的
   // `loadSourcesPage(currentNotebookId ?? "", {})` 之类的形态，那会绕开
   // `currentPageRequest()` 保存的分页/搜索状态。
+  //
+  // 语义判据排在下面那条文本 deepEqual **之前**，因为它才是这条不变量的内容：箭头
+  // 体里只有那**一条**调用链，没有第二个调用。它替下了此前两条全局计数断言
+  // （page.tsx 的 `useEffect` 总数 == 29、`sourceLibrary.loadSourcesPage` 调用点
+  // == 2）——那两条对 page.tsx 任何无关改动都会误报，把一条关于第 4 实参的约束伪装
+  // 成了对整个文件的冻结。"不新增 effect / 不新增领域 I/O" 这半条由本断言直接兑现：
+  // 箭头体里只允许出现这两个调用目标，`useEffect(...)`、`reloadCheckup()`、
+  // `loadNotebookCollection()` 一律在此报红。
+  const refreshArgument = actions[0].arguments[3];
+  assert.ok(refreshArgument, "createOwnedWorkspaceExtensionActions must receive a 4th argument");
+  const refreshCallTargets = [];
+  function collectRefreshCalls(node) {
+    if (ts.isCallExpression(node)) refreshCallTargets.push(node.expression.getText(page));
+    ts.forEachChild(node, collectRefreshCalls);
+  }
+  collectRefreshCalls(refreshArgument);
+  assert.deepEqual(
+    refreshCallTargets.sort(),
+    ["sourceLibrary.currentPageRequest", "sourceLibrary.loadSourcesPage"],
+    "the refreshSources argument must be exactly one call chain:"
+    + " sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest()) and nothing else",
+  );
   assert.deepEqual(actions[0].arguments.map((argument) => argument.getText(page)), [
     "workspaceExtensions.owner",
     "workspaceExtensions.owns",
@@ -604,28 +626,43 @@ test("extension owner is wired into authentication and workspace transitions", a
     assert.equal(outlet.bindings.ownerKey, "workspaceExtensions.ownerKey");
     assert.equal(outlet.bindings.actions, "workspaceExtensionActions");
   }
-  // `refreshSources` 必须只是 sourceLibrary 已有的 command 重触发一次，不是新增的
-  // 领域 I/O：Home 作用域下（含它自己内部那个同名的本地 loadSourcesPage 包装函数）
-  // 对 `sourceLibrary.loadSourcesPage` 的调用点数量必须恰好比接入前多 1。
-  const sourceLibraryLoadCalls = scopedCalls(page)
-    .filter((entry) => (
-      entry.target === "sourceLibrary.loadSourcesPage" && entry.scope.startsWith("<module>.Home")
-    ))
-    .reduce((sum, entry) => sum + entry.count, 0);
-  assert.equal(
-    sourceLibraryLoadCalls,
-    2,
-    "refreshSources must add exactly one new sourceLibrary.loadSourcesPage call site under Home",
-  );
-  // `refreshSources` 不得新增 effect——它是点击驱动的窄 command，不是又一路轮询/
-  // 订阅。基线（接入前）为 29，逐字钉住而不是「至少不多」。
-  let useEffectCallCount = 0;
-  function countUseEffect(node) {
-    if (ts.isCallExpression(node) && node.expression.getText(page) === "useEffect") {
-      useEffectCallCount += 1;
+});
+
+
+test("the api port and the builtin registry validate plugin ids with the identical pattern", async () => {
+  // `api.ts` 的 `PLUGIN_ID` 与 `registry.ts` 的 `STABLE_ID` 是同一条判据的两处拼写：
+  // 端口拿来限定路径前缀的那个 id，就是 registry 登记时校验过的那个 id。两边漂移不会
+  // 报任何错，只会安静地打开或关上一道门——放宽 registry 而不放宽端口，一条合法登记的
+  // contribution 每次请求都同步抛 TypeError；反过来放宽端口，端口开始接受 registry
+  // 根本发不出来的 id 形状，路径限定的论证（"前缀就是登记时那个 id"）当场失去前提。
+  //
+  // 判据走 AST 而不是读裸文本：拿的是那个变量的初始化器节点、并要求它是正则字面量，
+  // 所以改名/挪位置/加注释都不报红，改**取值**才报红。
+  const modules = await appSourceModules();
+  function regexLiteral(modulePath, name) {
+    const entry = modules.find((row) => row.path === modulePath);
+    assert.ok(entry, `${modulePath} not found（路径约定变了？守卫失效）`);
+    let found;
+    function visit(node) {
+      if (
+        ts.isVariableDeclaration(node)
+        && node.name.getText(entry.module) === name
+        && node.initializer
+      ) found = node.initializer;
+      ts.forEachChild(node, visit);
     }
-    ts.forEachChild(node, countUseEffect);
+    visit(entry.module);
+    assert.ok(found, `${modulePath} 里没有 ${name}（改名或删除？守卫失效）`);
+    assert.equal(
+      found.kind,
+      ts.SyntaxKind.RegularExpressionLiteral,
+      `${modulePath} 的 ${name} 必须仍是一条正则字面量`,
+    );
+    return found.getText(entry.module);
   }
-  countUseEffect(page);
-  assert.equal(useEffectCallCount, 29, "page.tsx must not gain a new useEffect for refreshSources");
+  assert.equal(
+    regexLiteral("features/extension-sdk/api.ts", "PLUGIN_ID"),
+    regexLiteral("features/extension-sdk/registry.ts", "STABLE_ID"),
+    "the api port's plugin id pattern must stay byte-identical to the registry's stable id pattern",
+  );
 });
