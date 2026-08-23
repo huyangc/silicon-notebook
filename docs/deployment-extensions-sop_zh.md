@@ -621,6 +621,8 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | `plugin_route_lifecycle_denied` | router 上挂了 `on_startup`/`on_shutdown` | 那会跑在应用 lifespan 里，紧挨着迁移与 warm-up，既没预算也没有失败隔离。惰性做。 |
 | `plugin_route_unsupported_kind` | 出现了非 `APIRoute` 的路由 | 挂载的子应用、裸 websocket、裸 Starlette route 都逃过依赖检查，它们的笔记本门无法被证明。 |
 | `plugin_route_missing_notebook_gate` | 路径里含 `{notebook_id}` 却没跑 core 的任何一道门 | 加 `Depends(context.require_notebook_read)` 或 `Depends(context.require_notebook_capability("<能力>"))`。把 core 的门包在自己的依赖里同样算数——扫描是传递的。 |
+| `plugin_router_factory_failed` | `spec.factory(context)` 抛出了除 `PluginRouteMountError`/`KeyboardInterrupt`/`SystemExit` 之外的任何东西 | 只显示异常类名——工厂调用时手里握着插件自己已校验的 settings，不消毒就可能把一个密钥泄进启动 traceback。本地复现。 |
+| `plugin_router_validation_failed` | 上面这几条结构性检查抛出了除它们自己主动抛的 `PluginRouteMountError` 之外的东西——例如某个 `APIRouter` 子类的 `on_startup`/`on_shutdown`/`routes` 读取时抛异常 | 只显示异常类名，理由同 `plugin_router_factory_failed`。别把这几个属性覆写成任何可能失败的东西。 |
 
 ### 运行期
 

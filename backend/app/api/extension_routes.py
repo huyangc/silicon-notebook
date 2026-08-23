@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import wraps
+import logging
 import re
 from typing import Any
 
@@ -70,15 +71,34 @@ from app.domain.extension_http import (
 class PluginRouteMountError(RuntimeError):
     """A plugin router was refused; ``create_app()`` — and the process — stops.
 
-    The message is ``"{plugin_id}: {reason_code}"`` and nothing else: no
-    module path, no route handler name, no settings value. An operator gets
-    the plugin to disable and a stable code to look up.
+    The message is ``"{plugin_id}: {reason_code}"``, optionally followed by
+    ``" ({exception_type})"`` — the offending exception's *class name*, never
+    ``str(exc)`` — and nothing else: no module path, no route handler name, no
+    settings value, no traceback. An operator gets the plugin to disable, a
+    stable code to look up, and (when the reason names a caught exception) the
+    class it was. This mirrors ``ExtensionDiscoveryError`` in
+    ``app.extensions.discovery`` on purpose — same shape, same redaction.
     """
 
-    def __init__(self, plugin_id: str, reason: str) -> None:
+    def __init__(
+        self, plugin_id: str, reason: str, *, exception_type: str = ""
+    ) -> None:
         self.plugin_id = plugin_id
         self.reason = reason
-        super().__init__(f"{plugin_id}: {reason}")
+        self.exception_type = exception_type
+        message = f"{plugin_id}: {reason}"
+        if exception_type:
+            message = f"{message} ({exception_type})"
+        super().__init__(message)
+
+
+# Deliberately the same logger *name* ``app.extensions.discovery`` logs
+# rejections under (``DISCOVERY_LOGGER`` there), gotten by name rather than by
+# importing that module — this file may not import ``app.extensions.*`` (see
+# the module docstring). One logger name means an operator filters exactly one
+# thing for every deployment-plugin rejection, whether it happened during
+# discovery or here at mount time.
+_PLUGIN_ROUTE_LOGGER = logging.getLogger("silicon_notebook.extensions")
 
 
 async def plugin_actor(user=Depends(get_current_user)) -> PluginActor:
@@ -437,6 +457,91 @@ def _wrap_handler_unauthorized(
     dependant.call = call
 
 
+def _call_plugin_router_factory(
+    spec: PluginRouterSpec, context: PluginRouteContext
+) -> Any:
+    """Call ``spec.factory(context)``, sanitizing whatever it raises.
+
+    A plugin's ``build_router`` is arbitrary code handed the plugin's own
+    validated settings — see ``_UrlSourceImportAdapter`` and
+    :class:`PluginRouteContext` above for what that settings object may hold,
+    up to and including secrets a deployment operator configured for it. If
+    the factory raises with that value interpolated into its message (a
+    perfectly ordinary thing to do — "upstream refused {token}" — from the
+    factory's own point of view), letting the exception propagate untouched
+    out of ``create_app()`` would put that secret in a startup traceback: on
+    stderr, in a process supervisor's log, potentially in an error-tracking
+    service. So every exception this call can raise is caught here and
+    replaced with :class:`PluginRouteMountError` carrying only the plugin id,
+    a stable reason code, and the exception's *class name* — never
+    ``str(exc)``, never the traceback (``from None`` clears ``__cause__`` and
+    sets ``__suppress_context__`` so nothing upstream re-attaches it).
+
+    Two things are deliberately let through untouched:
+
+    * a :class:`PluginRouteMountError` the factory itself raises (or a
+      preceding call already wrapped) — re-wrapping it would double-encode
+      the reason and lose the original one;
+    * ``KeyboardInterrupt``/``SystemExit`` — an operator's Ctrl-C or a
+      ``sys.exit()`` reached from inside factory code must still stop the
+      process, exactly as ``app.extensions.discovery`` treats them.
+    """
+
+    try:
+        return spec.factory(context)
+    except PluginRouteMountError:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        _PLUGIN_ROUTE_LOGGER.error(
+            "plugin router factory failed: plugin=%s reason=%s exc=%s",
+            spec.plugin_id,
+            "plugin_router_factory_failed",
+            type(exc).__name__,
+        )
+        raise PluginRouteMountError(
+            spec.plugin_id,
+            "plugin_router_factory_failed",
+            exception_type=type(exc).__name__,
+        ) from None
+
+
+def _run_plugin_router_validation(plugin_id: str, router: APIRouter) -> None:
+    """Run :func:`_validate_plugin_router`, sanitizing whatever it raises.
+
+    ``_validate_plugin_router`` itself only ever raises
+    :class:`PluginRouteMountError` for a condition it checks for on purpose —
+    that passes through unchanged. What it does *not* control is the shape of
+    ``router``: a plugin factory can return an ``APIRouter`` subclass whose
+    ``on_startup``/``on_shutdown``/``routes`` are overridden properties, and a
+    property that raises on read would otherwise blow up validation with a
+    raw, unsanitized exception before this module has had a chance to look at
+    it — the same secret-leak risk the factory call above guards against, one
+    step later. ``KeyboardInterrupt``/``SystemExit`` still pass through
+    untouched.
+    """
+
+    try:
+        _validate_plugin_router(plugin_id, router)
+    except PluginRouteMountError:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        _PLUGIN_ROUTE_LOGGER.error(
+            "plugin router validation failed: plugin=%s reason=%s exc=%s",
+            plugin_id,
+            "plugin_router_validation_failed",
+            type(exc).__name__,
+        )
+        raise PluginRouteMountError(
+            plugin_id,
+            "plugin_router_validation_failed",
+            exception_type=type(exc).__name__,
+        ) from None
+
+
 def mount_extension_routers(
     app: FastAPI, specs: Sequence[PluginRouterSpec]
 ) -> None:
@@ -468,10 +573,10 @@ def mount_extension_routers(
             url_sources=_UrlSourceImportAdapter(),
             emit_event=emit,
         )
-        router = spec.factory(context)
+        router = _call_plugin_router_factory(spec, context)
         if not isinstance(router, APIRouter):
             raise PluginRouteMountError(spec.plugin_id, "plugin_router_not_a_router")
-        _validate_plugin_router(spec.plugin_id, router)
+        _run_plugin_router_validation(spec.plugin_id, router)
         # ``include_router`` copies each APIRoute into a fresh instance with its
         # own freshly solved dependant, so the translation has to be applied to
         # what landed on the app — not to the plugin's own router objects.

@@ -14,6 +14,7 @@ See docs/superpowers/plans/2026-08-23-deployment-extensions-backend.md §3.3 and
 from __future__ import annotations
 
 import dataclasses
+import logging
 import sys
 import textwrap
 
@@ -24,6 +25,7 @@ from fastapi.testclient import TestClient
 from app.api.extension_routes import (
     PluginRouteMountError,
     _event_emitter,
+    _run_plugin_router_validation,
     mount_extension_routers,
 )
 from app.domain.extension_http import (
@@ -310,6 +312,90 @@ def build_router(context):
     return router
 """
 
+# The factory raises the mount seam's own exception directly — the way a
+# factory might if it wants to refuse mounting on its own terms (an unmet
+# runtime precondition, say). ``_call_plugin_router_factory`` must let this
+# through unchanged rather than re-wrapping it: double-wrapping would replace
+# the factory's own reason code with a generic one and lose it.
+_FACTORY_RAISES_MOUNT_ERROR_SRC = """
+from app.api.extension_routes import PluginRouteMountError
+
+
+def build_router(context):
+    raise PluginRouteMountError(PLUGIN_ID, "plugin_custom_denied")
+"""
+
+# ``SystemExit`` (like ``KeyboardInterrupt``) must reach the interpreter
+# untouched — an operator's Ctrl-C or a ``sys.exit()`` reached from inside
+# factory code has to still stop the process, not turn into an HTTP-shaped
+# ``PluginRouteMountError``.
+_FACTORY_RAISES_SYSTEM_EXIT_SRC = """
+def build_router(context):
+    raise SystemExit(1)
+"""
+
+# A settings-carrying plugin whose factory leaks its own secret into an
+# exception message — exactly the shape ``_call_plugin_router_factory`` exists
+# to sanitize. Deliberately *not* built through ``_plugin_body``: that helper's
+# fixed ``Bundle`` never binds ``settings_model``/``configure``, so this is
+# its own full bundle, mirroring
+# ``test_extension_discovery._REGISTER_RAISES_BODY``.
+_FACTORY_RAISES_WITH_SETTINGS_BODY = """
+from dataclasses import dataclass
+
+from pydantic import BaseModel
+
+from app.extension_sdk import (
+    ContributionDeclaration,
+    ContributionKind,
+    EXTENSION_API_VERSION,
+    ExtensionContribution,
+    ExtensionManifest,
+)
+from app.extension_sdk.http import PLUGIN_HTTP_ROUTER_POINT
+
+
+class SampleSettings(BaseModel):
+    token: str = ""
+
+
+_DECLARATION = ContributionDeclaration(
+    id="corp.sample.router",
+    point=PLUGIN_HTTP_ROUTER_POINT,
+    kind=ContributionKind.CONTRIBUTOR,
+)
+
+
+def build_router(context):
+    raise RuntimeError(f"upstream refused {context.settings.token}")
+
+
+@dataclass
+class Bundle:
+    manifest: ExtensionManifest
+    settings_model: object = SampleSettings
+    settings: object = None
+
+    def configure(self, settings) -> None:
+        self.settings = settings
+
+    def register(self, registrar) -> None:
+        registrar.add_contributor(ExtensionContribution(
+            declaration=_DECLARATION,
+            implementation=build_router,
+        ))
+
+
+bundle = Bundle(ExtensionManifest(
+    id=PLUGIN_ID,
+    version="0.1.0",
+    api_version=EXTENSION_API_VERSION,
+    display_name="Sample deployment plugin",
+    trust="deployment",
+    contributions=(_DECLARATION,),
+))
+"""
+
 
 # --------------------------------------------------------------------------
 # Application helpers
@@ -324,6 +410,26 @@ def _clear_caches() -> None:
     get_settings.cache_clear()
     default_extension_runtime.cache_clear()
     deps.repository.cache_clear()
+
+
+def _set_test_env(tmp_path, monkeypatch, *, config_path: str, env=None) -> None:
+    """The environment every test app in this module boots against.
+
+    Split out of ``_configure`` so ``_configure_full_body`` (a plugin body
+    written whole, not through the ``_plugin_body`` scaffold) can share it
+    without also inheriting ``_plugin_body``'s fixed, settings-less ``Bundle``.
+    """
+
+    monkeypatch.setenv("EXTENSIONS_CONFIG", config_path)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    _clear_caches()
 
 
 def _configure(tmp_path, monkeypatch, *, factory_src: str, env=None, extra=()) -> None:
@@ -344,16 +450,28 @@ def _configure(tmp_path, monkeypatch, *, factory_src: str, env=None, extra=()) -
             body=_plugin_body(extra_src, declaration_id=f"{plugin_id}.router"),
         )
         entries.append(_entry(extra_module, plugin_id=plugin_id))
-    monkeypatch.setenv("EXTENSIONS_CONFIG", _write_config(tmp_path, "".join(entries)))
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
-    for key, value in (env or {}).items():
-        monkeypatch.setenv(key, value)
-    _clear_caches()
+    _set_test_env(
+        tmp_path,
+        monkeypatch,
+        config_path=_write_config(tmp_path, "".join(entries)),
+        env=env,
+    )
+
+
+def _configure_full_body(
+    tmp_path, monkeypatch, *, body: str, config_extra: str = ""
+) -> None:
+    """Like ``_configure``, but ``body`` is a complete plugin module verbatim.
+
+    For plugins that need something the ``_plugin_body`` scaffold's fixed,
+    settings-less ``Bundle`` cannot express — here, a ``settings_model`` bound
+    through ``configure()`` (see ``test_extension_discovery._REGISTER_RAISES_BODY``
+    for the same pattern one layer down, at registration rather than mount).
+    """
+
+    module = _write_plugin_package(tmp_path, body=body)
+    config_path = _write_config(tmp_path, _entry(module, extra=config_extra))
+    _set_test_env(tmp_path, monkeypatch, config_path=config_path)
 
 
 def _create_app():
@@ -1237,6 +1355,113 @@ def test_factory_returning_a_non_router_is_rejected(
     with pytest.raises(PluginRouteMountError) as excinfo:
         _create_app()
     assert excinfo.value.reason == "plugin_router_not_a_router"
+
+
+# --------------------------------------------------------------------------
+# Factory (and validation) failures are sanitized, not raised verbatim
+# (codex #578 R1 P1)
+# --------------------------------------------------------------------------
+
+
+def test_factory_exception_is_sanitized_and_logged(
+    tmp_path, monkeypatch, caplog, frozen_runtime_reset
+):
+    """A factory that leaks a settings secret into its own exception message.
+
+    Mirrors ``test_extension_discovery.test_deployment_register_failure_is_sanitized_and_logged``
+    one seam later: the same settings value, the same shape of failure, at
+    router-factory time instead of registration time.
+    """
+
+    _configure_full_body(
+        tmp_path,
+        monkeypatch,
+        body=_FACTORY_RAISES_WITH_SETTINGS_BODY,
+        config_extra='[extensions."corp.sample".settings]\ntoken = "TOPSECRET"\n',
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(PluginRouteMountError) as excinfo:
+            _create_app()
+
+    error = excinfo.value
+    assert error.reason == "plugin_router_factory_failed"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == _PLUGIN_ID
+    message = str(error)
+    assert "plugin_router_factory_failed" in message
+    assert "RuntimeError" in message
+    assert "TOPSECRET" not in message
+    assert "TOPSECRET" not in repr(error)
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert "TOPSECRET" not in caplog.text
+    assert "reason=plugin_router_factory_failed" in caplog.text
+    assert "exc=RuntimeError" in caplog.text
+
+
+def test_factory_raising_the_mount_error_itself_passes_through_unwrapped(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Re-wrapping would replace the factory's own reason with a generic one."""
+
+    _configure(tmp_path, monkeypatch, factory_src=_FACTORY_RAISES_MOUNT_ERROR_SRC)
+    with pytest.raises(PluginRouteMountError) as excinfo:
+        _create_app()
+    assert excinfo.value.reason == "plugin_custom_denied"
+    assert excinfo.value.exception_type == ""
+
+
+def test_factory_raising_system_exit_is_not_caught(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """``SystemExit`` must reach the interpreter, not become an HTTP failure."""
+
+    _configure(tmp_path, monkeypatch, factory_src=_FACTORY_RAISES_SYSTEM_EXIT_SRC)
+    with pytest.raises(SystemExit):
+        _create_app()
+
+
+def test_router_validation_exception_is_sanitized_and_logged(caplog):
+    """A router property that raises is sanitized the same way a factory is.
+
+    Exercised directly against ``_run_plugin_router_validation`` — a duck-typed
+    stand-in for a plugin's ``APIRouter`` subclass is enough here, and it keeps
+    this test independent of Starlette's actual attribute shapes for
+    ``on_startup``/``on_shutdown``/``routes``.
+    """
+
+    class _ExplodingRouter:
+        on_startup: tuple = ()
+        on_shutdown: tuple = ()
+
+        @property
+        def routes(self):
+            raise ValueError("router.routes exploded")
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(PluginRouteMountError) as excinfo:
+            _run_plugin_router_validation(_PLUGIN_ID, _ExplodingRouter())
+
+    error = excinfo.value
+    assert error.reason == "plugin_router_validation_failed"
+    assert error.exception_type == "ValueError"
+    assert error.plugin_id == _PLUGIN_ID
+    assert "router.routes exploded" not in str(error)
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert "router.routes exploded" not in caplog.text
+    assert "reason=plugin_router_validation_failed" in caplog.text
+    assert "exc=ValueError" in caplog.text
+
+
+def test_router_validations_own_mount_error_passes_through_unwrapped():
+    """``_validate_plugin_router``'s own refusals must not be re-wrapped."""
+
+    with pytest.raises(PluginRouteMountError) as excinfo:
+        _run_plugin_router_validation(_PLUGIN_ID, APIRouter(on_startup=[lambda: None]))
+    assert excinfo.value.reason == "plugin_route_lifecycle_denied"
+    assert excinfo.value.exception_type == ""
 
 
 def test_two_router_contributions_from_one_plugin_are_rejected():

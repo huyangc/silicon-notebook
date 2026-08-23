@@ -621,6 +621,8 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 | `plugin_route_lifecycle_denied` | The router carries `on_startup`/`on_shutdown` | Those would run inside the application lifespan, next to migrations and warm-up, with no budget and no failure containment. Do the work lazily. |
 | `plugin_route_unsupported_kind` | A route that is not an `APIRoute` | A mounted sub-application, a raw websocket, or a bare Starlette route escapes the dependency inspection, so its notebook gate cannot be proven. |
 | `plugin_route_missing_notebook_gate` | A path containing `{notebook_id}` runs none of core's gates | Add `Depends(context.require_notebook_read)` or `Depends(context.require_notebook_capability("<capability>"))`. Wrapping a core gate inside your own dependency counts — the scan is transitive. |
+| `plugin_router_factory_failed` | `spec.factory(context)` raised anything other than `PluginRouteMountError`/`KeyboardInterrupt`/`SystemExit` | Only the exception class is shown — the factory runs with the plugin's own validated settings in hand, so an unsanitized message could leak a secret into a startup traceback. Reproduce locally. |
+| `plugin_router_validation_failed` | The structural checks above raised something other than the `PluginRouteMountError` they themselves throw — e.g. an `APIRouter` subclass whose `on_startup`/`on_shutdown`/`routes` raises on read | Only the exception class is shown, same reasoning as `plugin_router_factory_failed`. Do not override those attributes with anything that can fail. |
 
 ### Runtime
 
