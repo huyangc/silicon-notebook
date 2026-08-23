@@ -375,7 +375,7 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 | 把 `actions` 或 `context` 放进 `useEffect`/`useMemo` 的依赖数组 | 两者每帧都是新对象（owner 闸每次渲染现冻结）。`actions.api` 按 `pluginId` 记忆，放进依赖数组是安全的。 |
 | 让 `refreshSources()` 的 rejection 没人接 | owner 闸已关闭时它静默 resolve（那不是错误，只是这次刷新已经没有意义），真正的加载失败才 reject。只在自己的动作完成后调**一次**，并 `catch` 住。 |
 | 自己给弹窗留一份 `open` 状态 | `context.dialog` 是唯一真相来源。本地布尔关不掉一个协调器已经收回去的弹窗（冲突的 primary、切库），两者一分叉，插件就会渲染一个 core 认为已经关闭的弹窗。 |
-| 从 `source.detail_section` 开弹窗 | 两个理由。那个 slot 的宿主自己就是一个浮动卡片，`ExtensionModal` 的 `position: fixed` 会相对宿主卡片而不是视口定位，弹窗会跟着来源详情窗跑；而且那个宿主握着 `source-detail` 这条 primary lease，与 `extension` 互斥——开你的弹窗会把来源详情窗冲突关掉，你自己的 contribution 也随之卸载。已登记的限制；本轮只在 `workspace.side_panel` 开弹窗。 |
+| 从 `source.detail_section` 开弹窗 | 两个理由。那个 slot 的宿主自己就是一个浮动卡片，`ExtensionModal` 的 `position: fixed` 会相对宿主卡片而不是视口定位，弹窗会跟着来源详情窗跑；而且那个宿主握着 `source-detail` 这条 primary lease，与 `extension` 互斥——开你的弹窗会把来源详情窗冲突关掉，你自己的 contribution 也随之卸载。**宿主结构性禁止，不是靠你自觉**：该槽位下 `actions.openDialog()`/`actions.closeDialog()` 都是不触达 core 的拒绝函数（no-op；开发模式打一句 `console.warn`），`context.dialog.open` 恒为 `false`；`ExtensionModal` 在这个 slot 下直接 `throw new TypeError`，连渲染都不会尝试。 |
 
 包内文件：恰好一个 `ui-plugin.json`、恰好一个 `workspace-plugin.ts` **或** `.tsx`、任意多个扁平的兄弟 `.ts`/`.tsx` 模块。`.d.ts` 与 `*.test.*` 一律拒绝。包根下以 `.` 开头的**普通文件**（`.DS_Store`、`.gitignore`、编辑器残留）跳过并在 stderr 记一行；**子目录一律拒绝，`.git` 也不例外**——所以 UI 包要放在自己的目录里，不要直接放在仓库根。
 
@@ -581,7 +581,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | `plugin_bundle_spec_invalid` | 不是恰好一个 `:`、模块名为空，或属性名不是合法标识符 | 形状是 `module.path:ATTRIBUTE`。 |
 | `plugin_module_import_failed` | import 抛异常 | 异常类名就是诊断：`ModuleNotFoundError` = 没装进 `PYTHON_BIN` 的环境；其它 = 插件 import 期代码自己出错。 |
 | `plugin_attribute_missing` | 模块没有该属性（或它的 `__getattr__` 抛了） | 核对属性名，并确认它是模块级的。 |
-| `plugin_not_a_bundle` | `manifest` 不是 `ExtensionManifest`，或 `register` 不可调用 | 通常是插件按另一版 SDK 构建的，或 manifest 用了 dataclass 的副本。 |
+| `plugin_not_a_bundle` | `manifest` 不是 `ExtensionManifest`、`register` 不可调用，或读取其中任一属性时抛了异常 | 通常是插件按另一版 SDK 构建的、manifest 用了 dataclass 的副本，或 `manifest`/`register` 被实现成了会抛异常的 property。 |
 | `plugin_id_mismatch` | `manifest.id` ≠ 配置里的键 | 改成一致；配置键是权威。 |
 | `plugin_trust_not_deployment` | `trust` 不是 `"deployment"` | 只有 `deployment` 能这样装载。`isolated` 是保留值，当前处处拒绝。 |
 | `plugin_api_version_unsupported` | `manifest.api_version` ≠ 本次构建的 `EXTENSION_API_VERSION` | 装与这个 core 构建配套的插件构建。 |
@@ -593,7 +593,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | --- | --- | --- |
 | `plugin_settings_not_a_table` | `settings` 不是表 | 用 `[extensions."<id>".settings]`。 |
 | `plugin_settings_not_accepted` | 给一个既没有 `settings_model` 也没有 `configure` 的插件写了 `[settings]` 表 | 删掉这张表，或给 bundle 补上两半。 |
-| `plugin_settings_binding_missing` | `settings_model` / `configure` 只声明了其中一个 | 它们是一对。补上另一个，或两个都删。 |
+| `plugin_settings_binding_missing` | `settings_model` / `configure` 只声明了其中一个，或读取其中一个时抛了异常 | 它们是一对。补上另一个，或两个都删；会抛异常的 property 与「没有这个属性」同等对待。 |
 | `plugin_settings_model_invalid` | `settings_model` 不是 pydantic `BaseModel` 子类 | 用 `pydantic.BaseModel`。 |
 | `plugin_settings_unknown_key` | 模型不接受的键 | 消息列出键名。只匹配 `AliasChoices`/`AliasPath` 的键也落在这里（已登记的限制，方向是 fail-closed）。 |
 | `plugin_settings_invalid` | pydantic 拒绝了这张表 | 只显示异常类名，因为 `ValidationError` 会回显被拒的取值。本地拿同一个模型校验一遍。 |
@@ -603,7 +603,8 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 | 码 | 含义 | 怎么修 |
 | --- | --- | --- |
-| `plugin_capability_declaration_invalid` | `provides` 非空却没有 `capability_decisions`、它不是 Mapping、迭代时抛异常，或某个 probe 不可调用 | 给一个普通的 `dict[str, AvailabilityProbe]`。 |
+| `plugin_attribute_access_failed` | 合并 capability decisions 时重读 `manifest` 抛了异常（这份 manifest 在装载 bundle 时已经成功读过一次——说明这是个不确定性的访问器） | 只显示异常类名。把 `manifest` 改成一个普通、不会抛异常的属性。 |
+| `plugin_capability_declaration_invalid` | `provides` 非空却没有 `capability_decisions`、它不是 Mapping、迭代时抛异常、读取它本身抛了异常，或某个 probe 不可调用 | 给一个普通的 `dict[str, AvailabilityProbe]`。 |
 | `plugin_capability_name_invalid` | 名字不是稳定 id | 小写、`.`/`_`/`-` 分隔。`:` 是 core 的。 |
 | `plugin_capability_not_declared` | 有 probe 的名字不在 `provides` 里 | 消息列出名字。要么加进 `provides`，要么删掉 probe。 |
 | `plugin_capability_missing_decision` | `provides` 里的名字没有 probe | 消息列出名字。 |

@@ -19,22 +19,34 @@
  *  · **被盖住时退出交互树**。`context.dialog.topmost` 为假（例如上面盖了一个 `info`
  *    确认框）时本组件加 `inert` + `aria-hidden`，背景控件不再可聚焦；焦点归还由
  *    协调器的 layout effect 统一做。
+ *  · **键盘焦点自己管，归还不管**（codex #578 review）。变为最上层时本组件把焦点
+ *    从背景的触发按钮移进对话框（关闭按钮），并在最上层期间把 Tab/Shift+Tab 圈在
+ *    对话框内——镜像 `app/model-service-panel.tsx` 现有的同款 `.utility-modal` +
+ *    `topmost`/`interactive` 做法，而不是另造一套。**归还**焦点（关闭之后回到当初
+ *    触发它的那个背景按钮）仍完全是协调器 `pendingFocusReturnRef` 的职责——那份
+ *    记录在 `rootModals.open()` 那一刻捕获 `document.activeElement`，本组件够不着
+ *    也不该重做。
  *  · **一次只有一个插件弹窗**。持有者由壳层记着、host 按 `contribution.id` 过滤
  *    （不是 plugin id——同一个插件可以注册多条 contribution），非持有者拿到的恒是
  *    一份 closed view。窗口位置记忆仍按 `pluginId` 分段：那是"记在哪一格"，粒度
  *    到插件就够了。
  *
- * **一条登记在案的限制**，插件作者与后来改这里的人都要知道：
+ * **一条登记在案的限制，现已从"请不要"升级为结构性禁止**（codex #578 R4 P2），插件
+ * 作者与后来改这里的人都要知道：
  *
- * ① **只保证在 `workspace.side_panel` 下正确定位。** `FloatingModalCard` 始终给卡片
- *    施加 `translate3d(...)`（静止时也是 `translate3d(0,0,0)`），卡片因此成为其
- *    `position: fixed` 后代的**包含块**。`source.detail_section` 的宿主本身就是一个
- *    `FloatingModalCard`，所以在那个 slot 下渲染本组件，`.utility-modal` 的 fixed
- *    定位会相对**宿主卡片**而不是视口——弹窗会跟着来源详情窗跑。正解是 portal，
- *    但全仓没有一处 `createPortal`，本轮不引入。第二个理由同样硬：那个 slot 的宿主
- *    握着 `source-detail` 这条 primary lease，而 `extension` 也是 primary——开它会
- *    把来源详情窗冲突关掉，宿主一卸载，弹窗自己也没了。本轮 `source.detail_section`
- *    的 contribution 请不要开弹窗。
+ * ① **`source.detail_section` 下本组件直接拒绝渲染。** 两个理由都是硬约束，不是风格
+ *    偏好：`FloatingModalCard` 始终给卡片施加 `translate3d(...)`（静止时也是
+ *    `translate3d(0,0,0)`），卡片因此成为其 `position: fixed` 后代的**包含块**——
+ *    `source.detail_section` 的宿主本身就是一个 `FloatingModalCard`，若允许在那个 slot
+ *    下渲染本组件，`.utility-modal` 的 fixed 定位会相对**宿主卡片**而不是视口，弹窗会
+ *    跟着来源详情窗跑（正解是 portal，但全仓没有一处 `createPortal`，本轮不引入）。
+ *    第二个理由同样硬：那个 slot 的宿主握着 `source-detail` 这条 primary lease，而
+ *    `extension` 也是 primary——开它会把来源详情窗冲突关掉，宿主一卸载，弹窗自己也
+ *    没了，留下一格永远等不到人渲染的幽灵认领。所以本组件在 `context.slot ===
+ *    "source.detail_section"` 时**无条件** `throw`（开发期响亮失败，见函数体）——不是
+ *    "调用方最好别这样做"，而是这样做会立刻炸；配套地，`host.tsx` 已经把该槽位下
+ *    `actions.openDialog()`/`closeDialog()` 换成不触达壳层的拒绝函数，`context.dialog`
+ *    也恒为冻结的 CLOSED 视图，两道防线独立生效，任何一道单独失守都还有另一道兜底。
  *
  * **存储键分两段隔离**：`extension.` 前缀隔离的是「插件 vs 核心弹窗」，插件之间靠
  * `pluginId` 那一段隔离。两段都由本组件拼、插件改不了——`pluginId` 由 host 按
@@ -44,7 +56,7 @@
  * ownerKey，切库/换用户时整棵子树连同这个弹窗一起卸载。它与协调器的 owner 失效是
  * 同向的两条路，组件测试两条都钉住了。
  */
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import type {
   WorkspaceExtensionContext,
@@ -106,6 +118,83 @@ export function ExtensionModal({
   description,
   children,
 }: ExtensionModalProps) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Hooks 必须排在下面几条 `throw`/`return null` 之前无条件调用（Rules of Hooks）：
+  // 那几条判的是「这个组件压根不该出现在这里」，是构造期就该炸穿的合同违反，不是
+  // 随渲染在 valid/invalid 之间来回翻的正常状态；把 hooks 摆在它们之后会让"同一个
+  // 组件实例这次渲染调了 hooks、上次却在 hooks 之前就抛了"这种理论上的顺序错位
+  // 变得可能。`topmost` 用可选链读——此刻 `context`/`context.dialog` 都还没被下面
+  // 那几条校验过。
+  const topmost = context?.dialog?.topmost === true;
+
+  // 打开且在最上层时把焦点从背景的触发按钮移进对话框，镜像
+  // `app/model-service-panel.tsx` 现有的同款 `.utility-modal` + `interactive`
+  // 做法（那也是 core 最接近 `ExtensionModal` 结构的一个 primary 弹窗）。只依赖
+  // `topmost`：它在打开时 false→true 翻一次（触发聚焦），关闭时 true→false 再翻
+  // 一次（`closeButtonRef.current` 此刻多半已经是 null 或一个即将卸载的按钮，
+  // `?.focus()` 是安全的 no-op）。**归还**焦点不在这里做——那是协调器
+  // `pendingFocusReturnRef` 在 `rootModals.open()` 那一刻就捕获好的记录，回到关闭
+  // 前的背景按钮。
+  useEffect(() => {
+    if (!topmost) return;
+    closeButtonRef.current?.focus();
+  }, [topmost]);
+
+  // Tab/Shift+Tab 环绕，只在最上层生效——同样镜像 `model-service-panel.tsx`：绑在
+  // `window` 而不是本组件的 `onKeyDown`，这样即便焦点已经跑出对话框（比如浏览器
+  // 怪癖、或某个被覆盖层短暂抢走过焦点），也能在下一次 Tab 时把它按回来；本地
+  // `onKeyDown` 处理不了「按下 Tab 那一刻焦点已经不在这棵子树里」的情形。被 `info`
+  // 盖住时整棵子树本该已经 `inert`（浏览器语义上挡掉焦点进出），这里的 `topmost`
+  // 判据是双保险，也是让 jsdom 下的用例钉得住「被盖住时不圈」这条的唯一依据——
+  // jsdom 对 `inert` 的语义支持并不完整。**刻意不接 Escape**：`extension` slot 在
+  // 协调器的 policy 表里是 `escape: false`（`use-root-modal-coordinator.ts` 的注释
+  // 写明这不是遗漏），`WorkspaceExtensionDialogCloseReason` 的类型也只有
+  // `"button" | "backdrop"` 两个值，给插件弹窗单独开 Escape 会比任何核心弹窗都更
+  // 容易被误关。
+  useEffect(() => {
+    if (!topmost) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !dialog.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [topmost]);
+
+  // `source.detail_section` 结构性禁止——两条理由都写在头注释①里（定位相对宿主卡片
+  // 而不是视口、宿主自己就是与 `extension` 互斥的 primary lease）。这条检查排在最
+  // 前面且**无条件**：与下面几条不同，它不是在防某个字段畸形，而是"这个组件压根不
+  // 该出现在这个槽位"，跟 `dialog`/`pluginId` 长什么样无关——即使 host 那道拒绝
+  // （见 `host.tsx`）失守让 `dialog.open` 意外为真，这里仍要响亮失败而不是渲染一个
+  // 定位错误、随时可能把来源详情窗一起干掉的弹窗。
+  if (context?.slot === "source.detail_section") {
+    throw new TypeError("ExtensionModal is only available to workspace.side_panel contributions");
+  }
   const pluginId = context?.pluginId;
   const dialog = context?.dialog;
   // 运行时判据，不是类型断言：`pluginId` 与 `dialog` 走的是 host 注入那条路（形状已由
@@ -135,10 +224,16 @@ export function ExtensionModal({
   if (!dialog.open) return null;
   return (
     <section
+      ref={dialogRef}
+      // 无实际内容时（理论上不会发生，`FloatingModalCard` 恒渲染带关闭按钮的头部）
+      // 让 Tab 陷阱的零可聚焦兜底分支有地方落焦点，见上面的 `onKeyDown`。
+      tabIndex={-1}
       className="utility-modal"
       role="dialog"
       // 被盖住时整棵子树退出交互树（`inert`）并对辅助技术隐藏，与每个核心 root dialog
-      // 同一口径；焦点归还由协调器的 layout effect 统一做，这里不碰焦点。
+      // 同一口径。**焦点归还**（关闭后回到触发它的背景按钮）仍由协调器的 layout
+      // effect 统一做，这里不碰；**焦点移入与 Tab 陷阱**是本组件上面那两个 effect
+      // 的职责，两者分工不重叠。
       aria-modal={dialog.topmost}
       aria-hidden={!dialog.topmost}
       inert={dialog.topmost ? undefined : true}
@@ -157,8 +252,10 @@ export function ExtensionModal({
               {description ? <p>{description}</p> : null}
             </div>
             {/* 可见内容是 `×`，那也是浏览器算出来的可及名——所以显式给 aria-label，
-                否则辅助技术读到的是一个叫「×」的按钮（`title` 有内容时不参与可及名）。 */}
-            <button type="button" className="icon-button" onClick={() => actions.closeDialog()} title="关闭" aria-label="关闭">×</button>
+                否则辅助技术读到的是一个叫「×」的按钮（`title` 有内容时不参与可及名）。
+                同时是打开/成为最上层时的默认焦点落点（见上面那个 `useEffect`）：它是
+                本组件唯一自己渲染、保证每次都存在的可聚焦元素。 */}
+            <button ref={closeButtonRef} type="button" className="icon-button" onClick={() => actions.closeDialog()} title="关闭" aria-label="关闭">×</button>
           </div>
           <div className="source-detail-body">{children}</div>
         </>)}

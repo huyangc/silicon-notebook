@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -377,6 +377,80 @@ test("a covered dialog leaves the interaction tree instead of staying focusable 
 });
 
 
+// codex #578 review — keyboard focus management. `ExtensionModal` had none: a
+// plugin's dialog opened with focus still sitting on the background trigger
+// button, and Tab could walk straight out of it. These three cases mirror
+// `app/model-service-panel.tsx`'s existing `.utility-modal` + `interactive`
+// pattern (the closest coordinator-integrated primary dialog) rather than
+// inventing a second focus-trap implementation.
+
+test("becoming topmost moves focus from the background trigger into the dialog", () => {
+  const trigger = document.createElement("button");
+  trigger.textContent = "触发";
+  document.body.appendChild(trigger);
+  trigger.focus();
+  expect(document.activeElement).toBe(trigger);
+
+  render(
+    <ExtensionModal context={modalContext("sample-plugin")} actions={{ closeDialog: () => undefined }} storageKey="sample.panel" title="示例面板">
+      <p>面板内容</p>
+    </ExtensionModal>,
+  );
+  // 唯一被 SDK 自己渲染、保证每次都存在的可聚焦元素——见组件里的注释。
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "关闭" }));
+  trigger.remove();
+});
+
+
+test("Tab from the last focusable element wraps back to the first while topmost", () => {
+  render(
+    <ExtensionModal context={modalContext("sample-plugin")} actions={{ closeDialog: () => undefined }} storageKey="sample.panel" title="示例面板">
+      <button type="button">操作 A</button>
+      <button type="button">操作 B</button>
+    </ExtensionModal>,
+  );
+  const closeButton = screen.getByRole("button", { name: "关闭" });
+  const lastButton = screen.getByRole("button", { name: "操作 B" });
+  lastButton.focus();
+  expect(document.activeElement).toBe(lastButton);
+
+  // 直接 `fireEvent`（而不是 `userEvent.tab()`）：jsdom 本身不实现原生 Tab 焦点导航，
+  // 只有我们自己的处理器或 userEvent 的模拟逻辑会移动焦点——用 `fireEvent` 精确排除
+  // 后者，量的才是处理器自己的环绕算术，不是两套逻辑碰巧算出同一个答案。
+  fireEvent.keyDown(lastButton, { key: "Tab", bubbles: true, cancelable: true });
+  expect(document.activeElement).toBe(closeButton);
+
+  fireEvent.keyDown(closeButton, { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+  expect(document.activeElement).toBe(lastButton);
+});
+
+
+test("a covered dialog does not trap Tab", () => {
+  const outside = document.createElement("button");
+  outside.textContent = "外部按钮";
+  document.body.appendChild(outside);
+  render(
+    <ExtensionModal
+      context={modalContext("sample-plugin", { open: true, topmost: false, zIndex: 60 })}
+      actions={{ closeDialog: () => undefined }}
+      storageKey="sample.panel"
+      title="示例面板"
+    >
+      <button type="button">面板里的按钮</button>
+    </ExtensionModal>,
+  );
+  outside.focus();
+  expect(document.activeElement).toBe(outside);
+
+  fireEvent.keyDown(outside, { key: "Tab", bubbles: true, cancelable: true });
+  // 被盖住时 Tab 陷阱那个 effect 直接 `return`，根本不 `addEventListener`；jsdom 不
+  // 实现原生 Tab 导航，所以焦点原地不动才证明了这一点——处理器若意外注册，会主动
+  // `.focus()` 把焦点搬进对话框，而不是"什么都不做"。
+  expect(document.activeElement).toBe(outside);
+  outside.remove();
+});
+
+
 test("the modal refuses a host-injected dialog view that is not a coordinator view", () => {
   // `context.dialog` 缺席不会报错、只会让弹窗永远不出现（或永远不退出交互树）——
   // 与畸形存储键同类的静默失败，所以这里同样响亮失败。
@@ -643,4 +717,142 @@ test("the modal's lifetime is owned by the coordinator and by the outlet's owner
   view.rerender(<Outlet ownerKey="user-a:notebook-b:2" />);
   expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
   expect(screen.getByRole("button", { name: "打开面板" })).toBeInTheDocument();
+});
+
+
+// ---------------------------------------------------------------------------
+// codex #578 R4 P2 — `source.detail_section` 的宿主本身就是一个与 `extension`
+// 互斥的 primary lease（`source-detail`）：那个槽位下的 contribution 若真的开成
+// 弹窗，会把宿主自己的 primary 冲突关掉、宿主一卸载、弹窗跟着消失，留下一格永远
+// 等不到人渲染的幽灵认领。这组用例钉的是**结构性拒绝**而不是"插件自觉"——host 层
+// 面 `openDialog`/`closeDialog` 就不触达壳层，`context.dialog` 恒为 CLOSED，
+// `ExtensionModal` 在该槽位下整体拒绝渲染。
+
+const sourceDetailContext: Omit<WorkspaceExtensionContext, "pluginId" | "dialog"> = {
+  ...context,
+  slot: "source.detail_section",
+  source: { id: "source-a", notebookId: "notebook-a", title: "来源 A" },
+};
+
+/**
+ * 一条 `source.detail_section` contribution：请求打开弹窗，并把收到的
+ * `context.dialog.open` 暴露成可断言的文本。它刻意**不**渲染 `ExtensionModal`——
+ * 那半由下面独立一条用例覆盖（`ui.tsx` 的拒绝渲染），混在一起会让"host 拒绝了
+ * openDialog"与"ui.tsx 拒绝渲染"两件事互相掩盖对方的失败归因。
+ */
+function SourceDetailProbe({ context: pluginContext, actions: pluginActions }: WorkspaceExtensionProps) {
+  return (
+    <div>
+      <span data-testid="source-detail-dialog-open">{String(pluginContext.dialog.open)}</span>
+      <button type="button" onClick={() => pluginActions.openDialog()}>请求打开来源详情弹窗</button>
+    </div>
+  );
+}
+const sourceDetailRegistry = defineWorkspaceUiRegistry([{
+  id: "sample-source-panel", pluginId: "sample-plugin", pluginVersion: "1.0.0",
+  capability: "sample.ui.available", slot: "source.detail_section",
+  permission: "notebook:read", mode: "all", Component: SourceDetailProbe,
+}]);
+const sourceDetailProjection: SystemExtensionProjection = { apiVersion: "1", extensions: [{
+  pluginId: "sample-plugin", displayName: "Sample", version: "1.0.0",
+  contributionId: "sample-source-panel", available: true, unavailableReason: null,
+}] };
+
+/**
+ * `Outlet` 的最小变体，接的是真的 `useRootModalCoordinator`：`openSpy` 记录"壳层
+ * 真正的 openDialog 实现"被调用了几次。若 host 的拒绝失守，点击按钮会让这个 spy
+ * 记一次并把 `extension` 那格 lease 真的开起来——两者都是本测试要证伪的事。
+ */
+function SourceDetailOutlet({ ownerKey, openSpy }: { ownerKey: string | null; openSpy: () => void }) {
+  const rootModals = useRootModalCoordinator({
+    actorId: "user-a", sourceId: "source-a",
+    onClosed: () => undefined,
+  });
+  coordinator = rootModals;
+  const outletActions = createOwnedWorkspaceExtensionActions(
+    { actorId: "user-a" },
+    () => true,
+    () => undefined,
+    async () => {},
+    () => {
+      openSpy();
+      rootModals.open("extension", rootModals.captureWorkspaceOwner());
+    },
+    () => undefined,
+  );
+  if (!ownerKey) return null;
+  return (
+    <WorkspaceExtensionOutlet
+      slot="source.detail_section"
+      registry={sourceDetailRegistry}
+      projection={sourceDetailProjection}
+      context={sourceDetailContext}
+      actions={outletActions}
+      ownerKey={ownerKey}
+      dialog={rootModals.view("extension")}
+      dialogHolder={null}
+    />
+  );
+}
+
+
+test("a source.detail_section contribution's openDialog() never reaches the coordinator (codex #578 R4 P2)", async () => {
+  const user = userEvent.setup();
+  const openSpy = vi.fn();
+  render(<SourceDetailOutlet ownerKey="user-a:notebook-a:1" openSpy={openSpy} />);
+  enterWorkspace();
+  expect(screen.getByTestId("source-detail-dialog-open")).toHaveTextContent("false");
+
+  await user.click(screen.getByRole("button", { name: "请求打开来源详情弹窗" }));
+  expect(openSpy).not.toHaveBeenCalled();
+  expect(document.querySelector(".utility-modal")).toBeNull();
+  expect(coordinator!.view("extension").open).toBe(false);
+  expect(screen.getByTestId("source-detail-dialog-open")).toHaveTextContent("false");
+});
+
+
+test("the outlet forces a closed dialog view and a refused openDialog even if the shell mis-reports the holder (codex #578 R4 P2)", async () => {
+  // 与上一条不同，这里不接真的协调器：`dialogHolder`/`dialog` 被直接摆成"这一格已经
+  // 归这条 contribution、且开在最上层"——host 仍必须无条件覆盖成 CLOSED，证明那条
+  // 覆盖不依赖"壳层从没喂错过这两个 prop"这个前提。
+  const user = userEvent.setup();
+  const openSpy = vi.fn();
+  const stubActions = {
+    openUnderstanding: () => undefined,
+    refreshSources: async () => {},
+    openDialog: openSpy,
+    closeDialog: () => undefined,
+  };
+  render(
+    <WorkspaceExtensionOutlet
+      slot="source.detail_section"
+      registry={sourceDetailRegistry}
+      projection={sourceDetailProjection}
+      context={sourceDetailContext}
+      actions={stubActions}
+      ownerKey="user-a:notebook-a:1"
+      dialog={{ open: true, topmost: true, zIndex: 60 }}
+      dialogHolder="sample-source-panel"
+    />,
+  );
+  expect(screen.getByTestId("source-detail-dialog-open")).toHaveTextContent("false");
+
+  await user.click(screen.getByRole("button", { name: "请求打开来源详情弹窗" }));
+  expect(openSpy).not.toHaveBeenCalled();
+  expect(screen.getByTestId("source-detail-dialog-open")).toHaveTextContent("false");
+});
+
+
+test("ExtensionModal refuses to render inside the source.detail_section slot (codex #578 R4 P2)", () => {
+  const closeDialog = vi.fn();
+  expect(() => render(
+    <ExtensionModal
+      context={{ ...sourceDetailContext, pluginId: "sample-plugin", dialog: TOPMOST_DIALOG }}
+      actions={{ closeDialog }}
+      storageKey="sample.panel"
+      title="示例面板"
+    >
+      <p>面板内容</p>
+    </ExtensionModal>,
+  )).toThrow(TypeError);
 });
