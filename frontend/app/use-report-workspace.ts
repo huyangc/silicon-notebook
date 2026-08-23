@@ -106,6 +106,13 @@ const optimisticGenerating = (
 
 export type ReportWorkspace = ReturnType<typeof useReportWorkspace>;
 
+// Hidden-state fallback for the export selection must be a **stable reference**
+// (same rule as the frozen `NO_*` arrays in the sibling hooks): a fresh
+// `new Set()` per render makes every consumer dependency "change" each render.
+// It is never mutated — the hook only ever replaces the selection via
+// `setSelectedIds(new Set(...))` — so sharing one instance is safe.
+const NO_SELECTED_IDS: Set<string> = new Set<string>();
+
 export function useReportWorkspace({
   actorId,
   notebookId,
@@ -704,7 +711,7 @@ export function useReportWorkspace({
     deletingId: visible ? deletingId : null,
     downloadingId: visible ? downloadingId : null,
     selectMode: visible && selectMode,
-    selectedIds: visible ? selectedIds : new Set<string>(),
+    selectedIds: visible ? selectedIds : NO_SELECTED_IDS,
     zipBusy: visible && zipBusy,
     activateActor,
     beginNotebookTransition,

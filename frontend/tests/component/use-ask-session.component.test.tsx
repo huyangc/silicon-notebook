@@ -1466,3 +1466,37 @@ test("durable A/G1 stream publishes only history after notebook A -> B -> A/G3",
   expect(value!.turns).toHaveLength(1);
   expect(value!.turns[0]?.response.answer_id).toBe("answer-conversation-g3");
 });
+
+// PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
+// fall back to a bare `[]`/`{}` literal whenever the owner is not visible
+// (actorId is null, e.g. logged out / collection page). A bare literal is a
+// brand-new reference on every render, which makes a consuming effect's
+// dependency array "change" every render — page.tsx has one such effect that
+// calls setState in its body, turning into an infinite render loop ("Maximum
+// update depth exceeded"). The fix hoists frozen, stable module-level
+// fallback constants; re-rendering with the owner still hidden must hand
+// back the *same* reference every time.
+test("owner-hidden view fields stay referentially stable across re-renders", () => {
+  const view = render(<Harness actorId={null} notebookId={null} />);
+  const first = value!;
+  expect(first.turns).toEqual([]);
+  expect(first.sessions).toEqual([]);
+  expect(first.pendingTrace).toEqual([]);
+  expect(first.feedbackSent).toEqual({});
+
+  act(() => {
+    view.rerender(<Harness actorId={null} notebookId={null} />);
+  });
+  const second = value!;
+  act(() => {
+    view.rerender(<Harness actorId={null} notebookId={null} />);
+  });
+  const third = value!;
+
+  for (const later of [second, third]) {
+    expect(later.turns).toBe(first.turns);
+    expect(later.sessions).toBe(first.sessions);
+    expect(later.pendingTrace).toBe(first.pendingTrace);
+    expect(later.feedbackSent).toBe(first.feedbackSent);
+  }
+});

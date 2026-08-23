@@ -532,3 +532,35 @@ test("access refresh remains one-shot after its sole retry is superseded again",
   expect(notebookApi.listNotebooks).toHaveBeenCalledTimes(2);
   expect(effects.reconcileAccess).not.toHaveBeenCalled();
 });
+
+// PR #557 regression: `rows`/`visibleRows`/`searchHits` used to fall back to
+// a bare `[]`/`{}` literal whenever rows are not yet published for this
+// owner (no beginListRead/commitListSnapshot has landed — e.g. actorId is
+// null, or the collection page hasn't loaded a list yet). A bare literal is
+// a brand-new reference on every render, which makes a consuming effect's
+// dependency array "change" every render (see use-ask-session.ts for the
+// traced infinite-loop incident). The fix hoists frozen, stable module-level
+// fallback constants; re-rendering with rows still unpublished must hand
+// back the *same* reference every time.
+test("rows-unpublished view fields stay referentially stable across re-renders", () => {
+  const view = render(<Harness actorId={null} />);
+  const first = value!;
+  expect(first.rows).toEqual([]);
+  expect(first.visibleRows).toEqual([]);
+  expect(first.searchHits).toEqual({});
+
+  act(() => {
+    view.rerender(<Harness actorId={null} />);
+  });
+  const second = value!;
+  act(() => {
+    view.rerender(<Harness actorId={null} />);
+  });
+  const third = value!;
+
+  for (const later of [second, third]) {
+    expect(later.rows).toBe(first.rows);
+    expect(later.visibleRows).toBe(first.visibleRows);
+    expect(later.searchHits).toBe(first.searchHits);
+  }
+});

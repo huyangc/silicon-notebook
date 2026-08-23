@@ -350,3 +350,32 @@ test("latest source page wins without an extra list request", async () => {
   expect(value!.sources.map((item) => item.id)).toEqual(["newer"]);
   expect(value!.sourcesPage).toBe(1);
 });
+
+// PR #557 regression: `sources`/`sourceElements` used to fall back to a bare
+// `[]` literal whenever the owner is not active (no commitNotebookSnapshot
+// has ever landed — e.g. actorId is null). A bare literal is a brand-new
+// reference on every render, which makes a consuming effect's dependency
+// array "change" every render (see use-ask-session.ts for the traced
+// infinite-loop incident). The fix hoists frozen, stable module-level
+// fallback constants; re-rendering with the owner still inactive must hand
+// back the *same* reference every time.
+test("owner-inactive view fields stay referentially stable across re-renders", () => {
+  const view = render(<Harness actorId={null} />);
+  const first = value!;
+  expect(first.sources).toEqual([]);
+  expect(first.sourceElements).toEqual([]);
+
+  act(() => {
+    view.rerender(<Harness actorId={null} />);
+  });
+  const second = value!;
+  act(() => {
+    view.rerender(<Harness actorId={null} />);
+  });
+  const third = value!;
+
+  for (const later of [second, third]) {
+    expect(later.sources).toBe(first.sources);
+    expect(later.sourceElements).toBe(first.sourceElements);
+  }
+});

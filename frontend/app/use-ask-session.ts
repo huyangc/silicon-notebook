@@ -61,6 +61,25 @@ import {
 const RECONNECT_POLL_MS = 1500;
 const RECONNECT_CAP_MS = 20 * 60 * 1000;
 
+// Hidden-state (owner not visible) fallback values must be **stable references**.
+// The returned view is read by page.tsx effects/useMemo that depend on these
+// fields; handing back a brand-new `[]`/`{}` on every render makes those
+// dependencies "change" every render. One such effect calls setState inside
+// its body, which turns into an infinite render loop (Next.js reports
+// "Maximum update depth exceeded"). Freezing them also makes any accidental
+// in-place write from a consumer throw immediately in development.
+// Declared with the same (mutable-looking) type as the state they stand in
+// for, so the ternary branches unify cleanly instead of widening the return
+// shape to a `T[] | readonly T[]` union for every consumer. `Object.freeze`
+// still makes the cast a lie only at the type level, not at runtime; the
+// inner `as` on the literal avoids TS inferring `never[]`/`{}` first (which
+// `Object.freeze` would then widen to a type with no overlap with `T[]`).
+const NO_TURNS: ChatTurn[] = Object.freeze([] as ChatTurn[]) as ChatTurn[];
+const NO_SESSIONS: ConversationSummary[] = Object.freeze([] as ConversationSummary[]) as ConversationSummary[];
+const NO_PENDING_TRACE: ReasoningTraceStep[] = Object.freeze([] as ReasoningTraceStep[]) as ReasoningTraceStep[];
+const EMPTY_FEEDBACK_SENT: Record<string, string> =
+  Object.freeze({} as Record<string, string>) as Record<string, string>;
+
 type AskPolicy = Readonly<{
   advanced: boolean;
   askUnavailable: boolean;
@@ -1195,9 +1214,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
 
   return {
     question: ownerIsVisible ? question : "",
-    turns: ownerIsVisible ? turns : [],
+    turns: ownerIsVisible ? turns : NO_TURNS,
     conversationId: ownerIsVisible ? conversationId : null,
-    sessions: ownerIsVisible ? sessions : [],
+    sessions: ownerIsVisible ? sessions : NO_SESSIONS,
     asking: ownerIsVisible ? asking : false,
     intentChecking: ownerIsVisible ? intentChecking : false,
     intentReview: ownerIsVisible ? intentReview : null,
@@ -1205,14 +1224,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     pendingQuestion: ownerIsVisible ? pendingQuestion : "",
     pendingAskedAt: ownerIsVisible ? pendingAskedAt : "",
     pendingMode: ownerIsVisible ? pendingMode : DEFAULT_ASK_MODE,
-    pendingTrace: ownerIsVisible ? pendingTrace : [],
+    pendingTrace: ownerIsVisible ? pendingTrace : NO_PENDING_TRACE,
     mode: ownerIsVisible ? mode : DEFAULT_ASK_MODE,
     retrievalEffort: ownerIsVisible ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
     sessionPanelOpen: ownerIsVisible ? sessionPanelOpen : false,
     renamingSessionId: ownerIsVisible ? renamingSessionId : null,
     sessionTitleDraft: ownerIsVisible ? sessionTitleDraft : "",
     sessionTitleOverLimit: conversationTitleLimitHint(sessionTitleDraft.trim()),
-    feedbackSent: ownerIsVisible ? feedbackSent : {},
+    feedbackSent: ownerIsVisible ? feedbackSent : EMPTY_FEEDBACK_SENT,
     inFlight: ownerIsVisible && (asking || intentChecking || Boolean(intentReview)),
     activateActor,
     beginNotebookTransition,
