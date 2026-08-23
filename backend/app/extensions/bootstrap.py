@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
+import logging
+from types import MappingProxyType
 from typing import Callable, Mapping
 
 from app.extension_sdk import (
@@ -52,6 +54,11 @@ from app.extensions.capabilities import (
     CapabilityDecision,
     CapabilityDecisionCatalog,
 )
+from app.extensions.discovery import (
+    ExtensionDiscoveryError,
+    capability_decisions_from_bundles,
+    discover_deployment_extensions,
+)
 from app.extensions.registry import ExtensionRegistry, frozen_registry
 from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
@@ -62,6 +69,12 @@ from app.extensions.report_export import ReportExporterHost
 
 _BOUND_AGENT_PROFILE_UI_PORT = object()
 
+# Deployment-plugin rejections are logged here before being re-raised.  The
+# record carries a plugin id, a stable reason code, and an exception class name
+# and nothing else — never `exc.names`, `str(exc)`, a module path, a file path,
+# or any settings value (see app.extensions.discovery).
+_DISCOVERY_LOGGER = logging.getLogger("silicon_notebook.extensions")
+
 
 @dataclass(frozen=True)
 class ExtensionRuntime:
@@ -71,6 +84,12 @@ class ExtensionRuntime:
     ask_completed_observers: AskCompletedObserverHost
     report_completed_observers: ReportCompletedObserverHost
     report_exporter: ReportExporterHost
+    # Validated settings instance per deployment plugin, keyed by plugin id.
+    # Built-in bundles never appear here.  The mapping is read-only so a later
+    # consumer (the plugin route host) cannot mutate the frozen composition.
+    plugin_settings: Mapping[str, object] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 def build_extension_registry(
@@ -93,12 +112,14 @@ def build_extension_runtime(
     ] | None = None,
     event_sink: Callable[[dict[str, object]], None] | None = None,
     trusted_report_exporter_plugins: frozenset[str] = frozenset(),
+    plugin_settings: Mapping[str, object] | None = None,
 ) -> ExtensionRuntime:
     registry = build_extension_registry(
         bundles, capability_decisions=capability_decisions
     )
     return ExtensionRuntime(
         registry=registry,
+        plugin_settings=MappingProxyType(dict(plugin_settings or {})),
         retrieval_contributors=RetrievalContributorHost(
             registry,
             admission_policies=retrieval_admission_policies,
@@ -205,54 +226,83 @@ def default_extension_runtime() -> ExtensionRuntime:
             "agent_profile_disabled",
         )
 
-    return build_extension_runtime(
-        (
-            ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
-            ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
-            ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
-            REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
-            REPORT_MARKDOWN_EXPORTER_BUNDLE,
-            PARSER_BUILTIN_BUNDLE,
-            GENERATED_QUESTION_BUNDLE,
-            PARSER_CLOUD_BUNDLE,
-            SELECTED_SOURCE_GRAPH_BUNDLE,
-            PARSER_SELF_HOSTED_BUNDLE,
+    builtin_bundles = (
+        ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
+        ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
+        ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
+        REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
+        REPORT_MARKDOWN_EXPORTER_BUNDLE,
+        PARSER_BUILTIN_BUNDLE,
+        GENERATED_QUESTION_BUNDLE,
+        PARSER_CLOUD_BUNDLE,
+        SELECTED_SOURCE_GRAPH_BUNDLE,
+        PARSER_SELF_HOSTED_BUNDLE,
+    )
+    core_decisions = {
+        AGENT_PROFILE_WORKSPACE_UI_CAPABILITY: agent_profile_ui_access,
+        ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
+            ask_completed_access(
+                context,
+                ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
+            )
         ),
-        capability_decisions={
-            AGENT_PROFILE_WORKSPACE_UI_CAPABILITY: agent_profile_ui_access,
-            ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
-                ask_completed_access(
-                    context,
-                    ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
-                )
-            ),
-            ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY: (
-                lambda context: ask_completed_access(
-                    context,
-                    ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID,
-                )
-            ),
-            ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
-                ask_completed_access(
-                    context,
-                    ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
-                )
-            ),
-            REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: (
-                report_completed_access
-            ),
-            GENERATED_QUESTION_ACCESS_CAPABILITY: generated_question_access,
-            SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,
-            PARSER_SELF_HOSTED_ACCESS_CAPABILITY: lambda context: parser_access(
-                context, PARSER_SELF_HOSTED_CONTRIBUTION_ID
-            ),
-            PARSER_CLOUD_ACCESS_CAPABILITY: lambda context: parser_access(
-                context, PARSER_CLOUD_CONTRIBUTION_ID
-            ),
-            PARSER_BUILTIN_ACCESS_CAPABILITY: lambda context: parser_access(
-                context, PARSER_BUILTIN_CONTRIBUTION_ID
-            ),
-        },
+        ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY: (
+            lambda context: ask_completed_access(
+                context,
+                ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID,
+            )
+        ),
+        ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda context: (
+            ask_completed_access(
+                context,
+                ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
+            )
+        ),
+        REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: (
+            report_completed_access
+        ),
+        GENERATED_QUESTION_ACCESS_CAPABILITY: generated_question_access,
+        SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: selected_graph_access,
+        PARSER_SELF_HOSTED_ACCESS_CAPABILITY: lambda context: parser_access(
+            context, PARSER_SELF_HOSTED_CONTRIBUTION_ID
+        ),
+        PARSER_CLOUD_ACCESS_CAPABILITY: lambda context: parser_access(
+            context, PARSER_CLOUD_CONTRIBUTION_ID
+        ),
+        PARSER_BUILTIN_ACCESS_CAPABILITY: lambda context: parser_access(
+            context, PARSER_BUILTIN_CONTRIBUTION_ID
+        ),
+    }
+
+    # Lazily read Settings: this module is imported during composition, and the
+    # deployment plugin list must be resolved per call (the lru_cache above is
+    # the single freeze point) rather than at import time.
+    from app.core.config import get_settings
+
+    try:
+        discovered = discover_deployment_extensions(
+            get_settings().extensions_config
+        )
+        # Deployment plugins are appended after the built-in tuple, in plugin-id
+        # order, so an unset EXTENSIONS_CONFIG leaves the frozen topology
+        # byte-identical to what shipped with this build.
+        bundles = builtin_bundles + tuple(item.bundle for item in discovered)
+        capability_decisions = capability_decisions_from_bundles(
+            bundles, core_decisions
+        )
+    except ExtensionDiscoveryError as exc:
+        _DISCOVERY_LOGGER.error(
+            "extension discovery FAILED — service will not start: "
+            "plugin=%s reason=%s exc=%s",
+            exc.plugin_id,
+            exc.reason,
+            exc.exception_type,
+        )
+        raise
+
+    return build_extension_runtime(
+        bundles,
+        capability_decisions=capability_decisions,
         retrieval_admission_policies={
             GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
             SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
@@ -260,4 +310,7 @@ def default_extension_runtime() -> ExtensionRuntime:
         trusted_report_exporter_plugins=frozenset(
             {REPORT_MARKDOWN_EXPORTER_PLUGIN_ID}
         ),
+        plugin_settings={
+            item.plugin_id: item.settings for item in discovered
+        },
     )
