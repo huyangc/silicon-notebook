@@ -168,7 +168,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-06：Ask reasoning/retrieval stage DTO
 
-状态：已完成并合入；prepare → retrieval evidence → response draft → committed answer 的不可变应用合同、权威绑定与双路 review/CI 均已闭合。
+状态：已完成并合入；prepare → retrieval evidence → response draft → committed answer 的不可变应用合同、权威绑定与双路 review/CI 均已闭合。后续结构项 B6 再把 response draft 这一级做成**可注入** seam：`ResponseDraftStage` / `ResponseDraftInput` / `execute_response_draft_stage`，默认实现 `DefaultResponseDraftStage` 即既有内联合成/绑定逻辑，行为零变化。
 
 - 先拆 `reasoning_retrieval.run` / `ask_reasoning` 的不可变 stage input/output；
 - 显式标注 scope、retrieval run、leaf slot、连接持有区间、取消点；
