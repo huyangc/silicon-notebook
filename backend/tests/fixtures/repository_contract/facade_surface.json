@@ -1564,6 +1564,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.export_reports_endpoint",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.generate_report",
         "target": "_runtime"
       },
@@ -2585,12 +2591,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.add_knowhow_row",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.add_knowhow_rows",
         "target": "_runtime"
       },
       {
@@ -3934,12 +3934,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.retrieval_experience_jobs",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.retrieval_experiences",
         "target": "_runtime"
       },
@@ -4006,12 +4000,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.search_profile_jobs",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.set_conflict_status",
         "target": "_runtime"
       },
@@ -4037,12 +4025,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.set_knowhow_hidden_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.set_knowhow_row_projection",
         "target": "_runtime"
       },
       {
