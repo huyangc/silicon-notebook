@@ -73,9 +73,19 @@ class PluginUrlImportResult:
 class PluginUrlSourceImportPort(Protocol):
     """The only way a plugin route may add sources to a notebook.
 
-    This reuses core's existing capacity accounting, admin exemptions, and
-    unconfigured-parser mapping (see ``app.api.source_routes.import_url_sources``)
-    instead of handing the plugin a repository or a model client.
+    **The port authorizes itself.** Core checks ``sources:write`` on
+    ``notebook_id`` for the request's own authenticated user — resolved from
+    core's request context, never from anything the caller passes — before any
+    source is created, and refuses with the same 404 core's own endpoints use
+    (existence is not disclosed). A plugin therefore cannot widen its reach by
+    choosing a permissive route shape: mounting only the read gate, naming the
+    path parameter something other than ``{notebook_id}``, or taking the id out
+    of a request body all end at the same check.
+
+    Past that check this reuses core's existing capacity accounting, admin
+    exemptions, and unconfigured-parser mapping (see
+    ``app.api.source_routes.import_url_sources``) instead of handing the plugin
+    a repository or a model client.
     """
 
     def import_urls(

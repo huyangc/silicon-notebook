@@ -151,6 +151,9 @@ def test_system_extensions_response_is_unchanged(client):
     assert response.status_code == 200
     body = response.json()
     assert set(body.keys()) == {"api_version", "extensions"}
+    # Non-emptiness first: the loop below is the whole assertion, and it passes
+    # vacuously against a surface that returned nothing at all.
+    assert body["extensions"], "the builtin UI topology must not be empty"
     for row in body["extensions"]:
         assert set(row.keys()) == {
             "plugin_id",

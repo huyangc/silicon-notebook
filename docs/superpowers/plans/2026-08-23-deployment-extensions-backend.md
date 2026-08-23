@@ -385,5 +385,6 @@ T1、T2 可合并为一个实现任务（文件互不相交）→ T3 → T4 → 
 
 1. 插件的 `user_error` 文案绕过公网词表守卫：以 `--extra-root` 自检 + 文档要求兜底（裁决 3）。
 2. probe 不做 I/O 只能是文档合同 + 既有消毒。
-3. `{notebook_id}` 门守卫依赖 FastAPI 半公开的 `route.dependant`（版本锁 `requirements.txt:1`），正反两条用例同时保留。
+3. `{notebook_id}` 门守卫依赖 FastAPI 半公开的 `route.dependant`（版本锁 `requirements.txt:1`），正反两条用例同时保留。同一条依赖延伸到 401→424 翻译：它换的是 `route.dependant.call`（`run_endpoint_function` 在依赖全部解析完之后才读它，故只覆盖 handler 自己抛的 401，不动 router 级 `get_current_user` 的真 401）。生成器端点刻意不翻译——那时状态行已经发出去了。
 4. `enabled` 缺省 `true`（点名即启用）。
+5. `ExtensionRegistryError` 对 deployment 插件原样透传：它不在 SDK 面上（`app.extension_sdk` 不 re-export），但仓库外代码照样能 `from app.extensions.registry import ExtensionRegistryError` 再自己 raise 一条带插件文本的消息，从而绕过 deployment 分支的消毒进到运维日志。插件没有正当理由 raise core 的内部注册异常，且爆炸半径只是启动期一行日志（注册两种情况都被拒绝），故不额外防御。

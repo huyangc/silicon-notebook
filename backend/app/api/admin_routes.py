@@ -585,7 +585,12 @@ def list_admin_extensions(
     """
     if user.role != "admin":
         raise user_error(403, "仅管理员可查看已加载的扩展")
-    projection = request.app.state.extension_admin_projection
+    # getattr with a default, not attribute access: Starlette's ``State``
+    # raises AttributeError for an unset key, so ``state.x`` would bypass the
+    # guard below entirely and surface as a 500 with a Starlette-worded message
+    # instead of this module's own. An app built without the extension wiring
+    # must fail here, deliberately.
+    projection = getattr(request.app.state, "extension_admin_projection", None)
     if not callable(projection):
         raise RuntimeError("application extension admin projection is unavailable")
     return AdminExtensionsResponse(

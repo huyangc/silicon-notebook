@@ -76,7 +76,7 @@ from app.extension_sdk.http import PLUGIN_HTTP_ROUTER_POINT
 SEEN: list = []
 
 _DECLARATION = ContributionDeclaration(
-    id="corp.sample.router",
+    id=DECLARATION_ID,
     point=PLUGIN_HTTP_ROUTER_POINT,
     kind=ContributionKind.CONTRIBUTOR,
 )
@@ -107,10 +107,25 @@ bundle = Bundle(ExtensionManifest(
 """
 
 
-def _plugin_body(factory_src: str) -> str:
-    """Wrap one ``build_router`` implementation in the standard bundle scaffold."""
+def _plugin_body(
+    factory_src: str, *, declaration_id: str = "corp.sample.router"
+) -> str:
+    """Wrap one ``build_router`` implementation in the standard bundle scaffold.
 
-    return _BODY_PREFIX + textwrap.dedent(factory_src).strip("\n") + "\n" + _BODY_SUFFIX
+    ``declaration_id`` is injected as a module-level name (like ``PLUGIN_ID``)
+    rather than formatted into the template: the factory bodies below are full
+    of dict literals, so any brace-based substitution would have to escape them.
+    Contribution ids are unique registry-wide, so a second plugin in the same
+    config needs its own.
+    """
+
+    return (
+        f"DECLARATION_ID = {declaration_id!r}\n"
+        + _BODY_PREFIX
+        + textwrap.dedent(factory_src).strip("\n")
+        + "\n"
+        + _BODY_SUFFIX
+    )
 
 
 _FULL_ROUTER_SRC = """
@@ -201,6 +216,100 @@ def build_router(context):
     return router
 """
 
+_MINIMAL_GATED_SRC = """
+def build_router(context):
+    router = APIRouter()
+
+    @router.get(
+        "/notebooks/{notebook_id}/peek",
+        dependencies=[Depends(context.require_notebook_read)],
+    )
+    def peek(notebook_id: str):
+        return {"notebook_id": notebook_id}
+
+    return router
+"""
+
+# Three route shapes that all clear ``_validate_plugin_router`` while proving
+# nothing about write access, then reach for the URL import port anyway. Each
+# one is a real way a plugin could be written — none is a contrived escape —
+# which is exactly why authorization has to live in the port.
+_PORT_AUTHZ_SRC = """
+def build_router(context):
+    router = APIRouter()
+
+    def _import(notebook_id, urls):
+        result = context.url_sources.import_urls(notebook_id, urls)
+        return {"created": [row.source_id for row in result.created]}
+
+    # Shape 1: the path template check passes, but the gate it mounts is the
+    # *read* gate — every reader of the notebook clears it.
+    @router.post(
+        "/notebooks/{notebook_id}/read-gated",
+        dependencies=[Depends(context.require_notebook_read)],
+    )
+    def read_gated(notebook_id: str, payload: dict):
+        return _import(notebook_id, payload["urls"])
+
+    # Shape 2: same notebook-scoped route, path parameter named something else,
+    # so the ``{notebook_id}`` rule never fires and no gate is required at all.
+    @router.post("/n/{nb}/aliased")
+    def aliased(nb: str, payload: dict):
+        return _import(nb, payload["urls"])
+
+    # Shape 3: the notebook id is not in the path in any form.
+    @router.post("/from-body")
+    def from_body(payload: dict):
+        return _import(payload["notebook_id"], payload["urls"])
+
+    return router
+"""
+
+# A core gate wrapped in the plugin's own dependency — the ordinary way a
+# plugin adds its own precondition on top of core's. ``_dependant_calls`` must
+# find the core gate transitively or this router cannot be mounted at all.
+_WRAPPED_GATE_SRC = """
+def build_router(context):
+    _core_read_gate = context.require_notebook_read
+
+    def my_gate(notebook_id: str, gated: str = Depends(_core_read_gate)):
+        return gated
+
+    router = APIRouter()
+
+    @router.get(
+        "/notebooks/{notebook_id}/wrapped", dependencies=[Depends(my_gate)]
+    )
+    def wrapped(notebook_id: str):
+        return {"notebook_id": notebook_id}
+
+    return router
+"""
+
+# Both handler flavours raise a bare 401, the way a plugin re-raising an
+# upstream service's rejection would.
+_UPSTREAM_401_SRC = """
+from fastapi import HTTPException
+
+
+def build_router(context):
+    router = APIRouter()
+
+    @router.get("/sync-401")
+    def sync_401():
+        raise HTTPException(status_code=401, detail="upstream says no")
+
+    @router.get("/async-401")
+    async def async_401():
+        raise HTTPException(status_code=401, detail="upstream says no")
+
+    @router.get("/sync-403")
+    def sync_403():
+        raise HTTPException(status_code=403, detail="upstream says forbidden")
+
+    return router
+"""
+
 
 # --------------------------------------------------------------------------
 # Application helpers
@@ -217,11 +326,25 @@ def _clear_caches() -> None:
     deps.repository.cache_clear()
 
 
-def _configure(tmp_path, monkeypatch, *, factory_src: str, env=None) -> None:
-    """Write the plugin, point EXTENSIONS_CONFIG at it, and set a fresh env."""
+def _configure(tmp_path, monkeypatch, *, factory_src: str, env=None, extra=()) -> None:
+    """Write the plugin(s), point EXTENSIONS_CONFIG at them, set a fresh env.
+
+    ``extra`` holds additional ``(plugin_id, factory_src)`` pairs written as
+    their own modules and config entries. Mount order is by plugin id (see
+    ``collect_plugin_router_specs``), so a caller that needs a specific plugin
+    to be validated second picks an id that sorts after ``corp.sample``.
+    """
 
     module = _write_plugin_package(tmp_path, body=_plugin_body(factory_src))
-    monkeypatch.setenv("EXTENSIONS_CONFIG", _write_config(tmp_path, _entry(module)))
+    entries = [_entry(module)]
+    for plugin_id, extra_src in extra:
+        extra_module = _write_plugin_package(
+            tmp_path,
+            plugin_id=plugin_id,
+            body=_plugin_body(extra_src, declaration_id=f"{plugin_id}.router"),
+        )
+        entries.append(_entry(extra_module, plugin_id=plugin_id))
+    monkeypatch.setenv("EXTENSIONS_CONFIG", _write_config(tmp_path, "".join(entries)))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
@@ -239,8 +362,10 @@ def _create_app():
     return create_app()
 
 
-def _client(tmp_path, monkeypatch, *, factory_src: str = _FULL_ROUTER_SRC, env=None):
-    _configure(tmp_path, monkeypatch, factory_src=factory_src, env=env)
+def _client(
+    tmp_path, monkeypatch, *, factory_src: str = _FULL_ROUTER_SRC, env=None, extra=()
+):
+    _configure(tmp_path, monkeypatch, factory_src=factory_src, env=env, extra=extra)
     return TestClient(_create_app())
 
 
@@ -267,6 +392,68 @@ def _notebook(client: TestClient, headers: dict[str, str]) -> str:
 
 def _seen_context(module_prefix: str = _PLUGIN_ID) -> PluginRouteContext:
     return sys.modules[_module_name(module_prefix)].SEEN[0]
+
+
+_REACHABLE_MAX_DEPTH = 4
+
+
+def _reachable_from(root, *, depth: int = _REACHABLE_MAX_DEPTH) -> list:
+    """Objects reachable from ``root`` through instance state and closures.
+
+    Deliberately narrow, in both directions:
+
+    * ``__dict__`` and ``__closure__`` are followed, plus plain containers,
+      because those are the ways a seam can *hold* a core object — checking only
+      the eight top-level fields would miss an adapter with a repository
+      attribute or a closure that captured one.
+    * ``__globals__`` is **not** followed. Every function object reaches its
+      defining module's globals, so walking them would report the repository via
+      any core function the context legitimately exposes, and the assertion
+      would be about nothing.
+
+    Bounded by ``depth`` and by identity, so a self-referential graph (the
+    logging module's registry is one) terminates.
+    """
+
+    seen: set[int] = set()
+    found: list = []
+    frontier = [(root, 0)]
+    while frontier:
+        obj, level = frontier.pop()
+        if level > depth or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        found.append(obj)
+        children: list = []
+        for cell in getattr(obj, "__closure__", None) or ():
+            try:
+                children.append(cell.cell_contents)
+            except ValueError:  # pragma: no cover - empty cell
+                continue
+        state = getattr(obj, "__dict__", None)
+        if state is not None:
+            try:
+                children.extend(dict(state).values())
+            except Exception:  # pragma: no cover - exotic mapping
+                pass
+        # ``PluginRouteContext`` is ``slots=True``, so it has no ``__dict__`` at
+        # all — reading only that would make this walk stop at the root and
+        # report nothing, which is exactly the vacuous shape being replaced.
+        for cls in type(obj).__mro__:
+            slots = getattr(cls, "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for name in slots:
+                try:
+                    children.append(getattr(obj, name))
+                except AttributeError:  # pragma: no cover - unset slot
+                    continue
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            children.extend(obj)
+        elif isinstance(obj, dict):
+            children.extend(obj.values())
+        frontier.extend((child, level + 1) for child in children)
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -533,6 +720,256 @@ def test_router_missing_the_notebook_gate_fails_to_mount(
     assert str(excinfo.value) == f"{_PLUGIN_ID}: plugin_route_missing_notebook_gate"
 
 
+def test_a_wrapped_core_gate_still_counts(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """``Depends(my_gate)`` wrapping ``Depends(context.require_notebook_read)``.
+
+    Adding a plugin's own precondition on top of a core gate is the ordinary
+    shape, so the gate scan has to be transitive. Mounting at all is half the
+    assertion (a one-level scan refuses this router and ``_create_app`` raises);
+    the owner/stranger split is the other half — the wrapped gate must still be
+    *doing* something, not merely be findable.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_WRAPPED_GATE_SRC)
+    owner = _auth(client, "z00131013")
+    stranger = _auth(client, "z00141014")
+    notebook_id = _notebook(client, owner)
+
+    response = client.get(f"{_MOUNT}/notebooks/{notebook_id}/wrapped", headers=owner)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"notebook_id": notebook_id}
+    assert (
+        client.get(
+            f"{_MOUNT}/notebooks/{notebook_id}/wrapped", headers=stranger
+        ).status_code
+        == 404
+    )
+
+
+def test_every_plugin_router_is_validated_not_just_the_first(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Two plugins, and it is the *second* one whose router is ungated.
+
+    Specs are mounted in plugin-id order, so ``corp.zzz`` is validated after
+    ``corp.sample``. A validation loop that only ever looked at the first spec
+    would start this application happily, with an ungated notebook-scoped route
+    live on the second plugin's prefix.
+    """
+
+    _configure(
+        tmp_path,
+        monkeypatch,
+        factory_src=_MINIMAL_GATED_SRC,
+        extra=(("corp.zzz", _UNGATED_SRC),),
+    )
+    with pytest.raises(PluginRouteMountError) as excinfo:
+        _create_app()
+    assert excinfo.value.plugin_id == "corp.zzz"
+    assert excinfo.value.reason == "plugin_route_missing_notebook_gate"
+
+
+# --------------------------------------------------------------------------
+# Port-level authorization: the gate a plugin declares is not the boundary
+# --------------------------------------------------------------------------
+
+
+def _grant_world(client: TestClient, letter: str) -> dict:
+    """One owner's notebook plus a reader, a group admin, and a stranger.
+
+    Both non-owner roles arrive through real grant edges rather than
+    ``add_member``, because the two capability levels this exercises are
+    defined on those edges: ``principal_type="group"`` + ``role="viewer"``
+    gives read and nothing more; ``principal_type="group_admins"`` +
+    ``role="admin"`` is what makes ``sources:write`` (an "admin"-level
+    capability) resolve true for someone who is not the owner.
+
+    ``letter`` prefixes this world's usernames so parallel cases cannot collide.
+    """
+
+    owner = _auth(client, f"{letter}00000001")
+    notebook_id = _notebook(client, owner)
+    reader = _auth(client, f"{letter}00000002")
+    reader_id = client.get("/api/me", headers=reader).json()["id"]
+    deputy = _auth(client, f"{letter}00000003")
+    deputy_id = client.get("/api/me", headers=deputy).json()["id"]
+    stranger = _auth(client, f"{letter}00000004")
+
+    for user_id, group_name, member_role, principal_type, grant_role in (
+        (reader_id, "读者组", "member", "group", "viewer"),
+        (deputy_id, "管理组", "admin", "group_admins", "admin"),
+    ):
+        group_id = client.post(
+            "/api/groups", json={"name": group_name}, headers=owner
+        ).json()["id"]
+        assert (
+            client.put(
+                f"/api/groups/{group_id}/members/{user_id}",
+                json={"role": member_role},
+                headers=owner,
+            ).status_code
+            == 200
+        )
+        granted = client.post(
+            f"/api/notebooks/{notebook_id}/grants",
+            json={
+                "principal_type": principal_type,
+                "principal_id": group_id,
+                "role": grant_role,
+            },
+            headers=owner,
+        )
+        assert granted.status_code == 200, granted.text
+
+    return {
+        "notebook": notebook_id,
+        "owner": owner,
+        "reader": reader,
+        "deputy": deputy,
+        "stranger": stranger,
+    }
+
+
+@pytest.fixture
+def port_authz(tmp_path, monkeypatch, frozen_runtime_reset):
+    """One app whose plugin offers three ways to reach the URL import port."""
+
+    from app.services import remote_sources
+    from app.services.remote_sources import PdfProbe
+
+    client = _client(
+        tmp_path, monkeypatch, factory_src=_PORT_AUTHZ_SRC, env={"MINERU_API_TOKEN": "tok"}
+    )
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf", lambda url, **kw: PdfProbe(True, "", 1, "d.pdf")
+    )
+    monkeypatch.setattr(
+        __import__("app.api.source_routes", fromlist=["kg_scheduler"]).kg_scheduler,
+        "submit_job",
+        lambda fn, *a, **k: None,
+    )
+    return client, _grant_world(client, "y")
+
+
+def _source_count(client: TestClient, notebook_id: str, headers: dict) -> int:
+    response = client.get(f"/api/notebooks/{notebook_id}/sources", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["total_count"]
+
+
+def test_reader_cannot_import_through_a_read_gated_plugin_route(port_authz):
+    """The route's own gate lets the reader in; the port refuses them.
+
+    404 rather than 403, matching every core notebook guard: a plugin route
+    must not become the one surface that confirms a notebook id exists to
+    someone who may not write to it.
+    """
+
+    client, world = port_authz
+    before = _source_count(client, world["notebook"], world["owner"])
+    response = client.post(
+        f"{_MOUNT}/notebooks/{world['notebook']}/read-gated",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=world["reader"],
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Notebook not found"
+    assert _source_count(client, world["notebook"], world["owner"]) == before
+
+
+def test_stranger_cannot_import_through_an_aliased_path_parameter(port_authz):
+    """``/n/{nb}/aliased`` never trips the ``{notebook_id}`` shape rule."""
+
+    client, world = port_authz
+    before = _source_count(client, world["notebook"], world["owner"])
+    response = client.post(
+        f"{_MOUNT}/n/{world['notebook']}/aliased",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=world["stranger"],
+    )
+    assert response.status_code == 404, response.text
+    assert _source_count(client, world["notebook"], world["owner"]) == before
+
+
+def test_stranger_cannot_import_when_the_notebook_id_arrives_in_the_body(port_authz):
+    """No notebook id in the path at all — the shape rule cannot see this one."""
+
+    client, world = port_authz
+    before = _source_count(client, world["notebook"], world["owner"])
+    response = client.post(
+        f"{_MOUNT}/from-body",
+        json={"notebook_id": world["notebook"], "urls": ["https://a/d.pdf"]},
+        headers=world["stranger"],
+    )
+    assert response.status_code == 404, response.text
+    assert _source_count(client, world["notebook"], world["owner"]) == before
+
+
+def test_owner_imports_through_the_same_ungated_shapes(port_authz):
+    """Non-vacuity for all three refusals above: the routes do work.
+
+    Each shape is exercised by the owner and the source is checked to have
+    actually landed — otherwise a port that refused *everyone* would satisfy
+    the three tests above while breaking the feature.
+    """
+
+    client, world = port_authz
+    notebook_id = world["notebook"]
+    calls = (
+        (f"{_MOUNT}/notebooks/{notebook_id}/read-gated", {"urls": ["https://a/1.pdf"]}),
+        (f"{_MOUNT}/n/{notebook_id}/aliased", {"urls": ["https://a/2.pdf"]}),
+        (
+            f"{_MOUNT}/from-body",
+            {"notebook_id": notebook_id, "urls": ["https://a/3.pdf"]},
+        ),
+    )
+    for index, (path, body) in enumerate(calls, start=1):
+        response = client.post(path, json=body, headers=world["owner"])
+        assert response.status_code == 200, response.text
+        assert len(response.json()["created"]) == 1
+        assert _source_count(client, notebook_id, world["owner"]) == index
+
+
+def test_group_admin_imports_through_the_plugin_port(port_authz):
+    """``sources:write`` is an "admin"-level capability, so the port honours it.
+
+    Pinning this direction as well as the refusals is what keeps the port from
+    silently hardening into owner-only: the deputy owns nothing here, and reads
+    the notebook only through a ``group_admins``/``admin`` edge.
+    """
+
+    client, world = port_authz
+    response = client.post(
+        f"{_MOUNT}/notebooks/{world['notebook']}/read-gated",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=world["deputy"],
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["created"]) == 1
+    assert _source_count(client, world["notebook"], world["owner"]) == 1
+
+
+def test_the_import_port_reads_the_user_from_core_not_from_its_caller():
+    """Outside a request there is no user, and the port refuses rather than
+    falling back.
+
+    ``get_request_user()`` returns ``None`` when unset — the seeded-admin
+    fallback lives further down, in the repository's ``current_user``, and must
+    never be what answers an authorization question. A plugin calling the port
+    from a thread it spawned itself lands here.
+    """
+
+    from app.api.extension_routes import _UrlSourceImportAdapter
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        _UrlSourceImportAdapter().import_urls("nb-does-not-matter", ["https://a/d.pdf"])
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == "Notebook not found"
+
+
 # --------------------------------------------------------------------------
 # Error copy, actor shape, and the context's closed field set
 # --------------------------------------------------------------------------
@@ -547,6 +984,89 @@ def test_user_error_header_is_visible_on_plugin_routes(
     assert response.status_code == 409
     assert response.headers.get("X-User-Message") == "1"
     assert response.json()["detail"] == "这项操作暂时无法完成"
+
+
+@pytest.mark.parametrize("path", ["sync-401", "async-401"])
+def test_handler_raised_401_becomes_424(
+    tmp_path, monkeypatch, frozen_runtime_reset, path
+):
+    """A plugin's upstream credential must not log the user out of core.
+
+    ``frontend/app/errors.ts`` treats 401 as "your session died": it clears the
+    stored token and reloads. So a 401 that a plugin handler raised — because
+    *its* upstream said no — is translated to 424 with user copy. Both handler
+    flavours are covered: the sync branch runs in a threadpool, the async one on
+    the event loop, and they are separate wrappers.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_UPSTREAM_401_SRC)
+    headers = _auth(client, "z00151015")
+    response = client.get(f"{_MOUNT}/{path}", headers=headers)
+    assert response.status_code == 424, response.text
+    assert response.headers.get("X-User-Message") == "1"
+    assert response.json()["detail"] == "扩展服务的上游认证失败，请联系管理员"
+    # The upstream's own wording never reaches the browser.
+    assert "upstream" not in response.text
+
+
+def test_a_real_missing_session_is_still_401(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """The translation is scoped to the handler, so core's own 401 survives.
+
+    The router-level ``Depends(get_current_user)`` raises before the endpoint is
+    ever called, so it is outside the wrapper — which is the whole reason the
+    wrapper sits at ``dependant.call`` rather than around the route handler.
+    Losing this distinction would mean an expired session stopped logging the
+    user out.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_UPSTREAM_401_SRC)
+    assert client.get(f"{_MOUNT}/sync-401").status_code == 401
+    assert (
+        client.get(
+            f"{_MOUNT}/sync-401", headers={"Authorization": "Bearer nope"}
+        ).status_code
+        == 401
+    )
+
+
+def test_other_plugin_statuses_pass_through_untouched(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Only 401 is rewritten; a plugin's 403 stays a 403 with its own detail."""
+
+    client = _client(tmp_path, monkeypatch, factory_src=_UPSTREAM_401_SRC)
+    headers = _auth(client, "z00161016")
+    response = client.get(f"{_MOUNT}/sync-403", headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "upstream says forbidden"
+    assert "X-User-Message" not in response.headers
+
+
+def test_upstream_401_is_counted_on_the_event_sink():
+    """One whitelisted code, no upstream text, no notebook or user identity."""
+
+    from fastapi import HTTPException
+
+    from app.api.extension_routes import _translate_unauthorized
+
+    log = _RecordingLog()
+    emit = _event_emitter(_PLUGIN_ID, log)
+    translated = _translate_unauthorized(
+        HTTPException(status_code=401, detail="token abc123 expired"), emit
+    )
+    assert translated is not None and translated.status_code == 424
+    assert log.records == [
+        {
+            "event": "plugin_upstream_unauthorized",
+            "kind": "extension_plugin",
+            "plugin_id": _PLUGIN_ID,
+        }
+    ]
+
+    assert _translate_unauthorized(HTTPException(status_code=403), emit) is None
+    assert len(log.records) == 1
 
 
 def test_plugin_actor_is_narrow(tmp_path, monkeypatch, frozen_runtime_reset):
@@ -568,10 +1088,11 @@ def test_plugin_actor_is_narrow(tmp_path, monkeypatch, frozen_runtime_reset):
 def test_plugin_cannot_reach_repository_or_settings_through_the_context(
     tmp_path, monkeypatch, frozen_runtime_reset
 ):
-    """The context is exactly eight seams, and none of them is a core object."""
+    """The context is exactly eight seams, and no core object hides behind one."""
 
     from app.api import deps
     from app.core.config import Settings
+    from app.repositories.ports import NotebookRepository
 
     client = _client(tmp_path, monkeypatch)
     _auth(client, "z00101010")  # force a request so the repository exists
@@ -592,12 +1113,16 @@ def test_plugin_cannot_reach_repository_or_settings_through_the_context(
         context.plugin_id = "other"
 
     repository = deps.repository()
-    for field in dataclasses.fields(PluginRouteContext):
-        value = getattr(context, field.name)
-        assert value is not repository
-        assert not isinstance(value, Settings)
-        # No seam smuggles the repository or the settings out as an attribute.
-        assert getattr(value, "_runtime", None) is None
+    reachable = _reachable_from(context)
+    # Non-vacuity: the walk must actually be walking. The event sink is a
+    # closure over an EventLogger, so a scan that only looked at the eight
+    # top-level seams would never see one.
+    from app.core.event_logging import EventLogger
+
+    assert any(isinstance(obj, EventLogger) for obj in reachable)
+    for obj in reachable:
+        assert obj is not repository
+        assert not isinstance(obj, (Settings, NotebookRepository)), type(obj).__name__
     # This plugin declares no settings_model, so its slot is None — not a
     # Settings object, and not core configuration of any kind.
     assert context.settings is None
