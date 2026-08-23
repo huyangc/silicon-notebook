@@ -10,6 +10,7 @@ from app.domain.extensions import (
     GENERATED_QUESTION_ACCESS_CAPABILITY,
     RetrievalContributionCallContext,
     RetrievalEvidenceProposal,
+    lane_is_dormant,
 )
 from app.services.cancellation import AskCancelled
 from app.services.retrieval import RetrievedChunk, est_tokens
@@ -350,19 +351,14 @@ def generated_question_lane_is_dormant(host: Any) -> bool:
     """True when disabling the generated-question capability leaves
     ``chunk_candidates`` with nothing.
 
-    Mirrors ``source_graph_activation.selected_evidence_lane_is_dormant``
-    (codex #565): this asks the host about its own frozen topology rather
-    than assuming the generated-question contributor is the only one
-    registered at this invocation.  The moment any other ``chunk_candidates``
-    registration exists that does not require
-    ``GENERATED_QUESTION_ACCESS_CAPABILITY``, this is False and the caller
-    enters the host exactly as before, so that contribution keeps its
-    output.
-
-    The caller only asks this from the branch that is about to disable the
-    capability anyway (``not generated_enabled`` -- deployment mode is
-    ``off``, no actor is bound to this run, or this request's baseline
-    already cleared the trigger threshold): the same
+    Delegates to ``app.domain.extensions.lane_is_dormant`` for the generic
+    probe-safety argument (defensive read, fail into the host) shared with
+    ``source_graph_activation.selected_evidence_lane_is_dormant`` (codex
+    #565). What is lane-specific here: the caller only asks this from the
+    branch that is about to disable the capability anyway (``not
+    generated_enabled`` -- deployment mode is ``off``, no actor is bound to
+    this run, or this request's baseline already cleared the trigger
+    threshold): the same
     ``disabled_capabilities={GENERATED_QUESTION_ACCESS_CAPABILITY}`` set that
     branch would otherwise only hand to ``host.run`` after unconditionally
     building a call/context envelope. When dormant, the caller returns the
@@ -370,23 +366,12 @@ def generated_question_lane_is_dormant(host: Any) -> bool:
     to what ``host.run`` would have handed back after filtering out the only
     registration, since a fully-filtered ``_run`` returns the exact baseline
     object with zero contribution attempts and therefore zero events.
-
-    A host that predates the query, or a probe that answers anything other
-    than the literal ``False`` this function is checking for, both keep the
-    old path -- the probe is read strictly and defensively rather than
-    truthiness-tested, so a malformed or unexpected answer can never be
-    mistaken for "nothing else contributes here".
     """
-    probe = getattr(host, "has_contributions", None)
-    if not callable(probe):
-        return False
-    try:
-        return probe(
-            "chunk_candidates",
-            disabled_capabilities=frozenset({GENERATED_QUESTION_ACCESS_CAPABILITY}),
-        ) is False
-    except Exception:  # noqa: BLE001 — a probe failure must not skip the host
-        return False
+    return lane_is_dormant(
+        host,
+        "chunk_candidates",
+        frozenset({GENERATED_QUESTION_ACCESS_CAPABILITY}),
+    )
 
 
 def generated_question_call_context(

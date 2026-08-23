@@ -23,7 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field
 #: core_models_service_imports (now empty). This tuple is also the renderer's
 #: whitelist: a row whose label is not here renders nothing at all -- see
 #: ``agent_profile_block.selected_profile_blocks`` for why dropping beats
-#: rendering-at-the-end.
+#: rendering-at-the-end. Not a candidate for sinking further down into
+#: ``app.domain`` the way ``app.domain.retrieval_experience`` did for its own
+#: narrowing helpers: the import-time ``assert`` below that keeps
+#: ``UnderstandingLabel`` (a FastAPI path-parameter ``Literal`` that belongs
+#: to ``app.models`` for routing) in sync with this tuple only fires if both
+#: names live in the same module, so this tuple has to stay wherever
+#: ``UnderstandingLabel`` stays.
 PROFILE_LABEL_ORDER: tuple[str, ...] = (
     "corpus_shape",
     "key_entities",

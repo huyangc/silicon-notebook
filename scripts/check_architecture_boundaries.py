@@ -614,13 +614,32 @@ def function_length_violations(
     return violations
 
 
+def _has_protocol_base(base: ast.expr) -> bool:
+    """True when ``base`` names ``Protocol``, however it was spelled.
+
+    Handles the three shapes a class base can take in this file: a bare name
+    (``Protocol``), a qualified attribute (``typing.Protocol``), and a
+    subscripted generic (``Protocol[T]``) -- the last by recursing into the
+    subscript's ``value``.
+    """
+    if isinstance(base, ast.Name):
+        return base.id == "Protocol"
+    if isinstance(base, ast.Attribute):
+        return base.attr == "Protocol"
+    if isinstance(base, ast.Subscript):
+        return _has_protocol_base(base.value)
+    return False
+
+
 def ports_protocol_method_count(root: Path) -> int:
     """Count every ``FunctionDef``/``AsyncFunctionDef`` nested directly inside
-    a ``ClassDef`` in ``backend/app/repositories/ports.py`` -- i.e. Protocol
-    (and Protocol-adjacent mixin) methods. Module-level functions such as
-    ``project_run_row`` do not count; only the consumer-facing method surface
-    the Protocols declare does, regardless of which one of the file's classes
-    a given method lives on."""
+    a ``ClassDef`` that subclasses ``Protocol`` in
+    ``backend/app/repositories/ports.py`` -- i.e. actual Protocol methods.
+    Module-level functions such as ``project_run_row`` do not count, and
+    neither do methods on the file's plain (non-Protocol) classes, such as
+    the handful of exception classes defined here (``ConversationBusyError``
+    and friends) -- only the consumer-facing method surface the Protocols
+    themselves declare does."""
 
     path = root / "backend" / "app" / "repositories" / "ports.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -628,6 +647,7 @@ def ports_protocol_method_count(root: Path) -> int:
         1
         for node in ast.walk(tree)
         if isinstance(node, ast.ClassDef)
+        and any(_has_protocol_base(base) for base in node.bases)
         for child in node.body
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
     )

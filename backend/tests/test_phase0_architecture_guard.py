@@ -282,25 +282,31 @@ def test_core_models_service_import_allowlist_covers_type_checking_imports(tmp_p
 
 def test_baseline_ceilings_and_allowlist_have_not_collapsed_to_empty():
     """A baseline read as ``{}`` (missing file, truncated write, bad key)
-    would make every ceiling/allowlist check vacuously pass -- both loops in
-    ``function_length_violations``/``core_models_service_import_violations``
-    iterate the *baseline*, not the repository, so an empty baseline finds
-    nothing to check. This reads the real checked-in baseline and pins the
-    function-length half to a non-trivial lower bound.
+    would make the function-length ceiling check vacuously pass --
+    ``function_length_violations`` iterates the *baseline* ceilings, not the
+    repository, so an empty baseline finds nothing to check. This reads the
+    real checked-in baseline and pins the function-length half to a
+    non-trivial lower bound.
 
-    The core/models allowlist is legitimately empty now -- both debt edges it
-    used to carry (``app.core.llm -> app.services.cancellation`` and
-    ``app.models.agent_profile -> app.services.agent_profile_block``) were
-    fixed by moving the shared definitions into ``app.domain``/``app.models``
-    respectively, so an empty allowlist here can no longer be told apart from
-    a quietly-truncated baseline by pinning it to a non-trivial value the way
-    the function-length half above does. Instead this scans the real
-    checked-in ``backend/app`` tree with the same
-    ``core_models_service_import_edges`` the guard itself calls and asserts
-    the live edge set is *also* empty -- a baseline that went empty for the
-    wrong reason (a normalization regression hiding a real edge, rather than
-    the edges actually being gone) still fails loudly here instead of the
-    real guard run silently no-op'ing on a checked-in violation.
+    The core/models allowlist half works differently, and is legitimately
+    empty now -- both debt edges it used to carry (``app.core.llm ->
+    app.services.cancellation`` and ``app.models.agent_profile ->
+    app.services.agent_profile_block``) were fixed by moving the shared
+    definitions into ``app.domain``/``app.models`` respectively. Unlike the
+    function-length loop, ``core_models_service_import_violations`` scans the
+    *live repository* (``core_models_service_import_edges``) and diffs it
+    against the allowlist in both directions, so an empty allowlist does not
+    make that check vacuously pass -- it would flag any real live edge as a
+    fresh violation instead. What an empty allowlist cannot protect against
+    on its own is a *normalization* regression, where a real edge gets
+    stringified into a different key on each read and the diff silently
+    no-ops both ways; that guarantee is pinned separately by
+    ``test_core_models_service_import_edges_normalize_to_the_submodule``.
+    This test's own job is narrower: assert the live edge set really is
+    empty right now, using the same ``core_models_service_import_edges`` the
+    guard itself calls, so a baseline that went empty for the wrong reason
+    (someone deleting the allowlist entries rather than the edges actually
+    being gone) still fails loudly here.
     """
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
 
@@ -435,7 +441,8 @@ def test_ports_protocol_method_count_ceiling_only_allows_reduction(tmp_path):
     """
     _write_ports(
         tmp_path,
-        "class Store:\n"
+        "from typing import Protocol\n\n\n"
+        "class Store(Protocol):\n"
         "    def a(self): ...\n"
         "    def b(self): ...\n",
     )  # 2 protocol methods
@@ -444,7 +451,8 @@ def test_ports_protocol_method_count_ceiling_only_allows_reduction(tmp_path):
 
     _write_ports(
         tmp_path,
-        "class Store:\n"
+        "from typing import Protocol\n\n\n"
+        "class Store(Protocol):\n"
         "    def a(self): ...\n"
         "    def b(self): ...\n"
         "    def c(self): ...\n",
@@ -463,15 +471,35 @@ def test_ports_protocol_method_count_ceiling_only_allows_reduction(tmp_path):
         "ports_protocol_method_count)"
     ]
 
+    # Fourth arm: a plain (non-Protocol) class's methods must NOT count
+    # toward the ceiling -- e.g. the handful of exception classes this file
+    # also defines (``ConversationBusyError`` and friends). The ceiling
+    # below is exactly the 3 Protocol methods above; if ``PlainError``'s
+    # method leaked into the count too, this would trip the growth branch
+    # instead of matching the unchanged ceiling.
+    _write_ports(
+        tmp_path,
+        "from typing import Protocol\n\n\n"
+        "class Store(Protocol):\n"
+        "    def a(self): ...\n"
+        "    def b(self): ...\n"
+        "    def c(self): ...\n\n\n"
+        "class PlainError(Exception):\n"
+        "    def extra_method(self): ...\n",
+    )
+    assert ports_method_count_violations(tmp_path, 3) == []
+
 
 def test_ports_protocol_method_count_ignores_module_level_functions(tmp_path):
     """Module-level ``def`` (e.g. ``project_run_row``) never counts -- only a
-    method nested directly inside a ``ClassDef`` body does."""
+    method nested directly inside a ``ClassDef`` that subclasses ``Protocol``
+    does."""
     _write_ports(
         tmp_path,
+        "from typing import Protocol\n\n\n"
         "def free_function():\n"
         "    pass\n\n\n"
-        "class Store:\n"
+        "class Store(Protocol):\n"
         "    def a(self): ...\n"
         "    def b(self): ...\n",
     )
@@ -480,11 +508,12 @@ def test_ports_protocol_method_count_ignores_module_level_functions(tmp_path):
     # Adding a THIRD module-level function still must not move the count.
     _write_ports(
         tmp_path,
+        "from typing import Protocol\n\n\n"
         "def free_function():\n"
         "    pass\n\n\n"
         "def another_free_function():\n"
         "    pass\n\n\n"
-        "class Store:\n"
+        "class Store(Protocol):\n"
         "    def a(self): ...\n"
         "    def b(self): ...\n",
     )

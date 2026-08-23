@@ -2001,8 +2001,12 @@ class CandidateRetrievalService(_RetrievalState):
         )
         if not generated_enabled and generated_question_lane_is_dormant(host):
             # Unconfigured/untriggered this call: say so before building a
-            # call/context envelope the host would immediately discard.
-            # Mirrors ``selected_evidence_lane_is_dormant`` (codex #565).
+            # call/context envelope the host would immediately discard. This
+            # mirrors ``selected_evidence_lane_is_dormant`` (codex #565) for
+            # symmetry between the two lanes -- the envelope it skips is a
+            # plain in-memory dataclass construction (~5 microseconds), not
+            # something ever profiled as a hot path; skipping it is a side
+            # benefit of the symmetry, not the reason for it.
             return baseline
         call = GeneratedQuestionContributionCall(
             notebook_id,

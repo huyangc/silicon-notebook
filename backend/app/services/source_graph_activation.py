@@ -19,6 +19,7 @@ from app.domain.extensions import (
     SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     RetrievalContributionCallContext,
     RetrievalEvidenceProposal,
+    lane_is_dormant,
 )
 from app.services.cancellation import AskCancelled
 from app.services.retrieval import RetrievedChunk, RetrievalSupport, est_tokens
@@ -928,34 +929,21 @@ class SelectedSourceGraphContributionCall:
 def selected_evidence_lane_is_dormant(host: Any) -> bool:
     """True when an unconfigured graph leaves ``selected_evidence`` with nothing.
 
-    The point stays generic: this asks the host about its own frozen topology
-    rather than assuming the graph contributor is the only one.  The moment any
-    other ``selected_evidence`` bundle/registration exists that does not
-    require the graph capability, this is False and the workflow enters the
-    host exactly as before, so that contribution keeps its output.  (The unit
-    that keeps or drops together is the *registration* under a plugin
-    manifest's ``requires``, not the individual contribution: a manifest that
-    registers more than one ``selected_evidence`` contribution shares one
-    ``requires`` set, so disabling the graph capability filters every
-    contribution that manifest registers, not just the one that logically
-    needs it.)
-
-    A host that predates the query, or a probe that answers anything other
-    than the literal ``False`` this function is checking for, both keep the
-    old path -- the probe is read strictly and defensively rather than
-    truthiness-tested, so a malformed or unexpected answer can never be
-    mistaken for "nothing else contributes here".
+    Delegates to ``app.domain.extensions.lane_is_dormant`` for the generic
+    probe-safety argument (defensive read, fail into the host) shared with
+    ``generated_question_contribution.generated_question_lane_is_dormant``.
+    What is lane-specific here: the unit that keeps or drops together is the
+    *registration* under a plugin manifest's ``requires``, not the individual
+    contribution -- a manifest that registers more than one
+    ``selected_evidence`` contribution shares one ``requires`` set, so
+    disabling the graph capability filters every contribution that manifest
+    registers, not just the one that logically needs it.
     """
-    probe = getattr(host, "has_contributions", None)
-    if not callable(probe):
-        return False
-    try:
-        return probe(
-            "selected_evidence",
-            disabled_capabilities=UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES,
-        ) is False
-    except Exception:  # noqa: BLE001 — a probe failure must not skip the host
-        return False
+    return lane_is_dormant(
+        host,
+        "selected_evidence",
+        UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES,
+    )
 
 
 def selected_source_graph_call_context(
