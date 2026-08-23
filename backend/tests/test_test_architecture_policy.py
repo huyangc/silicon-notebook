@@ -210,7 +210,7 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     module sets, plus a source-text scan for the marker decorators) rather
     than hardcoded, so this stays valid as tests gain or lose these markers.
 
-    This test itself costs ~5s (dominated by one `--collect-only`
+    This test itself costs ≈2–4s (dominated by one `--collect-only`
     subprocess) and is a deliberate exception to the G1/G2 split it proves:
     it stays in G1 on every PR because it *is* the guard that makes the
     56/8 `architecture_contract`/`architecture_contract_heavy` split
@@ -261,30 +261,58 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     heavy_tests = ast.literal_eval(heavy_match.group(1))
     module_sets |= {file_name for file_name, _ in heavy_tests}
 
+    tests_dir = ROOT / "backend" / "tests"
+    # conftest.py's three constants above only ever name modules that live
+    # directly in backend/tests/ — its own matching is `Path(fspath).name`
+    # against these bare basenames (see pytest_collection_modifyitems) — so
+    # resolving them against tests_dir is correct for this source.
+    candidate_relpaths = {
+        str((tests_dir / name).relative_to(ROOT)) for name in module_sets
+    }
+
     decorator_pattern = re.compile(
         r"@pytest\.mark\.(?:slow|architecture_contract(?:_heavy)?|graph_index_contract)\b"
+        r"|pytestmark\s*=\s*.*mark\.(?:slow|architecture_contract(?:_heavy)?|graph_index_contract)"
     )
-    tests_dir = ROOT / "backend" / "tests"
     for path in tests_dir.rglob("*.py"):
         if "postgres" in path.relative_to(tests_dir).parts:
             continue
         if path.name == "conftest.py":
             continue
         if decorator_pattern.search(path.read_text(encoding="utf-8")):
-            module_sets.add(path.name)
+            # Unlike the conftest-derived names above, this scan walks
+            # subdirectories (e.g. backend/tests/kg/). Keep the *full*
+            # relative path here — collapsing to `path.name` would silently
+            # rewrite a decorated file below tests_dir into a same-named
+            # sibling directly under tests_dir (or a nonexistent path when
+            # no such sibling exists), dropping the real file from the
+            # candidate set the collect-only subprocess below is given.
+            candidate_relpaths.add(str(path.relative_to(ROOT)))
 
-    candidate_paths = sorted(
-        str((tests_dir / name).relative_to(ROOT)) for name in module_sets
-    )
+    candidate_paths = sorted(candidate_relpaths)
     assert candidate_paths, "expected at least one architecture_contract-bearing file"
+    missing_candidates = [
+        rel for rel in candidate_paths if not (ROOT / rel).is_file()
+    ]
+    assert not missing_candidates, (
+        "candidate files resolved from conftest.py's marker-driving module "
+        "names do not exist on disk (a name likely collided across "
+        f"subdirectories of backend/tests/): {missing_candidates}"
+    )
 
     def marker_expr(layer_index: int) -> str:
-        source = (ROOT / EXTENDED_BACKEND_LAYERS[layer_index]).read_text(
-            encoding="utf-8"
-        )
-        match = re.search(r'-m\s+"([^"]+)"', source)
-        assert match, EXTENDED_BACKEND_LAYERS[layer_index]
-        return match.group(1)
+        path = EXTENDED_BACKEND_LAYERS[layer_index]
+        source = (ROOT / path).read_text(encoding="utf-8")
+        # Scan line by line and skip comments — a `-m "..."` example sitting
+        # in a comment (e.g. the re-timing hint above the real invocation)
+        # must not be picked up ahead of the actual pytest invocation.
+        for line in source.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            match = re.search(r'-m\s+"([^"]+)"', line)
+            if match:
+                return match.group(1)
+        raise AssertionError(f"no -m \"...\" expression found in {path}")
 
     args = [
         sys.executable,
@@ -304,8 +332,13 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
         env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
         timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"collect-only subprocess failed (exit {result.returncode}):\n"
+        f"stdout (tail):\n{result.stdout[-4000:]}\n"
+        f"stderr (tail):\n{result.stderr[-4000:]}"
     )
     assert START_SENTINEL in result.stdout and END_SENTINEL in result.stdout, (
         "lane_partition_plugin dump not found in collect-only output:\n"
@@ -316,6 +349,17 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
 
     universe = {item["nodeid"] for item in items}
     assert universe, "candidate discovery found files but collected zero tests"
+
+    all_markers: set[str] = set()
+    for item in items:
+        all_markers.update(item["markers"])
+    for marker_name in ("slow", "architecture_contract_heavy", "graph_index_contract"):
+        assert marker_name in all_markers, (
+            f"no collected item carries @pytest.mark.{marker_name} — the "
+            "partition assertions below would pass vacuously (every item "
+            "trivially satisfies 'not <marker>') if this marker name were "
+            "typo'd upstream or its only test dropped out of the candidate set"
+        )
 
     def select(expression_text: str) -> set[str]:
         compiled = Expression.compile(expression_text)

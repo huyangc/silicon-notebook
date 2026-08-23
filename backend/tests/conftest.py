@@ -1,6 +1,7 @@
 """测试进程默认开 auth_optional：无 token 的请求回退 seeded admin，
 既有 HTTP 测试无需逐一登录即可继续以 admin 身份跑。"""
 import os
+import sys
 from itertools import count
 from pathlib import Path
 import shutil
@@ -62,7 +63,7 @@ _ARCHITECTURE_CONTRACT_MODULES = {
 # together with it.
 #
 # `test_test_architecture_policy.py::test_verification_lane_markers_partition_
-# every_architecture_contract_test` costs ~5s and is a deliberate exception to
+# every_architecture_contract_test` costs ≈2–4s and is a deliberate exception to
 # this split: it stays in G1 on every PR because it is the guard that proves
 # the 56/8 split above is actually correct, not one of the tests being split
 # by it. Re-timing the split with the `-m architecture_contract` command above
@@ -303,7 +304,7 @@ def pytest_collection_modifyitems(config, items):
             if entry[0] in collected_file_names and entry not in hit_heavy_tests
         )
         if stale_heavy_entries:
-            raise pytest.UsageError(
+            message = (
                 "backend/tests/conftest.py: _ARCHITECTURE_CONTRACT_HEAVY_TESTS "
                 "names (file, test name) pairs that were not found among the "
                 "tests collected from that file — the test was likely renamed, "
@@ -312,6 +313,12 @@ def pytest_collection_modifyitems(config, items):
                 "the comment above `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`). Stale "
                 f"entries: {stale_heavy_entries}"
             )
+            # pytest.UsageError raised from a collection hook under xdist can be
+            # swallowed by the controller before its message reaches the
+            # terminal — write it to stderr directly so a worker process's
+            # stderr (which does surface) still carries the actionable text.
+            sys.stderr.write(f"\n[architecture_contract_heavy] {message}\n")
+            raise pytest.UsageError(message)
 
 
 @pytest.fixture(scope="session")
