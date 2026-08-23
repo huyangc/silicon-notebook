@@ -360,7 +360,7 @@ def test_run_kind_authority_rejects_hostile_str_subclass(monkeypatch):
         draft = ReasoningResponseDraft(
             notebook_id="nb",
             question="q",
-            response=AskResponse(conclusion="ok", mode="reasoning"),
+            response=AskResponse(conversation_id="conv", conclusion="ok", mode="reasoning"),
             conversation_id="conv",
             user_id="user",
             job_id="",
@@ -484,7 +484,7 @@ def test_public_ask_owns_one_scope_run_and_cancellation_authority(monkeypatch):
         seen["execute_scope"] = current_source_scope()
         seen["execute_run"] = current_retrieval_run()
         return CommittedReasoningAnswer(
-            response=AskResponse(conclusion="ok")
+            response=AskResponse(conversation_id="conv", conclusion="ok")
         )
 
     monkeypatch.setattr(service, "_prepare_reasoning_ask", prepare)
@@ -535,7 +535,7 @@ def test_commit_stage_preserves_the_shared_response_object_graph(monkeypatch):
         location_label="§1",
         quoted_span="evidence",
     )
-    response = AskResponse(
+    response = AskResponse(conversation_id="conv", 
         conclusion="ok",
         citations=[citation, citation],
         mode="reasoning",
@@ -587,7 +587,7 @@ def test_commit_stage_requires_the_injected_connection_probe_identity(
     draft = ReasoningResponseDraft(
         notebook_id="nb",
         question="q",
-        response=AskResponse(conclusion="ok", mode="reasoning"),
+        response=AskResponse(conversation_id="conv", conclusion="ok", mode="reasoning"),
         conversation_id="conv",
         user_id="user",
         job_id="",
@@ -619,7 +619,7 @@ def test_commit_stage_rejects_wrong_run_kind_and_empty_actor(monkeypatch):
         draft = ReasoningResponseDraft(
             notebook_id="nb",
             question="q",
-            response=AskResponse(conclusion="ok", mode="reasoning"),
+            response=AskResponse(conversation_id="conv", conclusion="ok", mode="reasoning"),
             conversation_id="conv",
             user_id="victim",
             job_id="",
@@ -793,7 +793,7 @@ def test_response_draft_stage_receives_the_frozen_post_retrieval_envelope(
     monkeypatch,
 ):
     _stub_retrieval(monkeypatch)
-    stage = _RecordingDraftStage(AskResponse(conclusion="drafted", mode="reasoning"))
+    stage = _RecordingDraftStage(AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning"))
     service = _minimal_ask_service(response_draft_stage=stage)
     monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
 
@@ -828,7 +828,7 @@ def test_injected_response_draft_stage_replaces_only_the_draft(monkeypatch):
         location_label="§1",
         quoted_span="evidence",
     )
-    response = AskResponse(
+    response = AskResponse(conversation_id="conv", 
         conclusion="drafted", citations=[citation, citation], mode="reasoning",
     )
     stage = _RecordingDraftStage(response)
@@ -883,7 +883,7 @@ def test_response_draft_stage_cannot_forge_the_committed_job_or_conversation_ide
         fields = dict(
             notebook_id=stage.prepared.notebook_id,
             question=stage.prepared.question,
-            response=AskResponse(conclusion="drafted", mode="reasoning"),
+            response=AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning"),
             conversation_id=stage.prepared.conversation_id,
             user_id=stage.prepared.user_id,
             job_id=stage.prepared.job_id,
@@ -904,6 +904,48 @@ def test_response_draft_stage_cannot_forge_the_committed_job_or_conversation_ide
     assert saves == []
 
 
+def test_response_draft_stage_cannot_detach_the_response_from_the_prepared_conversation(
+    monkeypatch,
+):
+    """The payload/returned ``AskResponse`` carries its own ``conversation_id``
+    (the browser adopts it via ``setConversationId``); an injected stage that
+    leaves it blank or points it elsewhere must be refused at the commit
+    boundary even though the *envelope* names the right conversation
+    (codex #571 R3 P2)."""
+    from app.application.ask_reasoning import (
+        ReasoningResponseDraft,
+        StageBoundaryError,
+    )
+
+    _stub_retrieval(monkeypatch)
+
+    def detach(stage, runtime):
+        return ReasoningResponseDraft(
+            notebook_id=stage.prepared.notebook_id,
+            question=stage.prepared.question,
+            response=AskResponse(
+                conclusion="drafted", mode="reasoning", conversation_id="other"
+            ),
+            conversation_id=stage.prepared.conversation_id,
+            user_id=stage.prepared.user_id,
+            job_id=stage.prepared.job_id,
+            asked_at=stage.prepared.asked_at,
+        )
+
+    service = _minimal_ask_service(
+        response_draft_stage=SimpleNamespace(draft_response=detach)
+    )
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(StageBoundaryError, match="response conversation_id"):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert saves == []
+
+
+
 def test_injected_response_draft_stage_keeps_retrieval_side_model_errors_without_the_private_sink(
     monkeypatch,
 ):
@@ -922,7 +964,7 @@ def test_injected_response_draft_stage_keeps_retrieval_side_model_errors_without
         sink.append({"stage": "embed", "message": "missing_config"})
 
     _stub_retrieval(monkeypatch, on_run=on_run)
-    response = AskResponse(conclusion="drafted", mode="reasoning")
+    response = AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning")
     # A stage double that never touches ``model_errors`` at all -- it is a
     # plain attribute on the ``AskResponse`` it hands back, defaulting to
     # ``[]``, exactly like an implementation that has never heard of the
@@ -982,7 +1024,7 @@ def test_default_response_draft_stage_rejects_a_malformed_envelope_directly():
         (SimpleNamespace(), "has no runner"),
         (
             SimpleNamespace(
-                draft_response=lambda stage, runtime: AskResponse(conclusion="x")
+                draft_response=lambda stage, runtime: AskResponse(conversation_id="conv", conclusion="x")
             ),
             "response draft output",
         ),
@@ -1014,7 +1056,7 @@ def test_response_draft_stage_cannot_change_the_ask_mode(monkeypatch):
     ``chunk``-mode response by mistake)."""
 
     _stub_retrieval(monkeypatch)
-    stage = _RecordingDraftStage(AskResponse(conclusion="drafted", mode="chunk"))
+    stage = _RecordingDraftStage(AskResponse(conversation_id="conv", conclusion="drafted", mode="chunk"))
     service = _minimal_ask_service(response_draft_stage=stage)
     saves: list = []
     monkeypatch.setattr(
@@ -1033,7 +1075,7 @@ def test_response_draft_stage_cannot_return_holding_a_database_connection(
     _stub_retrieval(monkeypatch)
     probe = _HoldProbe()
     stage = _RecordingDraftStage(
-        AskResponse(conclusion="drafted", mode="reasoning"),
+        AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning"),
         before_return=lambda: setattr(probe, "held", True),
     )
     service = _minimal_ask_service(
@@ -1055,7 +1097,7 @@ def test_response_draft_stage_cannot_replace_the_connection_authority(monkeypatc
     probe = _HoldProbe()
     service_box: list = []
     stage = _RecordingDraftStage(
-        AskResponse(conclusion="drafted", mode="reasoning"),
+        AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning"),
         before_return=lambda: setattr(
             service_box[0], "retrieval_connection_probe", _HoldProbe()
         ),
@@ -1087,7 +1129,7 @@ def test_response_draft_stage_entry_rejects_a_connection_held_after_retrieval(
 
     _stub_retrieval(monkeypatch)
     probe = _HoldProbe()
-    stage = _RecordingDraftStage(AskResponse(conclusion="drafted", mode="reasoning"))
+    stage = _RecordingDraftStage(AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning"))
     service = _minimal_ask_service(
         response_draft_stage=stage, retrieval_connection_probe=probe
     )
@@ -1118,7 +1160,7 @@ def test_cancellation_is_checked_on_both_sides_of_the_response_draft_stage(
     #     cancelled turn does not pay for the schema read that opens assembly.
     cancel_event = threading.Event()
     _stub_retrieval(monkeypatch)
-    stage = _RecordingDraftStage(AskResponse(conclusion="drafted"))
+    stage = _RecordingDraftStage(AskResponse(conversation_id="conv", conclusion="drafted"))
     service = _minimal_ask_service(response_draft_stage=stage)
     monkeypatch.setattr(
         service,
@@ -1143,7 +1185,7 @@ def test_cancellation_is_checked_on_both_sides_of_the_response_draft_stage(
     #     last check before the atomic save, so the answer row is never written.
     late_cancel = threading.Event()
     late_stage = _RecordingDraftStage(
-        AskResponse(conclusion="drafted", mode="reasoning"),
+        AskResponse(conversation_id="conv", conclusion="drafted", mode="reasoning"),
         before_return=late_cancel.set,
     )
     late_service = _minimal_ask_service(response_draft_stage=late_stage)
