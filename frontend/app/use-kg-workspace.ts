@@ -45,10 +45,21 @@ export type UseKgWorkspaceOptions = {
   effects: KgWorkspaceEffects;
 };
 
+// Every domain must expose these two commands so the authority's fan-out
+// below can route to it by iterating `KgDomains` — no hand-maintained call
+// list to fall out of sync when a fourth domain is added. The `&
+// KgDomainOwner` intersection on each `KgDomains` member is what makes that
+// a compile error rather than a silently-skipped domain: a domain hook
+// whose return type drops either command fails to typecheck here.
+type KgDomainOwner = {
+  clearVisibleState: () => void;
+  invalidate: () => void;
+};
+
 type KgDomains = {
-  knowledge: ReturnType<typeof useKgKnowledge>;
-  schema: ReturnType<typeof useKgSchema>;
-  graph: ReturnType<typeof useKgGraph>;
+  knowledge: ReturnType<typeof useKgKnowledge> & KgDomainOwner;
+  schema: ReturnType<typeof useKgSchema> & KgDomainOwner;
+  graph: ReturnType<typeof useKgGraph> & KgDomainOwner;
 };
 
 export type KgWorkspace = ReturnType<typeof useKgWorkspace>;
@@ -76,19 +87,18 @@ export function useKgWorkspace({
     actorId,
     notebookId,
     fanOut: {
+      // Derived from `KgDomains` itself (not a hand-picked subset) so a
+      // fourth domain is swept in automatically: see the `KgDomainOwner`
+      // comment above.
       clearVisibleState: () => {
         const domains = domainsRef.current;
         if (!domains) return;
-        domains.knowledge.clearVisibleState();
-        domains.schema.clearVisibleState();
-        domains.graph.clearVisibleState();
+        for (const domain of Object.values(domains)) domain.clearVisibleState();
       },
       invalidate: () => {
         const domains = domainsRef.current;
         if (!domains) return;
-        domains.knowledge.invalidate();
-        domains.schema.invalidate();
-        domains.graph.invalidate();
+        for (const domain of Object.values(domains)) domain.invalidate();
       },
       adoptOwner: (owner: KgWorkspaceOwner, notebookSnapshot: NotebookSummary | null) => {
         domainsRef.current?.graph.adoptOwner(owner, notebookSnapshot);

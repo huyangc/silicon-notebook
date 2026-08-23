@@ -86,6 +86,11 @@ export function useKgOwner({ actorId, notebookId, fanOut }: UseKgOwnerOptions) {
     && sameKgIdentity(ownerRef.current, owner),
   );
 
+  // `kind` keys a single shared `Map`, so the three domains' operation kinds
+  // all live in one namespace and must not collide: `use-kg-knowledge.ts`
+  // uses `"knowledge"`; `use-kg-schema.ts` uses `"schema"`; `use-kg-graph.ts`
+  // uses `"review"`, `"review-all"`, `"merge-decision"`, and `"kg-build"`.
+  // A domain picking a new kind must pick one none of the others already own.
   const beginOperation = (kind: string): object => {
     const token = {};
     operationTokensRef.current.set(kind, token);
