@@ -210,9 +210,12 @@ test("page composes one availability owner and exactly the two canonical outlets
 
 
 test("extension SDK remains static, narrow, and free of domain owners or remote loaders", async () => {
+  // 插件模块按路径约定认（features/<feature>/workspace-plugin.ts），不手抄清单：
+  // 加第二个插件不该改这份守卫，但每个插件仍要过同一套 import 白名单。
+  const PLUGIN_MODULE = /^features\/[a-z0-9-]+\/workspace-plugin\.tsx?$/;
   const modules = (await appSourceModules()).filter((row) => (
     row.path.startsWith("features/extension-sdk/")
-    || row.path === "features/agent-profile/workspace-plugin.ts"
+    || PLUGIN_MODULE.test(row.path)
     || row.path === "use-workspace-extensions.ts"
   ));
   const forbidden = /\b(fetch\s*\(|import\s*\(|setInterval\s*\(|setTimeout\s*\(|WebSocket\b|EventSource\b|page\.tsx|useSourceLibrary|useAskSession|useReportWorkspace|useKgWorkspace|useNotebookCollection)\b/;
@@ -221,17 +224,38 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   }
   const registry = modules.find((row) => row.path === "features/extension-sdk/registry.ts");
   assert.ok(registry);
-  assert.deepEqual(importsIn(registry.module).map((row) => row.module), [
-    "../agent-profile/workspace-plugin.ts",
-    "./contracts.ts",
-  ]);
-  const plugin = modules.find((row) => row.path === "features/agent-profile/workspace-plugin.ts");
-  assert.ok(plugin);
-  assert.deepEqual(importsIn(plugin.module).map((row) => row.module), [
-    "../extension-sdk/contracts.ts",
-    "lucide-react",
-    "react",
-  ]);
+  // registry.ts 只能 import 合同与插件组件模块（按路径形状认，不钉死插件清单）；
+  // 插件 import 数必须等于登记条目数——漏登记或多 import 都红，守卫因此非空转。
+  const registryImports = importsIn(registry.module).map((row) => row.module);
+  const pluginImports = registryImports.filter((module) => /^\.\.\/[a-z0-9-]+\/workspace-plugin\.tsx?$/.test(module));
+  assert.deepEqual(
+    registryImports.filter((module) => module !== "./contracts.ts" && !pluginImports.includes(module)),
+    [],
+    "registry.ts may import only ./contracts.ts and features/*/workspace-plugin modules",
+  );
+  let registeredEntries = 0;
+  function countEntries(entry) {
+    if (
+      ts.isCallExpression(entry)
+      && entry.expression.getText(registry.module) === "defineWorkspaceUiRegistry"
+      && entry.arguments[0] && ts.isArrayLiteralExpression(entry.arguments[0])
+    ) registeredEntries += entry.arguments[0].elements.filter(ts.isObjectLiteralExpression).length;
+    ts.forEachChild(entry, countEntries);
+  }
+  countEntries(registry.module);
+  assert.ok(registeredEntries > 0, "registry must register at least one contribution (guard would be vacuous)");
+  assert.equal(pluginImports.length, registeredEntries, "every registered contribution imports exactly one plugin module and vice versa");
+  // 每个插件组件模块只许依赖 SDK 合同、react 与图标库——同一张白名单对所有插件生效。
+  const PLUGIN_IMPORT_ALLOWLIST = new Set(["../extension-sdk/contracts.ts", "lucide-react", "react"]);
+  const plugins = modules.filter((row) => PLUGIN_MODULE.test(row.path));
+  assert.equal(plugins.length, registeredEntries, "one plugin module per registered contribution");
+  for (const plugin of plugins) {
+    assert.deepEqual(
+      importsIn(plugin.module).map((row) => row.module).filter((module) => !PLUGIN_IMPORT_ALLOWLIST.has(module)),
+      [],
+      `${plugin.path} imports outside the plugin allowlist`,
+    );
+  }
   const owner = modules.find((row) => row.path === "use-workspace-extensions.ts");
   assert.ok(owner);
   const ownerFunction = findFunction(owner.module, "useWorkspaceExtensions");
