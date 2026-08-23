@@ -157,6 +157,45 @@ def test_application_runtime_wires_report_completion_to_existing_profile_job(
     assert runtime.report_execution.after_completed == runtime._after_report_completed
 
 
+def test_a_failing_observer_signal_never_turns_a_committed_report_into_an_error(
+    tmp_path, monkeypatch
+):
+    """Mirrors test_agent_profile_job_overlay.py's Ask-side
+    ``test_a_failing_signal_never_turns_a_delivered_answer_into_an_error``.
+
+    Every collaborator ``observe_application`` calls on the way to the
+    built-in observer (``_core_access.notify_once``, the per-observer
+    ``contribution.implementation.observe`` wrapper, and ``_emit``'s event
+    sink call) already fail-open internally, so a raising
+    ``note_report_completed`` never actually reaches
+    ``RepositoryRuntime._after_report_completed``'s own
+    ``except Exception: pass`` -- that guard is the outermost layer, there
+    to catch a broken *host* itself (``observe_application`` raising
+    directly), not a broken plugin. The report already won its terminal
+    CAS before this hook ever runs, so nothing at this layer may raise out
+    of it."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.bootstrap import create_application_repository
+    from app.core.config import Settings
+
+    repo = create_application_repository(Settings(_env_file=None))
+    runtime = repo._runtime
+
+    def _boom(_call_context, *, event_sink=None):
+        raise RuntimeError("report_completed_observers host is broken")
+
+    monkeypatch.setattr(
+        runtime.report_completed_observers, "observe_application", _boom
+    )
+
+    # Must return None without raising: the committed report stays "done".
+    assert runtime._after_report_completed(
+        CommittedReport("nb", "rep", "actor")
+    ) is None
+
+
 def test_composed_terminal_cas_drives_exactly_one_profile_signal(
     tmp_path, monkeypatch
 ):

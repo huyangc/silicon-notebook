@@ -556,7 +556,7 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
 检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 22 个 core 工具及每个 provider 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 22 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -609,7 +609,8 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
 每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十二个工具如下；
-`mcp_server.CORE_TOOLS` 派生这个内建前缀；`mcp_server.PUBLIC_TOOLS` 派生完整默认冻结目录（含默认受信 provider）：
+`mcp_server.PUBLIC_TOOLS` 就是下面这 22 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+是同一份清单：
 
 | 分组 | 工具 | Scope |
 | --- | --- | --- |
@@ -627,9 +628,12 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
 22 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/scope/allowlist/成员权，所有写 scope 都强制经过 owner-only
-notebook 闸。结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行
-字节/深度 rail，超大容器不会先构造第二份无界对象图。异常只返回稳定错误码；FastMCP schema 错误
-发生在工具体之前，归 transport/request audit。结果整次拒绝，绝不静默截断。
+notebook 闸。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
+先被完整构造出来才裁剪。这份有界拷贝随后被逐步、可见地压缩（先缩最长字符串，再丢 map 条目，
+再丢 list 条目，最后才动标识符），直到总量落进 12,000 UTF-8 bytes 预算内；每一刀都记进
+`truncation` 字段回传（`truncated`/`omitted_items`/`omitted_map_entries`/`omitted_characters`/
+`omitted_fields`）。异常只返回稳定错误码；FastMCP schema 错误发生在工具体之前，归 transport/request
+audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默截断的结果。
 
 `list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
