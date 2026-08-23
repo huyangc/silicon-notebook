@@ -170,6 +170,10 @@ test("插件侧模块不带内联 style，字符串里没有颜色字面量", as
   // 三类扫描面:内建插件入口、仓库外插件包的**每个**模块、以及插件唯一能 import 的
   // 共享 UI。第二类是这条守卫真正的目标读者——它们由同步脚本从内网复制进来,谁也
   // 没有在 review 里看过;只扫内建插件等于只检查唯一一个本来就守规矩的模块。
+  //
+  // ⚠ 分工登记:`features/ext-*/` 是生成物、不入库,所以在**公网仓库里这一档恒为空**,
+  // 下面的空转保护只对内建插件与共享 UI 两档起作用(它们非空是硬性的)。这一档的非空
+  // 验证由装了私有插件的那棵树承担——`npm run sync:ui-plugins` 之后跑同一条命令。
   const plugins = modules.filter((row) => (
     /^features\/[^/]+\/workspace-plugin\.tsx?$/.test(row.path)
     || /^features\/ext-[a-z0-9-]+\/.+\.tsx?$/.test(row.path)
@@ -239,11 +243,17 @@ test("扩展弹窗只用系统弹窗骨架类", async () => {
     [],
     "扩展弹窗只能用既有系统弹窗骨架类;需要新类就等于要给插件开一条写样式的口子",
   );
-  // 存储键前缀由 SDK 加、插件改不了:插件之间、以及插件与核心弹窗之间不会互相顶掉
-  // 拖动位置的记忆。
+  // 存储键的两段都由 SDK 拼、插件改不了。`extension.` 前缀隔离的是「插件 vs 核心
+  // 弹窗」;插件**之间**靠 `pluginId` 那一段隔离——少了它,两个插件各写一个
+  // `storageKey="search"` 就共用同一格 sessionStorage、互相顶掉窗口位置,而这种失败
+  // 事后完全看不出来(它只表现为位置偶尔"自己变了")。
   assert.ok(storageKeyExpression, `${SHARED_PLUGIN_UI} 必须给 FloatingModalCard 传 storageKey`);
   assert.ok(
     storageKeyExpression.includes("extension."),
     `扩展弹窗的 storageKey 必须带 extension. 前缀,实际是 ${storageKeyExpression}`,
+  );
+  assert.ok(
+    storageKeyExpression.includes("pluginId"),
+    `扩展弹窗的 storageKey 必须带 pluginId 段,否则两个插件会共用一格位置记忆,实际是 ${storageKeyExpression}`,
   );
 });

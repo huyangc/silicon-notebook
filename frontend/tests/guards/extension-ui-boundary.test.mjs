@@ -1,51 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import path from "node:path";
 import ts from "typescript";
 
-import { appSourceModules, findFunction, importsIn, jsxElements, parseModule, scopedCalls } from "../../test-support/semantic-source.mjs";
-// 守卫之间可以互相 import：插件包的 import 白名单只能有**一份**判据，而它自己那条
-// 真值表、真包扫描与包形状检查都住在包边界守卫里。放进 `test-support/` 反而不对——
-// 那里是跨泳道共享的 setup/adapter，这条判据只服务这两个守卫。
-import { pluginPackageImportOffenders } from "./extension-plugin-package-guard.test.mjs";
-
-
-/** 仓库外插件包的落点：`features/ext-<包名>/`（同步脚本的 `GENERATED_PACKAGE_DIR`）。 */
-const PLUGIN_PACKAGE_DIR = /^features\/ext-[a-z][a-z0-9-]*\//;
-
-
-/**
- * 「这条相对说明符指向同一个插件包内部吗」——插件 import 白名单的第四项。
- *
- * 一个包可以有兄弟模块（§1.5：入口文件之外的任意扁平 `.ts`/`.tsx`），入口 import
- * 它们是正常写法，白名单不认就等于要求每个包把全部代码塞进一个文件。
- *
- * **判据必须在 `path.posix.normalize` 之后做**，不能拿说明符做前缀字符串比较：
- * `./sub/../../app/page.tsx` 拼起来仍以包目录开头，归一化之后才看得出它落在
- * `app/` 里——前缀比较会让任何插件用一串 `..` 直接 import 壳层模块。
- *
- * 判的是「归一化后仍在本包目录之下」而不是「就在同一层」：包是扁平的（同步脚本
- * 拒绝子目录、T6 的 readdir 再查一遍），所以这条差别在真实包上不可达，但它让
- * 归一化成为**承重**的一步——同一层判据下，一个没归一化的实现照样会因为多出的
- * `/` 判否，那条变异就打空了。
- *
- * ⚠ 想变异验证这一条的人注意：**删掉外层那个 `path.posix.normalize` 调用是个空转变异**
- * ——`path.posix.join` 自己就归一化，外层只是把意图写明。真正承重的性质是「解析成路径
- * 再比」而不是「拿原始说明符做前缀比较」，所以有效的变异是把这两行整个换成字符串拼接
- * （`dirname + "/" + specifier`）。照着「去掉 normalize」做出来的绿色不是守卫失效的证据。
- *
- * 导出给 `tests/guards/extension-plugin-package-guard.test.mjs`（T6）复用：两处
- * 白名单必须是同一份判据，不是两份互相漂移的拼写。
- */
-export function samePluginPackageSpecifier(modulePath, specifier) {
-  if (typeof specifier !== "string" || !specifier.startsWith(".")) return false;
-  const owner = PLUGIN_PACKAGE_DIR.exec(modulePath)?.[0];
-  if (owner === undefined) return false;
-  const resolved = path.posix.normalize(
-    path.posix.join(path.posix.dirname(modulePath), specifier),
-  );
-  return resolved.startsWith(owner) && resolved.length > owner.length;
-}
+import { appSourceModules, findFunction, importsIn, jsxElements, parseModule, parseText, scopedCalls } from "../../test-support/semantic-source.mjs";
+// 判据不住在任何一个守卫里：插件包的 import 白名单与侧信道判据只能有**一份**拼写，
+// 而它的两个消费者（本文件的逐插件白名单检查、包边界守卫的真值表与真包扫描）如果
+// 互相 import，node 泳道单跑任一文件都会把另一份的全部用例一起加载并再跑一遍。
+// 放进 `test-support/` 反而不对——那里是跨泳道共享的 setup/adapter，这份判据只服务
+// 这两个守卫，所以它住在 `tests/guards/` 的一个非测试入口模块里。
+import {
+  pluginPackageImportOffenders,
+  pluginPackageSideChannelOffenders,
+  samePluginPackageSpecifier,
+} from "./_plugin-import-predicate.mjs";
 
 
 test("page composes one availability owner and exactly the two canonical outlets", async () => {
@@ -252,17 +219,43 @@ test("page composes one availability owner and exactly the two canonical outlets
 });
 
 
+/**
+ * 插件模块按路径约定认（features/<feature>/workspace-plugin.ts），不手抄清单：
+ * 加第二个插件不该改这份守卫，但每个插件仍要过同一套 import 白名单。
+ */
+const PLUGIN_MODULE = /^features\/[a-z0-9-]+\/workspace-plugin\.tsx?$/;
+/** 仓库外插件包的落点：`features/ext-<包名>/`（同步脚本的 `GENERATED_PACKAGE_DIR`）。 */
+const EXT_PACKAGE_MODULE = /^features\/ext-[a-z0-9-]+\//;
+/** 仓库自己的 SDK 模块里不许出现的字样（远端装载器与领域 owner）。 */
+const FORBIDDEN_SDK_TEXT = /\b(fetch\s*\(|import\s*\(|setInterval\s*\(|setTimeout\s*\(|WebSocket\b|EventSource\b|page\.tsx|useSourceLibrary|useAskSession|useReportWorkspace|useKgWorkspace|useNotebookCollection)\b/;
+
+/**
+ * 文本正则的扫描面：**仓库自己写的**那些模块，不含仓库外插件包（`features/ext-<包名>/`）。
+ *
+ * 那是一条**文本**正则，注释与字符串一起数。SDK 与内建插件是我们写的，一句
+ * 「本模块不得 setTimeout(」的注释可以顺手改掉；插件包不是——它由同步脚本从内网复制
+ * 进来，谁也不会为了让基座的正则高兴去改它的注释，而一次注释误报会把整棵装了插件的
+ * 树判红，逼下一个人去放宽正则。
+ *
+ * 覆盖没有变窄，只是换了判据：包里的**每个**模块（入口与兄弟）由
+ * `pluginPackageSideChannelOffenders` 的 AST 扫描认真调用，`fetch(` 由
+ * `api-boundary.test.mjs` 对全部模块普查。下面那条用例把这两半钉在一起。
+ */
+function textScanTargets(rows) {
+  return rows.filter((row) => !EXT_PACKAGE_MODULE.test(row.path));
+}
+
+
 test("extension SDK remains static, narrow, and free of domain owners or remote loaders", async () => {
-  // 插件模块按路径约定认（features/<feature>/workspace-plugin.ts），不手抄清单：
-  // 加第二个插件不该改这份守卫，但每个插件仍要过同一套 import 白名单。
-  const PLUGIN_MODULE = /^features\/[a-z0-9-]+\/workspace-plugin\.tsx?$/;
   const modules = (await appSourceModules()).filter((row) => (
     row.path.startsWith("features/extension-sdk/")
     || PLUGIN_MODULE.test(row.path)
     || row.path === "use-workspace-extensions.ts"
   ));
-  const forbidden = /\b(fetch\s*\(|import\s*\(|setInterval\s*\(|setTimeout\s*\(|WebSocket\b|EventSource\b|page\.tsx|useSourceLibrary|useAskSession|useReportWorkspace|useKgWorkspace|useNotebookCollection)\b/;
-  for (const { path, module } of modules) {
+  const forbidden = FORBIDDEN_SDK_TEXT;
+  const textScanned = textScanTargets(modules);
+  assert.ok(textScanned.length > 0, "文本扫描面被过滤空了（守卫失效）");
+  for (const { path, module } of textScanned) {
     assert.doesNotMatch(module.getText(module), forbidden, path);
   }
   // registry 现在是三个模块，import 规则各不相同、必须分开钉：
@@ -444,9 +437,9 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     );
   }
   // 每个插件组件模块只许依赖 SDK 合同、react、图标库与**同包兄弟模块**——同一张白名单
-  // 对所有插件生效。判据整份抽在 T6 的包边界守卫里（`pluginPackageImportOffenders`），
+  // 对所有插件生效。判据整份住在 `./_plugin-import-predicate.mjs`（`pluginPackageImportOffenders`），
   // 这里只是它的一个消费点：白名单在两处各写一份拼写，就会在一份改了另一份没改时互相
-  // 认同一个陈旧值，同时与真实边界脱节。那边的真值表逐条钉住这份判据的形状，包括
+  // 认同一个陈旧值，同时与真实边界脱节。包边界守卫的真值表逐条钉住这份判据的形状，包括
   // `api.ts` 被单独点名拒绝（`createWorkspaceExtensionApi(pluginId)` 一旦对插件可见，
   // 插件 A 就能给自己造一条绑定插件 B 的端口，路径限定当场失去意义）。
   //
@@ -544,6 +537,38 @@ test("the plugin sibling allowance is decided after normalization and never leav
   assert.equal(
     samePluginPackageSpecifier("features/agent-profile/workspace-plugin.ts", "./labels.ts"),
     false,
+  );
+});
+
+
+test("plugin packages answer to the AST side-channel scan, not to this file's text regex", () => {
+  // 这条用例把「文本正则不扫插件包」与「AST 判据仍然扫它」两半钉在一起。少了它，
+  // 把 ext-* 摘出文本扫描面就只是一次单方面放宽，没人证明覆盖还在。
+  const entry = "features/ext-probe/workspace-plugin.tsx";
+  // 一份**只在注释和字符串里**出现禁用字样的插件入口。这正是文本正则的误报形态：
+  // 插件作者在自己的包里解释「本模块不开 setTimeout( 轮询、也不用 WebSocket」，
+  // 基座的正则却把这两个词当成实现。
+  const commented = [
+    "// 本插件不做轮询：既不 setTimeout( 也不开 WebSocket，全部 I/O 走注入的 api 端口。",
+    'export const NOTE = "no setTimeout( / WebSocket here";',
+    "export function Panel() { return null; }",
+  ].join("\n");
+  assert.match(commented, FORBIDDEN_SDK_TEXT, "夹具必须真的能触发那条文本正则（否则本用例空转）");
+  assert.deepEqual(
+    textScanTargets([{ path: entry, module: null }]),
+    [],
+    "仓库外插件包不进文本正则的扫描面",
+  );
+  assert.deepEqual(
+    pluginPackageSideChannelOffenders(parseText(commented, entry)),
+    [],
+    "只出现在注释与字符串里的字样不是侧信道",
+  );
+  // 反方向：同一份源码真的调用了它，AST 判据必须红——覆盖是换了判据，不是被放弃。
+  const calling = `${commented}\nexport const beat = () => setTimeout(() => undefined, 1000);`;
+  assert.deepEqual(
+    pluginPackageSideChannelOffenders(parseText(calling, entry)),
+    ["setTimeout"],
   );
 });
 

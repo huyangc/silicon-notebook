@@ -14,11 +14,12 @@ vi.mock("../../app/admin/extensions/api.ts", () => ({
 }));
 
 import AdminExtensionsPage from "../../app/admin/extensions/page";
+import type { LoadedExtension } from "../../app/admin/extensions/api";
 import { humanizedError } from "../../app/errors";
 
 
-// 合成的十行内建拓扑(与后端 test_admin_extensions_routes.py 里钉的 10 个内建
-// 扩展同量级)。第一行带完整的两类接入明细,其余只需要身份与计数。
+// 合成的十行内建拓扑,与后端那份运维视图契约测试所钉的内建扩展条数同量级。
+// 第一行带完整的两类接入明细,其余只需要身份与计数。
 const AGENT_PROFILE = {
   id: "builtin.ask_agent_profile",
   displayName: "Ask agent-profile completion",
@@ -48,7 +49,11 @@ const OTHER_IDS = [
   "builtin.report_completion",
 ];
 
-function topology(extensions = [
+// ⚠ 参数**必须**显式标注 `readonly LoadedExtension[]`。不标注时 TypeScript 从默认值
+// 推断参数类型,而默认值里每一行的 `trust` 都是 `"builtin" as const`——推断出的形参
+// 类型因此是 `trust: "builtin"`,任何传 `"deployment"` 的调用点直接 TS2322。这不是
+// 风格问题:`npm run lint` / `npx tsc --noEmit` 会因此整条红。
+function topology(extensions: readonly LoadedExtension[] = [
   AGENT_PROFILE,
   ...OTHER_IDS.map((id) => ({
     id,

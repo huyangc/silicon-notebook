@@ -177,20 +177,34 @@ function buildWorkspaceExtensionApi(
   pluginId: string,
   transport: ExtensionApiTransport,
 ): WorkspaceExtensionApi {
+  // 三个请求方法一律 `async`。**这不是排版偏好**：`extensionApiPath` 与 `safeHeaders`
+  // 都在碰 transport 之前**同步**抛 TypeError，非 async 的方法会把那次拒绝原样同步
+  // 抛出调用点——而插件最自然的写法 `api.requestVoid(p).catch(show)` 或
+  // `void api.requestJson(p).catch(...)` 接不住同步异常：`.catch` 还没被求值，异常就
+  // 已经从 `api.requestVoid(p)` 那一步炸出去了，落成一次未处理的运行时错误（在
+  // React 事件处理器里就是整棵子树的错误边界）。`async` 把它翻成 rejection，`await`
+  // 与 `.catch()` 两种写法就都接得住。
+  //
+  // 路径闸的语义**一个字没变**：拒绝仍发生在 transport 之前，被拒的请求一个字节都
+  // 到不了网络（单测按 `calls.length` 钉住这一点）。变的只是它以哪种形式抵达调用方。
+  //
+  // `userMessage` 刻意保持同步：它返回一句给用户看的文案，插件要在渲染/setState 里
+  // 原地用它（`setError(api.userMessage(e, "…"))`），翻成 Promise 会把每个消费点都
+  // 逼成异步，而它根本不做 I/O、也没有会抛的闸。
   return Object.freeze({
-    requestJson<T>(path: string, init?: ExtensionRequestInit): Promise<T> {
+    async requestJson<T>(path: string, init?: ExtensionRequestInit): Promise<T> {
       return transport.requestJson<T>(
         extensionApiPath(pluginId, path, init?.query),
         coreOptions(init),
       );
     },
-    requestVoid(path: string, init?: ExtensionRequestInit): Promise<void> {
+    async requestVoid(path: string, init?: ExtensionRequestInit): Promise<void> {
       return transport.requestVoid(
         extensionApiPath(pluginId, path, init?.query),
         coreOptions(init),
       );
     },
-    requestBlob(path: string, init?: ExtensionRequestInit): Promise<Blob> {
+    async requestBlob(path: string, init?: ExtensionRequestInit): Promise<Blob> {
       return transport.requestBlob(
         extensionApiPath(pluginId, path, init?.query),
         coreOptions(init),
