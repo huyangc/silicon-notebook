@@ -4,6 +4,7 @@ from app.extension_sdk.contracts import (
     EXTENSION_API_VERSION,
     ActorRef,
     Availability,
+    AvailabilityProbe,
     AvailabilityStatus,
     CancellationToken,
     ContributionDeclaration,
@@ -101,11 +102,28 @@ from app.extension_sdk.report_export import (
     ReportExportItemRef,
     ReportExportView,
 )
+from app.extension_sdk.http import (
+    PLUGIN_HTTP_ROUTER_POINT,
+    PLUGIN_ROUTE_PREFIX,
+    PluginActor,
+    PluginImportedSource,
+    PluginRejectedUrl,
+    PluginRouteContext,
+    PluginRouterFactory,
+    PluginRouterSpec,
+    PluginUrlImportResult,
+    PluginUrlSourceImportPort,
+)
+from app.extension_sdk.deployment import (
+    CapabilityProvidingBundle,
+    DeploymentExtensionBundle,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
     "ActorRef",
     "Availability",
+    "AvailabilityProbe",
     "AvailabilityStatus",
     "CancellationToken",
     "ContributionDeclaration",
@@ -191,4 +209,16 @@ __all__ = [
     "ReportExporterProvider",
     "ReportExportItemRef",
     "ReportExportView",
+    "PLUGIN_HTTP_ROUTER_POINT",
+    "PLUGIN_ROUTE_PREFIX",
+    "PluginActor",
+    "PluginImportedSource",
+    "PluginRejectedUrl",
+    "PluginRouteContext",
+    "PluginRouterFactory",
+    "PluginRouterSpec",
+    "PluginUrlImportResult",
+    "PluginUrlSourceImportPort",
+    "CapabilityProvidingBundle",
+    "DeploymentExtensionBundle",
 ]

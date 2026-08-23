@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     # to the repository root below so startup CWD cannot change the deployment.
     model_services_config: str = Field("", validation_alias="MODEL_SERVICES_CONFIG")
 
+    # Deployment-owned out-of-repo plugin manifest (TOML). Empty = no deployment
+    # plugins; the frozen topology is then byte-identical to the built-in tuple. A
+    # non-empty path that cannot be read or parsed is a startup failure, never a
+    # silent downgrade — same posture as MODEL_SERVICES_CONFIG. Relative paths are
+    # anchored to the repo root below.
+    extensions_config: str = Field("", validation_alias="EXTENSIONS_CONFIG")
+
     openai_compat_timeout_seconds: int = Field(
         60,
         validation_alias="OPENAI_COMPAT_TIMEOUT_SECONDS",
@@ -1177,6 +1184,9 @@ class Settings(BaseSettings):
 
         if self.model_services_config and not Path(self.model_services_config).is_absolute():
             self.model_services_config = str(_ROOT_DIR / self.model_services_config)
+
+        if self.extensions_config and not Path(self.extensions_config).is_absolute():
+            self.extensions_config = str(_ROOT_DIR / self.extensions_config)
 
         if database_identity(self.database_url).scheme != "sqlite":
             return self

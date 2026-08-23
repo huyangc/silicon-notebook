@@ -460,3 +460,36 @@ def test_contribution_availability_failure_and_content_reason_are_sanitized():
     result = unsafe_reason.availability("probe")
     assert result.status is AvailabilityStatus.UNAVAILABLE
     assert result.reason_code == "invalid_availability_reason"
+
+
+def test_registry_rejects_isolated_trust_and_accepts_deployment():
+    isolated = replace(_manifest("isolated_plugin"), trust="isolated")
+    with pytest.raises(ExtensionRegistryError, match="invalid trust classification"):
+        build_extension_registry((_Bundle(isolated),))
+
+    deployment = replace(_manifest("deployment_plugin"), trust="deployment")
+    registry = build_extension_registry((_Bundle(deployment),))
+
+    assert registry.manifests() == (deployment,)
+
+
+@pytest.mark.parametrize(
+    "provides",
+    [
+        ["cap.a"],
+        ("Bad Name",),
+        ("cap.a", "cap.a"),
+    ],
+    ids=["not_a_tuple", "malformed_name", "duplicate_name"],
+)
+def test_registry_rejects_malformed_provided_capability_names(provides):
+    manifest = replace(_manifest("provider_plugin"), provides=provides)
+
+    with pytest.raises(
+        ExtensionRegistryError, match="declares invalid provided capabilities"
+    ):
+        build_extension_registry((_Bundle(manifest),))
+
+
+def test_default_manifest_provides_is_empty():
+    assert _manifest("plain_plugin").provides == ()

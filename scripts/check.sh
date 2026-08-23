@@ -8,6 +8,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 # call paid/network model services. Tests opt into any provider explicitly.
 export SILICON_NOTEBOOK_ENV_FILE=""
 export MODEL_SERVICES_CONFIG=""
+export EXTENSIONS_CONFIG=""   # 验证绝不装入部署插件（否则会漏进冻结的 app.openapi()）
 export MINERU_MODE="off" MINERU_API_TOKEN=""
 
 mkdir -p "$ROOT_DIR/.local/pycache"
