@@ -1,0 +1,360 @@
+{
+  "directions_over_first_round_cap": {
+    "counts": {
+      "embed_query": 6,
+      "llm.reflect": 1,
+      "ppr_retrieve": 1,
+      "retrieval.federated_retrieve": 4,
+      "retrieval.ppr_retrieve": 1,
+      "search": 4
+    },
+    "sizes": {
+      "attempted": [
+        {
+          "new": 2,
+          "query": "MoE 架构",
+          "tries": 1
+        },
+        {
+          "new": 0,
+          "query": "训练数据",
+          "tries": 1
+        },
+        {
+          "new": 0,
+          "query": "推理成本",
+          "tries": 1
+        },
+        {
+          "new": 0,
+          "query": "上下文长度",
+          "tries": 1
+        }
+      ],
+      "chunks": 0,
+      "elements": 0,
+      "top_hits": 2
+    },
+    "trace": [
+      {
+        "detail_keys": [
+          "source",
+          "sub_queries"
+        ],
+        "step_type": "plan",
+        "summary": "采用已确认意图的 2 个检索方向"
+      },
+      {
+        "detail_keys": [
+          "count",
+          "result_ids"
+        ],
+        "step_type": "retrieve",
+        "summary": "初检索得到 2 个候选节点"
+      },
+      {
+        "detail_keys": [
+          "found",
+          "phase",
+          "result_ids"
+        ],
+        "step_type": "ppr",
+        "summary": "概念漫游:跨文档检索,得到 0 段原文"
+      },
+      {
+        "detail_keys": [
+          "new",
+          "query",
+          "result_ids",
+          "source"
+        ],
+        "step_type": "retrieve",
+        "summary": "补充已确认方向:推理成本"
+      },
+      {
+        "detail_keys": [
+          "new",
+          "query",
+          "result_ids",
+          "source"
+        ],
+        "step_type": "retrieve",
+        "summary": "补充已确认方向:上下文长度"
+      },
+      {
+        "detail_keys": [
+          "next_action",
+          "no_progress",
+          "stale",
+          "sufficient"
+        ],
+        "step_type": "reflect",
+        "summary": "answer"
+      },
+      {
+        "detail_keys": [
+          "directions",
+          "pending",
+          "reason"
+        ],
+        "step_type": "skip",
+        "summary": "检索预算不足,以下已确认方向未能执行:对齐方法、开源许可"
+      },
+      {
+        "detail_keys": [
+          "chains",
+          "elements",
+          "enumerated_items",
+          "enumerations",
+          "kg",
+          "quota",
+          "top_n"
+        ],
+        "step_type": "answer",
+        "summary": "合成候选"
+      }
+    ]
+  },
+  "empty_evidence_fallback": {
+    "counts": {
+      "embed_query": 3,
+      "llm.plan": 1,
+      "llm.reflect": 1,
+      "ppr_retrieve": 1,
+      "retrieval.federated_retrieve": 1,
+      "retrieval.ppr_retrieve": 1,
+      "retrieval.retrieve_elements": 1,
+      "retrieval.retrieve_scored": 1,
+      "search": 1,
+      "search_elements": 1
+    },
+    "sizes": {
+      "attempted": [
+        {
+          "new": 0,
+          "query": "MoE 架构",
+          "tries": 1
+        }
+      ],
+      "chunks": 0,
+      "elements": 0,
+      "top_hits": 0
+    },
+    "trace": [
+      {
+        "detail_keys": [
+          "source",
+          "sub_queries"
+        ],
+        "step_type": "plan",
+        "summary": "规划了 1 个子查询"
+      },
+      {
+        "detail_keys": [
+          "count",
+          "result_ids"
+        ],
+        "step_type": "retrieve",
+        "summary": "初检索得到 0 个候选节点"
+      },
+      {
+        "detail_keys": [
+          "found",
+          "phase",
+          "result_ids"
+        ],
+        "step_type": "ppr",
+        "summary": "概念漫游:跨文档检索,得到 0 段原文"
+      },
+      {
+        "detail_keys": [
+          "found",
+          "query",
+          "reason"
+        ],
+        "step_type": "fallback",
+        "summary": "初始证据未命中，补查来源原文，新增 0 段"
+      },
+      {
+        "detail_keys": [
+          "next_action",
+          "no_progress",
+          "stale",
+          "sufficient"
+        ],
+        "step_type": "reflect",
+        "summary": "answer"
+      },
+      {
+        "detail_keys": [
+          "chains",
+          "elements",
+          "enumerated_items",
+          "enumerations",
+          "kg",
+          "top_n"
+        ],
+        "step_type": "answer",
+        "summary": "合成候选"
+      }
+    ]
+  },
+  "plain": {
+    "counts": {
+      "embed_query": 4,
+      "llm.plan": 1,
+      "llm.reflect": 1,
+      "ppr_retrieve": 1,
+      "retrieval.federated_retrieve": 1,
+      "retrieval.ppr_retrieve": 1,
+      "retrieval.retrieve_scored": 1,
+      "search": 1
+    },
+    "sizes": {
+      "attempted": [
+        {
+          "new": 2,
+          "query": "MoE 架构",
+          "tries": 1
+        }
+      ],
+      "chunks": 3,
+      "elements": 0,
+      "top_hits": 2
+    },
+    "trace": [
+      {
+        "detail_keys": [
+          "source",
+          "sub_queries"
+        ],
+        "step_type": "plan",
+        "summary": "规划了 1 个子查询"
+      },
+      {
+        "detail_keys": [
+          "count",
+          "result_ids"
+        ],
+        "step_type": "retrieve",
+        "summary": "初检索得到 2 个候选节点"
+      },
+      {
+        "detail_keys": [
+          "found",
+          "phase",
+          "result_ids"
+        ],
+        "step_type": "ppr",
+        "summary": "概念漫游:跨文档检索,得到 3 段原文"
+      },
+      {
+        "detail_keys": [
+          "next_action",
+          "no_progress",
+          "stale",
+          "sufficient"
+        ],
+        "step_type": "reflect",
+        "summary": "answer"
+      },
+      {
+        "detail_keys": [
+          "chains",
+          "elements",
+          "enumerated_items",
+          "enumerations",
+          "kg",
+          "top_n"
+        ],
+        "step_type": "answer",
+        "summary": "合成候选"
+      }
+    ]
+  },
+  "quoted_identifier": {
+    "counts": {
+      "embed_query": 4,
+      "exact_lookup": 1,
+      "llm.plan": 1,
+      "llm.reflect": 1,
+      "ppr_retrieve": 1,
+      "retrieval.exact_lookup_chunks": 1,
+      "retrieval.federated_retrieve": 1,
+      "retrieval.ppr_retrieve": 1,
+      "retrieval.retrieve_scored": 1,
+      "search": 1
+    },
+    "sizes": {
+      "attempted": [
+        {
+          "new": 2,
+          "query": "MoE 架构",
+          "tries": 1
+        }
+      ],
+      "chunks": 3,
+      "elements": 0,
+      "top_hits": 2
+    },
+    "trace": [
+      {
+        "detail_keys": [
+          "source",
+          "sub_queries"
+        ],
+        "step_type": "plan",
+        "summary": "规划了 1 个子查询"
+      },
+      {
+        "detail_keys": [
+          "count",
+          "result_ids"
+        ],
+        "step_type": "retrieve",
+        "summary": "初检索得到 2 个候选节点"
+      },
+      {
+        "detail_keys": [
+          "found",
+          "phase",
+          "result_ids"
+        ],
+        "step_type": "ppr",
+        "summary": "概念漫游:跨文档检索,得到 3 段原文"
+      },
+      {
+        "detail_keys": [
+          "found",
+          "phase",
+          "result_ids",
+          "terms"
+        ],
+        "step_type": "exact_lookup",
+        "summary": "按名称精确查找:新增 0 段原文"
+      },
+      {
+        "detail_keys": [
+          "next_action",
+          "no_progress",
+          "stale",
+          "sufficient"
+        ],
+        "step_type": "reflect",
+        "summary": "answer"
+      },
+      {
+        "detail_keys": [
+          "chains",
+          "elements",
+          "enumerated_items",
+          "enumerations",
+          "kg",
+          "top_n"
+        ],
+        "step_type": "answer",
+        "summary": "合成候选"
+      }
+    ]
+  }
+}

@@ -1682,6 +1682,190 @@ class ReasoningResult:
     baseline_manifest: object | None = None
 
 
+class _TraceRecorder:
+    """`run` 全程共用的一个轨迹记账器。
+
+    每步耗时 = 相邻两次记账的墙钟差(步在其工作完成后才记账,故差值即该步工作
+    耗时);首步从构造那一刻算起(含 plan 的 LLM 时间)。构造点因此必须留在 run
+    状态初始化**之后**、第一次真正做事之前 —— 与它当初作为 `run` 内闭包时的
+    `last_ts = time.perf_counter()` 位置逐字一致。
+
+    抽成可调用对象(而不是留在 `run` 里当闭包)只为让首轮阶段函数拿到同一个
+    记账器;调用形状 `record(TraceStep(...))` 与闭包时代逐字相同,`trace` 也仍是
+    调用方持有的那一个 list(这里只往里 append,不另存一份)。
+    """
+
+    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts")
+
+    def __init__(self, trace: List[TraceStep], cancel_event: CancelEvent,
+                 on_step) -> None:
+        self._trace = trace
+        self._cancel_event = cancel_event
+        self._on_step = on_step
+        self._last_ts = time.perf_counter()
+
+    def __call__(self, step: TraceStep) -> None:
+        raise_if_cancelled(self._cancel_event)
+        now = time.perf_counter()
+        step.duration_ms = round((now - self._last_ts) * 1000)
+        self._last_ts = now
+        self._trace.append(step)
+        if self._on_step:
+            self._on_step(step)
+
+
+@dataclass
+class _ReasoningRunState:
+    """一次 `ReasoningRetriever.run` 的 run 级状态。
+
+    它存在的唯一理由是让**首轮**(状态初始化 → 理解块/打法块/集合地图注入 →
+    规划 → 初检索 → PPR seed → 精确查找 seed → 空证据兜底 → 已确认方向补种)
+    能从 `run` 里搬成独立、可单测的阶段:那些阶段之间靠十几个可变容器与计数器
+    交接,不给它们一个显式载体就只能继续挤在同一个函数里。
+
+    ⚠ **它是首轮与 reflect 循环之间的一次性交接,不是全程的状态权威。**`run`
+    在首轮结束后把它整体解包成局部名,此后 reflect 循环与收尾只读写那些局部名,
+    再也不回看这个对象——所以本对象上的标量字段(`steps`/`stale`/`enum_*` 等)
+    在解包之后就是陈旧值。可变容器(dict/list/set)是同一个对象,两侧看到的一直
+    是同一份数据。这样安排是为了让 reflect 循环本体一个字都不用改(本次结构项
+    刻意不动它),代价就是这条「解包之后别再读 state 标量」的纪律。
+
+    每个字段的注释说明它**由谁写、被谁读**。
+    """
+
+    # —— 冻结输入:由 `run` 的形参原样带入,任何阶段都只读 ——
+    notebook_id: str
+    question: str
+    history: str
+    # `run(intent_queries=...)` 原样带入;只有规划阶段读它(去重成 reviewed_all)。
+    intent_queries: object
+    # 已确认意图契约的结构化字段;打法块(current_situation)与 reflect 循环读。
+    intent_detail: object
+    limits: Optional[AskRetrievalLimits]
+
+    # —— 轨迹 ——
+    # `record` 与 `trace` 是同一份数据的两个把手:前者记账、后者是被 append 的
+    # 那个 list,最终原样进 `ReasoningResult.trace`。
+    record: _TraceRecorder
+    trace: List[TraceStep]
+
+    # —— 预算与策略:全部在 `_new_run_state` 里按 settings/limits 解析一次 ——
+    action_policy: object
+    max_outline_updates: int
+    max_steps: int
+    initial_query_limit: int
+    per_query_take: int
+    neighbor_expand_limit: int
+    enum_limits: AskRetrievalLimits
+    enumeration_active: bool
+    outline_active: bool
+    consult_memory_flag: bool
+    kg_gap_active: bool
+
+    # —— 证据池:首轮各阶段写入,reflect 循环继续就地写入,收尾读 ——
+    collected: Dict[str, RetrievedKnowledge]
+    elements: List[RetrievedElement]
+    elements_searches: int
+    chunks: List[RetrievedChunk]
+    chains: List[object]
+    seen_chunks: set
+    visited: set
+
+    # —— 精确查找账目:seed pass 写,reflect 的 exact_lookup 分支继续写 ——
+    exact_lookup_log: List["_ExactLookupAttempt"]
+    exact_terms_done: set
+
+    # —— 邻居展开截断账目:只有 reflect 的 expand_graph 分支写 ——
+    neighbor_truncated: Dict[str, str]
+
+    # —— 类型化集合枚举:地图由首轮建,预算池与续跑账目由 reflect 循环消费 ——
+    enum_rows_used: int
+    enum_pages_used: int
+    enum_payload_used: int
+    enum_chains: Dict[tuple, "_EnumChain"]
+    enumerations: List["CollectionEnumerationOutcome"]
+    collection_map_text: str
+
+    # —— 大纲便签:全部由 reflect 循环的 update_outline 分支写 ——
+    outline: List["OutlineSection"]
+    outline_updates: int
+    outline_nudges: int
+    outline_overflow: Dict[str, List[str]]
+    ever_shown_outline_keys: set
+    outline_terminal_repair_used: bool
+    outline_cap_repair_used: bool
+
+    # —— KG 弱支撑边回喂:全部由 reflect 循环写 ——
+    kg_gap_seen: set
+    kg_gap_probed_seeds: set
+    kg_gap_pending: List
+
+    # —— consult_memory(Agentic Memory P4 T5):全部由 reflect 循环写 ——
+    consult_delivered_this_turn: bool
+    consult_used: int
+    consult_delivered_ids: set
+    consult_rows_accum: List
+    consult_overlay_note: str
+    consult_block_text: str
+
+    # —— 步级零命中提示(P4 T6):全部由 reflect 循环写 ——
+    zero_hit_by_action: Dict[str, int]
+    nudged_actions: set
+    nudges_used: int
+
+    # —— 以下字段由首轮的某个阶段产出,构造时留空 ——
+    # `_first_round_prompt_blocks` 写:Agent 库理解块与它的原始行(后者供
+    # consult_memory 复用),部署级打法块与它渲染前的选中集。
+    profile_block: str = ""
+    profile_raw_blocks: List = field(default_factory=list)
+    experience_block: str = ""
+    experience_entries: List = field(default_factory=list)
+    # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储词表)。
+    # 只在真的注入过条目时才积累——没注入就没有「采用」可言。reflect 循环写、
+    # 收尾的采用回写读。
+    adopted_actions: set = field(default_factory=set)
+
+    # `_first_round_plan` 写:已确认方向的去重原文、身份注册表(简称 ↔ 方向)、
+    # 首轮实际执行的那批、以及溢出到补种阶段的那批。
+    reviewed_all: List[str] = field(default_factory=list)
+    label_of: Dict[str, str] = field(default_factory=dict)
+    direction_of: Dict[str, str] = field(default_factory=dict)
+    reviewed_queries: List[str] = field(default_factory=list)
+    pending_intent_queries: List[str] = field(default_factory=list)
+    subqueries: List["SubQuery"] = field(default_factory=list)
+
+    # `_first_round_search`(初检索与补种共用)写:检索本身抛异常(非「成功但零
+    # 命中」)的查询原文集合。并发 add/discard 都是同 GIL 原子操作,且每个 worker
+    # 只碰自己那条查询的键,无竞态。终态账目据它给 attempted 行打稀疏 `failed`
+    # 标(见 run 收尾)。
+    failed_search_queries: set = field(default_factory=set)
+    # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
+    # 每轮回喂 reflect(模型能看到试过什么、哪条是干的),add_subquery 对重复键
+    # 硬跳过 —— 治「反复补充同一条子查询」的两层根源。
+    attempted: Dict[str, "_QueryAttempt"] = field(default_factory=dict)
+    # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。首轮定型后由
+    # reflect 循环的 add_subquery/expand_community 继续追加。
+    used_queries: List[str] = field(default_factory=list)
+
+    # 同一 run 内已 expand_community 过的焦点(防反复触发)。reflect 循环独用。
+    community_focals_done: set = field(default_factory=set)
+    follow_chain_done: set = field(default_factory=set)
+
+    # 步数账目:补种阶段与 reflect 循环**共用同一份**(补种最多用掉一半预算)。
+    steps: int = 0
+    # 补种阶段预算耗尽时攒下的已确认方向;真正的披露在 run 收尾按终态重算。
+    uncovered_intent_queries: List[str] = field(default_factory=list)
+
+    # 首轮结束时的进展快照,直接作为 reflect 循环的入口值。
+    no_progress: bool = False
+    stale: int = 0
+
+    # reflect 循环的动作配额计数器,构造时归零后只由循环自己推进。
+    ppr_searches: int = 0
+    follow_chain_searches: int = 0
+    exact_lookups: int = 0
+
+
 class ReasoningRetriever:
     def __init__(
         self,
@@ -2402,12 +2586,17 @@ class ReasoningRetriever:
                 )
         return ReasoningEvidenceSnapshot.from_result(result)
 
-    def run(self, notebook_id, question, history="", on_step=None, top_n=None,
-            max_steps=None, intent_queries=None,
-            limits: Optional[AskRetrievalLimits] = None,
-            intent_detail=None):
-        raise_if_cancelled(self.cancel_event)
-        self._per_query_scored.clear()
+    def _new_run_state(
+        self, notebook_id, question, history, on_step, *,
+        max_steps, intent_queries, limits, intent_detail,
+    ) -> "_ReasoningRunState":
+        """解析本 run 的全部预算/开关并铺开 run 级账目(零 I/O、零模型调用)。
+
+        搬自 `run` 的开头一段,逐行未改。判定入口(`enumeration_active()`、
+        `outline_wiring_active`、`consult_memory_active`、
+        `_unsafe_scope_restricted()`)都只读 settings/limits/端口在场与否与请求级
+        ContextVar,故它们在这里求值与在 `run` 里求值完全等价。
+        """
         action_policy = reasoning_action_policy(self.settings)
         max_outline_updates = action_policy.max_outline_updates
         # top_n:显式传入(报告管线每节独立预算)直通;None=合成时按最终方面数
@@ -2540,412 +2729,498 @@ class ReasoningRetriever:
         zero_hit_by_action: Dict[str, int] = {}
         nudged_actions: set = set()
         nudges_used = 0
+        return _ReasoningRunState(
+            notebook_id=notebook_id,
+            question=question,
+            history=history,
+            intent_queries=intent_queries,
+            intent_detail=intent_detail,
+            limits=limits,
+            # 记账器**最后**构造:它的起点戳等价于原先紧跟在上面这段初始化之后
+            # 的那句 `last_ts = time.perf_counter()`,首步耗时口径因此不变。
+            record=_TraceRecorder(trace, self.cancel_event, on_step),
+            trace=trace,
+            action_policy=action_policy,
+            max_outline_updates=max_outline_updates,
+            max_steps=max_steps,
+            initial_query_limit=initial_query_limit,
+            per_query_take=per_query_take,
+            neighbor_expand_limit=neighbor_expand_limit,
+            enum_limits=enum_limits,
+            enumeration_active=enumeration_active,
+            outline_active=outline_active,
+            consult_memory_flag=consult_memory_flag,
+            kg_gap_active=kg_gap_active,
+            collected=collected,
+            elements=elements,
+            elements_searches=elements_searches,
+            chunks=chunks,
+            chains=chains,
+            seen_chunks=seen_chunks,
+            visited=visited,
+            exact_lookup_log=exact_lookup_log,
+            exact_terms_done=exact_terms_done,
+            neighbor_truncated=neighbor_truncated,
+            enum_rows_used=enum_rows_used,
+            enum_pages_used=enum_pages_used,
+            enum_payload_used=enum_payload_used,
+            enum_chains=enum_chains,
+            enumerations=enumerations,
+            collection_map_text=collection_map_text,
+            outline=outline,
+            outline_updates=outline_updates,
+            outline_nudges=outline_nudges,
+            outline_overflow=outline_overflow,
+            ever_shown_outline_keys=ever_shown_outline_keys,
+            outline_terminal_repair_used=outline_terminal_repair_used,
+            outline_cap_repair_used=outline_cap_repair_used,
+            kg_gap_seen=kg_gap_seen,
+            kg_gap_probed_seeds=kg_gap_probed_seeds,
+            kg_gap_pending=kg_gap_pending,
+            consult_delivered_this_turn=consult_delivered_this_turn,
+            consult_used=consult_used,
+            consult_delivered_ids=consult_delivered_ids,
+            consult_rows_accum=consult_rows_accum,
+            consult_overlay_note=consult_overlay_note,
+            consult_block_text=consult_block_text,
+            zero_hit_by_action=zero_hit_by_action,
+            nudged_actions=nudged_actions,
+            nudges_used=nudges_used,
+        )
 
-        # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
-        # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
-        last_ts = time.perf_counter()
-
-        def record(step: TraceStep) -> None:
-            nonlocal last_ts
-            raise_if_cancelled(self.cancel_event)
-            now = time.perf_counter()
-            step.duration_ms = round((now - last_ts) * 1000)
-            last_ts = now
-            trace.append(step)
-            if on_step:
-                on_step(step)
-
-        # P0-C: seed pass PPR 只依赖原问题与只读图状态,与 plan 的 LLM 时间完全
-        # 重叠(copy_context 保住 per-user 模型解析的 ContextVar)。在原 seed pass
-        # 位置 join,故 seen_chunks 合并时序/trace 顺序与串行版逐位一致;
-        # future.result() 重抛异常=与串行抛出同语义。
-        # submit 与下方 seed pass 共用同一 graph_ppr_enabled 条件:只要没有异常
-        # 提前跳出,两者必然成对执行。下面单一 try/finally 包住从 submit 之后到
-        # seed pass join 为止的整段(plan、初检索、seed pass 三处都在内)——无论
-        # 正常返回、plan/初检索抛异常(含 AskCancelled)、还是 ppr_future.result()
-        # 本身抛异常,finally 都无条件关闭线程池且原异常原样向外传播;不需要
-        # except 分支兜底,一次 try/finally 覆盖所有路径,不会出现"submit 了却
-        # 无人 join 且池未关闭"的线程泄漏,也不会出现两处 shutdown 各触发一次。
-        ppr_future = None
-        ppr_pool = None
-        if (not self._unsafe_scope_restricted()
-                and self.allow_ppr and self.settings.graph_ppr_enabled and getattr(
-                self.settings, "reasoning_ppr_prefetch", True)):
-            ppr_pool = ThreadPoolExecutor(max_workers=1)
-            ppr_future = ppr_pool.submit(
-                contextvars.copy_context().run,
-                self.ppr_retrieve, notebook_id, question)
-
+    def _first_round_search(
+        self, state: "_ReasoningRunState", sq: "SubQuery",
+    ) -> List[RetrievedKnowledge]:
+        """执行一条子查询。初检索与已确认方向补种共用同一份实现——补种的种子
+        本就是首轮装不下的溢出,不是模型动作,所以每查询纳入数、单条失败语义
+        (fail-open;fail_closed 下照抛;AskCancelled 始终上抛)必须逐字一致。
+        """
+        raise_if_cancelled(self.cancel_event)
         try:
-            # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。每 run 只
-            # 读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选摘要
-            # 尾部。
-            #
-            # ⚠ 顺序刻意排在下面的集合地图**之前**:这里的 record() 是 run 进入
-            # try 块后的第一次记账。若排在地图构建之后,地图那次(若干次查询、
-            # 有界缓存但仍非零耗时)会被计进 profile 步自己的 duration_ms——而这
-            # 一步对应的其实只是一次 ≤10 行的主键前缀点查。排在前面让地图的构建
-            # 耗时改由它后面的下一步(plan,本来就是一次模型调用)吸收,不会污染
-            # profile 步的账目。
-            #
-            # 收窄口径与集合地图**刻意不同**:``_unsafe_scope_restricted()`` 为真时
-            # 地图必须清空(它承诺了一批本次枚举不到的集合),而理解块**照常注入**
-            # ——它不开任何检索通道、不是证据、不能被 [k] 引用,只影响措辞与查法,
-            # 收窄来源范围并不会让「这个库主要是工艺手册」这句话变得不成立。
-            #
-            # fail-open:读不到就当没有。但**不记 skip 步**——这与 memory 零命中记
-            # skip 的口径是分开的:那条 skip 承载的是一次 embedding 往返 + 向量
-            # 扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个还没
-            # 整理过的库(常态)每一轮都多一条「无」步是纯噪声。
-            profile_block = ""
-            # Agentic Memory P4 (T5): 原始行留存,供 consult_memory 的「本人覆盖层」
-            # 半复用(见 _undelivered_retrieval_note)——零新增查询,关闭态/读取
-            # 失败都保持空列表,consult_memory 那半自然查不到任何东西。
-            profile_raw_blocks: List = []
-            if profile_wiring_active(self.settings, self.agent_profile):
-                try:
-                    profile_raw_blocks = self.agent_profile.read_blocks(
-                        notebook_id, self.profile_owner_id)
-                    profile_block = render_profile_block(profile_raw_blocks)
-                    if profile_block:
-                        record(TraceStep(
-                            step_type="profile",
-                            summary="带上对这个库的已有理解",
-                            detail={
-                                # 真正**渲染进** prompt 的行数,不是清空前候选的
-                                # 行数:整块 1200 字符硬顶可能把候选行整行截掉,
-                                # 按候选数计会在那种情况下高报(见
-                                # rendered_row_count 的 docstring)。
-                                "blocks": rendered_row_count(profile_block),
-                                "chars": len(profile_block)}))
-                except AskCancelled:
-                    raise
-                except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
-                    profile_block = ""
-                    profile_raw_blocks = []
-            # 部署级全局的「检索打法」(Agentic Memory P2 §6.1)。紧挨着上面那块
-            # 读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
-            # ——表头 + 一句框定语 + `- ` 行 + 一个整块硬顶 + 按**送达**行数记步。
-            #
-            # 与理解块的差别只有一条,但它是本特性的红线:理解块讲「这个库是什么」,
-            # 打法讲「这类问题该用哪个通道去查」。后者**绝不**触及来源范围——那是
-            # 用户自己的勾选,而这条约束是结构性的(动作词表里没有任何范围类动作,
-            # 条目本身也没有来源/库字段可渲染),不是提示词里的一句请求。
-            #
-            # fail-open 且**不记 skip 步**,同理由:关闭态是默认形态,没蒸出东西
-            # 的部署(常态)每一轮多一条「无」步是纯噪声。
-            experience_block = ""
-            experience_entries: List = []
-            if experience_wiring_active(self.settings, self.retrieval_experiences):
-                try:
-                    situation = current_situation(
-                        intent_detail,
-                        mode=_EXPERIENCE_RUN_MODE,
-                        retrieval_effort=(
-                            limits.effort if limits is not None else ""),
-                    )
-                    experience_entries = select_experiences(
-                        _cached_experiences(self.retrieval_experiences), situation)
-                    experience_block = render_experience_block(experience_entries)
-                    if experience_block:
-                        record(TraceStep(
-                            step_type="experience",
-                            summary="带上以往检索攒下的打法",
-                            detail={
-                                # 送达行数,不是选中行数:整块 600 字符硬顶按整行
-                                # 丢弃装不下的条目(见 render_experience_block)。
-                                "entries": rendered_experience_count(
-                                    experience_block),
-                                "chars": len(experience_block)}))
-                except AskCancelled:
-                    raise
-                except Exception:  # noqa: BLE001 — 打法是背景,不是必需品
-                    experience_block = ""
-                    experience_entries = []
-            # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储
-            # 词表)。只在真的注入过条目时才积累——没注入就没有「采用」可言。
-            adopted_actions: set = set()
-            # 集合地图:每 run 只建一次(计数走有界缓存,但仍是若干次查询),同一个
-            # 字符串既进规划上下文、又进每一轮 reflect 的候选摘要尾部。
-            # fail-open:地图建不出来时照常检索作答——它只是让模型「知道有多少」,
-            # 不是任何一条证据的前提。记一条 skip 是为了别把这次失败吞得无影无踪。
-            if enumeration_active:
-                try:
-                    collection_map_text = (
-                        self.collection_catalog.collection_map_text(notebook_id)
-                    )
-                except AskCancelled:
-                    raise
-                except Exception as exc:  # noqa: BLE001 — 见上:地图不是必需品
-                    record(TraceStep(
-                        step_type="skip",
-                        summary="跳过内容清点(暂时读不到各类条目数量)",
-                        detail={"reason": "collection_map_unavailable",
-                                "error": str(exc)[:120]}))
-            reviewed_all = list(dict.fromkeys(
-                str(query).strip() for query in (intent_queries or [])
-                if str(query).strip()
-            ))
-            # 方向身份注册表:本 run 对已确认方向的展示简称与防重/未覆盖识别
-            # 的唯一真源(见 _build_direction_registry)。intent_queries 为空
-            # 时 reviewed_all 恒空,两个字典也恒空——下游三处消费全部短路,
-            # 是中性回归的落点之一。
-            label_of, direction_of = _build_direction_registry(reviewed_all)
-            reviewed_queries = reviewed_all[:initial_query_limit]
-            # 首轮上限约束的是**首轮并发**,不是「装不下的方向就不做了」。溢出的
-            # 已确认方向进入待覆盖账目,在首轮与确定性 seed pass 之后、reflect
-            # 循环之前按序补种(见下方 coverage pass)。intent_queries 为空或不
-            # 超限时它恒为空列表,补种整段与披露/回喂全部不执行 —— 这是中性回归
-            # 的落点:那两种形态下轨迹与检索行为与本特性之前逐位一致。
-            pending_intent_queries = reviewed_all[initial_query_limit:]
-            # A reviewed intent contract is authoritative. Do not ask a second
-            # model to reinterpret it before retrieval; the reflect loop may
-            # still add evidence-driven subqueries after the frozen seed pass.
-            #
-            # Agentic Memory P3(B-Profile,T8):用户的检索/回答风格偏好,一次
-            # 主键点读(按 profile_owner_id = 本次提问 user_id)。⚠ 挪到这里
-            # (``reviewed_queries`` 已经算出、且只在它为空——也就是 ``self.
-            # plan(...)`` 真的会被调用——时才读):正式 UI 路径永远带着已确认
-            # 意图(``reviewed_queries`` 非空),``self.plan()`` 整个不执行,
-            # 提前点读就是给这条最常见的路径白付一次 identity store 读取。与
-            # 上面 profile_block/experience_block 两块故意不同——那两块要喂进
-            # reflect 循环(整个 run 期间反复消费,不只是 plan() 这一次调用),
-            # 提前一次性读没有「按分支延后」的空间;这一块只喂 ``plan()`` 的
-            # ``style_block`` 形参(见其上 reflect 刻意不注入风格块的说明),
-            # 挪迟没有安全隐患,只是把读取推到真正需要它的分支里。fail-open
-            # 同款,同理由不记 skip 步——常态是这条 run 没有可渲染的偏好,每轮
-            # 多一条「无」步是噪声。空 owner(见 profile_owner_id 的类型注释,
-            # 空串是合法且安全的取值)与关闸都合法地产出空串,不触发任何读取。
-            style_block = ""
-            if not reviewed_queries and self.profile_owner_id and (
-                    search_profile_wiring_active(
-                        self.settings, self.identity_store)):
-                try:
-                    style_profile = self.identity_store.get_user_search_profile(
-                        self.profile_owner_id)
-                    style_block = render_style_block(style_profile) if style_profile else ""
-                except AskCancelled:
-                    raise
-                except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
-                    style_block = ""
-            # 可选参数按「有才传」:没有档位就不覆盖 planner 上限、没有地图就不传
-            # 地图,调用形状与接入前逐字一致(镜像 _construct_reasoning_retriever
-            # 对 fail_closed 的处理)。
-            plan_kwargs = {}
-            if limits is not None:
-                plan_kwargs["max_subqueries"] = limits.max_initial_subqueries
-            if collection_map_text:
-                plan_kwargs["collection_map"] = collection_map_text
-            if profile_block:
-                plan_kwargs["profile_block"] = profile_block
-            if experience_block:
-                plan_kwargs["experience_block"] = experience_block
-            if style_block:
-                plan_kwargs["style_block"] = style_block
-            subqueries = (
-                [SubQuery(query=query) for query in reviewed_queries]
-                if reviewed_queries
-                else self.plan(question, history, **plan_kwargs)
-            )
+            hits = self.search(
+                state.notebook_id, sq.query, sq.types, sq.prefer
+            )[:state.per_query_take]
             raise_if_cancelled(self.cancel_event)
-            record(TraceStep(
-                step_type="plan",
-                summary=(
-                    f"采用已确认意图的 {len(subqueries)} 个检索方向"
-                    if reviewed_queries else f"规划了 {len(subqueries)} 个子查询"
-                ),
-                detail={"sub_queries": [{"query": s.query, "types": s.types,
-                                         "prefer": s.prefer, "reason": s.reason}
-                                        for s in subqueries],
-                        "source": "confirmed_intent" if reviewed_queries else "planner"}))
+            # 成功清除失败标记:同一查询稍后重试成功,账目就不再说它失败。
+            state.failed_search_queries.discard(sq.query)
+            return hits
+        except AskCancelled:
+            raise
+        except Exception:
+            if self.fail_closed:
+                raise
+            # fail-open 吞掉异常,但账目必须能区分「检索过、空手而归」与
+            # 「检索本身炸了」:attempted 记的是"发起过",报告的 run 后
+            # 方向兜底以它为判据跳过重复——不打标,一次瞬态数据库故障
+            # 就让该方向的 KG 证据被静默永久丢弃(此前由 run 后独立
+            # 检索兜底覆盖)。
+            state.failed_search_queries.add(sq.query)
+            return []
 
-            # 初检索:N 个子查询并发执行 search(只读检索,线程安全),按 subqueries
-            # 原顺序收集结果再依次 setdefault —— 故去重/确定性与串行版完全等价
-            # (每个 object_id 保留按"子查询顺序 + 查询内顺序"的第一个版本)。
-            # 单个子查询失败被吞掉(记空结果),不拖垮整个 run。
-            # `failed_search_queries`:检索本身抛异常(非「成功但零命中」)的查询
-            # 原文集合。并发 add/discard 都是同 GIL 原子操作,且每个 worker 只碰
-            # 自己那条查询的键,无竞态。终态账目据它给 attempted 行打稀疏
-            # `failed` 标(见 run 收尾)。
-            failed_search_queries: set = set()
+    def _first_round_prompt_blocks(self, state: "_ReasoningRunState") -> None:
+        """注入三块规划背景:Agent 库理解、部署级检索打法、集合地图。
 
-            def _run_search(sq: SubQuery) -> List[RetrievedKnowledge]:
-                raise_if_cancelled(self.cancel_event)
-                try:
-                    hits = self.search(
-                        notebook_id, sq.query, sq.types, sq.prefer
-                    )[:per_query_take]
+        三者都是 prompt 脚手架而非证据:不开任何检索通道、不能被 [k] 引用。
+        顺序(理解 → 打法 → 地图)承重,见搬过来的原注释。
+        """
+        record = state.record
+        notebook_id = state.notebook_id
+        intent_detail = state.intent_detail
+        limits = state.limits
+        enumeration_active = state.enumeration_active
+        collection_map_text = state.collection_map_text
+        # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。每 run 只
+        # 读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选摘要
+        # 尾部。
+        #
+        # ⚠ 顺序刻意排在下面的集合地图**之前**:这里的 record() 是 run 进入
+        # try 块后的第一次记账。若排在地图构建之后,地图那次(若干次查询、
+        # 有界缓存但仍非零耗时)会被计进 profile 步自己的 duration_ms——而这
+        # 一步对应的其实只是一次 ≤10 行的主键前缀点查。排在前面让地图的构建
+        # 耗时改由它后面的下一步(plan,本来就是一次模型调用)吸收,不会污染
+        # profile 步的账目。
+        #
+        # 收窄口径与集合地图**刻意不同**:``_unsafe_scope_restricted()`` 为真时
+        # 地图必须清空(它承诺了一批本次枚举不到的集合),而理解块**照常注入**
+        # ——它不开任何检索通道、不是证据、不能被 [k] 引用,只影响措辞与查法,
+        # 收窄来源范围并不会让「这个库主要是工艺手册」这句话变得不成立。
+        #
+        # fail-open:读不到就当没有。但**不记 skip 步**——这与 memory 零命中记
+        # skip 的口径是分开的:那条 skip 承载的是一次 embedding 往返 + 向量
+        # 扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个还没
+        # 整理过的库(常态)每一轮都多一条「无」步是纯噪声。
+        profile_block = ""
+        # Agentic Memory P4 (T5): 原始行留存,供 consult_memory 的「本人覆盖层」
+        # 半复用(见 _undelivered_retrieval_note)——零新增查询,关闭态/读取
+        # 失败都保持空列表,consult_memory 那半自然查不到任何东西。
+        profile_raw_blocks: List = []
+        if profile_wiring_active(self.settings, self.agent_profile):
+            try:
+                profile_raw_blocks = self.agent_profile.read_blocks(
+                    notebook_id, self.profile_owner_id)
+                profile_block = render_profile_block(profile_raw_blocks)
+                if profile_block:
+                    record(TraceStep(
+                        step_type="profile",
+                        summary="带上对这个库的已有理解",
+                        detail={
+                            # 真正**渲染进** prompt 的行数,不是清空前候选的
+                            # 行数:整块 1200 字符硬顶可能把候选行整行截掉,
+                            # 按候选数计会在那种情况下高报(见
+                            # rendered_row_count 的 docstring)。
+                            "blocks": rendered_row_count(profile_block),
+                            "chars": len(profile_block)}))
+            except AskCancelled:
+                raise
+            except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
+                profile_block = ""
+                profile_raw_blocks = []
+        # 部署级全局的「检索打法」(Agentic Memory P2 §6.1)。紧挨着上面那块
+        # 读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
+        # ——表头 + 一句框定语 + `- ` 行 + 一个整块硬顶 + 按**送达**行数记步。
+        #
+        # 与理解块的差别只有一条,但它是本特性的红线:理解块讲「这个库是什么」,
+        # 打法讲「这类问题该用哪个通道去查」。后者**绝不**触及来源范围——那是
+        # 用户自己的勾选,而这条约束是结构性的(动作词表里没有任何范围类动作,
+        # 条目本身也没有来源/库字段可渲染),不是提示词里的一句请求。
+        #
+        # fail-open 且**不记 skip 步**,同理由:关闭态是默认形态,没蒸出东西
+        # 的部署(常态)每一轮多一条「无」步是纯噪声。
+        experience_block = ""
+        experience_entries: List = []
+        if experience_wiring_active(self.settings, self.retrieval_experiences):
+            try:
+                situation = current_situation(
+                    intent_detail,
+                    mode=_EXPERIENCE_RUN_MODE,
+                    retrieval_effort=(
+                        limits.effort if limits is not None else ""),
+                )
+                experience_entries = select_experiences(
+                    _cached_experiences(self.retrieval_experiences), situation)
+                experience_block = render_experience_block(experience_entries)
+                if experience_block:
+                    record(TraceStep(
+                        step_type="experience",
+                        summary="带上以往检索攒下的打法",
+                        detail={
+                            # 送达行数,不是选中行数:整块 600 字符硬顶按整行
+                            # 丢弃装不下的条目(见 render_experience_block)。
+                            "entries": rendered_experience_count(
+                                experience_block),
+                            "chars": len(experience_block)}))
+            except AskCancelled:
+                raise
+            except Exception:  # noqa: BLE001 — 打法是背景,不是必需品
+                experience_block = ""
+                experience_entries = []
+        # 集合地图:每 run 只建一次(计数走有界缓存,但仍是若干次查询),同一个
+        # 字符串既进规划上下文、又进每一轮 reflect 的候选摘要尾部。
+        # fail-open:地图建不出来时照常检索作答——它只是让模型「知道有多少」,
+        # 不是任何一条证据的前提。记一条 skip 是为了别把这次失败吞得无影无踪。
+        if enumeration_active:
+            try:
+                collection_map_text = (
+                    self.collection_catalog.collection_map_text(notebook_id)
+                )
+            except AskCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 见上:地图不是必需品
+                record(TraceStep(
+                    step_type="skip",
+                    summary="跳过内容清点(暂时读不到各类条目数量)",
+                    detail={"reason": "collection_map_unavailable",
+                            "error": str(exc)[:120]}))
+        state.profile_block = profile_block
+        state.profile_raw_blocks = profile_raw_blocks
+        state.experience_block = experience_block
+        state.experience_entries = experience_entries
+        state.collection_map_text = collection_map_text
+
+    def _first_round_plan(self, state: "_ReasoningRunState") -> None:
+        """确定本轮的检索方向:已确认意图优先,否则调 `plan()`,并记 plan 步。"""
+        record = state.record
+        question = state.question
+        history = state.history
+        limits = state.limits
+        intent_queries = state.intent_queries
+        initial_query_limit = state.initial_query_limit
+        collection_map_text = state.collection_map_text
+        profile_block = state.profile_block
+        experience_block = state.experience_block
+        reviewed_all = list(dict.fromkeys(
+            str(query).strip() for query in (intent_queries or [])
+            if str(query).strip()
+        ))
+        # 方向身份注册表:本 run 对已确认方向的展示简称与防重/未覆盖识别
+        # 的唯一真源(见 _build_direction_registry)。intent_queries 为空
+        # 时 reviewed_all 恒空,两个字典也恒空——下游三处消费全部短路,
+        # 是中性回归的落点之一。
+        label_of, direction_of = _build_direction_registry(reviewed_all)
+        reviewed_queries = reviewed_all[:initial_query_limit]
+        # 首轮上限约束的是**首轮并发**,不是「装不下的方向就不做了」。溢出的
+        # 已确认方向进入待覆盖账目,在首轮与确定性 seed pass 之后、reflect
+        # 循环之前按序补种(见下方 coverage pass)。intent_queries 为空或不
+        # 超限时它恒为空列表,补种整段与披露/回喂全部不执行 —— 这是中性回归
+        # 的落点:那两种形态下轨迹与检索行为与本特性之前逐位一致。
+        pending_intent_queries = reviewed_all[initial_query_limit:]
+        # A reviewed intent contract is authoritative. Do not ask a second
+        # model to reinterpret it before retrieval; the reflect loop may
+        # still add evidence-driven subqueries after the frozen seed pass.
+        #
+        # Agentic Memory P3(B-Profile,T8):用户的检索/回答风格偏好,一次
+        # 主键点读(按 profile_owner_id = 本次提问 user_id)。⚠ 挪到这里
+        # (``reviewed_queries`` 已经算出、且只在它为空——也就是 ``self.
+        # plan(...)`` 真的会被调用——时才读):正式 UI 路径永远带着已确认
+        # 意图(``reviewed_queries`` 非空),``self.plan()`` 整个不执行,
+        # 提前点读就是给这条最常见的路径白付一次 identity store 读取。与
+        # 上面 profile_block/experience_block 两块故意不同——那两块要喂进
+        # reflect 循环(整个 run 期间反复消费,不只是 plan() 这一次调用),
+        # 提前一次性读没有「按分支延后」的空间;这一块只喂 ``plan()`` 的
+        # ``style_block`` 形参(见其上 reflect 刻意不注入风格块的说明),
+        # 挪迟没有安全隐患,只是把读取推到真正需要它的分支里。fail-open
+        # 同款,同理由不记 skip 步——常态是这条 run 没有可渲染的偏好,每轮
+        # 多一条「无」步是噪声。空 owner(见 profile_owner_id 的类型注释,
+        # 空串是合法且安全的取值)与关闸都合法地产出空串,不触发任何读取。
+        style_block = ""
+        if not reviewed_queries and self.profile_owner_id and (
+                search_profile_wiring_active(
+                    self.settings, self.identity_store)):
+            try:
+                style_profile = self.identity_store.get_user_search_profile(
+                    self.profile_owner_id)
+                style_block = render_style_block(style_profile) if style_profile else ""
+            except AskCancelled:
+                raise
+            except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
+                style_block = ""
+        # 可选参数按「有才传」:没有档位就不覆盖 planner 上限、没有地图就不传
+        # 地图,调用形状与接入前逐字一致(镜像 _construct_reasoning_retriever
+        # 对 fail_closed 的处理)。
+        plan_kwargs = {}
+        if limits is not None:
+            plan_kwargs["max_subqueries"] = limits.max_initial_subqueries
+        if collection_map_text:
+            plan_kwargs["collection_map"] = collection_map_text
+        if profile_block:
+            plan_kwargs["profile_block"] = profile_block
+        if experience_block:
+            plan_kwargs["experience_block"] = experience_block
+        if style_block:
+            plan_kwargs["style_block"] = style_block
+        subqueries = (
+            [SubQuery(query=query) for query in reviewed_queries]
+            if reviewed_queries
+            else self.plan(question, history, **plan_kwargs)
+        )
+        raise_if_cancelled(self.cancel_event)
+        record(TraceStep(
+            step_type="plan",
+            summary=(
+                f"采用已确认意图的 {len(subqueries)} 个检索方向"
+                if reviewed_queries else f"规划了 {len(subqueries)} 个子查询"
+            ),
+            detail={"sub_queries": [{"query": s.query, "types": s.types,
+                                     "prefer": s.prefer, "reason": s.reason}
+                                    for s in subqueries],
+                    "source": "confirmed_intent" if reviewed_queries else "planner"}))
+        state.reviewed_all = reviewed_all
+        state.label_of = label_of
+        state.direction_of = direction_of
+        state.reviewed_queries = reviewed_queries
+        state.pending_intent_queries = pending_intent_queries
+        state.subqueries = subqueries
+
+    def _first_round_initial_search(
+        self, state: "_ReasoningRunState",
+    ) -> None:
+        """初检索:N 个子查询并发执行 search(只读检索,线程安全),按 subqueries
+        原顺序收集结果再依次 setdefault —— 故去重/确定性与串行版完全等价
+        (每个 object_id 保留按"子查询顺序 + 查询内顺序"的第一个版本)。
+        单个子查询失败被吞掉(记空结果),不拖垮整个 run。
+        """
+        record = state.record
+        collected = state.collected
+        subqueries = state.subqueries
+        reviewed_queries = state.reviewed_queries
+        label_of = state.label_of
+        attempted = state.attempted
+        if subqueries:
+            with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
+                # Context must be copied once PER task; a single Context
+                # cannot be entered concurrently, while a bare executor
+                # loses per-user model/log routing entirely.
+                search_futures = [
+                    ex.submit(contextvars.copy_context().run,
+                                  self._first_round_search, state, sq)
+                    for sq in subqueries
+                ]
+                # futures 按提交顺序 result:第 i 个结果仍对应第 i 个子查询。
+                for sq, future in zip(subqueries, search_futures):
+                    hits = future.result()
                     raise_if_cancelled(self.cancel_event)
-                    # 成功清除失败标记:同一查询稍后重试成功,账目就不再说它失败。
-                    failed_search_queries.discard(sq.query)
-                    return hits
-                except AskCancelled:
-                    raise
-                except Exception:
-                    if self.fail_closed:
-                        raise
-                    # fail-open 吞掉异常,但账目必须能区分「检索过、空手而归」与
-                    # 「检索本身炸了」:attempted 记的是"发起过",报告的 run 后
-                    # 方向兜底以它为判据跳过重复——不打标,一次瞬态数据库故障
-                    # 就让该方向的 KG 证据被静默永久丢弃(此前由 run 后独立
-                    # 检索兜底覆盖)。
-                    failed_search_queries.add(sq.query)
-                    return []
+                    # label 只在这轮子查询来自已确认意图种子(reviewed_queries)
+                    # 时才写,取自注册表的唯一简称——plan() 产生的子查询走非
+                    # intent 路径,label_of 里没有它,label 留空,渲染时回退到
+                    # query 原文(中性硬约束)。
+                    rec = attempted.setdefault(_norm_query(sq.query),
+                                               _QueryAttempt(
+                                                   query=sq.query,
+                                                   label=(label_of.get(sq.query, "")
+                                                          if reviewed_queries else "")))
+                    rec.tries += 1
+                    for h in hits:
+                        if h.object_id not in collected:
+                            collected[h.object_id] = h
+                            rec.new += 1
+        # Agentic Memory P4 (T1): "result_ids" is the raw material for
+        # step→anchor attribution (P2 registered this as a later phase —
+        # see RunObservation's docstring). The rule is HARD and applies to
+        # every write site below that reaches this comment's twin: a step
+        # that actually dispatched I/O writes "result_ids" unconditionally
+        # (an empty list on a genuine zero-hit result IS the signal — it
+        # is what lets the read side tell "old trace, field absent" apart
+        # from "ran, found nothing"), while a "skip" branch never writes
+        # the key at all. IDs are bounded to TRACE_RESULT_IDS_MAX — see
+        # that constant's docstring in app.models.ask for the disclosure
+        # argument. Cost is zero: every id list truncated here already
+        # sits in a local variable this line was going to read anyway.
+        _result_ids, _result_ids_truncated = _capped_result_ids(
+            list(collected.keys()))
+        _initial_detail = {"count": len(collected), "result_ids": _result_ids}
+        if _result_ids_truncated:
+            _initial_detail["result_ids_truncated"] = True
+        record(TraceStep(step_type="retrieve",
+                         summary=f"初检索得到 {len(collected)} 个候选节点",
+                         detail=_initial_detail))
 
-            # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
-            # 每轮回喂 reflect(模型能看到试过什么、哪条是干的),add_subquery 对
-            # 重复键硬跳过 —— 治「反复补充同一条子查询」的两层根源。
-            attempted: Dict[str, _QueryAttempt] = {}
-            if subqueries:
-                with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
-                    # Context must be copied once PER task; a single Context
-                    # cannot be entered concurrently, while a bare executor
-                    # loses per-user model/log routing entirely.
-                    search_futures = [
-                        ex.submit(contextvars.copy_context().run, _run_search, sq)
-                        for sq in subqueries
-                    ]
-                    # futures 按提交顺序 result:第 i 个结果仍对应第 i 个子查询。
-                    for sq, future in zip(subqueries, search_futures):
-                        hits = future.result()
-                        raise_if_cancelled(self.cancel_event)
-                        # label 只在这轮子查询来自已确认意图种子(reviewed_queries)
-                        # 时才写,取自注册表的唯一简称——plan() 产生的子查询走非
-                        # intent 路径,label_of 里没有它,label 留空,渲染时回退到
-                        # query 原文(中性硬约束)。
-                        rec = attempted.setdefault(_norm_query(sq.query),
-                                                   _QueryAttempt(
-                                                       query=sq.query,
-                                                       label=(label_of.get(sq.query, "")
-                                                              if reviewed_queries else "")))
-                        rec.tries += 1
-                        for h in hits:
-                            if h.object_id not in collected:
-                                collected[h.object_id] = h
-                                rec.new += 1
-            # Agentic Memory P4 (T1): "result_ids" is the raw material for
-            # step→anchor attribution (P2 registered this as a later phase —
-            # see RunObservation's docstring). The rule is HARD and applies to
-            # every write site below that reaches this comment's twin: a step
-            # that actually dispatched I/O writes "result_ids" unconditionally
-            # (an empty list on a genuine zero-hit result IS the signal — it
-            # is what lets the read side tell "old trace, field absent" apart
-            # from "ran, found nothing"), while a "skip" branch never writes
-            # the key at all. IDs are bounded to TRACE_RESULT_IDS_MAX — see
-            # that constant's docstring in app.models.ask for the disclosure
-            # argument. Cost is zero: every id list truncated here already
-            # sits in a local variable this line was going to read anyway.
+    def _first_round_ppr_seed(
+        self, state: "_ReasoningRunState", ppr_future,
+    ) -> None:
+        """PPR seed pass。`ppr_future` 是 plan 期间预取的那一次(可能为 None)。"""
+        record = state.record
+        notebook_id = state.notebook_id
+        question = state.question
+        seen_chunks = state.seen_chunks
+        chunks = state.chunks
+        # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
+        # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
+        if (not self._unsafe_scope_restricted()
+                and self.allow_ppr and self.settings.graph_ppr_enabled):
+            raise_if_cancelled(self.cancel_event)
+            ppr_all = (ppr_future.result() if ppr_future is not None
+                       else self.ppr_retrieve(notebook_id, question))
+            seeded = [c for c in ppr_all if c.chunk_id not in seen_chunks]
+            for c in seeded:
+                seen_chunks.add(c.chunk_id)
+            chunks.extend(seeded)
             _result_ids, _result_ids_truncated = _capped_result_ids(
-                list(collected.keys()))
-            _initial_detail = {"count": len(collected), "result_ids": _result_ids}
+                [c.chunk_id for c in seeded])
+            _ppr_seed_detail = {"found": len(seeded), "phase": "seed",
+                                "result_ids": _result_ids}
             if _result_ids_truncated:
-                _initial_detail["result_ids_truncated"] = True
-            record(TraceStep(step_type="retrieve",
-                             summary=f"初检索得到 {len(collected)} 个候选节点",
-                             detail=_initial_detail))
+                _ppr_seed_detail["result_ids_truncated"] = True
+            record(TraceStep(step_type="ppr",
+                             summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
+                             detail=_ppr_seed_detail))
 
-            # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
-            # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
-            if (not self._unsafe_scope_restricted()
-                    and self.allow_ppr and self.settings.graph_ppr_enabled):
-                raise_if_cancelled(self.cancel_event)
-                ppr_all = (ppr_future.result() if ppr_future is not None
-                           else self.ppr_retrieve(notebook_id, question))
-                seeded = [c for c in ppr_all if c.chunk_id not in seen_chunks]
-                for c in seeded:
-                    seen_chunks.add(c.chunk_id)
-                chunks.extend(seeded)
-                _result_ids, _result_ids_truncated = _capped_result_ids(
-                    [c.chunk_id for c in seeded])
-                _ppr_seed_detail = {"found": len(seeded), "phase": "seed",
-                                    "result_ids": _result_ids}
-                if _result_ids_truncated:
-                    _ppr_seed_detail["result_ids_truncated"] = True
-                record(TraceStep(step_type="ppr",
-                                 summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
-                                 detail=_ppr_seed_detail))
+    def _first_round_exact_seed(self, state: "_ReasoningRunState") -> None:
+        """精确查找 seed pass(镜像 PPR seed pass)。"""
+        record = state.record
+        notebook_id = state.notebook_id
+        question = state.question
+        seen_chunks = state.seen_chunks
+        chunks = state.chunks
+        exact_terms_done = state.exact_terms_done
+        exact_lookup_log = state.exact_lookup_log
+        # 精确查找 seed pass(确定性兜底,镜像上面的 PPR seed pass):权威问题里
+        # 点名了完整命令/接口名时无条件先按名称定位它所在的小节并整节取齐,不赌
+        # agent 是否选 exact_lookup。零模型调用、零 embedding。
+        # 排在 PPR seed 之后是为了让 PPR 的 seen_chunks 去重与 seeded 计数逐位
+        # 保持原样——本通道只往 chunks 里追加,不改既有那一步的任何数字。
+        # 问题不含可探测名称 → exact_probe_terms 为空 → 一次调用都不发、也不记轨迹步,
+        # 现有轨迹逐字节不变(这是中性回归的验收点,由 stub 测试直接断言)。
+        seed_terms = (self._exact_lookup_terms(question)
+                      if self.settings.exact_lookup_enabled
+                      and self.allow_exact_lookup
+                      and not self._unsafe_scope_restricted() else [])
+        if seed_terms:
+            raise_if_cancelled(self.cancel_event)
+            # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
+            # (action 传同一个编码)。打分口径现在由通道自己钉死(它对
+            # 本次实际探测的名称打分,不看调用方传什么串),所以这里传名称是
+            # 为了探测语义正确,不再是为了把分数拿对。
+            # 逐个加引号而不是空格拼接:通道会对收到的串**重新**抽名称,
+            # 「static timing analysis」这种多词短语裸拼进去就再也抽不回来,
+            # 会被当成三个普通词丢掉。单词标识符经引号分支原样往返。
+            found = [c for c in self.exact_lookup(
+                         notebook_id, exact_probe_query(seed_terms))
+                     if c.chunk_id not in seen_chunks]
+            for c in found:
+                seen_chunks.add(c.chunk_id)
+            chunks.extend(found)
+            exact_terms_done.update(_norm_query(t) for t in seed_terms)
+            exact_lookup_log.append(
+                _ExactLookupAttempt(terms=list(seed_terms), new=len(found)))
+            _result_ids, _result_ids_truncated = _capped_result_ids(
+                [c.chunk_id for c in found])
+            _exact_seed_detail = {"terms": list(seed_terms), "found": len(found),
+                                  "phase": "seed", "result_ids": _result_ids}
+            if _result_ids_truncated:
+                _exact_seed_detail["result_ids_truncated"] = True
+            record(TraceStep(
+                step_type="exact_lookup",
+                summary=f"按名称精确查找:新增 {len(found)} 段原文",
+                detail=_exact_seed_detail))
 
-            # 精确查找 seed pass(确定性兜底,镜像上面的 PPR seed pass):权威问题里
-            # 点名了完整命令/接口名时无条件先按名称定位它所在的小节并整节取齐,不赌
-            # agent 是否选 exact_lookup。零模型调用、零 embedding。
-            # 排在 PPR seed 之后是为了让 PPR 的 seen_chunks 去重与 seeded 计数逐位
-            # 保持原样——本通道只往 chunks 里追加,不改既有那一步的任何数字。
-            # 问题不含可探测名称 → exact_probe_terms 为空 → 一次调用都不发、也不记轨迹步,
-            # 现有轨迹逐字节不变(这是中性回归的验收点,由 stub 测试直接断言)。
-            seed_terms = (self._exact_lookup_terms(question)
-                          if self.settings.exact_lookup_enabled
-                          and self.allow_exact_lookup
-                          and not self._unsafe_scope_restricted() else [])
-            if seed_terms:
-                raise_if_cancelled(self.cancel_event)
-                # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
-                # (action 传同一个编码)。打分口径现在由通道自己钉死(它对
-                # 本次实际探测的名称打分,不看调用方传什么串),所以这里传名称是
-                # 为了探测语义正确,不再是为了把分数拿对。
-                # 逐个加引号而不是空格拼接:通道会对收到的串**重新**抽名称,
-                # 「static timing analysis」这种多词短语裸拼进去就再也抽不回来,
-                # 会被当成三个普通词丢掉。单词标识符经引号分支原样往返。
-                found = [c for c in self.exact_lookup(
-                             notebook_id, exact_probe_query(seed_terms))
-                         if c.chunk_id not in seen_chunks]
-                for c in found:
-                    seen_chunks.add(c.chunk_id)
-                chunks.extend(found)
-                exact_terms_done.update(_norm_query(t) for t in seed_terms)
-                exact_lookup_log.append(
-                    _ExactLookupAttempt(terms=list(seed_terms), new=len(found)))
-                _result_ids, _result_ids_truncated = _capped_result_ids(
-                    [c.chunk_id for c in found])
-                _exact_seed_detail = {"terms": list(seed_terms), "found": len(found),
-                                      "phase": "seed", "result_ids": _result_ids}
-                if _result_ids_truncated:
-                    _exact_seed_detail["result_ids_truncated"] = True
-                record(TraceStep(
-                    step_type="exact_lookup",
-                    summary=f"按名称精确查找:新增 {len(found)} 段原文",
-                    detail=_exact_seed_detail))
+    def _first_round_empty_fallback(
+        self, state: "_ReasoningRunState",
+    ) -> None:
+        """三条确定性通道全空时的原文兜底(不让 reflect 看见空证据就收工)。"""
+        record = state.record
+        notebook_id = state.notebook_id
+        question = state.question
+        collected = state.collected
+        elements = state.elements
+        chunks = state.chunks
+        elements_searches = state.elements_searches
+        # Do not let reflect see a completely empty evidence state and
+        # prematurely declare it sufficient.  This runs after every
+        # deterministic seed channel (KG, PPR, exact lookup), and therefore
+        # also covers a one-source all-selected run where graph channels
+        # stay enabled but produce no seed.  Source-partitioned retrieval
+        # still receives the frozen checkbox ceiling before Top-K.
+        if (
+            not (collected or elements or chunks)
+            and self.settings.reasoning_max_element_searches > 0
+        ):
+            elements_searches = 1
+            found = self.search_elements(notebook_id, question)
+            added = merge_element_hits(elements, found)
+            record(TraceStep(
+                step_type="fallback",
+                summary=f"初始证据未命中，补查来源原文，新增 {len(added)} 段",
+                detail={
+                    "query": question,
+                    "found": len(added),
+                    "reason": "initial_evidence_empty",
+                },
+            ))
+        state.elements_searches = elements_searches
 
-            # Do not let reflect see a completely empty evidence state and
-            # prematurely declare it sufficient.  This runs after every
-            # deterministic seed channel (KG, PPR, exact lookup), and therefore
-            # also covers a one-source all-selected run where graph channels
-            # stay enabled but produce no seed.  Source-partitioned retrieval
-            # still receives the frozen checkbox ceiling before Top-K.
-            if (
-                not (collected or elements or chunks)
-                and self.settings.reasoning_max_element_searches > 0
-            ):
-                elements_searches = 1
-                found = self.search_elements(notebook_id, question)
-                added = merge_element_hits(elements, found)
-                record(TraceStep(
-                    step_type="fallback",
-                    summary=f"初始证据未命中，补查来源原文，新增 {len(added)} 段",
-                    detail={
-                        "query": question,
-                        "found": len(added),
-                        "reason": "initial_evidence_empty",
-                    },
-                ))
-        finally:
-            # 无论正常走完、plan/初检索抛异常(含 AskCancelled)、还是上面
-            # ppr_future.result() 本身抛异常,这里都无条件关闭线程池且只关一次;
-            # 异常(如有)由 try 块原样向外传播,finally 不吞、不重抛。
-            if ppr_pool is not None:
-                if ppr_future is not None:
-                    ppr_future.cancel()
-                # A running DB/graph leaf cannot be force-cancelled safely.
-                # Join it so no run emits final stats before its last I/O ends.
-                ppr_pool.shutdown(wait=True, cancel_futures=True)
-
-        # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
-        used_queries = list(dict.fromkeys(s.query for s in subqueries))
-        # 同一 run 内已 expand_community 过的焦点(防反复触发)。
-        community_focals_done: set = set()
-        follow_chain_done: set = set()
-
-        steps = 0
-
+    def _first_round_coverage_pass(
+        self, state: "_ReasoningRunState",
+    ) -> None:
+        """已确认意图种子补种。步数记在 `state.steps` 上,与 reflect 循环共用。"""
+        record = state.record
+        max_steps = state.max_steps
+        pending_intent_queries = state.pending_intent_queries
+        attempted = state.attempted
+        collected = state.collected
+        used_queries = state.used_queries
+        label_of = state.label_of
+        steps = state.steps
+        uncovered_intent_queries = state.uncovered_intent_queries
         # --- 已确认意图种子补种(coverage pass)-------------------------------
         # 优先级理由:用户在确认卡上审阅过的检索方向,优先于模型自己提出的探索动作。
         # 这与 PPR seed pass、精确查找 seed pass 是同一个哲学 ——「不赌模型」:那两条
@@ -2969,7 +3244,6 @@ class ReasoningRetriever:
         # 熔断交互:stale 熔断只作用于 reflect 循环内部(它统计的是"上一轮动作有没有
         # 带来新证据"),补种整段跑在循环之前,既不读也不写 stale/no_progress,天然
         # 无交互;补种拿到的新证据只是让循环入口的 no_progress 初值更诚实。
-        uncovered_intent_queries: List[str] = []
         if pending_intent_queries:
             coverage_budget = max(0, max_steps // 2)
             for query in pending_intent_queries:
@@ -2990,7 +3264,8 @@ class ReasoningRetriever:
                 # add_subquery 分支同型),不写 result_ids 会让「已确认方向」这条
                 # 归因链单独在起点断掉,即便命中了答案锚点也读不出来。
                 new_ids: List[str] = []
-                for h in _run_search(SubQuery(query=query)):
+                for h in self._first_round_search(
+                        state, SubQuery(query=query)):
                     if h.object_id not in collected:
                         collected[h.object_id] = h
                         added += 1
@@ -3025,17 +3300,163 @@ class ReasoningRetriever:
             # "预算刚耗尽那一刻"的旧账,即便模型后来真的补齐了也不会更正
             # (PR#400 codex R1 P2-1)。uncovered_intent_queries 仍在这里累积,只是
             # 消费点挪到 run 收尾的终态披露(见 while 循环结束之后)。
+        state.steps = steps
+
+    def _run_first_round(self, state: "_ReasoningRunState") -> None:
+        """首轮:reflect 循环之前的全部确定性工作。
+
+        阶段顺序本身是合同(每一条都有独立理由,见各阶段的原注释):
+        理解/打法/地图注入 → 规划 → 初检索 → PPR seed → 精确查找 seed →
+        空证据兜底 → 已确认方向补种。特别地,精确查找 seed 必须排在 PPR seed
+        **之后**,否则 PPR 那一步的 `seen_chunks` 去重与 `seeded` 计数会变。
+        """
+        notebook_id = state.notebook_id
+        question = state.question
+        # P0-C: seed pass PPR 只依赖原问题与只读图状态,与 plan 的 LLM 时间完全
+        # 重叠(copy_context 保住 per-user 模型解析的 ContextVar)。在原 seed pass
+        # 位置 join,故 seen_chunks 合并时序/trace 顺序与串行版逐位一致;
+        # future.result() 重抛异常=与串行抛出同语义。
+        # submit 与下方 seed pass 共用同一 graph_ppr_enabled 条件:只要没有异常
+        # 提前跳出,两者必然成对执行。下面单一 try/finally 包住从 submit 之后到
+        # seed pass join 为止的整段(plan、初检索、seed pass 三处都在内)——无论
+        # 正常返回、plan/初检索抛异常(含 AskCancelled)、还是 ppr_future.result()
+        # 本身抛异常,finally 都无条件关闭线程池且原异常原样向外传播;不需要
+        # except 分支兜底,一次 try/finally 覆盖所有路径,不会出现"submit 了却
+        # 无人 join 且池未关闭"的线程泄漏,也不会出现两处 shutdown 各触发一次。
+        ppr_future = None
+        ppr_pool = None
+        if (not self._unsafe_scope_restricted()
+                and self.allow_ppr and self.settings.graph_ppr_enabled and getattr(
+                self.settings, "reasoning_ppr_prefetch", True)):
+            ppr_pool = ThreadPoolExecutor(max_workers=1)
+            ppr_future = ppr_pool.submit(
+                contextvars.copy_context().run,
+                self.ppr_retrieve, notebook_id, question)
+        try:
+            self._first_round_prompt_blocks(state)
+            self._first_round_plan(state)
+            self._first_round_initial_search(state)
+            self._first_round_ppr_seed(state, ppr_future)
+            self._first_round_exact_seed(state)
+            self._first_round_empty_fallback(state)
+        finally:
+            # 无论正常走完、plan/初检索抛异常(含 AskCancelled)、还是上面
+            # ppr_future.result() 本身抛异常,这里都无条件关闭线程池且只关一次;
+            # 异常(如有)由 try 块原样向外传播,finally 不吞、不重抛。
+            if ppr_pool is not None:
+                if ppr_future is not None:
+                    ppr_future.cancel()
+                # A running DB/graph leaf cannot be force-cancelled safely.
+                # Join it so no run emits final stats before its last I/O ends.
+                ppr_pool.shutdown(wait=True, cancel_futures=True)
+
+        # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
+        state.used_queries = list(
+            dict.fromkeys(s.query for s in state.subqueries))
+
+        self._first_round_coverage_pass(state)
 
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
-        no_progress = not (collected or elements or chunks)
+        state.no_progress = not (
+            state.collected or state.elements or state.chunks)
         # 确定性熔断: 连续无有效进展轮数; search_elements 累计执行次数。
         # 软提示(NO_NEW_EVIDENCE_NOTE)交模型自觉, stale 是硬熔断——模型若无视软提示
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
-        stale = 1 if no_progress else 0
-        ppr_searches = 0
-        follow_chain_searches = 0
-        exact_lookups = 0
+        state.stale = 1 if state.no_progress else 0
+
+    def run(self, notebook_id, question, history="", on_step=None, top_n=None,
+            max_steps=None, intent_queries=None,
+            limits: Optional[AskRetrievalLimits] = None,
+            intent_detail=None):
+        """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
+
+        首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`,run 级状态
+        走 `_ReasoningRunState`);reflect 循环本体、它的三个嵌套 def 与收尾的
+        证据预算/配额重排/采用回写仍在本函数里,是登记在案的下一件结构工作。
+        """
+        raise_if_cancelled(self.cancel_event)
+        self._per_query_scored.clear()
+        state = self._new_run_state(
+            notebook_id, question, history, on_step,
+            max_steps=max_steps, intent_queries=intent_queries,
+            limits=limits, intent_detail=intent_detail,
+        )
+        self._run_first_round(state)
+
+        # --- 首轮 → reflect 循环的交接 ---------------------------------------
+        # 一次性把 run 级状态解包成局部名。可变容器是**同一个对象**(下面的
+        # reflect 循环就地写入,`state` 上看到的是同一份数据);标量是拷贝,所以
+        # 解包之后就**不再回看** `state` —— 循环与收尾只认这些局部名。
+        #
+        # 这样安排是为了让 reflect 循环本体与它的三个嵌套 def 一个字都不用改
+        # (本次结构项刻意只拆首轮),代价就是这段解包块。
+        action_policy = state.action_policy
+        max_outline_updates = state.max_outline_updates
+        max_steps = state.max_steps
+        per_query_take = state.per_query_take
+        trace = state.trace
+        collected = state.collected
+        elements = state.elements
+        elements_searches = state.elements_searches
+        chunks = state.chunks
+        chains = state.chains
+        seen_chunks = state.seen_chunks
+        visited = state.visited
+        exact_lookup_log = state.exact_lookup_log
+        exact_terms_done = state.exact_terms_done
+        neighbor_truncated = state.neighbor_truncated
+        neighbor_expand_limit = state.neighbor_expand_limit
+        enum_limits = state.enum_limits
+        enum_rows_used = state.enum_rows_used
+        enum_pages_used = state.enum_pages_used
+        enum_payload_used = state.enum_payload_used
+        enum_chains = state.enum_chains
+        enumerations = state.enumerations
+        collection_map_text = state.collection_map_text
+        outline_active = state.outline_active
+        consult_memory_flag = state.consult_memory_flag
+        consult_delivered_this_turn = state.consult_delivered_this_turn
+        outline = state.outline
+        outline_updates = state.outline_updates
+        outline_nudges = state.outline_nudges
+        outline_overflow = state.outline_overflow
+        ever_shown_outline_keys = state.ever_shown_outline_keys
+        outline_terminal_repair_used = state.outline_terminal_repair_used
+        outline_cap_repair_used = state.outline_cap_repair_used
+        kg_gap_active = state.kg_gap_active
+        kg_gap_seen = state.kg_gap_seen
+        kg_gap_probed_seeds = state.kg_gap_probed_seeds
+        kg_gap_pending = state.kg_gap_pending
+        consult_used = state.consult_used
+        consult_delivered_ids = state.consult_delivered_ids
+        consult_rows_accum = state.consult_rows_accum
+        consult_overlay_note = state.consult_overlay_note
+        consult_block_text = state.consult_block_text
+        zero_hit_by_action = state.zero_hit_by_action
+        nudged_actions = state.nudged_actions
+        nudges_used = state.nudges_used
+        record = state.record
+        profile_block = state.profile_block
+        profile_raw_blocks = state.profile_raw_blocks
+        experience_block = state.experience_block
+        experience_entries = state.experience_entries
+        adopted_actions = state.adopted_actions
+        reviewed_all = state.reviewed_all
+        label_of = state.label_of
+        direction_of = state.direction_of
+        failed_search_queries = state.failed_search_queries
+        attempted = state.attempted
+        used_queries = state.used_queries
+        community_focals_done = state.community_focals_done
+        follow_chain_done = state.follow_chain_done
+        steps = state.steps
+        uncovered_intent_queries = state.uncovered_intent_queries
+        no_progress = state.no_progress
+        stale = state.stale
+        ppr_searches = state.ppr_searches
+        follow_chain_searches = state.follow_chain_searches
+        exact_lookups = state.exact_lookups
 
         def feed_exact_lookup_skip(key: str, terms: List[str], note: str) -> None:
             """把一次被跳过的按名称查找计入账本(带教学措辞)并回喂 reflect——
