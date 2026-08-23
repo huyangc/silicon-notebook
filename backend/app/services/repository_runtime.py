@@ -743,6 +743,9 @@ def _build_ask_domain(
             # ⚠ 三参:coordinator 按 (nb, uid, mode_id) 调用(codex #524 R5 P1:
             # 这里少一个参数,TypeError 会被协调器的 fail-open 吞掉,两条后台
             # 链一起静默死亡而答案照常交付——由行为用例按真实 arity 钉住)。
+            # 这层 lambda 保留只是为了把上面那条 ⚠ 注释钉在正确的 arity 上,不是
+            # 为了迟绑定——``note_ask_completed`` 参数本身已经是 ``self._note_ask_completed``
+            # 这个 bound method,迟绑定早已成立。
             note_ask_completed=lambda nb, uid, mode_id: note_ask_completed(
                 nb, uid, mode_id
             ),
@@ -1027,6 +1030,9 @@ class RepositoryRuntime:
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
         # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
+        # SQLite maintenance face(CLI/batch 组合根)同理不在 runtime 里——它由 facade 的
+        # ``maintenance`` property 懒接线,因为它需要 embedder-bound retrieval provider,与
+        # 上面的 ``ask`` 同一个理由。
 
     def _current_user_id(self) -> str:
         """The request's current user id, resolved at CALL time.
@@ -1684,7 +1690,7 @@ class RepositoryRuntime:
                 notebook_id, object_id, check_access=False
             ),
             memory_retriever=self.memory_retriever,
-            current_user_id=lambda: self.identity.current_user().id,
+            current_user_id=self._current_user_id,
             queries=self.queries,
         )
         self.pending_actions_service = PendingActionsService(
@@ -2037,7 +2043,7 @@ class RepositoryRuntime:
                 source_titles=self.source_store.source_titles,
                 knowhow_store=self.knowhow_store,
                 memory_retriever=self.memory_retriever,
-                current_user_id=lambda: self.identity.current_user().id,
+                current_user_id=self._current_user_id,
                 cancellations=self.ask_cancellations,
                 # 逐步推理的集合地图/清单:交**这两个** eager 实例,和离线/其他
                 # 调用方共用同一份 per-source 计数缓存(地图与清单必须同源)。

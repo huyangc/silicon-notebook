@@ -183,8 +183,9 @@ def test_no_domain_builder_can_reach_the_runtime():
 
     A builder that accepted ``self``/``runtime``/``repo`` could read a domain
     built *after* it and reintroduce the cycle -- and every test would stay
-    green, because the runtime would still compose.  Parameter names are the
-    checkable form of "inputs come only from earlier domains".
+    green, because the runtime would still compose.  Parameter names plus the
+    ``__self__``/``__closure__`` ban below are the checkable form of "inputs
+    come only from earlier domains".
     """
 
     forbidden = {"self", "runtime", "repo", "repository", "facade"}
@@ -199,16 +200,34 @@ def test_no_domain_builder_can_reach_the_runtime():
     )
 
 
+_RUNTIME_ESCAPE_HATCH_ATTRS = {"__self__", "__closure__", "__func__", "__dict__"}
+
+
 def test_no_domain_builder_reads_the_runtime_class():
     """The other half of the same rule: a builder that never *takes* the
     runtime could still reach it through the class (``RepositoryRuntime`` is a
-    module global), which is the same cycle with an extra hop."""
+    module global), which is the same cycle with an extra hop.
+
+    It could also reach it through the back door of the callables it *is*
+    handed: three of them (``self._current_user_id``, ``self.ask_service``,
+    ``self._note_ask_completed``) are late-bound bound methods passed to
+    builders precisely so no builder has to close over the runtime -- but a
+    bound method's ``__self__`` *is* the composition root, and its
+    ``__closure__``/``__func__``/``__dict__`` are one hop further into the
+    same object. Reading any of those off anything inside a builder is banned
+    the same way the ``RepositoryRuntime`` name itself is.
+    """
 
     offenders = []
     for builder in _builders(_runtime_tree()):
         for node in ast.walk(builder):
             if isinstance(node, ast.Name) and node.id == "RepositoryRuntime":
                 offenders.append(builder.name)
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr in _RUNTIME_ESCAPE_HATCH_ATTRS
+            ):
+                offenders.append(f"{builder.name}:{node.attr}")
     assert offenders == [], offenders
 
 
@@ -322,15 +341,36 @@ def test_the_storage_root_callable_does_not_retain_the_runtime(runtime):
     assert not any(item is runtime for item in retained)
 
 
-LAZY_WIRING_SEATS = (
-    "report_execution", "memory_service", "memory_retriever",
-    "scale_catalog", "scale_builder", "scale_artifacts",
-    "source_embedding", "source_chunking", "source_ingestion",
-    "kg_mutations", "knowledge_governance", "knowledge_lifecycle",
-    "knowledge_query", "pending_actions_service", "notebook_copies",
-    "sharing", "evidence_context", "candidate_retrieval",
-    "graph_retrieval", "retrieval", "ask",
-)
+LAZY_WIRING_SEATS = {
+    "_build_ask_domain": frozenset({"ask"}),
+    "_build_knowledge_domain": frozenset(
+        {
+            "kg_mutations",
+            "knowledge_governance",
+            "knowledge_lifecycle",
+            "knowledge_query",
+            "pending_actions_service",
+        }
+    ),
+    "_build_notebook_domain": frozenset({"notebook_copies", "sharing"}),
+    "_build_report_domain": frozenset({"report_execution"}),
+    "_build_retrieval_domain": frozenset(
+        {
+            "candidate_retrieval",
+            "evidence_context",
+            "graph_retrieval",
+            "memory_retriever",
+            "memory_service",
+            "retrieval",
+        }
+    ),
+    "_build_source_graph_domain": frozenset(
+        {"scale_artifacts", "scale_builder", "scale_catalog"}
+    ),
+    "_build_source_pipeline": frozenset(
+        {"source_chunking", "source_embedding", "source_ingestion"}
+    ),
+}
 
 
 def test_the_lazy_seats_are_left_empty_by_their_builders():
@@ -338,14 +378,22 @@ def test_the_lazy_seats_are_left_empty_by_their_builders():
     builder that filled one eagerly would move a facade-bound seam call into
     the composition root, where the seam does not exist yet.
 
+    Keyed by builder rather than flattened into one set on purpose: a seat
+    left ``None`` by the *wrong* builder would satisfy a flat membership
+    check while actually meaning the seat moved between domains -- e.g.
+    ``sharing`` migrating from ``_build_notebook_domain`` into
+    ``_build_report_domain`` changes which later ``wire_*`` call is allowed
+    to fill it, and a flat set can't see that.
+
     Asserted on the builders and not on a composed runtime on purpose: the
     facade's own constructor calls most of the ``wire_*`` methods, so by the
     time anyone can hold a ``RepositoryRuntime`` all but five of these are
     already filled and a live check would be nearly vacuous.
     """
 
-    empty: set[str] = set()
+    empty_by_builder: dict[str, set[str]] = {}
     for builder in _builders(_runtime_tree()):
+        empty: set[str] = set()
         for node in ast.walk(builder):
             if (
                 isinstance(node, ast.keyword)
@@ -354,10 +402,13 @@ def test_the_lazy_seats_are_left_empty_by_their_builders():
                 and node.value.value is None
             ):
                 empty.add(node.arg)
-    missing = sorted(set(LAZY_WIRING_SEATS) - empty)
-    assert missing == [], (
-        f"these seats are no longer left empty by their domain builder: {missing}"
-    )
+        empty_by_builder[builder.name] = empty
+
+    for builder_name, seats in LAZY_WIRING_SEATS.items():
+        missing = sorted(seats - empty_by_builder.get(builder_name, set()))
+        assert missing == [], (
+            f"{builder_name} no longer leaves these seats empty: {missing}"
+        )
 
 
 def test_the_current_user_accessor_is_late_bound(runtime):
