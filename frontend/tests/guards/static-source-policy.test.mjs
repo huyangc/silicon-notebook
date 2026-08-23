@@ -67,6 +67,13 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 第三列、来源栏收起态与移动端单列。jsdom 不执行 grid 布局，样式表文本是唯一
   // 可验证输入；组件测试另行证明无可见 contribution 时 host 返回 exact null。
   "tests/guards/extension-ui-layout-guard.test.mjs",
+  // 构建期装载仓库外 UI 插件的同步脚本：在临时目录里造插件包夹具、跑真同步、
+  // 再读回自己刚生成的产物。读的全是测试自己写出来的临时文件，加上后端契约
+  // 生成器里那一行排序键声明——没有一处是对生产源码的位置/顺序查询。
+  "tests/unit/sync-ui-plugins.test.mjs",
+  // 只读 package.json 的生命周期钩子与根 .gitignore 的两条忽略规则。生成物按定义
+  // 不入库，所以「它总在」只能由钩子保证，而这两份都是配置元数据、不是生产源码。
+  "tests/guards/extension-plugin-package-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

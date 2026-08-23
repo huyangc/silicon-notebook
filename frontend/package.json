@@ -4,12 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "sync:ui-plugins": "node scripts/sync-ui-plugins.mjs",
+    "postinstall": "npm run sync:ui-plugins",
+    "predev": "npm run sync:ui-plugins",
     "dev": "next dev",
+    "prebuild": "npm run sync:ui-plugins",
     "build": "next build",
+    "prestart": "npm run sync:ui-plugins",
     "start": "next start",
+    "pretest": "npm run sync:ui-plugins",
     "test": "npm run test:node && npm run test:component",
     "test:node": "node --test --test-concurrency=4 $(find tests/unit tests/guards -name '*.test.mjs' -type f -print)",
     "test:component": "vitest run",
+    "prelint": "npm run sync:ui-plugins",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
