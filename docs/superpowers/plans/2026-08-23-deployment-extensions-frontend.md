@@ -242,7 +242,7 @@ export async function syncUiPlugins({ frontendDir, roots }) // { packages, rows 
 
 ### T5 — SDK `ui.tsx`：可拖动浮动弹窗 + 通用入口类（sonnet）
 
-- 新增 `features/extension-sdk/ui.tsx`：`ExtensionModal({ storageKey, title, description?, onClose, children })`，骨架与 `app/conversation-share-modal.tsx:362-464`/`app/groups-panel.tsx:238-758` 同构（`section.utility-modal[role=dialog][aria-modal][aria-label]` → `FloatingModalCard storageKey={`extension.${storageKey}.window`} className="utility-modal-card"` → `div.source-modal-header` 带 `floating.dragHandleProps` + 标题/描述 + `button.icon-button` 关闭 → `div.source-detail-body`）。头注释两条限制：只保证在 `workspace.side_panel` 下正确定位（`source.detail_section` 的宿主本身走 `FloatingModalCard`，`position:fixed` 后代以卡片为包含块；仓库无 `createPortal`，本轮不引入）；不接入 `use-root-modal-coordinator`，生命周期由 outlet 的 `ownerKey` 门承担。
+- 新增 `features/extension-sdk/ui.tsx`：`ExtensionModal({ storageKey, title, description?, onClose, children })`，骨架与 `app/conversation-share-modal.tsx:362-464`/`app/groups-panel.tsx:238-758` 同构（`section.utility-modal[role=dialog][aria-modal][aria-label]` → `FloatingModalCard storageKey={`extension.${storageKey}.window`} className="utility-modal-card"` → `div.source-modal-header` 带 `floating.dragHandleProps` + 标题/描述 + `button.icon-button` 关闭 → `div.source-detail-body`）。头注释两条限制：只保证在 `workspace.side_panel` 下正确定位（`source.detail_section` 的宿主本身走 `FloatingModalCard`，`position:fixed` 后代以卡片为包含块；仓库无 `createPortal`，本轮不引入）。（弹窗后来接入了 `use-root-modal-coordinator`，props 也随之改成 `{ context, actions, storageKey, title, description?, children }`——见下面 R4。outlet 的 `ownerKey` 门保留为同向的第二道兜底。）
 - `app/globals.css:1092-1120`：`.agent-profile-workspace-plugin` 三段规则改名 `.workspace-extension-entry`（声明一字不改）。`features/agent-profile/workspace-plugin.ts:23` className 改 `"button secondary workspace-extension-entry"`。
 - 守卫 `extension-ui-layout-guard.test.mjs`：第 39 行前缀改 `.workspace-extension-entry`；第 147-169 行扫描范围扩到 `features/ext-*/` 全部 `.ts/.tsx` + 内建插件 + `features/extension-sdk/ui.tsx`（不许内联 style/颜色字面量）；新增用例「扩展弹窗只用系统弹窗骨架类」（`ui.tsx` 的 className 字面量集合 ⊆ `{utility-modal, utility-modal-card, source-modal-header, source-detail-body, icon-button}` 且非空；`storageKey` 含 `extension.` 前缀）。
 - 组件用例（并入 `extension-plugin-surface.component.test.tsx`）：渲染 `role="dialog"`、`aria-label`、header 有 `onPointerDown` 与 `touchAction: none`、× 调 `onClose` 一次；`innerWidth=700` + resize 后卡片 `style.transform` 为空；outlet 因 `ownerKey` 消失卸载时弹窗一并消失。
@@ -288,7 +288,7 @@ export async function syncUiPlugins({ frontendDir, roots }) // { packages, rows 
 - R1 `typedRoutes`/TS：无需配置改动（`tsconfig.json:23` include 覆盖 `features/ext-*/**`；`allowImportingTsExtensions: true` 已有先例）。插件不得带 `tsconfig.json`。
 - R2 插件 `node_modules`/`package.json`：脚本硬拒绝（原因见 0.3 与双 React 实例）。插件只能用 `react`/`react-dom`/`lucide-react`/SDK；要新依赖走基座 PR。
 - R3 `ExtensionModal` 在 `source.detail_section` 下会相对卡片定位：登记限制；本轮只用于 `workspace.side_panel`。
-- R4 插件弹窗不接入 root-modal coordinator：登记接受；不扩 `RootModalSlot`。
+- R4 插件弹窗接入 root-modal coordinator：**已接入**（codex #578 R1 P2）。`RootModalSlot` 只加一格**通用**的 `"extension"`——联合类型里仍不出现任何插件名（零补丁）；认领由壳层按 **contribution id** 记录，SDK 侧的端口是 `actions.openDialog()`/`closeDialog()` 与 `context.dialog`。因此一次只有一个插件弹窗、被盖住时 `inert`/`aria-hidden`、焦点归还归协调器。
 - R5 内网跑 `npm run test` 时 parity 只对内建；合并结果仍过 `defineWorkspaceUiRegistry` 校验。
 - R6 `frontend/scripts/` 新顶层目录：无守卫枚举；"生产代码只放 app/features"约束的是生产代码。
 - R7 脚本删目录：三重闸（名字正则、`.ui-plugin-origin` 标记、`path.relative` 在 `features/` 之下）。

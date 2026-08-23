@@ -37,7 +37,7 @@ import { readFile } from "node:fs/promises";
 import postcss from "postcss";
 import ts from "typescript";
 
-import { appSourceModules, parseModule } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, parseModule, parseText } from "../../test-support/semantic-source.mjs";
 
 const css = await readFile(new URL("../../app/globals.css", import.meta.url), "utf8");
 const stylesheet = postcss.parse(css);
@@ -59,6 +59,27 @@ const MODAL_SKELETON_CLASSES = new Set([
   "source-detail-body",
   "icon-button",
 ]);
+
+/**
+ * `ui.tsx` 唯一放行的内联 `style` 形态：**只含 `zIndex` 一个键**。
+ *
+ * 它是承重的而不是方便：插件弹窗现在与核心弹窗同处一个 primary 冲突组，层级由
+ * `use-root-modal-coordinator` 逐次算出来（同层多开时还要按 order 加 rank），落不到
+ * DOM 上就只能吃样式表里那个静态的 `.utility-modal { z-index: 60 }`，排序当场失效。
+ * 每个核心弹窗曲面写的都是同一个形态（`style={{ zIndex: … }}`）。
+ *
+ * 判据钉死"恰好一个键、且叫 zIndex"：放宽成"含 zIndex 即可"就等于把整个内联样式的
+ * 口子开回来——一条 `{ zIndex, background: "#fff" }` 会照样通过。
+ */
+function zIndexOnlyStyle(node, module) {
+  if (!ts.isJsxAttribute(node)) return false;
+  const initializer = node.initializer;
+  if (!initializer || !ts.isJsxExpression(initializer) || !initializer.expression) return false;
+  const object = initializer.expression;
+  if (!ts.isObjectLiteralExpression(object) || object.properties.length !== 1) return false;
+  const [only] = object.properties;
+  return ts.isPropertyAssignment(only) && only.name.getText(module) === "zIndex";
+}
 
 // 颜色字面量:十六进制、rgb()/rgba()、hsl()/hsla(),以及最常见的一批具名色。
 // 具名色不穷举——穷举 CSS 那 148 个名字只会给人一种「已经查全了」的错觉,而真正
@@ -192,6 +213,10 @@ test("插件侧模块不带内联 style，字符串里没有颜色字面量", as
   // ⚠ 判据只认**具名** `style` 属性/键。`ui.tsx` 展开的 `{...floating.dragHandleProps}`
   // 带一个 `style`(`touchAction`/`cursor`),那是全仓浮窗的共享拖动契约、且不含颜色,
   // 刻意放行:它是 JsxSpreadAttribute,结构上就不在下面这个判据里。
+  //
+  // 第二条例外是**只给 `ui.tsx` 的**、且只放行 `style={{ zIndex }}` 这**一个**形态
+  // (见 `zIndexOnlyStyle` 的注释:层级归 root-dialog 协调器算,不落 DOM 就排不了序)。
+  // 插件侧的模块一个 `style` 都不许有,这条例外不外借。
   const offenders = [];
   for (const { path, module } of plugins) {
     function visit(node) {
@@ -199,6 +224,7 @@ test("插件侧模块不带内联 style，字符串里没有颜色字面量", as
       if (
         (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node) || ts.isJsxAttribute(node))
         && node.name.getText(module) === "style"
+        && !(path === SHARED_PLUGIN_UI && zIndexOnlyStyle(node, module))
       ) offenders.push(`${path}: inline style`);
       if (ts.isStringLiteralLike(node) && COLOR_LITERAL.test(node.text)) {
         offenders.push(`${path}: ${JSON.stringify(node.text)}`);
@@ -208,6 +234,33 @@ test("插件侧模块不带内联 style，字符串里没有颜色字面量", as
     visit(module);
   }
   assert.deepEqual(offenders, [], "插件组件的视觉只能来自系统类与 :root token,不得内联颜色");
+});
+
+
+test("ui.tsx 的内联 style 例外只放行 zIndex 这一个键", () => {
+  // 例外本身是被 root-dialog 裁决逼出来的（层级要算、要落 DOM），但它极易被放宽成
+  // 「含 zIndex 即可」——那等于把整个内联样式的口子重新开开。这条按真解析出的 JSX
+  // 属性逐条判，正反两个方向都钉。
+  const parse = (attribute) => {
+    const module = parseText(`export const X = () => <section ${attribute} />;\n`, SHARED_PLUGIN_UI);
+    let found;
+    function visit(node) {
+      if (ts.isJsxAttribute(node) && node.name.getText(module) === "style") found = node;
+      ts.forEachChild(node, visit);
+    }
+    visit(module);
+    assert.ok(found, `夹具里没解析出 style 属性：${attribute}`);
+    return zIndexOnlyStyle(found, module);
+  };
+  assert.equal(parse("style={{ zIndex: dialog.zIndex }}"), true);
+  assert.equal(parse("style={{ zIndex: 60 }}"), true);
+  for (const attribute of [
+    'style={{ zIndex: dialog.zIndex, background: "#fff" }}',
+    'style={{ background: "#fff" }}',
+    "style={{ ...base, zIndex: dialog.zIndex }}",
+    "style={styles}",
+    'style="z-index: 60"',
+  ]) assert.equal(parse(attribute), false, attribute);
 });
 
 

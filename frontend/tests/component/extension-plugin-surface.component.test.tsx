@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
+import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator";
 import { createOwnedWorkspaceExtensionActions } from "../../features/extension-sdk/actions";
 import { ExtensionModal } from "../../features/extension-sdk/ui";
 import { WorkspaceExtensionOutlet } from "../../features/extension-sdk/host";
@@ -10,6 +11,7 @@ import { defineWorkspaceUiRegistry } from "../../features/extension-sdk/registry
 import type {
   SystemExtensionProjection,
   WorkspaceExtensionContext,
+  WorkspaceExtensionPluginActions,
   WorkspaceExtensionProps,
 } from "../../features/extension-sdk/contracts";
 
@@ -43,6 +45,8 @@ test("refreshSources delegates to the injected command exactly once under the cu
     ),
     openUnderstanding,
     refreshSources,
+    () => undefined,
+    () => undefined,
   );
   await actions.refreshSources();
   expect(refreshSources).toHaveBeenCalledOnce();
@@ -64,6 +68,8 @@ test("a stale refreshSources call after a workspace switch (generation 1 -> 3) r
     ),
     openUnderstanding,
     refreshSources,
+    () => undefined,
+    () => undefined,
   );
   // 两次切库：notebook-a(G1) -> notebook-b(G2) -> notebook-a(G3)。staleAction 是
   // A-G1 那次冻结出来的引用，即使浏览器或组件仍握着它的旧回调，也不能作用于
@@ -88,6 +94,8 @@ test("a core load failure reaches the plugin as a rejection, not a silent resolv
     () => true,
     openUnderstanding,
     refreshSources,
+    () => undefined,
+    () => undefined,
   );
   await expect(actions.refreshSources()).rejects.toBe(failure);
   expect(refreshSources).toHaveBeenCalledOnce();
@@ -110,6 +118,8 @@ test("a refreshSources call from a different actor is dropped by the owner gate"
     ),
     openUnderstanding,
     refreshSources,
+    () => undefined,
+    () => undefined,
   );
   await expect(staleActorActions.refreshSources()).resolves.toBeUndefined();
   expect(refreshSources).not.toHaveBeenCalled();
@@ -117,10 +127,10 @@ test("a refreshSources call from a different actor is dropped by the owner gate"
 
 
 // X5 T5 — SDK 共享弹窗 `ExtensionModal`。它是插件唯一被允许使用的弹窗外壳，所以钉的是
-// 三件事：可及性与关闭语义、拖动手柄真的接上了共享浮窗实现（而不是自己搓了一个）、
-// 以及**生命周期归 outlet 的 ownerKey 门**——它刻意不接
-// `use-root-modal-coordinator`（实现计划 R4 登记接受），所以「切库/离开工作区时弹窗
-// 跟着消失」这一条只能由那道门兑现，必须有用例证明它真的兑现了。
+// 四件事：可及性与关闭语义、拖动手柄真的接上了共享浮窗实现（而不是自己搓了一个）、
+// **接入核心 root-dialog 裁决**（codex #578 R1 P2：被盖住时退出交互树、一次只有一个
+// 插件弹窗、认领与释放都只经协调器），以及生命周期的第二道兜底——outlet 的 ownerKey
+// 门（切库/离开工作区时整棵子树卸载）。
 
 // jsdom 的 `window.innerWidth` 是整个 worker 共享的:下面那条窄视口用例把它按到 700
 // 之后不还原,同文件里**之后**渲染浮窗的用例就都跑在「浮窗几何已停用」的世界里,而
@@ -135,15 +145,17 @@ afterEach(() => {
     configurable: true, writable: true, value: ORIGINAL_INNER_WIDTH,
   });
   window.sessionStorage.clear();
+  coordinator = null;
+  lastPluginActions = new Map();
 });
 
 const permissions = {
   notebookRead: true, notebookWrite: false, notebookConfigure: false,
   sourceRead: false, sourceWrite: false, systemAdmin: false,
 };
-// 壳层构造的那一半 context:**不含** `pluginId`，它由 host 按 contribution 逐条注入
-// （`host.tsx` 的 outlet props 就是这个 `Omit`）。
-const context: Omit<WorkspaceExtensionContext, "pluginId"> = {
+// 壳层构造的那一半 context:**不含** `pluginId` 与 `dialog`，两者都由 host 按
+// contribution 逐条注入（`host.tsx` 的 outlet props 就是这个 `Omit`）。
+const context: Omit<WorkspaceExtensionContext, "pluginId" | "dialog"> = {
   slot: "workspace.side_panel",
   actor: { id: "user-a", username: "user-a", displayName: "user-a" },
   notebook: { id: "notebook-a", name: "notebook-a" },
@@ -151,54 +163,134 @@ const context: Omit<WorkspaceExtensionContext, "pluginId"> = {
   uiMode: "auto",
   permissions,
 };
-const actions = {
-  openUnderstanding: () => undefined,
-  refreshSources: async () => {},
-  api: {
-    requestJson: async <T,>() => ({} as T),
-    requestVoid: async () => {},
-    requestBlob: async () => new Blob(),
-    userMessage: (_error: unknown, fallback: string) => fallback,
-  },
-};
+
+/** 直接渲染 `ExtensionModal` 的用例用的那份 host 注入结果：开着且在最上层。 */
+const TOPMOST_DIALOG = { open: true, topmost: true, zIndex: 60 } as const;
+
+function modalContext(
+  pluginId: string,
+  dialog: WorkspaceExtensionContext["dialog"] = TOPMOST_DIALOG,
+): WorkspaceExtensionContext {
+  return { ...context, pluginId, dialog };
+}
 
 /**
- * 一条会开弹窗的合成 contribution：按钮打开，弹窗自己的 × 关闭。
+ * 一条会开弹窗的合成 contribution：按钮**请求**打开，弹窗自己的 × 请求关闭。
  *
- * 插件把 `context.pluginId` 原样转交给弹窗——那是它拿到自己身份的唯一途径（host
- * 注入，插件说了不算），也是窗口位置存储键里隔离插件与插件的那一段。
+ * 它刻意**没有** `useState`——弹窗的可见性归核心的 root-dialog 裁决（`context.dialog`），
+ * 插件自己那份状态既关不掉一次被顶掉的弹窗、也会与协调器分叉。`context.pluginId` 与
+ * `context.dialog` 都由 host 注入，插件只是把整份 context 原样转交。
+ *
+ * 用工厂而不是三份复制：三条 contribution 只在标题/按钮文案/存储键上不同，复制一份
+ * JSX 必然分叉。`contributionId` 只用来把 actions 记进 `lastPluginActions`（用例要拿
+ * 迟到的旧回调）——**插件自己拿不到它**，`openDialog()` 是 host 绑好的零参数命令。
  */
-function ModalPlugin({ context: pluginContext }: WorkspaceExtensionProps) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button type="button" onClick={() => setOpen(true)}>打开面板</button>
-      {open && (
+function modalPanel(options: {
+  contributionId: string;
+  openLabel: string;
+  title: string;
+  storageKey: string;
+  bodyText: string;
+}) {
+  return function Panel({ context: pluginContext, actions: pluginActions }: WorkspaceExtensionProps) {
+    lastPluginActions.set(options.contributionId, pluginActions);
+    return (
+      <>
+        <button type="button" onClick={() => pluginActions.openDialog()}>{options.openLabel}</button>
         <ExtensionModal
-          pluginId={pluginContext.pluginId}
-          storageKey="sample.panel"
-          title="示例面板"
+          context={pluginContext}
+          actions={pluginActions}
+          storageKey={options.storageKey}
+          title={options.title}
           description="一句说明"
-          onClose={() => setOpen(false)}
         >
-          <p>面板内容</p>
+          <p>{options.bodyText}</p>
         </ExtensionModal>
-      )}
-    </>
-  );
+      </>
+    );
+  };
 }
 
 const modalRegistry = defineWorkspaceUiRegistry([{
   id: "sample-panel", pluginId: "sample-plugin", pluginVersion: "1.0.0",
   capability: "sample.ui.available", slot: "workspace.side_panel",
-  permission: "notebook:read", mode: "all", Component: ModalPlugin,
+  permission: "notebook:read", mode: "all",
+  Component: modalPanel({
+    contributionId: "sample-panel", openLabel: "打开面板",
+    title: "示例面板", storageKey: "sample.panel", bodyText: "面板内容",
+  }),
+}, {
+  // **同一个插件的第二条 contribution**：持有权按 contribution id 而不是 plugin id，
+  // 否则这两条会同时看到 `dialog.open === true`、一起挂出弹窗（codex #578 R1 P2）。
+  id: "sample-second-panel", pluginId: "sample-plugin", pluginVersion: "1.0.0",
+  capability: "sample.ui.available", slot: "workspace.side_panel",
+  permission: "notebook:read", mode: "all",
+  Component: modalPanel({
+    contributionId: "sample-second-panel", openLabel: "打开同插件第二面板",
+    title: "同插件第二面板", storageKey: "sample.second", bodyText: "第二面板内容",
+  }),
+}, {
+  id: "other-panel", pluginId: "other-plugin", pluginVersion: "1.0.0",
+  capability: "other.ui.available", slot: "workspace.side_panel",
+  permission: "notebook:read", mode: "all",
+  Component: modalPanel({
+    contributionId: "other-panel", openLabel: "打开另一个面板",
+    title: "另一个面板", storageKey: "other.panel", bodyText: "另一个面板内容",
+  }),
 }]);
 const modalProjection: SystemExtensionProjection = { apiVersion: "1", extensions: [{
   pluginId: "sample-plugin", displayName: "Sample", version: "1.0.0",
   contributionId: "sample-panel", available: true, unavailableReason: null,
+}, {
+  pluginId: "sample-plugin", displayName: "Sample", version: "1.0.0",
+  contributionId: "sample-second-panel", available: true, unavailableReason: null,
+}, {
+  pluginId: "other-plugin", displayName: "Other", version: "1.0.0",
+  contributionId: "other-panel", available: true, unavailableReason: null,
 }] };
 
+/**
+ * 壳层的最小复刻：`page.tsx` 的三样接线——协调器、`extension` 那格的持有者 state、
+ * 以及"认领只经 `rootModals.open`、释放只经 `onClosed`"这两条。用例通过 `coordinator`
+ * 直接驱动核心侧（进工作区、开一个盖在上面的 `info` 层、开一个冲突的 primary）。
+ */
+let coordinator: ReturnType<typeof useRootModalCoordinator> | null = null;
+/**
+ * 用例可以抓下来的一份「上一次渲染时插件手上的 actions」，用于模拟迟到的旧回调。
+ * 键是 **contribution id**——那正是弹窗持有权的粒度。
+ */
+let lastPluginActions = new Map<string, WorkspaceExtensionPluginActions>();
+
 function Outlet({ ownerKey }: { ownerKey: string | null }) {
+  const [holder, setHolder] = useState<string | null>(null);
+  // 与 page.tsx 逐字同构：关闭请求按**当时**的持有者判，所以另留一份 ref。
+  const holderRef = useRef<string | null>(null);
+  const rootModals = useRootModalCoordinator({
+    actorId: "user-a",
+    sourceId: null,
+    onClosed: (slot) => {
+      if (slot !== "extension") return;
+      holderRef.current = null;
+      setHolder(null);
+    },
+  });
+  coordinator = rootModals;
+  const outletActions = createOwnedWorkspaceExtensionActions(
+    { actorId: "user-a" },
+    () => true,
+    () => undefined,
+    async () => {},
+    (contributionId) => {
+      if (rootModals.open("extension", rootModals.captureWorkspaceOwner())) {
+        holderRef.current = contributionId;
+        setHolder(contributionId);
+      }
+    },
+    (contributionId, reason) => {
+      if (holderRef.current !== contributionId) return;
+      rootModals.requestClose("extension", reason);
+    },
+  );
   // 镜像 page.tsx 的门：没有 owner 就整棵子树不渲染。
   if (!ownerKey) return null;
   return (
@@ -207,18 +299,29 @@ function Outlet({ ownerKey }: { ownerKey: string | null }) {
       registry={modalRegistry}
       projection={modalProjection}
       context={context}
-      actions={actions}
+      actions={outletActions}
       ownerKey={ownerKey}
+      dialog={rootModals.view("extension")}
+      dialogHolder={holder}
     />
   );
 }
 
+function enterWorkspace(notebookId = "notebook-a", workspaceEpoch = 1) {
+  act(() => {
+    const transition = coordinator!.beginWorkspaceTransition();
+    coordinator!.finishWorkspaceTransition(transition, {
+      actorId: "user-a", notebookId, workspaceEpoch,
+    });
+  });
+}
 
-test("the shared modal is a labelled dialog whose close button fires exactly once", async () => {
+
+test("the shared modal is a labelled dialog whose close button asks the coordinator exactly once", async () => {
   const user = userEvent.setup();
-  const onClose = vi.fn();
+  const closeDialog = vi.fn();
   render(
-    <ExtensionModal pluginId="sample-plugin" storageKey="sample.panel" title="示例面板" description="一句说明" onClose={onClose}>
+    <ExtensionModal context={modalContext("sample-plugin")} actions={{ closeDialog }} storageKey="sample.panel" title="示例面板" description="一句说明">
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -227,17 +330,68 @@ test("the shared modal is a labelled dialog whose close button fires exactly onc
   // 保证读得到名字的途径。
   expect(dialog).toHaveAttribute("aria-modal", "true");
   expect(dialog).toHaveClass("utility-modal");
+  // 层级由协调器给，不由样式表的 `.utility-modal { z-index: 60 }` 兜底——插件弹窗与
+  // 核心弹窗同处一个 primary 冲突组，落不到 DOM 上就没法参与排序。
+  expect(dialog.style.zIndex).toBe("60");
   expect(screen.getByText("一句说明")).toBeInTheDocument();
   expect(screen.getByText("面板内容")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "关闭" }));
-  expect(onClose).toHaveBeenCalledOnce();
+  expect(closeDialog).toHaveBeenCalledOnce();
+});
+
+
+test("a closed dialog view renders nothing at all", () => {
+  // 可见性归核心：插件没有第二个开关。这条同时是下面那些"开着"的用例的反向保护。
+  const { container } = render(
+    <ExtensionModal
+      context={modalContext("sample-plugin", { open: false, topmost: false, zIndex: 0 })}
+      actions={{ closeDialog: () => undefined }}
+      storageKey="sample.panel"
+      title="示例面板"
+    >
+      <p>面板内容</p>
+    </ExtensionModal>,
+  );
+  expect(container).toBeEmptyDOMElement();
+});
+
+
+test("a covered dialog leaves the interaction tree instead of staying focusable behind the top layer", () => {
+  render(
+    <ExtensionModal
+      context={modalContext("sample-plugin", { open: true, topmost: false, zIndex: 60 })}
+      actions={{ closeDialog: () => undefined }}
+      storageKey="sample.panel"
+      title="示例面板"
+    >
+      <button type="button">面板里的按钮</button>
+    </ExtensionModal>,
+  );
+  // `getByRole` 会跳过 aria-hidden 的子树，所以这里按 class 取。
+  const dialog = document.querySelector(".utility-modal") as HTMLElement;
+  expect(dialog).not.toBeNull();
+  expect(dialog).toHaveAttribute("aria-hidden", "true");
+  expect(dialog).toHaveAttribute("inert");
+  expect(dialog).toHaveAttribute("aria-modal", "false");
+});
+
+
+test("the modal refuses a host-injected dialog view that is not a coordinator view", () => {
+  // `context.dialog` 缺席不会报错、只会让弹窗永远不出现（或永远不退出交互树）——
+  // 与畸形存储键同类的静默失败，所以这里同样响亮失败。
+  const broken = { ...context, pluginId: "sample-plugin" } as unknown as WorkspaceExtensionContext;
+  expect(() => render(
+    <ExtensionModal context={broken} actions={{ closeDialog: () => undefined }} storageKey="sample.panel" title="t">
+      <p>x</p>
+    </ExtensionModal>,
+  )).toThrow(TypeError);
 });
 
 
 test("the header is the shared floating-window drag handle, not a hand-rolled one", () => {
   const { container } = render(
-    <ExtensionModal pluginId="sample-plugin" storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
+    <ExtensionModal context={modalContext("sample-plugin")} actions={{ closeDialog: () => undefined }} storageKey="sample.panel" title="示例面板">
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -257,7 +411,7 @@ test("the header is the shared floating-window drag handle, not a hand-rolled on
 test("narrow viewports hand the geometry back to CSS instead of pinning an inline transform", () => {
   Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
   const { container } = render(
-    <ExtensionModal pluginId="sample-plugin" storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
+    <ExtensionModal context={modalContext("sample-plugin")} actions={{ closeDialog: () => undefined }} storageKey="sample.panel" title="示例面板">
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -287,7 +441,7 @@ const SEEDED_RECT = JSON.stringify({ x: 120, y: 40, width: null, height: null })
 
 function renderModalFor(pluginId: string) {
   const { container } = render(
-    <ExtensionModal pluginId={pluginId} storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
+    <ExtensionModal context={modalContext(pluginId)} actions={{ closeDialog: () => undefined }} storageKey="sample.panel" title="示例面板">
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -325,7 +479,7 @@ test("the modal refuses a malformed identity instead of silently building a stra
   }
   for (const storageKey of ["", "a/b", "a b", "..", "x".repeat(65)]) {
     expect(() => render(
-      <ExtensionModal pluginId="sample-plugin" storageKey={storageKey} title="t" onClose={() => undefined}>
+      <ExtensionModal context={modalContext("sample-plugin")} actions={{ closeDialog: () => undefined }} storageKey={storageKey} title="t">
         <p>x</p>
       </ExtensionModal>,
     )).toThrow(TypeError);
@@ -334,10 +488,142 @@ test("the modal refuses a malformed identity instead of silently building a stra
 });
 
 
-test("the modal's lifetime is owned by the outlet's ownerKey gate", async () => {
+// ---------------------------------------------------------------------------
+// codex #578 R1 P2 — 插件弹窗接入 root-dialog 裁决。下面这组用例用的都是那份最小
+// 壳层复刻（`Outlet`），驱动的是真的 `useRootModalCoordinator`。
+
+test("openDialog claims the coordinator slot and the dialog becomes topmost", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  const dialog = screen.getByRole("dialog", { name: "示例面板" });
+  expect(dialog).toBeInTheDocument();
+  expect(dialog).toHaveAttribute("aria-modal", "true");
+  expect(dialog).not.toHaveAttribute("inert");
+  // 认领的是核心那格，不是插件自己的一份影子状态。
+  expect(coordinator!.view("extension").open).toBe(true);
+});
+
+
+test("a core dialog above the extension dialog pushes it out of the interaction tree", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  expect(screen.getByRole("dialog", { name: "示例面板" })).not.toHaveAttribute("inert");
+
+  // `info` 是唯一合法压在 primary 之上的层（conflictGroup 为 null、layer 80）——它才是
+  // 「盖住」的真实形态。另一个 **primary** 会走冲突分支把插件弹窗整个关掉，见下一条。
+  act(() => { coordinator!.open("info", coordinator!.captureWorkspaceOwner()); });
+  const covered = document.querySelector(".utility-modal") as HTMLElement;
+  expect(covered).not.toBeNull();
+  expect(covered).toHaveAttribute("inert");
+  expect(covered).toHaveAttribute("aria-hidden", "true");
+  expect(covered).toHaveAttribute("aria-modal", "false");
+  // 还在 DOM 里（只是退出了交互树），否则这条断言与「被关掉」分不开。
+  expect(screen.getByText("面板内容")).toBeInTheDocument();
+});
+
+
+test("a conflicting core primary closes the extension dialog and releases the holder", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+
+  act(() => { coordinator!.open("notebook-editor", coordinator!.captureActorOwner()); });
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+  expect(coordinator!.view("extension").open).toBe(false);
+  // 持有者随 lease 一起释放：同一个插件立刻还能重新认领（holder 卡住的话，
+  // `handleRootModalClosed` 那条 close sink 就没有把两者绑在一起）。
+  act(() => { coordinator!.requestClose("notebook-editor", "button"); });
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
+});
+
+
+test("only the holder sees an open dialog: a second plugin gets a closed view", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
+  // 另一个插件同时在场、同一格 lease 开着——它拿到的必须是一份 closed view。
+  expect(screen.queryByRole("dialog", { name: "另一个面板" })).toBeNull();
+  expect(lastPluginActions.get("other-panel")).toBeDefined();
+
+  // 换它认领：那一格易主，上一个插件的弹窗随之消失。
+  await user.click(screen.getByRole("button", { name: "打开另一个面板" }));
+  expect(screen.getByRole("dialog", { name: "另一个面板" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+});
+
+
+test("two contributions of the same plugin do not both open: the holder is a contribution, not a plugin", async () => {
+  // codex #578 R1 P2：按 plugin id 判持有权时这两条 contribution 会同时看到
+  // `dialog.open === true`，屏幕上一次挂出两个弹窗。
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "同插件第二面板" })).toBeNull();
+  expect(document.querySelectorAll(".utility-modal")).toHaveLength(1);
+
+  // 同插件的另一条来认领：易主，前一条随之关闭——仍然只有一个弹窗。
+  await user.click(screen.getByRole("button", { name: "打开同插件第二面板" }));
+  expect(screen.getByRole("dialog", { name: "同插件第二面板" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+  expect(document.querySelectorAll(".utility-modal")).toHaveLength(1);
+
+  // 同插件的旧回调同样关不掉现任持有者的弹窗——闸判的是 contribution，不是 plugin。
+  act(() => { lastPluginActions.get("sample-panel")!.closeDialog(); });
+  expect(screen.getByRole("dialog", { name: "同插件第二面板" })).toBeInTheDocument();
+});
+
+
+test("a stale closeDialog from a plugin that no longer holds the slot cannot close someone else's dialog", async () => {
+  // codex #578 R1 P2：owner 闸只挡得住「换代之后的旧回调」，挡不住「同一代里那一格已经
+  // 易主」。插件 A 留着的那份 `closeDialog()` 必须对 B 的弹窗无效。
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  const staleClose = lastPluginActions.get("sample-panel")!.closeDialog;
+
+  await user.click(screen.getByRole("button", { name: "打开另一个面板" }));
+  expect(screen.getByRole("dialog", { name: "另一个面板" })).toBeInTheDocument();
+
+  act(() => { staleClose(); });
+  expect(screen.getByRole("dialog", { name: "另一个面板" })).toBeInTheDocument();
+  expect(coordinator!.view("extension").open).toBe(true);
+
+  // 反向保护：当前持有者自己关，必须真的关得掉（否则上面那条在"谁都关不掉"时也绿）。
+  act(() => { lastPluginActions.get("other-panel")!.closeDialog(); });
+  expect(screen.queryByRole("dialog", { name: "另一个面板" })).toBeNull();
+  expect(coordinator!.view("extension").open).toBe(false);
+});
+
+
+test("the close button releases both the dialog and the coordinator slot", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  await user.click(screen.getByRole("button", { name: "关闭" }));
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+  expect(coordinator!.view("extension").open).toBe(false);
+});
+
+
+test("the modal's lifetime is owned by the coordinator and by the outlet's ownerKey gate", async () => {
   const user = userEvent.setup();
   // ① owner 消失（离开工作区/登出）——整棵子树卸载，弹窗跟着走。
   const view = render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
   await user.click(screen.getByRole("button", { name: "打开面板" }));
   expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
 
@@ -345,13 +631,15 @@ test("the modal's lifetime is owned by the outlet's ownerKey gate", async () => 
   expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
   expect(view.container).toBeEmptyDOMElement();
 
-  // ② owner 换代（切库）——outlet 仍在，但 contribution 的 React key 含 ownerKey，
-  // 组件重挂载、`open` 状态被丢弃。这是切库的真实路径：不靠它，用户会在新笔记本里
-  // 看到一个仍开着的、装着上一本库数据的插件弹窗。
+  // ② 切库——协调器同步撤销 workspace 拥有的那格 lease。这是切库的真实路径：不靠它，
+  // 用户会在新笔记本里看到一个仍开着的、装着上一本库数据的插件弹窗。outlet 的
+  // ownerKey 门是同向的第二道兜底（contribution 的 React key 含 ownerKey）。
   view.rerender(<Outlet ownerKey="user-a:notebook-a:1" />);
   await user.click(screen.getByRole("button", { name: "打开面板" }));
   expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
 
+  act(() => { coordinator!.beginWorkspaceTransition(); });
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
   view.rerender(<Outlet ownerKey="user-a:notebook-b:2" />);
   expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
   expect(screen.getByRole("button", { name: "打开面板" })).toBeInTheDocument();

@@ -298,7 +298,7 @@ import { ExtensionModal } from "../extension-sdk/ui.tsx";
 type Candidate = { id: string; title: string; url: string };
 
 export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
-  const [open, setOpen] = useState(false);
+  // 没有 `open` 状态：弹窗开不开由 `context.dialog` 说了算（见下）。
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -326,28 +326,28 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
       <button
         type="button"
         className="button secondary workspace-extension-entry"
-        onClick={() => setOpen(true)}
+        onClick={() => actions.openDialog()}
       >
         <Search size={16} aria-hidden="true" />
         <span>文献检索</span>
       </button>
-      {open ? (
-        <ExtensionModal
-          pluginId={context.pluginId}
-          storageKey="search"
-          title="文献检索"
-          description="搜索并导入到当前笔记本"
-          onClose={() => setOpen(false)}
-        >
-          {/* 你的面板；`busy` 让提交控件不可点，`notice` 就地上屏 */}
-        </ExtensionModal>
-      ) : null}
+      <ExtensionModal
+        context={context}
+        actions={actions}
+        storageKey="search"
+        title="文献检索"
+        description="搜索并导入到当前笔记本"
+      >
+        {/* 你的面板；`busy` 让提交控件不可点，`notice` 就地上屏 */}
+      </ExtensionModal>
     </>
   );
 }
 ```
 
 *core 替你做的：* 注入一份按**本条 contribution 的** `pluginId` 绑定的 `actions.api`，因此每次请求都限定在 `/api/extensions/<plugin id>/` 之下、你设的 `authorization`/`cookie` 头会被剥掉、`tag`/`auth`/`unauthorized` 由 core 写死。`ExtensionModal` 白送系统弹窗外壳、标题栏拖动，以及一格按插件分段的窗口位置记忆。
+
+*弹窗归 core 管。* 你手上没有一个 `open` 布尔：`actions.openDialog()` 只是向 core 的 root-dialog 协调器**申请**那唯一一格通用 `extension` slot，`context.dialog` 是答复，`ExtensionModal` 在 `context.dialog.open` 为真之前什么都不渲染。另一个 primary 弹窗打开、用户切库、登出，core 都会替你关掉它；`actions.closeDialog()` 是**你**关它的唯一途径。两条要知道的后果：同一时刻只有一个插件弹窗可见（那一格按 **contribution** 认领，所以同一个插件的两条 contribution 不会一起开），而被更高层盖住的弹窗会变成 `inert`/`aria-hidden`，不会在背后继续可聚焦。自己留一个 `useState` 只会与这一切分叉——它关不掉一个协调器已经收回去的弹窗。
 
 *你不能：*
 
@@ -362,7 +362,8 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 | 写颜色字面量 | 复用既有类与 `:root` token。`extension-ui-layout-guard` 两侧都钉。 |
 | 把 `actions` 或 `context` 放进 `useEffect`/`useMemo` 的依赖数组 | 两者每帧都是新对象（owner 闸每次渲染现冻结）。`actions.api` 按 `pluginId` 记忆，放进依赖数组是安全的。 |
 | 让 `refreshSources()` 的 rejection 没人接 | owner 闸已关闭时它静默 resolve（那不是错误，只是这次刷新已经没有意义），真正的加载失败才 reject。只在自己的动作完成后调**一次**，并 `catch` 住。 |
-| 从 `source.detail_section` 开弹窗 | 那个 slot 的宿主自己就是一个浮动卡片，`ExtensionModal` 的 `position: fixed` 会相对宿主卡片而不是视口定位，弹窗会跟着来源详情窗跑。已登记的限制；本轮只在 `workspace.side_panel` 开弹窗。 |
+| 自己给弹窗留一份 `open` 状态 | `context.dialog` 是唯一真相来源。本地布尔关不掉一个协调器已经收回去的弹窗（冲突的 primary、切库），两者一分叉，插件就会渲染一个 core 认为已经关闭的弹窗。 |
+| 从 `source.detail_section` 开弹窗 | 两个理由。那个 slot 的宿主自己就是一个浮动卡片，`ExtensionModal` 的 `position: fixed` 会相对宿主卡片而不是视口定位，弹窗会跟着来源详情窗跑；而且那个宿主握着 `source-detail` 这条 primary lease，与 `extension` 互斥——开你的弹窗会把来源详情窗冲突关掉，你自己的 contribution 也随之卸载。已登记的限制；本轮只在 `workspace.side_panel` 开弹窗。 |
 
 包内文件：恰好一个 `ui-plugin.json`、恰好一个 `workspace-plugin.ts` **或** `.tsx`、任意多个扁平的兄弟 `.ts`/`.tsx` 模块。`.d.ts` 与 `*.test.*` 一律拒绝。包根下以 `.` 开头的**普通文件**（`.DS_Store`、`.gitignore`、编辑器残留）跳过并在 stderr 记一行；**子目录一律拒绝，`.git` 也不例外**——所以 UI 包要放在自己的目录里，不要直接放在仓库根。
 
@@ -643,6 +644,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | 匿名插件路由 | 挂载点恒带 router 级会话依赖。免登录公开页是核心的产品决定，不是插件能开的。 |
 | 扩展 MCP 工具目录 | `PUBLIC_TOOLS` 是一份 core 拥有的冻结清单，静态文档与 smoke guard 都从它派生。不向插件开放。 |
 | 插件 CSS、插件依赖、远程浏览器代码 | 视觉复用既有类与 `:root` token；新依赖走基座 PR；浏览器绝不在运行时拉取插件 JavaScript。 |
+| 每个插件一格自己的 root-dialog slot | 只有一格通用的 `extension` slot，按 contribution 认领，所以同一时刻只有一个插件弹窗可见。把插件名写进 core 的 slot 联合类型等于每装一个插件就要给公网仓库打一次补丁——那正是整套流程要避免的事。 |
 
 ## 11. 检查清单
 
@@ -658,7 +660,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 - [ ] `plugin_id` / `id` / `capability` / `version` 与后端 manifest 逐字一致。
 - [ ] UI 侧不 import 白名单之外的任何东西——尤其绝不 import `api.ts`。
 - [ ] 无计时器、无动态 `import(`、无 socket、无 `fetch(`、不读 `error.message`、无颜色字面量。
-- [ ] `ExtensionModal` 收到 `pluginId={context.pluginId}` 与一个 `storageKey`。
+- [ ] `ExtensionModal` 收到 `context={context}`、`actions={actions}` 与一个 `storageKey`；弹窗经 `actions.openDialog()` 打开，没有本地 `open` 状态。
 - [ ] `refreshSources()` 只在动作完成后调一次，且 rejection 被 catch 住。
 - [ ] `check_ui_vocabulary.py --extra-root <src>` 干净。
 - [ ] 同步后，基座的 `extension-*` 守卫与 `npm run build` 干净。

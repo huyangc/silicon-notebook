@@ -4,6 +4,7 @@ import type {
   SystemExtensionProjection,
   WorkspaceExtensionActions,
   WorkspaceExtensionContext,
+  WorkspaceExtensionDialogView,
   WorkspaceExtensionSlot,
   WorkspaceUiContribution,
 } from "./contracts.ts";
@@ -11,18 +12,35 @@ import { withExtensionApi } from "./api.ts";
 import { visibleWorkspaceUiContributions } from "./visibility.ts";
 
 
+/**
+ * 非持有者看到的那一份。`zIndex` 取 0 只是让形状完整——`open` 为假时
+ * `ExtensionModal` 直接不渲染，这个数到不了 DOM。
+ */
+const CLOSED_DIALOG: WorkspaceExtensionDialogView = Object.freeze({
+  open: false, topmost: false, zIndex: 0,
+});
+
+
 type WorkspaceExtensionOutletProps = Readonly<{
   slot: WorkspaceExtensionSlot;
   registry: readonly WorkspaceUiContribution[];
   projection: SystemExtensionProjection | null;
   /**
-   * 壳层给的是**不含 `pluginId`** 的那一半：一个 outlet 会渲染多条来自不同插件的
-   * contribution，插件身份只可能由 host 逐条补上（见下面的 spread）。壳层若自己写
-   * 一个 `pluginId`，它对这一格里的每条 contribution 都是错的。
+   * 壳层给的是**不含 `pluginId` 与 `dialog`** 的那一半：一个 outlet 会渲染多条来自
+   * 不同插件的 contribution，插件身份与「这一格弹窗现在是不是你的」都只可能由 host
+   * 逐条补上（见下面的 spread）。壳层若自己写一个 `pluginId`／一份 `dialog`，它对
+   * 这一格里的每条 contribution 都是错的。
    */
-  context: Omit<WorkspaceExtensionContext, "pluginId">;
+  context: Omit<WorkspaceExtensionContext, "pluginId" | "dialog">;
   actions: WorkspaceExtensionActions;
   ownerKey: string;
+  /** 核心 root-dialog 裁决给唯一那格 `extension` slot 算出的 view（壳层直接透传）。 */
+  dialog: WorkspaceExtensionDialogView;
+  /**
+   * 当前认领了那一格的 **contribution id**（不是 plugin id）；`null` 表示没人认领。
+   * 同一个插件可以注册多条 contribution，按 plugin 判会让它们一起挂出弹窗。
+   */
+  dialogHolder: string | null;
 }>;
 
 
@@ -33,6 +51,8 @@ export function WorkspaceExtensionOutlet({
   context,
   actions,
   ownerKey,
+  dialog,
+  dialogHolder,
 }: WorkspaceExtensionOutletProps) {
   const visible = visibleWorkspaceUiContributions(registry, projection, {
     slot,
@@ -49,7 +69,17 @@ export function WorkspaceExtensionOutlet({
           // 各写一个 `storageKey="search"` 也不会共用一格记忆。这里不新增任何引用
           // 稳定性承诺——`context` 本来就是每帧新对象（见下面那段），spread 只是让
           // 它多带一个取值稳定的字段。
-          context={{ ...context, pluginId: contribution.pluginId }}
+          //
+          // `dialog` 同理逐条补，**并且按持有者过滤**：核心那格 `extension` slot 一次
+          // 只归一条 contribution，非持有者恒拿 closed view。少了这道过滤，多条
+          // contribution 会在同一格 lease 上同时挂出弹窗——协调器只知道"那一格开着"，
+          // 分不出是谁开的。键是 `contribution.id` 而不是 `pluginId`：同一个插件注册
+          // 多条 contribution 时，按 plugin 判会让它们全都看到 open（codex #578 R1 P2）。
+          context={{
+            ...context,
+            pluginId: contribution.pluginId,
+            dialog: dialogHolder === contribution.id ? dialog : CLOSED_DIALOG,
+          }}
           // api 端口按**本条 contribution 的** pluginId 绑定：插件自己 import 不到
           // `./api.ts`，所以这是它拿到端口的唯一途径，也保证了插件 A 造不出插件 B
           // 的端口。
@@ -60,7 +90,7 @@ export function WorkspaceExtensionOutlet({
           // `createWorkspaceExtensionApi` 按 pluginId 记忆，跨渲染引用稳定，可以进依赖
           // 数组。端口不闭包 owner，所以那份记忆与 outlet 的 ownerKey 门互不相干——
           // ownerKey 门管的是组件树的生命周期（它在下面的 key 里），不是端口的身份。
-          actions={withExtensionApi(actions, contribution.pluginId)}
+          actions={withExtensionApi(actions, contribution.pluginId, contribution.id)}
         />
       ))}
     </aside>

@@ -17,6 +17,32 @@ export type WorkspaceExtensionPermission =
 
 export type WorkspaceExtensionModePolicy = "all" | "advanced";
 
+/**
+ * 本 contribution 的弹窗在 root-dialog 裁决里的当前位置，由 host 注入。
+ *
+ * 结构上与 `app/use-root-modal-coordinator.ts` 的 `RootModalView` 相同，但**刻意各写
+ * 一份**：SDK 不 import 那个协调器（它是 React 客户端模块，而 SDK 合同要留在 node
+ * 泳道装得下的闭包里），插件也不该知道核心的 slot 词表长什么样。
+ *
+ *  · `open`     —— 只对**当前持有那一格的那条 contribution** 为真。别的 contribution
+ *                  （含同一个插件注册的其它条目）拿到的恒是一份 closed view，所以不会
+ *                  有两个弹窗同时挂出来。
+ *  · `topmost`  —— 为假时上面还盖着别的 dialog（例如 `info` 确认框），此时弹窗必须
+ *                  退出交互树（`ExtensionModal` 会加 `inert` + `aria-hidden`）。
+ *  · `zIndex`   —— 协调器算出的层级，`ExtensionModal` 原样落到 DOM。
+ */
+export type WorkspaceExtensionDialogView = Readonly<{
+  open: boolean;
+  topmost: boolean;
+  zIndex: number;
+}>;
+
+/**
+ * 关闭弹窗的理由。刻意只有两个值：核心那张 policy 表给 `extension` 记的是
+ * `backdrop: true` / `escape: false`，多写一个 `"escape"` 会让插件以为它能生效。
+ */
+export type WorkspaceExtensionDialogCloseReason = "button" | "backdrop";
+
 export type WorkspaceExtensionPermissionSnapshot = Readonly<{
   notebookRead: boolean;
   notebookWrite: boolean;
@@ -57,6 +83,15 @@ export type WorkspaceExtensionContext = Readonly<{
   }> | null;
   uiMode: UiMode;
   permissions: WorkspaceExtensionPermissionSnapshot;
+  /**
+   * 本 contribution 的弹窗现在处于什么位置，**由 host 注入**（与 `pluginId` 同一条
+   * 路径：壳层给的那一半是 `Omit<…, "pluginId" | "dialog">`）。插件不持有弹窗的开关
+   * 状态——它调 `actions.openDialog()` 提出请求，是否真的开由核心的 root-dialog 裁决
+   * 决定（拿不到 workspace owner、被更晚的 primary 顶掉、切库/换用户都会把它关掉）。
+   *
+   * 插件把整个 `context` 交给 `ExtensionModal` 即可，不必自己读这三个字段。
+   */
+  dialog: WorkspaceExtensionDialogView;
 }>;
 
 export type WorkspaceExtensionActions = Readonly<{
@@ -75,6 +110,29 @@ export type WorkspaceExtensionActions = Readonly<{
    *    不 catch 就是一条无人处理的 promise rejection。
    */
   refreshSources(): Promise<void>;
+  /**
+   * 认领那唯一一格插件弹窗。**壳层持有的这一份收 `contributionId`**——一个 outlet 会
+   * 渲染多条 contribution，身份只可能由 host 逐条绑定（见 `withExtensionApi`，与 `api`
+   * 同一机制）。插件手上那一份是零参数的 `openDialog()`，它造不出别人的认领。
+   *
+   * ⚠ 键是 **contribution id，不是 plugin id**：同一个插件可以注册多条 contribution
+   * （不同 slot、甚至同一 slot 里的两个入口），按 plugin 判会让它们**同时**看到
+   * `dialog.open === true`、一起挂出弹窗。contribution id 由 `defineWorkspaceUiRegistry`
+   * 保证全局唯一，正好是"那一格归谁"的粒度。
+   *
+   * 它只是**提出请求**：核心的 root-dialog 裁决可能拒绝（当前没有 workspace owner），
+   * 也可能随后把它关掉（另一个 primary 弹窗打开、切库、换用户）。插件唯一的真相来源
+   * 是 `context.dialog`，不是自己的一个 `useState`。
+   */
+  openDialog(contributionId: string): void;
+  /**
+   * 关掉**自己**的弹窗。同样收 `contributionId` 且同样由 host 逐条绑定，理由与
+   * `openDialog` 对称但更硬：插件留着一个旧回调（`setTimeout`、迟到的请求回调、一个
+   * 没卸载干净的组件）时，那一格可能已经易主，一次迟到的 `closeDialog()` 会把**别人**
+   * 刚开的弹窗关掉。壳层因此按**当时**的持有者判，非持有者静默返回。省略 `reason`
+   * 等同 `"button"`。
+   */
+  closeDialog(contributionId: string, reason?: WorkspaceExtensionDialogCloseReason): void;
 }>;
 
 /**
@@ -113,9 +171,20 @@ export type WorkspaceExtensionApi = Readonly<{
  * pluginId 绑定**的 api 端口。宿主侧持有的仍是 `WorkspaceExtensionActions`，
  * `api` 由 outlet 逐 contribution 注入——插件 A 因此拿不到插件 B 的端口。
  */
-export type WorkspaceExtensionPluginActions = WorkspaceExtensionActions & Readonly<{
-  api: WorkspaceExtensionApi;
-}>;
+export type WorkspaceExtensionPluginActions = Readonly<
+  Omit<WorkspaceExtensionActions, "openDialog" | "closeDialog">
+  & {
+    /**
+     * 零参数：身份由 host 按 `contribution.id` 绑定。**不是**壳层那份
+     * `openDialog(contributionId)` 的重载——插件 A 能替插件 B 认领唯一那格弹窗的话，
+     * "一次一个插件弹窗"就成了一句谁都能替别人做主的话。
+     */
+    openDialog(): void;
+    /** 同上：身份由 host 绑定，插件只说关不关、说不了关谁的。 */
+    closeDialog(reason?: WorkspaceExtensionDialogCloseReason): void;
+    api: WorkspaceExtensionApi;
+  }
+>;
 
 export type WorkspaceExtensionProps = Readonly<{
   context: WorkspaceExtensionContext;
