@@ -5,6 +5,7 @@ import {
   ChevronDown,
   KeyRound,
   LogOut,
+  Puzzle,
   SlidersHorizontal,
   Users,
   Wand2,
@@ -188,6 +189,19 @@ export function AccountMenu({
             >
               <BarChart3 size={16} />
               <span>用户总览</span>
+            </a>
+          )}
+          {/* 与「用户总览」同一道判据(showAdminUsage / canSeeAdminUsage):两个页面
+              的后端端点都是仅系统管理员可读,入口没有独立的能力位。 */}
+          {showAdminUsage && (
+            <a
+              className="user-logout"
+              role="menuitem"
+              href="/admin/extensions"
+              title="查看这个服务已经装入的扩展"
+            >
+              <Puzzle size={16} />
+              <span>已加载的扩展</span>
             </a>
           )}
           <button

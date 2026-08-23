@@ -1,0 +1,83 @@
+/* 「已加载的扩展」管理员只读页。排版镜像 admin/usage/usage.css(同样的页宽、
+   表格密度与展开行形态),颜色一律取 globals.css `:root` 的 token,不写字面量。 */
+
+.ext-page { max-width: 1180px; margin: 0 auto; padding: 24px; }
+.ext-description { margin: 4px 0 14px; color: var(--muted); font-size: 14px; }
+.ext-status { color: var(--muted); font-size: 14px; }
+
+.ext-notice {
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 13px;
+}
+
+.ext-table-wrap { overflow-x: auto; }
+.ext-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.ext-table th, .ext-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+.ext-table th { color: var(--muted); font-weight: 600; }
+.ext-table tbody tr:hover { background: var(--soft); }
+.ext-table tr.ext-row-expanded, .ext-table tr.ext-row-expanded:hover { background: var(--soft); }
+
+.ext-expand-col { width: 28px; padding-right: 0; }
+.ext-expand-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  line-height: 1;
+}
+.ext-expand-btn:hover { background: var(--line); color: inherit; }
+.ext-expand-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+.ext-name { font-weight: 600; }
+.ext-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.ext-count { font-variant-numeric: tabular-nums; }
+
+.ext-trust {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ext-trust-deployment { border-color: var(--blue); background: var(--panel); color: var(--blue); }
+
+.ext-subrow td { background: var(--soft); padding: 6px 10px 12px 38px; }
+.ext-detail { display: grid; gap: 14px; }
+.ext-detail-title { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.ext-none { margin: 0; color: var(--muted); font-size: 13px; }
+
+.ext-subtable {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  font-size: 13px;
+}
+.ext-subtable th, .ext-subtable td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.ext-subtable th { color: var(--muted); font-weight: 600; background: var(--soft); }
+.ext-subtable tbody tr:last-child td { border-bottom: none; }
