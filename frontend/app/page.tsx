@@ -1059,6 +1059,15 @@ export default function Home() {
     },
   });
   const { knowledge: kgKnowledge, schema: kgSchema, graph: kgGraph } = kgWorkspace;
+  // 为什么下面每个 root modal 曲面都逐字重复 `rootModals.view("<slot>")` 三四遍,
+  // 而不像上面 kgWorkspace 那样抽出一个 `modalA11y(slot)` helper 一次性返回
+  // `{ topmost, zIndex, ... }`:`root-modal-boundary.test.mjs` 按四元组
+  // (aria-modal/aria-hidden/inert/zIndex)的**字面** `rootModals\.view\("<slot>"\)`
+  // 正则钉住每个曲面的形状(见其"every coordinated root surface..."用例),抽个
+  // helper 会让四处调用点全部换成 `view.topmost`/`view.zIndex` 这类新写法,守卫的
+  // 正则不会跟着自动更新。要做这个简化,必须同一个 PR 里把守卫也改成认 helper 调用
+  // 而不是认 `rootModals.view(...)` 字面链——这本身工作量不小、且与本次「去掉三段
+  // reflatten shim」是两件不同的事,留作独立一件事,不要顺手在这里抽。
   // 「AI 对这个库的理解」弹窗(P1-T7)。入口由 workspace side-panel 插件提供，
   // 弹窗本身仍渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
   // 它的业务数据仍由 AgentProfilePanel 自持；根层是否呈现及切库同步失效由
@@ -1072,10 +1081,10 @@ export default function Home() {
   // downgrade, or workspace transition.  Mirror that close into the
   // presentation coordinator so a hidden lease never remains topmost.
   useEffect(() => {
-    if (!(notebookCollection.editor?.target ?? null) && rootModals.activeLease("notebook-editor")) {
+    if (!notebookCollection.editor?.target && rootModals.activeLease("notebook-editor")) {
       rootModals.requestClose("notebook-editor", "button");
     }
-    if (!(notebookCollection.deletion?.target ?? null) && rootModals.activeLease("notebook-delete")) {
+    if (!notebookCollection.deletion?.target && rootModals.activeLease("notebook-delete")) {
       rootModals.requestClose("notebook-delete", "button");
     }
     if (!sourceDetail && rootModals.activeLease("source-detail")) {
@@ -1218,7 +1227,7 @@ export default function Home() {
   // Relink isolated nodes: additive/background, no confirm needed.
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView + 它下面那条 relink/status 轮询，
   // 终态时按当前范围重拉）。
-  // Backfill completion polling: same shape as the buildingKg poll above, for the
+  // Backfill completion polling: same shape as the kgGraph.buildingKg poll above, for the
   // "补全论文信息"后台任务(paper-meta backfill)。同样在「索引与构建」面板打开时让位
   // (该面板本就不覆盖 paper_meta,不存在重复轮询的问题——只是保持与既有三条 legacy
   // poll 一致的让位约定)。完工不弹 toast：那是待确认中心铃铛(paper_meta_done 事件)
@@ -1271,7 +1280,7 @@ export default function Home() {
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [currentNotebookId]);
-  // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
+  // Mirror the kgGraph.buildingKg poll: while a scale-index rebuild runs, poll status every 6s
   // until building flips false, with a 20min safety cap so the button never spins forever.
   // 同上:面板打开时让位给聚合轮询 effect(见其完工检测),避免与 /scale-index/status 重复轮询。
   useEffect(() => {
@@ -1299,7 +1308,7 @@ export default function Home() {
   // 「索引与构建」看板弹窗打开期间,若三系统任一在忙(本地忙碌位,或聚合端点报告的
   // kg/概念合并后台在建),轮询聚合端点(6s)保持面板内三行状态新鲜；modal 关闭或全部
   // 空闲时自动停止,不额外占用轮询。
-  // 面板打开期间本 effect 独占轮询(上方 buildingKg/buildingScaleIndex 两条 legacy poll
+  // 面板打开期间本 effect 独占轮询(上方 kgGraph.buildingKg/buildingScaleIndex 两条 legacy poll
   // effect 各自加了 `analytics` 跳过守卫,面板开着时不再重复打 /notebooks 与
   // /scale-index/status)——完工检测(flag 复位 + toast)相应搬来这里,否则面板开着时
   // legacy effect 不跑、标志位与完成提示永远等不到。知识图谱完工额外补一次
@@ -1340,7 +1349,7 @@ export default function Home() {
         }
       }).catch(() => {});
       // paper-meta 完成检测:index-status 不覆盖 paper_meta_backfilling,单独拉
-      // NotebookSummary(同上方 buildingKg-done 分支的既有做法)。完工不弹 toast:
+      // NotebookSummary(同上方 kgGraph.buildingKg-done 分支的既有做法)。完工不弹 toast:
       // 那是待确认中心铃铛(paper_meta_done 事件)的职责,聚合 poll 与主 poll
       // 保持一致(见 :984-1009 独立 backfill poll)。
       if (backfillingMeta) {
@@ -2173,8 +2182,8 @@ export default function Home() {
     Boolean(currentNotebook?.kg_ready),
   );
   // 多领域基准库(Task 14):引用徽章要把 citation/anchor 的 notebook_id 解成人话
-  // 库名——id→name 映射从 notebooks(自己的库集合)与当前笔记本挂载的参考库
-  // (base_notebooks,覆盖别人创建、不在自己集合里的公共知识库)合并得到,逐 turn
+  // 库名——id→name 映射从 notebookCollection.rows(自己的库集合)与当前笔记本挂载的
+  // 参考库(base_notebooks,覆盖别人创建、不在自己集合里的公共知识库)合并得到,逐 turn
   // 复用同一份而非每条引用各建一次。
   const notebookNames = useMemo(() => {
     const names: Record<string, string> = {};
@@ -2195,9 +2204,9 @@ export default function Home() {
   // codex 对 PR#304 的审查(2026-07-19)P2 #2:全局 Memory 页(scope==="global")
   // 一条记忆可能来自任意 notebook,不能像上面 notebookPromotionBases 那样共用
   // 同一份——按 memory.notebook_id 各自查。数据源同上一个 useMemo 的理由:不喊
-  // owner-only 的 /bases,改用 notebooks(list_for_user 已覆盖 owner∪reader,
-  // 涵盖一切可能出现在这里的 memory.notebook_id)里每条自带的 base_notebooks,
-  // 一次性建好全量映射。
+  // owner-only 的 /bases,改用 notebookCollection.rows(list_for_user 已覆盖
+  // owner∪reader,涵盖一切可能出现在这里的 memory.notebook_id)里每条自带的
+  // base_notebooks,一次性建好全量映射。
   const notebookBasesById: Record<string, MountedBase[]> = useMemo(() => {
     const map: Record<string, MountedBase[]> = {};
     for (const nb of notebookCollection.rows) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
@@ -2264,7 +2273,7 @@ export default function Home() {
 
   const selectedKgNode = useMemo(() => {
     if (!kgGraph.merged || !kgGraph.selectedNodeId) return null;
-    // 也在搜索命中中查找（搜索结果节点可能还未进入 uGraphMerged）
+    // 也在搜索命中中查找（搜索结果节点可能还未进入 kgGraph.merged）
     const fromGraph = kgGraph.merged.nodes.find((node) => node.id === kgGraph.selectedNodeId);
     if (fromGraph) return fromGraph;
     const hit = kgGraph.searchHits.find((h) => h.object_id === kgGraph.selectedNodeId);
@@ -2713,7 +2722,7 @@ export default function Home() {
 
   function submitNotebookEditor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!(notebookCollection.editor?.target ?? null)) return;
+    if (!notebookCollection.editor?.target) return;
     const formData = new FormData(event.currentTarget);
     const splitLines = (value: string) =>
       value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
@@ -3649,9 +3658,9 @@ export default function Home() {
     await kgWorkspace.openGraph(targetNodeId, sourceNotebookId || notebookId);
   }
 
-  // 关闭知识图谱视图。刻意做成具名函数而不是内联 `() => setKgViewOpen(false)`:
-  // 视图内还挂着「图谱分析」弹窗的开关,它必须和父视图一起归零(见 kgAnalysisOpen 声明处),
-  // 而"关闭时要一起做的事"散在内联箭头里就迟早会漏掉一条。
+  // 关闭知识图谱视图。刻意做成具名函数而不是内联 `() => kgWorkspace.closeGraph()`:
+  // 视图内还挂着「图谱分析」弹窗的开关,它必须和父视图一起归零(见 rootModals 的
+  // "kg-analysis" slot),而"关闭时要一起做的事"散在内联箭头里就迟早会漏掉一条。
   function closeKgView() {
     rootModals.requestClose("kg-schema", "button");
     rootModals.requestClose("kg-analysis", "button");
@@ -3691,8 +3700,8 @@ export default function Home() {
   // 编一个「已补上 N 条」出来。忙碌位在 await 之前就置上（长任务按钮红线），由轮询在
   // 终态解除；POST 自己失败时当场解除，否则按钮会锁在一个根本没起来的任务上。
   // codex R4 P2(B):「重新合并」与「补上关联」共用服务端同一把按笔记本单飞锁，早退必须
-  // 认「任一忙碌位为真即忙」（relinkingKg || kgRefreshBusy）——只看自己那一位会在对方
-  // 占槽期间仍然发出请求，白撞一次 409。
+  // 认「任一忙碌位为真即忙」（kgGraph.relinking || kgGraph.rebuilding）——只看自己那
+  // 一位会在对方占槽期间仍然发出请求，白撞一次 409。
   // codex R8:POST 撞 409 说明服务端确有一个维护任务在跑(可能是另一个标签页/会话
   // 在「一次性状态探测之后、这次点击之前」发起的)。把它当提交失败清掉本地位,轮询就
   // 永远不会领养那个任务——按钮回到可点、图谱在任务完成后保持陈旧。正确动作是查两个
@@ -3720,8 +3729,9 @@ export default function Home() {
   // 这里**不能**拿 POST 的返回值编一个「共 N 组概念」出来。忙碌位在 await 之前就置上
   // （长任务按钮红线），由轮询在终态解除；POST 自己失败时当场解除，否则按钮会锁在一个
   // 根本没起来的任务上。
-  // codex R4 P2(B):早退必须认「任一忙碌位为真即忙」（kgRefreshBusy || relinkingKg）——
-  // 「补上关联」在跑时占的是同一把服务端锁，只看自己那一位仍会发出请求、白撞一次 409。
+  // codex R4 P2(B):早退必须认「任一忙碌位为真即忙」（kgGraph.rebuilding ||
+  // kgGraph.relinking）——「补上关联」在跑时占的是同一把服务端锁，只看自己那一位仍
+  // 会发出请求、白撞一次 409。
   async function refreshUnifiedKg() {
     await kgWorkspace.startRebuild();
   }
@@ -5557,7 +5567,7 @@ export default function Home() {
                     types={kgKnowledge.types}
                     statusFilter={kgKnowledge.statusFilter}
                     duplicates={kgKnowledge.duplicates}
-                    contexts={kgWorkspace.knowledge.contexts}
+                    contexts={kgKnowledge.contexts}
                     onLoadContext={kgWorkspace.loadKnowledgeContext}
                     onKind={kgWorkspace.selectKnowledgeKind}
                     onStatus={(id, status) => kgWorkspace.updateKnowledge(id, { status })}
@@ -6669,18 +6679,19 @@ export default function Home() {
                       const titles = g.sample.map(titleOf).filter(Boolean).slice(0, 6);
                       // 「这一组的修复还在后台跑」——判定规则在 checkup-view.ts::isRepairing。
                       //
-                      // extract_kg 是例外:它**只**看 buildingKg,不进 repairingFix(见下方
-                      // runFix 里的理由)。isRepairing 对它恒为 false(从没写过那个键),
-                      // 忙碌态完全由 buildingKg 表达——那个位失败时会被 startKgBuild 清掉。
+                      // extract_kg 是例外:它**只**看 kgGraph.buildingKg,不进 repairingFix
+                      // (见下方 runFix 里的理由)。isRepairing 对它恒为 false(从没写过那个键),
+                      // 忙碌态完全由 kgGraph.buildingKg 表达——那个位失败时会被 startKgBuild 清掉。
                       const repairing = isRepairing(repairingFix[g.key], g.count)
                         || (g.fix === "extract_kg" && kgGraph.buildingKg);
                       const runFix = async () => {
                         const nb = currentNotebookId;
                         if (!nb || repairing) return;
-                        // extract_kg **只**认 buildingKg,不另记 repairingFix(codex 第 1 轮 P2)。
-                        // startKgBuild 是 fire-and-forget:同步置 buildingKg,POST 失败时自己在
-                        // 异步回调里清掉,但**不回传受理结果**。若这里也记一份 repairingFix,
-                        // 那份记录在建图请求被拒时没人清得掉(count 没变、buildingKg 已归位),
+                        // extract_kg **只**认 kgGraph.buildingKg,不另记 repairingFix(codex 第 1
+                        // 轮 P2)。startKgBuild 是 fire-and-forget:同步置 kgGraph.buildingKg,
+                        // POST 失败时自己在异步回调里清掉,但**不回传受理结果**。若这里也记一份
+                        // repairingFix,那份记录在建图请求被拒时没人清得掉(count 没变、
+                        // kgGraph.buildingKg 已归位),
                         // 按钮会一直锁到轮询窗口结束。少记一份 = 少一个解不开的锁。
                         if (g.fix === "extract_kg") {
                           startKgBuild(nb);
@@ -6828,7 +6839,7 @@ export default function Home() {
                               <>
                                 {/* 补连是**后台任务**:POST 立刻返回,忙碌位由 relink/status 的
                                     轮询在终态解除(relinkFromKgView 与它下面那条 effect)。上面那个
-                                    busy 只看 KG 构建、不含 relinkingKg——所以这里必须自己带忙碌位,
+                                    busy 只看 KG 构建、不含 kgGraph.relinking——所以这里必须自己带忙碌位,
                                     否则「点完还能接着点」会一路点到服务端 409。
                                     与知识图谱视图侧栏的同一动作(disabled + 「补连中…」)保持一致。 */}
                                 <button
@@ -6866,7 +6877,7 @@ export default function Home() {
                         </div>
                         {!busy && !readOnlyWorkspace && (
                           <div className="index-ctas">
-                            {/* codex R4 P2(B):这一格自己的 busy 只看 uk.building/kgRefreshBusy
+                            {/* codex R4 P2(B):这一格自己的 busy 只看 uk.building/kgGraph.rebuilding
                                 （概念合并自身的状态标签/色调不该被「补上关联」污染），但共用同一把
                                 服务端单飞锁的「补上关联」在跑时，这颗按钮仍需同口径禁用，否则点了
                                 只会撞 409。 */}
@@ -7503,8 +7514,9 @@ export default function Home() {
                       {cand.target_base_id && (
                         <p className="tool-hint">
                           {/* Task 13 审查 #4:优先用后端 join 出来的 target_base_name(策展人不一定是
-                              目标库 owner,notebooks 只覆盖自有∪只读加入,猜不出别人创建的公共库真名)；
-                              查不到再回退旧写法(notebooks.find),最后兜底截断 id。 */}
+                              目标库 owner,notebookCollection.rows 只覆盖自有∪只读加入,猜不出别人
+                              创建的公共库真名)；查不到再回退旧写法(notebookCollection.rows.find),
+                              最后兜底截断 id。 */}
                           目标公共知识库: {cand.target_base_name || notebookCollection.rows.find((n) => n.id === cand.target_base_id)?.name || cand.target_base_id.slice(0, 10)}
                         </p>
                       )}
