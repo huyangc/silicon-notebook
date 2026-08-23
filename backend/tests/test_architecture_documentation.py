@@ -776,11 +776,17 @@ def test_projection_ownership_claim_matches_sql_and_application_boundaries():
 def test_report_cancellation_is_the_documented_process_global_runtime_exception():
     assert report_engine.REPORT_CANCELLATIONS is report_execution.REPORT_CANCELLATIONS
     assert repository_runtime.REPORT_CANCELLATIONS is report_execution.REPORT_CANCELLATIONS
+    # B4:报告领域的构造搬进 ``_build_report_domain``,所以「引用同一个进程级
+    # 注册表」这条链现在有两跳——builder 取全局、``__init__`` 挂到 runtime 上。
+    # 两跳都钉住:少任一跳,runtime 都会拿到一个不是全局那份的 registry,而
+    # 上面的 module 级 identity 断言仍然为真。
+    report_source = inspect.getsource(repository_runtime._build_report_domain)
     init_source = inspect.getsource(repository_runtime.RepositoryRuntime.__init__)
     wire_source = inspect.getsource(
         repository_runtime.RepositoryRuntime.wire_report_execution
     )
-    assert "self.report_cancellations = REPORT_CANCELLATIONS" in init_source
+    assert "report_cancellations=REPORT_CANCELLATIONS" in report_source
+    assert "self.report_cancellations = report.report_cancellations" in init_source
     assert "cancellations=self.report_cancellations" in wire_source
 
     _assert_phrases(

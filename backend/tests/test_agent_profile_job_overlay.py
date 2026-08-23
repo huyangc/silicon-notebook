@@ -2019,7 +2019,12 @@ def test_the_runtime_actually_wires_the_access_seat():
     """codex 复核(P2-T3 spec 评审 P2):`repository_runtime.py` 是生产里 access
     座位唯一的来源,删掉那一行整仓测试仍会全绿(overlay fixture 自己接线,守卫只
     扫 agent_profile_job.py),而 R5 会原样复活且无人报错。照 startup sweep 守卫
-    的先例,把接线钉成静态断言。"""
+    的先例,把接线钉成静态断言。
+
+    B4(领域构造函数拆分)之后这一行搬进了 `_build_agent_jobs`,座位来源从
+    `self.sharing_store` 变成 `seats.sharing_store`;两种拼写都认,但**必须**是
+    某个名字上的 `.sharing_store` 属性——判据仍是「取的是分享 store 那个座位」,
+    不是「传了个什么东西给 access」。"""
     import ast
     from pathlib import Path as _Path
 
@@ -2035,12 +2040,12 @@ def test_the_runtime_actually_wires_the_access_seat():
                 isinstance(value, ast.Attribute)
                 and value.attr == "sharing_store"
                 and isinstance(value.value, ast.Name)
-                and value.value.id == "self"
+                and value.value.id in {"self", "seats"}
             ):
                 wired = True
     assert wired, (
         "repository_runtime 里 AgentProfileConsolidationService 的 access 座位"
-        "必须接 self.sharing_store——删掉它 R5 静默复活(所有测试仍绿)。"
+        "必须接 self/seats 的 sharing_store——删掉它 R5 静默复活(所有测试仍绿)。"
     )
 
 
