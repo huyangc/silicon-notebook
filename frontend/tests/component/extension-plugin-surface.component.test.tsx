@@ -280,7 +280,14 @@ function Outlet({ ownerKey }: { ownerKey: string | null }) {
     () => true,
     () => undefined,
     async () => {},
+    // 与 page.tsx 逐字同构（codex #578 R7 P2）：持有者换人时先 `requestClose` 让
+    // 协调器把此刻的 `document.activeElement`（新持有者刚点的按钮）记成新的归还
+    // 目标，再申请一份属于新持有者的 lease——否则 owner 不变时 `open()` 会把旧
+    // 持有者的 lease 原样递回来，焦点归还目标停在旧持有者的触发按钮上不动。
     (contributionId) => {
+      if (holderRef.current !== null && holderRef.current !== contributionId) {
+        rootModals.requestClose("extension", "button");
+      }
       if (rootModals.open("extension", rootModals.captureWorkspaceOwner())) {
         holderRef.current = contributionId;
         setHolder(contributionId);
@@ -656,6 +663,70 @@ test("two contributions of the same plugin do not both open: the holder is a con
   // 同插件的旧回调同样关不掉现任持有者的弹窗——闸判的是 contribution，不是 plugin。
   act(() => { lastPluginActions.get("sample-panel")!.closeDialog(); });
   expect(screen.getByRole("dialog", { name: "同插件第二面板" })).toBeInTheDocument();
+});
+
+
+// codex #578 R7 P2 — 持有者换人时的焦点归还目标。`rootModals.open()` 在 owner 不变时
+// 对同一格 lease 是幂等的：它会把**旧持有者**的 lease 原样递回来，那份 lease 里的
+// `returnFocus` 是旧持有者的触发按钮。少了「换人先 requestClose 再 open」这一步，
+// 新弹窗关闭后焦点会跑回旧持有者，而不是刚点开它的那个按钮。
+
+test("a different contribution's openDialog() closes the previous holder's dialog and becomes the new holder (codex #578 R7 P2)", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+
+  await user.click(screen.getByRole("button", { name: "打开面板" }));
+  expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "打开另一个面板" }));
+  expect(screen.getByRole("dialog", { name: "另一个面板" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+  // 持有者确实换了人：那一格只归当前的持有者，document.querySelectorAll 只会看到
+  // 一个 `.utility-modal`（另一条断言已经钉过，这里额外确认协调器视角同步）。
+  expect(coordinator!.view("extension").open).toBe(true);
+});
+
+
+test("closing a dialog opened by a different contribution than the previous holder returns focus to that contribution's own trigger, not the stale one (codex #578 R7 P2)", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+
+  const openA = screen.getByRole("button", { name: "打开面板" });
+  await user.click(openA);
+  expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
+
+  const openB = screen.getByRole("button", { name: "打开另一个面板" });
+  await user.click(openB);
+  expect(screen.getByRole("dialog", { name: "另一个面板" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "示例面板" })).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "关闭" }));
+  expect(screen.queryByRole("dialog", { name: "另一个面板" })).toBeNull();
+  // 少了「换人先 requestClose」这一步，这里会是 openA（旧持有者的触发按钮）。
+  expect(document.activeElement).toBe(openB);
+});
+
+
+test("re-invoking openDialog() from the current holder is idempotent and keeps the original focus-return target (codex #578 R7 P2)", async () => {
+  const user = userEvent.setup();
+  render(<Outlet ownerKey="user-a:notebook-a:1" />);
+  enterWorkspace();
+
+  const openA = screen.getByRole("button", { name: "打开面板" });
+  await user.click(openA);
+  const firstLease = coordinator!.activeLease("extension");
+  expect(firstLease).not.toBeNull();
+
+  // 再点一次同一个触发按钮：holder 不变，不该重发 lease——`extensionDialogHolderRef`
+  // 里的持有者与本次 contribution 相同，`openDialog()` 直接跳过 `requestClose`。
+  await user.click(openA);
+  const secondLease = coordinator!.activeLease("extension");
+  expect(secondLease).not.toBeNull();
+  expect(secondLease!.issue).toBe(firstLease!.issue);
+  expect(secondLease!.returnFocus).toBe(firstLease!.returnFocus);
+  expect(screen.getByRole("dialog", { name: "示例面板" })).toBeInTheDocument();
 });
 
 

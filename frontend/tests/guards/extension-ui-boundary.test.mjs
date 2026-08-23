@@ -654,12 +654,16 @@ test("extension owner is wired into authentication and workspace transitions", a
     "the refreshSources argument must be exactly one call chain:"
     + " sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest()) and nothing else",
   );
-  // 第 5/6 实参（codex #578 R1 P2）：插件弹窗接入 root-dialog 裁决的两条接线，逐字
-  // 钉住，因为它们的每一处都在挡一种**静默**失败：
+  // 第 5/6 实参（codex #578 R1 P2、R7 P2）：插件弹窗接入 root-dialog 裁决的两条接线，
+  // 逐字钉住，因为它们的每一处都在挡一种**静默**失败：
   //  · `openDialog` 必须先经 `rootModals.open` 拿到 lease **再**记持有者——反过来会
   //    留下一个永远等不到 lease 的持有者（那一格在界面上"归它了"、弹窗却不会开）。
   //  · 记的是 `contributionId` 而不是 pluginId——同一个插件的多条 contribution 会
   //    一起挂出弹窗。
+  //  · 持有者**换人**时必须先 `requestClose` 再 `open`（R7 P2）——owner 不变时
+  //    `rootModals.open()` 会把旧持有者的 lease 原样递回来，那份 lease 捕获的
+  //    `returnFocus` 还是旧持有者的触发按钮；反过来直接 `open` 会让新弹窗关闭后
+  //    焦点跑回旧持有者而不是刚点开它的按钮。
   //  · `closeDialog` 必须按**当时**的持有者判（读 ref，不读渲染闭包里的 state），
   //    否则一次迟到的关闭会关掉别人刚开的弹窗。
   //  · 持有者的**清空**只有 `handleRootModalClosed` 那一条出口（下一条断言）。
@@ -669,6 +673,9 @@ test("extension owner is wired into authentication and workspace transitions", a
     '() => {\n      rootModals.open("understanding", rootModals.captureWorkspaceOwner());\n    }',
     "() => sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest())",
     '(contributionId: string) => {\n'
+    + '      if (extensionDialogHolderRef.current !== null && extensionDialogHolderRef.current !== contributionId) {\n'
+    + '        rootModals.requestClose("extension", "button");\n'
+    + '      }\n'
     + '      if (rootModals.open("extension", rootModals.captureWorkspaceOwner())) {\n'
     + "        extensionDialogHolderRef.current = contributionId;\n"
     + "        setExtensionDialogHolder(contributionId);\n"

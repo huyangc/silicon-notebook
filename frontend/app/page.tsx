@@ -4655,8 +4655,18 @@ export default function Home() {
     () => sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest()),
     // 插件弹窗认领那唯一一格 `extension` slot：**先由协调器裁决，成功了才记持有者**。
     // 反过来先 setHolder 会留下一个永远等不到 lease 的持有者（弹窗不会开，而那一格
-    // 在界面上已经"归它了"）。
+    // 在界面上已经"归它了"）。持有者**换人**时（codex #578 R7 P2）：owner 没变，
+    // `rootModals.open()` 会把旧持有者的 lease 原样递回来——那份 lease 捕获的
+    // `returnFocus` 还是旧持有者的触发按钮，新弹窗关闭后焦点会跑回旧持有者而不是
+    // 刚点开它的那个按钮。所以先按当时持有者 `requestClose`，让协调器把此刻的
+    // `document.activeElement`（新持有者刚点的按钮）记成新的归还目标，再申请一份
+    // 属于新持有者的 lease；`requestClose` 同步触发 `onClosed`（`removeWithoutRender`
+    // 的 `notify=true` 分支直接调用，没有 effect/微任务缝隙），下一行执行时 ref
+    // 已经清空，不会把这次 open 误判成同一持有者的幂等重开。
     (contributionId: string) => {
+      if (extensionDialogHolderRef.current !== null && extensionDialogHolderRef.current !== contributionId) {
+        rootModals.requestClose("extension", "button");
+      }
       if (rootModals.open("extension", rootModals.captureWorkspaceOwner())) {
         extensionDialogHolderRef.current = contributionId;
         setExtensionDialogHolder(contributionId);
