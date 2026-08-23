@@ -90,6 +90,15 @@ export function useWorkspaceExtensions(
         }
       },
       () => {
+        // A failed projection request must not be cached forever: clear it so the
+        // next committed workspace (notebook switch, actor reactivation, or any
+        // other ownerVersion bump) re-issues the request instead of leaving the
+        // side panel entry hidden until the user signs out and back in. The
+        // identity check is what makes this a no-op once the actor has already
+        // rotated generation — actor rotation resets requestRef.current
+        // synchronously during render (see above), so a late reject from a
+        // superseded generation can never see itself as the still-current request.
+        if (requestRef.current === request) requestRef.current = null;
         if (alive && actorRef.current === actorId
           && `${actorRef.current}\0${actorGenerationRef.current}` === availabilityOwnerKey) {
           setState({ ownerKey: availabilityOwnerKey, projection: { apiVersion: "1", extensions: [] } });

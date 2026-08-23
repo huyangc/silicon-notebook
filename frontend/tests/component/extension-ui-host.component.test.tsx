@@ -242,3 +242,25 @@ test("actor A-B-A rejects the first actor response and issues one request per ge
   expect(screen.getByTestId("extension")).toBeInTheDocument();
   expect(load).toHaveBeenCalledTimes(3);
 });
+
+test("a failed projection request is re-issued on the next committed workspace", async () => {
+  const first = deferred<SystemExtensionProjection>();
+  const second = deferred<SystemExtensionProjection>();
+  const load = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const ref = { current: null as WorkspaceExtensions | null };
+  const view = render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" entries={syntheticRegistry} load={load} />);
+  act(() => commit(ref, "user-a", "notebook-a", 1));
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () => { first.reject(new Error("network drop")); await Promise.resolve(); });
+  expect(screen.queryByTestId("extension")).toBeNull();
+  expect(load).toHaveBeenCalledTimes(1);
+
+  // Same actor, next committed workspace (a notebook switch) must retry rather
+  // than reuse the request the network drop already spent.
+  view.rerender(<Harness ref={ref} actorId="user-a" notebookId="notebook-b" entries={syntheticRegistry} load={load} />);
+  act(() => commit(ref, "user-a", "notebook-b", 2));
+  expect(load).toHaveBeenCalledTimes(2);
+  await act(async () => { second.resolve(syntheticProjection); await Promise.resolve(); });
+  expect(screen.getByTestId("extension")).toBeInTheDocument();
+  expect(load).toHaveBeenCalledTimes(2);
+});
