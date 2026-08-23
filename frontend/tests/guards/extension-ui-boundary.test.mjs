@@ -1,8 +1,42 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import ts from "typescript";
 
 import { appSourceModules, findFunction, importsIn, jsxElements, parseModule, scopedCalls } from "../../test-support/semantic-source.mjs";
+
+
+/** 仓库外插件包的落点：`features/ext-<包名>/`（同步脚本的 `GENERATED_PACKAGE_DIR`）。 */
+const PLUGIN_PACKAGE_DIR = /^features\/ext-[a-z][a-z0-9-]*\//;
+
+
+/**
+ * 「这条相对说明符指向同一个插件包内部吗」——插件 import 白名单的第四项。
+ *
+ * 一个包可以有兄弟模块（§1.5：入口文件之外的任意扁平 `.ts`/`.tsx`），入口 import
+ * 它们是正常写法，白名单不认就等于要求每个包把全部代码塞进一个文件。
+ *
+ * **判据必须在 `path.posix.normalize` 之后做**，不能拿说明符做前缀字符串比较：
+ * `./sub/../../app/page.tsx` 拼起来仍以包目录开头，归一化之后才看得出它落在
+ * `app/` 里——前缀比较会让任何插件用一串 `..` 直接 import 壳层模块。
+ *
+ * 判的是「归一化后仍在本包目录之下」而不是「就在同一层」：包是扁平的（同步脚本
+ * 拒绝子目录、T6 的 readdir 再查一遍），所以这条差别在真实包上不可达，但它让
+ * 归一化成为**承重**的一步——同一层判据下，一个没归一化的实现照样会因为多出的
+ * `/` 判否，那条变异就打空了。
+ *
+ * 导出给 `tests/guards/extension-plugin-package-guard.test.mjs`（T6）复用：两处
+ * 白名单必须是同一份判据，不是两份互相漂移的拼写。
+ */
+export function samePluginPackageSpecifier(modulePath, specifier) {
+  if (typeof specifier !== "string" || !specifier.startsWith(".")) return false;
+  const owner = PLUGIN_PACKAGE_DIR.exec(modulePath)?.[0];
+  if (owner === undefined) return false;
+  const resolved = path.posix.normalize(
+    path.posix.join(path.posix.dirname(modulePath), specifier),
+  );
+  return resolved.startsWith(owner) && resolved.length > owner.length;
+}
 
 
 test("page composes one availability owner and exactly the two canonical outlets", async () => {
@@ -234,11 +268,16 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   const local = modules.find((row) => row.path === "features/extension-sdk/registry.local.ts");
   if (!local) assert.fail("registry.local.ts 缺失——先跑 npm run sync:ui-plugins");
   // registry.ts 只能 import 合同与插件组件模块（按路径形状认，不钉死插件清单）；
-  // 插件 import 数必须等于登记条目数——漏登记或多 import 都红，守卫因此非空转。
+  // 它的插件 import 数必须等于**内建**登记条目数——漏登记或多 import 都红。这条
+  // 一一对应只对手写的内建目录成立，本地那半另有判据（见下面那段注释）。
   const registryImports = importsIn(registry.module).map((row) => row.module);
   const builtinPluginImports = registryImports.filter((module) => /^\.\.\/[a-z0-9-]+\/workspace-plugin\.tsx?$/.test(module));
-  assert.ok(
-    !registryImports.includes("./registry.local.ts"),
+  // 按**前缀**判而不是等值判 `./registry.local.ts`：`allowImportingTsExtensions`
+  // 是仓库惯例而不是打包器的要求，无扩展名的 `./registry.local` 解析到同一个
+  // 生成文件，等值判据会整条放过它。
+  assert.deepEqual(
+    registryImports.filter((module) => module.startsWith("./registry.local")),
+    [],
     "registry.ts must not import the generated local registry: the node --test lane imports"
     + " registry.ts directly and Node cannot load the plugin .tsx entries it pulls in",
   );
@@ -275,13 +314,18 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     mergedArgument && ts.isArrayLiteralExpression(mergedArgument),
     "the merged registry must be validated as one explicit array literal of both sources",
   );
+  // 钉的是**形状**：合并点恰好是两条 spread、没有第三个来源、也没有就地拼装的
+  // 条目。spread 的先后本身不承重——`defineWorkspaceUiRegistry` 按 id 排序后冻结，
+  // 两种顺序产出逐字相同的数组；固定写法只是让这一行读起来与审计起来都只有一种
+  // 形态（重复 id 由 defineWorkspaceUiRegistry 直接拒绝，不存在「谁覆盖谁」）。
   assert.deepEqual(
     mergedArgument.elements.map((element) => element.getText(merged.module)),
     ["...BUILTIN_WORKSPACE_UI_CONTRIBUTIONS", "...LOCAL_WORKSPACE_UI_CONTRIBUTIONS"],
-    "merged registry must spread the builtin registry first, then the generated local one",
+    "merged registry must be exactly the builtin registry and the generated local one, spread in that fixed shape",
   );
   const LOCAL_PLUGIN_SPECIFIER = /^\.\.\/ext-[a-z0-9-]+\/workspace-plugin\.tsx?$/;
-  const localImports = importsIn(local.module).map((row) => row.module);
+  const localImportRows = importsIn(local.module);
+  const localImports = localImportRows.map((row) => row.module);
   const localPluginImports = localImports.filter((module) => LOCAL_PLUGIN_SPECIFIER.test(module));
   assert.deepEqual(
     localImports.filter((module) => module !== "./contracts.ts" && !localPluginImports.includes(module)),
@@ -298,29 +342,96 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     ts.forEachChild(entry, countEntries);
   }
   countEntries(registry.module);
-  // 生成物里没有 defineWorkspaceUiRegistry 调用（校验发生在合并处），它的条目就是
-  // LOCAL_WORKSPACE_UI_CONTRIBUTIONS 那个顶层数组字面量的成员。workspace-registry.ts
-  // 显式不计数：它把两份 spread 进同一次调用，按调用形状数会把内建条目重复计一遍。
-  let localEntries = 0;
+  assert.ok(registeredEntries > 0, "registry must register at least one contribution (guard would be vacuous)");
+  // 内建目录是手写的，一个 contribution 配一个插件模块仍然是它的形状——这条同时
+  // 是本守卫的空转保护（少了它，插件解析函数整个失效时下面每条断言都比较空集合）。
+  assert.equal(
+    builtinPluginImports.length,
+    registeredEntries,
+    "registry.ts: every builtin contribution imports exactly one plugin module and vice versa",
+  );
+  const plugins = modules.filter((row) => PLUGIN_MODULE.test(row.path));
+  // **本地条目与插件模块不是一一对应的**，所以这里刻意不数「条目数 == 模块数」也不数
+  // 「条目数 == import 绑定数」：§1.5 的 `contributions` 是数组而每个包恰好一个入口
+  // 文件（一包两条 → 模块少一个），同步脚本又按组件名去重 import 绑定（两条复用同一个
+  // 组件 → 绑定少一个）。两条计数都会把完全合法的包判红。改钉两条与「一文件一条目」
+  // 无关的结构性质：
+  //  ① registry.local.ts 引用的入口集合 == 磁盘上 features/ext-*/ 的入口集合；
+  //  ② 每条本地条目的 Component 都绑定到本文件某条 import 的名字。
+  const LOCAL_PLUGIN_PATH = /^features\/ext-[a-z0-9-]+\/workspace-plugin\.tsx?$/;
+  const importedEntryPaths = [...new Set(localPluginImports.map(
+    (module) => `features/${module.replace("../", "")}`,
+  ))].sort();
+  const presentEntryPaths = plugins
+    .map((row) => row.path)
+    .filter((modulePath) => LOCAL_PLUGIN_PATH.test(modulePath))
+    .sort();
+  const orphanEntryModules = presentEntryPaths.filter((modulePath) => !importedEntryPaths.includes(modulePath));
+  const danglingEntryImports = importedEntryPaths.filter((modulePath) => !presentEntryPaths.includes(modulePath));
+  assert.deepEqual(
+    orphanEntryModules,
+    [],
+    `plugin package entry present under features/ext-*/ but never imported by registry.local.ts: ${
+      orphanEntryModules.join(", ")
+    } — run npm run sync:ui-plugins, or remove the hand-placed package`,
+  );
+  assert.deepEqual(
+    danglingEntryImports,
+    [],
+    `registry.local.ts imports a plugin entry that is not on disk: ${
+      danglingEntryImports.join(", ")
+    } — the generated registry and the copied packages must be written by the same sync run`,
+  );
+  // 本地条目住在 LOCAL_WORKSPACE_UI_CONTRIBUTIONS 那个顶层数组字面量里（生成物没有
+  // defineWorkspaceUiRegistry 调用，校验发生在合并处）。按导出名认，不按「随便哪个
+  // 数组字面量」认：workspace-registry.ts 消费的就是这个名字。
+  const localEntryObjects = [];
+  let localArrayDeclared = false;
   for (const top of local.module.statements) {
     if (!ts.isVariableStatement(top)) continue;
     for (const declared of top.declarationList.declarations) {
+      if (declared.name.getText(local.module) !== "LOCAL_WORKSPACE_UI_CONTRIBUTIONS") continue;
       const initialized = declared.initializer;
       if (!initialized || !ts.isArrayLiteralExpression(initialized)) continue;
-      localEntries += initialized.elements.filter(ts.isObjectLiteralExpression).length;
+      localArrayDeclared = true;
+      localEntryObjects.push(...initialized.elements.filter(ts.isObjectLiteralExpression));
     }
   }
-  const totalEntries = registeredEntries + localEntries;
-  assert.ok(registeredEntries > 0, "registry must register at least one contribution (guard would be vacuous)");
-  const pluginImports = [...builtinPluginImports, ...localPluginImports];
-  assert.equal(pluginImports.length, totalEntries, "every registered contribution imports exactly one plugin module and vice versa");
-  // 每个插件组件模块只许依赖 SDK 合同、react 与图标库——同一张白名单对所有插件生效。
+  assert.ok(
+    localArrayDeclared,
+    "registry.local.ts must export LOCAL_WORKSPACE_UI_CONTRIBUTIONS as one explicit array literal",
+  );
+  const localImportNames = new Set(localImportRows.map((row) => row.local));
+  function declaredPropertyOf(item, name) {
+    return item.properties.find((property) => (
+      ts.isPropertyAssignment(property) && property.name.getText(local.module) === name
+    ));
+  }
+  for (const item of localEntryObjects) {
+    const declaredProperty = (name) => declaredPropertyOf(item, name);
+    const declaredId = declaredProperty("id");
+    const label = declaredId && ts.isStringLiteral(declaredId.initializer)
+      ? declaredId.initializer.text
+      : "<unnamed entry>";
+    const component = declaredProperty("Component");
+    assert.ok(
+      component
+      && ts.isIdentifier(component.initializer)
+      && localImportNames.has(component.initializer.text),
+      `registry.local.ts entry ${label}: Component must bind an identifier this file imports`
+      + " (the aliased local name), so every local contribution is backed by a real plugin module",
+    );
+  }
+  // 每个插件组件模块只许依赖 SDK 合同、react、图标库与**同包兄弟模块**——同一张白名单
+  // 对所有插件生效。兄弟那一项是路径判据不是字面量，抽在 samePluginPackageSpecifier 里
+  // 与 T6 的包边界守卫共用。
   const PLUGIN_IMPORT_ALLOWLIST = new Set(["../extension-sdk/contracts.ts", "lucide-react", "react"]);
-  const plugins = modules.filter((row) => PLUGIN_MODULE.test(row.path));
-  assert.equal(plugins.length, totalEntries, "one plugin module per registered contribution");
   for (const plugin of plugins) {
     assert.deepEqual(
-      importsIn(plugin.module).map((row) => row.module).filter((module) => !PLUGIN_IMPORT_ALLOWLIST.has(module)),
+      importsIn(plugin.module).map((row) => row.module).filter((module) => (
+        !PLUGIN_IMPORT_ALLOWLIST.has(module)
+        && !samePluginPackageSpecifier(plugin.path, module)
+      )),
       [],
       `${plugin.path} imports outside the plugin allowlist`,
     );
@@ -365,6 +476,39 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     && emptyGuard.expression.getText(owner.module) === "registry.length === 0 || !actorId || !visibleOwner"
     && ts.isReturnStatement(emptyGuard.thenStatement),
     "empty registry must be the effect's first semantic statement and return before side effects",
+  );
+});
+
+
+test("the plugin sibling allowance is decided after normalization and never leaves the package", () => {
+  const entry = "features/ext-alpha/workspace-plugin.tsx";
+  for (const specifier of [
+    "./labels.ts",
+    "./model.tsx",
+    // 归一化后仍落在包内。判据是「在本包目录之下」而不是「就在同一层」：包是扁平的
+    // （同步脚本拒绝子目录），所以更宽的那半在真实包上不可达，但它让归一化成为承重
+    // 的一步——按同一层判的实现会因为多出的 `/` 顺手挡住越界写法，越界那条就再也
+    // 证明不了归一化有没有被做。
+    "./sub/../labels.ts",
+    "./sub/model.ts",
+  ]) assert.equal(samePluginPackageSpecifier(entry, specifier), true, specifier);
+  for (const specifier of [
+    // 拼起来以 `features/ext-alpha/` 开头，归一化之后落在 app/ 里：前缀字符串比较
+    // 会整条放过它，插件因此可以一串 `..` 直接 import 壳层模块。
+    "./sub/../../app/page.tsx",
+    "../ext-other/labels.ts",
+    "../extension-sdk/api.ts",
+    "../extension-sdk/contracts.ts",
+    "../../app/api-client.ts",
+    "./",
+    ".",
+    "react",
+    "lucide-react",
+  ]) assert.equal(samePluginPackageSpecifier(entry, specifier), false, specifier);
+  // 内建插件不住在 ext-* 包里，没有兄弟豁免：它的 import 集合另有更窄的钉法（T6）。
+  assert.equal(
+    samePluginPackageSpecifier("features/agent-profile/workspace-plugin.ts", "./labels.ts"),
+    false,
   );
 });
 

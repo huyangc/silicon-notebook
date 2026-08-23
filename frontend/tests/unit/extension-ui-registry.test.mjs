@@ -57,6 +57,20 @@ test("workspace registry freezes stable order and rejects aliases or duplicates"
     () => defineWorkspaceUiRegistry([{ ...base, slot: "source_detail_section" }]),
     /invalid/,
   );
+  // 这两条是**仓库外**插件元数据在运行期的唯一准入闸。同步脚本不解析 TypeScript
+  // （它只按 /^[A-Z][A-Za-z0-9_]*$/ 校验 manifest 里的 component 名字），vitest 与
+  // next dev 也都不跑 tsc——所以「Component 真的是个组件吗」「version 真的非空吗」
+  // 只有 defineWorkspaceUiRegistry 答得了：一个改过名字的导出会让生成的
+  // registry.local.ts 把字符串（或 undefined）当组件交给 host，空 version 则让四门
+  // 里的服务端精确 tuple 比对失去一个维度。
+  assert.throws(
+    () => defineWorkspaceUiRegistry([{ ...base, Component: "Entry" }]),
+    /invalid/,
+  );
+  assert.throws(
+    () => defineWorkspaceUiRegistry([{ ...base, pluginVersion: "" }]),
+    /invalid/,
+  );
 });
 
 

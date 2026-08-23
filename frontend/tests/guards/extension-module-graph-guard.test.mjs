@@ -31,7 +31,16 @@ const TSX_ONLY_MODULES = new Set([
 ]);
 // 仓库外插件包的落点，整目录都可能是 .tsx。
 const TSX_ONLY_PACKAGE = /^features\/ext-[a-z0-9-]+\//;
-const SCANNED_TEST_ROOTS = ["tests/unit", "tests/guards"];
+// node 泳道的扫描面。`tests/{unit,guards}` 是入口；`test-support/**.mjs` 被那些入口
+// 真实 import（semantic-source.mjs、static-source-contracts.mjs），它们的说明符同样
+// 会在 import 阶段被解析——把这些模块自己也当扫描根，就是把那一跳跟到底：只扫入口
+// 的直接说明符时，一个 test-support 模块 import 了 host.tsx 照样会炸整条泳道，而守卫
+// 全绿。
+const NODE_LANE_SCAN = [
+  { root: "tests/unit", suffix: ".test.mjs" },
+  { root: "tests/guards", suffix: ".test.mjs" },
+  { root: "test-support", suffix: ".mjs" },
+];
 
 
 function scriptKind(relative) {
@@ -64,20 +73,31 @@ async function isFile(relative) {
 }
 
 
-async function relativeSpecifiers(relative) {
-  const parsed = ts.createSourceFile(
-    relative,
-    await readFile(path.join(FRONTEND_DIR, relative), "utf8"),
-    ts.ScriptTarget.Latest,
-    true,
-    scriptKind(relative),
-  );
+/**
+ * 整条语句都是 type-only 的 import/export **不是**模块图上的边：Node 的 type
+ * stripping 会把整条语句擦掉，那个模块根本不会被加载（仓库现存写法：
+ * `app/ask-retrieval-effort.ts` 的 `import type { … } from "./…"`）。把它算成边，
+ * 这条守卫给出的失败文案就是事实错误——它会说「node --test 装不下这个模块」，
+ * 而 node 压根不会去装它。
+ *
+ * 内联的 `import { type X, y } from "./z"` 仍然是边：那条语句在运行时照常加载
+ * `./z`，被擦掉的只是花括号里的那个名字。
+ */
+function typeOnlyStatement(item) {
+  if (ts.isImportDeclaration(item)) return Boolean(item.importClause?.isTypeOnly);
+  if (ts.isExportDeclaration(item)) return Boolean(item.isTypeOnly);
+  return false;
+}
+
+
+function relativeSpecifiersIn(parsed) {
   const found = [];
   function collect(item) {
     if (
       (ts.isImportDeclaration(item) || ts.isExportDeclaration(item))
       && item.moduleSpecifier
       && ts.isStringLiteral(item.moduleSpecifier)
+      && !typeOnlyStatement(item)
     ) {
       found.push(item.moduleSpecifier.text);
     }
@@ -85,6 +105,25 @@ async function relativeSpecifiers(relative) {
   }
   collect(parsed);
   return found.filter((specifier) => specifier.startsWith("."));
+}
+
+
+function parseSpecifiers(relative, moduleText) {
+  return relativeSpecifiersIn(ts.createSourceFile(
+    relative,
+    moduleText,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind(relative),
+  ));
+}
+
+
+async function relativeSpecifiers(relative) {
+  return parseSpecifiers(
+    relative,
+    await readFile(path.join(FRONTEND_DIR, relative), "utf8"),
+  );
 }
 
 
@@ -118,19 +157,19 @@ async function nodeLaneClosure() {
 
 async function nodeLaneTestModules() {
   const found = [];
-  async function visit(relative) {
+  async function visit(relative, suffix) {
     for (
       const entry of await readdir(path.join(FRONTEND_DIR, relative), { withFileTypes: true })
     ) {
       const child = `${relative}/${entry.name}`;
       if (entry.isDirectory()) {
-        await visit(child);
+        await visit(child, suffix);
         continue;
       }
-      if (entry.name.endsWith(".test.mjs")) found.push(child);
+      if (entry.name.endsWith(suffix)) found.push(child);
     }
   }
-  for (const root of SCANNED_TEST_ROOTS) await visit(root);
+  for (const scan of NODE_LANE_SCAN) await visit(scan.root, scan.suffix);
   return found.sort();
 }
 
@@ -158,9 +197,33 @@ test("the builtin registry's module closure stays free of .tsx", async () => {
 });
 
 
+test("only statements that survive type stripping count as module-graph edges", () => {
+  const sample = [
+    'import type { Alpha } from "./whole-statement-type-only.ts";',
+    'import type Bravo from "./whole-statement-default-type-only.ts";',
+    'export type { Charlie } from "./whole-statement-type-reexport.ts";',
+    'import { type Delta, echo } from "./inline-type.ts";',
+    'import "./side-effect.ts";',
+    'import { foxtrot } from "./value.ts";',
+    'export { golf } from "./value-reexport.ts";',
+    'import { hotel } from "bare-package";',
+  ].join("\n");
+  assert.deepEqual(parseSpecifiers("features/sample.ts", sample).sort(), [
+    "./inline-type.ts",
+    "./side-effect.ts",
+    "./value-reexport.ts",
+    "./value.ts",
+  ]);
+});
+
+
 test("node --test modules never import a .tsx-only module", async () => {
   const scanned = await nodeLaneTestModules();
   assert.ok(scanned.length > 0, "node lane must contain test modules to scan");
+  assert.ok(
+    scanned.some((relative) => relative.startsWith("test-support/")),
+    "the shared node lane helpers must be scanned too (they are imported by the entrypoints)",
+  );
   const offenders = [];
   let resolvesBuiltinRegistry = false;
   for (const relative of scanned) {
