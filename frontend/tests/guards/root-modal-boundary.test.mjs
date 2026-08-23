@@ -30,9 +30,23 @@ test("page composes one typed root-modal coordinator and has no legacy modal boo
   for (const slot of ["notebook-editor", "notebook-delete", "source-detail", "kg-schema", "kg-analysis"]) {
     assert.match(pageText, new RegExp(`rootModals\\.view\\(\\"${slot}\\"\\)`), slot);
   }
-  assert.doesNotMatch(pageText, /\{editingNotebook && \([\s\S]{0,120}aria-modal="true"/);
-  assert.doesNotMatch(pageText, /\{deleteNotebook && \([\s\S]{0,120}aria-modal="true"/);
-  assert.doesNotMatch(pageText, /\{schemaModalOpen && \([\s\S]{0,120}aria-modal="true"/);
+  // 与标识符无关的判据(取代上面三条已随 editingNotebook/deleteNotebook/
+  // schemaModalOpen 被删除而永真的 doesNotMatch):page.tsx 里除 kg-view(知识图谱
+  // 主视图,见下方说明)外,任何 role="dialog" 曲面的 aria-modal 都不许是静态字面量
+  // "true"/"false",必须是 rootModals.view("<slot>").topmost 表达式。这样不论回潮
+  // 时用的是哪个已删的旧布尔变量名(不局限于上面三个),都会被这条钉住。
+  //
+  // kg-view 不是 RootModalSlot(见 use-root-modal-coordinator.ts 的 RootModalSlot
+  // 联合类型,其中没有 "kg-view")——它是知识图谱主视图,由 kgGraph.open 直接控制,
+  // 独立于本文件描述的 rootModals 协调器边界之外,不参与「被覆盖时退出交互树」的
+  // inert/aria-hidden 契约,是先于本次 root-modal-boundary 工作就存在的既有设计。
+  // 用它自己的结构标记(className="kg-view")整体挖掉后,残留文本里不该再出现任何
+  // 静态 aria-modal 字面量。
+  const pageTextWithoutKgView = pageText.replace(
+    /<section className="kg-view" role="dialog" aria-modal="true">/,
+    "",
+  );
+  assert.doesNotMatch(pageTextWithoutKgView, /aria-modal="(?:true|false)"/);
   assert.match(pageText, /<SourceDetailWindow[\s\S]{0,240}interactive=\{rootModals\.view\("source-detail"\)\.topmost\}/);
   assert.match(pageText, /<KgAnalysisView[\s\S]{0,300}interactive=\{rootModals\.view\("kg-analysis"\)\.topmost\}/);
 });

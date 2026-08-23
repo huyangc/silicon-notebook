@@ -89,6 +89,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"UI extension contract fixture OK ({len(fixture['contributions'])} contributions)")
         return 0
 
+    try:
+        on_disk_json = json.loads(on_disk)
+    except json.JSONDecodeError as exc:
+        print(
+            "UI extension contract fixture is not valid JSON: "
+            f"{FIXTURE_PATH.relative_to(ROOT)}\n"
+            f"  parse error: {exc}\n"
+            "  run `python3 scripts/generate_ui_extension_contract.py` to rewrite it.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if _normalized(on_disk_json) == _normalized(fixture):
+        # Same contributions, same api_version — only whitespace/indentation/key
+        # order/list order differ (both consumers compare the row *set*, per the
+        # module docstring, so a reordering alone is not a contract break). Still
+        # exit non-zero: the contracts lane must stay strict about byte-identical
+        # fixtures so `git diff` on the fixture stays meaningful.
+        print(
+            "UI extension contract fixture is present but not byte-identical to "
+            "the canonical rendering — content is identical, only formatting "
+            "differs (仅格式差异，跑一次生成器即可):\n"
+            "  python3 scripts/generate_ui_extension_contract.py",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         "UI extension contract fixture is STALE — the live registry no longer "
         f"matches {FIXTURE_PATH.relative_to(ROOT)}.\n"
@@ -96,13 +123,101 @@ def main(argv: list[str] | None = None) -> int:
         "then re-run the frontend parity guard.",
         file=sys.stderr,
     )
-    try:
-        on_disk_json = json.loads(on_disk)
-    except json.JSONDecodeError:
-        on_disk_json = None
-    print(f"  committed: {on_disk_json}", file=sys.stderr)
-    print(f"  live     : {fixture}", file=sys.stderr)
+    for line in _diff_fixtures(on_disk_json, fixture):
+        print(f"  {line}", file=sys.stderr)
     return 1
+
+
+_CONTRIBUTION_KEY_FIELDS = ("plugin_id", "version", "contribution_id")
+_CONTRIBUTION_SORT_FIELDS = ("plugin_id", "version", "contribution_id", "slot", "capability")
+
+
+def _contribution_sort_key(row: object) -> tuple[str, ...]:
+    if not isinstance(row, dict):
+        return (repr(row),)
+    return tuple(str(row.get(field, "")) for field in _CONTRIBUTION_SORT_FIELDS)
+
+
+def _normalized(fixture_obj: object) -> object:
+    """Canonicalize a parsed fixture for content-equality comparison.
+
+    Both documented consumers (the backend pytest parity test and the
+    frontend `extension-ui-parity` guard) compare the *set* of contribution
+    rows, not their list order — see the module docstring. So a fixture that
+    differs from the live registry only in row order is not stale; sort rows
+    into a stable order before comparing so that reordering does not get
+    reported as drift.
+    """
+    if not isinstance(fixture_obj, dict):
+        return fixture_obj
+    contributions = fixture_obj.get("contributions")
+    if not isinstance(contributions, list):
+        return fixture_obj
+    normalized = dict(fixture_obj)
+    normalized["contributions"] = sorted(contributions, key=_contribution_sort_key)
+    return normalized
+
+
+def _contribution_key(row: object) -> tuple[str, ...] | None:
+    if not isinstance(row, dict):
+        return None
+    return tuple(str(row.get(field, "")) for field in _CONTRIBUTION_KEY_FIELDS)
+
+
+def _diff_fixtures(committed: object, live: object) -> list[str]:
+    """Render a per-key diff between the committed and live fixture dicts.
+
+    Top-level scalar keys (e.g. `api_version`) are compared directly.
+    `contributions` is compared as a keyed collection (by plugin_id/version/
+    contribution_id) rather than as an ordered list, so an added, removed, or
+    field-changed row is reported individually instead of dumping both full
+    fixtures as opaque reprs.
+    """
+    lines: list[str] = []
+    if not isinstance(committed, dict) or not isinstance(live, dict):
+        lines.append(f"committed={committed!r}")
+        lines.append(f"live     ={live!r}")
+        return lines
+
+    keys = sorted(set(committed) | set(live), key=str)
+    for key in keys:
+        committed_value = committed.get(key, "<missing>")
+        live_value = live.get(key, "<missing>")
+        if committed_value == live_value:
+            continue
+        if key == "contributions" and isinstance(committed_value, list) and isinstance(live_value, list):
+            lines.extend(_diff_contributions(committed_value, live_value))
+        else:
+            lines.append(f"{key}: committed={committed_value!r} live={live_value!r}")
+    return lines
+
+
+def _diff_contributions(committed_rows: list[object], live_rows: list[object]) -> list[str]:
+    lines: list[str] = []
+    committed_by_key = {_contribution_key(row): row for row in committed_rows}
+    live_by_key = {_contribution_key(row): row for row in live_rows}
+
+    def sort_keys(keys: set[object]) -> list[object]:
+        return sorted(keys, key=lambda key: tuple(str(part) for part in key) if key else ("",))
+
+    for key in sort_keys(set(committed_by_key) - set(live_by_key)):
+        lines.append(f"contributions: removed committed row {committed_by_key[key]!r}")
+    for key in sort_keys(set(live_by_key) - set(committed_by_key)):
+        lines.append(f"contributions: added live row {live_by_key[key]!r}")
+    for key in sort_keys(set(committed_by_key) & set(live_by_key)):
+        committed_row = committed_by_key[key]
+        live_row = live_by_key[key]
+        if committed_row == live_row:
+            continue
+        field_keys = sorted(set(committed_row) | set(live_row), key=str)
+        for field in field_keys:
+            committed_field = committed_row.get(field, "<missing>")
+            live_field = live_row.get(field, "<missing>")
+            if committed_field != live_field:
+                lines.append(
+                    f"contributions[{key}].{field}: committed={committed_field!r} live={live_field!r}"
+                )
+    return lines
 
 
 if __name__ == "__main__":
