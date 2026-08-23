@@ -22,6 +22,14 @@ Three properties define this module and none of them may be softened:
    ``ValidationError`` echoes the rejected input value, so ``str(exc)`` on a
    settings failure would print the secret into logs and tracebacks.
 
+Capability naming: a plugin-provided capability name is a stable metadata id
+(``_STABLE_ID`` below) — lowercase, dot/underscore/hyphen separated, e.g.
+``corp.ieee.available``.  A colon is **not** accepted here even though core's
+own nine capability names read ``point:name``: that spelling is reserved for
+core-owned decisions, so a plugin can never mint a name that looks like one of
+them.  (The conflict checks in ``capability_decisions_from_bundles`` are the
+enforcement; the reserved separator is what keeps the two namespaces legible.)
+
 Import boundary: this module imports only ``app.extension_sdk``, third-party
 packages, and the standard library.  It must never reach into services,
 repositories, the API layer, or ``app.core`` — deployment plugins are wired by
@@ -32,6 +40,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import importlib
+import logging
 import re
 import tomllib
 
@@ -44,8 +53,16 @@ from app.extension_sdk import (
 )
 
 
+# Every deployment-plugin rejection is logged through this one logger name —
+# here and in the composition root — so an operator filters exactly one thing.
+# The record carries a plugin id, a stable reason code, and an exception *class*
+# name and nothing else: never ``exc.names``, ``str(exc)``, a module path, a
+# file path, or any settings value.
+DISCOVERY_LOGGER = logging.getLogger("silicon_notebook.extensions")
+
 # Same stable-metadata-id shape the registry enforces on manifest ids: all
-# accepted values are URL-path-segment safe.
+# accepted values are URL-path-segment safe.  Note it excludes ``:`` — see the
+# capability-naming paragraph in the module docstring.
 _STABLE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _TOP_LEVEL_KEYS = frozenset({"extensions"})
 _ENTRY_KEYS = frozenset({"bundle", "enabled", "settings"})
@@ -185,6 +202,17 @@ def _load_bundle(plugin_id: str, entry: Mapping[str, object]) -> object:
         module = importlib.import_module(module_path)
     except BaseException as exc:  # plugin import may raise anything at all
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            # These two propagate untouched — an operator's Ctrl-C or a
+            # ``sys.exit()`` inside plugin import code must still stop the
+            # process.  But they would otherwise leave *no* trace naming which
+            # plugin's import the interpreter was inside when it happened, so
+            # record that one fact (id + stable reason, no exception text)
+            # before getting out of the way.
+            DISCOVERY_LOGGER.error(
+                "extension import interrupted: plugin=%s reason=%s",
+                plugin_id,
+                "plugin_module_import_interrupted",
+            )
             raise
         raise ExtensionDiscoveryError(
             plugin_id,
@@ -266,6 +294,14 @@ def _bind_settings(
             getattr(field, "validation_alias", None),
             getattr(field, "alias", None),
         ):
+            # Only plain string aliases widen the accepted set.  Registered
+            # limitation: pydantic also allows ``AliasChoices``/``AliasPath``
+            # here, and those names are *not* collected — a settings key that
+            # only matches such an alias is reported as
+            # ``plugin_settings_unknown_key`` instead of being accepted.  That
+            # is the fail-closed direction (a rejected startup, not a silently
+            # ignored key), and enumerating those shapes would mean this module
+            # reimplementing pydantic's alias resolution.
             if type(alias) is str:
                 accepted.add(alias)
     unknown_keys = tuple(sorted(set(table) - accepted))
@@ -330,6 +366,21 @@ def capability_decisions_from_bundles(
             raise ExtensionDiscoveryError(
                 plugin_id, "plugin_capability_declaration_invalid"
             ) from None
+        else:
+            # ``isinstance(..., Mapping)`` only proves the shape is registered,
+            # not that iterating it is safe: a plugin-supplied Mapping may raise
+            # from ``__iter__``/``__getitem__``, and every read below (``set``,
+            # ``tuple``, ``decisions[name]``) would then let that exception —
+            # whose message the plugin wrote — escape unsanitized.  Materialize
+            # once, here, behind the same conversion as every other rejection.
+            try:
+                decisions = dict(decisions)
+            except Exception as exc:
+                raise ExtensionDiscoveryError(
+                    plugin_id,
+                    "plugin_capability_declaration_invalid",
+                    exception_type=type(exc).__name__,
+                ) from None
 
         for name in tuple(provides) + tuple(decisions):
             if type(name) is not str or not _STABLE_ID.fullmatch(name):
@@ -367,6 +418,7 @@ def capability_decisions_from_bundles(
 
 
 __all__ = [
+    "DISCOVERY_LOGGER",
     "DiscoveredExtension",
     "ExtensionDiscoveryError",
     "capability_decisions_from_bundles",

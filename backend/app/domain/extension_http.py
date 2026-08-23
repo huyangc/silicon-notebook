@@ -33,12 +33,24 @@ class PluginActor:
     """
 
     id: str
+    # Site-level system administrator (``users.role == "admin"``), and nothing
+    # more.  This is NOT notebook-scoped authorization: it says nothing about
+    # whether this user may read or write any particular notebook.  Gate
+    # notebook access with ``require_notebook_capability`` /
+    # ``require_notebook_read`` from the route context — never by branching on
+    # this flag.
     is_admin: bool
 
 
 @dataclass(frozen=True, slots=True)
 class PluginImportedSource:
     source_id: str
+    # ``sources.title`` as written at creation, which is the URL-derived name:
+    # paper-metadata grounding has not run yet at this instant, so the richer
+    # ``display_title`` would be empty here regardless.  A plugin that shows a
+    # source name to a user should read it back later through core's
+    # ``source_display_title`` rules rather than persisting this value as the
+    # display name.
     title: str
     url: str
 
@@ -46,6 +58,9 @@ class PluginImportedSource:
 @dataclass(frozen=True, slots=True)
 class PluginRejectedUrl:
     url: str
+    # User-facing Chinese copy explaining the rejection, produced by core's
+    # existing import path.  It is NOT a stable reason code: the wording may
+    # change with UI copy, so a plugin must never branch on it.
     reason: str
 
 
@@ -89,7 +104,7 @@ class PluginRouteContext:
     # plugin mount a read-only notebook-scoped route without a write gate.
     require_notebook_read: Any
     # FastAPI dependency resolving to a PluginActor for the current request.
-    current_actor: Callable[..., Any]
+    current_actor: Callable[..., PluginActor]
     # Builds a user-facing 4xx exception whose detail routes through core's
     # user_error() plumbing (X-User-Message), so plugin error text follows
     # the same UI-copy rules as core endpoints.

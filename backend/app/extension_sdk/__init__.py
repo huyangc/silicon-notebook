@@ -110,7 +110,6 @@ from app.extension_sdk.http import (
     PluginRejectedUrl,
     PluginRouteContext,
     PluginRouterFactory,
-    PluginRouterSpec,
     PluginUrlImportResult,
     PluginUrlSourceImportPort,
 )
@@ -216,7 +215,6 @@ __all__ = [
     "PluginRejectedUrl",
     "PluginRouteContext",
     "PluginRouterFactory",
-    "PluginRouterSpec",
     "PluginUrlImportResult",
     "PluginUrlSourceImportPort",
     "CapabilityProvidingBundle",

@@ -22,6 +22,7 @@ from app.extensions.capabilities import (
     EMPTY_CAPABILITY_CATALOG,
     CapabilityDecisionCatalog,
 )
+from app.extensions.discovery import ExtensionDiscoveryError
 
 
 class ExtensionRegistryError(ValueError):
@@ -196,8 +197,25 @@ class ExtensionRegistry:
                 raise ExtensionRegistryError(
                     f"extension {manifest.id!r} registrations do not match its manifest"
                 )
-        except Exception:
+        except Exception as exc:
             self._rollback_manifest(manifest.id, before)
+            if manifest.trust == "deployment":
+                # An out-of-repo plugin's ``register()`` may raise anything, and
+                # a deployment plugin routinely holds an API key or an internal
+                # hostname on the bundle it is registering from — a plain
+                # ``raise ValueError(f"... {self.settings.token} ...")`` would put
+                # that value into the traceback and into every log that renders
+                # it.  Registration is therefore sanitized exactly like every
+                # other deployment-plugin rejection: plugin id, stable reason
+                # code, exception *class* name, and ``from None`` so the original
+                # never reaches a traceback.  Built-in bundles keep their
+                # verbatim ``ExtensionRegistryError`` — that text is core's own
+                # diagnostic, not plugin-controlled.
+                raise ExtensionDiscoveryError(
+                    manifest.id,
+                    "plugin_registration_failed",
+                    exception_type=type(exc).__name__,
+                ) from None
             raise
 
     def _rollback_manifest(self, plugin_id: str, prior_ids: set[str]) -> None:

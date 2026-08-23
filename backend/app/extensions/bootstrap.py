@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
-import logging
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -55,6 +54,7 @@ from app.extensions.capabilities import (
     CapabilityDecisionCatalog,
 )
 from app.extensions.discovery import (
+    DISCOVERY_LOGGER,
     ExtensionDiscoveryError,
     capability_decisions_from_bundles,
     discover_deployment_extensions,
@@ -72,8 +72,9 @@ _BOUND_AGENT_PROFILE_UI_PORT = object()
 # Deployment-plugin rejections are logged here before being re-raised.  The
 # record carries a plugin id, a stable reason code, and an exception class name
 # and nothing else — never `exc.names`, `str(exc)`, a module path, a file path,
-# or any settings value (see app.extensions.discovery).
-_DISCOVERY_LOGGER = logging.getLogger("silicon_notebook.extensions")
+# or any settings value.  One spelling of the logger name, owned by
+# app.extensions.discovery, so both halves of the surface land in one place.
+_DISCOVERY_LOGGER = DISCOVERY_LOGGER
 
 
 @dataclass(frozen=True)
@@ -87,8 +88,18 @@ class ExtensionRuntime:
     # Validated settings instance per deployment plugin, keyed by plugin id.
     # Built-in bundles never appear here.  The mapping is read-only so a later
     # consumer (the plugin route host) cannot mutate the frozen composition.
+    #
+    # A present key may map to ``None`` — that is a plugin which declared no
+    # settings_model, not a plugin that is absent.  Consumers (T5's route host)
+    # must therefore test membership with ``in``, never truthiness of the value.
+    #
+    # ``repr=False`` is load-bearing, not cosmetic: these instances hold API
+    # keys and internal hostnames, and a plugin's own model is free to render
+    # them in plain text.  Without it every ``repr(runtime)`` — which is what an
+    # unhandled exception's frame locals, a debugger, and most log formatters
+    # print — would carry the deployment's secrets.
     plugin_settings: Mapping[str, object] = field(
-        default_factory=lambda: MappingProxyType({})
+        default_factory=lambda: MappingProxyType({}), repr=False
     )
 
 
@@ -279,6 +290,12 @@ def default_extension_runtime() -> ExtensionRuntime:
     # the single freeze point) rather than at import time.
     from app.core.config import get_settings
 
+    # Every deployment-plugin failure mode lives inside this one `try`, and
+    # composition is part of it: a plugin's `register()` runs during
+    # `build_extension_runtime`, and that call is as capable of surfacing a
+    # secret as settings binding is (the registry converts it — see
+    # `ExtensionRegistry.register`).  Leaving the build outside would let a
+    # registration rejection reach the operator with no log line at all.
     try:
         discovered = discover_deployment_extensions(
             get_settings().extensions_config
@@ -290,6 +307,20 @@ def default_extension_runtime() -> ExtensionRuntime:
         capability_decisions = capability_decisions_from_bundles(
             bundles, core_decisions
         )
+        return build_extension_runtime(
+            bundles,
+            capability_decisions=capability_decisions,
+            retrieval_admission_policies={
+                GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
+                SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
+            },
+            trusted_report_exporter_plugins=frozenset(
+                {REPORT_MARKDOWN_EXPORTER_PLUGIN_ID}
+            ),
+            plugin_settings={
+                item.plugin_id: item.settings for item in discovered
+            },
+        )
     except ExtensionDiscoveryError as exc:
         _DISCOVERY_LOGGER.error(
             "extension discovery FAILED — service will not start: "
@@ -299,18 +330,3 @@ def default_extension_runtime() -> ExtensionRuntime:
             exc.exception_type,
         )
         raise
-
-    return build_extension_runtime(
-        bundles,
-        capability_decisions=capability_decisions,
-        retrieval_admission_policies={
-            GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
-            SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
-        },
-        trusted_report_exporter_plugins=frozenset(
-            {REPORT_MARKDOWN_EXPORTER_PLUGIN_ID}
-        ),
-        plugin_settings={
-            item.plugin_id: item.settings for item in discovered
-        },
-    )
