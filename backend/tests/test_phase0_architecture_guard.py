@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD_PATH = ROOT / "scripts" / "check_architecture_boundaries.py"
+BASELINE_PATH = ROOT / "scripts" / "architecture_boundary_baseline.json"
 _SPEC = importlib.util.spec_from_file_location("phase0_architecture_guard", GUARD_PATH)
 if _SPEC is None or _SPEC.loader is None:  # pragma: no cover - impossible checkout
     raise RuntimeError(f"cannot load architecture guard from {GUARD_PATH}")
@@ -15,7 +17,13 @@ _GUARD = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_GUARD)
 
 boundary_violations = _GUARD.boundary_violations
+core_models_service_import_edges = _GUARD.core_models_service_import_edges
+core_models_service_import_violations = (
+    _GUARD.core_models_service_import_violations
+)
 facade_surface_additions = _GUARD.facade_surface_additions
+function_length = _GUARD.function_length
+function_length_violations = _GUARD.function_length_violations
 import_graph = _GUARD.import_graph
 public_class_surface = _GUARD.public_class_surface
 repository_service_import_violations = (
@@ -226,6 +234,249 @@ def test_repository_service_reverse_import_ceiling_only_allows_reduction(tmp_pat
         "repositories/postgres service imports grew: 1 > 0",
         "repositories/sqlite service imports grew: 1 > 0",
     ]
+
+
+def test_core_models_service_import_allowlist_only_allows_reduction(tmp_path):
+    app = tmp_path / "app"
+    _write(app / "core/x.py", "from app.services.y import thing\n")
+
+    # A new reverse edge that isn't on the allowlist is rejected.
+    assert core_models_service_import_violations(app, set()) == [
+        "core/models gained a service import: app.core.x -> app.services.y"
+    ]
+
+    # The same edge, allowlisted and still present, is silent.
+    assert (
+        core_models_service_import_violations(app, {"app.core.x -> app.services.y"})
+        == []
+    )
+
+    # The allowlist has zero slack: an entry the code no longer needs must
+    # be removed from the baseline in the same change, not left stale.
+    _write(app / "core/x.py", "VALUE = 1\n")
+    assert core_models_service_import_violations(
+        app, {"app.core.x -> app.services.y"}
+    ) == [
+        "core/models service import allowlist is stale, remove: "
+        "app.core.x -> app.services.y "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "core_models_service_imports.allowed)"
+    ]
+
+
+def test_core_models_service_import_allowlist_covers_type_checking_imports(tmp_path):
+    app = tmp_path / "app"
+    _write(
+        app / "models/z.py",
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from app.services.y import Thing\n",
+    )
+
+    assert core_models_service_import_violations(app, set()) == [
+        "core/models gained a service import: app.models.z -> app.services.y"
+    ]
+
+
+def test_baseline_ceilings_and_allowlist_have_not_collapsed_to_empty():
+    """A baseline read as ``{}`` (missing file, truncated write, bad key)
+    would make every ceiling/allowlist check vacuously pass -- both loops in
+    ``function_length_violations``/``core_models_service_import_violations``
+    iterate the *baseline*, not the repository, so an empty baseline finds
+    nothing to check. This reads the real checked-in baseline and pins it to
+    a non-trivial lower bound and to the exact known allowlist, so a
+    baseline that quietly lost its contents fails loudly here instead of the
+    real guard run silently no-op'ing.
+    """
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+
+    assert len(baseline["function_length_ceiling"]) >= 22
+    assert set(baseline["core_models_service_imports"]["allowed"]) == {
+        "app.core.llm -> app.services.cancellation",
+        "app.models.agent_profile -> app.services.agent_profile_block",
+    }
+
+
+def test_core_models_service_import_edges_normalize_to_the_submodule(tmp_path):
+    """Every spelling that reaches the same submodule must produce the same
+    edge, and a reference that cannot be attributed to one submodule must
+    normalize to its own edge that no submodule-qualified allowlist entry can
+    ever satisfy.
+
+    This is the shape named in review: a bare package import or a bare
+    ``import app`` followed by attribute access could otherwise land on the
+    allowlist and then silently authorize importing *any* member of
+    ``app.services``, not just the one originally reviewed.
+    """
+    app = tmp_path / "app"
+    _write(
+        app / "core/from_package.py",
+        "from app.services import cancellation\n",
+    )
+    _write(
+        app / "core/from_submodule.py",
+        "from app.services.cancellation import AskCancelled\n",
+    )
+    _write(app / "core/plain_import.py", "import app.services.cancellation\n")
+    _write(app / "core/deep_submodule.py", "from app.services.kg.ppr import run\n")
+    _write(app / "core/bare_package.py", "import app.services\n")
+    _write(app / "core/star_import.py", "from app.services import *\n")
+    _write(
+        app / "core/bare_app_attribute.py",
+        "import app\nBAD = app.services.cancellation.AskCancelled\n",
+    )
+    # ``from app import services`` binds the whole package under a local name;
+    # the relative spelling inside app/core resolves to the same base.
+    _write(app / "core/from_app_member.py", "from app import services\n")
+    _write(app / "core/relative_app_member.py", "from .. import services as svc\n")
+    _write(app / "core/from_app_other.py", "from app import models\n")
+
+    edges = core_models_service_import_edges(app)
+
+    # All three spellings that name ``cancellation`` specifically collapse to
+    # the identical, submodule-qualified edge.
+    assert "app.core.from_package -> app.services.cancellation" in edges
+    assert "app.core.from_submodule -> app.services.cancellation" in edges
+    assert "app.core.plain_import -> app.services.cancellation" in edges
+
+    # A reference three levels deep still normalizes to the first submodule.
+    assert "app.core.deep_submodule -> app.services.kg" in edges
+
+    # References that cannot be attributed to one submodule get their own
+    # edge instead of silently vanishing or aliasing a real submodule edge.
+    assert "app.core.bare_package -> app.services" in edges
+    assert "app.core.star_import -> app.services" in edges
+    assert "app.core.bare_app_attribute -> app" in edges
+    assert "app.core.from_app_member -> app.services" in edges
+    assert "app.core.relative_app_member -> app.services" in edges
+    # Importing a non-services member from ``app`` is not a services edge.
+    assert not any(edge.startswith("app.core.from_app_other ->") for edge in edges)
+
+    # None of the unattributable edges can ever satisfy a submodule-qualified
+    # allowlist entry -- confirm the violation check actually rejects them
+    # rather than the allowlist accidentally matching by string prefix.
+    allowed = {"app.core.bare_package -> app.services.cancellation"}
+    violations = core_models_service_import_violations(app, allowed)
+    assert any(
+        "app.core.bare_package -> app.services" in violation
+        for violation in violations
+        if "gained" in violation
+    )
+
+
+def test_core_models_service_import_allowlist_covers_plain_imports_too(tmp_path):
+    """A plain top-level import must be caught exactly like a TYPE_CHECKING one.
+
+    Pairs with the TYPE_CHECKING test above as a contrast arm: a change that
+    accidentally scoped detection to only the inside of ``if TYPE_CHECKING:``
+    blocks would still pass that test but fail this one, and a change that
+    broke plain-import detection while leaving the TYPE_CHECKING branch alone
+    would fail this one while that test stayed green.
+    """
+    app = tmp_path / "app"
+    _write(app / "models/z.py", "from app.services.y import Thing\n")
+
+    assert core_models_service_import_violations(app, set()) == [
+        "core/models gained a service import: app.models.z -> app.services.y"
+    ]
+
+
+def test_function_length_ceiling_only_allows_reduction(tmp_path):
+    path = tmp_path / "pkg" / "mod.py"
+    key = "pkg/mod.py::widget"
+    _write(path, "def widget():\n" + "    pass\n" * 9)  # 10 lines total
+
+    assert function_length_violations(tmp_path, {key: 10}) == []
+
+    _write(path, "def widget():\n" + "    pass\n" * 10)  # 11 lines total
+    assert function_length_violations(tmp_path, {key: 10}) == [
+        f"function grew: {key} 11 > 10"
+    ]
+
+    # The ceiling has zero slack: a function that shrank below its recorded
+    # ceiling must have the baseline lowered in the same change.
+    assert function_length_violations(tmp_path, {key: 12}) == [
+        f"function length ceiling is stale, lower it: {key} 11 < 12 "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "function_length_ceiling)"
+    ]
+
+    # A renamed (or removed) target is a loud failure, not a silent pass.
+    _write(path, "def renamed():\n" + "    pass\n" * 10)
+    assert function_length_violations(tmp_path, {key: 11}) == [
+        f"function length ceiling target not found: {key} "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "function_length_ceiling)"
+    ]
+
+
+def test_function_length_excludes_decorator_lines(tmp_path):
+    path = tmp_path / "pkg" / "mod.py"
+    _write(path, "@decorator\ndef widget():\n    pass\n")
+
+    assert function_length(tmp_path, "pkg/mod.py::widget") == 2
+
+
+def test_function_length_resolves_nested_and_method_qualnames(tmp_path):
+    path = tmp_path / "pkg" / "mod.py"
+    _write(
+        path,
+        "class Outer:\n"
+        "    def method(self):\n"
+        "        pass\n"
+        "\n"
+        "def register():\n"
+        "    def inner():\n"
+        "        pass\n"
+        "    return inner\n",
+    )
+
+    assert (
+        function_length_violations(
+            tmp_path,
+            {
+                "pkg/mod.py::Outer.method": 2,
+                "pkg/mod.py::register.inner": 2,
+            },
+        )
+        == []
+    )
+
+
+def test_function_length_resolves_async_qualnames(tmp_path):
+    """``find_qualname_node`` must match ``async def`` targets too.
+
+    Every existing qualname-resolution test above uses plain ``def``, so a
+    change that dropped ``ast.AsyncFunctionDef`` from ``find_qualname_node``
+    (or from ``public_class_surface``'s own function-node check) would leave
+    them all green. This covers an async method and an async function nested
+    inside an async function, mirroring the sync nesting case above.
+    """
+    path = tmp_path / "pkg" / "amod.py"
+    _write(
+        path,
+        "class Outer:\n"
+        "    async def method(self):\n"
+        "        pass\n"
+        "\n"
+        "async def register():\n"
+        "    async def inner():\n"
+        "        pass\n"
+        "    return inner\n",
+    )
+
+    assert function_length(tmp_path, "pkg/amod.py::Outer.method") == 2
+    assert function_length(tmp_path, "pkg/amod.py::register.inner") == 2
+    assert (
+        function_length_violations(
+            tmp_path,
+            {
+                "pkg/amod.py::Outer.method": 2,
+                "pkg/amod.py::register.inner": 2,
+            },
+        )
+        == []
+    )
 
 
 def test_extension_composition_is_statically_isolated_from_workflows():

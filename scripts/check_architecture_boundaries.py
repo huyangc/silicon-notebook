@@ -338,6 +338,129 @@ def repository_service_import_violations(
     ]
 
 
+CORE_MODELS_SERVICE_PREFIXES = ("app.core", "app.models")
+
+
+def _normalized_service_edge(module: str, reference: str) -> set[str]:
+    """Normalize one raw ``app.services...`` module reference to an edge.
+
+    A reference is normalized to ``<module> -> app.services.<submodule>``
+    whenever it names a specific submodule, no matter how many path segments
+    beyond that submodule it carries (``app.services.kg`` and
+    ``app.services.kg.ppr`` both normalize to ``app.services.kg``). A
+    reference that cannot be attributed to any specific submodule -- the bare
+    ``app.services`` package itself -- normalizes to its own unnormalizable
+    edge instead, which can never satisfy an allowlist entry that always
+    names a concrete submodule. Non-``app.services`` references produce no
+    edge at all.
+    """
+
+    if reference == "app.services":
+        return {f"{module} -> app.services"}
+    if not reference.startswith("app.services."):
+        return set()
+    submodule = reference.split(".")[2]
+    if not submodule:
+        return {f"{module} -> app.services"}
+    return {f"{module} -> app.services.{submodule}"}
+
+
+def core_models_service_import_edges(app_root: Path) -> set[str]:
+    """Reverse-dependency edges from ``app.core``/``app.models`` into
+    ``app.services``, normalized to the immediate ``app.services.<name>``
+    submodule regardless of which import spelling reached it.
+
+    This is an intentional debt allowlist, not a desired dependency: every
+    edge here predates this guard and may be removed, but no new edge may be
+    added and no existing edge may go stale without the baseline being
+    updated in the same change. Unlike the facade/repository ceilings above
+    (which only grow, so a lowered call the ceiling could still absorb goes
+    unnoticed), this allowlist and the hot-function ceiling below carry zero
+    slack, which also catches a stub collapsing to its first overload match.
+
+    The edge is deliberately normalized rather than taken verbatim from
+    whichever import spelling was used: a raw ``from app.services import
+    cancellation`` and a raw ``from app.services.cancellation import X``
+    reach the exact same submodule and must produce the exact same edge, or
+    the allowlist could be satisfied by one spelling while the other slips
+    past unrecorded. Left unnormalized, a bare package-level edge
+    (``app.core.llm -> app.services``) could also end up in the allowlist by
+    accident and then silently authorize importing *any* submodule of
+    ``app.services`` from that module, not just the one originally reviewed
+    -- so any reference that cannot be attributed to a specific submodule (a
+    bare ``import app.services``, a wildcard ``from app.services import *``,
+    or a bare ``import app`` reached only through later attribute access) is
+    recorded as its own edge that can never satisfy an allowlist entry naming
+    a concrete submodule.
+    """
+
+    modules = python_modules(app_root)
+    edges: set[str] = set()
+    for module, path in modules.items():
+        if not matches_module_prefix(module, CORE_MODELS_SERVICE_PREFIXES):
+            continue
+        if imports_bare_module(path, "app"):
+            # A bare ``import app`` can reach any ``app.services`` submodule
+            # through attribute access alone, with no further import
+            # statement to normalize, so it is flagged outright -- mirroring
+            # the ``app.application`` boundary check's own use of
+            # ``imports_bare_module`` above.
+            edges.add(f"{module} -> app")
+        # ast.walk reaches imports nested inside ``if TYPE_CHECKING:`` blocks
+        # and other conditionals, same as the include_members=True walk this
+        # replaces.
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    edges.update(_normalized_service_edge(module, alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                base = import_from_base(module, path, node)
+                if base == "app":
+                    # ``from app import services`` (or the relative
+                    # ``from .. import services`` inside app/core) binds the
+                    # whole package under a local name, after which any
+                    # submodule is one attribute access away with no further
+                    # import to normalize -- the same hole as a bare
+                    # ``import app.services``, so it gets the same
+                    # unnormalizable edge (codex #565 R1 P2).
+                    if any(alias.name == "services" for alias in node.names):
+                        edges.add(f"{module} -> app.services")
+                    continue
+                if base != "app.services" and not base.startswith(
+                    "app.services."
+                ):
+                    continue
+                if base != "app.services":
+                    edges.update(_normalized_service_edge(module, base))
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        edges.add(f"{module} -> app.services")
+                        continue
+                    edges.update(
+                        _normalized_service_edge(module, f"{base}.{alias.name}")
+                    )
+    return edges
+
+
+def core_models_service_import_violations(
+    app_root: Path, allowed_edges: set[str]
+) -> list[str]:
+    actual = core_models_service_import_edges(app_root)
+    violations = [
+        f"core/models gained a service import: {edge}"
+        for edge in sorted(actual - allowed_edges)
+    ]
+    violations.extend(
+        "core/models service import allowlist is stale, remove: "
+        f"{edge} (update scripts/architecture_boundary_baseline.json :: "
+        "core_models_service_imports.allowed)"
+        for edge in sorted(allowed_edges - actual)
+    )
+    return violations
+
+
 def public_class_surface(path: Path, class_name: str) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     class_node = next(
@@ -400,6 +523,97 @@ def facade_violations(root: Path) -> list[str]:
     return violations
 
 
+def find_qualname_node(
+    tree: ast.Module, qualname: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Resolve a dotted qualname (``method`` / ``Class.method`` /
+    ``outer_func.inner_func``) to its function node by walking direct
+    ``body`` children at each level — this reaches methods nested in a
+    class and functions nested in another function (e.g. a tool registered
+    inside a ``register_*`` closure), but not conditionally-defined
+    functions.
+    """
+
+    node: ast.AST = tree
+    for part in qualname.split("."):
+        found = None
+        for child in getattr(node, "body", []):
+            if (
+                isinstance(
+                    child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                )
+                and child.name == part
+            ):
+                found = child
+                break
+        if found is None:
+            return None
+        node = found
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return node
+    return None
+
+
+def function_length(root: Path, qualified_path: str) -> int | None:
+    """Line count for ``<repo-relative path>::<qualname>``.
+
+    Counts from the ``def``/``async def`` line through the last line of the
+    body inclusive (``node.end_lineno - node.lineno + 1``); decorator lines
+    are excluded because ``ast`` already points ``lineno`` at the ``def``
+    keyword rather than the first decorator. Returns ``None`` when the file
+    or the qualname inside it cannot be resolved.
+    """
+
+    repo_relative, _, qualname = qualified_path.partition("::")
+    path = root / repo_relative
+    if not path.is_file():
+        return None
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    node = find_qualname_node(tree, qualname)
+    if node is None:
+        return None
+    return node.end_lineno - node.lineno + 1
+
+
+def function_length_violations(
+    root: Path, ceilings: dict[str, int]
+) -> list[str]:
+    """Zero-slack ceiling on a fixed set of hot functions: grew above the
+    recorded ceiling is a violation, and shrank below it is *also* a
+    violation (the baseline must be lowered in the same change), unlike the
+    facade/repository ceilings above, which only grow. Those two only check
+    for growth -- a shrink is accepted silently, so their recorded baselines
+    can lag behind reality without tripping anything. This ceiling and the
+    core-models allowlist above it are zero-slack on purpose: an only-grow
+    ceiling accumulates silent headroom a later regression can spend
+    unnoticed (say, 2250 lines quietly dropping to 2000 and then climbing
+    back to 2240 without ever being caught), and a zero-slack ceiling is also
+    the only one of the two that can catch a function collapsing to a stub
+    that happens to match its first ``@overload``."""
+
+    violations: list[str] = []
+    for qualified_path, ceiling in sorted(ceilings.items()):
+        actual = function_length(root, qualified_path)
+        if actual is None:
+            violations.append(
+                "function length ceiling target not found: "
+                f"{qualified_path} (update "
+                "scripts/architecture_boundary_baseline.json :: "
+                "function_length_ceiling)"
+            )
+            continue
+        if actual > ceiling:
+            violations.append(f"function grew: {qualified_path} {actual} > {ceiling}")
+        elif actual < ceiling:
+            violations.append(
+                "function length ceiling is stale, lower it: "
+                f"{qualified_path} {actual} < {ceiling} (update "
+                "scripts/architecture_boundary_baseline.json :: "
+                "function_length_ceiling)"
+            )
+    return violations
+
+
 def check(root: Path) -> list[str]:
     app_root = root / "backend/app"
     baseline = json.loads(
@@ -413,9 +627,17 @@ def check(root: Path) -> list[str]:
             app_root, baseline["repository_service_import_ceiling"]
         )
     )
+    violations.extend(
+        core_models_service_import_violations(
+            app_root, set(baseline["core_models_service_imports"]["allowed"])
+        )
+    )
     components = strongly_connected_components(import_graph(app_root))
     violations.extend(f"static import SCC: {', '.join(item)}" for item in components)
     violations.extend(facade_violations(root))
+    violations.extend(
+        function_length_violations(root, baseline["function_length_ceiling"])
+    )
     return violations
 
 
@@ -432,7 +654,9 @@ def main() -> int:
         return 1
     print(
         "architecture guard: OK "
-        "(0 SCCs; boundaries frozen; reverse imports capped; facade may only shrink)"
+        "(0 SCCs; boundaries frozen; reverse imports capped; "
+        "core/models service imports allowlisted; "
+        "facade and hot functions may only shrink)"
     )
     return 0
 
