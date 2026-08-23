@@ -934,3 +934,19 @@ that deployment setting above the longest supported Ask run or use the durable j
 reopen the completed conversation after a disconnect.
 
 When the required chat workloads are unbound, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.
+
+### Deployment extensions (EXTENSIONS_CONFIG)
+
+An unset `EXTENSIONS_CONFIG` means zero deployment plugins; the loaded topology is byte-identical to the built-in composition. Set but unreadable or unparseable (missing file, bad TOML, an unknown key, a malformed entry) is a **startup failure** — the process refuses to start, it never degrades. Offline CLI tools (`batch_ingest.py` and friends) load the same plugin topology, so the fix is changing the config, never clearing the variable — clearing it silently swaps in a different discovery/registry composition rather than restoring pre-plugin behavior.
+
+```toml
+[extensions."corp.ieee_search"]
+bundle = "silicon_notebook_ieee.bundle:BUNDLE"
+enabled = true
+
+[extensions."corp.ieee_search".settings]
+```
+
+Three rules govern every entry: only a **named**, not `enabled = false`, plugin is ever imported — nothing here scans a directory, reads entry points, or consults a second environment variable; a plugin's own pydantic `settings_model` rejects an unknown key or a type error as a startup failure, so a secret should be referenced (e.g. by an env-var name field, mirroring `model-services.toml`'s `api_key_env`) rather than embedded as a raw value, and no settings value ever reaches a log, an event, or `GET /api/admin/extensions`; and the plugin package installs into the same `PYTHON_BIN` environment as the backend, not a separate interpreter. A plugin's `configure()` must be cheap and side-effect-free — no threads, no network/database connections, no blocking I/O; do that lazily on first use. A plugin capability name uses dot/underscore/hyphen separators only (`:` is reserved for core's own `point:name` capabilities). Enabling, disabling, or upgrading a plugin always means a process restart; there is no hot reload.
+
+An operator self-checks a deployment's live plugin topology against the paired frontend build with `EXTENSIONS_CONFIG=/etc/silicon/extensions.toml PYTHONPATH=backend python3 scripts/check_deployment_extension_parity.py --frontend-contract frontend/.local/ui-extension-contract.json` (exit `0` parity, `1` drift, `2` usage/environment error). A plugin package should run `python3 scripts/check_ui_vocabulary.py --extra-root <plugin-source-dir>` against its own source for the same Chinese-UI-copy guarantee core enforces on itself. `scripts/generate_ui_extension_contract.py` must be regenerated with `EXTENSIONS_CONFIG` empty — the committed fixture reflects the built-in topology only, never a site's deployment plugins.

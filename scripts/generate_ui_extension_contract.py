@@ -43,7 +43,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.extensions import default_extension_runtime  # noqa: E402
-from app.extensions.ui_projection import ui_contribution_contract  # noqa: E402
+from app.extensions.ui_projection import (  # noqa: E402
+    CONTRIBUTION_SORT_FIELDS,
+    ui_contribution_contract,
+)
 
 
 FIXTURE_PATH = ROOT / "backend" / "tests" / "fixtures" / "ui_extension_contract.json"
@@ -56,12 +59,13 @@ API_VERSION = "1"
 
 def build_fixture() -> dict[str, object]:
     registry = default_extension_runtime().registry
-    # `ui_contribution_contract` returns rows in registry order (its own
-    # docstring: it never re-sorts, so it stays safe to call from a live
-    # request path). The committed fixture is sorted here instead, purely so
+    # `ui_contribution_contract` already returns rows sorted by
+    # `CONTRIBUTION_SORT_FIELDS` (see its docstring in ui_projection.py), so
     # the file on disk is deterministic and reproducible from an empty
-    # topology onward — both documented consumers already compare the row
-    # *set*, not list order (see `contract_rows_match` below), so this sort
+    # topology onward without this script re-sorting. The `sorted(...)` call
+    # here is kept anyway — it is a no-op on already-sorted input — purely
+    # as defense in depth: both documented consumers already compare the row
+    # *set*, not list order (see `contract_rows_match` below), so re-sorting
     # cannot itself turn a match into a mismatch or vice versa.
     contributions = sorted(
         ui_contribution_contract(registry), key=_contribution_sort_key
@@ -146,7 +150,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 _CONTRIBUTION_KEY_FIELDS = ("plugin_id", "version", "contribution_id")
-_CONTRIBUTION_SORT_FIELDS = ("plugin_id", "version", "contribution_id", "slot", "capability")
+# Reuse the same field tuple `ui_contribution_contract` sorted by, so this
+# script's own (now-redundant, see `build_fixture`) re-sort and its
+# comparators in `contract_rows_match`/`contract_diff` can never silently
+# drift from the one place that owns the sort order.
+_CONTRIBUTION_SORT_FIELDS = CONTRIBUTION_SORT_FIELDS
 
 
 def _contribution_sort_key(row: object) -> tuple[str, ...]:
