@@ -36,6 +36,15 @@
 //     的键"都被误判成合法,即便那个键实际上并不存在于该 hook 上。分表后每个 hook
 //     的合法命名空间键各自独立声明,判据是"这个键在该 hook 上映射的值本身还是一层
 //     命名空间对象(要再 `.field` 才能拿到叶子数据)",不是任意字符串巧合相等。
+// (e) `destructureRootHookName` 现在同时认根为 hook 名或 `namespaceAliasRoots`
+//     里的命名空间别名——`const { merged } = kgGraph;` 因此与 `const { graph:
+//     { merged } } = kgWorkspace;` 同罪,不再因为根标识符不在 `HOOK_ROOTS` 里就
+//     被整条豁免。
+// (f) 命名空间级解构的每个绑定元素必须是简单标识符:`const { knowledge: { items }
+//     } = kgWorkspace;` 这种嵌套 binding pattern,`propertyName` 仍是合法的
+//     "knowledge",但 `element.name` 又是一层解构模式——那是把 "knowledge" 命名
+//     空间继续摊平到字段级,判据必须同时要求 `ts.isIdentifier(element.name)`,只
+//     比对 propertyName 会漏判。
 //
 // ⚠ `askSession`/`sourceLibrary` 各自已有一段**先于本任务存在**的大段逐字段解构
 // (`const { question, turns, ... } = askSession;`、`const { sources, ... } =
@@ -146,12 +155,23 @@ function isSimpleLiteralDefault(expr) {
 // (`const { open } = rootModals.view("x");` 因此不算 hook 根解构,调用结果解构不是
 // 本守卫要拦的形状;这与上面 chainRoot 对纯标识符赋值放开调用是两回事,分别对应
 // 两种不同的既有写法)。
+//
+// 根既可以是七个 owner hook 之一,也可以是下面反查出的命名空间别名之一
+// (`namespaceAliasRoots`,例如 `kgGraph`)——命名空间别名本身就是一层命名空间级
+// 视图,`const { merged } = kgGraph;` 与直接 `const { graph: { merged } } =
+// kgWorkspace;` 是同一种再摊平,必须同罪认定。函数定义时 `namespaceAliasRoots`
+// 尚未声明,但本函数只在它声明之后才会被调用(见下方 `collectNamespaceAliases`/
+// `visit` 的调用时机),按引用捕获、无 TDZ 风险。
 function destructureRootHookName(initializer) {
   let current = unwrapTransparent(initializer);
   while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
     current = unwrapTransparent(current.expression);
   }
-  return ts.isIdentifier(current) && HOOK_ROOTS.has(current.text) ? current.text : null;
+  if (!ts.isIdentifier(current)) return null;
+  if (HOOK_ROOTS.has(current.text) || namespaceAliasRoots.has(current.text)) {
+    return current.text;
+  }
+  return null;
 }
 
 function declarationText(node) {
@@ -231,10 +251,17 @@ function visit(node) {
           const bareRoot = unwrapTransparent(initializer);
           const isBareHookIdentifier = ts.isIdentifier(bareRoot) && bareRoot.text === hookName;
           const allowedKeys = ALLOWED_NAMESPACE_KEYS_BY_HOOK.get(hookName) ?? new Set();
-          const boundNames = name.elements
-            .filter((element) => !element.dotDotDotToken)
+          const boundElements = name.elements.filter((element) => !element.dotDotDotToken);
+          // 命名空间级解构的每个绑定元素必须是简单标识符——`knowledge: { items }`
+          // 这种嵌套 binding pattern 表面上 propertyName 仍是合法的 "knowledge",
+          // 但 `element.name` 本身又是一层 ObjectBindingPattern/ArrayBindingPattern,
+          // 等于在同一条声明里把 "knowledge" 命名空间再摊平到字段级,与顶层
+          // `const uKnowledge = kgWorkspace.knowledge.items;` 同罪,必须一律违规。
+          const allSimpleIdentifiers = boundElements.every((element) => ts.isIdentifier(element.name));
+          const boundNames = boundElements
             .map((element) => (element.propertyName ?? element.name).getText(page));
-          const onlyNamespaceKeys = boundNames.length > 0
+          const onlyNamespaceKeys = allSimpleIdentifiers
+            && boundNames.length > 0
             && boundNames.every((boundName) => allowedKeys.has(boundName));
           if (!isBareHookIdentifier || !onlyNamespaceKeys) {
             violations.push(declarationText(node));
