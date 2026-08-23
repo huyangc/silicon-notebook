@@ -50,9 +50,25 @@ TypeScript AST; doing that from Python would mean spawning node and dragging
 script. `npm run test` collects `*.test.mjs` recursively, so `scripts/check.sh` still
 runs it as a hard gate. Split of duties: this file guards *rendered text*, that one
 guards *code shape*.
+
+`--extra-root <dir>` (repeatable) is a self-check hook for out-of-tree deployment
+plugins (`EXTENSIONS_CONFIG`, AGENTS.md「主 agent 裁决 3」): plugin source lives
+outside this repository, so it cannot ship in `frontend/app`/`frontend/features` or
+`backend/app` and therefore is not reachable by the two default scan roots above no
+matter how the guard is invoked. Each `--extra-root` directory's `**/*.py` is scanned
+for `user_error(...)` messages with the same rules as the default backend scan
+(same blacklist, same `SANCTIONED_UI` allowance, same f-string handling) — a plugin
+package that wants CI-grade assurance runs this guard against its own tree the same
+way this repository runs it against `backend/app`. It is deliberately scoped to
+*only* extend the scan face: passing no `--extra-root` leaves every check (including
+`MIN_USER_ERROR_SITES`, which only ever counts the default `backend/app` root, never
+an extra one — an empty or tiny plugin tree must not be able to push the floor check
+below its real threshold) and every line of output byte-for-byte unchanged from
+before this option existed.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import re
 import sys
@@ -360,7 +376,32 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--extra-root",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help=(
+            "repeatable; scan this directory's **/*.py user_error(...) messages in "
+            "addition to backend/app (out-of-tree deployment plugin self-check — see "
+            "the module docstring). Only widens the scan face: omitting it leaves "
+            "every check and every line of output unchanged."
+        ),
+    )
+    # `argv is None` here means "called with no argument at all" (e.g. the direct
+    # `guard.main()` calls in test_ui_vocabulary_guard.py), not "read this process's
+    # sys.argv" — unlike the CLI entry point below, which explicitly forwards
+    # `sys.argv[1:]`. Falling back to argparse's own None-means-sys.argv default
+    # would make every in-process `main()` call parse pytest's own arguments.
+    return parser.parse_args(argv if argv is not None else [])
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    extra_roots = [Path(p) for p in args.extra_root]
+
     files = sorted(
         p
         for directory in FRONTEND_PRODUCTION_DIRS
@@ -392,6 +433,26 @@ def main() -> int:
         for line, term, snippet in hits:
             snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
             violations.append(f"  {rel}:{line}: 「{term}」in user_error message: {snippet!r}")
+
+    # 仓库外插件自检面(裁决 3):只扩大扫描面,MIN_USER_ERROR_SITES 只对默认根计数,
+    # 不传 --extra-root 时这整段不产生任何输出或副作用。
+    extra_root_sites = 0
+    for root in extra_roots:
+        for path in sorted(root.rglob("*.py")):
+            rel = _rel(path)
+            sites, hits = scan_user_error(path)
+            extra_root_sites += sites
+            for line, term, snippet in hits:
+                snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
+                violations.append(
+                    f"  {rel}:{line}: 「{term}」in user_error message (extra root): {snippet!r}"
+                )
+    if extra_roots:
+        print(
+            f"check_ui_vocabulary: extra-root scan covered {extra_root_sites} "
+            f"{USER_ERROR}() call site(s) across {len(extra_roots)} root(s)"
+        )
+
     if marked_sites < MIN_USER_ERROR_SITES:
         print(
             f"check_ui_vocabulary: only {marked_sites} {USER_ERROR}() call sites found in "
@@ -410,13 +471,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(
+    ok_message = (
         f"UI vocabulary contract OK: scanned {len(files)} frontend production files + "
         f"{marked_sites} backend {USER_ERROR}() messages "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
+    if extra_roots:
+        ok_message += f" + {extra_root_sites} extra-root {USER_ERROR}() messages"
+    print(ok_message)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

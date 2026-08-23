@@ -8,6 +8,7 @@ raises on import, exposes the wrong object, or ships a mismatched manifest.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -1634,3 +1635,262 @@ def test_create_app_refuses_to_start_on_discovery_failure(
             deps.repository()
     finally:
         readiness._state.update(before)
+
+
+# --------------------------------------------------------------------------
+# T6 — deployment parity script (`scripts/check_deployment_extension_parity.py`)
+# and `scripts/check_ui_vocabulary.py --extra-root` (main agent ruling 3).
+#
+# Both target scripts live under ``scripts/``, which is not a package, so they
+# are loaded by file path the same way ``test_phase0_architecture_guard.py``
+# loads ``check_architecture_boundaries.py`` — a real ``exec_module`` on a real
+# file, not a monkeypatched stand-in.  Each load uses its own module name so
+# these tests cannot collide with ``test_ui_vocabulary_guard.py``'s own load of
+# ``check_ui_vocabulary.py`` under the plain name ``"check_ui_vocabulary"``.
+# --------------------------------------------------------------------------
+
+
+def _load_script_module(name: str, relative_path: str):
+    path = _REPO_ROOT / "scripts" / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:  # pragma: no cover - impossible checkout
+        raise RuntimeError(f"cannot load {relative_path} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_UI_CONTRACT_FIXTURE_PATH = (
+    _REPO_ROOT / "backend" / "tests" / "fixtures" / "ui_extension_contract.json"
+)
+
+
+def _reset_extension_caches() -> None:
+    from app.core.config import get_settings
+    from app.extensions.bootstrap import default_extension_runtime
+
+    get_settings.cache_clear()
+    default_extension_runtime.cache_clear()
+
+
+def test_deployment_parity_script_exits_zero_on_match(
+    monkeypatch, tmp_path, frozen_runtime_reset
+):
+    monkeypatch.setenv("EXTENSIONS_CONFIG", "")
+    _reset_extension_caches()
+
+    contract = tmp_path / "frontend_contract.json"
+    contract.write_text(
+        _UI_CONTRACT_FIXTURE_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    parity = _load_script_module(
+        "sn_test_deployment_parity_match",
+        "check_deployment_extension_parity.py",
+    )
+    assert parity.main(["--frontend-contract", str(contract)]) == 0
+
+
+def test_deployment_parity_script_reports_drift_and_never_writes(
+    monkeypatch, tmp_path, frozen_runtime_reset, capsys
+):
+    monkeypatch.setenv("EXTENSIONS_CONFIG", "")
+    _reset_extension_caches()
+
+    payload = json.loads(_UI_CONTRACT_FIXTURE_PATH.read_text(encoding="utf-8"))
+    payload["contributions"].append({
+        "plugin_id": "corp.does_not_exist",
+        "version": "9.9.9",
+        "contribution_id": "corp.does_not_exist.panel",
+        "slot": "workspace.side_panel",
+        "capability": "corp.does_not_exist.available",
+    })
+    contract = tmp_path / "frontend_contract.json"
+    contract.write_text(json.dumps(payload), encoding="utf-8")
+    before_text = contract.read_text(encoding="utf-8")
+    before_mtime_ns = contract.stat().st_mtime_ns
+
+    parity = _load_script_module(
+        "sn_test_deployment_parity_drift",
+        "check_deployment_extension_parity.py",
+    )
+    rc = parity.main(["--frontend-contract", str(contract)])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert "DRIFT" in err
+    assert "corp.does_not_exist" in err
+    # Never writes: the file on disk is untouched, byte for byte, mtime included.
+    assert contract.read_text(encoding="utf-8") == before_text
+    assert contract.stat().st_mtime_ns == before_mtime_ns
+
+
+def test_deployment_parity_script_usage_errors_exit_two(tmp_path, capsys):
+    parity = _load_script_module(
+        "sn_test_deployment_parity_usage",
+        "check_deployment_extension_parity.py",
+    )
+
+    missing = tmp_path / "nope.json"
+    assert parity.main(["--frontend-contract", str(missing)]) == 2
+    assert "not found" in capsys.readouterr().err
+
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("not json", encoding="utf-8")
+    assert parity.main(["--frontend-contract", str(bad_json)]) == 2
+    assert "not valid JSON" in capsys.readouterr().err
+
+    bad_version = tmp_path / "bad_version.json"
+    bad_version.write_text(
+        json.dumps({"api_version": "2", "contributions": []}), encoding="utf-8"
+    )
+    assert parity.main(["--frontend-contract", str(bad_version)]) == 2
+    assert "api_version" in capsys.readouterr().err
+
+
+def test_deployment_parity_script_reports_discovery_failure_as_exit_two(
+    monkeypatch, tmp_path, frozen_runtime_reset, capsys
+):
+    bad_toml = tmp_path / "extensions.toml"
+    bad_toml.write_text("not valid toml {{{\n", encoding="utf-8")
+    monkeypatch.setenv("EXTENSIONS_CONFIG", str(bad_toml))
+    _reset_extension_caches()
+
+    contract = tmp_path / "frontend_contract.json"
+    contract.write_text(
+        _UI_CONTRACT_FIXTURE_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    parity = _load_script_module(
+        "sn_test_deployment_parity_discovery_failure",
+        "check_deployment_extension_parity.py",
+    )
+    rc = parity.main(["--frontend-contract", str(contract)])
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert "deployment extension discovery failed" in err
+    assert "plugin=" in err
+    assert "reason=" in err
+    # Only the plugin id + stable reason code — no settings value, and in
+    # particular not the TOML file's own path, which is the closest thing to
+    # a "settings value" this failure mode has access to.
+    assert str(bad_toml) not in err
+
+
+def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
+    tmp_path, capsys
+):
+    vocab = _load_script_module(
+        "sn_test_check_ui_vocabulary_extra_root", "check_ui_vocabulary.py"
+    )
+
+    # Not passing --extra-root at all (bare main()) must behave identically to
+    # explicitly passing an empty argv — both are "no extra roots" and neither
+    # reads this process's real sys.argv (which, under pytest, is pytest's own).
+    rc_bare = vocab.main()
+    out_bare = capsys.readouterr()
+    rc_empty = vocab.main([])
+    out_empty = capsys.readouterr()
+    assert rc_bare == rc_empty == 0
+    assert out_bare.out == out_empty.out
+    assert out_bare.err == out_empty.err
+
+    plugin_root = tmp_path / "plugin_src"
+    plugin_root.mkdir()
+    (plugin_root / "routes.py").write_text(
+        'from app.api.deps import user_error\n\n'
+        'def handler():\n'
+        '    raise user_error(403, "仅管理员可设置基准库")\n',
+        encoding="utf-8",
+    )
+
+    rc = vocab.main(["--extra-root", str(plugin_root)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "基准库" in err
+    assert "routes.py" in err
+
+
+def test_ui_contract_generator_sorts_rows(monkeypatch):
+    from dataclasses import dataclass
+
+    from app.extension_sdk import (
+        EXTENSION_API_VERSION,
+        ExtensionManifest,
+        UiContributionDeclaration,
+    )
+    from app.extensions import build_extension_registry
+
+    @dataclass
+    class _UiOnlyBundle:
+        manifest: ExtensionManifest
+
+        def register(self, _registrar) -> None:
+            return None
+
+    def _manifest(plugin_id: str, contribution_id: str) -> ExtensionManifest:
+        return ExtensionManifest(
+            id=plugin_id,
+            version="1.0.0",
+            api_version=EXTENSION_API_VERSION,
+            display_name=plugin_id,
+            trust="builtin",
+            contributions=(),
+            ui_contributions=(UiContributionDeclaration(
+                id=contribution_id,
+                slot="workspace.side_panel",
+                capability=f"{plugin_id}.available",
+            ),),
+        )
+
+    # `ExtensionRegistry.freeze()` already sorts its `_ui_contributions` dict by
+    # *contribution_id* (registry.py: `dict(sorted(self._ui_contributions.items()))`)
+    # before this generator ever sees it — so a naive test that lets contribution_id
+    # track plugin_id (e.g. both "aaa.sample" / "aaa.sample.panel") would pass even
+    # with the generator's own `sorted(...)` deleted, because the registry's
+    # contribution_id sort already happens to agree with plugin_id sort. Deliberately
+    # anti-correlate the two here — "zzz.sample" gets the alphabetically *first*
+    # contribution_id and "aaa.sample" the *last* — so registry order (by
+    # contribution_id: aaa_panel, zzz_panel → zzz.sample, aaa.sample) and the
+    # generator's own `_CONTRIBUTION_SORT_FIELDS` order (by plugin_id: aaa.sample,
+    # zzz.sample) actually disagree, and only the generator's sort produces the
+    # plugin_id-ascending order this test asserts.
+    registry = build_extension_registry(
+        (
+            _UiOnlyBundle(_manifest("zzz.sample", "aaa_panel")),
+            _UiOnlyBundle(_manifest("aaa.sample", "zzz_panel")),
+        ),
+        capability_decisions={
+            "zzz.sample.available": lambda _context: Availability(
+                AvailabilityStatus.UNAVAILABLE, "unused"
+            ),
+            "aaa.sample.available": lambda _context: Availability(
+                AvailabilityStatus.UNAVAILABLE, "unused"
+            ),
+        },
+    )
+
+    class _FakeRuntime:
+        pass
+
+    fake_runtime = _FakeRuntime()
+    fake_runtime.registry = registry
+
+    generator = _load_script_module(
+        "sn_test_generate_ui_extension_contract_sort",
+        "generate_ui_extension_contract.py",
+    )
+    monkeypatch.setattr(generator, "default_extension_runtime", lambda: fake_runtime)
+
+    fixture = generator.build_fixture()
+    plugin_ids = [row["plugin_id"] for row in fixture["contributions"]]
+    assert plugin_ids == ["aaa.sample", "zzz.sample"]
+
+    # The shared comparator confirms row order alone is never drift: a
+    # deliberately reversed copy of this sorted output still "matches" it.
+    reversed_copy = {
+        "api_version": generator.API_VERSION,
+        "contributions": list(reversed(fixture["contributions"])),
+    }
+    assert generator.contract_rows_match(reversed_copy, fixture)
