@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { importsIn, parseModule } from "../../test-support/semantic-source.mjs";
+import { callsIn, findFunctionIn, importsIn, parseModule } from "../../test-support/semantic-source.mjs";
 
 
 test("page composes one source-library owner and does not retain source CRUD/detail state", async () => {
@@ -32,10 +32,18 @@ test("page composes one source-library owner and does not retain source CRUD/det
   ]) {
     assert.equal(sourceImports.includes(hookOwned), false, `page imports hook-owned ${hookOwned}`);
   }
+  // sourceLibrary.activateActor 现在只经共享函数 activateWorkspaceOwners 间接
+  // 调用；守卫 workspace-owner-transition-guard 钉住「只能从那里发出」。原断言钉
+  // 「紧邻 setCurrentUser(u)」的顺序邻接，现拆成两半：共享函数体内确有调用，加上
+  // 两个认证站点各自 activateWorkspaceOwners(u.id) 紧邻 setCurrentUser(u)。
+  assert.ok(
+    callsIn(findFunctionIn(page, "Home", "activateWorkspaceOwners")).includes("sourceLibrary.activateActor"),
+    "activateWorkspaceOwners must activate the source-library owner",
+  );
   assert.match(
     text,
-    /sourceLibrary\.activateActor\(u\.id\);\s*setCurrentUser\(u\)/,
-    "authenticated restoration must activate source identity before opening a hash target",
+    /activateWorkspaceOwners\(u\.id\);\s*setCurrentUser\(u\)/,
+    "authenticated restoration must activate workspace owners before opening a hash target",
   );
   assert.match(text, /openNotebook\(workspace\.notebookId, "none", u\.id\)/);
   assert.match(text, /openNotebookMemory\(notebookId, u\.id\)/);

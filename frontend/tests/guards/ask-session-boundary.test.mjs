@@ -6,6 +6,7 @@ import ts from "typescript";
 import {
   callsIn,
   findFunction,
+  findFunctionIn,
   importsIn,
   parseModule,
 } from "../../test-support/semantic-source.mjs";
@@ -138,17 +139,40 @@ test("workspace transitions delegate Ask ownership and authenticated bootstrap a
   ]) {
     assert.ok(openCalls.includes(call), `openNotebook is missing ${call}`);
   }
+  // askSession.leaveWorkspace/abortForLogout/activateActor 现在只经共享函数
+  // leaveWorkspaceOwners/leaveActorOwners/activateWorkspaceOwners 间接调用；守卫
+  // workspace-owner-transition-guard 钉住「只能从那里发出」。
   assert.ok(
-    callsIn(findFunction(page, "showCollection")).includes("askSession.leaveWorkspace"),
-    "collection transition must synchronously detach the Ask owner",
+    callsIn(findFunction(page, "showCollection")).includes("leaveWorkspaceOwners"),
+    "collection transition must call the shared leaveWorkspaceOwners sink",
   );
   assert.ok(
-    callsIn(findFunction(page, "handleLogout")).includes("askSession.abortForLogout"),
-    "logout must explicitly tear down Ask work",
+    callsIn(findFunctionIn(page, "Home", "leaveWorkspaceOwners")).includes("askSession.leaveWorkspace"),
+    "leaveWorkspaceOwners must synchronously detach the Ask owner",
   );
+  assert.ok(
+    callsIn(findFunction(page, "handleLogout")).includes("leaveActorOwners"),
+    "logout must call the shared leaveActorOwners sink",
+  );
+  assert.ok(
+    callsIn(findFunctionIn(page, "Home", "leaveActorOwners")).includes("askSession.abortForLogout"),
+    "leaveActorOwners must explicitly tear down Ask work",
+  );
+  assert.ok(
+    callsIn(findFunctionIn(page, "Home", "activateWorkspaceOwners")).includes("askSession.activateActor"),
+    "activateWorkspaceOwners must activate the Ask owner",
+  );
+  // 原断言钉「askSession → sourceLibrary → setCurrentUser」顺序邻接；现拆成两半：
+  // 共享函数体内 askSession 仍紧邻 sourceLibrary（相对顺序不变），加上两个认证站点
+  // 各自 activateWorkspaceOwners(u.id) 紧邻 setCurrentUser(u)（站点内顺序不变）。
   assert.match(
-    page.getText(page),
-    /askSession\.activateActor\(u\.id\);\s*sourceLibrary\.activateActor\(u\.id\);\s*setCurrentUser\(u\)/,
+    findFunctionIn(page, "Home", "activateWorkspaceOwners").getText(page),
+    /askSession\.activateActor\(actorId\);\s*sourceLibrary\.activateActor\(actorId\);/,
+    "activateWorkspaceOwners must keep askSession before sourceLibrary",
+  );
+  assert.equal(
+    (page.getText(page).match(/activateWorkspaceOwners\(u\.id\);\s*setCurrentUser\(u\)/g) ?? []).length,
+    2,
     "authenticated bootstrap must activate hook identities before publishing currentUser",
   );
   assert.match(

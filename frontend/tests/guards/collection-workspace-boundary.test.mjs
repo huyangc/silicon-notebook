@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   callsIn,
   findFunction,
+  findFunctionIn,
   importsIn,
   parseModule,
 } from "../../test-support/semantic-source.mjs";
@@ -88,10 +89,16 @@ test("collection search is not reverse-owned by Ask or page", () => {
 });
 
 test("authentication binds collection authority before publishing currentUser", () => {
-  const bootstrap = pageText.indexOf("notebookCollection.activateActor(u.id)");
+  // notebookCollection.activateActor 现在只经共享函数 activateWorkspaceOwners
+  // 间接调用；守卫 workspace-owner-transition-guard 钉住「只能从那里发出」。
+  assert.ok(
+    callsIn(findFunctionIn(page, "Home", "activateWorkspaceOwners")).includes("notebookCollection.activateActor"),
+    "activateWorkspaceOwners must activate the collection owner",
+  );
+  const bootstrap = pageText.indexOf("activateWorkspaceOwners(u.id)");
   const publish = pageText.indexOf("setCurrentUser(u)", bootstrap);
   assert.ok(bootstrap >= 0 && publish > bootstrap);
-  const authGate = pageText.lastIndexOf("notebookCollection.activateActor(u.id)");
+  const authGate = pageText.lastIndexOf("activateWorkspaceOwners(u.id)");
   const authPublish = pageText.indexOf("setCurrentUser(u)", authGate);
   assert.ok(authGate > bootstrap && authPublish > authGate);
 });
