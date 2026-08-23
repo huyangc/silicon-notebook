@@ -136,7 +136,7 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   const leave = findFunction(page, "handleLeaveShared");
   assert.ok(leave, "缺 handleLeaveShared");
   assert.ok(
-    callsIn(leave).includes("refreshAfterAccessChange"),
+    callsIn(leave).includes("notebookCollection.refreshAfterAccessChange"),
     "「退出只读共享」没复用同一个收口",
   );
   assert.ok(
@@ -242,9 +242,20 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   assert.equal(jsxElements(page, "ReaderNotebookBadge").length, 1);
   const menuActions = jsxElements(page, "NotebookMenuActions");
   assert.equal(menuActions.length, 1);
-  assert.match(menuActions[0].bindings.onLeave ?? "", /leaveNotebook\(target\.id\)/);
+  assert.equal(
+    menuActions[0].bindings.onLeave,
+    "leaveMenuNotebook(notebookCollection.menu.notebook.id)",
+    "菜单的退出共享回调没有绑到 leaveMenuNotebook 工厂",
+  );
+  // leaveMenuNotebook 是把「读 notebookCollection.menu.notebook.id」挪到 JSX 渲染层
+  // (窄化在那里成立)、把结果绑成普通字符串参数捕获进闭包的工厂——闭包内部因此不用
+  // 再碰一条可能为 null 的属性链。真正的退出逻辑钉在工厂函数体里。
+  const leaveFactory = findFunction(page, "leaveMenuNotebook");
+  assert.ok(leaveFactory, "缺 leaveMenuNotebook 工厂函数");
+  const leaveFactoryText = leaveFactory.getText(page);
+  assert.match(leaveFactoryText, /leaveNotebook\(notebookId\)/);
   assert.match(
-    menuActions[0].bindings.onLeave ?? "",
+    leaveFactoryText,
     /loadNotebookCollection\(\)/,
     "集合卡片退出共享必须保留既有 composite 刷新，不能降成 access-only list",
   );
@@ -252,7 +263,7 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   // 反向:page.tsx 里不该再出现自己渲染的「退出共享」按钮。
   const strays = jsxElements(page, "button").filter((element) =>
     (element.bindings?.onClick ?? "").includes("handleLeaveShared(")
-    || (element.bindings?.onClick ?? "").includes("leaveNotebook(target.id)"));
+    || (element.bindings?.onClick ?? "").includes("leaveNotebook("));
   assert.deepEqual(
     strays.map((element) => element.bindings.onClick),
     [],

@@ -135,6 +135,6 @@ test("owner recovery adopts server-running rebuild without inferring pending wor
 
 test("presentation disables both maintenance actions while either shared task is busy", () => {
   const text = page.getFullText();
-  assert.match(text, /if \(kgRefreshBusy \|\| relinkingKg \|\| buildingKg\) return/);
-  assert.match(text, /disabled=\{kgRefreshBusy \|\| relinkingKg \|\| buildingKg\}/);
+  assert.match(text, /if \(kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\) return/);
+  assert.match(text, /disabled=\{kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\}/);
 });

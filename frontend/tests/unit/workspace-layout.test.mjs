@@ -121,8 +121,8 @@ test("修改密码弹窗在 page 接线:菜单回调打开、内置管理员隐�
   assert.equal(modals.length, 1);
   assert.deepEqual(modals[0].bindings, {
     onClose: '() => rootModals.requestClose("password-change", "button")',
-    interactive: "passwordModal.topmost",
-    zIndex: "passwordModal.zIndex",
+    interactive: 'rootModals.view("password-change").topmost',
+    zIndex: 'rootModals.view("password-change").zIndex',
   });
   const menus = jsxElements(page, "AccountMenu");
   assert.equal(menus.length, 1);
@@ -146,8 +146,8 @@ test("source detail uses the dedicated draggable window shell", () => {
     // sourceLibrary.closeSourceDetail 清 highlightedElementId；同时 topmost 决定
     // aria-modal/inert，防止上层确认框出现时后台详情继续接收键盘输入。
     onClose: '() => rootModals.requestClose("source-detail", "button")',
-    interactive: "sourceDetailModal.topmost",
-    zIndex: "sourceDetailModal.zIndex",
+    interactive: 'rootModals.view("source-detail").topmost',
+    zIndex: 'rootModals.view("source-detail").zIndex',
   });
   assert.equal(
     importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),

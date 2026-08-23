@@ -949,23 +949,6 @@ export default function Home() {
       reconcileAccess: (rows, navigationEpoch) => reconcileOpenNotebook(rows, navigationEpoch),
     },
   });
-  const notebooks = notebookCollection.rows;
-  const visibleNotebooks = notebookCollection.visibleRows;
-  const filter = notebookCollection.filter;
-  const viewMode = notebookCollection.viewMode;
-  const sortMode = notebookCollection.sortMode;
-  const searchQuery = notebookCollection.searchQuery;
-  const sortOpen = notebookCollection.sortOpen;
-  const menuNotebook = notebookCollection.menu.notebook;
-  const menuPosition = notebookCollection.menu.position;
-  const notebookMenuRef = notebookCollection.menu.ref;
-  const editingNotebook = notebookCollection.editor?.target ?? null;
-  const mountable = notebookCollection.editor?.mountable ?? [];
-  const mountedIds = notebookCollection.editor?.mountedIds ?? [];
-  const mountEdges = notebookCollection.editor?.mountEdges ?? [];
-  const deleteNotebook = notebookCollection.deletion?.target ?? null;
-  const deleteMountedByCount = notebookCollection.deletion?.mountedByCount ?? 0;
-  const refreshAfterAccessChange = notebookCollection.refreshAfterAccessChange;
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
@@ -1075,42 +1058,7 @@ export default function Home() {
       focusGraphNode: (nodeId) => focusKgGraphNode(nodeId),
     },
   });
-  const knowledgeKind = kgWorkspace.knowledge.kind;
-  const knowledgeItems = kgWorkspace.knowledge.items;
-  const knowledgeTypes = kgWorkspace.knowledge.types;
-  const knowledgeStatusFilter = kgWorkspace.knowledge.statusFilter;
-  const knowledgeTotalForKind = kgWorkspace.knowledge.total;
-  const knowledgePageForKind = kgWorkspace.knowledge.page;
-  const duplicates = kgWorkspace.knowledge.duplicates;
-  const schemaModalOpen = kgWorkspace.schema.open;
-  const schemas = kgWorkspace.schema.schemas;
-  const schemaBusy = kgWorkspace.schema.busy;
-  const schemaView = kgWorkspace.schema.view;
-  const kgViewOpen = kgWorkspace.graph.open;
-  const kgAnalysisOpen = kgWorkspace.graph.analysisOpen;
-  const uGraph = kgWorkspace.graph.graph;
-  const uGraphMerged = kgWorkspace.graph.merged;
-  const vizBuilding = kgWorkspace.graph.vizBuilding;
-  const kgSearch = kgWorkspace.graph.search;
-  const kgSearchHits = kgWorkspace.graph.searchHits;
-  const kgSearchBusy = kgWorkspace.graph.searchBusy;
-  const kgLimit = kgWorkspace.graph.rangeLimit;
-  const kgRangeBusy = kgWorkspace.graph.rangeBusy;
-  const kgSelectedTypes = kgWorkspace.graph.selectedTypes;
-  const pendingMerges = kgWorkspace.graph.pendingMerges;
-  const unifiedKgStatus = kgWorkspace.graph.status;
-  const selectedKgNodeId = kgWorkspace.graph.selectedNodeId;
-  const conceptDetail = kgWorkspace.graph.conceptDetail;
-  const nodeCtx = kgWorkspace.graph.nodeContext;
-  const kgReviewBusy = kgWorkspace.graph.reviewBusy;
-  const decidingMerge = kgWorkspace.graph.decidingMerge;
-  const reviewAllJob = kgWorkspace.graph.reviewAllJob;
-  const reviewAllStarting = kgWorkspace.graph.reviewAllStarting;
-  const reviewAllRunning = kgWorkspace.graph.reviewAllRunning;
-  const buildingKg = kgWorkspace.graph.buildingKg;
-  const trackedKgJobId = kgWorkspace.graph.trackedKgJobId;
-  const kgRefreshBusy = kgWorkspace.graph.rebuilding;
-  const relinkingKg = kgWorkspace.graph.relinking;
+  const { knowledge: kgKnowledge, schema: kgSchema, graph: kgGraph } = kgWorkspace;
   // 「AI 对这个库的理解」弹窗(P1-T7)。入口由 workspace side-panel 插件提供，
   // 弹窗本身仍渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
   // 它的业务数据仍由 AgentProfilePanel 自持；根层是否呈现及切库同步失效由
@@ -1120,47 +1068,26 @@ export default function Home() {
     sourceId: sourceDetail?.id ?? null,
     onClosed: handleRootModalClosed,
   });
-  const passwordModal = rootModals.view("password-change");
-  const searchProfileModal = rootModals.view("search-profile");
-  const notebookEditorModal = rootModals.view("notebook-editor");
-  const notebookDeleteModal = rootModals.view("notebook-delete");
-  const sourceModal = rootModals.view("source-add");
-  const sourceDetailModal = rootModals.view("source-detail");
-  const infoModalView = rootModals.view("info");
-  const modelPanel = rootModals.view("model-service");
-  const notebookShareModal = rootModals.view("notebook-share");
-  const sharedPreviewModal = rootModals.view("shared-preview");
-  const sharedByMeModal = rootModals.view("shared-by-me");
-  const memorySaveModal = rootModals.view("memory-save");
-  const catalogReviewModal = rootModals.view("catalog-review");
-  const conversationShareModal = rootModals.view("conversation-share");
-  const analyticsModal = rootModals.view("analytics");
-  const kgSchemaModal = rootModals.view("kg-schema");
-  const kgAnalysisModal = rootModals.view("kg-analysis");
-  const understandingModal = rootModals.view("understanding");
-  const promotionQueueModal = rootModals.view("promotion-queue");
-  const promotionTargetModal = rootModals.view("promotion-target");
-  const edgeReviewModal = rootModals.view("edge-review");
   // Domain owners may clear their payload after a successful write, permission
   // downgrade, or workspace transition.  Mirror that close into the
   // presentation coordinator so a hidden lease never remains topmost.
   useEffect(() => {
-    if (!editingNotebook && rootModals.activeLease("notebook-editor")) {
+    if (!(notebookCollection.editor?.target ?? null) && rootModals.activeLease("notebook-editor")) {
       rootModals.requestClose("notebook-editor", "button");
     }
-    if (!deleteNotebook && rootModals.activeLease("notebook-delete")) {
+    if (!(notebookCollection.deletion?.target ?? null) && rootModals.activeLease("notebook-delete")) {
       rootModals.requestClose("notebook-delete", "button");
     }
     if (!sourceDetail && rootModals.activeLease("source-detail")) {
       rootModals.requestClose("source-detail", "button");
     }
-    if (!schemaModalOpen && rootModals.activeLease("kg-schema")) {
+    if (!kgSchema.open && rootModals.activeLease("kg-schema")) {
       rootModals.requestClose("kg-schema", "button");
     }
-    if (!kgAnalysisOpen && rootModals.activeLease("kg-analysis")) {
+    if (!kgGraph.analysisOpen && rootModals.activeLease("kg-analysis")) {
       rootModals.requestClose("kg-analysis", "button");
     }
-  }, [editingNotebook?.id, deleteNotebook?.id, sourceDetail?.id, schemaModalOpen, kgAnalysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [notebookCollection.editor?.target?.id, notebookCollection.deletion?.target?.id, sourceDetail?.id, kgSchema.open, kgGraph.analysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -1262,7 +1189,7 @@ export default function Home() {
   // arrives. URL import has a separate server-side size contract and stays usable.
   useEffect(() => {
     if (
-      !sourceModal.open
+      !rootModals.view("source-add").open
       || (sourceUploadMaxBytes !== null && sourceUploadMaxFilesPerBatch !== null)
     ) return;
     let cancelled = false;
@@ -1287,7 +1214,7 @@ export default function Home() {
     };
     void loadUploadLimit();
     return () => { cancelled = true; window.clearTimeout(retryTimer); };
-  }, [sourceModal.open, sourceUploadMaxBytes, sourceUploadMaxFilesPerBatch]);
+  }, [rootModals.view("source-add").open, sourceUploadMaxBytes, sourceUploadMaxFilesPerBatch]);
   // Relink isolated nodes: additive/background, no confirm needed.
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView + 它下面那条 relink/status 轮询，
   // 终态时按当前范围重拉）。
@@ -1383,7 +1310,7 @@ export default function Home() {
     // 打开分析看板期间 paper-meta 补抽也算「忙」——否则新独立的 backfill poll
     // 因 analytics gate 让位不跑、聚合 poll 又不知道它在忙,补抽在看板打开期间
     // 完成就形成状态死区(按钮永远显示「补全中…」,来源列表不刷新)。
-    const busy = buildingKg || kgRefreshBusy || buildingScaleIndex || backfillingMeta
+    const busy = kgGraph.buildingKg || kgGraph.rebuilding || buildingScaleIndex || backfillingMeta
       || Boolean(indexStatus?.kg.building) || Boolean(indexStatus?.unified_kg.building);
     if (!busy) return;
     const nb = currentNotebookId;
@@ -1394,7 +1321,7 @@ export default function Home() {
         if (cancelled) return;
         setIndexStatus(s);
         setScaleIndexStatus(s.scale_index);
-        if (buildingKg && !s.kg.building) {
+        if (kgGraph.buildingKg && !s.kg.building) {
           getNotebook(nb)
             .then((refreshed) => {
               if (cancelled) return;
@@ -1438,7 +1365,7 @@ export default function Home() {
       }
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
-  }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, trackedKgJobId, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
+  }, [analytics, currentNotebookId, kgGraph.buildingKg, kgGraph.rebuilding, buildingScaleIndex, backfillingMeta, kgGraph.trackedKgJobId, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
   // 切库即清空旧库体检结果(per-notebook,旧库结论不能跨库显示)+ 对新库**立即拉一次**
   // 体检——不等看板打开(codex P2:否则铃铛在用户打开看板前无从提醒,违背主动提醒初衷)。
   // best-effort、只读、无模型;仅当仍是当前库时落状态。
@@ -2109,7 +2036,7 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (!kgViewOpen) return;
+    if (!kgGraph.open) return;
     const element = kgCanvasRef.current;
     if (!element) return;
     const updateSize = () => {
@@ -2127,7 +2054,7 @@ export default function Home() {
       observer?.disconnect();
       window.removeEventListener("resize", updateSize);
     };
-  }, [kgViewOpen]);
+  }, [kgGraph.open]);
   const {
     question,
     turns,
@@ -2251,10 +2178,10 @@ export default function Home() {
   // 复用同一份而非每条引用各建一次。
   const notebookNames = useMemo(() => {
     const names: Record<string, string> = {};
-    for (const nb of notebooks) names[nb.id] = nb.name;
+    for (const nb of notebookCollection.rows) names[nb.id] = nb.name;
     for (const base of currentNotebook?.base_notebooks ?? []) names[base.id] = base.name;
     return names;
-  }, [notebooks, currentNotebook]);
+  }, [notebookCollection.rows, currentNotebook]);
   // 多领域基准库(Task 14 追加项):Memory 晋升按钮要复用与知识条目同一套
   // resolvePromotionTarget(0 个禁用/1 个直接用/>1 个弹选择器)。数据源刻意不用
   // owner-only 的 /bases 端点(currentNotebookBases 只在进「Rules」tab 时按
@@ -2273,25 +2200,25 @@ export default function Home() {
   // 一次性建好全量映射。
   const notebookBasesById: Record<string, MountedBase[]> = useMemo(() => {
     const map: Record<string, MountedBase[]> = {};
-    for (const nb of notebooks) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
+    for (const nb of notebookCollection.rows) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
     return map;
-  }, [notebooks]);
+  }, [notebookCollection.rows]);
   const fgData = useMemo(() => {
-    const q = kgSearch.trim();
-    if (!uGraphMerged) return { nodes: [] as FgNode[], links: [] as FgLink[], searchHitCount: 0 };
+    const q = kgGraph.search.trim();
+    if (!kgGraph.merged) return { nodes: [] as FgNode[], links: [] as FgLink[], searchHitCount: 0 };
 
     // 搜索模式：服务端返回的命中节点 + 核心图/展开图中对应节点的已知边。
-    if (q && kgSearchHits.length > 0) {
+    if (q && kgGraph.searchHits.length > 0) {
       const deg: Record<string, number> = {};
-      uGraphMerged.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
-      const filtered = kgSearchHits.filter((h) => kgSelectedTypes.length === 0 || kgSelectedTypes.includes(h.object_type));
+      kgGraph.merged.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
+      const filtered = kgGraph.searchHits.filter((h) => kgGraph.selectedTypes.length === 0 || kgGraph.selectedTypes.includes(h.object_type));
       const nodes: FgNode[] = filtered.map((h) => {
         const degree = deg[h.object_id] ?? 0;
         return { id: h.object_id, name: h.name, type: h.object_type, val: 5 + Math.min(18, degree), degree };
       });
       // 命中节点之间已知的边也渲染出来。
       const keep = new Set(nodes.map((n) => n.id));
-      const links: FgLink[] = uGraphMerged.edges
+      const links: FgLink[] = kgGraph.merged.edges
         .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
         .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type, sourceCount: e.source_count }));
       return { nodes, links, searchHitCount: nodes.length };
@@ -2302,27 +2229,27 @@ export default function Home() {
 
     // 非搜索模式：渲染合并图（核心 + 展开邻居），支持类型过滤。
     const deg: Record<string, number> = {};
-    uGraphMerged.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
-    const nodes: FgNode[] = uGraphMerged.nodes
-      .filter((n) => kgSelectedTypes.length === 0 || kgSelectedTypes.includes(n.object_type))
+    kgGraph.merged.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
+    const nodes: FgNode[] = kgGraph.merged.nodes
+      .filter((n) => kgGraph.selectedTypes.length === 0 || kgGraph.selectedTypes.includes(n.object_type))
       .map((n) => {
         const degree = deg[n.id] ?? 0;
         return { id: n.id, name: kgNodeName(n), type: n.object_type, val: 5 + Math.min(18, degree), degree };
       });
     const keep = new Set(nodes.map((n) => n.id));
-    const links: FgLink[] = uGraphMerged.edges
+    const links: FgLink[] = kgGraph.merged.edges
       .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
       .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type, sourceCount: e.source_count }));
     return { nodes, links, searchHitCount: 0 };
-  }, [uGraphMerged, kgSearch, kgSearchHits, kgSelectedTypes]);
+  }, [kgGraph.merged, kgGraph.search, kgGraph.searchHits, kgGraph.selectedTypes]);
 
-  const kgSearching = kgSearch.trim().length > 0;
-  const kgDenseView = kgSelectedTypes.length === 0 && !kgSearch.trim() && fgData.nodes.length > 36;
+  const kgSearching = kgGraph.search.trim().length > 0;
+  const kgDenseView = kgGraph.selectedTypes.length === 0 && !kgGraph.search.trim() && fgData.nodes.length > 36;
 
   const kgTypeCounts = useMemo(() => {
-    if (!uGraph) return [] as Array<{ type: string; label: string; count: number }>;
+    if (!kgGraph.graph) return [] as Array<{ type: string; label: string; count: number }>;
     const counts = new Map<string, number>();
-    uGraph.nodes.forEach((node) => counts.set(node.object_type, (counts.get(node.object_type) ?? 0) + 1));
+    kgGraph.graph.nodes.forEach((node) => counts.set(node.object_type, (counts.get(node.object_type) ?? 0) + 1));
     return Array.from(counts.entries())
       .map(([type, count]) => ({ type, label: kgTypeLabel(type), count }))
       .sort((left, right) => {
@@ -2333,23 +2260,23 @@ export default function Home() {
         }
         return left.label.localeCompare(right.label, "en");
       });
-  }, [uGraph]);
+  }, [kgGraph.graph]);
 
   const selectedKgNode = useMemo(() => {
-    if (!uGraphMerged || !selectedKgNodeId) return null;
+    if (!kgGraph.merged || !kgGraph.selectedNodeId) return null;
     // 也在搜索命中中查找（搜索结果节点可能还未进入 uGraphMerged）
-    const fromGraph = uGraphMerged.nodes.find((node) => node.id === selectedKgNodeId);
+    const fromGraph = kgGraph.merged.nodes.find((node) => node.id === kgGraph.selectedNodeId);
     if (fromGraph) return fromGraph;
-    const hit = kgSearchHits.find((h) => h.object_id === selectedKgNodeId);
+    const hit = kgGraph.searchHits.find((h) => h.object_id === kgGraph.selectedNodeId);
     if (hit) return { id: hit.object_id, object_type: hit.object_type, payload: { name: hit.name } } satisfies UnifiedConceptNode;
     return null;
-  }, [selectedKgNodeId, uGraphMerged, kgSearchHits]);
+  }, [kgGraph.selectedNodeId, kgGraph.merged, kgGraph.searchHits]);
 
   const selectedKgEdges = useMemo(() => {
-    if (!uGraphMerged || !selectedKgNodeId) return [];
-    const nodeById = new Map(uGraphMerged.nodes.map((node) => [node.id, node]));
-    return uGraphMerged.edges
-      .filter((edge) => edge.source_object_id === selectedKgNodeId || edge.target_object_id === selectedKgNodeId)
+    if (!kgGraph.merged || !kgGraph.selectedNodeId) return [];
+    const nodeById = new Map(kgGraph.merged.nodes.map((node) => [node.id, node]));
+    return kgGraph.merged.edges
+      .filter((edge) => edge.source_object_id === kgGraph.selectedNodeId || edge.target_object_id === kgGraph.selectedNodeId)
       .map((edge) => ({
         ...edge,
         sourceName: kgNodeName(nodeById.get(edge.source_object_id) ?? { id: edge.source_object_id, object_type: "", payload: { name: edge.source_object_id } }),
@@ -2357,7 +2284,7 @@ export default function Home() {
         targetName: kgNodeName(nodeById.get(edge.target_object_id) ?? { id: edge.target_object_id, object_type: "", payload: { name: edge.target_object_id } }),
         targetType: nodeById.get(edge.target_object_id)?.object_type ?? ""
       }));
-  }, [selectedKgNodeId, uGraphMerged]);
+  }, [kgGraph.selectedNodeId, kgGraph.merged]);
 
   const kgNodeGroups = useMemo(() => {
     const byType = new Map<string, FgNode[]>();
@@ -2381,9 +2308,9 @@ export default function Home() {
   }, [fgData.nodes]);
 
   const relatedNodeGroups = useMemo(() => {
-    if (!conceptDetail) return [] as Array<{ type: string; label: string; nodes: KgObject[] }>;
+    if (!kgGraph.conceptDetail) return [] as Array<{ type: string; label: string; nodes: KgObject[] }>;
     const byType = new Map<string, KgObject[]>();
-    conceptDetail.attached.forEach((node) => {
+    kgGraph.conceptDetail.attached.forEach((node) => {
       byType.set(node.object_type, [...(byType.get(node.object_type) ?? []), node]);
     });
     return Array.from(byType.entries())
@@ -2400,12 +2327,12 @@ export default function Home() {
         }
         return left.label.localeCompare(right.label, "en");
       });
-  }, [conceptDetail]);
+  }, [kgGraph.conceptDetail]);
 
   function toggleKgType(type: string) {
     const allTypes = kgTypeCounts.map((item) => item.type);
     if (allTypes.length === 0) return;
-    if (!kgSelectedTypes.includes(type) && kgSelectedTypes.length + 1 === allTypes.length) {
+    if (!kgGraph.selectedTypes.includes(type) && kgGraph.selectedTypes.length + 1 === allTypes.length) {
       kgWorkspace.clearTypes();
       return;
     }
@@ -2434,17 +2361,17 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (!kgViewOpen || fgData.nodes.length === 0) return;
+    if (!kgGraph.open || fgData.nodes.length === 0) return;
     const graph = kgGraphRef.current;
     graph?.d3Force?.("link")?.distance?.(kgDenseView ? 128 : 96);
     graph?.d3Force?.("charge")?.strength?.(kgDenseView ? -310 : -190);
-    graph?.d3Force?.("typeBand", kgTypeBandForce(kgSize.width, kgSize.height, kgSelectedTypes));
+    graph?.d3Force?.("typeBand", kgTypeBandForce(kgSize.width, kgSize.height, kgGraph.selectedTypes));
     graph?.d3ReheatSimulation?.();
     const timer = window.setTimeout(() => {
       fitKgGraphView(450);
     }, 700);
     return () => window.clearTimeout(timer);
-  }, [fgData.nodes.length, fgData.links.length, kgDenseView, kgSelectedTypes, kgSize.height, kgSize.width, kgViewOpen]);
+  }, [fgData.nodes.length, fgData.links.length, kgDenseView, kgGraph.selectedTypes, kgSize.height, kgSize.width, kgGraph.open]);
 
   async function refreshModelStatus(): Promise<ModelServicesStatus | null> {
     const requestId = ++modelStatusRequestRef.current;
@@ -2470,7 +2397,7 @@ export default function Home() {
   // which, because refreshModelStatus bumps modelStatusRequestRef at request start, would
   // otherwise keep discarding every response and never update under sustained latency.
   useEffect(() => {
-    if (!modelPanel.open) return;
+    if (!rootModals.view("model-service").open) return;
     let cancelled = false;
     let timer = 0;
     const scheduleNext = () => {
@@ -2483,7 +2410,7 @@ export default function Home() {
     return () => { cancelled = true; window.clearTimeout(timer); };
     // refreshModelStatus only touches refs + setState (stable); gate solely on open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelPanel.open]);
+  }, [rootModals.view("model-service").open]);
 
   async function loadNotebookCollection(opts: { guard?: () => boolean } = {}) {
     // The collection hook owns the issued/published watermarks.  The shell keeps
@@ -2786,7 +2713,7 @@ export default function Home() {
 
   function submitNotebookEditor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!editingNotebook) return;
+    if (!(notebookCollection.editor?.target ?? null)) return;
     const formData = new FormData(event.currentTarget);
     const splitLines = (value: string) =>
       value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
@@ -2813,6 +2740,28 @@ export default function Home() {
     const lease = rootModals.issue("notebook-delete", rootModals.captureActorOwner());
     if (!lease) return;
     if (await notebookCollection.openDelete(notebookId)) rootModals.publish(lease);
+  }
+
+  // 三个笔记本菜单动作的 curry 工厂:notebookCollection.menu.notebook 只在 JSX 渲染
+  // 这一层(未跨闭包边界)被 TypeScript 窄化为非空，deferred 到 onClick 闭包内部
+  // 再读同一条属性链会丢失窄化；改成在渲染时把 id 读出来、绑进闭包捕获的普通字符
+  // 串参数，闭包内部就不用再碰可能为 null 的属性链。
+  function editMenuNotebook(notebookId: string) {
+    return () => { void presentNotebookEditor(notebookId); notebookCollection.closeMenu(); };
+  }
+
+  function deleteMenuNotebook(notebookId: string) {
+    return () => { void presentNotebookDelete(notebookId); notebookCollection.closeMenu(); };
+  }
+
+  function leaveMenuNotebook(notebookId: string) {
+    return () => {
+      notebookCollection.closeMenu();
+      leaveNotebook(notebookId)
+        .then(() => loadNotebookCollection())
+        .then(() => setToast("已退出只读共享"))
+        .catch(reportError);
+    };
   }
 
   // Stage selected files so the user can pick a document type per file before
@@ -3780,14 +3729,14 @@ export default function Home() {
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   // codex R4 P2(B):同样认「任一忙碌位为真即忙」，与 refreshUnifiedKg 的早退同口径。
   function confirmRefreshUnifiedKg() {
-    if (kgRefreshBusy || relinkingKg || buildingKg) return;
+    if (kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg) return;
     confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新分析来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
   }
 
   // 图谱分析页的动作与「重新合并」复用同一条后台任务，只把用户目标说成报告生成，
   // 避免让人自己猜“尚未生成”的五份数据究竟由哪个维护动作产出。
   function confirmGenerateKgAnalysis() {
-    if (kgRefreshBusy || relinkingKg || buildingKg) return;
+    if (kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg) return;
     confirmIndexAction(
       "生成或更新图谱分析？\n\n将重算跨文档概念合并、主题板块和质量统计（不重新分析来源）。后台进行，完成后分析页会自动刷新。",
       () => refreshUnifiedKg(),
@@ -4077,7 +4026,7 @@ export default function Home() {
       await leaveNotebook(leftId);
       // 走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中一道闸——
       // 这次漏的正是请求世代)。
-      await refreshAfterAccessChange(navEpoch);
+      await notebookCollection.refreshAfterAccessChange(navEpoch);
       setToast("已退出只读共享");
     } finally {
       setLeaveBusy(false);
@@ -4583,7 +4532,7 @@ export default function Home() {
   // 单独一区。判据是 granted_via 非空而不是 access —— 只读共享同样是 reader,但它
   // 有「退出共享」这个用户自己能按的出口,群组共享没有(那个按钮打的是成员表,对
   // 授权边一点作用都没有),两者必须分开。
-  const notebookPartition = partitionByGrant(visibleNotebooks);
+  const notebookPartition = partitionByGrant(notebookCollection.visibleRows);
 
   // 两个分区渲染的是同一种卡片,所以抽成一个函数 —— 复制一份 JSX 必然分叉。
   const renderNotebookCard = (
@@ -4713,31 +4662,31 @@ export default function Home() {
                 ["mine", "我的笔记本"],
                 ["featured", "精选笔记本"]
               ].map(([id, label]) => (
-                <button key={id} className={`tab ${filter === id ? "active" : ""}`} onClick={() => notebookCollection.selectFilter(id)}>
+                <button key={id} className={`tab ${notebookCollection.filter === id ? "active" : ""}`} onClick={() => notebookCollection.selectFilter(id)}>
                   {label}
                 </button>
               ))}
             </div>
             <div className="library-actions">
-              <div className={`collection-search ${searchQuery ? "search-open" : ""}`}>
+              <div className={`collection-search ${notebookCollection.searchQuery ? "search-open" : ""}`}>
                 <button className="icon-button" title="Search">⌕</button>
-                <input value={searchQuery} onChange={(event) => notebookCollection.updateSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
+                <input value={notebookCollection.searchQuery} onChange={(event) => notebookCollection.updateSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
               </div>
               <div className="segmented" aria-label="View mode">
                 {[
                   { id: "grid", icon: <LayoutGrid size={16} />, title: "卡片视图" },
                   { id: "list", icon: <ListIcon size={16} />, title: "列表视图" },
                 ].map(({ id, icon, title }) => (
-                  <button key={id} className={viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => notebookCollection.selectView(id)}>
+                  <button key={id} className={notebookCollection.viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => notebookCollection.selectView(id)}>
                     {icon}
                   </button>
                 ))}
               </div>
               <div className="sort-menu-wrap">
                 <button className="sort-button" onClick={notebookCollection.toggleSort}>
-                  {sortMode === "name" ? "名称 ▾" : sortMode === "sources" ? "来源 ▾" : "最近 ▾"}
+                  {notebookCollection.sortMode === "name" ? "名称 ▾" : notebookCollection.sortMode === "sources" ? "来源 ▾" : "最近 ▾"}
                 </button>
-                <div className={`popover sort-menu ${sortOpen ? "" : "hidden"}`}>
+                <div className={`popover sort-menu ${notebookCollection.sortOpen ? "" : "hidden"}`}>
                   {[
                     ["recent", "最近创建"],
                     ["name", "名称"],
@@ -4756,11 +4705,11 @@ export default function Home() {
 
           <section className="collection-title">
             <h1>我的笔记本</h1>
-            {searchQuery && <p>{visibleNotebooks.length} 个笔记本，搜索 “{searchQuery}”</p>}
+            {notebookCollection.searchQuery && <p>{notebookCollection.visibleRows.length} 个笔记本，搜索 “{notebookCollection.searchQuery}”</p>}
           </section>
 
-          <section className={`notebook-grid view-${viewMode}`}>
-            {viewMode === "list" ? (
+          <section className={`notebook-grid view-${notebookCollection.viewMode}`}>
+            {notebookCollection.viewMode === "list" ? (
               <NotebookList
                 entries={notebookPartition.personal}
                 openNotebook={(id) => openNotebook(id).catch(reportError)}
@@ -4769,7 +4718,7 @@ export default function Home() {
               />
             ) : (
               <>
-                {!searchQuery && filter !== "featured" && (
+                {!notebookCollection.searchQuery && notebookCollection.filter !== "featured" && (
                   <button className="notebook-card create-card" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>
                     <div className="create-circle">＋</div>
                     <h2>新建笔记本</h2>
@@ -4778,7 +4727,7 @@ export default function Home() {
                 {notebookPartition.personal.map(renderNotebookCard)}
               </>
             )}
-            {visibleNotebooks.length === 0 && (
+            {notebookCollection.visibleRows.length === 0 && (
               <article className="empty-state">
                 <strong>没有找到笔记本</strong>
                 <p>换一个关键词，或回到“我的笔记本”创建新的笔记本。</p>
@@ -4794,8 +4743,8 @@ export default function Home() {
                 <h1>群组</h1>
                 <p>经群组共享给你的知识库。可以打开、提问、写自己的深度报告，也可以挂为参考库；由组管理员管理。</p>
               </section>
-              <section className={`notebook-grid view-${viewMode}`}>
-                {viewMode === "list" ? (
+              <section className={`notebook-grid view-${notebookCollection.viewMode}`}>
+                {notebookCollection.viewMode === "list" ? (
                   <NotebookList
                     entries={notebookPartition.group}
                     roleText="群组成员"
@@ -4830,11 +4779,11 @@ export default function Home() {
         <GroupsPage
           currentUserId={currentUser.id}
           isSystemAdmin={currentUser.role === "admin"}
-          notebooks={notebooks}
+          notebooks={notebookCollection.rows}
           initialGroupId={groupNavigation.groupId}
           initialTab={groupNavigation.tab}
           onBack={showCollection}
-          onChanged={() => { refreshAfterAccessChange().catch(reportError); }}
+          onChanged={() => { notebookCollection.refreshAfterAccessChange().catch(reportError); }}
           onOpenNotebook={(notebookId) => { void openNotebook(notebookId); }}
           onNavigate={(groupId, nextTab) => {
             setGroupNavigation({ groupId, tab: nextTab });
@@ -5064,11 +5013,11 @@ export default function Home() {
                               <button
                                 type="button"
                                 className="add-source-button"
-                                disabled={buildingKg}
+                                disabled={kgGraph.buildingKg}
                                 title="有新增来源尚未分析，点击分析新增内容并合并进知识图谱"
                                 onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                               >
-                                <Network size={20} strokeWidth={2.7} /> {buildingKg ? "分析中…" : `分析新增 ${currentNotebook.kg_pending_sources ?? "?"} 篇并合并`}
+                                <Network size={20} strokeWidth={2.7} /> {kgGraph.buildingKg ? "分析中…" : `分析新增 ${currentNotebook.kg_pending_sources ?? "?"} 篇并合并`}
                               </button>
                               <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                                 知识图谱已就绪 · 有 {currentNotebook.kg_pending_sources ?? "?"} 篇来源待分析
@@ -5088,13 +5037,13 @@ export default function Home() {
                         <button
                           type="button"
                           className="add-source-button"
-                          disabled={buildingKg}
+                          disabled={kgGraph.buildingKg}
                           title={currentNotebook?.base_kg_available
                             ? `本笔记本尚未整理知识图谱，${strictLabel}会借用已挂载的参考库；点击为本笔记本单独整理`
                             : `本笔记本尚未整理知识图谱，也没挂参考库；「${strictLabel}」需先整理知识图谱或挂一个参考库`}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
-                          <Network size={20} strokeWidth={2.7} /> {buildingKg ? "整理中…" : "整理知识图谱"}
+                          <Network size={20} strokeWidth={2.7} /> {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
                         </button>
                         <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                           {currentNotebook?.base_kg_available
@@ -5113,7 +5062,7 @@ export default function Home() {
                     <span>{currentKgBuildView.detail}</span>
                     {canContinueKgBuild(
                       currentKgBuildView.actionLabel,
-                      buildingKg,
+                      kgGraph.buildingKg,
                       readOnlyWorkspace,
                     ) && (
                       <button
@@ -5603,11 +5552,11 @@ export default function Home() {
 
                 {chatMode === "rules" && (
                   <KnowledgeBrowser
-                    kind={knowledgeKind}
-                    items={knowledgeItems}
-                    types={knowledgeTypes}
-                    statusFilter={knowledgeStatusFilter}
-                    duplicates={duplicates}
+                    kind={kgKnowledge.kind}
+                    items={kgKnowledge.items}
+                    types={kgKnowledge.types}
+                    statusFilter={kgKnowledge.statusFilter}
+                    duplicates={kgKnowledge.duplicates}
                     contexts={kgWorkspace.knowledge.contexts}
                     onLoadContext={kgWorkspace.loadKnowledgeContext}
                     onKind={kgWorkspace.selectKnowledgeKind}
@@ -5619,8 +5568,8 @@ export default function Home() {
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
                     proposeDisabledReason={promotionTarget.kind === "none" ? "需先挂载一个公共知识库" : undefined}
-                    total={knowledgeTotalForKind}
-                    page={knowledgePageForKind}
+                    total={kgKnowledge.total}
+                    page={kgKnowledge.page}
                     onPage={kgWorkspace.goToKnowledgePage}
                     onStatusFilter={kgWorkspace.selectKnowledgeStatus}
                     readOnly={!capabilities.canGovernKnowledge}
@@ -5748,10 +5697,10 @@ export default function Home() {
                             type="button"
                             className="mode-engine"
                             style={{ marginLeft: 6 }}
-                            disabled={buildingKg || asking || sessionLoading}
+                            disabled={kgGraph.buildingKg || asking || sessionLoading}
                             onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                           >
-                            {buildingKg ? "整理中…" : "整理知识图谱"}
+                            {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
                           </button>
                         </span>
                       )
@@ -5792,30 +5741,23 @@ export default function Home() {
         </main>
       )}
 
-      {menuNotebook && menuPosition && (
+      {notebookCollection.menu.notebook && notebookCollection.menu.position && (
         <div
-          ref={notebookMenuRef}
+          ref={notebookCollection.menu.ref}
           className="popover notebook-menu"
-          style={{ left: menuPosition.left, top: menuPosition.top }}
+          style={{ left: notebookCollection.menu.position.left, top: notebookCollection.menu.position.top }}
         >
           <NotebookMenuActions
-            notebook={menuNotebook}
-            onLeave={() => {
-              const target = menuNotebook;
-              notebookCollection.closeMenu();
-              leaveNotebook(target.id)
-                .then(() => loadNotebookCollection())
-                .then(() => setToast("已退出只读共享"))
-                .catch(reportError);
-            }}
-            onEdit={() => { void presentNotebookEditor(menuNotebook.id); notebookCollection.closeMenu(); }}
-            onDelete={() => { void presentNotebookDelete(menuNotebook.id); notebookCollection.closeMenu(); }}
+            notebook={notebookCollection.menu.notebook}
+            onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id)}
+            onEdit={editMenuNotebook(notebookCollection.menu.notebook.id)}
+            onDelete={deleteMenuNotebook(notebookCollection.menu.notebook.id)}
           />
         </div>
       )}
 
-      {notebookShareModal.open && shareModal && currentNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal={notebookShareModal.topmost} aria-hidden={!notebookShareModal.topmost} inert={notebookShareModal.topmost ? undefined : true} style={{ zIndex: notebookShareModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>
+      {rootModals.view("notebook-share").open && shareModal && currentNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("notebook-share").topmost} aria-hidden={!rootModals.view("notebook-share").topmost} inert={rootModals.view("notebook-share").topmost ? undefined : true} style={{ zIndex: rootModals.view("notebook-share").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("notebook-share", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.share.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5882,8 +5824,8 @@ export default function Home() {
         </section>
       )}
 
-      {sharedPreviewModal.open && sharedPreview && (
-        <section className="utility-modal" role="dialog" aria-modal={sharedPreviewModal.topmost} aria-hidden={!sharedPreviewModal.topmost} inert={sharedPreviewModal.topmost ? undefined : true} style={{ zIndex: sharedPreviewModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-preview", "backdrop"); }}>
+      {rootModals.view("shared-preview").open && sharedPreview && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("shared-preview").topmost} aria-hidden={!rootModals.view("shared-preview").topmost} inert={rootModals.view("shared-preview").topmost ? undefined : true} style={{ zIndex: rootModals.view("shared-preview").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-preview", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.sharedPreview.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -5941,8 +5883,8 @@ export default function Home() {
         </section>
       )}
 
-      {sharedByMeModal.open && (
-        <section className="utility-modal" role="dialog" aria-modal={sharedByMeModal.topmost} aria-hidden={!sharedByMeModal.topmost} inert={sharedByMeModal.topmost ? undefined : true} style={{ zIndex: sharedByMeModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-by-me", "backdrop"); }}>
+      {rootModals.view("shared-by-me").open && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("shared-by-me").topmost} aria-hidden={!rootModals.view("shared-by-me").topmost} inert={rootModals.view("shared-by-me").topmost ? undefined : true} style={{ zIndex: rootModals.view("shared-by-me").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-by-me", "backdrop"); }}>
           <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6037,8 +5979,8 @@ export default function Home() {
         </section>
       )}
 
-      {sourceModal.open && (
-        <section className="source-modal" role="dialog" aria-modal={sourceModal.topmost} aria-hidden={!sourceModal.topmost} inert={sourceModal.topmost ? undefined : true} style={{ zIndex: sourceModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal("backdrop"); }}>
+      {rootModals.view("source-add").open && (
+        <section className="source-modal" role="dialog" aria-modal={rootModals.view("source-add").topmost} aria-hidden={!rootModals.view("source-add").topmost} inert={rootModals.view("source-add").topmost ? undefined : true} style={{ zIndex: rootModals.view("source-add").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal("backdrop"); }}>
           <FloatingModalCard storageKey="source.add.window" className="source-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6211,20 +6153,20 @@ export default function Home() {
         </section>
       )}
 
-      {memorySaveModal.open && memoryAnswerId && currentNotebookId && (
+      {rootModals.view("memory-save").open && memoryAnswerId && currentNotebookId && (
         <MemorySaveDialog
           answerId={memoryAnswerId}
           notebookId={currentNotebookId}
           sessionSignal={memorySessionAbortRef.current.signal}
           onClose={() => rootModals.requestClose("memory-save", "button")}
           onSaved={(memory) => handleMemorySaved(memory).catch(reportError)}
-          interactive={memorySaveModal.topmost}
-          zIndex={memorySaveModal.zIndex}
+          interactive={rootModals.view("memory-save").topmost}
+          zIndex={rootModals.view("memory-save").zIndex}
         />
       )}
 
-      {notebookEditorModal.open && editingNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal={notebookEditorModal.topmost} aria-hidden={!notebookEditorModal.topmost} inert={notebookEditorModal.topmost ? undefined : true} style={{ zIndex: notebookEditorModal.zIndex }}>
+      {rootModals.view("notebook-editor").open && notebookCollection.editor?.target && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("notebook-editor").topmost} aria-hidden={!rootModals.view("notebook-editor").topmost} inert={rootModals.view("notebook-editor").topmost ? undefined : true} style={{ zIndex: rootModals.view("notebook-editor").zIndex }}>
           <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6237,9 +6179,9 @@ export default function Home() {
             <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
                 <div className="settings-section-head"><h3>基本信息</h3></div>
-                <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
-                <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
-                <label>领域关键词<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
+                <label>标题<input name="name" defaultValue={notebookCollection.editor?.target?.name} maxLength={80} required /></label>
+                <label>描述<textarea name="purpose" defaultValue={notebookCollection.editor?.target?.purpose} rows={3} maxLength={260} /></label>
+                <label>领域关键词<input name="primary_domain" defaultValue={notebookCollection.editor?.target?.primary_domain} maxLength={80} /></label>
               </section>
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -6253,7 +6195,10 @@ export default function Home() {
                   // mountable 候选里,只渲染 mountable 会让那一行永久消失,用户也没法取消勾选
                   // 它、保存表单会被后端 400 拒绝(见 notebook-bases.ts mergeMountCandidates
                   // 与 routes.py set_notebook_bases_route 的联动说明)。
-                  const groups = groupMountable(mergeMountCandidates(mountable, mountEdges));
+                  const groups = groupMountable(mergeMountCandidates(
+                    notebookCollection.editor?.mountable ?? [],
+                    notebookCollection.editor?.mountEdges ?? [],
+                  ));
                   const render = (title: string, list: MountedBase[], variant: "public" | "mine" | "shared") =>
                     list.length === 0 ? null : (
                       <div className={`base-picker-group base-picker-group--${variant}`} key={title}>
@@ -6264,7 +6209,7 @@ export default function Home() {
                             <label className={`base-picker-row${dead ? " base-picker-row-dead" : ""}`} key={n.id}>
                               <input
                                 type="checkbox"
-                                checked={mountedIds.includes(n.id)}
+                                checked={(notebookCollection.editor?.mountedIds ?? []).includes(n.id)}
                                 disabled={notebookCollection.editor?.busy}
                                 onChange={(e) => notebookCollection.toggleMountedBase(n.id, e.target.checked)}
                               />
@@ -6293,20 +6238,20 @@ export default function Home() {
                     </>
                   );
                 })()}
-                {mountCostHint(mountedIds.length) && (
-                  <p className="base-picker-hint">{mountCostHint(mountedIds.length)}</p>
+                {mountCostHint((notebookCollection.editor?.mountedIds ?? []).length) && (
+                  <p className="base-picker-hint">{mountCostHint((notebookCollection.editor?.mountedIds ?? []).length)}</p>
                 )}
                 </div>
               </section>
               <section className="settings-section">
                 <div className="settings-section-head"><h3>更多信息</h3></div>
                 <div className="settings-grid-2">
-                  <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
-                  <label>访问范围<input name="access_scope" defaultValue={editingNotebook.access_scope ?? ""} maxLength={80} /></label>
+                  <label>目标用户<input name="target_users" defaultValue={notebookCollection.editor?.target?.target_users ?? ""} maxLength={120} /></label>
+                  <label>访问范围<input name="access_scope" defaultValue={notebookCollection.editor?.target?.access_scope ?? ""} maxLength={80} /></label>
                 </div>
-                <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
-                <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
-                <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
+                <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(notebookCollection.editor?.target?.expected_questions ?? []).join("\n")} rows={2} /></label>
+                <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(notebookCollection.editor?.target?.source_types ?? []).join(", ")} /></label>
+                <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(notebookCollection.editor?.target?.taxonomy ?? []).join(", ")} /></label>
               </section>
               <div className="modal-actions settings-footer">
                 <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")}>取消</button>
@@ -6318,17 +6263,17 @@ export default function Home() {
         </section>
       )}
 
-      {notebookDeleteModal.open && deleteNotebook && (
-        <section className="utility-modal" role="dialog" aria-modal={notebookDeleteModal.topmost} aria-hidden={!notebookDeleteModal.topmost} inert={notebookDeleteModal.topmost ? undefined : true} style={{ zIndex: notebookDeleteModal.zIndex }}>
+      {rootModals.view("notebook-delete").open && notebookCollection.deletion?.target && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("notebook-delete").topmost} aria-hidden={!rootModals.view("notebook-delete").topmost} inert={rootModals.view("notebook-delete").topmost ? undefined : true} style={{ zIndex: rootModals.view("notebook-delete").zIndex }}>
           <FloatingModalCard storageKey="notebook.delete.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>删除笔记本</h2>
-                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；{NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING}</p>
-                {deleteMountedByCount > 0 && (
+                <p>确定删除 “{notebookCollection.deletion?.target?.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；{NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING}</p>
+                {(notebookCollection.deletion?.mountedByCount ?? 0) > 0 && (
                   <p className="delete-mount-warning">
-                    {deleteMountedByCount} 个笔记本正在把它作为参考库，删除后这些笔记本会立即失去这条参考库——此操作不可撤销。
+                    {notebookCollection.deletion?.mountedByCount ?? 0} 个笔记本正在把它作为参考库，删除后这些笔记本会立即失去这条参考库——此操作不可撤销。
                   </p>
                 )}
               </div>
@@ -6343,26 +6288,26 @@ export default function Home() {
         </section>
       )}
 
-      {passwordModal.open && (
+      {rootModals.view("password-change").open && (
         <PasswordChangeModal
           onClose={() => rootModals.requestClose("password-change", "button")}
-          interactive={passwordModal.topmost}
-          zIndex={passwordModal.zIndex}
+          interactive={rootModals.view("password-change").topmost}
+          zIndex={rootModals.view("password-change").zIndex}
         />
       )}
 
-      {searchProfileModal.open && currentUser && (
+      {rootModals.view("search-profile").open && currentUser && (
         <SearchProfileModal
           currentUser={currentUser}
           onSaved={setCurrentUser}
           onClose={() => rootModals.requestClose("search-profile", "button")}
-          interactive={searchProfileModal.topmost}
-          zIndex={searchProfileModal.zIndex}
+          interactive={rootModals.view("search-profile").topmost}
+          zIndex={rootModals.view("search-profile").zIndex}
         />
       )}
 
-      {infoModalView.open && infoModal && (
-        <section className="utility-modal utility-modal-top" role="dialog" aria-modal={infoModalView.topmost} aria-hidden={!infoModalView.topmost} inert={infoModalView.topmost ? undefined : true} style={{ zIndex: infoModalView.zIndex }}>
+      {rootModals.view("info").open && infoModal && (
+        <section className="utility-modal utility-modal-top" role="dialog" aria-modal={rootModals.view("info").topmost} aria-hidden={!rootModals.view("info").topmost} inert={rootModals.view("info").topmost ? undefined : true} style={{ zIndex: rootModals.view("info").zIndex }}>
           <FloatingModalCard storageKey="info.window" className="utility-modal-card narrow">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6418,11 +6363,11 @@ export default function Home() {
         </section>
       )}
 
-      {sourceDetailModal.open && sourceDetail && (
+      {rootModals.view("source-detail").open && sourceDetail && (
         <SourceDetailWindow
           onClose={() => rootModals.requestClose("source-detail", "button")}
-          interactive={sourceDetailModal.topmost}
-          zIndex={sourceDetailModal.zIndex}
+          interactive={rootModals.view("source-detail").topmost}
+          zIndex={rootModals.view("source-detail").zIndex}
         >
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
@@ -6642,7 +6587,7 @@ export default function Home() {
           是 fixed 后代的包含块,920px 宽的审阅弹窗塞进 740px 的来源详情卡片会被
           overflow:hidden 裁掉(P0,两次评审独立确认)。与 infoModal/MemorySaveDialog
           同一种「调用方持有开关状态、根层渲染」形状。 */}
-      {catalogReviewModal.open && catalogReview && (
+      {rootModals.view("catalog-review").open && catalogReview && (
         <CommandCatalogReview
           notebookId={catalogReview.notebookId}
           sourceId={catalogReview.sourceId}
@@ -6654,12 +6599,12 @@ export default function Home() {
           onToast={setToast}
           isCurrent={() => rootModals.owns(catalogReviewLease)}
           onReviewed={() => setCatalogReviewSeq((seq) => seq + 1)}
-          interactive={catalogReviewModal.topmost}
-          zIndex={catalogReviewModal.zIndex}
+          interactive={rootModals.view("catalog-review").topmost}
+          zIndex={rootModals.view("catalog-review").zIndex}
         />
       )}
 
-      {conversationShareModal.open && sharingSession && currentNotebookId && (
+      {rootModals.view("conversation-share").open && sharingSession && currentNotebookId && (
         <ConversationShareModal
           // key 含边界:同一条会话里换一条回答再点分享,必须整块重挂,否则弹窗会带着
           // 上一次的 notice/error 与已加载态,把「已生成分享链接」按到新的边界上。
@@ -6669,13 +6614,13 @@ export default function Home() {
           title={sharingSession.title || ""}
           throughAnswerId={sharingSession.throughAnswerId}
           onClose={() => rootModals.requestClose("conversation-share", "button")}
-          interactive={conversationShareModal.topmost}
-          zIndex={conversationShareModal.zIndex}
+          interactive={rootModals.view("conversation-share").topmost}
+          zIndex={rootModals.view("conversation-share").zIndex}
         />
       )}
 
-      {analyticsModal.open && analytics && (
-        <section className="utility-modal" role="dialog" aria-modal={analyticsModal.topmost} aria-hidden={!analyticsModal.topmost} inert={analyticsModal.topmost ? undefined : true} style={{ zIndex: analyticsModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics("backdrop"); }}>
+      {rootModals.view("analytics").open && analytics && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("analytics").topmost} aria-hidden={!rootModals.view("analytics").topmost} inert={rootModals.view("analytics").topmost ? undefined : true} style={{ zIndex: rootModals.view("analytics").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics("backdrop"); }}>
           <FloatingModalCard storageKey="analytics.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -6728,7 +6673,7 @@ export default function Home() {
                       // runFix 里的理由)。isRepairing 对它恒为 false(从没写过那个键),
                       // 忙碌态完全由 buildingKg 表达——那个位失败时会被 startKgBuild 清掉。
                       const repairing = isRepairing(repairingFix[g.key], g.count)
-                        || (g.fix === "extract_kg" && buildingKg);
+                        || (g.fix === "extract_kg" && kgGraph.buildingKg);
                       const runFix = async () => {
                         const nb = currentNotebookId;
                         if (!nb || repairing) return;
@@ -6831,7 +6776,7 @@ export default function Home() {
                     );
                     const busy = kg.job?.status === "running"
                       || kg.building
-                      || buildingKg;
+                      || kgGraph.buildingKg;
                     const tone = view.tone === "success"
                       ? "ok"
                       : view.tone === "neutral"
@@ -6889,10 +6834,10 @@ export default function Home() {
                                 <button
                                   type="button"
                                   className="index-cta"
-                                  disabled={relinkingKg || kgRefreshBusy}
+                                  disabled={kgGraph.relinking || kgGraph.rebuilding}
                                   onClick={relinkFromKgView}
                                 >
-                                  {relinkingKg ? "补连中…" : "补上关联"}
+                                  {kgGraph.relinking ? "补连中…" : "补上关联"}
                                 </button>
                               </>
                             )}
@@ -6904,7 +6849,7 @@ export default function Home() {
                   {/* 概念合并行:状态取 indexStatus.unified_kg,唯一动作 = 既有 refreshUnifiedKg(经统一确认)。 */}
                   {(() => {
                     const uk = indexStatus.unified_kg;
-                    const busy = uk.building || kgRefreshBusy;
+                    const busy = uk.building || kgGraph.rebuilding;
                     const stateLabel = busy ? "重建中…" : uk.dirty ? "待重建" : "最新";
                     const tone: "ok" | "warn" = busy || uk.dirty ? "warn" : "ok";
                     const color = tone === "ok" ? "var(--color-ok, #1a7f5a)" : "var(--color-warn, #b97a00)";
@@ -6928,7 +6873,7 @@ export default function Home() {
                             <button
                               type="button"
                               className={`index-cta${uk.dirty ? " primary" : ""}`}
-                              disabled={relinkingKg}
+                              disabled={kgGraph.relinking}
                               onClick={confirmRefreshUnifiedKg}
                             >
                               重新合并
@@ -7058,8 +7003,8 @@ export default function Home() {
         </section>
       )}
 
-      {kgSchemaModal.open && schemaModalOpen && (
-        <section className="utility-modal" role="dialog" aria-modal={kgSchemaModal.topmost} aria-hidden={!kgSchemaModal.topmost} inert={kgSchemaModal.topmost ? undefined : true} style={{ zIndex: kgSchemaModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
+      {rootModals.view("kg-schema").open && kgSchema.open && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("kg-schema").topmost} aria-hidden={!rootModals.view("kg-schema").topmost} inert={rootModals.view("kg-schema").topmost ? undefined : true} style={{ zIndex: rootModals.view("kg-schema").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
           <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -7071,10 +7016,10 @@ export default function Home() {
             </div>
             <div className="source-detail-body">
               <SchemaManager
-                schemas={schemas}
-                busy={schemaBusy}
-                view={schemaView}
-                canEdit={schemaView === "global" ? capabilities.canManageGlobalSchemas : capabilities.canManageNotebookSchemas}
+                schemas={kgSchema.schemas}
+                busy={kgSchema.busy}
+                view={kgSchema.view}
+                canEdit={kgSchema.view === "global" ? capabilities.canManageGlobalSchemas : capabilities.canManageNotebookSchemas}
                 canManageGlobal={capabilities.canManageGlobalSchemas}
                 onView={kgWorkspace.selectSchemaView}
                 onPatch={kgWorkspace.patchSchema}
@@ -7089,8 +7034,8 @@ export default function Home() {
       )}
 
       {/* Agent Profile remains an independent presentation modal. */}
-      {understandingModal.open && currentNotebookId && (
-        <section className="utility-modal" role="dialog" aria-modal={understandingModal.topmost} aria-hidden={!understandingModal.topmost} inert={understandingModal.topmost ? undefined : true} style={{ zIndex: understandingModal.zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("understanding", "backdrop"); }}>
+      {rootModals.view("understanding").open && currentNotebookId && (
+        <section className="utility-modal" role="dialog" aria-modal={rootModals.view("understanding").topmost} aria-hidden={!rootModals.view("understanding").topmost} inert={rootModals.view("understanding").topmost ? undefined : true} style={{ zIndex: rootModals.view("understanding").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("understanding", "backdrop"); }}>
           <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -7122,7 +7067,7 @@ export default function Home() {
       )}
 
 
-      {kgViewOpen && (
+      {kgGraph.open && (
         <section className="kg-view" role="dialog" aria-modal="true">
           <div className="kg-view-header">
             <div><h2>知识图谱</h2><p>Object 级知识图谱：Concept / Claim / Formula / Procedure 同屏展示。节点名称、类型形状和边标签直接画在主视图中。</p></div>
@@ -7151,7 +7096,7 @@ export default function Home() {
           </div>
           <div className="kg-view-body">
             <aside className="kg-rail">
-              <input className="kg-search" placeholder="搜索节点名称或类型…" value={kgSearch} onChange={(e) => handleKgSearchChange(e.target.value)} />
+              <input className="kg-search" placeholder="搜索节点名称或类型…" value={kgGraph.search} onChange={(e) => handleKgSearchChange(e.target.value)} />
               {!readOnlyWorkspace && (
               <div className="kg-rail-section">
                 <h3>图谱处理</h3>
@@ -7162,29 +7107,29 @@ export default function Home() {
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={relinkingKg || kgRefreshBusy || buildingKg}
+                    disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg}
                     title="为没建立关联的内容补上关联（快速、确定性，不覆盖现有图）"
                     onClick={relinkFromKgView}
                   >
-                    {relinkingKg ? "补连中…" : "补上关联"}
+                    {kgGraph.relinking ? "补连中…" : "补上关联"}
                   </button>
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={kgRefreshBusy || relinkingKg || buildingKg}
+                    disabled={kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg}
                     title="对现有概念重新聚类 / 跨文档合并并刷新（不重新分析来源，会先确认）"
                     onClick={confirmRefreshUnifiedKg}
                   >
-                    {kgRefreshBusy ? "合并中…" : "重新合并"}
+                    {kgGraph.rebuilding ? "合并中…" : "重新合并"}
                   </button>
                   <button
                     type="button"
                     className="sort-button kg-action-danger"
-                    disabled={buildingKg}
+                    disabled={kgGraph.buildingKg}
                     title="清空现有知识图谱并重新分析全部来源（后台任务，可能数分钟）"
                     onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
                   >
-                    {buildingKg ? "分析中…" : "全部重新分析"}
+                    {kgGraph.buildingKg ? "分析中…" : "全部重新分析"}
                   </button>
                 </div>
               </div>
@@ -7192,12 +7137,12 @@ export default function Home() {
               <div className="kg-rail-section">
                 <h3>当前视图</h3>
                 <div className="tag-row">
-                  <span className="tag">节点 {fgData.nodes.length}{!kgSearching && uGraphMerged ? ` / ${uGraphMerged.nodes.length}` : ""}</span>
-                  <span className="tag">边 {fgData.links.length}{!kgSearching && uGraphMerged ? ` / ${uGraphMerged.edges.length}` : ""}</span>
+                  <span className="tag">节点 {fgData.nodes.length}{!kgSearching && kgGraph.merged ? ` / ${kgGraph.merged.nodes.length}` : ""}</span>
+                  <span className="tag">边 {fgData.links.length}{!kgSearching && kgGraph.merged ? ` / ${kgGraph.merged.edges.length}` : ""}</span>
                 </div>
                 <label className="kg-range">
                   <span>范围</span>
-                  <select value={kgLimit} disabled={kgRangeBusy || kgSearching} onChange={(e) => changeKgRange(Number(e.target.value))}>
+                  <select value={kgGraph.rangeLimit} disabled={kgGraph.rangeBusy || kgSearching} onChange={(e) => changeKgRange(Number(e.target.value))}>
                     {KG_RANGE_STEPS
                       .filter((opt) => {
                         // index 索引库（base_kg_available）用搜索+展开代替全量拉取，隐藏「全部」。
@@ -7209,31 +7154,31 @@ export default function Home() {
                 </label>
                 {kgSearching ? (
                   <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
-                    {kgSearchBusy
+                    {kgGraph.searchBusy
                       ? "搜索中…"
                       : `命中 ${fgData.searchHitCount} 个节点`}
                   </p>
-                ) : uGraph && (
+                ) : kgGraph.graph && (
                   <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
-                    {kgRangeBusy
+                    {kgGraph.rangeBusy
                       ? "加载中…"
-                      : uGraph.truncated
-                        ? `已载 ${uGraph.nodes.length} / 共 ${uGraph.total_nodes ?? uGraph.nodes.length} 节点 · 按连接度，可扩大范围`
-                        : `共 ${uGraph.total_nodes ?? uGraph.nodes.length} 节点（已全部显示）`}
+                      : kgGraph.graph.truncated
+                        ? `已载 ${kgGraph.graph.nodes.length} / 共 ${kgGraph.graph.total_nodes ?? kgGraph.graph.nodes.length} 节点 · 按连接度，可扩大范围`
+                        : `共 ${kgGraph.graph.total_nodes ?? kgGraph.graph.nodes.length} 节点（已全部显示）`}
                   </p>
                 )}
-                {unifiedKgStatus && (
+                {kgGraph.status && (
                   <div className="tag-row" style={{ marginTop: 4 }}>
                     {/* 纯状态展示,非交互——唯一动作入口是上方「重新合并」按钮(去重复,见其 title)。 */}
                     <span
                       className="tag"
                       title="概念合并状态；点击上方「重新合并」按钮可手动刷新"
-                      style={{ color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined }}
+                      style={{ color: kgGraph.status.dirty ? "var(--color-warn, #b97a00)" : undefined }}
                     >
-                      {kgRefreshBusy ? "重建中…" : unifiedKgStatus.dirty ? "待重建" : "最新"}
+                      {kgGraph.rebuilding ? "重建中…" : kgGraph.status.dirty ? "待重建" : "最新"}
                     </span>
-                    {unifiedKgStatus.last_rebuild_at && (
-                      <span className="tag">上次重建 · {formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
+                    {kgGraph.status.last_rebuild_at && (
+                      <span className="tag">上次重建 · {formatRelativeTime(kgGraph.status.last_rebuild_at)}</span>
                     )}
                     {scaleIndexStatus && (() => {
                       const s = scaleIndexStatus;
@@ -7271,20 +7216,20 @@ export default function Home() {
                 <h3>类型过滤</h3>
                 <div className="kg-type-filter">
                   <button
-                    aria-pressed={kgSelectedTypes.length === 0}
-                    className={kgSelectedTypes.length === 0 ? "active" : ""}
+                    aria-pressed={kgGraph.selectedTypes.length === 0}
+                    className={kgGraph.selectedTypes.length === 0 ? "active" : ""}
                     onClick={kgWorkspace.clearTypes}
                   >
                     <span className="kg-shape-stack">
                       {kgTypeCounts.slice(0, 4).map((item) => <KgTypeMark key={item.type} type={item.type} />)}
                     </span>
                     <strong>全部</strong>
-                    <em>{uGraph?.nodes.length ?? 0}</em>
+                    <em>{kgGraph.graph?.nodes.length ?? 0}</em>
                   </button>
                   {kgTypeCounts.map((item) => (
                     <button
-                      aria-pressed={kgSelectedTypes.includes(item.type)}
-                      className={kgSelectedTypes.includes(item.type) ? "active" : ""}
+                      aria-pressed={kgGraph.selectedTypes.includes(item.type)}
+                      className={kgGraph.selectedTypes.includes(item.type) ? "active" : ""}
                       key={item.type}
                       onClick={() => toggleKgType(item.type)}
                     >
@@ -7296,36 +7241,36 @@ export default function Home() {
                 </div>
               </div>
               <div className="kg-rail-section">
-                <h3>待确认合并 ({pendingMerges.length})</h3>
+                <h3>待确认合并 ({kgGraph.pendingMerges.length})</h3>
                 {!readOnlyWorkspace && (
                   <>
-                    <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
-                      {kgReviewBusy ? "判重中…" : "自动判重"}
+                    <button className="ghost-button" onClick={reviewPendingMerges} disabled={!kgGraph.pendingMerges.length || kgGraph.reviewBusy}>
+                      {kgGraph.reviewBusy ? "判重中…" : "自动判重"}
                     </button>
                     <button
                       className="ghost-button"
                       onClick={reviewAllMerges}
-                      disabled={!pendingMerges.length || reviewAllStarting || reviewAllJob?.status === "running"}
+                      disabled={!kgGraph.pendingMerges.length || kgGraph.reviewAllStarting || kgGraph.reviewAllJob?.status === "running"}
                     >
-                      {reviewAllJob?.status === "running"
-                        ? `全部判重中… ${reviewAllJob.done}/${reviewAllJob.total}`
-                        : reviewAllStarting
+                      {kgGraph.reviewAllJob?.status === "running"
+                        ? `全部判重中… ${kgGraph.reviewAllJob.done}/${kgGraph.reviewAllJob.total}`
+                        : kgGraph.reviewAllStarting
                           ? "全部判重中…"
                           : "全部自动判重"}
                     </button>
                   </>
                 )}
-                {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
+                {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : kgGraph.pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
                     <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
                     {!readOnlyWorkspace && <span className="kg-merge-actions">
                       {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
                           与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
-                      <button disabled={decidingMerge !== null || kgRefreshBusy} onClick={() => decideMerge(m, true)}>
-                        {decidingMerge?.id === m.id && decidingMerge.confirm ? "合并中…" : "合并"}
+                      <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding} onClick={() => decideMerge(m, true)}>
+                        {kgGraph.decidingMerge?.id === m.id && kgGraph.decidingMerge.confirm ? "合并中…" : "合并"}
                       </button>
-                      <button disabled={decidingMerge !== null || kgRefreshBusy} onClick={() => decideMerge(m, false)}>
-                        {decidingMerge?.id === m.id && !decidingMerge.confirm ? "分开中…" : "拒绝"}
+                      <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding} onClick={() => decideMerge(m, false)}>
+                        {kgGraph.decidingMerge?.id === m.id && !kgGraph.decidingMerge.confirm ? "分开中…" : "拒绝"}
                       </button>
                     </span>}
                   </div>
@@ -7333,7 +7278,7 @@ export default function Home() {
               </div>
             </aside>
             <div className="kg-canvas" ref={kgCanvasRef}>
-              {uGraph === null ? <p className="tool-hint kg-canvas-empty">加载中…</p> : vizBuilding ? (
+              {kgGraph.graph === null ? <p className="tool-hint kg-canvas-empty">加载中…</p> : kgGraph.vizBuilding ? (
                 <div className="tool-hint kg-canvas-empty">
                   <strong>图谱索引构建中，首次构建大库可能需要几分钟…</strong>
                   <p style={{ marginTop: 6 }}>建成后会自动刷新为完整图谱</p>
@@ -7358,7 +7303,7 @@ export default function Home() {
                   }}
                   linkCanvasObjectMode={() => "after"}
                   linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgLinkLabel(link, ctx, globalScale, kgDenseView)}
-                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgNode(node, ctx, globalScale, selectedKgNodeId, kgDenseView)}
+                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgNode(node, ctx, globalScale, kgGraph.selectedNodeId, kgDenseView)}
                   nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => paintKgPointerArea(node, color, ctx)}
                   d3VelocityDecay={0.32}
                   onEngineStop={() => fitKgGraphView(350)}
@@ -7386,7 +7331,7 @@ export default function Home() {
                     <div className="kg-node-list">
                       {group.nodes.map((node) => (
                         <button
-                          className={`kg-node-button ${selectedKgNodeId === node.id ? "active" : ""}`}
+                          className={`kg-node-button ${kgGraph.selectedNodeId === node.id ? "active" : ""}`}
                           key={node.id}
                           onClick={() => selectKgNode(node.id).catch(reportError)}
                         >
@@ -7431,16 +7376,16 @@ export default function Home() {
                         ))}
                       </>
                     )}
-                    {nodeCtx?.definition && (<><h4>定义</h4><p className="kg-text-card">{nodeCtx.definition}</p></>)}
-                    {nodeCtx?.object_type === "procedure" && nodeCtx.steps && nodeCtx.steps.length > 0 && (
-                      <><h4>流程步骤</h4>{nodeCtx.steps.map((s, i) => (
+                    {kgGraph.nodeContext?.definition && (<><h4>定义</h4><p className="kg-text-card">{kgGraph.nodeContext.definition}</p></>)}
+                    {kgGraph.nodeContext?.object_type === "procedure" && kgGraph.nodeContext.steps && kgGraph.nodeContext.steps.length > 0 && (
+                      <><h4>流程步骤</h4>{kgGraph.nodeContext.steps.map((s, i) => (
                         <KgProcedureStepCard step={s} index={i} key={`${s.name}-${i}`} />
                       ))}</>
                     )}
-                    {conceptDetail && (
+                    {kgGraph.conceptDetail && (
                       <>
                         <h4>出处</h4>
-                        {conceptDetail.evidence.length === 0 ? <p className="tool-hint">无</p> : conceptDetail.evidence.slice(0, 20).map((ev, i) => (
+                        {kgGraph.conceptDetail.evidence.length === 0 ? <p className="tool-hint">无</p> : kgGraph.conceptDetail.evidence.slice(0, 20).map((ev, i) => (
                           <KgEvidenceCard evidence={ev} index={i} key={`${ev.source_id}-${ev.element_id}-${i}`} />
                         ))}
                         <h4>相关节点</h4>
@@ -7462,8 +7407,8 @@ export default function Home() {
                         ))}
                       </>
                     )}
-                    {!conceptDetail && nodeCtx && (nodeCtx.occurrences ?? []).length > 0 && (
-                      <><h4>出处</h4>{(nodeCtx.occurrences ?? []).slice(0, 10).map((o, i) => (
+                    {!kgGraph.conceptDetail && kgGraph.nodeContext && (kgGraph.nodeContext.occurrences ?? []).length > 0 && (
+                      <><h4>出处</h4>{(kgGraph.nodeContext.occurrences ?? []).slice(0, 10).map((o, i) => (
                         <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
                       ))}</>
                     )}
@@ -7472,14 +7417,14 @@ export default function Home() {
               </div>
             </aside>
           </div>
-          {kgAnalysisModal.open && kgAnalysisOpen && currentNotebookId && (
+          {rootModals.view("kg-analysis").open && kgGraph.analysisOpen && currentNotebookId && (
             <KgAnalysisView
               notebookId={currentNotebookId}
               canAnalyze={!readOnlyWorkspace}
-              analysisRunning={kgRefreshBusy}
-              analysisBlocked={relinkingKg || buildingKg}
-              interactive={kgAnalysisModal.topmost}
-              zIndex={kgAnalysisModal.zIndex}
+              analysisRunning={kgGraph.rebuilding}
+              analysisBlocked={kgGraph.relinking || kgGraph.buildingKg}
+              interactive={rootModals.view("kg-analysis").topmost}
+              zIndex={rootModals.view("kg-analysis").zIndex}
               onAnalyze={confirmGenerateKgAnalysis}
               onClose={closeKgAnalysis}
             />
@@ -7499,14 +7444,14 @@ export default function Home() {
         />
       )}
 
-      {promotionQueueModal.open && (
+      {rootModals.view("promotion-queue").open && (
         <section
           className="utility-modal"
           role="dialog"
-          aria-modal={promotionQueueModal.topmost}
-          aria-hidden={!promotionQueueModal.topmost}
-          inert={promotionQueueModal.topmost ? undefined : true}
-          style={{ zIndex: promotionQueueModal.zIndex }}
+          aria-modal={rootModals.view("promotion-queue").topmost}
+          aria-hidden={!rootModals.view("promotion-queue").topmost}
+          inert={rootModals.view("promotion-queue").topmost ? undefined : true}
+          style={{ zIndex: rootModals.view("promotion-queue").zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-queue", "backdrop"); }}
         >
           <FloatingModalCard storageKey="promotion.window" className="utility-modal-card">
@@ -7560,7 +7505,7 @@ export default function Home() {
                           {/* Task 13 审查 #4:优先用后端 join 出来的 target_base_name(策展人不一定是
                               目标库 owner,notebooks 只覆盖自有∪只读加入,猜不出别人创建的公共库真名)；
                               查不到再回退旧写法(notebooks.find),最后兜底截断 id。 */}
-                          目标公共知识库: {cand.target_base_name || notebooks.find((n) => n.id === cand.target_base_id)?.name || cand.target_base_id.slice(0, 10)}
+                          目标公共知识库: {cand.target_base_name || notebookCollection.rows.find((n) => n.id === cand.target_base_id)?.name || cand.target_base_id.slice(0, 10)}
                         </p>
                       )}
                       {review.evidence.length > 0 && (
@@ -7611,14 +7556,14 @@ export default function Home() {
         </section>
       )}
 
-      {promotionTargetModal.open && pendingPromotionObjectId && (
+      {rootModals.view("promotion-target").open && pendingPromotionObjectId && (
         <section
           className="utility-modal"
           role="dialog"
-          aria-modal={promotionTargetModal.topmost}
-          aria-hidden={!promotionTargetModal.topmost}
-          inert={promotionTargetModal.topmost ? undefined : true}
-          style={{ zIndex: promotionTargetModal.zIndex }}
+          aria-modal={rootModals.view("promotion-target").topmost}
+          aria-hidden={!rootModals.view("promotion-target").topmost}
+          inert={rootModals.view("promotion-target").topmost ? undefined : true}
+          style={{ zIndex: rootModals.view("promotion-target").zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-target", "backdrop"); }}
         >
           <FloatingModalCard storageKey="promotionTarget.window" className="utility-modal-card narrow">
@@ -7652,14 +7597,14 @@ export default function Home() {
         </section>
       )}
 
-      {edgeReviewModal.open && (
+      {rootModals.view("edge-review").open && (
         <section
           className="utility-modal"
           role="dialog"
-          aria-modal={edgeReviewModal.topmost}
-          aria-hidden={!edgeReviewModal.topmost}
-          inert={edgeReviewModal.topmost ? undefined : true}
-          style={{ zIndex: edgeReviewModal.zIndex }}
+          aria-modal={rootModals.view("edge-review").topmost}
+          aria-hidden={!rootModals.view("edge-review").topmost}
+          inert={rootModals.view("edge-review").topmost ? undefined : true}
+          style={{ zIndex: rootModals.view("edge-review").zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("edge-review", "backdrop"); }}
         >
           <FloatingModalCard storageKey="edgeReview.window" className="utility-modal-card">
@@ -7717,7 +7662,7 @@ export default function Home() {
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
-      {modelPanel.open && (
+      {rootModals.view("model-service").open && (
         <ModelServicePanel
           status={modelStatus}
           highlightedServiceId={highlightedModelServiceId}
@@ -7727,8 +7672,8 @@ export default function Home() {
           onClose={closeModelPanel}
           testingServiceIds={modelTestActivity.services}
           allTesting={modelTestActivity.all}
-          interactive={modelPanel.topmost}
-          zIndex={modelPanel.zIndex}
+          interactive={rootModals.view("model-service").topmost}
+          zIndex={rootModals.view("model-service").zIndex}
         />
       )}
     </div>

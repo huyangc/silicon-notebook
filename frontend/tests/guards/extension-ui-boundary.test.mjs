@@ -105,7 +105,7 @@ test("page composes one availability owner and exactly the two canonical outlets
     sourceDetailGate
     && ts.isBinaryExpression(sourceDetailGate)
     && sourceDetailGate.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
-    && sourceDetailGate.left.getText(page) === "sourceDetailModal.open && sourceDetail",
+    && sourceDetailGate.left.getText(page) === 'rootModals.view("source-detail").open && sourceDetail',
     "source detail and its extension slot must be synchronously hidden by the coordinator open lease",
   );
 
