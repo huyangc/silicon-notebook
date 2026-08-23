@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 import weakref
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.core.config import Settings
@@ -118,6 +119,790 @@ class _ReportCompletedAccess:
         self.__notify()
 
 
+# ──────────────────────────────────────────────── domain composition ──
+# ``RepositoryRuntime.__init__`` used to inline the wiring of the whole
+# backend in one 428-line constructor (architecture review 2026-08-21, A1/B4:
+# "按领域提取纯构造函数……`RepositoryRuntime` 只组合这些结果").  The composition
+# now lives in the frozen domain bundles below.  Two properties make the split
+# load-bearing rather than cosmetic, and both are pinned by
+# ``backend/tests/test_repository_runtime_composition.py``:
+#
+#   * every ``_build_*`` is a module-level PURE function whose parameters are
+#     earlier bundles — never ``self``/the runtime.  A builder that could
+#     reach the runtime would be able to read a *later* domain and re-create
+#     the cycle this split removes, so the call order in ``__init__`` IS the
+#     dependency topology and a cycle cannot be spelled;
+#   * ``__init__`` keeps exactly one job: call the builders in order and mount
+#     each bundle field with an explicit ``self.<name> = <bundle>.<name>``
+#     line, so a dropped seat is visible in the diff and caught by the frozen
+#     attribute-set test.
+#
+# Construction order still matters for the three process-level side effects in
+# domain 1 and the persistence bundle in domain 2; every later domain only
+# constructs objects (no seam calls, no I/O), which is why they may be grouped
+# by domain rather than by their historical interleaved order.
+#
+# The one deliberate exception to "no runtime in a builder": domains 6, 9 and
+# 10 take NARROW runtime-bound callables (``_current_user_id``, the
+# ``ask_service`` accessor and ``_note_ask_completed``).  Those three seats are
+# late-bound by design — they resolve state that only exists after the facade
+# constructor finishes — and passing the two-or-three callables keeps the edge
+# explicit and one-directional where passing ``self`` would not.
+
+
+@dataclass(frozen=True)
+class _ProcessFoundation:
+    """Process-level collaborators every other domain reads."""
+
+    settings: Settings
+    root_dir: Path
+    seams: RepositoryCompatibilitySeams
+    event_log: EventLogger
+    # Production factory injection supplies the process-shared host used
+    # by app.state, Ask and Report. Direct constructor tests may leave the
+    # optional seat empty and retain their exact historical behavior.
+    retrieval_contributors: RetrievalContributorHostPort | None
+    ask_completed_observers: AskCompletedObserverHostPort | None
+    report_completed_observers: ReportCompletedObserverHostPort | None
+    parser_provider_chain: ParserProviderChainHostPort
+    models: Any
+
+
+def _build_process_foundation(
+    settings: Settings,
+    root_dir: Path,
+    seams: RepositoryCompatibilitySeams,
+    model_provider: Any | None,
+    # Keyword-only: four same-shaped optional host seats, where a positional
+    # call site would swap two of them without any type or test noticing.
+    *,
+    retrieval_contributor_host: RetrievalContributorHostPort | None,
+    ask_completed_observer_host: AskCompletedObserverHostPort | None,
+    report_completed_observer_host: ReportCompletedObserverHostPort | None,
+    parser_provider_chain_host: ParserProviderChainHostPort | None,
+) -> _ProcessFoundation:
+    """Domain 1 — depends on nothing but the constructor arguments.
+
+    It owns the three process-level side effects that must keep happening in
+    this exact order, ahead of every other domain: the scheduler deployment
+    check, the event logger (whose ``logger`` carries the LLM-log-directory
+    warning) and ``kg_scheduler.initialize`` sized from the model provider.
+    ``BuiltinParserChainHost`` is a stateless fallback, so composing it with
+    the returned bundle rather than before the warning is order-neutral.
+    """
+
+    validate_process_local_scheduler_deployment()
+    event_log = EventLogger(settings, channel="events", per_user=True)
+    if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
+        event_log.logger.warning(
+            "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
+            "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
+            settings.llm_log_path,
+            settings.event_log_dir,
+        )
+    models = model_provider or RuntimeModelProvider(settings, event_log)
+    kg_scheduler.initialize(
+        window_workers=models.parallelism("kg_extract"),
+        job_workers=settings.kg_job_concurrency,
+    )
+    return _ProcessFoundation(
+        settings=settings,
+        root_dir=root_dir,
+        seams=seams,
+        event_log=event_log,
+        retrieval_contributors=retrieval_contributor_host,
+        ask_completed_observers=ask_completed_observer_host,
+        report_completed_observers=report_completed_observer_host,
+        parser_provider_chain=(
+            parser_provider_chain_host or BuiltinParserChainHost()
+        ),
+        models=models,
+    )
+
+
+@dataclass(frozen=True)
+class _PersistenceSeats:
+    """Every port seat produced by the ONE persistence bundle.
+
+    Construction of all of these is seam-free (they only capture the shared
+    database boundary plus the id/clock seams), so the whole domain is eager.
+    ``model_status`` is the one service in here: it is the read/write pair over
+    ``model_status_store`` and the process model provider, and it has to be
+    built where the store is because it also installs the provider's
+    observation sink.
+    """
+
+    database: Any
+    identity: Any
+    model_status_store: Any
+    model_status: ModelStatusService
+    queries: Any
+    notebook_store: Any
+    kg_build_jobs: Any
+    # Agentic Memory P1 (T2): bare store seat, no consumer yet — T3-T6
+    # wire injection/routes on top of this. See AgentProfileStorePort in
+    # repositories/ports.py for the read/write contract.
+    agent_profile: Any
+    # Agentic Memory P2 (T5): bare store seat for the deployment-GLOBAL
+    # retrieval-experience library. Its distillation service is built by
+    # ``_build_agent_jobs`` (it needs ``models``/``event_log``); the injection
+    # side is T6. See RetrievalExperienceStorePort in repositories/ports.py —
+    # note in particular why a store with no tenancy column is the right
+    # shape here, and what carries its isolation argument instead.
+    retrieval_experiences: Any
+    # Agentic Memory P3 (T2): bare store seat, no consumer yet — T3 (MCP
+    # ``add_observation``), T4 (untrusted overlay-consolidation sample)
+    # and T5 (the member-facing "my observations" API) wire on top of
+    # this. See AgentObservationStorePort in repositories/ports.py.
+    agent_observations: Any
+    source_store: Any
+    chunk_store: Any
+    # Task 25: reports-table row persistence is seam-free (the shared
+    # database boundary + the id/clock seams + identity's current_user).
+    # The execution coordinator over it is finished by
+    # wire_report_execution() because its engine factory rides the lazily
+    # wired retrieval and evidence-context ports.
+    report_store: Any
+    # Task 13: the three knowledge-domain persistence stores share the ONE
+    # database boundary. Their primitives are connection-taking — the
+    # facade keeps every transaction/connection boundary (its `_write` /
+    # `_connect` compatibility seams stay the observable commit points).
+    knowledge: Any
+    governance: Any
+    unified_kg: Any
+    # Task 22: Ask/answer/conversation/job/trace persistence shares the ONE
+    # database boundary.  Identity is explicit (user_id per call — the
+    # store never reads request ContextVars) and the seams dataclass is
+    # stored, never evaluated.  Cancel-event registry + fail-open trace
+    # logging stay facade-side.
+    ask_state: Any
+    memory_store: Any
+    index_projections: IndexProjectionStorePort
+    # Vector persistence is finished by wire_persistence(): its write seat
+    # is the facade's `_write` compatibility seam, which only exists once
+    # the facade constructor reaches it.
+    embedding_store: EmbeddingStorePort
+    # Sharing/deep-copy composition is finished by wire_sharing(): its
+    # collaborators (facade _insert_row seat, notebook_copy_stats memo,
+    # storage_dir) are facade-bound seams.
+    sharing_store: SharingStorePort
+    # 群组 / 组成员 / 授权边的行持久化。构造 seam-free(只存 bundle 给的实例),
+    # 故 eager;它没有 service 层——策略全在 `app/api/group_routes.py`,store 只
+    # 管行,所以路由经 `deps.group_repository()` 直取这个端口(与
+    # `notebook_store_port()` 同一惯例),中间不架一层只做转发的 service。
+    groups: GroupStorePort
+    # knowhow-tables PR-1 Task 2: row persistence for the Task-1 schema
+    # (knowhow_tables/columns/rows/cells + notebook_assets). Seam-free
+    # (only new_id/now, like notebook_store above). Task 5's projector and
+    # Task 6's import/table API depend on the facade's one-hop delegates
+    # over this exact instance.
+    knowhow_store: Any
+    # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）。id/时钟
+    # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
+    # 注释），store 自己不需要——不带 new_id/now 构造参数。
+    knowhow_transfer_store: Any
+    # knowhow 表版本管理 Task 3：变更流水/里程碑的读侧 store。new_id/now
+    # 与上面 knowhow_store 用同一对 seams 可调用对象，保持三个 store 的
+    # id/时钟来源单一（record_change 本身是模块级函数，不在这里持有——
+    # 由 Task 4-6 的写方法在各自事务内直接调用）。
+    knowhow_history_store: Any
+    # Consumed by ``_build_content_tools`` only; deliberately NOT mounted on
+    # the runtime — the command-catalog service is the single owner of this
+    # store, and an extra runtime attribute would be a second door to it.
+    catalog_store: Any
+
+
+def _build_persistence_seats(
+    persistence_factory: PersistenceBundleFactory,
+    foundation: _ProcessFoundation,
+) -> _PersistenceSeats:
+    """Domain 2 — the ONE persistence bundle, from domain 1's config/seams.
+
+    Inputs: ``foundation.settings`` / ``root_dir`` / ``seams`` for the bundle
+    factory, ``foundation.event_log`` for the database stats sink and
+    ``foundation.models`` for the model-status pair.  This is the only place
+    that touches the bundle: every later domain reads the seats off the
+    returned object, so "which store did this service get" is answerable from
+    one function.
+    """
+
+    bundle = persistence_factory.create(
+        settings=foundation.settings,
+        root_dir=foundation.root_dir,
+        seams=foundation.seams,
+    )
+    stats = getattr(bundle.database, "stats", None)
+    if stats is not None:
+        stats.sink = foundation.event_log.emit
+    model_status = ModelStatusService(
+        getattr(foundation.models, "registry", SystemModelServiceRegistry({}, {})),
+        foundation.models,
+        bundle.model_status,
+    )
+    set_observation_sink = getattr(foundation.models, "set_observation_sink", None)
+    if callable(set_observation_sink):
+        set_observation_sink(model_status.record_provider_observation)
+    return _PersistenceSeats(
+        database=bundle.database,
+        identity=bundle.identity,
+        model_status_store=bundle.model_status,
+        model_status=model_status,
+        queries=bundle.queries,
+        notebook_store=bundle.notebooks,
+        kg_build_jobs=bundle.kg_build_jobs,
+        agent_profile=bundle.agent_profile,
+        retrieval_experiences=bundle.retrieval_experiences,
+        agent_observations=bundle.agent_observations,
+        source_store=bundle.sources,
+        chunk_store=bundle.chunks,
+        report_store=bundle.reports,
+        knowledge=bundle.knowledge,
+        governance=bundle.governance,
+        unified_kg=bundle.unified_kg,
+        ask_state=bundle.ask_state,
+        memory_store=bundle.memory,
+        index_projections=bundle.index_projection,
+        embedding_store=bundle.embeddings,
+        sharing_store=bundle.sharing,
+        groups=bundle.groups,
+        knowhow_store=bundle.knowhow,
+        knowhow_transfer_store=bundle.knowhow_transfer,
+        knowhow_history_store=bundle.knowhow_history,
+        catalog_store=bundle.catalog,
+    )
+
+
+@dataclass(frozen=True)
+class _NotebookDomain:
+    """Notebook catalog, source-file storage and the deep-copy/sharing seats."""
+
+    notebook_summaries: NotebookSummaryQuery
+    source_files: SourceFileStore
+    catalog: NotebookCatalogService
+    # Finished by wire_sharing(): its collaborators (facade _insert_row seat,
+    # notebook_copy_stats memo, storage_dir) are facade-bound seams that only
+    # exist once the facade constructor reaches them.
+    notebook_copies: "NotebookCopyService | None"
+    sharing: "NotebookSharingService | None"
+
+
+def _build_notebook_domain(
+    foundation: _ProcessFoundation, seats: _PersistenceSeats
+) -> _NotebookDomain:
+    """Domain 3 — notebook identity/catalog over domain 2's seats.
+
+    Inputs: ``seats.database`` / ``queries`` / ``identity`` / ``notebook_store``
+    / ``kg_build_jobs`` from domain 2 and ``foundation.settings`` from domain 1.
+    """
+
+    summaries = NotebookSummaryQuery(
+        seats.database, seats.queries, seats.kg_build_jobs
+    )
+    # Source files resolve storage_dir through the database. Construct
+    # BEFORE the catalog so its storage_dir callable can bind THIS store
+    # directly.
+    source_files = SourceFileStore(
+        seats.database.resolve_path(foundation.settings.storage_dir),
+        resolve_path=seats.database.resolve_path,
+    )
+    return _NotebookDomain(
+        notebook_summaries=summaries,
+        source_files=source_files,
+        catalog=NotebookCatalogService(
+            store=seats.notebook_store,
+            summaries=summaries,
+            queries=seats.queries,
+            identity=seats.identity,
+            # Lazy: resolves the LIVE storage root only at delete_notebook
+            # time.  Deliberately default-bound to the eager SourceFileStore
+            # above — NOT ``lambda: self.storage_dir`` — because closing over
+            # the runtime would chain catalog -> runtime -> facade-bound seam
+            # closures -> SQLiteRepository, keeping the whole facade alive for
+            # as long as anything retains the catalog (ScaleArtifactRuntime
+            # holds it as ``notebooks``; see
+            # test_retained_scale_runtime_does_not_transitively_retain_repository).
+            # Liveness is preserved: the facade's mutable storage_dir setter
+            # chain (sqlite_repository.storage_dir -> runtime.set_storage_dir)
+            # mutates source_files.storage_dir IN PLACE, so this callable
+            # observes every post-construction swap (same Callable[[], Path]
+            # convention as wire_sharing's NotebookCopyService).
+            storage_dir=lambda source_files=source_files: source_files.storage_dir,
+        ),
+        notebook_copies=None,
+        sharing=None,
+    )
+
+
+@dataclass(frozen=True)
+class _SourcePipelineDomain:
+    """Parse → chunk → embed pipeline seats for one source."""
+
+    chunk_question_index: ChunkQuestionIndexService
+    # Finished by wire_source_pipeline(): the mutable embedder and
+    # _mark_unified_kg_dirty collaborators plus the wired EmbeddingStore only
+    # exist once the facade constructor reaches them.
+    source_embedding: "SourceEmbeddingService | None"
+    source_chunking: "SourceChunkingService | None"
+    # Finished by wire_source_ingestion(): its collaborators (facade _write
+    # seat, facade-owned parse/summarize/model seams and the TEMPORARY KG
+    # callbacks that Gate 5 replaces with real services) are facade-bound
+    # seams that only exist once the facade constructor reaches them.
+    source_ingestion: "SourceIngestionService | None"
+
+
+def _build_source_pipeline(
+    foundation: _ProcessFoundation, seats: _PersistenceSeats
+) -> _SourcePipelineDomain:
+    """Domain 4 — the per-source ingestion pipeline.
+
+    Inputs: ``foundation.settings`` / ``models`` / ``event_log`` / ``seams``
+    from domain 1 and ``seats.chunk_store`` from domain 2.  Everything except
+    the generated-question index is a lazy seat; none of them calls a seam
+    here.
+    """
+
+    return _SourcePipelineDomain(
+        chunk_question_index=ChunkQuestionIndexService(
+            settings=foundation.settings,
+            chunks=seats.chunk_store,
+            models=foundation.models,
+            event_log=foundation.event_log,
+            now=foundation.seams.now,
+        ),
+        source_embedding=None,
+        source_chunking=None,
+        source_ingestion=None,
+    )
+
+
+@dataclass(frozen=True)
+class _ReportDomain:
+    """Deep-report application service plus the process-global cancel registry."""
+
+    report_application: ReportApplicationService
+    # ``REPORT_CANCELLATIONS`` is the intentionally process-global canonical
+    # owner: the runtime, the report coordinator and the module compatibility
+    # functions must share this same identity reference.
+    report_cancellations: Any
+    # Finished by wire_report_execution() — its engine factory rides the
+    # lazily wired retrieval and evidence-context ports.
+    report_execution: "ReportExecutionCoordinator | None"
+
+
+def _build_report_domain(
+    seats: _PersistenceSeats, notebook: _NotebookDomain
+) -> _ReportDomain:
+    """Domain 5 — reports over domain 2's row store and domain 3's catalog.
+
+    Inputs: ``seats.report_store`` from domain 2 and ``notebook.catalog`` from
+    domain 3.
+    """
+
+    return _ReportDomain(
+        report_application=ReportApplicationService(
+            notebook.catalog, seats.report_store
+        ),
+        report_cancellations=REPORT_CANCELLATIONS,
+        report_execution=None,
+    )
+
+
+@dataclass(frozen=True)
+class _KnowledgeDomain:
+    """Knowledge-graph analysis, schema registry and the lifecycle seats."""
+
+    # KG 质量分析报告的只读装配(T3)。**后端中性**:它只吃 database + unified_kg
+    # 两个 seam(两者都是后端相关的实例,由 bundle 给),自己不 import 任何后端 ——
+    # 所以它落在这个中性 runtime 里,而不是像 checkup 那样落在两个 facade 各一份
+    # (checkup 依赖 sqlite/postgres 各自的 maintenance adapter,neutrality 守卫
+    # 禁止 runtime import 它们)。构造是 eager 且 seam-free 的(只存引用);进程内
+    # 的记忆化因此跟着 runtime 单例跨请求存活 —— 那正是它存在的意义(大库上板块
+    # 列表要排 8.8 万行)。
+    kg_analysis: KgAnalysisService
+    # Task 13: schema CRUD + LLM-backed induction. It requests the
+    # ``schema_induction`` workload from the process-owned provider.
+    schema_registry: SchemaRegistryService
+    # Finished by wire_kg_mutations(): its remaining collaborators (the
+    # scale-runtime auto-index once-set, the corpus-language memo and the
+    # facade `_write` transaction seat) only exist once the facade constructor
+    # reaches them.  The caches come from the retrieval domain's snapshots.
+    kg_mutations: "KgMutationCoordinator | None"
+    # Finished by wire_knowledge_lifecycle(): their collaborators (the facade
+    # `_write`/`_connect` transaction seats, the facade-owned unified/viz cache
+    # objects, the coordinator-backed dirty/invalidate wrappers, the
+    # process-owned model provider and the Gate-6 scale/viz adapters) only
+    # exist once the facade constructor reaches them.
+    knowledge_governance: "KnowledgeGovernanceService | None"
+    knowledge_lifecycle: "KnowledgeLifecycleService | None"
+    knowledge_query: "KnowledgeQueryService | None"
+    pending_actions_service: "PendingActionsService | None"
+
+
+def _build_knowledge_domain(
+    foundation: _ProcessFoundation,
+    seats: _PersistenceSeats,
+    current_user_id: Callable[[], str],
+) -> _KnowledgeDomain:
+    """Domain 6 — knowledge graph analysis/governance over domain 2's seats.
+
+    Inputs: ``seats.database`` / ``unified_kg`` / ``notebook_store`` /
+    ``knowledge`` / ``source_store`` from domain 2, ``foundation.models`` /
+    ``settings`` / ``seams`` from domain 1, plus the runtime's narrow
+    ``current_user_id`` accessor (resolved per call, never at build time).
+    """
+
+    return _KnowledgeDomain(
+        kg_analysis=KgAnalysisService(
+            database=seats.database,
+            unified_kg=seats.unified_kg,
+            now=foundation.seams.now,
+        ),
+        schema_registry=SchemaRegistryService(
+            seats.database,
+            seats.notebook_store,
+            seats.knowledge,
+            seats.source_store,
+            foundation.models,
+            foundation.settings,
+            current_user_id=current_user_id,
+        ),
+        kg_mutations=None,
+        knowledge_governance=None,
+        knowledge_lifecycle=None,
+        knowledge_query=None,
+        pending_actions_service=None,
+    )
+
+
+@dataclass(frozen=True)
+class _RetrievalDomain:
+    """Retrieval + memory-recall seats, all finished by wire_retrieval/memory."""
+
+    # Task 17: the retrieval snapshot caches are seam-free (a version-keyed
+    # VectorCache sized from settings plus the plain unified-graph dict), so
+    # the runtime owns them eagerly. The facade's `_vector_cache` /
+    # `_unified_cache` handles are write-through descriptors over THESE
+    # objects and the KG mutation coordinator reads them through this cache —
+    # one owner, no facade-only copies.
+    retrieval_snapshots: RetrievalSnapshotCache
+    memory_service: "MemoryService | None"
+    memory_retriever: "MemoryRetriever | None"
+    evidence_context: "EvidenceContextService | None"
+    candidate_retrieval: "CandidateRetrievalService | None"
+    graph_retrieval: "GraphRetrievalService | None"
+    retrieval: "RetrievalService | None"
+
+
+def _build_retrieval_domain(foundation: _ProcessFoundation) -> _RetrievalDomain:
+    """Domain 7 — retrieval/memory seats.
+
+    Inputs: only ``foundation.settings`` from domain 1 (the vector cache size).
+    Every other seat is embedder-bound and therefore filled by
+    ``wire_retrieval()`` / ``wire_memory()`` after the facade constructor
+    finishes.
+    """
+
+    return _RetrievalDomain(
+        retrieval_snapshots=RetrievalSnapshotCache(
+            vector_cache=VectorCache(
+                max_entries=foundation.settings.vector_cache_max_entries
+            ),
+            unified_cache={},
+        ),
+        memory_service=None,
+        memory_retriever=None,
+        evidence_context=None,
+        candidate_retrieval=None,
+        graph_retrieval=None,
+        retrieval=None,
+    )
+
+
+@dataclass(frozen=True)
+class _SourceGraphDomain:
+    """Selected-source graph projection, its PPR lanes and the scale artifacts."""
+
+    # Task 18: scale/viz artifact FILE persistence is seam-free (raw
+    # settings.storage_dir paths + the pure kg.scale_index / kg.viz_index
+    # load/save modules), so the runtime owns it eagerly.
+    scale_artifact_store: ScaleArtifactStore
+    # Read-only selected-source graph projection. It is intentionally not
+    # consumed by Ask/Report in this PR; wiring it here gives later graph
+    # primitives one backend-neutral, generation-keyed snapshot owner.
+    source_subgraphs: SourceSubgraphService
+    # Shadow-only selected-source graph tools. Public Ask/Report wiring is
+    # intentionally deferred to the baseline-preserving rollout PRs.
+    source_graph_primitives: SourceGraphPrimitives
+    # Shadow lane keeps the historical result immutable. Ask/Report wiring
+    # remains deferred; later consumers must finish B before invoking G.
+    source_graph_enrichment: BaselineProtectedEnrichmentService
+    source_subgraph_ppr: SourceSubgraphPprService
+    source_partitioned_ppr: SourcePartitionedPprService
+    selected_source_graph: SelectedSourceGraphActivationService
+    # The DB projections + read catalog over the artifact store are finished
+    # by wire_scale_artifacts() — their collaborators (the facade `_connect`
+    # read seam, the `_in_batches` IN-chunking helper, the retrieval-owned
+    # ent-chunk/mention/vector-matrix caches, the memoized version key, the
+    # LRU cache + cold-load lock table and the model-error note) are
+    # facade-bound seams that only exist once the facade constructor
+    # reaches them.
+    scale_catalog: "ScaleArtifactCatalog | None"
+    scale_builder: "ScaleIndexBuilder | None"
+    scale_artifacts: "ScaleArtifactRuntime | None"
+
+
+def _build_source_graph_domain(
+    foundation: _ProcessFoundation, seats: _PersistenceSeats
+) -> _SourceGraphDomain:
+    """Domain 8 — selected-source graph lanes over domain 2's projections.
+
+    Inputs: ``seats.index_projections`` from domain 2 and
+    ``foundation.settings`` / ``event_log`` from domain 1.
+    """
+
+    settings = foundation.settings
+    subgraphs = SourceSubgraphService(
+        projections=seats.index_projections, settings=settings
+    )
+    primitives = SourceGraphPrimitives(snapshots=subgraphs, settings=settings)
+    enrichment = BaselineProtectedEnrichmentService()
+    online_ppr = SourceSubgraphPprService(settings=settings)
+    artifact_store = ScaleArtifactStore(settings)
+    partitioned_ppr = SourcePartitionedPprService(
+        settings=settings,
+        artifacts=artifact_store,
+        projections=seats.index_projections,
+    )
+    return _SourceGraphDomain(
+        scale_artifact_store=artifact_store,
+        source_subgraphs=subgraphs,
+        source_graph_primitives=primitives,
+        source_graph_enrichment=enrichment,
+        source_subgraph_ppr=online_ppr,
+        source_partitioned_ppr=partitioned_ppr,
+        selected_source_graph=SelectedSourceGraphActivationService(
+            settings=settings,
+            snapshots=subgraphs,
+            primitives=primitives,
+            online_ppr=online_ppr,
+            partitioned_ppr=partitioned_ppr,
+            enrichment=enrichment,
+            event_log=foundation.event_log,
+        ),
+        scale_catalog=None,
+        scale_builder=None,
+        scale_artifacts=None,
+    )
+
+
+@dataclass(frozen=True)
+class _AskDomain:
+    """Ask cancellation + detached streaming execution."""
+
+    # Task 23: seam-free (the Task-22 ask_state store, the module-level
+    # copied-context job helper and the runtime event log).  The facade's
+    # frozen _ask_cancel_events/_ask_cancel_lock attributes become
+    # compatibility handles over THIS registry (one owner — the explicit
+    # cancel endpoint and the coordinator's register/unregister meet in the
+    # same map).
+    ask_cancellations: AskCancellationRegistry
+    # Task 24: composition rides the wired retrieval port, which is
+    # embedder-bound and only exists after the facade constructor finishes
+    # and the first ask touches it.
+    ask: "AskService | None"
+    ask_execution: AskExecutionCoordinator
+
+
+def _build_ask_domain(
+    foundation: _ProcessFoundation,
+    seats: _PersistenceSeats,
+    ask_service: Callable[[], AskService],
+    note_ask_completed: Callable[[str, str, str], None],
+) -> _AskDomain:
+    """Domain 9 — Ask execution over domain 2's ask-state store.
+
+    Inputs: ``seats.ask_state`` from domain 2, ``foundation.event_log`` from
+    domain 1, plus the two NARROW runtime-bound callables this domain cannot
+    resolve on its own: the ``ask_service`` accessor (Task 24 — the ONE
+    runtime-owned AskService, composed lazily) and ``_note_ask_completed``.
+    Both are late-bound by contract; the builder never sees the runtime.
+    """
+
+    cancellations = AskCancellationRegistry()
+    return _AskDomain(
+        ask_cancellations=cancellations,
+        ask=None,
+        ask_execution=AskExecutionCoordinator(
+            ask_state=seats.ask_state,
+            cancellations=cancellations,
+            job_submitter=background_jobs,
+            event_log=foundation.event_log,
+            ask=ask_service,
+            # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
+            # 计数。
+            # ⚠ 三参:coordinator 按 (nb, uid, mode_id) 调用(codex #524 R5 P1:
+            # 这里少一个参数,TypeError 会被协调器的 fail-open 吞掉,两条后台
+            # 链一起静默死亡而答案照常交付——由行为用例按真实 arity 钉住)。
+            note_ask_completed=lambda nb, uid, mode_id: note_ask_completed(
+                nb, uid, mode_id
+            ),
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _ContentToolsDomain:
+    """Content-facing tool services composed over the persistence seats."""
+
+    # 方案 C·C1b:命令目录抽取。**后端中性**——它吃的全是端口/可调用
+    # (catalog/source/chunk/knowhow store + models + event_log + 两个 seam),
+    # 自己不 import 任何后端,所以和 kg_analysis 一样落在这个中性 runtime,而不是
+    # 每个 facade 各构一份。单例是必要的而非顺手:取消事件的注册表挂在实例上,
+    # 「发起 job 的请求」与「跑 job 的后台线程」必须看到同一份。
+    command_catalog: CommandCatalogService
+    # 逐步推理集合枚举 PR-2 T2:类型化集合的「地图层」计数。只吃窄端口
+    # (database/sources/notebooks/queries/unified_kg),零模型调用,构造即
+    # 建三个有界进程内缓存,故与几个 store 一样是 eager 且无 seam。
+    collection_catalog: CollectionCatalogService
+    # 同批 T3:类型化集合的「清单层」。刻意吃**上面那一个** catalog 实例而不是
+    # 自己新建——地图计数与枚举必须来自同一份 per-source 缓存,否则会出现
+    # 「地图报 12、清单只列 8」这种无法自证的假部分。同样零模型调用、无 seam。
+    collection_enumeration: CollectionEnumerationService
+
+
+def _build_content_tools(
+    foundation: _ProcessFoundation,
+    seats: _PersistenceSeats,
+    current_user_id: Callable[[], str],
+) -> _ContentToolsDomain:
+    """Domain 10 — command-catalog extraction and the typed-collection layers.
+
+    Inputs: ``seats.catalog_store`` / ``source_store`` / ``chunk_store`` /
+    ``knowhow_store`` / ``database`` / ``notebook_store`` / ``queries`` /
+    ``knowledge`` / ``unified_kg`` from domain 2, ``foundation.models`` /
+    ``event_log`` / ``seams`` from domain 1, plus the runtime's narrow
+    ``current_user_id`` accessor.
+    """
+
+    collection_catalog = CollectionCatalogService(
+        database=seats.database,
+        sources=seats.source_store,
+        notebooks=seats.notebook_store,
+        queries=seats.queries,
+        unified_kg=seats.unified_kg,
+    )
+    return _ContentToolsDomain(
+        command_catalog=CommandCatalogService(
+            catalog=seats.catalog_store,
+            sources=seats.source_store,
+            chunks=seats.chunk_store,
+            knowhow=seats.knowhow_store,
+            models=foundation.models,
+            event_log=foundation.event_log,
+            now=foundation.seams.now,
+            current_user_id=current_user_id,
+        ),
+        collection_catalog=collection_catalog,
+        collection_enumeration=CollectionEnumerationService(
+            database=seats.database,
+            catalog=collection_catalog,
+            sources=seats.source_store,
+            notebooks=seats.notebook_store,
+            knowledge=seats.knowledge,
+            unified_kg=seats.unified_kg,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _AgentJobsDomain:
+    """The three post-ask background chains (Agentic Memory P1/P2/P3)."""
+
+    # Agentic Memory P1 (T4):「AI 对这个库的理解」的巡固任务。后端中性——只吃
+    # 端口(agent_profile/database/sources/queries)与 models/event_log 两个进程级
+    # 对象,故与 command_catalog 同处这个中性 runtime。**单例是必要的而非顺手**:
+    # 阈值闸与单飞都落在持久行上,但「谁来提交后台线程」必须只有一份实现,来源
+    # 管线的 hook 与(T6 的)手动重建按钮才会走同一条 claim→submit 路径。
+    agent_profile_jobs: AgentProfileConsolidationService
+    # Agentic Memory P2 (T5):检索打法的蒸馏任务。与它的 P1 兄弟同处这个
+    # **后端中性** runtime,同样只吃端口与两个进程级对象。单例同样是必要的
+    # 而非顺手:阈值计数与单飞都是**进程内**状态,构造两份就等于两个各自计
+    # 到一半的计数器和两条可以同时开跑的链。
+    retrieval_experience_jobs: RetrievalExperienceDistillationService
+    # Agentic Memory P3(B-Profile,T7):每用户「检索/回答风格偏好」文档里
+    # 唯一一个 v1 会归纳的字段(``answer_language``)的确定性、零模型触发
+    # service。单例同样是必要的而非顺手:每用户阈值计数是**进程内**状态,
+    # 分身出第二个实例就是两份各自计到一半的计数器。它比它的两个 P1/P2
+    # 兄弟更薄——没有模型调用,读写都在同一个进程内锁的临界区内同步完成,
+    # 不需要后台线程池句柄(见 ``search_profile_job`` 模块 docstring)。
+    search_profile_jobs: SearchProfileInferenceService
+
+
+def _build_agent_jobs(
+    foundation: _ProcessFoundation, seats: _PersistenceSeats
+) -> _AgentJobsDomain:
+    """Domain 11 — the post-ask consolidation/distillation/inference chains.
+
+    Inputs: ``seats.agent_profile`` / ``retrieval_experiences`` /
+    ``agent_observations`` / ``database`` / ``source_store`` / ``queries`` /
+    ``ask_state`` / ``sharing_store`` / ``identity`` from domain 2 and
+    ``foundation.settings`` / ``models`` / ``event_log`` from domain 1.
+    """
+
+    return _AgentJobsDomain(
+        agent_profile_jobs=AgentProfileConsolidationService(
+            settings=foundation.settings,
+            profiles=seats.agent_profile,
+            database=seats.database,
+            sources=seats.source_store,
+            queries=seats.queries,
+            models=foundation.models,
+            event_log=foundation.event_log,
+            # T5:覆盖层链路唯一的取数座位。它读的是**该成员自己**的提问轨迹
+            # (谓词写在 SQL 里,见 ``recent_user_ask_traces``),底座链路一个字
+            # 都不许碰它——那条边界由隔离守卫按函数分组静态钉住。
+            ask_state=seats.ask_state,
+            # P2-T3:覆盖层的成员资格座位。用的是**读侧同一份谓词**
+            # (`access_sql.NOTEBOOK_READ_SQL`),所以「这条链还该不该存在」与
+            # 「这个人还读不读得到这个库」不会分叉。座位单开一个而不是往
+            # ask_state 上加方法:隔离守卫的端口白名单是按链路分的,而按人判定
+            # 的方法绝不该出现在底座那张里。
+            access=seats.sharing_store,
+            # Agentic Memory P3 (T4):覆盖层的第三个取数座位,唯一够得着
+            # ``agent_observations``——外部 Agent 经 MCP `add_observation`(T3)
+            # 写下的、关于它自己怎么用这个库的短句。座位单开一个而不是往
+            # ask_state 上加方法,理由与 ask_state/access 同形:隔离守卫的端口
+            # 白名单按链路分,这个座位必须永远只出现在覆盖层那张里。
+            observations=seats.agent_observations,
+        ),
+        retrieval_experience_jobs=RetrievalExperienceDistillationService(
+            settings=foundation.settings,
+            experiences=seats.retrieval_experiences,
+            # ⚠ 同一个 ask_state 座位,读的却是**没有任何用户/笔记本谓词**的那条
+            # 方法(``recent_completed_ask_runs``)。它的安全性不来自谓词,而来自
+            # 投影——见 ports.py 上那段说明与 retrieval_experience_projection.py。
+            ask_state=seats.ask_state,
+            models=foundation.models,
+            event_log=foundation.event_log,
+        ),
+        search_profile_jobs=SearchProfileInferenceService(
+            settings=foundation.settings,
+            # ⚠ 读的是``recent_user_ask_languages``——同一个 ask_state 座位上
+            # 第三条按``created_by``收窄的读,层三隔离守卫钉在
+            # ``TRACE_READ_METHODS``里(与另外两条同一份 ``ask_state_store.py``,
+            # 认同一个列名),但它**不属于** P1 的底座/覆盖层链路,登记只为覆盖
+            # 层三判据。
+            ask_state=seats.ask_state,
+            # 唯一的写入座位:读-改-写 ``user_profiles.search_profile_json`` 必须
+            # 走 ``IdentityRepository.set_user_search_profile``(T6),而不是另开
+            # 一个座位——该方法本就在同一个写事务内做「job 不覆盖 user 字段」的
+            # 合并,详见 ``search_profile.merge_field``。
+            identity=seats.identity,
+            event_log=foundation.event_log,
+        ),
+    )
+
+
 class RepositoryRuntime:
     def __init__(
         self,
@@ -132,426 +917,126 @@ class RepositoryRuntime:
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
     ) -> None:
-        validate_process_local_scheduler_deployment()
-        self.settings = settings
-        self.root_dir = root_dir
-        self.seams = seams
+        """Call the domain builders in order, then mount their fields: the
+        call order below IS the dependency topology."""
+        foundation = _build_process_foundation(
+            settings, root_dir, seams, model_provider,
+            retrieval_contributor_host=retrieval_contributor_host,
+            ask_completed_observer_host=ask_completed_observer_host,
+            report_completed_observer_host=report_completed_observer_host,
+            parser_provider_chain_host=parser_provider_chain_host,
+        )
+        self.settings = foundation.settings
+        self.root_dir = foundation.root_dir
+        self.seams = foundation.seams
+        self.event_log = foundation.event_log
+        self.retrieval_contributors = foundation.retrieval_contributors
+        self.ask_completed_observers = foundation.ask_completed_observers
+        self.report_completed_observers = foundation.report_completed_observers
+        self.parser_provider_chain = foundation.parser_provider_chain
+        self.models = foundation.models
+        # Runtime-private state: no domain owns it; the locks guard wire_*.
         self._closed = False
-        self.event_log = EventLogger(settings, channel="events", per_user=True)
-        # Production factory injection supplies the process-shared host used
-        # by app.state, Ask and Report. Direct constructor tests may leave the
-        # optional seat empty and retain their exact historical behavior.
-        self.retrieval_contributors = retrieval_contributor_host
-        self.ask_completed_observers = ask_completed_observer_host
-        self.report_completed_observers = report_completed_observer_host
-        self.parser_provider_chain = (
-            parser_provider_chain_host or BuiltinParserChainHost()
-        )
-        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
-            self.event_log.logger.warning(
-                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
-                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
-                settings.llm_log_path,
-                settings.event_log_dir,
-            )
-        self.models = model_provider or RuntimeModelProvider(settings, self.event_log)
-        kg_scheduler.initialize(
-            window_workers=self.models.parallelism("kg_extract"),
-            job_workers=settings.kg_job_concurrency,
-        )
-        bundle = persistence_factory.create(
-            settings=settings,
-            root_dir=root_dir,
-            seams=seams,
-        )
-        self.database = bundle.database
-        stats = getattr(self.database, "stats", None)
-        if stats is not None:
-            stats.sink = self.event_log.emit
-        self.identity = bundle.identity
-        self.model_status_store = bundle.model_status
-        self.model_status = ModelStatusService(
-            getattr(self.models, "registry", SystemModelServiceRegistry({}, {})),
-            self.models,
-            self.model_status_store,
-        )
-        set_observation_sink = getattr(self.models, "set_observation_sink", None)
-        if callable(set_observation_sink):
-            set_observation_sink(self.model_status.record_provider_observation)
-        self.queries = bundle.queries
-        self.notebook_store = bundle.notebooks
-        self.kg_build_jobs = bundle.kg_build_jobs
-        # Agentic Memory P1 (T2): bare store seat, no consumer yet — T3-T6
-        # wire injection/routes on top of this. See AgentProfileStorePort in
-        # repositories/ports.py for the read/write contract.
-        self.agent_profile = bundle.agent_profile
-        # Agentic Memory P2 (T5): bare store seat for the deployment-GLOBAL
-        # retrieval-experience library. Its distillation service is built
-        # further down (it needs ``models``/``event_log``); the injection side
-        # is T6. See RetrievalExperienceStorePort in repositories/ports.py —
-        # note in particular why a store with no tenancy column is the right
-        # shape here, and what carries its isolation argument instead.
-        self.retrieval_experiences = bundle.retrieval_experiences
-        # Agentic Memory P3 (T2): bare store seat, no consumer yet — T3 (MCP
-        # ``add_observation``), T4 (untrusted overlay-consolidation sample)
-        # and T5 (the member-facing "my observations" API) wire on top of
-        # this. See AgentObservationStorePort in repositories/ports.py.
-        self.agent_observations = bundle.agent_observations
-        self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries, self.kg_build_jobs)
-        # Source files resolve storage_dir through the database. Construct eagerly
-        # BEFORE the catalog so its storage_dir callable can bind THIS store
-        # directly.
-        self.source_files = SourceFileStore(
-            self.database.resolve_path(settings.storage_dir),
-            resolve_path=self.database.resolve_path,
-        )
-        self.catalog = NotebookCatalogService(
-            store=self.notebook_store,
-            summaries=self.notebook_summaries,
-            queries=self.queries,
-            identity=self.identity,
-            # Lazy: resolves the LIVE storage root only at delete_notebook
-            # time.  Deliberately default-bound to the eager SourceFileStore
-            # above — NOT ``lambda: self.storage_dir`` — because closing over
-            # the runtime would chain catalog -> runtime -> facade-bound seam
-            # closures -> SQLiteRepository, keeping the whole facade alive for
-            # as long as anything retains the catalog (ScaleArtifactRuntime
-            # holds it as ``notebooks``; see
-            # test_retained_scale_runtime_does_not_transitively_retain_repository).
-            # Liveness is preserved: the facade's mutable storage_dir setter
-            # chain (sqlite_repository.storage_dir -> runtime.set_storage_dir)
-            # mutates source_files.storage_dir IN PLACE, so this callable
-            # observes every post-construction swap (same Callable[[], Path]
-            # convention as wire_sharing's NotebookCopyService).
-            storage_dir=lambda source_files=self.source_files: source_files.storage_dir,
-        )
-        self.source_store = bundle.sources
-        self.chunk_store = bundle.chunks
-        self.chunk_question_index = ChunkQuestionIndexService(
-            settings=self.settings,
-            chunks=self.chunk_store,
-            models=self.models,
-            event_log=self.event_log,
-            now=self.seams.now,
-        )
-        # Task 25: reports-table row persistence is seam-free (the shared
-        # database boundary + the id/clock seams + identity's current_user),
-        # so the runtime owns and constructs it eagerly.  The process-global
-        # cancellation registry is referenced BY IDENTITY (report_engine's
-        # register/cancel/unregister delegates observe the same instance);
-        # the execution coordinator is finished by wire_report_execution()
-        # because its engine factory rides the lazily wired retrieval and
-        # evidence-context ports.
-        self.report_store = bundle.reports
-        self.report_application = ReportApplicationService(
-            self.catalog, self.report_store
-        )
-        self.report_cancellations = REPORT_CANCELLATIONS
-        self.report_execution: "ReportExecutionCoordinator | None" = None
-        # Task 13: the three knowledge-domain persistence stores share the ONE
-        # database boundary. Their primitives are connection-taking — the
-        # facade keeps every transaction/connection boundary (its `_write` /
-        # `_connect` compatibility seams stay the observable commit points),
-        # so construction is eager and seam-free.
-        self.knowledge = bundle.knowledge
-        self.governance = bundle.governance
-        self.unified_kg = bundle.unified_kg
-        # KG 质量分析报告的只读装配(T3)。**后端中性**:它只吃 database + unified_kg
-        # 两个 seam(两者都是后端相关的实例,由上面的 bundle 给),自己不 import 任何
-        # 后端 —— 所以它落在这个中性 runtime 里,而不是像 checkup 那样落在两个 facade
-        # 各一份(checkup 依赖 sqlite/postgres 各自的 maintenance adapter,neutrality
-        # 守卫禁止 runtime import 它们)。
-        # 构造是 eager 且 seam-free 的(只存引用);进程内的记忆化因此跟着 runtime 单例
-        # 跨请求存活 —— 那正是它存在的意义(大库上板块列表要排 8.8 万行)。
-        self.kg_analysis = KgAnalysisService(
-            database=self.database,
-            unified_kg=self.unified_kg,
-            now=seams.now,
-        )
-        # Task 22: Ask/answer/conversation/job/trace persistence shares the ONE
-        # database boundary.  Identity is explicit (user_id per call — the
-        # store never reads request ContextVars) and the seams dataclass is
-        # stored, never evaluated, so construction is eager and seam-free.
-        # Cancel-event registry + fail-open trace logging stay facade-side.
-        self.ask_state = bundle.ask_state
-        self.memory_store = bundle.memory
-        self.memory_service: "MemoryService | None" = None
-        self.memory_retriever: "MemoryRetriever | None" = None
         self._embedder: Any = None
         self._notebook_languages: dict[str, list[str]] = {}
-        # Task 18: scale/viz artifact FILE persistence is seam-free (raw
-        # settings.storage_dir paths + the pure kg.scale_index / kg.viz_index
-        # load/save modules), so the runtime owns and constructs it eagerly.
-        # The DB projections + read catalog over it are finished by
-        # wire_scale_artifacts() — their collaborators (the facade `_connect`
-        # read seam, the `_in_batches` IN-chunking helper, the retrieval-owned
-        # ent-chunk/mention/vector-matrix caches, the memoized version key,
-        # the LRU cache + cold-load lock table and the model-error note) are
-        # facade-bound seams that only exist once the facade constructor
-        # reaches them.  Construction stays lazy — no seam calls.
-        self.scale_artifact_store = ScaleArtifactStore(settings)
-        self.index_projections: IndexProjectionStorePort = bundle.index_projection
-        # Read-only selected-source graph projection. It is intentionally not
-        # consumed by Ask/Report in this PR; wiring it here gives later graph
-        # primitives one backend-neutral, generation-keyed snapshot owner.
-        self.source_subgraphs = SourceSubgraphService(
-            projections=self.index_projections,
-            settings=self.settings,
-        )
-        # Shadow-only selected-source graph tools. Public Ask/Report wiring is
-        # intentionally deferred to the baseline-preserving rollout PRs.
-        self.source_graph_primitives = SourceGraphPrimitives(
-            snapshots=self.source_subgraphs,
-            settings=self.settings,
-        )
-        # Shadow lane keeps the historical result immutable. Ask/Report wiring
-        # remains deferred; later consumers must finish B before invoking G.
-        self.source_graph_enrichment = BaselineProtectedEnrichmentService()
-        self.source_subgraph_ppr = SourceSubgraphPprService(settings=self.settings)
-        self.source_partitioned_ppr = SourcePartitionedPprService(
-            settings=self.settings,
-            artifacts=self.scale_artifact_store,
-            projections=self.index_projections,
-        )
-        self.selected_source_graph = SelectedSourceGraphActivationService(
-            settings=self.settings,
-            snapshots=self.source_subgraphs,
-            primitives=self.source_graph_primitives,
-            online_ppr=self.source_subgraph_ppr,
-            partitioned_ppr=self.source_partitioned_ppr,
-            enrichment=self.source_graph_enrichment,
-            event_log=self.event_log,
-        )
-        self.scale_catalog: "ScaleArtifactCatalog | None" = None
-        self.scale_builder: "ScaleIndexBuilder | None" = None
-        self.scale_artifacts: "ScaleArtifactRuntime | None" = None
-        # Vector persistence is finished by wire_persistence(): its write seat
-        # is the facade's `_write` compatibility seam, which only exists once
-        # the facade constructor reaches it. Construction stays lazy.
-        self.embedding_store: EmbeddingStorePort = bundle.embeddings
-        # The source embed/chunk pipeline is finished by wire_source_pipeline():
-        # its mutable embedder and _mark_unified_kg_dirty collaborators plus
-        # the wired EmbeddingStore only exist once the facade constructor
-        # reaches them. Construction stays lazy — no seam calls.
-        self.source_embedding: "SourceEmbeddingService | None" = None
-        self.source_chunking: "SourceChunkingService | None" = None
-        # Source ingestion orchestration is finished by wire_source_ingestion():
-        # its collaborators (facade _write seat, facade-owned parse/summarize/
-        # model seams and the TEMPORARY KG callbacks that Gate 5 replaces with
-        # real services) are facade-bound seams that only exist once the facade
-        # constructor reaches them.  Construction stays lazy — no seam calls.
-        self.source_ingestion: "SourceIngestionService | None" = None
-        # Task 17: the retrieval snapshot caches are seam-free (a version-keyed
-        # VectorCache sized from settings plus the plain unified-graph dict),
-        # so the runtime owns and constructs them eagerly. The facade's
-        # `_vector_cache` / `_unified_cache` handles are write-through
-        # descriptors over THESE objects and the KG mutation coordinator reads
-        # them through this cache — one owner, no facade-only copies.
-        self.retrieval_snapshots = RetrievalSnapshotCache(
-            vector_cache=VectorCache(max_entries=settings.vector_cache_max_entries),
-            unified_cache={},
-        )
-        # The KG mutation coordinator is finished by wire_kg_mutations(): its
-        # remaining collaborators (the scale-runtime auto-index once-set, the
-        # corpus-language memo and the facade `_write` transaction seat) only
-        # exist once the facade constructor reaches them.  Construction stays
-        # lazy — no seam calls.  The caches come from retrieval_snapshots.
-        self.kg_mutations: "KgMutationCoordinator | None" = None
-        # The knowledge lifecycle/governance services are finished by
-        # wire_knowledge_lifecycle(): their collaborators (the facade `_write`/
-        # `_connect` transaction seats, the facade-owned unified/viz cache
-        # objects, the coordinator-backed dirty/invalidate wrappers, the
-        # process-owned model provider and the Gate-6 scale/viz adapters)
-        # only exist once the facade constructor reaches them.  Construction
-        # stays lazy — no seam calls.
-        self.knowledge_governance: "KnowledgeGovernanceService | None" = None
-        self.knowledge_lifecycle: "KnowledgeLifecycleService | None" = None
-        self.knowledge_query: "KnowledgeQueryService | None" = None
-        self.pending_actions_service: "PendingActionsService | None" = None
-        # Sharing/deep-copy composition is finished by wire_sharing(): its
-        # collaborators (facade _insert_row seat, notebook_copy_stats memo,
-        # storage_dir) are facade-bound seams that only exist once the facade
-        # constructor reaches them.  Construction stays lazy — no seam calls.
-        self.sharing_store: SharingStorePort = bundle.sharing
-        # 群组 / 组成员 / 授权边的行持久化。构造 seam-free(只存 bundle 给的实例),
-        # 故 eager;它没有 service 层——策略全在 `app/api/group_routes.py`,store 只
-        # 管行,所以路由经 `deps.group_repository()` 直取这个端口(与
-        # `notebook_store_port()` 同一惯例),中间不架一层只做转发的 service。
-        self.groups: GroupStorePort = bundle.groups
-        self.notebook_copies: "NotebookCopyService | None" = None
-        self.sharing: "NotebookSharingService | None" = None
-        self.evidence_context: "EvidenceContextService | None" = None
-        self.candidate_retrieval: "CandidateRetrievalService | None" = None
-        self.graph_retrieval: "GraphRetrievalService | None" = None
-        self.retrieval: "RetrievalService | None" = None
         self._retrieval_wire_lock = threading.Lock()
-        # Task 13: schema CRUD + LLM-backed induction. It requests the
-        # ``schema_induction`` workload from the process-owned provider.
-        self.schema_registry = SchemaRegistryService(
-            self.database,
-            self.notebook_store,
-            self.knowledge,
-            self.source_store,
-            self.models,
-            settings,
-            current_user_id=lambda: self.identity.current_user().id,
-        )
-        # Task 23: Ask cancellation + detached streaming execution.  Both are
-        # seam-free (the Task-22 ask_state store, the module-level
-        # copied-context job helper and the runtime event log), so the runtime
-        # owns and constructs them eagerly.  The facade's frozen
-        # _ask_cancel_events/_ask_cancel_lock attributes become compatibility
-        # handles over THIS registry (one owner — the explicit cancel endpoint
-        # and the coordinator's register/unregister meet in the same map).
-        # Task 24: the coordinator's runner is no longer a facade callback —
-        # it resolves the ONE runtime-owned AskService through the bound
-        # ``ask_service`` accessor (lazy: composition rides the wired
-        # retrieval port, which is embedder-bound and only exists after the
-        # facade constructor finishes and the first ask touches it).
-        self.ask_cancellations = AskCancellationRegistry()
-        self.ask: "AskService | None" = None
         self._ask_wire_lock = threading.Lock()
         self._ask_retrieval: "Callable[[], Any] | None" = None
-        self.ask_execution = AskExecutionCoordinator(
-            ask_state=self.ask_state,
-            cancellations=self.ask_cancellations,
-            job_submitter=background_jobs,
-            event_log=self.event_log,
-            ask=self.ask_service,
-            # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
-            # 计数。late-bound lambda 而不是直接传方法:巡固服务在本构造函数里
-            # 更靠后才建出来(与上面 ``ask`` 同一个理由)。
-            # ⚠ 三参:coordinator 按 (nb, uid, mode_id) 调用(codex #524 R5 P1:
-            # 这里少一个参数,TypeError 会被协调器的 fail-open 吞掉,两条后台
-            # 链一起静默死亡而答案照常交付——由行为用例按真实 arity 钉住)。
-            note_ask_completed=lambda nb, uid, mode_id: self._note_ask_completed(
-                nb, uid, mode_id
-            ),
-        )
-        # Task 27: SQLite maintenance face for CLI/batch composition roots —
-        # lazily wired by the facade `maintenance` property (it needs the
-        # embedder-bound retrieval provider, exactly like `ask` above).
-        # knowhow-tables PR-1 Task 2: row persistence for the Task-1 schema
-        # (knowhow_tables/columns/rows/cells + notebook_assets). Seam-free
-        # (only new_id/now, like notebook_store above), so construction is
-        # eager. Task 5's projector and Task 6's import/table API depend on
-        # the facade's one-hop delegates over this exact instance.
-        self.knowhow_store = bundle.knowhow
-        # 方案 C·C1b:命令目录抽取。**后端中性**——它吃的全是端口/可调用
-        # (catalog/source/chunk/knowhow store + models + event_log + 两个 seam),
-        # 自己不 import 任何后端,所以和 kg_analysis 一样落在这个中性 runtime,而不是
-        # 每个 facade 各构一份。单例是必要的而非顺手:取消事件的注册表挂在实例上,
-        # 「发起 job 的请求」与「跑 job 的后台线程」必须看到同一份。
-        self.command_catalog = CommandCatalogService(
-            catalog=bundle.catalog,
-            sources=self.source_store,
-            chunks=self.chunk_store,
-            knowhow=self.knowhow_store,
-            models=self.models,
-            event_log=self.event_log,
-            now=seams.now,
-            current_user_id=lambda: self.identity.current_user().id,
-        )
-        # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）。id/时钟
-        # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
-        # 注释），store 自己不需要——不带 new_id/now 构造参数。
-        self.knowhow_transfer_store = bundle.knowhow_transfer
-        # knowhow 表版本管理 Task 3：变更流水/里程碑的读侧 store。new_id/now
-        # 与上面 knowhow_store 用同一对 seams 可调用对象，保持三个 store 的
-        # id/时钟来源单一（record_change 本身是模块级函数，不在这里持有——
-        # 由 Task 4-6 的写方法在各自事务内直接调用）。
-        self.knowhow_history_store = bundle.knowhow_history
-        # 逐步推理集合枚举 PR-2 T2:类型化集合的「地图层」计数。只吃窄端口
-        # (database/sources/notebooks/queries/unified_kg),零模型调用,构造即
-        # 建三个有界进程内缓存,故与上面几个 store 一样是 eager 且无 seam。
-        self.collection_catalog = CollectionCatalogService(
-            database=self.database,
-            sources=self.source_store,
-            notebooks=self.notebook_store,
-            queries=self.queries,
-            unified_kg=self.unified_kg,
-        )
-        # 同批 T3:类型化集合的「清单层」。刻意吃**上面那一个** catalog 实例而不是
-        # 自己新建——地图计数与枚举必须来自同一份 per-source 缓存,否则会出现
-        # 「地图报 12、清单只列 8」这种无法自证的假部分。同样零模型调用、无 seam。
-        self.collection_enumeration = CollectionEnumerationService(
-            database=self.database,
-            catalog=self.collection_catalog,
-            sources=self.source_store,
-            notebooks=self.notebook_store,
-            knowledge=self.knowledge,
-            unified_kg=self.unified_kg,
-        )
-        # Agentic Memory P1 (T4):「AI 对这个库的理解」的巡固任务。后端中性——只吃
-        # 端口(agent_profile/database/sources/queries)与 models/event_log 两个进程级
-        # 对象,故与 command_catalog 同处这个中性 runtime。**单例是必要的而非顺手**:
-        # 阈值闸与单飞都落在持久行上,但「谁来提交后台线程」必须只有一份实现,来源
-        # 管线的 hook 与(T6 的)手动重建按钮才会走同一条 claim→submit 路径。
-        self.agent_profile_jobs = AgentProfileConsolidationService(
-            settings=self.settings,
-            profiles=self.agent_profile,
-            database=self.database,
-            sources=self.source_store,
-            queries=self.queries,
-            models=self.models,
-            event_log=self.event_log,
-            # T5:覆盖层链路唯一的取数座位。它读的是**该成员自己**的提问轨迹
-            # (谓词写在 SQL 里,见 ``recent_user_ask_traces``),底座链路一个字
-            # 都不许碰它——那条边界由隔离守卫按函数分组静态钉住。
-            ask_state=self.ask_state,
-            # P2-T3:覆盖层的成员资格座位。用的是**读侧同一份谓词**
-            # (`access_sql.NOTEBOOK_READ_SQL`),所以「这条链还该不该存在」与
-            # 「这个人还读不读得到这个库」不会分叉。座位单开一个而不是往
-            # ask_state 上加方法:隔离守卫的端口白名单是按链路分的,而按人判定
-            # 的方法绝不该出现在底座那张里。
-            access=self.sharing_store,
-            # Agentic Memory P3 (T4):覆盖层的第三个取数座位,唯一够得着
-            # ``agent_observations``——外部 Agent 经 MCP `add_observation`(T3)
-            # 写下的、关于它自己怎么用这个库的短句。座位单开一个而不是往
-            # ask_state 上加方法,理由与 ask_state/access 同形:隔离守卫的端口
-            # 白名单按链路分,这个座位必须永远只出现在覆盖层那张里。
-            observations=self.agent_observations,
-        )
-        # Agentic Memory P2 (T5):检索打法的蒸馏任务。与它的 P1 兄弟同处这个
-        # **后端中性** runtime,同样只吃端口与两个进程级对象。单例同样是必要的
-        # 而非顺手:阈值计数与单飞都是**进程内**状态,构造两份就等于两个各自计
-        # 到一半的计数器和两条可以同时开跑的链。
-        self.retrieval_experience_jobs = RetrievalExperienceDistillationService(
-            settings=self.settings,
-            experiences=self.retrieval_experiences,
-            # ⚠ 同一个 ask_state 座位,读的却是**没有任何用户/笔记本谓词**的那条
-            # 方法(``recent_completed_ask_runs``)。它的安全性不来自谓词,而来自
-            # 投影——见 ports.py 上那段说明与 retrieval_experience_projection.py。
-            ask_state=self.ask_state,
-            models=self.models,
-            event_log=self.event_log,
-        )
-        # Agentic Memory P3(B-Profile,T7):每用户「检索/回答风格偏好」文档里
-        # 唯一一个 v1 会归纳的字段(``answer_language``)的确定性、零模型触发
-        # service。单例同样是必要的而非顺手:每用户阈值计数是**进程内**状态,
-        # 分身出第二个实例就是两份各自计到一半的计数器。它比它的两个 P1/P2
-        # 兄弟更薄——没有模型调用,读写都在同一个进程内锁的临界区内同步完成,
-        # 不需要后台线程池句柄(见 ``search_profile_job`` 模块 docstring)。
-        self.search_profile_jobs = SearchProfileInferenceService(
-            settings=self.settings,
-            # ⚠ 读的是``recent_user_ask_languages``——同一个 ask_state 座位上
-            # 第三条按``created_by``收窄的读,层三隔离守卫钉在
-            # ``TRACE_READ_METHODS``里(与另外两条同一份 ``ask_state_store.py``,
-            # 认同一个列名),但它**不属于** P1 的底座/覆盖层链路,登记只为覆盖
-            # 层三判据。
-            ask_state=self.ask_state,
-            # 唯一的写入座位:读-改-写 ``user_profiles.search_profile_json`` 必须
-            # 走 ``IdentityRepository.set_user_search_profile``(T6),而不是另开
-            # 一个座位——该方法本就在同一个写事务内做「job 不覆盖 user 字段」的
-            # 合并,详见 ``search_profile.merge_field``。
-            identity=self.identity,
-            event_log=self.event_log,
-        )
+        seats = _build_persistence_seats(persistence_factory, foundation)
+        self.database = seats.database
+        self.identity = seats.identity
+        self.model_status_store = seats.model_status_store
+        self.model_status = seats.model_status
+        self.queries = seats.queries
+        self.notebook_store = seats.notebook_store
+        self.kg_build_jobs = seats.kg_build_jobs
+        self.agent_profile = seats.agent_profile
+        self.retrieval_experiences = seats.retrieval_experiences
+        self.agent_observations = seats.agent_observations
+        self.source_store = seats.source_store
+        self.chunk_store = seats.chunk_store
+        self.report_store = seats.report_store
+        self.knowledge = seats.knowledge
+        self.governance = seats.governance
+        self.unified_kg = seats.unified_kg
+        self.ask_state = seats.ask_state
+        self.memory_store = seats.memory_store
+        self.index_projections: IndexProjectionStorePort = seats.index_projections
+        self.embedding_store: EmbeddingStorePort = seats.embedding_store
+        self.sharing_store: SharingStorePort = seats.sharing_store
+        self.groups: GroupStorePort = seats.groups
+        self.knowhow_store = seats.knowhow_store
+        self.knowhow_transfer_store = seats.knowhow_transfer_store
+        self.knowhow_history_store = seats.knowhow_history_store
+        notebook = _build_notebook_domain(foundation, seats)
+        self.notebook_summaries = notebook.notebook_summaries
+        self.source_files = notebook.source_files
+        self.catalog = notebook.catalog
+        self.notebook_copies = notebook.notebook_copies
+        self.sharing = notebook.sharing
+        pipeline = _build_source_pipeline(foundation, seats)
+        self.chunk_question_index = pipeline.chunk_question_index
+        self.source_embedding = pipeline.source_embedding
+        self.source_chunking = pipeline.source_chunking
+        self.source_ingestion = pipeline.source_ingestion
+        report = _build_report_domain(seats, notebook)
+        self.report_application = report.report_application
+        self.report_cancellations = report.report_cancellations
+        self.report_execution = report.report_execution
+        knowledge = _build_knowledge_domain(foundation, seats, self._current_user_id)
+        self.kg_analysis = knowledge.kg_analysis
+        self.schema_registry = knowledge.schema_registry
+        self.kg_mutations = knowledge.kg_mutations
+        self.knowledge_governance = knowledge.knowledge_governance
+        self.knowledge_lifecycle = knowledge.knowledge_lifecycle
+        self.knowledge_query = knowledge.knowledge_query
+        self.pending_actions_service = knowledge.pending_actions_service
+        retrieval = _build_retrieval_domain(foundation)
+        self.retrieval_snapshots = retrieval.retrieval_snapshots
+        self.memory_service = retrieval.memory_service
+        self.memory_retriever = retrieval.memory_retriever
+        self.evidence_context = retrieval.evidence_context
+        self.candidate_retrieval = retrieval.candidate_retrieval
+        self.graph_retrieval = retrieval.graph_retrieval
+        self.retrieval = retrieval.retrieval
+        graph = _build_source_graph_domain(foundation, seats)
+        self.scale_artifact_store = graph.scale_artifact_store
+        self.source_subgraphs = graph.source_subgraphs
+        self.source_graph_primitives = graph.source_graph_primitives
+        self.source_graph_enrichment = graph.source_graph_enrichment
+        self.source_subgraph_ppr = graph.source_subgraph_ppr
+        self.source_partitioned_ppr = graph.source_partitioned_ppr
+        self.selected_source_graph = graph.selected_source_graph
+        self.scale_catalog = graph.scale_catalog
+        self.scale_builder = graph.scale_builder
+        self.scale_artifacts = graph.scale_artifacts
+        ask = _build_ask_domain(foundation, seats, self.ask_service, self._note_ask_completed)
+        self.ask_cancellations = ask.ask_cancellations
+        self.ask = ask.ask
+        self.ask_execution = ask.ask_execution
+        tools = _build_content_tools(foundation, seats, self._current_user_id)
+        self.command_catalog = tools.command_catalog
+        self.collection_catalog = tools.collection_catalog
+        self.collection_enumeration = tools.collection_enumeration
+        agents = _build_agent_jobs(foundation, seats)
+        self.agent_profile_jobs = agents.agent_profile_jobs
+        self.retrieval_experience_jobs = agents.retrieval_experience_jobs
+        self.search_profile_jobs = agents.search_profile_jobs
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
         # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
+
+    def _current_user_id(self) -> str:
+        """The request's current user id, resolved at CALL time.
+
+        Handed as a bound method to the two domains that need it (schema
+        registry, command catalog) so neither builder has to close over the
+        runtime: a zero-argument read-only accessor is a narrow, one-way edge
+        where passing ``self`` would be a cycle back into the composition root.
+        Mirrors what both persistence bundles already do with ``identity``."""
+        return self.identity.current_user().id
 
     # codex #535 R4 P2(驳回,登记决定):本通知只由流式 AskExecutionCoordinator
     # 触发,同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook`(经
