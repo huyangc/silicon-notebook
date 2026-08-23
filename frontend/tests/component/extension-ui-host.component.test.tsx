@@ -80,6 +80,12 @@ function commit(ref: { current: WorkspaceExtensions | null }, actorId: string, n
 test("with zero local plugins the merged registry is the builtin one, entry for entry", () => {
   // 本仓库不带任何仓库外插件，所以生成的 registry.local.ts 是空数组存根，合并
   // registry 必须与内建目录逐字相同——拆成两个模块不得改变默认部署看到的任何东西。
+  //
+  // 这两条长度断言是**登记接受的取舍**：装了私有插件的那棵树上，合并 registry 会长
+  // 出更多条目，这条用例必然红。基座的 `npm run test` 因此只是**公网仓库**（零插件）
+  // 的验收；私有部署的验收是 `.local/ui-extension-contract.json` 与后端投影对账
+  // 加 `npm run build`（见实现计划 T7 的文档条目）。把它放宽成 `>= 1` 就等于不再钉
+  // 「零插件时合并结果逐字等于内建目录」——而那正是拆模块这件事唯一要证明的性质。
   expect(BUILTIN_WORKSPACE_UI_CONTRIBUTIONS).toHaveLength(1);
   expect(WORKSPACE_UI_CONTRIBUTIONS).toHaveLength(1);
   expect(WORKSPACE_UI_CONTRIBUTIONS).toEqual(BUILTIN_WORKSPACE_UI_CONTRIBUTIONS);

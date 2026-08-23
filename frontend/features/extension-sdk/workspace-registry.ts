@@ -11,6 +11,11 @@
  *
  * 合并结果再过一次 `defineWorkspaceUiRegistry`：本地条目与内建条目走同一套元数据
  * 校验、同一条重复 id 拒绝、同一份稳定排序与冻结，仓库外的包拿不到任何豁免。
+ *
+ * 两条 spread 的先后**不承重**：`defineWorkspaceUiRegistry` 按 id 排序后冻结，换个
+ * 顺序产出逐字相同的数组（重复 id 由它直接拒绝，不存在「谁覆盖谁」）。写死这个形状
+ * 只是让合并点只有一种读法，也让守卫能钉住「恰好这两个来源、没有第三份、没有就地
+ * 拼装的条目」。
  */
 import type { WorkspaceUiContribution } from "./contracts.ts";
 import { BUILTIN_WORKSPACE_UI_CONTRIBUTIONS, defineWorkspaceUiRegistry } from "./registry.ts";

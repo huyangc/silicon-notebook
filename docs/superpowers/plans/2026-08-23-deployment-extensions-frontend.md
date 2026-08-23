@@ -264,6 +264,7 @@ export async function syncUiPlugins({ frontendDir, roots }) // { packages, rows 
 2. `docs/product-and-api.md:2153` 与 `_zh.md:1672`：`GET /api/system/extensions` 那条后加一条：`SILICON_NOTEBOOK_UI_PLUGINS`、`frontend/.local/ui-extension-contract.json` 形状（与 fixture 同形同排序键）、它是部署期对账输入而非运行时依赖；插件路由固定 `/api/extensions/{plugin_id}/…`，浏览器侧由 SDK 端口限定。
 3. `CLAUDE.md:339`「Workspace UI registry」bullet 追加一段（构建期注入链、`registry.ts` 保持 `.ts`、插件 import 白名单与 `api.ts` 禁令、不写 CSS/不内联颜色/不读 `error.message`、`refreshSources` 同为 exact-owner 窄 action、仍禁远程 JS 与运行时注册）。
 4. `AGENTS.md:81` 同上英文。
+5. 插件作者文档另写明**验收口径**：基座的 `npm run test` 只是**公网仓库（零插件）**的验收，装了私有插件的树跑它必然红——`tests/component/extension-ui-host.component.test.tsx` 钉「零插件时合并 registry 与内建目录逐字相同、长度为 1」，那正是拆 registry 模块唯一要证明的性质，不得为了容纳插件把它放宽成 `>= 1`。私有部署的验收是：`frontend/.local/ui-extension-contract.json` 与后端 `GET /api/system/extensions` 投影对账，加 `npm run build`（它做全量类型检查，覆盖 `features/ext-*/`）。
 验证：`python3 ../scripts/check_ui_vocabulary.py`；中英逐条对应。
 
 ## 3. `page.tsx` 接触面
