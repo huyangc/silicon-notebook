@@ -464,13 +464,15 @@ test("dotfiles in the package root are skipped, while subdirectories stay refuse
 });
 
 
-test("the contract sort key is the one the backend generator uses", async () => {
-  const generatorModule = await readFile(
-    path.join(REPO_DIR, "scripts", "generate_ui_extension_contract.py"),
+test("the contract sort key is the one the backend projection uses", async () => {
+  // 排序键的唯一真源是 backend/app/extensions/ui_projection.py 的
+  // CONTRIBUTION_SORT_FIELDS（生成器与部署对账脚本都从它 import），这里读的就是它。
+  const projectionModule = await readFile(
+    path.join(REPO_DIR, "backend", "app", "extensions", "ui_projection.py"),
     "utf8",
   );
-  const declared = generatorModule.match(/_CONTRIBUTION_SORT_FIELDS = \(([^)]*)\)/);
-  assert.ok(declared, "backend generator must declare _CONTRIBUTION_SORT_FIELDS");
+  const declared = projectionModule.match(/\nCONTRIBUTION_SORT_FIELDS = \(([^)]*)\)/);
+  assert.ok(declared, "backend ui_projection must declare CONTRIBUTION_SORT_FIELDS");
   const backendFields = [...declared[1].matchAll(/"([a-z_]+)"/g)].map((hit) => hit[1]);
   assert.deepEqual(
     backendFields,
