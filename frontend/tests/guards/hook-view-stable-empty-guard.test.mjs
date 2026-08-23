@@ -76,6 +76,11 @@ import { appSourceModules, findFunction, parseModule } from "../../test-support/
 // not a place to silently opt a hook out of coverage.
 const NOT_A_VIEW_OWNER = new Map([
   ["use-floating-window.ts", "拖动窗口几何状态，不持有 notebook/actor 视图"],
+  [
+    "use-kg-owner.ts",
+    "KG 三个领域 owner 共用的 actor/notebook/generation 门。它只返回判定函数与生命周期"
+    + "命令，一个领域状态字段都不持有，因此结构上不存在 owner-hidden 回退值可判",
+  ],
 ]);
 
 // Hooks that DO own a view, but whose own `return {...}` object literal is

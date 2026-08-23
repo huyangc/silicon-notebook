@@ -181,8 +181,8 @@ test("KG start callbacks are owned by notebook, workspace, and request epoch", (
 });
 
 test("durable KG polling never synthesizes completion after a time cap", async () => {
-  const hook = await parseModule("use-kg-workspace.ts");
-  const owner = findFunction(hook, "useKgWorkspace");
+  const hook = await parseModule("use-kg-graph.ts");
+  const owner = findFunction(hook, "useKgGraph");
   const kgPoll = callbackFlowsIn(owner, "useEffect").find(
     ({ otherArguments }) => (
       otherArguments[0]

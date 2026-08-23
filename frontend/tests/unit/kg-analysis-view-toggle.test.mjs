@@ -30,7 +30,7 @@ function callsWith(node, target, argument) {
 
 
 test("opening the knowledge-graph view resets the analysis modal", async () => {
-  const hook = await parseModule("use-kg-workspace.ts");
+  const hook = await parseModule("use-kg-graph.ts");
   const openKgView = findFunction(hook, "openGraph");
 
   assert.equal(callsWith(openKgView, "setGraphOpen", "true"), true);
@@ -47,7 +47,7 @@ test("opening the knowledge-graph view resets the analysis modal", async () => {
 
 
 test("closing the knowledge-graph view closes the analysis modal with it", async () => {
-  const hook = await parseModule("use-kg-workspace.ts");
+  const hook = await parseModule("use-kg-graph.ts");
   const closeKgView = findFunction(hook, "closeGraph");
 
   assert.equal(callsWith(closeKgView, "setGraphOpen", "false"), true);
@@ -56,7 +56,7 @@ test("closing the knowledge-graph view closes the analysis modal with it", async
 
 
 test("the knowledge-graph view toggles only through openKgView / closeKgView", async () => {
-  const hook = await parseModule("use-kg-workspace.ts");
+  const hook = await parseModule("use-kg-graph.ts");
   // JSX 属性里的箭头函数不是具名声明, 它的 scope 会落在外层组件(`<module>.Home`)上 ——
   // 所以一条内联的 `onClick={() => setKgViewOpen(false)}` 在这里是看得见的。
   const scopes = scopedCalls(hook)
@@ -65,8 +65,8 @@ test("the knowledge-graph view toggles only through openKgView / closeKgView", a
     .sort();
 
   assert.deepEqual(scopes, [
-    "<module>.useKgWorkspace.clearVisibleState",
-    "<module>.useKgWorkspace.closeGraph",
-    "<module>.useKgWorkspace.openGraph",
+    "<module>.useKgGraph.clearVisibleState",
+    "<module>.useKgGraph.closeGraph",
+    "<module>.useKgGraph.openGraph",
   ]);
 });
