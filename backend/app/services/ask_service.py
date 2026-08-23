@@ -2474,6 +2474,8 @@ class AskService:
             raise StageBoundaryError("invalid reasoning commit runtime")
         if type(draft.response) is not AskResponse:
             raise StageBoundaryError("invalid reasoning response graph")
+        if draft.response.mode != "reasoning":
+            raise StageBoundaryError("response draft changed the ask mode")
         response = draft.response
         self._assert_reasoning_runtime(
             runtime,
@@ -2962,8 +2964,21 @@ class AskService:
             # 读 schema 覆盖层(一次真实 I/O);历史检查排在那次读取**之后**,
             # 于是被取消的一轮会先白付一次立刻丢弃的读。提到边界之前结局仍是
             # 同一个 AskCancelled,只是不再付那笔钱(与「拿到槽位后、发起 I/O
-            # 前再检查一次」同一条口径)。
+            # 前再检查一次」同一条口径)。已取消且那次 schema 读自身也会抛错时,
+            # 异常类型从该读的异常变成 AskCancelled(取消优先)。
             raise_if_cancelled(cancel_event)
+            # 权威复核同样上提到编排器:曾经是 ``_draft_reasoning_response``
+            # (出厂默认实现)自己的 prologue 才做的检查,现在挪到这里、紧挨
+            # 进入 seam 之前 —— 这样注入实现也在已验证权威下进入,而不是只有
+            # 出厂路径受保护。``_draft_reasoning_response`` 自己保留两条
+            # ``type(...)`` 检查作纵深防御,但不再重复这次(权威不会在同一次
+            # 调用内两次漂移)的全量校验。
+            self._assert_reasoning_runtime(
+                runtime,
+                "response-draft",
+                notebook_id=notebook_id,
+                user_id=user_id,
+            )
             draft = execute_response_draft_stage(
                 self.response_draft_stage,
                 ResponseDraftInput(
@@ -3023,17 +3038,19 @@ class AskService:
             StageBoundaryError,
         )
 
+        # Defense-in-depth only: the full authority sweep for this point now
+        # runs once in the orchestrator (``_run_reasoning_stage``), right
+        # before it enters this seam, so every stage implementation -- shipped
+        # or injected -- is admitted under the same already-verified runtime.
+        # These two ``type(...)`` checks stay here because this method is
+        # itself directly callable (it is the shipped stage's own body), and
+        # a malformed envelope should still fail loudly even when invoked
+        # outside the orchestrator's protection.
         if type(stage) is not ResponseDraftInput:
             raise StageBoundaryError("invalid reasoning response draft input")
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError("invalid reasoning response draft runtime")
         prepared = stage.prepared
-        self._assert_reasoning_runtime(
-            runtime,
-            "response-draft",
-            notebook_id=prepared.notebook_id,
-            user_id=prepared.user_id,
-        )
         notebook_id = prepared.notebook_id
         conversation_id = prepared.conversation_id
         reasoning_history = prepared.history

@@ -40,6 +40,12 @@ class ResponseDraftStage(Protocol):
     ``ReasoningResponseDraft``.  Persistence stays behind the separate commit
     boundary, so no stage implementation can reach the atomic save, the job
     terminal state, or the answer row.
+
+    ``mode`` (always ``"reasoning"``) and ``model_errors`` are produced by the
+    stage as part of the drafted ``AskResponse`` -- core re-verifies ``mode``
+    at the commit boundary (``_commit_reasoning_draft``) so a stage cannot
+    silently steer a reasoning turn's persisted answer into another mode's
+    shape.
     """
 
     def draft_response(
