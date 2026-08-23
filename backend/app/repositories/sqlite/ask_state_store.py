@@ -41,6 +41,7 @@ from app.core.internal_observability import (
     public_trace_steps,
     sanitize_answer_payload,
 )
+from app.domain.retrieval_experience import project_run_step, project_trace_step
 from app.models.ask import (
     ActiveAskJob,
     AskRequest,
@@ -61,8 +62,6 @@ from app.repositories.ports import (
     project_report_attempt,
     project_report_row,
     project_run_row,
-    project_run_step,
-    project_trace_step,
 )
 from app.repositories.sqlite.database import SqliteDatabase
 # Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming

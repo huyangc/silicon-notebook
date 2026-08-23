@@ -1988,6 +1988,7 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.generated_question_contribution import (
             GeneratedQuestionContributionCall,
             generated_question_call_context,
+            generated_question_lane_is_dormant,
         )
         from app.services.retrieval_run import current_retrieval_run
 
@@ -1998,6 +1999,11 @@ class CandidateRetrievalService(_RetrievalState):
             and mode != "off"
             and len(scored) < self.settings.generated_question_trigger_hits
         )
+        if not generated_enabled and generated_question_lane_is_dormant(host):
+            # Unconfigured/untriggered this call: say so before building a
+            # call/context envelope the host would immediately discard.
+            # Mirrors ``selected_evidence_lane_is_dormant`` (codex #565).
+            return baseline
         call = GeneratedQuestionContributionCall(
             notebook_id,
             baseline,

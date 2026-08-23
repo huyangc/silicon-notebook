@@ -614,6 +614,51 @@ def function_length_violations(
     return violations
 
 
+def ports_protocol_method_count(root: Path) -> int:
+    """Count every ``FunctionDef``/``AsyncFunctionDef`` nested directly inside
+    a ``ClassDef`` in ``backend/app/repositories/ports.py`` -- i.e. Protocol
+    (and Protocol-adjacent mixin) methods. Module-level functions such as
+    ``project_run_row`` do not count; only the consumer-facing method surface
+    the Protocols declare does, regardless of which one of the file's classes
+    a given method lives on."""
+
+    path = root / "backend" / "app" / "repositories" / "ports.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+
+
+def ports_method_count_violations(root: Path, ceiling: int) -> list[str]:
+    """Zero-slack ceiling on ``ports.py``'s total Protocol method surface --
+    same shape and rationale as ``function_length_violations`` above: grown
+    past the recorded ceiling is a violation, and shrunk below it is *also* a
+    violation (the baseline must be lowered in the same change). An only-grow
+    ceiling would accumulate silent headroom a later regression could spend
+    unnoticed; zero slack means the file's Protocol surface may only shrink,
+    one reviewed step at a time."""
+
+    actual = ports_protocol_method_count(root)
+    if actual > ceiling:
+        return [
+            f"ports.py gained protocol methods: {actual} > {ceiling} "
+            "(update scripts/architecture_boundary_baseline.json :: "
+            "ports_protocol_method_count)"
+        ]
+    if actual < ceiling:
+        return [
+            "ports.py protocol method ceiling is stale, lower it: "
+            f"{actual} < {ceiling} (update "
+            "scripts/architecture_boundary_baseline.json :: "
+            "ports_protocol_method_count)"
+        ]
+    return []
+
+
 def check(root: Path) -> list[str]:
     app_root = root / "backend/app"
     baseline = json.loads(
@@ -638,6 +683,9 @@ def check(root: Path) -> list[str]:
     violations.extend(
         function_length_violations(root, baseline["function_length_ceiling"])
     )
+    violations.extend(
+        ports_method_count_violations(root, baseline["ports_protocol_method_count"])
+    )
     return violations
 
 
@@ -656,7 +704,8 @@ def main() -> int:
         "architecture guard: OK "
         "(0 SCCs; boundaries frozen; reverse imports capped; "
         "core/models service imports allowlisted; "
-        "facade and hot functions may only shrink)"
+        "facade and hot functions may only shrink; "
+        "ports surface may only shrink)"
     )
     return 0
 

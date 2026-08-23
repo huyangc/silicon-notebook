@@ -11,7 +11,8 @@ made one layer earlier, on the SHAPE of what can be observed at all:
 
     ``RunObservation`` and every type reachable from it have NO free-text
     field. Every field is an ``int``, a ``bool``, or a ``Literal`` over a
-    closed vocabulary defined in this file or in ``ports.py``.
+    closed vocabulary defined in this file or in
+    ``app.domain.retrieval_experience``.
 
 That is a property a test can check by reading the annotations, which is the
 entire reason the design was collapsed to closed vocabularies in the first
@@ -53,7 +54,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
-from app.repositories.ports import (
+from app.domain.retrieval_experience import (
     SITUATION_ASK_MODES,
     SITUATION_RESULT_SCOPES,
     SITUATION_RETRIEVAL_EFFORTS,
@@ -324,10 +325,11 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
     and an experience whose IF side is "all unknown" would match every future
     run equally, which is worse than having no entry.
 
-    The store has already narrowed each step through ``ports.project_run_step``
-    (action type, one count, one duration, plus the intent step's closed
-    situation). This function only aggregates and buckets; it reads no field
-    that projection did not already restrict.
+    The store has already narrowed each step through
+    ``app.domain.retrieval_experience.project_run_step`` (action type, one
+    count, one duration, plus the intent step's closed situation). This
+    function only aggregates and buckets; it reads no field that projection
+    did not already restrict.
 
     ⚠ Step types outside ``RETRIEVAL_ACTIONS`` — most notably every ``skip``
     step (an exact-lookup teaching message, a memory miss, an enumeration
@@ -368,9 +370,10 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
             continue
         if str(step.get("step_type") or "") not in ("synthesis", "answer"):
             continue
-        # 修复轮 Q-P1-1: 按键存在判定,镜像 result_ids 的规则(见
-        # ``ports.project_run_step``)——不止一种 step_type 等于 "synthesis"/
-        # "answer" 的行(逐节撰写进度步、枚举回答分支、reasoning_retrieval.py
+        # 修复轮 Q-P1-1: 按键存在判定,镜像 result_ids 的规则
+        # (见 ``app.domain.retrieval_experience.project_run_step``)——不止
+        # 一种 step_type 等于 "synthesis"/"answer" 的行(逐节撰写进度步、
+        # 枚举回答分支、reasoning_retrieval.py
         # 的候选池汇总步都同名),只有真正携带 anchor_evidence_ids 键的那一条
         # 才是可用的锚点来源。``step_limit`` 会把一个 run 的 trace 行按 seq
         # 截尾,真正带锚点的"synthesis"步完全可能被切掉、只留下前面那条

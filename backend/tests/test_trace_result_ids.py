@@ -9,7 +9,8 @@
 ``result_ids``/``anchor_evidence_ids``(零命中写 ``[]``),``skip`` 分支一律不写;
 截断发生时补稀疏 ``result_ids_truncated``/``anchor_evidence_ids_truncated``
 标记(修复轮 spec②,只在真截断那天出现)。
-读侧硬判据(见 ``ports.py::project_run_step`` 的 docstring,修复轮 Q-P1-1 改写):
+读侧硬判据(见 ``app.domain.retrieval_experience::project_run_step`` 的 docstring,
+修复轮 Q-P1-1 改写):
 非 synthesis/answer 步按 ``detail`` 里 **有没有** ``result_ids`` 这把键透传,
 而不是按 step_type 猜;synthesis/answer 步的 ``anchor_evidence_ids`` **同样**
 按键存在透传——同名但不携带锚点的步(枚举回答分支、逐节撰写进度步、
@@ -39,7 +40,7 @@ from app.models.ask import (
     AnswerAnchor,
 )
 from app.models.schemas import AskRequest, NotebookCreate
-from app.repositories.ports import (
+from app.domain.retrieval_experience import (
     _bounded_id_list,
     project_run_step,
     project_trace_step,
@@ -522,15 +523,15 @@ def test_synthesis_step_truncates_anchor_evidence_ids(rrepo):
     step = next(t for t in response.reasoning_trace if t.step_type == "synthesis")
     assert len(step.detail["anchor_evidence_ids"]) == TRACE_ANCHOR_EVIDENCE_IDS_MAX
     # 写侧(ask_service.py)的稀疏标键名是 anchor_evidence_ids_truncated;
-    # ports.py::project_run_step 读它后再重发成 anchor_ids_truncated —— 两个
-    # 名字不同层各自成立,见下面 ports 读侧那组用例。
+    # app.domain.retrieval_experience::project_run_step 读它后再重发成
+    # anchor_ids_truncated —— 两个名字不同层各自成立,见下面读侧那组用例。
     assert step.detail["anchor_evidence_ids_truncated"] is True
 
     projected = project_run_step(step.model_dump())
     assert projected["anchor_ids_truncated"] is True
 
 
-# --------------------------------------------------------- ports.py read side
+# ---------------------------------------------- domain.retrieval_experience read side
 
 
 def test_bounded_id_list_drops_non_str_and_empty_and_truncates():
