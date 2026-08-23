@@ -12,9 +12,17 @@
   * 每个被检索通道的调用次数（含 embedding 往返）——钉住「请求数不变」；
   * 结果规模（候选/原文/元素/attempted 账目）。
 
-`detail` 只录**键集合**而不录值：值里含 object_id / chunk_id 这类随 seed 数据变化
-的句柄，录值会把黄金件变成「数据库长什么样」的快照而不是「首轮做了什么」的快照。
-计数由 summary 那一半承担。
+`detail` 默认只录**键集合**而不录值：值里含 object_id / chunk_id 这类随 seed 数据
+变化的句柄，录值会把黄金件变成「数据库长什么样」的快照而不是「首轮做了什么」的
+快照，计数由 summary 那一半承担。唯一的例外是 `_DETAIL_VALUE_WHITELIST`——一份
+不含句柄的数字/布尔/枚举键白名单（`answer.{top_n,quota,kg,elements,chains,
+enumerations,enumerated_items}` 与 `reflect.{no_progress,stale,sufficient,
+next_action}`），这些键额外把**实际值**录进 `detail_values`：它们是计数/开关而
+不是句柄，不随 seed 数据变化，而录值才能钉住"首轮 → reflect 循环"之间几处只
+交接、不被任何断言消费就永远不会变红的状态（`state.steps`/`state.elements_
+searches`/`state.used_queries` 的写入时序，B8 quality P2-1/P2-2）。
+`result_ids`/`anchor_evidence_ids` 这类句柄键不在白名单内，仍然只进
+`detail_keys`。
 
 重录：`REGEN_FIRST_ROUND_GOLDEN=1 PYTHONPATH=backend .venv/bin/python -m pytest \
 backend/tests/test_reasoning_first_round_golden.py -q`
@@ -81,15 +89,26 @@ class _CountingRetrievalPort:
 
 
 class _StubLLM:
-    """plan 出一个子查询；reflect 永远直接作答 —— 首轮之后立刻收尾。
+    """plan 出一个子查询；reflect 按 `reflect_sequence` 逐次决定动作，用尽后
+    重复最后一项。
 
-    reflect 不参与本项，固定 answer 让黄金件只描述首轮。
+    省略 `reflect_sequence`（默认）时 reflect 永远直接作答 —— 首轮之后立刻
+    收尾，四个既有场景的黄金值逐字不变。
+
+    带 `reflect_sequence` 的两个新场景专为钉住首轮 → reflect 循环之间此前从未
+    被观测的两处交接（B8 quality P2-1）：`state.steps`（预算耗尽场景——reflect
+    连续选 add_subquery，直到 `run()` 自己的步数预算耗尽为止）与
+    `state.elements_searches`（search_elements 场景——reflect 的第一次
+    search_elements 动作命中的是它从首轮空证据兜底继承来的计数，不是自己新
+    累积出来的）。
     """
 
     configured = True
 
-    def __init__(self, counts):
+    def __init__(self, counts, reflect_sequence=None):
         self._counts = counts
+        self._reflect_sequence = reflect_sequence
+        self._reflect_calls = 0
 
     def chat_json(self, messages, schema_hint, **kwargs):
         if "sub_queries" in schema_hint:
@@ -97,9 +116,23 @@ class _StubLLM:
             return json.dumps({"sub_queries": [{"query": "MoE 架构"}]})
         if "next_action" in schema_hint:
             self._counts["llm.reflect"] += 1
+            if self._reflect_sequence:
+                idx = min(self._reflect_calls, len(self._reflect_sequence) - 1)
+                self._reflect_calls += 1
+                return json.dumps(self._reflect_sequence[idx])
             return json.dumps({"next_action": "answer", "sufficient": True})
         self._counts["llm.other"] += 1
         return json.dumps({"answer": "见 [k1]。", "grounded": True})
+
+
+# 需要**录值**（而不只录键）的白名单：只收不含句柄的数字/布尔/枚举字段——
+# `result_ids`/`anchor_evidence_ids` 这类值随 seed 数据变化的句柄键刻意不在
+# 这里，仍然只进 `detail_keys`（见模块 docstring）。
+_DETAIL_VALUE_WHITELIST = {
+    "answer": ("top_n", "quota", "kg", "elements", "chains",
+               "enumerations", "enumerated_items"),
+    "reflect": ("no_progress", "stale", "sufficient", "next_action"),
+}
 
 
 @pytest.fixture
@@ -185,16 +218,31 @@ def _seed(repo):
     return notebook
 
 
-def _observe(repo, notebook_id, *, question, intent_queries=None, effort=None):
-    """跑一次 run，返回可比对的 (trace, counts, sizes) 观测。"""
+def _observe(repo, notebook_id, *, question, intent_queries=None, effort=None,
+              reflect_sequence=None, element_search_cap=None):
+    """跑一次 run，返回可比对的 (trace, counts, sizes) 观测。
+
+    `reflect_sequence`/`element_search_cap` 仅供 B8 quality P2-1 的两个新场景
+    使用，省略时逐字复现之前的行为（`_StubLLM` 默认永远直接作答，settings
+    与 `repo.settings` 是同一个对象）。`element_search_cap` 通过 `model_copy`
+    构造一份**独立**的 settings 副本，绝不直接改写共享的 `repo.settings`——
+    那会把这一处覆盖悄悄漏进同一个 `repo` 上跑的其它场景。
+    """
     from app.core.ask_retrieval_policy import ask_retrieval_limits
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     counts: collections.Counter = collections.Counter()
     bind_all_embedding_clients(repo, _CountingEmbedder(counts))
-    bind_chat_client(repo, "reasoning_agent", _StubLLM(counts))
+    bind_chat_client(
+        repo, "reasoning_agent",
+        _StubLLM(counts, reflect_sequence=reflect_sequence))
 
-    retriever = ReasoningRetriever.from_repository(repo, repo.settings)
+    settings = repo.settings
+    if element_search_cap is not None:
+        settings = settings.model_copy(
+            update={"reasoning_max_element_searches": element_search_cap})
+
+    retriever = ReasoningRetriever.from_repository(repo, settings)
     retriever.retrieval = _CountingRetrievalPort(retriever.retrieval, counts)
     for name in ("search", "ppr_retrieve", "exact_lookup", "search_elements",
                  "neighbors", "get", "follow_chain"):
@@ -214,14 +262,20 @@ def _observe(repo, notebook_id, *, question, intent_queries=None, effort=None):
         intent_queries=list(intent_queries or []),
         limits=ask_retrieval_limits(effort) if effort else None,
     )
-    trace = [
-        {
+    trace = []
+    for step in result.trace:
+        detail = step.detail or {}
+        entry = {
             "step_type": step.step_type,
             "summary": step.summary,
-            "detail_keys": sorted((step.detail or {}).keys()),
+            "detail_keys": sorted(detail.keys()),
         }
-        for step in result.trace
-    ]
+        whitelist = _DETAIL_VALUE_WHITELIST.get(step.step_type)
+        if whitelist:
+            entry["detail_values"] = {
+                key: detail[key] for key in whitelist if key in detail
+            }
+        trace.append(entry)
     sizes = {
         "top_hits": len(result.top_hits),
         "chunks": len(result.chunks),
@@ -233,7 +287,8 @@ def _observe(repo, notebook_id, *, question, intent_queries=None, effort=None):
     return {"trace": trace, "counts": dict(sorted(counts.items())), "sizes": sizes}
 
 
-# 三个代表性形态：普通问题 / 带引号短语 + 标识符 / 确认方向超首轮上限。
+# 四个代表性形态：普通问题 / 带引号短语 + 标识符 / 确认方向超首轮上限 /
+# reflect 连续检索直到预算耗尽。
 SCENARIOS = {
     "plain": {"question": "DeepSeek 与 GLM 的架构对比"},
     "quoted_identifier": {
@@ -254,6 +309,32 @@ SCENARIOS = {
             "开源许可",
         ],
     },
+    "budget_exhaustion": {
+        # B8 quality P2-1：钉住 `_first_round_coverage_pass` → reflect 循环
+        # 之间 `state.steps` 的交接。与上面同一份 6 方向 / overview 档：补种
+        # 阶段先消耗 2 步（state.steps=2），reflect 循环拿到的预算只剩
+        # max_steps(4) - 2 = 2 —— 桩连续两次 add_subquery（确定性、不要求
+        # 命中新数据）正好把它花完，循环因步数耗尽而结束，不产生显式
+        # "answer" 决定。若 `state.steps = steps` 那行赋值被删掉，reflect
+        # 循环会误以为预算还剩 4，多跑 2 轮 add_subquery——轨迹步数与
+        # sizes.attempted 都会变，从而变红。
+        "question": "综述这个库",
+        "effort": "overview",
+        "intent_queries": [
+            "MoE 架构",
+            "训练数据",
+            "推理成本",
+            "上下文长度",
+            "对齐方法",
+            "开源许可",
+        ],
+        "reflect_sequence": [
+            {"next_action": "add_subquery",
+             "new_sub_query": {"query": "预算耗尽探针 1"}},
+            {"next_action": "add_subquery",
+             "new_sub_query": {"query": "预算耗尽探针 2"}},
+        ],
+    },
 }
 
 
@@ -268,6 +349,22 @@ def _collect(repo):
     empty = repo.create_notebook(NotebookCreate(name="empty"))
     observed["empty_evidence_fallback"] = _observe(
         repo, empty.id, question="这个库里有什么"
+    )
+    # B8 quality P2-1：钉住 `_first_round_empty_fallback` → reflect 循环之间
+    # `state.elements_searches` 的交接。复用同一本空库：首轮的空证据兜底会先
+    # 把 elements_searches 记成 1（本项特意把单来源检索上限降到 1，让 reflect
+    # 的**第一次** search_elements 决定立即撞上限）——命中的正是它从兜底继承
+    # 来的那个 1，不是循环自己新累积出来的。若 `state.elements_searches =
+    # elements_searches` 那行赋值被删掉，交接会丢回默认值 0，第一次
+    # search_elements 就不会撞上限（记成 "fallback" 步而不是 "skip" 步），
+    # 从而变红。
+    observed["element_search_cap_handoff"] = _observe(
+        repo, empty.id, question="这个库里有什么",
+        reflect_sequence=[
+            {"next_action": "search_elements", "elements_query": "库内容"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        element_search_cap=1,
     )
     return observed
 

@@ -18,6 +18,48 @@ def test_trace_step_model_shape():
     assert t.model_dump()["duration_ms"] == 1234
 
 
+def test_trace_recorder_duration_is_delta_between_adjacent_records(monkeypatch):
+    """`_TraceRecorder` 的耗时语义(B8 quality P3-1):`duration_ms` = 相邻两次
+    记账的墙钟差,且 `_last_ts` 必须在**记账之后**才更新——构造那一刻算作
+    "上一次记账",所以首步耗时含构造到首次 record 之间的时间。"""
+    import app.services.reasoning_retrieval as rr
+    from app.models.schemas import TraceStep
+
+    ticks = iter([0.0, 0.25, 0.9, 2.4])  # 构造 / 首步 / 第二步 / 第三步
+
+    def fake_perf_counter():
+        return next(ticks)
+
+    monkeypatch.setattr(rr.time, "perf_counter", fake_perf_counter)
+
+    trace: list = []
+    recorder = rr._TraceRecorder(trace, None, None)  # 构造消费第一个刻度(0.0)
+
+    recorder(TraceStep(step_type="plan", summary="s1"))       # 消费 0.25
+    recorder(TraceStep(step_type="retrieve", summary="s2"))   # 消费 0.9
+    recorder(TraceStep(step_type="answer", summary="s3"))     # 消费 2.4
+
+    assert [step.duration_ms for step in trace] == [250, 650, 1500]
+
+
+def test_trace_recorder_invokes_on_step_and_propagates_cancellation():
+    import app.services.reasoning_retrieval as rr
+    from app.domain.cancellation import AskCancelled
+    from app.models.schemas import TraceStep
+
+    seen = []
+    recorder = rr._TraceRecorder([], None, seen.append)
+    step = TraceStep(step_type="plan", summary="s1")
+    recorder(step)
+    assert seen == [step]
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+    cancelled_recorder = rr._TraceRecorder([], cancel_event, None)
+    with pytest.raises(AskCancelled):
+        cancelled_recorder(TraceStep(step_type="plan", summary="s2"))
+
+
 def test_ask_request_mode_defaults_chunk():
     from app.models.schemas import AskRequest
     assert AskRequest(question="x").mode == "chunk"
