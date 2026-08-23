@@ -21,7 +21,8 @@ import textwrap
 import threading
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from app.api.extension_routes import (
@@ -420,6 +421,74 @@ def build_router(context):
 _FACTORY_RAISES_SYSTEM_EXIT_SRC = """
 def build_router(context):
     raise SystemExit(1)
+"""
+
+# The same upstream 401, raised from the plugin's own ``Depends(...)`` instead
+# of from its handler — codex #578 R7 P1. Checking an upstream inside a
+# dependency is at least as ordinary as checking it inside the handler, and
+# FastAPI solves dependencies *before* ``run_endpoint_function``, so wrapping
+# only ``route.dependant.call`` left this shape leaking a real 401 to the
+# browser (which clears the token and reloads).
+#
+# ``core-gated`` is the negative control in the same router: core's own read
+# gate must keep answering 401 (no session) and 404 (not a member) untouched.
+_DEPENDENCY_401_SRC = """
+from fastapi import HTTPException
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+def build_router(context):
+    def upstream_gate():
+        raise HTTPException(status_code=401, detail="upstream says no")
+
+    async def async_upstream_gate():
+        raise HTTPException(status_code=401, detail="upstream says no")
+
+    def starlette_upstream_gate():
+        raise StarletteHTTPException(status_code=401, detail="upstream says no")
+
+    def forbidden_gate():
+        raise HTTPException(status_code=403, detail="upstream says forbidden")
+
+    def innermost_gate():
+        raise HTTPException(status_code=401, detail="upstream says no")
+
+    def middle_gate(inner=Depends(innermost_gate)):
+        return inner
+
+    def outer_gate(middle=Depends(middle_gate)):
+        return middle
+
+    router = APIRouter()
+
+    @router.get("/dep-401", dependencies=[Depends(upstream_gate)])
+    def dep_401():
+        return {"ok": True}
+
+    @router.get("/dep-async-401", dependencies=[Depends(async_upstream_gate)])
+    def dep_async_401():
+        return {"ok": True}
+
+    @router.get("/dep-starlette-401", dependencies=[Depends(starlette_upstream_gate)])
+    def dep_starlette_401():
+        return {"ok": True}
+
+    @router.get("/dep-403", dependencies=[Depends(forbidden_gate)])
+    def dep_403():
+        return {"ok": True}
+
+    @router.get("/dep-nested-401")
+    def dep_nested_401(value=Depends(outer_gate)):
+        return {"ok": True}
+
+    @router.get(
+        "/notebooks/{notebook_id}/core-gated",
+        dependencies=[Depends(context.require_notebook_read)],
+    )
+    def core_gated(notebook_id: str):
+        return {"notebook_id": notebook_id}
+
+    return router
 """
 
 # A settings-carrying plugin whose factory leaks its own secret into an
@@ -1265,6 +1334,275 @@ def test_handler_returned_401_becomes_424(
     assert response.json()["detail"] == "扩展服务的上游认证失败，请联系管理员"
     # The upstream's own wording never reaches the browser.
     assert "upstream" not in response.text
+
+
+@pytest.mark.parametrize(
+    "path", ["dep-401", "dep-async-401", "dep-starlette-401", "dep-nested-401"]
+)
+def test_dependency_raised_401_becomes_424(
+    tmp_path, monkeypatch, frozen_runtime_reset, path
+):
+    """A 401 from the plugin's own ``Depends(...)`` translates too (codex #578 R7 P1).
+
+    Checking an upstream inside a dependency is the natural way to write it —
+    one guard, reused by every route in the plugin's router. FastAPI solves
+    dependencies before it ever calls ``run_endpoint_function``, so wrapping
+    only the endpoint's ``dependant.call`` meant this 401 never entered the
+    translation at all: it reached the browser verbatim and
+    ``frontend/app/errors.ts`` cleared the user's token and reloaded — the whole
+    product logged out over one plugin's upstream credential.
+
+    All four flavours are covered because they are four different code paths:
+    sync and async wrappers are separate closures, the Starlette base class is a
+    different ``except`` target than FastAPI's subclass, and ``dep-nested-401``
+    raises two levels down (a plugin guard composed of another plugin guard),
+    which only the transitive walk reaches.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_DEPENDENCY_401_SRC)
+    headers = _auth(client, "z00171017")
+    response = client.get(f"{_MOUNT}/{path}", headers=headers)
+    assert response.status_code == 424, response.text
+    assert response.headers.get("X-User-Message") == "1"
+    assert response.json()["detail"] == "扩展服务的上游认证失败，请联系管理员"
+    # The upstream's own wording never reaches the browser.
+    assert "upstream" not in response.text
+
+
+def test_dependency_raised_403_passes_through_untouched(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Only 401 is rewritten in a dependency, exactly as in a handler.
+
+    Non-vacuity for the parametrized test above: a wrapper that turned *every*
+    ``HTTPException`` into a 424 would satisfy it.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_DEPENDENCY_401_SRC)
+    headers = _auth(client, "z00181018")
+    response = client.get(f"{_MOUNT}/dep-403", headers=headers)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "upstream says forbidden"
+    assert "X-User-Message" not in response.headers
+
+
+def test_core_gates_mounted_by_a_plugin_are_never_translated(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Core's own dependencies keep both of their real answers (codex #578 R7 P1).
+
+    The dependency walk has to distinguish "the plugin's upstream said no" from
+    "core said no", because they call for opposite browser behaviour: the first
+    must not log the user out, the second must. Both of core's answers are
+    checked on a route the *plugin* mounted the gate on — 401 for no session
+    (the gate's own ``get_current_user``) and 404 for a user who cannot read the
+    notebook — since that is where a too-eager exclusion rule would show up.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_DEPENDENCY_401_SRC)
+    owner = _auth(client, "z00191019")
+    notebook = _notebook(client, owner)
+
+    anonymous = client.get(f"{_MOUNT}/notebooks/{notebook}/core-gated")
+    assert anonymous.status_code == 401, anonymous.text
+    bad_token = client.get(
+        f"{_MOUNT}/notebooks/{notebook}/core-gated",
+        headers={"Authorization": "Bearer nope"},
+    )
+    assert bad_token.status_code == 401, bad_token.text
+
+    stranger = _auth(client, "z00201020")
+    refused = client.get(
+        f"{_MOUNT}/notebooks/{notebook}/core-gated", headers=stranger
+    )
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"] == "Notebook not found"
+
+    # Non-vacuity: the route works for someone who may read the notebook, so
+    # the two refusals above are the gate talking and not a broken route.
+    allowed = client.get(f"{_MOUNT}/notebooks/{notebook}/core-gated", headers=owner)
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json() == {"notebook_id": notebook}
+
+
+def test_core_dependencies_are_classified_out_of_the_plugin_owned_set(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """The exclusion is asserted structurally, because HTTP cannot see it.
+
+    Measured, not assumed (codex #578 R7): deleting the core-dependency
+    exclusion does **not** change a single HTTP response today, for two
+    independent and entirely incidental reasons —
+
+    * ``get_current_user`` is an *async generator* dependency (it yields so it
+      can reset the request-user ContextVar), so
+      ``_install_unauthorized_translation`` already refuses it on the generator
+      branch, which runs before the exclusion is ever consulted;
+    * the notebook gates refuse with 404, and ``_translate_unauthorized``
+      rewrites only 401.
+
+    Both are properties of how core happens to be written this week, not of
+    what the exclusion promises. Turn ``get_current_user`` into a plain
+    ``async def`` — a plausible refactor, since the ContextVar reset could move
+    to middleware — and the generator branch stops covering it; from that
+    commit on, the exclusion is the only thing standing between an expired
+    session and a 424 that never logs anybody out. So the guarantee is pinned
+    here, where it is visible, rather than resting on those two coincidences.
+
+    The route is the plugin's own ``core-gated`` one: the gate is mounted by
+    plugin code, which is exactly the case a too-eager walk would swallow.
+
+    ⚠ The assertion is **identity**, never name. Wrapping replaces
+    ``Dependant.call``, and the replacement carries ``@wraps(inner)`` — so it
+    reports the wrapped function's ``__name__``, ``__qualname__`` and
+    ``__module__`` as its own, and even ``repr()`` renders it as
+    ``<function require_notebook_read at ...>``. Anything that compares names,
+    modules or reprs would pass while looking at the wrapper. Only ``is`` /
+    ``in`` against the module attribute can tell "core's gate" from "a
+    translation wrapper impersonating core's gate", and staying untouched is
+    exactly what the exclusion promises.
+    """
+
+    from app.api import deps as core_deps
+    from app.api.extension_routes import _dependant_calls
+
+    client = _client(tmp_path, monkeypatch, factory_src=_DEPENDENCY_401_SRC)
+    route = next(
+        route
+        for route in client.app.routes
+        if isinstance(route, APIRoute) and route.path.endswith("/core-gated")
+    )
+
+    # Read *after* mounting, so this reflects the post-wrap tree: a core
+    # dependency is still present as itself if and only if it was not wrapped.
+    reachable = _dependant_calls(route.dependant)
+    assert core_deps.get_current_user in reachable
+    assert core_deps.require_notebook_read in reachable
+
+
+def test_plugin_owned_dependants_splits_core_from_plugin():
+    """The classifier itself, on a tree that has never been wrapped.
+
+    The mounted-route test above can only observe the decision through its
+    after-effect, and every callable in that tree is post-wrap. This one calls
+    the classifier directly on a freshly solved dependant, so "core out, plugin
+    in" is read straight off the return value — and both halves are asserted,
+    because a rule that excluded *everything* would satisfy the exclusion on
+    its own.
+
+    The route is built here rather than in a plugin package on purpose: the
+    classifier takes a dependant, not a plugin, so this needs no app, no
+    fixture and no config file.
+    """
+
+    from fastapi import FastAPI
+
+    from app.api import deps as core_deps
+    from app.api.extension_routes import (
+        _core_dependency_calls,
+        _plugin_owned_dependants,
+    )
+
+    def innermost_gate():  # pragma: no cover - never called
+        return None
+
+    def middle_gate(inner=Depends(innermost_gate)):  # pragma: no cover
+        return inner
+
+    router = APIRouter()
+
+    @router.get(
+        "/notebooks/{notebook_id}/mixed",
+        dependencies=[Depends(core_deps.require_notebook_read)],
+    )
+    def mixed(notebook_id: str, value=Depends(middle_gate)):  # pragma: no cover
+        return {}
+
+    app = FastAPI()
+    app.include_router(
+        router, dependencies=[Depends(core_deps.get_current_user)]
+    )
+    route = next(r for r in app.routes if isinstance(r, APIRoute))
+
+    owned = {
+        node.call
+        for node in _plugin_owned_dependants(
+            route.dependant, _core_dependency_calls()
+        )
+    }
+    assert owned == {middle_gate, innermost_gate}
+    assert core_deps.require_notebook_read not in owned
+    assert core_deps.get_current_user not in owned
+
+
+def test_declared_in_core_reads_the_defining_module():
+    """The module half of the double check, unit-tested on each shape it handles.
+
+    It exists because the identity set in :func:`_core_dependency_calls` is
+    exact only for the dependencies core *hands* a plugin; a plugin composing a
+    guard out of some other core helper would produce a core-owned callable
+    that is not one of those objects.
+    """
+
+    from app.api import deps as core_deps
+    from app.api.extension_routes import _declared_in_core, plugin_actor
+
+    assert _declared_in_core(core_deps.require_notebook_read)
+    assert _declared_in_core(core_deps.get_current_user)
+    assert _declared_in_core(plugin_actor)
+
+    def plugin_side_guard():  # pragma: no cover - never called
+        return None
+
+    plugin_side_guard.__module__ = "corp_plugin.guards"
+    assert not _declared_in_core(plugin_side_guard)
+
+    # A callable *instance* resolves to where its class was defined, not to
+    # ``builtins`` — the branch that reads ``type(call).__module__``.
+    class PluginGuard:
+        def __call__(self):  # pragma: no cover - never called
+            return None
+
+    PluginGuard.__module__ = "corp_plugin.guards"
+    assert not _declared_in_core(PluginGuard())
+    CoreGuard = type("CoreGuard", (PluginGuard,), {"__module__": "app.api.deps"})
+    assert _declared_in_core(CoreGuard())
+
+    # A name that merely starts with the same letters is not the core package.
+    plugin_side_guard.__module__ = "apparel.guards"
+    assert not _declared_in_core(plugin_side_guard)
+
+
+def _module_of(call) -> str:
+    module = getattr(call, "__module__", None)
+    return module if isinstance(module, str) else type(call).__module__
+
+
+def test_core_dependency_exclusions_are_derived_not_hand_listed():
+    """The excluded set is core's live gate table plus the two session seams.
+
+    ``_notebook_gates`` is already derived from ``deps._CAPABILITY_LEVELS``, so
+    asserting equality here keeps a future capability from quietly falling
+    outside the exclusion and having its 404-shaped guard wrapped.
+    """
+
+    from app.api import deps as core_deps
+    from app.api.extension_routes import (
+        _core_dependency_calls,
+        _notebook_gates,
+        plugin_actor,
+    )
+
+    assert _core_dependency_calls() == _notebook_gates() | {
+        core_deps.get_current_user,
+        plugin_actor,
+    }
+    # Non-vacuity: the gate table is not empty, so the union above says
+    # something.
+    assert _notebook_gates()
+    assert all(
+        _module_of(call).startswith("app.") for call in _core_dependency_calls()
+    )
 
 
 def test_a_real_missing_session_is_still_401(

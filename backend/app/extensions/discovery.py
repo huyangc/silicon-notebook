@@ -315,13 +315,43 @@ def _bind_settings(
             plugin_id, "plugin_settings_model_invalid"
         ) from None
 
+    # Whether pydantic will *populate* a field from its declared name when the
+    # field also carries an alias. It will not, by default: an aliased field is
+    # validated by alias only. Accepting the field name unconditionally
+    # therefore had the accepted set claim a key pydantic then silently
+    # dropped — the operator writes ``api_key = "..."`` for
+    # ``api_key: str = Field(alias="token")``, startup reports nothing, and the
+    # plugin runs on the field's default. That is precisely the "the feature was
+    # never actually on" failure the accepted set exists to catch, arrived at
+    # from the other side (codex #578 R7 P2). ``validate_by_name`` is pydantic
+    # 2.11+'s spelling of the same opt-in and is read defensively so this does
+    # not depend on which one a plugin's pydantic knows about.
+    config = getattr(model, "model_config", None)
+    if not isinstance(config, Mapping):
+        config = {}
+    populate_by_name = bool(
+        config.get("populate_by_name") or config.get("validate_by_name")
+    )
+
     accepted: set[str] = set()
     for name, field in model.model_fields.items():
-        accepted.add(name)
-        for alias in (
-            getattr(field, "validation_alias", None),
-            getattr(field, "alias", None),
-        ):
+        aliases = tuple(
+            alias
+            for alias in (
+                getattr(field, "validation_alias", None),
+                getattr(field, "alias", None),
+            )
+            if alias is not None
+        )
+        # An unaliased field is always populated by its own name; an aliased one
+        # only when the model opted in above. Note the asymmetry with the
+        # ``type(alias) is str`` filter below: a field whose only alias is an
+        # ``AliasChoices``/``AliasPath`` contributes *no* accepted key at all,
+        # which stays the fail-closed direction (a rejected startup rather than
+        # a silently ignored key).
+        if not aliases or populate_by_name:
+            accepted.add(name)
+        for alias in aliases:
             # Only plain string aliases widen the accepted set.  Registered
             # limitation: pydantic also allows ``AliasChoices``/``AliasPath``
             # here, and those names are *not* collected — a settings key that

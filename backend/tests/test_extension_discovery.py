@@ -823,6 +823,136 @@ def test_settings_type_error_fails_and_error_never_contains_the_value(tmp_path):
     assert error.__context__ is None or error.__suppress_context__
 
 
+# A settings model whose one field is reachable *only* by its alias — the
+# default pydantic behaviour for ``Field(alias=...)``.  ``{CONFIG}`` is a
+# substitution slot so the opt-in variant below can drop a ``model_config``
+# line in without a second copy of the bundle scaffold.
+_ALIASED_SETTINGS_BODY = """
+from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.extension_sdk import EXTENSION_API_VERSION, ExtensionManifest
+
+BOUND: list[object] = []
+
+
+class SampleSettings(BaseModel):
+{CONFIG}
+    api_key: str = Field("default", alias="token")
+
+
+@dataclass
+class Bundle:
+    manifest: ExtensionManifest
+    settings_model: object = SampleSettings
+
+    def configure(self, settings) -> None:
+        BOUND.append(settings)
+
+    def register(self, registrar) -> None:
+        pass
+
+
+bundle = Bundle(ExtensionManifest(
+    id=PLUGIN_ID,
+    version="0.1.0",
+    api_version=EXTENSION_API_VERSION,
+    display_name="Sample deployment plugin",
+    trust="deployment",
+    contributions=(),
+))
+"""
+
+
+def _aliased_settings_body(*, populate_by_name: bool = False) -> str:
+    config = (
+        "    model_config = ConfigDict(populate_by_name=True)"
+        if populate_by_name
+        else "    pass"
+    )
+    return _ALIASED_SETTINGS_BODY.replace("{CONFIG}", config)
+
+
+def test_aliased_field_name_is_not_accepted_without_the_opt_in(tmp_path):
+    """The declared name of an aliased field is a *rejected* key, not a silent
+    no-op (codex #578 R7 P2).
+
+    ``api_key: str = Field(alias="token")`` is validated by ``token`` only —
+    pydantic drops ``api_key`` on the floor and hands the plugin the default.
+    Accepting the field name here made core report success for a deployment
+    config that never took effect: the exact "the feature was never actually
+    on" failure the accepted-key set exists to catch, reached from the other
+    side.  The key name still reaches the operator; the value still never does.
+    """
+
+    module = _write_plugin_package(tmp_path, body=_aliased_settings_body())
+    config = _write_config(
+        tmp_path,
+        _entry(
+            module,
+            extra='[extensions."corp.sample".settings]\napi_key = "TOPSECRET"\n',
+        ),
+    )
+    with pytest.raises(ExtensionDiscoveryError) as excinfo:
+        discover_deployment_extensions(config)
+
+    error = excinfo.value
+    assert error.reason == "plugin_settings_unknown_key"
+    assert error.names == ("api_key",)
+    assert "TOPSECRET" not in str(error) + repr(error)
+
+
+def test_the_alias_itself_is_accepted_and_actually_binds(tmp_path):
+    """The other half: the key pydantic *does* read must still pass through.
+
+    Without this the fix above would be indistinguishable from "reject aliased
+    fields entirely", which would break every plugin that uses an alias.
+    """
+
+    module = _write_plugin_package(tmp_path, body=_aliased_settings_body())
+    config = _write_config(
+        tmp_path,
+        _entry(
+            module,
+            extra='[extensions."corp.sample".settings]\ntoken = "X"\n',
+        ),
+    )
+    discover_deployment_extensions(config)
+
+    bound = sys.modules[module.stem].BOUND
+    assert len(bound) == 1
+    assert bound[0].api_key == "X"
+
+
+def test_populate_by_name_reopens_the_declared_name(tmp_path):
+    """A model that opts in gets its field name back — and it binds.
+
+    The accepted set is derived from what pydantic will actually populate, not
+    from a blanket rule, so ``populate_by_name`` (pydantic 2.11+ also spells it
+    ``validate_by_name``, and setting either turns both on) has to move it.
+    Asserting the bound value, not just the absence of an error, is what makes
+    this test able to fail if the accepted set and pydantic ever disagree in
+    this direction too.
+    """
+
+    module = _write_plugin_package(
+        tmp_path, body=_aliased_settings_body(populate_by_name=True)
+    )
+    config = _write_config(
+        tmp_path,
+        _entry(
+            module,
+            extra='[extensions."corp.sample".settings]\napi_key = "X"\n',
+        ),
+    )
+    discover_deployment_extensions(config)
+
+    bound = sys.modules[module.stem].BOUND
+    assert len(bound) == 1
+    assert bound[0].api_key == "X"
+
+
 _SECRET_UI_BODY = """
 from dataclasses import dataclass
 
