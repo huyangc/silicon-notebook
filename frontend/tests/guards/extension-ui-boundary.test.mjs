@@ -263,6 +263,18 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   //  · registry.local.ts      —— 同步脚本的生成物，只许 import 合同与 features/ext-*/ 下的插件入口。
   const registry = modules.find((row) => row.path === "features/extension-sdk/registry.ts");
   assert.ok(registry);
+  // api 端口是插件唯一的 HTTP 出口，所以它自己的依赖面必须窄到可以一眼看完：核心
+  // api 客户端（唯一允许发请求的模块）、错误人性化（插件读不得 `error.message`——
+  // errors-guard 是精确计数普查，仓库外的包登记不进那份清单）、以及 SDK 合同。
+  // 多出任何一条——尤其是 `../../app/source-api.ts` 这种领域 API——就等于让插件端口
+  // 顺带成为某个领域能力的转发器，而它本该只会拼路径。
+  const port = modules.find((row) => row.path === "features/extension-sdk/api.ts");
+  assert.ok(port, "features/extension-sdk/api.ts must remain the plugin HTTP port");
+  assert.deepEqual(
+    [...new Set(importsIn(port.module).map((row) => row.module))].sort(),
+    ["../../app/api-client.ts", "../../app/errors.ts", "./contracts.ts"],
+    "api.ts may import only the core api client, the error humanizer and the SDK contracts",
+  );
   const merged = modules.find((row) => row.path === "features/extension-sdk/workspace-registry.ts");
   assert.ok(merged, "workspace-registry.ts must remain the single merged registry module");
   const local = modules.find((row) => row.path === "features/extension-sdk/registry.local.ts");
@@ -426,6 +438,15 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   // 对所有插件生效。兄弟那一项是路径判据不是字面量，抽在 samePluginPackageSpecifier 里
   // 与 T6 的包边界守卫共用。
   const PLUGIN_IMPORT_ALLOWLIST = new Set(["../extension-sdk/contracts.ts", "lucide-react", "react"]);
+  // `api.ts` 永远不在这份白名单里：`createWorkspaceExtensionApi(pluginId)` 一旦对插件
+  // 可见，插件 A 就能给自己造一条绑定插件 B 的端口，路径限定当场失去意义。端口只经
+  // host 按 `contribution.pluginId` 注入到 `actions.api`。（T6 的包边界守卫会把它作为
+  // 被点名拒绝的说明符再钉一遍；这里钉的是白名单本身没有它。）
+  assert.equal(
+    PLUGIN_IMPORT_ALLOWLIST.has("../extension-sdk/api.ts"),
+    false,
+    "the plugin HTTP port must be injected by the host, never imported by a plugin",
+  );
   for (const plugin of plugins) {
     assert.deepEqual(
       importsIn(plugin.module).map((row) => row.module).filter((module) => (
