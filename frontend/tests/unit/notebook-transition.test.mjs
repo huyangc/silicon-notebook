@@ -211,6 +211,37 @@ test("没有 commit 的步骤被跳过，且 settle 拿到的是自己 begin 出
 });
 
 
+test("commit 返回自定义 thenable（非原生 Promise 实例）也会被等待", async () => {
+  // 鸭子类型判定的存在理由：`customThenable instanceof Promise` 为 false，
+  // 但 `await customThenable` 仍会调用它的 `.then`。旧的 `instanceof Promise`
+  // 判据会直接跳过等待，`conclude` 就可能跑在 `.then` 被调用之前。
+  let thenCalled = false;
+  const customThenable = {
+    then(resolve) {
+      thenCalled = true;
+      resolve(undefined);
+    },
+  };
+  const step = transitionStep({
+    name: "custom-thenable",
+    begin: () => ({}),
+    commit: () => customThenable,
+    settle: () => {},
+  });
+  let thenCalledBeforeConclude = false;
+  const result = await runNotebookTransition(plan([step], {
+    conclude: () => {
+      thenCalledBeforeConclude = thenCalled;
+      return true;
+    },
+  }));
+
+  assert.equal(result.status, "committed");
+  assert.equal(thenCalled, true, "commit 返回的自定义 thenable 必须被等待（.then 必须被调用）");
+  assert.equal(thenCalledBeforeConclude, true, "conclude 必须排在 thenable 被等待之后");
+});
+
+
 test("enter 抛出：不取数、不提交，已 begin 的逆序回滚后原样抛出", async () => {
   const log = [];
   const steps = [probeStep("a", log), probeStep("b", log)];

@@ -32,7 +32,11 @@
 //
 // 同步 commit 刻意**不 await**：`await undefined` 也会插一个微任务节拍，而
 // `openNotebook` 在 apply 与第二次 epoch 复核之间历史上只有一次真实 await（Ask 会话
-// 还原）。多插的节拍会无谓地拉宽被顶替窗口，故这里按「返回值是不是 Promise」判定。
+// 还原）。多插的节拍会无谓地拉宽被顶替窗口，故这里按鸭子类型判定返回值是否
+// thenable（`typeof value?.then === "function"`），而不是 `instanceof Promise`——
+// 跨 realm 的 Promise（例如来自 iframe）与自定义 thenable 都不是当前 realm 的
+// `Promise` 实例，但 `await` 对它们一样生效，`instanceof Promise` 会把它们误判成
+// 「同步返回」而漏掉一次本该有的 await。
 
 /** 步骤 begin 的返回值。必须是对象（非空即代表这一步已建立），`null`/`undefined` = 拒绝。 */
 export type TransitionTicket = object;
@@ -99,6 +103,15 @@ export type NotebookTransitionPlan<Loaded, Outcome> = {
   readonly conclude: (outcome: Outcome) => boolean;
 };
 
+/**
+ * 鸭子类型判定：`value` 是否可被 `await`。不用 `instanceof Promise`——跨 realm 的
+ * Promise 与自定义 thenable 都不是当前 realm 的 `Promise` 实例，但 `await` 对它们
+ * 一样生效；`isThenable` 是这条判定唯一的收口。
+ */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof (value as { then?: unknown } | null | undefined)?.then === "function";
+}
+
 export type NotebookTransitionResult<Outcome> =
   | { readonly status: "committed"; readonly outcome: Outcome }
   | { readonly status: "refused"; readonly refusedBy: readonly string[] }
@@ -143,7 +156,7 @@ export async function runNotebookTransition<Loaded, Outcome>(
     const context: TransitionCommitContext<Loaded, Outcome> = { loaded, outcome };
     for (const entry of begun) {
       const pending: unknown = entry.step.commit?.(entry.ticket, context);
-      if (pending instanceof Promise) await pending;
+      if (isThenable(pending)) await pending;
     }
     if (!plan.conclude(outcome)) {
       settle(null);
