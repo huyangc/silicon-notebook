@@ -1419,8 +1419,11 @@ the backend critical path. `next build` must keep TypeScript errors fatal
 (`ignoreBuildErrors` stays unset), and level 1 must not run the same
 `tsc --noEmit` immediately before that build. The level-1 backend lane excludes
 the `slow` real-index/performance marker, the `graph_index_contract` cold graph/index
-contracts, the `architecture_contract` repository-wide semantic source scans, and the
-separately authoritative PostgreSQL tree. Run
+contracts, the `architecture_contract_heavy` subset (>2s per test) of the repository-wide
+semantic source scans, and the separately authoritative PostgreSQL tree. The remaining,
+cheap `architecture_contract` tests (<=2s each; see
+`backend/tests/conftest.py::_ARCHITECTURE_CONTRACT_HEAVY_TESTS` for the exact heavy
+allowlist) run in level 1 on every PR/push. Run
 `scripts/check_extended.sh` for level 2: it reuses level 1 and adds the exact
 backend complement. `.github/workflows/daily-extended.yml` runs level 2 once
 daily at 18:17 UTC (02:17 Asia/Shanghai) and on manual dispatch; ordinary PRs

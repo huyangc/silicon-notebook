@@ -180,11 +180,12 @@ def test_verification_lanes_do_not_hide_committed_tests():
     standard = (ROOT / EXTENDED_BACKEND_LAYERS[0]).read_text(encoding="utf-8")
     extended = (ROOT / EXTENDED_BACKEND_LAYERS[1]).read_text(encoding="utf-8")
     assert (
-        '-m "not slow and not architecture_contract and not graph_index_contract"'
+        '-m "not slow and not architecture_contract_heavy and not graph_index_contract"'
         in standard
     )
     assert (
-        '-m "slow or architecture_contract or graph_index_contract"' in extended
+        '-m "slow or architecture_contract_heavy or graph_index_contract"'
+        in extended
     )
     assert "backend/tests/postgres" in standard
     assert "backend/tests/postgres" in extended
@@ -193,10 +194,116 @@ def test_verification_lanes_do_not_hide_committed_tests():
     ).read_text(encoding="utf-8")
 
 
+def test_verification_lane_markers_partition_every_architecture_contract_test():
+    """Empirically prove the G1/G2 backend marker split has no gap or overlap.
+
+    The pinned literal strings above catch textual drift between the two `-m`
+    expressions, but they cannot catch a *consistent* mistake: someone edits
+    both `check_backend.sh` and this pinned string together (e.g. copies the
+    NOT/AND form into check_backend_extended.sh instead of writing the dual
+    OR form), which would keep both hardcoded checks green while some
+    architecture_contract_heavy test silently ran in neither lane. Only
+    running the two real `-m` expressions through pytest's own collector,
+    against the real test files, proves the actual split.
+
+    Candidate files are discovered dynamically (conftest.py's marker-driving
+    module sets, plus a source-text scan for the marker decorators) rather
+    than hardcoded, so this stays valid as tests gain or lose these markers.
+    """
+    import ast
+    import re
+    import subprocess
+    import sys
+
+    conftest_source = (ROOT / "backend/tests/conftest.py").read_text(
+        encoding="utf-8"
+    )
+    module_sets: set[str] = set()
+    for constant in (
+        "_ARCHITECTURE_CONTRACT_MODULES",
+        "_GRAPH_INDEX_CONTRACT_MODULES",
+    ):
+        match = re.search(
+            rf"{constant}\s*=\s*(\{{.*?\}})", conftest_source, re.DOTALL
+        )
+        assert match, f"conftest.py must still define {constant}"
+        module_sets |= ast.literal_eval(match.group(1))
+    heavy_match = re.search(
+        r"_ARCHITECTURE_CONTRACT_HEAVY_TESTS\s*=\s*(\{.*?\})",
+        conftest_source,
+        re.DOTALL,
+    )
+    assert heavy_match, "conftest.py must still define _ARCHITECTURE_CONTRACT_HEAVY_TESTS"
+    heavy_tests = ast.literal_eval(heavy_match.group(1))
+    module_sets |= {file_name for file_name, _ in heavy_tests}
+
+    decorator_pattern = re.compile(
+        r"@pytest\.mark\.(?:slow|architecture_contract(?:_heavy)?|graph_index_contract)\b"
+    )
+    tests_dir = ROOT / "backend" / "tests"
+    for path in tests_dir.rglob("*.py"):
+        if "postgres" in path.relative_to(tests_dir).parts:
+            continue
+        if path.name == "conftest.py":
+            continue
+        if decorator_pattern.search(path.read_text(encoding="utf-8")):
+            module_sets.add(path.name)
+
+    candidate_paths = sorted(
+        str((tests_dir / name).relative_to(ROOT)) for name in module_sets
+    )
+    assert candidate_paths, "expected at least one architecture_contract-bearing file"
+
+    def marker_expr(layer_index: int) -> str:
+        source = (ROOT / EXTENDED_BACKEND_LAYERS[layer_index]).read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r'-m\s+"([^"]+)"', source)
+        assert match, EXTENDED_BACKEND_LAYERS[layer_index]
+        return match.group(1)
+
+    def collect_ids(marker_expression: str | None) -> set[str]:
+        args = [
+            sys.executable,
+            "-m",
+            "pytest",
+            *candidate_paths,
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ]
+        if marker_expression is not None:
+            args += ["-m", marker_expression]
+        result = subprocess.run(
+            args,
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
+        )
+        return {
+            line.strip()
+            for line in result.stdout.splitlines()
+            if "::" in line and not line.startswith(" ")
+        }
+
+    universe = collect_ids(None)
+    g1_ids = collect_ids(marker_expr(0))
+    g2_ids = collect_ids(marker_expr(1))
+
+    assert universe, "candidate discovery found files but collected zero tests"
+    assert g1_ids | g2_ids == universe
+    assert g1_ids & g2_ids == set()
+
+
 def test_backend_parallelism_is_bounded_and_explicit():
     config = (ROOT / "backend" / "pytest.ini").read_text(encoding="utf-8")
     assert "addopts = -n 12 --dist loadgroup" in config
     assert "architecture_contract:" in config
+    assert "architecture_contract_heavy:" in config
     assert "graph_index_contract:" in config
     assert "-n auto" not in config
     assert "worksteal" not in config
