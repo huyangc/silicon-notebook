@@ -33,6 +33,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from app.application.ask_reasoning import ResponseDraftStage
     from app.repositories.ports import (
         AskCandidatePort,
         AskGraphPort,
@@ -310,6 +311,32 @@ def knowledge_record(object_type: str, obj: dict, schema) -> KnowledgeRecord:
     )
 
 
+class DefaultResponseDraftStage:
+    """The shipped ``ResponseDraftStage``: AskService's own synthesis segment.
+
+    Thin on purpose.  Making the ``retrieval evidence -> response draft`` step
+    an *object* is what makes it injectable -- a test or a future deployment
+    hands ``AskService`` a different ``draft_response`` and the orchestrator
+    is unchanged -- while the default body stays a method of the service it
+    has always been part of.  That keeps the move out of
+    ``_run_reasoning_stage`` a pure relocation instead of a rewrite of
+    ``self`` across 650 lines of synthesis and citation binding.
+
+    It holds the service only; it owns no repository, connection, budget,
+    cancellation authority or persistence port of its own, and it cannot
+    reach the atomic save -- ``_commit_reasoning_draft`` runs after this seam
+    returns, in the orchestrator.
+    """
+
+    __slots__ = ("_service",)
+
+    def __init__(self, service: "AskService") -> None:
+        self._service = service
+
+    def draft_response(self, stage, runtime):
+        return self._service._draft_reasoning_response(stage, runtime)
+
+
 class AskService:
     # mix 合成的 KG 段编号基点 / prompt 结构预留 token(与 facade 冻结常量同值)。
     _MIX_KG_KEY_BASE = 1000
@@ -354,6 +381,7 @@ class AskService:
         ] = lambda _notebook_id, _actor_id, _ids: (),
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
+        response_draft_stage: "ResponseDraftStage | None" = None,
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
@@ -402,6 +430,15 @@ class AskService:
         self.retrieval_contributor_hydrate = retrieval_contributor_hydrate
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
+        # ``retrieval evidence -> response draft`` 这一级的可注入 stage seam
+        # (application 合同 ``ResponseDraftStage``)。缺省 = 历史内联逻辑本身,
+        # 所以不接线的组合根与窄测试替身逐字不变;注入别的实现只替换草稿产出
+        # ——持久化(``_commit_reasoning_draft``)与 job 终态仍在 core 手里。
+        self.response_draft_stage = (
+            response_draft_stage
+            if response_draft_stage is not None
+            else DefaultResponseDraftStage(self)
+        )
 
     def _activate_selected_source_graph(
         self,
@@ -2460,13 +2497,22 @@ class AskService:
         )
 
     def _run_reasoning_stage(self, prepared, runtime):
-        """Retrieve, synthesize, bind and commit one prepared reasoning Ask."""
+        """Orchestrate one prepared reasoning Ask across the typed stages.
+
+        Only orchestration lives here: the pre-retrieval short circuits, the
+        typed retrieval seam, and then the injectable ``ResponseDraftStage``
+        that turns retrieval evidence into the response draft.  The commit
+        boundary stays core-owned below both seams -- no stage implementation
+        reaches the atomic save.
+        """
         from app.application.ask_reasoning import (
             CommittedReasoningAnswer,
             PreparedReasoningAsk,
             ReasoningResponseDraft,
             ReasoningRetrievalRuntime,
+            ResponseDraftInput,
             StageBoundaryError,
+            execute_response_draft_stage,
         )
         from app.services.reasoning_retrieval import (
             ReasoningResult,
@@ -2912,665 +2958,780 @@ class AskService:
                 reasoning_outline = []
                 reasoning_outline_evidence = []
 
-            # Federated hits carry their owning notebook. Render each payload
-            # against THAT notebook's schema overlay: the active notebook may
-            # customize the same object_type, but its field order/primary label
-            # must never be projected onto an object from a mounted base.
-            schema_registries = {
-                owner_id: self.schemas.effective_schemas(owner_id)
-                for owner_id in {
-                    item.notebook_id or notebook_id for item in top_hits
-                }
-            }
-            seen_ids: set = set()
-            related_knowledge: List[KnowledgeRecord] = []
+            # 检索之后、合成之前的取消检查。草稿阶段做的第一件事是按笔记本
+            # 读 schema 覆盖层(一次真实 I/O);历史检查排在那次读取**之后**,
+            # 于是被取消的一轮会先白付一次立刻丢弃的读。提到边界之前结局仍是
+            # 同一个 AskCancelled,只是不再付那笔钱(与「拿到槽位后、发起 I/O
+            # 前再检查一次」同一条口径)。
             raise_if_cancelled(cancel_event)
-            for item in top_hits:
-                if item.object_id in seen_ids:
-                    continue
-                seen_ids.add(item.object_id)
-                related_knowledge.append(knowledge_record(
-                    item.object_type,
-                    {"id": item.object_id, "payload": item.payload, "status": item.status,
-                     "owner": getattr(item, "owner", ""),
-                     "last_reviewed": getattr(item, "last_reviewed", ""),
-                     "evidence": item.evidence},
-                    schema_registries[item.notebook_id or notebook_id].get(
-                        item.object_type
-                    )))
-            related_knowledge = related_knowledge[
-                : self.settings.ask_related_knowledge_limit
-            ]
-
-            cited_element_ids = {ev.element_id for item in top_hits
-                                 for ev in item.evidence if ev.element_id}
-            citations = self.evidence_context.citations_from(
-                top_hits, cited_element_ids, "KG evidence", notebook_id=notebook_id)
-
-            answer, llm_grounded, anchors = "", False, []
-            synth_failed = False
-            synthesis_ran = False
-            synthesis_started = time.perf_counter()
-            # _answer_reasoning returns a 4th `counts` element (included_kg/
-            # chunks/elements); _answer_with_retry's synth() contract is shared
-            # with other answer paths and stays a 3-tuple, so this closure
-            # captures counts as a side effect instead of widening that contract.
-            reasoning_counts: dict = {}
-            reasoning_baseline: dict = {}
-            raise_if_cancelled(cancel_event)
-            answer_client = self.model_clients.chat("ask_answer")
-            # 地图块:确定性服务端小块,不依赖 enumerations 是否为空——「集合太大
-            # 就别枚举、直接报数」这条路径下恰恰一条清单都没有,而那个数正是答案
-            # 本身。渲染纯字符串拼接,不可能抛,故不需要 try 包(与下方清单块不同,
-            # 那里有映射/预算计算)。
-            from app.services.collection_enumeration_answer import (
-                collection_map_block as _collection_map_block,
-            )
-            collection_map_prompt_block = (
-                _collection_map_block(collection_map_text)
-                if answer_client.configured else ""
-            )
-            structured_block = ""
-            if structured_batch is not None and answer_client.configured:
-                from app.services.structured_retrieval import structured_prompt_block
-                structured_block = structured_prompt_block(
-                    structured_batch,
-                    inline_rows=limits.inline_answer_rows,
-                    cell_excerpt_chars=limits.cell_excerpt_chars,
-                    budget_chars=limits.chunk_context_chars,
-                )
-            # 类型化集合清单(T4 产出的 enumerations)映射成 AskResponse.result_sets
-            # 行 + 合成证据块(T5)。映射与 prompt 块拼接放在**同一个** try 里:两者
-            # 失败都只应让清单这一整份"锦上添花"的产出消失,不该出现"卡片有了
-            # 但块裸抛穿整轮 Ask"或"块建起来了但卡片已经在别的异常里被清空"的
-            # 一半状态(codex 评审实测复现过后一种)。`enumerations` 在上面的 broad
-            # except 分支里可能已经被清空过一次,这里的 try 只防映射/渲染本身再
-            # 出岔子。
-            typed_collection_result_sets: list = []
-            enumeration_block_dropped = False
-            collection_item_citations: dict = {}
-            structured_map: dict = {}
-            if enumerations:
-                try:
-                    from app.services.collection_enumeration_answer import (
-                        apply_synthesis_preview_counts,
-                        delivered_outcomes,
-                        enumeration_prompt_block,
-                        typed_collection_results,
-                    )
-                    # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
-                    # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
-                    # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
-                    collection_items = [
-                        item for outcome in enumerations for item in outcome.items
-                    ]
-                    collection_item_citations = (
-                        self.evidence_context.collection_item_citations(
-                            collection_items,
-                            active_notebook_id=notebook_id,
-                        )
-                    )
-                    typed_collection_result_sets = typed_collection_results(
-                        enumerations,
-                        payload_chars=limits.structured_payload_chars,
-                        citations_by_item_id=collection_item_citations,
-                    )
-                    if answer_client.configured:
-                        from app.services.collection_enumeration_answer import (
-                            enumeration_sub_budget,
-                        )
-                        # 枚举块在后:与既有 knowhow structured_block 拼接,整体
-                        # 仍经 structured_block 这一个参数进 _answer_reasoning,
-                        # 装配位保持在 source 分区最前(语义不变,见该函数 843
-                        # 行起)。子预算三层夹(见 enumeration_sub_budget 的
-                        # docstring):减去 knowhow 已占字符 + 两者之间 "\n\n"
-                        # 拼接符本身的 2 个字符,再夹到 chunk_context_chars 的
-                        # 一半,防止模型"顺便列出所有表格"把另一半问题
-                        # (chunks/elements)的证据预算整个挤空。
-                        enum_budget_chars = enumeration_sub_budget(
-                            chunk_context_chars=limits.chunk_context_chars,
-                            structured_block_len=len(structured_block),
-                        )
-                        # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
-                        # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
-                        # 头部还写着「complete」——prompt 与卡片对同一份清单说
-                        # 两套话,正是 coverage 合同要防的东西。
-                        preview = enumeration_prompt_block(
-                            delivered_outcomes(
-                                enumerations, typed_collection_result_sets
-                            ),
-                            inline_rows=limits.inline_answer_rows,
-                            budget_chars=enum_budget_chars,
-                            citations_by_item_id=collection_item_citations,
-                        )
-                        structured_map = preview.evidence_by_id
-                        apply_synthesis_preview_counts(
-                            typed_collection_result_sets, preview.shown_rows
-                        )
-                        if preview.text:
-                            structured_block = (
-                                f"{structured_block}\n\n{preview.text}"
-                                if structured_block else preview.text
-                            )
-                        else:
-                            # 预算把连块头都挤没了(极端场景,如 knowhow 已经吃满
-                            # chunk_context_chars 的绝大部分):清单结果卡仍然
-                            # 存在(上面 typed_collection_result_sets 不受影响),
-                            # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
-                            # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
-                            enumeration_block_dropped = True
-                except Exception:
-                    typed_collection_result_sets = []
-                    enumeration_block_dropped = False
-            def _synth_reasoning():
-                # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
-                # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
-                ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
-                    notebook_id, research_question, top_hits, elements,
-                    reasoning_history,
-                    cancel_event=cancel_event, chunks=chunks, chains=chains,
-                    memory_hits=memory_hits, answer_client=answer_client,
-                    kg_context_chars=limits.kg_context_chars,
-                    chunk_context_chars=limits.chunk_context_chars,
-                    element_items=limits.answer_element_items,
-                    structured_block=structured_block,
-                    structured_map=structured_map,
-                    collection_map_block=collection_map_prompt_block,
-                    counts_sink=reasoning_counts,
-                    baseline_sink=reasoning_baseline,
-                    style_block=style_block)
-                return ans, llm_grounded_, anchors_
-
-            # ---------------------------------------------- 按节合成(设计文档 §3.1)
-            # 终态大纲有 ≥2 个能装配出证据的节时,逐节合成再拼接:每节只看见自己
-            # 绑上的那几条证据(DualGraph 的产出侧借鉴,避免 lost-in-the-middle)。
-            # 闸与 O1 同一个 —— 只在穷尽档提供,k 次合成调用的成本由用户显式选择
-            # 「穷尽」来承担;门关着或大纲够不到两节时,下面那条单次合成路径逐字
-            # 节不变。
-            outline_slices: list = []
-            outline_skipped: list[str] = []
-            outline_attempted = False
-            outline_planned = False
-            sectioned = None
-            # 分节阶段可能记下的 model_error 起点。回退**成功**后要把这一段摘掉:
-            # 那次故障已经被同一轮的重试路径吸收,用户拿到了完整答案,再挂一条红色
-            # 横幅是假报警。事件日志(events.jsonl)不受影响 —— note_model_error 的
-            # 两个副作用里,只有响应里的这一份是给用户看的。
-            outline_err_mark = len(_err_sink)
-
-            def record_section_step(step: TraceStep) -> None:
-                """分节进度步:实时推给客户端,同时留在本轮轨迹里。"""
-                raise_if_cancelled(cancel_event)
-                trace.append(step)
-                if on_trace:
-                    on_trace(step)
-
-            if answer_client.configured and reasoning_outline:
-                from app.services.outline_synthesis import plan_outline_sections
-                from app.services.reasoning_retrieval import outline_wiring_active
-                if outline_wiring_active(self.settings, limits):
-                    # top_hits 的重排分数优先:同一个对象两处都有时,以最终选集
-                    # 那一份为准(补集只补它没有的)。
-                    outline_kg_by_id = {
-                        hit.object_id: hit for hit in reasoning_outline_evidence
-                    }
-                    outline_kg_by_id.update({hit.object_id: hit for hit in top_hits})
-                    outline_slices, outline_skipped = plan_outline_sections(
-                        reasoning_outline,
-                        kg_by_id=outline_kg_by_id,
-                        element_by_id={item.element_id: item for item in elements},
-                        chunk_by_id={item.chunk_id: item for item in chunks},
-                    )
-                    outline_planned = True
-                    # 产出过集合清单/结构化整表枚举的 run 保持单次合成(codex r7):
-                    # 节切片刻意只装该节绑定证据,清单块与结构化行不进切片——
-                    # 「按来源列出全部公式」这类请求若被节化,合成会拿 ranked 样本
-                    # 写散文,把手上已有的完整清单丢在回退路径里,甚至自称不完整。
-                    # 单次合成路径的清单预览/覆盖披露机制是成熟的,清单类问题本来
-                    # 就该走它;清单进节切片是 v2 的设计题,不在绕过里偷做。
-                    if (len(outline_slices) >= 2 and not enumerations
-                            and structured_batch is None):
-                        outline_attempted = True
-                        sectioned = self._answer_reasoning_sections(
-                            notebook_id, research_question, outline_slices,
-                            history=reasoning_history, limits=limits,
-                            answer_client=answer_client, cancel_event=cancel_event,
-                            on_section=record_section_step,
-                            style_block=style_block,
-                        )
-            # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
-            # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
-            outline_fallback = outline_attempted and sectioned is None
-            if sectioned is not None:
-                answer = sectioned.answer
-                llm_grounded = sectioned.llm_grounded
-                anchors = sectioned.anchors
-                reasoning_counts.clear()
-                reasoning_counts.update(sectioned.counts)
-                reasoning_baseline.clear()
-                reasoning_baseline.update({
-                    "context_block": "\n".join(
-                        str(row.get("context_block") or "")
-                        for row in sectioned.baseline_assemblies
-                    ),
-                    "id_map": {
-                        key: value
-                        for row in sectioned.baseline_assemblies
-                        for key, value in dict(row.get("id_map") or {}).items()
-                    },
-                    "ordered_handles": tuple(
-                        handle
-                        for row in sectioned.baseline_assemblies
-                        for handle in tuple(row.get("ordered_handles") or ())
-                    ),
-                    "budget_chars": sum(
-                        int(row.get("budget_chars") or 0)
-                        for row in sectioned.baseline_assemblies
-                    ),
-                    "capture_error_count": sum(
-                        int(row.get("capture_error_count") or 0)
-                        for row in sectioned.baseline_assemblies
-                    ),
-                })
-                synthesis_ran = True
-            # 地图也是合成的触发条件之一:大集合场景里模型 reflect 直接 answer、
-            # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
-            # 不跑,用户拿到的是空答案(codex 第 4 轮 P2)。地图非空意味着枚举
-            # 工具接线成功且作用域里有可数的东西(空库在更早的早退里就返回了),
-            # 所以这不是给空库额外加一次模型调用。
-            elif answer_client.configured and (
-                    top_hits or elements or chunks or chains or memory_hits
-                    or structured_batch is not None or enumerations
-                    or collection_map_prompt_block):
-                # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
-                fallback_err_mark = len(_err_sink)
-                answer, llm_grounded, anchors, _ok = self._answer_with_retry(
-                    _synth_reasoning,
-                    getattr(answer_client, "model", ""),
-                    service="ask_answer",
-                )
-                synth_failed = not _ok
-                synthesis_ran = True
-                if outline_fallback and _ok:
-                    # 只摘分节那一段(mark..fallback_mark)。单次合成自己那几条
-                    # 已经由 `_answer_with_retry` 按同一条规则处理过了(重试成功
-                    # 自摘、两次都失败全留),所以这里刻意仍用**闭区间上界**
-                    # `fallback_err_mark` 而不是 `del _err_sink[outline_err_mark:]`:
-                    # 上界是这两段的边界,写成开区间就等于宣称「回退阶段的报警一律
-                    # 由这一行负责」,哪天单次合成路径多记一条本该保留的错误就会被
-                    # 这一行悄悄吞掉。
-                    del _err_sink[outline_err_mark:fallback_err_mark]
-
-            from app.services.retrieval_baseline import (
-                build_retrieval_baseline_manifest,
-            )
-            candidate_manifest = getattr(result, "baseline_manifest", None)
-            final_baseline_manifest = build_retrieval_baseline_manifest(
-                notebook_id=notebook_id,
-                query=research_question,
-                mode="reasoning",
-                settings=self.settings,
-                candidate_knowledge=(
-                    candidate_manifest.candidate_knowledge
-                    if candidate_manifest is not None else top_hits
+            draft = execute_response_draft_stage(
+                self.response_draft_stage,
+                ResponseDraftInput(
+                    prepared=prepared,
+                    intent_contract=intent_contract,
+                    top_hits=tuple(top_hits),
+                    elements=tuple(elements),
+                    trace=tuple(trace),
+                    chunks=tuple(chunks),
+                    chains=tuple(chains),
+                    enumerations=tuple(enumerations),
+                    collection_map_text=collection_map_text,
+                    outline=tuple(reasoning_outline),
+                    outline_evidence=tuple(reasoning_outline_evidence),
+                    historical_chunks=tuple(historical_reasoning_chunks),
+                    memory_hits=tuple(memory_hits),
+                    structured_batch=structured_batch,
+                    completeness_unavailable=completeness_unavailable,
+                    kg_required=no_usable_kg,
+                    # 检索器自己的候选账本(broad-except 降级时 ``result`` 仍是
+                    # 进入这一轮时的那个对象,取不到就是 None)——原样保留旧的
+                    # getattr 语义,只是把它算在编排侧、不让整个检索结果对象
+                    # 跨过边界。
+                    candidate_manifest=getattr(result, "baseline_manifest", None),
                 ),
-                candidate_chunks=(
-                    candidate_manifest.candidate_chunks
-                    if candidate_manifest is not None else chunks
-                ),
-                candidate_elements=(
-                    candidate_manifest.candidate_elements
-                    if candidate_manifest is not None else elements
-                ),
-                selected_knowledge=top_hits,
-                selected_chunks=historical_reasoning_chunks,
-                selected_elements=elements,
-                final_context_block=str(reasoning_baseline.get("context_block") or ""),
-                final_id_map=dict(reasoning_baseline.get("id_map") or {}),
-                final_ordered_handles=tuple(
-                    reasoning_baseline.get("ordered_handles") or ()
-                ),
-                final_budget_chars=int(reasoning_baseline.get("budget_chars") or 0),
-                prior_manifest=candidate_manifest,
-                capture_error_count=int(
-                    reasoning_baseline.get("capture_error_count") or 0
-                ),
-                baseline_step_usage=len(trace),
-            )
-
-            # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
-            # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
-            # Relation anchors need classifier entries, but chain trust is NOT
-            # query relevance.  Each chain carries only the relevance of the
-            # candidate that authorized that action; unrelated high-scoring hits
-            # elsewhere in the answer cannot elevate its anchors over tau.
-            from types import SimpleNamespace
-            from app.services.kg.follow_chain import chain_anchor_relevances
-            relation_relevances = chain_anchor_relevances(chains)
-            chain_evidence = [SimpleNamespace(
-                object_id=relation_id, relevance=relevance,
-            ) for relation_id, relevance in relation_relevances.items()]
-            citations.extend(self._memory_citations(anchors, memory_hits))
-            element_by_id = {item.element_id: item for item in elements}
-            element_refs = self.evidence_context.knowhow_refs_for(element_by_id)
-            element_source_info = self.evidence_context.citation_source_info(
-                item.source_id for item in elements
-            )
-            element_tier = self._tier_map_for({notebook_id}).get(
-                notebook_id, "personal"
-            )
-            for anchor in anchors:
-                if anchor.object_type != "element" or anchor.object_id not in element_by_id:
-                    continue
-                item = element_by_id[anchor.object_id]
-                source_info = element_source_info.get(item.source_id) or {}
-                source_title = source_info.get("title", item.source_title)
-                citations.append(Citation(
-                    label=f"{source_title} · {item.location_label}".strip(" ·"),
-                    source_id=item.source_id,
-                    element_id=item.element_id,
-                    location_label=item.location_label,
-                    quoted_span=item.text[:200],
-                    source_file_name=source_info.get("file_name", ""),
-                    tier=element_tier,
-                    notebook_id="",
-                    knowhow=element_refs.get(item.element_id),
-                ))
-            # Typed collection rows have their own deterministic k5001+
-            # bindings.  Mirror the cited rows into the fallback Citation
-            # contract as well, while keeping the anchor path authoritative.
-            seen_collection_citations: set[tuple[str, str]] = set()
-            # 这些 Citation **实例**同时躺在 `typed_collection_result_sets` 的行
-            # 里(`typed_collection_results` 把同一个对象挂进 `TypedCollectionItem
-            # .citation`),所以下面那次 `attach_citation_images` 必须按身份把它们
-            # 排除——理由写在那处。
-            collection_citation_ids: set[int] = set()
-            for anchor in anchors:
-                citation = collection_item_citations.get(anchor.object_id)
-                if citation is None:
-                    continue
-                identity = (citation.source_id, citation.element_id)
-                if identity in seen_collection_citations:
-                    continue
-                seen_collection_citations.add(identity)
-                citations.append(citation)
-                collection_citation_ids.add(id(citation))
-            element_evidence = [SimpleNamespace(
-                object_id=item.element_id, relevance=float(item.score or 0.0),
-            ) for item in elements]
-            # 按节合成真正写进 prompt 的知识对象里,有一部分被 top_n 截断挤出了
-            # top_hits(见 outline_truncated_kg_evidence)。它们进不了这个池子的话,
-            # 引用了它们的句子在 classify_evidence 眼里就是"引了个不存在的东西",
-            # 整篇答案被降级成 inferred —— 而模型引的恰恰是服务端指名喂给它的证据。
-            # 只在按节合成真的产出答案时并入:回退路径与关闭态的池子逐字不变。
-            outline_pool_extra: list = []
-            if sectioned is not None:
-                pooled_ids = {hit.object_id for hit in top_hits}
-                for item in outline_slices:
-                    for hit in item.hits:
-                        if hit.object_id in pooled_ids:
-                            continue
-                        pooled_ids.add(hit.object_id)
-                        outline_pool_extra.append(hit)
-            evidence_pool = (
-                list(top_hits) + outline_pool_extra + list(chunks) + chain_evidence
-                + element_evidence + list(memory_hits)
-            )
-            collection_exact_keys = {
-                key
-                for key, context in structured_map.items()
-                if context.get("source_id") and context.get("element_id")
-            }
-            evidence_level, top_relevance = classify_evidence(
-                evidence_pool, anchors, llm_grounded,
-                self.settings.evidence_tau_low, self.settings.evidence_tau_high,
-                exact_evidence_keys=collection_exact_keys,
-            )
-            if sectioned is not None:
-                grounded_sections = sum(
-                    1 for item in sectioned.section_grounding
-                    if item["grounded"]
-                )
-                if grounded_sections < sectioned.sections:
-                    # 部分或零节通过逐节 grounded 门时,整体最多 overview。这里是
-                    # 封顶而非强制设置:全局分类若已是 inferred 不会被反向抬高;
-                    # 零节各自为 overview 时也不会被误写成「未命中笔记本依据」。
-                    if evidence_level == "grounded":
-                        evidence_level = "overview"
-            grounded = evidence_level == "grounded"
-
-            # An enumeration answer with no bound [k] marker has no verifiable
-            # attribution.  Do not let unrelated ranked-retrieval citations
-            # masquerade as sources for a checklist the model may have copied.
-            if enumerations and synthesis_ran and not anchors:
-                citations = []
-
-            # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
-            # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等
-            # 到上面那条枚举清零判完,否则会给一批马上要被扔掉的引用白发一次读取。
-            # 这里的引用(KG / element)各自都带 element_id,所以只有 chunk 锚点需要
-            # 额外候选。锚点与引用同一次调用,共享每答案预算。
-            #
-            # **集合枚举行的引用按身份排除**(collection_citation_ids):它们是嵌在
-            # `typed_collection_result_sets` 里的**同一个** Citation 实例,就地填
-            # `.images` 会绕过 `typed_collection_results` 已经按 wire 形状收完的
-            # 载荷计费(每张图约 +77 字节未计费),把「响应不会大于它声明的」这条
-            # 保证拆掉;而清单卡本来就自带 `TypedCollectionItem.asset_id`,附图对它
-            # 纯属冗余。k5001 锚点那条腿不受影响——锚点是另一批对象。
-            self.evidence_context.attach_citation_images(
-                anchor_image_targets(
-                    anchors, {item.chunk_id: item.element_ids for item in chunks}
-                ) + [
-                    (citation, ()) for citation in citations
-                    if id(citation) not in collection_citation_ids
-                ]
-            )
-
-            if synthesis_ran:
-                # The retriever's own last step reports which evidence it ADOPTED;
-                # writing the answer (and assembling its citations) happens out
-                # here and used to be invisible.  Without this step the trace
-                # stalls on "合成" for the whole generation call and the trace
-                # total silently omits it — usually the largest slice of a run.
-                synthesis_step = TraceStep(
-                    step_type="synthesis",
-                    summary=(
-                        # anchors 才是模型真正绑上的 [k];citations 是「每条检索到
-                        # 的证据一张卡」,模型一个锚点都没吐出来时它还会被当兜底
-                        # 列表展示(见 evidence_context.citations_from 的注释)。
-                        # 拿它当引用数,会在零绑定的回答上写出「引用 10 处证据」。
-                        f"已生成答案，引用 {len(anchors)} 处证据"
-                        if answer else "答案合成未产出内容"
-                    ),
-                    detail={
-                        "citations": len(citations),
-                        "anchors": len(anchors),
-                        "evidence_level": evidence_level,
-                        # Actual counts that entered the synthesis prompt (post
-                        # per-partition budget truncation), distinct from the
-                        # earlier "answer" step's pre-truncation candidate pool.
-                        "included_kg": reasoning_counts.get("included_kg", 0),
-                        "included_chunks": reasoning_counts.get("included_chunks", 0),
-                        "included_elements": reasoning_counts.get("included_elements", 0),
-                        "included_collections": reasoning_counts.get(
-                            "included_collections", 0
-                        ),
-                        # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
-                        # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
-                        # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
-                        "enumerated_collections": len(enumerations),
-                        # 枚举块因预算太紧(连块头都放不下)被整体挤出合成证据;
-                        # 结果卡不受影响(typed_collection_result_sets 仍然完整),
-                        # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
-                        # 挂点。
-                        "enumeration_block_dropped": enumeration_block_dropped,
-                        # Agentic Memory P4 (T1): the answer's actually-bound
-                        # [k] anchors, by object_id — the raw material for
-                        # step→anchor attribution (see TRACE_ANCHOR_EVIDENCE_
-                        # IDS_MAX's docstring in app.models.ask for the
-                        # disclosure argument and the cap's derivation).
-                        # Written unconditionally, including the empty-list
-                        # zero-anchor case — a synthesis step with no anchors
-                        # is itself a real signal, not an absent one.
-                        "anchor_evidence_ids": [
-                            anchor.object_id for anchor in anchors
-                        ][:TRACE_ANCHOR_EVIDENCE_IDS_MAX],
-                    },
-                    duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
-                )
-                if len(anchors) > TRACE_ANCHOR_EVIDENCE_IDS_MAX:
-                    # Sparse marker (mirrors the "neighbor_truncated" pattern
-                    # in reasoning_retrieval.py's expand step): the cap is a
-                    # protocol ceiling that should never actually bind in
-                    # practice under the existing per-tier retrieval budgets,
-                    # so this key only appears on the (unexpected) day it does.
-                    synthesis_step.detail["anchor_evidence_ids_truncated"] = True
-                if outline_planned:
-                    # 这组键在大纲**规划跑过**时就出现,而不只在按节合成真的被尝试
-                    # 过时(codex r6):大纲只装配出 1 个有证据节时按节合成被绕过,
-                    # 但另一节「问到了没找到」的披露不能跟着消失——否则单节答案看
-                    # 起来是完整的。没有大纲、低档位与关闭态下规划不会跑,synthesis
-                    # 步的 detail 仍逐键不变(冻结基线口径)。
-                    synthesis_step.detail.update({
-                        # 实际合成的节数;回退时为 0(分节产物已全部丢弃)。
-                        "outline_sections": (
-                            sectioned.sections if sectioned is not None else 0
-                        ),
-                        "outline_fallback": outline_fallback,
-                        # 被跳过的空节标题:它们是「问到了但没找到」的诚实记录,
-                        # 只在轨迹里露面,答案里不留空壳标题。
-                        "outline_skipped": outline_skipped,
-                        # 只落 trace detail,不扩 AskResponse。每节结果已经过该节
-                        # 自己的 classify_evidence,不是模型裸自报。
-                        "section_grounded": (
-                            sectioned.section_grounding
-                            if sectioned is not None else []
-                        ),
-                        "ungrounded_sections": (
-                            [
-                                item["title"]
-                                for item in sectioned.section_grounding
-                                if not item["grounded"]
-                            ]
-                            if sectioned is not None else []
-                        ),
-                    })
-                trace.append(synthesis_step)
-                if on_trace:
-                    on_trace(synthesis_step)
-
-            if answer:
-                conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
-                llm_mode = "grounded" if grounded else "ungrounded"
-            elif synth_failed:
-                # 诚实降级:检索成功但答案合成未产出内容 —— 绝不冒充成 "Found N objects"
-                # (那读起来像"成功但偷懒")。如实说明并保留下方证据(related_knowledge/citations)。
-                llm_mode = "synthesis_failed"
-                conclusion = (
-                    f"已检索到 {len(top_hits)} 条相关证据,但本次答案合成未产出内容"
-                    "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。"
-                    if top_hits else
-                    "本次答案合成未产出内容,请重试该问题。")
-            else:
-                llm_mode = "deterministic"
-                conclusion = _NO_RETRIEVAL_EVIDENCE_MESSAGE
-
-            # 抑制免责声明须是确定性规则,不是"有任何一张卡就消音"。四个条件
-            # 全部成立才抑制,任一不成立就保留警告——方向是**宁可多警告**:
-            # 多一句免责最多显得啰嗦,少一句就是把「相关性抽样」说成了「全部」。
-            #
-            # ①result_scope=="aggregate"(如"库里有多少种公式"这类去重/种类计数)
-            # 从不抑制——枚举工具只会精确统计"表里的物理条目数",证明不了模型
-            # 自己在归并去重后的种类数,红线要求这类问题必须回退到相关性检索并
-            # 保留警告,哪怕模型顺手枚举出了一张卡。
-            # ②意图合同里带**谓词**(约束/排除项/前提)时同样不抑制。清单卡的
-            # coverage 只证明「某个物理集合被完整走了一遍」,证明不了那个集合就是
-            # 用户要的那个子集——模型完全可能枚举了无关的 kind、或者把带条件的
-            # 请求做成了不过滤的全集(codex 第 1 轮 P1-2)。这里刻意**不做**语义
-            # 匹配(「这张卡是否覆盖了这条约束」没有确定性判据,做出来的只会是
-            # 又一个说不清对错的启发式),而是按合同字段是否为空一刀切。
-            #   assumptions(前提)也算在内:一条「只统计 2023 年之后的」与一条
-            #   「假定用户指当前笔记本」在字段层面长得一模一样,区分它们需要的
-            #   正是上面刚否掉的语义匹配。宁可在有前提时多留一句免责。
-            # ③卡有但 returned_total==0(例如枚举了一个空集合)不算「已产出清单
-            # 结果」——0 条清单不能替这道题的「全部结果」背书。
-            # ④而且必须至少有一张 complete=True 的卡:部分清单自己的 partial
-            # 徽章只说明「这张卡没列完」,承担不了「你要的那种请求本产品还不
-            # 支持完整枚举」这句披露。
-            #
-            # 四条都过时,每张卡自己的 coverage 徽章已经承担「完整/部分」的披露,
-            # 再前置一句免责反而会让「明明列出了公式清单」的回答开头像在道歉。
-            has_complete_collection_result = any(
-                row.coverage.complete and row.coverage.returned_total > 0
-                for row in typed_collection_result_sets
-            )
-            has_scoping_predicate = bool(
-                intent_contract.constraints
-                or intent_contract.excluded_topics
-                or intent_contract.assumptions
-            )
-            suppress_completeness_warning = (
-                intent_contract.result_scope != "aggregate"
-                and not has_scoping_predicate
-                and has_complete_collection_result
-            )
-            if completeness_unavailable and not suppress_completeness_warning:
-                warning = (
-                    "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                    "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
-                    "条件筛选、去重、分组或其他集合请求本次仍来自相关性检索，"
-                    "不能视为全部结果。"
-                )
-                conclusion = f"{warning}\n\n{conclusion}"
-                answer = f"> {warning}\n\n{answer}" if answer else warning
-            elif structured_batch is not None:
-                enumeration_line = (
-                    f"Knowhow 枚举：{structured_batch.returned_rows}/"
-                    f"{structured_batch.known_total_rows} 行，"
-                    f"{'完整' if structured_batch.complete else '部分'}。"
-                )
-                analysis_line = (
-                    "分析未运行。"
-                    if structured_batch.synthesis_complete is None else
-                    f"分析覆盖：{structured_batch.synthesis_rows}/"
-                    f"{structured_batch.known_total_rows} 行，"
-                    f"{'完整' if structured_batch.synthesis_complete else '部分'}。"
-                )
-                coverage_line = f"{enumeration_line} {analysis_line}"
-                conclusion = f"{coverage_line}\n\n{conclusion}"
-                answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
-
-            response = AskResponse(
-                answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-                evidence_level=evidence_level, anchors=anchors,
-                related_knowledge=related_knowledge, citations=citations,
-                llm_mode=llm_mode, conversation_id=conversation_id,
-                retrieval_query=research_question, top_relevance=top_relevance,
-                reasoning_trace=trace or None,
-                intent=intent_contract,
-                retrieval_effort=retrieval_effort,
-                # Knowhow 的整表批(kind="knowhow")在前,本轮类型化集合清单
-                # (kind="collection")在后——顺序与 result_sets 判别 union 的
-                # 追加顺序一致(见 app.models.ask.AskResponse.result_sets),T6
-                # 按 kind 分派渲染,不依赖顺序本身携带语义。
-                result_sets=(
-                    (structured_batch.result_sets if structured_batch else [])
-                    + typed_collection_result_sets
-                ),
-                result_coverage=(
-                    structured_batch.coverage() if structured_batch else None
-                ),
-                # 走到这里说明这一轮真的跑了检索与作答,但「本笔记本还没有知识
-                # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
-                # 与答案并存。它只是不再是一道闸。
-                kg_required=no_usable_kg,
+                runtime,
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
             _ASK_EMBED_CACHE.reset(_emb_token)
+        # 持久化边界仍由 core 独占:最后一次取消检查与原子 save 都在
+        # ``_commit_reasoning_draft`` 里,任何 stage 实现都够不到它们。
+        return self._commit_reasoning_draft(draft, runtime)
+
+    def _draft_reasoning_response(self, stage, runtime):
+        """The shipped ``ResponseDraftStage`` body: evidence -> response draft.
+
+        Everything below the rebinding prologue is the historical inline
+        segment of ``_run_reasoning_stage``, moved verbatim: answer synthesis,
+        sectioned synthesis, ``classify_evidence``, ``[k]`` anchor binding,
+        the synthesis trace step and ``AskResponse`` assembly keep their exact
+        order and their exact object graph.  ``self`` is deliberately not
+        renamed -- the seam is the injected ``DefaultResponseDraftStage``
+        object, not a rename across 650 lines of body.
+
+        The response graph is *finished* here, including ``mode`` and the
+        response-visible ``model_errors``, so the only mutation left after the
+        frozen envelope is ``answer_id`` -- which the commit boundary owns.
+        Ordering ``model_errors`` before rather than after the caller's
+        ContextVar reset is immaterial: both read the same request-local list
+        object, and nothing appends to it once the response is assembled.
+        """
+        from app.application.ask_reasoning import (
+            ReasoningResponseDraft,
+            ReasoningRetrievalRuntime,
+            ResponseDraftInput,
+            StageBoundaryError,
+        )
+
+        if type(stage) is not ResponseDraftInput:
+            raise StageBoundaryError("invalid reasoning response draft input")
+        if type(runtime) is not ReasoningRetrievalRuntime:
+            raise StageBoundaryError("invalid reasoning response draft runtime")
+        prepared = stage.prepared
+        self._assert_reasoning_runtime(
+            runtime,
+            "response-draft",
+            notebook_id=prepared.notebook_id,
+            user_id=prepared.user_id,
+        )
+        notebook_id = prepared.notebook_id
+        conversation_id = prepared.conversation_id
+        reasoning_history = prepared.history
+        style_block = prepared.style_block
+        research_question = prepared.research_question
+        limits = prepared.limits
+        retrieval_effort = prepared.retrieval_effort
+        intent_contract = stage.intent_contract
+        memory_hits = list(stage.memory_hits)
+        structured_batch = stage.structured_batch
+        completeness_unavailable = stage.completeness_unavailable
+        no_usable_kg = stage.kg_required
+        top_hits = list(stage.top_hits)
+        elements = list(stage.elements)
+        trace = list(stage.trace)
+        chunks = list(stage.chunks)
+        chains = list(stage.chains)
+        enumerations = list(stage.enumerations)
+        collection_map_text = stage.collection_map_text
+        reasoning_outline = list(stage.outline)
+        reasoning_outline_evidence = list(stage.outline_evidence)
+        historical_reasoning_chunks = list(stage.historical_chunks)
+        on_trace = runtime.trace_sink
+        cancel_event = runtime.cancellation
+        # 与 ``_answer_with_retry`` 同一条惯例:响应内报警表是请求局部
+        # ContextVar,由 ``_run_reasoning_stage`` 设置、在它的 ``finally`` 里
+        # 复位。直调/离线路径下它是 None —— 那时 ``note_model_error`` 只写事件
+        # 日志、不写响应,没有可摘也没有可报的东西。
+        _err_sink = _ASK_MODEL_ERRORS.get()
+        if _err_sink is None:
+            _err_sink = []
+
+        # Federated hits carry their owning notebook. Render each payload
+        # against THAT notebook's schema overlay: the active notebook may
+        # customize the same object_type, but its field order/primary label
+        # must never be projected onto an object from a mounted base.
+        schema_registries = {
+            owner_id: self.schemas.effective_schemas(owner_id)
+            for owner_id in {
+                item.notebook_id or notebook_id for item in top_hits
+            }
+        }
+        seen_ids: set = set()
+        related_knowledge: List[KnowledgeRecord] = []
+        raise_if_cancelled(cancel_event)
+        for item in top_hits:
+            if item.object_id in seen_ids:
+                continue
+            seen_ids.add(item.object_id)
+            related_knowledge.append(knowledge_record(
+                item.object_type,
+                {"id": item.object_id, "payload": item.payload, "status": item.status,
+                 "owner": getattr(item, "owner", ""),
+                 "last_reviewed": getattr(item, "last_reviewed", ""),
+                 "evidence": item.evidence},
+                schema_registries[item.notebook_id or notebook_id].get(
+                    item.object_type
+                )))
+        related_knowledge = related_knowledge[
+            : self.settings.ask_related_knowledge_limit
+        ]
+
+        cited_element_ids = {ev.element_id for item in top_hits
+                             for ev in item.evidence if ev.element_id}
+        citations = self.evidence_context.citations_from(
+            top_hits, cited_element_ids, "KG evidence", notebook_id=notebook_id)
+
+        answer, llm_grounded, anchors = "", False, []
+        synth_failed = False
+        synthesis_ran = False
+        synthesis_started = time.perf_counter()
+        # _answer_reasoning returns a 4th `counts` element (included_kg/
+        # chunks/elements); _answer_with_retry's synth() contract is shared
+        # with other answer paths and stays a 3-tuple, so this closure
+        # captures counts as a side effect instead of widening that contract.
+        reasoning_counts: dict = {}
+        reasoning_baseline: dict = {}
+        raise_if_cancelled(cancel_event)
+        answer_client = self.model_clients.chat("ask_answer")
+        # 地图块:确定性服务端小块,不依赖 enumerations 是否为空——「集合太大
+        # 就别枚举、直接报数」这条路径下恰恰一条清单都没有,而那个数正是答案
+        # 本身。渲染纯字符串拼接,不可能抛,故不需要 try 包(与下方清单块不同,
+        # 那里有映射/预算计算)。
+        from app.services.collection_enumeration_answer import (
+            collection_map_block as _collection_map_block,
+        )
+        collection_map_prompt_block = (
+            _collection_map_block(collection_map_text)
+            if answer_client.configured else ""
+        )
+        structured_block = ""
+        if structured_batch is not None and answer_client.configured:
+            from app.services.structured_retrieval import structured_prompt_block
+            structured_block = structured_prompt_block(
+                structured_batch,
+                inline_rows=limits.inline_answer_rows,
+                cell_excerpt_chars=limits.cell_excerpt_chars,
+                budget_chars=limits.chunk_context_chars,
+            )
+        # 类型化集合清单(T4 产出的 enumerations)映射成 AskResponse.result_sets
+        # 行 + 合成证据块(T5)。映射与 prompt 块拼接放在**同一个** try 里:两者
+        # 失败都只应让清单这一整份"锦上添花"的产出消失,不该出现"卡片有了
+        # 但块裸抛穿整轮 Ask"或"块建起来了但卡片已经在别的异常里被清空"的
+        # 一半状态(codex 评审实测复现过后一种)。`enumerations` 在上面的 broad
+        # except 分支里可能已经被清空过一次,这里的 try 只防映射/渲染本身再
+        # 出岔子。
+        typed_collection_result_sets: list = []
+        enumeration_block_dropped = False
+        collection_item_citations: dict = {}
+        structured_map: dict = {}
+        if enumerations:
+            try:
+                from app.services.collection_enumeration_answer import (
+                    apply_synthesis_preview_counts,
+                    delivered_outcomes,
+                    enumeration_prompt_block,
+                    typed_collection_results,
+                )
+                # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
+                # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
+                # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
+                collection_items = [
+                    item for outcome in enumerations for item in outcome.items
+                ]
+                collection_item_citations = (
+                    self.evidence_context.collection_item_citations(
+                        collection_items,
+                        active_notebook_id=notebook_id,
+                    )
+                )
+                typed_collection_result_sets = typed_collection_results(
+                    enumerations,
+                    payload_chars=limits.structured_payload_chars,
+                    citations_by_item_id=collection_item_citations,
+                )
+                if answer_client.configured:
+                    from app.services.collection_enumeration_answer import (
+                        enumeration_sub_budget,
+                    )
+                    # 枚举块在后:与既有 knowhow structured_block 拼接,整体
+                    # 仍经 structured_block 这一个参数进 _answer_reasoning,
+                    # 装配位保持在 source 分区最前(语义不变,见该函数 843
+                    # 行起)。子预算三层夹(见 enumeration_sub_budget 的
+                    # docstring):减去 knowhow 已占字符 + 两者之间 "\n\n"
+                    # 拼接符本身的 2 个字符,再夹到 chunk_context_chars 的
+                    # 一半,防止模型"顺便列出所有表格"把另一半问题
+                    # (chunks/elements)的证据预算整个挤空。
+                    enum_budget_chars = enumeration_sub_budget(
+                        chunk_context_chars=limits.chunk_context_chars,
+                        structured_block_len=len(structured_block),
+                    )
+                    # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
+                    # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
+                    # 头部还写着「complete」——prompt 与卡片对同一份清单说
+                    # 两套话,正是 coverage 合同要防的东西。
+                    preview = enumeration_prompt_block(
+                        delivered_outcomes(
+                            enumerations, typed_collection_result_sets
+                        ),
+                        inline_rows=limits.inline_answer_rows,
+                        budget_chars=enum_budget_chars,
+                        citations_by_item_id=collection_item_citations,
+                    )
+                    structured_map = preview.evidence_by_id
+                    apply_synthesis_preview_counts(
+                        typed_collection_result_sets, preview.shown_rows
+                    )
+                    if preview.text:
+                        structured_block = (
+                            f"{structured_block}\n\n{preview.text}"
+                            if structured_block else preview.text
+                        )
+                    else:
+                        # 预算把连块头都挤没了(极端场景,如 knowhow 已经吃满
+                        # chunk_context_chars 的绝大部分):清单结果卡仍然
+                        # 存在(上面 typed_collection_result_sets 不受影响),
+                        # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
+                        # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
+                        enumeration_block_dropped = True
+            except Exception:
+                typed_collection_result_sets = []
+                enumeration_block_dropped = False
+        def _synth_reasoning():
+            # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
+            # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
+            ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
+                notebook_id, research_question, top_hits, elements,
+                reasoning_history,
+                cancel_event=cancel_event, chunks=chunks, chains=chains,
+                memory_hits=memory_hits, answer_client=answer_client,
+                kg_context_chars=limits.kg_context_chars,
+                chunk_context_chars=limits.chunk_context_chars,
+                element_items=limits.answer_element_items,
+                structured_block=structured_block,
+                structured_map=structured_map,
+                collection_map_block=collection_map_prompt_block,
+                counts_sink=reasoning_counts,
+                baseline_sink=reasoning_baseline,
+                style_block=style_block)
+            return ans, llm_grounded_, anchors_
+
+        # ---------------------------------------------- 按节合成(设计文档 §3.1)
+        # 终态大纲有 ≥2 个能装配出证据的节时,逐节合成再拼接:每节只看见自己
+        # 绑上的那几条证据(DualGraph 的产出侧借鉴,避免 lost-in-the-middle)。
+        # 闸与 O1 同一个 —— 只在穷尽档提供,k 次合成调用的成本由用户显式选择
+        # 「穷尽」来承担;门关着或大纲够不到两节时,下面那条单次合成路径逐字
+        # 节不变。
+        outline_slices: list = []
+        outline_skipped: list[str] = []
+        outline_attempted = False
+        outline_planned = False
+        sectioned = None
+        # 分节阶段可能记下的 model_error 起点。回退**成功**后要把这一段摘掉:
+        # 那次故障已经被同一轮的重试路径吸收,用户拿到了完整答案,再挂一条红色
+        # 横幅是假报警。事件日志(events.jsonl)不受影响 —— note_model_error 的
+        # 两个副作用里,只有响应里的这一份是给用户看的。
+        outline_err_mark = len(_err_sink)
+
+        def record_section_step(step: TraceStep) -> None:
+            """分节进度步:实时推给客户端,同时留在本轮轨迹里。"""
+            raise_if_cancelled(cancel_event)
+            trace.append(step)
+            if on_trace:
+                on_trace(step)
+
+        if answer_client.configured and reasoning_outline:
+            from app.services.outline_synthesis import plan_outline_sections
+            from app.services.reasoning_retrieval import outline_wiring_active
+            if outline_wiring_active(self.settings, limits):
+                # top_hits 的重排分数优先:同一个对象两处都有时,以最终选集
+                # 那一份为准(补集只补它没有的)。
+                outline_kg_by_id = {
+                    hit.object_id: hit for hit in reasoning_outline_evidence
+                }
+                outline_kg_by_id.update({hit.object_id: hit for hit in top_hits})
+                outline_slices, outline_skipped = plan_outline_sections(
+                    reasoning_outline,
+                    kg_by_id=outline_kg_by_id,
+                    element_by_id={item.element_id: item for item in elements},
+                    chunk_by_id={item.chunk_id: item for item in chunks},
+                )
+                outline_planned = True
+                # 产出过集合清单/结构化整表枚举的 run 保持单次合成(codex r7):
+                # 节切片刻意只装该节绑定证据,清单块与结构化行不进切片——
+                # 「按来源列出全部公式」这类请求若被节化,合成会拿 ranked 样本
+                # 写散文,把手上已有的完整清单丢在回退路径里,甚至自称不完整。
+                # 单次合成路径的清单预览/覆盖披露机制是成熟的,清单类问题本来
+                # 就该走它;清单进节切片是 v2 的设计题,不在绕过里偷做。
+                if (len(outline_slices) >= 2 and not enumerations
+                        and structured_batch is None):
+                    outline_attempted = True
+                    sectioned = self._answer_reasoning_sections(
+                        notebook_id, research_question, outline_slices,
+                        history=reasoning_history, limits=limits,
+                        answer_client=answer_client, cancel_event=cancel_event,
+                        on_section=record_section_step,
+                        style_block=style_block,
+                    )
+        # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
+        # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
+        outline_fallback = outline_attempted and sectioned is None
+        if sectioned is not None:
+            answer = sectioned.answer
+            llm_grounded = sectioned.llm_grounded
+            anchors = sectioned.anchors
+            reasoning_counts.clear()
+            reasoning_counts.update(sectioned.counts)
+            reasoning_baseline.clear()
+            reasoning_baseline.update({
+                "context_block": "\n".join(
+                    str(row.get("context_block") or "")
+                    for row in sectioned.baseline_assemblies
+                ),
+                "id_map": {
+                    key: value
+                    for row in sectioned.baseline_assemblies
+                    for key, value in dict(row.get("id_map") or {}).items()
+                },
+                "ordered_handles": tuple(
+                    handle
+                    for row in sectioned.baseline_assemblies
+                    for handle in tuple(row.get("ordered_handles") or ())
+                ),
+                "budget_chars": sum(
+                    int(row.get("budget_chars") or 0)
+                    for row in sectioned.baseline_assemblies
+                ),
+                "capture_error_count": sum(
+                    int(row.get("capture_error_count") or 0)
+                    for row in sectioned.baseline_assemblies
+                ),
+            })
+            synthesis_ran = True
+        # 地图也是合成的触发条件之一:大集合场景里模型 reflect 直接 answer、
+        # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
+        # 不跑,用户拿到的是空答案(codex 第 4 轮 P2)。地图非空意味着枚举
+        # 工具接线成功且作用域里有可数的东西(空库在更早的早退里就返回了),
+        # 所以这不是给空库额外加一次模型调用。
+        elif answer_client.configured and (
+                top_hits or elements or chunks or chains or memory_hits
+                or structured_batch is not None or enumerations
+                or collection_map_prompt_block):
+            # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
+            fallback_err_mark = len(_err_sink)
+            answer, llm_grounded, anchors, _ok = self._answer_with_retry(
+                _synth_reasoning,
+                getattr(answer_client, "model", ""),
+                service="ask_answer",
+            )
+            synth_failed = not _ok
+            synthesis_ran = True
+            if outline_fallback and _ok:
+                # 只摘分节那一段(mark..fallback_mark)。单次合成自己那几条
+                # 已经由 `_answer_with_retry` 按同一条规则处理过了(重试成功
+                # 自摘、两次都失败全留),所以这里刻意仍用**闭区间上界**
+                # `fallback_err_mark` 而不是 `del _err_sink[outline_err_mark:]`:
+                # 上界是这两段的边界,写成开区间就等于宣称「回退阶段的报警一律
+                # 由这一行负责」,哪天单次合成路径多记一条本该保留的错误就会被
+                # 这一行悄悄吞掉。
+                del _err_sink[outline_err_mark:fallback_err_mark]
+
+        from app.services.retrieval_baseline import (
+            build_retrieval_baseline_manifest,
+        )
+        candidate_manifest = stage.candidate_manifest
+        final_baseline_manifest = build_retrieval_baseline_manifest(
+            notebook_id=notebook_id,
+            query=research_question,
+            mode="reasoning",
+            settings=self.settings,
+            candidate_knowledge=(
+                candidate_manifest.candidate_knowledge
+                if candidate_manifest is not None else top_hits
+            ),
+            candidate_chunks=(
+                candidate_manifest.candidate_chunks
+                if candidate_manifest is not None else chunks
+            ),
+            candidate_elements=(
+                candidate_manifest.candidate_elements
+                if candidate_manifest is not None else elements
+            ),
+            selected_knowledge=top_hits,
+            selected_chunks=historical_reasoning_chunks,
+            selected_elements=elements,
+            final_context_block=str(reasoning_baseline.get("context_block") or ""),
+            final_id_map=dict(reasoning_baseline.get("id_map") or {}),
+            final_ordered_handles=tuple(
+                reasoning_baseline.get("ordered_handles") or ()
+            ),
+            final_budget_chars=int(reasoning_baseline.get("budget_chars") or 0),
+            prior_manifest=candidate_manifest,
+            capture_error_count=int(
+                reasoning_baseline.get("capture_error_count") or 0
+            ),
+            baseline_step_usage=len(trace),
+        )
+
+        # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
+        # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
+        # Relation anchors need classifier entries, but chain trust is NOT
+        # query relevance.  Each chain carries only the relevance of the
+        # candidate that authorized that action; unrelated high-scoring hits
+        # elsewhere in the answer cannot elevate its anchors over tau.
+        from types import SimpleNamespace
+        from app.services.kg.follow_chain import chain_anchor_relevances
+        relation_relevances = chain_anchor_relevances(chains)
+        chain_evidence = [SimpleNamespace(
+            object_id=relation_id, relevance=relevance,
+        ) for relation_id, relevance in relation_relevances.items()]
+        citations.extend(self._memory_citations(anchors, memory_hits))
+        element_by_id = {item.element_id: item for item in elements}
+        element_refs = self.evidence_context.knowhow_refs_for(element_by_id)
+        element_source_info = self.evidence_context.citation_source_info(
+            item.source_id for item in elements
+        )
+        element_tier = self._tier_map_for({notebook_id}).get(
+            notebook_id, "personal"
+        )
+        for anchor in anchors:
+            if anchor.object_type != "element" or anchor.object_id not in element_by_id:
+                continue
+            item = element_by_id[anchor.object_id]
+            source_info = element_source_info.get(item.source_id) or {}
+            source_title = source_info.get("title", item.source_title)
+            citations.append(Citation(
+                label=f"{source_title} · {item.location_label}".strip(" ·"),
+                source_id=item.source_id,
+                element_id=item.element_id,
+                location_label=item.location_label,
+                quoted_span=item.text[:200],
+                source_file_name=source_info.get("file_name", ""),
+                tier=element_tier,
+                notebook_id="",
+                knowhow=element_refs.get(item.element_id),
+            ))
+        # Typed collection rows have their own deterministic k5001+
+        # bindings.  Mirror the cited rows into the fallback Citation
+        # contract as well, while keeping the anchor path authoritative.
+        seen_collection_citations: set[tuple[str, str]] = set()
+        # 这些 Citation **实例**同时躺在 `typed_collection_result_sets` 的行
+        # 里(`typed_collection_results` 把同一个对象挂进 `TypedCollectionItem
+        # .citation`),所以下面那次 `attach_citation_images` 必须按身份把它们
+        # 排除——理由写在那处。
+        collection_citation_ids: set[int] = set()
+        for anchor in anchors:
+            citation = collection_item_citations.get(anchor.object_id)
+            if citation is None:
+                continue
+            identity = (citation.source_id, citation.element_id)
+            if identity in seen_collection_citations:
+                continue
+            seen_collection_citations.add(identity)
+            citations.append(citation)
+            collection_citation_ids.add(id(citation))
+        element_evidence = [SimpleNamespace(
+            object_id=item.element_id, relevance=float(item.score or 0.0),
+        ) for item in elements]
+        # 按节合成真正写进 prompt 的知识对象里,有一部分被 top_n 截断挤出了
+        # top_hits(见 outline_truncated_kg_evidence)。它们进不了这个池子的话,
+        # 引用了它们的句子在 classify_evidence 眼里就是"引了个不存在的东西",
+        # 整篇答案被降级成 inferred —— 而模型引的恰恰是服务端指名喂给它的证据。
+        # 只在按节合成真的产出答案时并入:回退路径与关闭态的池子逐字不变。
+        outline_pool_extra: list = []
+        if sectioned is not None:
+            pooled_ids = {hit.object_id for hit in top_hits}
+            for item in outline_slices:
+                for hit in item.hits:
+                    if hit.object_id in pooled_ids:
+                        continue
+                    pooled_ids.add(hit.object_id)
+                    outline_pool_extra.append(hit)
+        evidence_pool = (
+            list(top_hits) + outline_pool_extra + list(chunks) + chain_evidence
+            + element_evidence + list(memory_hits)
+        )
+        collection_exact_keys = {
+            key
+            for key, context in structured_map.items()
+            if context.get("source_id") and context.get("element_id")
+        }
+        evidence_level, top_relevance = classify_evidence(
+            evidence_pool, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high,
+            exact_evidence_keys=collection_exact_keys,
+        )
+        if sectioned is not None:
+            grounded_sections = sum(
+                1 for item in sectioned.section_grounding
+                if item["grounded"]
+            )
+            if grounded_sections < sectioned.sections:
+                # 部分或零节通过逐节 grounded 门时,整体最多 overview。这里是
+                # 封顶而非强制设置:全局分类若已是 inferred 不会被反向抬高;
+                # 零节各自为 overview 时也不会被误写成「未命中笔记本依据」。
+                if evidence_level == "grounded":
+                    evidence_level = "overview"
+        grounded = evidence_level == "grounded"
+
+        # An enumeration answer with no bound [k] marker has no verifiable
+        # attribution.  Do not let unrelated ranked-retrieval citations
+        # masquerade as sources for a checklist the model may have copied.
+        if enumerations and synthesis_ran and not anchors:
+            citations = []
+
+        # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
+        # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等
+        # 到上面那条枚举清零判完,否则会给一批马上要被扔掉的引用白发一次读取。
+        # 这里的引用(KG / element)各自都带 element_id,所以只有 chunk 锚点需要
+        # 额外候选。锚点与引用同一次调用,共享每答案预算。
+        #
+        # **集合枚举行的引用按身份排除**(collection_citation_ids):它们是嵌在
+        # `typed_collection_result_sets` 里的**同一个** Citation 实例,就地填
+        # `.images` 会绕过 `typed_collection_results` 已经按 wire 形状收完的
+        # 载荷计费(每张图约 +77 字节未计费),把「响应不会大于它声明的」这条
+        # 保证拆掉;而清单卡本来就自带 `TypedCollectionItem.asset_id`,附图对它
+        # 纯属冗余。k5001 锚点那条腿不受影响——锚点是另一批对象。
+        self.evidence_context.attach_citation_images(
+            anchor_image_targets(
+                anchors, {item.chunk_id: item.element_ids for item in chunks}
+            ) + [
+                (citation, ()) for citation in citations
+                if id(citation) not in collection_citation_ids
+            ]
+        )
+
+        if synthesis_ran:
+            # The retriever's own last step reports which evidence it ADOPTED;
+            # writing the answer (and assembling its citations) happens out
+            # here and used to be invisible.  Without this step the trace
+            # stalls on "合成" for the whole generation call and the trace
+            # total silently omits it — usually the largest slice of a run.
+            synthesis_step = TraceStep(
+                step_type="synthesis",
+                summary=(
+                    # anchors 才是模型真正绑上的 [k];citations 是「每条检索到
+                    # 的证据一张卡」,模型一个锚点都没吐出来时它还会被当兜底
+                    # 列表展示(见 evidence_context.citations_from 的注释)。
+                    # 拿它当引用数,会在零绑定的回答上写出「引用 10 处证据」。
+                    f"已生成答案，引用 {len(anchors)} 处证据"
+                    if answer else "答案合成未产出内容"
+                ),
+                detail={
+                    "citations": len(citations),
+                    "anchors": len(anchors),
+                    "evidence_level": evidence_level,
+                    # Actual counts that entered the synthesis prompt (post
+                    # per-partition budget truncation), distinct from the
+                    # earlier "answer" step's pre-truncation candidate pool.
+                    "included_kg": reasoning_counts.get("included_kg", 0),
+                    "included_chunks": reasoning_counts.get("included_chunks", 0),
+                    "included_elements": reasoning_counts.get("included_elements", 0),
+                    "included_collections": reasoning_counts.get(
+                        "included_collections", 0
+                    ),
+                    # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
+                    # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
+                    # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
+                    "enumerated_collections": len(enumerations),
+                    # 枚举块因预算太紧(连块头都放不下)被整体挤出合成证据;
+                    # 结果卡不受影响(typed_collection_result_sets 仍然完整),
+                    # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
+                    # 挂点。
+                    "enumeration_block_dropped": enumeration_block_dropped,
+                    # Agentic Memory P4 (T1): the answer's actually-bound
+                    # [k] anchors, by object_id — the raw material for
+                    # step→anchor attribution (see TRACE_ANCHOR_EVIDENCE_
+                    # IDS_MAX's docstring in app.models.ask for the
+                    # disclosure argument and the cap's derivation).
+                    # Written unconditionally, including the empty-list
+                    # zero-anchor case — a synthesis step with no anchors
+                    # is itself a real signal, not an absent one.
+                    "anchor_evidence_ids": [
+                        anchor.object_id for anchor in anchors
+                    ][:TRACE_ANCHOR_EVIDENCE_IDS_MAX],
+                },
+                duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
+            )
+            if len(anchors) > TRACE_ANCHOR_EVIDENCE_IDS_MAX:
+                # Sparse marker (mirrors the "neighbor_truncated" pattern
+                # in reasoning_retrieval.py's expand step): the cap is a
+                # protocol ceiling that should never actually bind in
+                # practice under the existing per-tier retrieval budgets,
+                # so this key only appears on the (unexpected) day it does.
+                synthesis_step.detail["anchor_evidence_ids_truncated"] = True
+            if outline_planned:
+                # 这组键在大纲**规划跑过**时就出现,而不只在按节合成真的被尝试
+                # 过时(codex r6):大纲只装配出 1 个有证据节时按节合成被绕过,
+                # 但另一节「问到了没找到」的披露不能跟着消失——否则单节答案看
+                # 起来是完整的。没有大纲、低档位与关闭态下规划不会跑,synthesis
+                # 步的 detail 仍逐键不变(冻结基线口径)。
+                synthesis_step.detail.update({
+                    # 实际合成的节数;回退时为 0(分节产物已全部丢弃)。
+                    "outline_sections": (
+                        sectioned.sections if sectioned is not None else 0
+                    ),
+                    "outline_fallback": outline_fallback,
+                    # 被跳过的空节标题:它们是「问到了但没找到」的诚实记录,
+                    # 只在轨迹里露面,答案里不留空壳标题。
+                    "outline_skipped": outline_skipped,
+                    # 只落 trace detail,不扩 AskResponse。每节结果已经过该节
+                    # 自己的 classify_evidence,不是模型裸自报。
+                    "section_grounded": (
+                        sectioned.section_grounding
+                        if sectioned is not None else []
+                    ),
+                    "ungrounded_sections": (
+                        [
+                            item["title"]
+                            for item in sectioned.section_grounding
+                            if not item["grounded"]
+                        ]
+                        if sectioned is not None else []
+                    ),
+                })
+            trace.append(synthesis_step)
+            if on_trace:
+                on_trace(synthesis_step)
+
+        if answer:
+            conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        elif synth_failed:
+            # 诚实降级:检索成功但答案合成未产出内容 —— 绝不冒充成 "Found N objects"
+            # (那读起来像"成功但偷懒")。如实说明并保留下方证据(related_knowledge/citations)。
+            llm_mode = "synthesis_failed"
+            conclusion = (
+                f"已检索到 {len(top_hits)} 条相关证据,但本次答案合成未产出内容"
+                "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。"
+                if top_hits else
+                "本次答案合成未产出内容,请重试该问题。")
+        else:
+            llm_mode = "deterministic"
+            conclusion = _NO_RETRIEVAL_EVIDENCE_MESSAGE
+
+        # 抑制免责声明须是确定性规则,不是"有任何一张卡就消音"。四个条件
+        # 全部成立才抑制,任一不成立就保留警告——方向是**宁可多警告**:
+        # 多一句免责最多显得啰嗦,少一句就是把「相关性抽样」说成了「全部」。
+        #
+        # ①result_scope=="aggregate"(如"库里有多少种公式"这类去重/种类计数)
+        # 从不抑制——枚举工具只会精确统计"表里的物理条目数",证明不了模型
+        # 自己在归并去重后的种类数,红线要求这类问题必须回退到相关性检索并
+        # 保留警告,哪怕模型顺手枚举出了一张卡。
+        # ②意图合同里带**谓词**(约束/排除项/前提)时同样不抑制。清单卡的
+        # coverage 只证明「某个物理集合被完整走了一遍」,证明不了那个集合就是
+        # 用户要的那个子集——模型完全可能枚举了无关的 kind、或者把带条件的
+        # 请求做成了不过滤的全集(codex 第 1 轮 P1-2)。这里刻意**不做**语义
+        # 匹配(「这张卡是否覆盖了这条约束」没有确定性判据,做出来的只会是
+        # 又一个说不清对错的启发式),而是按合同字段是否为空一刀切。
+        #   assumptions(前提)也算在内:一条「只统计 2023 年之后的」与一条
+        #   「假定用户指当前笔记本」在字段层面长得一模一样,区分它们需要的
+        #   正是上面刚否掉的语义匹配。宁可在有前提时多留一句免责。
+        # ③卡有但 returned_total==0(例如枚举了一个空集合)不算「已产出清单
+        # 结果」——0 条清单不能替这道题的「全部结果」背书。
+        # ④而且必须至少有一张 complete=True 的卡:部分清单自己的 partial
+        # 徽章只说明「这张卡没列完」,承担不了「你要的那种请求本产品还不
+        # 支持完整枚举」这句披露。
+        #
+        # 四条都过时,每张卡自己的 coverage 徽章已经承担「完整/部分」的披露,
+        # 再前置一句免责反而会让「明明列出了公式清单」的回答开头像在道歉。
+        has_complete_collection_result = any(
+            row.coverage.complete and row.coverage.returned_total > 0
+            for row in typed_collection_result_sets
+        )
+        has_scoping_predicate = bool(
+            intent_contract.constraints
+            or intent_contract.excluded_topics
+            or intent_contract.assumptions
+        )
+        suppress_completeness_warning = (
+            intent_contract.result_scope != "aggregate"
+            and not has_scoping_predicate
+            and has_complete_collection_result
+        )
+        if completeness_unavailable and not suppress_completeness_warning:
+            warning = (
+                "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
+                "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
+                "条件筛选、去重、分组或其他集合请求本次仍来自相关性检索，"
+                "不能视为全部结果。"
+            )
+            conclusion = f"{warning}\n\n{conclusion}"
+            answer = f"> {warning}\n\n{answer}" if answer else warning
+        elif structured_batch is not None:
+            enumeration_line = (
+                f"Knowhow 枚举：{structured_batch.returned_rows}/"
+                f"{structured_batch.known_total_rows} 行，"
+                f"{'完整' if structured_batch.complete else '部分'}。"
+            )
+            analysis_line = (
+                "分析未运行。"
+                if structured_batch.synthesis_complete is None else
+                f"分析覆盖：{structured_batch.synthesis_rows}/"
+                f"{structured_batch.known_total_rows} 行，"
+                f"{'完整' if structured_batch.synthesis_complete else '部分'}。"
+            )
+            coverage_line = f"{enumeration_line} {analysis_line}"
+            conclusion = f"{coverage_line}\n\n{conclusion}"
+            answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors,
+            related_knowledge=related_knowledge, citations=citations,
+            llm_mode=llm_mode, conversation_id=conversation_id,
+            retrieval_query=research_question, top_relevance=top_relevance,
+            reasoning_trace=trace or None,
+            intent=intent_contract,
+            retrieval_effort=retrieval_effort,
+            # Knowhow 的整表批(kind="knowhow")在前,本轮类型化集合清单
+            # (kind="collection")在后——顺序与 result_sets 判别 union 的
+            # 追加顺序一致(见 app.models.ask.AskResponse.result_sets),T6
+            # 按 kind 分派渲染,不依赖顺序本身携带语义。
+            result_sets=(
+                (structured_batch.result_sets if structured_batch else [])
+                + typed_collection_result_sets
+            ),
+            result_coverage=(
+                structured_batch.coverage() if structured_batch else None
+            ),
+            # 走到这里说明这一轮真的跑了检索与作答,但「本笔记本还没有知识
+            # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
+            # 与答案并存。它只是不再是一道闸。
+            kg_required=no_usable_kg,
+        )
+
         response.mode = "reasoning"
         response.model_errors = [ModelError(**e) for e in _err_sink]
-        return commit_response(response, final_baseline_manifest)
+        return ReasoningResponseDraft(
+            notebook_id=notebook_id,
+            question=prepared.question,
+            response=response,
+            conversation_id=conversation_id,
+            user_id=prepared.user_id,
+            job_id=prepared.job_id,
+            asked_at=prepared.asked_at,
+            baseline_manifest=final_baseline_manifest,
+        )
 
     # ------------------------------------------------------------------
     # graph engine

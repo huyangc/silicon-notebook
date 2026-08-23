@@ -255,7 +255,10 @@ class _MinimalEvidence:
         return None
 
 
-def _minimal_ask_service():
+def _minimal_ask_service(**overrides):
+    """Narrow AskService double.  ``overrides`` reaches the real constructor so
+    a caller can exercise a construction-time seam (the injectable
+    ``response_draft_stage``, a connection probe) without a second factory."""
     return AskService(
         ask_state=_MinimalAskState(), retrieval=_MinimalRetrieval(),
         candidates=_MinimalCandidates(), graph=_MinimalGraph(),
@@ -269,6 +272,7 @@ def _minimal_ask_service():
         notebooks=SimpleNamespace(get_notebook=lambda notebook_id: object()),
         schemas=SimpleNamespace(effective_schemas=lambda: {}),
         community_reports=lambda notebook_id: [], source_titles=lambda ids: {},
+        **overrides,
     )
 
 

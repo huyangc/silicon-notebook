@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
 from app.domain.cancellation import CancelEvent
-from app.models.ask import AskResponse
+from app.models.ask import AskResponse, QueryIntentContract
 
 
 class StageBoundaryError(RuntimeError):
@@ -28,6 +28,25 @@ class ReasoningStageExecutor(Protocol):
         stage: "ReasoningRunInput",
         runtime: "ReasoningRetrievalRuntime",
     ) -> "ReasoningEvidenceSnapshot": ...
+
+
+class ResponseDraftStage(Protocol):
+    """The sole behavior admitted through the application synthesis seam.
+
+    ``retrieval evidence -> response draft`` is the second injectable Ask
+    reasoning stage.  The shipped implementation is the previously inline
+    synthesis/binding segment; any implementation receives the same immutable
+    input and the same point-specific runtime, and owes the core exactly one
+    ``ReasoningResponseDraft``.  Persistence stays behind the separate commit
+    boundary, so no stage implementation can reach the atomic save, the job
+    terminal state, or the answer row.
+    """
+
+    def draft_response(
+        self,
+        stage: "ResponseDraftInput",
+        runtime: "ReasoningRetrievalRuntime",
+    ) -> "ReasoningResponseDraft": ...
 
 
 class ConnectionHoldProbe(Protocol):
@@ -173,6 +192,44 @@ class RetrievedReasoningAsk:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseDraftInput:
+    """Immutable ownership transfer from retrieval into answer assembly.
+
+    Deliberately *not* a ``RetrievedReasoningAsk``: that envelope carries the
+    retriever's pristine snapshot, while this one carries what answer assembly
+    actually consumes -- the evidence after selected-source-graph activation
+    and after the retriever's own fail-open degradation, which can legitimately
+    be empty where the snapshot was not.  Collapsing the two would let a
+    degraded turn read a snapshot the run never actually used.
+
+    The pre-retrieval facts (memory hits, the structured Knowhow batch, the two
+    disclosure flags) ride along because the drafted answer discloses them; they
+    are decided before retrieval and are read-only here.  Tuple snapshots keep
+    assembly from mutating the orchestrator's containers, while the contained
+    domain evidence keeps its object identity because citation binding and
+    baseline attestation rely on it.
+    """
+
+    prepared: PreparedReasoningAsk
+    intent_contract: QueryIntentContract
+    top_hits: tuple[object, ...]
+    elements: tuple[object, ...]
+    trace: tuple[object, ...]
+    chunks: tuple[object, ...]
+    chains: tuple[object, ...]
+    enumerations: tuple[object, ...]
+    collection_map_text: str
+    outline: tuple[object, ...]
+    outline_evidence: tuple[object, ...]
+    historical_chunks: tuple[object, ...]
+    memory_hits: tuple[object, ...]
+    structured_batch: object | None
+    completeness_unavailable: bool
+    kg_required: bool
+    candidate_manifest: object | None
+
+
+@dataclass(frozen=True, slots=True)
 class ReasoningResponseDraft:
     """Exclusive core-owned response graph before the only atomic save.
 
@@ -213,3 +270,24 @@ def execute_reasoning_retrieval_stage(
             raise StageBoundaryError("invalid reasoning retrieval stage output")
         return result
     raise StageBoundaryError("reasoning retriever has no stage runner")
+
+
+def execute_response_draft_stage(
+    stage_impl: ResponseDraftStage,
+    stage: ResponseDraftInput,
+    runtime: ReasoningRetrievalRuntime,
+) -> ReasoningResponseDraft:
+    """Enter the one typed production synthesis seam.
+
+    Mirrors ``execute_reasoning_retrieval_stage``: the exact output type is a
+    core invariant, so a stage returning a look-alike (or a bare
+    ``AskResponse``) fails the boundary instead of reaching the atomic save.
+    """
+
+    runner = getattr(stage_impl, "draft_response", None)
+    if callable(runner):
+        result = runner(stage, runtime)
+        if type(result) is not ReasoningResponseDraft:
+            raise StageBoundaryError("invalid reasoning response draft output")
+        return result
+    raise StageBoundaryError("reasoning response draft stage has no runner")

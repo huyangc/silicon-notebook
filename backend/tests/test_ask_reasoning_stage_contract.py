@@ -14,6 +14,7 @@ from app.application.ask_reasoning import (
     ReasoningResponseDraft,
     ReasoningRetrievalRuntime,
     ReasoningRunInput,
+    ResponseDraftInput,
     RetrievedReasoningAsk,
     StageBoundaryError,
 )
@@ -72,6 +73,7 @@ def test_reasoning_stage_data_contracts_are_frozen_slotted_and_narrow():
         ReasoningRunInput,
         ReasoningEvidenceSnapshot,
         RetrievedReasoningAsk,
+        ResponseDraftInput,
         ReasoningResponseDraft,
         CommittedReasoningAnswer,
     ):
@@ -87,6 +89,7 @@ def test_reasoning_stage_data_contracts_are_frozen_slotted_and_narrow():
         PreparedReasoningAsk,
         ReasoningRunInput,
         ReasoningEvidenceSnapshot,
+        ResponseDraftInput,
         ReasoningResponseDraft,
     ):
         assert forbidden.isdisjoint(contract.__dataclass_fields__)
@@ -677,3 +680,289 @@ def test_application_stage_contracts_do_not_import_implementation_layers():
     assert "app.services" not in source
     assert "app.repositories" not in source
     assert "app.extensions" not in source
+
+
+# ---------------------------------------------------------------------------
+# retrieval evidence -> response draft: the second injectable reasoning stage
+# ---------------------------------------------------------------------------
+
+
+class _HoldProbe:
+    """Mutable connection probe so a stage can flip the boundary under test."""
+
+    def __init__(self, held: bool = False) -> None:
+        self.held = held
+
+    def is_connection_held(self) -> bool:
+        return self.held
+
+
+class _RecordingDraftStage:
+    """Injected ``ResponseDraftStage`` double.
+
+    It records the envelope it was handed and returns a draft built around a
+    caller-owned ``AskResponse`` instance, so the caller can assert the object
+    graph survives the seam by identity.
+    """
+
+    def __init__(self, response, *, before_return=None) -> None:
+        self.response = response
+        self.calls: list = []
+        self._before_return = before_return
+
+    def draft_response(self, stage, runtime):
+        self.calls.append((stage, runtime))
+        if self._before_return is not None:
+            self._before_return()
+        return ReasoningResponseDraft(
+            notebook_id=stage.prepared.notebook_id,
+            question=stage.prepared.question,
+            response=self.response,
+            conversation_id=stage.prepared.conversation_id,
+            user_id=stage.prepared.user_id,
+            job_id=stage.prepared.job_id,
+            asked_at=stage.prepared.asked_at,
+        )
+
+
+def _stub_retrieval(monkeypatch, on_run=None):
+    """Keep the first seam trivial so the assertions are about the second."""
+
+    def run(self, *args, **kwargs):
+        if on_run is not None:
+            on_run()
+        return ReasoningResult()
+
+    monkeypatch.setattr(ReasoningRetriever, "run", run)
+
+
+def _reasoning_request():
+    return AskRequest(question="q", mode="reasoning")
+
+
+def test_response_draft_input_denies_the_seats_this_stage_must_not_hold():
+    """Beyond the shared sweep above: the synthesis seam is the one stage that
+    could plausibly want a repository, a model client or the settings object,
+    because the shipped body reaches all three through ``self``.  Reaching them
+    through the *envelope* would hand an injected stage the same authority, so
+    those names are denied on the contract itself."""
+
+    forbidden = {
+        "notebooks", "settings", "model_clients", "schemas", "knowhow_store",
+        "evidence_context", "candidates", "graph", "retrieval", "ask_state",
+        "cancellations", "event_log",
+    }
+    assert forbidden.isdisjoint(ResponseDraftInput.__dataclass_fields__)
+
+
+def test_response_draft_stage_receives_the_frozen_post_retrieval_envelope(
+    monkeypatch,
+):
+    _stub_retrieval(monkeypatch)
+    stage = _RecordingDraftStage(AskResponse(conclusion="drafted"))
+    service = _minimal_ask_service(response_draft_stage=stage)
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
+
+    service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+
+    assert len(stage.calls) == 1
+    envelope, runtime = stage.calls[0]
+    assert type(envelope) is ResponseDraftInput
+    assert type(runtime) is ReasoningRetrievalRuntime
+    assert type(envelope.prepared) is PreparedReasoningAsk
+    assert envelope.prepared.notebook_id == "nb"
+    assert envelope.prepared.user_id == "user"
+    # Evidence crosses as tuples so answer assembly cannot mutate the
+    # orchestrator's containers behind its back.
+    for field in (
+        "top_hits", "elements", "trace", "chunks", "chains", "enumerations",
+        "outline", "outline_evidence", "historical_chunks", "memory_hits",
+    ):
+        assert isinstance(getattr(envelope, field), tuple), field
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        envelope.kg_required = True
+
+
+def test_injected_response_draft_stage_replaces_only_the_draft(monkeypatch):
+    """Construction-time injection: the seam owns the draft, not persistence."""
+
+    _stub_retrieval(monkeypatch)
+    citation = Citation(
+        label="source",
+        source_id="source-1",
+        element_id="element-1",
+        location_label="§1",
+        quoted_span="evidence",
+    )
+    response = AskResponse(conclusion="drafted", citations=[citation, citation])
+    stage = _RecordingDraftStage(response)
+    service = _minimal_ask_service(response_draft_stage=stage)
+    saves: list = []
+
+    def save(*args, **kwargs):
+        saves.append(kwargs.get("user_id"))
+        return "answer-1"
+
+    monkeypatch.setattr(service, "_save_answer", save)
+
+    result = service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+
+    assert service.response_draft_stage is stage
+    # The typed envelope hands the response graph over without a JSON round
+    # trip or a deepcopy: collection cards and the citation list deliberately
+    # share Citation instances, and both copies would break that sharing.
+    assert result is response
+    assert result.citations[0] is citation
+    assert result.citations[1] is citation
+    assert result.conclusion == "drafted"
+    # Persistence stayed core-owned: the stage never saw ``_save_answer``.
+    assert saves == ["user"]
+    assert result.answer_id == "answer-1"
+
+
+def test_default_response_draft_stage_is_the_shipped_inline_logic(monkeypatch):
+    _stub_retrieval(monkeypatch)
+    # A held-capable probe on purpose: the shipped stage must also return
+    # *without* a database connection in hand, exactly like an injected one.
+    probe = _HoldProbe()
+    service = _minimal_ask_service(retrieval_connection_probe=probe)
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
+
+    assert type(service.response_draft_stage).__name__ == "DefaultResponseDraftStage"
+
+    result = service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+
+    # The default stage still owns everything the inline segment owned:
+    # ``mode``, the response-visible model errors and the assembled response.
+    assert result.mode == "reasoning"
+    assert result.model_errors == []
+    assert result.answer_id == "answer-1"
+    assert result.conversation_id == "conv"
+    assert probe.held is False
+
+
+@pytest.mark.parametrize(
+    "stage_impl,error",
+    [
+        (SimpleNamespace(), "has no runner"),
+        (
+            SimpleNamespace(
+                draft_response=lambda stage, runtime: AskResponse(conclusion="x")
+            ),
+            "response draft output",
+        ),
+        (
+            SimpleNamespace(draft_response=lambda stage, runtime: None),
+            "response draft output",
+        ),
+    ],
+)
+def test_response_draft_stage_output_type_is_a_core_invariant(
+    monkeypatch, stage_impl, error,
+):
+    _stub_retrieval(monkeypatch)
+    service = _minimal_ask_service(response_draft_stage=stage_impl)
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(StageBoundaryError, match=error):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert saves == []
+
+
+def test_response_draft_stage_cannot_return_holding_a_database_connection(
+    monkeypatch,
+):
+    _stub_retrieval(monkeypatch)
+    probe = _HoldProbe()
+    stage = _RecordingDraftStage(
+        AskResponse(conclusion="drafted"),
+        before_return=lambda: setattr(probe, "held", True),
+    )
+    service = _minimal_ask_service(
+        response_draft_stage=stage, retrieval_connection_probe=probe
+    )
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(StageBoundaryError, match="holds a database connection"):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert len(stage.calls) == 1
+    assert saves == []
+
+
+def test_response_draft_stage_cannot_replace_the_connection_authority(monkeypatch):
+    _stub_retrieval(monkeypatch)
+    probe = _HoldProbe()
+    service_box: list = []
+    stage = _RecordingDraftStage(
+        AskResponse(conclusion="drafted"),
+        before_return=lambda: setattr(
+            service_box[0], "retrieval_connection_probe", _HoldProbe()
+        ),
+    )
+    service = _minimal_ask_service(
+        response_draft_stage=stage, retrieval_connection_probe=probe
+    )
+    service_box.append(service)
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(StageBoundaryError, match="connection authority changed"):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert saves == []
+
+
+def test_cancellation_is_checked_on_both_sides_of_the_response_draft_stage(
+    monkeypatch,
+):
+    # (a) cancelled between retrieval and the seam: the stage never runs, so a
+    #     cancelled turn does not pay for the schema read that opens assembly.
+    cancel_event = threading.Event()
+    _stub_retrieval(monkeypatch)
+    stage = _RecordingDraftStage(AskResponse(conclusion="drafted"))
+    service = _minimal_ask_service(response_draft_stage=stage)
+    monkeypatch.setattr(
+        service,
+        "_activate_selected_source_graph",
+        lambda notebook_id, chunks, **kwargs: (
+            cancel_event.set(), (list(chunks), None)
+        )[1],
+    )
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(AskCancelled):
+        service.ask_reasoning(
+            "nb", _reasoning_request(), user_id="user", cancel_event=cancel_event,
+        )
+    assert stage.calls == []
+    assert saves == []
+
+    # (b) cancelled while the stage was drafting: the commit boundary keeps the
+    #     last check before the atomic save, so the answer row is never written.
+    late_cancel = threading.Event()
+    late_stage = _RecordingDraftStage(
+        AskResponse(conclusion="drafted"),
+        before_return=late_cancel.set,
+    )
+    late_service = _minimal_ask_service(response_draft_stage=late_stage)
+    late_saves: list = []
+    monkeypatch.setattr(
+        late_service, "_save_answer", lambda *args, **kwargs: late_saves.append(True)
+    )
+
+    with pytest.raises(AskCancelled):
+        late_service.ask_reasoning(
+            "nb", _reasoning_request(), user_id="user", cancel_event=late_cancel,
+        )
+    assert len(late_stage.calls) == 1
+    assert late_saves == []
