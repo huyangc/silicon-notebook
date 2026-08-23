@@ -235,6 +235,7 @@ Workspace UI 扩展只允许随构建静态进入。首个真实 contribution �
 | --- | --- |
 | 产品行为、检索模式、Memory/MCP、knowhow、API、当前限制 | [产品与 API 参考](./docs/product-and-api_zh.md) |
 | 外部 Agent 界面配置、Codex/Claude CLI 与可运行 MCP/Memory 示例 | [Agent MCP 与 Memory 接入 SOP](./docs/agent-mcp-memory-sop_zh.md) |
+| 开发、接入与运维一个仓库外部署插件（后端 bundle、构建期 UI 包、安装、拒绝码表） | [部署插件 SOP](./docs/deployment-extensions-sop_zh.md) |
 | 安装、源码/生产部署、模型服务、配置项 | [部署与配置](./docs/deployment-and-configuration_zh.md) |
 | 日志、事故采集、MinerU、批量摄取、回放、迁移、回填 | [运维、诊断与摄取工具](./docs/operations_zh.md) |
 | 验证、CI、开发流程、测试和文档契约 | [开发与仓库契约](./docs/development_zh.md) |
