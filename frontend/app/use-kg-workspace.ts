@@ -125,6 +125,22 @@ type KnowledgeRequest = {
 const ownerKey = (owner: Pick<KgWorkspaceOwner, "actorId" | "notebookId">): string =>
   `${owner.actorId}\0${owner.notebookId}`;
 
+// Hidden-state (owner not visible) fallback values must be **stable
+// references**. The returned view is read by page.tsx effects/useMemo that
+// depend on these fields; handing back a brand-new `[]`/`{}` on every render
+// makes those dependencies "change" every render and can drive a
+// setState-in-effect loop (see use-ask-session.ts for the traced incident).
+// Freezing also turns any accidental in-place write into an immediate
+// dev-time throw. Declared with the same mutable type as the state they
+// stand in for so the ternary branches unify.
+const NO_KNOWLEDGE_TYPES: KnowledgeTypeCount[] =
+  Object.freeze([] as KnowledgeTypeCount[]) as KnowledgeTypeCount[];
+const EMPTY_KNOWLEDGE_CONTEXTS: Record<string, NodeContext> =
+  Object.freeze({} as Record<string, NodeContext>) as Record<string, NodeContext>;
+const NO_SEARCH_HITS: KgSearchHit[] = Object.freeze([] as KgSearchHit[]) as KgSearchHit[];
+const NO_SELECTED_TYPES: string[] = Object.freeze([] as string[]) as string[];
+const NO_PENDING_MERGES: PendingMerge[] = Object.freeze([] as PendingMerge[]) as PendingMerge[];
+
 export type KgWorkspace = ReturnType<typeof useKgWorkspace>;
 
 export function useKgWorkspace({
@@ -1588,12 +1604,12 @@ export function useKgWorkspace({
     knowledge: {
       kind: knowledgeKind,
       items: visible ? (knowledge[knowledgeKind] ?? null) : null,
-      types: visible ? knowledgeTypes : [],
+      types: visible ? knowledgeTypes : NO_KNOWLEDGE_TYPES,
       statusFilter: visible ? knowledgeStatusFilter : "all",
       total: visible ? (knowledgeTotal[knowledgeKind] ?? 0) : 0,
       page: visible ? (knowledgePage[knowledgeKind] ?? 0) : 0,
       duplicates: visible ? duplicates : null,
-      contexts: visible ? knowledgeContexts : {},
+      contexts: visible ? knowledgeContexts : EMPTY_KNOWLEDGE_CONTEXTS,
       busyId: visible ? knowledgeBusy : null,
     },
     schema: {
@@ -1609,12 +1625,12 @@ export function useKgWorkspace({
       merged: visible ? mergedGraph : null,
       vizBuilding: visible && vizBuilding,
       search: visible ? search : "",
-      searchHits: visible ? searchHits : [],
+      searchHits: visible ? searchHits : NO_SEARCH_HITS,
       searchBusy: visible && searchBusy,
       rangeLimit: visible ? rangeLimit : KG_RANGE_DEFAULT,
       rangeBusy: visible && rangeBusy,
-      selectedTypes: visible ? selectedTypes : [],
-      pendingMerges: visible ? pendingMerges : [],
+      selectedTypes: visible ? selectedTypes : NO_SELECTED_TYPES,
+      pendingMerges: visible ? pendingMerges : NO_PENDING_MERGES,
       status: visible ? unifiedStatus : null,
       selectedNodeId: visible ? selectedNodeId : null,
       conceptDetail: visible ? conceptDetail : null,

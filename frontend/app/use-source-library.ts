@@ -37,6 +37,16 @@ const SOURCE_POLL_INITIAL_MS = 1500;
 const SOURCE_POLL_MAX_MS = 15000;
 const SOURCE_POLL_MAX_ATTEMPTS = 120;
 
+// Hidden-state (owner not active) fallback values must be **stable references**.
+// Consumers of the returned view depend on these fields in effects/useMemo;
+// a fresh `[]` on every render makes those dependencies "change" every
+// render, which can drive a setState-in-effect loop (see use-ask-session.ts
+// for the traced incident). Freezing also turns any accidental in-place
+// write into an immediate dev-time throw. Declared with the same mutable
+// type as the state they stand in for so the ternary branches unify.
+const NO_SOURCES: SourceSummary[] = Object.freeze([] as SourceSummary[]) as SourceSummary[];
+const NO_SOURCE_ELEMENTS: SourceElement[] = Object.freeze([] as SourceElement[]) as SourceElement[];
+
 export type SourceLibraryOwner = Readonly<{
   actorId: string;
   notebookId: string;
@@ -564,7 +574,7 @@ export function useSourceLibrary({
   }, [highlightedElementId, sourceDetail, sourceElements]);
 
   const ownerIsActive = currentOwner() !== null;
-  const visibleSources = ownerIsActive ? sources : [];
+  const visibleSources = ownerIsActive ? sources : NO_SOURCES;
   const hasPending = visibleSources.some(
     (source) => !["extracted", "failed"].includes(source.parse_status),
   );
@@ -680,7 +690,7 @@ export function useSourceLibrary({
     sourceDetail: ownerIsActive ? sourceDetail : null,
     deletingSourceIds: ownerIsActive ? deletingSourceIds : inactiveDeletingIdsRef.current,
     reparsingSource: ownerIsActive ? reparsingSource : false,
-    sourceElements: ownerIsActive ? sourceElements : [],
+    sourceElements: ownerIsActive ? sourceElements : NO_SOURCE_ELEMENTS,
     sourceElementsTotal: ownerIsActive ? sourceElementsTotal : 0,
     sourceElementStartOffset: ownerIsActive ? sourceElementStartOffset : 0,
     sourceElementsLoading: ownerIsActive ? sourceElementsLoading : false,

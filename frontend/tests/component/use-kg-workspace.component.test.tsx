@@ -669,3 +669,39 @@ test("a merge decision tombstone converges across A to B to A", async () => {
   await deciding;
   expect(value!.graph.pendingMerges).toEqual([]);
 });
+
+// PR #557 regression: `knowledge.types`/`knowledge.contexts`/`graph.searchHits`/
+// `graph.selectedTypes`/`graph.pendingMerges` used to fall back to a bare
+// `[]`/`{}` literal whenever the owner is not visible (no
+// beginNotebookTransition has ever landed — e.g. actorId/notebookId are
+// null). A bare literal is a brand-new reference on every render, which
+// makes a consuming effect's dependency array "change" every render (see
+// use-ask-session.ts for the traced infinite-loop incident). The fix hoists
+// frozen, stable module-level fallback constants; re-rendering with the
+// owner still hidden must hand back the *same* reference every time.
+test("owner-hidden knowledge/graph view fields stay referentially stable across re-renders", () => {
+  const view = render(<Harness actorId={null} notebookId={null} />);
+  const first = value!;
+  expect(first.knowledge.types).toEqual([]);
+  expect(first.knowledge.contexts).toEqual({});
+  expect(first.graph.searchHits).toEqual([]);
+  expect(first.graph.selectedTypes).toEqual([]);
+  expect(first.graph.pendingMerges).toEqual([]);
+
+  act(() => {
+    view.rerender(<Harness actorId={null} notebookId={null} />);
+  });
+  const second = value!;
+  act(() => {
+    view.rerender(<Harness actorId={null} notebookId={null} />);
+  });
+  const third = value!;
+
+  for (const later of [second, third]) {
+    expect(later.knowledge.types).toBe(first.knowledge.types);
+    expect(later.knowledge.contexts).toBe(first.knowledge.contexts);
+    expect(later.graph.searchHits).toBe(first.graph.searchHits);
+    expect(later.graph.selectedTypes).toBe(first.graph.selectedTypes);
+    expect(later.graph.pendingMerges).toBe(first.graph.pendingMerges);
+  }
+});

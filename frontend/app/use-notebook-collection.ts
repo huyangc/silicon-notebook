@@ -80,6 +80,25 @@ function ownerKey(actorId: string): string {
   return actorId;
 }
 
+// Shape produced by the `visibleRows` search/sort projection below — named
+// so the stable-empty fallback constant can be typed without repeating the
+// anonymous object literal inline.
+type NotebookSearchRow = { notebook: NotebookSummary; index: number; hits: SearchHit[] };
+
+// Hidden-state (owner not visible) fallback values must be **stable
+// references**. Consumers of the returned view depend on these fields in
+// effects/useMemo; handing back a brand-new `[]`/`{}` on every render makes
+// those dependencies "change" every render and can drive a setState-in-effect
+// loop (see use-ask-session.ts for the traced incident). Freezing also turns
+// any accidental in-place write into an immediate dev-time throw. Declared
+// with the same mutable type as the state they stand in for so the ternary
+// branches unify.
+const NO_ROWS: NotebookSummary[] = Object.freeze([] as NotebookSummary[]) as NotebookSummary[];
+const NO_VISIBLE_ROWS: NotebookSearchRow[] =
+  Object.freeze([] as NotebookSearchRow[]) as NotebookSearchRow[];
+const EMPTY_SEARCH_HITS: Record<string, SearchHit[]> =
+  Object.freeze({} as Record<string, SearchHit[]>) as Record<string, SearchHit[]>;
+
 export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -654,9 +673,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     : null;
 
   return {
-    rows: rowsVisible ? rows : [],
-    visibleRows: rowsVisible ? visibleRows : [],
-    searchHits: rowsVisible ? searchHits : {},
+    rows: rowsVisible ? rows : NO_ROWS,
+    visibleRows: rowsVisible ? visibleRows : NO_VISIBLE_ROWS,
+    searchHits: rowsVisible ? searchHits : EMPTY_SEARCH_HITS,
     filter: visible ? filter : "mine",
     viewMode: visible ? viewMode : "grid",
     sortMode: visible ? sortMode : "recent",
