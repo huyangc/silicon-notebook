@@ -1092,11 +1092,13 @@ button {
 
 /* 一行式入口:视觉全部由 `.button.secondary` 提供(系统边框/圆角/字重/背景),这里
    **只补排版**。刻意不写任何颜色字面量——需要颜色时取 :root 的 token。也刻意不写
-   :hover:系统 secondary 按钮本来就没有单独的悬停态,而且 `.agent-profile-workspace-plugin:hover`
+   :hover:系统 secondary 按钮本来就没有单独的悬停态,而且 `.workspace-extension-entry:hover`
    与 `.button.secondary` 特异度相同(0,2,0)、源序在前,写了也会被盖掉(评审实测)。
    `min-width: 0` 是因为它是 outlet(grid)的 item:不解开 `min-width:auto`,长文案会
-   把按钮撑出 outlet 而不是让 span 省略。 */
-.agent-profile-workspace-plugin {
+   把按钮撑出 outlet 而不是让 span 省略。
+   类名是**通用**的(不带 agent-profile 字样):仓库外插件的 side-panel 入口共用这一条,
+   它们不许自己写 CSS。 */
+.workspace-extension-entry {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1106,13 +1108,13 @@ button {
   text-align: left;
 }
 
-.agent-profile-workspace-plugin > svg {
+.workspace-extension-entry > svg {
   flex: 0 0 auto;
   color: var(--muted);
 }
 
 /* 来源栏最窄到 270px,长文案必须能省略而不是把按钮撑破。 */
-.agent-profile-workspace-plugin > span {
+.workspace-extension-entry > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

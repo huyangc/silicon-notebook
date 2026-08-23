@@ -20,7 +20,7 @@ export function AgentProfileWorkspacePanel({ actions }: WorkspaceExtensionProps)
     "button",
     {
       type: "button",
-      className: "button secondary agent-profile-workspace-plugin",
+      className: "button secondary workspace-extension-entry",
       // 可见文案与 aria-label 同字:辅助技术读到的名字就是屏幕上那一行,窄栏下
       // 文案被省略号截断时也仍然完整。
       "aria-label": "AI 对这个库的理解",
