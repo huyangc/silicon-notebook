@@ -614,20 +614,57 @@ def function_length_violations(
     return violations
 
 
-def _has_protocol_base(base: ast.expr) -> bool:
-    """True when ``base`` names ``Protocol``, however it was spelled.
+_PROTOCOL_HOME_MODULES = ("typing", "typing_extensions")
 
-    Handles the three shapes a class base can take in this file: a bare name
-    (``Protocol``), a qualified attribute (``typing.Protocol``), and a
-    subscripted generic (``Protocol[T]``) -- the last by recursing into the
-    subscript's ``value``.
+
+def _protocol_spellings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """Resolve how ``Protocol`` may be spelled in this module.
+
+    Returns ``(names, module_aliases)``: ``names`` are local identifiers bound
+    to ``Protocol`` itself (``from typing import Protocol``, ``... as P``, or a
+    ``from typing import *`` that binds the bare name), ``module_aliases`` are
+    local identifiers bound to a module that exports it (``import typing``,
+    ``import typing_extensions as te``) so ``t.Protocol`` is recognised too. A
+    count that only knew the bare spelling could be dodged by aliasing the
+    import (codex #566 R2 P2); resolving the module's own import statements
+    closes that without guessing.
     """
+
+    names: set[str] = set()
+    module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _PROTOCOL_HOME_MODULES:
+            for alias in node.names:
+                if alias.name == "Protocol":
+                    names.add(alias.asname or alias.name)
+                elif alias.name == "*":
+                    names.add("Protocol")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _PROTOCOL_HOME_MODULES:
+                    module_aliases.add(alias.asname or alias.name)
+    return names, module_aliases
+
+
+def _has_protocol_base(
+    base: ast.expr, names: set[str], module_aliases: set[str]
+) -> bool:
+    """True when ``base`` names ``Protocol`` under any spelling this module
+    binds: a bare or aliased name (``Protocol``, ``P``), a qualified attribute
+    on an imported typing module (``typing.Protocol``, ``te.Protocol``), or a
+    subscripted generic of either (``Protocol[T]``) -- the last by recursing
+    into the subscript's ``value``."""
+
     if isinstance(base, ast.Name):
-        return base.id == "Protocol"
+        return base.id in names
     if isinstance(base, ast.Attribute):
-        return base.attr == "Protocol"
+        return (
+            base.attr == "Protocol"
+            and isinstance(base.value, ast.Name)
+            and base.value.id in module_aliases
+        )
     if isinstance(base, ast.Subscript):
-        return _has_protocol_base(base.value)
+        return _has_protocol_base(base.value, names, module_aliases)
     return False
 
 
@@ -643,11 +680,12 @@ def ports_protocol_method_count(root: Path) -> int:
 
     path = root / "backend" / "app" / "repositories" / "ports.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names, module_aliases = _protocol_spellings(tree)
     return sum(
         1
         for node in ast.walk(tree)
         if isinstance(node, ast.ClassDef)
-        and any(_has_protocol_base(base) for base in node.bases)
+        and any(_has_protocol_base(base, names, module_aliases) for base in node.bases)
         for child in node.body
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
     )

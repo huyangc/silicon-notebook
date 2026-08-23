@@ -520,6 +520,32 @@ def test_ports_protocol_method_count_ignores_module_level_functions(tmp_path):
     assert ports_method_count_violations(tmp_path, 2) == []
 
 
+def test_ports_protocol_method_count_resolves_protocol_import_aliases(tmp_path):
+    """An aliased ``Protocol`` import must not dodge the ceiling (codex #566
+    R2 P2): ``from typing import Protocol as P``, ``import typing_extensions
+    as te`` + ``te.Protocol``, and the subscripted ``P[int]`` all count; a
+    plain class whose base merely *looks* unrelated does not."""
+    _write_ports(
+        tmp_path,
+        "from typing import Protocol as P\n"
+        "import typing_extensions as te\n\n\n"
+        "class A(P):\n"
+        "    def a(self): ...\n\n\n"
+        "class B(te.Protocol):\n"
+        "    def b(self): ...\n"
+        "    def b2(self): ...\n\n\n"
+        "class C(P[int]):\n"
+        "    def c(self): ...\n\n\n"
+        "class Plain:\n"
+        "    def not_counted(self): ...\n",
+    )
+    assert ports_method_count_violations(tmp_path, 4) == []
+    assert ports_method_count_violations(tmp_path, 3) == [
+        "ports.py gained protocol methods: 4 > 3 "
+        "(update scripts/architecture_boundary_baseline.json :: ports_protocol_method_count)"
+    ]
+
+
 def test_function_length_excludes_decorator_lines(tmp_path):
     path = tmp_path / "pkg" / "mod.py"
     _write(path, "@decorator\ndef widget():\n    pass\n")
