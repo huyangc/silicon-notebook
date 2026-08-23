@@ -3,15 +3,21 @@
 
 This is **step 1 of the B5 structural-item plan**: it does not retire, patch
 or even suggest editing any facade method — it only produces a reproducible
-census of who calls each of the ~313 public members of
-``backend/app/services/repository_facade.py::RepositoryFacade``, split into
-production / script / test buckets, plus a fourth "ambiguous" bucket for
-names we cannot confidently resolve. The output feeds
+census of who calls each public member of
+``backend/app/services/repository_facade.py::RepositoryFacade`` (run this
+script for the current count — 308 as of this writing; it drifts as methods
+are retired), split into production / script / test buckets, plus a fourth
+"ambiguous" bucket for names we cannot confidently resolve. The output feeds
 ``docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md``.
 
 Usage
 -----
     PYTHONPATH=backend python3 scripts/audit_facade_callers.py [--json OUT]
+    PYTHONPATH=backend python3 scripts/audit_facade_callers.py --assert-no-retire-now
+
+The second form is the G2 ratchet ``scripts/check_extended.sh`` runs daily:
+non-zero exit + a printed name list if any facade method has drifted into
+``retire-now``, silent success otherwise. It never writes any output file.
 
 Run from the repo root (or anywhere — paths are resolved relative to this
 file). No network, no database, no repository construction — pure AST/text
@@ -41,8 +47,9 @@ Methodology (read before trusting a "retire-now" row)
    the small set of other known one-hop targets: ``self.retrieval``,
    ``self.maintenance``, ``self.report_execution``, ``self.event_log``,
    ``self._migrator``); anything else (loops, multi-statement logic, calls
-   to other facade members, branching) is an "adapter". 3 of the 312 public
-   rows are adapters today: ``source_parse_busy``, ``federated_retrieve``,
+   to other facade members, branching) is an "adapter". 3 of the public
+   rows are adapters today (run this script for the current total row
+   count): ``source_parse_busy``, ``federated_retrieve``,
    ``claim_report_generation`` (plus 3 private helpers outside this
    audit's public-only scope).
 
@@ -75,9 +82,12 @@ Methodology (read before trusting a "retire-now" row)
    ``getattr(<receiver>, "<method>")`` literals are treated the same way as
    ``<receiver>.<method>(``.
 
-3. **Three counted buckets + a mirror column.**
+3. **Three counted buckets + two mirror columns.**
      - production: ``backend/app/**`` excluding ``repository_facade.py``
-       itself and the two thin subclass wrappers (``sqlite_repository.py``,
+       itself (see point 6 below — the facade file is not skipped outright;
+       it feeds a fifth, dedicated ``facade_internal`` bucket instead,
+       folded into this production total at classification time) and the
+       two thin subclass wrappers (``sqlite_repository.py``,
        ``postgres/repository.py``), which are reported separately in the
        "wrapper镜像" column because a call landing on those files is either
        (a) an override that shadows the facade body entirely, or (b) an
@@ -120,6 +130,31 @@ Methodology (read before trusting a "retire-now" row)
    callers **and** zero unresolved same-name calls anywhere are filed
    ``retire-now``.
 
+6. **Facade-internal self-wiring is a real production caller, counted in
+   its own bucket.** ``RepositoryFacade.__init__`` wires several of its own
+   public methods into late-bound lambda seams handed to
+   ``RepositoryRuntime`` (e.g. ``notebook_copy_stats=lambda notebook_id:
+   self.notebook_copy_stats(notebook_id)`` inside ``wire_knowledge_lifecycle``)
+   so that post-construction monkeypatches on the facade instance stay
+   observed by the runtime at call time. **Blind spot this audit shipped
+   with and then fixed:** the first pass treated "skip
+   ``repository_facade.py``, it's the thing being audited" as an absolute
+   rule and excluded the file from scanning entirely — which also hid these
+   ``self.<name>`` references, even though the lambda is invoked by
+   ``RepositoryRuntime`` at runtime and is unambiguously a real caller, not
+   dead code. Six methods (``notebook_copy_stats``, ``decided_seed_pairs``,
+   ``relations_for_notebook``, ``set_conflict_status``,
+   ``concept_whitelist_terms``, ``maybe_auto_index``) misfiled
+   ``test-only`` as a direct result. The fix: the facade file *is* scanned,
+   but only for ``self.<name>`` references (call form or bare) that fall
+   *outside* ``<name>``'s own ``def`` body — a method recursing into itself
+   does not count as an external caller of itself. Matches are counted into
+   a dedicated ``facade_internal`` bucket (its own ledger column, distinct
+   from the ``production``/``script``/``test`` counts sourced from the rest
+   of the tree) and folded into the ``production`` total at classification
+   time (see ``classify()``), so the ledger shows both the raw count and
+   *why* a row moved.
+
 Known limitations (see the ledger's risk-assessment section for the full
 discussion):
   - ``@property`` / ``@x.setter`` members are primarily used as **bare
@@ -135,6 +170,14 @@ discussion):
   - Dynamic dispatch through fully computed strings (``getattr(x, some_var)``
     where ``some_var`` is not a literal), reflection, or serialization-driven
     dispatch cannot be seen by this script at all.
+  - The scan only walks ``backend/app/``, ``scripts/`` and
+    ``backend/tests/`` (plus ``repository_facade.py`` itself, scanned
+    separately for the ``facade_internal`` bucket in point 6 above).
+    ``fangan/`` and ``.claude/`` are entirely outside this audit's scope —
+    a caller living only in one of those trees would not be seen at all.
+    As of this writing neither tree mentions any facade method name (spot
+    checked with ``grep``), so this is a documented blind spot in the
+    scan's coverage, not a known false negative in today's report.
   - This is a name/receiver heuristic, not a type checker; it is a *census
     for human review*, not a retirement authority.
 """
@@ -237,6 +280,15 @@ class CallCounts:
     wrapper_postgres_override: bool = False
     wrapper_sqlite_self_calls: int = 0
     wrapper_postgres_self_calls: int = 0
+    # `self.<name>` references found anywhere in repository_facade.py
+    # itself, outside `<name>`'s own `def` body (see module docstring point
+    # 6). Real production usage — RepositoryFacade.__init__ wires several
+    # of its own public methods into late-bound lambda seams consumed by
+    # RepositoryRuntime — that a blanket file exclusion previously hid.
+    # Reported as its own column and folded into `production` in
+    # `classify()`.
+    facade_internal: int = 0
+    facade_internal_sites: list[str] = field(default_factory=list)
 
     @property
     def property_attr_hint(self) -> int:
@@ -460,7 +512,11 @@ def _bucket_for(relpath: str) -> str | None:
     if relpath in WRAPPER_RELS:
         return "wrapper"
     if relpath == FACADE_FILE:
-        return None
+        # Not excluded from the scan — routed to the dedicated
+        # `facade_internal` self-wiring bucket instead (module docstring
+        # point 6). `_scan_tree` special-cases this bucket entirely; it
+        # does not run the generic receiver-whitelist call scanning below.
+        return "facade_internal"
     if relpath.startswith("backend/tests/"):
         return "tests"
     if relpath.startswith("backend/app/"):
@@ -533,6 +589,58 @@ def _record_site(counts_obj: CallCounts, bucket: str, relpath: str, lineno: int)
         counts_obj.tests += 1
         if len(counts_obj.tests_sites) < MAX_SITES_SAMPLED:
             counts_obj.tests_sites.append(f"{relpath}:{lineno}")
+    elif bucket == "facade_internal":
+        counts_obj.facade_internal += 1
+        if len(counts_obj.facade_internal_sites) < MAX_SITES_SAMPLED:
+            counts_obj.facade_internal_sites.append(f"{relpath}:{lineno}")
+
+
+def _facade_class_def(tree: ast.AST) -> ast.ClassDef | None:
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == RepositoryFacade.__name__:
+            return node
+    return None
+
+
+def _scan_facade_internal(
+    tree: ast.AST,
+    relpath: str,
+    by_name: dict[str, MethodInfo],
+    counts: dict[str, CallCounts],
+) -> None:
+    """Module docstring point 6. Finds every ``self.<name>`` reference
+    (call form or bare) anywhere inside the ``RepositoryFacade`` class body
+    that falls *outside* ``<name>``'s own ``def`` — i.e. not a method
+    recursing into itself — and counts each into the ``facade_internal``
+    bucket for that name. This is the *only* thing done with the facade
+    file; none of the generic receiver-whitelist scanning in `_scan_tree`
+    applies here (there is no external receiver to resolve — `self` inside
+    the facade's own methods unambiguously *is* the facade instance).
+    """
+    class_node = _facade_class_def(tree)
+    if class_node is None:
+        return
+    # Map every node id inside each top-level method's subtree to that
+    # method's own name, so a `self.<name>` reference can be checked
+    # against "am I lexically inside <name>'s own def?" (nested closures,
+    # e.g. the __init__ lambdas, are still "inside" their enclosing
+    # top-level method for this purpose).
+    owners: dict[int, str] = {}
+    for member in class_node.body:
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for sub in ast.walk(member):
+                owners[id(sub)] = member.name
+    for node in ast.walk(class_node):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr in by_name
+        ):
+            continue
+        if owners.get(id(node)) == node.attr:
+            continue  # `<name>` referencing itself — not an external caller
+        _record_site(counts[node.attr], "facade_internal", relpath, node.lineno)
 
 
 def _scan_tree(
@@ -543,6 +651,9 @@ def _scan_tree(
     property_names: set[str],
     counts: dict[str, CallCounts],
 ) -> None:
+    if bucket == "facade_internal":
+        _scan_facade_internal(tree, relpath, by_name, counts)
+        return
     is_wrapper = bucket == "wrapper"
     wrapper_key = "sqlite" if relpath == SQLITE_WRAPPER_REL else "postgres" if relpath == POSTGRES_WRAPPER_REL else None
     extra_names = frozenset() if is_wrapper else _file_bound_repo_names(tree)
@@ -667,6 +778,12 @@ def classify(method: MethodInfo, counts: CallCounts) -> str:
     else:
         production, scripts, tests = counts.production, counts.scripts, counts.tests
 
+    # Facade-internal self-wiring (module docstring point 6) is real
+    # production usage — RepositoryFacade.__init__ wiring one of its own
+    # methods into a late-bound lambda seam — regardless of property/setter
+    # status, so it folds into `production` unconditionally.
+    production += counts.facade_internal
+
     non_test_total = production + scripts
     resolved_total = non_test_total + tests
     if non_test_total > 0:
@@ -721,6 +838,8 @@ def build_report() -> dict[str, object]:
                 "property_attr_hint_production": c.property_attr_hint_production,
                 "property_attr_hint_scripts": c.property_attr_hint_scripts,
                 "property_attr_hint_tests": c.property_attr_hint_tests,
+                "facade_internal_calls": c.facade_internal,
+                "facade_internal_sites": c.facade_internal_sites,
                 "wrapper_mirror": ", ".join(wrapper_bits) if wrapper_bits else "-",
                 "classification": classification,
             }
@@ -748,9 +867,9 @@ def render_markdown_table(report: dict[str, object]) -> str:
     """
     rows = sorted(report["methods"], key=lambda r: r["name"])
     header = (
-        "| 方法 | 行号 | 委托目标 | 分类(kind) | 生产调用数 | 脚本调用数 | 测试调用数 | "
+        "| 方法 | 行号 | 委托目标 | 分类(kind) | 生产调用数 | facade内部 | 脚本调用数 | 测试调用数 | "
         "撞名未解析 | wrapper镜像 | 档 |\n"
-        "|---|---|---|---|---|---|---|---|---|---|\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|\n"
     )
     lines = [header]
     for r in rows:
@@ -761,12 +880,13 @@ def render_markdown_table(report: dict[str, object]) -> str:
         else:
             name_disp = f"`{name}`"
         lines.append(
-            "| {name} | {lineno} | `{target}` | {delegate_kind} | {prod} | {script} | {test} | {unresolved} | {wrapper} | **{classification}** |\n".format(
+            "| {name} | {lineno} | `{target}` | {delegate_kind} | {prod} | {facade_internal} | {script} | {test} | {unresolved} | {wrapper} | **{classification}** |\n".format(
                 name=name_disp,
                 lineno=r["lineno"],
                 target=r["delegate_target"],
                 delegate_kind=r["delegate_kind"],
                 prod=r["production_calls"],
+                facade_internal=r["facade_internal_calls"],
                 script=r["script_calls"],
                 test=r["test_calls"],
                 unresolved=r["unresolved_same_name_calls"],
@@ -786,9 +906,40 @@ def main() -> int:
         default=None,
         help="optional path to write the full per-method GFM ledger table",
     )
+    parser.add_argument(
+        "--assert-no-retire-now",
+        action="store_true",
+        help=(
+            "exit non-zero and list the offending method names if any facade "
+            "member has drifted into the retire-now bucket (zero resolved "
+            "callers in every counted bucket — production, scripts, tests "
+            "and facade_internal — and zero unresolved same-name calls). "
+            "Intended as scripts/check_extended.sh's daily G2 ratchet: a "
+            "facade seat should never silently accumulate zero callers "
+            "without a human triaging it (retire it, or extend the "
+            "script's receiver whitelist if it is a false positive)."
+        ),
+    )
     args = parser.parse_args()
 
     report = build_report()
+    exit_code = 0
+    if args.assert_no_retire_now:
+        retire_now_names = sorted(
+            r["name"] for r in report["methods"] if r["classification"] == "retire-now"
+        )
+        if retire_now_names:
+            print(
+                "audit_facade_callers: "
+                f"{len(retire_now_names)} facade method(s) have zero resolved "
+                "callers (retire-now): " + ", ".join(retire_now_names) + ". "
+                "Triage: retire them (see "
+                "docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md) "
+                "or, if a false positive, fix the script's receiver "
+                "resolution and re-run.",
+                file=sys.stderr,
+            )
+            exit_code = 1
     if args.json:
         args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"wrote {args.json}", file=sys.stderr)
@@ -797,7 +948,7 @@ def main() -> int:
         print(f"wrote {args.markdown}", file=sys.stderr)
     if not args.json and not args.markdown:
         print(json.dumps(report["summary"], indent=2, ensure_ascii=False))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
