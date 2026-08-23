@@ -106,13 +106,6 @@ const optimisticGenerating = (
 
 export type ReportWorkspace = ReturnType<typeof useReportWorkspace>;
 
-// Hidden-state fallback for the export selection must be a **stable reference**
-// (same rule as the frozen `NO_*` arrays in the sibling hooks): a fresh
-// `new Set()` per render makes every consumer dependency "change" each render.
-// It is never mutated — the hook only ever replaces the selection via
-// `setSelectedIds(new Set(...))` — so sharing one instance is safe.
-const NO_SELECTED_IDS: Set<string> = new Set<string>();
-
 export function useReportWorkspace({
   actorId,
   notebookId,
@@ -142,6 +135,17 @@ export function useReportWorkspace({
   const operationTokensRef = useRef(new Map<string, object>());
   const transitionSuspendedRef = useRef(false);
   const transitionGenerationRef = useRef(0);
+  // Hidden-state fallback for the export selection must be a **stable
+  // reference** (same rule as the frozen `NO_*` arrays in the sibling
+  // hooks): a fresh `new Set()` per render makes every consumer dependency
+  // "change" each render. A module-level `Set` can't be frozen shut (unlike
+  // an array/object literal, `Object.freeze` doesn't stop `.add`/`.delete`
+  // on a Set/Map), so a stray write from anywhere in the module would leak
+  // across every hook instance and every actor/notebook. A per-instance ref
+  // keeps the same stable-reference guarantee but shrinks that blast radius
+  // to this one hook instance — it is never mutated, only ever replaced via
+  // `setSelectedIds(new Set(...))`.
+  const hiddenSelectedIdsRef = useRef(new Set<string>());
   const beginOperation = (kind: string): object => {
     const token = {};
     operationTokensRef.current.set(kind, token);
@@ -711,7 +715,7 @@ export function useReportWorkspace({
     deletingId: visible ? deletingId : null,
     downloadingId: visible ? downloadingId : null,
     selectMode: visible && selectMode,
-    selectedIds: visible ? selectedIds : NO_SELECTED_IDS,
+    selectedIds: visible ? selectedIds : hiddenSelectedIdsRef.current,
     zipBusy: visible && zipBusy,
     activateActor,
     beginNotebookTransition,

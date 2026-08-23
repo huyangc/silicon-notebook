@@ -1483,6 +1483,14 @@ test("owner-hidden view fields stay referentially stable across re-renders", () 
   expect(first.sessions).toEqual([]);
   expect(first.pendingTrace).toEqual([]);
   expect(first.feedbackSent).toEqual({});
+  // A plain `useState` initial value is never frozen; only the hidden-state
+  // fallback branch (the module-level `NO_*` constant) is. Asserting frozen
+  // here pins down *which* branch actually produced this value, not merely
+  // that it happens to equal an empty literal.
+  expect(Object.isFrozen(first.turns)).toBe(true);
+  expect(Object.isFrozen(first.sessions)).toBe(true);
+  expect(Object.isFrozen(first.pendingTrace)).toBe(true);
+  expect(Object.isFrozen(first.feedbackSent)).toBe(true);
 
   act(() => {
     view.rerender(<Harness actorId={null} notebookId={null} />);
