@@ -240,6 +240,7 @@ Contributor safety: any task that will write repository code, tests, documentati
 | --- | --- |
 | Product behavior, retrieval modes, Memory/MCP, knowhow, APIs, current limitations | [Product and API reference](./docs/product-and-api.md) |
 | Step-by-step external Agent setup, Codex/Claude CLI, and runnable MCP/Memory example | [Agent MCP and Memory onboarding SOP](./docs/agent-mcp-memory-sop.md) |
+| Building, integrating and operating an out-of-tree deployment plugin (backend bundle, build-time UI package, install, rejection codes) | [Deployment extensions SOP](./docs/deployment-extensions-sop.md) |
 | Installation, source/production deployment, model services, settings | [Deployment and configuration](./docs/deployment-and-configuration.md) |
 | Logs, incident capture, MinerU, batch ingestion, replay, migrations, backfills | [Operations, diagnostics, and ingestion tools](./docs/operations.md) |
 | Verification, CI, development workflow, test and documentation contracts | [Development and repository contracts](./docs/development.md) |

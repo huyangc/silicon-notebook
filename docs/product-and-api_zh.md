@@ -1729,7 +1729,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 `/api/extensions/{plugin_id}/…` 是部署插件自有 HTTP 路由的唯一挂载面：router 级会话依赖意味着没有匿名面，路由工厂拿到的是 8 个字段的 `PluginRouteContext`——`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`emit_event`——绝不给 repository、全局 `Settings`、model client、FastMCP host 或原始 bearer token。**这些接缝背后的每个 core 端口都自己给请求的当前用户做授权判定**——例如 `url_sources.import_urls` 会对调用用户核对 `sources:write` 能力,不通过就 404——所以挂载点自身的 `{notebook_id}` 路径形状守卫只是纵深防御,不是授权边界本身。插件 handler 抛出的 401 会被翻译成 424（并记一条事件）,不会被误当成会话失效；core 自己 router 级会话门产生的真 401 仍然原样是 401。
 
-数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP：`docs/deployment-extensions-sop*.md`（后续 PR）。
+数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP——写后端 bundle 与构建期 UI 包、本地联调、打包、安装、启动校验、升级/回滚，以及完整拒绝码表：[部署插件 SOP](./deployment-extensions-sop_zh.md)。
 
 ## 管理员用户活动日志（`/dev/logs`）
 
