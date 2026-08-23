@@ -15,7 +15,12 @@ type WorkspaceExtensionOutletProps = Readonly<{
   slot: WorkspaceExtensionSlot;
   registry: readonly WorkspaceUiContribution[];
   projection: SystemExtensionProjection | null;
-  context: WorkspaceExtensionContext;
+  /**
+   * 壳层给的是**不含 `pluginId`** 的那一半：一个 outlet 会渲染多条来自不同插件的
+   * contribution，插件身份只可能由 host 逐条补上（见下面的 spread）。壳层若自己写
+   * 一个 `pluginId`，它对这一格里的每条 contribution 都是错的。
+   */
+  context: Omit<WorkspaceExtensionContext, "pluginId">;
   actions: WorkspaceExtensionActions;
   ownerKey: string;
 }>;
@@ -40,7 +45,11 @@ export function WorkspaceExtensionOutlet({
       {visible.map((contribution) => (
         <contribution.Component
           key={`${ownerKey}:${context.source?.id ?? ""}:${contribution.id}`}
-          context={context}
+          // 插件身份逐条补：`ExtensionModal` 用它给窗口位置的存储键分段，两个插件
+          // 各写一个 `storageKey="search"` 也不会共用一格记忆。这里不新增任何引用
+          // 稳定性承诺——`context` 本来就是每帧新对象（见下面那段），spread 只是让
+          // 它多带一个取值稳定的字段。
+          context={{ ...context, pluginId: contribution.pluginId }}
           // api 端口按**本条 contribution 的** pluginId 绑定：插件自己 import 不到
           // `./api.ts`，所以这是它拿到端口的唯一途径，也保证了插件 A 造不出插件 B
           // 的端口。

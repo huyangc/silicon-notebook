@@ -10,6 +10,7 @@ import { defineWorkspaceUiRegistry } from "../../features/extension-sdk/registry
 import type {
   SystemExtensionProjection,
   WorkspaceExtensionContext,
+  WorkspaceExtensionProps,
 } from "../../features/extension-sdk/contracts";
 
 // X5 T4 — `actions.refreshSources()` 是双闸窄 command 中的 extension-owner 那一半
@@ -121,13 +122,28 @@ test("a refreshSources call from a different actor is dropped by the owner gate"
 // `use-root-modal-coordinator`（实现计划 R4 登记接受），所以「切库/离开工作区时弹窗
 // 跟着消失」这一条只能由那道门兑现，必须有用例证明它真的兑现了。
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+// jsdom 的 `window.innerWidth` 是整个 worker 共享的:下面那条窄视口用例把它按到 700
+// 之后不还原,同文件里**之后**渲染浮窗的用例就都跑在「浮窗几何已停用」的世界里,而
+// 它们断言的恰好是几何生效时才有的东西。还原写在 afterEach 里而不是那条用例末尾——
+// 用例中途失败时 `afterEach` 仍会跑,写在末尾则不会。
+const ORIGINAL_INNER_WIDTH = window.innerWidth;
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true, writable: true, value: ORIGINAL_INNER_WIDTH,
+  });
+  window.sessionStorage.clear();
+});
 
 const permissions = {
   notebookRead: true, notebookWrite: false, notebookConfigure: false,
   sourceRead: false, sourceWrite: false, systemAdmin: false,
 };
-const context: WorkspaceExtensionContext = {
+// 壳层构造的那一半 context:**不含** `pluginId`，它由 host 按 contribution 逐条注入
+// （`host.tsx` 的 outlet props 就是这个 `Omit`）。
+const context: Omit<WorkspaceExtensionContext, "pluginId"> = {
   slot: "workspace.side_panel",
   actor: { id: "user-a", username: "user-a", displayName: "user-a" },
   notebook: { id: "notebook-a", name: "notebook-a" },
@@ -146,14 +162,20 @@ const actions = {
   },
 };
 
-/** 一条会开弹窗的合成 contribution：按钮打开，弹窗自己的 × 关闭。 */
-function ModalPlugin() {
+/**
+ * 一条会开弹窗的合成 contribution：按钮打开，弹窗自己的 × 关闭。
+ *
+ * 插件把 `context.pluginId` 原样转交给弹窗——那是它拿到自己身份的唯一途径（host
+ * 注入，插件说了不算），也是窗口位置存储键里隔离插件与插件的那一段。
+ */
+function ModalPlugin({ context: pluginContext }: WorkspaceExtensionProps) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <button type="button" onClick={() => setOpen(true)}>打开面板</button>
       {open && (
         <ExtensionModal
+          pluginId={pluginContext.pluginId}
           storageKey="sample.panel"
           title="示例面板"
           description="一句说明"
@@ -196,7 +218,7 @@ test("the shared modal is a labelled dialog whose close button fires exactly onc
   const user = userEvent.setup();
   const onClose = vi.fn();
   render(
-    <ExtensionModal storageKey="sample.panel" title="示例面板" description="一句说明" onClose={onClose}>
+    <ExtensionModal pluginId="sample-plugin" storageKey="sample.panel" title="示例面板" description="一句说明" onClose={onClose}>
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -215,7 +237,7 @@ test("the shared modal is a labelled dialog whose close button fires exactly onc
 
 test("the header is the shared floating-window drag handle, not a hand-rolled one", () => {
   const { container } = render(
-    <ExtensionModal storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
+    <ExtensionModal pluginId="sample-plugin" storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -235,7 +257,7 @@ test("the header is the shared floating-window drag handle, not a hand-rolled on
 test("narrow viewports hand the geometry back to CSS instead of pinning an inline transform", () => {
   Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
   const { container } = render(
-    <ExtensionModal storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
+    <ExtensionModal pluginId="sample-plugin" storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
       <p>面板内容</p>
     </ExtensionModal>,
   );
@@ -251,6 +273,64 @@ test("narrow viewports hand the geometry back to CSS instead of pinning an inlin
   // ≤720px 一律停用浮窗几何：内联样式优先级高于媒体查询，留着它会把桌面记忆的
   // 位置/尺寸贴到整屏卡片上造成横向溢出。
   expect(card.style.transform).toBe("");
+});
+
+
+// 存储键的隔离：`extension.` 前缀只把插件与**核心**弹窗分开;插件与插件之间靠
+// `pluginId` 段。少了那一段,两个插件各写一个 `storageKey="search"` 就共用同一格
+// sessionStorage、互相顶掉窗口位置——而这种失败事后完全看不出来(它只表现为位置
+// 偶尔"自己变了"),所以必须有用例钉住。
+//
+// 判据是**行为**不是字符串:往期望的键里预置一份位置记忆,看弹窗认不认。断言那个
+// 键名本身的写法会在实现改成等价拼接时误报,而这样写只会在真的读错键时报红。
+const SEEDED_RECT = JSON.stringify({ x: 120, y: 40, width: null, height: null });
+
+function renderModalFor(pluginId: string) {
+  const { container } = render(
+    <ExtensionModal pluginId={pluginId} storageKey="sample.panel" title="示例面板" onClose={() => undefined}>
+      <p>面板内容</p>
+    </ExtensionModal>,
+  );
+  return (container.querySelector(".utility-modal-card") as HTMLElement).style.transform;
+}
+
+
+test("the window position memory is keyed per plugin, not just per storageKey", () => {
+  window.sessionStorage.setItem("extension.sample-plugin.sample.panel.window", SEEDED_RECT);
+
+  const owned = renderModalFor("sample-plugin");
+  // 非空转保护:先证明预置的那份记忆真的被读到了(否则下面那条"另一个插件读不到"
+  // 在实现根本不读 sessionStorage 时也会绿)。
+  expect(owned).toContain("120px");
+  expect(owned).toContain("40px");
+  cleanup();
+
+  // 同一个 storageKey、另一个 pluginId:必须读不到上面那份记忆。
+  const other = renderModalFor("other-plugin");
+  expect(other).not.toContain("120px");
+  expect(other).not.toBe(owned);
+  cleanup();
+
+  // 同 pluginId + 同 storageKey 仍然共用同一格:分段不是把每次渲染都隔离掉。
+  expect(renderModalFor("sample-plugin")).toBe(owned);
+});
+
+
+test("the modal refuses a malformed identity instead of silently building a stray key", () => {
+  // 两段都校验:`pluginId` 走 host 注入(形状已由 registry 校验过),`storageKey` 完全
+  // 由插件给。畸形键不会报错、只会安静地落进另一格记忆,所以这里要响亮失败。
+  for (const pluginId of ["Sample", "../other", "", "sample plugin"]) {
+    expect(() => renderModalFor(pluginId)).toThrow(TypeError);
+    cleanup();
+  }
+  for (const storageKey of ["", "a/b", "a b", "..", "x".repeat(65)]) {
+    expect(() => render(
+      <ExtensionModal pluginId="sample-plugin" storageKey={storageKey} title="t" onClose={() => undefined}>
+        <p>x</p>
+      </ExtensionModal>,
+    )).toThrow(TypeError);
+    cleanup();
+  }
 });
 
 

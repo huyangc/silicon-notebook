@@ -169,11 +169,38 @@ test("all three verbs and the message translator go through the same confinement
   assert.equal(calls[0].options.auth, "required");
   assert.equal(calls[0].options.unauthorized, "clear-and-reload");
   assert.deepEqual(Object.keys(calls[0].options).sort(), ["auth", "tag", "unauthorized"]);
-  // 同步抛而不是返回一个 rejected promise：限定发生在碰 transport 之前，插件写
-  // `void api.requestVoid(...)`（不接 promise）时也仍然是响亮失败。
-  assert.throws(() => api.requestVoid("/../notebooks/x"), TypeError);
+  // 必须 **reject** 而不是同步抛,否则 `.catch()` 写法接不住:插件最自然的形态
+  // `api.requestVoid(p).catch(show)` 会在 `.catch` 被求值**之前**就从
+  // `api.requestVoid(p)` 那一步炸出去,落成一次未处理的运行时错误(在 React 事件
+  // 处理器里就是整棵子树的错误边界)。限定本身没变——它仍发生在碰 transport 之前,
+  // 下一条 `calls.length` 断言钉的就是这一点。
+  await assert.rejects(api.requestVoid("/../notebooks/x"), TypeError);
   assert.equal(calls.length, 3, "拒绝的请求一个字节都不许到达 transport");
   assert.equal(Object.isFrozen(api), true);
+});
+
+
+test("a refused path reaches a .catch() handler instead of throwing past it", async () => {
+  // 这条用例的形态就是插件会写的那一行:不 await、只挂一个 `.catch`。方法非 async
+  // 时它整条失效——异常在 `.catch` 之前抛出,handler 一次都不会被调用。
+  const { calls, transport } = recordingTransport();
+  const api = createWorkspaceExtensionApi("ieee", transport);
+  const caught = [];
+  await new Promise((resolve) => {
+    void api.requestVoid("/../notebooks/x").catch((error) => {
+      caught.push(error);
+      resolve(undefined);
+    });
+  });
+  assert.equal(caught.length, 1);
+  assert.ok(caught[0] instanceof TypeError);
+  assert.equal(calls.length, 0, "拒绝的请求一个字节都不许到达 transport");
+  // 三个请求方法都是同一条路:同步抛会让其中任何一个漏掉 `.catch`。
+  await assert.rejects(api.requestJson("/x?y=1"), TypeError);
+  await assert.rejects(api.requestBlob("//evil/x"), TypeError);
+  // 头部剥离那道闸同样在 transport 之前跑,它抛的东西也必须是 rejection。
+  await assert.rejects(api.requestJson("/x", { headers: { "破 header": "v" } }));
+  assert.equal(calls.length, 0);
 });
 
 
@@ -232,7 +259,7 @@ test("the default-transport port is memoized per plugin id so plugins can depend
 });
 
 
-test("withExtensionApi keeps the host's owner gate and binds the api to that contribution", () => {
+test("withExtensionApi keeps the host's owner gate and binds the api to that contribution", async () => {
   const opened = [];
   const generation = { current: 1 };
   // 宿主那份 actions 的 openUnderstanding 是一个闭包着 owner 的窄 command；
@@ -252,8 +279,9 @@ test("withExtensionApi keeps the host's owner gate and binds the api to that con
   assert.deepEqual(opened, ["open"], "过期 owner 的回调必须继续被宿主的闸拒绝");
   assert.equal(Object.isFrozen(stale.api), true);
   // 注入进来的确实是一个受限端口，不是随手挂的转发函数：越界路径在碰 transport
-  // 之前就同步抛（这里刻意不调合法路径——默认 transport 是真的核心 api 客户端）。
-  assert.throws(() => stale.api.requestJson("/../notebooks/x"), TypeError);
+  // 之前就被拒（这里刻意不调合法路径——默认 transport 是真的核心 api 客户端）。
+  // 必须 reject 而不是同步抛，理由同上：`.catch()` 写法接不住同步异常。
+  await assert.rejects(stale.api.requestJson("/../notebooks/x"), TypeError);
   // 端口绑的是传进去的那个 pluginId，两条 contribution 各拿各的前缀。
   assert.equal(extensionApiPath("ieee", "/x"), "/extensions/ieee/x");
   assert.equal(extensionApiPath("other", "/x"), "/extensions/other/x");

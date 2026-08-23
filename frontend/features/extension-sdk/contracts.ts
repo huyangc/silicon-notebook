@@ -27,6 +27,19 @@ export type WorkspaceExtensionPermissionSnapshot = Readonly<{
 }>;
 
 export type WorkspaceExtensionContext = Readonly<{
+  /**
+   * 本 contribution 的插件身份，**由 host 注入**（`contribution.pluginId`），不是壳层
+   * 构造 context 时给的——壳层那份是 `Omit<WorkspaceExtensionContext, "pluginId">`
+   * （见 `host.tsx` 的 outlet props），一个 outlet 会渲染多条来自不同插件的
+   * contribution，身份只可能逐条补。
+   *
+   * 插件拿它有且只有一个用途：`ExtensionModal` 的 `pluginId`。窗口位置记忆的存储键
+   * 里必须有它，否则两个插件都写 `storageKey="search"` 就共用一格记忆、互相顶掉。
+   *
+   * ⚠ 与 `context` 整体一样，这是**每帧新对象**上的一个字段——`pluginId` 的**取值**
+   * 跨渲染稳定，但 `context` 本身不能进依赖数组（`actions.api` 才是那份稳定引用）。
+   */
+  pluginId: string;
   slot: WorkspaceExtensionSlot;
   actor: Readonly<{
     id: string;

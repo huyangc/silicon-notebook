@@ -5,8 +5,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-import { appSourceModules, callsIn, importsIn, parseText } from "../../test-support/semantic-source.mjs";
-import { samePluginPackageSpecifier } from "./extension-ui-boundary.test.mjs";
+import { appSourceModules, importsIn, parseText } from "../../test-support/semantic-source.mjs";
+// 判据住在自己的模块里（不是测试入口，node 泳道按后缀收不到它）。此前它住在
+// `extension-ui-boundary.test.mjs`、由本文件 import 过去，于是单跑任一守卫都会把
+// 另一份的全部用例一起加载并再跑一遍。
+import {
+  BUILTIN_UI_REASON,
+  pluginPackageImportOffenders,
+  pluginPackageSideChannelOffenders,
+} from "./_plugin-import-predicate.mjs";
 
 
 const FRONTEND_DIR = path.resolve(
@@ -43,114 +50,6 @@ const EXT_PACKAGE_MODULE = /^features\/ext-[a-z][a-z0-9-]*\//;
 /** 同步脚本写进副本目录的出处标记；`readdir` 判形状时它是合法条目之一。 */
 const ORIGIN_MARKER = ".ui-plugin-origin";
 const MANIFEST_FILE = "ui-plugin.json";
-
-const SDK_CONTRACTS = "features/extension-sdk/contracts.ts";
-const SDK_UI = "features/extension-sdk/ui.tsx";
-const SDK_API = "features/extension-sdk/api.ts";
-/** 插件只能用基座已经装好的这两个包（§1.4 白名单的裸说明符那一半）。 */
-const BARE_IMPORT_ALLOWLIST = new Set(["lucide-react", "react"]);
-
-// 四条拒绝理由各写一句「为什么」，因为读到失败的人多半是插件作者，他手上没有本仓库的
-// 上下文。`api.ts` 被单独点名：它是唯一一个「看起来该给、实际绝不能给」的 SDK 模块。
-const API_PORT_REASON = "api 端口必须由 host 按 contribution.pluginId 注入到 actions.api"
-  + "——插件自持 createWorkspaceExtensionApi 工厂，就等于可以构造别的插件的端口，路径限定当场失效";
-const BUILTIN_UI_REASON = "内建插件住在 registry.ts 的 node 泳道闭包里，而 node --test 装不下 .tsx"
-  + "：共享弹窗外壳只发给仓库外的 ext-* 包";
-const OUTSIDE_REASON = "插件只能 import 同包兄弟模块、extension-sdk/contracts.ts 与 extension-sdk/ui.tsx";
-const BARE_REASON = "插件只能用基座已有的 react / lucide-react；新依赖走基座 PR"
-  + "（插件包不得带 package.json 或 node_modules）";
-
-/** 计时器与两条常驻连接：兄弟模块和入口一样，不得自己开一条后台通道。 */
-const SIDE_CHANNEL_CALLS = new Set([
-  "setInterval",
-  "setTimeout",
-  "window.setInterval",
-  "window.setTimeout",
-  "globalThis.setInterval",
-  "globalThis.setTimeout",
-  // 动态 import：绕过静态说明符的白名单，`callsIn` 把它记成目标 `import`。
-  "import",
-]);
-const SIDE_CHANNEL_CONSTRUCTORS = new Set(["EventSource", "WebSocket"]);
-
-
-/**
- * 「这条 import 说明符越过插件包边界了吗」——`ext-*` 包与内建插件共用的**唯一**判据。
- *
- * `extension-ui-boundary.test.mjs` 的逐插件白名单检查调它，本文件的真值表、真包扫描与
- * 内建插件那条也调它。两处白名单必须是同一份判据：写成两份拼写，一份改了另一份不改，
- * 守卫就会在互相认同一个陈旧值的同时与真实边界脱节。
- *
- * 允许集合恰好四项：
- *  · 同包兄弟模块——判据委托给 `samePluginPackageSpecifier`，它在 `path.posix.normalize`
- *    之后判「归一化后仍在本包目录之下」。**归一化是承重的**：`./sub/../../app/page.tsx`
- *    拼起来仍以包目录开头，前缀比较会整条放过它。
- *  · `features/extension-sdk/contracts.ts`——类型合同。
- *  · `features/extension-sdk/ui.tsx`——共享弹窗外壳，**只给仓库外的包**（`builtin` 选项）。
- *  · 裸 `react` / `lucide-react`。
- *
- * 其余一律违规，其中 `features/extension-sdk/api.ts` 带自己的理由：它是唯一一个插件作者
- * 会真心以为该导入的模块。
- *
- * @param {string} packagePath  模块在 `appSourceModules()` 里的路径（`features/…`）
- * @param {readonly string[]} specifiers  该模块的全部 import/export-from 说明符
- * @param {{ builtin?: boolean }} [options]  内建插件档：白名单少一项 `ui.tsx`
- * @returns {{ specifier: unknown, reason: string }[]}
- */
-export function pluginPackageImportOffenders(packagePath, specifiers, options = {}) {
-  const builtin = options.builtin === true;
-  const offenders = [];
-  for (const specifier of specifiers) {
-    if (typeof specifier !== "string" || specifier.length === 0) {
-      offenders.push({ specifier, reason: OUTSIDE_REASON });
-      continue;
-    }
-    if (!specifier.startsWith(".")) {
-      if (BARE_IMPORT_ALLOWLIST.has(specifier)) continue;
-      offenders.push({ specifier, reason: BARE_REASON });
-      continue;
-    }
-    if (samePluginPackageSpecifier(packagePath, specifier)) continue;
-    const resolved = path.posix.normalize(
-      path.posix.join(path.posix.dirname(packagePath), specifier),
-    );
-    if (resolved === SDK_CONTRACTS) continue;
-    if (resolved === SDK_UI) {
-      if (!builtin) continue;
-      offenders.push({ specifier, reason: BUILTIN_UI_REASON });
-      continue;
-    }
-    offenders.push({
-      specifier,
-      reason: resolved === SDK_API ? API_PORT_REASON : OUTSIDE_REASON,
-    });
-  }
-  return offenders;
-}
-
-
-/**
- * 兄弟模块自开的后台通道。
- *
- * `extension-ui-boundary.test.mjs` 的禁用文本扫描只覆盖**入口**模块
- * （`features/<x>/workspace-plugin.tsx?`），所以一个包只要把轮询挪进兄弟模块就整条逃掉——
- * 这正是 T2 评审点名的缺口。`fetch(` 刻意不在这里重复：`api-boundary.test.mjs` 已经对
- * `appSourceModules()` 的每个模块（含 `features/ext-<name>/` 的兄弟）普查过它，两处各写一遍
- * 只会让将来放宽其中一处时没人发现另一处还在拦。
- */
-export function pluginPackageSideChannelOffenders(parsed) {
-  const offenders = callsIn(parsed).filter((target) => SIDE_CHANNEL_CALLS.has(target));
-  function collect(item) {
-    if (ts.isNewExpression(item) && ts.isIdentifier(item.expression)) {
-      const constructed = item.expression.text;
-      if (SIDE_CHANNEL_CONSTRUCTORS.has(constructed)) offenders.push(`new ${constructed}`);
-    }
-    ts.forEachChild(item, collect);
-  }
-  collect(parsed);
-  return [...new Set(offenders)].sort();
-}
-
 
 /** 一个模块的全部 import/export-from 说明符（含副作用 import 与 type-only）。 */
 function moduleSpecifiersOf(parsed) {
@@ -324,17 +223,28 @@ test("plugin siblings open no background channel of their own", async () => {
       'export const later = () => window.setTimeout(() => undefined, 10);',
       'export const stream = () => new EventSource("/api/extensions/x/stream");',
       'export const socket = () => new WebSocket("wss://example.invalid");',
+      'export const legacy = () => new XMLHttpRequest();',
+      // 卸载时仍会送达的一次性外发：最方便的「静默把数据带出去」形态。裸拼写与
+      // `navigator.` 拼写是同一件事（`const { sendBeacon } = navigator` 之后就是裸的）。
+      'export const beacon = () => navigator.sendBeacon("https://example.invalid", "x");',
       'export const lazy = () => import("./model.ts");',
     ].join("\n"),
     "features/ext-probe/model.ts",
   );
   assert.deepEqual(pluginPackageSideChannelOffenders(probe), [
     "import",
+    "navigator.sendBeacon",
     "new EventSource",
     "new WebSocket",
+    "new XMLHttpRequest",
     "setInterval",
     "window.setTimeout",
   ]);
+  const barehanded = parseText(
+    'const { sendBeacon } = navigator;\nexport const ping = () => sendBeacon("https://example.invalid", "x");',
+    "features/ext-probe/beacon.ts",
+  );
+  assert.deepEqual(pluginPackageSideChannelOffenders(barehanded), ["sendBeacon"]);
   const quiet = parseText(
     'export const label = (name: string) => name.trim();',
     "features/ext-probe/labels.ts",
