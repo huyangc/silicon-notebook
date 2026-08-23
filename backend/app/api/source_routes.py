@@ -289,21 +289,33 @@ def import_sources(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/sources/url", response_model=AddUrlSourcesResult, dependencies=[Depends(require_notebook_capability("sources:write"))])
-def add_url_sources(
-    notebook_id: str,
-    payload: AddUrlSourcesRequest,
-) -> AddUrlSourcesResult:
+def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult:
+    """按 URL 建源的**唯一**实现,浏览器端点与部署插件路由宿主共用。
+
+    抽成模块级函数只为让第二个调用方(``app.api.extension_routes`` 的
+    ``PluginUrlSourceImportPort`` 适配器)复用**同一份**语义,而不是让插件自己
+    再拼一遍——它拿不到 repository,也就不可能另写一份:
+
+    * **容量逐条扣减**:URL 导入天然部分成功(空白/不可达/非 PDF 会被跳过),故容量按
+      **成功探测逐条**核算:剩余额度 = 有效上限 − 当前数;超出的有效 URL 进 rejected
+      (不消耗配额、不整批 409),与「一个无效链接拖累整批」相反。
+    * **admin 豁免**:owner 是 admin 的笔记本 ``capacity=None``(不限)。
+    * **未配置解析服务 → 400**,且 ``detail`` 是服务层原文(``str(exc)``)而**不是**
+      ``user_error()``:它带的是「本地 MINERU_MODE 或云端 MINERU_API_TOKEN」这类部署
+      配置措辞,不是给终端用户看的中文文案,所以刻意不打 ``X-User-Message``。这条
+      行为在抽取前后逐字不变——插件路由得到的映射与浏览器端点完全一致。
+
+    ``notebook_id`` 的授权由**调用方**负责(端点是 ``sources:write`` 装饰器守卫,插件
+    路由是它自己挂的 core 门 + ``_validate_plugin_router`` 的强制检查):这个函数只做
+    容量与调度,不判权限。
+    """
     repo = source_repository()
-    # URL 导入天然部分成功(空白/不可达/非 PDF 会被跳过),故容量按**成功探测逐条**核算:
-    # 剩余额度 = 有效上限 − 当前数;超出的有效 URL 进 rejected(不消耗配额、不整批 409),
-    # 与「一个无效链接拖累整批」相反。admin 豁免 → capacity=None(不限)。
     cap = _document_capacity(notebook_id)
     capacity = None if cap is None else max(0, cap[1] - cap[0])
     try:
         return repo.add_url_sources(
             notebook_id,
-            payload.urls,
+            urls,
             scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
             capacity=capacity,
         )
@@ -311,6 +323,14 @@ def add_url_sources(
         raise HTTPException(status_code=400, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/sources/url", response_model=AddUrlSourcesResult, dependencies=[Depends(require_notebook_capability("sources:write"))])
+def add_url_sources(
+    notebook_id: str,
+    payload: AddUrlSourcesRequest,
+) -> AddUrlSourcesResult:
+    return import_url_sources(notebook_id, payload.urls)
 
 
 # response_model 是 SourceSummary 的子类：字段只增不减（多一个 reused），旧客户端
