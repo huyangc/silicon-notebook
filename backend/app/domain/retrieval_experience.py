@@ -6,11 +6,20 @@ PostgreSQL — narrowing a raw persisted trace row before it ever leaves the
 store) and by ``app.services.retrieval_experience_projection`` (folding the
 narrowed row into the deployment-global experience library). Repositories may
 not import services (see ``scripts/architecture_boundary_baseline.json`` ::
-core_models_service_imports and the zero-slack architecture guard), so this
-whole self-contained narrowing cluster — not just ``project_run_step`` itself
-— lives here in ``app.domain``, the one layer both repositories and services
-may import forward from. Nothing here changed: every function body, docstring
-and constant is carried over verbatim; only the module changed.
+core_models_service_imports and the zero-slack architecture guard), so
+``project_run_step``, ``project_trace_step`` and the narrowing helpers and
+vocabularies they depend on live here in ``app.domain``, the one layer both
+repositories and services may import forward from.
+
+This module is NOT fully self-contained, though: two of its helpers,
+``clip_trace_text`` and ``closed_value``, are public precisely because
+``app.repositories.ports`` imports them back by name — ``project_run_row``,
+``project_ask_row``, ``project_report_row`` and ``project_report_attempt``
+stay in ``ports.py`` (they narrow other persisted row shapes, not a trace
+step) and reuse the exact same two clip/vocabulary budgets rather than
+re-implement them. Everything else about the moved functions is unchanged:
+every body, docstring and constant is carried over verbatim; only the module
+(and, for those two helpers, the leading underscore) changed.
 """
 from __future__ import annotations
 
@@ -64,7 +73,7 @@ _TRACE_COUNT_KEYS = ("count", "found", "returned_total", "new", "citations")
 _RETRIEVE_COUNT_KEYS = ("count",)
 
 
-def _clip_trace_text(value: object) -> str:
+def clip_trace_text(value: object) -> str:
     text = " ".join(str(value or "").split())
     if len(text) > AGENT_PROFILE_TRACE_TEXT_MAX_CHARS:
         return text[: AGENT_PROFILE_TRACE_TEXT_MAX_CHARS - 1] + "…"
@@ -167,7 +176,7 @@ def project_trace_step(step: object) -> dict | None:
     duration = step.get("duration_ms")
     return {
         "step_type": step_type,
-        "summary": _clip_trace_text(step.get("summary")),
+        "summary": clip_trace_text(step.get("summary")),
         "duration_ms": int(duration) if isinstance(duration, int) and not isinstance(duration, bool) else None,
         "count": count,
     }
@@ -195,7 +204,7 @@ SITUATION_RETRIEVAL_EFFORTS = (
 )
 
 
-def _closed_value(raw: object, vocabulary: tuple[str, ...]) -> str:
+def closed_value(raw: object, vocabulary: tuple[str, ...]) -> str:
     text = str(raw or "").strip().lower()
     return text if text in vocabulary else SITUATION_UNKNOWN
 
@@ -241,7 +250,7 @@ def project_run_step(step: object) -> dict | None:
     ``int`` count, or a member of a closed vocabulary above — the step's
     ``resolved_question``, its per-topic questions and its ``assumptions`` /
     ``expected_output`` prose are not read at all, and the two enumerated
-    fields cannot pass an unexpected string through (see ``_closed_value``).
+    fields cannot pass an unexpected string through (see ``closed_value``).
     Entity and topic LISTS contribute their LENGTH only; the service layer
     buckets those into coarse bands, and their contents never leave this
     function.
@@ -345,10 +354,10 @@ def project_run_step(step: object) -> dict | None:
     if not isinstance(detail, Mapping):
         return projected
     projected["situation"] = {
-        "result_scope": _closed_value(
+        "result_scope": closed_value(
             detail.get("result_scope"), SITUATION_RESULT_SCOPES
         ),
-        "retrieval_effort": _closed_value(
+        "retrieval_effort": closed_value(
             detail.get("retrieval_effort"), SITUATION_RETRIEVAL_EFFORTS
         ),
         "completeness_required": bool(detail.get("completeness_required")),

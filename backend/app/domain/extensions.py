@@ -95,6 +95,39 @@ class RetrievalContributorHostPort(Protocol):
     ) -> Sequence[T]: ...
 
 
+def lane_is_dormant(
+    host: object, invocation: str, disabled_capabilities: frozenset[str]
+) -> bool:
+    """True when disabling ``disabled_capabilities`` leaves ``invocation`` with
+    nothing else registered on ``host``.
+
+    Shared by ``source_graph_activation.selected_evidence_lane_is_dormant``
+    and ``generated_question_contribution.generated_question_lane_is_dormant``
+    (codex finding on #565/#567: the two lane bodies were byte-identical apart
+    from the invocation name and the capability set). This asks the host
+    about its own frozen topology rather than assuming the caller's
+    contributor is the only one registered for ``invocation``. The moment any
+    other registration exists that does not require a disabled capability,
+    this is False and the caller enters the host exactly as before, so that
+    other contribution keeps its output.
+
+    The safety direction runs INTO the host, not out of it: a host that
+    predates this query (``has_contributions`` missing or not callable), or a
+    probe that raises, or a probe that answers anything other than the
+    literal ``False`` this function is checking for, all keep the old path by
+    returning False here. The probe is read strictly and defensively rather
+    than truthiness-tested, so a malformed or unexpected answer can never be
+    mistaken for "nothing else contributes here".
+    """
+    probe = getattr(host, "has_contributions", None)
+    if not callable(probe):
+        return False
+    try:
+        return probe(invocation, disabled_capabilities=disabled_capabilities) is False
+    except Exception:  # noqa: BLE001 — a probe failure must not skip the host
+        return False
+
+
 ParserSourceKind = Literal["file", "url"]
 ParserExecutionBoundary = Literal["local", "private_service", "public_cloud"]
 PARSER_SELF_HOSTED_PROVIDER = "parser.mineru_self_hosted"

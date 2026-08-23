@@ -39,8 +39,8 @@ from app.domain.graph import FollowChainResult
 from app.domain.notebook_scale import NotebookScaleFacts
 from app.domain.retrieval_experience import (
     SITUATION_ASK_MODES,
-    _clip_trace_text,
-    _closed_value,
+    clip_trace_text,
+    closed_value,
 )
 from app.domain.scale import ScaleIndexView
 from app.domain.retrieval import (
@@ -4042,13 +4042,16 @@ AGENT_PROFILE_REPORT_SAMPLE = 10
 AGENT_PROFILE_REPORT_ATTEMPT_LIMIT = 200
 
 #: ``project_trace_step``, ``project_run_step`` and their shared narrowing
-#: helpers/vocabularies (``_clip_trace_text``, ``_step_detail_mapping``,
-#: ``_bounded_id_list``, ``_closed_value``, ``_list_len``, the ``SITUATION_*``
+#: helpers/vocabularies (``clip_trace_text``, ``_step_detail_mapping``,
+#: ``_bounded_id_list``, ``closed_value``, ``_list_len``, the ``SITUATION_*``
 #: tuples) moved to ``app.domain.retrieval_experience`` (2026-08-23):
 #: ``project_run_step`` is consumed both by repository adapters
 #: (``ask_state_store.py``, both backends) and by
 #: ``app.services.retrieval_experience_projection``, and repositories may not
-#: import services — see that module's own docstring for the full argument.
+#: import services. ``clip_trace_text``/``closed_value`` are imported back
+#: here by name because the four ``project_*_row``/``project_report_attempt``
+#: functions below stay in this module and reuse the same two budgets — see
+#: that module's own docstring for the full argument.
 
 
 def project_run_row(job_id: object, mode: object) -> dict:
@@ -4068,7 +4071,7 @@ def project_run_row(job_id: object, mode: object) -> dict:
     """
     return {
         "run_id": str(job_id or ""),
-        "mode": _closed_value(mode, SITUATION_ASK_MODES),
+        "mode": closed_value(mode, SITUATION_ASK_MODES),
         "steps": [],
     }
 
@@ -4085,7 +4088,7 @@ def project_ask_row(
     """
     return {
         "job_id": str(job_id or ""),
-        "question": _clip_trace_text(question),
+        "question": clip_trace_text(question),
         "status": str(status or ""),
         "created_at": str(created_at or ""),
         "steps": [],
@@ -4098,13 +4101,13 @@ def project_report_row(report_id: object, question: object, created_at: object) 
     Agentic Memory P2 (T4). The report's own question is the same kind of
     input as an ask's own question — the member's own words about their own
     run, the single most useful free text the overlay can see — so it is kept
-    and clipped through the same ``_clip_trace_text`` budget. ``attempts``
+    and clipped through the same ``clip_trace_text`` budget. ``attempts``
     starts empty; the caller fills it from the report's persisted
     ``sections_json[i].attempted`` rows via ``project_report_attempt``.
     """
     return {
         "report_id": str(report_id or ""),
-        "question": _clip_trace_text(question),
+        "question": clip_trace_text(question),
         "created_at": str(created_at or ""),
         "attempts": [],
     }
@@ -4118,7 +4121,7 @@ def project_report_attempt(query: object, failed: object) -> dict:
     those four are kept, and WHICH two changed in the T4 fix round:
 
     * ``query`` — the direction's own wording, clipped through the same
-      ``_clip_trace_text`` budget as an ask's question. This is what the
+      ``clip_trace_text`` budget as an ask's question. This is what the
       sample is FOR: ``retrieval_notes`` is a note about how this member
       phrases research, and a direction they confirmed is their phrasing.
       It is their own text about their own run, and the block it feeds is
@@ -4152,7 +4155,7 @@ def project_report_attempt(query: object, failed: object) -> dict:
         f = failed.strip().lower() == "true"
     else:
         f = False
-    return {"query": _clip_trace_text(query), "failed": f}
+    return {"query": clip_trace_text(query), "failed": f}
 
 
 @dataclass(frozen=True)

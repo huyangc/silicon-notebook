@@ -523,6 +523,40 @@ def test_failing_topology_probe_still_enters_the_host():
     assert result.chunks == appended
 
 
+def test_none_topology_probe_still_enters_the_host():
+    """The probe is read strictly: only the literal ``False`` answer counts
+    as "nothing else contributes here". A probe that answers ``None``
+    (neither ``True`` nor ``False``) must keep the old path exactly like a
+    missing or broken probe does -- ``lane_is_dormant`` in
+    ``app.domain.extensions`` checks ``probe(...) is False``, not
+    truthiness, so this must never be mistaken for the dormant signal.
+    """
+    baseline = [SimpleNamespace(chunk_id="base")]
+    appended = [*baseline, SimpleNamespace(chunk_id="plugin")]
+
+    class _NoneProbeHost(_RecordingHost):
+        def has_contributions(self, _invocation, **_kwargs):
+            return None
+
+    host = _NoneProbeHost(output=appended)
+    ask = _ask_with_host(host)
+    ask_chunks, ask_status = ask._activate_selected_source_graph(
+        "notebook", baseline
+    )
+
+    report = _report_with_host(host)
+    result = SimpleNamespace(chunks=baseline)
+    report._activate_selected_source_graph("notebook", result)
+
+    assert [invocation for _baseline, invocation in host.calls] == [
+        "selected_evidence",
+        "selected_evidence",
+    ]
+    assert ask_chunks == appended
+    assert ask_status is None
+    assert result.chunks == appended
+
+
 def test_registered_independent_contribution_still_enters_the_host():
     """Non-vacuous generality: another real contribution keeps the host call."""
     from app.extensions import build_extension_runtime
@@ -747,6 +781,32 @@ def test_failing_generated_question_topology_probe_still_enters_the_host():
 
     baseline = ([], [], None)
     host = _BrokenProbeHost(output=baseline[0])
+    candidates = _candidates_with_host(host, mode="off")
+
+    with retrieval_run(run_kind="ask_chunk", actor_id="actor"):
+        result = candidates._run_chunk_candidate_contributors(
+            "notebook", "question", baseline
+        )
+
+    assert [invocation for _baseline, invocation in host.calls] == [
+        "chunk_candidates",
+    ]
+    assert result is baseline
+
+
+def test_none_generated_question_topology_probe_still_enters_the_host():
+    """Mirrors ``test_none_topology_probe_still_enters_the_host`` for the
+    generated-question lane: a probe answering ``None`` must not be mistaken
+    for the dormant ``False`` signal.
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    class _NoneProbeHost(_RecordingHost):
+        def has_contributions(self, _invocation, **_kwargs):
+            return None
+
+    baseline = ([], [], None)
+    host = _NoneProbeHost(output=baseline[0])
     candidates = _candidates_with_host(host, mode="off")
 
     with retrieval_run(run_kind="ask_chunk", actor_id="actor"):
