@@ -437,7 +437,17 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   // 每个插件组件模块只许依赖 SDK 合同、react、图标库与**同包兄弟模块**——同一张白名单
   // 对所有插件生效。兄弟那一项是路径判据不是字面量，抽在 samePluginPackageSpecifier 里
   // 与 T6 的包边界守卫共用。
-  const PLUGIN_IMPORT_ALLOWLIST = new Set(["../extension-sdk/contracts.ts", "lucide-react", "react"]);
+  // `ui.tsx` 是插件唯一被允许使用的弹窗外壳（X5 T5）：给它，是因为不给的结果是每个
+  // 插件自己手搓一个浮窗——那会同时违反「复用系统色板/边框/圆角」与「浮动弹窗只能
+  // 复用 use-floating-window」两条红线，而它交出去的只是一个骨架类写死、不接任何
+  // 领域端口的容器。⚠ 内建插件**不得** import 它：内建插件在 registry.ts 的 node
+  // 泳道闭包里，而 `.tsx` 在那条泳道上根本装不进去（module-graph 守卫会红）。
+  const PLUGIN_IMPORT_ALLOWLIST = new Set([
+    "../extension-sdk/contracts.ts",
+    "../extension-sdk/ui.tsx",
+    "lucide-react",
+    "react",
+  ]);
   // `api.ts` 永远不在这份白名单里：`createWorkspaceExtensionApi(pluginId)` 一旦对插件
   // 可见，插件 A 就能给自己造一条绑定插件 B 的端口，路径限定当场失去意义。端口只经
   // host 按 `contribution.pluginId` 注入到 `actions.api`。（T6 的包边界守卫会把它作为
@@ -447,22 +457,41 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     false,
     "the plugin HTTP port must be injected by the host, never imported by a plugin",
   );
-  for (const plugin of plugins) {
-    assert.deepEqual(
-      importsIn(plugin.module).map((row) => row.module).filter((module) => (
-        !PLUGIN_IMPORT_ALLOWLIST.has(module)
-        && !samePluginPackageSpecifier(plugin.path, module)
-      )),
-      [],
-      `${plugin.path} imports outside the plugin allowlist`,
-    );
-  }
   // 内建插件由 registry.ts 自己点名；其余插件模块只能是同步脚本复制进来的仓库外包，
   // 落点固定 features/ext-*/。手写一个 features/notmyext/workspace-plugin.ts 并从
   // registry.local.ts 引用它会在这里与上面的 local import 规则同时报红。
   const builtinPluginPaths = new Set(builtinPluginImports.map(
     (module) => `features/${module.replace("../", "")}`,
   ));
+  // **内建插件的白名单更窄一格：没有 `ui.tsx`。** 它在 registry.ts 的模块闭包里，而
+  // 那条闭包被 `node --test` 直接 import——Node 对 `.tsx` 报 `Unknown file extension`，
+  // 整条 node 泳道会在 import 阶段炸掉。module-graph 守卫也会红，但那条说的是「闭包
+  // 里有 .tsx」；这条说的是「内建插件不许 import 共享 UI」，两句话都要有人讲：只留
+  // module-graph 那条，读到失败的人只知道闭包脏了，不知道自己踩的是白名单分档。
+  const BUILTIN_PLUGIN_IMPORT_ALLOWLIST = new Set(
+    [...PLUGIN_IMPORT_ALLOWLIST].filter((module) => module !== "../extension-sdk/ui.tsx"),
+  );
+  assert.equal(
+    BUILTIN_PLUGIN_IMPORT_ALLOWLIST.size,
+    PLUGIN_IMPORT_ALLOWLIST.size - 1,
+    "the builtin allowlist must be exactly the plugin allowlist minus the shared .tsx UI",
+  );
+  for (const plugin of plugins) {
+    const allowlist = builtinPluginPaths.has(plugin.path)
+      ? BUILTIN_PLUGIN_IMPORT_ALLOWLIST
+      : PLUGIN_IMPORT_ALLOWLIST;
+    assert.deepEqual(
+      importsIn(plugin.module).map((row) => row.module).filter((module) => (
+        !allowlist.has(module)
+        && !samePluginPackageSpecifier(plugin.path, module)
+      )),
+      [],
+      `${plugin.path} imports outside the plugin allowlist`
+      + (builtinPluginPaths.has(plugin.path)
+        ? " (builtin plugins live in the node-lane closure and may not import the shared .tsx UI)"
+        : ""),
+    );
+  }
   assert.deepEqual(
     plugins.map((row) => row.path).filter((modulePath) => (
       !builtinPluginPaths.has(modulePath) && !/^features\/ext-[a-z0-9-]+\//.test(modulePath)

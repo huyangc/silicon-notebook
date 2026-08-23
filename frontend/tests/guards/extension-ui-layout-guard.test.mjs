@@ -12,15 +12,21 @@
 //
 //   ① globals.css 里(含 @media 内)不存在任何 selector 同时含 `:has(` 与
 //      `workspace-extension-outlet` 的规则——即扩展点不得再撑出自己的一列;
-//   ② `.agent-profile-workspace-plugin` 前缀的规则里没有颜色字面量,颜色只能取
+//   ② `.workspace-extension-entry` 前缀的规则里没有颜色字面量,颜色只能取
 //      `var(--…)` / `inherit` / `transparent` / `currentColor` / `none`;
 //   ③ page.tsx 里 slot 为 `workspace.side_panel` 的 outlet 位于 `.sources-panel`
 //      的 JSX 子树内(它现在是来源栏里的一行入口,不是工作区网格的直接子级)。
 //      「固定区、不在滚动的 .source-list 里」那一半由 extension-ui-boundary.test.mjs
 //      的直接父级断言(`div.workspace-panel-body.sources-body`)承重,本条只钉子树与
 //      「不是网格直接子级」两个方向;
-//   ④ 插件组件本身(features/*/workspace-plugin.ts)不带内联 `style`、字符串里没有
-//      颜色字面量——否则 ② 可以被绕开(把颜色从 CSS 搬进 createElement 的 props)。
+//   ④ 插件侧的**全部**模块(内建 `features/*/workspace-plugin.ts`、仓库外插件包
+//      `features/ext-*/` 的每个 .ts/.tsx、以及插件唯一能 import 的共享 UI
+//      `features/extension-sdk/ui.tsx`)不带内联 `style`、字符串里没有颜色字面量——
+//      否则 ② 可以被绕开(把颜色从 CSS 搬进 createElement 的 props)。扫描面必须覆盖
+//      仓库外插件包:那正是「不许写 CSS」这条约束的目标读者,只扫内建插件等于只检查
+//      唯一一个本来就守规矩的模块;
+//   ⑤ `ui.tsx` 只用系统弹窗骨架类,并且给存储键加上 `extension.` 前缀——插件不得
+//      经共享 UI 拿到一个自定义类名的口子,弹窗位置记忆也不许与核心弹窗撞键。
 //
 // 覆盖边界:①②③ 都是形态判据,不证明像素结果——真正的排版由浏览器决定,jsdom 量
 // 不到。运行时可见性(能力/权限/切库失效)由 extension-ui-host.component.test.tsx
@@ -36,8 +42,23 @@ import { appSourceModules, parseModule } from "../../test-support/semantic-sourc
 const css = await readFile(new URL("../../app/globals.css", import.meta.url), "utf8");
 const stylesheet = postcss.parse(css);
 
-const PLUGIN_PREFIX = ".agent-profile-workspace-plugin";
+const PLUGIN_PREFIX = ".workspace-extension-entry";
 const OUTLET_TOKEN = "workspace-extension-outlet";
+/** 插件唯一能 import 的共享 UI；它替插件写 JSX，所以它自己也在「不许内联颜色」之内。 */
+const SHARED_PLUGIN_UI = "features/extension-sdk/ui.tsx";
+/**
+ * `ui.tsx` 允许出现的 className 字面量。全是既有系统弹窗骨架类（`utility-modal` 系
+ * 与 `source-modal-header` / `source-detail-body` / `icon-button`），一个新类都不加：
+ * 共享 UI 一旦能带自己的类，插件就有了绕过「不许写 CSS」的口子——它只要请求在这里
+ * 加一条类，样式表就得为它加一条规则。
+ */
+const MODAL_SKELETON_CLASSES = new Set([
+  "utility-modal",
+  "utility-modal-card",
+  "source-modal-header",
+  "source-detail-body",
+  "icon-button",
+]);
 
 // 颜色字面量:十六进制、rgb()/rgba()、hsl()/hsla(),以及最常见的一批具名色。
 // 具名色不穷举——穷举 CSS 那 148 个名字只会给人一种「已经查全了」的错觉,而真正
@@ -144,12 +165,29 @@ test("理解入口挂在来源栏内，不是工作区网格的直接子级", as
 });
 
 
-test("插件组件不带内联 style，字符串里没有颜色字面量", async () => {
-  const plugins = (await appSourceModules()).filter((row) => (
+test("插件侧模块不带内联 style，字符串里没有颜色字面量", async () => {
+  const modules = await appSourceModules();
+  // 三类扫描面:内建插件入口、仓库外插件包的**每个**模块、以及插件唯一能 import 的
+  // 共享 UI。第二类是这条守卫真正的目标读者——它们由同步脚本从内网复制进来,谁也
+  // 没有在 review 里看过;只扫内建插件等于只检查唯一一个本来就守规矩的模块。
+  const plugins = modules.filter((row) => (
     /^features\/[^/]+\/workspace-plugin\.tsx?$/.test(row.path)
+    || /^features\/ext-[a-z0-9-]+\/.+\.tsx?$/.test(row.path)
+    || row.path === SHARED_PLUGIN_UI
   ));
-  // 空转保护:registry 至少登记了一个真实插件,扫不到文件就是路径约定变了。
-  assert.ok(plugins.length > 0, "没找到 features/*/workspace-plugin.ts(路径约定变了？守卫失效)");
+  // 空转保护:registry 至少登记了一个真实内建插件,共享 UI 也必须在扫描面里——
+  // 改名/挪走任何一个都要响亮失败,而不是静默把它排除出去。
+  assert.ok(
+    plugins.some((row) => /^features\/[^/]+\/workspace-plugin\.tsx?$/.test(row.path)),
+    "没找到 features/*/workspace-plugin.ts(路径约定变了？守卫失效)",
+  );
+  assert.ok(
+    plugins.some((row) => row.path === SHARED_PLUGIN_UI),
+    `没找到 ${SHARED_PLUGIN_UI}(改名或删除？守卫失效)`,
+  );
+  // ⚠ 判据只认**具名** `style` 属性/键。`ui.tsx` 展开的 `{...floating.dragHandleProps}`
+  // 带一个 `style`(`touchAction`/`cursor`),那是全仓浮窗的共享拖动契约、且不含颜色,
+  // 刻意放行:它是 JsxSpreadAttribute,结构上就不在下面这个判据里。
   const offenders = [];
   for (const { path, module } of plugins) {
     function visit(node) {
@@ -166,4 +204,46 @@ test("插件组件不带内联 style，字符串里没有颜色字面量", async
     visit(module);
   }
   assert.deepEqual(offenders, [], "插件组件的视觉只能来自系统类与 :root token,不得内联颜色");
+});
+
+
+test("扩展弹窗只用系统弹窗骨架类", async () => {
+  const modules = await appSourceModules();
+  const shared = modules.find((row) => row.path === SHARED_PLUGIN_UI);
+  assert.ok(shared, `没找到 ${SHARED_PLUGIN_UI}(改名或删除？守卫失效)`);
+
+  const classNames = [];
+  let storageKeyExpression;
+  function visit(node) {
+    if (ts.isJsxAttribute(node) && node.name.getText(shared.module) === "className") {
+      const initializer = node.initializer;
+      // 只接受字符串字面量:模板串/表达式意味着类名是算出来的,那正是「插件带自己的
+      // 类」会长的样子,判否比放行安全。
+      assert.ok(
+        initializer && ts.isStringLiteral(initializer),
+        `${SHARED_PLUGIN_UI} 的 className 必须是字符串字面量,不得由表达式拼出`,
+      );
+      classNames.push(...initializer.text.split(/\s+/).filter(Boolean));
+    }
+    if (ts.isJsxAttribute(node) && node.name.getText(shared.module) === "storageKey") {
+      storageKeyExpression = node.initializer?.getText(shared.module) ?? "";
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(shared.module);
+
+  // 非空:扫不出任何 className 说明组件被改写成别的形态,守卫会静默变成空断言。
+  assert.ok(classNames.length > 0, `${SHARED_PLUGIN_UI} 里一个 className 都没扫到(守卫失效)`);
+  assert.deepEqual(
+    [...new Set(classNames)].filter((name) => !MODAL_SKELETON_CLASSES.has(name)).sort(),
+    [],
+    "扩展弹窗只能用既有系统弹窗骨架类;需要新类就等于要给插件开一条写样式的口子",
+  );
+  // 存储键前缀由 SDK 加、插件改不了:插件之间、以及插件与核心弹窗之间不会互相顶掉
+  // 拖动位置的记忆。
+  assert.ok(storageKeyExpression, `${SHARED_PLUGIN_UI} 必须给 FloatingModalCard 传 storageKey`);
+  assert.ok(
+    storageKeyExpression.includes("extension."),
+    `扩展弹窗的 storageKey 必须带 extension. 前缀,实际是 ${storageKeyExpression}`,
+  );
 });
