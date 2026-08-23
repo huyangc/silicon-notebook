@@ -22,7 +22,12 @@ from app.services.kg.edge_schema import is_queryable_edge_pair
 from app.services.kg.scale_index import build_transition
 from app.services.source_subgraph import GRAPH_CONTRACT_VERSION
 
-SOURCE_PARTITION_FORMAT_VERSION = 2
+# Sunk to app.domain.kg.source_partition in B3 (app.repositories'
+# maintenance modules import it directly there); re-exported here
+# unchanged for this module's own use and existing importers such as
+# filesystem/scale_artifact_store.py.
+from app.domain.kg.source_partition import SOURCE_PARTITION_FORMAT_VERSION  # noqa: F401
+
 _PARTITION_FILES = (
     "graph.npz",
     "node_ids.npy",

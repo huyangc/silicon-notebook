@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from app.services.knowledge_contracts import (
+from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPE_GROUPS,
     CLUSTER_OBJECT_TYPES,
     CLUSTER_SIZE_BUCKETS,
@@ -85,7 +85,7 @@ def _reject_unknown_buckets(seen, allowed: frozenset, what: str) -> None:
     if unknown:
         raise ValueError(
             f"{what}:SQL 返回了契约外的桶名 {unknown};"
-            f"合法取值见 app.services.knowledge_contracts。"
+            f"合法取值见 app.domain.knowledge_contracts。"
             "静默忽略会让这些行凭空消失、并悄悄打破「计数 + 排除量 = 总行数」"
         )
 

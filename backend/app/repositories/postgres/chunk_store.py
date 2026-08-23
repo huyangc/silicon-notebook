@@ -16,7 +16,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.search import chunk_section_rows
-from app.services.vector_index import encode_vector
+from app.domain.vector_index import encode_vector
 
 
 # Bounded fan-out for the element -> chunk point lookup. Deliberately a local

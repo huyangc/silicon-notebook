@@ -35,8 +35,8 @@ from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maint
 from app.repositories.ports import VectorBatchEncoder
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
-from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
-from app.services.vector_index import decode_vector
+from app.domain.kg.source_partition import SOURCE_PARTITION_FORMAT_VERSION
+from app.domain.vector_index import decode_vector
 
 # Rows consumed per fetch while streaming the orphan-asset keeper scan. A
 # protocol boundary, not a budget: every matching row is still visited, only the
@@ -112,7 +112,7 @@ class SQLiteMaintenanceAdapter:
     ) -> str:
         from pathlib import Path
         from app.repositories.sqlite.source_store import SourceElementWrite
-        from app.services.kg.parsing import parse_elements
+        from app.domain.kg.parsing import parse_elements
 
         path = Path(tmpdir) / f"{name}.md"
         path.write_text(text, encoding="utf-8")
@@ -184,7 +184,7 @@ class SQLiteMaintenanceAdapter:
         admin (owner=None) to a UserProfile; None when not found."""
         with self._runtime.database.connect() as db:
             if owner is not None:
-                from app.services.auth_utils import normalize_username
+                from app.domain.auth_utils import normalize_username
 
                 user = db.execute(
                     "SELECT * FROM users WHERE username=?",

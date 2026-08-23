@@ -432,7 +432,7 @@ def test_repeated_job_write_of_the_same_value_skips_the_update(
     from datetime import timezone as _timezone
 
     from app.repositories.sqlite import identity_store as identity_store_module
-    from app.services import search_profile as search_profile_module
+    from app.domain import search_profile as search_profile_module  # B3: merge_field now lives (and reads datetime) here
 
     class _FixedDatetime(_real_datetime):
         @classmethod

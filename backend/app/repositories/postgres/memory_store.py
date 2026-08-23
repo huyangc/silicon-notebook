@@ -37,7 +37,7 @@ from app.repositories.postgres.search import (
     memory_match_count,
     memory_page_candidate_ids,
 )
-from app.services.vector_index import encode_vector
+from app.domain.vector_index import encode_vector
 
 
 def _json_object(raw: Any) -> dict[str, Any]:

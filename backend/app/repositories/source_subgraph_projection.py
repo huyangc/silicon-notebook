@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
-from app.services.knowledge_contracts import USABLE_STATUSES
+from app.domain.knowledge_contracts import USABLE_STATUSES
 
 
 def _in_clause(placeholder: str, values: Sequence[str]) -> str:

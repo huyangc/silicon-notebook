@@ -24,7 +24,7 @@ from app.repositories.postgres._store_utils import (
     utc_now,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.services.search_profile import (
+from app.domain.search_profile import (
     SEARCH_PROFILE_ORIGINS,
     merge_field,
     parse_search_profile,
@@ -98,7 +98,7 @@ class IdentityStore:
         """在调用方已打开的写事务内建用户+profile,返回 (user_row, profile_row)。
         供 create_user 与 register_user_with_session 共用。UniqueViolation 的
         翻译留在公开方法(异常在 execute 时抛出,穿过本 helper 上抛)。"""
-        from app.services.auth_utils import hash_password, is_valid_username, normalize_username
+        from app.domain.auth_utils import hash_password, is_valid_username, normalize_username
 
         if not is_valid_username(username):
             raise ValueError("invalid username")
@@ -169,7 +169,7 @@ class IdentityStore:
         return (self._user_profile(user, profile), token)
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
-        from app.services.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import normalize_username, verify_password
 
         with self.database.connect() as connection:
             user = connection.execute(
@@ -194,7 +194,7 @@ class IdentityStore:
         R1 P1)。改密/重置同样先 FOR UPDATE 该行,两者因此在行锁上串行——登录
         排在改密前,插的会话会被改密的 DELETE 带走;排在后,旧密码直接失败。
         语义与 SQLite 侧逐字一致。"""
-        from app.services.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import normalize_username, verify_password
 
         with self.database.write() as db:
             user = db.execute(
@@ -465,7 +465,7 @@ class IdentityStore:
         `keep_token`(默认当前请求所带的会话)之外的全部会话。吊销范围只有浏览器
         会话(auth_sessions),Agent 长期凭据刻意不动;内置管理员(user-local)拒绝
         ——它的密码每次启动都被 seed 重写,语义与 SQLite 侧逐字一致。"""
-        from app.services.auth_utils import hash_password, verify_password
+        from app.domain.auth_utils import hash_password, verify_password
 
         if user_id == "user-local":
             raise BuiltinAdminPasswordError("builtin admin password is env-derived")
@@ -506,7 +506,7 @@ class IdentityStore:
             raise BuiltinAdminPasswordError("builtin admin password is env-derived")
         if not (new_password or "").strip():
             raise ValueError("empty password")
-        from app.services.auth_utils import hash_password
+        from app.domain.auth_utils import hash_password
 
         # 镜像 change_user_password:哈希提前算,缩短持锁时间。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)

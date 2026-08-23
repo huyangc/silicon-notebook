@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
-from app.services.knowledge_contracts import USABLE_STATUSES
+from app.domain.knowledge_contracts import USABLE_STATUSES
 from app.repositories.postgres._store_utils import iso_timestamp, json_value
 from app.repositories.postgres.embedding_store import EmbeddingStore
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
@@ -95,7 +95,7 @@ class IndexProjectionStore:
         row read, no table aggregates. runtime_dim / mention_seq fold into the
         settings tail exactly as before (they flow through version_facts'
         caller into the on-disk manifest.version comparison)."""
-        from app.services.vector_index import resolve_runtime_dim
+        from app.domain.vector_index import resolve_runtime_dim
         settings_tail = (
             self.settings.ppr_variant_edge_weight,
             self.settings.ppr_emb_synonym_enabled,
@@ -423,8 +423,8 @@ class IndexProjectionStore:
           kg_node_ids       : list[str]  — KG object ids (for idf / n_kg_nodes)
           membership_counts : dict[str,int] — {object_id: len(chunks)} for IDF
         """
-        from app.services.kg.edge_schema import is_queryable_edge_pair
-        from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
+        from app.domain.kg.edge_schema import is_queryable_edge_pair
+        from app.domain.kg.ppr_pairs import variant_edge_pairs, emb_synonym_edges
         import numpy as np
 
         ph = ",".join("%s" for _ in USABLE_STATUSES)
@@ -698,7 +698,7 @@ class IndexProjectionStore:
         generator (frozen `_delta_vecs` shape); an empty list returns
         ([], []). Both paths truncate through build_matrix(runtime_dim=...)
         — the dim-consumption point stays here UNCHANGED (漏消费点 = 静默零召回)."""
-        from app.services.vector_index import build_matrix, resolve_runtime_dim
+        from app.domain.vector_index import build_matrix, resolve_runtime_dim
         runtime_dim = resolve_runtime_dim(self.settings)
         if object_ids is None:
             with self.connect() as db:

@@ -20,7 +20,7 @@ from app.repositories.postgres.mount_sql import (
     MOUNT_VALID as _MOUNT_VALID,
     MOUNT_VALID_EXPR as _MOUNT_VALID_EXPR,
 )
-from app.services.knowledge_contracts import USABLE_STATUSES  # noqa: F401
+from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 
 
 class NotebookStore:

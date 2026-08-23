@@ -333,9 +333,9 @@
     }
   },
   "repository_service_import_ceiling": {
-    "other": 7,
-    "postgres": 32,
-    "sqlite": 32
+    "other": 5,
+    "postgres": 2,
+    "sqlite": 0
   },
   "core_models_service_imports": {
     "allowed": []

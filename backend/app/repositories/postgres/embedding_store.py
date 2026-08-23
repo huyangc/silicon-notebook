@@ -10,7 +10,7 @@ from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalize_timestamp,
 )
-from app.services.vector_index import decode_vector, encode_vector
+from app.domain.vector_index import decode_vector, encode_vector
 
 
 _EMBEDDING_ID_COLUMNS = {

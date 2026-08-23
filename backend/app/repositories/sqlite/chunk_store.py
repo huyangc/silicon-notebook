@@ -8,7 +8,7 @@ from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
-from app.services.vector_index import encode_vector
+from app.domain.vector_index import encode_vector
 
 
 # Bounded IN(...) fan-out for the element -> chunk point lookup. SQLite's

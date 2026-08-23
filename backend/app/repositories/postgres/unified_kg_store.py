@@ -52,12 +52,12 @@ from app.repositories.postgres.search import (
     mention_scan_matches as search_mention_scan_matches,
     prepare_mention_scan,
 )
-from app.services.kg_analysis_precompute import (
+from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
     batched,
     check_artifact_payloads,
 )
-from app.services.knowledge_contracts import (
+from app.domain.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
     KG_COMMUNITY_EDGES_MAX,

@@ -147,7 +147,7 @@ def test_login_verify_happens_inside_the_write_lock(tmp_path, monkeypatch):
     会话」的第三种交错。旧的拆分实现(authenticate_user 读连接验证 + 事后
     create_session)在验证点不持写锁,本断言必红;不用线程交错测试是因为那种写法
     对拆分实现的交错结果不确定(DELETE 也可能恰好落在 INSERT 之后而侥幸变绿)。"""
-    from app.services import auth_utils
+    from app.domain import auth_utils  # B3: repos now lazy-import from domain
 
     ident = _identity(_repo(tmp_path))
     ident.create_user("z00000013", "pw")

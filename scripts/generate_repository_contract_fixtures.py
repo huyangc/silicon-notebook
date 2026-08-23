@@ -962,7 +962,7 @@ class _FakeMinerUAdapter:
 
 @contextlib.contextmanager
 def _deterministic_runtime() -> Iterator[None]:
-    from app.services import auth_utils
+    from app.domain import auth_utils  # B3: repositories now lazy-import hash_password from here
     from app.services import embedding
     from app.services import model_provider
     from app.services import rerank_client
@@ -1465,7 +1465,7 @@ def normalized_repository_snapshot(repo: SQLiteRepository, notebook_id: str) -> 
 
 def _seed_v9_rows(repo, final_storage: Path) -> str:
     from app.models.schemas import AskResponse, Citation, ModelError, TraceStep
-    from app.services import auth_utils
+    from app.domain import auth_utils  # B3: must see the same patched hash_password as _deterministic_runtime
 
     notebook_id = "nb-fixture"
     source_path = final_storage / "notebooks" / notebook_id / "fixture-source.md"
