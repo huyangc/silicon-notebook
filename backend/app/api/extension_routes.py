@@ -25,10 +25,11 @@ gate, and none of those shapes would be caught by a path-template rule.
 Two response-shape rules the mount also enforces, both about not letting a
 plugin's failure look like a core failure:
 
-* a 401 raised *inside* a plugin handler becomes a 424 (see
-  ``_wrap_handler_unauthorized``), because the browser treats 401 as "your
-  session died" and logs the user out;
-* everything else the plugin raises is its own business.
+* a 401 that a plugin handler either *raises* or *returns* (a plugin proxying
+  an upstream service's own 401 response is a normal return, not a raise)
+  becomes a 424 (see ``_wrap_handler_unauthorized``), because the browser
+  treats 401 as "your session died" and logs the user out;
+* everything else the plugin raises or returns is its own business.
 
 Failures here raise :class:`PluginRouteMountError` out of ``create_app()``, so
 the process refuses to start. A plugin whose routes cannot be mounted safely
@@ -44,6 +45,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute
+from starlette.responses import Response
 
 from app.api import deps as core_deps
 from app.api import source_routes
@@ -385,6 +387,35 @@ def _translate_unauthorized(
     return user_error(424, "扩展服务的上游认证失败，请联系管理员")
 
 
+def _translate_unauthorized_response(
+    result: Any, emit: Callable[[Mapping[str, object]], None]
+) -> "HTTPException | None":
+    """The 424 to raise instead of a handler's *returned* 401 ``Response``.
+
+    Sibling of :func:`_translate_unauthorized`, for the other way a plugin
+    hands core a 401: a handler that catches its own upstream call, copies the
+    status straight onto a ``Response``/``JSONResponse`` it builds itself (a
+    perfectly ordinary "proxy the upstream status" shape), and returns it —
+    never raising anything, so :func:`_translate_unauthorized`'s ``except``
+    clause never runs. To the browser this is indistinguishable from a raised
+    401: ``frontend/app/errors.ts`` reads the status line, not how the backend
+    produced it. Same event, same copy, same header, so a plugin cannot get a
+    different user-facing outcome by returning the status instead of raising
+    it — see ``_wrap_handler_unauthorized`` for where this is called.
+
+    ``result`` is deliberately typed ``Any`` rather than ``Response``: this
+    runs on *every* handler return value, most of which are plain dicts/models
+    FastAPI has not yet serialized, and ``isinstance`` below is what separates
+    "an actual Response object" from "a 401 field somewhere in a payload" —
+    the latter is the plugin's own business, not core's.
+    """
+
+    if not isinstance(result, Response) or result.status_code != 401:
+        return None
+    emit({"event": _UPSTREAM_UNAUTHORIZED_EVENT})
+    return user_error(424, "扩展服务的上游认证失败，请联系管理员")
+
+
 def _wrap_handler_unauthorized(
     route: APIRoute, emit: Callable[[Mapping[str, object]], None]
 ) -> None:
@@ -422,6 +453,17 @@ def _wrap_handler_unauthorized(
     nothing left to translate. Touching the three ``is_*_callable`` properties
     before the swap also warms their ``cached_property`` slots off the original
     callable rather than the wrapper.
+
+    A handler can also hand core a 401 without raising it — proxying an
+    upstream service by returning a ``Response``/``JSONResponse`` built from
+    the upstream's own status code is the normal shape for that, not an edge
+    case. So after ``inner`` returns normally (no exception at all), the
+    return value is checked the same way the exception is:
+    :func:`_translate_unauthorized_response` is the ``except`` branch's sibling
+    for that path, same event, same copy, same header. This is why the swap
+    still has to happen at ``dependant.call`` and not, say, only around the
+    ``except``: the check has to see every ordinary return, not just the ones
+    that unwound through an exception.
     """
 
     dependant = route.dependant
@@ -435,24 +477,32 @@ def _wrap_handler_unauthorized(
         @wraps(inner)
         async def call(**values: Any) -> Any:
             try:
-                return await inner(**values)
+                result = await inner(**values)
             except HTTPException as exc:
                 translated = _translate_unauthorized(exc, emit)
                 if translated is None:
                     raise
                 raise translated from None
+            translated = _translate_unauthorized_response(result, emit)
+            if translated is not None:
+                raise translated
+            return result
 
     else:
 
         @wraps(inner)
         def call(**values: Any) -> Any:
             try:
-                return inner(**values)
+                result = inner(**values)
             except HTTPException as exc:
                 translated = _translate_unauthorized(exc, emit)
                 if translated is None:
                     raise
                 raise translated from None
+            translated = _translate_unauthorized_response(result, emit)
+            if translated is not None:
+                raise translated
+            return result
 
     dependant.call = call
 

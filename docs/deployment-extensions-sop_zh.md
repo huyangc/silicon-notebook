@@ -232,7 +232,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 - **按端口授权。** `url_sources.import_urls` 对**请求自己的那个用户**核对 `sources:write`——用户从 core 的请求上下文解析，绝不从你传进去的任何东西解析——不通过就用与 core 端点相同的 404 拒绝（不泄露存在性）。过了这一关，它就是 core 自己那个 URL 导入函数本人：同样的容量记账、管理员豁免、未配置解析器映射与后台解析调度。
 - **对 `{notebook_id}` 路由的结构性守卫。** 路径里含这个字面子串的路由必须跑 core 自己的一道门（任一能力守卫，或读权门）。这是**纵深防御，不是边界**：把参数改名 `{nb}`、或从请求体里取 id，这道检查就看不见了——而端口照样拒绝。拿掉端口那道检查会开一个洞，拿掉这道不会。
-- **401 翻译。** 你的 handler **内部**抛出的 401 会变成 `424`，带 core 自己的文案，并记一条 `plugin_upstream_unauthorized` 事件。在 core 里 401 对浏览器只有一个含义——清 token 并重载——所以某个插件路由里一张过期的上游凭据，否则会把用户从整个产品里登出。core 自己 router 级会话门产生的真 401 仍然原样是 401。
+- **401 翻译。** 你的 handler **抛出或返回**的 401 都会变成 `424`（把上游服务自己的 401 原样搬到你自己构造的 `Response`/`JSONResponse` 上再返回是很正常的写法，不是抛出，同样会被接住），带 core 自己的文案，并记一条 `plugin_upstream_unauthorized` 事件。在 core 里 401 对浏览器只有一个含义——清 token 并重载——所以某个插件路由里一张过期的上游凭据，否则会把用户从整个产品里登出。core 自己 router 级会话门产生的真 401 仍然原样是 401。
 - **事件脱敏。** `emit_event` 只收四个字段——`event`、`outcome`、`count`、`elapsed_ms`——出现别的键就**整条**丢弃。`kind` 与 `plugin_id` 由 core 补。它永远不会反向抛回你的 handler。
 
 *你不能：* 在 router 上挂 startup/shutdown 钩子；加非 `APIRoute` 的路由（挂载子应用、裸 websocket、裸 Starlette route）；声明第二个 router；返回不是 `APIRouter` 的东西。每一条都是启动失败，各有自己的码（见第 9 节）。
@@ -628,7 +628,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 | 信号 | 含义 |
 | --- | --- |
-| `plugin_upstream_unauthorized` 事件，客户端看到 `424` | 你的 handler 抛了 401。core 翻译了它，免得浏览器把用户登出。想要自己的措辞，就自己翻译上游 401。 |
+| `plugin_upstream_unauthorized` 事件，客户端看到 `424` | 你的 handler 抛出或返回了 401。core 翻译了它，免得浏览器把用户登出。想要自己的措辞，就自己翻译上游 401。 |
 | `url_sources.import_urls` 返回 404 | 调用用户对该笔记本没有 `sources:write`——或者该笔记本不存在。两者刻意不可区分。 |
 | 你的事件在日志里静默消失 | 载荷带了 `event`/`outcome`/`count`/`elapsed_ms` 之外的字段、稳定码超过 64 字符或不匹配 `^[a-z][a-z0-9_]{0,63}$`、或 `count`/`elapsed_ms` 不是 `0..1e9` 区间的整数（`True` 不算 `1`）。整条记录被丢弃，而不是写一半。 |
 | 入口不渲染，但 `/admin/extensions` 列着这个插件 | 第 7 节那四道可见性闸有一道为假。先看 `GET /api/system/extensions`：该行的 `available` 与 `unavailable_reason`（`disabled` = 你的 probe 返回了 `DISABLED`，`unavailable` = 返回了 `UNAVAILABLE`）。如果该行整个不存在，说明浏览器侧的本地三元组没命中——两边 manifest 的 `version` 漂了。 |

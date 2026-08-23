@@ -289,9 +289,14 @@ def build_router(context):
 """
 
 # Both handler flavours raise a bare 401, the way a plugin re-raising an
-# upstream service's rejection would.
+# upstream service's rejection would. Two more routes *return* a 401 instead
+# of raising one — a plugin proxying an upstream service's status onto its own
+# Response is a normal return, not a raise, and codex #578 R3 P2 is exactly
+# that gap: the raised routes above went through ``except HTTPException``
+# untouched by a returned 401, which never raises anything at all.
 _UPSTREAM_401_SRC = """
 from fastapi import HTTPException
+from starlette.responses import JSONResponse, Response
 
 
 def build_router(context):
@@ -308,6 +313,18 @@ def build_router(context):
     @router.get("/sync-403")
     def sync_403():
         raise HTTPException(status_code=403, detail="upstream says forbidden")
+
+    @router.get("/returned-401-json")
+    def returned_401_json():
+        return JSONResponse({"detail": "upstream"}, status_code=401)
+
+    @router.get("/returned-401-bare")
+    def returned_401_bare():
+        return Response(status_code=401)
+
+    @router.get("/returned-403-json")
+    def returned_403_json():
+        return JSONResponse({"detail": "upstream forbidden"}, status_code=403)
 
     return router
 """
@@ -1127,6 +1144,31 @@ def test_handler_raised_401_becomes_424(
     assert "upstream" not in response.text
 
 
+@pytest.mark.parametrize("path", ["returned-401-json", "returned-401-bare"])
+def test_handler_returned_401_becomes_424(
+    tmp_path, monkeypatch, frozen_runtime_reset, path
+):
+    """A *returned* 401 gets the same treatment as a raised one (codex #578 R3 P2).
+
+    A plugin proxying an upstream service commonly copies the upstream's status
+    straight onto its own ``Response``/``JSONResponse`` and returns it, rather
+    than raising an ``HTTPException`` — that never enters
+    ``_wrap_handler_unauthorized``'s ``except`` clause at all, so before this
+    fix it reached the browser untouched and the core client would clear the
+    token and reload. Both response flavours are covered: a ``JSONResponse``
+    carrying an upstream-shaped body, and a bare ``Response`` with none.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_UPSTREAM_401_SRC)
+    headers = _auth(client, "z00151115")
+    response = client.get(f"{_MOUNT}/{path}", headers=headers)
+    assert response.status_code == 424, response.text
+    assert response.headers.get("X-User-Message") == "1"
+    assert response.json()["detail"] == "扩展服务的上游认证失败，请联系管理员"
+    # The upstream's own wording never reaches the browser.
+    assert "upstream" not in response.text
+
+
 def test_a_real_missing_session_is_still_401(
     tmp_path, monkeypatch, frozen_runtime_reset
 ):
@@ -1161,6 +1203,13 @@ def test_other_plugin_statuses_pass_through_untouched(
     assert response.json()["detail"] == "upstream says forbidden"
     assert "X-User-Message" not in response.headers
 
+    # A *returned* non-401 status must not be mistaken for the returned-401
+    # check either: only ``status_code == 401`` triggers translation.
+    returned = client.get(f"{_MOUNT}/returned-403-json", headers=headers)
+    assert returned.status_code == 403
+    assert returned.json()["detail"] == "upstream forbidden"
+    assert "X-User-Message" not in returned.headers
+
 
 def test_upstream_401_is_counted_on_the_event_sink():
     """One whitelisted code, no upstream text, no notebook or user identity."""
@@ -1184,6 +1233,39 @@ def test_upstream_401_is_counted_on_the_event_sink():
     ]
 
     assert _translate_unauthorized(HTTPException(status_code=403), emit) is None
+    assert len(log.records) == 1
+
+
+def test_upstream_401_response_is_counted_on_the_event_sink():
+    """Sibling of the raised-401 event-sink test, for a *returned* 401.
+
+    Same whitelisted event, same absence of upstream text or identity — a
+    plugin cannot avoid being counted by returning the status instead of
+    raising it.
+    """
+
+    from starlette.responses import Response
+
+    from app.api.extension_routes import _translate_unauthorized_response
+
+    log = _RecordingLog()
+    emit = _event_emitter(_PLUGIN_ID, log)
+    translated = _translate_unauthorized_response(Response(status_code=401), emit)
+    assert translated is not None and translated.status_code == 424
+    assert log.records == [
+        {
+            "event": "plugin_upstream_unauthorized",
+            "kind": "extension_plugin",
+            "plugin_id": _PLUGIN_ID,
+        }
+    ]
+
+    assert (
+        _translate_unauthorized_response(Response(status_code=403), emit) is None
+    )
+    # Not a Response at all: the value most handler returns actually are
+    # before FastAPI serializes them, and must never be mistaken for one.
+    assert _translate_unauthorized_response({"status_code": 401}, emit) is None
     assert len(log.records) == 1
 
 
