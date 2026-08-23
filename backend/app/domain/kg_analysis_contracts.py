@@ -20,7 +20,7 @@ Pure, zero app.services/app.repositories dependency.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional
+from typing import Iterable, Iterator, List, Mapping, Optional
 
 
 # 产物账本 `kg_analysis_artifacts.kind` 的**全部**合法取值。

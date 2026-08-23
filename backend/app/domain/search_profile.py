@@ -38,6 +38,11 @@ SEARCH_PROFILE_VERSION = 1
 # forbids models → services imports, and the wire models need them too);
 # re-exported here so this module stays the one place consumers read the
 # document contract from.
+#
+# ``SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS`` / ``SEARCH_PROFILE_DOMAIN_TERMS_MAX``:
+# bounds for the user-authored ``domain_terms`` list (at most this many terms,
+# each at most this many characters). Exact values are registered only in
+# ``docs/product-and-api*.md`` (numeric-limit red line).
 from app.models.identity import (  # noqa: E402  (contract re-export)
     ANSWER_DETAIL_VALUES,
     ANSWER_LANGUAGE_VALUES,

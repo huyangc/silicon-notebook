@@ -20,6 +20,13 @@ import rustworkx as rx
 
 from app.services.kg.edge_schema import is_queryable_edge_pair
 
+# variant_edge_pairs / emb_synonym_edges sunk to app.domain.kg.ppr_pairs in B3
+# (pure functions, zero app.services/app.repositories dependency, so
+# app.repositories adapters can import them directly). Re-exported here
+# unchanged so this module's own callers (build_scale_index and friends)
+# keep resolving to the SAME objects without any call-site changes.
+from app.domain.kg.ppr_pairs import emb_synonym_edges, variant_edge_pairs  # noqa: F401
+
 
 def build_ppr_graph(
     kg_nodes: Dict[str, dict],
@@ -114,14 +121,6 @@ def build_ppr_graph(
             _edge(a, b, float(weight))
 
     return G, key_to_idx, chunk_idx_to_id
-
-
-# variant_edge_pairs / emb_synonym_edges sunk to app.domain.kg.ppr_pairs in B3
-# (pure functions, zero app.services/app.repositories dependency, so
-# app.repositories adapters can import them directly). Re-exported here
-# unchanged so this module's own callers (build_scale_index and friends)
-# keep resolving to the SAME objects without any call-site changes.
-from app.domain.kg.ppr_pairs import emb_synonym_edges, variant_edge_pairs  # noqa: F401
 
 
 def run_ppr(

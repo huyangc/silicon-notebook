@@ -1871,7 +1871,7 @@ class UnifiedKgStorePort(Protocol):
     # `kg_community_edges` / `kg_source_profiles` 的每一行都成了悬空引用,而 T3 的
     # 记忆化签名(state 的 seq + 账本行的 seq/created_at)在 `force=True` 的同 seq
     # 重铸上一个字段都不会变。理由与「为什么只作废这两份」见
-    # `app.services.kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+    # `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
     # ⚠ 它只覆盖**本次自己重铸板块**那一档(全量路径:重铸与作废同事务,构造上自洽)。
     # 「板块被**别人**换掉」那一档由上面的 `board_partition_still_holds` 守 —— 补账本
     # 路径根本不调本方法(它不重铸板块),所以两条都要,少一条就漏一半。

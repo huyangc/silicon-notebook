@@ -4,7 +4,8 @@ The authoritative KG edge contract now lives in
 ``app.domain.kg.edge_schema`` (zero ``app.*`` dependency, so
 ``app.repositories`` adapters can import it directly). This module
 re-exports every name unchanged so existing importers keep resolving to the
-SAME objects without any call-site changes.
+SAME objects without any call-site changes. New ``EdgeSpec`` entries must be
+declared in ``app.domain.kg.edge_schema``, never appended here.
 """
 from __future__ import annotations
 
