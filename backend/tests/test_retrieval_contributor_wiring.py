@@ -639,3 +639,219 @@ def test_registered_independent_contribution_still_enters_the_host():
     # Declaring the capability disabled drops the graph contribution at the
     # registration filter, so its live decision is never even consulted.
     assert graph_decisions == []
+
+
+def _candidates_with_host(host, *, mode: str = "off", trigger_hits: int = 5):
+    """A minimal ``CandidateRetrievalService`` instance for exercising
+    ``_run_chunk_candidate_contributors`` without a real repository."""
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    candidates = object.__new__(CandidateRetrievalService)
+    candidates.settings = SimpleNamespace(
+        generated_question_index_mode=mode,
+        generated_question_trigger_hits=trigger_hits,
+        chunk_recall=10,
+        generated_question_recall=10,
+        max_total_tokens=1000,
+    )
+    candidates.retrieval_contributors = host
+    candidates.database = SimpleNamespace(is_connection_held=lambda: False)
+    candidates.event_log = SimpleNamespace(emit=lambda _event: None)
+    return candidates
+
+
+def test_dormant_generated_question_lane_never_reaches_the_host(monkeypatch):
+    """Off/untriggered + nothing else registered at ``chunk_candidates`` =>
+    the baseline is returned before the call bridge or the typed call-context
+    envelope is ever constructed.
+
+    Mirrors ``test_dormant_selected_evidence_lane_never_reaches_the_host``
+    (codex #565) for the generated-question lane
+    (``retrieval_candidates.CandidateRetrievalService._run_chunk_candidate_contributors``).
+    The traps are *recorders*, not raisers, for the same reason as that test:
+    a raise from inside the constructor call would be silently absorbed by
+    the surrounding ``except Exception:`` in
+    ``_run_chunk_candidate_contributors``, so a regression that merely moves
+    the short circuit *below* the constructors would still pass a raising
+    trap.
+    """
+    from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
+    from app.extensions import default_extension_runtime
+    from app.services import generated_question_contribution as gq_module
+    from app.services.retrieval_run import retrieval_run
+
+    recorder: list[str] = []
+
+    def _recording(name: str):
+        original = getattr(gq_module, name)
+
+        def _wrapped(*args, **kwargs):
+            recorder.append(name)
+            return original(*args, **kwargs)
+
+        return _wrapped
+
+    monkeypatch.setattr(
+        gq_module,
+        "GeneratedQuestionContributionCall",
+        _recording("GeneratedQuestionContributionCall"),
+    )
+    monkeypatch.setattr(
+        gq_module,
+        "generated_question_call_context",
+        _recording("generated_question_call_context"),
+    )
+
+    host = _CountingHost(default_extension_runtime().retrieval_contributors)
+    candidates = _candidates_with_host(host, mode="off")
+    # A dormant lane must not even touch the connection probe or emit an
+    # event -- both would only be reached past the short circuit.
+    candidates.database = SimpleNamespace(
+        is_connection_held=lambda: (_ for _ in ()).throw(
+            AssertionError("dormant lane touched the connection probe")
+        )
+    )
+    candidates.event_log = SimpleNamespace(
+        emit=lambda _event: (_ for _ in ()).throw(
+            AssertionError("dormant lane emitted an event")
+        )
+    )
+
+    baseline = ([], [], None)
+    with retrieval_run(run_kind="ask_chunk", actor_id="actor"):
+        result = candidates._run_chunk_candidate_contributors(
+            "notebook", "question", baseline
+        )
+
+    assert recorder == []
+    assert host.runs == []
+    assert host.queries == [
+        (
+            "chunk_candidates",
+            frozenset({GENERATED_QUESTION_ACCESS_CAPABILITY}),
+            False,
+        ),
+    ]
+    assert result is baseline
+
+
+def test_failing_generated_question_topology_probe_still_enters_the_host():
+    """The probe is an optimisation; failing it must never drop a
+    contribution. Mirrors ``test_failing_topology_probe_still_enters_the_host``
+    for the generated-question lane."""
+    from app.services.retrieval_run import retrieval_run
+
+    class _BrokenProbeHost(_RecordingHost):
+        def has_contributions(self, _invocation, **_kwargs):
+            raise RuntimeError("probe exploded")
+
+    baseline = ([], [], None)
+    host = _BrokenProbeHost(output=baseline[0])
+    candidates = _candidates_with_host(host, mode="off")
+
+    with retrieval_run(run_kind="ask_chunk", actor_id="actor"):
+        result = candidates._run_chunk_candidate_contributors(
+            "notebook", "question", baseline
+        )
+
+    assert [invocation for _baseline, invocation in host.calls] == [
+        "chunk_candidates",
+    ]
+    assert result is baseline
+
+
+def test_registered_independent_generated_question_contribution_still_enters_the_host():
+    """Non-vacuous generality for the generated-question lane's own short
+    circuit: another real ``chunk_candidates`` contribution keeps the host
+    call even while the generated-question capability itself stays disabled.
+    Mirrors ``test_registered_independent_contribution_still_enters_the_host``.
+    """
+    from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
+    from app.extensions import build_extension_runtime
+    from app.extension_sdk import (
+        EXTENSION_API_VERSION,
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        ContributionDeclaration,
+        ContributionKind,
+        ContributorResult,
+        EvidenceCandidate,
+        EvidenceProvenance,
+        ExtensionContribution,
+        ExtensionManifest,
+        ExtensionResultStatus,
+    )
+    from app.services.retrieval import RetrievedChunk
+    from app.services.retrieval_run import retrieval_run
+
+    def chunk(chunk_id: str) -> RetrievedChunk:
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="source", source_title="Source",
+            section_path="Section", text=chunk_id, notebook_id="notebook",
+        )
+
+    class _Independent:
+        invocations = frozenset({"chunk_candidates"})
+
+        def __init__(self):
+            self.calls = 0
+
+        def contribute(self, _context):
+            self.calls += 1
+            return ContributorResult((EvidenceCandidate(
+                identity="other", notebook_id="notebook", source_id="source",
+                provenance=EvidenceProvenance("chunk", "other"),
+                value=object(), token_cost=1,
+            ),), ExtensionResultStatus.AVAILABLE)
+
+    contributor = _Independent()
+    declaration = ContributionDeclaration(
+        "builtin.independent_chunk_candidate",
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        ContributionKind.CONTRIBUTOR,
+    )
+
+    class _Bundle:
+        manifest = ExtensionManifest(
+            id="builtin.independent_chunk_candidate", version="1.0.0",
+            api_version=EXTENSION_API_VERSION, display_name="Independent",
+            trust="builtin", contributions=(declaration,),
+        )
+
+        def register(self, registrar):
+            registrar.add_contributor(
+                ExtensionContribution(declaration, contributor)
+            )
+
+    runtime = build_extension_runtime((_Bundle(),))
+    host = _CountingHost(runtime.retrieval_contributors)
+    candidates = _candidates_with_host(host, mode="off")
+    candidates.hydrate_retrieval_contribution_chunks = (
+        lambda _notebook_id, _actor_id, _ids: [chunk("other")]
+    )
+    candidates._hydrate_chunk_candidates = (
+        lambda cand_ids: ([], list(cand_ids), "MATRIX")
+    )
+
+    baseline_chunk = chunk("base")
+    baseline = ([baseline_chunk], ["base"], None)
+
+    with retrieval_run(run_kind="ask_chunk", actor_id="actor"):
+        result = candidates._run_chunk_candidate_contributors(
+            "notebook", "question", baseline
+        )
+
+    scored, ids, matrix = result
+    assert host.queries == [
+        (
+            "chunk_candidates",
+            frozenset({GENERATED_QUESTION_ACCESS_CAPABILITY}),
+            True,
+        ),
+    ]
+    assert host.runs == [
+        ("chunk_candidates", frozenset({GENERATED_QUESTION_ACCESS_CAPABILITY})),
+    ]
+    assert contributor.calls == 1
+    assert [item.chunk_id for item in scored] == ["base", "other"]
+    assert ids == ["base", "other"]
+    assert matrix == "MATRIX"

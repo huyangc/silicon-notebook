@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from app.domain.retrieval_experience import project_run_step, project_trace_step
 from app.models.ask import (
     ActiveAskJob,
     AskRequest,
@@ -24,8 +25,6 @@ from app.repositories.ports import (
     project_report_attempt,
     project_report_row,
     project_run_row,
-    project_run_step,
-    project_trace_step,
 )
 from app.repositories.postgres._store_utils import (
     json_value,

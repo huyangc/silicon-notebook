@@ -691,11 +691,11 @@ class UsageStats:
     member's own activity in ONE notebook.
 
     Deliberately no answer text, no Memory content and no evidence excerpts:
-    the projections in ``ports.project_trace_step``/``project_report_row``/
-    ``project_report_attempt`` keep an action type, a human summary, a
-    duration and one count (asks) or a question and per-direction wording
-    plus an error flag (reports), and this dataclass cannot hold anything
-    those projections did not produce.
+    the projections in ``app.domain.retrieval_experience.project_trace_step``/
+    ``ports.project_report_row``/``project_report_attempt`` keep an action
+    type, a human summary, a duration and one count (asks) or a question and
+    per-direction wording plus an error flag (reports), and this dataclass
+    cannot hold anything those projections did not produce.
     """
 
     #: Projected ask rows, newest first (``ports.project_ask_row`` shape).
@@ -2429,7 +2429,8 @@ class AgentProfileConsolidationService:
 
         Private Memory content is not in this sample and cannot be: the ask
         projection keeps an action type, a summary, a duration and a count
-        (``ports.project_trace_step``), so even the ``memory`` step
+        (``app.domain.retrieval_experience.project_trace_step``), so even
+        the ``memory`` step
         contributes only "found N"; the report projection keeps a question
         and, per confirmed direction, that direction's own wording plus
         whether executing it errored

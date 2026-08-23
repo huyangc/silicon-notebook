@@ -16,7 +16,21 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.services.agent_profile_block import PROFILE_LABEL_ORDER
+#: The five app-layer labels, in render order. Canonical definition lives
+#: here (not in ``app.services.agent_profile_block``, which imports it back)
+#: because ``app.models`` must stay import-clean of ``app.services`` --
+#: see ``scripts/architecture_boundary_baseline.json`` ::
+#: core_models_service_imports (now empty). This tuple is also the renderer's
+#: whitelist: a row whose label is not here renders nothing at all -- see
+#: ``agent_profile_block.selected_profile_blocks`` for why dropping beats
+#: rendering-at-the-end.
+PROFILE_LABEL_ORDER: tuple[str, ...] = (
+    "corpus_shape",
+    "key_entities",
+    "corpus_gaps",
+    "retrieval_notes",
+    "usage_gaps",
+)
 
 #: Wire-level scope discriminator. ``"shared"`` = the notebook-wide base layer
 #: (write requires ``agent_profile:write``); ``"mine"`` = the caller's own

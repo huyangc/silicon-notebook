@@ -10,7 +10,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from app.core.config import Settings
 from app.core.cache import CacheBackend, is_cacheable_llm_response, llm_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
-from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
+from app.domain.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
 
 
 def llm_status_code(exc: Exception) -> int | None:

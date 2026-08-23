@@ -25,6 +25,8 @@ facade_surface_additions = _GUARD.facade_surface_additions
 function_length = _GUARD.function_length
 function_length_violations = _GUARD.function_length_violations
 import_graph = _GUARD.import_graph
+ports_method_count_violations = _GUARD.ports_method_count_violations
+ports_protocol_method_count = _GUARD.ports_protocol_method_count
 public_class_surface = _GUARD.public_class_surface
 repository_service_import_violations = (
     _GUARD.repository_service_import_violations
@@ -283,18 +285,28 @@ def test_baseline_ceilings_and_allowlist_have_not_collapsed_to_empty():
     would make every ceiling/allowlist check vacuously pass -- both loops in
     ``function_length_violations``/``core_models_service_import_violations``
     iterate the *baseline*, not the repository, so an empty baseline finds
-    nothing to check. This reads the real checked-in baseline and pins it to
-    a non-trivial lower bound and to the exact known allowlist, so a
-    baseline that quietly lost its contents fails loudly here instead of the
-    real guard run silently no-op'ing.
+    nothing to check. This reads the real checked-in baseline and pins the
+    function-length half to a non-trivial lower bound.
+
+    The core/models allowlist is legitimately empty now -- both debt edges it
+    used to carry (``app.core.llm -> app.services.cancellation`` and
+    ``app.models.agent_profile -> app.services.agent_profile_block``) were
+    fixed by moving the shared definitions into ``app.domain``/``app.models``
+    respectively, so an empty allowlist here can no longer be told apart from
+    a quietly-truncated baseline by pinning it to a non-trivial value the way
+    the function-length half above does. Instead this scans the real
+    checked-in ``backend/app`` tree with the same
+    ``core_models_service_import_edges`` the guard itself calls and asserts
+    the live edge set is *also* empty -- a baseline that went empty for the
+    wrong reason (a normalization regression hiding a real edge, rather than
+    the edges actually being gone) still fails loudly here instead of the
+    real guard run silently no-op'ing on a checked-in violation.
     """
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
 
     assert len(baseline["function_length_ceiling"]) >= 22
-    assert set(baseline["core_models_service_imports"]["allowed"]) == {
-        "app.core.llm -> app.services.cancellation",
-        "app.models.agent_profile -> app.services.agent_profile_block",
-    }
+    assert set(baseline["core_models_service_imports"]["allowed"]) == set()
+    assert core_models_service_import_edges(ROOT / "backend" / "app") == set()
 
 
 def test_core_models_service_import_edges_normalize_to_the_submodule(tmp_path):
@@ -408,6 +420,75 @@ def test_function_length_ceiling_only_allows_reduction(tmp_path):
         "(update scripts/architecture_boundary_baseline.json :: "
         "function_length_ceiling)"
     ]
+
+
+def _write_ports(root: Path, source: str) -> None:
+    _write(root / "backend" / "app" / "repositories" / "ports.py", source)
+
+
+def test_ports_protocol_method_count_ceiling_only_allows_reduction(tmp_path):
+    """Mirrors ``test_function_length_ceiling_only_allows_reduction``: zero
+    slack in both directions on ``ports.py``'s total Protocol method count,
+    same rationale as the hot-function ceiling above it -- an only-grow
+    ceiling would let a later regression spend headroom a prior shrink left
+    unclaimed.
+    """
+    _write_ports(
+        tmp_path,
+        "class Store:\n"
+        "    def a(self): ...\n"
+        "    def b(self): ...\n",
+    )  # 2 protocol methods
+
+    assert ports_method_count_violations(tmp_path, 2) == []
+
+    _write_ports(
+        tmp_path,
+        "class Store:\n"
+        "    def a(self): ...\n"
+        "    def b(self): ...\n"
+        "    def c(self): ...\n",
+    )  # 3 protocol methods
+    assert ports_method_count_violations(tmp_path, 2) == [
+        "ports.py gained protocol methods: 3 > 2 "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "ports_protocol_method_count)"
+    ]
+
+    # The ceiling has zero slack: fewer methods than recorded must have the
+    # baseline lowered in the same change.
+    assert ports_method_count_violations(tmp_path, 4) == [
+        "ports.py protocol method ceiling is stale, lower it: 3 < 4 "
+        "(update scripts/architecture_boundary_baseline.json :: "
+        "ports_protocol_method_count)"
+    ]
+
+
+def test_ports_protocol_method_count_ignores_module_level_functions(tmp_path):
+    """Module-level ``def`` (e.g. ``project_run_row``) never counts -- only a
+    method nested directly inside a ``ClassDef`` body does."""
+    _write_ports(
+        tmp_path,
+        "def free_function():\n"
+        "    pass\n\n\n"
+        "class Store:\n"
+        "    def a(self): ...\n"
+        "    def b(self): ...\n",
+    )
+    assert ports_method_count_violations(tmp_path, 2) == []
+
+    # Adding a THIRD module-level function still must not move the count.
+    _write_ports(
+        tmp_path,
+        "def free_function():\n"
+        "    pass\n\n\n"
+        "def another_free_function():\n"
+        "    pass\n\n\n"
+        "class Store:\n"
+        "    def a(self): ...\n"
+        "    def b(self): ...\n",
+    )
+    assert ports_method_count_violations(tmp_path, 2) == []
 
 
 def test_function_length_excludes_decorator_lines(tmp_path):

@@ -1,24 +1,16 @@
 from __future__ import annotations
 
-import time
+# Pure re-export: the actual definitions live in ``app.domain.cancellation``
+# (a stable, dependency-free layer) so that ``app.core``/``app.models`` can
+# import cancellation primitives without reaching into ``app.services`` --
+# see ``scripts/architecture_boundary_baseline.json`` :: core_models_service_imports
+# (now empty). Every existing importer of ``app.services.cancellation`` keeps
+# working unchanged; only the canonical definition moved.
+from app.domain.cancellation import (  # noqa: F401
+    AskCancelled,
+    CancelEvent,
+    raise_if_cancelled,
+    sleep_or_cancel,
+)
 
-from app.domain.cancellation import CancelEvent, CoreCancellation
-
-
-class AskCancelled(CoreCancellation):
-    """Raised when an in-flight Ask request is cancelled by the client."""
-
-
-def raise_if_cancelled(cancel_event: CancelEvent) -> None:
-    if cancel_event is not None and cancel_event.is_set():
-        raise AskCancelled()
-
-
-def sleep_or_cancel(seconds: float, cancel_event: CancelEvent) -> None:
-    deadline = time.monotonic() + max(0.0, seconds)
-    while True:
-        raise_if_cancelled(cancel_event)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(0.1, remaining))
+__all__ = ["AskCancelled", "CancelEvent", "raise_if_cancelled", "sleep_or_cancel"]

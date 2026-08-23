@@ -19,11 +19,11 @@ from dataclasses import fields, is_dataclass
 
 import pytest
 
+from app.domain.retrieval_experience import project_run_step
 from app.repositories.ports import (
     RETRIEVAL_EXPERIENCE_BATCH_RUNS,
     RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
     RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS,
-    project_run_step,
 )
 from app.services.retrieval_experience_job import (
     _offered_entries,
@@ -1120,7 +1120,7 @@ def test_provenance_and_support_belong_only_to_runs_that_used_the_action():
 def test_the_grounding_signal_reads_anchors_never_the_fallback_cards():
     """codex #524 R9 P2:citations 是兜底卡数,零绑定回答里照样非零——接地
     信号必须取 anchors,缺 anchors 的旧行按 0(保守,不学假成功)。"""
-    from app.repositories.ports import project_run_step
+    from app.domain.retrieval_experience import project_run_step
 
     grounded = project_run_step(
         {"step_type": "synthesis", "summary": "",

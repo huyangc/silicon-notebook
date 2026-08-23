@@ -23,19 +23,18 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-# The five app-layer labels, in render order. This tuple is also the whitelist:
-# a row whose label is not here renders nothing at all. Dropping beats
+from app.models.agent_profile import PROFILE_LABEL_ORDER
+
+# PROFILE_LABEL_ORDER: the five app-layer labels, in render order. Canonical
+# definition lives in ``app.models.agent_profile`` (a lower layer this module
+# can import forward without creating the reverse ``app.models -> app.services``
+# edge it used to be) -- see ``scripts/architecture_boundary_baseline.json`` ::
+# core_models_service_imports (now empty). This tuple is also the whitelist: a
+# row whose label is not here renders nothing at all. Dropping beats
 # rendering-at-the-end because the block's whole point is a fixed, predictable
 # shape the planning model sees identically on every round of every run; an
 # unknown label can only come from a future writer that has not been taught
 # what this block means yet, and a stray line is worse than a missing one.
-PROFILE_LABEL_ORDER: tuple[str, ...] = (
-    "corpus_shape",
-    "key_entities",
-    "corpus_gaps",
-    "retrieval_notes",
-    "usage_gaps",
-)
 
 # Human-readable name per label. A mismatch against ``PROFILE_LABEL_ORDER`` is
 # NOT a KeyError at runtime in either direction: a label present only in
