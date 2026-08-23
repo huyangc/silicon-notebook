@@ -66,6 +66,37 @@ def _retriever(cancel_event=None) -> ReasoningRetriever:
     )
 
 
+def _prepared_ask(**overrides) -> PreparedReasoningAsk:
+    """Minimal ``PreparedReasoningAsk`` for direct ``_commit_reasoning_draft``
+    calls -- the commit boundary now re-verifies the draft's identity fields
+    against this object (codex #571 R2 P2), so a test that builds a
+    ``ReasoningResponseDraft`` by hand must hand over a matching one.  Field
+    defaults mirror the drafts constructed below (``notebook_id="nb"``,
+    ``question="q"``, ``conversation_id="conv"``, ``user_id="user"``,
+    ``job_id=""``, ``asked_at=""``); override only what a given test varies.
+    """
+
+    defaults = dict(
+        notebook_id="nb",
+        question="q",
+        conversation_id="conv",
+        history="",
+        style_block="",
+        intent_json="{}",
+        research_question="q",
+        intent_queries=(),
+        limits=ask_retrieval_limits("standard"),
+        intent_projection=_projection(),
+        intent_trace_duration_ms=None,
+        user_id="user",
+        job_id="",
+        asked_at="",
+        retrieval_effort="standard",
+    )
+    defaults.update(overrides)
+    return PreparedReasoningAsk(**defaults)
+
+
 def test_reasoning_stage_data_contracts_are_frozen_slotted_and_narrow():
     for contract in (
         ReasoningIntentProjection,
@@ -336,7 +367,7 @@ def test_run_kind_authority_rejects_hostile_str_subclass(monkeypatch):
             asked_at="",
         )
         with pytest.raises(StageBoundaryError, match="run kind"):
-            service._commit_reasoning_draft(draft, runtime)
+            service._commit_reasoning_draft(draft, runtime, _prepared_ask())
     assert legacy_calls == []
     assert saves == []
 
@@ -528,7 +559,7 @@ def test_commit_stage_preserves_the_shared_response_object_graph(monkeypatch):
         asked_at="",
     )
 
-    committed = service._commit_reasoning_draft(draft, runtime)
+    committed = service._commit_reasoning_draft(draft, runtime, _prepared_ask())
 
     assert committed.response is response
     assert committed.response.citations[0] is citation
@@ -564,7 +595,7 @@ def test_commit_stage_requires_the_injected_connection_probe_identity(
     )
 
     with pytest.raises(StageBoundaryError, match="connection authority changed"):
-        service._commit_reasoning_draft(draft, runtime)
+        service._commit_reasoning_draft(draft, runtime, _prepared_ask())
     assert saves == []
 
 
@@ -594,12 +625,14 @@ def test_commit_stage_rejects_wrong_run_kind_and_empty_actor(monkeypatch):
             job_id="",
             asked_at="",
         )
+        prepared = _prepared_ask(user_id="victim")
         with pytest.raises(StageBoundaryError, match="run kind changed"):
-            service._commit_reasoning_draft(draft, runtime)
+            service._commit_reasoning_draft(draft, runtime, prepared)
 
         empty_actor = dataclasses.replace(draft, user_id="")
+        empty_prepared = dataclasses.replace(prepared, user_id="")
         with pytest.raises(StageBoundaryError, match="actor authority"):
-            service._commit_reasoning_draft(empty_actor, runtime)
+            service._commit_reasoning_draft(empty_actor, runtime, empty_prepared)
     assert saves == []
 
 
@@ -821,6 +854,88 @@ def test_injected_response_draft_stage_replaces_only_the_draft(monkeypatch):
     # Persistence stayed core-owned: the stage never saw ``_save_answer``.
     assert saves == ["user"]
     assert result.answer_id == "answer-1"
+
+
+@pytest.mark.parametrize(
+    "field,forged_value",
+    [
+        ("notebook_id", "other-notebook"),
+        ("conversation_id", "other-conversation"),
+        ("job_id", "other-job"),
+        ("question", "a different question"),
+    ],
+)
+def test_response_draft_stage_cannot_forge_the_committed_job_or_conversation_identity(
+    monkeypatch, field, forged_value,
+):
+    """The commit boundary re-verifies every identity field the draft
+    envelope carries against ``prepared`` -- the same frozen input the stage
+    was actually handed -- so an injected stage cannot silently persist the
+    answer into a different job, conversation or notebook, or under a
+    different question, than the one it was asked to serve.  A stage that
+    left one of these fields at a benign-looking default is exactly what this
+    guards against: nothing else on the commit path re-derives them from
+    ``prepared`` (codex #571 R2 P2)."""
+
+    _stub_retrieval(monkeypatch)
+
+    def forge(stage, runtime):
+        fields = dict(
+            notebook_id=stage.prepared.notebook_id,
+            question=stage.prepared.question,
+            response=AskResponse(conclusion="drafted", mode="reasoning"),
+            conversation_id=stage.prepared.conversation_id,
+            user_id=stage.prepared.user_id,
+            job_id=stage.prepared.job_id,
+            asked_at=stage.prepared.asked_at,
+        )
+        fields[field] = forged_value
+        return ReasoningResponseDraft(**fields)
+
+    stage_impl = SimpleNamespace(draft_response=forge)
+    service = _minimal_ask_service(response_draft_stage=stage_impl)
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(StageBoundaryError, match=f"changed {field}"):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert saves == []
+
+
+def test_injected_response_draft_stage_keeps_retrieval_side_model_errors_without_the_private_sink(
+    monkeypatch,
+):
+    """core, not the stage, owns filling ``model_errors``: the orchestrator
+    copies the request-local model-error sink onto the drafted response right
+    after the stage returns, so an injected stage that never imports the
+    private ``_ASK_MODEL_ERRORS`` ContextVar still ships retrieval-side
+    warnings (memory recall, planning/reflection model calls) to the user
+    (codex #571 R2 P2)."""
+
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+
+    def on_run():
+        sink = _ASK_MODEL_ERRORS.get()
+        assert sink is not None
+        sink.append({"stage": "embed", "message": "missing_config"})
+
+    _stub_retrieval(monkeypatch, on_run=on_run)
+    response = AskResponse(conclusion="drafted", mode="reasoning")
+    # A stage double that never touches ``model_errors`` at all -- it is a
+    # plain attribute on the ``AskResponse`` it hands back, defaulting to
+    # ``[]``, exactly like an implementation that has never heard of the
+    # private sink.
+    stage = _RecordingDraftStage(response)
+    service = _minimal_ask_service(response_draft_stage=stage)
+    monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
+
+    result = service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+
+    assert result is response
+    assert [item.stage for item in result.model_errors] == ["embed"]
+    assert [item.message for item in result.model_errors] == ["missing_config"]
 
 
 def test_default_response_draft_stage_is_the_shipped_inline_logic(monkeypatch):

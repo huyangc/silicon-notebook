@@ -2454,8 +2454,23 @@ class AskService:
             retrieval_effort=payload.retrieval_effort,
         )
 
-    def _commit_reasoning_draft(self, draft, runtime):
+    def _commit_reasoning_draft(self, draft, runtime, prepared):
         """The only reasoning answer persistence boundary.
+
+        Beyond ``mode``, this re-verifies every identity field the draft
+        envelope carries against ``prepared`` -- the same frozen input every
+        stage (shipped or injected) actually received.  A stage constructs
+        ``ReasoningResponseDraft`` itself, so nothing upstream of this
+        boundary previously stopped an injected implementation from writing
+        the answer into a *different* job or conversation than the one it was
+        asked to serve; even a benign implementation that left a field at its
+        dataclass default would silently persist inconsistent payload
+        metadata (codex #571 R2 P2).  ``notebook_id``/``user_id`` also get a
+        narrower cross-check a few lines down from ``_assert_reasoning_runtime``
+        (against the retrieval run actor and, when the request scoped
+        sources, the source scope's own notebook) -- this sweep is the one
+        place all six fields are compared against the same source of truth
+        regardless of whether those narrower authorities happen to be armed.
 
         The cancellation checkpoint is deliberately before the atomic save.
         Once that save succeeds, the completed answer wins; a late token must
@@ -2463,6 +2478,7 @@ class AskService:
         """
         from app.application.ask_reasoning import (
             CommittedReasoningAnswer,
+            PreparedReasoningAsk,
             ReasoningResponseDraft,
             ReasoningRetrievalRuntime,
             StageBoundaryError,
@@ -2472,10 +2488,24 @@ class AskService:
             raise StageBoundaryError("invalid reasoning response draft")
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError("invalid reasoning commit runtime")
+        if type(prepared) is not PreparedReasoningAsk:
+            raise StageBoundaryError("invalid reasoning commit prepared input")
         if type(draft.response) is not AskResponse:
             raise StageBoundaryError("invalid reasoning response graph")
         if draft.response.mode != "reasoning":
             raise StageBoundaryError("response draft changed the ask mode")
+        if draft.notebook_id != prepared.notebook_id:
+            raise StageBoundaryError("response draft changed notebook_id")
+        if draft.question != prepared.question:
+            raise StageBoundaryError("response draft changed question")
+        if draft.conversation_id != prepared.conversation_id:
+            raise StageBoundaryError("response draft changed conversation_id")
+        if draft.user_id != prepared.user_id:
+            raise StageBoundaryError("response draft changed user_id")
+        if draft.job_id != prepared.job_id:
+            raise StageBoundaryError("response draft changed job_id")
+        if draft.asked_at != prepared.asked_at:
+            raise StageBoundaryError("response draft changed asked_at")
         response = draft.response
         self._assert_reasoning_runtime(
             runtime,
@@ -2573,6 +2603,7 @@ class AskService:
                     baseline_manifest=baseline_manifest,
                 ),
                 runtime,
+                prepared,
             )
 
         def stream_intent() -> None:
@@ -3006,12 +3037,27 @@ class AskService:
                 ),
                 runtime,
             )
+            # ``model_errors`` 由 core 统一填充,不再要求(也不再允许假定)stage
+            # 自己写了它:检索阶段(memory 召回、``ReasoningRetriever.run()`` 内部
+            # 的规划/反思模型调用)记的报警都落在这同一个请求局部 ``_err_sink``
+            # 里,一个从不 import 私有 ``_ASK_MODEL_ERRORS`` 的注入 stage 不会
+            # 因此丢掉它们(codex #571 R2 P2)。放在 stage 返回之后、``finally``
+            # 的 reset 之前——``_err_sink`` 是一个局部变量,值不因 ContextVar
+            # reset 而改变,但填充动作留在权威读取仍然有效的这一刻,不必去
+            # reset 之后再论证为什么局部变量还能用。
+            # 类型防御同 ``_commit_reasoning_draft``:``draft.response`` 若不是
+            # ``AskResponse``,让那个边界自己的类型检查去报
+            # "invalid reasoning response graph",这里不重复、也不因此崩溃。
+            if type(draft.response) is AskResponse:
+                draft.response.model_errors = [
+                    ModelError(**e) for e in _err_sink
+                ]
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
             _ASK_EMBED_CACHE.reset(_emb_token)
         # 持久化边界仍由 core 独占:最后一次取消检查与原子 save 都在
         # ``_commit_reasoning_draft`` 里,任何 stage 实现都够不到它们。
-        return self._commit_reasoning_draft(draft, runtime)
+        return self._commit_reasoning_draft(draft, runtime, prepared)
 
     def _draft_reasoning_response(self, stage, runtime):
         """The shipped ``ResponseDraftStage`` body: evidence -> response draft.
@@ -3024,12 +3070,12 @@ class AskService:
         renamed -- the seam is the injected ``DefaultResponseDraftStage``
         object, not a rename across 650 lines of body.
 
-        The response graph is *finished* here, including ``mode`` and the
-        response-visible ``model_errors``, so the only mutation left after the
-        frozen envelope is ``answer_id`` -- which the commit boundary owns.
-        Ordering ``model_errors`` before rather than after the caller's
-        ContextVar reset is immaterial: both read the same request-local list
-        object, and nothing appends to it once the response is assembled.
+        The response graph is *finished* here, including ``mode`` -- so the
+        only mutations left after the frozen envelope are ``model_errors``
+        (filled by the orchestrator right after this stage returns, from the
+        same request-local sink, so every stage gets the same treatment
+        without needing to import it -- see ``_run_reasoning_stage``) and
+        ``answer_id`` (which the commit boundary owns).
         """
         from app.application.ask_reasoning import (
             ReasoningResponseDraft,
@@ -3738,7 +3784,15 @@ class AskService:
         )
 
         response.mode = "reasoning"
-        response.model_errors = [ModelError(**e) for e in _err_sink]
+        # ``model_errors`` is deliberately *not* set here any more: the
+        # orchestrator (``_run_reasoning_stage``) fills
+        # ``draft.response.model_errors`` from the same request-local
+        # ``_err_sink`` right after this stage returns, so every stage --
+        # shipped or injected -- gets the same treatment and an injected
+        # implementation is never required to import the private
+        # ``_ASK_MODEL_ERRORS`` ContextVar just to keep retrieval-side
+        # warnings visible (codex #571 R2 P2).  Setting it here too would
+        # only assign it twice with the same value.
         return ReasoningResponseDraft(
             notebook_id=notebook_id,
             question=prepared.question,

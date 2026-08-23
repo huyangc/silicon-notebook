@@ -41,11 +41,21 @@ class ResponseDraftStage(Protocol):
     boundary, so no stage implementation can reach the atomic save, the job
     terminal state, or the answer row.
 
-    ``mode`` (always ``"reasoning"``) and ``model_errors`` are produced by the
-    stage as part of the drafted ``AskResponse`` -- core re-verifies ``mode``
-    at the commit boundary (``_commit_reasoning_draft``) so a stage cannot
-    silently steer a reasoning turn's persisted answer into another mode's
-    shape.
+    ``mode`` (always ``"reasoning"``) is produced by the stage as part of the
+    drafted ``AskResponse``.  ``model_errors`` is the opposite: the stage does
+    not need to and should not set it -- core fills
+    ``draft.response.model_errors`` from the request-local model-error sink
+    itself, right after the stage returns and before the retrieval
+    ``ContextVar``s reset, so retrieval-side warnings survive even a stage
+    that never imports the private sink (codex #571 R2 P2).
+
+    Core re-verifies ``mode`` *and* every identity field the draft envelope
+    carries (``notebook_id``, ``question``, ``conversation_id``, ``user_id``,
+    ``job_id``, ``asked_at``) against the same frozen ``PreparedReasoningAsk``
+    the stage was handed, at the commit boundary (``_commit_reasoning_draft``)
+    -- so a stage cannot silently steer a reasoning turn's persisted answer
+    into another mode's shape, or into a different job/conversation/notebook
+    than the one it was asked to serve.
     """
 
     def draft_response(
