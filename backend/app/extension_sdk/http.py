@@ -8,6 +8,11 @@ and returns a router that core mounts under
 ``{PLUGIN_ROUTE_PREFIX}/{plugin_id}`` behind router-level session
 authentication. See ``app.domain.extension_http`` for the full contract; this
 module only re-exports it for plugin code plus the point name.
+
+Deliberately *not* re-exported: ``PluginRouterSpec``.  That type is produced by
+core's collector and consumed by core's mount helper; a plugin never builds one
+and never receives one, so exporting it would widen the SDK's public surface
+with a name no plugin can use.  It stays in ``app.domain.extension_http``.
 """
 from __future__ import annotations
 
@@ -18,7 +23,6 @@ from app.domain.extension_http import (
     PluginRejectedUrl,
     PluginRouteContext,
     PluginRouterFactory,
-    PluginRouterSpec,
     PluginUrlImportResult,
     PluginUrlSourceImportPort,
 )
@@ -38,7 +42,6 @@ __all__ = [
     "PluginRejectedUrl",
     "PluginRouteContext",
     "PluginRouterFactory",
-    "PluginRouterSpec",
     "PluginUrlImportResult",
     "PluginUrlSourceImportPort",
 ]

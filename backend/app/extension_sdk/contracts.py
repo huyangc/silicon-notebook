@@ -155,10 +155,17 @@ class ExtensionManifest:
     # Metadata-only workspace UI declarations.  Browser implementations stay
     # in the static frontend registry and must pass the cross-stack parity gate.
     ui_contributions: tuple[UiContributionDeclaration, ...] = ()
-    # Capability names this bundle supplies a probe for (deployment plugins
-    # only). Each entry must be a stable metadata id and have a matching
-    # entry in the bundle's capability_decisions mapping; see
-    # extensions/discovery.py::capability_decisions_from_bundles.
+    # Capability names this bundle supplies a probe for. Any bundle may declare
+    # them — the merge in extensions/discovery.py::capability_decisions_from_bundles
+    # checks every bundle, built-in ones included — though in practice only
+    # deployment plugins need to, since core's own probes are written directly
+    # into the decision catalog at composition.
+    #
+    # Each entry must be a stable metadata id (lowercase, separated by "." "_"
+    # or "-", e.g. "corp.ieee.available") and must have a matching entry in the
+    # bundle's capability_decisions mapping. Note ":" is not a legal separator
+    # here: core's own capability names read "point:name", and that spelling is
+    # reserved so a plugin can never mint a name shaped like a core one.
     provides: tuple[str, ...] = ()
 
 
