@@ -4,7 +4,7 @@
 
 本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。完整 Agent/开发约束仍以 [AGENTS.md](../AGENTS.md) 为准，详细运行时架构以 [architecture.md](../architecture.md) 为准。
 
-外部 Agent MCP 面由一个 API-owned registration host 和启动期冻结目录组成：`app.api.mcp_tools` 的固定 bundle 被捕获为精确 22-tool 面，`mcp_server.PUBLIC_TOOLS` 就是这份活目录，`CORE_TOOLS` 是同一份清单的结构化别名——不存在第二份手抄。core handler 保持既有 validation/auth/I/O 顺序，复用实时权威、owner-write、progress 与 output 边界。异常只映射稳定公开码，结果 rail 在递归复制过程中执行；注册/listing 为零 repository/model 工作。原先「追加显式信任的进程内 `agent.tool_provider` contributor 标量 descriptor」那一半零消费者，已整体移除。
+外部 Agent MCP 面由一个 API-owned registration host 和启动期冻结目录组成：`app.api.mcp_tools` 的固定 bundle 被捕获为精确 22-tool 面，`mcp_server.PUBLIC_TOOLS` 就是这份活目录，`CORE_TOOLS` 是同一份清单的结构化别名——不存在第二份手抄。core handler 保持既有 validation/auth/I/O 顺序，复用实时权威、owner-write、progress 与 output 边界。异常只映射稳定公开码；注册/listing 为零 repository/model 工作。原先「追加显式信任的进程内 `agent.tool_provider` contributor 标量 descriptor」那一半零消费者，已整体移除。
 
 深度报告后端批量导出是首个真实 single Provider 消费者。Repository 负责授权和已完成行收窄，释放连接后才把最小不可变批次交给启动冻结的 `report.exporter` host。默认内建 Markdown provider 是默认 topology 的唯一 provider，不存在 fallback formatter；core 校验完整有序结果并继续拥有文件名冲突策略与 ZIP 构造。浏览器既有单篇 Markdown 本地下载刻意保持不变，不属于后端 provider 路径。
 

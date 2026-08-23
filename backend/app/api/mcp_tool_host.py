@@ -81,8 +81,6 @@ def register_agent_tools(
     """Register the frozen core Agent tool prefix exactly once."""
     core_tools = capture_core_agent_tools(repository_provider)
     names = tuple(tool.name for tool in core_tools)
-    if len(names) != len(set(names)):
-        raise RuntimeError("duplicate Agent tool name")
     for tool in core_tools:
         server.add_tool(tool.handler, name=tool.name, description=tool.description)
     return names

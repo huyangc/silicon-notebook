@@ -735,7 +735,7 @@ other clients apply a flat per-call ceiling instead. `ask_notebook` in `reasonin
 routinely runs for minutes (plan, federated retrieval, reflect loop, synthesis) and
 `build_kg` can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 22 core tools and every provider tool therefore runs its blocking body
+answer was about to arrive. Every one of the 22 core tools therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -804,8 +804,8 @@ that cannot interpolate persists the raw header instead: use least-privilege sco
 expiry, protect the local config, and revoke/rotate the token after use.
 
 Every new MCP session must call `select_notebook` before a data tool. The default core tool set
-is these 22 tools; `mcp_server.CORE_TOOLS` derives that prefix and `mcp_server.PUBLIC_TOOLS`
-derives the full default frozen catalog, including any default trusted providers:
+is these 22 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 22 tools, not a larger combined
+catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
 | --- | --- | --- |
@@ -824,11 +824,15 @@ The deployed server-local frozen catalog is authoritative for discovery and onbo
 exactly the 22 tools above, derived live from the seven core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
 repeats live token/scope/allowlist/membership checks, and every write scope is forced through the
-owner-only notebook gate. Results must be JSON objects no deeper than 5 levels and at most
-12,000 UTF-8 bytes. The byte/depth rail is enforced while copying, so oversized containers are
-rejected before a second unbounded graph is built. Exceptions surface only as stable error codes;
-FastMCP schema errors occur before the tool body and remain transport/request audit events.
-Results are rejected whole, never silently truncated.
+owner-only notebook gate. Results are copied into a bounded shape while being built -- no deeper than 5 levels, with
+per-field/map/list limits applied one entry at a time -- so an oversized container is never fully
+materialized before being cut down. That bounded copy is then progressively and visibly shrunk
+(longest strings, then map entries, then list items, then identifiers as a last resort) until it
+fits the 12,000 UTF-8 byte total budget; every cut is reported back in a `truncation` field
+(`truncated`/`omitted_items`/`omitted_map_entries`/`omitted_characters`/`omitted_fields`).
+Exceptions surface only as stable error codes; FastMCP schema errors occur before the tool body
+and remain transport/request audit events. Only when the copy truly cannot be shrunk any further
+does the call fail outright, rather than returning a silently truncated result.
 
 `list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a
 live token, a notebook inside its allowlist, and read access to that notebook. Every session
