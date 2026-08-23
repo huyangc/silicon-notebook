@@ -385,6 +385,86 @@ def test_object_that_is_not_a_bundle_fails_startup(tmp_path):
     assert excinfo.value.reason == "plugin_not_a_bundle"
 
 
+_MANIFEST_PROPERTY_RAISES_BODY = """
+class Bundle:
+    @property
+    def manifest(self):
+        raise RuntimeError("token=TOPSECRET")
+
+    def register(self, registrar) -> None:
+        return None
+
+
+bundle = Bundle()
+"""
+
+
+def test_manifest_property_raising_is_sanitized_not_propagated(tmp_path, caplog):
+    """``manifest`` may be a ``property``, not a plain attribute.
+
+    A bare ``getattr(bundle, "manifest", None)`` only substitutes the default
+    for ``AttributeError``; any other exception raised by the accessor -- and
+    whatever secret-bearing message the plugin wrote into it -- would
+    otherwise propagate straight through this module's careful sanitization
+    and land in the startup traceback untouched.
+    """
+
+    module = _write_plugin_package(tmp_path, body=_MANIFEST_PROPERTY_RAISES_BODY)
+    config = _write_config(tmp_path, _entry(module))
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ExtensionDiscoveryError) as excinfo:
+            discover_deployment_extensions(config)
+
+    error = excinfo.value
+    assert error.reason == "plugin_not_a_bundle"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == "corp.sample"
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error) + caplog.text
+
+
+_REGISTER_PROPERTY_RAISES_BODY = """
+from app.extension_sdk import EXTENSION_API_VERSION, ExtensionManifest
+
+
+class Bundle:
+    manifest = ExtensionManifest(
+        id=PLUGIN_ID,
+        version="0.1.0",
+        api_version=EXTENSION_API_VERSION,
+        display_name="Sample deployment plugin",
+        trust="deployment",
+        contributions=(),
+    )
+
+    @property
+    def register(self):
+        raise RuntimeError("token=TOPSECRET")
+
+
+bundle = Bundle()
+"""
+
+
+def test_register_property_raising_is_sanitized_not_propagated(tmp_path, caplog):
+    """Same structural check, same hole, on the ``register`` side."""
+
+    module = _write_plugin_package(tmp_path, body=_REGISTER_PROPERTY_RAISES_BODY)
+    config = _write_config(tmp_path, _entry(module))
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ExtensionDiscoveryError) as excinfo:
+            discover_deployment_extensions(config)
+
+    error = excinfo.value
+    assert error.reason == "plugin_not_a_bundle"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == "corp.sample"
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error) + caplog.text
+
+
 def test_manifest_id_must_equal_the_config_key(tmp_path):
     module = _write_plugin_package(tmp_path, plugin_id="corp.sample")
     config = _write_config(
@@ -972,6 +1052,57 @@ def test_malformed_settings_binding_fails_with_stable_reason_codes(
     assert excinfo.value.__cause__ is None
 
 
+_SETTINGS_MODEL_PROPERTY_RAISES_BODY = """
+from app.extension_sdk import EXTENSION_API_VERSION, ExtensionManifest
+
+
+class Bundle:
+    manifest = ExtensionManifest(
+        id=PLUGIN_ID,
+        version="0.1.0",
+        api_version=EXTENSION_API_VERSION,
+        display_name="Sample deployment plugin",
+        trust="deployment",
+        contributions=(),
+    )
+
+    @property
+    def settings_model(self):
+        raise RuntimeError("token=TOPSECRET")
+
+    def register(self, registrar) -> None:
+        return None
+
+
+bundle = Bundle()
+"""
+
+
+def test_settings_model_property_raising_is_sanitized_not_propagated(
+    tmp_path, caplog
+):
+    """``settings_model`` is read unconditionally, even with no ``[settings]``
+    table at all -- so a raising accessor must be sanitized the same way a
+    plain-missing one already is (``plugin_settings_binding_missing``).
+    """
+
+    module = _write_plugin_package(
+        tmp_path, body=_SETTINGS_MODEL_PROPERTY_RAISES_BODY
+    )
+    config = _write_config(tmp_path, _entry(module))
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ExtensionDiscoveryError) as excinfo:
+            discover_deployment_extensions(config)
+
+    error = excinfo.value
+    assert error.reason == "plugin_settings_binding_missing"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == "corp.sample"
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error) + caplog.text
+
+
 def test_configure_failure_is_sanitized_and_never_echoes_the_value(tmp_path):
     """``configure`` sees the real settings; its exception must not carry them."""
 
@@ -1440,6 +1571,94 @@ def test_malformed_capability_declarations_fail_with_stable_reason_codes(
     # A hostile Mapping's exception text is plugin-authored; only its class name
     # may cross the boundary.
     assert "10_0_0_7" not in str(error) + repr(error)
+
+
+_CAPABILITY_DECISIONS_PROPERTY_RAISES_BODY = """
+from app.extension_sdk import EXTENSION_API_VERSION, ExtensionManifest
+
+
+class Bundle:
+    manifest = ExtensionManifest(
+        id=PLUGIN_ID,
+        version="0.1.0",
+        api_version=EXTENSION_API_VERSION,
+        display_name="Corp capability plugin",
+        trust="deployment",
+        contributions=(),
+    )
+
+    @property
+    def capability_decisions(self):
+        raise RuntimeError("token=TOPSECRET")
+
+    def register(self, registrar) -> None:
+        return None
+
+
+bundle = Bundle()
+"""
+
+
+def test_capability_decisions_property_raising_is_sanitized_not_propagated(
+    tmp_path,
+):
+    """Distinguish a raising ``capability_decisions`` *accessor* from a
+    ``Mapping`` whose iteration raises once obtained (the ``HostileMapping``
+    case above, parametrized into
+    ``test_malformed_capability_declarations_fail_with_stable_reason_codes``):
+    here the attribute read itself -- the ``getattr`` -- is what blows up,
+    before ``isinstance(decisions, Mapping)`` ever runs.
+    """
+
+    module = _write_plugin_package(
+        tmp_path, body=_CAPABILITY_DECISIONS_PROPERTY_RAISES_BODY
+    )
+    config = _write_config(tmp_path, _entry(module))
+    discovered = discover_deployment_extensions(config)
+
+    with pytest.raises(ExtensionDiscoveryError) as excinfo:
+        capability_decisions_from_bundles(
+            [item.bundle for item in discovered], {}
+        )
+
+    error = excinfo.value
+    assert error.reason == "plugin_capability_declaration_invalid"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == "corp.sample"
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error)
+
+
+def test_capability_merge_manifest_property_raising_is_sanitized(caplog):
+    """``capability_decisions_from_bundles`` re-reads ``manifest`` here, after
+    ``_load_bundle`` already read it once successfully during discovery -- so
+    a non-deterministic accessor can still blow up on this second read, and
+    before a plugin id is even known (the same reporting convention as every
+    other pre-identification rejection in this module, e.g.
+    ``config_unreadable``). Exercised directly against a hand-built bundle,
+    matching the existing built-in-substitution tests below, since this
+    function accepts any bundle-shaped object and does not require one to
+    have passed through the TOML/import machinery.
+    """
+
+    class Bundle:
+        @property
+        def manifest(self):
+            raise RuntimeError("token=TOPSECRET")
+
+        def register(self, registrar) -> None:
+            return None
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ExtensionDiscoveryError) as excinfo:
+            capability_decisions_from_bundles([Bundle()], {})
+
+    error = excinfo.value
+    assert error.reason == "plugin_attribute_access_failed"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == ""
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error) + caplog.text
 
 
 def _builtin_bundles() -> tuple[object, ...]:

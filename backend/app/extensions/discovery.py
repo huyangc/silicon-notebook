@@ -110,6 +110,30 @@ class DiscoveredExtension:
     settings: object | None
 
 
+def _plugin_attr(obj: object, name: str, plugin_id: str, reason: str) -> object:
+    """``getattr(obj, name, None)`` with the plugin's own exceptions sanitized.
+
+    Every "read this attribute off an object this module does not yet trust"
+    call below goes through here rather than a bare ``getattr``. A bundle
+    author can implement any attribute checked in this module — ``manifest``,
+    ``register``, ``settings_model``, ``configure``, ``capability_decisions``
+    — as a ``property`` or via ``__getattribute__`` that raises. A bare
+    ``getattr(obj, name, None)`` only substitutes the default for
+    ``AttributeError``; every *other* exception — carrying whatever
+    secret-bearing message the plugin wrote into it — propagates straight
+    through this module's careful sanitization and into the startup
+    traceback untouched. ``KeyboardInterrupt``/``SystemExit`` still propagate
+    unchanged, matching every other rejection path in this module.
+    """
+
+    try:
+        return getattr(obj, name, None)
+    except Exception as exc:
+        raise ExtensionDiscoveryError(
+            plugin_id, reason, exception_type=type(exc).__name__
+        ) from None
+
+
 def discover_deployment_extensions(
     config_path: str,
 ) -> tuple[DiscoveredExtension, ...]:
@@ -230,9 +254,9 @@ def _load_bundle(plugin_id: str, entry: Mapping[str, object]) -> object:
             exception_type=type(exc).__name__,
         ) from None
 
-    manifest = getattr(bundle, "manifest", None)
+    manifest = _plugin_attr(bundle, "manifest", plugin_id, "plugin_not_a_bundle")
     if type(manifest) is not ExtensionManifest or not callable(
-        getattr(bundle, "register", None)
+        _plugin_attr(bundle, "register", plugin_id, "plugin_not_a_bundle")
     ):
         raise ExtensionDiscoveryError(plugin_id, "plugin_not_a_bundle") from None
     if manifest.id != plugin_id:
@@ -270,8 +294,12 @@ def _bind_settings(
         raise ExtensionDiscoveryError(
             plugin_id, "plugin_settings_not_a_table"
         ) from None
-    model = getattr(bundle, "settings_model", None)
-    configure = getattr(bundle, "configure", None)
+    model = _plugin_attr(
+        bundle, "settings_model", plugin_id, "plugin_settings_binding_missing"
+    )
+    configure = _plugin_attr(
+        bundle, "configure", plugin_id, "plugin_settings_binding_missing"
+    )
     if model is None and configure is None:
         if table:
             raise ExtensionDiscoveryError(
@@ -352,10 +380,21 @@ def capability_decisions_from_bundles(
     merged: dict[str, AvailabilityProbe] = dict(core_decisions)
     claimed: dict[str, str] = {}
     for bundle in bundles:
-        manifest = getattr(bundle, "manifest", None)
+        # ``plugin_id`` is not known yet -- deriving it is exactly what this
+        # access is for -- so a raising ``manifest`` property is reported
+        # under an empty plugin id, same as every other pre-identification
+        # rejection in this module (e.g. ``config_unreadable``).
+        manifest = _plugin_attr(
+            bundle, "manifest", "", "plugin_attribute_access_failed"
+        )
         plugin_id = getattr(manifest, "id", "") if manifest is not None else ""
         provides = getattr(manifest, "provides", ()) if manifest is not None else ()
-        decisions = getattr(bundle, "capability_decisions", None)
+        decisions = _plugin_attr(
+            bundle,
+            "capability_decisions",
+            plugin_id,
+            "plugin_capability_declaration_invalid",
+        )
         if decisions is None:
             if provides:
                 raise ExtensionDiscoveryError(
