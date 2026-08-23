@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import ts from "typescript";
 
-import { importsIn, parseModule } from "../../test-support/semantic-source.mjs";
+import { callsIn, findFunctionIn, importsIn, parseModule } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
 const hook = await parseModule("use-kg-workspace.ts");
@@ -118,8 +118,19 @@ test("workspace transition and both authentication paths bind KG authority", () 
   assert.match(text, /kgWorkspace\.beginNotebookTransition\(\)/);
   assert.match(text, /kgWorkspace\.finishNotebookTransition\(kgTransition, opened \? openedNotebook : null\)/);
   assert.match(text, /kgWorkspace\.leaveWorkspace\(\)/);
-  assert.equal((text.match(/kgWorkspace\.activateActor\(u\.id\);/g) ?? []).length, 2);
-  assert.match(text, /kgWorkspace\.activateActor\(u\.id\);[\s\S]{0,220}setCurrentUser\(u\)/);
+  // kgWorkspace.activateActor 现在只经共享函数 activateWorkspaceOwners 间接调用；
+  // 守卫 workspace-owner-transition-guard 钉住「只能从那里发出」。原断言钉「两个
+  // 认证站点各出现一次 kgWorkspace.activateActor(u.id) 且紧邻 setCurrentUser」，
+  // 现拆成两半：共享函数体内恰好调用一次，加上两个认证站点各自
+  // activateWorkspaceOwners(u.id) 紧邻 setCurrentUser(u)。
+  assert.ok(
+    callsIn(findFunctionIn(page, "Home", "activateWorkspaceOwners")).includes("kgWorkspace.activateActor"),
+    "activateWorkspaceOwners must activate the KG workspace owner",
+  );
+  assert.equal(
+    (text.match(/activateWorkspaceOwners\(u\.id\);[\s\S]{0,220}setCurrentUser\(u\)/g) ?? []).length,
+    2,
+  );
   assert.match(
     text,
     /listBases\(notebookId\)[\s\S]{0,300}workspaceActorIdRef\.current === actorId[\s\S]{0,180}activeNotebookIdRef\.current === notebookId[\s\S]{0,180}workspaceEpochRef\.current === workspaceEpoch/,

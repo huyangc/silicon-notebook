@@ -47,8 +47,12 @@ test("workspace transitions invalidate root slots before old-domain work and clo
   const openCalls = callSitesIn(findFunctionIn(page, "Home", "openNotebook")).map(({ target }) => target);
   assert.ok(openCalls.includes("rootModals.beginWorkspaceTransition"));
   assert.ok(openCalls.includes("rootModals.finishWorkspaceTransition"));
+  // rootModals.leaveWorkspace 现在只经共享函数 leaveWorkspaceOwners 间接调用；
+  // 守卫 workspace-owner-transition-guard 钉住「只能从那里发出」。
   const collectionCalls = callSitesIn(findFunctionIn(page, "Home", "showCollection")).map(({ target }) => target);
-  assert.ok(collectionCalls.includes("rootModals.leaveWorkspace"));
+  assert.ok(collectionCalls.includes("leaveWorkspaceOwners"));
+  const leaveWorkspaceOwnersCalls = callSitesIn(findFunctionIn(page, "Home", "leaveWorkspaceOwners")).map(({ target }) => target);
+  assert.ok(leaveWorkspaceOwnersCalls.includes("rootModals.leaveWorkspace"));
   const closeCalls = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed")).map(({ target }) => target);
   assert.ok(closeCalls.includes("resetStagedIntake"));
   assert.ok(closeCalls.includes("setLinkSectionOpen"));
@@ -62,12 +66,19 @@ test("workspace transitions invalidate root slots before old-domain work and clo
 });
 
 test("authenticated bootstrap activates modal authority before publishing the user", () => {
+  // rootModals.activateActor/leaveActor 现在只经共享函数
+  // activateWorkspaceOwners/leaveActorOwners 间接调用；守卫
+  // workspace-owner-transition-guard 钉住「只能从那里发出」。
+  const activateOwnersCalls = callSitesIn(findFunctionIn(page, "Home", "activateWorkspaceOwners")).map(({ target }) => target);
+  assert.ok(activateOwnersCalls.includes("rootModals.activateActor"));
   assert.equal(
-    (pageText.match(/rootModals\.activateActor\(u\.id\);[\s\S]{0,220}setCurrentUser\(u\)/g) ?? []).length,
+    (pageText.match(/activateWorkspaceOwners\(u\.id\);[\s\S]{0,220}setCurrentUser\(u\)/g) ?? []).length,
     2,
   );
   const logoutCalls = callSitesIn(findFunctionIn(page, "Home", "handleLogout")).map(({ target }) => target);
-  assert.ok(logoutCalls.includes("rootModals.leaveActor"));
+  assert.ok(logoutCalls.includes("leaveActorOwners"));
+  const leaveActorOwnersCalls = callSitesIn(findFunctionIn(page, "Home", "leaveActorOwners")).map(({ target }) => target);
+  assert.ok(leaveActorOwnersCalls.includes("rootModals.leaveActor"));
   assert.ok(logoutCalls.includes("logoutUser"));
 });
 

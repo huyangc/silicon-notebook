@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import ts from "typescript";
 
-import { importsIn, parseModule } from "../../test-support/semantic-source.mjs";
+import { findFunctionIn, importsIn, parseModule } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
 const hook = await parseModule("use-report-workspace.ts");
@@ -80,9 +80,19 @@ test("workspace transitions and authenticated bootstrap delegate report authorit
   assert.match(text, /reportWorkspace\.beginNotebookTransition\(\)/);
   assert.match(text, /reportWorkspace\.finishNotebookTransition\(reportTransition, opened\)/);
   assert.match(text, /reportWorkspace\.leaveWorkspace\(\)/);
+  // reportWorkspace/askSession/sourceLibrary.activateActor 现在只经共享函数
+  // activateWorkspaceOwners 间接调用；守卫 workspace-owner-transition-guard 钉住
+  // 「只能从那里发出」。原断言钉三次调用紧邻 setCurrentUser(u) 的顺序邻接，现拆成
+  // 两半：共享函数体内 reportWorkspace 仍紧邻 askSession 紧邻 sourceLibrary（相对
+  // 顺序不变），加上两个认证站点各自 activateWorkspaceOwners(u.id) 紧邻
+  // setCurrentUser(u)（站点内顺序不变）。
   assert.match(
-    text,
-    /reportWorkspace\.activateActor\(u\.id\);\s*askSession\.activateActor\(u\.id\);\s*sourceLibrary\.activateActor\(u\.id\);\s*setCurrentUser\(u\)/,
+    findFunctionIn(page, "Home", "activateWorkspaceOwners").getText(page),
+    /reportWorkspace\.activateActor\(actorId\);\s*askSession\.activateActor\(actorId\);\s*sourceLibrary\.activateActor\(actorId\);/,
+  );
+  assert.equal(
+    (text.match(/activateWorkspaceOwners\(u\.id\);\s*setCurrentUser\(u\)/g) ?? []).length,
+    2,
   );
 });
 

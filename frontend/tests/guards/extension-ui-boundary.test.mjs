@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
 
-import { appSourceModules, findFunction, importsIn, jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, findFunction, importsIn, jsxElements, parseModule, scopedCalls } from "../../test-support/semantic-source.mjs";
 
 
 test("page composes one availability owner and exactly the two canonical outlets", async () => {
@@ -276,7 +276,27 @@ test("extension owner is wired into authentication and workspace transitions", a
     ts.forEachChild(node, visit);
   }
   visit(page);
-  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.activateActor").length, 2);
+  // workspaceExtensions.activateActor 现在只经共享函数 activateWorkspaceOwners
+  // 间接调用；守卫 workspace-owner-transition-guard 钉住「只能从那里发出」。原断言
+  // 钉「两个认证站点各出现一次」，现拆成两半：字面只出现一次（在共享函数体内），
+  // 且该共享函数本身被两个认证站点各调用一次。
+  assert.equal(calls.filter((row) => row.target === "workspaceExtensions.activateActor").length, 1);
+  const sharedCalls = scopedCalls(page);
+  assert.ok(
+    sharedCalls.some((entry) => (
+      entry.scope === "<module>.Home.activateWorkspaceOwners"
+      && entry.target === "workspaceExtensions.activateActor"
+    )),
+    "workspaceExtensions.activateActor must be called from activateWorkspaceOwners",
+  );
+  const activateOwnersInvocations = sharedCalls
+    .filter((entry) => entry.target === "activateWorkspaceOwners")
+    .reduce((sum, entry) => sum + entry.count, 0);
+  assert.equal(
+    activateOwnersInvocations,
+    2,
+    "activateWorkspaceOwners must be invoked from the two authentication call sites",
+  );
   assert.equal(calls.filter((row) => row.target === "workspaceExtensions.beginNotebookTransition").length, 1);
   assert.ok(calls.some((row) => row.target === "workspaceExtensions.finishNotebookTransition"
     && row.arguments.join("|") === "workspaceExtensionTransition|opened"));

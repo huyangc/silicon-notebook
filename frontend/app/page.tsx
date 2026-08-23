@@ -1663,13 +1663,7 @@ export default function Home() {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then(async (u) => {
-        notebookCollection.activateActor(u.id);
-        workspaceExtensions.activateActor(u.id);
-        rootModals.activateActor(u.id);
-        kgWorkspace.activateActor(u.id);
-        reportWorkspace.activateActor(u.id);
-        askSession.activateActor(u.id);
-        sourceLibrary.activateActor(u.id);
+        activateWorkspaceOwners(u.id);
         setCurrentUser(u);
         await loadNotebookCollection();
         const groupTarget = parseGroupsHash(window.location.hash);
@@ -2066,6 +2060,54 @@ export default function Home() {
       },
     },
   });
+
+  // ---------------------------------------------------------------------
+  // Owner hook 生命周期扇出的唯一入口。这七个 hook——notebookCollection /
+  // workspaceExtensions / rootModals / kgWorkspace / reportWorkspace /
+  // askSession / sourceLibrary——各自独立拥有一段 workspace/actor 状态；新增
+  // 第八个 owner hook 时只改下面这三个函数（回归门
+  // workspace-owner-transition-guard 会钉住散落调用点）。
+  //
+  // activateWorkspaceOwners：登录成功（挂载认证 / AuthGate 两个调用点，顺序
+  //   逐字相同）时把 actor 接上全部 owner hook。
+  // leaveWorkspaceOwners：回集合页（showCollection）——放弃 workspace、保留
+  //   actor，故不含 notebookCollection（它本就不属于单个 workspace）与
+  //   sourceLibrary（这条路径改用 beginTransition()，与其余 upload/url busy
+  //   态的 ref 重置是同一组，原地保留、不纳入本扇出）。
+  // leaveActorOwners：登出（handleLogout）——放弃 actor 本身，因此包含
+  //   notebookCollection.leaveActor() 与 rootModals.leaveActor()；
+  //   workspaceExtensions/reportWorkspace/kgWorkspace 在这条路径上仍只有
+  //   leaveWorkspace()（这几个 hook 没有单独的 leaveActor 语义），
+  //   askSession 用它专属的 abortForLogout()。showCollection 里没有调用过
+  //   leaveActor/abortForLogout，因此下面 (b) 的“现状放行”分支未触发。
+  // ---------------------------------------------------------------------
+  function activateWorkspaceOwners(actorId: string): void {
+    notebookCollection.activateActor(actorId);
+    workspaceExtensions.activateActor(actorId);
+    rootModals.activateActor(actorId);
+    kgWorkspace.activateActor(actorId);
+    reportWorkspace.activateActor(actorId);
+    askSession.activateActor(actorId);
+    sourceLibrary.activateActor(actorId);
+  }
+
+  function leaveWorkspaceOwners(): void {
+    rootModals.leaveWorkspace();
+    workspaceExtensions.leaveWorkspace();
+    askSession.leaveWorkspace();
+    reportWorkspace.leaveWorkspace();
+    kgWorkspace.leaveWorkspace();
+  }
+
+  function leaveActorOwners(): void {
+    notebookCollection.leaveActor();
+    rootModals.leaveActor();
+    workspaceExtensions.leaveWorkspace();
+    askSession.abortForLogout();
+    reportWorkspace.leaveWorkspace();
+    kgWorkspace.leaveWorkspace();
+  }
+
   useEffect(() => {
     if (!kgViewOpen) return;
     const element = kgCanvasRef.current;
@@ -2124,7 +2166,12 @@ export default function Home() {
     const activeNotebook = currentNotebookId;
     const batches = answerIdBatches(turns.map((turn) => turn.response.answer_id));
     if (!activeNotebook || batches.length === 0) {
-      setMemorySavedAnswers({});
+      // Functional update, not a bare `{}` literal: even if an upstream
+      // dependency (e.g. `turns`) were ever unstable again, replacing an
+      // already-empty map with a fresh empty object every render would be
+      // the other half of a self-triggering effect loop. Only write when
+      // there is something to actually clear.
+      setMemorySavedAnswers((prev) => (Object.keys(prev).length ? {} : prev));
       return;
     }
     const workspaceEpoch = workspaceEpochRef.current;
@@ -2642,8 +2689,7 @@ export default function Home() {
   }
 
   function showCollection() {
-    rootModals.leaveWorkspace();
-    workspaceExtensions.leaveWorkspace();
+    leaveWorkspaceOwners();
     closeKnowhow();
     workspaceEpochRef.current += 1;
     sourceLibrary.beginTransition();
@@ -2651,9 +2697,6 @@ export default function Home() {
     urlRequestOwnerRef.current = null;
     setUploadBusy(false);
     setUrlBusy(false);
-    askSession.leaveWorkspace();
-    reportWorkspace.leaveWorkspace();
-    kgWorkspace.leaveWorkspace();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -4366,18 +4409,13 @@ export default function Home() {
 
   async function handleLogout() {
     workspaceEpochRef.current += 1;
-    notebookCollection.leaveActor();
-    rootModals.leaveActor();
-    workspaceExtensions.leaveWorkspace();
+    leaveActorOwners();
     titleSaveOperationRef.current = null;
     setTitleSaveInFlight(false);
     sourceLibrary.beginTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
     activeNotebookIdRef.current = null;
-    askSession.abortForLogout();
-    reportWorkspace.leaveWorkspace();
-    kgWorkspace.leaveWorkspace();
     memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -4586,13 +4624,7 @@ export default function Home() {
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
-      notebookCollection.activateActor(u.id);
-      workspaceExtensions.activateActor(u.id);
-      rootModals.activateActor(u.id);
-      kgWorkspace.activateActor(u.id);
-      reportWorkspace.activateActor(u.id);
-      askSession.activateActor(u.id);
-      sourceLibrary.activateActor(u.id);
+      activateWorkspaceOwners(u.id);
       setCurrentUser(u);
       setStatusText("");
       loadNotebookCollection().catch(reportError);
