@@ -72,7 +72,8 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/api/system_routes.py" \
   "$ROOT_DIR/backend/app/api/debug_logs.py" \
   "$ROOT_DIR/backend/app/services/auth_utils.py" \
-  "$ROOT_DIR/backend/app/domain/auth_utils.py"
+  "$ROOT_DIR/backend/app/domain/auth_utils.py" \
+  "$ROOT_DIR/scripts/audit_facade_callers.py"
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \
   "import markdown_it, numpy"
