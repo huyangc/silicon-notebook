@@ -7,6 +7,12 @@ from app.extensions.bootstrap import (
     default_extension_runtime,
 )
 from app.extensions.capabilities import CapabilityDecisionCatalog
+from app.extensions.discovery import (
+    DiscoveredExtension,
+    ExtensionDiscoveryError,
+    capability_decisions_from_bundles,
+    discover_deployment_extensions,
+)
 from app.extensions.ask import AskCompletedObserverHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
@@ -15,6 +21,8 @@ from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChai
 from app.extensions.retrieval import RetrievalContributorHost, RetrievalHostCancelled
 
 __all__ = [
+    "DiscoveredExtension",
+    "ExtensionDiscoveryError",
     "ExtensionRegistry",
     "ExtensionRegistryError",
     "ExtensionRuntime",
@@ -28,5 +36,7 @@ __all__ = [
     "RetrievalHostCancelled",
     "build_extension_registry",
     "build_extension_runtime",
+    "capability_decisions_from_bundles",
     "default_extension_runtime",
+    "discover_deployment_extensions",
 ]
