@@ -38,6 +38,7 @@ from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
 from app.bootstrap import (
+    application_extension_admin_projection,
     application_extension_runtime,
     application_extension_ui_projection,
 )
@@ -258,6 +259,12 @@ def create_app() -> FastAPI:
     # API routes receive only this sanitized projection seam, never the registry
     # or SDK topology as a service locator.
     app.state.extension_ui_projection = application_extension_ui_projection(
+        extension_runtime
+    )
+    # Admin-only sanitized view of the loaded extension topology
+    # (GET /admin/extensions). Same seam discipline as the UI projection above:
+    # the route never touches the registry or SDK topology directly.
+    app.state.extension_admin_projection = application_extension_admin_projection(
         extension_runtime
     )
 
