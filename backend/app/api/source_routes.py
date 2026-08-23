@@ -305,9 +305,12 @@ def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult
       配置措辞,不是给终端用户看的中文文案,所以刻意不打 ``X-User-Message``。这条
       行为在抽取前后逐字不变——插件路由得到的映射与浏览器端点完全一致。
 
-    ``notebook_id`` 的授权由**调用方**负责(端点是 ``sources:write`` 装饰器守卫,插件
-    路由是它自己挂的 core 门 + ``_validate_plugin_router`` 的强制检查):这个函数只做
-    容量与调度,不判权限。
+    ``notebook_id`` 的授权由**调用方**负责:这个函数只做容量与调度,不判权限。浏览器
+    端点靠 ``sources:write`` 装饰器守卫;插件路由靠
+    ``extension_routes._UrlSourceImportAdapter`` 在委托进来**之前**用
+    ``notebook_capability_allowed("sources:write", …)`` 对**本请求已认证的用户**判一次
+    ——不是靠插件自己挂了哪道门(它可以只挂读门、把 id 藏在 body 里,或者给路径参数换
+    个名字)。
     """
     repo = source_repository()
     cap = _document_capacity(notebook_id)

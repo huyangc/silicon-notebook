@@ -202,11 +202,20 @@ class ExtensionRegistry:
             # match its manifest" check just above — are constructed entirely
             # from stable metadata identifiers this module already validated,
             # never from plugin-controlled text. They stay verbatim and
-            # unwrapped for *every* trust tier, deployment included: a plugin
-            # cannot manufacture one (it would have to import and raise this
-            # module's own exception type with the exact diagnostic core
-            # would have produced), and sanitizing it here would hide core's
-            # most actionable rejection message behind an opaque reason code.
+            # unwrapped for *every* trust tier, deployment included, because
+            # sanitizing them would hide core's most actionable rejection
+            # message behind an opaque reason code.
+            #
+            # ⚠ Residual risk, accepted and logged (plan §5): a plugin *can*
+            # reach this branch on purpose. ``ExtensionRegistryError`` is not
+            # on the SDK surface — ``app.extension_sdk`` does not re-export it
+            # — but nothing stops out-of-repo code from doing
+            # ``from app.extensions.registry import ExtensionRegistryError``
+            # and raising it with its own message, which would then reach the
+            # operator's log unsanitized. A plugin has no legitimate reason to
+            # raise core's internal registry exception, and the blast radius is
+            # a startup-time log line (registration is refused either way), so
+            # this is not defended against here.
             self._rollback_manifest(manifest.id, before)
             raise
         except Exception as exc:
