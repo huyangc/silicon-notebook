@@ -589,14 +589,43 @@ test("extension owner is wired into authentication and workspace transitions", a
   visitActions(page);
   assert.equal(actions.length, 1);
   assert.equal(actions[0].expression.getText(page), "createOwnedWorkspaceExtensionActions");
+  // 第 4 实参（X5 T4）：`refreshSources` 只用 `sourceLibrary` 自己的具名 command
+  // （`loadSourcesPage(currentPageRequest())`）——不是页面级重新派生的
+  // `loadSourcesPage(currentNotebookId ?? "", {})` 之类的形态，那会绕开
+  // `currentPageRequest()` 保存的分页/搜索状态。
   assert.deepEqual(actions[0].arguments.map((argument) => argument.getText(page)), [
     "workspaceExtensions.owner",
     "workspaceExtensions.owns",
     '() => {\n      rootModals.open("understanding", rootModals.captureWorkspaceOwner());\n    }',
+    "() => sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest())",
   ]);
   const outlets = jsxElements(page, "WorkspaceExtensionOutlet");
   for (const outlet of outlets) {
     assert.equal(outlet.bindings.ownerKey, "workspaceExtensions.ownerKey");
     assert.equal(outlet.bindings.actions, "workspaceExtensionActions");
   }
+  // `refreshSources` 必须只是 sourceLibrary 已有的 command 重触发一次，不是新增的
+  // 领域 I/O：Home 作用域下（含它自己内部那个同名的本地 loadSourcesPage 包装函数）
+  // 对 `sourceLibrary.loadSourcesPage` 的调用点数量必须恰好比接入前多 1。
+  const sourceLibraryLoadCalls = scopedCalls(page)
+    .filter((entry) => (
+      entry.target === "sourceLibrary.loadSourcesPage" && entry.scope.startsWith("<module>.Home")
+    ))
+    .reduce((sum, entry) => sum + entry.count, 0);
+  assert.equal(
+    sourceLibraryLoadCalls,
+    2,
+    "refreshSources must add exactly one new sourceLibrary.loadSourcesPage call site under Home",
+  );
+  // `refreshSources` 不得新增 effect——它是点击驱动的窄 command，不是又一路轮询/
+  // 订阅。基线（接入前）为 29，逐字钉住而不是「至少不多」。
+  let useEffectCallCount = 0;
+  function countUseEffect(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(page) === "useEffect") {
+      useEffectCallCount += 1;
+    }
+    ts.forEachChild(node, countUseEffect);
+  }
+  countUseEffect(page);
+  assert.equal(useEffectCallCount, 29, "page.tsx must not gain a new useEffect for refreshSources");
 });

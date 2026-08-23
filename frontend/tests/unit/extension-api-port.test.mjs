@@ -46,6 +46,13 @@ test("a legal relative path is prefixed with the calling plugin's own namespace"
   // 结尾 `/` 合法（`/collection/` 与 `/collection` 是两个资源，端口不替插件裁剪）。
   assert.equal(extensionApiPath("ieee.xplore", "/search/"), "/extensions/ieee.xplore/search/");
   assert.equal(extensionApiPath("a", "/x~y.z-0"), "/extensions/a/x~y.z-0");
+  // 下划线合法，包括段首（RESTful 资源名常见蛇形命名，如 `import_selected`）。
+  assert.equal(extensionApiPath("a", "/import_selected"), "/extensions/a/import_selected");
+  assert.equal(extensionApiPath("a", "/a_b/c_d/"), "/extensions/a/a_b/c_d/");
+  // 段首本身就是下划线：这一条才真正只被「段首字符类含 `_`」放行——
+  // `/import_selected` 与 `/a_b/c_d/` 两段都以字母开头，段首字符类本来就一直
+  // 含字母数字，光靠它们证明不了段首字符类被扩过（变异验证钉住了这一点）。
+  assert.equal(extensionApiPath("a", "/_selected"), "/extensions/a/_selected");
 });
 
 

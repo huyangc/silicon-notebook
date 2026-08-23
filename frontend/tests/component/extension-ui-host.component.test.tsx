@@ -94,10 +94,10 @@ const Harness = forwardRef<WorkspaceExtensions, HarnessProps>(function Harness({
   return <>
     <WorkspaceExtensionOutlet slot="workspace.side_panel" registry={entries}
       projection={live.projection} ownerKey={live.ownerKey}
-      actions={{ openUnderstanding: onOpen }} context={context} />
+      actions={{ openUnderstanding: onOpen, refreshSources: async () => {} }} context={context} />
     <WorkspaceExtensionOutlet slot="source.detail_section" registry={entries}
       projection={live.projection} ownerKey={live.ownerKey}
-      actions={{ openUnderstanding: onOpen }} context={{ ...context, slot: "source.detail_section" }} />
+      actions={{ openUnderstanding: onOpen, refreshSources: async () => {} }} context={{ ...context, slot: "source.detail_section" }} />
   </>;
 });
 
@@ -200,11 +200,13 @@ test("the outlet injects an api port bound to each contribution's own plugin id"
 
 test("owned actions reject an A-G1 callback after A-B-A and admit the current A-G3 callback", () => {
   const openUnderstanding = vi.fn();
+  const refreshSources = vi.fn(async () => {});
   const generation = { current: 1 };
   const oldAction = createOwnedWorkspaceExtensionActions(
     { actorId: "user-a", notebookId: "notebook-a", generation: 1 },
     (owner) => owner.generation === generation.current,
     openUnderstanding,
+    refreshSources,
   );
   generation.current = 2;
   generation.current = 3;
@@ -215,6 +217,7 @@ test("owned actions reject an A-G1 callback after A-B-A and admit the current A-
     { actorId: "user-a", notebookId: "notebook-a", generation: 3 },
     (owner) => owner.generation === generation.current,
     openUnderstanding,
+    refreshSources,
   );
   currentAction.openUnderstanding();
   expect(openUnderstanding).toHaveBeenCalledOnce();
