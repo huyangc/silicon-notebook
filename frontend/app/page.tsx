@@ -907,6 +907,19 @@ export default function Home() {
     currentNotebookId,
   );
   const workspaceExtensionProjection = workspaceExtensions.projection;
+  // 谁认领了 root-dialog 那唯一一格 `extension` slot——存的是 **contribution id**（不是
+  // plugin id：同一个插件可以注册多条 contribution，按 plugin 判会让它们一起挂出弹窗，
+  // codex #578 R1 P2）。协调器只知道「那一格开着」，分不出是谁开的——插件名绝不进核心的
+  // slot 联合类型（零补丁红线），所以持有者记在这里，由 host 按 `contribution.id` 过滤
+  // 出每条 contribution 的 dialog view。
+  // 清空只有一条路：协调器的 `onClosed`（关闭、冲突、切库、换用户走的都是它）。
+  //
+  // ⚠ 关闭请求要按**当时**的持有者判，所以另留一份 ref：插件留着一个旧 `closeDialog()`
+  // （setTimeout、迟到的请求回调、没卸载干净的组件）而那一格已经易主时，按发放回调那
+  // 一帧的闭包值判会让插件 A 关掉插件 B 刚开的弹窗（codex #578 R1 P2）。两个写入点各自
+  // 同时更新 state 与 ref，不在渲染期改 ref。
+  const [extensionDialogHolder, setExtensionDialogHolder] = useState<string | null>(null);
+  const extensionDialogHolderRef = useRef<string | null>(null);
   const sourceLibrary = useSourceLibrary({
     actorId: currentUser?.id ?? null,
     canWriteSources,
@@ -4433,6 +4446,13 @@ export default function Home() {
       case "edge-review":
         setEdgeQueue(null);
         return;
+      // 插件弹窗的持有者只在这里清空——关闭、被别的 primary 冲突顶掉、切库、换用户
+      // 走的都是这条 close sink。少了它，一个已经没有 lease 的持有者会一直留在 state
+      // 里（今天只是脏数据，但它正是「那一格归谁」的唯一记录，必须与 lease 同生共死）。
+      case "extension":
+        extensionDialogHolderRef.current = null;
+        setExtensionDialogHolder(null);
+        return;
     }
   }
 
@@ -4633,6 +4653,23 @@ export default function Home() {
     // effect 会接手，并在它的 `reachedExtracted` 分支里跑那三个刷新；这里再塞一遍
     // 会让插件一次动作变成四个请求，还与 source-poll-refresh-guard 钉的既有节奏重复。
     () => sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest()),
+    // 插件弹窗认领那唯一一格 `extension` slot：**先由协调器裁决，成功了才记持有者**。
+    // 反过来先 setHolder 会留下一个永远等不到 lease 的持有者（弹窗不会开，而那一格
+    // 在界面上已经"归它了"）。
+    (contributionId: string) => {
+      if (rootModals.open("extension", rootModals.captureWorkspaceOwner())) {
+        extensionDialogHolderRef.current = contributionId;
+        setExtensionDialogHolder(contributionId);
+      }
+    },
+    // 关闭只经协调器，且**只有当时的持有者关得掉**（codex #578 R1 P2）：一次迟到的
+    // `closeDialog()` 否则会关掉别的插件刚开的弹窗。判据读 ref 而不是渲染闭包里的
+    // state——那份闭包停在发放回调的那一帧，正好看不见「已经易主」这件事。持有者的
+    // 清空仍挂在 `handleRootModalClosed` 那条唯一出口上，这里不额外 setHolder(null)。
+    (contributionId, reason) => {
+      if (extensionDialogHolderRef.current !== contributionId) return;
+      rootModals.requestClose("extension", reason);
+    },
   );
   // 内容管理入口的**唯一**判据(群组知识共享 P2)。此前这些入口写的是 `!isReader`,
   // 而 P2 把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」——再按 access 判
@@ -5265,6 +5302,8 @@ export default function Home() {
                     projection={workspaceExtensionProjection}
                     ownerKey={workspaceExtensions.ownerKey}
                     actions={workspaceExtensionActions}
+                    dialog={rootModals.view("extension")}
+                    dialogHolder={extensionDialogHolder}
                     context={{
                       slot: "workspace.side_panel",
                       actor: {
@@ -6647,6 +6686,8 @@ export default function Home() {
                   projection={workspaceExtensionProjection}
                   ownerKey={workspaceExtensions.ownerKey}
                   actions={workspaceExtensionActions}
+                  dialog={rootModals.view("extension")}
+                  dialogHolder={extensionDialogHolder}
                   context={{
                     slot: "source.detail_section",
                     actor: {

@@ -101,13 +101,24 @@ const Harness = forwardRef<WorkspaceExtensions, HarnessProps>(function Harness({
     notebook: { id: notebookId, name: notebookId }, source: null,
     uiMode: "auto" as const, permissions: { ...permissions, notebookRead },
   };
+  // 这份夹具不接 root-modal 协调器：本文件覆盖的是可用性/权限/owner 门，弹窗裁决由
+  // extension-plugin-surface.component.test.tsx 覆盖，所以这里传一份恒 closed 的 view。
+  const dialogActions = {
+    openUnderstanding: onOpen,
+    refreshSources: async () => {},
+    openDialog: () => undefined,
+    closeDialog: () => undefined,
+  };
+  const closedDialog = { open: false, topmost: false, zIndex: 0 } as const;
   return <>
     <WorkspaceExtensionOutlet slot="workspace.side_panel" registry={entries}
       projection={live.projection} ownerKey={live.ownerKey}
-      actions={{ openUnderstanding: onOpen, refreshSources: async () => {} }} context={context} />
+      dialog={closedDialog} dialogHolder={null}
+      actions={dialogActions} context={context} />
     <WorkspaceExtensionOutlet slot="source.detail_section" registry={entries}
       projection={live.projection} ownerKey={live.ownerKey}
-      actions={{ openUnderstanding: onOpen, refreshSources: async () => {} }} context={{ ...context, slot: "source.detail_section" }} />
+      dialog={closedDialog} dialogHolder={null}
+      actions={dialogActions} context={{ ...context, slot: "source.detail_section" }} />
   </>;
 });
 
@@ -225,6 +236,8 @@ test("owned actions reject an A-G1 callback after A-B-A and admit the current A-
     (owner) => owner.generation === generation.current,
     openUnderstanding,
     refreshSources,
+    () => undefined,
+    () => undefined,
   );
   generation.current = 2;
   generation.current = 3;
@@ -236,6 +249,8 @@ test("owned actions reject an A-G1 callback after A-B-A and admit the current A-
     (owner) => owner.generation === generation.current,
     openUnderstanding,
     refreshSources,
+    () => undefined,
+    () => undefined,
   );
   currentAction.openUnderstanding();
   expect(openUnderstanding).toHaveBeenCalledOnce();

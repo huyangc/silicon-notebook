@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
 
-import { appSourceModules, findFunction, importsIn, jsxElements, parseModule, parseText, scopedCalls } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, findFunction, findFunctionIn, importsIn, jsxElements, parseModule, parseText, scopedCalls } from "../../test-support/semantic-source.mjs";
 // 判据不住在任何一个守卫里：插件包的 import 白名单与侧信道判据只能有**一份**拼写，
 // 而它的两个消费者（本文件的逐插件白名单检查、包边界守卫的真值表与真包扫描）如果
 // 互相 import，node 泳道单跑任一文件都会把另一份的全部用例一起加载并再跑一遍。
@@ -654,16 +654,49 @@ test("extension owner is wired into authentication and workspace transitions", a
     "the refreshSources argument must be exactly one call chain:"
     + " sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest()) and nothing else",
   );
+  // 第 5/6 实参（codex #578 R1 P2）：插件弹窗接入 root-dialog 裁决的两条接线，逐字
+  // 钉住，因为它们的每一处都在挡一种**静默**失败：
+  //  · `openDialog` 必须先经 `rootModals.open` 拿到 lease **再**记持有者——反过来会
+  //    留下一个永远等不到 lease 的持有者（那一格在界面上"归它了"、弹窗却不会开）。
+  //  · 记的是 `contributionId` 而不是 pluginId——同一个插件的多条 contribution 会
+  //    一起挂出弹窗。
+  //  · `closeDialog` 必须按**当时**的持有者判（读 ref，不读渲染闭包里的 state），
+  //    否则一次迟到的关闭会关掉别人刚开的弹窗。
+  //  · 持有者的**清空**只有 `handleRootModalClosed` 那一条出口（下一条断言）。
   assert.deepEqual(actions[0].arguments.map((argument) => argument.getText(page)), [
     "workspaceExtensions.owner",
     "workspaceExtensions.owns",
     '() => {\n      rootModals.open("understanding", rootModals.captureWorkspaceOwner());\n    }',
     "() => sourceLibrary.loadSourcesPage(sourceLibrary.currentPageRequest())",
+    '(contributionId: string) => {\n'
+    + '      if (rootModals.open("extension", rootModals.captureWorkspaceOwner())) {\n'
+    + "        extensionDialogHolderRef.current = contributionId;\n"
+    + "        setExtensionDialogHolder(contributionId);\n"
+    + "      }\n"
+    + "    }",
+    "(contributionId, reason) => {\n"
+    + "      if (extensionDialogHolderRef.current !== contributionId) return;\n"
+    + '      rootModals.requestClose("extension", reason);\n'
+    + "    }",
   ]);
+  // 释放那一半：`extension` 的持有者只在协调器的 close sink 里清空。协调器只知道
+  // "那一格开着"，谁认领了它只有这里记着——两者必须同生共死，否则一次冲突/切库之后
+  // 会留下一个没有 lease 的持有者。这条是 mutation (d) 的守卫（行为上不可观测：没有
+  // lease 时 host 本来就不渲染，所以只能按源码语义钉）。
+  const closeSink = findFunctionIn(page, "Home", "handleRootModalClosed").getText(page);
+  assert.match(
+    closeSink,
+    /case "extension":[\s\S]{0,200}?extensionDialogHolderRef\.current = null;[\s\S]{0,80}?setExtensionDialogHolder\(null\);[\s\S]{0,40}?return;/,
+    "the extension dialog holder must be released through the coordinator close sink",
+  );
   const outlets = jsxElements(page, "WorkspaceExtensionOutlet");
   for (const outlet of outlets) {
     assert.equal(outlet.bindings.ownerKey, "workspaceExtensions.ownerKey");
     assert.equal(outlet.bindings.actions, "workspaceExtensionActions");
+    // 两个 outlet 都必须透传同一格的 view 与同一个持有者——只接一个的话，另一个 slot
+    // 里的 contribution 会永远拿不到 open 的 dialog view（静默不可见）。
+    assert.equal(outlet.bindings.dialog, 'rootModals.view("extension")');
+    assert.equal(outlet.bindings.dialogHolder, "extensionDialogHolder");
   }
 });
 

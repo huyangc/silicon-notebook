@@ -164,6 +164,40 @@ test("collection and KG presentation slots participate in the same primary water
   expect(value!.view("kg-analysis").open).toBe(true);
 });
 
+// codex #578 R1 P2 — 部署插件的弹窗接进来的那**一个通用格子**。它没有自己的 policy
+// 分档：与其它 primary 互斥、与 `info` 共存、workspace 拥有、切库同步撤销。这里钉的是
+// 它真的落在既有那套规则里，而不是被悄悄放宽成一个不参与冲突/层级的旁路。
+test("the generic extension slot is an ordinary workspace primary that coexists only with info", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  const actor = value!.captureActorOwner();
+
+  // actor 拥有的 slot 不能拿它开：插件弹窗只在有 workspace 时存在。
+  expect(value!.open("extension", actor)).toBeNull();
+  expect(value!.open("extension", workspace)).not.toBeNull();
+  expect(value!.view("extension").open).toBe(true);
+  expect(value!.view("extension").topmost).toBe(true);
+
+  // info 合法压在它之上：仍开着，但退出 topmost（消费方据此加 inert/aria-hidden）。
+  expect(value!.open("info", workspace)).not.toBeNull();
+  expect(value!.view("extension").open).toBe(true);
+  expect(value!.view("extension").topmost).toBe(false);
+  expect(value!.view("extension").zIndex).toBeLessThan(value!.view("info").zIndex);
+
+  // 另一个 primary 则把它冲突关掉——反过来也一样。
+  expect(value!.open("understanding", workspace)).not.toBeNull();
+  expect(value!.view("extension").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("extension", "conflict");
+  expect(value!.open("extension", workspace)).not.toBeNull();
+  expect(value!.view("understanding").open).toBe(false);
+
+  // 切库同步撤销。
+  value!.beginWorkspaceTransition();
+  expect(value!.view("extension").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("extension", "owner-invalidated");
+});
+
 test("source detail invalidates older primary opens while its catalog review remains a legal overlay", () => {
   const screen = render(<Harness />);
   enterWorkspace();

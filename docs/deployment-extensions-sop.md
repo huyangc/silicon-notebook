@@ -298,7 +298,7 @@ import { ExtensionModal } from "../extension-sdk/ui.tsx";
 type Candidate = { id: string; title: string; url: string };
 
 export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
-  const [open, setOpen] = useState(false);
+  // No `open` state: whether the dialog is showing is `context.dialog`'s answer (see below).
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -326,28 +326,28 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
       <button
         type="button"
         className="button secondary workspace-extension-entry"
-        onClick={() => setOpen(true)}
+        onClick={() => actions.openDialog()}
       >
         <Search size={16} aria-hidden="true" />
         <span>文献检索</span>
       </button>
-      {open ? (
-        <ExtensionModal
-          pluginId={context.pluginId}
-          storageKey="search"
-          title="文献检索"
-          description="搜索并导入到当前笔记本"
-          onClose={() => setOpen(false)}
-        >
-          {/* your panel; `busy` disables the submit control, `notice` is shown inline */}
-        </ExtensionModal>
-      ) : null}
+      <ExtensionModal
+        context={context}
+        actions={actions}
+        storageKey="search"
+        title="文献检索"
+        description="搜索并导入到当前笔记本"
+      >
+        {/* your panel; `busy` disables the submit control, `notice` is shown inline */}
+      </ExtensionModal>
     </>
   );
 }
 ```
 
 *Core does for you:* injects `actions.api` bound to **this contribution's** `pluginId`, so every request is confined under `/api/extensions/<plugin id>/`, `authorization`/`cookie` headers you set are stripped, and `tag`/`auth`/`unauthorized` are fixed. `ExtensionModal` gives you the system dialog shell, the drag handle, and a per-plugin window-position key.
+
+*The dialog is core-owned.* You do not hold an `open` boolean. `actions.openDialog()` **asks** for the one generic `extension` slot in core's root-dialog coordinator; `context.dialog` is the answer, and `ExtensionModal` renders nothing until `context.dialog.open` is true. Core closes it for you when another primary dialog opens, when the user switches notebooks, and on sign-out; `actions.closeDialog()` is the only way *you* close it. Two consequences worth knowing: one plugin dialog is visible at a time (the slot is claimed per **contribution**, so two contributions of the same plugin do not both open), and a dialog covered by a higher layer becomes `inert`/`aria-hidden` instead of quietly staying focusable behind it. A local `useState` for the dialog would only diverge from all of that — it cannot close a dialog the coordinator already took away.
 
 *You cannot:*
 
@@ -362,7 +362,8 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 | Write a colour literal | Reuse existing classes and `:root` tokens. `extension-ui-layout-guard` pins this on both sides. |
 | Put `actions` or `context` in a `useEffect`/`useMemo` dependency array | Both are fresh objects every render (the owner gate is re-frozen each pass). `actions.api` is memoized per `pluginId` and *is* safe there. |
 | Let `refreshSources()` reject unhandled | It resolves silently once the owner gate has closed (that is not an error, just a refresh that no longer matters) and rejects on a genuine load failure. Call it at most once, after your own action completes, and `catch` it. |
-| Open a dialog from `source.detail_section` | `ExtensionModal`'s `position: fixed` resolves against the host's own floating card there, so the dialog follows the source-detail window. Registered limitation; `workspace.side_panel` only for now. |
+| Keep your own `open` state for the dialog | `context.dialog` is the single source of truth. A local boolean cannot close a dialog the coordinator already took away (a conflicting primary, a notebook switch), so the two diverge and the plugin renders a dialog core believes is closed. |
+| Open a dialog from `source.detail_section` | Two reasons. `ExtensionModal`'s `position: fixed` resolves against the host's own floating card there, so the dialog follows the source-detail window; and that host holds the `source-detail` primary lease, which the `extension` lease conflicts with — opening one closes the source-detail window, unmounting your own contribution with it. Registered limitation; `workspace.side_panel` only for now. |
 
 The package files: exactly one `ui-plugin.json`, exactly one `workspace-plugin.ts` **or** `.tsx`, any number of flat sibling `.ts`/`.tsx` modules. `.d.ts` and `*.test.*` files are rejected. Dotfiles at the package root (`.DS_Store`, `.gitignore`, editor leftovers) are skipped with a note on stderr; **subdirectories are always rejected, `.git` included** — keep the UI package in its own directory, not at the repository root.
 
@@ -643,6 +644,7 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 | Anonymous plugin routes | The mount always carries a router-level session dependency. Public, sign-in-free pages are a core product decision, not a plugin one. |
 | Extending the MCP tool catalog | `PUBLIC_TOOLS` is one frozen, core-owned list with static documentation and smoke guards derived from it. Not open to plugins. |
 | Plugin CSS, plugin dependencies, remote browser code | Visuals reuse existing classes and `:root` tokens; new dependencies go through a base-repository PR; the browser never fetches plugin JavaScript at runtime. |
+| A dedicated root-dialog slot per plugin | There is one generic `extension` slot, claimed per contribution, so one plugin dialog is visible at a time. Naming plugins in core's slot union would mean patching the public tree for every install — the exact thing this whole procedure exists to avoid. |
 
 ## 11. Checklists
 
@@ -658,7 +660,7 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 - [ ] `plugin_id` / `id` / `capability` / `version` match the backend manifest exactly.
 - [ ] The UI imports nothing outside the allowlist — and never `api.ts`.
 - [ ] No timers, no dynamic `import(`, no sockets, no `fetch(`, no `error.message`, no colour literals.
-- [ ] `ExtensionModal` receives `pluginId={context.pluginId}` and a `storageKey`.
+- [ ] `ExtensionModal` receives `context={context}`, `actions={actions}` and a `storageKey`; the dialog opens through `actions.openDialog()` and there is no local `open` state.
 - [ ] `refreshSources()` is called at most once, after the action, and its rejection is caught.
 - [ ] `check_ui_vocabulary.py --extra-root <src>` is clean.
 - [ ] The base repository's `extension-*` guards and `npm run build` are clean with the package synced.

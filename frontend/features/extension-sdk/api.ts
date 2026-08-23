@@ -25,6 +25,7 @@ import type {
   ExtensionRequestInit,
   WorkspaceExtensionActions,
   WorkspaceExtensionApi,
+  WorkspaceExtensionDialogCloseReason,
   WorkspaceExtensionPluginActions,
 } from "./contracts.ts";
 
@@ -219,14 +220,28 @@ function buildWorkspaceExtensionApi(
 
 /**
  * 宿主侧的注入点：保留宿主 actions 上那道 exact-owner 闸（`openUnderstanding` 的
- * 闭包原样搬过来，不重新包一层），追加一份按 `pluginId` 绑定的 api。
+ * 闭包原样搬过来，不重新包一层），追加一份按 `pluginId` 绑定的 api，并把弹窗认领
+ * 也绑定到同一个 `pluginId`。
+ *
+ * `openDialog`/`closeDialog` 与 `api` 是同一条论证：身份必须由 host 逐 contribution
+ * 注入，插件说了不算。插件手上留一个收 id 的 `openDialog` 就等于让一条 contribution
+ * 替另一条认领唯一那格弹窗——而那格弹窗的持有者决定了谁的 `context.dialog.open` 为真；
+ * `closeDialog` 同理，且失败形态更隐蔽：一次迟到的关闭会关掉**别人**刚开的弹窗
+ * （codex #578 R1 P2），所以身份也必须是绑定的、由壳层按当时的持有者复核。
+ *
+ * ⚠ **两个 id 各管各的**：`api` 按 `pluginId` 绑（路径前缀是插件级的，端口也按它记忆），
+ * 弹窗按 `contributionId` 绑（同一个插件可以注册多条 contribution，按 plugin 判会让它们
+ * 同时挂出弹窗）。传错任一个都不会报错，只会安静地把边界挪到错误的粒度上。
  */
 export function withExtensionApi(
   actions: WorkspaceExtensionActions,
   pluginId: string,
+  contributionId: string,
 ): WorkspaceExtensionPluginActions {
   return Object.freeze({
     ...actions,
+    openDialog: () => actions.openDialog(contributionId),
+    closeDialog: (reason?: WorkspaceExtensionDialogCloseReason) => actions.closeDialog(contributionId, reason),
     api: createWorkspaceExtensionApi(pluginId),
   });
 }
