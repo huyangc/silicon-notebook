@@ -1661,6 +1661,83 @@ def test_capability_merge_manifest_property_raising_is_sanitized(caplog):
     assert "TOPSECRET" not in str(error) + repr(error) + caplog.text
 
 
+def test_capability_merge_manifest_id_property_raising_is_sanitized():
+    """``manifest`` itself reads fine here, but ``manifest.id`` can still be a
+    raising ``property`` (or served via a custom ``__getattribute__``) on any
+    hand-built bundle -- ``capability_decisions_from_bundles`` accepts any
+    bundle-shaped object, so nothing upstream guarantees ``.id`` is a plain
+    attribute. Before this fix the access was a bare
+    ``getattr(manifest, "id", "")``, which only substitutes the default for
+    ``AttributeError`` and lets every other exception -- and whatever message
+    the plugin wrote into it -- escape unsanitized. ``plugin_id`` is not known
+    yet at this point (deriving it is exactly what the access is for), so the
+    rejection is reported under an empty plugin id, same as the ``manifest``
+    read itself failing above.
+    """
+
+    class Manifest:
+        provides = ()
+
+        @property
+        def id(self):
+            raise RuntimeError("token=TOPSECRET")
+
+    class Bundle:
+        manifest = Manifest()
+
+        def register(self, registrar) -> None:
+            return None
+
+    with pytest.raises(ExtensionDiscoveryError) as excinfo:
+        capability_decisions_from_bundles([Bundle()], {})
+
+    error = excinfo.value
+    assert error.reason == "plugin_attribute_access_failed"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == ""
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error)
+
+
+def test_capability_merge_manifest_provides_iteration_raising_is_sanitized():
+    """``manifest.provides`` can read back fine and still not be a real tuple:
+    a plugin manifest is under no obligation to store one there, and a custom
+    iterable whose ``__bool__``/``__iter__``/``__len__`` raises would
+    otherwise blow up every use below (``if provides:``, ``tuple(provides)``,
+    ``set(provides)``) with that exception's own message. This is a distinct
+    failure mode from ``manifest.provides`` itself raising on *access*
+    (covered by the ``id``-property test above, and the generic
+    ``_plugin_attr`` coverage this module already has for ``manifest``): here
+    the attribute read succeeds and returns a hostile object, so only the
+    guarded materialization into ``provided`` -- not ``_plugin_attr`` -- is
+    what has to catch this.
+    """
+
+    class HostileProvides:
+        def __iter__(self):
+            raise RuntimeError("token=TOPSECRET")
+
+    class Manifest:
+        id = "corp.hostile_provides"
+        provides = HostileProvides()
+
+    class Bundle:
+        manifest = Manifest()
+
+        def register(self, registrar) -> None:
+            return None
+
+    with pytest.raises(ExtensionDiscoveryError) as excinfo:
+        capability_decisions_from_bundles([Bundle()], {})
+
+    error = excinfo.value
+    assert error.reason == "plugin_capability_declaration_invalid"
+    assert error.exception_type == "RuntimeError"
+    assert error.plugin_id == "corp.hostile_provides"
+    assert error.__cause__ is None
+    assert "TOPSECRET" not in str(error) + repr(error)
+
+
 def _builtin_bundles() -> tuple[object, ...]:
     """The exact ten bundles the composition root ships, by their own names."""
 

@@ -346,8 +346,17 @@ def build_router(context):
 # Response is a normal return, not a raise, and codex #578 R3 P2 is exactly
 # that gap: the raised routes above went through ``except HTTPException``
 # untouched by a returned 401, which never raises anything at all.
+#
+# ``starlette-401``/``starlette-403`` raise ``starlette.exceptions.HTTPException``
+# directly rather than ``fastapi.HTTPException`` — the way a plugin handler (or
+# a library it depends on, e.g. an upstream HTTP client wrapper) might, since
+# FastAPI's is a subclass and nothing obliges a plugin author to know that.
+# codex #578 R6 P1: before this fix ``_wrap_handler_unauthorized`` caught only
+# the FastAPI subclass, so a Starlette-raised 401 fell straight through
+# unwrapped and reached the browser as a real 401.
 _UPSTREAM_401_SRC = """
 from fastapi import HTTPException
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 
 
@@ -365,6 +374,16 @@ def build_router(context):
     @router.get("/sync-403")
     def sync_403():
         raise HTTPException(status_code=403, detail="upstream says forbidden")
+
+    @router.get("/starlette-401")
+    def starlette_401():
+        raise StarletteHTTPException(status_code=401, detail="upstream says no")
+
+    @router.get("/starlette-403")
+    def starlette_403():
+        raise StarletteHTTPException(
+            status_code=403, detail="upstream says forbidden"
+        )
 
     @router.get("/returned-401-json")
     def returned_401_json():
@@ -1196,6 +1215,33 @@ def test_handler_raised_401_becomes_424(
     assert "upstream" not in response.text
 
 
+def test_handler_raised_starlette_401_becomes_424(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """A 401 raised as ``starlette.exceptions.HTTPException`` translates too
+    (codex #578 R6 P1).
+
+    ``fastapi.HTTPException`` is a subclass of Starlette's, but nothing about
+    that relationship is visible to a plugin author — a handler (or a library
+    it depends on, e.g. an upstream HTTP client wrapper) can just as easily
+    raise the Starlette base directly. Before this fix
+    ``_wrap_handler_unauthorized``'s ``except`` clause named only the FastAPI
+    subclass, so this exact request fell straight through unwrapped and the
+    core client would have cleared the user's token and reloaded — the
+    precise failure the mount seam exists to prevent for *any* plugin 401,
+    not only the FastAPI-shaped ones.
+    """
+
+    client = _client(tmp_path, monkeypatch, factory_src=_UPSTREAM_401_SRC)
+    headers = _auth(client, "z00151016")
+    response = client.get(f"{_MOUNT}/starlette-401", headers=headers)
+    assert response.status_code == 424, response.text
+    assert response.headers.get("X-User-Message") == "1"
+    assert response.json()["detail"] == "扩展服务的上游认证失败，请联系管理员"
+    # The upstream's own wording never reaches the browser.
+    assert "upstream" not in response.text
+
+
 @pytest.mark.parametrize("path", ["returned-401-json", "returned-401-bare"])
 def test_handler_returned_401_becomes_424(
     tmp_path, monkeypatch, frozen_runtime_reset, path
@@ -1246,7 +1292,13 @@ def test_a_real_missing_session_is_still_401(
 def test_other_plugin_statuses_pass_through_untouched(
     tmp_path, monkeypatch, frozen_runtime_reset
 ):
-    """Only 401 is rewritten; a plugin's 403 stays a 403 with its own detail."""
+    """Only 401 is rewritten; a plugin's 403 stays a 403 with its own detail.
+
+    Covers both exception flavours: catching the wider Starlette base class
+    (codex #578 R6 P1) must not turn into catching *every* status that base
+    class can carry — a Starlette-raised 403 has to pass through exactly like
+    a FastAPI-raised one.
+    """
 
     client = _client(tmp_path, monkeypatch, factory_src=_UPSTREAM_401_SRC)
     headers = _auth(client, "z00161016")
@@ -1254,6 +1306,11 @@ def test_other_plugin_statuses_pass_through_untouched(
     assert response.status_code == 403
     assert response.json()["detail"] == "upstream says forbidden"
     assert "X-User-Message" not in response.headers
+
+    starlette_response = client.get(f"{_MOUNT}/starlette-403", headers=headers)
+    assert starlette_response.status_code == 403
+    assert starlette_response.json()["detail"] == "upstream says forbidden"
+    assert "X-User-Message" not in starlette_response.headers
 
     # A *returned* non-401 status must not be mistaken for the returned-401
     # check either: only ``status_code == 401`` triggers translation.

@@ -387,8 +387,52 @@ def capability_decisions_from_bundles(
         manifest = _plugin_attr(
             bundle, "manifest", "", "plugin_attribute_access_failed"
         )
-        plugin_id = getattr(manifest, "id", "") if manifest is not None else ""
-        provides = getattr(manifest, "provides", ()) if manifest is not None else ()
+        # Both ``manifest.id`` and ``manifest.provides`` go through
+        # ``_plugin_attr`` rather than a bare ``getattr`` for the same reason
+        # ``bundle.manifest`` above does: either can be implemented as a
+        # ``property`` (or served via a custom ``__getattribute__``) that
+        # raises, and a bare ``getattr(obj, name, default)`` only substitutes
+        # the default for ``AttributeError`` -- any other exception, carrying
+        # whatever message the plugin wrote into it, would otherwise escape
+        # this module's sanitization untouched. ``plugin_id`` is not known yet
+        # when ``.id`` itself is what raises, so that access is reported under
+        # ``""`` like the ``manifest`` read above; ``.provides`` is reported
+        # under whatever ``plugin_id`` resolved to (possibly still ``""``).
+        # ``_plugin_attr``'s default return for a missing attribute is
+        # ``None`` (not ``""``), so ``or ""`` keeps ``plugin_id`` a plain
+        # string for every ``ExtensionDiscoveryError`` constructed below.
+        plugin_id = (
+            (
+                _plugin_attr(manifest, "id", "", "plugin_attribute_access_failed")
+                or ""
+            )
+            if manifest is not None
+            else ""
+        )
+        provides = (
+            _plugin_attr(
+                manifest, "provides", plugin_id, "plugin_attribute_access_failed"
+            )
+            if manifest is not None
+            else ()
+        )
+        # ``provides`` survived the *attribute read* above, but nothing
+        # guarantees it is a real tuple: a plugin manifest can hold any
+        # object there, including a custom iterable whose ``__bool__``/
+        # ``__iter__``/``__len__`` raises. Every use below (``if provides:``,
+        # ``tuple(provides)``, ``set(provides)``) would then let that
+        # exception -- and whatever message the plugin wrote into it --
+        # escape unsanitized. Materialize once, here, into a plain tuple that
+        # is immune to all of that, and use only ``provided`` from this point
+        # on.
+        try:
+            provided = tuple(provides)
+        except Exception as exc:
+            raise ExtensionDiscoveryError(
+                plugin_id or "",
+                "plugin_capability_declaration_invalid",
+                exception_type=type(exc).__name__,
+            ) from None
         decisions = _plugin_attr(
             bundle,
             "capability_decisions",
@@ -396,7 +440,7 @@ def capability_decisions_from_bundles(
             "plugin_capability_declaration_invalid",
         )
         if decisions is None:
-            if provides:
+            if provided:
                 raise ExtensionDiscoveryError(
                     plugin_id, "plugin_capability_declaration_invalid"
                 ) from None
@@ -421,23 +465,23 @@ def capability_decisions_from_bundles(
                     exception_type=type(exc).__name__,
                 ) from None
 
-        for name in tuple(provides) + tuple(decisions):
+        for name in provided + tuple(decisions):
             if type(name) is not str or not _STABLE_ID.fullmatch(name):
                 raise ExtensionDiscoveryError(
                     plugin_id, "plugin_capability_name_invalid"
                 ) from None
-        undeclared = tuple(sorted(set(decisions) - set(provides)))
+        undeclared = tuple(sorted(set(decisions) - set(provided)))
         if undeclared:
             raise ExtensionDiscoveryError(
                 plugin_id, "plugin_capability_not_declared", names=undeclared
             ) from None
-        missing = tuple(sorted(set(provides) - set(decisions)))
+        missing = tuple(sorted(set(provided) - set(decisions)))
         if missing:
             raise ExtensionDiscoveryError(
                 plugin_id, "plugin_capability_missing_decision", names=missing
             ) from None
 
-        for name in sorted(provides):
+        for name in sorted(provided):
             probe = decisions[name]
             if not callable(probe):
                 raise ExtensionDiscoveryError(

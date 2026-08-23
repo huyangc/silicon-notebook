@@ -28,7 +28,12 @@ plugin's failure look like a core failure:
 * a 401 that a plugin handler either *raises* or *returns* (a plugin proxying
   an upstream service's own 401 response is a normal return, not a raise)
   becomes a 424 (see ``_wrap_handler_unauthorized``), because the browser
-  treats 401 as "your session died" and logs the user out;
+  treats 401 as "your session died" and logs the user out. "Raises" covers
+  both ``fastapi.HTTPException`` and ``starlette.exceptions.HTTPException`` —
+  the former is a subclass of the latter, but a plugin author has no reason
+  to know that, and one that imports the Starlette base directly (or a
+  library it depends on raises it under the hood) gets exactly the same 424,
+  not a leaked 401;
 * everything else the plugin raises or returns is its own business.
 
 Failures here raise :class:`PluginRouteMountError` out of ``create_app()``, so
@@ -47,6 +52,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
 from app.api import deps as core_deps
@@ -442,9 +448,17 @@ _UPSTREAM_UNAUTHORIZED_EVENT = "plugin_upstream_unauthorized"
 
 
 def _translate_unauthorized(
-    exc: HTTPException, emit: Callable[[Mapping[str, object]], None]
+    exc: StarletteHTTPException, emit: Callable[[Mapping[str, object]], None]
 ) -> "HTTPException | None":
     """The 424 to raise instead of ``exc``, or ``None`` to let ``exc`` stand.
+
+    ``exc`` is typed as ``starlette.exceptions.HTTPException`` — the base
+    class — rather than ``fastapi.HTTPException`` on purpose: that is what
+    :func:`_wrap_handler_unauthorized`'s ``except`` clause now catches, and a
+    plugin handler that raises the Starlette base directly (or calls into a
+    dependency that does) must translate exactly like one that raises
+    FastAPI's subclass. Only ``exc.status_code`` is read, which both classes
+    define identically.
 
     The copy is written inline rather than hoisted to a module constant on
     purpose: both ``scripts/check_ui_vocabulary.py`` and
@@ -536,6 +550,16 @@ def _wrap_handler_unauthorized(
     still has to happen at ``dependant.call`` and not, say, only around the
     ``except``: the check has to see every ordinary return, not just the ones
     that unwound through an exception.
+
+    The ``except`` clause below catches ``starlette.exceptions.HTTPException``
+    — the base class — rather than ``fastapi.HTTPException``. FastAPI's is a
+    subclass of Starlette's, so this still catches everything it used to; what
+    it additionally catches is a plugin handler (or a library it calls into,
+    e.g. an upstream HTTP client wrapper) raising the Starlette base directly.
+    Narrowing this to the FastAPI subclass would let such a 401 fall straight
+    through unwrapped and reach the browser as a real 401 — logging the user
+    out of the whole product over one plugin's upstream credential, exactly
+    the failure this function exists to prevent.
     """
 
     dependant = route.dependant
@@ -550,7 +574,7 @@ def _wrap_handler_unauthorized(
         async def call(**values: Any) -> Any:
             try:
                 result = await inner(**values)
-            except HTTPException as exc:
+            except StarletteHTTPException as exc:
                 translated = _translate_unauthorized(exc, emit)
                 if translated is None:
                     raise
@@ -566,7 +590,7 @@ def _wrap_handler_unauthorized(
         def call(**values: Any) -> Any:
             try:
                 result = inner(**values)
-            except HTTPException as exc:
+            except StarletteHTTPException as exc:
                 translated = _translate_unauthorized(exc, emit)
                 if translated is None:
                     raise
