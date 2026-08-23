@@ -13,6 +13,10 @@ os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
 # 断言读到上一次运行的响应，制造大规模假失败/假成功。
 os.environ["LLM_CACHE_ENABLED"] = "false"
 
+# 部署插件配置同理必须硬清：留着开发者本机 .env 里的 EXTENSIONS_CONFIG 会让测试
+# 进程装入真实部署插件，冻结拓扑与 openapi() 契约会随本机配置漂移。
+os.environ["EXTENSIONS_CONFIG"] = ""
+
 # python-igraph imports its drawing adapters lazily on the first graph rebuild,
 # which imports Matplotlib. On macOS, a missing Matplotlib cache invokes the
 # system font enumerator (~8 s). Without a shared prewarm every xdist worker

@@ -111,7 +111,11 @@ class ExtensionRegistry:
             raise ExtensionRegistryError(
                 f"extension {manifest.id!r} uses unsupported API {manifest.api_version!r}"
             )
-        if manifest.trust not in {"builtin", "isolated"}:
+        # "isolated" is a reserved value for a future process-isolated trust
+        # tier — it must never enter this in-process registry. Only
+        # "builtin" (shipped with this build) and "deployment"
+        # (EXTENSIONS_CONFIG-loaded, in-process) bundles register here.
+        if manifest.trust not in {"builtin", "deployment"}:
             raise ExtensionRegistryError(
                 f"extension {manifest.id!r} has invalid trust classification"
             )
@@ -169,6 +173,17 @@ class ExtensionRegistry:
         if set(ui_ids) & set(declaration_ids):
             raise ExtensionRegistryError(
                 f"extension {manifest.id!r} reuses one id across runtime and UI contributions"
+            )
+        if (
+            type(manifest.provides) is not tuple
+            or any(
+                type(name) is not str or not _STABLE_METADATA_ID.fullmatch(name)
+                for name in manifest.provides
+            )
+            or len(manifest.provides) != len(set(manifest.provides))
+        ):
+            raise ExtensionRegistryError(
+                f"extension {manifest.id!r} declares invalid provided capabilities"
             )
         self._manifests[manifest.id] = manifest
         for declaration in manifest.ui_contributions:

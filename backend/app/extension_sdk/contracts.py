@@ -141,7 +141,10 @@ class ExtensionManifest:
     version: str
     api_version: str
     display_name: str
-    trust: Literal["builtin", "isolated"]
+    # "builtin" = shipped with this build; "deployment" = deployment-owned
+    # out-of-repo package loaded in-process via EXTENSIONS_CONFIG;
+    # "isolated" = process-isolated, never enters the in-process registry.
+    trust: Literal["builtin", "deployment", "isolated"]
     contributions: tuple[ContributionDeclaration, ...]
     # Capability requirements.  The Phase-1 capability catalog will validate
     # that each named capability has a decision entry; these are not plugin ids.
@@ -152,6 +155,11 @@ class ExtensionManifest:
     # Metadata-only workspace UI declarations.  Browser implementations stay
     # in the static frontend registry and must pass the cross-stack parity gate.
     ui_contributions: tuple[UiContributionDeclaration, ...] = ()
+    # Capability names this bundle supplies a probe for (deployment plugins
+    # only). Each entry must be a stable metadata id and have a matching
+    # entry in the bundle's capability_decisions mapping; see
+    # extensions/discovery.py::capability_decisions_from_bundles.
+    provides: tuple[str, ...] = ()
 
 
 AvailabilityProbe = Callable[[object | None], Availability]
