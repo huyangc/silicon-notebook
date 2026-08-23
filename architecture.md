@@ -485,7 +485,7 @@ cd frontend
 npm run build
 ```
 
-门禁按 G0–G3 分级：G0 是按改动选跑的目标测试；G1 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane，并用于编辑期及每次 PR/push，backend 默认使用 12 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖，Node 原生测试与 Vitest 各限制为 4 workers；frontend 的 production build 负责 TypeScript 校验且禁止 `ignoreBuildErrors`，G1 不在它之前重复执行同一遍 `tsc --noEmit`；G2 `scripts/check_extended.sh` 先复用 G1，再补跑 `slow` 真实索引/性能用例与 `architecture_contract` 全仓语义源码扫描，由独立 GitHub Actions workflow 每天 18:17 UTC（北京时间次日 02:17）执行一次，也支持手动触发；G3 `scripts/check_postgres.sh` 独立负责 PostgreSQL 集成覆盖。G1/G2 backend marker 表达式必须精确互补。每个 lane
+门禁按 G0–G3 分级：G0 是按改动选跑的目标测试；G1 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane，并用于编辑期及每次 PR/push，backend 默认使用 12 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖，Node 原生测试与 Vitest 各限制为 4 workers；frontend 的 production build 负责 TypeScript 校验且禁止 `ignoreBuildErrors`，G1 不在它之前重复执行同一遍 `tsc --noEmit`；G2 `scripts/check_extended.sh` 先复用 G1，再补跑 `slow` 真实索引/性能用例与 `architecture_contract_heavy`（8 个 >2s 的全仓语义扫描）；其余 56 个 `architecture_contract` 测试随 G1 每次 PR 都跑，由独立 GitHub Actions workflow 每天 18:17 UTC（北京时间次日 02:17）执行一次，也支持手动触发；G3 `scripts/check_postgres.sh` 独立负责 PostgreSQL 集成覆盖。G1/G2 backend marker 表达式必须精确互补。每个 lane
 拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js
 后代。静态契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；
 源码行号/offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用
