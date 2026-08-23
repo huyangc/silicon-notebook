@@ -105,6 +105,79 @@ function publicSurface(module, functionName) {
   return names;
 }
 
+// The `fanOut: { ... }` object literal passed to `useKgOwner(...)` inside
+// `useKgWorkspace` — the composition layer's one legitimate spot for calling
+// a domain's named command. Used both to check every `KgDomains` key is
+// routed (below) and to bound where a domain call is allowed to appear at
+// all (the "confined to the fan-out routing spots" test).
+function findFanOutObject(module, functionName) {
+  const hookNode = findFunction(module, functionName);
+  let match;
+  function visit(node) {
+    if (match) return;
+    if (
+      ts.isPropertyAssignment(node)
+      && node.name.getText(module) === "fanOut"
+      && ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      match = node.initializer;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(hookNode.body);
+  if (!match) {
+    throw new Error(`fanOut object literal not found in ${functionName} — parsing broke`);
+  }
+  return match;
+}
+
+// The property names declared on the `KgDomains` type literal — the roster
+// of domains the fan-out must sweep. Read from the type, not hand-copied,
+// so a fourth domain key is picked up automatically.
+function kgDomainKeys(module) {
+  let keys;
+  function visit(node) {
+    if (keys) return;
+    if (
+      ts.isTypeAliasDeclaration(node)
+      && node.name.text === "KgDomains"
+      && ts.isTypeLiteralNode(node.type)
+    ) {
+      keys = node.type.members
+        .filter((member) => ts.isPropertySignature(member) && member.name)
+        .map((member) => member.name.getText(module));
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(module);
+  if (!keys) {
+    throw new Error("KgDomains type literal not found — parsing broke");
+  }
+  return keys;
+}
+
+// Recognizes `for (const <var> of Object.values(domains)) { ... }` inside a
+// fan-out property's body — the loop must walk `domains` itself (not a
+// hand-picked subset dressed up as one) for the sweep guarantee to hold.
+function domainsValuesLoop(node, module) {
+  let loop;
+  function visit(child) {
+    if (loop) return;
+    if (
+      ts.isForOfStatement(child)
+      && child.expression.getText(module).replace(/\s+/g, "") === "Object.values(domains)"
+    ) {
+      loop = child;
+      return;
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return loop;
+}
+
 test("page composes one KG workspace owner and no longer owns Knowledge or graph HTTP", () => {
   assert.equal(callCount(page, "useKgWorkspace"), 1);
   assert.equal(importsIn(page).some(({ module }) => module === "./knowledge-api"), false);
@@ -250,24 +323,92 @@ test("every KG hook exposes readonly views and named commands, never raw setters
   }
 });
 
-test("cross-domain coordination is only the composition layer routing named commands", () => {
+test("every KgDomains key is routed through clearVisibleState and invalidate", () => {
+  const domainKeys = kgDomainKeys(composition);
+  assert.ok(domainKeys.length >= 3, `KgDomains 键数异常: ${domainKeys.join(",")}`);
+
+  const fanOut = findFanOutObject(composition, "useKgWorkspace");
+  const clearProperty = fanOut.properties.find(
+    (property) => property.name?.getText(composition) === "clearVisibleState",
+  );
+  const invalidateProperty = fanOut.properties.find(
+    (property) => property.name?.getText(composition) === "invalidate",
+  );
+  assert.ok(clearProperty && invalidateProperty, "fanOut 缺少 clearVisibleState/invalidate 属性");
+
+  // Judgement is structural: if the fan-out is a loop over
+  // `Object.values(domains)`, the loop body must invoke `.<command>()` on
+  // the loop variable (walking `domains` itself, not a hand-picked subset —
+  // `domainsValuesLoop` only matches the exact iterable). If a future
+  // refactor reverts to an explicit per-key list, every `KgDomains` key must
+  // have its own routed call instead.
+  function assertRoutesAllDomains(property, command) {
+    const initializer = property.initializer;
+    const loop = domainsValuesLoop(initializer, composition);
+    if (loop) {
+      const declarations = ts.isVariableDeclarationList(loop.initializer)
+        ? loop.initializer.declarations
+        : [];
+      assert.equal(declarations.length, 1, `${command}: for-of 循环变量解析失败`);
+      const loopVar = declarations[0].name.getText(composition);
+      assert.ok(
+        callsIn(loop.statement).includes(`${loopVar}.${command}`),
+        `${command}: Object.values(domains) 循环体没有调用 .${command}()`,
+      );
+      return;
+    }
+    const initializerText = initializer.getText(composition);
+    for (const key of domainKeys) {
+      assert.match(
+        initializerText,
+        new RegExp(`domains\\.${key}\\.${command}\\(`),
+        `${command} 没有路由 KgDomains 的 "${key}" 键（既不是 Object.values(domains) 循环，也没有显式 domains.${key}.${command}()）`,
+      );
+    }
+  }
+
+  assertRoutesAllDomains(clearProperty, "clearVisibleState");
+  assertRoutesAllDomains(invalidateProperty, "invalidate");
+});
+
+test("domain command calls are confined to the fan-out routing spots", () => {
   const compose = findFunction(composition, "useKgWorkspace");
-  const domainCalls = callsIn(compose).filter((target) => target.startsWith("domains.")
-    || target.startsWith("domainsRef.current"));
-  assert.ok(domainCalls.length > 0, "组合层一个领域命令都没调 —— 扇出接线已断");
-  const allowedFanOut = new Set([
-    "domains.knowledge.clearVisibleState",
-    "domains.schema.clearVisibleState",
-    "domains.graph.clearVisibleState",
-    "domains.knowledge.invalidate",
-    "domains.schema.invalidate",
-    "domains.graph.invalidate",
-    "domainsRef.current?.graph.adoptOwner",
-  ]);
+  const fanOut = findFanOutObject(composition, "useKgWorkspace");
+
+  // The allowed regions are the fan-out object literal's own property
+  // initializers (arrow functions) — this covers both an explicit per-key
+  // list and a loop over `Object.values(domains)`, since either form is
+  // written inside one of these initializers. Containment is judged
+  // structurally: a single descent from the composition function body
+  // carries an `allowed` flag that flips true only on entering one of these
+  // exact node objects (identity, not a source-position/order query — this
+  // repo's static-source-policy guard forbids `.pos`/`.end`/`getStart`/
+  // `getEnd` in test code).
+  const allowedRoots = new Set(fanOut.properties.map((property) => property.initializer));
+
+  // A "domain command call" is any call whose callee text is rooted at an
+  // identifier starting with "domain" and reaches a member through at least
+  // one dot — this catches the explicit form (`domains.knowledge.invalidate(`),
+  // the ref form (`domainsRef.current?.graph.adoptOwner(`), and the loop
+  // form (`domain.clearVisibleState(`) regardless of which one production
+  // code currently uses.
+  const offenders = [];
+  function visit(node, allowed) {
+    const nowAllowed = allowed || allowedRoots.has(node);
+    if (ts.isCallExpression(node)) {
+      const calleeText = node.expression.getText(composition);
+      if (/^domain/i.test(calleeText) && calleeText.includes(".") && !nowAllowed) {
+        offenders.push(calleeText);
+      }
+    }
+    ts.forEachChild(node, (child) => visit(child, nowAllowed));
+  }
+  visit(compose.body, false);
+
   assert.deepEqual(
-    domainCalls.filter((target) => !allowedFanOut.has(target)),
+    offenders,
     [],
-    "组合层调用了扇出三件套之外的领域命令",
+    `组合层在扇出路由位置之外调用了领域命令: ${offenders.join(", ")}`,
   );
 });
 
