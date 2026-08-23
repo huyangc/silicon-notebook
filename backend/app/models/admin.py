@@ -281,3 +281,46 @@ class CacheEvictRequest(BaseModel):
 class CacheEvictResult(BaseModel):
     evicted: int
     scope: str                     # 被清理的 tag 名，或 'all'
+
+
+# --- GET /admin/extensions：已加载扩展拓扑的只读运维视图 --------------------
+#
+# 白名单，恰好 6 个字段（id/version/trust/display_name/contributions/
+# ui_contributions），刻意**没有** `enabled`——拓扑启动冻结，被停用的插件根本
+# 没有进入 registry，一个恒为 true 的字段只会误导运维。真源见
+# backend/app/extensions/admin_projection.py 与
+# docs/superpowers/plans/2026-08-23-deployment-extensions-backend.md 主 agent 裁决 1。
+
+
+class AdminExtensionContribution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    point: str
+    kind: str
+
+
+class AdminExtensionUiContribution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    slot: str
+    capability: str
+
+
+class AdminExtension(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    version: str
+    trust: Literal["builtin", "deployment"]
+    display_name: str
+    contributions: List[AdminExtensionContribution]
+    ui_contributions: List[AdminExtensionUiContribution]
+
+
+class AdminExtensionsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_version: Literal["1"] = "1"
+    extensions: List[AdminExtension]

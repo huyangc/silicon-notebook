@@ -337,6 +337,126 @@
           "title": "AddUrlSourcesResult",
           "type": "object"
         },
+        "AdminExtension": {
+          "additionalProperties": false,
+          "properties": {
+            "contributions": {
+              "items": {
+                "$ref": "#/components/schemas/AdminExtensionContribution"
+              },
+              "title": "Contributions",
+              "type": "array"
+            },
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "trust": {
+              "enum": [
+                "builtin",
+                "deployment"
+              ],
+              "title": "Trust",
+              "type": "string"
+            },
+            "ui_contributions": {
+              "items": {
+                "$ref": "#/components/schemas/AdminExtensionUiContribution"
+              },
+              "title": "Ui Contributions",
+              "type": "array"
+            },
+            "version": {
+              "title": "Version",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "version",
+            "trust",
+            "display_name",
+            "contributions",
+            "ui_contributions"
+          ],
+          "title": "AdminExtension",
+          "type": "object"
+        },
+        "AdminExtensionContribution": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "point": {
+              "title": "Point",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "point",
+            "kind"
+          ],
+          "title": "AdminExtensionContribution",
+          "type": "object"
+        },
+        "AdminExtensionUiContribution": {
+          "additionalProperties": false,
+          "properties": {
+            "capability": {
+              "title": "Capability",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "slot": {
+              "title": "Slot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "slot",
+            "capability"
+          ],
+          "title": "AdminExtensionUiContribution",
+          "type": "object"
+        },
+        "AdminExtensionsResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "api_version": {
+              "const": "1",
+              "default": "1",
+              "title": "Api Version",
+              "type": "string"
+            },
+            "extensions": {
+              "items": {
+                "$ref": "#/components/schemas/AdminExtension"
+              },
+              "title": "Extensions",
+              "type": "array"
+            }
+          },
+          "required": [
+            "extensions"
+          ],
+          "title": "AdminExtensionsResponse",
+          "type": "object"
+        },
         "AdminPasswordResetRequest": {
           "additionalProperties": false,
           "properties": {
@@ -11081,6 +11201,25 @@
             }
           },
           "summary": "Evict Cache"
+        }
+      },
+      "/api/admin/extensions": {
+        "get": {
+          "description": "已加载的扩展拓扑（部署运维只读视图）。仅 admin。\n\n白名单投影：绝不返回模块路径/文件路径/settings 值/reason/异常文本；\n拓扑在启动时已经冻结，被停用的插件从未进入 registry，因此不会出现\n在这里——没有 `enabled` 字段。",
+          "operationId": "list_admin_extensions_api_admin_extensions_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminExtensionsResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "List Admin Extensions"
         }
       },
       "/api/admin/model-services/test-all": {

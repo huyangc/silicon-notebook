@@ -473,6 +473,47 @@ def test_registry_rejects_isolated_trust_and_accepts_deployment():
     assert registry.manifests() == (deployment,)
 
 
+def test_deployment_bundle_core_registry_errors_pass_through_unwrapped():
+    """Core's own diagnostics must reach the caller verbatim for *every*
+    trust tier, deployment included — only a plugin's own exceptions get
+    sanitized into an opaque ``plugin_registration_failed``.
+
+    Mirrors ``test_builtin_register_failure_keeps_its_verbatim_registry_error``
+    (test_extension_discovery.py) for ``trust="deployment"``, proving the
+    exemption is keyed on exception *type* (``ExtensionRegistryError``), not
+    on the bundle's trust tier.
+    """
+
+    manifest = replace(
+        _manifest(
+            "deployment_plugin",
+            ContributionDeclaration(
+                "deployment_plugin.one",
+                "ask.completed_observer",
+                ContributionKind.OBSERVER,
+            ),
+            ContributionDeclaration(
+                "deployment_plugin.two",
+                "ask.completed_observer",
+                ContributionKind.OBSERVER,
+            ),
+        ),
+        trust="deployment",
+    )
+    # register() calls registrar.add() for only the first declared
+    # contribution — the second is declared in the manifest but never
+    # registered, tripping core's own post-register() consistency check.
+    bundle = _Bundle(manifest, implementations=(object(),))
+
+    with pytest.raises(
+        ExtensionRegistryError, match="registrations do not match its manifest"
+    ) as excinfo:
+        build_extension_registry((bundle,))
+    # The core diagnostic text is intact — not replaced by a stable reason
+    # code, and not an ExtensionDiscoveryError.
+    assert "deployment_plugin" in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "provides",
     [

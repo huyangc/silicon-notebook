@@ -830,9 +830,17 @@ def test_secret_settings_never_reach_logs_or_projections(
     # Still reachable on purpose — this is a redaction of the default rendering,
     # not of the value; T5's route host reads it deliberately.
     assert runtime.plugin_settings["corp.sample"].token == "TOPSECRET"
-    # TODO(T4): also assert the /admin/extensions projection
-    # (app.extensions.admin_projection.project_loaded_extensions) carries no
-    # settings value once that surface lands.
+    # The /admin/extensions projection is a second, independent sanitized view
+    # of the same frozen registry — it must carry no settings value either.
+    from dataclasses import asdict
+
+    from app.extensions.admin_projection import project_loaded_extensions
+
+    admin_dump = json.dumps(
+        [asdict(row) for row in project_loaded_extensions(runtime.registry)]
+    )
+    assert "corp.sample" in admin_dump
+    assert "TOPSECRET" not in admin_dump
 
 
 def test_scalar_settings_value_is_rejected_before_it_is_read_as_a_key_set(

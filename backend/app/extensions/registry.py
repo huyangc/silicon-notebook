@@ -197,6 +197,18 @@ class ExtensionRegistry:
                 raise ExtensionRegistryError(
                     f"extension {manifest.id!r} registrations do not match its manifest"
                 )
+        except ExtensionRegistryError:
+            # Core's own diagnostics — including the "registrations do not
+            # match its manifest" check just above — are constructed entirely
+            # from stable metadata identifiers this module already validated,
+            # never from plugin-controlled text. They stay verbatim and
+            # unwrapped for *every* trust tier, deployment included: a plugin
+            # cannot manufacture one (it would have to import and raise this
+            # module's own exception type with the exact diagnostic core
+            # would have produced), and sanitizing it here would hide core's
+            # most actionable rejection message behind an opaque reason code.
+            self._rollback_manifest(manifest.id, before)
+            raise
         except Exception as exc:
             self._rollback_manifest(manifest.id, before)
             if manifest.trust == "deployment":

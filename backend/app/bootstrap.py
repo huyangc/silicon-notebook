@@ -5,6 +5,10 @@ from collections.abc import Callable
 
 from app.core.config import Settings
 from app.extensions import ExtensionRuntime, default_extension_runtime
+from app.extensions.admin_projection import (
+    LoadedExtensionProjection,
+    project_loaded_extensions,
+)
 from app.extensions.ui_projection import (
     UiContributionProjection,
     project_ui_contributions,
@@ -23,6 +27,19 @@ def application_extension_ui_projection(
     """Bind the frozen registry behind the API's narrow sanitized projection seam."""
 
     return lambda context: project_ui_contributions(runtime.registry, context)
+
+
+def application_extension_admin_projection(
+    runtime: ExtensionRuntime,
+) -> Callable[[], tuple[LoadedExtensionProjection, ...]]:
+    """Bind the frozen registry behind the admin-only topology projection seam.
+
+    Unlike the UI projection above, this has no per-request context: the
+    projection is a pure function of the startup-frozen registry, so the
+    returned callable takes no arguments.
+    """
+
+    return lambda: project_loaded_extensions(runtime.registry)
 
 
 def create_application_repository(settings: Settings) -> NotebookRepository:

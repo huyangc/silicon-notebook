@@ -20,6 +20,10 @@ from app.models.admin import (
     ActivityReport,
     ActivityResponse,
     ActivitySource,
+    AdminExtension,
+    AdminExtensionContribution,
+    AdminExtensionUiContribution,
+    AdminExtensionsResponse,
     AdminPasswordResetRequest,
     AdminPasswordResetResult,
     AdminUserNotebook,
@@ -564,3 +568,46 @@ def evict_cache(
     if not tag:
         raise user_error(400, "请指定要清理的模型名，或明确选择清空全部缓存")
     return CacheEvictResult(evicted=backend.evict_tag(tag), scope=tag)
+
+
+# --- 扩展拓扑：只读运维视图 --------------------------------------------------
+
+
+@router.get("/admin/extensions", response_model=AdminExtensionsResponse)
+def list_admin_extensions(
+    request: Request, user: UserProfile = Depends(get_current_user)
+) -> AdminExtensionsResponse:
+    """已加载的扩展拓扑（部署运维只读视图）。仅 admin。
+
+    白名单投影：绝不返回模块路径/文件路径/settings 值/reason/异常文本；
+    拓扑在启动时已经冻结，被停用的插件从未进入 registry，因此不会出现
+    在这里——没有 `enabled` 字段。
+    """
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看已加载的扩展")
+    projection = request.app.state.extension_admin_projection
+    if not callable(projection):
+        raise RuntimeError("application extension admin projection is unavailable")
+    return AdminExtensionsResponse(
+        extensions=[
+            AdminExtension(
+                id=row.id,
+                version=row.version,
+                trust=row.trust,
+                display_name=row.display_name,
+                contributions=[
+                    AdminExtensionContribution(
+                        id=item.id, point=item.point, kind=item.kind
+                    )
+                    for item in row.contributions
+                ],
+                ui_contributions=[
+                    AdminExtensionUiContribution(
+                        id=item.id, slot=item.slot, capability=item.capability
+                    )
+                    for item in row.ui_contributions
+                ],
+            )
+            for row in projection()
+        ]
+    )
