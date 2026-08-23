@@ -74,6 +74,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 只读 package.json 的生命周期钩子与根 .gitignore 的两条忽略规则。生成物按定义
   // 不入库，所以「它总在」只能由钩子保证，而这两份都是配置元数据、不是生产源码。
   "tests/guards/extension-plugin-package-guard.test.mjs",
+  // node --test 对 `.tsx` 报 Unknown file extension，而 node 泳道真的 import 生产
+  // registry。这条守卫遍历模块图证明那条闭包全是 `.ts`，因此必须自己 resolve 并
+  // 打开被 import 到的每个文件——它只消费 import 说明符与文件扩展名，不做任何
+  // 源码位置/顺序查询。
+  "tests/guards/extension-module-graph-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

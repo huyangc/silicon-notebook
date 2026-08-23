@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { WORKSPACE_UI_CONTRIBUTIONS } from "../../features/extension-sdk/registry.ts";
+// fixture 只钉**内建**目录：合并 registry（内建 + 构建期装载的仓库外插件）住在
+// workspace-registry.ts，它 import 插件包的 `.tsx` 入口，node --test 装不下；而
+// 合并集合与后端的对账是部署期的事（frontend/.local/ui-extension-contract.json）。
+import { BUILTIN_WORKSPACE_UI_CONTRIBUTIONS } from "../../features/extension-sdk/registry.ts";
 
 
 function normalized(rows) {
@@ -20,13 +23,13 @@ function assertParity(frontendRows, backendRows) {
 }
 
 
-test("build registry matches the backend UI contract fixture", async () => {
+test("builtin registry matches the backend UI contract fixture", async () => {
   const fixture = JSON.parse(await readFile(
     new URL("../../../backend/tests/fixtures/ui_extension_contract.json", import.meta.url),
     "utf8",
   ));
   assert.equal(fixture.api_version, "1");
-  assertParity(WORKSPACE_UI_CONTRIBUTIONS, fixture.contributions);
+  assertParity(BUILTIN_WORKSPACE_UI_CONTRIBUTIONS, fixture.contributions);
 });
 
 

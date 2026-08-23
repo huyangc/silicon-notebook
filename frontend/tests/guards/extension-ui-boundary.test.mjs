@@ -222,16 +222,71 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   for (const { path, module } of modules) {
     assert.doesNotMatch(module.getText(module), forbidden, path);
   }
+  // registry 现在是三个模块，import 规则各不相同、必须分开钉：
+  //  · registry.ts            —— node --test 泳道直接 import 它，闭包必须全是 .ts，
+  //                              因此**不许** import ./registry.local.ts（生成物会拉进插件的 .tsx 入口）。
+  //  · workspace-registry.ts  —— 唯一的合并点，只许碰这三份 SDK 内部模块。
+  //  · registry.local.ts      —— 同步脚本的生成物，只许 import 合同与 features/ext-*/ 下的插件入口。
   const registry = modules.find((row) => row.path === "features/extension-sdk/registry.ts");
   assert.ok(registry);
+  const merged = modules.find((row) => row.path === "features/extension-sdk/workspace-registry.ts");
+  assert.ok(merged, "workspace-registry.ts must remain the single merged registry module");
+  const local = modules.find((row) => row.path === "features/extension-sdk/registry.local.ts");
+  if (!local) assert.fail("registry.local.ts 缺失——先跑 npm run sync:ui-plugins");
   // registry.ts 只能 import 合同与插件组件模块（按路径形状认，不钉死插件清单）；
   // 插件 import 数必须等于登记条目数——漏登记或多 import 都红，守卫因此非空转。
   const registryImports = importsIn(registry.module).map((row) => row.module);
-  const pluginImports = registryImports.filter((module) => /^\.\.\/[a-z0-9-]+\/workspace-plugin\.tsx?$/.test(module));
+  const builtinPluginImports = registryImports.filter((module) => /^\.\.\/[a-z0-9-]+\/workspace-plugin\.tsx?$/.test(module));
+  assert.ok(
+    !registryImports.includes("./registry.local.ts"),
+    "registry.ts must not import the generated local registry: the node --test lane imports"
+    + " registry.ts directly and Node cannot load the plugin .tsx entries it pulls in",
+  );
   assert.deepEqual(
-    registryImports.filter((module) => module !== "./contracts.ts" && !pluginImports.includes(module)),
+    registryImports.filter((module) => module !== "./contracts.ts" && !builtinPluginImports.includes(module)),
     [],
     "registry.ts may import only ./contracts.ts and features/*/workspace-plugin modules",
+  );
+  assert.deepEqual(
+    [...new Set(importsIn(merged.module).map((row) => row.module))].sort(),
+    ["./contracts.ts", "./registry.local.ts", "./registry.ts"],
+    "workspace-registry.ts may merge only the builtin registry and the generated local one",
+  );
+  // 合并结果必须**再过一次** defineWorkspaceUiRegistry：本地条目与内建条目共用同一套
+  // 元数据校验、重复 id 拒绝、稳定排序与冻结。直接拼数组（`[...builtin, ...local]`）在
+  // 零插件部署上看不出任何差别，却让仓库外插件包的重复 id、非法 slot 或不是函数的
+  // Component 静默走到 host，并让合并结果不再冻结。
+  let mergedInitializer;
+  for (const top of merged.module.statements) {
+    if (!ts.isVariableStatement(top)) continue;
+    for (const declared of top.declarationList.declarations) {
+      if (declared.name.getText(merged.module) !== "WORKSPACE_UI_CONTRIBUTIONS") continue;
+      mergedInitializer = declared.initializer;
+    }
+  }
+  assert.ok(
+    mergedInitializer
+    && ts.isCallExpression(mergedInitializer)
+    && mergedInitializer.expression.getText(merged.module) === "defineWorkspaceUiRegistry",
+    "workspace-registry.ts must re-validate the merged registry through defineWorkspaceUiRegistry",
+  );
+  const mergedArgument = mergedInitializer.arguments[0];
+  assert.ok(
+    mergedArgument && ts.isArrayLiteralExpression(mergedArgument),
+    "the merged registry must be validated as one explicit array literal of both sources",
+  );
+  assert.deepEqual(
+    mergedArgument.elements.map((element) => element.getText(merged.module)),
+    ["...BUILTIN_WORKSPACE_UI_CONTRIBUTIONS", "...LOCAL_WORKSPACE_UI_CONTRIBUTIONS"],
+    "merged registry must spread the builtin registry first, then the generated local one",
+  );
+  const LOCAL_PLUGIN_SPECIFIER = /^\.\.\/ext-[a-z0-9-]+\/workspace-plugin\.tsx?$/;
+  const localImports = importsIn(local.module).map((row) => row.module);
+  const localPluginImports = localImports.filter((module) => LOCAL_PLUGIN_SPECIFIER.test(module));
+  assert.deepEqual(
+    localImports.filter((module) => module !== "./contracts.ts" && !localPluginImports.includes(module)),
+    [],
+    "registry.local.ts may import only ./contracts.ts and features/ext-*/workspace-plugin modules",
   );
   let registeredEntries = 0;
   function countEntries(entry) {
@@ -243,12 +298,26 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     ts.forEachChild(entry, countEntries);
   }
   countEntries(registry.module);
+  // 生成物里没有 defineWorkspaceUiRegistry 调用（校验发生在合并处），它的条目就是
+  // LOCAL_WORKSPACE_UI_CONTRIBUTIONS 那个顶层数组字面量的成员。workspace-registry.ts
+  // 显式不计数：它把两份 spread 进同一次调用，按调用形状数会把内建条目重复计一遍。
+  let localEntries = 0;
+  for (const top of local.module.statements) {
+    if (!ts.isVariableStatement(top)) continue;
+    for (const declared of top.declarationList.declarations) {
+      const initialized = declared.initializer;
+      if (!initialized || !ts.isArrayLiteralExpression(initialized)) continue;
+      localEntries += initialized.elements.filter(ts.isObjectLiteralExpression).length;
+    }
+  }
+  const totalEntries = registeredEntries + localEntries;
   assert.ok(registeredEntries > 0, "registry must register at least one contribution (guard would be vacuous)");
-  assert.equal(pluginImports.length, registeredEntries, "every registered contribution imports exactly one plugin module and vice versa");
+  const pluginImports = [...builtinPluginImports, ...localPluginImports];
+  assert.equal(pluginImports.length, totalEntries, "every registered contribution imports exactly one plugin module and vice versa");
   // 每个插件组件模块只许依赖 SDK 合同、react 与图标库——同一张白名单对所有插件生效。
   const PLUGIN_IMPORT_ALLOWLIST = new Set(["../extension-sdk/contracts.ts", "lucide-react", "react"]);
   const plugins = modules.filter((row) => PLUGIN_MODULE.test(row.path));
-  assert.equal(plugins.length, registeredEntries, "one plugin module per registered contribution");
+  assert.equal(plugins.length, totalEntries, "one plugin module per registered contribution");
   for (const plugin of plugins) {
     assert.deepEqual(
       importsIn(plugin.module).map((row) => row.module).filter((module) => !PLUGIN_IMPORT_ALLOWLIST.has(module)),
@@ -256,6 +325,19 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
       `${plugin.path} imports outside the plugin allowlist`,
     );
   }
+  // 内建插件由 registry.ts 自己点名；其余插件模块只能是同步脚本复制进来的仓库外包，
+  // 落点固定 features/ext-*/。手写一个 features/notmyext/workspace-plugin.ts 并从
+  // registry.local.ts 引用它会在这里与上面的 local import 规则同时报红。
+  const builtinPluginPaths = new Set(builtinPluginImports.map(
+    (module) => `features/${module.replace("../", "")}`,
+  ));
+  assert.deepEqual(
+    plugins.map((row) => row.path).filter((modulePath) => (
+      !builtinPluginPaths.has(modulePath) && !/^features\/ext-[a-z0-9-]+\//.test(modulePath)
+    )),
+    [],
+    "plugin modules the builtin registry does not own must live under features/ext-*/",
+  );
   const owner = modules.find((row) => row.path === "use-workspace-extensions.ts");
   assert.ok(owner);
   const ownerFunction = findFunction(owner.module, "useWorkspaceExtensions");

@@ -6,7 +6,11 @@ import { afterEach, expect, test, vi } from "vitest";
 import { useWorkspaceExtensions, type WorkspaceExtensions } from "../../app/use-workspace-extensions";
 import { WorkspaceExtensionOutlet } from "../../features/extension-sdk/host";
 import { createOwnedWorkspaceExtensionActions } from "../../features/extension-sdk/actions";
-import { WORKSPACE_UI_CONTRIBUTIONS, defineWorkspaceUiRegistry } from "../../features/extension-sdk/registry";
+import {
+  BUILTIN_WORKSPACE_UI_CONTRIBUTIONS,
+  defineWorkspaceUiRegistry,
+} from "../../features/extension-sdk/registry";
+import { WORKSPACE_UI_CONTRIBUTIONS } from "../../features/extension-sdk/workspace-registry";
 import type { SystemExtensionProjection } from "../../features/extension-sdk/contracts";
 
 function deferred<T>() {
@@ -72,6 +76,25 @@ function commit(ref: { current: WorkspaceExtensions | null }, actorId: string, n
   const transition = ref.current!.beginNotebookTransition({ actorId, notebookId, workspaceEpoch });
   ref.current!.finishNotebookTransition(transition!, true);
 }
+
+test("with zero local plugins the merged registry is the builtin one, entry for entry", () => {
+  // 本仓库不带任何仓库外插件，所以生成的 registry.local.ts 是空数组存根，合并
+  // registry 必须与内建目录逐字相同——拆成两个模块不得改变默认部署看到的任何东西。
+  expect(BUILTIN_WORKSPACE_UI_CONTRIBUTIONS).toHaveLength(1);
+  expect(WORKSPACE_UI_CONTRIBUTIONS).toHaveLength(1);
+  expect(WORKSPACE_UI_CONTRIBUTIONS).toEqual(BUILTIN_WORKSPACE_UI_CONTRIBUTIONS);
+  // 合并结果仍是 defineWorkspaceUiRegistry 的产物：直接拼两个数组会在零插件部署上
+  // 看不出差别，却丢掉冻结——以及本地条目本该受到的那一整套元数据校验。
+  expect(Object.isFrozen(WORKSPACE_UI_CONTRIBUTIONS)).toBe(true);
+  expect(Object.isFrozen(WORKSPACE_UI_CONTRIBUTIONS[0])).toBe(true);
+  const [merged] = WORKSPACE_UI_CONTRIBUTIONS;
+  const [builtin] = BUILTIN_WORKSPACE_UI_CONTRIBUTIONS;
+  for (const field of [
+    "id", "pluginId", "pluginVersion", "capability", "slot", "permission", "mode", "Component",
+  ] as const) {
+    expect(merged[field]).toBe(builtin[field]);
+  }
+});
 
 test("empty registry and collection path perform no request, controller or DOM work", () => {
   const load = vi.fn<() => Promise<SystemExtensionProjection>>();
