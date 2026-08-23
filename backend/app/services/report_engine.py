@@ -27,7 +27,6 @@ from app.application.report_pipeline import (
     FinalizedReportArtifact,
     GeneratedReportSections,
     PlannedReportOutline,
-    ReportAuditFacts,
     ReportFinalAuditInput,
     ReportGenerationInput,
     ReportPlanningInput,
@@ -2791,35 +2790,6 @@ class ReportEngine:
         self._assert_report_stage_runtime(
             generation, runtime, run_kind="report_generation"
         )
-        synthesis_status = generated.synthesis_status
-        unsupported = sum(
-            int(
-                (section.get("citation_audit") or {}).get(
-                    "unsupported", 0
-                )
-                or 0
-            )
-            for section in sections
-            if isinstance(section.get("citation_audit"), dict)
-        )
-        facts = ReportAuditFacts(
-            section_count=len(sections),
-            successful_section_count=generated.successful_count,
-            failed_section_count=len(sections) - generated.successful_count,
-            reference_count=len(references),
-            gap_count=len(gaps),
-            claim_ledgers_available=sum(
-                section.get("claim_ledger_status") in {"available", "partial"}
-                for section in sections
-            ),
-            claim_ledgers_partial=sum(
-                section.get("claim_ledger_status") == "partial"
-                for section in sections
-            ),
-            unsupported_high_risk_assertions=unsupported,
-            content_chars=len(content_md),
-            synthesis_status=synthesis_status,
-        )
         persisted_sections: list[Mapping[str, object]] = []
         for section in sections:
             clean = dict(section)
@@ -2833,7 +2803,6 @@ class ReportEngine:
             content_md=content_md,
             gaps=tuple(gaps),
             references=tuple(MappingProxyType(dict(row)) for row in references),
-            audit_facts=facts,
         )
 
     def _generate_run(
@@ -2921,7 +2890,6 @@ class ReportEngine:
                 notebook_id=notebook_id,
                 report_id=rid,
                 actor_id=self.user_id,
-                audit_facts=artifact.audit_facts,
             )
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")

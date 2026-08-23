@@ -1,4 +1,4 @@
-"""Governed post-completion hosts for Ask auditors and observers."""
+"""Governed post-completion host for Ask completion observers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,17 +12,14 @@ from app.domain.extensions import (
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     AgentProfileAskCompletedPort,
-    AnswerAuditSnapshot,
     AskCompletedObserverCallContext,
     CompletedAskNotification,
     RetrievalExperienceAskCompletedPort,
     SearchProfileAskCompletedPort,
 )
 from app.extension_sdk import (
-    ANSWER_AUDITOR_POINT,
     ASK_COMPLETED_OBSERVER_POINT,
     ActorRef,
-    AuditorResult,
     AvailabilityStatus,
     ContributionKind,
     ExtensionFailure,
@@ -30,11 +27,6 @@ from app.extension_sdk import (
     ExtensionResultStatus,
     NotebookRef,
     ObserverReceipt,
-    AnswerAudit,
-    AnswerAuditAvailabilityContext,
-    AnswerAuditExtensionContext,
-    AnswerAuditFinding,
-    AnswerAuditView,
     AskCompletedAvailabilityContext,
     AskCompletedExtensionContext,
 )
@@ -46,17 +38,11 @@ from app.extensions.registry import (
 
 
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
-_SEVERITIES = frozenset({"info", "warning", "risk"})
 _OBSERVER_ACCESS_CAPABILITIES = frozenset({
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
 })
-
-
-@dataclass(frozen=True)
-class _FrozenAuditor:
-    registered: RegisteredContribution
 
 
 @dataclass(frozen=True)
@@ -81,153 +67,6 @@ class _CoreCompletedAccess:
 
     def notify(self) -> ObserverReceipt:
         return self.__notify_once()
-
-
-class AnswerAuditorHost:
-    """Run optional auditors without exposing or replacing ``AskResponse``."""
-
-    def __init__(
-        self,
-        registry: ExtensionRegistry,
-        *,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        if not registry.frozen:
-            raise ExtensionRegistryError(
-                "answer auditor host requires a frozen registry"
-            )
-        auditors: list[_FrozenAuditor] = []
-        for item in registry.contributions(ANSWER_AUDITOR_POINT):
-            declaration = item.contribution.declaration
-            implementation = item.contribution.implementation
-            if (
-                declaration.kind is not ContributionKind.AUDITOR
-                or not callable(getattr(implementation, "audit", None))
-            ):
-                raise ExtensionRegistryError(
-                    f"answer auditor {declaration.id!r} does not implement "
-                    "the answer auditor contract"
-                )
-            auditors.append(_FrozenAuditor(item))
-        self._registry = registry
-        self._auditors = tuple(auditors)
-        self._event_sink = event_sink
-        self._clock = clock
-
-    @property
-    def has_auditors(self) -> bool:
-        """Startup topology fact used by the outer root to keep empty paths inert."""
-        return bool(self._auditors)
-
-    def audit_application(
-        self,
-        snapshot: AnswerAuditSnapshot,
-        *,
-        connection_probe: object,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
-    ) -> tuple[AnswerAudit, ...]:
-        # Empty topology is a strict no-op: no validation, probe, clock or event.
-        if not self._auditors:
-            return ()
-        view = _answer_view(snapshot)
-        if (
-            view is None
-            or not _valid_budget(snapshot.max_findings, snapshot.deadline_monotonic)
-            or not _connection_clear(connection_probe)
-        ):
-            return ()
-        accepted: list[AnswerAudit] = []
-        sink = event_sink if event_sink is not None else self._event_sink
-        availability_context = AnswerAuditAvailabilityContext(
-            view.mode_id,
-            view.grounded,
-            view.evidence_level,
-            snapshot.deadline_monotonic,
-        )
-        for frozen in self._auditors:
-            contribution = frozen.registered.contribution
-            contribution_id = contribution.declaration.id
-            plugin_id = frozen.registered.plugin_id
-            started = _safe_clock(self._clock)
-            if not _deadline_open(started, snapshot.deadline_monotonic):
-                _emit(
-                    sink,
-                    point=ANSWER_AUDITOR_POINT,
-                    plugin_id=plugin_id,
-                    contribution_id=contribution_id,
-                    status="unavailable",
-                    reason_code="extension_point_budget_exhausted",
-                    duration_ms=0,
-                )
-                break
-            availability = self._registry.availability(
-                contribution_id, availability_context
-            )
-            if not _connection_clear(connection_probe):
-                _emit(
-                    sink,
-                    point=ANSWER_AUDITOR_POINT,
-                    plugin_id=plugin_id,
-                    contribution_id=contribution_id,
-                    status="unavailable",
-                    reason_code="connection_lease_held",
-                    duration_ms=_elapsed_ms(self._clock, started),
-                )
-                break
-            if availability.status is not AvailabilityStatus.AVAILABLE:
-                _emit(
-                    sink,
-                    point=ANSWER_AUDITOR_POINT,
-                    plugin_id=plugin_id,
-                    contribution_id=contribution_id,
-                    status="unavailable",
-                    reason_code=availability.reason_code,
-                    duration_ms=_elapsed_ms(self._clock, started),
-                )
-                continue
-            if not _deadline_open(_safe_clock(self._clock), snapshot.deadline_monotonic):
-                break
-            try:
-                result = contribution.implementation.audit(
-                    AnswerAuditExtensionContext(
-                        view,
-                        snapshot.max_findings,
-                        snapshot.deadline_monotonic,
-                    )
-                )
-            except Exception:
-                result = AuditorResult(
-                    None,
-                    ExtensionResultStatus.UNAVAILABLE,
-                    ExtensionFailure(
-                        ExtensionFailureKind.FAILED,
-                        "answer_auditor_failed",
-                    ),
-                )
-            valid, audit = _validate_auditor_result(
-                result, max_findings=snapshot.max_findings
-            )
-            status = result.status.value if valid else "invalid"
-            if audit is not None:
-                accepted.append(audit)
-            _emit(
-                sink,
-                point=ANSWER_AUDITOR_POINT,
-                plugin_id=plugin_id,
-                contribution_id=contribution_id,
-                status=status,
-                reason_code=(
-                    _failure_code(result)
-                    if valid
-                    else "invalid_answer_audit_result"
-                ),
-                duration_ms=_elapsed_ms(self._clock, started),
-                count=len(audit.findings) if audit is not None else 0,
-            )
-            if not _connection_clear(connection_probe):
-                break
-        return tuple(accepted)
 
 
 class AskCompletedObserverHost:
@@ -436,34 +275,6 @@ class AskCompletedObserverHost:
                 break
 
 
-def _answer_view(snapshot: object) -> AnswerAuditView | None:
-    if type(snapshot) is not AnswerAuditSnapshot:
-        return None
-    if (
-        type(snapshot.mode_id) is not str
-        or not _STABLE_CODE.fullmatch(snapshot.mode_id)
-        or type(snapshot.grounded) is not bool
-        or type(snapshot.evidence_level) is not str
-        or not _STABLE_CODE.fullmatch(snapshot.evidence_level)
-    ):
-        return None
-    counts = (
-        snapshot.citation_count,
-        snapshot.anchor_count,
-        snapshot.model_error_count,
-        snapshot.answer_chars,
-        snapshot.conclusion_chars,
-    )
-    if any(type(value) is not int or value < 0 for value in counts):
-        return None
-    return AnswerAuditView(
-        snapshot.mode_id,
-        snapshot.grounded,
-        snapshot.evidence_level,
-        *counts,
-    )
-
-
 def _valid_notification(value: object) -> bool:
     return (
         type(value) is CompletedAskNotification
@@ -560,47 +371,6 @@ def _valid_failure(value: object) -> bool:
     )
 
 
-def _validate_auditor_result(
-    value: object,
-    *,
-    max_findings: int,
-) -> tuple[bool, AnswerAudit | None]:
-    if (
-        type(value) is not AuditorResult
-        or type(value.status) is not ExtensionResultStatus
-        or not _valid_failure(value.failure)
-    ):
-        return False, None
-    if value.status is ExtensionResultStatus.UNAVAILABLE:
-        return value.audit is None and value.failure is not None, None
-    if (
-        value.status not in {
-            ExtensionResultStatus.AVAILABLE,
-            ExtensionResultStatus.PARTIAL,
-        }
-        or type(value.audit) is not AnswerAudit
-        or type(value.audit.findings) is not tuple
-        or len(value.audit.findings) > max_findings
-        or (
-            value.status is ExtensionResultStatus.AVAILABLE
-            and value.failure is not None
-        )
-    ):
-        return False, None
-    for finding in value.audit.findings:
-        if (
-            type(finding) is not AnswerAuditFinding
-            or type(finding.severity) is not str
-            or finding.severity not in _SEVERITIES
-            or type(finding.code) is not str
-            or not _STABLE_CODE.fullmatch(finding.code)
-            or type(finding.count) is not int
-            or finding.count < 1
-        ):
-            return False, None
-    return True, value.audit
-
-
 def _valid_observer_receipt(value: object) -> bool:
     if not (
         type(value) is ObserverReceipt
@@ -646,14 +416,6 @@ def _safe_clock(clock: Callable[[], float]) -> float | None:
 
 def _valid_deadline(value: object) -> bool:
     return type(value) is float and math.isfinite(value) and value > 0
-
-
-def _valid_budget(max_findings: object, deadline: object) -> bool:
-    return (
-        type(max_findings) is int
-        and max_findings > 0
-        and _valid_deadline(deadline)
-    )
 
 
 def _deadline_open(now: float | None, deadline: float) -> bool:
@@ -708,4 +470,4 @@ def _emit(
         pass
 
 
-__all__ = ["AnswerAuditorHost", "AskCompletedObserverHost"]
+__all__ = ["AskCompletedObserverHost"]

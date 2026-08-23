@@ -55,11 +55,8 @@ from app.extensions.capabilities import (
 from app.extensions.registry import ExtensionRegistry, frozen_registry
 from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
-from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
-from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
-from app.extensions.element_enrichment import SourceElementEnricherHost
-from app.extensions.knowledge_projection import KnowledgeCandidateProjectorHost
-from app.extensions.agent_tools import AgentToolProviderHost
+from app.extensions.ask import AskCompletedObserverHost
+from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
 
 
@@ -71,13 +68,8 @@ class ExtensionRuntime:
     registry: ExtensionRegistry
     retrieval_contributors: RetrievalContributorHost
     parser_chain: ParserProviderChainHost
-    answer_auditors: AnswerAuditorHost
     ask_completed_observers: AskCompletedObserverHost
-    report_auditors: ReportAuditorHost
     report_completed_observers: ReportCompletedObserverHost
-    element_enrichers: SourceElementEnricherHost
-    knowledge_candidate_projectors: KnowledgeCandidateProjectorHost
-    agent_tools: AgentToolProviderHost
     report_exporter: ReportExporterHost
 
 
@@ -100,7 +92,6 @@ def build_extension_runtime(
         str, RetrievalAdmissionPolicy
     ] | None = None,
     event_sink: Callable[[dict[str, object]], None] | None = None,
-    trusted_agent_tool_plugins: frozenset[str] = frozenset(),
     trusted_report_exporter_plugins: frozenset[str] = frozenset(),
 ) -> ExtensionRuntime:
     registry = build_extension_registry(
@@ -117,33 +108,13 @@ def build_extension_runtime(
             registry,
             event_sink=event_sink,
         ),
-        answer_auditors=AnswerAuditorHost(
-            registry,
-            event_sink=event_sink,
-        ),
         ask_completed_observers=AskCompletedObserverHost(
-            registry,
-            event_sink=event_sink,
-        ),
-        report_auditors=ReportAuditorHost(
             registry,
             event_sink=event_sink,
         ),
         report_completed_observers=ReportCompletedObserverHost(
             registry,
             event_sink=event_sink,
-        ),
-        element_enrichers=SourceElementEnricherHost(
-            registry,
-            event_sink=event_sink,
-        ),
-        knowledge_candidate_projectors=KnowledgeCandidateProjectorHost(
-            registry,
-            event_sink=event_sink,
-        ),
-        agent_tools=AgentToolProviderHost(
-            registry,
-            trusted_plugin_ids=trusted_agent_tool_plugins,
         ),
         report_exporter=ReportExporterHost(
             registry,

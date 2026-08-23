@@ -1086,7 +1086,7 @@ class _InlineSubmitter:
         return threading.current_thread()
 
 
-def _ask_coordinator(calls, *, runner, noted, audited=None):
+def _ask_coordinator(calls, *, runner, noted):
     service = SimpleNamespace(
         ask=lambda notebook_id, payload, *, user_id, job_id="", on_trace=None,
         cancel_event=None: runner(),
@@ -1097,7 +1097,6 @@ def _ask_coordinator(calls, *, runner, noted, audited=None):
         job_submitter=_InlineSubmitter(),
         event_log=SimpleNamespace(logger=SimpleNamespace(exception=lambda *a: None)),
         ask=lambda: service,
-        audit_answer_completed=audited,
         note_ask_completed=noted,
     )
 
@@ -1160,8 +1159,7 @@ def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row(
     assert calls == [("finish", "done"), ("put_final",), ("note",)]
 
 
-def test_post_completion_extensions_run_after_final_in_auditor_then_observer_order(
-):
+def test_post_completion_observers_run_after_the_final_event():
     import app.services.ask_execution as ask_execution_module
 
     calls: list = []
@@ -1180,9 +1178,6 @@ def test_post_completion_extensions_run_after_final_in_auditor_then_observer_ord
         coordinator = _ask_coordinator(
             calls,
             runner=_response,
-            audited=lambda response, mode_id: calls.append(
-                ("audit", response.answer_id, mode_id)
-            ),
             noted=lambda notebook_id, user_id, mode_id: calls.append(
                 ("observe", notebook_id, user_id, mode_id)
             ),
@@ -1200,7 +1195,6 @@ def test_post_completion_extensions_run_after_final_in_auditor_then_observer_ord
     assert calls == [
         ("finish", "done"),
         ("put_final",),
-        ("audit", "ans-t5", "chunk"),
         ("observe", "nb-t5", USER_A, "chunk"),
         ("sentinel",),
     ]
@@ -1245,27 +1239,6 @@ def test_a_failing_signal_never_turns_a_delivered_answer_into_an_error():
 
     assert [event["event"] for event in delivered][-1] == "final"
     assert calls == [("finish", "done")]
-
-
-def test_a_failing_auditor_never_turns_a_delivered_answer_into_an_error():
-    calls: list = []
-
-    def fail_audit(_response, _mode_id):
-        raise RuntimeError("auditor unavailable")
-
-    delivered = _drain(_ask_coordinator(
-        calls,
-        runner=_response,
-        audited=fail_audit,
-        noted=lambda *_args: calls.append(("note",)),
-    ).start(
-        "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
-        user_id=USER_A,
-    ))
-
-    assert [event["event"] for event in delivered][-1] == "final"
-    assert not any(event["event"] == "error" for event in delivered)
-    assert calls == [("finish", "done"), ("note",)]
 
 
 def test_the_sample_size_constant_is_the_one_the_service_uses(harness):

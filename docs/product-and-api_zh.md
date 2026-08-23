@@ -624,15 +624,12 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | 构建状态读取 | `get_build_status` | `knowledge:read` |
 | 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
 
-实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单；它可在 core 前缀后
-追加显式信任的进程内 `agent.tool_provider` contributor 标量 schema 工具。这些工具拿不到 repository、
-FastMCP 对象、原始 bearer 或 Memory 审核能力；每次调用都重新检查 live token/scope/allowlist/成员权，
-provider 的所有写 scope 都强制经过 owner-only notebook 闸。provider 参数对象序列化后的 UTF-8
-超过 16,384 bytes 时整次拒绝；descriptor 最多 16 个参数、工具名最多 64 字符、说明最多 1,000 字符，
-结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行字节/深度 rail，
-超大容器不会先构造第二份无界对象图。插件异常只返回稳定错误码，core audit 按 token owner 归属且仅含 tool/plugin/status。FastMCP schema 错误发生在 provider host 之前，归 transport/request audit；provider audit 的 `invalid` 表示 schema 合法但未通过 host 的额外 wire admission。
-输入和结果都整次拒绝，绝不静默截断。默认 topology 没有 provider contribution，因此发布面
-仍精确等于上表 22 个工具。
+实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
+22 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+手抄。每次调用都重新检查 live token/scope/allowlist/成员权，所有写 scope 都强制经过 owner-only
+notebook 闸。结果必须是深度不超过 5 且 UTF-8 不超过 12,000 bytes 的 JSON object；复制时即执行
+字节/深度 rail，超大容器不会先构造第二份无界对象图。异常只返回稳定错误码；FastMCP schema 错误
+发生在工具体之前，归 transport/request audit。结果整次拒绝，绝不静默截断。
 
 `list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
@@ -1167,13 +1164,9 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 `POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。联合范围按路径区分：`chunk` 基线 active-only；可选 KG overlay / PPR 可加入 federated KG 与 base-backed chunk；`graph` / `reasoning` 走 federated KG。`federated_retrieve()` 的知识对象命中不改 score，只在完全平局时以 `base` 为第二排序键；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。这些排序信号不进入接地阈值。
 
-流式 Ask 只在持久答案与浏览器 final 事件之后运行完成后 auditor/observer。每个 point 的协作式墙钟预算来自 `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS`（默认 `30`，有效范围 `>0..300` 秒）：已经进入同步调用的 callback 可安全完成，但 deadline 到达后 host 不再启动后续 contribution。`ANSWER_AUDIT_MAX_FINDINGS` 限制单个 auditor 结果（默认 `32`，有效范围 `1..256`）；超限结果整体拒绝，绝不静默截断。这些只是部署/内部扩展护栏，不改变检索、答案正文、引用或用户已收到的 final 事件。
+流式 Ask 只在持久答案与浏览器 final 事件之后运行完成后 observer。该 point 的协作式墙钟预算来自 `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS`（默认 `30`，有效范围 `>0..300` 秒）：已经进入同步调用的 callback 可安全完成，但 deadline 到达后 host 不再启动后续 contribution。这只是部署/内部扩展护栏，不改变检索、答案正文、引用或用户已收到的 final 事件。
 
-Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 默认 `30`、有效范围 `>0..300` 秒；`REPORT_AUDIT_MAX_FINDINGS` 默认 `32`、有效范围 `1..256`。deadline 是协作式的，超限 auditor 结果整体拒绝。只有报告行从 `generating` 原子提交到 `done` 且全部生成执行上下文释放后才运行这两个 point；它们不能改变章节正文、引用、参考文献、检索输出或终态。
-
-解析元素 enrichment 是内部且默认空拓扑的扩展点。`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS` 默认 `10`、有效范围 `>0..300` 秒；`SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS` 默认 `2048`、有效范围 `1..25000`；`SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES` 默认 `1048576`、有效范围 `1024..16777216`；`SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS` 默认 `4096`、有效范围 `1..32768`。本 point 还把稳定 plugin/contribution 标识限制为 `128` 个字符、安全 manifest version 限制为 `64` 个字符。护栏在 core element 事务前应用；metadata 字节护栏计算包含 contribution namespace 与 plugin id/version 在内的完整持久化子树，越界 contribution 整体拒绝、不静默截断。该 point 不能改变解析文本或检索行为，且没有内建 contributor。
-
-Knowledge candidate projection 同样是内部且默认空拓扑的扩展点。`KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS` 默认 `10`、有效范围 `>0..300` 秒；`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS` 默认 `512`、有效范围 `1..25000`；`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS` 默认 `1024`、有效范围 `1..50000`；`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES` 默认 `1048576`、有效范围 `1024..16777216`。Evidence quote 的结构上限为 `400` 个字符；稳定 plugin/contribution 标识上限为 `128` 个字符，安全 manifest version 上限为 `64`。这些 rail 是 point-wide 且跨 contribution 递减；同步 callback 可以安全完成，但 deadline 后返回的结果会被拒绝，也不再启动后续 contribution。越界或非法 contribution 整体拒绝、不截断，先前已接纳 contribution 与 core KG baseline 保持不变。该 point 只在旧 relink 与 partial-retry 保留 gate 之后、唯一来源代次事务之前运行；没有内建 contributor，隐藏 Memory/Knowhow 来源不适用。
+Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 默认 `30`、有效范围 `>0..300` 秒，deadline 是协作式的。只有报告行从 `generating` 原子提交到 `done` 且全部生成执行上下文释放后才运行该 point；它不能改变章节正文、引用、参考文献、检索输出或终态。
 
 | 模式 | 分组 | 需 KG | 一句话 |
 |------|------|-------|--------|

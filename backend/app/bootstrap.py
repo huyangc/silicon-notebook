@@ -31,22 +31,6 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         settings,
         retrieval_contributor_host=runtime.retrieval_contributors,
         parser_provider_chain_host=runtime.parser_chain,
-        answer_auditor_host=(
-            runtime.answer_auditors if runtime.answer_auditors.has_auditors else None
-        ),
         ask_completed_observer_host=runtime.ask_completed_observers,
-        report_auditor_host=(
-            runtime.report_auditors if runtime.report_auditors.has_auditors else None
-        ),
         report_completed_observer_host=runtime.report_completed_observers,
-        element_enricher_host=(
-            runtime.element_enrichers
-            if runtime.element_enrichers.has_contributors
-            else None
-        ),
-        knowledge_candidate_projector_host=(
-            runtime.knowledge_candidate_projectors
-            if runtime.knowledge_candidate_projectors.has_contributors
-            else None
-        ),
     )

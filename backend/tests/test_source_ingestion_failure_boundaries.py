@@ -18,7 +18,6 @@ from app.repositories.ports import UploadedSourceFile
 from app.services import remote_sources
 from app.services.remote_sources import PdfProbe
 from app.services.source_ingestion import SourceIngestionService  # noqa: F401 — Task 12 gate
-from app.services.knowledge_candidate_projection import KnowledgeProjectionBoundaryError
 from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
 from tests.model_testkit import bind_all_embedding_clients
@@ -150,26 +149,6 @@ def test_extraction_failure_sets_failed_and_persists_error_message(repo, monkeyp
     assert src.parse_status == "failed"
     assert "extract boom" in src.error_message
     assert src.summary == "Parsing failed; see source error."
-
-
-def test_projection_connection_boundary_bypasses_pipeline_failure_writes(
-    repo, monkeypatch
-):
-    _patch_parse(monkeypatch, [_element("projection boundary body")])
-    repo.settings.kg_auto_extract = True
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    sid = _seed_queued_source(repo, nb.id)
-
-    def boundary(_source_id):
-        raise KnowledgeProjectionBoundaryError()
-
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", boundary)
-    with pytest.raises(KnowledgeProjectionBoundaryError):
-        repo.process_source(sid)
-
-    # The ordinary pipeline error handler must not acquire another connection
-    # to rewrite the source as failed after the projection boundary is unknown.
-    assert repo.get_source(sid).parse_status == "extracting"
 
 
 def test_delete_commits_db_cleanup_before_file_delete(repo, monkeypatch):

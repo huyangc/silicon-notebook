@@ -70,9 +70,6 @@ class _BundleRegistrar:
     def add_contributor(self, contribution: ExtensionContribution) -> None:
         self._add_kind(contribution, ContributionKind.CONTRIBUTOR)
 
-    def add_auditor(self, contribution: ExtensionContribution) -> None:
-        self._add_kind(contribution, ContributionKind.AUDITOR)
-
     def add_observer(self, contribution: ExtensionContribution) -> None:
         self._add_kind(contribution, ContributionKind.OBSERVER)
 

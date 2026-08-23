@@ -5,12 +5,10 @@ import time
 
 from app.domain.extensions import (
     CompletedReportNotification,
-    ReportAuditSnapshot,
     ReportCompletedObserverCallContext,
 )
 from app.extension_sdk import (
     EXTENSION_API_VERSION,
-    REPORT_AUDITOR_POINT,
     REPORT_COMPLETED_OBSERVER_POINT,
     REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ContributionDeclaration,
@@ -21,7 +19,7 @@ from app.extension_sdk import (
     ExtensionRegistrar,
 )
 from app.extensions.bootstrap import build_extension_runtime, default_extension_runtime
-from app.application.report_pipeline import CommittedReport, ReportAuditFacts
+from app.application.report_pipeline import CommittedReport
 
 
 class _Probe:
@@ -55,24 +53,6 @@ def _deadline():
     return time.monotonic() + 30.0
 
 
-def _snapshot():
-    return ReportAuditSnapshot(
-        report_id="rep",
-        section_count=2,
-        successful_section_count=1,
-        failed_section_count=1,
-        reference_count=3,
-        gap_count=1,
-        claim_ledgers_available=1,
-        claim_ledgers_partial=0,
-        unsupported_high_risk_assertions=0,
-        content_chars=100,
-        synthesis_status="available",
-        max_findings=32,
-        deadline_monotonic=_deadline(),
-    )
-
-
 def _context(calls, *, probe=None):
     return ReportCompletedObserverCallContext(
         notification=CompletedReportNotification("rep", "actor", "nb", "done"),
@@ -82,15 +62,15 @@ def _context(calls, *, probe=None):
     )
 
 
-def test_empty_report_auditor_is_strict_noop_before_any_collaborator():
+def test_empty_report_observer_is_strict_noop_before_any_collaborator():
     def poison(*_args, **_kwargs):
         raise AssertionError("empty host touched a collaborator")
 
     runtime = build_extension_runtime((), event_sink=poison)
-    runtime.report_auditors._clock = poison
-    assert runtime.report_auditors.audit_application(
-        object(), connection_probe=object(), event_sink=poison
-    ) == ()
+    runtime.report_completed_observers._clock = poison
+    assert runtime.report_completed_observers.observe_application(
+        object(), event_sink=poison
+    ) is None
 
 
 def test_default_report_observer_calls_core_once_and_emits_content_free_event():
@@ -115,81 +95,6 @@ def test_report_observer_is_inert_when_connection_is_held():
         _context(calls, probe=_Probe(True))
     )
     assert calls == []
-
-
-def test_auditor_gets_counts_only_and_cannot_replace_the_report():
-    seen = []
-
-    class Auditor:
-        def audit(self, context):
-            seen.append(context)
-            from app.extension_sdk import AuditorResult, ExtensionResultStatus, ReportAudit
-            return AuditorResult(ReportAudit(()), ExtensionResultStatus.AVAILABLE)
-
-    declaration = ContributionDeclaration(
-        "audit.report_structure", REPORT_AUDITOR_POINT, ContributionKind.AUDITOR
-    )
-    bundle = _Bundle(
-        ExtensionManifest(
-            id="audit.report_structure",
-            version="1.0.0",
-            api_version=EXTENSION_API_VERSION,
-            display_name="report audit",
-            trust="builtin",
-            contributions=(declaration,),
-        ),
-        ExtensionContribution(declaration, Auditor()),
-    )
-    runtime = build_extension_runtime((bundle,))
-    result = runtime.report_auditors.audit_application(
-        _snapshot(), connection_probe=_Probe()
-    )
-    assert len(result) == 1 and result[0].findings == ()
-    view = seen[0].report
-    assert view.section_count == 2
-    assert not hasattr(view, "content_md")
-    assert not hasattr(view, "sections")
-    assert not hasattr(view, "references")
-
-
-def test_report_auditor_rejects_available_result_with_a_failure():
-    class Auditor:
-        def audit(self, _context):
-            from app.extension_sdk import (
-                AuditorResult,
-                ExtensionFailure,
-                ExtensionFailureKind,
-                ExtensionResultStatus,
-                ReportAudit,
-            )
-            return AuditorResult(
-                ReportAudit(()),
-                ExtensionResultStatus.AVAILABLE,
-                ExtensionFailure(ExtensionFailureKind.FAILED, "contradiction"),
-            )
-
-    declaration = ContributionDeclaration(
-        "audit.report_contradiction", REPORT_AUDITOR_POINT,
-        ContributionKind.AUDITOR,
-    )
-    bundle = _Bundle(
-        ExtensionManifest(
-            id="audit.report_contradiction",
-            version="1.0.0",
-            api_version=EXTENSION_API_VERSION,
-            display_name="report contradiction",
-            trust="builtin",
-            contributions=(declaration,),
-        ),
-        ExtensionContribution(declaration, Auditor()),
-    )
-    events = []
-    result = build_extension_runtime((bundle,)).report_auditors.audit_application(
-        _snapshot(), connection_probe=_Probe(), event_sink=events.append
-    )
-    assert result == ()
-    assert events[-1]["status"] == "invalid"
-    assert events[-1]["reason_code"] == "invalid_report_audit_result"
 
 
 def test_generic_report_observer_receives_only_the_opaque_report_ref():
@@ -245,42 +150,11 @@ def test_application_runtime_wires_report_completion_to_existing_profile_job(
         lambda notebook_id, actor_id: calls.append((notebook_id, actor_id)),
     )
     monkeypatch.setattr(runtime.event_log, "emit", events.append)
-    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
-    runtime._after_report_completed(CommittedReport("nb", "rep", "actor", facts))
+    runtime._after_report_completed(CommittedReport("nb", "rep", "actor"))
 
     assert calls == [("nb", "actor")]
     assert [event["kind"] for event in events] == ["report_extension"]
     assert runtime.report_execution.after_completed == runtime._after_report_completed
-
-
-def test_runtime_isolates_auditor_host_failure_from_completion_observer(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    from app.bootstrap import create_application_repository
-    from app.core.config import Settings
-
-    repo = create_application_repository(Settings(_env_file=None))
-    runtime = repo._runtime
-    calls = []
-
-    class BrokenAuditorHost:
-        def audit_application(self, *_args, **_kwargs):
-            raise RuntimeError("auditor host down")
-
-    class RecordingObserverHost:
-        def observe_application(self, context, **_kwargs):
-            calls.append(context.notification.report_id)
-
-    runtime.report_auditors = BrokenAuditorHost()
-    runtime.report_completed_observers = RecordingObserverHost()
-    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
-
-    runtime._after_report_completed(CommittedReport("nb", "rep", "actor", facts))
-
-    assert calls == ["rep"]
 
 
 def test_composed_terminal_cas_drives_exactly_one_profile_signal(
@@ -306,7 +180,6 @@ def test_composed_terminal_cas_drives_exactly_one_profile_signal(
         "note_report_completed",
         lambda notebook_id, actor_id: signals.append((notebook_id, actor_id)),
     )
-    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
 
     class Engine:
         def __init__(self, lose):
@@ -324,7 +197,7 @@ def test_composed_terminal_cas_drives_exactly_one_profile_signal(
                 references=[],
             )
             return (
-                CommittedReport(notebook_id, report_id, "actor", facts)
+                CommittedReport(notebook_id, report_id, "actor")
                 if committed else None
             )
 

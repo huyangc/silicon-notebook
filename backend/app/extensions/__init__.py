@@ -7,11 +7,8 @@ from app.extensions.bootstrap import (
     default_extension_runtime,
 )
 from app.extensions.capabilities import CapabilityDecisionCatalog
-from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
-from app.extensions.report import ReportAuditorHost, ReportCompletedObserverHost
-from app.extensions.element_enrichment import SourceElementEnricherHost
-from app.extensions.knowledge_projection import KnowledgeCandidateProjectorHost
-from app.extensions.agent_tools import AgentToolProviderHost
+from app.extensions.ask import AskCompletedObserverHost
+from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChainHost
@@ -22,13 +19,8 @@ __all__ = [
     "ExtensionRegistryError",
     "ExtensionRuntime",
     "CapabilityDecisionCatalog",
-    "AnswerAuditorHost",
     "AskCompletedObserverHost",
-    "ReportAuditorHost",
     "ReportCompletedObserverHost",
-    "SourceElementEnricherHost",
-    "KnowledgeCandidateProjectorHost",
-    "AgentToolProviderHost",
     "ReportExporterHost",
     "ParserChainCancelled",
     "ParserProviderChainHost",

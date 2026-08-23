@@ -9,15 +9,11 @@ from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
 from app.domain.extensions import (
-    AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
-    ElementEnricherHostPort,
-    ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
-from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     reset_request_user,
@@ -60,14 +56,8 @@ class SQLiteRepository(RepositoryFacade):
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
-        answer_auditor_host: AnswerAuditorHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
-        report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
-        element_enricher_host: ElementEnricherHostPort | None = None,
-        knowledge_candidate_projector_host: (
-            KnowledgeCandidateProjectorHostPort | None
-        ) = None,
     ) -> None:
         super().__init__(
             settings,
@@ -75,12 +65,8 @@ class SQLiteRepository(RepositoryFacade):
             model_provider=model_provider,
             retrieval_contributor_host=retrieval_contributor_host,
             parser_provider_chain_host=parser_provider_chain_host,
-            answer_auditor_host=answer_auditor_host,
             ask_completed_observer_host=ask_completed_observer_host,
-            report_auditor_host=report_auditor_host,
             report_completed_observer_host=report_completed_observer_host,
-            element_enricher_host=element_enricher_host,
-            knowledge_candidate_projector_host=knowledge_candidate_projector_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
