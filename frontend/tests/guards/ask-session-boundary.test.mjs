@@ -131,13 +131,17 @@ test("Ask-session public surface exposes readonly views and named commands, neve
 
 
 test("workspace transitions delegate Ask ownership and authenticated bootstrap activates identity first", () => {
-  const openCalls = callsIn(findFunction(page, "openNotebook"));
+  // 结构项 F3：打开笔记本的编排收成了 `notebook-transition.ts` 的单一 transition，
+  // 每个 owner 的 begin / commit / settle 只在 `notebookTransitionSteps` 这一份 step
+  // 列表里声明（`openNotebook` 自己不再直接触达任何 owner hook 生命周期——
+  // notebook-transition-guard 钉住这条）。Ask 的三个调用因此改在这里断言。
+  const openCalls = callsIn(findFunctionIn(page, "Home", "notebookTransitionSteps"));
   for (const call of [
     "askSession.beginNotebookTransition",
     "askSession.restoreNotebook",
     "askSession.finishNotebookTransition",
   ]) {
-    assert.ok(openCalls.includes(call), `openNotebook is missing ${call}`);
+    assert.ok(openCalls.includes(call), `notebookTransitionSteps is missing ${call}`);
   }
   // askSession.leaveWorkspace/abortForLogout/activateActor 现在只经共享函数
   // leaveWorkspaceOwners/leaveActorOwners/activateWorkspaceOwners 间接调用；守卫

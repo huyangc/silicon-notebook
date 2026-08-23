@@ -77,8 +77,15 @@ test("report hook exposes readonly views and named commands, never raw setters",
 
 test("workspace transitions and authenticated bootstrap delegate report authority", () => {
   const text = page.getText(page);
-  assert.match(text, /reportWorkspace\.beginNotebookTransition\(\)/);
-  assert.match(text, /reportWorkspace\.finishNotebookTransition\(reportTransition, opened\)/);
+  // 结构项 F3：报告 owner 的 begin/settle 只在 `notebookTransitionSteps` 的 step 列表
+  // 里声明；settle 的第二个实参由 `opened` 布尔换成「本次 transition 有没有产出
+  // outcome」（`outcome !== null` 就是旧的 `opened`），语义逐字不变。
+  const stepText = findFunctionIn(page, "Home", "notebookTransitionSteps").getText(page);
+  assert.match(stepText, /reportWorkspace\.beginNotebookTransition\(\)/);
+  assert.match(
+    stepText,
+    /reportWorkspace\.finishNotebookTransition\(\s*ticket,\s*outcome !== null,?\s*\)/,
+  );
   assert.match(text, /reportWorkspace\.leaveWorkspace\(\)/);
   // reportWorkspace/askSession/sourceLibrary.activateActor 现在只经共享函数
   // activateWorkspaceOwners 间接调用；守卫 workspace-owner-transition-guard 钉住

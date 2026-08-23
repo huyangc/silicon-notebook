@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 
 import ts from "typescript";
 
-import { callsIn, findFunction, findFunctionIn, importsIn, parseModule } from "../../test-support/semantic-source.mjs";
+import { callSitesIn, callsIn, findFunction, findFunctionIn, importsIn, parseModule } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
 const composition = await parseModule("use-kg-workspace.ts");
@@ -447,8 +447,18 @@ test("Knowledge, schemas, and unified graph remain explicit lazy commands", () =
 
 test("workspace transition and both authentication paths bind KG authority", () => {
   const text = page.getText(page);
-  assert.match(text, /kgWorkspace\.beginNotebookTransition\(\)/);
-  assert.match(text, /kgWorkspace\.finishNotebookTransition\(kgTransition, opened \? openedNotebook : null\)/);
+  // 结构项 F3：KG owner 的 begin/settle 只在 `notebookTransitionSteps` 的 step 列表里
+  // 声明。settle 仍必须携带**提交成功时才存在**的 notebook 快照（回滚时传 null）——
+  // 旧写法是 `opened ? openedNotebook : null`，现在由编排器的 `outcome` 承载，语义
+  // 逐字相同。断言按语义 AST 的实参形状比对，不再按整页正则。
+  const stepCalls = callSitesIn(findFunctionIn(page, "Home", "notebookTransitionSteps"));
+  assert.ok(stepCalls.some((call) => (
+    call.target === "kgWorkspace.beginNotebookTransition" && call.arguments.length === 0
+  )));
+  assert.ok(stepCalls.some((call) => (
+    call.target === "kgWorkspace.finishNotebookTransition"
+    && call.arguments.join("|") === "ticket|outcome && outcome.notebook"
+  )));
   assert.match(text, /kgWorkspace\.leaveWorkspace\(\)/);
   // kgWorkspace.activateActor 现在只经共享函数 activateWorkspaceOwners 间接调用；
   // 守卫 workspace-owner-transition-guard 钉住「只能从那里发出」。原断言钉「两个

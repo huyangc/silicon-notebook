@@ -226,6 +226,11 @@ import {
   readStableSourceSnapshot,
 } from "./source-delete-state";
 import {
+  runNotebookTransition,
+  transitionStep,
+  type TransitionStep,
+} from "./notebook-transition";
+import {
   doneItemDestination,
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
@@ -358,6 +363,28 @@ type WelcomeCopy = {
   description: string;
   prompts: Array<[string, string]>;
 };
+
+// --- 打开笔记本的单一 transition：共享类型 ---------------------------------
+// 编排本身在 `notebook-transition.ts`（纯逻辑）；这里只声明本页面往里填的两个
+// 载荷类型与来源库那一步的哨兵 ticket。
+
+/** 打开一本笔记本要并行取回的两份快照。请求数恒为 2，且恒并行。 */
+type NotebookOpenLoad = {
+  readonly notebook: NotebookSummary;
+  readonly sourcesPage: Awaited<ReturnType<typeof listSources>>;
+};
+
+/** 提交成功后交给每个 owner 的结果。`null` 代表这次打开被放弃（回滚）。 */
+type NotebookOpenOutcome = {
+  readonly actorId: string;
+  readonly notebookId: string;
+  readonly workspaceEpoch: number;
+  readonly notebook: NotebookSummary;
+};
+
+// 来源库的 begin 不发 ticket（它靠自己的 generation ref 守门），但编排器要用一个
+// 非空返回值区分「已建立」与「拒绝」，所以给它一个固定哨兵。
+const SOURCE_LIBRARY_TRANSITION = Object.freeze({ owner: "source-library" });
 
 function sourceTopicCandidates(notebook: NotebookSummary | null, sources: SourceSummary[]): string[] {
   const stop = new Set([
@@ -2479,6 +2506,149 @@ export default function Home() {
     await sourceLibrary.loadSourcesPage({ notebookId, ...opts });
   }
 
+  /**
+   * 打开一本笔记本时被一起挪动的 owner hook —— **这份列表是唯一的登记点**。
+   *
+   * 接入前，同一个 owner 的生命周期散在 `openNotebook` 的四个位置上：开头一串
+   * `begin`、中间「谁拒绝了就整体放弃」那段分支里的一次 `finish(false)`、成功路径上
+   * 的 `commit`，以及 `finally` 里带 `opened` 布尔的另一次 `finish`。新增一个 owner
+   * 要在四处各补一笔，漏掉任意一处都是静默失败（owner 永远停在 suspended 态，或者一
+   * 次被顶替的切换把状态提交给了新工作区）。现在只需在本列表加一项。
+   *
+   * 声明顺序 = begin 顺序，逐字保持接入前的顺序（rootModals 必须最先——它同步撤销旧的
+   * source-add lease，其 close sink 跑 resetStagedIntake，是暂存文件 / bundle 勾选
+   * resolver / 迟到解包世代的唯一清理路径）。settle 由编排器按**逆 begin 序**执行。
+   *
+   * ⚠ settle 顺序与接入前那份固定顺序（ask → ext → report → kg → rootModals）不同，
+   * 这是可证明惰性的：五个 finish 各自只按自己 hook 的 generation ref 守门、只写自己
+   * hook 的 state，彼此不互读，同一 React 批次内提交出的渲染结果相同。
+   */
+  function notebookTransitionSteps(
+    owner: { actorId: string; notebookId: string; workspaceEpoch: number },
+  ): TransitionStep<NotebookOpenLoad, NotebookOpenOutcome>[] {
+    return [
+      // Root-modal transition synchronously closes the old source-add lease and
+      // its close sink runs resetStagedIntake. This is the single cleanup path
+      // for staged files, bundle-choice resolvers and late unpack generations.
+      transitionStep({
+        name: "root-modals",
+        begin: () => rootModals.beginWorkspaceTransition(),
+        settle: (ticket, outcome) => rootModals.finishWorkspaceTransition(
+          ticket,
+          outcome && {
+            actorId: outcome.actorId,
+            notebookId: outcome.notebookId,
+            workspaceEpoch: outcome.workspaceEpoch,
+          },
+        ),
+      }),
+      transitionStep({
+        name: "workspace-extensions",
+        begin: () => workspaceExtensions.beginNotebookTransition(owner),
+        settle: (ticket, outcome) => workspaceExtensions.finishNotebookTransition(
+          ticket,
+          outcome !== null,
+        ),
+      }),
+      transitionStep({
+        name: "source-library",
+        begin: () => {
+          sourceLibrary.beginTransition();
+          return SOURCE_LIBRARY_TRANSITION;
+        },
+        // 来源列表由 page 在取数之后**显式提交稳定快照**（红线：不得改成 effect
+        // 再拉一次）。它是唯一一个有 commit 相位的 owner。
+        commit: (_ticket, { loaded }) => {
+          sourceLibrary.commitNotebookSnapshot({ ...owner, page: loaded.sourcesPage });
+        },
+        settle: () => undefined,
+      }),
+      transitionStep({
+        name: "report-workspace",
+        begin: () => reportWorkspace.beginNotebookTransition(),
+        settle: (ticket, outcome) => reportWorkspace.finishNotebookTransition(
+          ticket,
+          outcome !== null,
+        ),
+      }),
+      transitionStep({
+        name: "kg-workspace",
+        begin: () => kgWorkspace.beginNotebookTransition(),
+        settle: (ticket, outcome) => kgWorkspace.finishNotebookTransition(
+          ticket,
+          outcome && outcome.notebook,
+        ),
+      }),
+      transitionStep({
+        name: "ask-session",
+        begin: () => askSession.beginNotebookTransition(owner),
+        commit: (ticket) => askSession.restoreNotebook(ticket),
+        settle: (ticket) => askSession.finishNotebookTransition(ticket),
+      }),
+    ];
+  }
+
+  /** `enter` 相位：全部 begin 成功之后、取数之前的一次性清理。被拒绝时不执行。 */
+  function enterNotebookTransition() {
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
+    activeNotebookIdRef.current = null;
+    setMemoryAnswerId(null);
+    setMemorySavedAnswers({});
+  }
+
+  /** `load` 相位：notebook + 首个来源页**并行一次**，绝不改成 effect 再拉一次。 */
+  async function openNotebookSnapshot(notebookId: string): Promise<NotebookOpenLoad> {
+    // A DELETE may complete while this transition deliberately holds the active
+    // notebook id at null. Keep reading both snapshots until one full read sees
+    // a stable delete generation; tombstones alone cannot repair ask_available.
+    const [notebook, sourcesPage] = await readStableSourceSnapshot(
+      () => sourceLibrary.deleteGeneration(notebookId),
+      () => Promise.all([
+        getNotebook(notebookId),
+        listSources(notebookId, 0, SOURCES_PAGE_SIZE),
+      ]),
+    );
+    return { notebook, sourcesPage };
+  }
+
+  /** `apply` 相位：同步写入 page 自己持有的工作区视图状态，产出交给各 owner 的结果。 */
+  function applyOpenedNotebook(
+    owner: { actorId: string; notebookId: string; workspaceEpoch: number },
+    notebook: NotebookSummary,
+  ): NotebookOpenOutcome {
+    activeNotebookIdRef.current = owner.notebookId;
+    setCurrentNotebookId(owner.notebookId);
+    setCurrentNotebook(notebook);
+    setTitleDraft(notebook.name);
+    // 参考库的选择状态挂在**上一个**笔记本的挂载集上，不一起重置就会把旧库 id 带进
+    // 新笔记本的请求（422），或反过来悄悄沿用旧的排除项。
+    setBaseScopeSelection(defaultBaseScopeSelection());
+    setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
+    setChatMode("ask");
+    setOuterView("notebooks");
+    setCurrentNotebookBases([]);
+    return { ...owner, notebook };
+  }
+
+  /** `conclude` 相位：所有 owner commit 之后的最后一次守门 + 历史/滚动副作用。 */
+  function concludeOpenNotebook(
+    notebookId: string,
+    historyMode: "push" | "replace" | null,
+    isCurrent: () => boolean,
+  ): boolean {
+    if (!isCurrent()) return false;
+    // "none" = 挂载还原 / popstate:浏览器已经把 URL 摆对了,再写一次只会多一个
+    // 死条目(用户按返回没反应)。默认 "push" 让返回键能退出 notebook。
+    if (historyMode === "push") {
+      window.history.pushState(null, "", notebookHash(notebookId));
+    } else if (historyMode === "replace") {
+      window.history.replaceState(null, "", notebookHash(notebookId));
+    }
+    window.scrollTo(0, 0);
+    return true;
+  }
+
   async function openNotebook(
     notebookId: string,
     history: "push" | "none" = "push",
@@ -2487,101 +2657,33 @@ export default function Home() {
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
-    const rootModalTransition = rootModals.beginWorkspaceTransition();
+    // ⚠ 这段 page 自己的清理提到了全部 owner begin 之前（接入前它夹在 rootModals 的
+    // begin 与 askSession 的 begin 之间）。可证明惰性：六个 begin 无一读取这些 ref /
+    // state，rootModals 的 begin 只撤销 modal lease，它的 close sink
+    // （resetStagedIntake）也不碰 uploadBusy / urlBusy / uploadRequestOwnerRef。
     titleSaveOperationRef.current = null;
     setTitleSaveInFlight(false);
     closeKnowhow();
-    const workspaceEpoch = ++workspaceEpochRef.current;
-    const askActorId = actorIdOverride ?? currentUser?.id ?? "";
-    const workspaceExtensionTransition = workspaceExtensions.beginNotebookTransition({
-      actorId: askActorId,
-      notebookId,
-      workspaceEpoch,
-    });
-    sourceLibrary.beginTransition();
-    const reportTransition = reportWorkspace.beginNotebookTransition();
-    const kgTransition = kgWorkspace.beginNotebookTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
     setUploadBusy(false);
     setUrlBusy(false);
-    // Root-modal transition synchronously closes the old source-add lease and
-    // its close sink runs resetStagedIntake. This is the single cleanup path
-    // for staged files, bundle-choice resolvers and late unpack generations.
-    const askTransition = askSession.beginNotebookTransition({
-      actorId: askActorId,
+    const workspaceEpoch = ++workspaceEpochRef.current;
+    const transitionOwner = {
+      actorId: actorIdOverride ?? currentUser?.id ?? "",
       notebookId,
       workspaceEpoch,
+    };
+    const isCurrent = () => workspaceEpochRef.current === workspaceEpoch;
+    const result = await runNotebookTransition<NotebookOpenLoad, NotebookOpenOutcome>({
+      steps: notebookTransitionSteps(transitionOwner),
+      enter: enterNotebookTransition,
+      load: () => openNotebookSnapshot(notebookId),
+      isCurrent,
+      apply: ({ notebook }) => applyOpenedNotebook(transitionOwner, notebook),
+      conclude: () => concludeOpenNotebook(notebookId, historyMode, isCurrent),
     });
-    if (!askTransition || !workspaceExtensionTransition) {
-      if (askTransition) askSession.finishNotebookTransition(askTransition);
-      if (workspaceExtensionTransition) {
-        workspaceExtensions.finishNotebookTransition(workspaceExtensionTransition, false);
-      }
-      rootModals.finishWorkspaceTransition(rootModalTransition, null);
-      reportWorkspace.finishNotebookTransition(reportTransition, false);
-      kgWorkspace.finishNotebookTransition(kgTransition);
-      return false;
-    }
-    let opened = false;
-    let openedNotebook: NotebookSummary | null = null;
-    try {
-      memoryLinksAbortRef.current?.abort();
-      memoryLinksAbortRef.current = null;
-      activeNotebookIdRef.current = null;
-      setMemoryAnswerId(null);
-      setMemorySavedAnswers({});
-      // A DELETE may complete while this transition deliberately holds the active
-      // notebook id at null. Keep reading both snapshots until one full read sees
-      // a stable delete generation; tombstones alone cannot repair ask_available.
-      const [notebook, sourcesPage] = await readStableSourceSnapshot(
-        () => sourceLibrary.deleteGeneration(notebookId),
-        () => Promise.all([
-          getNotebook(notebookId),
-          listSources(notebookId, 0, SOURCES_PAGE_SIZE),
-        ]),
-      );
-      if (workspaceEpochRef.current !== workspaceEpoch) return false;
-      activeNotebookIdRef.current = notebookId;
-      setCurrentNotebookId(notebookId);
-      setCurrentNotebook(notebook);
-      openedNotebook = notebook;
-      setTitleDraft(notebook.name);
-      sourceLibrary.commitNotebookSnapshot({
-        actorId: askActorId,
-        notebookId,
-        workspaceEpoch,
-        page: sourcesPage,
-      });
-    // 参考库的选择状态挂在**上一个**笔记本的挂载集上，不一起重置就会把旧库 id 带进
-    // 新笔记本的请求（422），或反过来悄悄沿用旧的排除项。
-    setBaseScopeSelection(defaultBaseScopeSelection());
-    setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
-    setChatMode("ask");
-    setOuterView("notebooks");
-    setCurrentNotebookBases([]);
-    await askSession.restoreNotebook(askTransition);
-    if (workspaceEpochRef.current !== workspaceEpoch) return false;
-    // "none" = 挂载还原 / popstate:浏览器已经把 URL 摆对了,再写一次只会多一个
-    // 死条目(用户按返回没反应)。默认 "push" 让返回键能退出 notebook。
-    if (historyMode === "push") {
-      window.history.pushState(null, "", notebookHash(notebookId));
-    } else if (historyMode === "replace") {
-      window.history.replaceState(null, "", notebookHash(notebookId));
-    }
-      window.scrollTo(0, 0);
-      opened = true;
-      return true;
-    } finally {
-      askSession.finishNotebookTransition(askTransition);
-      workspaceExtensions.finishNotebookTransition(workspaceExtensionTransition, opened);
-      reportWorkspace.finishNotebookTransition(reportTransition, opened);
-      kgWorkspace.finishNotebookTransition(kgTransition, opened ? openedNotebook : null);
-      rootModals.finishWorkspaceTransition(
-        rootModalTransition,
-        opened ? { actorId: askActorId, notebookId, workspaceEpoch } : null,
-      );
-    }
+    return result.status === "committed";
   }
 
   async function openNotebookMemory(notebookId: string, actorIdOverride?: string) {
