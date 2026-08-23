@@ -1,13 +1,17 @@
 """Agentic Memory P3 (T6) — the per-user "search/answer style" preference
 document, ``user_profiles.search_profile_json``.
 
-This module is the SOLE parse/serialize/validate point for that document —
-every reader and writer (both ``IdentityStore`` implementations, the
-``PATCH /me/search-profile`` endpoint, and the T7 deterministic-inference job
-that lands later) must go through the functions here rather than touching the
-JSON shape directly. A second hand-rolled copy of this validation is exactly
-the kind of thing that drifts: one path accepts a value the other rejects, or
-one path forgets the "job never overwrites a user edit" rule.
+The parse/serialize/validate/merge functions live in
+``app.domain.search_profile`` (sunk there in B3); this module re-exports them
+unchanged and additionally owns ``render_style_block`` (which depends on
+``app.services.agent_profile_block.collapse_prompt_line``, a services-layer
+dependency the domain module must not carry). Every reader and writer (both
+``IdentityStore`` implementations, the ``PATCH /me/search-profile`` endpoint,
+and the T7 deterministic-inference job that lands later) must go through
+those functions rather than touching the JSON shape directly. A second
+hand-rolled copy of this validation is exactly the kind of thing that
+drifts: one path accepts a value the other rejects, or one path forgets the
+"job never overwrites a user edit" rule.
 
 **Document shape** (``NULL`` on the column means "never touched" — this
 module never sees that case; callers pass ``None`` straight through)::
@@ -49,6 +53,17 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+# --------------------------------------------------------------------------- #
+# SEARCH_PROFILE_VERSION / SEARCH_PROFILE_FIELDS / SEARCH_PROFILE_ORIGINS,
+# the parse/serialize/merge functions, the ANSWER_*_VALUES / domain-terms
+# caps (re-exported from app.models.identity), and classify_ask_language
+# sunk to app.domain.search_profile in B3 (imported below, re-exported
+# unchanged below for existing importers — both IdentityStore
+# implementations, ask_state_store.py, ask_service.py, reasoning_retrieval.py
+# and the search-profile test suite). render_style_block below still needs
+# SEARCH_PROFILE_VERSION/SEARCH_PROFILE_FIELDS purely for its own docstrings/
+# comments (no runtime use), so nothing else in this module changed.
+# --------------------------------------------------------------------------- #
 from app.domain.search_profile import (
     ANSWER_DETAIL_VALUES,
     ANSWER_LANGUAGE_VALUES,
@@ -74,24 +89,6 @@ from app.domain.search_profile import (
 # ``" ".join(value.split())`` a third time) is a leaf → leaf import: neither
 # module imports the other, so this creates no cycle.
 from app.services.agent_profile_block import collapse_prompt_line  # noqa: E402
-
-# --------------------------------------------------------------------------- #
-# SEARCH_PROFILE_VERSION / SEARCH_PROFILE_FIELDS / SEARCH_PROFILE_ORIGINS,
-# the parse/serialize/merge functions, the ANSWER_*_VALUES / domain-terms
-# caps (re-exported from app.models.identity), and classify_ask_language
-# sunk to app.domain.search_profile in B3 (imported above, re-exported
-# unchanged below for existing importers — both IdentityStore
-# implementations, ask_state_store.py, ask_service.py, reasoning_retrieval.py
-# and the search-profile test suite). render_style_block below still needs
-# SEARCH_PROFILE_VERSION/SEARCH_PROFILE_FIELDS purely for its own docstrings/
-# comments (no runtime use), so nothing else in this module changed.
-# --------------------------------------------------------------------------- #
-
-
-#: ``domain_terms`` caps: at most this many terms, each at most this many
-#: characters. Registered in docs/product-and-api*.md alongside the other
-#: field caps once T8/T9 land the consumer surfaces (T6 only establishes the
-#: enforced boundary).
 
 
 #: Hard cap on :func:`render_style_block`'s output. Consumed starting T8

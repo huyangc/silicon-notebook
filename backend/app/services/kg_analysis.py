@@ -502,7 +502,7 @@ class KgAnalysisService:
 
         ⚠ **签名里为什么没有「板块世代」这一项,以及缺了它靠什么补。** 板块 id 只由
         `replace_communities` 重铸,而写侧在**同一个事务**里作废依赖板块的两份账本行
-        (见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)—— 删掉一行就动了
+        (见 `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`)—— 删掉一行就动了
         签名,这是这份缓存唯一 O(1) 的失效手段。世代只能由**写侧推**、不能由读侧拉:任何
         从 `communities` 现算的世代标记都是 O(板块数) 的读(生产 88 580 个板块,而
         `communities` 上没有 size 索引),那恰恰就是这份缓存要省掉的那笔钱。
@@ -747,7 +747,7 @@ def _detail_rows_are_readable(kind: str, ledger: Dict[str, Dict[str, Any]]) -> b
 
     此时无条件查明细表 = 同一份响应既报 ``present=False``,又把那些行发出去,让消费者
     (俯瞰图会照着画连线)呈现一份账本说不存在的产物。判据必须是账本行 —— 这是本特性
-    从 T2 到 T3 反复声明的那条(见 `kg_analysis_precompute.ARTIFACT_KINDS` 段头:
+    从 T2 到 T3 反复声明的那条(见 `app.domain.kg_analysis_contracts.ARTIFACT_KINDS` 段头:
     「账本行的**存在与否**才是这份产物在不在的唯一判据,明细表的行数不是」)。
 
     ⚠ 反过来**不**成立:账本行在、明细表零行是完全正常的一档(单一板块的图
@@ -812,7 +812,7 @@ def _ledger_state(ledger: Dict[str, Dict[str, Any]]) -> str:
     """账本整体处在哪一档:空 / 残缺 / 齐全。
 
     「必需」的集合与写侧共用 `required_artifact_kinds` —— 有板块时来源画像就是必需的,
-    零板块时它合法缺席(见 `kg_analysis_precompute.OPTIONAL_ARTIFACT_KINDS`)。
+    零板块时它合法缺席(见 `app.domain.kg_analysis_contracts.OPTIONAL_ARTIFACT_KINDS`)。
 
     ⚠ 这里**必须**跟着板块数走,不能只看那四份恒定必需的。否则「有板块却少了来源画像」
     这一档会同屏给出两个互相矛盾的说法:`_absence` 判「本该有却缺失」(红档),而档位

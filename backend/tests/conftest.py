@@ -159,6 +159,23 @@ def _fast_default_password_hashing(monkeypatch, request):
 
     monkeypatch.setattr(auth_utils, "hash_password", fast_hash_password)
 
+    # Self-assert the patch actually lands where repository call sites read
+    # it from. Repository stores resolve `hash_password` via a per-call lazy
+    # `from app.domain.auth_utils import hash_password`, i.e. they read the
+    # attribute off the DOMAIN module object at call time. If this fixture
+    # were ever pointed at `app.services.auth_utils` (the re-export shim)
+    # instead, repository calls would silently keep using the slow real
+    # implementation -- the suite would still pass, just ~25% slower, with
+    # no failing assertion anywhere to say why. Assert identity here so that
+    # regression is a loud fixture failure, not a quiet timing drift.
+    from app.domain.auth_utils import hash_password as _resolved_hash_password
+
+    assert _resolved_hash_password is fast_hash_password, (
+        "fast-hash patch target must be app.domain.auth_utils (repository "
+        "call sites import hash_password from there lazily per call); "
+        "patching app.services.auth_utils would silently do nothing"
+    )
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
     """Keep repository-wide source scans on one worker.

@@ -59,6 +59,10 @@ import hmac
 import re
 from typing import Any, Iterator, Sequence
 
+# Sunk to app.domain.conversation_public_view in B3 (app.repositories'
+# ask_state_store imports it directly there); re-exported here unchanged.
+from app.domain.conversation_public_view import MAX_TURNS
+
 # Mirrors ``report_public_view``'s caps; the report body (``content_md``) is
 # left uncapped and the conversation answer body (``answer_md``) AND the
 # question follow that precedent — a shared Q&A is the user's own artifact.
@@ -75,9 +79,6 @@ MAX_SNIPPET_CHARS = 1200
 # ``title_truncated`` rather than dropped silently (codex #522 R3; AGENTS.md
 # 用户编辑的数据不得静默截断). Registered in ``docs/product-and-api*.md`` (T6).
 MAX_REFERENCE_TITLE_CHARS = 400
-# Sunk to app.domain.conversation_public_view in B3 (app.repositories'
-# ask_state_store imports it directly there); re-exported here unchanged.
-from app.domain.conversation_public_view import MAX_TURNS  # noqa: F401
 
 # T4 — the anonymous image channel.
 #

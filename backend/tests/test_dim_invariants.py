@@ -94,7 +94,11 @@ def test_no_raw_frombuffer_similarity_outside_vector_index():
     truncate 语义无关)。守卫真正要挡的是绕过 decode_vector 的向量解码,故放行 uint8。"""
     hits = []
     for p in APP.rglob("*.py"):
-        if p.name == "vector_index.py":
+        # Only the domain module actually decodes bytes with frombuffer; the
+        # app.services.vector_index shim (same basename, B3 re-export) has
+        # zero frombuffer calls of its own, so exempting by basename alone
+        # would silently cover a services-layer violation too.
+        if p.relative_to(APP) == pathlib.Path("domain/vector_index.py"):
             continue
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             if "np.frombuffer(" in line or (".frombuffer(" in line and "np" in line):

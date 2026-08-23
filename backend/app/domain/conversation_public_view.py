@@ -2,10 +2,10 @@
 
 Only ``MAX_TURNS`` moves — it's the one name app.repositories (ask_state_store,
 both backends) imports directly (a safety ceiling on how many turns one
-public page renders). The rest of the public-conversation projection stays in
-app.services.conversation_public_view (it depends on request/response models
-and other services). ``app.services.conversation_public_view`` re-exports
-this name unchanged for existing importers.
+public page renders). This sink is scoped to exactly the name repositories
+consume; sinking the rest of the public-conversation projection module is a
+separate piece of work, not attempted here. ``app.services.conversation_public_view``
+re-exports this name unchanged for existing importers.
 """
 from __future__ import annotations
 

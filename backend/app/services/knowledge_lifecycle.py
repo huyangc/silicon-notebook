@@ -4565,7 +4565,7 @@ class KnowledgeLifecycleService:
         只看 KG 世代的闸对整条簇写路径完全失明:簇变了、簇大小直方图与最大簇榜单
         (直接从 `concept_clusters` 算)跟着变了,而闸短路、读侧报「与当前一致」。
         哪四份受影响、`relation_provenance` 为什么不受影响,依据见
-        `kg_analysis_precompute.CLUSTER_DEPENDENT_ARTIFACT_KINDS` 的逐条 SQL 说明。
+        `app.domain.kg_analysis_contracts.CLUSTER_DEPENDENT_ARTIFACT_KINDS` 的逐条 SQL 说明。
 
         簇世代触发的补账本走的仍是上面那条「只补账本」路径 —— 它**沿用库里已有的板块
         划分**,而那批板块是在旧的合并结果上跑出来的。这不是本次新引入的近似:B1 那条
@@ -4603,7 +4603,7 @@ class KnowledgeLifecycleService:
         # ⚠ 默认层的判据里**没有**板块数:零板块是合法终态,理由见 docstring 那段。
         # 非默认层反过来 —— 那份不分 level 的账目替它说不了话,见下面的方向四/方向五。
         # 账本读的是**整行**(含 payload)而不是只读 seq:簇世代盖在 payload 里(刻意
-        # 不加列,见 `kg_analysis_precompute.CLUSTER_SEQ_PAYLOAD_KEY`),闸拿不到 payload
+        # 不加列,见 `app.domain.kg_analysis_contracts.CLUSTER_SEQ_PAYLOAD_KEY`),闸拿不到 payload
         # 就判不出簇是否漂过。这也是同一次读同时喂给下面 `_compute_kg_analysis` 的
         # 复用判断 —— 账本只读一遍,闸与复用不可能读到两份不同的账本。
         with self._connect() as _db:
@@ -4858,7 +4858,7 @@ class KnowledgeLifecycleService:
                     # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧
                     #  的 `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
                     # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
-                    # 理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+                    # 理由见 `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
                     # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
                     # **失败**那一档,而那一档没有别的东西替它守。
                     #

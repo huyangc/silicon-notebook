@@ -48,6 +48,32 @@ from typing import (
 
 import numpy as np
 
+# ARTIFACT_* kind vocabulary, artifact_cluster_seq(_is_unknown),
+# check_artifact_payloads and batched sunk to app.domain.kg_analysis_contracts
+# in B3 (imported below, re-exported unchanged for this module's own callers
+# — stamp_cluster_seq / artifact_is_current / _cluster_generation_verdict /
+# _generation_verdict below — and for external importers such as
+# app.repositories.*.unified_kg_store).
+from app.domain.kg_analysis_contracts import (
+    ARTIFACT_CLUSTER_HISTOGRAM,
+    ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_KINDS,
+    ARTIFACT_LARGEST_CLUSTERS,
+    ARTIFACT_RELATION_PROVENANCE,
+    ARTIFACT_SOURCE_PROFILES,
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
+    OPTIONAL_ARTIFACT_KINDS,
+    REQUIRED_ARTIFACT_KINDS,
+    _ARTIFACT_KINDS,
+    _BOARD_DEPENDENT_ARTIFACT_KINDS,
+    artifact_cluster_seq,
+    artifact_cluster_seq_is_unknown,
+    batched,
+    check_artifact_payloads,
+)
+
 # canonical 节点下标与边权的存储类型(设计 §3.32)。int32 是刻意的:节点下标的上界是
 # canonical 成员数(生产 ~171 万),边权的上界是关系行数(生产 836 万),两者都离
 # 2^31 有三个数量级的余量,而 int64 会让整张边表凭空翻一倍。
@@ -91,34 +117,6 @@ PRECOMPUTED_LARGEST_CLUSTERS = 20
 # 总数)、`truncated` 与 `edge_limit`,`cross_weight` 则始终是**全部**跨板块边权之和
 # (它是一个图统计量,不该随展示上限变化)。
 MAX_PERSISTED_COMMUNITY_EDGES = 200_000
-
-
-# ARTIFACT_* kind vocabulary, artifact_cluster_seq(_is_unknown),
-# check_artifact_payloads and batched sunk to app.domain.kg_analysis_contracts
-# in B3 (imported below, re-exported unchanged for this module's own callers
-# — stamp_cluster_seq / artifact_is_current / _cluster_generation_verdict /
-# _generation_verdict below — and for external importers such as
-# app.repositories.*.unified_kg_store).
-from app.domain.kg_analysis_contracts import (
-    ARTIFACT_CLUSTER_HISTOGRAM,
-    ARTIFACT_COMMUNITY_EDGES,
-    ARTIFACT_KINDS,
-    ARTIFACT_LARGEST_CLUSTERS,
-    ARTIFACT_RELATION_PROVENANCE,
-    ARTIFACT_SOURCE_PROFILES,
-    BOARD_DEPENDENT_ARTIFACT_KINDS,
-    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
-    CLUSTER_SEQ_PAYLOAD_KEY,
-    OPTIONAL_ARTIFACT_KINDS,
-    REQUIRED_ARTIFACT_KINDS,
-    _ARTIFACT_KINDS,
-    _BOARD_DEPENDENT_ARTIFACT_KINDS,
-    artifact_cluster_seq,
-    artifact_cluster_seq_is_unknown,
-    batched,
-    check_artifact_payloads,
-)
-
 
 
 def stamp_cluster_seq(

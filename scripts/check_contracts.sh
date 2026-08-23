@@ -36,6 +36,7 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/repositories/sqlite/catalog_store.py" \
   "$ROOT_DIR/backend/app/repositories/postgres/catalog_store.py" \
   "$ROOT_DIR/backend/app/services/extraction_profiles.py" \
+  "$ROOT_DIR/backend/app/domain/extraction_profiles.py" \
   "$ROOT_DIR/backend/app/services/kg/extract.py" \
   "$ROOT_DIR/backend/app/services/kg/graph_reason.py" \
   "$ROOT_DIR/backend/app/services/kg/models.py" \
@@ -70,7 +71,8 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/api/source_routes.py" \
   "$ROOT_DIR/backend/app/api/system_routes.py" \
   "$ROOT_DIR/backend/app/api/debug_logs.py" \
-  "$ROOT_DIR/backend/app/services/auth_utils.py"
+  "$ROOT_DIR/backend/app/services/auth_utils.py" \
+  "$ROOT_DIR/backend/app/domain/auth_utils.py"
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \
   "import markdown_it, numpy"
