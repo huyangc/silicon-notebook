@@ -7,6 +7,7 @@ import type {
   WorkspaceExtensionSlot,
   WorkspaceUiContribution,
 } from "./contracts.ts";
+import { withExtensionApi } from "./api.ts";
 import { visibleWorkspaceUiContributions } from "./visibility.ts";
 
 
@@ -40,7 +41,12 @@ export function WorkspaceExtensionOutlet({
         <contribution.Component
           key={`${ownerKey}:${context.source?.id ?? ""}:${contribution.id}`}
           context={context}
-          actions={actions}
+          // api 端口按**本条 contribution 的** pluginId 绑定，逐 contribution 现造：
+          // 插件自己 import 不到 `./api.ts`，所以这是它拿到端口的唯一途径，也保证了
+          // 插件 A 造不出插件 B 的端口。刻意不 memo——`createWorkspaceExtensionApi`
+          // 只是拼几个闭包（零 I/O、零 hook），而模块级缓存会把一个跨 owner 存活的
+          // 对象引进来，正好抵消 outlet 的 ownerKey 门。
+          actions={withExtensionApi(actions, contribution.pluginId)}
         />
       ))}
     </aside>

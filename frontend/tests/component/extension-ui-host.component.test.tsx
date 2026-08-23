@@ -11,7 +11,10 @@ import {
   defineWorkspaceUiRegistry,
 } from "../../features/extension-sdk/registry";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../../features/extension-sdk/workspace-registry";
-import type { SystemExtensionProjection } from "../../features/extension-sdk/contracts";
+import type {
+  SystemExtensionProjection,
+  WorkspaceExtensionProps,
+} from "../../features/extension-sdk/contracts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -33,6 +36,34 @@ const realProjection: SystemExtensionProjection = { apiVersion: "1", extensions:
 const syntheticProjection: SystemExtensionProjection = { apiVersion: "1", extensions: [{
   pluginId: "sample-plugin", displayName: "Sample", version: "1.0.0",
   contributionId: "sample-panel", available: true, unavailableReason: null,
+}] };
+// 两条 contribution、两个不同的 pluginId，各自渲染一个只会调 `actions.api` 的按钮。
+// 两条同时在场是承重的：一条证明不了端口是**按 contribution** 绑定的——那种形态下
+// "outlet 传了某个 api" 与 "outlet 传了正确的 api" 长得一模一样。
+function apiProbe(testId: string) {
+  return function ApiProbe({ actions }: WorkspaceExtensionProps) {
+    return (
+      <button data-testid={testId} onClick={() => { void actions.api.requestJson("/x"); }}>
+        probe
+      </button>
+    );
+  };
+}
+const apiRegistry = defineWorkspaceUiRegistry([{
+  id: "sample-panel", pluginId: "sample-plugin", pluginVersion: "1.0.0",
+  capability: "sample.ui.available", slot: "workspace.side_panel",
+  permission: "notebook:read", mode: "all", Component: apiProbe("probe-sample"),
+}, {
+  id: "other-panel", pluginId: "other-plugin", pluginVersion: "1.0.0",
+  capability: "other.ui.available", slot: "workspace.side_panel",
+  permission: "notebook:read", mode: "all", Component: apiProbe("probe-other"),
+}]);
+const apiProjection: SystemExtensionProjection = { apiVersion: "1", extensions: [{
+  pluginId: "sample-plugin", displayName: "Sample", version: "1.0.0",
+  contributionId: "sample-panel", available: true, unavailableReason: null,
+}, {
+  pluginId: "other-plugin", displayName: "Other", version: "1.0.0",
+  contributionId: "other-panel", available: true, unavailableReason: null,
 }] };
 const permissions = {
   notebookRead: true, notebookWrite: false, notebookConfigure: false,
@@ -133,6 +164,39 @@ test("real production contribution is lazy, mode-all and reader-visible, with on
   await user.click(screen.getByRole("button", { name: "AI 对这个库的理解" }));
   expect(onOpen).toHaveBeenCalledOnce();
 });
+
+test("the outlet injects an api port bound to each contribution's own plugin id", async () => {
+  // 走的是**真的**默认 transport（api-client → 核心请求管线），只把最外层的网络出口
+  // 换成假的：这样 `/extensions/<id>/` 前缀、API_BASE 约束与 options 口径是一起被
+  // 证明的，而不是靠一个替身 transport 自说自话。
+  const user = userEvent.setup();
+  const calls: { url: string; init: RequestInit }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: unknown, init: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return {
+      ok: true, status: 200,
+      headers: { get: () => null },
+      json: async () => ({ ok: true }),
+    };
+  }));
+  const load = vi.fn(async () => apiProjection);
+  const ref = { current: null as WorkspaceExtensions | null };
+  render(<Harness ref={ref} actorId="user-a" notebookId="notebook-a" entries={apiRegistry} load={load} />);
+  act(() => commit(ref, "user-a", "notebook-a", 1));
+
+  await user.click(await screen.findByTestId("probe-sample"));
+  await user.click(await screen.findByTestId("probe-other"));
+  expect(calls).toHaveLength(2);
+  expect(calls.map((entry) => new URL(entry.url).pathname)).toEqual([
+    "/api/extensions/sample-plugin/x",
+    "/api/extensions/other-plugin/x",
+  ]);
+  // 核心身份由端口固定：插件设不了鉴权头，也改不了 401 的处置。
+  expect(new Headers(calls[0].init.headers).get("Authorization")).toBeNull();
+  expect(calls[0].init.method).toBeUndefined();
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
 
 test("owned actions reject an A-G1 callback after A-B-A and admit the current A-G3 callback", () => {
   const openUnderstanding = vi.fn();

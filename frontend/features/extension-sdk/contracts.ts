@@ -50,9 +50,49 @@ export type WorkspaceExtensionActions = Readonly<{
   openUnderstanding(): void;
 }>;
 
+/**
+ * 查询串只能经这个字段走：`extensionApiPath` 拒绝路径里出现 `?`，所以插件没有
+ * 第二条拼查询的路子，而拼接由 `URLSearchParams` 统一编码。
+ */
+export type ExtensionApiQuery = Readonly<Record<string, string | number | boolean>>;
+
+/**
+ * 插件能对一次请求说的**全部**话。刻意没有 `tag`/`auth`/`unauthorized`/`credentials`/
+ * `mode`：那几项是核心的鉴权与诊断口径，由 `createWorkspaceExtensionApi` 固定。
+ */
+export type ExtensionRequestInit = Readonly<{
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  body?: string | FormData;
+  headers?: Readonly<Record<string, string>>;
+  signal?: AbortSignal;
+  query?: ExtensionApiQuery;
+}>;
+
+/**
+ * 插件唯一的 HTTP 出口，按 `pluginId` 绑定，路径恒在 `/extensions/<plugin id>/` 之下。
+ *
+ * `userMessage` 不是便利函数而是必需品：`errors-guard` 是精确计数普查，读
+ * `error.message` 必须登记在公网仓库的清单里，仓库外插件登记不进去。
+ */
+export type WorkspaceExtensionApi = Readonly<{
+  requestJson<T>(path: string, init?: ExtensionRequestInit): Promise<T>;
+  requestVoid(path: string, init?: ExtensionRequestInit): Promise<void>;
+  requestBlob(path: string, init?: ExtensionRequestInit): Promise<Blob>;
+  userMessage(error: unknown, fallback: string): string;
+}>;
+
+/**
+ * 插件组件实际收到的 actions：宿主自己的窄 action 加上一份**按本 contribution 的
+ * pluginId 绑定**的 api 端口。宿主侧持有的仍是 `WorkspaceExtensionActions`，
+ * `api` 由 outlet 逐 contribution 注入——插件 A 因此拿不到插件 B 的端口。
+ */
+export type WorkspaceExtensionPluginActions = WorkspaceExtensionActions & Readonly<{
+  api: WorkspaceExtensionApi;
+}>;
+
 export type WorkspaceExtensionProps = Readonly<{
   context: WorkspaceExtensionContext;
-  actions: WorkspaceExtensionActions;
+  actions: WorkspaceExtensionPluginActions;
 }>;
 
 export type WorkspaceUiContribution = Readonly<{
