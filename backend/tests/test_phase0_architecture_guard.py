@@ -699,17 +699,38 @@ def test_guard_allows_only_named_application_composition_root(tmp_path):
 
 
 def test_registry_composition_does_not_change_route_topology(monkeypatch):
+    """An *empty* plugin topology adds no routes and moves no existing one.
+
+    Scope note: this asserts the zero-plugin case only — that the registry
+    composition seam itself is route-neutral. What a *non-empty* topology is
+    allowed to mount (prefix, router-level auth, notebook gates, refusals) is
+    covered by ``backend/tests/test_extension_plugin_routes.py``, not here.
+
+    The stand-in must therefore answer the two reads ``create_app`` now makes
+    of the registry — ``contributions(point)`` and ``manifests()`` — plus carry
+    an empty ``plugin_settings``. A bare ``object()`` would raise instead of
+    proving anything.
+    """
+
     from app import main as app_main
 
     baseline = app_main.create_app()
-    sentinel = object()
+
+    class _EmptyRegistry:
+        def contributions(self, point):
+            return ()
+
+        def manifests(self):
+            return ()
+
+    sentinel = _EmptyRegistry()
     monkeypatch.setattr(
         app_main,
         "application_extension_runtime",
         lambda: type(
             "Runtime",
             (),
-            {"registry": sentinel},
+            {"registry": sentinel, "plugin_settings": {}},
         )(),
     )
     composed = app_main.create_app()

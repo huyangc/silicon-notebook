@@ -5,10 +5,12 @@ from collections.abc import Callable
 
 from app.core.config import Settings
 from app.extensions import ExtensionRuntime, default_extension_runtime
+from app.domain.extension_http import PluginRouterSpec
 from app.extensions.admin_projection import (
     LoadedExtensionProjection,
     project_loaded_extensions,
 )
+from app.extensions.http_router import collect_plugin_router_specs
 from app.extensions.ui_projection import (
     UiContributionProjection,
     project_ui_contributions,
@@ -40,6 +42,21 @@ def application_extension_admin_projection(
     """
 
     return lambda: project_loaded_extensions(runtime.registry)
+
+
+def application_plugin_router_specs(
+    runtime: ExtensionRuntime,
+) -> tuple[PluginRouterSpec, ...]:
+    """Freeze the deployment plugins' HTTP router contributions for mounting.
+
+    Unlike the two projections above this returns the value itself rather than
+    a callable: route topology must be decided while the application object is
+    being built, never lazily on a request. ``app.api.extension_routes`` is the
+    only consumer, and it cannot import ``app.extensions`` — this composition
+    root is the seam that joins them.
+    """
+
+    return collect_plugin_router_specs(runtime.registry, runtime.plugin_settings)
 
 
 def create_application_repository(settings: Settings) -> NotebookRepository:

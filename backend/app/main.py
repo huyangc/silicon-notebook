@@ -16,6 +16,7 @@ from app.api.agent_mcp_onboarding import (
     agent_mcp_onboarding_router,
 )
 from app.api.debug_logs import router as debug_logs_router
+from app.api.extension_routes import mount_extension_routers
 from app.api.deps import (
     USER_MESSAGE_HEADER,
     get_current_user,
@@ -41,6 +42,7 @@ from app.bootstrap import (
     application_extension_admin_projection,
     application_extension_runtime,
     application_extension_ui_projection,
+    application_plugin_router_specs,
 )
 from app.services.model_provider import validate_process_local_scheduler_deployment
 from app.services.pending_bus import pending_bus
@@ -397,6 +399,12 @@ def create_app() -> FastAPI:
     # guard first. Every route resolves its own auth (app.api.deps.
     # require_user_or_agent / user_or_agent_scope).
     app.include_router(knowhow_agent_router, prefix="/api")
+    # 部署插件的 HTTP 面(X4):**唯一**的挂载点。零部署插件时 specs 为空、
+    # mount_extension_routers 立即返回,一条路由都不注册——所以冻结的 api_contract
+    # 对默认部署仍逐字成立。每个 router 都挂在 `/api/extensions/{plugin_id}` 下,
+    # 并带 router 级 `Depends(get_current_user)`:插件面没有任何匿名路由,
+    # 与上面那条公开分享 router 的例外刻意不同。
+    mount_extension_routers(app, application_plugin_router_specs(extension_runtime))
     app.mount("/mcp", mcp_app, name="memory-mcp")
 
     # 待确认中心事件总线：注入 recompute，供后台 job（mark_dirty）与流式端点
