@@ -37,6 +37,7 @@ must never come up half-wired.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from functools import wraps
 import logging
@@ -45,6 +46,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 from app.api import deps as core_deps
@@ -158,6 +160,45 @@ def _authorized_notebook(capability: str, notebook_id: str) -> str:
     return notebook_id
 
 
+# Developer-facing on purpose, and therefore English and *not* routed through
+# ``user_error()``: no end user can act on it, and dressing it up as UI copy
+# would put a plugin's wiring bug in front of the person who typed a URL. It
+# reaches an operator as an ordinary 500 plus a traceback; what makes it worth
+# writing carefully is that it names the exact fix.
+_EVENT_LOOP_MISUSE_MESSAGE = (
+    "url_sources.import_urls must not be called from an async handler; "
+    "await url_sources.import_urls_async(...) instead"
+)
+
+
+def _refuse_event_loop_thread() -> None:
+    """Refuse to run blocking work on the thread the event loop is using.
+
+    ``asyncio.get_running_loop()`` *succeeding* is the signal: a loop is
+    running on **this** thread, so this call is inside an ``async def``
+    handler (or anything else awaited by the loop). Blocking there stalls
+    every other in-flight request in the process, and the URL import is a
+    database write plus one serial remote probe per URL — seconds, not
+    milliseconds, and bounded by somebody else's HTTP server.
+
+    The check is deliberately positive rather than a thread-identity
+    comparison: FastAPI's threadpool workers, ``run_in_threadpool`` and a
+    thread a plugin spawned itself all have no running loop and are all fine,
+    while "the loop thread" is not a stable object this module could name.
+
+    A raised ``RuntimeError`` — not an ``HTTPException``, not a ``user_error``
+    — because this is a bug in the plugin's code rather than a condition of
+    the request: it must surface as a 500 with a traceback pointing at the
+    call site, every time, and never look like something the end user did.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(_EVENT_LOOP_MISUSE_MESSAGE)
+
+
 class _UrlSourceImportAdapter:
     """``PluginUrlSourceImportPort`` over core's single URL-import implementation.
 
@@ -180,6 +221,13 @@ class _UrlSourceImportAdapter:
     def import_urls(
         self, notebook_id: str, urls: Sequence[str]
     ) -> PluginUrlImportResult:
+        """Blocking import, for a sync handler (or a worker thread).
+
+        See :func:`_refuse_event_loop_thread` for why an ``async def`` handler
+        is turned away here instead of being quietly served.
+        """
+
+        _refuse_event_loop_thread()
         _authorized_notebook(_URL_IMPORT_CAPABILITY, notebook_id)
         result = source_routes.import_url_sources(notebook_id, list(urls))
         return PluginUrlImportResult(
@@ -194,6 +242,30 @@ class _UrlSourceImportAdapter:
                 for row in result.rejected
             ),
         )
+
+    async def import_urls_async(
+        self, notebook_id: str, urls: Sequence[str]
+    ) -> PluginUrlImportResult:
+        """The same import, offloaded so an ``async def`` handler may await it.
+
+        It delegates to :meth:`import_urls` **in the worker thread** rather
+        than duplicating the body: one implementation means the authorization
+        check, the capacity accounting and the result shaping cannot drift
+        apart between the two entry points, and the loop-thread refusal above
+        is exercised on this path too (it passes, because a worker thread has
+        no running loop — which is precisely the property being bought).
+
+        ``run_in_threadpool`` is core's existing spelling for this hop (see
+        ``app.api.deps``), and it carries the current ``contextvars`` context
+        into the worker. That is load-bearing, not incidental: the port reads
+        the request's authenticated user out of ``app.core.request_context``,
+        so without the copied context ``get_request_user()`` would come back
+        ``None`` in the worker and *every* async import — the owner's included
+        — would 404. ``test_async_import_still_authorizes_the_request_user``
+        and its owner-side twin fail together if that ever stops holding.
+        """
+
+        return await run_in_threadpool(self.import_urls, notebook_id, list(urls))
 
 
 # One whitelisted observability payload: two stable codes and two counters.

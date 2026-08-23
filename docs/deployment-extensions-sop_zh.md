@@ -223,6 +223,17 @@ def build_router(context: PluginRouteContext) -> APIRouter:
             ],
         }
 
+    # `async def` handler 跑在事件循环线程上，必须 await 卸载版本。
+    # 授权一样、结果一样。
+    @router.post(
+        "/notebooks/{notebook_id}/import-async",
+        dependencies=[Depends(context.require_notebook_capability("sources:write"))],
+    )
+    async def import_selected_async(notebook_id: str, payload: dict):
+        urls = [u for u in (payload.get("urls") or []) if isinstance(u, str)]
+        result = await context.url_sources.import_urls_async(notebook_id, urls)
+        return {"created": [row.source_id for row in result.created]}
+
     return router
 ```
 
@@ -231,6 +242,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 *core 替你做的：*
 
 - **按端口授权。** `url_sources.import_urls` 对**请求自己的那个用户**核对 `sources:write`——用户从 core 的请求上下文解析，绝不从你传进去的任何东西解析——不通过就用与 core 端点相同的 404 拒绝（不泄露存在性）。过了这一关，它就是 core 自己那个 URL 导入函数本人：同样的容量记账、管理员豁免、未配置解析器映射与后台解析调度。
+- **拒绝阻塞事件循环。** `url_sources.import_urls` 是阻塞的——数据库写入，外加每个 URL 一次串行远端探测。`def` handler 本来就跑在 FastAPI 的线程池里，直接调它即可；`async def` handler 跑在事件循环线程上，必须 `await url_sources.import_urls_async(...)`，它把同一份活挪进线程池。用反了会在运行期被**拒绝**而不只是被劝阻：`import_urls` 发现自己这条线程上有正在运行的事件循环就抛 `RuntimeError`，且发生在动任何东西之前，文案直接点名该 await 哪个方法。因此不会导入一半；失败是一个普通 `500` 加 traceback，而不是面向用户的文案——这是插件自己的代码缺陷，不是终端用户做错了什么。
 - **对 `{notebook_id}` 路由的结构性守卫。** 路径里含这个字面子串的路由必须跑 core 自己的一道门（任一能力守卫，或读权门）。这是**纵深防御，不是边界**：把参数改名 `{nb}`、或从请求体里取 id，这道检查就看不见了——而端口照样拒绝。拿掉端口那道检查会开一个洞，拿掉这道不会。
 - **401 翻译。** 你的 handler **抛出或返回**的 401 都会变成 `424`（把上游服务自己的 401 原样搬到你自己构造的 `Response`/`JSONResponse` 上再返回是很正常的写法，不是抛出，同样会被接住），带 core 自己的文案，并记一条 `plugin_upstream_unauthorized` 事件。在 core 里 401 对浏览器只有一个含义——清 token 并重载——所以某个插件路由里一张过期的上游凭据，否则会把用户从整个产品里登出。core 自己 router 级会话门产生的真 401 仍然原样是 401。
 - **事件脱敏。** `emit_event` 只收四个字段——`event`、`outcome`、`count`、`elapsed_ms`——出现别的键就**整条**丢弃。`kind` 与 `plugin_id` 由 core 补。它永远不会反向抛回你的 handler。
@@ -630,7 +642,8 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | 信号 | 含义 |
 | --- | --- |
 | `plugin_upstream_unauthorized` 事件，客户端看到 `424` | 你的 handler 抛出或返回了 401。core 翻译了它，免得浏览器把用户登出。想要自己的措辞，就自己翻译上游 401。 |
-| `url_sources.import_urls` 返回 404 | 调用用户对该笔记本没有 `sources:write`——或者该笔记本不存在。两者刻意不可区分。 |
+| `url_sources.import_urls` / `import_urls_async` 返回 404 | 调用用户对该笔记本没有 `sources:write`——或者该笔记本不存在。两者刻意不可区分。 |
+| `RuntimeError: url_sources.import_urls must not be called from an async handler…`，客户端看到 `500` | 某个 `async def` handler 调了阻塞版本，那会让进程里其余所有在飞请求跟着卡住。改成 `await url_sources.import_urls_async(...)`；同步 `def` handler 仍然调 `import_urls`。这一次什么都没有导入。 |
 | 你的事件在日志里静默消失 | 载荷带了 `event`/`outcome`/`count`/`elapsed_ms` 之外的字段、稳定码超过 64 字符或不匹配 `^[a-z][a-z0-9_]{0,63}$`、或 `count`/`elapsed_ms` 不是 `0..1e9` 区间的整数（`True` 不算 `1`）。整条记录被丢弃，而不是写一半。 |
 | 入口不渲染，但 `/admin/extensions` 列着这个插件 | 第 7 节那四道可见性闸有一道为假。先看 `GET /api/system/extensions`：该行的 `available` 与 `unavailable_reason`（`disabled` = 你的 probe 返回了 `DISABLED`，`unavailable` = 返回了 `UNAVAILABLE`）。如果该行整个不存在，说明浏览器侧的本地三元组没命中——两边 manifest 的 `version` 漂了。 |
 

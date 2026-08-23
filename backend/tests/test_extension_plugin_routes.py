@@ -13,10 +13,12 @@ See docs/superpowers/plans/2026-08-23-deployment-extensions-backend.md §3.3 and
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import sys
 import textwrap
+import threading
 
 import pytest
 from fastapi import APIRouter
@@ -263,6 +265,56 @@ def build_router(context):
     @router.post("/from-body")
     def from_body(payload: dict):
         return _import(payload["notebook_id"], payload["urls"])
+
+    return router
+"""
+
+# The URL import port from an ``async def`` handler, which runs on the event
+# loop thread. Four routes, one per shape the offload contract has to answer:
+# the offloaded call, the refused blocking call, the same blocking call from a
+# sync handler (still fine), and an ungated async route so the port — not the
+# route's gate — is what turns a reader away.
+_ASYNC_PORT_SRC = """
+import threading
+
+HANDLER_THREADS = []
+
+
+def build_router(context):
+    router = APIRouter()
+
+    @router.post(
+        "/notebooks/{notebook_id}/import-async",
+        dependencies=[Depends(context.require_notebook_capability("sources:write"))],
+    )
+    async def import_async(notebook_id: str, payload: dict):
+        HANDLER_THREADS.append(threading.current_thread())
+        result = await context.url_sources.import_urls_async(
+            notebook_id, payload["urls"]
+        )
+        return {"created": [row.source_id for row in result.created]}
+
+    @router.post(
+        "/notebooks/{notebook_id}/import-sync-from-async",
+        dependencies=[Depends(context.require_notebook_capability("sources:write"))],
+    )
+    async def import_sync_from_async(notebook_id: str, payload: dict):
+        result = context.url_sources.import_urls(notebook_id, payload["urls"])
+        return {"created": [row.source_id for row in result.created]}
+
+    @router.post(
+        "/notebooks/{notebook_id}/import-sync",
+        dependencies=[Depends(context.require_notebook_capability("sources:write"))],
+    )
+    def import_sync(notebook_id: str, payload: dict):
+        HANDLER_THREADS.append(threading.current_thread())
+        result = context.url_sources.import_urls(notebook_id, payload["urls"])
+        return {"created": [row.source_id for row in result.created]}
+
+    @router.post("/n/{nb}/import-async-ungated")
+    async def import_async_ungated(nb: str, payload: dict):
+        result = await context.url_sources.import_urls_async(nb, payload["urls"])
+        return {"created": [row.source_id for row in result.created]}
 
     return router
 """
@@ -1405,6 +1457,195 @@ def test_url_import_maps_unconfigured_parser_to_400(
     )
     assert response.status_code == 400
     assert "X-User-Message" not in response.headers
+
+
+# --------------------------------------------------------------------------
+# The URL import port from an async handler (codex #578 R4 P1)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def async_port(tmp_path, monkeypatch, frozen_runtime_reset):
+    """One app whose plugin reaches the import port from four handler shapes.
+
+    The spy wrapped around core's own ``import_url_sources`` is what makes the
+    offload observable at all: it records, at the moment the blocking work
+    actually starts, which thread is running it and whether that thread has a
+    running event loop. It delegates to the real function afterwards, so the
+    source still lands and the "did it work" assertions stay non-vacuous.
+    """
+
+    import app.api.source_routes as source_routes_module
+    from app.services import remote_sources
+    from app.services.remote_sources import PdfProbe
+
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        factory_src=_ASYNC_PORT_SRC,
+        env={"MINERU_API_TOKEN": "tok"},
+    )
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf", lambda url, **kw: PdfProbe(True, "", 1, "d.pdf")
+    )
+    monkeypatch.setattr(
+        source_routes_module.kg_scheduler, "submit_job", lambda fn, *a, **k: None
+    )
+
+    imports: list[dict] = []
+    real_import = source_routes_module.import_url_sources
+
+    def spy(notebook_id, urls):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        imports.append({"thread": threading.current_thread(), "on_loop": on_loop})
+        return real_import(notebook_id, urls)
+
+    monkeypatch.setattr(source_routes_module, "import_url_sources", spy)
+    return client, _grant_world(client, "w"), imports
+
+
+def _handler_threads() -> list:
+    return sys.modules[_module_name(_PLUGIN_ID)].HANDLER_THREADS
+
+
+def test_an_async_handler_calling_the_sync_port_is_refused(async_port):
+    """``import_urls`` from an ``async def`` handler raises, and imports nothing.
+
+    The blocking call would otherwise run on the event loop thread — one
+    unreachable URL there stalls every other in-flight request in the process.
+    The refusal happens before any work, so nothing is half-done, and the
+    message names the method to await instead: a plugin author reading the
+    traceback gets the fix, not just a diagnosis.
+    """
+
+    client, world, imports = async_port
+    with pytest.raises(RuntimeError) as excinfo:
+        client.post(
+            f"{_MOUNT}/notebooks/{world['notebook']}/import-sync-from-async",
+            json={"urls": ["https://a/d.pdf"]},
+            headers=world["owner"],
+        )
+    message = str(excinfo.value)
+    assert "must not be called from an async handler" in message
+    assert "import_urls_async" in message
+    assert imports == []
+    assert _source_count(client, world["notebook"], world["owner"]) == 0
+
+
+def test_the_refusal_surfaces_as_a_server_error_not_as_user_copy(async_port):
+    """It is a plugin wiring bug, so it must not look like something the user did.
+
+    A plain 500 with no ``X-User-Message`` (the header core attaches to
+    user-facing copy) and no notebook id echoed into the body: the actionable
+    text belongs in the traceback an operator reads, not in the response an
+    end user reads.
+    """
+
+    client, world, _ = async_port
+    quiet = TestClient(client.app, raise_server_exceptions=False)
+    response = quiet.post(
+        f"{_MOUNT}/notebooks/{world['notebook']}/import-sync-from-async",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=world["owner"],
+    )
+    assert response.status_code == 500
+    assert "X-User-Message" not in response.headers
+    assert world["notebook"] not in response.text
+
+
+def test_async_import_lands_the_source_for_the_owner(async_port):
+    """The awaited variant does the same work and the source actually lands.
+
+    Non-vacuity for the two tests below: a port that refused everyone, or an
+    offload that lost the request context on the way into the worker thread,
+    would 404 here — the owner's own capability check reads the user out of
+    core's request context, which only exists in that thread if it was copied.
+    """
+
+    client, world, imports = async_port
+    response = client.post(
+        f"{_MOUNT}/notebooks/{world['notebook']}/import-async",
+        json={"urls": ["https://a/1.pdf"]},
+        headers=world["owner"],
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["created"]) == 1
+    assert _source_count(client, world["notebook"], world["owner"]) == 1
+    assert len(imports) == 1
+
+
+def test_the_offloaded_import_leaves_the_event_loop_thread(async_port):
+    """The point of the whole change: the blocking work runs somewhere else.
+
+    Two independent readings, because either alone can be satisfied by
+    accident: the worker has no running event loop, *and* it is a different
+    thread object from the one the async handler body itself ran on. Calling
+    the sync implementation directly instead of hopping to the threadpool
+    fails both.
+    """
+
+    client, world, imports = async_port
+    _handler_threads().clear()
+    response = client.post(
+        f"{_MOUNT}/notebooks/{world['notebook']}/import-async",
+        json={"urls": ["https://a/1.pdf"]},
+        headers=world["owner"],
+    )
+    assert response.status_code == 200, response.text
+    assert len(imports) == 1
+    assert imports[0]["on_loop"] is False
+    assert len(_handler_threads()) == 1
+    assert imports[0]["thread"] is not _handler_threads()[0]
+
+
+def test_async_import_still_authorizes_the_request_user(async_port):
+    """A reader is refused by the *port*, on the offloaded path too.
+
+    The route is ungated on purpose — the ``{notebook_id}`` shape rule never
+    fires for ``/n/{nb}/…`` — so the 404 can only come from the port checking
+    ``sources:write`` for the request's own user. Paired with
+    ``test_async_import_lands_the_source_for_the_owner``: that one proves the
+    request context reached the worker thread at all, this one proves what it
+    carried is still being enforced there.
+    """
+
+    client, world, imports = async_port
+    response = client.post(
+        f"{_MOUNT}/n/{world['notebook']}/import-async-ungated",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=world["reader"],
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Notebook not found"
+    assert imports == []
+    assert _source_count(client, world["notebook"], world["owner"]) == 0
+
+
+def test_a_sync_handler_still_calls_the_sync_port(async_port):
+    """The pre-existing shape is untouched: sync handler, blocking call, 200.
+
+    FastAPI already runs ``def`` endpoints in its threadpool, so there is no
+    loop on that thread and the new refusal never fires for them.
+    """
+
+    client, world, imports = async_port
+    _handler_threads().clear()
+    response = client.post(
+        f"{_MOUNT}/notebooks/{world['notebook']}/import-sync",
+        json={"urls": ["https://a/1.pdf"]},
+        headers=world["owner"],
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["created"]) == 1
+    assert _source_count(client, world["notebook"], world["owner"]) == 1
+    assert [row["on_loop"] for row in imports] == [False]
+    # Same thread this time: the handler is already off the loop, so there is
+    # no hop to make.
+    assert imports[0]["thread"] is _handler_threads()[0]
 
 
 # --------------------------------------------------------------------------
