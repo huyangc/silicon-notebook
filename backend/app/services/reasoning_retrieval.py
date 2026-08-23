@@ -1693,6 +1693,12 @@ class _TraceRecorder:
     抽成可调用对象(而不是留在 `run` 里当闭包)只为让首轮阶段函数拿到同一个
     记账器;调用形状 `record(TraceStep(...))` 与闭包时代逐字相同,`trace` 也仍是
     调用方持有的那一个 list(这里只往里 append,不另存一份)。
+
+    `cancel_event` 在**构造时**快照进 `self._cancel_event`,此后每次 `__call__`
+    都读这同一份引用 —— 旧闭包时代是每次调用重读外层局部变量,这里换成构造期
+    一次性快照,二者行为等价的前提是一次 `run` 只绑定一个取消令牌、从未在运行
+    中途换过第二个;`run` 本身也确实只在状态初始化时创建一次 `_TraceRecorder`,
+    不会中途重新构造或替换 `cancel_event`。
     """
 
     __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts")
@@ -1714,7 +1720,7 @@ class _TraceRecorder:
             self._on_step(step)
 
 
-@dataclass
+@dataclass(slots=True)
 class _ReasoningRunState:
     """一次 `ReasoningRetriever.run` 的 run 级状态。
 
