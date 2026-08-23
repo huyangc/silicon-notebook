@@ -55,42 +55,18 @@ the secrets named by `api_key_env` in `.env`. Delete the path or set it to an em
 for explicit deterministic offline mode (keyword-only retrieval, no model extraction or
 answers). Users cannot supply or override model credentials, endpoints, models, or capacity.
 
-`ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` and
-`ANSWER_AUDIT_MAX_FINDINGS` govern the internal post-terminal Ask extension
-points. The timeout is cooperative: an in-progress synchronous callback is not
-abandoned, while later contributions are skipped after its deadline. Exact
-defaults and validation ranges live only in the product/API contract.
+`ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` governs the internal
+post-terminal Ask extension point. The timeout is cooperative: an in-progress
+synchronous callback is not abandoned, while later contributions are skipped
+after its deadline. Exact defaults and validation ranges live only in the
+product/API contract.
 
-`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` and
-`REPORT_AUDIT_MAX_FINDINGS` independently govern Deep Report's post-terminal
-auditor/observer points. They use the same cooperative semantics but never
-share an Ask budget: a callback already started completes safely, later report
-contributions do not start after the deadline, and an oversized finding set is
-rejected whole. These hooks run only after a successful durable `done` CAS.
-Exact defaults and ranges live only in the product/API contract.
-
-A deployment that registers a parsed-element contributor configures it with
-`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`,
-`SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS`,
-`SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES`, and
-`SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS`. The deadline is point-wide and
-cooperative; proposal and byte limits reject an offending contribution as a
-whole rather than truncating it. The default registry contains no contributor,
-so these settings add no work until one is composed. Exact defaults and ranges
-live only in the product/API contract.
-
-A deployment that registers a knowledge candidate projector configures its
-point-wide cooperative deadline and aggregate object, relation, and serialized
-candidate budgets with `KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS`,
-`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS`,
-`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS`, and
-`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES`. An in-progress synchronous
-contribution is not abandoned, but a result returned after the deadline is not
-admitted and no later contribution starts. A contribution that exceeds a
-remaining budget is rejected atomically rather than truncated. The default registry contains no
-projector, so these settings add no schema read, event, database, model,
-embedding, or retrieval work until one is composed. Exact defaults and ranges
-live only in the product/API contract.
+`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` independently governs Deep
+Report's post-terminal observer point. It uses the same cooperative semantics
+but never shares an Ask budget: a callback already started completes safely and
+later report contributions do not start after the deadline. This hook runs only
+after a successful durable `done` CAS. Exact defaults and ranges live only in
+the product/API contract.
 
 A chat service may optionally set `top_p = 0.95` (or another finite value from `0` through
 `1`) when its provider requires a fixed nucleus-sampling value. This service-owned value

@@ -21,7 +21,6 @@ class ContributionKind(str, Enum):
     PROVIDER = "provider"
     PROVIDER_CHAIN = "provider_chain"
     CONTRIBUTOR = "contributor"
-    AUDITOR = "auditor"
     OBSERVER = "observer"
 
 
@@ -119,13 +118,6 @@ class ContributorResult(Generic[T]):
 
 
 @dataclass(frozen=True)
-class AuditorResult(Generic[T]):
-    audit: T | None
-    status: ExtensionResultStatus
-    failure: ExtensionFailure | None = None
-
-
-@dataclass(frozen=True)
 class ObserverReceipt:
     status: ExtensionResultStatus
     failure: ExtensionFailure | None = None
@@ -180,8 +172,6 @@ class ExtensionRegistrar(Protocol):
     def add_provider_chain_link(self, contribution: ExtensionContribution) -> None: ...
 
     def add_contributor(self, contribution: ExtensionContribution) -> None: ...
-
-    def add_auditor(self, contribution: ExtensionContribution) -> None: ...
 
     def add_observer(self, contribution: ExtensionContribution) -> None: ...
 

@@ -149,76 +149,11 @@ class Settings(BaseSettings):
         le=300,
         validation_alias="ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS",
     )
-    answer_audit_max_findings: int = Field(
-        32,
-        ge=1,
-        le=256,
-        validation_alias="ANSWER_AUDIT_MAX_FINDINGS",
-    )
     report_post_completion_extension_timeout_seconds: float = Field(
         30.0,
         gt=0,
         le=300,
         validation_alias="REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS",
-    )
-    report_audit_max_findings: int = Field(
-        32,
-        ge=1,
-        le=256,
-        validation_alias="REPORT_AUDIT_MAX_FINDINGS",
-    )
-    # Parsed-element enrichers run once per contributor and source between
-    # parser materialization and the core-owned element transaction. The
-    # point-wide cooperative budget starts no later contributor after expiry.
-    source_element_enricher_timeout_seconds: float = Field(
-        10.0,
-        gt=0,
-        le=300,
-        validation_alias="SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS",
-    )
-    source_element_enricher_max_proposals: int = Field(
-        2048,
-        ge=1,
-        le=25000,
-        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS",
-    )
-    source_element_enricher_max_metadata_bytes: int = Field(
-        1048576,
-        ge=1024,
-        le=16777216,
-        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES",
-    )
-    source_element_enricher_max_caption_chars: int = Field(
-        4096,
-        ge=1,
-        le=32768,
-        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS",
-    )
-    # Candidate projectors run after the legacy KG candidate/relink/partial
-    # gates and before the one core-owned source-generation transaction.
-    knowledge_candidate_projector_timeout_seconds: float = Field(
-        10.0,
-        gt=0,
-        le=300,
-        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS",
-    )
-    knowledge_candidate_projector_max_objects: int = Field(
-        512,
-        ge=1,
-        le=25000,
-        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS",
-    )
-    knowledge_candidate_projector_max_relations: int = Field(
-        1024,
-        ge=1,
-        le=50000,
-        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS",
-    )
-    knowledge_candidate_projector_max_candidate_bytes: int = Field(
-        1048576,
-        ge=1024,
-        le=16777216,
-        validation_alias="KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES",
     )
 
     # --- 深度报告(report_engine) ---

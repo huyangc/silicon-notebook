@@ -1,5 +1,9 @@
 # 模块化插件架构交付与 PR 流水计划
 
+> **注记（2026-08-23）**：`answer.audit`、`report.audit`、`source.element_enricher`、
+> `knowledge.candidate_projector` 与 `agent.tool_provider`（外部 provider descriptor 追加那一半）
+> 五个扩展点已因零消费者移除。本文保留原始交付记录，不代表当前代码状态。
+
 日期：2026-08-21
 依据：[`modular-plugin-architecture-design-2026-08-21.md`](./modular-plugin-architecture-design-2026-08-21.md)
 

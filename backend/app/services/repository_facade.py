@@ -19,15 +19,11 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.domain.extensions import (
-    AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
-    ElementEnricherHostPort,
-    ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
-from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     get_request_user,
@@ -292,14 +288,8 @@ class RepositoryFacade:
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
-        answer_auditor_host: AnswerAuditorHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
-        report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
-        element_enricher_host: ElementEnricherHostPort | None = None,
-        knowledge_candidate_projector_host: (
-            KnowledgeCandidateProjectorHostPort | None
-        ) = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -331,12 +321,8 @@ class RepositoryFacade:
             model_provider=model_provider,
             retrieval_contributor_host=retrieval_contributor_host,
             parser_provider_chain_host=parser_provider_chain_host,
-            answer_auditor_host=answer_auditor_host,
             ask_completed_observer_host=ask_completed_observer_host,
-            report_auditor_host=report_auditor_host,
             report_completed_observer_host=report_completed_observer_host,
-            element_enricher_host=element_enricher_host,
-            knowledge_candidate_projector_host=knowledge_candidate_projector_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the

@@ -8,17 +8,12 @@ from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
-    AnswerAuditSnapshot,
     AskCompletedObserverCallContext,
     CompletedAskNotification,
 )
 from app.extension_sdk import (
-    ANSWER_AUDITOR_POINT,
     ASK_COMPLETED_OBSERVER_POINT,
     EXTENSION_API_VERSION,
-    AnswerAudit,
-    AnswerAuditFinding,
-    AuditorResult,
     Availability,
     AvailabilityStatus,
     ContributionDeclaration,
@@ -32,7 +27,7 @@ from app.extension_sdk import (
     ExtensionResultStatus,
     ObserverReceipt,
 )
-from app.extensions.ask import AnswerAuditorHost, AskCompletedObserverHost
+from app.extensions.ask import AskCompletedObserverHost
 from app.extensions.bootstrap import build_extension_runtime, default_extension_runtime
 from app.services.repository_runtime import RepositoryRuntime
 
@@ -96,21 +91,6 @@ def _deadline() -> float:
     return time.monotonic() + 60.0
 
 
-def _snapshot() -> AnswerAuditSnapshot:
-    return AnswerAuditSnapshot(
-        mode_id="reasoning",
-        grounded=True,
-        evidence_level="grounded",
-        citation_count=2,
-        anchor_count=3,
-        model_error_count=0,
-        answer_chars=80,
-        conclusion_chars=12,
-        max_findings=32,
-        deadline_monotonic=_deadline(),
-    )
-
-
 def _call_context(
     calls: list[str],
     *,
@@ -134,116 +114,9 @@ def test_empty_hosts_are_strict_noops_before_validation_clock_probe_and_events()
         raise AssertionError("strict empty topology touched a collaborator")
 
     runtime = build_extension_runtime((), event_sink=poison)
-    runtime.answer_auditors._clock = poison
     runtime.ask_completed_observers._clock = poison
 
-    assert runtime.answer_auditors.audit_application(
-        object(), connection_probe=object(), event_sink=poison
-    ) == ()
     assert runtime.ask_completed_observers.observe_application(object()) is None
-
-
-def test_auditor_receives_only_closed_structural_view_and_cannot_replace_answer():
-    seen = []
-
-    class Auditor:
-        def audit(self, context):
-            seen.append(context)
-            return AuditorResult(
-                AnswerAudit((AnswerAuditFinding("warning", "weak_grounding", 2),)),
-                ExtensionResultStatus.AVAILABLE,
-            )
-
-    runtime = build_extension_runtime((
-        _bundle("audit.structural", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Auditor()),
-    ))
-    snapshot = _snapshot()
-    result = runtime.answer_auditors.audit_application(
-        snapshot, connection_probe=_ConnectionProbe()
-    )
-
-    assert result == (
-        AnswerAudit((AnswerAuditFinding("warning", "weak_grounding", 2),)),
-    )
-    assert len(seen) == 1
-    view = seen[0].answer
-    assert not hasattr(view, "answer")
-    assert not hasattr(view, "question")
-    assert not hasattr(view, "citations")
-    assert not hasattr(view, "repository")
-    assert view.citation_count == 2
-    assert seen[0].max_findings == 32
-    assert seen[0].deadline_monotonic == snapshot.deadline_monotonic
-
-
-def test_auditor_failure_and_malformed_result_do_not_stop_later_auditors():
-    calls = []
-
-    class Raising:
-        def audit(self, _context):
-            calls.append("raise")
-            raise RuntimeError("secret answer text")
-
-    class Invalid:
-        def audit(self, _context):
-            calls.append("invalid")
-            return AuditorResult(
-                AnswerAudit((AnswerAuditFinding("warning", "bad code"),)),
-                ExtensionResultStatus.AVAILABLE,
-            )
-
-    class Valid:
-        def audit(self, _context):
-            calls.append("valid")
-            return AuditorResult(AnswerAudit(()), ExtensionResultStatus.AVAILABLE)
-
-    events = []
-    runtime = build_extension_runtime(
-        (
-            _bundle("audit.c_raise", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Raising()),
-            _bundle("audit.b_invalid", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Invalid()),
-            _bundle("audit.d_valid", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Valid()),
-        ),
-        event_sink=events.append,
-    )
-
-    assert runtime.answer_auditors.audit_application(
-        _snapshot(), connection_probe=_ConnectionProbe()
-    ) == (AnswerAudit(()),)
-    assert calls == ["invalid", "raise", "valid"]
-    assert all("secret" not in repr(event) for event in events)
-    assert all(set(event) <= {
-        "kind", "point", "plugin_id", "contribution_id", "status", "duration_ms",
-        "count", "reason_code",
-    } for event in events)
-    assert {event["plugin_id"] for event in events} == {
-        "audit.b_invalid", "audit.c_raise", "audit.d_valid",
-    }
-
-
-def test_auditor_findings_are_rejected_at_the_point_owned_budget():
-    class Auditor:
-        def audit(self, _context):
-            return AuditorResult(
-                AnswerAudit((
-                    AnswerAuditFinding("warning", "first"),
-                    AnswerAuditFinding("warning", "second"),
-                )),
-                ExtensionResultStatus.AVAILABLE,
-            )
-
-    events = []
-    runtime = build_extension_runtime(
-        (_bundle("audit.bounded", ANSWER_AUDITOR_POINT, ContributionKind.AUDITOR, Auditor()),),
-        event_sink=events.append,
-    )
-    snapshot = replace(_snapshot(), max_findings=1)
-
-    assert runtime.answer_auditors.audit_application(
-        snapshot, connection_probe=_ConnectionProbe()
-    ) == ()
-    assert events[-1]["status"] == "invalid"
-    assert events[-1]["reason_code"] == "invalid_answer_audit_result"
 
 
 def test_default_observers_preserve_reasoning_order_and_chunk_filter():
@@ -680,16 +553,8 @@ def test_repository_runtime_supplies_its_call_scoped_content_free_event_sink():
         def observe_application(self, context, *, event_sink=None):
             captured.append(("observer", context, event_sink))
 
-    class AuditorHost:
-        def audit_application(
-            self, snapshot, *, connection_probe=None, event_sink=None
-        ):
-            captured.append(("auditor", snapshot, event_sink))
-            return ()
-
     runtime = object.__new__(RepositoryRuntime)
     runtime.ask_completed_observers = ObserverHost()
-    runtime.answer_auditors = AuditorHost()
     runtime.agent_profile_jobs = SimpleNamespace(note_ask_completed=lambda *_: None)
     runtime.retrieval_experience_jobs = SimpleNamespace(
         note_ask_completed=lambda: None
@@ -699,24 +564,10 @@ def test_repository_runtime_supplies_its_call_scoped_content_free_event_sink():
     runtime.event_log = SimpleNamespace(emit=emitted.append)
     runtime.settings = SimpleNamespace(
         ask_post_completion_extension_timeout_seconds=30.0,
-        answer_audit_max_findings=32,
     )
 
     runtime._note_ask_completed("notebook-1", "user-1", "reasoning")
-    runtime._audit_completed_answer(
-        SimpleNamespace(
-            grounded=True,
-            evidence_level="high",
-            citations=(),
-            anchors=(),
-            model_errors=(),
-            answer="answer",
-            conclusion="summary",
-        ),
-        "reasoning",
-    )
 
-    assert [kind for kind, *_ in captured] == ["observer", "auditor"]
+    assert [kind for kind, *_ in captured] == ["observer"]
     assert captured[0][2] is runtime.event_log.emit
-    assert captured[1][2] is runtime.event_log.emit
     assert emitted == []

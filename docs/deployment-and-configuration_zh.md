@@ -52,36 +52,14 @@ cp model-services.example.toml .local/model-services.toml
 写入 `.env`。删除配置路径或把它置空，会明确进入确定性离线模式（仅关键词检索，无模型
 抽取/作答）。用户不能提供或覆盖模型凭据、端点、模型名和容量。
 
-`ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 与
-`ANSWER_AUDIT_MAX_FINDINGS` 治理内部的 Ask 终态后扩展点。超时是协作式的：已经
-进入同步 callback 的工作不会被遗弃，deadline 之后的后续 contribution 则不再启动。
-精确默认值与校验范围只在 product/API 合同登记。
+`ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 治理内部的 Ask 终态后扩展点。
+超时是协作式的：已经进入同步 callback 的工作不会被遗弃，deadline 之后的后续
+contribution 则不再启动。精确默认值与校验范围只在 product/API 合同登记。
 
-`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 与
-`REPORT_AUDIT_MAX_FINDINGS` 独立治理 Deep Report 的终态后 auditor/observer，
-不借用 Ask 预算。其语义同样是协作式：已开始 callback 安全完成，deadline 后不再
-启动后续 report contribution，超限 finding 集整体拒绝；并且只在持久 `done` CAS
-成功后运行。精确默认值与范围只在 product/API 合同登记。
-
-部署注册解析元素 contributor 时，通过
-`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`、
-`SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS`、
-`SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES` 与
-`SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS` 配置。deadline 是 point-wide
-协作式预算；proposal 或字节越界时整条 contribution 拒绝，不做静默截断。默认
-registry 不含 contributor，因此部署未组合插件时这些设置不增加任何工作。精确默认值
+`REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` 独立治理 Deep Report 的终态后
+observer，不借用 Ask 预算。其语义同样是协作式：已开始 callback 安全完成，deadline
+后不再启动后续 report contribution；并且只在持久 `done` CAS 成功后运行。精确默认值
 与范围只在 product/API 合同登记。
-
-部署若注册 knowledge candidate projector，使用
-`KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS`、
-`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS`、
-`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS` 与
-`KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES` 配置 point-wide
-协作式 deadline 和总 object/relation/序列化 candidate 预算。已经开始的同步
-contribution 不会被遗弃，但 deadline 后返回的结果不予接纳，也不再启动后续
-contribution；超过剩余预算的 contribution 整体拒绝而不是截断。默认
-registry 不含 projector，因此显式组合之前不会增加 schema read、event、数据库、
-模型、embedding 或检索工作。精确默认值与范围只在 product/API 合同登记。
 
 如果供应商要求固定的核采样值，chat 服务可选配置 `top_p = 0.95`（或 `0` 到 `1` 的
 其他有限数值）。该服务级值覆盖所有已绑定 workload 的调用默认值，并同时用于真实请求和

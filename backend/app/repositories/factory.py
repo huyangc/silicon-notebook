@@ -4,15 +4,11 @@ from __future__ import annotations
 from app.core.config import Settings
 from app.core.database_url import database_identity
 from app.domain.extensions import (
-    AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
-    ElementEnricherHostPort,
-    ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
-from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.repositories.ports import NotebookRepository
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -26,34 +22,18 @@ def create_repository(
     *,
     retrieval_contributor_host: RetrievalContributorHostPort | None = None,
     parser_provider_chain_host: ParserProviderChainHostPort | None = None,
-    answer_auditor_host: AnswerAuditorHostPort | None = None,
     ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
-    report_auditor_host: ReportAuditorHostPort | None = None,
     report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
-    element_enricher_host: ElementEnricherHostPort | None = None,
-    knowledge_candidate_projector_host: (
-        KnowledgeCandidateProjectorHostPort | None
-    ) = None,
 ) -> NotebookRepository:
     host_kwargs = {}
     if retrieval_contributor_host is not None:
         host_kwargs["retrieval_contributor_host"] = retrieval_contributor_host
     if parser_provider_chain_host is not None:
         host_kwargs["parser_provider_chain_host"] = parser_provider_chain_host
-    if answer_auditor_host is not None:
-        host_kwargs["answer_auditor_host"] = answer_auditor_host
     if ask_completed_observer_host is not None:
         host_kwargs["ask_completed_observer_host"] = ask_completed_observer_host
-    if report_auditor_host is not None:
-        host_kwargs["report_auditor_host"] = report_auditor_host
     if report_completed_observer_host is not None:
         host_kwargs["report_completed_observer_host"] = report_completed_observer_host
-    if element_enricher_host is not None:
-        host_kwargs["element_enricher_host"] = element_enricher_host
-    if knowledge_candidate_projector_host is not None:
-        host_kwargs["knowledge_candidate_projector_host"] = (
-            knowledge_candidate_projector_host
-        )
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
         return SQLiteRepository(settings, **host_kwargs)

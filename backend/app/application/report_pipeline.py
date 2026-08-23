@@ -220,27 +220,12 @@ class ReportFinalAuditInput:
 
 
 @dataclass(frozen=True, slots=True)
-class ReportAuditFacts:
-    section_count: int
-    successful_section_count: int
-    failed_section_count: int
-    reference_count: int
-    gap_count: int
-    claim_ledgers_available: int
-    claim_ledgers_partial: int
-    unsupported_high_risk_assertions: int
-    content_chars: int
-    synthesis_status: str
-
-
-@dataclass(frozen=True, slots=True)
 class FinalizedReportArtifact:
     generation: ReportGenerationInput
     sections: tuple[Mapping[str, object], ...]
     content_md: str
     gaps: tuple[str, ...]
     references: tuple[Mapping[str, object], ...]
-    audit_facts: ReportAuditFacts
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +233,6 @@ class CommittedReport:
     notebook_id: str
     report_id: str
     actor_id: str
-    audit_facts: ReportAuditFacts
 
 
 def execute_report_planning_stage(
@@ -308,7 +292,6 @@ __all__ = [
     "FinalizedReportArtifact",
     "GeneratedReportSections",
     "PlannedReportOutline",
-    "ReportAuditFacts",
     "ReportFinalAuditInput",
     "ReportGenerationInput",
     "ReportPlanningInput",

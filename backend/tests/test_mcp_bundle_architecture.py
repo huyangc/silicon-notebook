@@ -83,12 +83,10 @@ async def test_unified_host_preserves_every_core_tool_descriptor() -> None:
     ]
 
 
-def test_composition_has_one_point_specific_tool_provider_seat() -> None:
+def test_composition_has_exactly_one_core_tool_registration_seat() -> None:
     signature = inspect.signature(mcp_server.create_memory_mcp)
     assert tuple(signature.parameters) == (
         "repository_provider",
-        "agent_tool_provider_host",
-        "agent_tool_audit_sink",
         "allowed_origins",
         "public_url",
         "require_https",
@@ -132,7 +130,7 @@ def test_composition_has_one_point_specific_tool_provider_seat() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "add_tool"
         for node in ast.walk(host_tree)
-    ) == 2
+    ) == 1
     server_tree = ast.parse(Path(mcp_server.__file__).read_text(encoding="utf-8"))
     assert not any(
         isinstance(node, ast.Call)
@@ -176,21 +174,3 @@ def test_frontend_scope_options_equal_the_core_scope_vocabulary() -> None:
     frontend_scopes = re.findall(r'value:\s*"([a-z_]+:[a-z_]+)"', block)
     assert len(frontend_scopes) == len(set(frontend_scopes))
     assert set(frontend_scopes) == set(AGENT_SCOPES)
-
-
-def test_provider_adapter_has_exactly_one_progress_wrapper() -> None:
-    host_path = Path(mcp_server.__file__).with_name("mcp_tool_host.py")
-    tree = ast.parse(host_path.read_text(encoding="utf-8"))
-    adapter = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_plugin_adapter"
-    )
-    progress_calls = [
-        node
-        for node in ast.walk(adapter)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_run_with_progress"
-    ]
-    assert len(progress_calls) == 1

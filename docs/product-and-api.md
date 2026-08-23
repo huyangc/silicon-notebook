@@ -820,18 +820,15 @@ derives the full default frozen catalog, including any default trusted providers
 | Build read | `get_build_status` | `knowledge:read` |
 | Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `agent_profile:read` / `agent_observation:write` |
 
-The deployed server-local frozen catalog is authoritative for discovery and onboarding. It may
-append scalar-schema tools from explicitly trusted in-process `agent.tool_provider` contributors.
-Those tools receive no repository, FastMCP object, raw bearer, or Memory-review capability; every
-call repeats live token/scope/allowlist/membership checks, and every provider write scope is forced
-through the owner-only notebook gate. Provider arguments are rejected whole when their serialized
-UTF-8 object exceeds 16,384 bytes; descriptors allow at most 16 parameters, a 64-character name,
-and a 1,000-character description. Results must be JSON objects no deeper than 5 levels and at
-most 12,000 UTF-8 bytes. The byte/depth rail is enforced while copying, so oversized containers
-are rejected before a second unbounded graph is built. Provider exceptions surface only as stable
-error codes; core audit is token-owner-scoped and contains tool/plugin/status only. FastMCP schema errors occur before the provider host and remain transport/request audit events; `invalid` provider audit means a schema-valid call failed the host's additional wire admission. Inputs and results are rejected whole,
-never silently truncated. The default topology has no
-provider contributions, so the shipped surface remains exactly the 22 tools above.
+The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
+exactly the 22 tools above, derived live from the seven core registrars, and
+`mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
+repeats live token/scope/allowlist/membership checks, and every write scope is forced through the
+owner-only notebook gate. Results must be JSON objects no deeper than 5 levels and at most
+12,000 UTF-8 bytes. The byte/depth rail is enforced while copying, so oversized containers are
+rejected before a second unbounded graph is built. Exceptions surface only as stable error codes;
+FastMCP schema errors occur before the tool body and remain transport/request audit events.
+Results are rejected whole, never silently truncated.
 
 `list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a
 live token, a notebook inside its allowlist, and read access to that notebook. Every session
@@ -1631,13 +1628,9 @@ whole segment; see "Extraction" above.
 
 `POST /ask` dispatches on `mode` — the registry `backend/app/services/ask_modes.py` is the single source of truth (default `chunk`). Federation is path-specific: baseline `chunk` is active-notebook-only; its optional KG overlay/PPR can add federated KG context and base-backed chunks; `graph` and `reasoning` use federated KG paths. Knowledge-object hits from `federated_retrieve()` keep tier-blind scores and use `base` only as the secondary key on an exact tie; `federated_retrieve_relations()` remains score-only. These ordering signals never feed grounding thresholds.
 
-Streaming Ask runs post-completion auditors/observers only after the durable answer and browser final event. Each point gets a cooperative wall-clock budget from `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` (default `30`, valid range `>0..300` seconds): a synchronous callback already in progress is allowed to finish safely, but the host starts no later contribution once the deadline has passed. `ANSWER_AUDIT_MAX_FINDINGS` bounds one auditor result (default `32`, valid range `1..256`); an oversized result is rejected as a whole, never silently truncated. These are deployment/internal extension rails and do not alter retrieval, answer text, citations, or the user-visible final event.
+Streaming Ask runs post-completion observers only after the durable answer and browser final event. The point gets a cooperative wall-clock budget from `ASK_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` (default `30`, valid range `>0..300` seconds): a synchronous callback already in progress is allowed to finish safely, but the host starts no later contribution once the deadline has passed. This is a deployment/internal extension rail and does not alter retrieval, answer text, citations, or the user-visible final event.
 
-Deep Report post-completion uses separate deployment rails. `REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` defaults to `30` and accepts `>0..300` seconds; `REPORT_AUDIT_MAX_FINDINGS` defaults to `32` and accepts `1..256`. The deadline is cooperative and an oversized auditor result is rejected whole. These points run only after the report row atomically commits from `generating` to `done` and every generation execution scope is released; they cannot alter section prose, citations, references, retrieval output, or terminal status.
-
-Parsed-element enrichment is an internal, default-empty extension point. `SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS` defaults to `10` and accepts `>0..300` seconds; `SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS` defaults to `2048` and accepts `1..25000`; `SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES` defaults to `1048576` and accepts `1024..16777216`; `SOURCE_ELEMENT_ENRICHER_MAX_CAPTION_CHARS` defaults to `4096` and accepts `1..32768`. This point additionally caps stable plugin/contribution identifiers at `128` characters and safe manifest versions at `64` characters. Limits are applied before the core element transaction; the metadata-byte rail counts the complete persisted contribution subtree, including its namespace and plugin id/version, and an over-limit contribution is rejected whole, never truncated. The point cannot change parsed text or retrieval behavior and has no built-in contributor.
-
-Knowledge candidate projection is also internal and default-empty. `KNOWLEDGE_CANDIDATE_PROJECTOR_TIMEOUT_SECONDS` defaults to `10` and accepts `>0..300` seconds; `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_OBJECTS` defaults to `512` and accepts `1..25000`; `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_RELATIONS` defaults to `1024` and accepts `1..50000`; `KNOWLEDGE_CANDIDATE_PROJECTOR_MAX_CANDIDATE_BYTES` defaults to `1048576` and accepts `1024..16777216`. Evidence quotes are structurally capped at `400` characters; stable plugin/contribution identifiers are capped at `128` characters and safe manifest versions at `64`. Rails are point-wide and decrement across contributions. A synchronous callback may finish safely, but a result returned after the deadline is rejected and no later contribution starts. An over-limit or invalid contribution is rejected whole, never truncated, while previously accepted contributions and the core KG baseline remain intact. The point runs only after legacy relink and partial-retry preservation and before the one source-generation transaction; it has no built-in contributor and does not apply to hidden Memory or Knowhow sources.
+Deep Report post-completion uses its own deployment rail. `REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS` defaults to `30` and accepts `>0..300` seconds, and the deadline is cooperative. The point runs only after the report row atomically commits from `generating` to `done` and every generation execution scope is released; it cannot alter section prose, citations, references, retrieval output, or terminal status.
 
 | Mode | Group | Needs KG | One-liner |
 |------|-------|----------|-----------|

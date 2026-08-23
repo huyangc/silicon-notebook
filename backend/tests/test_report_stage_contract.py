@@ -8,7 +8,6 @@ from app.application.report_pipeline import (
     FinalizedReportArtifact,
     GeneratedReportSections,
     PlannedReportOutline,
-    ReportAuditFacts,
     ReportFinalAuditInput,
     ReportGenerationInput,
     ReportPlanningInput,
@@ -37,9 +36,6 @@ class _Executor:
             content_md="# report",
             gaps=(),
             references=(),
-            audit_facts=ReportAuditFacts(
-                1, 1, 0, 0, 0, 0, 0, 0, 8, "not_requested"
-            ),
         )
 
 
@@ -183,9 +179,6 @@ def test_report_stage_wrappers_reject_exact_outputs_from_another_owner():
                 content_md="# report",
                 gaps=(),
                 references=(),
-                audit_facts=ReportAuditFacts(
-                    1, 1, 0, 0, 0, 0, 0, 0, 8, "not_requested"
-                ),
             )
 
     with pytest.raises(ReportStageBoundaryError):

@@ -10,21 +10,15 @@ from typing import Any, Callable
 from app.core.config import Settings
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.domain.extensions import (
-    AnswerAuditSnapshot,
-    AnswerAuditorHostPort,
     AskCompletedObserverCallContext,
     AskCompletedObserverHostPort,
     CompletedAskNotification,
-    ElementEnricherHostPort,
     CompletedReportNotification,
-    ReportAuditSnapshot,
-    ReportAuditorHostPort,
     ReportCompletedObserverCallContext,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
-from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -135,14 +129,8 @@ class RepositoryRuntime:
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
-        answer_auditor_host: AnswerAuditorHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
-        report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
-        element_enricher_host: ElementEnricherHostPort | None = None,
-        knowledge_candidate_projector_host: (
-            KnowledgeCandidateProjectorHostPort | None
-        ) = None,
     ) -> None:
         validate_process_local_scheduler_deployment()
         self.settings = settings
@@ -154,12 +142,8 @@ class RepositoryRuntime:
         # by app.state, Ask and Report. Direct constructor tests may leave the
         # optional seat empty and retain their exact historical behavior.
         self.retrieval_contributors = retrieval_contributor_host
-        self.answer_auditors = answer_auditor_host
         self.ask_completed_observers = ask_completed_observer_host
-        self.report_auditors = report_auditor_host
         self.report_completed_observers = report_completed_observer_host
-        self.element_enrichers = element_enricher_host
-        self.knowledge_candidate_projectors = knowledge_candidate_projector_host
         self.parser_provider_chain = (
             parser_provider_chain_host or BuiltinParserChainHost()
         )
@@ -434,11 +418,6 @@ class RepositoryRuntime:
             job_submitter=background_jobs,
             event_log=self.event_log,
             ask=self.ask_service,
-            audit_answer_completed=(
-                lambda response, mode_id: self._audit_completed_answer(
-                    response, mode_id
-                )
-            ),
             # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
             # 计数。late-bound lambda 而不是直接传方法:巡固服务在本构造函数里
             # 更靠后才建出来(与上面 ``ask`` 同一个理由)。
@@ -634,31 +613,6 @@ class RepositoryRuntime:
             ),
         )
         host.observe_application(context, event_sink=self.event_log.emit)
-
-    def _audit_completed_answer(self, response: Any, mode_id: str) -> None:
-        """Run the post-delivery auditor point over a closed structural view."""
-        host = self.answer_auditors
-        if host is None:
-            return
-        host.audit_application(
-            AnswerAuditSnapshot(
-                mode_id=mode_id,
-                grounded=bool(response.grounded),
-                evidence_level=str(response.evidence_level),
-                citation_count=len(response.citations),
-                anchor_count=len(response.anchors),
-                model_error_count=len(response.model_errors),
-                answer_chars=len(response.answer),
-                conclusion_chars=len(response.conclusion),
-                max_findings=self.settings.answer_audit_max_findings,
-                deadline_monotonic=(
-                    time.monotonic()
-                    + self.settings.ask_post_completion_extension_timeout_seconds
-                ),
-            ),
-            connection_probe=self.database,
-            event_sink=self.event_log.emit,
-        )
 
     def _note_ask_completed_compat(
         self, notebook_id: str, user_id: str, mode_id: str
@@ -964,9 +918,6 @@ class RepositoryRuntime:
             source_type_from_name=source_type_from_name,
             parser_provider_chain=self.parser_provider_chain,
             parser_connection_probe=self.database,
-            element_enricher_host=self.element_enrichers,
-            knowledge_candidate_projector_host=self.knowledge_candidate_projectors,
-            effective_knowledge_schemas=self.schema_registry.effective_schemas,
             mineru_client=mineru_client,
             mineru_cloud_client=mineru_cloud_client,
             model_clients=self.models,
@@ -1424,39 +1375,6 @@ class RepositoryRuntime:
 
     def _after_report_completed(self, committed) -> None:
         """Run report hooks after durable done and every execution scope exits."""
-        facts = committed.audit_facts
-        auditor = self.report_auditors
-        if auditor is not None:
-            try:
-                auditor.audit_application(
-                    ReportAuditSnapshot(
-                        report_id=committed.report_id,
-                        section_count=facts.section_count,
-                        successful_section_count=facts.successful_section_count,
-                        failed_section_count=facts.failed_section_count,
-                        reference_count=facts.reference_count,
-                        gap_count=facts.gap_count,
-                        claim_ledgers_available=facts.claim_ledgers_available,
-                        claim_ledgers_partial=facts.claim_ledgers_partial,
-                        unsupported_high_risk_assertions=(
-                            facts.unsupported_high_risk_assertions
-                        ),
-                        content_chars=facts.content_chars,
-                        synthesis_status=facts.synthesis_status,
-                        max_findings=self.settings.report_audit_max_findings,
-                        deadline_monotonic=(
-                            time.monotonic()
-                            + self.settings.report_post_completion_extension_timeout_seconds
-                        ),
-                    ),
-                    connection_probe=self.database,
-                    event_sink=self.event_log.emit,
-                )
-            except Exception:
-                # A concrete host is still an optional post-terminal seam. Its
-                # own failure must not suppress the independent completion
-                # observer or rewrite the already durable report.
-                pass
         observer = self.report_completed_observers
         if observer is None:
             return

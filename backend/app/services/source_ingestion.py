@@ -14,11 +14,7 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import cap_kwargs
-from app.domain.extensions import (
-    ElementEnricherHostPort,
-    ParserProviderChainHostPort,
-)
-from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
+from app.domain.extensions import ParserProviderChainHostPort
 from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
@@ -45,10 +41,6 @@ from app.services.kg.json_utils import safe_json
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
-from app.services.knowledge_candidate_projection import (
-    KnowledgeProjectionBoundaryError,
-    project_knowledge_candidates,
-)
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
@@ -63,7 +55,6 @@ from app.services.parser_chain_execution import (
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
-from app.services.source_element_enrichment import enrich_source_elements
 
 
 #: 「改了文档类型 → 只重抽 KG」失败时留给用户的说明。面向用户的文案，不带异常
@@ -182,11 +173,6 @@ class SourceIngestionService:
         # composing this service unchanged, and "no consolidation chain" is a
         # complete, correct behaviour (it is exactly the kill-switch-off path).
         note_corpus_change: Callable[[str], None] = lambda _notebook_id: None,
-        element_enricher_host: ElementEnricherHostPort | None = None,
-        knowledge_candidate_projector_host: (
-            KnowledgeCandidateProjectorHostPort | None
-        ) = None,
-        effective_knowledge_schemas: Callable[[str], Any] = lambda _notebook_id: {},
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -203,9 +189,6 @@ class SourceIngestionService:
         self.source_type_from_name = source_type_from_name
         self.parser_provider_chain = parser_provider_chain
         self.parser_connection_probe = parser_connection_probe
-        self.element_enricher_host = element_enricher_host
-        self.knowledge_candidate_projector_host = knowledge_candidate_projector_host
-        self.effective_knowledge_schemas = effective_knowledge_schemas
         self.make_persist_image = make_persist_image
         self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
@@ -1044,25 +1027,6 @@ class SourceIngestionService:
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
-            if self.element_enricher_host is not None:
-                elements = enrich_source_elements(
-                    elements,
-                    host=self.element_enricher_host,
-                    connection_probe=self.parser_connection_probe,
-                    max_proposals=(
-                        self.settings.source_element_enricher_max_proposals
-                    ),
-                    max_metadata_bytes=(
-                        self.settings.source_element_enricher_max_metadata_bytes
-                    ),
-                    max_caption_chars=(
-                        self.settings.source_element_enricher_max_caption_chars
-                    ),
-                    timeout_seconds=(
-                        self.settings.source_element_enricher_timeout_seconds
-                    ),
-                    event_sink=self.event_log.emit,
-                )
             # per-source 分块串行锁:把「换 elements → 建 chunks + 置 marker」整段串起来
             # (见 __init__ 说明)。锁必须从 replace_elements 一直持到 build_chunks 之后,
             # 否则并发同源 reparse 会交错出「B 代 elements + A 代 chunks + marker 已置」的
@@ -1879,40 +1843,6 @@ class SourceIngestionService:
                 raise PartialKgRetryIncomplete(message)
             if control is not None:
                 control.raise_if_aborted()
-            if (
-                self.knowledge_candidate_projector_host is not None
-                and source.type not in HIDDEN_SYNTHETIC_SOURCE_TYPES
-            ):
-                objects, relations = project_knowledge_candidates(
-                    objects,
-                    relations,
-                    source_id=source.id,
-                    source_title=source.title,
-                    source_type=source.type,
-                    elements=elements,
-                    host=self.knowledge_candidate_projector_host,
-                    effective_schemas=self.effective_knowledge_schemas,
-                    notebook_id=source.notebook_id,
-                    control=control,
-                    connection_probe=self.parser_connection_probe,
-                    max_objects=(
-                        self.settings.knowledge_candidate_projector_max_objects
-                    ),
-                    max_relations=(
-                        self.settings.knowledge_candidate_projector_max_relations
-                    ),
-                    max_candidate_bytes=(
-                        self.settings
-                        .knowledge_candidate_projector_max_candidate_bytes
-                    ),
-                    timeout_seconds=(
-                        self.settings
-                        .knowledge_candidate_projector_timeout_seconds
-                    ),
-                    event_sink=self.event_log.emit,
-                )
-            if control is not None:
-                control.raise_if_aborted()
             n_obj, n_rel = self.knowledge_lifecycle.store_kg(
                 source.notebook_id,
                 source.id,
@@ -1972,11 +1902,6 @@ class SourceIngestionService:
                 f"completion_mode={completion_stats.get('mode', 'off')} "
                 f"completion_inserted={completion_stats.get('inserted', 0)}",
             )
-        except KnowledgeProjectionBoundaryError:
-            # A projector callback crossed the no-database-lease boundary.
-            # Any status write here could acquire the same pool again; stop
-            # immediately and let the operator-visible run remain recoverable.
-            raise
         except KgBuildAborted as exc:
             message = f"{exc.failure.code}: {exc.failure.user_message}"
             status = "failed"

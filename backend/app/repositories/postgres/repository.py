@@ -5,15 +5,11 @@ from typing import Any
 
 from app.core.config import Settings
 from app.domain.extensions import (
-    AnswerAuditorHostPort,
     AskCompletedObserverHostPort,
-    ElementEnricherHostPort,
-    ReportAuditorHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
-from app.domain.knowledge_projection import KnowledgeCandidateProjectorHostPort
 from app.repositories.postgres.bundle import PostgresPersistenceBundleFactory
 from app.services.repository_facade import RepositoryFacade
 
@@ -26,14 +22,8 @@ class PostgresRepository(RepositoryFacade):
         model_provider: Any | None = None,
         retrieval_contributor_host: RetrievalContributorHostPort | None = None,
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
-        answer_auditor_host: AnswerAuditorHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
-        report_auditor_host: ReportAuditorHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
-        element_enricher_host: ElementEnricherHostPort | None = None,
-        knowledge_candidate_projector_host: (
-            KnowledgeCandidateProjectorHostPort | None
-        ) = None,
     ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
@@ -43,12 +33,8 @@ class PostgresRepository(RepositoryFacade):
                 model_provider=model_provider,
                 retrieval_contributor_host=retrieval_contributor_host,
                 parser_provider_chain_host=parser_provider_chain_host,
-                answer_auditor_host=answer_auditor_host,
                 ask_completed_observer_host=ask_completed_observer_host,
-                report_auditor_host=report_auditor_host,
                 report_completed_observer_host=report_completed_observer_host,
-                element_enricher_host=element_enricher_host,
-                knowledge_candidate_projector_host=knowledge_candidate_projector_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a

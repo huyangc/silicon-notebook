@@ -1,12 +1,5 @@
 import json
-from types import MappingProxyType
 import pytest
-from app.domain.knowledge_projection import (
-    KnowledgeProjectionEvidencePatch,
-    KnowledgeProjectionObjectPatch,
-    KnowledgeProjectionPatch,
-    KnowledgeProjectionRelationPatch,
-)
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.core.config import Settings
@@ -206,102 +199,6 @@ def test_run_extraction_with_surviving_edge(repo):
     assert rel["target_object_id"] in obj_ids, "target_object_id not a real object id"
 
 
-def test_candidate_projector_appends_before_the_single_core_kg_transaction(repo):
-    class Host:
-        has_contributors = True
-
-        def __init__(self):
-            self.calls = 0
-
-        def project_application(self, call, *, event_sink=None):
-            self.calls += 1
-            assert call.connection_probe.is_connection_held() is False
-            assert [item.text for item in call.elements] == [
-                "Engram is a memory architecture. Plugin insight."
-            ]
-            evidence = (KnowledgeProjectionEvidencePatch(1, "Plugin insight"),)
-            return (
-                KnowledgeProjectionPatch(
-                    "plugin-knowledge.integration",
-                    "1.0.0",
-                    "knowledge.integration",
-                    (
-                        KnowledgeProjectionObjectPatch(
-                            "plugin_concept",
-                            "concept",
-                            MappingProxyType(
-                                {"name": "Plugin concept", "section_path": ""}
-                            ),
-                            evidence,
-                        ),
-                        KnowledgeProjectionObjectPatch(
-                            "plugin_claim",
-                            "claim",
-                            MappingProxyType(
-                                {"name": "Plugin claim", "section_path": ""}
-                            ),
-                            evidence,
-                        ),
-                    ),
-                    (
-                        KnowledgeProjectionRelationPatch(
-                            "plugin_claim",
-                            "plugin_concept",
-                            "about",
-                            evidence,
-                        ),
-                    ),
-                ),
-            )
-
-    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
-        "nodes": [{
-            "local_id": "a",
-            "type": "Concept",
-            "name": "Engram",
-            "evidence": "Engram is a memory architecture",
-        }],
-        "edges": [],
-    })))
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    src = _test_insert_source(
-        repo,
-        nb.id,
-        "Doc",
-        "doc.md",
-        "academic_paper",
-        "Engram is a memory architecture. Plugin insight.",
-    )
-    host = Host()
-    repo._runtime.source_ingestion.knowledge_candidate_projector_host = host
-
-    repo._run_extraction(src.id)
-
-    assert host.calls == 1
-    with repo._connect() as db:
-        rows = db.execute(
-            "SELECT object_type,payload FROM knowledge_objects "
-            "WHERE source_id=? ORDER BY object_type,payload",
-            (src.id,),
-        ).fetchall()
-        facts = db.execute(
-            "SELECT element_id,source_generation FROM knowledge_source_fact_elements "
-            "WHERE source_id=?",
-            (src.id,),
-        ).fetchall()
-    assert sorted(json.loads(row["payload"])["name"] for row in rows) == [
-        "Engram",
-        "Plugin claim",
-        "Plugin concept",
-    ]
-    assert len(repo.relations_for_notebook(nb.id)) == 1
-    assert len(facts) == 3
-    assert {row["element_id"] for row in facts} == {
-        repo.source_elements(src.id)[0].id
-    }
-    assert len({row["source_generation"] for row in facts}) == 1
-
-
 def test_reextraction_is_idempotent(repo):
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
@@ -483,52 +380,6 @@ def test_partial_retry_preserves_old_graph_until_clean_replacement(repo):
     assert set(after_success).isdisjoint(before)
     assert completed_run["status"] == "completed"
     assert "windows_failed=0/1" in completed_run["error_message"]
-
-
-def test_partial_retry_gate_runs_before_candidate_projector(repo):
-    class Host:
-        has_contributors = True
-
-        def __init__(self):
-            self.calls = 0
-
-        def project_application(self, _call, *, event_sink=None):
-            self.calls += 1
-            raise AssertionError("partial core retry reached candidate projector")
-
-    repo.settings.paper_meta_enabled = False
-    repo.settings.kg_gleaning_enabled = False
-    repo.settings.kg_refine_enabled = False
-    payload = json.dumps({
-        "nodes": [{
-            "local_id": "a",
-            "type": "Concept",
-            "name": "Engram",
-            "evidence": "Engram is a memory architecture",
-        }],
-        "edges": [],
-    })
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    src = _test_insert_source(
-        repo,
-        nb.id,
-        "Doc",
-        "doc.md",
-        "academic_paper",
-        "Engram is a memory architecture.",
-    )
-    bind_chat_client(repo, "kg_extract", _FakeLLM(payload))
-    repo._run_extraction(src.id)
-
-    host = Host()
-    repo._runtime.source_ingestion.knowledge_candidate_projector_host = host
-    bind_chat_client(repo, "kg_extract", _FlakyLLM(payload, fail_n=1))
-    with pytest.raises(PartialKgRetryIncomplete, match="existing KG preserved"):
-        repo._runtime.source_ingestion.run_extraction(
-            src.id, preserve_existing_until_complete=True
-        )
-
-    assert host.calls == 0
 
 
 def test_partial_retry_store_failure_rolls_back_to_old_graph(repo, monkeypatch):

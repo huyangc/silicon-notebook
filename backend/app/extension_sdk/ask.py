@@ -1,15 +1,13 @@
 """Point-specific contracts for post-completion Ask extensions.
 
-The durable answer and terminal delivery are core-owned.  Auditors receive a
-closed structural snapshot and can only return stable findings; observers see
-only the identity dimensions required by their declared capability.  Neither
-extension point can rewrite an answer, persist core rows, or acquire a core
-database connection.
+The durable answer and terminal delivery are core-owned.  Observers see only
+the identity dimensions required by their declared capability and cannot
+rewrite an answer, persist core rows, or acquire a core database connection.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 
 from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
@@ -18,59 +16,12 @@ from app.domain.extensions import (
 )
 from app.extension_sdk.contracts import (
     ActorRef,
-    AuditorResult,
     NotebookRef,
     ObserverReceipt,
 )
 
 
-ANSWER_AUDITOR_POINT = "answer.audit"
 ASK_COMPLETED_OBSERVER_POINT = "ask.completed_observer"
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerAuditView:
-    mode_id: str
-    grounded: bool
-    evidence_level: str
-    citation_count: int
-    anchor_count: int
-    model_error_count: int
-    answer_chars: int
-    conclusion_chars: int
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerAuditFinding:
-    severity: Literal["info", "warning", "risk"]
-    code: str
-    count: int = 1
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerAudit:
-    findings: tuple[AnswerAuditFinding, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerAuditAvailabilityContext:
-    mode_id: str
-    grounded: bool
-    evidence_level: str
-    deadline_monotonic: float
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerAuditExtensionContext:
-    answer: AnswerAuditView
-    max_findings: int
-    deadline_monotonic: float
-
-
-class AnswerAuditor(Protocol):
-    def audit(
-        self, context: AnswerAuditExtensionContext
-    ) -> AuditorResult[AnswerAudit]: ...
 
 
 class AskCompletedAccess(Protocol):
@@ -103,17 +54,10 @@ class AskCompletedObserver(Protocol):
 
 
 __all__ = [
-    "ANSWER_AUDITOR_POINT",
     "ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY",
     "ASK_COMPLETED_OBSERVER_POINT",
     "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY",
     "ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY",
-    "AnswerAudit",
-    "AnswerAuditAvailabilityContext",
-    "AnswerAuditExtensionContext",
-    "AnswerAuditFinding",
-    "AnswerAuditor",
-    "AnswerAuditView",
     "AskCompletedAccess",
     "AskCompletedAvailabilityContext",
     "AskCompletedExtensionContext",

@@ -310,7 +310,7 @@ def test_baseline_ceilings_and_allowlist_have_not_collapsed_to_empty():
     """
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
 
-    assert len(baseline["function_length_ceiling"]) >= 22
+    assert len(baseline["function_length_ceiling"]) >= 18
     assert set(baseline["core_models_service_imports"]["allowed"]) == set()
     assert core_models_service_import_edges(ROOT / "backend" / "app") == set()
 
@@ -709,7 +709,7 @@ def test_registry_composition_does_not_change_route_topology(monkeypatch):
         lambda: type(
             "Runtime",
             (),
-            {"registry": sentinel, "agent_tools": None},
+            {"registry": sentinel},
         )(),
     )
     composed = app_main.create_app()
@@ -771,7 +771,6 @@ def test_report_stage_and_post_terminal_boundary_is_in_all_agent_documents():
         )
         assert "report" in normalized, name
         assert "stage" in normalized, name
-        assert "report.audit" in normalized, name
         assert "report.completed observer" in normalized, name
         assert "done" in normalized, name
 

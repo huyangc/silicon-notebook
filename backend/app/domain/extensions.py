@@ -1,7 +1,7 @@
 """Stable application ports for consuming extension hosts without a registry."""
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -222,28 +222,6 @@ ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
 
 
 @dataclass(frozen=True)
-class AnswerAuditSnapshot:
-    """Content-free, immutable facts about an already persisted answer.
-
-    PR-07 intentionally exposes no answer/question/evidence text.  A future
-    content auditor needs a separate privacy and full-stack delivery review;
-    the first contract can still identify structural grounding risks without
-    handing a plugin the mutable ``AskResponse`` graph.
-    """
-
-    mode_id: str
-    grounded: bool
-    evidence_level: str
-    citation_count: int
-    anchor_count: int
-    model_error_count: int
-    answer_chars: int
-    conclusion_chars: int
-    max_findings: int
-    deadline_monotonic: float
-
-
-@dataclass(frozen=True)
 class CompletedAskNotification:
     """The smallest core notification needed by the three built-in observers."""
 
@@ -274,16 +252,6 @@ class AskCompletedObserverCallContext:
     deadline_monotonic: float
 
 
-class AnswerAuditorHostPort(Protocol):
-    def audit_application(
-        self,
-        snapshot: AnswerAuditSnapshot,
-        *,
-        connection_probe: Any,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
-    ) -> tuple[Any, ...]: ...
-
-
 class AskCompletedObserverHostPort(Protocol):
     def observe_application(
         self,
@@ -294,28 +262,11 @@ class AskCompletedObserverHostPort(Protocol):
 
 
 # Deep Report post-terminal contracts mirror Ask's governance but remain
-# point-specific: the report observer needs actor+notebook identity while the
-# auditor sees only counts from an already committed artifact.
+# point-specific: the report observer needs actor+notebook identity from an
+# already committed artifact.
 REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
     "report:agent_profile_completed_access"
 )
-
-
-@dataclass(frozen=True)
-class ReportAuditSnapshot:
-    report_id: str
-    section_count: int
-    successful_section_count: int
-    failed_section_count: int
-    reference_count: int
-    gap_count: int
-    claim_ledgers_available: int
-    claim_ledgers_partial: int
-    unsupported_high_risk_assertions: int
-    content_chars: int
-    synthesis_status: str
-    max_findings: int
-    deadline_monotonic: float
 
 
 @dataclass(frozen=True)
@@ -338,16 +289,6 @@ class ReportCompletedObserverCallContext:
     deadline_monotonic: float
 
 
-class ReportAuditorHostPort(Protocol):
-    def audit_application(
-        self,
-        snapshot: ReportAuditSnapshot,
-        *,
-        connection_probe: Any,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
-    ) -> tuple[Any, ...]: ...
-
-
 class ReportCompletedObserverHostPort(Protocol):
     def observe_application(
         self,
@@ -355,57 +296,3 @@ class ReportCompletedObserverHostPort(Protocol):
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None: ...
-
-
-@dataclass(frozen=True)
-class ParsedElementEnvelope:
-    """Core-owned immutable projection; parser metadata never crosses the SDK."""
-
-    ordinal: int
-    element_type: str
-    location_label: str
-    text: str
-    caption: str
-
-
-@dataclass(frozen=True)
-class ElementEnrichmentPatch:
-    ordinal: int
-    plugin_id: str
-    plugin_version: str
-    contribution_id: str
-    metadata: Mapping[str, Any]
-    caption: str = ""
-
-
-class ElementEnrichmentCancellationPort(Protocol):
-    def is_set(self) -> bool: ...
-
-    def raise_if_cancelled(self) -> None: ...
-
-
-class ElementEnrichmentConnectionProbe(Protocol):
-    def is_connection_held(self) -> bool: ...
-
-
-@dataclass(frozen=True)
-class ElementEnrichmentCallContext:
-    elements: tuple[ParsedElementEnvelope, ...]
-    cancellation: ElementEnrichmentCancellationPort
-    connection_probe: ElementEnrichmentConnectionProbe
-    max_proposals: int
-    max_metadata_bytes: int
-    max_caption_chars: int
-    deadline_monotonic: float
-
-
-class ElementEnricherHostPort(Protocol):
-    @property
-    def has_contributors(self) -> bool: ...
-
-    def enrich_application(
-        self,
-        call_context: ElementEnrichmentCallContext,
-        *,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
-    ) -> tuple[ElementEnrichmentPatch, ...]: ...

@@ -16,7 +16,7 @@ import threading
 
 import pytest
 
-from app.application.report_pipeline import CommittedReport, ReportAuditFacts
+from app.application.report_pipeline import CommittedReport
 from app.services.report_execution import (
     REPORT_CANCELLATIONS,
     ReportCancellationRegistry,
@@ -396,11 +396,10 @@ def test_coordinator_submits_through_background_jobs_with_copied_context():
 def test_committed_report_hook_runs_before_cancel_unregister_after_scope_exit():
     registry = ReportCancellationRegistry()
     seen = []
-    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
 
     class _CommittedEngine:
         def generate(self, notebook_id, rid, question, depth=2):
-            return CommittedReport(notebook_id, rid, "actor", facts)
+            return CommittedReport(notebook_id, rid, "actor")
 
     def after(committed):
         from app.services import model_work
@@ -430,15 +429,14 @@ def test_committed_report_hook_runs_before_cancel_unregister_after_scope_exit():
 
 
 def test_auto_generate_plan_and_manual_generate_share_one_completion_hook():
-    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
     calls = []
 
     class _CommittedEngine:
         def run(self, notebook_id, rid, *_args, **_kwargs):
-            return CommittedReport(notebook_id, rid, "actor", facts)
+            return CommittedReport(notebook_id, rid, "actor")
 
         def generate(self, notebook_id, rid, *_args, **_kwargs):
-            return CommittedReport(notebook_id, rid, "actor", facts)
+            return CommittedReport(notebook_id, rid, "actor")
 
     coord = ReportExecutionCoordinator(
         reports=_Reports(),
@@ -460,13 +458,12 @@ def test_completion_hook_runs_after_generation_gate_is_released():
     release_hook = threading.Event()
     second_entered = threading.Event()
     threads = []
-    facts = ReportAuditFacts(1, 1, 0, 0, 0, 0, 0, 0, 4, "not_requested")
 
     class _GatedEngine:
         def generate(self, notebook_id, rid, _question, depth=2):
             with gate.slot():
                 pass
-            return CommittedReport(notebook_id, rid, "actor", facts)
+            return CommittedReport(notebook_id, rid, "actor")
 
     def submitter(fn, **_kwargs):
         thread = threading.Thread(target=fn)

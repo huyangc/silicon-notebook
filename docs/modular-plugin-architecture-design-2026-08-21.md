@@ -1,5 +1,10 @@
 # silicon-notebook 模块化与插件扩展架构设计（修订版）
 
+> **注记（2026-08-23）**：`answer.audit`、`report.audit`、`source.element_enricher`、
+> `knowledge.candidate_projector` 与 `agent.tool_provider`（外部 provider descriptor 追加那一半）
+> 五个扩展点已因零消费者移除——与本文 §17「不为以后可能有用预建没有真实消费者的 hook」一致。
+> 本文保留原始设计记录，不代表当前代码状态。
+
 日期：2026-08-21
 状态：实施稿（取代同名初稿；供实现，实施后由最终 review 收口）
 依据：`docs/architecture-review-2026-08-21.md`；初稿；初稿评审意见（Claude，2026-08-21）
