@@ -1158,6 +1158,29 @@ def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferre
         )
 
 
+def test_deployment_extension_boundary_is_in_all_agent_entry_documents():
+    """部署插件（`EXTENSIONS_CONFIG`）是新增的部署时装载面，按 Documentation Sync
+    规则必须同时进四份 agent 入口文档：README.md、README_zh.md、AGENTS.md、
+    CLAUDE.md（后两者是 Claude Code 会话实际加载的规范，`docs/product-and-api*.md`
+    的详细契约不能替代它们）。casefold + `_`/`-` 折成空格后做子串匹配，两侧措辞
+    不必逐字相同（中英文各自撰写），只要求同一组事实各自可查。
+    """
+
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+        normalized = (
+            (ROOT / name)
+            .read_text(encoding="utf-8")
+            .casefold()
+            .replace("_", " ")
+            .replace("-", " ")
+        )
+        assert "extensions config" in normalized, name
+        assert "deployment" in normalized, name
+        assert "trust" in normalized, name
+        assert "restart" in normalized or "重启" in normalized, name
+        assert "api extensions" in normalized, name
+
+
 def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
     """界面词汇守卫是**开发约束**变更(新增硬门 + AGENTS.md 词汇契约),按仓库
     Documentation Sync 规则必须同步两份 README:守卫存在、怎么单独跑、契约在哪。

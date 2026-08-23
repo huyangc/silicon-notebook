@@ -1812,7 +1812,7 @@ def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
     assert "routes.py" in err
 
 
-def test_ui_contract_generator_sorts_rows(monkeypatch):
+def test_ui_contract_generator_sorts_rows():
     from dataclasses import dataclass
 
     from app.extension_sdk import (
@@ -1821,6 +1821,7 @@ def test_ui_contract_generator_sorts_rows(monkeypatch):
         UiContributionDeclaration,
     )
     from app.extensions import build_extension_registry
+    from app.extensions.ui_projection import ui_contribution_contract
 
     @dataclass
     class _UiOnlyBundle:
@@ -1846,16 +1847,16 @@ def test_ui_contract_generator_sorts_rows(monkeypatch):
 
     # `ExtensionRegistry.freeze()` already sorts its `_ui_contributions` dict by
     # *contribution_id* (registry.py: `dict(sorted(self._ui_contributions.items()))`)
-    # before this generator ever sees it — so a naive test that lets contribution_id
-    # track plugin_id (e.g. both "aaa.sample" / "aaa.sample.panel") would pass even
-    # with the generator's own `sorted(...)` deleted, because the registry's
-    # contribution_id sort already happens to agree with plugin_id sort. Deliberately
-    # anti-correlate the two here — "zzz.sample" gets the alphabetically *first*
-    # contribution_id and "aaa.sample" the *last* — so registry order (by
-    # contribution_id: aaa_panel, zzz_panel → zzz.sample, aaa.sample) and the
-    # generator's own `_CONTRIBUTION_SORT_FIELDS` order (by plugin_id: aaa.sample,
-    # zzz.sample) actually disagree, and only the generator's sort produces the
-    # plugin_id-ascending order this test asserts.
+    # before `ui_contribution_contract` ever sees it — so a naive test that lets
+    # contribution_id track plugin_id (e.g. both "aaa.sample" / "aaa.sample.panel")
+    # would pass even with `ui_contribution_contract`'s own `sorted(...)` deleted,
+    # because the registry's contribution_id sort already happens to agree with
+    # plugin_id sort. Deliberately anti-correlate the two here — "zzz.sample" gets
+    # the alphabetically *first* contribution_id and "aaa.sample" the *last* — so
+    # registry order (by contribution_id: aaa_panel, zzz_panel → zzz.sample,
+    # aaa.sample) and `ui_contribution_contract`'s own `CONTRIBUTION_SORT_FIELDS`
+    # order (by plugin_id: aaa.sample, zzz.sample) actually disagree, and only its
+    # sort produces the plugin_id-ascending order this test asserts.
     registry = build_extension_registry(
         (
             _UiOnlyBundle(_manifest("zzz.sample", "aaa_panel")),
@@ -1871,26 +1872,26 @@ def test_ui_contract_generator_sorts_rows(monkeypatch):
         },
     )
 
-    class _FakeRuntime:
-        pass
-
-    fake_runtime = _FakeRuntime()
-    fake_runtime.registry = registry
+    # `ui_contribution_contract` itself — not the (now-redundant) re-sort in
+    # `scripts/generate_ui_extension_contract.py::build_fixture` — owns the
+    # sort, so every caller (the live registry, the fixture generator, and
+    # the byte-for-byte pytest parity assertion against the committed
+    # fixture) observes the identical deterministic order without each
+    # having to re-sort independently.
+    rows = ui_contribution_contract(registry)
+    plugin_ids = [row["plugin_id"] for row in rows]
+    assert plugin_ids == ["aaa.sample", "zzz.sample"]
 
     generator = _load_script_module(
         "sn_test_generate_ui_extension_contract_sort",
         "generate_ui_extension_contract.py",
     )
-    monkeypatch.setattr(generator, "default_extension_runtime", lambda: fake_runtime)
-
-    fixture = generator.build_fixture()
-    plugin_ids = [row["plugin_id"] for row in fixture["contributions"]]
-    assert plugin_ids == ["aaa.sample", "zzz.sample"]
+    fixture = {"api_version": generator.API_VERSION, "contributions": rows}
 
     # The shared comparator confirms row order alone is never drift: a
     # deliberately reversed copy of this sorted output still "matches" it.
     reversed_copy = {
         "api_version": generator.API_VERSION,
-        "contributions": list(reversed(fixture["contributions"])),
+        "contributions": list(reversed(rows)),
     }
     assert generator.contract_rows_match(reversed_copy, fixture)

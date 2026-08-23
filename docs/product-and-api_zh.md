@@ -1670,6 +1670,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `POST /api/notebooks/{id}/paper-meta/backfill` —— owner 触发的论文元数据补抽（后台、幂等可续跑），返回 `{queued}`；LLM 未配置 409。来源面板的「补全论文信息」按钮**只在确有活可干时显示**：`NotebookSummary` 的 `paper_meta_missing`（仅单库 `GET /api/notebooks/{id}` 精确回填，按补抽排队同口径的 EXISTS 探针计算；列表投影与旧后端为 `null`＝未计算）为 `false` 且当前可见来源页没有 `paper_meta_status="missing"` 的行时隐藏；`null`/缺失按旧行为继续显示（隐藏只能由显式的 `false` 触发），补抽运行期间保持可见以承载「补全中…」态
 - `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）、`source_upload_max_files_per_batch`（固定的单次请求文件数护栏），以及供 Markdown 压缩包上传配对预检使用（见上文「引用附图（本段附图）」）的 `source_image_max_bytes` / `source_image_max_per_source`（镜像 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`；旧后端缺字段时为 `null`，含义是「拿不到这个上限，交给服务端护栏兜底」；`0` 是合法值，语义是「一张都不持久化」，等效于图片存储关闭）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为该开关此前从不存在，不能让旧部署凭空弹出假警告）
 - `GET /api/system/extensions` —— 登录后可读的 build-time workspace UI contribution 元数据投影。响应只含 API version、稳定的 plugin/display/version/contribution 标识、实时 availability，以及 `disabled | unavailable | null` 三态固定原因；绝不下发 capability 名、依赖/信任拓扑、endpoint、路径、凭据或异常文本。production 已把既有 Agent Profile 入口注册为 `workspace.side_panel` 的 `builtin.ask_agent_profile.workspace_panel`。浏览器只在 workspace 成功提交后按 actor generation 读取一次；集合页和未登录不调用，同用户切库复用，旧后端/缺行/不可用均 fail closed。插件入口点击前不读取 Agent Profile 数据。
+- `GET /api/admin/extensions` —— 仅系统管理员可读的已加载部署插件拓扑只读投影（每个插件恰好 6 个白名单字段）；见[部署插件](#部署插件)。
+- `/api/extensions/{plugin_id}/…` —— 部署插件自有 HTTP 路由的唯一挂载面，经 router 级会话认证；见[部署插件](#部署插件)。
 - `POST /api/notebooks/{id}/sources` —— multipart 文件上传（异步解析/抽取）。每个文件在 multipart 流写入临时 spool 时即受限，超过 `SOURCE_UPLOAD_MAX_MB`（默认 50 MiB）返回 413；每次请求超过 20 个文件也返回 413。浏览器读取上面的两个护栏，取得前禁用文件输入，选择时即时拒绝超限文件，并在发送前复查暂存文件。每个被接受的文件以 `{source_id}_{净化后的客户端文件名}` 落盘；该组件整体压进文件系统 255 字节的单组件上限（按 UTF-8 字节截断主干、保留扩展名——浏览器允许客户端提交最长 255 字节的文件名，加上 37 字节的 id 前缀会在 ext4/XFS/NTFS 上超限导致上传失败）；被压缩的只有派生的磁盘名，存储的文件名与标题保持客户端原值
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`、`GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` —— owner∪成员口径，按来源自己所属的笔记本判权限。分页读取返回 `{items,total_count,offset,limit}`，`limit` 最大 100；anchor 有效时会把 `offset` 调整为包含目标元素的页。
 - `GET /api/notebooks/{id}/sources/{source_id}/elements-page?offset=&limit=&anchor_element_id=` —— 采用当前活跃 notebook 参与集授权的有界来源详情读取。浏览器使用该端点；代理全量 element 端点继续保留向后兼容。
@@ -1719,6 +1721,14 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 不改变最终章节的证据预算。
 
 当前持久化/API 契约是 `reports` 表与 `/reports` API；已退役的内容工作室存储与路由不属于当前 runtime。
+
+### 部署插件
+
+`GET /api/admin/extensions` 仅系统管理员可读，返回启动时冻结的 registry 拓扑的白名单投影：每个插件恰好 6 个字段——`id`、`version`、`trust`、`display_name`、`contributions[{id,point,kind}]`、`ui_contributions[{id,slot,capability}]`——绝不返回模块路径、文件路径、settings 值、内部 capability reason 或异常文本；部署把某个插件条目标为 `enabled=false` 时它从不注册，因此也不会出现在这里。`GET /api/system/extensions`（任意已登录用户，只给实时可用性）不变。
+
+`/api/extensions/{plugin_id}/…` 是部署插件自有 HTTP 路由的唯一挂载面：router 级会话依赖意味着没有匿名面，路由工厂拿到的是 8 个字段的 `PluginRouteContext`——`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`emit_event`——绝不给 repository、全局 `Settings`、model client、FastMCP host 或原始 bearer token。**这些接缝背后的每个 core 端口都自己给请求的当前用户做授权判定**——例如 `url_sources.import_urls` 会对调用用户核对 `sources:write` 能力,不通过就 404——所以挂载点自身的 `{notebook_id}` 路径形状守卫只是纵深防御,不是授权边界本身。插件 handler 抛出的 401 会被翻译成 424（并记一条事件）,不会被误当成会话失效；core 自己 router 级会话门产生的真 401 仍然原样是 401。
+
+数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP：`docs/deployment-extensions-sop*.md`（后续 PR）。
 
 ## 管理员用户活动日志（`/dev/logs`）
 

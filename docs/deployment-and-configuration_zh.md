@@ -772,3 +772,19 @@ idle timeout。CDN/负载均衡若设置了总请求时长硬上限，部署者�
 或在断连后通过已持久化 job 重新打开完成的会话。
 
 所需 chat workload 未绑定时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
+
+### 部署插件（EXTENSIONS_CONFIG）
+
+`EXTENSIONS_CONFIG` 未设置＝零部署插件，装载出的拓扑与内建组合逐字一致。设置了但不可读或解析不了（文件缺失、TOML 语法错误、未知键、条目格式非法）是**启动失败**——进程直接不起，绝不降级。离线 CLI（`batch_ingest.py` 等）装载的是同一套插件拓扑，所以修复办法是改配置本身,绝不是清空变量——清空只会静默换成另一套发现/注册组合,而不是恢复接入插件之前的行为。
+
+```toml
+[extensions."corp.ieee_search"]
+bundle = "silicon_notebook_ieee.bundle:BUNDLE"
+enabled = true
+
+[extensions."corp.ieee_search".settings]
+```
+
+每条配置遵守三条铁律：只加载**点名列表里、且未 `enabled = false`** 的插件——不扫描目录、不读 entry points、不看第二个环境变量；插件自带的 pydantic `settings_model` 会把未知键或类型错误判为启动失败，所以密钥应该经一个环境变量名字段引用（同 `model-services.toml` 的 `api_key_env` 约定），而不是把明文值直接写进配置,任何 settings 值都不会进日志、事件或 `GET /api/admin/extensions`;插件包装进与后端**同一个** `PYTHON_BIN` 环境,不是独立解释器。插件的 `configure()` 必须廉价且无副作用——不起线程、不开网络/数据库连接、不做阻塞 I/O,这类工作留到首次真正用到时再惰性执行。插件 capability 名只能用点/下划线/短横线分隔(`:` 留给 core 自己的 `point:name` capability)。启用、停用或升级插件一律靠重启进程,没有热加载。
+
+运维方用下面这条命令自查某次部署的实时插件拓扑是否与配套前端构建一致:`EXTENSIONS_CONFIG=/etc/silicon/extensions.toml PYTHONPATH=backend python3 scripts/check_deployment_extension_parity.py --frontend-contract frontend/.local/ui-extension-contract.json`(退出码 `0` 对等 / `1` 漂移 / `2` 用法或环境错误)。插件包应对自己的源码跑一次 `python3 scripts/check_ui_vocabulary.py --extra-root <插件源码目录>`,拿到与 core 自己同等的中文界面文案保证。重新生成 `scripts/generate_ui_extension_contract.py` 时必须清空 `EXTENSIONS_CONFIG`——它提交的 fixture 只反映内建拓扑,绝不能带上某次部署的插件。

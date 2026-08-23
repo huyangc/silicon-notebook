@@ -1,6 +1,6 @@
 # 部署插件后端底座实现计划（X1 发现装载 + X4 路由宿主）
 
-状态：执行中（2026-08-23）。基线 origin/master `b608805c`。本文是实现子代理的唯一规格来源；
+状态：已实现（待合入）（2026-08-23）。基线 origin/master `b608805c`。本文是实现子代理的唯一规格来源；
 它们看不到产生本文的对话。
 
 ## 主 agent 裁决（对 §5 风险的拍板，优先于下文任何相反表述）
@@ -385,6 +385,6 @@ T1、T2 可合并为一个实现任务（文件互不相交）→ T3 → T4 → 
 
 1. 插件的 `user_error` 文案绕过公网词表守卫：以 `--extra-root` 自检 + 文档要求兜底（裁决 3）。
 2. probe 不做 I/O 只能是文档合同 + 既有消毒。
-3. `{notebook_id}` 门守卫依赖 FastAPI 半公开的 `route.dependant`（版本锁 `requirements.txt:1`），正反两条用例同时保留。同一条依赖延伸到 401→424 翻译：它换的是 `route.dependant.call`（`run_endpoint_function` 在依赖全部解析完之后才读它，故只覆盖 handler 自己抛的 401，不动 router 级 `get_current_user` 的真 401）。生成器端点刻意不翻译——那时状态行已经发出去了。
+3. `{notebook_id}` 门守卫依赖 FastAPI 半公开的 `route.dependant`（版本锁 `requirements.txt:1`），正反两条用例同时保留。它本身只是**纵深防御**，不是授权边界——真正的授权是每个核心端口（如 `_UrlSourceImportAdapter.import_urls`）自己对请求当前用户复核 capability；守卫只拦「插件声明了一条带 `{notebook_id}` 的路径、却没挂任何核心门」这一种形状，一条把 id 从请求体里取出来的路由、或把参数名写成 `{nb}` 的路由，形状检查本身看不见，但端口自查仍会 404。同一条依赖延伸到 401→424 翻译：它换的是 `route.dependant.call`（`run_endpoint_function` 在依赖全部解析完之后才读它，故只覆盖 handler 自己抛的 401，不动 router 级 `get_current_user` 的真 401）。**残余未覆盖面**——翻译只包住端点函数本身（`dependant.call`），不包住插件自己声明的子依赖（`dependant.dependencies` 里的 `Depends(...)`）；一个 401 从插件自己的子依赖里抛出会原样冒泡成 401、让浏览器把用户登出，而不是翻成 424。生成器端点同样刻意不翻译——那时状态行已经发出去了。两者都是已知、接受的缺口：插件的授权仍必须落在核心端口自查上，401→424 只是「别把上游凭据过期误当会话失效」的可用性优化，不是安全边界。
 4. `enabled` 缺省 `true`（点名即启用）。
 5. `ExtensionRegistryError` 对 deployment 插件原样透传：它不在 SDK 面上（`app.extension_sdk` 不 re-export），但仓库外代码照样能 `from app.extensions.registry import ExtensionRegistryError` 再自己 raise 一条带插件文本的消息，从而绕过 deployment 分支的消毒进到运维日志。插件没有正当理由 raise core 的内部注册异常，且爆炸半径只是启动期一行日志（注册两种情况都被拒绝），故不额外防御。

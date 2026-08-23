@@ -21,6 +21,20 @@ class UiContributionProjection:
     unavailable_reason: PublicUiUnavailableReason | None
 
 
+# Sort key shared by `ui_contribution_contract` (below) and
+# `scripts/generate_ui_extension_contract.py` (which re-sorts the already-
+# sorted output purely to stay idempotent — see that script's docstring).
+# Field order matches the wire shape so a stable tie-break is total even
+# when two plugins declare contributions with colliding ids across slots.
+CONTRIBUTION_SORT_FIELDS = (
+    "plugin_id", "version", "contribution_id", "slot", "capability",
+)
+
+
+def _contribution_sort_key(row: dict[str, str]) -> tuple[str, ...]:
+    return tuple(row.get(field, "") for field in CONTRIBUTION_SORT_FIELDS)
+
+
 def ui_contribution_contract(registry: ExtensionRegistry) -> list[dict[str, str]]:
     """Static cross-stack UI topology contract (no live availability evaluation).
 
@@ -32,15 +46,23 @@ def ui_contribution_contract(registry: ExtensionRegistry) -> list[dict[str, str]
     test, at import time, or from an offline generator script — it is the
     single source both consume; do not re-spell this list comprehension a
     second time.
+
+    Rows are returned sorted by `CONTRIBUTION_SORT_FIELDS` (not registry
+    order) so every caller — the live `/api/system/extensions` equivalent
+    static contract, the committed fixture generator, and the pytest parity
+    assertion that compares this function's output against that fixture
+    byte-for-byte — sees the same deterministic order without each having to
+    re-sort it independently.
     """
 
-    return [{
+    rows = [{
         "plugin_id": manifest.id,
         "version": manifest.version,
         "contribution_id": declaration.id,
         "slot": declaration.slot,
         "capability": declaration.capability,
     } for manifest, declaration in registry.ui_contributions()]
+    return sorted(rows, key=_contribution_sort_key)
 
 
 def project_ui_contributions(
