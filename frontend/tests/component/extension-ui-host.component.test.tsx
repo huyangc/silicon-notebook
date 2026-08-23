@@ -43,7 +43,17 @@ const syntheticProjection: SystemExtensionProjection = { apiVersion: "1", extens
 function apiProbe(testId: string) {
   return function ApiProbe({ actions }: WorkspaceExtensionProps) {
     return (
-      <button data-testid={testId} onClick={() => { void actions.api.requestJson("/x"); }}>
+      <button
+        data-testid={testId}
+        onClick={() => {
+          void actions.api.requestJson("/x", {
+            // 伪造的鉴权凭据必须在端口里就被剥掉。断言那一端刻意不写成
+            // `Authorization === null`——不发这两个头时它本来就是 null，那种断言
+            // 在剥离逻辑被整个删掉之后照样绿。
+            headers: { Authorization: "Bearer forged", Cookie: "session=forged" },
+          });
+        }}
+      >
         probe
       </button>
     );
@@ -191,8 +201,16 @@ test("the outlet injects an api port bound to each contribution's own plugin id"
     "/api/extensions/sample-plugin/x",
     "/api/extensions/other-plugin/x",
   ]);
-  // 核心身份由端口固定：插件设不了鉴权头，也改不了 401 的处置。
-  expect(new Headers(calls[0].init.headers).get("Authorization")).toBeNull();
+  // 核心身份由端口固定：插件设不了鉴权凭据，也改不了 401 的处置。probe 真的塞了一份
+  // 伪造的 Authorization/Cookie（见 apiProbe），所以这里量的是"剥掉了没有"而不是
+  // "本来就没有"。
+  const sent = new Headers(calls[0].init.headers);
+  expect(sent.get("Authorization")).not.toBe("Bearer forged");
+  expect(sent.get("Cookie")).not.toBe("session=forged");
+  // 本夹具没有登录 token（localStorage 是空的），所以核心那一步不会补 Authorization，
+  // 剥离之后这个头一个都不剩。有 token 的部署上它会是核心自己那份 `Bearer <token>`。
+  expect(sent.get("Authorization")).toBeNull();
+  expect(sent.get("Cookie")).toBeNull();
   expect(calls[0].init.method).toBeUndefined();
   expect(load).toHaveBeenCalledTimes(1);
 });

@@ -8,8 +8,13 @@ import { createOwnedWorkspaceExtensionActions } from "../../features/extension-s
 // 在这里就是一个纯 spy，真正的 `loadSourcesPage` 闸由 use-source-library 自己的
 // 单测钉住）。这里只钉「exact-owner freeze-then-revalidate」这道闸本身：与
 // `extension-ui-host.component.test.tsx` 里 A-G1/A-G3 那条 `openUnderstanding`
-// 用例同构，换成 `refreshSources` 并额外覆盖 promise 语义（拒绝时静默 resolve，
-// 不能让插件的 `await actions.refreshSources()` 挂起或抛错）与换用户的形态。
+// 用例同构，换成 `refreshSources` 并额外覆盖 promise 语义与换用户的形态。
+//
+// ⚠ 「静默 resolve」只覆盖 **owner 闸拒绝**这一支：那不是错误，是这次刷新已经没有
+// 意义了，不该让插件的 `await actions.refreshSources()` 挂起或抛错。闸放行之后，
+// 底下的核心加载失败会**原样 reject**（`use-source-library.ts` 的 `loadSourcesPage`
+// 在请求仍是当前请求时 `throw error`），插件必须自己 catch 并用
+// `api.userMessage(error, fallback)` 出文案——最后一条用例钉的就是这个方向。
 
 type Owner = { actorId: string; notebookId: string; generation: number };
 
@@ -56,6 +61,25 @@ test("a stale refreshSources call after a workspace switch (generation 1 -> 3) r
   generation.current = 3;
   await expect(staleAction.refreshSources()).resolves.toBeUndefined();
   expect(refreshSources).not.toHaveBeenCalled();
+});
+
+
+test("a core load failure reaches the plugin as a rejection, not a silent resolve", async () => {
+  // 与 owner 闸拒绝那两条**方向相反**：闸放行了，失败的是底下的核心加载。
+  // `loadSourcesPage` 在「请求仍是当前请求」时把异常原样 throw 出来，端口这一层不得
+  // 把它吞成 resolve——那会让插件以为列表已经刷新、界面停在旧数据上而不给任何提示。
+  const openUnderstanding = vi.fn();
+  const failure = new TypeError("network drop");
+  const refreshSources = vi.fn(async () => { throw failure; });
+  const owner: Owner = { actorId: "user-a", notebookId: "notebook-a", generation: 1 };
+  const actions = createOwnedWorkspaceExtensionActions(
+    owner,
+    () => true,
+    openUnderstanding,
+    refreshSources,
+  );
+  await expect(actions.refreshSources()).rejects.toBe(failure);
+  expect(refreshSources).toHaveBeenCalledOnce();
 });
 
 

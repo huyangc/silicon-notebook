@@ -93,6 +93,19 @@ export function extensionApiPath(
 
 
 /**
+ * 插件绝不许自己设的请求头，按 WHATWG 归一（小写）后比对。
+ *
+ * `authorization`：核心只在**有 token 时**才 `set` 它（`authHeaders()` 无 token 返回
+ * 空对象），所以「核心的鉴权头会盖掉插件的」只在登录态成立——未登录、token 刚被清掉
+ * 或 `auth` 口径将来放宽时，插件伪造的 `Authorization` 会**原样发出去**。
+ * `cookie`：核心一次都不碰它，浏览器把它列为 forbidden header name（fetch 静默丢弃），
+ * 但那道保护是宿主环境给的、不是我们这边的判据。
+ * 两条都在这里剥掉，让「插件设不了鉴权凭据」变成无条件成立的性质。
+ */
+const FORBIDDEN_HEADERS = ["authorization", "cookie"];
+
+
+/**
  * 把插件那份窄 init 翻译成核心 api 客户端的 options。
  *
  * **只逐字段挑 4 项，绝不 spread 插件给的对象。** `tag`/`auth`/`unauthorized` 在最后
@@ -100,15 +113,19 @@ export function extensionApiPath(
  * 401 清 token 重载）或伪造 `tag`（把自己的失败记进核心的诊断口径）。TypeScript 挡得住
  * 老实的调用方，挡不住运行时多塞的键，所以这里是运行时判据。
  *
- * `headers` 会被 `api-client` 的鉴权头覆盖（`auth: "required"` 时逐个 `set`），
- * 插件设不了 `Authorization`。
+ * `headers` 先经 `new Headers(...)` 归一再删掉 `FORBIDDEN_HEADERS`——归一必须用
+ * `Headers` 而不是手写 `toLowerCase()` 过滤：它就是 `api-client` 随后要做的同一次
+ * 归一（`new Headers(inputHeaders)`），所以"这里删掉的"与"核心会看到的"逐字是同一组
+ * 名字，大小写变体与重复键都不会漏。归一后转回普通对象是为了让跨端口的边界保持
+ * 纯数据（核心自己会再包一次 `Headers`）；副作用是名字变成小写形态，HTTP 头名本就
+ * 大小写不敏感。
  */
 function coreOptions(init: ExtensionRequestInit | undefined) {
   const { method, body, headers, signal } = init ?? {};
   return {
     ...(method === undefined ? {} : { method }),
     ...(body === undefined ? {} : { body }),
-    ...(headers === undefined ? {} : { headers }),
+    ...(headers === undefined ? {} : { headers: safeHeaders(headers) }),
     ...(signal === undefined ? {} : { signal }),
     tag: "extension",
     auth: "required" as const,
@@ -117,9 +134,48 @@ function coreOptions(init: ExtensionRequestInit | undefined) {
 }
 
 
+function safeHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
+  const normalized = new Headers(headers);
+  for (const name of FORBIDDEN_HEADERS) normalized.delete(name);
+  return Object.fromEntries(normalized);
+}
+
+
+/**
+ * 默认 transport 的端口按 `pluginId` 记忆，让 `actions.api` 跨渲染保持**引用相等**。
+ *
+ * 为什么这是安全的：端口的四个方法只闭包 `pluginId` 与 `transport` 两个值——不读
+ * owner、notebook、actor 或任何请求期状态，所以同一个 `pluginId` 的端口在任何时刻
+ * 行为逐字相同，缓存**不改变任何权限语义**（授权由后端加这里的路径限定承担，owner
+ * 闸挂在 `actions` 的两个窄 command 上、那两个仍是每帧新造）。
+ *
+ * 为什么有界：唯一的生产调用点是 `withExtensionApi(actions, contribution.pluginId)`，
+ * 而 contribution 来自构建期冻结的 registry（`defineWorkspaceUiRegistry`），是一个
+ * 有限集合。显式传 `transport` 的调用（只有测试）**不进缓存**：那些替身 transport
+ * 各不相同，按 `pluginId` 记忆会把上一个用例的替身发给下一个。
+ *
+ * 为什么需要：插件把 `actions.api` 放进 `useEffect`/`useMemo` 依赖数组是最自然的写法，
+ * 每帧新对象会让那种 effect 每帧重跑（本仓库 PR #557 踩过同形态的无限循环）。
+ */
+const DEFAULT_TRANSPORT_PORTS = new Map<string, WorkspaceExtensionApi>();
+
+
 export function createWorkspaceExtensionApi(
   pluginId: string,
   transport: ExtensionApiTransport = EXTENSION_API_TRANSPORT,
+): WorkspaceExtensionApi {
+  if (transport !== EXTENSION_API_TRANSPORT) return buildWorkspaceExtensionApi(pluginId, transport);
+  const cached = DEFAULT_TRANSPORT_PORTS.get(pluginId);
+  if (cached !== undefined) return cached;
+  const port = buildWorkspaceExtensionApi(pluginId, transport);
+  DEFAULT_TRANSPORT_PORTS.set(pluginId, port);
+  return port;
+}
+
+
+function buildWorkspaceExtensionApi(
+  pluginId: string,
+  transport: ExtensionApiTransport,
 ): WorkspaceExtensionApi {
   return Object.freeze({
     requestJson<T>(path: string, init?: ExtensionRequestInit): Promise<T> {

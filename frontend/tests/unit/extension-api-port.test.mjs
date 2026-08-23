@@ -141,7 +141,9 @@ test("the port confines the path and freezes the core request identity", async (
   assert.equal(calls[0].options.unauthorized, "clear-and-reload");
   assert.equal(calls[0].options.method, "POST");
   assert.equal(calls[0].options.body, "{}");
-  assert.deepEqual(calls[0].options.headers, { "X-Plugin": "1" });
+  // 头名是 `Headers` 归一后的小写形态：端口用核心随后要用的同一次归一来剥鉴权头
+  // （见 `coreOptions` 的注释），HTTP 头名本就大小写不敏感。
+  assert.deepEqual(calls[0].options.headers, { "x-plugin": "1" });
   assert.equal(calls[0].options.signal, controller.signal);
   // query 属于路径，不该同时出现在 options 里；credentials/mode 是插件够不着的传输语义。
   assert.equal("query" in calls[0].options, false);
@@ -175,6 +177,24 @@ test("all three verbs and the message translator go through the same confinement
 });
 
 
+test("a plugin cannot smuggle its own credentials through the headers field", async () => {
+  const { calls, transport } = recordingTransport();
+  const api = createWorkspaceExtensionApi("ieee", transport);
+  await api.requestJson("/search", {
+    headers: {
+      // 大小写各一份：核心随后也用 `new Headers(...)` 归一，剥离必须在同一口径上做，
+      // 否则「删了 authorization、留下 Authorization」会是一个静默的洞。
+      Authorization: "Bearer forged",
+      authorization: "Bearer forged-lowercase",
+      Cookie: "session=forged",
+      cookie: "session=forged-lowercase",
+      "X-Trace": "t",
+    },
+  });
+  assert.deepEqual(calls[0].options.headers, { "x-trace": "t" });
+});
+
+
 test("the default transport is the core api client itself, not a shadow copy", () => {
   // 引用相等而不是"存在同名函数"：一份影子实现会绕开 api-client 的 API_BASE 约束、
   // 鉴权头注入与 401 清 token 重载，而单测里那些假 transport 什么都证明不了。
@@ -183,6 +203,32 @@ test("the default transport is the core api client itself, not a shadow copy", (
   assert.equal(EXTENSION_API_TRANSPORT.requestBlob, requestBlob);
   assert.equal(EXTENSION_API_TRANSPORT.toUserMessage, toUserMessage);
   assert.equal(Object.isFrozen(EXTENSION_API_TRANSPORT), true);
+});
+
+
+test("the default-transport port is memoized per plugin id so plugins can depend on it", () => {
+  // 插件把 `actions.api` 放进 effect 依赖数组是最自然的写法，而 `actions` 本身每帧
+  // 新造。端口只闭包 pluginId 与 transport（不读 owner），所以按 pluginId 记忆不改变
+  // 任何权限语义，只是把引用稳住。
+  assert.equal(
+    createWorkspaceExtensionApi("ieee"),
+    createWorkspaceExtensionApi("ieee"),
+    "same plugin id must hand back the same port object across renders",
+  );
+  assert.notEqual(
+    createWorkspaceExtensionApi("ieee"),
+    createWorkspaceExtensionApi("other"),
+    "two plugins must never share one port (that would share the path prefix)",
+  );
+  // 显式 transport 不进缓存：替身各不相同，按 pluginId 记忆会把上一个用例的替身
+  // 发给下一个用例。
+  const first = recordingTransport();
+  const second = recordingTransport();
+  assert.notEqual(
+    createWorkspaceExtensionApi("ieee", first.transport),
+    createWorkspaceExtensionApi("ieee", second.transport),
+  );
+  assert.notEqual(createWorkspaceExtensionApi("ieee", first.transport), createWorkspaceExtensionApi("ieee"));
 });
 
 

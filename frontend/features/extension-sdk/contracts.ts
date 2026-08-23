@@ -52,6 +52,14 @@ export type WorkspaceExtensionActions = Readonly<{
    * 重取当前笔记本的来源列表首页（复用打开时的分页/搜索状态）。窄命令，不是
    * setter：宿主侧只用 `use-source-library.ts` 自己的具名 command
    * `loadSourcesPage(currentPageRequest())`，插件拿不到列表状态本身。
+   *
+   * **返回的 promise 会 reject，插件必须 catch。** 两种结局刻意不同：
+   *  · 被 owner 闸拒绝（切库/换用户之后拿着旧回调调它，或宿主侧 notebook 闸判否）
+   *    ——静默 resolve。那不是错误，是这次刷新已经没有意义了，不该给用户弹东西。
+   *  · 核心加载真的失败（列表请求抛错且该请求仍是当前请求）——**reject**，异常原样
+   *    冒出来。插件要 `catch` 并用 `api.userMessage(error, fallback)` 出文案；直接读
+   *    `error.message` 会被 `errors-guard` 的精确计数普查拦下（见 `api.ts` 头注释）。
+   *    不 catch 就是一条无人处理的 promise rejection。
    */
   refreshSources(): Promise<void>;
 }>;
