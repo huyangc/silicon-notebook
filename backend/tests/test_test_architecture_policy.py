@@ -20,6 +20,7 @@ REQUIRED_LAYERS = {
     "scripts/check_frontend.sh": (
         "npm run test",
         "npm run build",
+        "npm run lint",
     ),
 }
 
@@ -145,7 +146,7 @@ def test_complete_gate_delegates_every_required_verification_layer():
         )
 
 
-def test_frontend_production_build_owns_the_standard_gate_typecheck():
+def test_frontend_lane_recovers_the_test_file_diagnostics_next_drops():
     frontend_lane = (ROOT / "scripts" / "check_frontend.sh").read_text(
         encoding="utf-8"
     )
@@ -153,9 +154,23 @@ def test_frontend_production_build_owns_the_standard_gate_typecheck():
         encoding="utf-8"
     )
 
+    # `next build` stays the fail-closed typecheck for production code.
     assert "npm run build" in frontend_lane
-    assert "npm run lint" not in frontend_lane
     assert "ignoreBuildErrors" not in next_config
+
+    # But Next's build-time type checker filters out every diagnostic in
+    # `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories
+    # (the ignoreRegex in next/dist/lib/typescript/runTypeCheck.js), so the
+    # lane must also run the package typecheck — and after the build, so it
+    # sees the freshly regenerated `.next/types` instead of a stale tree.
+    # Compare actual commands, not raw text: comments mention both spellings.
+    commands = [
+        line.strip()
+        for line in frontend_lane.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert "npm run lint" in commands
+    assert commands.index("npm run lint") > commands.index("npm run build")
 
 
 def test_openapi_framework_versions_are_exactly_pinned():

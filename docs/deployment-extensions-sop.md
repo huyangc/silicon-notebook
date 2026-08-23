@@ -449,8 +449,10 @@ python3 /path/to/public-checkout/scripts/check_ui_vocabulary.py \
 cd /path/to/public-checkout/frontend
 node --test tests/guards/extension-*.test.mjs
 
-# 4. the full type-check, which covers features/ext-*/
+# 4. the type-check covering features/ext-*/ — `next build`'s pass silently
+#    skips diagnostics in `*.test.*`/`*.spec.*`-named files, `npm run lint` does not
 npm run build
+npm run lint
 ```
 
 **A tree with plugins configured does not pass the base repository's `npm run test`.** `extension-ui-host.component.test.tsx` pins "the merged registry equals the built-in catalog, length 1, with zero plugins configured" — that property is the entire reason the registry is split into two modules, and it must never be loosened to `>= 1` to accommodate a local plugin. Your acceptance gate is items 3 and 4 above plus the parity check in §7, not `npm run test`.
@@ -679,7 +681,7 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 - [ ] `ExtensionModal` receives `context={context}`, `actions={actions}` and a `storageKey`; the dialog opens through `actions.openDialog()` and there is no local `open` state.
 - [ ] `refreshSources()` is called at most once, after the action, and its rejection is caught.
 - [ ] `check_ui_vocabulary.py --extra-root <src>` is clean.
-- [ ] The base repository's `extension-*` guards and `npm run build` are clean with the package synced.
+- [ ] The base repository's `extension-*` guards, `npm run build`, and `npm run lint` are clean with the package synced.
 - [ ] `CHANGELOG.md` names the supported `api_version`; `version` was bumped in both manifests together.
 
 ### Operator
