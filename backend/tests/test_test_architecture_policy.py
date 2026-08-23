@@ -209,11 +209,35 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     Candidate files are discovered dynamically (conftest.py's marker-driving
     module sets, plus a source-text scan for the marker decorators) rather
     than hardcoded, so this stays valid as tests gain or lose these markers.
+
+    This test itself costs ~5s (dominated by one `--collect-only`
+    subprocess) and is a deliberate exception to the G1/G2 split it proves:
+    it stays in G1 on every PR because it *is* the guard that makes the
+    56/8 `architecture_contract`/`architecture_contract_heavy` split
+    trustworthy, not one of the things being split by it. Re-timing that
+    split with `pytest -m architecture_contract --durations=0` will not
+    select this test (it carries no `architecture_contract` marker of its
+    own), so its cost is intentionally outside that accounting.
+
+    Collection now runs once, not once per `-m` expression: a single
+    `--collect-only` subprocess loads `tests.architecture.lane_partition_plugin`,
+    which dumps every collected item's nodeid and own marker names as JSON
+    (unfiltered — no `-m` passed to the subprocess). The two real `-m`
+    expressions are then evaluated in-process, per item, against that
+    marker set using pytest's own `_pytest.mark.expression` compiler — the
+    same engine `-m` itself uses (see `_pytest.mark.deselect_by_mark`) — so
+    this stays an empirical collection proof rather than a hand-rolled
+    re-implementation of marker matching.
     """
     import ast
+    import json
     import re
     import subprocess
     import sys
+
+    from _pytest.mark.expression import Expression
+
+    from tests.architecture.lane_partition_plugin import END_SENTINEL, START_SENTINEL
 
     conftest_source = (ROOT / "backend/tests/conftest.py").read_text(
         encoding="utf-8"
@@ -262,39 +286,49 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
         assert match, EXTENDED_BACKEND_LAYERS[layer_index]
         return match.group(1)
 
-    def collect_ids(marker_expression: str | None) -> set[str]:
-        args = [
-            sys.executable,
-            "-m",
-            "pytest",
-            *candidate_paths,
-            "--collect-only",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-        ]
-        if marker_expression is not None:
-            args += ["-m", marker_expression]
-        result = subprocess.run(
-            args,
-            cwd=ROOT,
-            env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=120,
-        )
-        return {
-            line.strip()
-            for line in result.stdout.splitlines()
-            if "::" in line and not line.startswith(" ")
-        }
+    args = [
+        sys.executable,
+        "-m",
+        "pytest",
+        *candidate_paths,
+        "--collect-only",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "tests.architecture.lane_partition_plugin",
+    ]
+    result = subprocess.run(
+        args,
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    assert START_SENTINEL in result.stdout and END_SENTINEL in result.stdout, (
+        "lane_partition_plugin dump not found in collect-only output:\n"
+        + result.stdout
+    )
+    dump = result.stdout.split(START_SENTINEL, 1)[1].split(END_SENTINEL, 1)[0]
+    items = json.loads(dump)
 
-    universe = collect_ids(None)
-    g1_ids = collect_ids(marker_expr(0))
-    g2_ids = collect_ids(marker_expr(1))
-
+    universe = {item["nodeid"] for item in items}
     assert universe, "candidate discovery found files but collected zero tests"
+
+    def select(expression_text: str) -> set[str]:
+        compiled = Expression.compile(expression_text)
+        selected: set[str] = set()
+        for item in items:
+            markers = set(item["markers"])
+            if compiled.evaluate(lambda name, **_: name in markers):
+                selected.add(item["nodeid"])
+        return selected
+
+    g1_ids = select(marker_expr(0))
+    g2_ids = select(marker_expr(1))
+
     assert g1_ids | g2_ids == universe
     assert g1_ids & g2_ids == set()
 

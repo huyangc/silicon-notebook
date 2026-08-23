@@ -128,7 +128,7 @@ bash scripts/check.sh
 | --- | --- | --- |
 | G0 目标测试 | 按当前改动文件与行为选跑 | 编辑循环中随时执行 |
 | G1 标准门 | `scripts/check.sh`：稳定后端、契约/harness、前端测试及负责类型检查的 production build | 本地交付前以及每次 PR/push/手动 CI |
-| G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试、冷图/索引契约与全仓语义扫描 | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
+| G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试、冷图/索引契约与全仓语义扫描（重活子集） | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
 | G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
 
 G1 并行运行三个有界 lane：`check_backend.sh` 以默认 12 个 worker 执行稳定 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx` 与 production build。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 负责 TypeScript 校验并且不得启用 `ignoreBuildErrors`，因此 G1 不再先用 `tsc --noEmit` 解析一遍同一程序再立即由 build 重复解析，`npm run lint` 仍作为 G0 定向命令保留。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（64 个 `architecture_contract` 全仓语义扫描里单测成本 >2s 的 8 个；其余 56 个随 G1 跑）和 PostgreSQL 树；G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的二十二个工具：七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理、三个构建与两个库理解工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。

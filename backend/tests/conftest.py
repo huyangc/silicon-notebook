@@ -60,6 +60,15 @@ _ARCHITECTURE_CONTRACT_MODULES = {
 # split, not a guess — and update `test_test_architecture_policy.py`'s pinned
 # `-m` strings plus AGENTS.md/CLAUDE.md/README*.md/docs/development*.md
 # together with it.
+#
+# `test_test_architecture_policy.py::test_verification_lane_markers_partition_
+# every_architecture_contract_test` costs ~5s and is a deliberate exception to
+# this split: it stays in G1 on every PR because it is the guard that proves
+# the 56/8 split above is actually correct, not one of the tests being split
+# by it. Re-timing the split with the `-m architecture_contract` command above
+# will not select this test — it carries no `architecture_contract` marker of
+# its own — so it never shows up in that accounting and never needs adding to
+# `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`.
 _ARCHITECTURE_CONTRACT_HEAVY_TESTS = {
     (
         "test_repository_monkeypatch_owners.py",
@@ -234,15 +243,18 @@ def _fast_default_password_hashing(monkeypatch, request):
     )
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(config, items):
     """Keep repository-wide source scans on one worker.
 
     Their process-local indexes are deliberately shared. Spreading the modules
     across xdist workers reparses the whole repository in every process and
     increases both CPU cost and complete-gate latency.
     """
+    collected_file_names: set[str] = set()
+    hit_heavy_tests: set[tuple[str, str]] = set()
     for item in items:
         file_name = Path(str(item.fspath)).name
+        collected_file_names.add(file_name)
         if file_name in _ARCHITECTURE_CONTRACT_MODULES:
             item.add_marker(
                 pytest.mark.architecture_contract,
@@ -254,12 +266,51 @@ def pytest_collection_modifyitems(items):
             item.add_marker(
                 pytest.mark.architecture_contract_heavy,
             )
+            hit_heavy_tests.add((file_name, item.name))
         if file_name in _GRAPH_INDEX_CONTRACT_MODULES:
             item.add_marker(
                 pytest.mark.graph_index_contract,
             )
             item.add_marker(
                 pytest.mark.xdist_group(name="graph_index_contract"),
+            )
+
+    # Self-guard for the measured split above: only check allowlist entries
+    # whose *file* was actually part of this collection run, so running a
+    # narrow subset (e.g. a single test file) never falsely reports the rest
+    # of the allowlist as stale. Within a collected file, every entry must be
+    # matched by name — a rename, deletion, or reparametrization silently
+    # drops a test out of the `architecture_contract_heavy` G2-only lane and
+    # back into G1, which is a cost regression the split was built to avoid
+    # (and the inverse — an entry that no longer exists at all — is exactly
+    # as silent as a stale entry, since Python set membership just never
+    # matches instead of raising).
+    #
+    # A file being present among the collected fspaths does not mean *every*
+    # test in that file was collected: `pytest some_file.py::some_test` (a
+    # routine way to iterate on a single test — including this very policy
+    # file, which itself carries a heavy-allowlisted entry) or `-k` narrow
+    # `items` to a subset before this hook ever sees it. Node-id or keyword
+    # narrowing can't be validated against the allowlist either way, so skip
+    # the check rather than report entries as stale just because a sibling
+    # test in the same file wasn't asked for.
+    node_id_narrowed = any("::" in arg for arg in config.args)
+    keyword_narrowed = bool(config.option.keyword)
+    if not node_id_narrowed and not keyword_narrowed:
+        stale_heavy_entries = sorted(
+            entry
+            for entry in _ARCHITECTURE_CONTRACT_HEAVY_TESTS
+            if entry[0] in collected_file_names and entry not in hit_heavy_tests
+        )
+        if stale_heavy_entries:
+            raise pytest.UsageError(
+                "backend/tests/conftest.py: _ARCHITECTURE_CONTRACT_HEAVY_TESTS "
+                "names (file, test name) pairs that were not found among the "
+                "tests collected from that file — the test was likely renamed, "
+                "deleted, or reparametrized. Update the allowlist (re-time with "
+                "`pytest -m architecture_contract --durations=0 -n0` first; see "
+                "the comment above `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`). Stale "
+                f"entries: {stale_heavy_entries}"
             )
 
 
