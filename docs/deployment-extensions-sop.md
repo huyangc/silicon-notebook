@@ -223,6 +223,17 @@ def build_router(context: PluginRouteContext) -> APIRouter:
             ],
         }
 
+    # An `async def` handler runs on the event loop thread, so it must await
+    # the offloaded variant instead. Same authorization, same result.
+    @router.post(
+        "/notebooks/{notebook_id}/import-async",
+        dependencies=[Depends(context.require_notebook_capability("sources:write"))],
+    )
+    async def import_selected_async(notebook_id: str, payload: dict):
+        urls = [u for u in (payload.get("urls") or []) if isinstance(u, str)]
+        result = await context.url_sources.import_urls_async(notebook_id, urls)
+        return {"created": [row.source_id for row in result.created]}
+
     return router
 ```
 
@@ -231,6 +242,7 @@ The eight seams, and nothing else: `plugin_id`, `settings`, `require_notebook_ca
 *Core does for you:*
 
 - **Authorization, per port.** `url_sources.import_urls` checks `sources:write` for the request's own user — resolved from core's request context, never from anything you pass — and refuses with the same 404 core's own endpoints use (existence is not disclosed). Past that check it is literally core's own URL-import function: the same capacity accounting, admin exemption, unconfigured-parser mapping and background parse scheduler.
+- **Refusing to block the event loop.** `url_sources.import_urls` blocks — database writes plus one serial remote probe per URL. A `def` handler is already in FastAPI's threadpool, so it calls it directly; an `async def` handler is on the event loop thread, so it must `await url_sources.import_urls_async(...)`, which does the same work in the threadpool. Getting it backwards is refused at runtime, not merely discouraged: `import_urls` raises `RuntimeError` when it finds a running event loop on its own thread, before doing any work, and the message names the method to await. Nothing is half-imported, and the failure is a plain `500` with a traceback rather than user-facing copy — it is a bug in the plugin, not something the end user did.
 - **A structural gate on `{notebook_id}` routes.** A route whose path contains that literal substring must run one of core's own gates (any capability guard, or the read gate). This is defence in depth, not the boundary: name the parameter `{nb}` or take the id from a body and the check does not see it — and the port still refuses. Removing the port's check would open a hole; removing this one would not.
 - **401 translation.** A 401 your handler either *raises* or *returns* (proxying an upstream service's own 401 response onto your own `Response`/`JSONResponse` is a normal return, not a raise, and is caught the same way) becomes `424` with core's own copy and a logged `plugin_upstream_unauthorized` event. In core, 401 has exactly one meaning to the browser — clear the token and reload — so an expired upstream credential inside one plugin route would otherwise sign the user out of the whole product. A genuine 401 from core's router-level session gate still surfaces as 401.
 - **Event sanitization.** `emit_event` accepts exactly four fields — `event`, `outcome`, `count`, `elapsed_ms` — and drops the *whole* record on anything else. Core adds `kind` and `plugin_id`. It can never raise back into your handler.
@@ -630,7 +642,8 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 | Signal | Meaning |
 | --- | --- |
 | `plugin_upstream_unauthorized` event, client sees `424` | Your handler raised or returned 401. Core translated it so the browser does not sign the user out. Translate upstream 401s yourself if you want your own wording. |
-| `404` from `url_sources.import_urls` | The calling user does not hold `sources:write` on that notebook — or the notebook does not exist. The two are deliberately indistinguishable. |
+| `404` from `url_sources.import_urls` / `import_urls_async` | The calling user does not hold `sources:write` on that notebook — or the notebook does not exist. The two are deliberately indistinguishable. |
+| `RuntimeError: url_sources.import_urls must not be called from an async handler…`, client sees `500` | An `async def` handler called the blocking variant, which would have stalled the event loop for every other in-flight request. `await url_sources.import_urls_async(...)` instead; a sync `def` handler keeps calling `import_urls`. Nothing was imported. |
 | Your event silently absent from the log | The payload carried a field outside `event`/`outcome`/`count`/`elapsed_ms`, a code longer than 64 characters or not matching `^[a-z][a-z0-9_]{0,63}$`, or a `count`/`elapsed_ms` that is not an integer in `0..1e9` (`True` is not `1`). The whole record is dropped rather than partially written. |
 | The entry does not render, but `/admin/extensions` lists the plugin | One of the four visibility gates in §7 is false. Check `GET /api/system/extensions` first: that row's `available` and `unavailable_reason` (`disabled` = your probe returned `DISABLED`, `unavailable` = it returned `UNAVAILABLE`). If the row is absent altogether, the browser's local tuple does not match — the manifest `version` on the two sides has drifted. |
 

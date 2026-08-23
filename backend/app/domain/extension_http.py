@@ -86,11 +86,47 @@ class PluginUrlSourceImportPort(Protocol):
     exemptions, and unconfigured-parser mapping (see
     ``app.api.source_routes.import_url_sources``) instead of handing the plugin
     a repository or a model client.
+
+    **Two call shapes, one implementation — which one you use is not a style
+    choice.** The work behind this port blocks: database writes plus one
+    serial remote probe per URL, so a single slow host holds the calling
+    thread for seconds.
+
+    * A **sync** handler (``def``) is already running in FastAPI's threadpool,
+      so it calls :meth:`import_urls` directly.
+    * An **async** handler (``async def``) runs *on the event loop thread*, so
+      it must ``await`` :meth:`import_urls_async`, which offloads the same work
+      to the threadpool. Calling :meth:`import_urls` there would block the one
+      thread every other in-flight request in the process is sharing.
+
+    Mixing the two up is refused at runtime rather than merely discouraged:
+    :meth:`import_urls` raises ``RuntimeError`` when it finds a running event
+    loop on its own thread, and the message names the method to await instead.
     """
 
     def import_urls(
         self, notebook_id: str, urls: Sequence[str]
-    ) -> PluginUrlImportResult: ...
+    ) -> PluginUrlImportResult:
+        """Import synchronously. Only from a **sync** (``def``) handler.
+
+        Raises ``RuntimeError`` if called on the event loop thread — see
+        :meth:`import_urls_async` for what to call from an ``async def``
+        handler.
+        """
+        ...
+
+    async def import_urls_async(
+        self, notebook_id: str, urls: Sequence[str]
+    ) -> PluginUrlImportResult:
+        """Import from an **async** (``async def``) handler.
+
+        Same authorization, same core implementation, same result — the only
+        difference is that the blocking work runs in the threadpool instead of
+        on the event loop thread. The request's authenticated user is carried
+        into that thread with the rest of the request context, so the port
+        authorizes exactly as it does on the sync path.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
