@@ -24,3 +24,8 @@ fangan/testcases_kg/
 # subagent-driven-development scratch (plans/reports/diffs)
 .superpowers/
 .worktrees/
+
+# 构建期装载的私有 UI 插件（SILICON_NOTEBOOK_UI_PLUGINS）——生成物，绝不入库。
+# `ext-*` 与手写的 `extension-sdk` 不冲突：第 4 个字符一个是 `-`、一个是 `e`。
+/frontend/features/ext-*/
+/frontend/features/extension-sdk/registry.local.ts
