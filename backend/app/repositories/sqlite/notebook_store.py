@@ -13,9 +13,10 @@ from app.repositories.sqlite.mount_sql import (
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
 # NotebookSummary type counts.  Task 13 moved the canonical definition to
-# app.services.knowledge_contracts; this re-export keeps the Task-8 import
-# sites (facade / notebook_catalog) pointing at the SAME tuple.
-from app.services.knowledge_contracts import USABLE_STATUSES  # noqa: F401
+# app.domain.knowledge_contracts (sunk from app.services in B3); this
+# re-export keeps the Task-8 import sites (facade / notebook_catalog)
+# pointing at the SAME tuple.
+from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 
 
 class NotebookStore:

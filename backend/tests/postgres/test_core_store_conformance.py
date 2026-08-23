@@ -438,7 +438,7 @@ def test_set_user_search_profile_skips_the_update_when_unchanged(
     from datetime import timezone as _timezone
 
     import app.repositories.postgres.identity_store as pg_identity_store_module
-    from app.services import search_profile as search_profile_module
+    from app.domain import search_profile as search_profile_module  # B3: merge_field now lives (and reads datetime) here
     from app.services.search_profile import parse_search_profile
 
     store = core_stores.identity

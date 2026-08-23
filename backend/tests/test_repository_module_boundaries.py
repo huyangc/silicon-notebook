@@ -47,6 +47,13 @@ def test_communities_module_consumes_unified_store_not_connect():
 
 
 def test_knowledge_contracts_is_leaf_of_the_dependency_graph():
-    modules = _imports(BACKEND / "app/services/knowledge_contracts.py")
+    """B3 sunk the definitions to app/domain/knowledge_contracts.py (a leaf
+    app.repositories can import directly); app/services/knowledge_contracts.py
+    is now a thin re-export shim (one ``from app.domain.knowledge_contracts
+    import (...)`` statement) so it keeps existing importers working, at the
+    cost of no longer being a leaf itself. The leaf property this test cares
+    about — the knowledge-status vocabulary has zero app.* dependencies —
+    still holds, just one module over."""
+    modules = _imports(BACKEND / "app/domain/knowledge_contracts.py")
     app_imports = {m for m in modules if m.startswith("app.")}
     assert app_imports == set(), app_imports

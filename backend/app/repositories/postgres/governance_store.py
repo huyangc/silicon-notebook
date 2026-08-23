@@ -26,7 +26,7 @@ from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
-from app.services.knowledge_contracts import (
+from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
@@ -148,7 +148,7 @@ def base_dedup_evidence(connection: Any, object_id: str) -> list:
 
 def seed_fn_for(object_type: str):
     """Return the kg_merge seed function for a KG object type."""
-    from app.services.kg_merge import (
+    from app.domain.kg_merge_seed import (
         seed_claim, seed_concept, seed_formula, seed_procedure,
     )
     return {

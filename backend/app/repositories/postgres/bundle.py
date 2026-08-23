@@ -37,7 +37,7 @@ from app.repositories.postgres.retrieval_experience_store import (
 from app.repositories.postgres.sharing_store import SharingStore
 from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
-from app.services.extraction_profiles import (
+from app.domain.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
     OBJECT_TYPE_LABELS,
@@ -66,8 +66,8 @@ def _initialize(
     """
     PostgresMigrator(database).migrate()
     now = normalize_timestamp(seams.now())
-    from app.services.auth_utils import hash_password
-    from app.services.kg.filters import _norm as whitelist_norm
+    from app.domain.auth_utils import hash_password
+    from app.domain.kg.names import normalize_name as whitelist_norm
 
     password_hash, password_salt, password_iterations = hash_password(
         settings.admin_password

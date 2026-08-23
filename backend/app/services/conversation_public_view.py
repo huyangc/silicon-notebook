@@ -75,11 +75,9 @@ MAX_SNIPPET_CHARS = 1200
 # ``title_truncated`` rather than dropped silently (codex #522 R3; AGENTS.md
 # 用户编辑的数据不得静默截断). Registered in ``docs/product-and-api*.md`` (T6).
 MAX_REFERENCE_TITLE_CHARS = 400
-# Safety ceiling on how many turns one public page renders. A conversation's
-# turn count is bounded by how many times a user asked, so this almost never
-# binds; it exists so a pathological conversation cannot balloon one anonymous
-# response. Truncation is disclosed (``truncated_turns``) rather than silent.
-MAX_TURNS = 500
+# Sunk to app.domain.conversation_public_view in B3 (app.repositories'
+# ask_state_store imports it directly there); re-exported here unchanged.
+from app.domain.conversation_public_view import MAX_TURNS  # noqa: F401
 
 # T4 — the anonymous image channel.
 #

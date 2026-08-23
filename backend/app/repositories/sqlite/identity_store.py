@@ -15,7 +15,7 @@ from app.repositories.identity_errors import (
     SelfDemotionError,
 )
 from app.repositories.sqlite.database import SqliteDatabase
-from app.services.search_profile import (
+from app.domain.search_profile import (
     SEARCH_PROFILE_ORIGINS,
     merge_field,
     parse_search_profile,
@@ -113,7 +113,7 @@ class IdentityStore:
     def _create_user_in_txn(self, db, username: str, password: str) -> UserProfile:
         """在调用方已打开的写事务内建用户+profile。供 create_user 与
         register_user_with_session 共用,后者要求「建用户+发首个会话」原子。"""
-        from app.services.auth_utils import hash_password, is_valid_username, normalize_username
+        from app.domain.auth_utils import hash_password, is_valid_username, normalize_username
 
         if not is_valid_username(username):
             raise ValueError("invalid username")
@@ -170,7 +170,7 @@ class IdentityStore:
             return (profile, self._insert_session_in_txn(db, profile.id))
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
-        from app.services.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import normalize_username, verify_password
 
         norm = normalize_username(username)
         with self.database.connect() as db:
@@ -200,7 +200,7 @@ class IdentityStore:
         同一写事务让登录与改密在同一把写锁上串行:登录排在改密前,它插的会话
         会被改密事务的 DELETE 带走;排在后,旧密码直接验证失败。verify 的
         PBKDF2(~30ms)因此进了写锁——登录低频,原子性优先(与改密同一取舍)。"""
-        from app.services.auth_utils import normalize_username, verify_password
+        from app.domain.auth_utils import normalize_username, verify_password
 
         norm = normalize_username(username)
         with self.database.write() as db:
@@ -446,7 +446,7 @@ class IdentityStore:
         (auth_sessions);Agent 长期凭据(agent_access_tokens)刻意不动,改密不该
         打断已授权的外部集成。内置管理员(user-local)拒绝:它的密码每次启动都被
         seed 按 settings.admin_password 重写,在线改了也会在下次重启被静默回滚。"""
-        from app.services.auth_utils import hash_password, verify_password
+        from app.domain.auth_utils import hash_password, verify_password
 
         if user_id == "user-local":
             raise BuiltinAdminPasswordError("builtin admin password is env-derived")
@@ -492,7 +492,7 @@ class IdentityStore:
             raise BuiltinAdminPasswordError("builtin admin password is env-derived")
         if not (new_password or "").strip():
             raise ValueError("empty password")
-        from app.services.auth_utils import hash_password
+        from app.domain.auth_utils import hash_password
 
         # 与 change_user_password 同理:哈希提前算,少持写锁。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)

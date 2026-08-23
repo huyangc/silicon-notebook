@@ -42,9 +42,9 @@ from app.repositories.postgres.source_store import (
     PAPER_META_NO_META_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
 )
-from app.services.extraction_profiles import OBJECT_TYPE_LABELS
-from app.services.knowledge_contracts import USABLE_STATUSES
-from app.services.notebook_scale import NotebookScaleFacts
+from app.domain.extraction_profiles import OBJECT_TYPE_LABELS
+from app.domain.knowledge_contracts import USABLE_STATUSES
+from app.domain.notebook_scale import NotebookScaleFacts
 
 
 _COUNT_IDENTIFIERS = {

@@ -10,14 +10,13 @@ from __future__ import annotations
 import re
 from typing import Sequence, Tuple
 
+from app.domain.kg.names import normalize_name
 from app.services.kg.parsing import SourceElementQ
 
 # --- normalization (must match concept_whitelist 存储/查找口径) ---
-_WS_RE = re.compile(r"[\s\-_]+")
-
-
-def _norm(name: str) -> str:
-    return _WS_RE.sub(" ", (name or "").strip().lower())
+# Sunk to app.domain.kg.names in B3 (pure, zero app.* dependency); kept bound
+# to the historical private name so this module's own callers are unaffected.
+_norm = normalize_name
 
 
 # --- window filter ---

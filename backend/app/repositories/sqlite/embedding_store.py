@@ -4,7 +4,7 @@ from typing import Callable, ContextManager, Sequence
 
 import sqlite3
 
-from app.services.vector_index import encode_vector
+from app.domain.vector_index import encode_vector
 
 
 class EmbeddingStore:

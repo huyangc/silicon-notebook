@@ -41,12 +41,12 @@ from app.repositories.postgres.database import PostgresDatabase
 # Single source of truth for the public page's turn ceiling — see the SQLite
 # adapter's import of the same constant for why the token-resolved query bounds
 # its fetch to ``MAX_TURNS + 1`` (codex #522 R6 P2). Pure leaf module, no cycle.
-from app.services.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import MAX_TURNS
 # Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
 # back from ``recent_user_ask_languages`` is turned into a closed language
 # bucket, before it leaves this store — see that method's own docstring, and
 # the SQLite adapter's mirror import for the same reason.
-from app.services.search_profile import classify_ask_language
+from app.domain.search_profile import classify_ask_language
 
 
 # Canonical oldest -> newest order for one conversation's answers. Mirrors

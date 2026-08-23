@@ -18,7 +18,7 @@ from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
-from app.services.knowledge_contracts import (
+from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
     PromotionApproval,
@@ -48,7 +48,7 @@ def _review_endpoint_ids(relation_rows) -> List[str]:
 
 def seed_fn_for(object_type: str):
     """Return the kg_merge seed function for a KG object type."""
-    from app.services.kg_merge import (
+    from app.domain.kg_merge_seed import (
         seed_claim, seed_concept, seed_formula, seed_procedure,
     )
     return {

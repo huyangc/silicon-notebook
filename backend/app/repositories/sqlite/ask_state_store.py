@@ -67,14 +67,14 @@ from app.repositories.sqlite.database import SqliteDatabase
 # Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
 # back from ``recent_user_ask_languages`` is turned into a closed language
 # bucket, before it leaves this store — see that method's own docstring.
-from app.services.search_profile import classify_ask_language
+from app.domain.search_profile import classify_ask_language
 # The public projection's turn ceiling is the single source of truth for how many
 # turns one anonymous page renders; the token-resolved query below bounds its
 # fetch to ``MAX_TURNS + 1`` (cap + 1) so a >MAX_TURNS conversation cannot force
 # every anonymous read to load and deserialize the WHOLE conversation's payloads
 # (codex #522 R6 P2). The projection is a pure leaf module (stdlib-only imports),
 # so importing this constant here creates no cycle and keeps the two in lockstep.
-from app.services.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import MAX_TURNS
 
 
 # Canonical oldest -> newest order for one conversation's answers.

@@ -17,7 +17,7 @@ from app.models.sources import (
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
-from app.services.source_display import summary_display_title
+from app.domain.source_display import summary_display_title
 from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.postgres._store_utils import (
     TimestampInput,

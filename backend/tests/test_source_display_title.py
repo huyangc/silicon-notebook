@@ -17,8 +17,9 @@ from app.services.source_display import source_display_title, summary_display_ti
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# 唯一定义点:(仓库相对路径, 函数名)。
-DEFINITION_SITE = ("backend/app/services/source_display.py", "source_display_title")
+# 唯一定义点:(仓库相对路径, 函数名)。B3:定义下沉到 app/domain,
+# app/services/source_display.py 现在只 re-export,不再自己定义它。
+DEFINITION_SITE = ("backend/app/domain/source_display.py", "source_display_title")
 
 # 必须 import 它的三处显示路径。三处命名的是同一批来源,是这条规则存在的理由。
 CONSUMERS = (

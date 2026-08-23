@@ -24,7 +24,7 @@ from app.repositories.sqlite.access_sql import (
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
-from app.services.vector_index import encode_vector
+from app.domain.vector_index import encode_vector
 
 
 def _json_object(raw: Any) -> dict[str, Any]:

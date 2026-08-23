@@ -134,11 +134,18 @@ def _fast_default_password_hashing(monkeypatch, request):
     ``hash_password`` lazily, so this fixture only replaces their default call
     during a test.  Explicit iteration counts, random salts, persisted fields,
     and real ``verify_password`` behavior remain intact.
+
+    ⚠ B3: patches ``app.domain.auth_utils`` (not ``app.services.auth_utils``,
+    which now only re-exports the name at import time). Repository call
+    sites do a per-call lazy ``from app.domain.auth_utils import
+    hash_password``, which resolves the attribute on the DOMAIN module at
+    call time — patching the services shim's own binding would silently stop
+    taking effect there.
     """
     if request.path.name in _REAL_PASSWORD_HASH_MODULES:
         return
 
-    from app.services import auth_utils
+    from app.domain import auth_utils
 
     real_hash_password = auth_utils.hash_password
 
