@@ -364,6 +364,12 @@ test("owner-inactive view fields stay referentially stable across re-renders", (
   const first = value!;
   expect(first.sources).toEqual([]);
   expect(first.sourceElements).toEqual([]);
+  // A plain `useState` initial value is never frozen; only the hidden-state
+  // fallback branch (the module-level `NO_*` constant) is. Asserting frozen
+  // here pins down *which* branch actually produced this value, not merely
+  // that it happens to equal an empty literal.
+  expect(Object.isFrozen(first.sources)).toBe(true);
+  expect(Object.isFrozen(first.sourceElements)).toBe(true);
 
   act(() => {
     view.rerender(<Harness actorId={null} />);

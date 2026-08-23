@@ -394,3 +394,34 @@ test("cancel reports a sticky terminal response instead of claiming cancellation
   expect(effects.notify).toHaveBeenCalledWith("报告已进入终态，无需再取消");
   expect(effects.notify).not.toHaveBeenCalledWith(expect.stringContaining("已请求取消"));
 });
+
+// PR #557 regression, same shape as the sibling hooks' "owner-hidden view
+// fields stay referentially stable" tests: `selectedIds` used to fall back
+// to a bare `new Set()` literal whenever the owner is not visible (actorId
+// is null). A bare literal is a brand-new reference on every render, which
+// makes a consuming effect's dependency array "change" every render (see
+// use-ask-session.ts for the traced infinite-loop incident). The fix is a
+// per-hook-instance `useRef(new Set())` rather than a frozen module-level
+// constant — unlike an array/object literal, `Object.freeze` doesn't stop
+// `.add`/`.delete` on a `Set`, so this test deliberately does not assert
+// `Object.isFrozen` (there is nothing to assert: the ref's Set is never
+// mutated, but it isn't and can't be frozen either).
+test("owner-hidden export selection stays referentially stable across re-renders", () => {
+  const view = render(<Harness actorId={null} notebookId={null} />);
+  const first = value!;
+  expect(first.selectedIds.size).toBe(0);
+
+  act(() => {
+    view.rerender(<Harness actorId={null} notebookId={null} />);
+  });
+  const second = value!;
+  act(() => {
+    view.rerender(<Harness actorId={null} notebookId={null} />);
+  });
+  const third = value!;
+
+  for (const later of [second, third]) {
+    expect(later.selectedIds).toBe(first.selectedIds);
+    expect(later.selectedIds.size).toBe(0);
+  }
+});

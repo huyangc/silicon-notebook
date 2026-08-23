@@ -548,6 +548,13 @@ test("rows-unpublished view fields stay referentially stable across re-renders",
   expect(first.rows).toEqual([]);
   expect(first.visibleRows).toEqual([]);
   expect(first.searchHits).toEqual({});
+  // A plain `useState` initial value is never frozen; only the hidden-state
+  // fallback branch (the module-level `NO_*` constant) is. Asserting frozen
+  // here pins down *which* branch actually produced this value, not merely
+  // that it happens to equal an empty literal.
+  expect(Object.isFrozen(first.rows)).toBe(true);
+  expect(Object.isFrozen(first.visibleRows)).toBe(true);
+  expect(Object.isFrozen(first.searchHits)).toBe(true);
 
   act(() => {
     view.rerender(<Harness actorId={null} />);

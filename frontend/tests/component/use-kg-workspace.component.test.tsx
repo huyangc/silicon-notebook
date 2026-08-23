@@ -687,6 +687,15 @@ test("owner-hidden knowledge/graph view fields stay referentially stable across 
   expect(first.graph.searchHits).toEqual([]);
   expect(first.graph.selectedTypes).toEqual([]);
   expect(first.graph.pendingMerges).toEqual([]);
+  // A plain `useState` initial value is never frozen; only the hidden-state
+  // fallback branch (the module-level `NO_*` constant) is. Asserting frozen
+  // here pins down *which* branch actually produced this value, not merely
+  // that it happens to equal an empty literal.
+  expect(Object.isFrozen(first.knowledge.types)).toBe(true);
+  expect(Object.isFrozen(first.knowledge.contexts)).toBe(true);
+  expect(Object.isFrozen(first.graph.searchHits)).toBe(true);
+  expect(Object.isFrozen(first.graph.selectedTypes)).toBe(true);
+  expect(Object.isFrozen(first.graph.pendingMerges)).toBe(true);
 
   act(() => {
     view.rerender(<Harness actorId={null} notebookId={null} />);
