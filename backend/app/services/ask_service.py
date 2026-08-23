@@ -2506,6 +2506,13 @@ class AskService:
             raise StageBoundaryError("response draft changed job_id")
         if draft.asked_at != prepared.asked_at:
             raise StageBoundaryError("response draft changed asked_at")
+        # The payload/returned AskResponse carries its own conversation_id --
+        # the browser adopts it via setConversationId(response.conversation_id)
+        # -- so an injected stage that leaves it blank or points it elsewhere
+        # would detach the next turn even though the row itself is saved under
+        # the prepared conversation (codex #571 R3 P2).
+        if draft.response.conversation_id != prepared.conversation_id:
+            raise StageBoundaryError("response draft changed the response conversation_id")
         response = draft.response
         self._assert_reasoning_runtime(
             runtime,
