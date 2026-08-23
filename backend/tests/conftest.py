@@ -37,6 +37,63 @@ _ARCHITECTURE_CONTRACT_MODULES = {
     "test_repository_protocol_coverage.py",
     "test_semantic_source.py",
 }
+# Structural item B7: architecture_contract used to be one 64-test, G2-only
+# group (~42s serial). Timing it (`pytest -m architecture_contract
+# --durations=0 -n0`) showed only 8 of the 64 actually cost >2s per test —
+# the rest are cheap, self-contained AST scans that were sitting in the daily
+# lane purely because they lived in a file matched by
+# `_ARCHITECTURE_CONTRACT_MODULES` above (module-name matching is all-or-
+# nothing) or carried a blanket `@pytest.mark.architecture_contract`
+# decorator. This explicit (file, test name) allowlist is the *only* thing
+# that additionally tags `architecture_contract_heavy`; every other
+# architecture_contract test keeps running (cheaply) in G1. It is deliberately
+# a flat allowlist rather than a per-file cost policy: several of these files
+# mix cheap and expensive tests (e.g. test_repository_protocol_coverage.py's
+# two >2s tests share a module-level `@lru_cache` full-corpus AST parse with
+# two <0.005s tests that never touch it), so the split has to be per-test, not
+# per-file. Entries keep the historical `xdist_group("architecture_contract")`
+# co-location (via `_ARCHITECTURE_CONTRACT_MODULES` membership, unchanged)
+# wherever more than one heavy test in the same file benefits from sharing a
+# worker-local parse cache; the three heavy tests from decorator-only files
+# never shared that cache before this change either, so they stay ungrouped.
+# Re-time with the command above before editing this set — it is a measured
+# split, not a guess — and update `test_test_architecture_policy.py`'s pinned
+# `-m` strings plus AGENTS.md/CLAUDE.md/README*.md/docs/development*.md
+# together with it.
+_ARCHITECTURE_CONTRACT_HEAVY_TESTS = {
+    (
+        "test_repository_monkeypatch_owners.py",
+        "test_every_private_facade_patch_targets_a_manifest_marked_seam",
+    ),
+    (
+        "test_architecture_hardening.py",
+        "test_retired_repository_model_attributes_cannot_be_read_or_rebound",
+    ),
+    (
+        "test_semantic_source.py",
+        "test_session_index_contains_known_repository_import",
+    ),
+    (
+        "test_collection_enumeration.py",
+        "test_enumerable_element_kinds_have_exactly_one_literal_definition",
+    ),
+    (
+        "test_repository_dependency_contract.py",
+        "test_retired_retrieval_privates_have_no_production_callers",
+    ),
+    (
+        "test_test_architecture_policy.py",
+        "test_repository_contracts_have_no_source_position_identity_or_markers",
+    ),
+    (
+        "test_repository_protocol_coverage.py",
+        "test_retrieval_port_declares_every_production_retrieval_call",
+    ),
+    (
+        "test_repository_protocol_coverage.py",
+        "test_ask_ports_declare_the_executable_service_and_route_surface",
+    ),
+}
 _GRAPH_INDEX_CONTRACT_MODULES = {
     "test_auto_scale_index.py",
     "test_autotune_wiring.py",
@@ -185,14 +242,19 @@ def pytest_collection_modifyitems(items):
     increases both CPU cost and complete-gate latency.
     """
     for item in items:
-        if Path(str(item.fspath)).name in _ARCHITECTURE_CONTRACT_MODULES:
+        file_name = Path(str(item.fspath)).name
+        if file_name in _ARCHITECTURE_CONTRACT_MODULES:
             item.add_marker(
                 pytest.mark.architecture_contract,
             )
             item.add_marker(
                 pytest.mark.xdist_group(name="architecture_contract"),
             )
-        elif Path(str(item.fspath)).name in _GRAPH_INDEX_CONTRACT_MODULES:
+        if (file_name, item.name) in _ARCHITECTURE_CONTRACT_HEAVY_TESTS:
+            item.add_marker(
+                pytest.mark.architecture_contract_heavy,
+            )
+        if file_name in _GRAPH_INDEX_CONTRACT_MODULES:
             item.add_marker(
                 pytest.mark.graph_index_contract,
             )
