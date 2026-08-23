@@ -58,7 +58,13 @@ test("coordinator is presentation-only: React is its sole dependency and it owns
 });
 
 test("workspace transitions invalidate root slots before old-domain work and close source intake through one sink", () => {
-  const openCalls = callSitesIn(findFunctionIn(page, "Home", "openNotebook")).map(({ target }) => target);
+  // 结构项 F3：打开笔记本的编排收成了单一 transition，root-modal 的 begin/settle 只在
+  // `notebookTransitionSteps` 的 step 列表里声明（`openNotebook` 自己不再直接触达任何
+  // owner hook 生命周期——notebook-transition-guard 钉住这条）。root-modal 必须排在
+  // 列表**第一位**：它同步撤销旧的 source-add lease，其 close sink 是暂存文件 /
+  // bundle 勾选 resolver / 迟到解包世代的唯一清理路径。
+  const openCalls = callSitesIn(findFunctionIn(page, "Home", "notebookTransitionSteps"))
+    .map(({ target }) => target);
   assert.ok(openCalls.includes("rootModals.beginWorkspaceTransition"));
   assert.ok(openCalls.includes("rootModals.finishWorkspaceTransition"));
   // rootModals.leaveWorkspace 现在只经共享函数 leaveWorkspaceOwners 间接调用；

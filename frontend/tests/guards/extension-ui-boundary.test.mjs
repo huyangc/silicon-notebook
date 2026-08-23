@@ -322,8 +322,11 @@ test("extension owner is wired into authentication and workspace transitions", a
     "activateWorkspaceOwners must be invoked from the two authentication call sites",
   );
   assert.equal(calls.filter((row) => row.target === "workspaceExtensions.beginNotebookTransition").length, 1);
+  // 结构项 F3：begin/settle 现在只在 `notebookTransitionSteps` 的 step 列表里声明，
+  // settle 的第二个实参由 `opened` 布尔换成「本次 transition 有没有产出 outcome」。
+  // 语义逐字不变（`outcome !== null` 就是旧的 `opened`），判据搬进了编排器。
   assert.ok(calls.some((row) => row.target === "workspaceExtensions.finishNotebookTransition"
-    && row.arguments.join("|") === "workspaceExtensionTransition|opened"));
+    && row.arguments.join("|") === "ticket|outcome !== null"));
   assert.ok(calls.filter((row) => row.target === "workspaceExtensions.leaveWorkspace").length >= 2);
   assert.equal(calls.filter((row) => row.target === "workspaceExtensions.owns").length, 0);
   const actions = [];

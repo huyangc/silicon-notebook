@@ -265,7 +265,11 @@ test("世代计数器由统一 close sink 递增，切库同步撤销 source-add
       + "新建笔记本共用的统一清空点，不递增就等于让这条契约名存实亡",
   );
 
-  const openTargets = callSitesIn(findFunctionIn(page, "Home", "openNotebook")).map((call) => call.target);
+  // 结构项 F3：切库的 root transition 现在只在 `notebookTransitionSteps` 的 step 列表
+  // 里声明（`openNotebook` 通过 `runNotebookTransition` 消费这份列表），撤销 lease 的
+  // 时机与接入前逐字相同——它仍是列表里第一个 begin。
+  const openTargets = callSitesIn(findFunctionIn(page, "Home", "notebookTransitionSteps"))
+    .map((call) => call.target);
   assert.ok(openTargets.includes("rootModals.beginWorkspaceTransition"));
   const sinkTargets = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
     .map((call) => call.target);
@@ -277,7 +281,11 @@ test("openNotebook 经 root transition 进入统一 close sink，结清 bundleCh
   // resolver 与忙碌栈帧不会因此自动消失。深链/浏览器导航切库时弹窗未必被
   // closeSourceModal 关过，旧笔记本的勾选面板会悬在新笔记本上，把「添加来源」
   // 入口一直锁死到用户手动确认/取消一个已经不指向当前笔记本的面板。
-  const openTargets = callSitesIn(findFunctionIn(page, "Home", "openNotebook")).map((call) => call.target);
+  // 结构项 F3：切库的 root transition 现在只在 `notebookTransitionSteps` 的 step 列表
+  // 里声明（`openNotebook` 通过 `runNotebookTransition` 消费这份列表），撤销 lease 的
+  // 时机与接入前逐字相同——它仍是列表里第一个 begin。
+  const openTargets = callSitesIn(findFunctionIn(page, "Home", "notebookTransitionSteps"))
+    .map((call) => call.target);
   assert.ok(openTargets.includes("rootModals.beginWorkspaceTransition"));
   const sinkTargets = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
     .map((call) => call.target);

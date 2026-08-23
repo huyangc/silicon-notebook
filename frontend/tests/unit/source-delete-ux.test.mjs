@@ -116,7 +116,9 @@ test("delete tombstones suppress stale rows and snapshot reads converge across t
   assert.match(removeText, /const key = ownerKey\(actorAtStart, source\.notebook_id\)/);
   assert.match(removeText, /deletedIdsRef\.current\.set/);
 
-  const open = findFunctionIn(page, "Home", "openNotebook");
+  // 结构项 F3：打开笔记本的 `load` 相位搬进了具名的 `openNotebookSnapshot`
+  // （`openNotebook` 只声明 transition plan）。稳定快照读取仍在同一条路径上。
+  const open = findFunctionIn(page, "Home", "openNotebookSnapshot");
   const openText = open.getText(page);
   assert.match(openText, /readStableSourceSnapshot/);
   const commit = findFunctionIn(sourceLibrary, "useSourceLibrary", "commitNotebookSnapshot");
