@@ -23,6 +23,10 @@ const LIFECYCLE_HOOKS = [
   "pretest",
   "prelint",
 ];
+// npm 只在**同名脚本存在**时运行它的 `pre*`：`prelint` 配 `lint`、`predev` 配 `dev`……
+// 任何一个基名被删掉或改名，它的 `pre*` 就静默变成一个永不触发的孤儿 key，
+// 生命周期断言照样全绿而那条路径跑在缺生成物的树上。
+const HOOKED_BASE_SCRIPTS = ["dev", "build", "start", "test", "lint"];
 
 const EXT_PACKAGE_RULE = "/frontend/features/ext-*/";
 const LOCAL_REGISTRY_RULE = "/frontend/features/extension-sdk/registry.local.ts";
@@ -37,6 +41,13 @@ test("every npm lifecycle that runs or checks the frontend syncs UI plugins firs
     LIFECYCLE_HOOKS.map((hook) => [hook, packageJson.scripts[hook]]),
     LIFECYCLE_HOOKS.map((hook) => [hook, HOOK_BODY]),
   );
+  for (const base of HOOKED_BASE_SCRIPTS) {
+    assert.equal(
+      typeof packageJson.scripts[base],
+      "string",
+      `script "${base}" must exist, otherwise "pre${base}" is an orphan npm never runs`,
+    );
+  }
 });
 
 

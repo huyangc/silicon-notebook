@@ -2,7 +2,7 @@
 /**
  * 构建期把 `SILICON_NOTEBOOK_UI_PLUGINS` 指向的仓库外私有 UI 插件包装进基座。
  *
- * 零依赖（只用 node:fs/promises、node:path、node:url），由 package.json 的
+ * 零依赖（只用 node:fs、node:fs/promises、node:path、node:url），由 package.json 的
  * `postinstall` 与五个 `pre*` 钩子调用，所以生成物总在——它们全部被 .gitignore
  * 忽略，绝不入库：已跟踪文件不受 .gitignore 影响，「提交空存根 + 脚本覆写」必然
  * 让 `git status` 变脏，唯一稳妥解就是「不入库 + 钩子保证它总在」。
@@ -12,9 +12,16 @@
  *   features/extension-sdk/registry.local.ts 本地 contribution 清单（空态是空数组）
  *   .local/ui-extension-contract.json        部署期对账输入（内建行 + 各包 manifest 行）
  *
+ * **两相位**：先把一切能失败的事做完（读内建契约、校验每个输入包、勘察
+ * `features/ext-*` 的每个既有目录、渲染两份产物文本），全部通过之后才动文件树
+ * （删旧副本 → 复制 → 写文件）。顺序不能反：先删后校验会在「已同步 A + 手工放了
+ * 一个无标记的 ext-B」时把 A 删掉、再在 B 上抛错，而 registry.local.ts 仍指向刚被
+ * 删掉的 A —— 之后每次 build 都红且不自愈。
+ *
  * 本模块导出纯函数供单测直接调用；`main()` 只在它作为进程入口被运行时执行。
  */
-import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { copyFile, lstat, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,8 +54,10 @@ const ENTRY_FILES = ["workspace-plugin.ts", "workspace-plugin.tsx"];
 const REGISTRY_LOCAL = "registry.local.ts";
 const CONTRACT_RELATIVE = ".local/ui-extension-contract.json";
 const BUILTIN_CONTRACT_RELATIVE = "../backend/tests/fixtures/ui_extension_contract.json";
-/** 与 scripts/generate_ui_extension_contract.py 的 `_CONTRIBUTION_SORT_FIELDS` 一致：
- *  两侧排出同一个顺序，部署期对账才能逐行比对。 */
+/** 与 scripts/generate_ui_extension_contract.py 的 `_CONTRIBUTION_SORT_FIELDS` 一致。
+ *  这份产物承诺的是**行集合**与后端 fixture 的内建行一致（加上各包 manifest 的行）；
+ *  **行序以本脚本的排序键为准**——后端生成器当前不对写出的数组排序，对账方按集合
+ *  或按同一组键重排后比对，别把它当成两侧逐行字节相同的承诺。 */
 const CONTRACT_SORT_FIELDS = [
   "plugin_id",
   "version",
@@ -161,7 +170,13 @@ export function validateManifest(manifest, packageName) {
 }
 
 
-/** 读取并校验一个插件包目录，返回 `{ name, entry, manifest, files }`。 */
+/**
+ * 读取并校验一个插件包目录，返回 `{ name, entry, manifest, files, skipped, root }`。
+ *
+ * `skipped` 是包根下以 `.` 开头的**普通文件**（`.DS_Store` / `.gitignore` / 编辑器
+ * 残留…）：既不复制也不报错——它们不参与构建，为它们中止整次同步只会把一台
+ * Mac 上随手打开过目录的插件作者挡在门外。**子目录仍一律拒绝**（`.git` 也不例外）。
+ */
 export async function inspectPackage(directory) {
   const absolute = path.resolve(directory);
   const name = path.basename(absolute);
@@ -180,12 +195,17 @@ export async function inspectPackage(directory) {
   }
 
   const files = [];
+  const skipped = [];
   for (const entry of listed) {
     if (entry.isDirectory()) {
       throw new Error(
         `ui plugin "${name}": subdirectory ${JSON.stringify(entry.name)} is not allowed. `
         + PACKAGE_SHAPE_HINT,
       );
+    }
+    if (entry.isFile() && entry.name.startsWith(".")) {
+      skipped.push(entry.name);
+      continue;
     }
     if (!entry.isFile()) {
       throw new Error(
@@ -210,6 +230,7 @@ export async function inspectPackage(directory) {
     files.push(entry.name);
   }
   files.sort();
+  skipped.sort();
 
   if (!files.includes(MANIFEST_FILE)) {
     throw new Error(`ui plugin "${name}": ${MANIFEST_FILE} is missing`);
@@ -232,7 +253,43 @@ export async function inspectPackage(directory) {
   }
   checkedContributions(manifest, name);
 
-  return { name, entry: entries[0], manifest, files, root: absolute };
+  return { name, entry: entries[0], manifest, files, skipped, root: absolute };
+}
+
+
+/**
+ * 生成文件里 import 用的本地别名。两个包各导出一个 `SearchEntry` 时，裸名字会让
+ * `registry.local.ts` 出现两条同名 import——`node` / `tsc` 报重复标识符，整个前端
+ * 构建挂在一份写着「do not edit」的生成文件上。别名按包名派生，故仍然确定。
+ */
+function componentAlias(packageName, component) {
+  return `ext_${packageName.replaceAll("-", "_")}__${component}`;
+}
+
+
+function aliasesByPackage(packages) {
+  const owners = new Map();
+  const perPackage = new Map();
+  for (const row of packages) {
+    const components = [
+      ...new Set(checkedContributions(row.manifest, row.name).map((item) => item.component)),
+    ].sort();
+    const aliases = new Map();
+    for (const component of components) {
+      const alias = componentAlias(row.name, component);
+      const previous = owners.get(alias);
+      if (previous !== undefined && previous !== row.name) {
+        throw new Error(
+          `ui plugin import alias is not unique: ${JSON.stringify(alias)} is produced by both `
+          + `${previous} and ${row.name}`,
+        );
+      }
+      owners.set(alias, row.name);
+      aliases.set(component, alias);
+    }
+    perPackage.set(row.name, aliases);
+  }
+  return perPackage;
 }
 
 
@@ -255,6 +312,7 @@ function registryEntryLines(row, component) {
 /** 渲染 `features/extension-sdk/registry.local.ts` 的完整文本。 */
 export function renderLocalRegistry(entries) {
   const packages = [...entries].sort((left, right) => left.name.localeCompare(right.name));
+  const aliases = aliasesByPackage(packages);
   const origin = packages.length === 0
     ? "<unset>"
     : `<${packages.length} package(s): ${packages.map((row) => row.name).join(", ")}>`;
@@ -264,11 +322,10 @@ export function renderLocalRegistry(entries) {
     "import type { WorkspaceUiContribution } from \"./contracts.ts\";",
   ];
   for (const row of packages) {
-    const components = [
-      ...new Set(checkedContributions(row.manifest, row.name).map((item) => item.component)),
-    ].sort();
+    const bindings = [...aliases.get(row.name).entries()]
+      .map(([component, alias]) => `${component} as ${alias}`);
     lines.push(
-      `import { ${components.join(", ")} } from "../ext-${row.name}/${row.entry}";`,
+      `import { ${bindings.join(", ")} } from "../ext-${row.name}/${row.entry}";`,
     );
   }
   lines.push("");
@@ -283,7 +340,7 @@ export function renderLocalRegistry(entries) {
   );
   for (const row of packages) {
     for (const item of checkedContributions(row.manifest, row.name)) {
-      lines.push(...registryEntryLines(item, item.component));
+      lines.push(...registryEntryLines(item, aliases.get(row.name).get(item.component)));
     }
   }
   lines.push("];");
@@ -330,7 +387,15 @@ async function builtinContractRows(frontendDir) {
       + "  run `python3 scripts/generate_ui_extension_contract.py` to create it",
     );
   }
-  const parsed = JSON.parse(rendered);
+  let parsed;
+  try {
+    parsed = JSON.parse(rendered);
+  } catch (error) {
+    throw new Error(
+      `built-in UI extension contract fixture is not valid JSON: ${fixture} `
+      + `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   if (!Array.isArray(parsed?.contributions)) {
     throw new Error(
       `built-in UI extension contract fixture has no "contributions" array: ${fixture}`,
@@ -340,57 +405,152 @@ async function builtinContractRows(frontendDir) {
 }
 
 
-/**
- * 删除既有 `features/ext-*` 副本。三重闸缺一不可：目录名匹配、含
- * `.ui-plugin-origin` 标记、路径确实在 `features/` 之下。匹配前缀但没有标记的
- * 目录是人写的，抛错而不是删掉它。
- */
-async function removeGeneratedPackages(featuresDir) {
-  for (const entry of await readdir(featuresDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !GENERATED_PACKAGE_DIR.test(entry.name)) continue;
-    const absolute = path.join(featuresDir, entry.name);
-    const relative = path.relative(featuresDir, absolute);
-    if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new Error(`refusing to remove a path outside features/: ${absolute}`);
-    }
-    try {
-      await stat(path.join(absolute, ORIGIN_MARKER));
-    } catch {
-      throw new Error(
-        `refusing to remove ${absolute}: it matches the generated "ext-*" prefix but carries `
-        + `no ${ORIGIN_MARKER} marker, so it was not written by this script`,
-      );
-    }
-    await rm(absolute, { recursive: true, force: true });
+/** `.ui-plugin-origin` 必须是一个真实普通文件；符号链接同样不算数。 */
+async function requireOriginMarker(absolute) {
+  let marker;
+  try {
+    marker = await lstat(path.join(absolute, ORIGIN_MARKER));
+  } catch {
+    marker = null;
+  }
+  if (marker === null || !marker.isFile()) {
+    throw new Error(
+      `refusing to remove ${absolute}: it matches the generated "ext-*" prefix but carries `
+      + `no ${ORIGIN_MARKER} marker, so it was not written by this script`,
+    );
   }
 }
 
 
-/** 同步一次：校验全部包 → 清理旧副本 → 复制 → 写 registry.local.ts 与契约。 */
-export async function syncUiPlugins({ frontendDir, roots }) {
+/**
+ * 勘察既有 `features/ext-*`：只有「名字匹配 + 真实目录 + 带标记」的才可以删。
+ *
+ * 「必须是真实目录」不是形式主义：`features/ext-foo` 若是一条指向
+ * `features/extension-sdk` 的符号链接，`isDirectory()` 为假（readdir 是 lstat 语义）
+ * 会让删除跳过它，随后 `mkdir(target, { recursive: true })` + `copyFile` 顺着链接
+ * 写进 SDK 目录，直接覆盖受版本控制的 SDK 源码。
+ *
+ * 这里刻意**不再**做 `path.relative(featuresDir, …)` 的越界判断：`readdir` 回来的
+ * `entry.name` 是单个路径分量，既不含分隔符也不可能是 `..`，那道闸对它不可达；
+ * 真正有牙的是上面这条 lstat 检查。
+ */
+async function surveyGeneratedPackages(featuresDir) {
+  let listed;
+  try {
+    listed = await readdir(featuresDir, { withFileTypes: true });
+  } catch {
+    throw new Error(`features directory is not readable: ${featuresDir}`);
+  }
+  const removals = [];
+  for (const entry of listed) {
+    if (!GENERATED_PACKAGE_DIR.test(entry.name)) continue;
+    const absolute = path.join(featuresDir, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error(
+        `refusing to touch ${absolute}: it matches the generated "ext-*" prefix but is not a real `
+        + "directory (copying into a symlink here would write straight through it into the "
+        + "tracked extension-sdk sources)",
+      );
+    }
+    await requireOriginMarker(absolute);
+    removals.push(absolute);
+  }
+  removals.sort();
+  return removals;
+}
+
+
+/** 复制前对落点再看一眼：只接受「不存在」或「带标记的真实目录」。 */
+async function requireWritableTarget(target) {
+  let info;
+  try {
+    info = await lstat(target);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw new Error(`ui plugin copy target is not inspectable: ${target}`);
+  }
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(
+      `refusing to copy into ${target}: it exists but is not a real directory (a symlink here `
+      + "would write straight through it into whatever it points at)",
+    );
+  }
+  await requireOriginMarker(target);
+}
+
+
+/**
+ * 全量勘察：读内建契约 → 逐个校验输入包 → 跨包查重 → 勘察既有副本 → 渲染两份
+ * 产物文本。整个过程**只读**；任何一条失败都在文件树被动过之前抛出。
+ */
+async function surveySync({ frontendDir, roots }) {
   const base = path.resolve(frontendDir);
-  // 先把所有包校验完再动文件树：任一包不合法就整次中止，不留半新半旧的副本。
+  const builtinRows = await builtinContractRows(base);
+
   const packages = [];
-  const claimed = new Map();
+  const claimedNames = new Map();
+  const claimedContributions = new Map();
   for (const root of roots) {
     const inspected = await inspectPackage(root);
-    const previous = claimed.get(inspected.name);
+    const previous = claimedNames.get(inspected.name);
     if (previous !== undefined) {
       throw new Error(
         `ui plugin package name is not unique: ${JSON.stringify(inspected.name)} is declared by `
         + `both ${previous} and ${inspected.root}`,
       );
     }
-    claimed.set(inspected.name, inspected.root);
+    claimedNames.set(inspected.name, inspected.root);
+    for (const row of checkedContributions(inspected.manifest, inspected.name)) {
+      const key = `${row.pluginId} ${row.id}`;
+      const owner = claimedContributions.get(key);
+      if (owner !== undefined) {
+        throw new Error(
+          `ui plugin contribution is not unique: plugin_id ${JSON.stringify(row.pluginId)} with `
+          + `id ${JSON.stringify(row.id)} is declared by both ${owner} and ${inspected.name}`,
+        );
+      }
+      claimedContributions.set(key, inspected.name);
+    }
     packages.push(inspected);
   }
   packages.sort((left, right) => left.name.localeCompare(right.name));
 
   const featuresDir = path.join(base, "features");
-  await removeGeneratedPackages(featuresDir);
+  const removals = await surveyGeneratedPackages(featuresDir);
+
+  const localRows = packages.flatMap((row) => validateManifest(row.manifest, row.name));
+  return {
+    base,
+    featuresDir,
+    packages,
+    removals,
+    registryText: renderLocalRegistry(packages),
+    contractText: renderContract(builtinRows, localRows),
+    rows: mergeContractRows(builtinRows, localRows),
+  };
+}
+
+
+/** 同步一次：全量勘察（只读）→ 清理旧副本 → 复制 → 写 registry.local.ts 与契约。 */
+export async function syncUiPlugins({ frontendDir, roots }) {
+  const plan = await surveySync({ frontendDir, roots });
+
+  for (const row of plan.packages) {
+    if (row.skipped.length === 0) continue;
+    process.stderr.write(
+      `sync-ui-plugins: ui plugin "${row.name}": skipped ${row.skipped.length} dotfile(s): `
+      + `${row.skipped.join(", ")}\n`,
+    );
+  }
+
+  for (const absolute of plan.removals) {
+    await rm(absolute, { recursive: true, force: true });
+  }
+
   const stamp = new Date().toISOString();
-  for (const row of packages) {
-    const target = path.join(featuresDir, `ext-${row.name}`);
+  for (const row of plan.packages) {
+    const target = path.join(plan.featuresDir, `ext-${row.name}`);
+    await requireWritableTarget(target);
     await mkdir(target, { recursive: true });
     for (const file of row.files) {
       await copyFile(path.join(row.root, file), path.join(target, file));
@@ -403,18 +563,16 @@ export async function syncUiPlugins({ frontendDir, roots }) {
   }
 
   await writeFile(
-    path.join(featuresDir, "extension-sdk", REGISTRY_LOCAL),
-    renderLocalRegistry(packages),
+    path.join(plan.featuresDir, "extension-sdk", REGISTRY_LOCAL),
+    plan.registryText,
     "utf8",
   );
 
-  const builtinRows = await builtinContractRows(base);
-  const localRows = packages.flatMap((row) => validateManifest(row.manifest, row.name));
-  const contractPath = path.join(base, ...CONTRACT_RELATIVE.split("/"));
+  const contractPath = path.join(plan.base, ...CONTRACT_RELATIVE.split("/"));
   await mkdir(path.dirname(contractPath), { recursive: true });
-  await writeFile(contractPath, renderContract(builtinRows, localRows), "utf8");
+  await writeFile(contractPath, plan.contractText, "utf8");
 
-  return { packages, rows: mergeContractRows(builtinRows, localRows) };
+  return { packages: plan.packages, rows: plan.rows };
 }
 
 
@@ -432,7 +590,24 @@ export async function main() {
 }
 
 
-const invokedPath = process.argv[1];
-if (invokedPath && path.resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+/**
+ * 入口判定按 **realpath** 比对：`node …/sync-ui-plugins.mjs` 走一条含符号链接的路径
+ * 时（共享 checkout、`npm` 的 bin 转发），`path.resolve(argv[1])` 与
+ * `fileURLToPath(import.meta.url)` 是两个不同的字符串，`main()` 会静默不跑——
+ * 脚本「成功」退出、什么产物都没有。
+ */
+function isProcessEntry() {
+  const invoked = process.argv[1];
+  if (typeof invoked !== "string" || invoked.length === 0) return false;
+  const here = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(invoked) === realpathSync(here);
+  } catch {
+    return path.resolve(invoked) === here;
+  }
+}
+
+
+if (isProcessEntry()) {
   await main();
 }
