@@ -4,6 +4,10 @@ import path from "node:path";
 import ts from "typescript";
 
 import { appSourceModules, findFunction, importsIn, jsxElements, parseModule, scopedCalls } from "../../test-support/semantic-source.mjs";
+// 守卫之间可以互相 import：插件包的 import 白名单只能有**一份**判据，而它自己那条
+// 真值表、真包扫描与包形状检查都住在包边界守卫里。放进 `test-support/` 反而不对——
+// 那里是跨泳道共享的 setup/adapter，这条判据只服务这两个守卫。
+import { pluginPackageImportOffenders } from "./extension-plugin-package-guard.test.mjs";
 
 
 /** 仓库外插件包的落点：`features/ext-<包名>/`（同步脚本的 `GENERATED_PACKAGE_DIR`）。 */
@@ -24,6 +28,11 @@ const PLUGIN_PACKAGE_DIR = /^features\/ext-[a-z][a-z0-9-]*\//;
  * 拒绝子目录、T6 的 readdir 再查一遍），所以这条差别在真实包上不可达，但它让
  * 归一化成为**承重**的一步——同一层判据下，一个没归一化的实现照样会因为多出的
  * `/` 判否，那条变异就打空了。
+ *
+ * ⚠ 想变异验证这一条的人注意：**删掉外层那个 `path.posix.normalize` 调用是个空转变异**
+ * ——`path.posix.join` 自己就归一化，外层只是把意图写明。真正承重的性质是「解析成路径
+ * 再比」而不是「拿原始说明符做前缀比较」，所以有效的变异是把这两行整个换成字符串拼接
+ * （`dirname + "/" + specifier`）。照着「去掉 normalize」做出来的绿色不是守卫失效的证据。
  *
  * 导出给 `tests/guards/extension-plugin-package-guard.test.mjs`（T6）复用：两处
  * 白名单必须是同一份判据，不是两份互相漂移的拼写。
@@ -435,59 +444,35 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
     );
   }
   // 每个插件组件模块只许依赖 SDK 合同、react、图标库与**同包兄弟模块**——同一张白名单
-  // 对所有插件生效。兄弟那一项是路径判据不是字面量，抽在 samePluginPackageSpecifier 里
-  // 与 T6 的包边界守卫共用。
-  // `ui.tsx` 是插件唯一被允许使用的弹窗外壳（X5 T5）：给它，是因为不给的结果是每个
-  // 插件自己手搓一个浮窗——那会同时违反「复用系统色板/边框/圆角」与「浮动弹窗只能
-  // 复用 use-floating-window」两条红线，而它交出去的只是一个骨架类写死、不接任何
-  // 领域端口的容器。⚠ 内建插件**不得** import 它：内建插件在 registry.ts 的 node
-  // 泳道闭包里，而 `.tsx` 在那条泳道上根本装不进去（module-graph 守卫会红）。
-  const PLUGIN_IMPORT_ALLOWLIST = new Set([
-    "../extension-sdk/contracts.ts",
-    "../extension-sdk/ui.tsx",
-    "lucide-react",
-    "react",
-  ]);
-  // `api.ts` 永远不在这份白名单里：`createWorkspaceExtensionApi(pluginId)` 一旦对插件
-  // 可见，插件 A 就能给自己造一条绑定插件 B 的端口，路径限定当场失去意义。端口只经
-  // host 按 `contribution.pluginId` 注入到 `actions.api`。（T6 的包边界守卫会把它作为
-  // 被点名拒绝的说明符再钉一遍；这里钉的是白名单本身没有它。）
-  assert.equal(
-    PLUGIN_IMPORT_ALLOWLIST.has("../extension-sdk/api.ts"),
-    false,
-    "the plugin HTTP port must be injected by the host, never imported by a plugin",
-  );
+  // 对所有插件生效。判据整份抽在 T6 的包边界守卫里（`pluginPackageImportOffenders`），
+  // 这里只是它的一个消费点：白名单在两处各写一份拼写，就会在一份改了另一份没改时互相
+  // 认同一个陈旧值，同时与真实边界脱节。那边的真值表逐条钉住这份判据的形状，包括
+  // `api.ts` 被单独点名拒绝（`createWorkspaceExtensionApi(pluginId)` 一旦对插件可见，
+  // 插件 A 就能给自己造一条绑定插件 B 的端口，路径限定当场失去意义）。
+  //
   // 内建插件由 registry.ts 自己点名；其余插件模块只能是同步脚本复制进来的仓库外包，
-  // 落点固定 features/ext-*/。手写一个 features/notmyext/workspace-plugin.ts 并从
+  // 落点固定 features/ext-<name>/。手写一个 features/notmyext/workspace-plugin.ts 并从
   // registry.local.ts 引用它会在这里与上面的 local import 规则同时报红。
   const builtinPluginPaths = new Set(builtinPluginImports.map(
     (module) => `features/${module.replace("../", "")}`,
   ));
-  // **内建插件的白名单更窄一格：没有 `ui.tsx`。** 它在 registry.ts 的模块闭包里，而
-  // 那条闭包被 `node --test` 直接 import——Node 对 `.tsx` 报 `Unknown file extension`，
-  // 整条 node 泳道会在 import 阶段炸掉。module-graph 守卫也会红，但那条说的是「闭包
-  // 里有 .tsx」；这条说的是「内建插件不许 import 共享 UI」，两句话都要有人讲：只留
-  // module-graph 那条，读到失败的人只知道闭包脏了，不知道自己踩的是白名单分档。
-  const BUILTIN_PLUGIN_IMPORT_ALLOWLIST = new Set(
-    [...PLUGIN_IMPORT_ALLOWLIST].filter((module) => module !== "../extension-sdk/ui.tsx"),
-  );
-  assert.equal(
-    BUILTIN_PLUGIN_IMPORT_ALLOWLIST.size,
-    PLUGIN_IMPORT_ALLOWLIST.size - 1,
-    "the builtin allowlist must be exactly the plugin allowlist minus the shared .tsx UI",
-  );
+  // **内建插件走更窄的一档（`{ builtin: true }`）：没有 `ui.tsx`。** 它在 registry.ts 的
+  // 模块闭包里，而那条闭包被 `node --test` 直接 import——Node 对 `.tsx` 报
+  // `Unknown file extension`，整条 node 泳道会在 import 阶段炸掉。module-graph 守卫也会
+  // 红，但那条说的是「闭包里有 .tsx」；这条说的是「内建插件不许 import 共享 UI」，两句话
+  // 都要有人讲：只留 module-graph 那条，读到失败的人只知道闭包脏了，不知道自己踩的是
+  // 白名单分档。
   for (const plugin of plugins) {
-    const allowlist = builtinPluginPaths.has(plugin.path)
-      ? BUILTIN_PLUGIN_IMPORT_ALLOWLIST
-      : PLUGIN_IMPORT_ALLOWLIST;
+    const builtin = builtinPluginPaths.has(plugin.path);
     assert.deepEqual(
-      importsIn(plugin.module).map((row) => row.module).filter((module) => (
-        !allowlist.has(module)
-        && !samePluginPackageSpecifier(plugin.path, module)
-      )),
+      pluginPackageImportOffenders(
+        plugin.path,
+        importsIn(plugin.module).map((row) => row.module),
+        { builtin },
+      ),
       [],
       `${plugin.path} imports outside the plugin allowlist`
-      + (builtinPluginPaths.has(plugin.path)
+      + (builtin
         ? " (builtin plugins live in the node-lane closure and may not import the shared .tsx UI)"
         : ""),
     );

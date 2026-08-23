@@ -71,8 +71,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 再读回自己刚生成的产物。读的全是测试自己写出来的临时文件，加上后端契约
   // 生成器里那一行排序键声明——没有一处是对生产源码的位置/顺序查询。
   "tests/unit/sync-ui-plugins.test.mjs",
-  // 只读 package.json 的生命周期钩子与根 .gitignore 的两条忽略规则。生成物按定义
-  // 不入库，所以「它总在」只能由钩子保证，而这两份都是配置元数据、不是生产源码。
+  // 只读 package.json 的生命周期钩子、根 .gitignore 的两条忽略规则，以及 features/ 下
+  // 复制进来的插件包的**目录清单**（readdir，判「扁平且只含 TS/manifest/出处标记」）。
+  // 生成物按定义不入库，所以「它总在」只能由钩子保证，而这几份都是配置元数据或文件
+  // 系统形状、不是生产源码；包内模块的 import 面仍走 semantic-source 的语义解析。
   "tests/guards/extension-plugin-package-guard.test.mjs",
   // node --test 对 `.tsx` 报 Unknown file extension，而 node 泳道真的 import 生产
   // registry。这条守卫遍历模块图证明那条闭包全是 `.ts`，因此必须自己 resolve 并
