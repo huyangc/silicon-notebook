@@ -375,7 +375,7 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 | Put `actions` or `context` in a `useEffect`/`useMemo` dependency array | Both are fresh objects every render (the owner gate is re-frozen each pass). `actions.api` is memoized per `pluginId` and *is* safe there. |
 | Let `refreshSources()` reject unhandled | It resolves silently once the owner gate has closed (that is not an error, just a refresh that no longer matters) and rejects on a genuine load failure. Call it at most once, after your own action completes, and `catch` it. |
 | Keep your own `open` state for the dialog | `context.dialog` is the single source of truth. A local boolean cannot close a dialog the coordinator already took away (a conflicting primary, a notebook switch), so the two diverge and the plugin renders a dialog core believes is closed. |
-| Open a dialog from `source.detail_section` | Two reasons. `ExtensionModal`'s `position: fixed` resolves against the host's own floating card there, so the dialog follows the source-detail window; and that host holds the `source-detail` primary lease, which the `extension` lease conflicts with — opening one closes the source-detail window, unmounting your own contribution with it. Registered limitation; `workspace.side_panel` only for now. |
+| Open a dialog from `source.detail_section` | Two reasons. `ExtensionModal`'s `position: fixed` resolves against the host's own floating card there, so the dialog follows the source-detail window; and that host holds the `source-detail` primary lease, which the `extension` lease conflicts with — opening one closes the source-detail window, unmounting your own contribution with it. **The host refuses this structurally, not by your discipline**: in that slot `actions.openDialog()`/`actions.closeDialog()` are no-ops that never reach core (a dev-mode `console.warn` fires), `context.dialog.open` is always `false`, and `ExtensionModal` throws a `TypeError` outright in that slot — it never even attempts to render. |
 
 The package files: exactly one `ui-plugin.json`, exactly one `workspace-plugin.ts` **or** `.tsx`, any number of flat sibling `.ts`/`.tsx` modules. `.d.ts` and `*.test.*` files are rejected. Dotfiles at the package root (`.DS_Store`, `.gitignore`, editor leftovers) are skipped with a note on stderr; **subdirectories are always rejected, `.git` included** — keep the UI package in its own directory, not at the repository root.
 
@@ -581,7 +581,7 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 | `plugin_bundle_spec_invalid` | Not exactly one `:`, empty module, or a non-identifier attribute | The form is `module.path:ATTRIBUTE`. |
 | `plugin_module_import_failed` | The import raised | The exception class is the diagnosis: `ModuleNotFoundError` = not installed in `PYTHON_BIN`'s environment; anything else = an error in the plugin's import-time code. |
 | `plugin_attribute_missing` | The module has no such attribute (or its `__getattr__` raised) | Check the attribute name and that it is module-level. |
-| `plugin_not_a_bundle` | `manifest` is not an `ExtensionManifest`, or `register` is not callable | Usually a plugin built against a different SDK, or a manifest built from a copy of the dataclass. |
+| `plugin_not_a_bundle` | `manifest` is not an `ExtensionManifest`, `register` is not callable, or reading either attribute raised | Usually a plugin built against a different SDK, a manifest built from a copy of the dataclass, or `manifest`/`register` implemented as a property that raises. |
 | `plugin_id_mismatch` | `manifest.id` ≠ the config key | Make them identical; the config key is authoritative. |
 | `plugin_trust_not_deployment` | `trust` is not `"deployment"` | Only `deployment` may be loaded this way. `isolated` is reserved and refused everywhere today. |
 | `plugin_api_version_unsupported` | `manifest.api_version` ≠ this build's `EXTENSION_API_VERSION` | Install the plugin build that matches this core build. |
@@ -593,7 +593,7 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 | --- | --- | --- |
 | `plugin_settings_not_a_table` | `settings` is not a table | Use `[extensions."<id>".settings]`. |
 | `plugin_settings_not_accepted` | A `[settings]` table for a plugin that declares neither `settings_model` nor `configure` | Remove the table, or add both halves to the bundle. |
-| `plugin_settings_binding_missing` | Exactly one of `settings_model` / `configure` is declared | They are a pair. Add the other, or remove both. |
+| `plugin_settings_binding_missing` | Exactly one of `settings_model` / `configure` is declared, or reading either raised | They are a pair. Add the other, or remove both; a raising property is treated the same as a missing attribute. |
 | `plugin_settings_model_invalid` | `settings_model` is not a pydantic `BaseModel` subclass | Use `pydantic.BaseModel`. |
 | `plugin_settings_unknown_key` | A key the model does not accept | The names are listed. Also lands here for a key that only matches an `AliasChoices`/`AliasPath` alias (registered limitation, fail-closed). |
 | `plugin_settings_invalid` | Pydantic rejected the table | Only the exception class is shown, because `ValidationError` echoes the rejected value. Validate locally against the same model. |
@@ -603,7 +603,8 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 
 | Code | Meaning | Fix |
 | --- | --- | --- |
-| `plugin_capability_declaration_invalid` | `capability_decisions` is absent while `provides` is non-empty, is not a Mapping, cannot be iterated, or a probe is not callable | Supply a plain `dict[str, AvailabilityProbe]`. |
+| `plugin_attribute_access_failed` | Re-reading `manifest` while merging capability decisions raised (this manifest was already read once, successfully, during bundle load — this is a non-deterministic accessor) | Only the exception class is shown. Make `manifest` a plain, non-raising attribute. |
+| `plugin_capability_declaration_invalid` | `capability_decisions` is absent while `provides` is non-empty, is not a Mapping, cannot be iterated, reading it raised, or a probe is not callable | Supply a plain `dict[str, AvailabilityProbe]`. |
 | `plugin_capability_name_invalid` | A name is not a stable id | Lowercase, dot/underscore/hyphen. `:` is reserved for core. |
 | `plugin_capability_not_declared` | A probe for a name not in `provides` | The names are listed. Add them to `provides` or drop the probes. |
 | `plugin_capability_missing_decision` | A `provides` name with no probe | The names are listed. |
