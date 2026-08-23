@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { fetchSystemExtensions } from "./system-api.ts";
 import type { SystemExtensionProjection, WorkspaceUiContribution } from "../features/extension-sdk/contracts.ts";
-import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/registry.ts";
+import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry.ts";
 
 type AvailabilityState = Readonly<{ ownerKey: string; projection: SystemExtensionProjection }>;
 type AvailabilityRequest = Readonly<{ ownerKey: string; promise: Promise<SystemExtensionProjection> }>;

@@ -210,7 +210,7 @@ import { SourceDetailWindow } from "./source-detail-window";
 import { useWorkspaceExtensions } from "./use-workspace-extensions";
 import { createOwnedWorkspaceExtensionActions } from "../features/extension-sdk/actions";
 import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
-import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/registry";
+import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry";
 import { sourceElementDomId } from "./source-detail-state";
 import { SchemaManager, type SchemaView } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
