@@ -21,6 +21,28 @@ class UiContributionProjection:
     unavailable_reason: PublicUiUnavailableReason | None
 
 
+def ui_contribution_contract(registry: ExtensionRegistry) -> list[dict[str, str]]:
+    """Static cross-stack UI topology contract (no live availability evaluation).
+
+    This is the shape compared against the frontend's build-time UI registry
+    (`frontend/tests/guards/extension-ui-parity.test.mjs`) and against the
+    committed fixture `backend/tests/fixtures/ui_extension_contract.json`.
+    Unlike `project_ui_contributions`, it never evaluates a capability
+    decision or touches a request `context`, so it is safe to call from a
+    test, at import time, or from an offline generator script — it is the
+    single source both consume; do not re-spell this list comprehension a
+    second time.
+    """
+
+    return [{
+        "plugin_id": manifest.id,
+        "version": manifest.version,
+        "contribution_id": declaration.id,
+        "slot": declaration.slot,
+        "capability": declaration.capability,
+    } for manifest, declaration in registry.ui_contributions()]
+
+
 def project_ui_contributions(
     registry: ExtensionRegistry,
     context: object | None,

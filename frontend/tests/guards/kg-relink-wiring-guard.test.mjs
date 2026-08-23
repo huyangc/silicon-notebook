@@ -103,5 +103,5 @@ test("presentation delegates relink to the hook and disables it during either ma
   const text = page.getFullText();
   assert.match(body("startRelink"), /policyRef\.current\.canWriteKg/);
   assert.match(text, /async function relinkFromKgView\(\)[\s\S]{0,120}kgWorkspace\.startRelink\(\)/);
-  assert.match(text, /disabled=\{relinkingKg \|\| kgRefreshBusy \|\| buildingKg\}/);
+  assert.match(text, /disabled=\{kgGraph\.relinking \|\| kgGraph\.rebuilding \|\| kgGraph\.buildingKg\}/);
 });

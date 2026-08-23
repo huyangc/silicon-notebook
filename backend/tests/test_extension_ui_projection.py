@@ -15,7 +15,7 @@ from app.extension_sdk import (
     UiContributionDeclaration,
 )
 from app.extensions import build_extension_registry
-from app.extensions.ui_projection import project_ui_contributions
+from app.extensions.ui_projection import project_ui_contributions, ui_contribution_contract
 
 
 @dataclass
@@ -221,11 +221,5 @@ def test_default_backend_ui_topology_matches_cross_stack_contract():
     fixture = json.loads(
         (Path(__file__).parent / "fixtures" / "ui_extension_contract.json").read_text()
     )
-    actual = [{
-        "plugin_id": manifest.id,
-        "version": manifest.version,
-        "contribution_id": declaration.id,
-        "slot": declaration.slot,
-        "capability": declaration.capability,
-    } for manifest, declaration in default_extension_runtime().registry.ui_contributions()]
+    actual = ui_contribution_contract(default_extension_runtime().registry)
     assert fixture == {"api_version": "1", "contributions": actual}

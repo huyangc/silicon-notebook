@@ -33,8 +33,8 @@ test("page composes one typed root-modal coordinator and has no legacy modal boo
   assert.doesNotMatch(pageText, /\{editingNotebook && \([\s\S]{0,120}aria-modal="true"/);
   assert.doesNotMatch(pageText, /\{deleteNotebook && \([\s\S]{0,120}aria-modal="true"/);
   assert.doesNotMatch(pageText, /\{schemaModalOpen && \([\s\S]{0,120}aria-modal="true"/);
-  assert.match(pageText, /<SourceDetailWindow[\s\S]{0,240}interactive=\{sourceDetailModal\.topmost\}/);
-  assert.match(pageText, /<KgAnalysisView[\s\S]{0,300}interactive=\{kgAnalysisModal\.topmost\}/);
+  assert.match(pageText, /<SourceDetailWindow[\s\S]{0,240}interactive=\{rootModals\.view\("source-detail"\)\.topmost\}/);
+  assert.match(pageText, /<KgAnalysisView[\s\S]{0,300}interactive=\{rootModals\.view\("kg-analysis"\)\.topmost\}/);
 });
 
 test("coordinator is presentation-only: React is its sole dependency and it owns no I/O or timer", () => {
@@ -121,35 +121,40 @@ test("collection and KG payload owners are coordinated only through typed presen
 });
 
 test("only the coordinator top layer drives the model focus trap", () => {
-  assert.match(pageText, /interactive=\{modelPanel\.topmost\}/);
+  assert.match(pageText, /interactive=\{rootModals\.view\("model-service"\)\.topmost\}/);
   assert.match(modelPanel.getText(modelPanel), /if \(!interactive\) return;/);
   assert.match(modelPanel.getText(modelPanel), /onClose\("escape"\)/);
 });
 
+// page.tsx 不再把每个 slot 的 view() 摊平成局部别名，每个使用点都直接
+// `rootModals.view("<slot>")`——下面两张表因此改按 slot id 生成正则，而不是按
+// 别名标识符。
 test("every coordinated root surface leaves the interaction tree when it is covered", () => {
-  const inlineViews = [
-    "notebookShareModal", "sharedPreviewModal", "sharedByMeModal", "sourceModal",
-    "notebookEditorModal", "notebookDeleteModal", "infoModalView", "analyticsModal",
-    "kgSchemaModal", "understandingModal", "promotionQueueModal", "promotionTargetModal",
-    "edgeReviewModal",
+  const inlineSlots = [
+    "notebook-share", "shared-preview", "shared-by-me", "source-add",
+    "notebook-editor", "notebook-delete", "info", "analytics",
+    "kg-schema", "understanding", "promotion-queue", "promotion-target",
+    "edge-review",
   ];
-  for (const view of inlineViews) {
+  for (const slot of inlineSlots) {
+    const view = `rootModals\\.view\\("${slot}"\\)`;
     assert.match(
       pageText,
       new RegExp(`aria-modal=\\{${view}\\.topmost\\}[\\s\\S]{0,180}aria-hidden=\\{!${view}\\.topmost\\}[\\s\\S]{0,180}inert=\\{${view}\\.topmost \\? undefined : true\\}`),
-      view,
+      slot,
     );
   }
   const componentBindings = [
-    ["PasswordChangeModal", "passwordModal"],
-    ["SearchProfileModal", "searchProfileModal"],
-    ["MemorySaveDialog", "memorySaveModal"],
-    ["CommandCatalogReview", "catalogReviewModal"],
-    ["ConversationShareModal", "conversationShareModal"],
-    ["SourceDetailWindow", "sourceDetailModal"],
-    ["KgAnalysisView", "kgAnalysisModal"],
+    ["PasswordChangeModal", "password-change"],
+    ["SearchProfileModal", "search-profile"],
+    ["MemorySaveDialog", "memory-save"],
+    ["CommandCatalogReview", "catalog-review"],
+    ["ConversationShareModal", "conversation-share"],
+    ["SourceDetailWindow", "source-detail"],
+    ["KgAnalysisView", "kg-analysis"],
   ];
-  for (const [component, view] of componentBindings) {
+  for (const [component, slot] of componentBindings) {
+    const view = `rootModals\\.view\\("${slot}"\\)`;
     assert.match(
       pageText,
       new RegExp(`<${component}[\\s\\S]{0,700}interactive=\\{${view}\\.topmost\\}[\\s\\S]{0,160}zIndex=\\{${view}\\.zIndex\\}`),
