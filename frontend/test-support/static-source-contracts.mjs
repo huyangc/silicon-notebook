@@ -24,4 +24,16 @@ export const STATIC_SOURCE_CONTRACTS = Object.freeze({
     reason: "keeps build-time UI contributions identical to the frozen backend declaration contract",
     roots: ["features/extension-sdk/registry.ts", "../backend/tests/fixtures/ui_extension_contract.json"],
   }),
+  workspaceUiPluginPackaging: Object.freeze({
+    category: "supply-chain",
+    reason:
+      "keeps out-of-tree UI plugin packages inside the import allowlist and the generated"
+      + " artifacts out of version control",
+    roots: [
+      "features/ext-*",
+      "features/extension-sdk/registry.local.ts",
+      "package.json",
+      "../.gitignore",
+    ],
+  }),
 });
