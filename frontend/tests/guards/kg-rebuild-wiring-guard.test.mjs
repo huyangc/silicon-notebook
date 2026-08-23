@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 
 import { findFunction, parseModule } from "../../test-support/semantic-source.mjs";
 
-const hook = await parseModule("use-kg-workspace.ts");
+// 拆分后 rebuild 追踪落在 KG 图谱领域 owner 里（`use-kg-workspace.ts` 只剩组合层）。
+const hook = await parseModule("use-kg-graph.ts");
 const page = await parseModule("page.tsx");
 const source = hook.getFullText();
 
@@ -125,12 +126,14 @@ test("rebuild refresh reaccounts the selected concept after replacing the graph"
   assert.match(refresh, /setNodeContext\(null\)/);
 });
 
+// 见 kg-relink-wiring-guard 里同名测试的说明：owner 建立时的恢复探针现在是这个
+// 领域 owner 的具名命令 `adoptOwner`，不再是一段按文本切出来的 effect 前缀。
 test("owner recovery adopts server-running rebuild without inferring pending work from dirty", () => {
-  const ownerEffect = source.slice(source.indexOf("useEffect(() => {"), source.indexOf("const beginNotebookTransition"));
-  assert.match(ownerEffect, /fetchUnifiedKgRebuildStatus\(notebookId\)/);
-  assert.match(ownerEffect, /claimNotebookSlot\(current, ownerKey\(owner\)\)/);
-  assert.equal(ownerEffect.includes("pendingRebuildRef.current.add"), false);
-  assert.equal(ownerEffect.includes("dirty"), false);
+  const adopt = body("adoptOwner");
+  assert.match(adopt, /fetchUnifiedKgRebuildStatus\(owner\.notebookId\)/);
+  assert.match(adopt, /claimNotebookSlot\(current, ownerKey\(owner\)\)/);
+  assert.equal(adopt.includes("pendingRebuildRef.current.add"), false);
+  assert.equal(adopt.includes("dirty"), false);
 });
 
 test("presentation disables both maintenance actions while either shared task is busy", () => {

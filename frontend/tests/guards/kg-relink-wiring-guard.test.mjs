@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 
 import { findFunction, parseModule } from "../../test-support/semantic-source.mjs";
 
-const hook = await parseModule("use-kg-workspace.ts");
+// 拆分后 relink 追踪落在 KG 图谱领域 owner 里（`use-kg-workspace.ts` 只剩组合层）。
+const hook = await parseModule("use-kg-graph.ts");
 const page = await parseModule("page.tsx");
 const source = hook.getFullText();
 
@@ -93,10 +94,15 @@ test("relink refresh reads the current range through its ref, not poll dependenc
   assert.match(refresh, /setUnifiedGraph\(graph\)/);
 });
 
+// 新 owner 建立时的维护态恢复探针现在是这个领域 owner 自己的具名命令
+// `adoptOwner(owner, notebookSnapshot)`——由 `use-kg-owner.ts` 的 owner 建立
+// effect 经组合层扇出调用。按函数体断言比原来的「从第一个 useEffect 切到
+// beginNotebookTransition」文本切片更精确，且 findFunction 找不到就直接抛，
+// 天然是空转保护。
 test("owner recovery adopts a server-running relink under the actor+notebook key", () => {
-  const ownerEffect = source.slice(source.indexOf("useEffect(() => {"), source.indexOf("const beginNotebookTransition"));
-  assert.match(ownerEffect, /fetchRelinkStatus\(notebookId\)/);
-  assert.match(ownerEffect, /claimNotebookSlot\(current, ownerKey\(owner\)\)/);
+  const adopt = body("adoptOwner");
+  assert.match(adopt, /fetchRelinkStatus\(owner\.notebookId\)/);
+  assert.match(adopt, /claimNotebookSlot\(current, ownerKey\(owner\)\)/);
 });
 
 test("presentation delegates relink to the hook and disables it during either maintenance kind", () => {
