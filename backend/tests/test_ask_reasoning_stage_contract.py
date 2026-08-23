@@ -329,7 +329,7 @@ def test_run_kind_authority_rejects_hostile_str_subclass(monkeypatch):
         draft = ReasoningResponseDraft(
             notebook_id="nb",
             question="q",
-            response=AskResponse(conclusion="ok"),
+            response=AskResponse(conclusion="ok", mode="reasoning"),
             conversation_id="conv",
             user_id="user",
             job_id="",
@@ -507,6 +507,7 @@ def test_commit_stage_preserves_the_shared_response_object_graph(monkeypatch):
     response = AskResponse(
         conclusion="ok",
         citations=[citation, citation],
+        mode="reasoning",
     )
     assert response.citations[0] is response.citations[1]
     monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
@@ -555,7 +556,7 @@ def test_commit_stage_requires_the_injected_connection_probe_identity(
     draft = ReasoningResponseDraft(
         notebook_id="nb",
         question="q",
-        response=AskResponse(conclusion="ok"),
+        response=AskResponse(conclusion="ok", mode="reasoning"),
         conversation_id="conv",
         user_id="user",
         job_id="",
@@ -587,7 +588,7 @@ def test_commit_stage_rejects_wrong_run_kind_and_empty_actor(monkeypatch):
         draft = ReasoningResponseDraft(
             notebook_id="nb",
             question="q",
-            response=AskResponse(conclusion="ok"),
+            response=AskResponse(conclusion="ok", mode="reasoning"),
             conversation_id="conv",
             user_id="victim",
             job_id="",
@@ -759,7 +760,7 @@ def test_response_draft_stage_receives_the_frozen_post_retrieval_envelope(
     monkeypatch,
 ):
     _stub_retrieval(monkeypatch)
-    stage = _RecordingDraftStage(AskResponse(conclusion="drafted"))
+    stage = _RecordingDraftStage(AskResponse(conclusion="drafted", mode="reasoning"))
     service = _minimal_ask_service(response_draft_stage=stage)
     monkeypatch.setattr(service, "_save_answer", lambda *args, **kwargs: "answer-1")
 
@@ -794,7 +795,9 @@ def test_injected_response_draft_stage_replaces_only_the_draft(monkeypatch):
         location_label="§1",
         quoted_span="evidence",
     )
-    response = AskResponse(conclusion="drafted", citations=[citation, citation])
+    response = AskResponse(
+        conclusion="drafted", citations=[citation, citation], mode="reasoning",
+    )
     stage = _RecordingDraftStage(response)
     service = _minimal_ask_service(response_draft_stage=stage)
     saves: list = []
@@ -841,6 +844,23 @@ def test_default_response_draft_stage_is_the_shipped_inline_logic(monkeypatch):
     assert probe.held is False
 
 
+def test_default_response_draft_stage_rejects_a_malformed_envelope_directly():
+    """The full authority sweep for this point now runs once, in the
+    orchestrator, before it ever enters this seam -- ``_draft_reasoning_response``
+    no longer repeats it.  But this method is itself the shipped stage's own
+    body and remains directly callable outside the orchestrator's protection
+    (e.g. by a future caller that reaches it some other way), so its own
+    ``type(...)`` checks stay as defense-in-depth and must still fail loudly
+    on a malformed envelope."""
+
+    service = _minimal_ask_service()
+
+    with pytest.raises(
+        StageBoundaryError, match="invalid reasoning response draft input",
+    ):
+        service._draft_reasoning_response(SimpleNamespace(), object())
+
+
 @pytest.mark.parametrize(
     "stage_impl,error",
     [
@@ -872,13 +892,33 @@ def test_response_draft_stage_output_type_is_a_core_invariant(
     assert saves == []
 
 
+def test_response_draft_stage_cannot_change_the_ask_mode(monkeypatch):
+    """The commit boundary re-verifies ``mode``: an injected stage cannot
+    silently steer a reasoning turn's persisted answer into another mode's
+    shape (e.g. a stage double that forgets to set it, or one that copies a
+    ``chunk``-mode response by mistake)."""
+
+    _stub_retrieval(monkeypatch)
+    stage = _RecordingDraftStage(AskResponse(conclusion="drafted", mode="chunk"))
+    service = _minimal_ask_service(response_draft_stage=stage)
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(StageBoundaryError, match="changed the ask mode"):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert len(stage.calls) == 1
+    assert saves == []
+
+
 def test_response_draft_stage_cannot_return_holding_a_database_connection(
     monkeypatch,
 ):
     _stub_retrieval(monkeypatch)
     probe = _HoldProbe()
     stage = _RecordingDraftStage(
-        AskResponse(conclusion="drafted"),
+        AskResponse(conclusion="drafted", mode="reasoning"),
         before_return=lambda: setattr(probe, "held", True),
     )
     service = _minimal_ask_service(
@@ -900,7 +940,7 @@ def test_response_draft_stage_cannot_replace_the_connection_authority(monkeypatc
     probe = _HoldProbe()
     service_box: list = []
     stage = _RecordingDraftStage(
-        AskResponse(conclusion="drafted"),
+        AskResponse(conclusion="drafted", mode="reasoning"),
         before_return=lambda: setattr(
             service_box[0], "retrieval_connection_probe", _HoldProbe()
         ),
@@ -916,6 +956,43 @@ def test_response_draft_stage_cannot_replace_the_connection_authority(monkeypatc
 
     with pytest.raises(StageBoundaryError, match="connection authority changed"):
         service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert saves == []
+
+
+def test_response_draft_stage_entry_rejects_a_connection_held_after_retrieval(
+    monkeypatch,
+):
+    """The authority sweep now runs once, in the orchestrator, immediately
+    before it enters the synthesis seam -- not only afterwards at the commit
+    boundary.  A connection acquired between retrieval and the seam (e.g. by
+    ``_activate_selected_source_graph``) must block entry outright: the stage
+    -- shipped or injected -- never runs at all.  ``stage.calls == []`` is
+    what distinguishes this from the "before-persist" checks above, which
+    only fire *after* the stage has already run once."""
+
+    _stub_retrieval(monkeypatch)
+    probe = _HoldProbe()
+    stage = _RecordingDraftStage(AskResponse(conclusion="drafted", mode="reasoning"))
+    service = _minimal_ask_service(
+        response_draft_stage=stage, retrieval_connection_probe=probe
+    )
+    monkeypatch.setattr(
+        service,
+        "_activate_selected_source_graph",
+        lambda notebook_id, chunks, **kwargs: (
+            setattr(probe, "held", True), (list(chunks), None)
+        )[1],
+    )
+    saves: list = []
+    monkeypatch.setattr(
+        service, "_save_answer", lambda *args, **kwargs: saves.append(True)
+    )
+
+    with pytest.raises(
+        StageBoundaryError, match="database connection at response-draft",
+    ):
+        service.ask_reasoning("nb", _reasoning_request(), user_id="user")
+    assert stage.calls == []
     assert saves == []
 
 
@@ -951,7 +1028,7 @@ def test_cancellation_is_checked_on_both_sides_of_the_response_draft_stage(
     #     last check before the atomic save, so the answer row is never written.
     late_cancel = threading.Event()
     late_stage = _RecordingDraftStage(
-        AskResponse(conclusion="drafted"),
+        AskResponse(conclusion="drafted", mode="reasoning"),
         before_return=late_cancel.set,
     )
     late_service = _minimal_ask_service(response_draft_stage=late_stage)
