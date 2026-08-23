@@ -1416,11 +1416,20 @@ bash scripts/check.sh
 `scripts/check.sh` is the level-1 edit-time and PR/push offline gate. It runs three bounded
 lanes concurrently: the stable backend pytest suite with default 12 backend pytest workers
 (override with `BACKEND_PYTEST_WORKERS`), syntax/smoke/contract/harness
-checks, and frontend tests plus the typechecking production build. Node's test
-runner and Vitest are each capped at four workers so they do not oversubscribe
-the backend critical path. `next build` must keep TypeScript errors fatal
-(`ignoreBuildErrors` stays unset), and level 1 must not run the same
-`tsc --noEmit` immediately before that build. The level-1 backend lane excludes
+checks, and frontend tests plus the typechecking production build and the
+package typecheck. Node's test runner and Vitest are each capped at four
+workers so they do not oversubscribe the backend critical path. `next build`
+must keep TypeScript errors fatal (`ignoreBuildErrors` stays unset) and stays
+the fail-closed typecheck for production code, but Next's build-time type
+checker silently drops every diagnostic in `*.test.*`/`*.spec.*` files and
+`__tests__`/`__mocks__` directories (the ignoreRegex in
+`next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type
+error that only exists under `frontend/tests/**` never fails the build. The
+frontend lane therefore runs `npm run lint` (`tsc --noEmit`) after the build —
+after, so it type-checks the freshly regenerated `.next/types` instead of a
+stale tree — as the one pass that sees those files; with `incremental` the
+warm re-check costs under a second (~5s cold), so the duplicate parse the lane
+once avoided is no longer a budget concern. The level-1 backend lane excludes
 the `slow` real-index/performance marker, the `graph_index_contract` cold graph/index
 contracts, the `architecture_contract_heavy` subset (>2s per test) of the repository-wide
 semantic source scans, and the separately authoritative PostgreSQL tree. The remaining,

@@ -14,7 +14,13 @@ fi
 
 cd "$ROOT_DIR/frontend"
 npm run test
-# `next build` owns the G1 typecheck and fails closed on TypeScript errors.
-# Keep the package typecheck as a targeted G0 command; running the same TypeScript pass
-# immediately before Next's type-validation pass only parses the program twice.
+# `next build` keeps TypeScript errors fatal for production code (`ignoreBuildErrors`
+# stays unset), but Next's build-time type checker silently drops every diagnostic in
+# `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the ignoreRegex
+# in next/dist/lib/typescript/runTypeCheck.js), so a type error that only exists under
+# frontend/tests/** never fails the build. `npm run lint` (tsc --noEmit) is the one
+# pass that sees those files. It runs after the build so `.next/types` has just been
+# regenerated (a stale tree cannot fail on generated route types), and `incremental`
+# keeps the warm re-check under a second (~5s cold).
 npm run build
+npm run lint
