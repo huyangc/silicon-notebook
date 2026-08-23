@@ -382,10 +382,6 @@ type NotebookOpenOutcome = {
   readonly notebook: NotebookSummary;
 };
 
-// 来源库的 begin 不发 ticket（它靠自己的 generation ref 守门），但编排器要用一个
-// 非空返回值区分「已建立」与「拒绝」，所以给它一个固定哨兵。
-const SOURCE_LIBRARY_TRANSITION = Object.freeze({ owner: "source-library" });
-
 function sourceTopicCandidates(notebook: NotebookSummary | null, sources: SourceSummary[]): string[] {
   const stop = new Set([
     "source", "untitled", "notebook", "markdown", "paper", "abstract", "section",
@@ -2522,6 +2518,22 @@ export default function Home() {
    * ⚠ settle 顺序与接入前那份固定顺序（ask → ext → report → kg → rootModals）不同，
    * 这是可证明惰性的：五个 finish 各自只按自己 hook 的 generation ref 守门、只写自己
    * hook 的 state，彼此不互读，同一 React 批次内提交出的渲染结果相同。
+   *
+   * ⚠ 第三处重排：`commitNotebookSnapshot`（来源库那一步唯一的 commit 相位）相对
+   * `applyOpenedNotebook` 里那五个 setState（`setBaseScopeSelection`/
+   * `setBackfillingMeta`/`setChatMode`/`setOuterView`/`setCurrentNotebookBases`），
+   * 接入前排在它们**之前**（夹在 `setTitleDraft` 与这五个之间——八个 setState 里的
+   * 「中间」位置）；现在编排器先跑完整个 `apply()`（八个 setState 全部同步发出）再
+   * 进入 commit 循环，`commitNotebookSnapshot` 因此挪到了这五个**之后**。同样可证明
+   * 惰性：它只读写 sourceLibrary 自己 hook 的状态，不读也不写这五个 setState 写的
+   * page 状态，八者仍在同一次 React 批次内提交，最终渲染结果不变。
+   *
+   * ⚠ step 顺序也决定 commit 顺序（编排器按声明序逐个 await 有 Promise 返回值的
+   * commit）：source-library 必须排在 ask-session 之前——它的 commit
+   * （`commitNotebookSnapshot`）是同步的，ask-session 的 commit（`restoreNotebook`）
+   * 返回 Promise、会被 await。commit 循环按声明序执行，source-library 排在
+   * ask-session 之前保证快照的同步提交先发生；挪到之后，快照提交就会跨过
+   * ask-session 那次 await 插入的、可被顶替的微任务窗口。
    */
   function notebookTransitionSteps(
     owner: { actorId: string; notebookId: string; workspaceEpoch: number },
@@ -2552,9 +2564,13 @@ export default function Home() {
       }),
       transitionStep({
         name: "source-library",
+        // 来源库的 begin 不发有意义的 ticket（它靠自己的 generation ref 守门），只需要
+        // 一个非空返回值区分「已建立」与「拒绝」。每次现铸新对象——不用共享的模块级
+        // 哨兵——让不变量③（一个 run 只 settle 自己那批 ticket）对它也成为真命题，
+        // 而不是仅仅因为 settle 忽略了 ticket 值才凑巧成立。
         begin: () => {
           sourceLibrary.beginTransition();
-          return SOURCE_LIBRARY_TRANSITION;
+          return {};
         },
         // 来源列表由 page 在取数之后**显式提交稳定快照**（红线：不得改成 effect
         // 再拉一次）。它是唯一一个有 commit 相位的 owner。

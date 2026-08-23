@@ -117,10 +117,23 @@ test("delete tombstones suppress stale rows and snapshot reads converge across t
   assert.match(removeText, /deletedIdsRef\.current\.set/);
 
   // 结构项 F3：打开笔记本的 `load` 相位搬进了具名的 `openNotebookSnapshot`
-  // （`openNotebook` 只声明 transition plan）。稳定快照读取仍在同一条路径上。
+  // （`openNotebook` 只声明 transition plan）。稳定快照读取仍在同一条路径上——
+  // 这条钉的不只是 `openNotebookSnapshot` 自己含 `readStableSourceSnapshot`
+  // （那本身可能是一段没人调用的死代码），还要钉住 `openNotebook` 的 plan 真的把
+  // `load` 相位接到这个函数上，即稳定快照读取确实在**实际执行路径**上。
   const open = findFunctionIn(page, "Home", "openNotebookSnapshot");
   const openText = open.getText(page);
   assert.match(openText, /readStableSourceSnapshot/);
+  const openNotebook = findFunctionIn(page, "Home", "openNotebook");
+  const runCall = callSitesIn(openNotebook).find(
+    (call) => call.target === "runNotebookTransition",
+  );
+  assert.ok(runCall, "openNotebook 必须调用 runNotebookTransition");
+  assert.match(
+    runCall.arguments[0],
+    /\bload: \(\) => openNotebookSnapshot\(/,
+    "plan 的 load 相位必须引用 openNotebookSnapshot，而不是内联并行取数",
+  );
   const commit = findFunctionIn(sourceLibrary, "useSourceLibrary", "commitNotebookSnapshot");
   assert.ok(callSitesIn(commit).some((call) => call.target === "filterDeletedSourceItems"));
 
