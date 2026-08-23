@@ -138,9 +138,22 @@ def _facade_class(cls) -> tuple[ast.ClassDef, int]:
     return class_node, start - 1
 
 
-def _facade_functions(cls) -> tuple[list[ast.FunctionDef], int]:
+def _facade_functions(
+    cls,
+) -> tuple[list[ast.FunctionDef | ast.AsyncFunctionDef], int]:
+    """Every method the class body defines, ``async def`` included.
+
+    The facade has no coroutine methods today, but the caller census and the
+    surface guards both enumerate through this helper: a ``FunctionDef``-only
+    filter would make a future ``async def`` seat invisible to
+    ``--assert-no-retire-now`` (codex #575 R1 P2).
+    """
     class_node, offset = _facade_class(cls)
-    functions = [node for node in class_node.body if isinstance(node, ast.FunctionDef)]
+    functions = [
+        node
+        for node in class_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
     return functions, offset
 
 
