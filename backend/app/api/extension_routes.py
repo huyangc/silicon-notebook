@@ -25,15 +25,20 @@ gate, and none of those shapes would be caught by a path-template rule.
 Two response-shape rules the mount also enforces, both about not letting a
 plugin's failure look like a core failure:
 
-* a 401 that a plugin handler either *raises* or *returns* (a plugin proxying
-  an upstream service's own 401 response is a normal return, not a raise)
-  becomes a 424 (see ``_wrap_handler_unauthorized``), because the browser
-  treats 401 as "your session died" and logs the user out. "Raises" covers
-  both ``fastapi.HTTPException`` and ``starlette.exceptions.HTTPException`` —
-  the former is a subclass of the latter, but a plugin author has no reason
-  to know that, and one that imports the Starlette base directly (or a
-  library it depends on raises it under the hood) gets exactly the same 424,
-  not a leaked 401;
+* a 401 that plugin code either *raises* or *returns* (a plugin proxying an
+  upstream service's own 401 response is a normal return, not a raise) becomes
+  a 424 (see ``_wrap_handler_unauthorized``), because the browser treats 401 as
+  "your session died" and logs the user out. "Plugin code" is the handler *and*
+  the plugin's own ``Depends(...)`` callables — an upstream check written as a
+  dependency is the ordinary shape, and dependencies are solved before the
+  endpoint runs, so covering only the handler would leave that shape leaking a
+  real 401. Core's own dependencies are excluded by identity and by module, so
+  a genuinely missing session still logs the user out. "Raises" covers both
+  ``fastapi.HTTPException`` and ``starlette.exceptions.HTTPException`` — the
+  former is a subclass of the latter, but a plugin author has no reason to know
+  that, and one that imports the Starlette base directly (or a library it
+  depends on raises it under the hood) gets exactly the same 424, not a leaked
+  401;
 * everything else the plugin raises or returns is its own business.
 
 Failures here raise :class:`PluginRouteMountError` out of ``create_app()``, so
@@ -51,6 +56,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute
+from fastapi.security.base import SecurityBase
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -502,6 +508,172 @@ def _translate_unauthorized_response(
     return user_error(424, "扩展服务的上游认证失败，请联系管理员")
 
 
+def _core_dependency_calls() -> set[Any]:
+    """Every dependency callable on a plugin route that *core* owns.
+
+    These are the ones whose 401 must reach the browser untranslated: a missing
+    or expired session really does mean "log out and start again", and rewriting
+    it to 424 would strand the user on a page that never re-authenticates. The
+    notebook gates are here for the mirror-image reason — they answer 404, not
+    401, but naming them keeps this set exactly "what core mounted" rather than
+    "the two authentication ones I happened to remember".
+
+    Identity, not shape: ``require_notebook_capability`` is ``lru_cache``d, so
+    the objects in :func:`_notebook_gates` are the same ones FastAPI recorded in
+    ``route.dependant``.
+    """
+
+    calls = _notebook_gates()
+    calls.add(get_current_user)
+    calls.add(plugin_actor)
+    return calls
+
+
+def _declared_in_core(call: Any) -> bool:
+    """Whether ``call`` was defined inside the ``app`` package.
+
+    The second half of the core-dependency test, and the reason it is not
+    redundant with :func:`_core_dependency_calls`: that set is exact for the
+    dependencies core *hands* a plugin, but a plugin composing its own guard out
+    of a core helper (``Depends(some_core_read_helper)``) would land a callable
+    that is core-owned without being one of those four objects. Translating such
+    a callable's 401 would be the same product bug as translating
+    ``get_current_user``'s.
+
+    ``__module__`` is read off the callable first and off its type second, which
+    is what makes a callable *class instance* resolve to where the class was
+    defined rather than to ``builtins``. A callable with neither (a
+    ``functools.partial``) resolves to ``functools`` and is therefore treated as
+    plugin-owned — the fail-open-to-translation direction, which for a genuinely
+    core partial is already covered by the identity set above.
+    """
+
+    module = getattr(call, "__module__", None)
+    if not isinstance(module, str):
+        module = getattr(type(call), "__module__", "") or ""
+    return module == "app" or module.startswith("app.")
+
+
+def _plugin_owned_dependants(dependant: Any, core_calls: set[Any]) -> list[Any]:
+    """Every sub-dependant under ``dependant`` whose callable the plugin owns.
+
+    Same transitive walk as :func:`_dependant_calls` (a plugin wrapping one of
+    its own dependencies in another is as normal as wrapping a core gate), but
+    it yields the ``Dependant`` *nodes* rather than the callables, because the
+    caller has to swap ``.call`` on each one.
+
+    ``dependant`` itself is deliberately not included: that is the endpoint, and
+    it is wrapped separately with the returned-``Response`` check the
+    dependencies must not get (see :func:`_wrap_handler_unauthorized`).
+
+    Three exclusions, each load-bearing:
+
+    * core's own callables (:func:`_core_dependency_calls` /
+      :func:`_declared_in_core`) — see those docstrings;
+    * generator dependencies (``yield``), for the same reason the endpoint skips
+      them: FastAPI drives them through ``_solve_generator`` and an exit stack,
+      and a plain function in that slot is not a generator at all;
+    * security schemes. FastAPI reads ``Dependant._security_scheme`` off
+      ``call`` when it builds the OpenAPI document, and a scheme also describes
+      the *incoming* request's credentials — the one 401 on a plugin route that
+      is genuinely about the caller rather than about some upstream service.
+    """
+
+    owned: list[Any] = []
+    stack = list(getattr(dependant, "dependencies", ()) or ())
+    while stack:
+        node = stack.pop()
+        stack.extend(getattr(node, "dependencies", ()) or ())
+        call = getattr(node, "call", None)
+        if call is None:
+            continue
+        if call in core_calls or _declared_in_core(call):
+            continue
+        if isinstance(call, SecurityBase):
+            continue
+        owned.append(node)
+    return owned
+
+
+def _install_unauthorized_translation(
+    dependant: Any,
+    emit: Callable[[Mapping[str, object]], None],
+    *,
+    translate_returned: bool,
+) -> None:
+    """Swap ``dependant.call`` for one that turns a 401 into a 424.
+
+    Shared by the endpoint and by each plugin-owned dependency;
+    ``translate_returned`` is what separates them. A handler that *returns* a
+    401 ``Response`` is proxying an upstream status and that response is the one
+    the browser gets, so it has to be checked. A dependency's return value is
+    injected as a parameter and never becomes the HTTP response, so checking it
+    there would translate nothing real and would misread a plugin that happens
+    to pass a ``Response`` object around as data.
+
+    Ordering inside this function is load-bearing. All four ``cached_property``
+    slots that are computed from ``call`` are read *before* the swap, so they
+    freeze against the original callable:
+
+    * ``is_gen_callable``/``is_async_gen_callable`` decide how FastAPI invokes
+      it (and this function refuses generators outright);
+    * ``is_coroutine_callable`` decides ``await`` versus threadpool — the
+      wrapper below matches the original either way, but warming it removes the
+      question;
+    * ``cache_key`` is ``(call, scopes, scope)``, and FastAPI dedupes a
+      dependency within one request by it. Warming it keeps the key pinned to
+      the *original* callable, so two dependants sharing one plugin dependency
+      still collapse to a single solve even though each gets its own wrapper
+      object. (Should a future FastAPI make this a plain property, the loss is
+      that such a dependency is solved twice — a cost, not a correctness
+      break.)
+    """
+
+    inner = dependant.call
+    if inner is None:  # pragma: no cover - FastAPI always sets it
+        return
+    if dependant.is_gen_callable or dependant.is_async_gen_callable:
+        return
+    is_coroutine = dependant.is_coroutine_callable
+    _ = dependant.cache_key
+
+    if is_coroutine:
+
+        @wraps(inner)
+        async def call(**values: Any) -> Any:
+            try:
+                result = await inner(**values)
+            except StarletteHTTPException as exc:
+                translated = _translate_unauthorized(exc, emit)
+                if translated is None:
+                    raise
+                raise translated from None
+            if translate_returned:
+                returned = _translate_unauthorized_response(result, emit)
+                if returned is not None:
+                    raise returned
+            return result
+
+    else:
+
+        @wraps(inner)
+        def call(**values: Any) -> Any:
+            try:
+                result = inner(**values)
+            except StarletteHTTPException as exc:
+                translated = _translate_unauthorized(exc, emit)
+                if translated is None:
+                    raise
+                raise translated from None
+            if translate_returned:
+                returned = _translate_unauthorized_response(result, emit)
+                if returned is not None:
+                    raise returned
+            return result
+
+    dependant.call = call
+
+
 def _wrap_handler_unauthorized(
     route: APIRoute, emit: Callable[[Mapping[str, object]], None]
 ) -> None:
@@ -540,6 +712,22 @@ def _wrap_handler_unauthorized(
     before the swap also warms their ``cached_property`` slots off the original
     callable rather than the wrapper.
 
+    **The plugin's own dependencies are in scope too** (codex #578 R7 P1).
+    Wrapping only the endpoint left the most natural shape for the exact
+    problem this function exists to solve completely uncovered: a plugin that
+    checks its upstream in ``Depends(check_upstream)`` and raises
+    ``HTTPException(401)`` there. FastAPI solves dependencies *before*
+    ``run_endpoint_function``, so that 401 never entered the endpoint wrapper at
+    all — it reached the browser verbatim and cleared the user's token. So the
+    dependency tree is walked and every *plugin-owned* node's ``call`` gets the
+    same translation; :func:`_plugin_owned_dependants` is where "plugin-owned"
+    is decided, and core's own gates are excluded there by identity *and* by
+    module so that a real missing-session 401 still logs the user out.
+
+    The dependencies get the raised-401 half only, not the returned-401 half —
+    see :func:`_install_unauthorized_translation` for why a dependency's return
+    value is not a response.
+
     A handler can also hand core a 401 without raising it — proxying an
     upstream service by returning a ``Response``/``JSONResponse`` built from
     the upstream's own status code is the normal shape for that, not an edge
@@ -563,44 +751,10 @@ def _wrap_handler_unauthorized(
     """
 
     dependant = route.dependant
-    inner = dependant.call
-    if inner is None:  # pragma: no cover - FastAPI always sets it
-        return
-    if dependant.is_gen_callable or dependant.is_async_gen_callable:
-        return
-    if dependant.is_coroutine_callable:
-
-        @wraps(inner)
-        async def call(**values: Any) -> Any:
-            try:
-                result = await inner(**values)
-            except StarletteHTTPException as exc:
-                translated = _translate_unauthorized(exc, emit)
-                if translated is None:
-                    raise
-                raise translated from None
-            translated = _translate_unauthorized_response(result, emit)
-            if translated is not None:
-                raise translated
-            return result
-
-    else:
-
-        @wraps(inner)
-        def call(**values: Any) -> Any:
-            try:
-                result = inner(**values)
-            except StarletteHTTPException as exc:
-                translated = _translate_unauthorized(exc, emit)
-                if translated is None:
-                    raise
-                raise translated from None
-            translated = _translate_unauthorized_response(result, emit)
-            if translated is not None:
-                raise translated
-            return result
-
-    dependant.call = call
+    core_calls = _core_dependency_calls()
+    for node in _plugin_owned_dependants(dependant, core_calls):
+        _install_unauthorized_translation(node, emit, translate_returned=False)
+    _install_unauthorized_translation(dependant, emit, translate_returned=True)
 
 
 def _call_plugin_router_factory(
