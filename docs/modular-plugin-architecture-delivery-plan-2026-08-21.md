@@ -176,7 +176,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-07：Ask auditors/observers
 
-状态：已完成并合入；独立 auditor/observer host、三条最小身份内建 observer、双路 review 与 CI 已闭合。
+状态：已完成并合入；独立 auditor/observer host、三条最小身份内建 observer、双路 review 与 CI 已闭合。2026-08-23：本 PR 引入的 `answer.audit` 扩展点已于 #569 移除（`ask.completed_observer` 未受影响，仍在用）。
 
 - 建立 answer auditor 和 completed observer host；
 - 把现有 Ask completion 后处理迁成内建 observers；
@@ -185,7 +185,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-08：Report stages + auditors/observers
 
-状态：已完成并由 PR #550 squash 合入；阶段 ownership envelope、原子 done CAS、report auditor/completed observer、双路 review 与 CI 均已闭合。
+状态：已完成并由 PR #550 squash 合入；阶段 ownership envelope、原子 done CAS、report auditor/completed observer、双路 review 与 CI 均已闭合。2026-08-23：本 PR 引入的 `report.audit` 扩展点已于 #569 移除（`report.completed_observer` 未受影响，仍在用）。
 
 - 拆 planning/generation/final audit 的明确 stage DTO；
 - 保持 intent confirmation、mandatory topics、scope revalidation、all-section retrieval、并行 drafting、claim ledger、final editor 和 retry 语义；
@@ -195,7 +195,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-09：Ingestion element enricher
 
-状态：已完成并由 PR #551 交付；默认空 topology、point-specific batch host、parser 后/core element 事务前的唯一接线、hostile/等价回归、三路 review 与 CI 均已闭合。
+状态：已完成并由 PR #551 交付；默认空 topology、point-specific batch host、parser 后/core element 事务前的唯一接线、hostile/等价回归、三路 review 与 CI 均已闭合。2026-08-23：该扩展点已于 #569 移除。
 
 - 在解析完成、核心验证之前增加类型化 element contribution；
 - 保持 source 生命周期、parser capability、图片/元素 provenance、失败和重试语义。
@@ -205,7 +205,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-10：Knowledge candidate projector
 
-状态：已完成并由 PR #552 交付；默认空 topology、point-specific batch host、core admission、唯一事务前接线、三路 review 与 CI 均已闭环。
+状态：已完成并由 PR #552 交付；默认空 topology、point-specific batch host、core admission、唯一事务前接线、三路 review 与 CI 均已闭环。2026-08-23：该扩展点已于 #569 移除。
 
 - 插件只产生候选，核心继续拥有 schema validation、审核、写事务和生命周期；
 - 不允许插件直接写核心表或持有核心事务。
@@ -222,7 +222,7 @@ Phase 1 出口：Ask/Report 共享一个 host；两项真实 contributor 都通�
 
 #### PR-12：统一 tool host / `agent.tool_provider`
 
-- 状态：已完成并由 PR #554 交付；统一冻结 catalog、core-owned scope/write policy、单 progress wrapper、默认空 provider topology、owner-bound content-free audit 与公开工具单一真源均已接线，三路 review 与 CI 已闭合；
+- 状态：已完成并由 PR #554 交付；统一冻结 catalog、core-owned scope/write policy、单 progress wrapper、默认空 provider topology、owner-bound content-free audit 与公开工具单一真源均已接线，三路 review 与 CI 已闭合；2026-08-23：本 PR 开放的 `agent.tool_provider`（外部 provider descriptor 追加那一半）已于 #569 移除，`PUBLIC_TOOLS` 现直接从核心七个 registrar 派生，不再有插件追加路径。
 - 仅在 §6.6 的四条前置红线全部可执行后开放；
 - 核心派生公开工具集合，插件不能绕过授权、审阅或数据范围。
 
