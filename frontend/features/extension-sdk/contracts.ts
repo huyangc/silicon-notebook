@@ -48,6 +48,12 @@ export type WorkspaceExtensionContext = Readonly<{
 
 export type WorkspaceExtensionActions = Readonly<{
   openUnderstanding(): void;
+  /**
+   * 重取当前笔记本的来源列表首页（复用打开时的分页/搜索状态）。窄命令，不是
+   * setter：宿主侧只用 `use-source-library.ts` 自己的具名 command
+   * `loadSourcesPage(currentPageRequest())`，插件拿不到列表状态本身。
+   */
+  refreshSources(): Promise<void>;
 }>;
 
 /**
