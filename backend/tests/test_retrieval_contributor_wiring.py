@@ -10,6 +10,8 @@ from app.services.report_engine import ReportEngine
 
 
 class _RecordingHost:
+    """A host that predates ``has_contributions``: workflows must still call it."""
+
     def __init__(self, output=None) -> None:
         self.calls = []
         self.output = output
@@ -17,6 +19,62 @@ class _RecordingHost:
     def run(self, baseline, *, invocation, **_kwargs):
         self.calls.append((baseline, invocation))
         return baseline if self.output is None else self.output
+
+
+class _CountingHost:
+    """Delegates the frozen-topology query to a real host and counts ``run``."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.runs = []
+        self.queries = []
+
+    def has_contributions(self, invocation, *, disabled_capabilities=frozenset()):
+        answer = self._inner.has_contributions(
+            invocation, disabled_capabilities=disabled_capabilities
+        )
+        self.queries.append((invocation, disabled_capabilities, answer))
+        return answer
+
+    def run(self, baseline, *, invocation, **kwargs):
+        self.runs.append((invocation, kwargs.get("disabled_capabilities")))
+        return self._inner.run(baseline, invocation=invocation, **kwargs)
+
+
+def _ask_with_host(host, *, graph=None):
+    ask = object.__new__(AskService)
+    ask.retrieval_contributors = host
+    ask.selected_source_graph = graph
+    ask.retrieval_connection_probe = SimpleNamespace(
+        is_connection_held=lambda: False
+    )
+    ask.retrieval_contributor_hydrate = (
+        lambda _notebook_id, _actor_id, _ids: ()
+    )
+    ask.current_user_id = lambda: "actor"
+    ask.settings = SimpleNamespace(selected_source_graph_enrichment_tokens=1)
+    return ask
+
+
+def _report_with_host(host, *, graph=None):
+    report = object.__new__(ReportEngine)
+    report.dependencies = SimpleNamespace(
+        retrieval_contributors=host,
+        selected_source_graph=graph,
+        retrieval_connection_probe=SimpleNamespace(
+            is_connection_held=lambda: False
+        ),
+        retrieval_contributor_hydrate=(
+            lambda _notebook_id, _actor_id, _ids: ()
+        ),
+    )
+    report.settings = SimpleNamespace(
+        ppr_top_chunks=1,
+        selected_source_graph_enrichment_tokens=1,
+    )
+    report.user_id = "actor"
+    report.cancel_event = None
+    return report
 
 
 def _graph_service_access_violations(text: str) -> list[str]:
@@ -351,3 +409,233 @@ def test_factory_created_ask_and_report_share_builtin_host(tmp_path):
         assert report_result.chunks is baseline
     finally:
         repository.close()
+
+
+def test_dormant_selected_evidence_lane_never_reaches_the_host(monkeypatch):
+    """Unconfigured graph + nothing else registered => B before any host work.
+
+    The host is the real frozen default topology, so ``has_contributions``
+    gives a real answer rather than a stubbed one; only ``run`` is counted.
+
+    Building the call bridge or the typed envelope is booby-trapped as well:
+    the contract is "return the baseline before the call/context is
+    constructed", so a short-circuit that merely moves below them is a
+    regression even though the visible result would be identical.
+
+    The traps are *recorders*, not raisers: each appends its own name to a
+    shared list and then delegates to the real implementation, rather than
+    raising ``AssertionError`` directly.  A raising trap's signal depends on
+    exactly where its call site's ``try/except`` happens to sit -- both
+    ``_activate_selected_source_graph`` implementations wrap
+    ``selected_source_graph_call_context`` in a broad ``except Exception:``,
+    so a raise from *that* trap is silently absorbed into
+    ``fail_closed_result`` instead of surfacing as a test failure, and any
+    future refactor that widens the try block around
+    ``SelectedSourceGraphContributionCall`` too would absorb that raise the
+    same way.  Recording first and returning the real implementation's result
+    keeps ``recorder == []`` true precisely when neither bridge was ever
+    invoked, independent of that call-site detail.
+    """
+    from app.extensions import default_extension_runtime
+    from app.domain.extensions import SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY
+    from app.services import ask_service as ask_module
+    from app.services import report_engine as report_module
+
+    recorder: list[tuple[str, str]] = []
+
+    def _recording(module, owner: str, name: str):
+        original = getattr(module, name)
+
+        def _wrapped(*args, **kwargs):
+            recorder.append((owner, name))
+            return original(*args, **kwargs)
+
+        return _wrapped
+
+    for owner, module in (("ask", ask_module), ("report", report_module)):
+        monkeypatch.setattr(
+            module,
+            "SelectedSourceGraphContributionCall",
+            _recording(module, owner, "SelectedSourceGraphContributionCall"),
+        )
+        monkeypatch.setattr(
+            module,
+            "selected_source_graph_call_context",
+            _recording(module, owner, "selected_source_graph_call_context"),
+        )
+
+    host = _CountingHost(default_extension_runtime().retrieval_contributors)
+    baseline = [SimpleNamespace(chunk_id="base")]
+
+    ask = _ask_with_host(host)
+    ask_chunks, ask_status = ask._activate_selected_source_graph(
+        "notebook", baseline
+    )
+
+    report = _report_with_host(host)
+    result = SimpleNamespace(chunks=baseline)
+    report._activate_selected_source_graph("notebook", result)
+
+    assert recorder == []
+    assert host.runs == []
+    assert host.queries == [
+        (
+            "selected_evidence",
+            frozenset({SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY}),
+            False,
+        ),
+    ] * 2
+    assert ask_chunks == baseline and ask_chunks is not baseline
+    assert ask_status is None
+    assert result.chunks is baseline
+    assert not hasattr(result, "baseline_chunks")
+
+
+def test_failing_topology_probe_still_enters_the_host():
+    """The probe is an optimisation; failing it must never drop a contribution.
+
+    Skipping the host on a probe error would silently discard another
+    contributor's output, so the helper has to fall back to the old path.
+    """
+    baseline = [SimpleNamespace(chunk_id="base")]
+    appended = [*baseline, SimpleNamespace(chunk_id="plugin")]
+
+    class _BrokenProbeHost(_RecordingHost):
+        def has_contributions(self, _invocation, **_kwargs):
+            raise RuntimeError("probe exploded")
+
+    host = _BrokenProbeHost(output=appended)
+    ask = _ask_with_host(host)
+    ask_chunks, ask_status = ask._activate_selected_source_graph(
+        "notebook", baseline
+    )
+
+    report = _report_with_host(host)
+    result = SimpleNamespace(chunks=baseline)
+    report._activate_selected_source_graph("notebook", result)
+
+    assert [invocation for _baseline, invocation in host.calls] == [
+        "selected_evidence",
+        "selected_evidence",
+    ]
+    assert ask_chunks == appended
+    assert ask_status is None
+    assert result.chunks == appended
+
+
+def test_registered_independent_contribution_still_enters_the_host():
+    """Non-vacuous generality: another real contribution keeps the host call."""
+    from app.extensions import build_extension_runtime
+    from app.domain.extensions import SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY
+    from app.extensions.builtin import (
+        SELECTED_SOURCE_GRAPH_BUNDLE,
+        SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID,
+    )
+    from app.extension_sdk import (
+        EXTENSION_API_VERSION,
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        Availability,
+        AvailabilityStatus,
+        ContributionDeclaration,
+        ContributionKind,
+        ContributorResult,
+        EvidenceCandidate,
+        EvidenceProvenance,
+        ExtensionContribution,
+        ExtensionManifest,
+        ExtensionResultStatus,
+        RetrievalHostContext,
+    )
+    from app.services.retrieval import RetrievedChunk
+
+    graph_decisions = []
+
+    def graph_availability(context):
+        graph_decisions.append(context)
+        if (
+            type(context) is RetrievalHostContext
+            and context.selected_source_graph_access is not None
+        ):
+            return Availability.available()
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE,
+            "selected_source_graph_access_unavailable",
+        )
+
+    def chunk(chunk_id):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="source", source_title="Source",
+            section_path="Section", text=chunk_id,
+            element_ids=[f"element-{chunk_id}"],
+        )
+
+    class _Independent:
+        invocations = frozenset({"selected_evidence"})
+
+        def __init__(self):
+            self.calls = 0
+
+        def contribute(self, _context):
+            self.calls += 1
+            return ContributorResult((EvidenceCandidate(
+                identity="other", notebook_id="notebook", source_id="source",
+                provenance=EvidenceProvenance("chunk", "other"),
+                value=object(), token_cost=1,
+            ),), ExtensionResultStatus.AVAILABLE)
+
+    contributor = _Independent()
+    declaration = ContributionDeclaration(
+        "builtin.independent",
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        ContributionKind.CONTRIBUTOR,
+    )
+
+    class _Bundle:
+        manifest = ExtensionManifest(
+            id="builtin.independent", version="1.0.0",
+            api_version=EXTENSION_API_VERSION, display_name="Independent",
+            trust="builtin", contributions=(declaration,),
+        )
+
+        def register(self, registrar):
+            registrar.add_contributor(
+                ExtensionContribution(declaration, contributor)
+            )
+
+    runtime = build_extension_runtime(
+        (SELECTED_SOURCE_GRAPH_BUNDLE, _Bundle()),
+        capability_decisions={
+            SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY: graph_availability,
+        },
+        retrieval_admission_policies={
+            SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",
+        },
+    )
+    host = _CountingHost(runtime.retrieval_contributors)
+    baseline = [chunk("base")]
+
+    ask = _ask_with_host(host)
+    ask.settings = SimpleNamespace(selected_source_graph_enrichment_tokens=100)
+    ask.retrieval_contributor_hydrate = (
+        lambda _notebook_id, _actor_id, _ids: [
+            RetrievedChunk(
+                chunk_id="other", source_id="source", source_title="Source",
+                section_path="Section", text="other",
+                element_ids=["element-other"], notebook_id="notebook",
+            )
+        ]
+    )
+    ask_chunks, ask_status = ask._activate_selected_source_graph(
+        "notebook", baseline
+    )
+
+    assert [item[2] for item in host.queries] == [True]
+    assert host.runs == [
+        ("selected_evidence", frozenset({SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY})),
+    ]
+    assert contributor.calls == 1
+    assert [item.chunk_id for item in ask_chunks] == ["base", "other"]
+    assert ask_status is None
+    # Declaring the capability disabled drops the graph contribution at the
+    # registration filter, so its live decision is never even consulted.
+    assert graph_decisions == []

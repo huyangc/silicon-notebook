@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from app.domain.extensions import (
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     RetrievalContributionCallContext,
     RetrievalEvidenceProposal,
 )
@@ -30,6 +31,21 @@ from app.services.source_scope import current_source_scope
 
 _MIN_CONTRIBUTION_EXECUTION_BUDGET = 1
 _HOST_ACCOUNTED_TOKEN_COST = 0
+# The graph capability decision registered by the extension composition root is
+# exactly ``selected_source_graph_access is not None``, which is exactly "the
+# deployment configured the service".  An unconfigured feature is therefore a
+# call-site fact rather than a live decision, so the workflow may declare it up
+# front the way the sibling generated-question lane already does.  (The decision
+# itself is not named here: workflows must not reference the composition root,
+# and that boundary is enforced by scripts/check_architecture_boundaries.py's
+# AST import-graph check, which rejects any ``app.services.*`` module that
+# imports the extension composition package (``backend/app/extensions/``)
+# outside an approved root -- reinforced, for this package specifically, by a
+# companion literal-text scan in
+# backend/tests/test_phase0_architecture_guard.py.)
+UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES = frozenset({
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY
+})
 _SOURCE_GRAPH_STATES = frozenset({
     "active", "shadow", "off", "historical", "degraded",
 })
@@ -907,6 +923,39 @@ class SelectedSourceGraphContributionCall:
             chunk.relevance,
             chunk.notebook_id,
         )
+
+
+def selected_evidence_lane_is_dormant(host: Any) -> bool:
+    """True when an unconfigured graph leaves ``selected_evidence`` with nothing.
+
+    The point stays generic: this asks the host about its own frozen topology
+    rather than assuming the graph contributor is the only one.  The moment any
+    other ``selected_evidence`` bundle/registration exists that does not
+    require the graph capability, this is False and the workflow enters the
+    host exactly as before, so that contribution keeps its output.  (The unit
+    that keeps or drops together is the *registration* under a plugin
+    manifest's ``requires``, not the individual contribution: a manifest that
+    registers more than one ``selected_evidence`` contribution shares one
+    ``requires`` set, so disabling the graph capability filters every
+    contribution that manifest registers, not just the one that logically
+    needs it.)
+
+    A host that predates the query, or a probe that answers anything other
+    than the literal ``False`` this function is checking for, both keep the
+    old path -- the probe is read strictly and defensively rather than
+    truthiness-tested, so a malformed or unexpected answer can never be
+    mistaken for "nothing else contributes here".
+    """
+    probe = getattr(host, "has_contributions", None)
+    if not callable(probe):
+        return False
+    try:
+        return probe(
+            "selected_evidence",
+            disabled_capabilities=UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES,
+        ) is False
+    except Exception:  # noqa: BLE001 — a probe failure must not skip the host
+        return False
 
 
 def selected_source_graph_call_context(

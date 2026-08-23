@@ -85,7 +85,9 @@ from app.services.retrieval_run import (
     retrieval_run,
 )
 from app.services.source_graph_activation import (
+    UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES,
     SelectedSourceGraphContributionCall,
+    selected_evidence_lane_is_dormant,
     selected_source_graph_call_context,
 )
 
@@ -700,6 +702,20 @@ class ReportEngine:
         )
         if host is None or connection_probe is None:
             return
+        disabled_capabilities: frozenset[str] = frozenset()
+        if service is None:
+            # Same call-site declaration as Ask: an unconfigured feature is a
+            # fact here, so the host never builds a context for a contribution
+            # it must reject.  A dormant lane leaves ``result`` untouched, which
+            # is the historical no-op for this path.
+            disabled_capabilities = (
+                UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES
+            )
+            if selected_evidence_lane_is_dormant(host):
+                return
+        # Split from the branch below on purpose rather than merged into one
+        # test: the dormant return has to happen before this copy, so that a
+        # dormant lane costs nothing at all.
         baseline = list(original)
         if service is None:
             call = SelectedSourceGraphContributionCall(
@@ -770,6 +786,7 @@ class ReportEngine:
                 event_sink=getattr(
                     getattr(self.dependencies, "event_log", None), "emit", None
                 ),
+                disabled_capabilities=disabled_capabilities,
             )
             visible, status = call.visible_result(host_chunks)
         except AskCancelled:

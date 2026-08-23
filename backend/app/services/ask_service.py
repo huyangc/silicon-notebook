@@ -77,7 +77,9 @@ from app.services.retrieval import (
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
+    UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES,
     SelectedSourceGraphContributionCall,
+    selected_evidence_lane_is_dormant,
     selected_source_graph_call_context,
 )
 from app.services.source_scope import source_scope_context, source_scope_restricted
@@ -415,7 +417,17 @@ class AskService:
         connection_probe = getattr(self, "retrieval_connection_probe", None)
         if host is None or connection_probe is None:
             return list(chunks), None
+        disabled_capabilities: frozenset[str] = frozenset()
         if service is None:
+            # Unconfigured feature: say so up front instead of letting the host
+            # rediscover it after building a context it will throw away.  When
+            # nothing else contributes to this point the lane is dormant and B
+            # is returned before any host work at all.
+            disabled_capabilities = (
+                UNCONFIGURED_SELECTED_SOURCE_GRAPH_CAPABILITIES
+            )
+            if selected_evidence_lane_is_dormant(host):
+                return list(chunks), None
             call = SelectedSourceGraphContributionCall(
                 None, notebook_id, chunks, max_results=max_results
             )
@@ -477,6 +489,7 @@ class AskService:
                 event_sink=getattr(
                     getattr(self, "event_log", None), "emit", None
                 ),
+                disabled_capabilities=disabled_capabilities,
             )
             return call.visible_result(host_chunks)
         except AskCancelled:

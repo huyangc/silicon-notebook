@@ -8,6 +8,12 @@ from typing import Any, Literal, Protocol, TypeVar
 
 RetrievalInvocation = Literal["selected_evidence", "chunk_candidates"]
 GENERATED_QUESTION_ACCESS_CAPABILITY = "retrieval:generated_question_access"
+# Both point-specific access capabilities are named here rather than in the SDK
+# so a workflow can declare "this call cannot provide it" without importing the
+# Extension SDK or the registry.  The SDK re-exports them for plugin manifests.
+SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY = (
+    "retrieval:selected_source_graph_access"
+)
 T = TypeVar("T")
 
 
@@ -68,6 +74,13 @@ class RetrievalContributionCallContext:
 
 
 class RetrievalContributorHostPort(Protocol):
+    def has_contributions(
+        self,
+        invocation: RetrievalInvocation,
+        *,
+        disabled_capabilities: frozenset[str] = frozenset(),
+    ) -> bool: ...
+
     def run(
         self,
         baseline: Sequence[T],

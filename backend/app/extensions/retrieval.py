@@ -210,6 +210,57 @@ class RetrievalContributorHost:
         })
         self._registry = registry
 
+    def _surviving_registrations(
+        self,
+        invocation: RetrievalInvocation,
+        disabled_capabilities: frozenset[str],
+    ) -> tuple[_FrozenRegistration, ...] | None:
+        """Validate ``disabled_capabilities`` and filter registrations by it.
+
+        Shared by ``has_contributions`` and ``_run`` so the two can never
+        silently drift apart: both must agree on exactly which registrations
+        a given ``disabled_capabilities`` set leaves standing.  Returns
+        ``None`` on malformed input rather than raising or defaulting to an
+        empty tuple, because "malformed" and "filtered down to nothing" mean
+        opposite things to the two callers -- see each caller's own handling
+        of the ``None`` sentinel, which is deliberately asymmetric.
+        """
+        if not isinstance(disabled_capabilities, frozenset) or any(
+            type(capability) is not str or not capability
+            for capability in disabled_capabilities
+        ):
+            return None
+        return tuple(
+            registration
+            for registration in self._by_invocation.get(invocation, ())
+            if registration.requires.isdisjoint(disabled_capabilities)
+        )
+
+    def has_contributions(
+        self,
+        invocation: RetrievalInvocation,
+        *,
+        disabled_capabilities: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Answer the startup-frozen topology question ``_run`` asks first.
+
+        A workflow that already knows it cannot provide a point-specific access
+        capability (an unconfigured optional feature) uses this to skip building
+        a call envelope the host would immediately discard.  It reads only the
+        frozen snapshot: no I/O, no clock, no registry availability decision, no
+        capability decision, and it never observes a request.
+
+        This deliberately answers *registration*, not live availability.  A
+        contribution reported here still goes through the host's real per-call
+        capability decision, so the query can never let a workflow reason about
+        whether a plugin will actually run.  Malformed input answers ``True`` so
+        the caller falls through to ``run``, which rejects it the same way.
+        """
+        surviving = self._surviving_registrations(invocation, disabled_capabilities)
+        if surviving is None:
+            return True
+        return bool(surviving)
+
     def run(
         self,
         baseline: Sequence[T],
@@ -248,20 +299,14 @@ class RetrievalContributorHost:
         event_sink: Callable[[dict[str, object]], None] | None = None,
         disabled_capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[T]:
-        if (
-            not isinstance(disabled_capabilities, frozenset)
-            or any(
-                type(capability) is not str or not capability
-                for capability in disabled_capabilities
-            )
-        ):
-            return baseline
-        registrations = tuple(
-            registration
-            for registration in self._by_invocation.get(invocation, ())
-            if registration.requires.isdisjoint(disabled_capabilities)
+        registrations = self._surviving_registrations(
+            invocation, disabled_capabilities
         )
         if not registrations:
+            # ``None`` (malformed ``disabled_capabilities``) and ``()`` (every
+            # registration filtered out) both mean "nothing to run" here, so
+            # this one falsy check covers both -- unlike ``has_contributions``,
+            # which must tell them apart (see ``_surviving_registrations``).
             return baseline
 
         if (

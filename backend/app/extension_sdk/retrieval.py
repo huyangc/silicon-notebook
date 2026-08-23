@@ -12,6 +12,7 @@ from typing import Any, Callable, Generic, Literal, Protocol, TypeVar, runtime_c
 
 from app.domain.extensions import (
     GENERATED_QUESTION_ACCESS_CAPABILITY,
+    SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY,
     RetrievalContributorHostPort,
     RetrievalInvocation,
 )
@@ -26,9 +27,6 @@ from app.extension_sdk.contracts import (
 RETRIEVAL_CONTRIBUTOR_POINT = "retrieval.contributor"
 RETRIEVAL_SCOPE_READER_CAPABILITY = "retrieval:scope_bound_evidence"
 SCHEDULED_MODEL_ACCESS_CAPABILITY = "model:scheduled_access"
-SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY = (
-    "retrieval:selected_source_graph_access"
-)
 RetrievalAdmissionPolicy = Literal["additive", "atomic"]
 EvidenceProvenanceKind = Literal[
     "chunk", "element", "knowledge_object", "relation", "ppr"

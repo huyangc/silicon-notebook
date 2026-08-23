@@ -1163,3 +1163,246 @@ def test_registry_rejects_non_enum_kind_through_generic_registrar():
 
     with pytest.raises(ExtensionRegistryError, match="stable metadata identifiers and kind"):
         build_extension_runtime((GenericBundle(),))
+
+
+def _has_contributions_host(*bundles, decisions=None):
+    return build_extension_runtime(
+        bundles, capability_decisions=decisions
+    ).retrieval_contributors
+
+
+def test_has_contributions_reports_the_frozen_topology_without_a_request():
+    host = _has_contributions_host(
+        _bundle("plugin.gated", _Contributor(), requires=("cap:gated",)),
+        decisions={"cap:gated": lambda _context: Availability.available()},
+    )
+
+    assert host.has_contributions("selected_evidence") is True
+    # The only registration requires the capability, so declaring it disabled
+    # leaves the point dormant and the workflow may skip the host entirely.
+    assert host.has_contributions(
+        "selected_evidence", disabled_capabilities=frozenset({"cap:gated"})
+    ) is False
+    # A point with no registration at all is dormant too.
+    assert host.has_contributions("chunk_candidates") is False
+    # Unrelated disabled capabilities never hide a registration.
+    assert host.has_contributions(
+        "selected_evidence", disabled_capabilities=frozenset({"cap:other"})
+    ) is True
+
+
+def test_has_contributions_keeps_independent_registrations_visible():
+    host = _has_contributions_host(
+        _bundle("plugin.gated", _Contributor(), requires=("cap:gated",)),
+        _bundle("plugin.free", _Contributor()),
+        decisions={"cap:gated": lambda _context: Availability.available()},
+    )
+
+    assert host.has_contributions(
+        "selected_evidence", disabled_capabilities=frozenset({"cap:gated"})
+    ) is True
+
+
+def test_has_contributions_answers_registration_not_live_availability():
+    """A registered-but-unavailable contribution must still enter the host.
+
+    Otherwise a workflow could use the query to reason about whether a plugin
+    will actually run, which is the host's decision alone.
+    """
+    host = _has_contributions_host(
+        _bundle("plugin.gated", _Contributor(), requires=("cap:gated",)),
+        decisions={
+            "cap:gated": lambda _context: Availability(
+                AvailabilityStatus.UNAVAILABLE, "never_available"
+            )
+        },
+    )
+
+    assert host.has_contributions("selected_evidence") is True
+
+
+@pytest.mark.parametrize(
+    "disabled",
+    [{"cap:gated"}, ["cap:gated"], frozenset({""}), frozenset({b"cap"}), None],
+)
+def test_has_contributions_fails_safe_on_malformed_disabled_capabilities(disabled):
+    """Malformed input answers True so the caller falls through to ``run``,
+    which rejects the same input and preserves the baseline itself."""
+    host = _has_contributions_host(
+        _bundle("plugin.gated", _Contributor(), requires=("cap:gated",)),
+        decisions={"cap:gated": lambda _context: Availability.available()},
+    )
+
+    assert host.has_contributions(
+        "selected_evidence", disabled_capabilities=disabled
+    ) is True
+    baseline = [object()]
+    assert host.run(
+        baseline, invocation="selected_evidence", disabled_capabilities=disabled
+    ) is baseline
+
+
+@dataclass
+class _MultiBundle:
+    """A single plugin manifest registering more than one contribution.
+
+    ``requires`` lives on the manifest, not on the individual contribution, so
+    every contribution a bundle registers shares the same gate -- this is the
+    shape that exercises that.
+    """
+
+    manifest: ExtensionManifest
+    implementations: tuple[object, ...]
+
+    def register(self, registrar) -> None:
+        for declaration, implementation in zip(
+            self.manifest.contributions, self.implementations
+        ):
+            registrar.add_contributor(
+                ExtensionContribution(declaration, implementation)
+            )
+
+
+def _multi_bundle(
+    plugin_id: str,
+    contribution_ids: tuple[str, ...],
+    implementations: tuple[object, ...],
+    *,
+    requires=(),
+    optional_requires=(),
+) -> _MultiBundle:
+    declarations = tuple(
+        ContributionDeclaration(
+            contribution_id, RETRIEVAL_CONTRIBUTOR_POINT, ContributionKind.CONTRIBUTOR
+        )
+        for contribution_id in contribution_ids
+    )
+    return _MultiBundle(
+        ExtensionManifest(
+            id=plugin_id,
+            version="1.0.0",
+            api_version=EXTENSION_API_VERSION,
+            display_name=plugin_id,
+            trust="builtin",
+            contributions=declarations,
+            requires=tuple(requires),
+            optional_requires=tuple(optional_requires),
+        ),
+        implementations,
+    )
+
+
+def test_has_contributions_agrees_with_run_short_circuit_across_topologies():
+    """``has_contributions`` and ``_run`` share one predicate; pin them together.
+
+    Both read ``_surviving_registrations``.  This test exists so a future edit
+    to either caller's handling of that shared result cannot quietly drift the
+    two apart: for every topology below, ``has_contributions(...) is False``
+    holds exactly when ``run(...)`` takes the pre-context short circuit --
+    returning the identical baseline object without ever calling
+    ``context_factory`` -- and ``has_contributions(...) is True`` holds
+    exactly when a real context is built and the surviving contributor's
+    candidate actually lands in the result.  Covers three shapes named in
+    review: a second contribution registered by the *same* bundle
+    (manifest-level ``requires`` must filter both together, not just the
+    first), a capability named only in ``optional_requires`` (must not gate
+    registration at all -- only ``requires`` does), and an empty ``requires``
+    (nothing to disable).
+    """
+
+    # Composition-time validation requires a decision entry for every
+    # capability named in a manifest's ``requires``, even one whose
+    # registration is filtered out by ``disabled_capabilities`` before it is
+    # ever evaluated -- so every scenario that names "cap:gated" in
+    # ``requires`` must register a decision for it up front.
+    gated_decisions = {"cap:gated": lambda _context: Availability.available()}
+
+    def _dormant_case(label, bundles, disabled, *, decisions=None):
+        runtime = build_extension_runtime(bundles, capability_decisions=decisions)
+        host = runtime.retrieval_contributors
+        baseline = ["base"]
+        context_built: list[None] = []
+
+        def context_factory():
+            context_built.append(None)
+            raise AssertionError("dormant lane must not build a context")
+
+        assert host.has_contributions(
+            "selected_evidence", disabled_capabilities=disabled
+        ) is False, label
+        result = host.run(
+            baseline,
+            invocation="selected_evidence",
+            context_factory=context_factory,
+            baseline_identity=str,
+            disabled_capabilities=disabled,
+        )
+        assert result is baseline, label
+        assert context_built == [], label
+
+    def _live_case(label, bundles, disabled, *, candidate_id, decisions=None):
+        runtime = build_extension_runtime(bundles, capability_decisions=decisions)
+        host = runtime.retrieval_contributors
+        baseline = ["base"]
+        reader = _Reader({"base", candidate_id})
+
+        assert host.has_contributions(
+            "selected_evidence", disabled_capabilities=disabled
+        ) is True, label
+        result = host.run(
+            baseline,
+            invocation="selected_evidence",
+            context_factory=lambda: _context(reader),
+            baseline_identity=str,
+            disabled_capabilities=disabled,
+        )
+        assert result == ("base", candidate_id), label
+        assert result is not baseline, label
+
+    _dormant_case(
+        "single gated contribution, capability disabled",
+        (_bundle("plugin.gated", _Contributor(), requires=("cap:gated",)),),
+        frozenset({"cap:gated"}),
+        decisions=gated_decisions,
+    )
+    _live_case(
+        "gated contribution filtered out, independent free contribution survives",
+        (
+            _bundle("plugin.gated", _Contributor(), requires=("cap:gated",)),
+            _bundle("plugin.free", _Contributor(_result(_candidate("free")))),
+        ),
+        frozenset({"cap:gated"}),
+        candidate_id="free",
+        decisions=gated_decisions,
+    )
+    _dormant_case(
+        "same bundle's second contribution shares the manifest-level gate",
+        (
+            _multi_bundle(
+                "plugin.multi",
+                ("plugin.multi.a", "plugin.multi.b"),
+                (_Contributor(), _Contributor()),
+                requires=("cap:gated",),
+            ),
+        ),
+        frozenset({"cap:gated"}),
+        decisions=gated_decisions,
+    )
+    _live_case(
+        "capability named only in optional_requires does not gate registration",
+        (
+            _bundle(
+                "plugin.optional",
+                _Contributor(_result(_candidate("optional"))),
+                optional_requires=("cap:gated",),
+            ),
+        ),
+        frozenset({"cap:gated"}),
+        candidate_id="optional",
+    )
+    _live_case(
+        "empty requires: disabling an unrelated capability is a no-op",
+        (_bundle("plugin.free", _Contributor(_result(_candidate("free")))),),
+        frozenset({"cap:unrelated"}),
+        candidate_id="free",
+    )
