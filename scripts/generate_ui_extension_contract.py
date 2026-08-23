@@ -24,6 +24,13 @@ Usage:
 was not refreshed). It is wired into scripts/check_contracts.sh so a stale
 fixture fails the contracts lane instead of only being caught by the slower
 pytest run.
+
+`contract_rows_match(committed, live) -> bool` and `contract_diff(committed,
+live) -> list[str]` are the public comparator this script's own `--check`
+uses — there is exactly one implementation of "do two fixture dicts describe
+the same contribution set", and `scripts/check_deployment_extension_parity.py`
+imports these two functions rather than re-spelling the comparison against a
+deployment-plugin registry.
 """
 from __future__ import annotations
 
@@ -49,9 +56,19 @@ API_VERSION = "1"
 
 def build_fixture() -> dict[str, object]:
     registry = default_extension_runtime().registry
+    # `ui_contribution_contract` returns rows in registry order (its own
+    # docstring: it never re-sorts, so it stays safe to call from a live
+    # request path). The committed fixture is sorted here instead, purely so
+    # the file on disk is deterministic and reproducible from an empty
+    # topology onward — both documented consumers already compare the row
+    # *set*, not list order (see `contract_rows_match` below), so this sort
+    # cannot itself turn a match into a mismatch or vice versa.
+    contributions = sorted(
+        ui_contribution_contract(registry), key=_contribution_sort_key
+    )
     return {
         "api_version": API_VERSION,
-        "contributions": ui_contribution_contract(registry),
+        "contributions": contributions,
     }
 
 
@@ -101,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if _normalized(on_disk_json) == _normalized(fixture):
+    if contract_rows_match(on_disk_json, fixture):
         # Same contributions, same api_version — only whitespace/indentation/key
         # order/list order differ (both consumers compare the row *set*, per the
         # module docstring, so a reordering alone is not a contract break). Still
@@ -123,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         "then re-run the frontend parity guard.",
         file=sys.stderr,
     )
-    for line in _diff_fixtures(on_disk_json, fixture):
+    for line in contract_diff(on_disk_json, fixture):
         print(f"  {line}", file=sys.stderr)
     return 1
 
@@ -164,14 +181,28 @@ def _contribution_key(row: object) -> tuple[str, ...] | None:
     return tuple(str(row.get(field, "")) for field in _CONTRIBUTION_KEY_FIELDS)
 
 
-def _diff_fixtures(committed: object, live: object) -> list[str]:
+def contract_rows_match(committed: object, live: object) -> bool:
+    """True when two parsed fixture dicts describe the identical contribution set.
+
+    This is the one and only comparator both documented consumers rely on —
+    `main()`'s own `--check` and `scripts/check_deployment_extension_parity.py`
+    (which compares a `--frontend-contract` file against a *deployment*-plugin
+    registry rather than this script's own `default_extension_runtime()`).
+    Row order never matters (see `_normalized`'s docstring), so callers must
+    not re-implement this as a bare `==` on unsorted `contributions` lists.
+    """
+    return _normalized(committed) == _normalized(live)
+
+
+def contract_diff(committed: object, live: object) -> list[str]:
     """Render a per-key diff between the committed and live fixture dicts.
 
     Top-level scalar keys (e.g. `api_version`) are compared directly.
     `contributions` is compared as a keyed collection (by plugin_id/version/
     contribution_id) rather than as an ordered list, so an added, removed, or
     field-changed row is reported individually instead of dumping both full
-    fixtures as opaque reprs.
+    fixtures as opaque reprs. Paired with `contract_rows_match` above — call
+    this only after that returns False, to explain *why*.
     """
     lines: list[str] = []
     if not isinstance(committed, dict) or not isinstance(live, dict):
