@@ -1,3 +1,4 @@
+import dataclasses
 import threading
 from types import SimpleNamespace
 
@@ -17,6 +18,17 @@ from app.services.source_graph_activation import SelectedSourceGraphActivationSe
 from app.services.source_graph_rollout import SourceGraphRolloutDecision
 from app.services.source_scope import source_scope_context
 from app.services.sqlite_repository import SQLiteRepository
+
+def _without_timing(status):
+    """Compare two independently timed activations without their wall clocks.
+
+    ``SourceGraphStatus.ppr_ms`` is measured separately for the legacy run and
+    the plugin run, so equality on the raw object is a race against the CI
+    machine (it failed on PR #571 with ``ppr_ms: 0 != 13``); every other
+    field is deterministic and is what the equivalence claim is about.
+    """
+    return dataclasses.replace(status, ppr_ms=0)
+
 
 
 def _chunk(chunk_id: str, source_id: str) -> RetrievedChunk:
@@ -518,7 +530,7 @@ def test_builtin_plugin_preserves_shadow_status_and_single_graph_event(monkeypat
         )
 
     assert plugin_chunks == list(legacy_result.chunks)
-    assert plugin_status == legacy_result.status
+    assert _without_timing(plugin_status) == _without_timing(legacy_result.status)
     assert plugin_events.rows == legacy_events.rows
     assert [row["state"] for row in plugin_events.rows] == ["shadow"]
 
@@ -583,7 +595,7 @@ def test_builtin_plugin_preserves_active_chunks_status_and_graph_event(monkeypat
         )
 
     assert plugin_chunks == list(legacy_result.chunks)
-    assert plugin_status == legacy_result.status
+    assert _without_timing(plugin_status) == _without_timing(legacy_result.status)
     assert plugin_events.rows == legacy_events.rows
     assert [chunk.chunk_id for chunk in plugin_chunks] == ["b", "g"]
     assert plugin_chunks[0].retrieval_supports == (
