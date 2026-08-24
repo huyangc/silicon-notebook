@@ -64,7 +64,7 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 | `SUMMARY_MAX_CHARS` | 4000 | `atom.py` | 展示护栏，不是核心那道上限，见下方说明 |
 | `AUTHOR_MAX_CHARS` | 80 | `atom.py` | |
 | `PUBLISHED_MAX_CHARS` | 40 | `atom.py` | |
-| `MAX_AUTHORS` | 20 | `atom.py` | 一条记录里超出的作者会被丢弃 |
+| `MAX_AUTHORS` | 20 | `atom.py` | 一条记录里超出的作者名字不进 `authors` 列表（内存/展示护栏），但 `authors_total` 会带出真实总数，见下方说明 |
 | `ARXIV_ID_MAX_CHARS` | 64 | `atom.py` | |
 | `MAX_RESPONSE_BYTES` | 1 MiB（1024×1024） | `client.py` | 约束的是网络成本而非内存，见第五节 |
 | `MAX_QUERY_TERMS` | 8 | `client.py` | 见下方「静默丢词」说明 |
@@ -104,6 +104,15 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 按钮并给出同一句提示，与词数上限的提示是两句独立文案；计数口径与 Python 的
 `len(str)` 同一种单位（Unicode 码点），不是 `string.length`（UTF-16 code unit，对
 基本多语言平面之外的字符会数成两个）。
+
+**`MAX_AUTHORS` 此前是一次静默丢弃，现在不再是（codex #596 R4）。** 大型联合署名
+论文（比如 ATLAS 或 CMS 的实验结果）可以带几千位作者，`atom.py::ArxivPaper.authors`
+仍然只保留前 20 个名字——这道上限的理由与 `TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` 一样，
+是为了约束单条上游记录的内存占用、让结果页仍然可读。改变的是超出上限的那部分作者
+不再直接消失：`ArxivPaper.authors_total` 会带出这条记录真实的作者总数（恒
+`>= len(authors)`），`/search` 路由的返回结构里同它一起下发，面板的
+`search-panel-model.ts::formatAuthors` 在两者不一致时会追加一句披露——「甲、乙等21
+人」——而不是把一份两千位作者的名单悄悄显示成只有 20 位。
 
 ## 四、行为披露
 

@@ -33,6 +33,11 @@ export type ArxivSearchResultItem = Readonly<{
   arxiv_id: string;
   title: string;
   authors: readonly string[];
+  // The true author count, independent of the server's own display/memory
+  // cap on `authors` (`atom.py::MAX_AUTHORS`, 20) — always `>= authors.length`.
+  // See {@link formatAuthors} for how the difference is disclosed rather
+  // than silently dropped.
+  authors_total: number;
   published: string;
   summary: string;
   pdf_url: string;
@@ -188,12 +193,25 @@ export function nextPageStart(start: number, returnedCount: number): number {
   return start + Math.max(0, returnedCount);
 }
 
-/** Join non-blank author names with the CJK enumeration comma; never truncates. */
-export function formatAuthors(authors: readonly string[]): string {
-  return authors
-    .map((name) => name.trim())
-    .filter((name) => name.length > 0)
-    .join("、");
+/**
+ * Join non-blank author names with the CJK enumeration comma. Never
+ * truncates the *list itself* — but the server already has, at
+ * `atom.py::MAX_AUTHORS` (20): `authors` here is that already-capped list,
+ * not the paper's full author roster. `total` is the roster's true size
+ * (`ArxivSearchResultItem.authors_total`, always `>= authors.length`); when
+ * it is strictly greater, a disclosure — "等 N 人" — is appended, so a
+ * thousand-author collaboration paper reads as "shown 20, and 1000 in
+ * total" rather than silently looking like a twenty-author paper. This
+ * mirrors the read-side half of the "数值上限与截断" red line: the display
+ * cap is fine, a *silent* one is not.
+ */
+export function formatAuthors(authors: readonly string[], total: number): string {
+  const names = authors.map((name) => name.trim()).filter((name) => name.length > 0);
+  const joined = names.join("、");
+  if (total > names.length) {
+    return joined.length > 0 ? `${joined}等${total}人` : `等${total}人`;
+  }
+  return joined;
 }
 
 /**

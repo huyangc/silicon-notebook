@@ -77,7 +77,7 @@ registered instead.
 | `SUMMARY_MAX_CHARS` | 4000 | `atom.py` | Display ceiling, not core's limit — see note below |
 | `AUTHOR_MAX_CHARS` | 80 | `atom.py` | |
 | `PUBLISHED_MAX_CHARS` | 40 | `atom.py` | |
-| `MAX_AUTHORS` | 20 | `atom.py` | Extra authors on a feed entry are dropped |
+| `MAX_AUTHORS` | 20 | `atom.py` | An in-memory/display ceiling on `authors`, not a silent drop — see below |
 | `ARXIV_ID_MAX_CHARS` | 64 | `atom.py` | |
 | `MAX_RESPONSE_BYTES` | 1 MiB (1024×1024) | `client.py` | Bounds network cost, not memory (see §5) |
 | `MAX_QUERY_TERMS` | 8 | `client.py` | See "silent term drop" below |
@@ -130,6 +130,19 @@ message, once the box holds more than 200 characters — counted the same way
 Python's `len(str)` counts (Unicode code points), not `string.length`
 (UTF-16 code units, which double-count anything outside the Basic
 Multilingual Plane).
+
+**`MAX_AUTHORS` used to be a silent drop; it no longer is (codex #596 R4).**
+A large-collaboration paper (an ATLAS or CMS result, say) can carry several
+thousand authors, and `atom.py::ArxivPaper.authors` still caps at 20 names —
+that ceiling exists for the same reason `TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS`
+do, to bound one upstream record's memory footprint and keep the results
+page readable. What changed is that the entries past the cap are no longer
+simply gone: `ArxivPaper.authors_total` carries the entry's true author
+count (always `>= len(authors)`), the `/search` route's wire shape includes
+it alongside the capped list, and the panel's
+`search-panel-model.ts::formatAuthors` appends a disclosure — "甲、乙等21人" —
+whenever the two diverge, rather than quietly showing a twenty-author list
+for a paper that has more.
 
 ## 4. Behaviour disclosures
 
