@@ -1035,7 +1035,12 @@ unavailability persists, or the service rejects/authenticates the request
 permanently, the shared control for that one job stops new requests, cancels
 queued source/window work, publishes `stopping` from the first failing window
 before either window- or source-level draining, and then drains calls already
-in flight. Other notebooks and later tasks are unaffected. The availability
+in flight. Probe and extraction calls forward that control's cancellation signal
+to the shared streaming JSON transport. The timeout therefore guards inactivity
+between received chunks (and initial response latency), rather than imposing a
+wall-clock cap on a long completion that continues to make progress; a gateway
+that buffers the stream or enforces its own hard request deadline remains outside
+this guarantee. Other notebooks and later tasks are unaffected. The availability
 probe explicitly bypasses the LLM response cache and does not populate it, so a
 stale successful probe cannot authorize destructive rebuild work during a live
 outage. It reuses the configured short-output budget instead of imposing a
