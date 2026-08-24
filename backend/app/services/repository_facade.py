@@ -24,6 +24,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.gap_consult import GapConsultHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     get_request_user,
@@ -290,6 +291,7 @@ class RepositoryFacade:
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -323,6 +325,7 @@ class RepositoryFacade:
             parser_provider_chain_host=parser_provider_chain_host,
             ask_completed_observer_host=ask_completed_observer_host,
             report_completed_observer_host=report_completed_observer_host,
+            gap_consult_host=gap_consult_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the

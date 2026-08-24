@@ -210,11 +210,13 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     host = object()
     parser_host = object()
     observer_host = object()
+    gap_host = object()
     runtime = SimpleNamespace(
         retrieval_contributors=host,
         parser_chain=parser_host,
         ask_completed_observers=observer_host,
         report_completed_observers=observer_host,
+        gap_consult=gap_host,
     )
     captured = {}
 
@@ -230,11 +232,15 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     )
 
     assert created.settings.database_url.startswith("sqlite")
+    # A frozen mapping, not a floor: every host the composition root hands the
+    # repository is named here, so adding a seat is a deliberate act and
+    # dropping one can never pass silently.
     assert captured == {
         "retrieval_contributor_host": host,
         "parser_provider_chain_host": parser_host,
         "ask_completed_observer_host": observer_host,
         "report_completed_observer_host": observer_host,
+        "gap_consult_host": gap_host,
     }
 
 

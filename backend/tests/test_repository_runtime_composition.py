@@ -15,7 +15,7 @@ behavioural test:
 
 The frozen attribute set below is the cheap, permanent version of the one-off
 construction-graph diff run against ``origin/master`` in the B4 PR (key set +
-per-attribute type + intra-runtime reference topology, 85 attributes and 200
+per-attribute type + intra-runtime reference topology, 86 attributes and 200
 reference edges, all identical).
 """
 from __future__ import annotations
@@ -69,6 +69,7 @@ RUNTIME_ATTRIBUTES = [
     "embedding_store",
     "event_log",
     "evidence_context",
+    "gap_consult",
     "governance",
     "graph_retrieval",
     "groups",

@@ -20,6 +20,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.gap_consult import GapConsultHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -164,6 +165,9 @@ class _ProcessFoundation:
     retrieval_contributors: RetrievalContributorHostPort | None
     ask_completed_observers: AskCompletedObserverHostPort | None
     report_completed_observers: ReportCompletedObserverHostPort | None
+    # Gap consultation is the one host with no built-in contribution at all:
+    # an empty seat here is the shipped shape, not an unwired deployment.
+    gap_consult: GapConsultHostPort | None
     parser_provider_chain: ParserProviderChainHostPort
     models: Any
 
@@ -179,6 +183,7 @@ def _build_process_foundation(
     retrieval_contributor_host: RetrievalContributorHostPort | None,
     ask_completed_observer_host: AskCompletedObserverHostPort | None,
     report_completed_observer_host: ReportCompletedObserverHostPort | None,
+    gap_consult_host: GapConsultHostPort | None,
     parser_provider_chain_host: ParserProviderChainHostPort | None,
 ) -> _ProcessFoundation:
     """Domain 1 — depends on nothing but the constructor arguments.
@@ -213,6 +218,7 @@ def _build_process_foundation(
         retrieval_contributors=retrieval_contributor_host,
         ask_completed_observers=ask_completed_observer_host,
         report_completed_observers=report_completed_observer_host,
+        gap_consult=gap_consult_host,
         parser_provider_chain=(
             parser_provider_chain_host or BuiltinParserChainHost()
         ),
@@ -919,6 +925,7 @@ class RepositoryRuntime:
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
         """Call the domain builders in order, then mount their fields: the
         call order below IS the dependency topology."""
@@ -927,6 +934,7 @@ class RepositoryRuntime:
             retrieval_contributor_host=retrieval_contributor_host,
             ask_completed_observer_host=ask_completed_observer_host,
             report_completed_observer_host=report_completed_observer_host,
+            gap_consult_host=gap_consult_host,
             parser_provider_chain_host=parser_provider_chain_host,
         )
         self.settings = foundation.settings
@@ -936,6 +944,7 @@ class RepositoryRuntime:
         self.retrieval_contributors = foundation.retrieval_contributors
         self.ask_completed_observers = foundation.ask_completed_observers
         self.report_completed_observers = foundation.report_completed_observers
+        self.gap_consult = foundation.gap_consult
         self.parser_provider_chain = foundation.parser_provider_chain
         self.models = foundation.models
         # Runtime-private state: no domain owns it; the locks guard wire_*.
@@ -2074,6 +2083,11 @@ class RepositoryRuntime:
                         retrieval.hydrate_chunk_candidates(ids)[0]
                     )
                 ),
+                # X9 PR-A: the frozen ``ask.gap_consult`` host.  No identity
+                # travels with it — the whole point of that contract is that a
+                # plugin sees a bounded question and nothing about who asked
+                # it or which notebook it came from.
+                gap_consult_host=self.gap_consult,
             )
         return self.ask
 
