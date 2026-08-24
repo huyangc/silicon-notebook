@@ -78,12 +78,12 @@ memory_embedding = "embedding"
 knowhow_embedding = "embedding"
 retrieval_rerank = "rerank"
 
-# Optional per-chat-workload DeepSeek V4 thinking policy. This is not a generic
-# OpenAI Chat Completions field: silicon-notebook sends it only to a
-# deepseek-v4-* model. Values are "enabled", "disabled", or
+# Optional per-chat-workload thinking policy. The current transport maps it to
+# DeepSeek V4's private field and sends it only to a deepseek-v4-* model. Values
+# are "enabled", "disabled", or
 # "provider_default". These entries spell out the built-in defaults so
 # deployments can review and override them in one place.
-[deepseek_thinking]
+[thinking]
 ask_answer = "enabled"
 reasoning_agent = "enabled"
 query_rewrite = "disabled"

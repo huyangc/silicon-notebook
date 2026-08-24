@@ -127,7 +127,7 @@ def test_hot_reload_updates_thinking_policy_without_rebuilding_the_service(
     class ThinkingDelegate(_ChatDelegate):
         def chat_json(self, messages, response_schema_hint, **kwargs):
             del messages, response_schema_hint
-            modes.append(kwargs.get("deepseek_thinking_mode"))
+            modes.append(kwargs.get("thinking_mode"))
             return '{"ok":true}'
 
     provider = RuntimeModelProvider(
@@ -139,7 +139,7 @@ def test_hot_reload_updates_thinking_policy_without_rebuilding_the_service(
     try:
         client.chat_json([], "{}")
         path.write_text(
-            base + '\n[deepseek_thinking]\nask_answer = "disabled"\n',
+            base + '\n[thinking]\nask_answer = "disabled"\n',
             encoding="utf-8",
         )
         assert provider.reload_if_changed(force=True) is True

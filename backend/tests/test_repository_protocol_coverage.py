@@ -277,7 +277,7 @@ def test_model_client_ports_match_concrete_call_signatures():
     raw_chat_contract = [
         parameter
         for parameter in _parameter_contract(OpenAICompatibleClient.chat_json)
-        if parameter[0] != "deepseek_thinking_mode"
+        if parameter[0] != "thinking_mode"
     ]
     assert _parameter_contract(JsonChatClientPort.chat_json) == raw_chat_contract
     assert get_type_hints(JsonChatClientPort.chat_json)["messages"] == (

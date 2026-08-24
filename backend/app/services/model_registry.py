@@ -20,7 +20,7 @@ from app.core.model_safety import safe_model_label
 
 ModelKind = Literal["chat", "embedding", "rerank"]
 ModelPriorityName = Literal["interactive", "report", "background"]
-DeepSeekThinkingMode = Literal["enabled", "disabled", "provider_default"]
+ThinkingMode = Literal["enabled", "disabled", "provider_default"]
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class WorkloadSpec:
     kind: ModelKind
     default_priority: ModelPriorityName
     display_label: str
-    default_deepseek_thinking_mode: DeepSeekThinkingMode = "provider_default"
+    default_thinking_mode: ThinkingMode = "provider_default"
 
 
 @dataclass(frozen=True)
@@ -93,8 +93,8 @@ _WORKLOAD_LABELS = MappingProxyType({
 # classification, rewriting, summarisation, and prose-rendering calls default
 # to non-thinking.  Keeping this exhaustive means a newly added chat workload
 # cannot silently inherit a provider's potentially expensive reasoning default.
-_CHAT_DEEPSEEK_THINKING_DEFAULTS: Mapping[
-    str, DeepSeekThinkingMode
+_CHAT_THINKING_DEFAULTS: Mapping[
+    str, ThinkingMode
 ] = MappingProxyType({
     # One final synthesis call has bounded fan-out and directly determines the
     # answer users read.  Keep reasoning here even when retrieval itself was
@@ -142,9 +142,9 @@ def workload_map(
     rerank: Mapping[str, ModelPriorityName],
 ) -> Mapping[str, WorkloadSpec]:
     """Construct the immutable catalog from the only approved workload data."""
-    if set(chat) != set(_CHAT_DEEPSEEK_THINKING_DEFAULTS):
+    if set(chat) != set(_CHAT_THINKING_DEFAULTS):
         raise ValueError(
-            "chat workload catalog does not match DeepSeek thinking defaults"
+            "chat workload catalog does not match thinking defaults"
         )
     result: dict[str, WorkloadSpec] = {}
     for kind, items in (("chat", chat), ("embedding", embedding), ("rerank", rerank)):
@@ -160,7 +160,7 @@ def workload_map(
                 kind,  # type: ignore[arg-type]
                 priority,
                 label,
-                _CHAT_DEEPSEEK_THINKING_DEFAULTS.get(
+                _CHAT_THINKING_DEFAULTS.get(
                     workload_id, "provider_default"
                 ),
             )
@@ -212,7 +212,7 @@ _REQUIRED_SERVICE_KEYS = frozenset({
 })
 _OPTIONAL_SERVICE_KEYS = frozenset({"top_p"})
 _SERVICE_KEYS = _REQUIRED_SERVICE_KEYS | _OPTIONAL_SERVICE_KEYS
-_TOP_LEVEL_KEYS = frozenset({"services", "bindings", "deepseek_thinking"})
+_TOP_LEVEL_KEYS = frozenset({"services", "bindings", "thinking"})
 _THINKING_MODES = frozenset({"enabled", "disabled", "provider_default"})
 _PROTOCOLS: Mapping[str, frozenset[str]] = MappingProxyType({
     "chat": frozenset({"openai"}),
@@ -250,12 +250,12 @@ class SystemModelServiceRegistry:
         self,
         services: Mapping[str, ModelServiceDefinition],
         bindings: Mapping[str, str],
-        deepseek_thinking_modes: Mapping[str, DeepSeekThinkingMode] | None = None,
+        thinking_modes: Mapping[str, ThinkingMode] | None = None,
     ) -> None:
         self._services = MappingProxyType(dict(services))
         self._bindings = MappingProxyType(dict(bindings))
-        self._deepseek_thinking_modes = MappingProxyType(
-            dict(deepseek_thinking_modes or {})
+        self._thinking_modes = MappingProxyType(
+            dict(thinking_modes or {})
         )
         grouped: dict[str, list[WorkloadSpec]] = {service_id: [] for service_id in services}
         for workload_id, service_id in bindings.items():
@@ -291,13 +291,13 @@ class SystemModelServiceRegistry:
         _reject_unknown_keys(parsed, _TOP_LEVEL_KEYS, "MODEL_SERVICES_CONFIG")
         raw_services = parsed.get("services", {})
         raw_bindings = parsed.get("bindings", {})
-        raw_deepseek_thinking = parsed.get("deepseek_thinking", {})
+        raw_thinking = parsed.get("thinking", {})
         if not all(
             isinstance(value, dict)
-            for value in (raw_services, raw_bindings, raw_deepseek_thinking)
+            for value in (raw_services, raw_bindings, raw_thinking)
         ):
             raise ValueError(
-                "MODEL_SERVICES_CONFIG services, bindings, and deepseek_thinking "
+                "MODEL_SERVICES_CONFIG services, bindings, and thinking "
                 "must be tables"
             )
 
@@ -332,8 +332,8 @@ class SystemModelServiceRegistry:
                 raise ValueError(f"model workload {workload_id} has a mismatched service kind")
             bindings[workload_id] = service_id
 
-        deepseek_thinking_modes: dict[str, DeepSeekThinkingMode] = {}
-        for workload_id, raw_mode in raw_deepseek_thinking.items():
+        thinking_modes: dict[str, ThinkingMode] = {}
+        for workload_id, raw_mode in raw_thinking.items():
             workload = WORKLOADS.get(workload_id)
             if workload is None:
                 raise ValueError(f"unknown model thinking workload: {workload_id}")
@@ -345,8 +345,8 @@ class SystemModelServiceRegistry:
                 raise ValueError(
                     f"model workload {workload_id} has an invalid thinking mode"
                 )
-            deepseek_thinking_modes[workload_id] = raw_mode  # type: ignore[assignment]
-        return cls(services, bindings, deepseek_thinking_modes)
+            thinking_modes[workload_id] = raw_mode  # type: ignore[assignment]
+        return cls(services, bindings, thinking_modes)
 
     def service(self, service_id: str) -> ModelServiceDefinition:
         return self._services[service_id]
@@ -361,12 +361,12 @@ class SystemModelServiceRegistry:
     def workload(self, workload_id: str) -> WorkloadSpec:
         return WORKLOADS[workload_id]
 
-    def deepseek_thinking_mode_for(
+    def thinking_mode_for(
         self, workload_id: str
-    ) -> DeepSeekThinkingMode:
+    ) -> ThinkingMode:
         workload = WORKLOADS[workload_id]
-        return self._deepseek_thinking_modes.get(
-            workload_id, workload.default_deepseek_thinking_mode
+        return self._thinking_modes.get(
+            workload_id, workload.default_thinking_mode
         )
 
     def workloads_for(self, service_id: str) -> tuple[WorkloadSpec, ...]:

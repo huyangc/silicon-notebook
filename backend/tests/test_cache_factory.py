@@ -231,10 +231,10 @@ def test_llm_key_isolates_explicit_thinking_mode_without_colding_defaults():
     u = "https://llm.example.test"
     default = llm_key("m", msgs, "{}", u)
     assert default == llm_key(
-        "m", msgs, "{}", u, deepseek_thinking_mode=None
+        "m", msgs, "{}", u, thinking_mode=None
     )
     assert default != llm_key(
-        "m", msgs, "{}", u, deepseek_thinking_mode="disabled"
+        "m", msgs, "{}", u, thinking_mode="disabled"
     )
 
 

@@ -153,7 +153,7 @@ def test_explicit_non_thinking_mode_is_sent_and_logged(monkeypatch):
         [{"role": "user", "content": "extract"}],
         "{}",
         cancel_event=threading.Event(),
-        deepseek_thinking_mode="disabled",
+        thinking_mode="disabled",
     ) == '{"ok":1}'
 
     assert create.calls[0]["extra_body"] == {
@@ -161,7 +161,7 @@ def test_explicit_non_thinking_mode_is_sent_and_logged(monkeypatch):
     }
     assert create.calls[0]["stream"] is True
     assert (
-        logger.records[-1]["request"]["deepseek_thinking_mode"] == "disabled"
+        logger.records[-1]["request"]["thinking_mode"] == "disabled"
     )
 
 
@@ -174,11 +174,11 @@ def test_non_deepseek_model_never_sends_private_thinking_extension(monkeypatch):
     client.chat_json(
         [{"role": "user", "content": "answer"}],
         "{}",
-        deepseek_thinking_mode="enabled",
+        thinking_mode="enabled",
     )
 
     assert "extra_body" not in create.calls[0]
-    assert "deepseek_thinking_mode" not in logger.records[-1]["request"]
+    assert "thinking_mode" not in logger.records[-1]["request"]
 
 
 def test_provider_default_request_does_not_send_thinking_extension(monkeypatch):

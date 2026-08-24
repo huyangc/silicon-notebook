@@ -107,10 +107,10 @@ def test_chat_workloads_make_an_exhaustive_thinking_default_choice():
     assert {
         key
         for key in chat_workloads
-        if WORKLOADS[key].default_deepseek_thinking_mode == "enabled"
+        if WORKLOADS[key].default_thinking_mode == "enabled"
     } == enabled
     assert all(
-        WORKLOADS[key].default_deepseek_thinking_mode == "disabled"
+        WORKLOADS[key].default_thinking_mode == "disabled"
         for key in chat_workloads - enabled
     )
 
@@ -147,7 +147,7 @@ def test_registry_accepts_per_workload_thinking_overrides(tmp_path):
         _service() + '''
 [bindings]
 ask_answer = "general"
-[deepseek_thinking]
+[thinking]
 ask_answer = "disabled"
 report_outline = "provider_default"''',
     )
@@ -155,12 +155,12 @@ report_outline = "provider_default"''',
         _settings(path), {"GENERAL_KEY": "secret"}
     )
 
-    assert registry.deepseek_thinking_mode_for("ask_answer") == "disabled"
+    assert registry.thinking_mode_for("ask_answer") == "disabled"
     assert (
-        registry.deepseek_thinking_mode_for("report_outline")
+        registry.thinking_mode_for("report_outline")
         == "provider_default"
     )
-    assert registry.deepseek_thinking_mode_for("source_summary") == "disabled"
+    assert registry.thinking_mode_for("source_summary") == "disabled"
 
 
 @pytest.mark.parametrize(
@@ -176,7 +176,7 @@ def test_registry_rejects_invalid_thinking_configuration(
 ):
     path = _write_config(
         tmp_path / "models.toml",
-        _service() + "\n[deepseek_thinking]\n" + thinking,
+        _service() + "\n[thinking]\n" + thinking,
     )
 
     with pytest.raises(ValueError, match=match):
