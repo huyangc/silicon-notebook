@@ -707,6 +707,13 @@ def test_a_misbehaving_host_still_leaves_the_answer_verbatim(make_repo):
             ),),
             "鸭子类型条目",
         ),
+        (
+            tuple(
+                GapSuggestion(f"paper {i}", f"https://example.org/{i}.pdf")
+                for i in range(GAP_CONSULT_MAX_SUGGESTIONS + 1)
+            ),
+            "超额批",
+        ),
     ],
 )
 def test_a_host_answering_the_wrong_shape_is_dropped_as_a_batch(
@@ -716,14 +723,16 @@ def test_a_host_answering_the_wrong_shape_is_dropped_as_a_batch(
 
     ``gap_consult_host=`` is threaded through five files and accepts whatever
     it is given; the frozen host sanitizes its contributors, but nothing
-    sanitizes the host.  All four shapes here are ones a plausible injected
-    implementation produces, and they split across the two halves of the rail:
+    sanitizes the host.  All five shapes here are ones a plausible injected
+    implementation produces, and they split across the halves of the rail:
     the list of dicts, the ``None`` and the well-typed item whose title is past
     the wire rail all raise (the last one inside pydantic during CONVERSION,
     not inside ``consult`` — which is why the guard has to span the conversion
     too), while the duck-typed item raises nothing at all and is refused only
-    because whole-batch admission compares its TYPE.  Each must cost the batch
-    and nothing else: the answer stays verbatim and the step is still recorded,
+    because whole-batch admission compares its TYPE, and the over-cap batch of
+    individually valid items is refused by the O(1) length check that also
+    bounds the per-item scan (codex #584 R2).  Each must cost the batch and
+    nothing else: the answer stays verbatim and the step is still recorded,
     because the run really did consult and the reader is owed that fact.
     """
     baseline = _answer_without_plugin(make_repo)

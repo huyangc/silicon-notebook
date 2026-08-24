@@ -409,6 +409,13 @@ def _admitted_gap_suggestions(raw: object) -> tuple[AskGapSuggestion, ...]:
     """
     if not isinstance(raw, tuple):
         return ()
+    # The cap check comes first because it is O(1) and bounds the per-item
+    # scan below: a faulty host answering an arbitrarily large tuple must not
+    # get a walk over it on the Ask critical path, and a batch over the
+    # documented maximum is the same "shape it was never asked for" as a
+    # wrong item type — all-or-nothing applies to it too.
+    if len(raw) > GAP_CONSULT_MAX_SUGGESTIONS:
+        return ()
     if any(type(item) is not GapSuggestion for item in raw):
         return ()
     return tuple(

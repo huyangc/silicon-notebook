@@ -35,6 +35,8 @@ from app.domain.cancellation import AskCancelled
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
     GAP_CONSULT_MAX_SUGGESTIONS,
+    GAP_CONSULT_PHRASE_MAX_CHARS,
+    GAP_CONSULT_QUESTION_MAX_CHARS,
     GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
@@ -341,7 +343,18 @@ class GapConsultHost:
         worker = threading.Thread(target=_target, daemon=True)
         worker.start()
         while True:
-            worker.join(_JOIN_SLICE_SECONDS)
+            # Each join slice is bounded by the budget that is actually left,
+            # not just the fixed slice width: a deployment may configure the
+            # timeout below one slice, and waiting the full slice would make
+            # real latency a multiple of the configured budget.  A broken
+            # clock (None) falls back to the plain slice — the post-join
+            # deadline check treats that clock as open for the same reason.
+            now = _safe_clock(self._clock)
+            worker.join(
+                _JOIN_SLICE_SECONDS
+                if now is None
+                else max(0.0, min(_JOIN_SLICE_SECONDS, deadline - now))
+            )
             finished = not worker.is_alive()
             # Both reads happen on EVERY pass, the one that observes the worker
             # finish included.  Reading them only while the thread was still
@@ -366,13 +379,20 @@ class GapConsultHost:
 
 
 def _valid_query(value: object) -> bool:
+    # Length is part of validity, not just shape: the query IS the egress
+    # surface, and this port is public — a manually constructed context must
+    # not be able to forward more text to a plugin than the documented bounds
+    # (AskService's own egress construction already stays inside them).
     return (
         type(value) is GapConsultQuery
         and type(value.question) is str
-        and bool(value.question)
+        and 0 < len(value.question) <= GAP_CONSULT_QUESTION_MAX_CHARS
         and type(value.gaps) is tuple
         and len(value.gaps) <= GAP_CONSULT_MAX_GAP_PHRASES
-        and all(type(phrase) is str for phrase in value.gaps)
+        and all(
+            type(phrase) is str and len(phrase) <= GAP_CONSULT_PHRASE_MAX_CHARS
+            for phrase in value.gaps
+        )
         and type(value.max_suggestions) is int
         and 1 <= value.max_suggestions <= GAP_CONSULT_MAX_SUGGESTIONS
     )
