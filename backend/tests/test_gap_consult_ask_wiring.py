@@ -340,13 +340,13 @@ def test_trigger_on_thin_evidence_below_the_tier_floor(make_repo):
     covered = [object()] * 10
     assert service._consult_gap_sources(
         prepared, overview, [], top_hits=covered, chunks=[], elements=[],
-        cancellation=None, on_step=None,
+        cancellation=None, sink=[], on_step=None,
     ) == ()
     assert plugin.contexts == []
 
     admitted = service._consult_gap_sources(
         prepared, standard, [], top_hits=covered, chunks=[], elements=[],
-        cancellation=None, on_step=None,
+        cancellation=None, sink=[], on_step=None,
     )
     assert [item.url for item in admitted] == [SUGGESTION.url]
 
@@ -355,7 +355,7 @@ def test_trigger_on_thin_evidence_below_the_tier_floor(make_repo):
     assert service._consult_gap_sources(
         prepared, overview, [],
         top_hits=covered[:4], chunks=covered[:4], elements=covered[:4],
-        cancellation=None, on_step=None,
+        cancellation=None, sink=[], on_step=None,
     ) == ()
     assert plugin.contexts == []
 
@@ -374,7 +374,7 @@ def test_no_trigger_when_covered_and_above_floor(make_repo):
     assert service._consult_gap_sources(
         _PreparedStub(), ask_retrieval_limits("overview"), trace,
         top_hits=[object()] * 30, chunks=[], elements=[],
-        cancellation=None, on_step=None,
+        cancellation=None, sink=trace, on_step=None,
     ) == ()
     assert plugin.contexts == []
     assert trace == []
@@ -819,7 +819,7 @@ def test_cancellation_during_consult_propagates(make_repo):
         service._consult_gap_sources(
             _PreparedStub(), ask_retrieval_limits("standard"), [],
             top_hits=[], chunks=[], elements=[],
-            cancellation=_Cancelled(), on_step=None,
+            cancellation=_Cancelled(), sink=[], on_step=None,
         )
     assert plugin.contexts == [], "取消必须先于任何外发"
 
@@ -1012,6 +1012,68 @@ def test_an_injected_draft_stage_cannot_drop_the_suggestions(make_repo):
 
     assert response.conclusion == "注入实现自己拼的答案"
     assert [item.url for item in response.gap_suggestions] == [SUGGESTION.url]
+
+
+def test_the_draft_stage_sees_no_trace_of_the_consultation(make_repo):
+    """The isolation is structural, not behavioural (codex #584 R3).
+
+    The consultation runs AFTER the draft stage returned, so an injected
+    ``ResponseDraftStage`` cannot vary the prose on anything gap-derived —
+    not the suggestions, and not even the disclosure step's ``count``
+    reaching it through ``stage.trace``.  The reader still gets both: core
+    lands the step and the suggestions on the response afterwards, the same
+    way it fills ``model_errors``.
+    """
+    from app.application.ask_reasoning import ReasoningResponseDraft
+    from app.models.ask import AskResponse
+
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin))
+    notebook = _seed(repo)
+    service = repo._runtime.ask_service()
+
+    seen_inputs: list[object] = []
+
+    class _RecordingStage:
+        def draft_response(self, stage, _runtime):
+            seen_inputs.append(stage)
+            prepared = stage.prepared
+            return ReasoningResponseDraft(
+                notebook_id=prepared.notebook_id,
+                question=prepared.question,
+                response=AskResponse(
+                    conclusion="记录型注入实现", answer="",
+                    mode="reasoning",
+                    conversation_id=prepared.conversation_id,
+                ),
+                conversation_id=prepared.conversation_id,
+                user_id=prepared.user_id,
+                job_id=prepared.job_id,
+                asked_at=prepared.asked_at,
+            )
+
+    service.response_draft_stage = _RecordingStage()
+    response = _ask(repo, notebook)
+
+    # The plugin really was consulted, and the reader really was told …
+    assert plugin.contexts, "外扩必须仍然发生"
+    assert [item.url for item in response.gap_suggestions] == [SUGGESTION.url]
+    gap_steps = [
+        step for step in (response.reasoning_trace or [])
+        if getattr(step, "step_type", None) == "gap_consult"
+    ]
+    assert len(gap_steps) == 1
+
+    # … but the envelope the stage received carried no trace of any of it:
+    # no gap step in ``trace``, and no field that could carry a suggestion.
+    (stage_input,) = seen_inputs
+    assert all(
+        getattr(step, "step_type", None) != "gap_consult"
+        for step in stage_input.trace
+    ), "注入 stage 的 envelope 里不得出现外扩步"
+    assert not any(
+        "gap" in name for name in type(stage_input).__dataclass_fields__
+    ), "ResponseDraftInput 结构上不得携带任何 gap 字段"
 
 
 def test_the_production_injection_chain_reaches_the_ask_service(make_repo):
