@@ -5,6 +5,7 @@ import {
   BookOpen,
   ChevronRight,
   Inbox,
+  Library,
   Link,
   Plus,
   Search,
@@ -288,17 +289,18 @@ export function GroupsPage({
 
   return (
     <main className="page group-page">
-      <section className="group-page-hero">
-        <button className="group-page-back" onClick={onBack}><ArrowLeft size={17} />笔记本列表</button>
-        <div className="group-page-hero-copy">
-          <span className="eyebrow">GROUP WORKSPACE</span>
-          <h1>群组</h1>
-          <p>集中管理成员、共享知识库和贡献审批。群组关系随成员加入与退出实时生效。</p>
+      <header className="group-page-head">
+        <button className="group-page-back" onClick={onBack}><ArrowLeft size={16} />笔记本列表</button>
+        <div className="group-page-head-row">
+          <div className="group-page-head-copy">
+            <h1>群组</h1>
+            <p>集中管理成员、共享知识库和贡献审批。群组关系随成员加入与退出实时生效。</p>
+          </div>
+          <button className="new-pill" onClick={() => setCreating((value) => !value)}>
+            <Plus size={16} /> 新建群组
+          </button>
         </div>
-        <button className="new-pill" onClick={() => setCreating((value) => !value)}>
-          <Plus size={16} /> 新建群组
-        </button>
-      </section>
+      </header>
 
       {error && <p className="password-change-status error group-page-status">{error}</p>}
       {notice && <p className="group-page-status success">{notice}</p>}
@@ -306,20 +308,30 @@ export function GroupsPage({
       {creating && (
         <section className="group-page-create">
           <div>
-            <span className="eyebrow">NEW GROUP</span>
             <h2>新建群组</h2>
             <p>创建者将成为首位群组 owner，后续可在设置中转让。</p>
           </div>
           <div className="group-page-create-form">
-            <input value={newName} maxLength={GROUP_INPUT_LIMITS.nameMaxChars} placeholder="群组名称" aria-label="群组名称"
-              onChange={(event) => setNewName(event.target.value)} />
+            <input
+              value={newName}
+              maxLength={GROUP_INPUT_LIMITS.nameMaxChars}
+              placeholder="群组名称"
+              aria-label="群组名称"
+              onChange={(event) => setNewName(event.target.value)}
+            />
             {kinds.length > 1 && (
               <select value={newKind} aria-label="群组分类" onChange={(event) => setNewKind(event.target.value)}>
                 {kinds.map((kind) => <option value={kind} key={kind}>{groupKindLabel(kind)}</option>)}
               </select>
             )}
-            <textarea value={newDescription} maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars} rows={2} placeholder="群组说明（可选）"
-              aria-label="新群组的说明" onChange={(event) => setNewDescription(event.target.value)} />
+            <textarea
+              value={newDescription}
+              maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars}
+              rows={2}
+              placeholder="群组说明（可选）"
+              aria-label="新群组的说明"
+              onChange={(event) => setNewDescription(event.target.value)}
+            />
             <div className="group-page-create-actions">
               <button className="sort-button" onClick={() => setCreating(false)}>取消</button>
               <button className="new-pill" disabled={Boolean(busy) || !newName.trim()}
@@ -341,10 +353,7 @@ export function GroupsPage({
       <section className="group-page-shell">
         <aside className="group-page-sidebar">
           <div className="group-page-sidebar-head">
-            <div>
-              <span className="eyebrow">YOUR GROUPS</span>
-              <h2>{scope === "all" ? "全部群组" : "我的群组"}</h2>
-            </div>
+            <h2>{scope === "all" ? "全部群组" : "我的群组"}</h2>
             {groups && <span className="group-count-chip">{groups.length}</span>}
           </div>
           {isSystemAdmin && (
@@ -355,7 +364,9 @@ export function GroupsPage({
           )}
           <div className="group-page-group-list">
             {groups === null && <p className="tool-hint">加载中…</p>}
-            {groups?.length === 0 && <EmptyState icon={<Users size={20} />} title="还没有群组">新建一个项目群组，或等待管理员邀请。</EmptyState>}
+            {groups?.length === 0 && (
+              <EmptyState icon={<Users size={20} />} title="还没有群组">新建一个项目群组，或等待管理员邀请。</EmptyState>
+            )}
             {groups?.map((group) => (
               <button key={group.id} className={`group-page-group-card ${detail?.id === group.id ? "active" : ""}`}
                 onClick={() => chooseGroup(group.id)}>
@@ -375,16 +386,31 @@ export function GroupsPage({
             <EmptyState icon={<ShieldCheck size={24} />} title="选择一个群组">从左侧选择群组，查看它的知识库、成员和共享申请。</EmptyState>
           ) : (<>
             <header className="group-page-detail-head">
-              <div className="group-page-avatar">{detail.name.trim().slice(0, 1).toUpperCase() || "G"}</div>
-              <div className="group-page-detail-copy">
-                <div className="group-page-title-row">
-                  <h2>{detail.name}</h2>
-                  <span className="group-chip">{groupKindLabel(detail.kind)}</span>
-                  {detail.owner_id === currentUserId && <span className="group-owner-chip">Owner</span>}
+              <div className="group-page-detail-id">
+                <div className="group-page-avatar">{detail.name.trim().slice(0, 1).toUpperCase() || "G"}</div>
+                <div className="group-page-detail-copy">
+                  <div className="group-page-title-row">
+                    <h2>{detail.name}</h2>
+                    <span className="group-chip">{groupKindLabel(detail.kind)}</span>
+                    {detail.owner_id === currentUserId && <span className="group-owner-chip">Owner</span>}
+                  </div>
+                  <p>{detail.description || "这个群组还没有填写说明。"}</p>
+                  <span>Owner {ownerMember ? memberLabel(ownerMember) : "—"}</span>
                 </div>
-                <p>{detail.description || "这个群组还没有填写说明。"}</p>
-                <span>{detail.member_count} 名成员 · Owner {ownerMember ? memberLabel(ownerMember) : "—"}</span>
               </div>
+              {/* 三个计数全部来自本页已经取回的数据（共享清单 / 群组详情 / 审批队列），
+                  不新增任何请求。「待审批」只对有审批权的人显示——普通成员根本不加载
+                  队列，给他看一个恒为 0 的格子只会让人以为审批过了。 */}
+              <dl className="group-stat-row">
+                <div><dt>知识库</dt><dd>{shared === null ? "—" : shared.length}</dd></div>
+                <div><dt>成员</dt><dd>{detail.member_count}</dd></div>
+                {canManage && (
+                  <div className={pendingCount > 0 ? "alert" : ""}>
+                    <dt>待审批</dt>
+                    <dd>{requests === null ? "—" : pendingCount}</dd>
+                  </div>
+                )}
+              </dl>
             </header>
 
             <nav className="group-page-tabs" aria-label="群组管理">
@@ -400,8 +426,10 @@ export function GroupsPage({
             <div className="group-page-panel">
               {tab === "notebooks" && (<>
                 <div className="group-page-section-head">
-                  <div><span className="eyebrow">SHARED NOTEBOOKS</span><h3>群组知识库</h3>
-                    <p>成员可以打开、提问、写自己的深度报告，并挂载为参考库。</p></div>
+                  <div>
+                    <h3>群组知识库</h3>
+                    <p>成员可以打开、提问、写自己的深度报告，并挂载为参考库。</p>
+                  </div>
                   {shared && <span className="group-count-chip">{shared.length}</span>}
                 </div>
                 {shared === null ? <p className="tool-hint">加载中…</p> : shared.length === 0 ? (
@@ -411,7 +439,7 @@ export function GroupsPage({
                   const ICanManageNotebook = manageableById.has(item.notebook_id);
                   return <article className="group-notebook-card" key={item.notebook_id}>
                     <button className="group-notebook-open" onClick={() => onOpenNotebook(item.notebook_id)}>
-                      <span className="group-notebook-mark">▧</span>
+                      <span className="group-notebook-mark"><Library size={19} /></span>
                       <span><strong>{item.name}</strong><small>所有者 {item.owner_username || "—"}</small></span>
                     </button>
                     <div className="group-notebook-meta">
@@ -441,8 +469,12 @@ export function GroupsPage({
                 })}</div>}
 
                 {canManage && <section className="group-add-notebooks">
-                  <div className="group-page-section-head compact"><div><span className="eyebrow">ADD NOTEBOOKS</span><h3>添加知识库</h3>
-                    <p>这里只显示你有管理权、且尚未共享给本组的笔记本。</p></div></div>
+                  <div className="group-page-section-head compact">
+                    <div>
+                      <h3>添加知识库</h3>
+                      <p>这里只显示你有管理权、且尚未共享给本组的笔记本。</p>
+                    </div>
+                  </div>
                   <label className="group-page-search"><Search size={16} /><input value={notebookQuery} placeholder="搜索可添加的笔记本"
                     onChange={(event) => setNotebookQuery(event.target.value)} /></label>
                   {candidates.length === 0 ? <p className="group-inline-empty">没有符合条件的笔记本。</p> : <div className="group-candidate-list">
@@ -468,8 +500,13 @@ export function GroupsPage({
               </>)}
 
               {tab === "members" && (<>
-                <div className="group-page-section-head"><div><span className="eyebrow">MEMBERS</span><h3>成员与角色</h3>
-                  <p>Owner 唯一且不可被降级或移出；管理员负责日常成员与知识库管理。</p></div></div>
+                <div className="group-page-section-head">
+                  <div>
+                    <h3>成员与角色</h3>
+                    <p>Owner 唯一且不可被降级或移出；管理员负责日常成员与知识库管理。</p>
+                  </div>
+                  <span className="group-count-chip">{detail.members.length}</span>
+                </div>
                 {canManage && <section className="group-settings-card group-invite-card">
                   <div className="group-invite-title"><span className="group-page-empty-icon"><Link size={20} /></span><div><h4>邀请链接</h4><p>拿到链接的登录用户会自动以普通成员身份加入。链接可重复使用，撤销或重新生成后旧链接立即失效。</p></div></div>
                   {invite === null ? <p className="tool-hint">邀请链接加载中…</p> : invite.active ? <>
@@ -508,12 +545,18 @@ export function GroupsPage({
               </>)}
 
               {tab === "requests" && (<>
-                <div className="group-page-section-head"><div><span className="eyebrow">INCOMING</span><h3>待审批贡献</h3>
-                  <p>批准后笔记本先以成员可查看方式进入群组，管理权可由笔记本管理者另行开启。</p></div>{pendingCount > 0 && <span className="group-count-chip">{pendingCount}</span>}</div>
+                <div className="group-page-section-head">
+                  <div>
+                    <h3>待审批贡献</h3>
+                    <p>批准后笔记本先以成员可查看方式进入群组，管理权可由笔记本管理者另行开启。</p>
+                  </div>
+                  {pendingCount > 0 && <span className="group-count-chip">{pendingCount}</span>}
+                </div>
                 {!canManage ? <EmptyState icon={<Inbox size={22} />} title="没有审批权限">只有 owner 和组管理员可以处理贡献申请。</EmptyState>
                   : requests === null ? <p className="tool-hint">加载中…</p> : requests.length === 0 ? <EmptyState icon={<Inbox size={22} />} title="没有待审批申请">新的成员贡献申请会出现在这里。</EmptyState>
                     : <div className="group-request-list">{requests.map((request) => <div className="group-request-row" key={request.id}>
-                      <span><strong>{request.notebook_name || "知识库"}</strong><small>申请人 {request.requested_by_username}</small></span>
+                      <span className="group-request-mark"><BookOpen size={17} /></span>
+                      <span className="group-request-copy"><strong>{request.notebook_name || "知识库"}</strong><small>申请人 {request.requested_by_username}</small></span>
                       <div><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run(`approve:${request.id}`, async () => {
                         await approveShareRequest(detail.id, request.id); setRequests(await listGroupShareRequests(detail.id)); setShared(await listGroupSharedNotebooks(detail.id)); onChanged();
                       }, "批准申请失败"); }}>批准</button><button className="sort-button" disabled={Boolean(busy)} onClick={() => { void run(`reject:${request.id}`, async () => {
@@ -521,7 +564,8 @@ export function GroupsPage({
                       }, "驳回申请失败"); }}>驳回</button></div>
                     </div>)}</div>}
                 {myRequests.filter((request) => request.group_id === detail.id).length > 0 && <section className="group-my-requests"><h3>我发起的申请</h3>{myRequests.filter((request) => request.group_id === detail.id).map((request) => <div className="group-request-row" key={request.id}>
-                  <span><strong>{request.notebook_name || "名称不再显示的知识库"}</strong><small>等待群组管理员审批</small></span>
+                  <span className="group-request-mark"><BookOpen size={17} /></span>
+                  <span className="group-request-copy"><strong>{request.notebook_name || "名称不再显示的知识库"}</strong><small>等待群组管理员审批</small></span>
                   <button className="sort-button" disabled={Boolean(busy)} onClick={() => { void run(`withdraw:${request.id}`, async () => {
                     await withdrawShareRequest(request.notebook_id, request.id); setMyRequests((items) => items.filter((item) => item.id !== request.id));
                   }, "撤回申请失败"); }}>撤回</button>
@@ -529,8 +573,12 @@ export function GroupsPage({
               </>)}
 
               {tab === "settings" && (<>
-                <div className="group-page-section-head"><div><span className="eyebrow">GROUP SETTINGS</span><h3>群组设置</h3>
-                  <p>日常资料与所有权操作分区处理。</p></div></div>
+                <div className="group-page-section-head">
+                  <div>
+                    <h3>群组设置</h3>
+                    <p>日常资料与所有权操作分区处理。</p>
+                  </div>
+                </div>
                 {canManage ? <section className="group-settings-card"><h4>基本信息</h4><label>群组名称<input value={renameDraft} maxLength={GROUP_INPUT_LIMITS.nameMaxChars} onChange={(event) => setRenameDraft(event.target.value)} /></label>
                   <label>群组说明<textarea rows={3} value={descriptionDraft} maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars} onChange={(event) => setDescriptionDraft(event.target.value)} /></label>
                   <div className="group-settings-actions"><button className="new-pill" disabled={Boolean(busy) || !renameDraft.trim()} onClick={() => { void run("save", async () => {
@@ -539,22 +587,22 @@ export function GroupsPage({
 
                 {isOwner && <section className="group-settings-card"><h4>转让群组</h4><p>新 owner 必须是现有成员，将自动成为管理员；你转让后仍保留管理员身份。</p>
                   <select value={transferTarget} onChange={(event) => setTransferTarget(event.target.value)} aria-label="选择新的群组所有者"><option value="">选择成员…</option>{detail.members.filter((member) => member.id !== detail.owner_id).map((member) => <option value={member.id} key={member.id}>{memberLabel(member)}</option>)}</select>
-                  {confirming === "transfer" ? <div className="group-inline-confirm"><span>确认把群组所有权转让给所选成员？</span><button className="new-pill" disabled={Boolean(busy) || !transferTarget} onClick={() => { void run("transfer", async () => {
+                  <div className="group-settings-actions">{confirming === "transfer" ? <div className="group-inline-confirm"><span>确认把群组所有权转让给所选成员？</span><button className="new-pill" disabled={Boolean(busy) || !transferTarget} onClick={() => { void run("transfer", async () => {
                     const transferredOwnGroup = detail.owner_id === currentUserId;
                     const updated = await transferGroupOwner(detail.id, transferTarget); setDetail(updated); setTransferTarget(""); setConfirming(""); await refreshGroups(scope);
                     setNotice(transferredOwnGroup ? "群组所有权已转让，你仍是组管理员。" : "群组所有权已转让。");
                   }, "转让群组失败"); }}>确认转让</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div>
-                    : <button className="sort-button" disabled={!transferTarget} onClick={() => setConfirming("transfer")}>转让群组</button>}
+                    : <button className="sort-button" disabled={!transferTarget} onClick={() => setConfirming("transfer")}>转让群组</button>}</div>
                 </section>}
 
                 <section className="group-settings-card danger"><h4>{isOwner ? "删除群组" : "退出群组"}</h4>
                   {isOwner ? <p>删除会收回成员对全部群组知识库的访问权；知识库本身仍属于原作者，不会删除。</p> : <p>退出后，你将失去经本群组获得的知识库访问权。</p>}
-                  {isOwner ? (confirming === "delete" ? <div className="group-inline-confirm"><button className="new-pill danger-pill" onClick={() => { void run("delete", async () => {
+                  <div className="group-settings-actions">{isOwner ? (confirming === "delete" ? <div className="group-inline-confirm"><button className="new-pill danger-pill" onClick={() => { void run("delete", async () => {
                     const removedGroupId = detail.id; await deleteGroup(removedGroupId); setDetail(null); setShared(null); setRequests(null); setConfirming(""); await selectAfterGroupRemoval(removedGroupId); onChanged();
                   }, "删除群组失败"); }}>确认删除群组</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div> : <button className="new-pill danger-pill" onClick={() => setConfirming("delete")}>删除群组</button>)
                     : (confirming === "leave" ? <div className="group-inline-confirm"><button className="new-pill danger-pill" onClick={() => { void run("leave", async () => {
                       const removedGroupId = detail.id; await leaveGroup(removedGroupId); setDetail(null); setShared(null); setRequests(null); setConfirming(""); await selectAfterGroupRemoval(removedGroupId); onChanged();
-                    }, "退出群组失败"); }}>确认退出</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div> : <button className="sort-button danger-text" onClick={() => setConfirming("leave")}>退出群组</button>)}
+                    }, "退出群组失败"); }}>确认退出</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div> : <button className="sort-button danger-text" onClick={() => setConfirming("leave")}>退出群组</button>)}</div>
                 </section>
               </>)}
             </div>

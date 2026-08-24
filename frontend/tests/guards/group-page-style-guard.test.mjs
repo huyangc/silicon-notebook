@@ -1,0 +1,142 @@
+// 独立群组页的样式守卫。
+//
+// 钉的是一类**只在浏览器里才看得出来、组件测试永远发现不了**的退化,与
+// group-layout-guard 同源但对象不同(那个盯 groups-panel/notebook-group-share 的
+// 行布局,这个盯独立页 groups-page.tsx)。
+//
+// 第一条来自真实缺陷:页面上 7 处 `<span className="eyebrow">GROUP WORKSPACE</span>`
+// 这类装饰性小标题,而 globals.css 里**从来没有** `.eyebrow` 规则 —— 于是它们以
+// 继承来的 16px 正文字号裸奔在标题上方,看起来像忘了删的调试文本。testing-library
+// 只看 DOM 与可访问名字,`getByText("GROUP WORKSPACE")` 一路通过;`tsc` 不检查
+// className 字符串;没有任何既有门禁会红。判据因此是构造性的:**页面里出现的每一个
+// class 名都必须在 globals.css 里真的作为类选择器出现过**。
+//
+// 第二、三条是这次改版踩到的两个布局陷阱,同样是「不报错、只是长错了」:
+//   - `main.group-page` 是 `.app` 网格的子项。只写 max-width + auto 外边距会关掉
+//     网格子项的 stretch,元素退回 fit-content —— 宽屏上整页缩成一条窄柱。
+//   - 同一个子项会被 `.app` 的 1fr 行拉满视口高度;网格 auto 行默认 stretch,短内容
+//     的页签(成员/设置)页头会被凭空撑开几十像素。
+//
+// 覆盖边界(如实说明):本文件只覆盖 groups-page.tsx 的 class 名存在性与 .group-page
+// 这三条声明,不检查具体间距/配色数值(那属于设计取舍,不是不变量),也不声称覆盖
+// 群组特性的其它渲染面。
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
+
+import { parseText } from "../../test-support/semantic-source.mjs";
+
+const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../app");
+const VIEW = "groups-page.tsx";
+
+const view = parseText(await readFile(path.join(APP_DIR, VIEW), "utf8"), VIEW);
+// 样式表没有可消费的 AST,jsdom 也不做级联,文本是唯一诚实的输入(与
+// group-layout-guard 同一条登记)。注释先剥掉,免得注释里写过的类名冒充规则。
+const CSS = (await readFile(path.join(APP_DIR, "globals.css"), "utf8"))
+  .replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** 收集 className 上出现的每一个静态 class token。
+ *
+ *  刻意不按标签名枚举(group-layout-guard 那份 TAGS 清单会让新标签静默逃逸):这里
+ *  走整棵 AST 找 `className` 属性,模板串取它的固定片段、三元取两个分支的字面量,
+ *  动态拼出来的部分本来就无从检查、直接跳过。 */
+function classTokens(sourceFile) {
+  const tokens = new Set();
+  // ⚠ 形参不叫 text/source/content:static-source-policy 把「在这类名字上调
+  // split/slice/indexOf」判成对生产源码做位置查询。这里切的是 className 的值,不是源码。
+  const add = (classList) => {
+    for (const token of classList.split(/\s+/)) {
+      if (token) tokens.add(token);
+    }
+  };
+
+  function collectFromExpression(node) {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      add(node.text);
+      return;
+    }
+    if (ts.isTemplateExpression(node)) {
+      add(node.head.text);
+      for (const span of node.templateSpans) {
+        collectFromExpression(span.expression);
+        add(span.literal.text);
+      }
+      return;
+    }
+    if (ts.isConditionalExpression(node)) {
+      collectFromExpression(node.whenTrue);
+      collectFromExpression(node.whenFalse);
+      return;
+    }
+    if (ts.isParenthesizedExpression(node)) {
+      collectFromExpression(node.expression);
+    }
+  }
+
+  function visit(node) {
+    if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "className" && node.initializer) {
+      if (ts.isStringLiteral(node.initializer)) add(node.initializer.text);
+      else if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {
+        collectFromExpression(node.initializer.expression);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+
+  return [...tokens];
+}
+
+/** globals.css 里是否存在以该 token 命名的类选择器。
+ *
+ *  `active` / `manage` / `compact` 这类修饰符只以复合选择器出现(`.group-access-chip.manage`),
+ *  所以判据是「`.token` 后面不再接标识符字符」,不要求它独占一段选择器。 */
+function hasClassRule(token) {
+  return new RegExp(`\\.${token.replace(/[-]/g, "\\-")}(?![\\w-])`).test(CSS);
+}
+
+test("groups-page.tsx 用到的每个 class 都在 globals.css 里真的有规则", () => {
+  const orphans = classTokens(view).filter((token) => !hasClassRule(token));
+  assert.deepEqual(
+    orphans,
+    [],
+    `groups-page.tsx 挂了 globals.css 里不存在的 class:${orphans.join("、")}`
+    + " —— 这类元素会以继承来的正文样式裸奔,组件测试与 tsc 都看不见",
+  );
+});
+
+/** 取某个选择器的声明体(同一选择器出现多次时合并)。 */
+function ruleBody(selector) {
+  const bodies = [];
+  const pattern = /([^{}]+)\{([^{}]*)\}/g;
+  let match;
+  while ((match = pattern.exec(CSS)) !== null) {
+    const selectors = match[1].trim();
+    if (selectors.startsWith("@")) continue;
+    if (selectors.split(",").map((one) => one.trim()).includes(selector)) bodies.push(match[2]);
+  }
+  assert.notEqual(bodies.length, 0, `globals.css 里找不到 ${selector} 规则`);
+  return bodies.join("\n");
+}
+
+test(".group-page 显式写出宽度,不靠网格子项的 stretch", () => {
+  const body = ruleBody(".group-page");
+  assert.match(body, /max-width:\s*1200px/, "与「笔记本列表」同一条测量线");
+  assert.match(
+    body,
+    /width:\s*100%/,
+    "只给 max-width + auto 外边距会关掉网格子项的 stretch —— 整页在宽屏上缩成一条窄柱",
+  );
+});
+
+test(".group-page 的行不跟着视口拉伸", () => {
+  assert.match(
+    ruleBody(".group-page"),
+    /align-content:\s*start/,
+    "main 会被 .app 的 1fr 行拉满视口高度,auto 行默认 stretch 会把短页签的页头凭空撑开",
+  );
+});
