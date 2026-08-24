@@ -70,13 +70,15 @@ export const FIRST_PAGE_START = 0;
  * rather than letting someone tick thirty papers and learn the limit from an
  * error banner.
  *
- * Registered trade-off: the number is spelled twice, once per language, with
- * nothing mechanically keeping the two in step — a sample plugin deliberately
- * ships no cross-language contract test, that machinery belongs to core rails.
- * The drift is safe in only one direction: if the server raises its limit and
- * this stays low the panel is merely stricter than it must be, whereas if the
- * server lowers its limit the panel still lets the request go and the 400 is
- * surfaced verbatim. Change one, grep for the other.
+ * The number is spelled twice, once per language, and drift would be safe in
+ * only one direction: if the server raises its limit and this stays low the
+ * panel is merely stricter than it must be, whereas if the server lowers its
+ * limit the panel still lets the request go and the 400 is surfaced verbatim.
+ * That asymmetry is precisely what makes drift easy to miss, so the two are
+ * reconciled by
+ * `backend/tests/test_arxiv_sample_plugin.py::test_the_ui_package_import_cap_matches_the_route_cap`
+ * — five lines of regex, in the G1 lane. Keep the `export const
+ * MAX_IMPORT_URLS = <n>;` shape it matches on.
  */
 export const MAX_IMPORT_URLS = 20;
 

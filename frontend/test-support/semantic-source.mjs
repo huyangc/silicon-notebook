@@ -36,6 +36,24 @@ export async function parseModule(relativePath) {
 }
 
 
+/**
+ * `parseModule` for a target that lives outside `frontend/app/`, resolved from
+ * the repository root instead.
+ *
+ * The one caller today is the arXiv sample plugin's guard: that package sits in
+ * `examples/`, deliberately outside the frontend tree, so neither `parseModule`
+ * nor `appSourceModules` can reach it. The read belongs here rather than in the
+ * guard because `static-source-policy` allows raw file reads only in this
+ * module — and that policy is right: what it is protecting is "callers consume
+ * AST nodes, never text positions", which is exactly as true through this
+ * entry point as through `parseModule`.
+ */
+export async function parseRepositoryModule(relativePath) {
+  const url = new URL(`../../${relativePath}`, import.meta.url);
+  return parseText(await readFile(url, "utf8"), relativePath);
+}
+
+
 export async function appSourceModules() {
   const appDirectory = fileURLToPath(new URL("../app/", import.meta.url));
   const featureDirectory = fileURLToPath(new URL("../features/", import.meta.url));

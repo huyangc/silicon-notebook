@@ -678,7 +678,12 @@ def test_every_search_call_site_goes_through_the_shared_mapper():
             ):
                 continue
             call_sites += 1
-            where = f"{Path(module.__file__).name}:{node.lineno}"
+            # The diagnostic names the call itself, not a file:line — the
+            # repository's test-contract policy refuses source-position
+            # identities in this tree (`architecture/policy.py`), and it is
+            # right to: a line number in an assertion message rots on the next
+            # edit above it, while the unparsed call expression stays true.
+            where = f"{Path(module.__file__).name}: {ast.unparse(node)}"
             # No hand-written transport keyword may appear here…
             assert [kw.arg for kw in node.keywords] == [None], where
             # …and the one ``**`` expansion must be the shared mapper.
@@ -1445,6 +1450,32 @@ def test_import_route_via_http_rejects_non_dict_bodies_with_422():
         assert response.status_code == 422, body_bytes
 
     assert sources.calls == []
+
+
+def test_the_ui_package_import_cap_matches_the_route_cap():
+    """The batch ceiling is spelled twice, once per language; keep them equal.
+
+    ``routes.py::MAX_IMPORT_URLS`` is the authoritative bound — it answers an
+    over-long batch with a 400 — and the TypeScript constant only exists so
+    the panel can disable its button and say why instead of letting someone
+    tick thirty papers and learn the limit from an error banner.
+
+    Drift is safe in only one direction (a panel stricter than the server is
+    merely conservative; a panel looser than the server surfaces the 400
+    verbatim), which is exactly why it would go unnoticed.  Five lines of
+    regex is cheap enough that "grep for the other one" does not have to be
+    the whole mechanism.  This lives in the G1 file rather than the
+    end-to-end one on purpose: it needs no application, and a number that
+    can silently drift should be checked on every pull request rather than
+    once a night.
+    """
+
+    source = (
+        _PLUGIN_ROOT / "ui" / "arxiv-search" / "search-panel-model.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"export const MAX_IMPORT_URLS = (\d+);", source)
+    assert match is not None, "the UI package no longer exports MAX_IMPORT_URLS"
+    assert int(match.group(1)) == arxiv_routes.MAX_IMPORT_URLS
 
 
 def test_import_route_emits_only_whitelisted_event_fields():
