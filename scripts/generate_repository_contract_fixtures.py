@@ -2473,7 +2473,7 @@ TRANSACTION_PHASES: dict[str, dict[str, object]] = {
     "process_source": {
         "sequence": [
             "set parsing",
-            "parse outside transaction",
+            "parse and optional in-memory element enrichment outside transaction",
             "replace elements and source-derived state in one write",
             "set parsed",
             "best-effort chunk build",
