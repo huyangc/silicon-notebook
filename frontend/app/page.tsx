@@ -3562,9 +3562,23 @@ export default function Home() {
   // URL 当一次普通链接来源添加进当前笔记本——核心 URL 端点,不打插件路由。
   // 复用 applyImportedUrlSources 而不是自己重写一遍,是为了让「导入即解禁
   // 对话框 / 刷新体检铃铛」这条既有链路对两个入口保持同一份实现。
+  // 站外建议导入的页级单飞（codex #584 R6）：后端的容量检查与插入不在一个
+  // 原子里，同页并发两次导入能在只剩一个名额时各自快照到 capacity=1、双双
+  // 入库越过上限。串行化关不掉跨标签页/跨用户的同一竞态（那是既有的全端点
+  // 性质，另行登记），它关掉的是这块新面板让并发变得容易的那扇门；in-flight
+  // 期间其余建议的按钮经 importGapSuggestionDisabledReason 置灰并写明原因。
+  // ref 是权威判据（state 更新是异步的，双击会在同一帧里读到旧 state）。
+  const gapImportInFlightRef = useRef(false);
+  const [gapImportInFlight, setGapImportInFlight] = useState(false);
+
   async function importGapSuggestion(url: string): Promise<{ ok: boolean; message?: string }> {
+    if (gapImportInFlightRef.current) {
+      return { ok: false, message: "另一条建议正在导入，请稍候再试" };
+    }
     const owner = sourceLibrary.captureOwner();
     if (!owner) return { ok: false, message: "未能添加这个链接" };
+    gapImportInFlightRef.current = true;
+    setGapImportInFlight(true);
     try {
       const result = await importUrlSources(owner.notebookId, [url]);
       if (result.created.length > 0) {
@@ -3579,6 +3593,9 @@ export default function Home() {
     } catch (error) {
       // ⚠ 不读 error.message/.error——errors.ts 是错误人话层唯一的翻译入口。
       return { ok: false, message: toUserMessage(error, "未能添加这个链接") };
+    } finally {
+      gapImportInFlightRef.current = false;
+      setGapImportInFlight(false);
     }
   }
 
@@ -5747,7 +5764,15 @@ export default function Home() {
                             // 并写明原因）——不必先发一次远端 PDF 探测再撞后端必然的容量
                             // 拒绝。onImportGapSuggestion 为 undefined（只读工作区）时按钮
                             // 压根不渲染，这个 prop 传不传都不影响。
-                            importGapSuggestionDisabledReason={docCapacity.atCapacity ? atDocCapacityHint : undefined}
+                            importGapSuggestionDisabledReason={
+                              docCapacity.atCapacity
+                                ? atDocCapacityHint
+                                // 页级单飞（codex #584 R6）：一条建议在导入时，其余按钮
+                                // 置灰说明原因，堵住同页并发赛过容量检查的窗口。
+                                : gapImportInFlight
+                                  ? "另一条建议正在导入，请稍候"
+                                  : undefined
+                            }
                             onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
                             onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
                             testingModelServices={modelTestActivity.services}
