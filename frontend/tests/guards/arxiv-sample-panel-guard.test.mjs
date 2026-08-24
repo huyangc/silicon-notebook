@@ -230,3 +230,62 @@ test("runSearch 的防御性重检同样按检索字符上限拒绝（P2-3）", 
     `runSearch 必须调用 queryExceedsCharLimit 做防御性重检 —— 实际调用集合：${JSON.stringify(called)}`,
   );
 });
+
+test("handleImport 发起新一批导入时清掉上一批的回执（codex #596 R3 P2-1）", async () => {
+  // 此前只清 importError：上一批的成功回执会跟新一批的失败错误并排显示，读起来
+  // 像是同一次请求的结果。这里钉的是 setReceipt(null) 这一次**具体调用**——不能
+  // 只看「handleImport 里出现过 setReceipt」就通过，因为成功路径本来就会
+  // setReceipt(outcome)：那条调用参数是 outcome，不是 null，不能拿它冒充这条重置。
+  const source = await panel();
+  const handleImport = findFunctionIn(source, COMPONENT, "handleImport");
+  const calls = callSitesIn(handleImport);
+  const resetsReceipt = calls.some(
+    (call) => call.target === "setReceipt" && call.arguments[0] === "null",
+  );
+  assert.ok(
+    resetsReceipt,
+    "handleImport 必须调用 setReceipt(null) 清空上一批回执，不能让它与新一批的结果/"
+      + `错误并排显示 —— 实际调用集合：${JSON.stringify(calls)}`,
+  );
+});
+
+test("「加载更多」追加可见行而不是整页替换，新检索仍整体替换（codex #596 R3 P2-2）", async () => {
+  // 此前每次响应都整页替换 visibleIds：翻页时前页已勾选的行从界面消失，但
+  // `selected`/`catalog` 都还留着它们，于是仍计入导入上限、仍会被导入、也无法
+  // 取消勾选。修复是按 mode 分派——"append"（翻页）追加、"replace"（新检索）
+  // 整体替换——这里钉住三处：两个调用点各自传对 mode 字面量，以及 runSearch 自己
+  // 真的按 mode 分派到 appendVisibleIds，而不是恒定走 `response.items.map(...)`
+  // 那条整体替换的老路（否则调用点参数传对了位置，翻页行为却没变）。
+  const source = await panel();
+
+  const handleSubmit = findFunctionIn(source, COMPONENT, "handleSubmit");
+  const submitCall = callSitesIn(handleSubmit).find((call) => call.target === "runSearch");
+  assert.ok(submitCall, "handleSubmit 必须调用 runSearch");
+  assert.equal(
+    submitCall.arguments[2],
+    '"replace"',
+    `handleSubmit 发起的新检索必须整体替换（第三个参数 "replace"）—— 实际：${JSON.stringify(submitCall.arguments)}`,
+  );
+
+  const handleLoadMore = findFunctionIn(source, COMPONENT, "handleLoadMore");
+  const loadMoreCall = callSitesIn(handleLoadMore).find((call) => call.target === "runSearch");
+  assert.ok(loadMoreCall, "handleLoadMore 必须调用 runSearch");
+  assert.equal(
+    loadMoreCall.arguments[2],
+    '"append"',
+    `handleLoadMore 发起的翻页必须追加而非替换（第三个参数 "append"）—— 实际：${JSON.stringify(loadMoreCall.arguments)}`,
+  );
+
+  const runSearch = findFunctionIn(source, COMPONENT, "runSearch");
+  const setVisibleIdsCalls = callSitesIn(runSearch).filter(
+    (call) => call.target === "setVisibleIds",
+  );
+  const dispatchesOnMode = setVisibleIdsCalls.some(
+    (call) => call.arguments[0]?.includes("appendVisibleIds"),
+  );
+  assert.ok(
+    dispatchesOnMode,
+    "runSearch 必须按 mode 把追加场景交给 appendVisibleIds，不能恒定整体替换 —— 实际 "
+      + `setVisibleIds 调用：${JSON.stringify(setVisibleIdsCalls)}`,
+  );
+});

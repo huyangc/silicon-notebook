@@ -37,6 +37,7 @@ import {
   MAX_IMPORT_URLS,
   MAX_QUERY_TERMS,
   QUERY_MAX_CHARS,
+  appendVisibleIds,
   classifyImportReceipt,
   countQueryTerms,
   deselectPaper,
@@ -154,6 +155,35 @@ test("search-panel-model：start 翻页按上一页真实返回条数推进", ()
   assert.equal(nextPageStart(10, 7), 17);
   // 零条返回（例如最后一页恰好取完）不推进——没有下一页可翻。
   assert.equal(nextPageStart(10, 0), 10);
+});
+
+
+test("search-panel-model：appendVisibleIds 按 id 去重、保持追加序，无新增时复用同一引用（codex #596 R3 P2-2）", () => {
+  const item = (id) => ({
+    arxiv_id: id,
+    title: `Paper ${id}`,
+    authors: [],
+    published: "",
+    summary: "",
+    pdf_url: `https://arxiv.org/pdf/${id}`,
+    abs_url: `https://arxiv.org/abs/${id}`,
+  });
+
+  const afterFirstPage = appendVisibleIds([], [item("a"), item("b")]);
+  assert.deepEqual(afterFirstPage, ["a", "b"]);
+
+  // 第二页带回一个复现的 "b"（结果集在两次请求之间轻微漂移）与一个真正的新 id
+  // "c"：只有 "c" 被追加，"b" 留在它首次出现的位置——不重复、不挪位。
+  const afterSecondPage = appendVisibleIds(afterFirstPage, [item("b"), item("c")]);
+  assert.deepEqual(afterSecondPage, ["a", "b", "c"]);
+  // 前一页的内容原样保留在前缀里——调用方存的旧 useState 引用里的每个 id 仍能
+  // 解析出同一份 catalog 条目，勾选不会因为这次追加而"消失"。
+  assert.deepEqual(afterSecondPage.slice(0, 2), afterFirstPage);
+
+  // 无新增（空 items，或者带回来的 id 全部已经在列表里）必须复用同一个数组引用
+  // ——否则调用方存进 useState 时会白触发一次多余渲染。
+  assert.equal(appendVisibleIds(afterSecondPage, []), afterSecondPage);
+  assert.equal(appendVisibleIds(afterSecondPage, [item("b")]), afterSecondPage);
 });
 
 
