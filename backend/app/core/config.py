@@ -162,6 +162,17 @@ class Settings(BaseSettings):
         le=300,
         validation_alias="REPORT_POST_COMPLETION_EXTENSION_TIMEOUT_SECONDS",
     )
+    # Unlike the two budgets above, this one is spent BEFORE the user has an
+    # answer: gap consultation runs inside the answer's latency, so every
+    # second here is a second the reader waits.  Hence the much smaller default
+    # and the much tighter ceiling.  It is also a hard deadline rather than a
+    # cooperative one — the host abandons a contributor that overruns it.
+    ask_gap_consult_timeout_seconds: float = Field(
+        4.0,
+        gt=0,
+        le=30,
+        validation_alias="ASK_GAP_CONSULT_TIMEOUT_SECONDS",
+    )
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(
