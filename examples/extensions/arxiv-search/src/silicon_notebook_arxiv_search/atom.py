@@ -31,11 +31,30 @@ from xml.etree import ElementTree
 
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
-# Plugin-private bounds.  Nothing here is a core rail: these only decide how
-# much of one upstream record this plugin is willing to carry around.  Core
-# applies its own, independent caps to whatever reaches a gap suggestion.
-TITLE_MAX_CHARS = 200
-SUMMARY_MAX_CHARS = 400
+# Plugin-private bounds.  Nothing here is a core rail: these decide how much
+# of one upstream record this parser is willing to hold in memory and show
+# on the interactive ``/search`` results page — not what a gap suggestion may
+# carry.
+#
+# ``TITLE_MAX_CHARS``/``SUMMARY_MAX_CHARS`` used to be pinned to core's own
+# ``GAP_SUGGESTION_TITLE_MAX_CHARS``/``GAP_SUGGESTION_SUMMARY_MAX_CHARS``
+# (200/400) so the gap-consult mapping in :mod:`.consult` never had to
+# truncate a second time on the way into a suggestion.  That alignment is
+# **retired**: it made this parser's *display* path — the results a person
+# reads on the search panel, imported through :mod:`.routes` — silently share
+# a limit that only ever needed to exist for the *gap-consult* path (an
+# unbidden suggestion core hands to a model).  A 400-character abstract is
+# unremarkable on a results page, and arXiv abstracts routinely run well past
+# it; cutting one off mid-sentence with no ellipsis (see :func:`_collapse`
+# below) is silent data loss on the page a caller actually asked to see.
+# These two constants are now sized as a generous in-memory safety ceiling
+# for one upstream record — wide enough that an ordinary arXiv title or
+# abstract is never touched — not a product-facing truncation.
+# :mod:`.consult` owns the gap-suggestion-specific cut now, against core's
+# own constants, at the one place that actually needs it — see
+# ``.consult::_suggestion``.
+TITLE_MAX_CHARS = 500
+SUMMARY_MAX_CHARS = 4000
 AUTHOR_MAX_CHARS = 80
 PUBLISHED_MAX_CHARS = 40
 ARXIV_ID_MAX_CHARS = 64
@@ -110,9 +129,14 @@ def _collapse(value: str, limit: int) -> str:
     """Fold every run of whitespace into one space, then cut to ``limit``.
 
     arXiv wraps titles and abstracts across lines with leading indentation, so
-    the raw text is never display-ready.  The cut is a hard one: no ellipsis,
-    because the result is also what the gap-consult path hands to core, and an
-    appended marker would be indistinguishable from the record's own text.
+    the raw text is never display-ready.  The cut is a hard one: no ellipsis
+    — an appended marker would be indistinguishable from the record's own
+    text.  At this layer's now-generous ``limit`` (see the module-level
+    constants above) the cut is essentially never reached by a real arXiv
+    record; it exists as a memory ceiling, not a product-facing truncation.
+    :mod:`.consult` applies its own, tighter, cut on the way into a gap
+    suggestion (see ``.consult::_suggestion``) and is free to make the same
+    no-ellipsis choice there, for the same reason.
     """
     return " ".join(value.split())[:limit]
 

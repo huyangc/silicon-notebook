@@ -285,6 +285,21 @@ def _import_urls(
     (only ``/search`` does), and ``None`` here simply means there is no
     configured mirror host to widen the allow-list with — see
     ``_is_arxiv_url``.
+
+    **De-duplication, order-preserving and silent.** A URL's second and
+    later occurrences in the batch are dropped before ``url_sources`` is
+    ever touched, without a 400 — core's own importer is not
+    content-addressed (see the module docstring), so sending the same URL
+    twice would create two duplicate sources for nothing, and two identical
+    entries in the same feed (or a client that double-submits a click) is an
+    ordinary shape, not a caller mistake worth refusing the whole batch
+    over. A repeat's host/length are not re-checked either: it is
+    byte-identical to a URL this same call already validated, so there is
+    nothing new to learn from checking it twice. The ``MAX_IMPORT_URLS``
+    ceiling below is therefore checked against this *deduplicated* count,
+    not ``len(raw)`` — a caller who names a handful of distinct papers more
+    times than the cap must not be refused for a repetition that will not
+    cost a second source.
     """
 
     if not isinstance(payload, dict):
@@ -292,15 +307,14 @@ def _import_urls(
     raw = payload.get("urls")
     if not isinstance(raw, list) or not raw:
         raise context.user_error(400, "请先选择要导入的文献")
-    if len(raw) > MAX_IMPORT_URLS:
-        raise context.user_error(
-            400, f"一次最多导入 {MAX_IMPORT_URLS} 篇，请分批选择"
-        )
     urls: list[str] = []
+    seen: set[str] = set()
     for item in raw:
         if not isinstance(item, str) or not item.strip():
             raise context.user_error(400, "请先选择要导入的文献")
         url = item.strip()
+        if url in seen:
+            continue
         # Host checked first, independent of length: a foreign host is
         # refused for what it is, not for how long it happens to be.  Only a
         # link that already cleared the host check gets the length message —
@@ -314,7 +328,12 @@ def _import_urls(
             raise context.user_error(
                 400, f"链接过长，最多支持 {MAX_URL_CHARS} 个字符"
             )
+        seen.add(url)
         urls.append(url)
+    if len(urls) > MAX_IMPORT_URLS:
+        raise context.user_error(
+            400, f"一次最多导入 {MAX_IMPORT_URLS} 篇，请分批选择"
+        )
     return urls
 
 

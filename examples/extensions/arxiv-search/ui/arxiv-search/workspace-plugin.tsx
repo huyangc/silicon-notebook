@@ -59,6 +59,7 @@ import {
   formatAuthors,
   mergeCatalog,
   nextPageStart,
+  queryExceedsCharLimit,
   selectPaper,
   selectedImportUrls,
   type ArxivImportResponse,
@@ -109,15 +110,19 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   // and letting a new page land underneath it would clear a selection the user
   // made against results that no longer exist.
   async function runSearch(term: string, nextStart: number) {
-    // The submit button is already disabled past the cap (see
-    // `overQueryTermLimit` below); this re-check is the defensive half, the
-    // same shape `handleImport` uses for `MAX_IMPORT_URLS` — so a stray
-    // programmatic call cannot spend a round trip on a query the plugin's
-    // own route will now answer with a 400 instead of silently truncating.
+    // The submit button is already disabled past either cap (see
+    // `overQueryCharLimit`/`overQueryTermLimit` below); this re-check is the
+    // defensive half, the same shape `handleImport` uses for
+    // `MAX_IMPORT_URLS` — so a stray programmatic call cannot spend a round
+    // trip on a query the plugin's own route will now answer with a 400
+    // instead of silently truncating. The route checks length before word
+    // count (`routes.py::search`), so this mirrors that order — though
+    // either condition alone is enough to refuse.
     if (
       term.length === 0 ||
       searchBusy ||
       importBusy ||
+      queryExceedsCharLimit(term) ||
       countQueryTerms(term) > MAX_QUERY_TERMS
     ) {
       return;
@@ -208,6 +213,7 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   }
   const noResults = searched && !searchBusy && !searchError && visibleItems.length === 0;
   const overImportLimit = selected.size > MAX_IMPORT_URLS;
+  const overQueryCharLimit = queryExceedsCharLimit(query);
   const overQueryTermLimit = countQueryTerms(query) > MAX_QUERY_TERMS;
 
   return (
@@ -241,12 +247,17 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
             type="submit"
             className="button"
             disabled={
-              searchBusy || importBusy || query.trim().length === 0 || overQueryTermLimit
+              searchBusy
+              || importBusy
+              || query.trim().length === 0
+              || overQueryCharLimit
+              || overQueryTermLimit
             }
           >
             {searchBusy ? "检索中…" : "检索"}
           </button>
         </form>
+        {overQueryCharLimit && <p>检索关键词过长，请精简后再试。</p>}
         {overQueryTermLimit && <p>检索词最多 {MAX_QUERY_TERMS} 个，请精简后重试。</p>}
         {searchError && <p role="alert">{searchError}</p>}
         {noResults && <p>没有找到相关文献，换个关键词试试。</p>}
