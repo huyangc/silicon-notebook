@@ -24,6 +24,12 @@ from app.core.model_safety import (
     safe_model_label,
     safe_model_support_id,
 )
+from app.domain.gap_consult import (
+    GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS,
+    GAP_SUGGESTION_SUMMARY_MAX_CHARS,
+    GAP_SUGGESTION_TITLE_MAX_CHARS,
+    GAP_SUGGESTION_URL_MAX_CHARS,
+)
 from app.models.common import Evidence
 from app.models.knowledge import KnowledgeRecord
 
@@ -579,6 +585,28 @@ class StructuredBatchCoverage(BaseModel):
     synthesis_complete: Optional[bool] = None
 
 
+class AskGapSuggestion(BaseModel):
+    """One pointer to material OUTSIDE this notebook.
+
+    Not evidence, and the field set says so: there is no ``source_id``, no
+    ``element_id``, no relevance score and no citation key, because nothing
+    here was retrieved, cited, anchored, or shown to the answering model.  A
+    reader who wants it has to import the URL first, which is an ordinary
+    source add with its own parsing and its own permissions.
+
+    The ``max_length`` values are imported from ``app.domain.gap_consult`` —
+    the same constants the host truncates with — so the wire rail and the
+    admission rail cannot drift apart.
+    """
+
+    title: str = Field(max_length=GAP_SUGGESTION_TITLE_MAX_CHARS)
+    url: str = Field(max_length=GAP_SUGGESTION_URL_MAX_CHARS)
+    summary: str = Field(default="", max_length=GAP_SUGGESTION_SUMMARY_MAX_CHARS)
+    source_label: str = Field(
+        default="", max_length=GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS
+    )
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     asked_at: str = Field(default="", exclude_if=lambda value: not value)
@@ -644,6 +672,21 @@ class AskResponse(BaseModel):
     # 驱动前端渲染「构建索引」提示。「建过但有 delta」不置此位(既有「N 源待索引」
     # 徽章覆盖那种最终一致态)。
     index_required: bool = False
+    # Gap consultation (``ask.gap_consult``): pointers to material outside the
+    # notebook, offered when this run came up thin or left a confirmed
+    # direction uncovered.  Three things it deliberately is NOT:
+    #   * not evidence — never retrieved, never scored, never in the synthesis
+    #     prompt, so it cannot have moved a single word of ``answer``;
+    #   * not citable — it takes no ``[k]`` key and appears in neither
+    #     ``anchors`` nor ``citations``;
+    #   * not public — ``conversation_public_view`` projects a whitelist and
+    #     this field is not on it, so a shared link never carries it.
+    # Empty by the ``exclude_if`` convention, so a deployment with no
+    # gap-consult plugin serializes byte-identically to every historical
+    # payload and a reopened legacy turn simply has none.
+    gap_suggestions: List[AskGapSuggestion] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     model_errors: List[ModelError] = Field(default_factory=list)
 
     @field_validator("reasoning_trace", mode="before")

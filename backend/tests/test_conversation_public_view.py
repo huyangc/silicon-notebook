@@ -772,3 +772,43 @@ def test_one_bad_turn_does_not_topple_the_whole_page():
     assert [t["question"] for t in payload["turns"]] == ["好问题", "坏问题"]
     assert payload["turns"][0]["references"][0]["key"] == "k1"
     assert payload["turns"][1]["references"] == []
+
+
+def test_gap_suggestions_never_reach_the_public_projection():
+    """Gap suggestions (``ask.gap_consult``) stay inside the authenticated app.
+
+    They are not evidence and not part of the answer, so a shared link has no
+    business carrying them: the URLs record what a *deployment plugin* was
+    asked about this reader's question, which is a signal about the run rather
+    than about the material the page exists to show.
+
+    The projection is a whitelist, so this holds constructively — but only for
+    as long as the emitted key set is the frozen one below.  Both halves matter:
+    the substring assertions catch a field added under a different name, and
+    the frozen key set catches a field added under any name at all.
+    """
+    turn = public_turn(_turn("引力波探测的最新进展？", {
+        "answer": "见 [k1]。",
+        "anchors": [_anchor("k1")],
+        "gap_suggestions": [{
+            "title": "LIGO O4 run summary",
+            "url": "https://example.org/ligo-o4.pdf",
+            "summary": "Detector sensitivity and event rate for the O4 run.",
+            "source_label": "arXiv",
+        }],
+    }))
+
+    rendered = json.dumps(turn, ensure_ascii=False)
+    for secret in (
+        "LIGO O4 run summary", "ligo-o4.pdf", "example.org",
+        "Detector sensitivity", "arXiv", "gap_suggestion",
+    ):
+        assert secret not in rendered, secret
+    assert set(turn) == {
+        "question", "answer_md", "asked_at", "answered_at", "evidence_level",
+        "references", "reference_count", "truncated_references",
+        "omitted_result_sets", "images",
+    }
+    # The turn is otherwise projected normally — this is an exclusion, not a
+    # payload that silently fails to render.
+    assert turn["references"][0]["key"] == "k1"

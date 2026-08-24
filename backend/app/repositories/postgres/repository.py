@@ -10,6 +10,7 @@ from app.domain.extensions import (
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
 )
+from app.domain.gap_consult import GapConsultHostPort
 from app.repositories.postgres.bundle import PostgresPersistenceBundleFactory
 from app.services.repository_facade import RepositoryFacade
 
@@ -24,6 +25,7 @@ class PostgresRepository(RepositoryFacade):
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
         factory = PostgresPersistenceBundleFactory()
         try:
@@ -35,6 +37,7 @@ class PostgresRepository(RepositoryFacade):
                 parser_provider_chain_host=parser_provider_chain_host,
                 ask_completed_observer_host=ask_completed_observer_host,
                 report_completed_observer_host=report_completed_observer_host,
+                gap_consult_host=gap_consult_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a

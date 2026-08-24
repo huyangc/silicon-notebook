@@ -1370,6 +1370,13 @@ _INTENT_DIRECTION_LABEL_WIDEN_CHARS = (120, 240)
 # 披露步 detail 与 reflect 回喂里最多逐条列出几个未执行方向(其余只给总数)。
 # 未执行方向数上界是 16(契约的必答主题上限),但一屏列 16 条谁也读不完。
 _INTENT_PENDING_DISCLOSE = 8
+# 终态披露步(reflect 循环跑完后落的那条 `skip`)的 detail reason。`run()` 收尾
+# 处写的是同值字面量——那一段被零余量行数上限钉着,本条只是给**读**它的消费方
+# (gap consultation 的触发判据)一个具名真源,而不是在 `run()` 里换一次写法。
+# 两者的对账由 `backend/tests/test_gap_consult_ask_wiring.py` 的
+# `test_terminal_disclosure_reason_is_the_shared_constant` 承担:那条用例真跑
+# 一轮方向未覆盖的 run,断言落下来的 detail 里就是这个值。
+INTENT_COVERAGE_INCOMPLETE_REASON = "intent_coverage_incomplete"
 # 回喂 reflect 时最多逐个点名几个「邻居被上限截断」的节点(其余只给总数)。
 # 节点名可能不短,而这段提示的作用是让模型改换动作,不是列清单。
 _NEIGHBOR_TRUNCATION_DISCLOSE = 5

@@ -1353,6 +1353,39 @@
           "title": "AskDetail",
           "type": "object"
         },
+        "AskGapSuggestion": {
+          "description": "One pointer to material OUTSIDE this notebook.\n\nNot evidence, and the field set says so: there is no ``source_id``, no\n``element_id``, no relevance score and no citation key, because nothing\nhere was retrieved, cited, anchored, or shown to the answering model.  A\nreader who wants it has to import the URL first, which is an ordinary\nsource add with its own parsing and its own permissions.\n\nThe ``max_length`` values are imported from ``app.domain.gap_consult`` —\nthe same constants the host truncates with — so the wire rail and the\nadmission rail cannot drift apart.",
+          "properties": {
+            "source_label": {
+              "default": "",
+              "maxLength": 40,
+              "title": "Source Label",
+              "type": "string"
+            },
+            "summary": {
+              "default": "",
+              "maxLength": 400,
+              "title": "Summary",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "title": "Title",
+              "type": "string"
+            },
+            "url": {
+              "maxLength": 2048,
+              "title": "Url",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "url"
+          ],
+          "title": "AskGapSuggestion",
+          "type": "object"
+        },
         "AskIntentConfirmation": {
           "properties": {
             "answers": {
@@ -1574,6 +1607,13 @@
               "default": "inferred",
               "title": "Evidence Level",
               "type": "string"
+            },
+            "gap_suggestions": {
+              "items": {
+                "$ref": "#/components/schemas/AskGapSuggestion"
+              },
+              "title": "Gap Suggestions",
+              "type": "array"
             },
             "grounded": {
               "default": false,

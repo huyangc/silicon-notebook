@@ -46,8 +46,18 @@ from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.ask_retrieval_policy import RetrievalEffort, ask_retrieval_limits
 from app.core.config import Settings
 from app.core.llm import cap_kwargs
+from app.domain.gap_consult import (
+    GAP_CONSULT_MAX_GAP_PHRASES,
+    GAP_CONSULT_MAX_SUGGESTIONS,
+    GAP_CONSULT_PHRASE_MAX_CHARS,
+    GAP_CONSULT_QUESTION_MAX_CHARS,
+    GapConsultCallContext,
+    GapConsultQuery,
+    gap_consult_host_is_dormant,
+)
 from app.models.ask import (
     TRACE_ANCHOR_EVIDENCE_IDS_MAX,
+    AskGapSuggestion,
     AskRequest,
     AskResponse,
     Citation,
@@ -323,6 +333,79 @@ def knowledge_record(object_type: str, obj: dict, schema) -> KnowledgeRecord:
     )
 
 
+def _egress_phrase(value: object, limit: int) -> str:
+    """Bound and de-noise one string on its way OUT of the deployment.
+
+    Citation-shaped tokens are stripped because ``[k3]`` names a server-owned
+    evidence key: outside this deployment it is meaningless at best, and a
+    handle worth correlating at worst.  Whitespace is collapsed so a phrase
+    cannot smuggle structure (or a newline-delimited payload) past the length
+    rail.
+    """
+    if type(value) is not str:
+        return ""
+    return " ".join(_LOOSE_MARKER_GROUP_RE.sub(" ", value).split())[:limit]
+
+
+def _egress_question(prepared: object) -> str:
+    """The single question string a gap-consult plugin gets to see.
+
+    Prefers the reviewed wording over the raw input — that is what this run
+    actually searched for — and falls back to the raw question when no intent
+    was confirmed.  Bounded by ``GAP_CONSULT_QUESTION_MAX_CHARS``, which is a
+    privacy rail rather than a budget: it is the ceiling on how much of the
+    user's own text leaves the deployment per consultation.
+    """
+    projection = getattr(prepared, "intent_projection", None)
+    for candidate in (
+        getattr(projection, "resolved_question", ""),
+        getattr(prepared, "research_question", ""),
+        getattr(prepared, "question", ""),
+    ):
+        phrase = _egress_phrase(candidate, GAP_CONSULT_QUESTION_MAX_CHARS)
+        if phrase:
+            return phrase
+    return ""
+
+
+def _uncovered_directions_from_trace(trace: object) -> tuple[str, ...]:
+    """Confirmed directions this run finished without ever executing.
+
+    Read from the terminal disclosure step the retriever writes after its
+    reflect loop — the only place that answers "still uncovered when the run
+    *ended*" rather than "uncovered when the seeding budget ran out"
+    (``run()`` deliberately recomputes it there for exactly that reason).
+
+    What comes back is the registry's short LABEL for each direction, never
+    the direction itself: an ``uncovered_intent_queries`` element is the
+    direction concatenated with the whole confirmed intent contract, and that
+    composite must not leave the deployment.  Labels are already bounded
+    upstream; this re-bounds them anyway, because an egress rail that depends
+    on its producer's rail is one refactor away from not being a rail.
+    """
+    from app.services.reasoning_retrieval import (
+        INTENT_COVERAGE_INCOMPLETE_REASON,
+    )
+
+    gaps: list[str] = []
+    seen: set[str] = set()
+    for step in tuple(trace or ()):
+        if getattr(step, "step_type", "") != "skip":
+            continue
+        detail = getattr(step, "detail", None)
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("reason") != INTENT_COVERAGE_INCOMPLETE_REASON:
+            continue
+        directions = detail.get("directions")
+        for item in directions if isinstance(directions, (list, tuple)) else ():
+            phrase = _egress_phrase(item, GAP_CONSULT_PHRASE_MAX_CHARS)
+            if phrase and phrase not in seen:
+                seen.add(phrase)
+                gaps.append(phrase)
+    return tuple(gaps[:GAP_CONSULT_MAX_GAP_PHRASES])
+
+
 class DefaultResponseDraftStage:
     """The shipped ``ResponseDraftStage``: AskService's own synthesis segment.
 
@@ -394,6 +477,7 @@ class AskService:
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
         response_draft_stage: "ResponseDraftStage | None" = None,
+        gap_consult_host=None,
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
@@ -451,6 +535,10 @@ class AskService:
             if response_draft_stage is not None
             else DefaultResponseDraftStage(self)
         )
+        # X9 PR-A: the frozen ``ask.gap_consult`` host.  ``None`` (and a host
+        # with no deployment plugin behind it) means this run is byte-identical
+        # to the one before the point existed — see ``_consult_gap_sources``.
+        self.gap_consult_host = gap_consult_host
 
     def _activate_selected_source_graph(
         self,
@@ -2545,6 +2633,105 @@ class AskService:
             baseline_manifest=draft.baseline_manifest,
         )
 
+    def _consult_gap_sources(
+        self,
+        prepared,
+        limits,
+        trace,
+        *,
+        top_hits,
+        chunks,
+        elements,
+        cancellation,
+        on_step,
+    ):
+        """Ask deployment plugins what exists OUTSIDE this notebook.
+
+        Called once per reasoning run, at the one moment where what this run
+        found is settled (source-graph activation and retrieval's fail-open
+        degradation included) but no word of the answer has been written yet,
+        and only when the run has something to admit to: a confirmed direction
+        it never executed, or an evidence pool thinner than this effort tier's
+        own ``ranked_final_floor``.  Both conditions are read off what the run
+        already produced — no extra query, no extra model call, and nothing at
+        all when neither holds.
+
+        What comes back is **not evidence**, which is why the caller attaches
+        it to the response *after* the draft stage rather than passing it
+        through ``ResponseDraftInput``: letting the drafting stage see it would
+        hand it a route into the prose.  The answering model therefore never
+        sees it, it takes no ``[k]`` key, it enters neither ``anchors`` nor
+        ``citations``, and it cannot have moved a word of the answer.
+
+        Every failure is fail-open and silent to the reader: no host, a
+        dormant point, a malformed trace, a raising plugin, an exhausted
+        budget — all of them return ``()`` and leave the answer exactly as it
+        would otherwise have been.  Cancellation is the sole exception: it is
+        the caller's own signal and must keep propagating.
+        """
+        host = getattr(self, "gap_consult_host", None)
+        if host is None or gap_consult_host_is_dormant(host):
+            return ()
+        gaps = _uncovered_directions_from_trace(trace)
+        thin = limits is not None and (
+            len(top_hits) + len(chunks) + len(elements)
+            < limits.ranked_final_floor
+        )
+        if not gaps and not thin:
+            return ()
+        question = _egress_question(prepared)
+        if not question:
+            return ()
+        started = time.monotonic()
+        try:
+            raw = host.consult(
+                GapConsultCallContext(
+                    GapConsultQuery(
+                        question, gaps, GAP_CONSULT_MAX_SUGGESTIONS
+                    ),
+                    cancellation,
+                    self.retrieval_connection_probe,
+                    started + self.settings.ask_gap_consult_timeout_seconds,
+                ),
+                event_sink=self.event_log.emit,
+            )
+        except AskCancelled:
+            raise
+        except Exception:
+            # Defence in depth: the host already fails open per contributor,
+            # so reaching here means the host itself misbehaved.  A gap
+            # suggestion is worth strictly less than the answer it accompanies.
+            raw = ()
+        suggestions = tuple(
+            AskGapSuggestion(
+                title=item.title,
+                url=item.url,
+                summary=item.summary,
+                source_label=item.source_label,
+            )
+            for item in raw
+        )
+        step = TraceStep(
+            step_type="gap_consult",
+            summary=(
+                f"已向站外来源询问 {len(gaps)} 个缺口，"
+                f"得到 {len(suggestions)} 条建议（不参与本次回答）"
+                if gaps
+                else f"库内证据偏少，已向站外来源询问，"
+                     f"得到 {len(suggestions)} 条建议（不参与本次回答）"
+            ),
+            detail={
+                "reason": "uncovered_directions" if gaps else "thin_evidence",
+                "count": len(suggestions),
+                "gaps": len(gaps),
+            },
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        )
+        trace.append(step)
+        if on_step:
+            on_step(step)
+        return suggestions
+
     def _run_reasoning_stage(self, prepared, runtime):
         """Orchestrate one prepared reasoning Ask across the typed stages.
 
@@ -3015,6 +3202,13 @@ class AskService:
             # 前再检查一次」同一条口径)。已取消且那次 schema 读自身也会抛错时,
             # 异常类型从该读的异常变成 AskCancelled(取消优先)。
             raise_if_cancelled(cancel_event)
+            # 缺口外扩:检索已定型、答案还没开始写的这一刻,恰好一次。产出刻意
+            # **不**进 ``ResponseDraftInput``(理由见 ``_consult_gap_sources``)。
+            gap_suggestions = self._consult_gap_sources(
+                prepared, limits, trace,
+                top_hits=top_hits, chunks=chunks, elements=elements,
+                cancellation=cancel_event, on_step=on_trace,
+            )
             # 权威复核同样上提到编排器:曾经是 ``_draft_reasoning_response``
             # (出厂默认实现)自己的 prologue 才做的检查,现在挪到这里、紧挨
             # 进入 seam 之前 —— 这样注入实现也在已验证权威下进入,而不是只有
@@ -3069,6 +3263,8 @@ class AskService:
                 draft.response.model_errors = [
                     ModelError(**e) for e in _err_sink
                 ]
+                # 同一条先例:非证据字段由 core 在 stage 之后填,注入实现够不着。
+                draft.response.gap_suggestions = list(gap_suggestions)
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
             _ASK_EMBED_CACHE.reset(_emb_token)
