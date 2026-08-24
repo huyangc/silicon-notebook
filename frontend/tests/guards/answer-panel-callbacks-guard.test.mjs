@@ -142,6 +142,13 @@ test("站外建议导入是页级单飞：传值读 in-flight 状态，函数体
     bound.includes("gapImportInFlight"),
     `importGapSuggestionDisabledReason 的传值没有读 gapImportInFlight——实际：${bound}`,
   );
+  // 忙碌位是「哪个库在忙」不是裸布尔（与「补上关联/重新合并」同一条红线，
+  // codex #584 R11）：传值必须按**当前库**查集合，A 库在飞的导入不得灰掉 B 库。
+  assert.match(
+    bound,
+    /gapImportInFlight\.has\(/,
+    `importGapSuggestionDisabledReason 没有按当前库查忙碌集合——实际：${bound}`,
+  );
   const fn = findFunction(page, "importGapSuggestion");
   assert.ok(fn, "page.tsx 里找不到 importGapSuggestion");
   const body = fn.getText();
@@ -149,7 +156,7 @@ test("站外建议导入是页级单飞：传值读 in-flight 状态，函数体
   // = false` 也含同一子串，只查子串会让删掉拒绝分支的变异照样绿。
   assert.match(
     body,
-    /if\s*\(\s*gapImportInFlightRef\.current\s*\)/,
-    "importGapSuggestion 没有按 ref 判据拒绝并发进入——双击可绕过单飞",
+    /if\s*\(\s*gapImportInFlightRef\.current\.has\(\s*owner\.notebookId\s*\)\s*\)/,
+    "importGapSuggestion 没有按 owner 的 notebookId 查忙碌集合拒绝并发——双击可绕过单飞，或串台到别的库",
   );
 });

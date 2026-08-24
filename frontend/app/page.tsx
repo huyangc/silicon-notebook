@@ -3562,23 +3562,30 @@ export default function Home() {
   // URL 当一次普通链接来源添加进当前笔记本——核心 URL 端点,不打插件路由。
   // 复用 applyImportedUrlSources 而不是自己重写一遍,是为了让「导入即解禁
   // 对话框 / 刷新体检铃铛」这条既有链路对两个入口保持同一份实现。
-  // 站外建议导入的页级单飞（codex #584 R6）：后端的容量检查与插入不在一个
-  // 原子里，同页并发两次导入能在只剩一个名额时各自快照到 capacity=1、双双
-  // 入库越过上限。串行化关不掉跨标签页/跨用户的同一竞态（那是既有的全端点
-  // 性质，另行登记），它关掉的是这块新面板让并发变得容易的那扇门；in-flight
-  // 期间其余建议的按钮经 importGapSuggestionDisabledReason 置灰并写明原因。
-  // ref 是权威判据（state 更新是异步的，双击会在同一帧里读到旧 state）。
-  const gapImportInFlightRef = useRef(false);
-  const [gapImportInFlight, setGapImportInFlight] = useState(false);
+  // 站外建议导入的按笔记本单飞（codex #584 R6/R11）：后端的容量检查与插入
+  // 不在一个原子里，同库并发两次导入能在只剩一个名额时各自快照到 capacity=1、
+  // 双双入库越过上限。串行化关不掉跨标签页/跨用户的同一竞态（那是既有的
+  // 全端点性质，另行登记），它关掉的是这块新面板让并发变得容易的那扇门；
+  // in-flight 期间同库其余按钮经 importGapSuggestionDisabledReason 置灰并写明
+  // 原因。忙碌位存的是「哪个库在忙」而不是裸布尔（与「补上关联/重新合并」
+  // 同一条红线）：容量竞态是按库的，A 库在飞的导入不该灰掉 B 库的按钮，
+  // 清除也只清自己那一格——迟到的 finally 绝不抹掉别的库刚建立的占用。
+  // ref 是权威判据（state 更新是异步的，双击会在同一帧里读到旧 state）；
+  // 集合而不是单格——A 库导入在飞时切到 B 库再导入，两个占用互不覆盖，
+  // 各自的 finally 只删自己的键。
+  const gapImportInFlightRef = useRef<Set<string>>(new Set());
+  const [gapImportInFlight, setGapImportInFlight] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   async function importGapSuggestion(url: string): Promise<{ ok: boolean; message?: string }> {
-    if (gapImportInFlightRef.current) {
-      return { ok: false, message: "另一条建议正在导入，请稍候再试" };
-    }
     const owner = sourceLibrary.captureOwner();
     if (!owner) return { ok: false, message: "未能添加这个链接" };
-    gapImportInFlightRef.current = true;
-    setGapImportInFlight(true);
+    if (gapImportInFlightRef.current.has(owner.notebookId)) {
+      return { ok: false, message: "另一条建议正在导入，请稍候再试" };
+    }
+    gapImportInFlightRef.current.add(owner.notebookId);
+    setGapImportInFlight(new Set(gapImportInFlightRef.current));
     try {
       const result = await importUrlSources(owner.notebookId, [url]);
       if (result.created.length > 0) {
@@ -3594,8 +3601,9 @@ export default function Home() {
       // ⚠ 不读 error.message/.error——errors.ts 是错误人话层唯一的翻译入口。
       return { ok: false, message: toUserMessage(error, "未能添加这个链接") };
     } finally {
-      gapImportInFlightRef.current = false;
-      setGapImportInFlight(false);
+      // 只删自己那一格：迟到的 settle 绝不抹掉别的库刚建立的占用。
+      gapImportInFlightRef.current.delete(owner.notebookId);
+      setGapImportInFlight(new Set(gapImportInFlightRef.current));
     }
   }
 
@@ -5767,9 +5775,10 @@ export default function Home() {
                             importGapSuggestionDisabledReason={
                               docCapacity.atCapacity
                                 ? atDocCapacityHint
-                                // 页级单飞（codex #584 R6）：一条建议在导入时，其余按钮
-                                // 置灰说明原因，堵住同页并发赛过容量检查的窗口。
-                                : gapImportInFlight
+                                // 按笔记本单飞（codex #584 R6/R11）：只有**当前库**有
+                                // 建议在导入时才置灰其余按钮——容量竞态是按库的，
+                                // A 库在飞的导入不该灰掉 B 库的按钮。
+                                : gapImportInFlight.has(currentNotebook.id)
                                   ? "另一条建议正在导入，请稍候"
                                   : undefined
                             }
