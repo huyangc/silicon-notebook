@@ -8,13 +8,23 @@ import os
 import re
 import zipfile
 from html.parser import HTMLParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 from app.models.sources import SourceElement
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.parser_registry import PARSER_ENGINES, builtin_parser_id
+
+
+# A Markdown bundle is one source, so its complete uncompressed file set must
+# fit the same deployment byte rail as any other source. The entry ceiling is
+# a structural ZIP parser bound rather than a deployment quality/cost knob.
+MARKDOWN_BUNDLE_MAX_ENTRIES = 2000
+_MARKDOWN_BUNDLE_EXTENSIONS = {".md", ".markdown"}
+_MARKDOWN_BUNDLE_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+_REMOTE_OR_DATA_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 
 
 #: 「MinerU 值得一试」的后缀单一真源。MinerU 原生解析 PDF/DOCX/PPTX/XLSX，
@@ -98,6 +108,10 @@ def parse_builtin_source_file(
     parser_id = builtin_parser_id(file_name)
     if parser_id == "markdown":
         return parse_markdown(source_id, Path(file_path), persist_image=persist_image)
+    if parser_id == "markdown_bundle":
+        return parse_markdown_bundle(
+            source_id, Path(file_path), persist_image=persist_image
+        )
     if parser_id == "docx":
         return parse_docx_mammoth(source_id, Path(file_path))
     if parser_id == "pptx":
@@ -458,7 +472,10 @@ def _persist_markdown_data_uri(src: str, persist_image: Any, ordinal: int) -> st
 
 
 def parse_markdown_text(
-    source_id: str, text: str, persist_image: Any = None
+    source_id: str,
+    text: str,
+    persist_image: Any = None,
+    resolve_image: Any = None,
 ) -> List[SourceElement]:
     """parse_markdown 的无文件版本：直接解析给定 markdown 文本（Memory 派生源等
     没有磁盘文件的调用方复用）。逐字复用 parse_markdown 原先内嵌的 parse_blocks
@@ -523,6 +540,15 @@ def parse_markdown_text(
                 asset_id = _persist_markdown_data_uri(src, persist_image, ordinal)
                 if asset_id:
                     metadata["asset_id"] = asset_id
+            elif isinstance(src, str) and resolve_image is not None:
+                try:
+                    asset_id = resolve_image(src, ordinal) or ""
+                except Exception:
+                    asset_id = ""
+                if asset_id:
+                    metadata["asset_id"] = asset_id
+                else:
+                    metadata["src"] = src
             else:
                 metadata["src"] = src
             if not caption and not description and not asset_id:
@@ -579,6 +605,182 @@ def parse_markdown(
         path.read_text(encoding="utf-8", errors="replace"),
         persist_image=persist_image,
     )
+
+
+def _normalize_bundle_entry_path(raw: str) -> str | None:
+    """Return a safe, root-relative POSIX archive path or ``None``.
+
+    ZIP member names are attacker-controlled. Backslashes are separators for
+    exported Windows bundles, while absolute paths, NULs and ``..`` escaping
+    the archive root are rejected before any member is read.
+    """
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        return None
+    replaced = raw.replace("\\", "/")
+    if replaced.startswith("/"):
+        return None
+    parts: list[str] = []
+    for part in replaced.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts) or None
+
+
+def _bundle_image_path(markdown_path: str, src: str) -> str | None:
+    """Resolve one Markdown image target against its owning bundle document."""
+    value = src.strip()
+    if not value or value.startswith("//") or _REMOTE_OR_DATA_SCHEME.match(value):
+        return None
+    # Query/fragment suffixes are URL syntax, not part of the stored file name.
+    value = value.split("#", 1)[0].split("?", 1)[0]
+    try:
+        value = unquote(value)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if value.startswith("/"):
+        combined = value.lstrip("/")
+    else:
+        parent = str(PurePosixPath(markdown_path).parent)
+        combined = value if parent == "." else f"{parent}/{value}"
+    return _normalize_bundle_entry_path(combined)
+
+
+def _bundle_image_extension(data: bytes) -> str:
+    """Sniff the four source-asset raster formats from magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
+def parse_markdown_bundle(
+    source_id: str,
+    path: Path,
+    persist_image: Any = None,
+    *,
+    max_uncompressed_bytes: int | None = None,
+) -> List[SourceElement]:
+    """Parse every Markdown document in a ZIP and persist relative images.
+
+    The raw archive remains the source of record. Parsing is background work,
+    and relative references are resolved against each Markdown member's own
+    directory. Missing/remote/unsupported images fail open as caption text;
+    malformed or unsafe archive structure rejects the source as a whole.
+    """
+    from app.core.config import get_settings
+
+    byte_limit = (
+        get_settings().source_upload_max_bytes
+        if max_uncompressed_bytes is None
+        else max_uncompressed_bytes
+    )
+    if byte_limit <= 0:
+        raise ValueError("Markdown bundle byte limit must be positive")
+
+    try:
+        archive = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError("invalid Markdown ZIP bundle") from exc
+
+    with archive:
+        members: dict[str, zipfile.ZipInfo] = {}
+        total_bytes = 0
+        for info in archive.infolist():
+            normalized = _normalize_bundle_entry_path(info.filename)
+            if normalized is None:
+                if info.is_dir():
+                    continue
+                raise ValueError("Markdown ZIP bundle contains an unsafe path")
+            if info.is_dir() or normalized.startswith("__MACOSX/"):
+                continue
+            if info.flag_bits & 0x1:
+                raise ValueError("encrypted Markdown ZIP bundles are not supported")
+            if info.compress_type not in _MARKDOWN_BUNDLE_COMPRESSION:
+                raise ValueError("Markdown ZIP bundle uses unsupported compression")
+            if normalized in members:
+                raise ValueError("Markdown ZIP bundle contains duplicate paths")
+            members[normalized] = info
+            if len(members) > MARKDOWN_BUNDLE_MAX_ENTRIES:
+                raise ValueError("Markdown ZIP bundle contains too many files")
+            total_bytes += info.file_size
+            if total_bytes > byte_limit:
+                raise ValueError("Markdown ZIP bundle is too large after decompression")
+
+        markdown_paths = sorted(
+            name
+            for name in members
+            if PurePosixPath(name).suffix.lower() in _MARKDOWN_BUNDLE_EXTENSIONS
+        )
+        if not markdown_paths:
+            raise ValueError("Markdown ZIP bundle contains no Markdown document")
+
+        def read_member(info: zipfile.ZipInfo) -> bytes:
+            """Read no more than the central-directory declaration plus one.
+
+            The aggregate admission above is useful only if a corrupt local
+            header cannot make ``ZipFile.read`` inflate unbounded bytes before
+            the size disagreement is noticed.
+            """
+            try:
+                with archive.open(info) as handle:
+                    data = handle.read(info.file_size + 1)
+                    trailing = handle.read(1)
+            except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                raise ValueError("Markdown ZIP bundle is corrupt") from exc
+            if len(data) != info.file_size or trailing:
+                raise ValueError("Markdown ZIP bundle member size is invalid")
+            return data
+
+        elements: List[SourceElement] = []
+        for markdown_path in markdown_paths:
+            markdown_text = read_member(members[markdown_path]).decode(
+                "utf-8", errors="replace"
+            )
+
+            def resolve_image(src: str, ordinal: int) -> str:
+                if persist_image is None:
+                    return ""
+                image_path = _bundle_image_path(markdown_path, src)
+                info = members.get(image_path or "")
+                if info is None:
+                    return ""
+                try:
+                    data = read_member(info)
+                except ValueError:
+                    return ""
+                extension = _bundle_image_extension(data)
+                if not extension:
+                    return ""
+                return persist_image(
+                    data,
+                    f"bundle-img-{ordinal}.{extension}",
+                ) or ""
+
+            parsed = parse_markdown_text(
+                source_id,
+                markdown_text,
+                persist_image=persist_image,
+                resolve_image=resolve_image,
+            )
+            for element in parsed:
+                element.metadata = {
+                    **element.metadata,
+                    "bundle_path": markdown_path,
+                }
+                element.location_label = f"{markdown_path} · {element.location_label}"
+            elements.extend(parsed)
+        return elements
 
 
 def parse_plain_text(source_id: str, path: Path, parser_name: str) -> List[SourceElement]:

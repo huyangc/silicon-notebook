@@ -1,6 +1,10 @@
 """Source creation, status, reparse, and deletion MCP tools."""
 
+import base64
+import binascii
 import hashlib
+import mimetypes
+from pathlib import Path
 from typing import Any, Callable
 
 import anyio
@@ -15,9 +19,13 @@ from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
 from app.models.sources import SourceDetail
 from app.repositories.ports import UploadedSourceFile
-from app.repositories.source_files import safe_filename
+from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.source_format_admission import (
+    supported_source_extensions,
+    supported_source_suffixes,
+)
 
 from ._shared import (
     _budget_response,
@@ -36,6 +44,47 @@ SOURCE_TITLE_MAX_CHARS = 200
 SOURCE_FILE_NAME_MAX_BYTES = 200
 # This is a bounded probe of the per-source parse lock, not a parse timeout.
 SOURCE_BUSY_PROBE_SECONDS = 0.5
+SOURCE_FILE_EXTENSIONS = supported_source_extensions()
+SOURCE_FILE_SUFFIXES = supported_source_suffixes()
+
+
+def _upload_agent_source(
+    repo: Any,
+    *,
+    notebook_id: str,
+    principal: Any,
+    file_name: str,
+    content_type: str,
+    payload: bytes,
+    title: str,
+) -> Any:
+    """Use the one canonical source upload/dedup/background scheduling path."""
+    digest = hashlib.sha256(payload).hexdigest()
+    if repo.source_id_by_hash(notebook_id, digest) is None:
+        _reject_when_notebook_is_full(repo, notebook_id, 1)
+    created = repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(
+            file_name=file_name,
+            content_type=content_type,
+            content=payload,
+            title=title,
+        )],
+        lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
+        principal.profile_id,
+    )
+    return created[0]
+
+
+def _source_result(source: Any) -> dict[str, Any]:
+    return {
+        "source_id": source.id,
+        "title": source.title,
+        "reused": bool(source.reused),
+        "parse_status": source.parse_status,
+        "status": source.status,
+        "agent_created": source.agent_created,
+    }
 
 
 def _own_source(repo: Any, notebook_id: str, source_id: str) -> SourceDetail:
@@ -112,9 +161,6 @@ def register_source_tools(
             _writable_notebook, ctx, repo, "sources:write"
         )
 
-        # The dedup key `upload_sources` will compute from these same bytes.
-        digest = hashlib.sha256(payload).hexdigest()
-
         def run() -> dict[str, Any]:
             with _owner_request_context(principal):
                 # Order matters: a call that is about to REUSE an existing row
@@ -131,51 +177,114 @@ def register_source_tools(
                 # (documented on `_enforce_document_capacity`) -- the next call
                 # refuses. Closing it would mean holding a write lock across the
                 # whole ingest.
-                if repo.source_id_by_hash(notebook_id, digest) is None:
-                    _reject_when_notebook_is_full(repo, notebook_id, 1)
-                # The synthetic-markdown upload seam (app/eval/speed.py uses the
-                # same one): hand `upload_sources` an UploadedSourceFile and the
-                # whole existing path -- content dedup, storage, background
-                # parse, KG extraction -- runs unchanged. No second ingest path.
-                created = repo.upload_sources(
-                    notebook_id,
-                    [UploadedSourceFile(
-                        # `title` and `file_name` are DIFFERENT things here, and
-                        # conflating them is what this pair fixes: the file name
-                        # is sanitized, byte-truncated and suffixed, so writing
-                        # it into `sources.title` would show the Agent (and the
-                        # user, in the sources tab) a derived path string in
-                        # place of the title that was submitted.
-                        file_name=_markdown_source_file_name(clean_title),
-                        content_type="text/markdown",
-                        content=payload,
-                        title=clean_title,
-                    )],
-                    lambda source_id: kg_scheduler.submit_job(
-                        repo.process_source, source_id
-                    ),
-                    principal.profile_id,
+                source = _upload_agent_source(
+                    repo,
+                    notebook_id=notebook_id,
+                    principal=principal,
+                    file_name=_markdown_source_file_name(clean_title),
+                    content_type="text/markdown",
+                    payload=payload,
+                    title=clean_title,
                 )
-                source = created[0]
-                return {
-                    "source_id": source.id,
-                    "title": source.title,
-                    # True = byte-identical content already existed in this
-                    # notebook and was reused. Report it rather than silently
-                    # answering "created": the Agent needs to know it did not
-                    # add a document, and `agent_created` below may then be
-                    # False because the row is somebody else's.
-                    "reused": bool(source.reused),
-                    "parse_status": source.parse_status,
-                    "status": source.status,
-                    "agent_created": source.agent_created,
-                }
+                return _source_result(source)
 
         return _budget_response(
             await _run_with_progress(ctx, run, label="add_source_text"),
             field_limits={
                 "title": 300, "parse_status": 40, "status": 40,
             },
+        )
+
+    @server.tool(
+        description=(
+            "Upload a binary or text document to the selected notebook and "
+            "start the ordinary background parsing pipeline. `file_name` must "
+            "end in one of the server-supported formats: "
+            + ", ".join(SOURCE_FILE_EXTENSIONS)
+            + ". Send the exact file bytes as standard base64 in "
+            "`content_base64` (no data-URI prefix or whitespace). ZIP is a "
+            "Markdown bundle: the server parses every .md/.markdown member and "
+            "persists relative png/jpeg/gif/webp images as source assets. "
+            "Use this for PDF, Word, PowerPoint, spreadsheets, Markdown bundles, "
+            "and other registered formats; keep add_source_text for authored "
+            "Markdown already available as text. Poll get_source_status after "
+            "the queued response. Requires sources:write scope and notebook "
+            "ownership."
+        )
+    )
+    async def add_source_file(
+        file_name: str,
+        content_base64: str,
+        ctx: Context,
+        title: str = "",
+    ) -> dict[str, Any]:
+        if not isinstance(file_name, str) or not file_name.strip():
+            raise ValueError("file_name must not be blank")
+        clean_name = safe_filename(file_name.strip())
+        if len(clean_name.encode("utf-8")) > FILESYSTEM_NAME_MAX_BYTES:
+            raise ValueError(
+                f"file_name must fit within {FILESYSTEM_NAME_MAX_BYTES} UTF-8 bytes"
+            )
+        suffix = Path(clean_name).suffix.lower()
+        if suffix not in SOURCE_FILE_SUFFIXES:
+            raise ValueError(
+                "unsupported source file type; supported suffixes: "
+                + ", ".join(sorted(SOURCE_FILE_SUFFIXES))
+            )
+        if not isinstance(content_base64, str) or not content_base64:
+            raise ValueError("content_base64 must not be blank")
+        max_bytes = get_settings().source_upload_max_bytes
+        max_encoded_chars = ((max_bytes + 2) // 3) * 4
+        if len(content_base64) > max_encoded_chars:
+            raise ValueError(
+                "content_base64 is larger than this deployment's per-source "
+                f"limit of {max_bytes} decoded bytes"
+            )
+        try:
+            encoded = content_base64.encode("ascii")
+            payload = base64.b64decode(encoded, validate=True)
+        except (UnicodeEncodeError, binascii.Error, ValueError):
+            raise ValueError(
+                "content_base64 must be standard base64 without whitespace or "
+                "a data-URI prefix"
+            ) from None
+        if not payload:
+            raise ValueError("decoded source file must not be empty")
+        if len(payload) > max_bytes:
+            raise ValueError(
+                f"decoded source file is {len(payload)} bytes, over this "
+                f"deployment's {max_bytes}-byte limit for one source"
+            )
+        title_value = title.strip() if isinstance(title, str) else title
+        clean_title = normalize_text(
+            title_value or clean_name,
+            field="title",
+            max_chars=SOURCE_TITLE_MAX_CHARS,
+        )
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _writable_notebook, ctx, repo, "sources:write"
+        )
+
+        def run() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                source = _upload_agent_source(
+                    repo,
+                    notebook_id=notebook_id,
+                    principal=principal,
+                    file_name=clean_name,
+                    content_type=(
+                        mimetypes.guess_type(clean_name)[0]
+                        or "application/octet-stream"
+                    ),
+                    payload=payload,
+                    title=clean_title,
+                )
+                return _source_result(source)
+
+        return _budget_response(
+            await _run_with_progress(ctx, run, label="add_source_file"),
+            field_limits={"title": 300, "parse_status": 40, "status": 40},
         )
 
     @server.tool(

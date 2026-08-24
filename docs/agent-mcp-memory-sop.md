@@ -298,6 +298,8 @@ Its default client request id is suffixed with the notebook id, so rerunning it 
 
 Pass `--profile` (requires `agent_profile:read`) to also call `get_notebook_profile` and print only block counts and character counts — never the block text itself, since this script's output is meant to be pasted into chat or logs.
 
+To verify non-text ingestion, add `--source-file path/to/manual.pdf` (or a DOCX, PPTX, XLS/XLSX, Markdown, CSV, or Markdown ZIP) and optionally `--source-title 'Display title'`. This requires `sources:write`; the script base64-encodes the exact local bytes for `add_source_file`, and the server queues the same parser-registry path the browser uses. For a Markdown ZIP, keep every `.md`/`.markdown` member and its images at their referenced relative paths; the backend stores the raw archive as one source and persists matched images during parsing.
+
 ## 7. Review the candidate in the UI
 
 Return to **Private Memory**, filter status to **待确认** and origin to **Agent 提议**, open the candidate, inspect its Profile and evidence provenance, then confirm, reject, or edit it. Only confirmation moves it into the formal notebook retrieval plane.
@@ -311,7 +313,7 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 - `search_notebook_context` excludes unconfirmed candidates.
 - With `memory:read_candidates`, `search_agent_memory` recalls the proposed candidate.
 - The UI shows the candidate as pending and Agent-proposed.
-- When the token carries `sources:write`: `add_source_text` returns a source id, `get_source_status` eventually reports it parsed, and the source list shows it with the neutral 「Agent 添加」 badge.
+- When the token carries `sources:write`: `add_source_text` accepts authored Markdown, while `add_source_file` accepts at least one local PDF/PPTX/DOCX/workbook or Markdown ZIP; both return a source id, `get_source_status` eventually reports it parsed, and the source list shows it with the neutral 「Agent 添加」 badge.
 - When the token carries `maintenance:execute`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
 - `delete_source` refuses a source that a person uploaded, and succeeds only on one the Agent added.
 - With `ask:execute`: an `ask_notebook` call in `mode="reasoning"` runs to completion instead of being cut off by the client's timeout — the client should show periodic progress while it runs.
@@ -387,6 +389,7 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | A source or build write tool refuses on a notebook that reads fine | Source-management and build writes are owner-only. The allowlist may include a notebook the token's owner only joined as a read-only member; reading works there, and those writes never do. The one exception is the `knowhow:code` cell-code write, which is scope-driven by design and works for a read-only member. |
 | A source the Agent added is no longer deletable after a notebook copy | By design. A deep copy clears source provenance, so every source in the copy counts as user-added. |
 | `add_source_text` returns `reused: true` | Byte-identical content already exists in this notebook, so the existing source is returned instead of a duplicate. If it was originally uploaded by a person, it stays user-added and is not deletable through MCP. |
+| `add_source_file` refuses base64 or a PDF/PPTX/DOCX/workbook/ZIP suffix | Send strict standard base64 with no whitespace or `data:` prefix, and keep the original supported extension in `file_name`. The decoded file must be non-empty and within the deployment's per-source upload cap. |
 | `reparse_source` refuses | That source is already being parsed. Poll `get_source_status` and retry once it settles. |
 | `get_notebook_profile` returns `enabled: false` | The `AGENT_PROFILE_ENABLED` deployment switch is off, or the notebook has no consolidated understanding yet — not an error. |
 | `add_observation` raises "this capability is currently disabled" | The `AGENT_PROFILE_ENABLED` deployment switch is off. Unlike the read tool above, the write tool refuses rather than silently accepting data no job will ever read. |

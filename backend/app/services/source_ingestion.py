@@ -427,6 +427,8 @@ class SourceIngestionService:
             return "pdf"
         if lower_name.endswith(".md") or lower_name.endswith(".markdown"):
             return "markdown"
+        if lower_name.endswith(".zip"):
+            return "markdown_bundle"
         if lower_name.endswith(".docx"):
             return "docx"
         if lower_name.endswith(".pptx"):

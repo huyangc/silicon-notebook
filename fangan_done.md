@@ -352,7 +352,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
   `propose_memory`，及 knowhow 四工具 `list_knowhow_tables`、`get_knowhow_discrimination`、
   `get_knowhow_row`、`put_knowhow_cell_code`（2026-07-16 随 knowhow 表 Agent 面加入，读取需
-  `knowledge:read`、代码写入需 `knowhow:code`）。**以上是本条目交付当时的工具面；后续已扩展至二十二个工具
+  `knowledge:read`、代码写入需 `knowhow:code`）。**以上是本条目交付当时的工具面；后续已扩展至二十三个工具
   （引用点查、来源管理、构建与库理解工具组，当前权威清单见 `mcp_server.PUBLIC_TOOLS` 与
   `docs/product-and-api.md`）。** 每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
   候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 默认
@@ -417,6 +417,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **群组唯一 owner 与独立工作台（群组知识共享，2026-08-20）**：schema v56 / PostgreSQL v34 为 `groups` 增加生效中的 `owner_id`；存量群组从当前管理员中确定性选择 owner（创建者仍是管理员时优先），不复活已降级或已退出的创建者，新群组的创建者成为初始 owner。只有 owner（系统管理员仅作恢复旁路）可以转让或删除群组，转让目标必须是现有成员并原子提升为管理员，原 owner 保留管理员身份；owner 不可被降级、移出或直接退出，删除路径也在群组根事务内重新验证 live owner，关闭鉴权与转让之间的竞态。账户菜单中的群组管理升级为独立页面，按知识库、成员、共享申请、设置四区组织：所有成员能直接看到本组**实际有读权**的 Notebook（管理员专属边不向普通成员披露），owner/组管理员可搜索并批量加入自己有管理权的 Notebook、撤销可见范围、切换「组管理员可管理」权限；owner 转让和删除均有独立二次确认，退出/删除后 URL 自动落到剩余群组或群组空态。页面复用现有系统的色板、按钮、边框、圆角、间距和响应式断点，桌面为左侧群组目录 + 右侧工作区，390px 窄屏四页签同屏可见。已通过 `scripts/check.sh`、前端生产 build、2326 条前端守卫、479 条组件测试及桌面/窄屏真实浏览器验收。
 
 - **群组邀请链接（群组知识共享延伸，2026-08-21）**：组管理员可在独立群组工作台的「成员」页生成、复制、换新或撤销一条可重复使用的邀请链接；token 会跨登录/注册门保留，登录用户打开后原子加入为普通成员。重复兑换幂等且不降级既有管理员，换新/撤销/删组立即使旧链接失效，无效状态统一 404。schema v57 / PostgreSQL v35 把可空 token、签发时间和签发人审计放在群组根行，并以仅覆盖非空 token 的部分唯一索引保证一条 capability 只解析到一个群组；正向 shadow 保持 82 张业务表和 12 个 row slot，unique surface 增至 113。后端覆盖签发幂等、加入、重复加入、换新、撤销与角色保留，前端补纯 helper、接线守卫和组件交互测试；`scripts/check.sh` 与前端 production build 通过。
+
+- **Markdown ZIP 后端摄取 + MCP 通用文件上传（§6.3 / §19.3，2026-08-24）**：`.zip` 从浏览器专属交换格式升级为 backend parser capability registry 的一等格式。原始压缩包按一个来源保存，builtin `markdown_bundle` 在后台稳定解析所有 `.md`/`.markdown`，逐元素记录 `bundle_path`，按每份 Markdown 自身目录解析相对图片并把 png/jpeg/gif/webp 字节写入既有来源资产；不解到宿主文件系统，危险/重复路径、加密/不支持压缩、无 Markdown、条目或解压总量超限整包拒绝，单图缺失/远程/损坏/不支持则保留图注/描述文字并无图降级。网页上传直接发送 ZIP 原字节，拖入文件夹继续保留浏览器 data-URI 兼容路径。MCP 新增第 23 个 core 工具 `add_source_file`：严格标准 base64 接受解析注册表支持的 PDF、DOCX、PPTX、XLS/XLSX、Markdown、CSV 与 ZIP，复用既有来源去重、文档数量上限、Agent 出处、owner-only `sources:write` 和后台解析调度；官方客户端示例新增 `--source-file`。专项后端 168 项、前端上传/配置 43 项通过；完整 `scripts/check.sh`（后端 9,171 项、前端 Node 2,425 项、组件 653 项、production build 与类型检查）及 `git diff --check` 通过。
 
 ## 20. 当前边界（后续阶段，未计入已完成）
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。

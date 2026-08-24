@@ -20,12 +20,13 @@ def _settings(**overrides) -> Settings:
 
 def test_registry_is_the_shared_upload_and_builtin_dispatch_surface():
     assert SUPPORTED_SOURCE_EXTENSIONS == (
-        "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"
+        "pdf", "md", "markdown", "zip", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"
     )
     assert SUPPORTED_SOURCE_SUFFIXES == {
-        ".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm", ".xls"
+        ".pdf", ".md", ".markdown", ".zip", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm", ".xls"
     }
     assert builtin_parser_id("README.Markdown") == "markdown"
+    assert builtin_parser_id("export.ZIP") == "markdown_bundle"
     assert builtin_parser_id("table.XLSM") == "xlsx"
     assert builtin_parser_id("legacy.XLS") == "xls"
     assert builtin_parser_id("unknown.txt") == "plain_text"
@@ -37,7 +38,7 @@ def test_optional_engine_format_declarations_prevent_unrelated_cloud_uploads():
     for name in ("paper.pdf", "paper.docx", "slides.pptx", "book.xlsx", "book.xlsm"):
         assert engine_supports_file("mineru_cloud", name)
     # .md/.csv 外发解析不了它们的第三方纯属隐私暴露;旧版二进制 .xls MinerU 不支持。
-    for name in ("notes.md", "data.csv", "legacy.xls"):
+    for name in ("notes.md", "bundle.zip", "data.csv", "legacy.xls"):
         assert not engine_supports_file("mineru_cloud", name)
 
 

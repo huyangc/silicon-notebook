@@ -90,7 +90,7 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
     assert.equal(config.report_max_sections, 6);
     assert.equal(config.report_max_subqueries_per_section, 4);
     assert.deepEqual(config.supported_source_extensions, [
-      "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
+      "pdf", "md", "markdown", "zip", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
     ]);
     assert.deepEqual(config.parser_engines, []);
     // 旧后端同样不下发图片护栏三兄弟:上限缺失 = 不做本地预检(`null`),

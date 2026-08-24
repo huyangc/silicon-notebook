@@ -1135,7 +1135,11 @@ def test_mineru_client_reaches_exactly_the_capable_suffixes(tmp_path, suffix):
     .csv 加了 MinerU 优先分支却没改常量」（云端上传闸会跟着漏发）或反过来「给常量
     加了后缀却没有对应分支」（云端白发一次往返）。"""
     path = tmp_path / f"probe{suffix}"
-    path.write_bytes(_MINIMAL_SOURCE_BYTES.get(suffix, b"PK\x03\x04stub"))
+    if suffix == ".zip":
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("notes.md", "# Title\n\nBody paragraph.\n")
+    else:
+        path.write_bytes(_MINIMAL_SOURCE_BYTES.get(suffix, b"PK\x03\x04stub"))
     client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
 
     _parse_via_chain("s1", path, path.name, client)

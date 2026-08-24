@@ -795,11 +795,8 @@ export default function Home() {
     DEFAULT_SUPPORTED_SOURCE_EXTENSIONS,
   );
   const [parserEngines, setParserEngines] = useState<ParserEngineCapability[]>([]);
-  // `.zip` 是前端交换格式（markdown + 图片打包上传），client-side 追加而非并入后端
-  // 下发的 supportedSourceExtensions——那份是后端解析注册表白名单，zip 从不上传给
-  // 后端，只在浏览器里解包（bundle-intake.ts）。
   const supportedSourceAccept = useMemo(
-    () => [...supportedSourceExtensions.map((ext) => `.${ext}`), ".zip"].join(","),
+    () => supportedSourceExtensions.map((ext) => `.${ext}`).join(","),
     [supportedSourceExtensions],
   );
   const supportedSourceUserHint = useMemo(
@@ -820,7 +817,7 @@ export default function Home() {
   const [userSearchProfileEnabled, setUserSearchProfileEnabled] = useState(false);
   // 待上传列表：文件 + 每项文档类型 + 每项是否被用户显式表态，**一个** state 对象。
   // 三条数组必须逐项对齐（uploadDocTypeFields 按下标配对），而入列会被跨 await 的
-  // 异步链触发（zip 解包、文件夹遍历）——拆成三个 state 就只能各自 setState，等长
+  // 异步链触发（文件夹遍历或兼容 ZIP intake）——拆成三个 state 就只能各自 setState，等长
   // 不变量没有任何一处能一次性维护。合并语义与等长不变量的真源在 staged-files.ts。
   const [staged, setStaged] = useState<StagedList>(() => emptyStagedList());
   // 同步 ref 镜像：updateStaged 是**唯一**写入口，写 state 的同时先把新值写进 ref，
@@ -845,11 +842,11 @@ export default function Home() {
   // 最近一次「添加文件」里被跳过的文件（类型不支持/超大小/超批量），在弹窗内持久展示。
   // 不能只发 toast：它 2.2 秒即逝，批量选文件时用户根本来不及看清哪些没进列表。
   const [stagedSkipped, setStagedSkipped] = useState<SkippedStagedFile[]>([]);
-  // zip/文件夹解包在飞（解压、遍历目录、内联图片）：非 null 时整个添加文件入口必须
-  // 禁用并换成该动作语义的进行态文案（红线：长任务按钮的忙碌态）。
+  // 文件夹兼容 intake（遍历目录、内联图片）或旧 ZIP intake 在飞：非 null 时整个
+  // 添加文件入口必须禁用并换成该动作语义的进行态文案（普通 ZIP 上传不经过这里）。
   const [bundleBusyLabel, setBundleBusyLabel] = useState<string | null>(null);
-  // zip/文件夹里有多个 markdown 时，等待用户在弹窗内勾选要添加的那几个；非 null 期间
-  // 同样视为「忙碌」，禁止再拖入新的 zip/文件夹（否则第二个 zip 的选择会覆盖第一个）。
+  // 拖入文件夹里有多个 markdown 时，等待用户勾选要添加的文件；旧 ZIP intake 也沿用
+  // 此状态。非 null 期间同样视为「忙碌」，避免新的文件夹覆盖当前选择。
   // selected 默认全选（设计文档 §3.1 第 2 条）。
   const [bundleChoice, setBundleChoice] = useState<{
     label: string;
@@ -861,21 +858,17 @@ export default function Home() {
     // （两者通常相同，但保持「捕获于链起点」的统一语义，见 bundleIntakeGenerationRef）。
     generation: number;
   } | null>(null);
-  // 一批里的多个 zip/文件夹按到达顺序串行处理（见 ingestBundleSources）；命中「多个
-  // markdown 需勾选」时，本 resolver 是让串行循环等到用户确认/取消才继续处理下一个
-  // 压缩包的信号——不这样做，第二个 zip 若也命中多选就会直接覆盖 bundleChoice，
-  // 静默吞掉用户还没来得及做的第一次选择。
+  // 兼容 intake 按到达顺序串行处理；命中「多个 markdown 需勾选」时，本 resolver
+  // 让异步链等到用户确认/取消才继续，避免新的文件夹覆盖尚未完成的选择。
   const bundleChoiceResolveRef = useRef<(() => void) | null>(null);
-  // 忙碌文案是一个**栈**而不是单值：拖入的文件夹里若含 zip，「读取文件夹…」这一帧
-  // 还没结束，内层「解析压缩包…」就已经开始又结束了。单值形态下内层的清零会把外层
-  // 的进行态一起抹掉——入口看上去恢复可用，其实链还在飞，用户此时再拖一个压缩包就
-  // 会覆盖掉还没确认的勾选（那正是 bundleChoiceResolveRef 要防的形态）。
+  // 忙碌文案是一个**栈**而不是单值：兼容 intake 可能嵌套，单值形态下内层清零会把
+  // 外层进行态一起抹掉，导致入口在链仍运行时提前恢复可用。
   const bundleBusyStackRef = useRef<string[]>([]);
-  // 用户主动关闭「添加来源」弹窗后，还在飞的解包链完成时不得把弹窗强行弹回来。
+  // 用户主动关闭「添加来源」弹窗后，还在飞的文件夹 intake 不得把弹窗强行弹回来。
   // 重新打开弹窗时清零。
   const sourceModalDismissedRef = useRef(false);
   // 暂存批次的世代计数器：resetStagedIntake()（关弹窗/清空/上传成功/新建笔记本）
-  // 与 openNotebook()（切换笔记本）各自 ++。zip/文件夹解包这类异步链在自己
+  // 与 openNotebook()（切换笔记本）各自 ++。文件夹 intake 这类异步链在自己
   // "起跑"那一刻捕获当前世代；写回暂存列表/回执/跳过记录（落盘）前重新比对，
   // 世代已变说明这批数据在链跑的这段时间里被用户取消或随切库作废，整条链的
   // 结果必须整体静默丢弃（含回执）——不能把已取消的文件复活进当前弹窗。
@@ -2942,8 +2935,8 @@ export default function Home() {
   }
 
   // 选择器与拖放共用的入列逻辑（**同步**部分）。被跳过的文件（类型不支持/超大小/
-  // 超批量）写进 stagedSkipped 在弹窗内持久展示，绝不静默丢弃；.zip 不在这里处理，
-  // 原样交回给调用方去解包（不进后端上传白名单，是前端交换格式，见 bundle-intake.ts）。
+  // 超批量）写进 stagedSkipped 在弹窗内持久展示，绝不静默丢弃；注册表准入的 .zip
+  // 与 PDF/PPTX 一样作为普通来源原样入列，由后端解包、解析并持久化相对图片。
   //
   // 合并从 stagedRef.current 起算并经 updateStaged 一次性写回：三条并行数组的等长
   // 不变量在 mergeStagedFiles 里维护，跨 await 的异步链不会再读到发起那一刻的旧闭包
@@ -2985,10 +2978,9 @@ export default function Home() {
     return { added: merge.added, skipped: allSkipped, duplicates: merge.duplicates, bundles };
   }
 
-  /** 入列 + 串行解包其中的 zip。调用方必须 `await` 或 `.catch(reportError)`——
-   *  丢掉这个 promise 就等于丢掉整条链的错误出口（以及嵌套链的忙碌位归属）。
-   *  `expectedGeneration` 原样透传给 `stageIncomingFilesSync`（见其上方注释）；
-   *  其中的 zip 各自作为独立异步链、在自己起跑时重新捕获世代，不继承这个参数。 */
+  /** 入列文件。调用方必须 `await` 或 `.catch(reportError)`，因为拖入文件夹的兼容
+   *  管线仍会沿用这个异步边界。注册表准入的 ZIP 已进入 `accepted`，不会出现在
+   *  `bundles`；保留后半段只为兼容旧分类结果，不能把正常 ZIP 改回浏览器解包。 */
   async function stageIncomingFiles(all: File[], expectedGeneration?: number): Promise<void> {
     const { bundles } = stageIncomingFilesSync(all, expectedGeneration);
     if (bundles.length > 0) await ingestBundleSources(bundles);
@@ -3058,7 +3050,7 @@ export default function Home() {
   }
 
   // 拖入的条目按到达顺序串行处理：文件夹递归遍历（见 ingestDroppedDirectory）；普通
-  // 文件先攒起来，最后一次性交给 stageIncomingFiles（其中会再拆出 .zip 单独解包）。
+  // 文件先攒起来，最后一次性交给 stageIncomingFiles；其中的 .zip 原样上传后台。
   async function dispatchDroppedEntries(entries: FileSystemEntry[]) {
     const plainFiles: File[] = [];
     const unreadable: SkippedStagedFile[] = [];
@@ -3169,8 +3161,8 @@ export default function Home() {
       // 只看路径（零 I/O）判断有没有 markdown：不含 md 的文件夹没必要把里面可能
       // 几十上百个文件的全部字节都读一遍，只为了发现用不上。
       if (!directoryHasMarkdown(entries)) {
-        // 必须 await：文件夹里可能还夹着 zip，那条嵌套链要在本帧的忙碌位释放**之前**
-        // 跑完，否则入口会提前恢复可用、让用户拖进第二个包去覆盖还没确认的勾选。
+        // 必须 await：保持文件夹 intake 的异步生命周期完整；其中的 zip 作为普通来源
+        // 原样入列，不再由浏览器解包。
         await stageIncomingFiles(entries.map((item) => item.file), generation);
         return;
       }
@@ -3187,7 +3179,7 @@ export default function Home() {
     }
   }
 
-  // 虚拟文件集（zip 解包或文件夹遍历产出）→ 按 markdown 数量分派：零个报错、一个
+  // 虚拟文件集（拖入文件夹遍历产出；旧 ZIP 解包入口仅为兼容保留）→ 按 markdown 数量分派：零个报错、一个
   // 直接处理、多个弹出勾选并挂起，直到用户确认/取消（设计文档 §3.1 第 2 条）。
   // `generation` 是调用方（ingestZipFile/ingestDroppedDirectory）自己那条链起跑
   // 时捕获的世代——这里是同一条链的延续,不重新捕获。世代已变(用户取消/切库)
@@ -4596,7 +4588,7 @@ export default function Home() {
     || sourceUploadMaxFilesPerBatch === null;
   const sourceBatchAtCapacity = sourceUploadMaxFilesPerBatch !== null
     && stagedFiles.length >= sourceUploadMaxFilesPerBatch;
-  // zip/文件夹解包在飞，或正等待用户在下方勾选要添加的 markdown：两者都必须禁用整个
+  // 文件夹/兼容 intake 在飞，或正等待用户在下方勾选要添加的 markdown：两者都必须禁用整个
   // 添加文件入口（红线：长任务按钮的忙碌态）——后者同样要禁，否则再拖入一个 zip 会
   // 覆盖用户还没确认完的第一次选择（bundleChoiceResolveRef 声明处有完整说明）。
   const bundleProcessing = bundleBusyLabel !== null || bundleChoice !== null;
@@ -6201,7 +6193,7 @@ export default function Home() {
                   ? bundleBusyLabel
                   : sourceUploadConfigLoading
                     ? "正在读取上传限制…"
-                    : `支持 ${supportedSourceUserHint}。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。也可拖入带图片的 Markdown 压缩包或文件夹，图片会自动内联。`}
+                    : `支持 ${supportedSourceUserHint}。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。Markdown 图片压缩包会上传到后台解析并保存图片。`}
               </small>
             </label>
             {stagedSkipped.length > 0 && (
