@@ -2715,25 +2715,29 @@ class AskService:
         chunks,
         elements,
         cancellation,
+        sink,
         on_step,
     ):
         """Ask deployment plugins what exists OUTSIDE this notebook.
 
-        Called once per reasoning run, at the one moment where what this run
-        found is settled (source-graph activation and retrieval's fail-open
-        degradation included) but no word of the answer has been written yet,
-        and only when the run has something to admit to: a confirmed direction
-        it never executed, or an evidence pool thinner than this effort tier's
-        own ``ranked_final_floor``.  Both conditions are read off what the run
-        already produced — no extra query, no extra model call, and nothing at
-        all when neither holds.
+        Called once per reasoning run, **after the draft stage returned** and
+        before persistence, and only when the run has something to admit to:
+        a confirmed direction it never executed, or an evidence pool thinner
+        than this effort tier's own ``ranked_final_floor``.  Both conditions
+        are read off what the run had already produced before drafting
+        (``trace`` here is the pre-draft list, deliberately not the response's
+        own trace — an injected stage may rewrite that one) — no extra query,
+        no extra model call, and nothing at all when neither holds.
 
-        What comes back is **not evidence**, which is why the caller attaches
-        it to the response *after* the draft stage rather than passing it
-        through ``ResponseDraftInput``: letting the drafting stage see it would
-        hand it a route into the prose.  The answering model therefore never
-        sees it, it takes no ``[k]`` key, it enters neither ``anchors`` nor
-        ``citations``, and it cannot have moved a word of the answer.
+        What comes back is **not evidence**, which is why nothing of it — not
+        the suggestions, and not even the disclosure step that says a
+        consultation happened — goes through ``ResponseDraftInput``: the step
+        lands in ``sink`` (the caller points it at the response that will be
+        persisted), so a drafting stage, injected or not, structurally cannot
+        vary the prose on any of it (codex #584 R3).  The answering model
+        therefore never sees it, it takes no ``[k]`` key, it enters neither
+        ``anchors`` nor ``citations``, and it cannot have moved a word of the
+        answer.
 
         Every failure is fail-open and silent to the reader: no host, a
         dormant point, a malformed trace, a raising plugin, an exhausted
@@ -2803,7 +2807,7 @@ class AskService:
             },
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
         )
-        trace.append(step)
+        sink.append(step)
         if on_step:
             on_step(step)
         return suggestions
@@ -3278,13 +3282,6 @@ class AskService:
             # 前再检查一次」同一条口径)。已取消且那次 schema 读自身也会抛错时,
             # 异常类型从该读的异常变成 AskCancelled(取消优先)。
             raise_if_cancelled(cancel_event)
-            # 缺口外扩:检索已定型、答案还没开始写的这一刻,恰好一次。产出刻意
-            # **不**进 ``ResponseDraftInput``(理由见 ``_consult_gap_sources``)。
-            gap_suggestions = self._consult_gap_sources(
-                prepared, limits, trace,
-                top_hits=top_hits, chunks=chunks, elements=elements,
-                cancellation=cancel_event, on_step=on_trace,
-            )
             # 权威复核同样上提到编排器:曾经是 ``_draft_reasoning_response``
             # (出厂默认实现)自己的 prologue 才做的检查,现在挪到这里、紧挨
             # 进入 seam 之前 —— 这样注入实现也在已验证权威下进入,而不是只有
@@ -3339,6 +3336,25 @@ class AskService:
                 draft.response.model_errors = [
                     ModelError(**e) for e in _err_sink
                 ]
+                # 缺口外扩:draft stage 返回**之后**才发起(codex #584 R3)——
+                # 注入的 stage 从 ``ResponseDraftInput``(含 trace 元组)里
+                # 结构上看不到任何 gap 痕迹,连「发生过一次外扩」这个事实都
+                # 看不到,散文因此不可能因它而变。触发判据读的仍是 stage 之前
+                # 就冻结的本地 ``trace`` 与证据计数;披露步经 ``gap_steps``
+                # 由 core 直接落到将被持久化的响应上,与 ``model_errors`` 的
+                # 回填同款。零外扩时不物化 ``reasoning_trace``(None 与 []
+                # 在持久化 payload 上不是一回事,别替无关请求改 wire 形状)。
+                gap_steps: list = []
+                gap_suggestions = self._consult_gap_sources(
+                    prepared, limits, trace,
+                    top_hits=top_hits, chunks=chunks, elements=elements,
+                    cancellation=cancel_event, sink=gap_steps,
+                    on_step=on_trace,
+                )
+                if gap_steps:
+                    if draft.response.reasoning_trace is None:
+                        draft.response.reasoning_trace = []
+                    draft.response.reasoning_trace.extend(gap_steps)
                 # 同一条先例:非证据字段由 core 在 stage 之后填,注入实现够不着。
                 draft.response.gap_suggestions = list(gap_suggestions)
         finally:
