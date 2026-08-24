@@ -441,4 +441,4 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   - **测试**：新增 `tests/test_auth.py`（注册/登录/会话/退出）、`tests/test_user_isolation.py`（notebook owner 隔离）以及集成场景覆盖；全部 ~990 测试通过，`scripts/check.sh` 与 `npm run build` 绿。
   - 本轮有意不包含：修改密码、共享、协作。
 
-- 已完成（2026-08-24，§6.4 / §9.1）：KG 起始探活复用统一短输出预算，不再以探测专用小上限截断推理型模型的可见 JSON；探活和正式抽取复用共享流式 JSON 传输，持续收到 chunk 的长输出不再受请求总墙钟误伤，任务熔断能合作式停止兄弟流；HTTP 成功但空白、截断或无效 JSON 的响应落成 `model_response_invalid`，界面明确显示“模型响应不可用”并保留继续分析入口，不再泛化为人工“分析已中断”。
+- 已完成（2026-08-24，§6.4 / §9.1）：KG 起始探活复用统一短输出预算，不再以探测专用小上限截断推理型模型的可见 JSON；探活和正式抽取复用共享流式 JSON 传输，持续收到 chunk 的长输出不再受请求总墙钟误伤，任务熔断能合作式停止兄弟流；流式传输请求并采集 provider 最终 usage trailer，恢复按用户 prompt/completion/total token 精确统计，明确不支持该可选参数的 provider 只探测一次后回退且不本地猜数；HTTP 成功但空白、截断或无效 JSON 的响应落成 `model_response_invalid`，界面明确显示“模型响应不可用”并保留继续分析入口，不再泛化为人工“分析已中断”。

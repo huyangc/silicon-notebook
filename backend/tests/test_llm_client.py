@@ -1,6 +1,9 @@
 """Regression tests for the LLM client's fail-fast behavior: a stalled
 connection must NOT be amplified into a ~6-minute block by SDK auto-retries or
 by the JSON-mode -> plain-mode fallback."""
+import threading
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -48,6 +51,40 @@ class _Chat:
 
 class _FakeOpenAI:
     def __init__(self, create): self.chat = _Chat(create)
+
+
+class _Stream:
+    def __init__(self, content='{"ok":1}', usage=None):
+        self.closed = False
+        self._chunks = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content=content),
+                    finish_reason="stop",
+                )],
+                usage=None,
+            ),
+            # OpenAI's include_usage trailer has no choices. The production
+            # loop must inspect usage before its empty-choice fast path.
+            SimpleNamespace(choices=[], usage=usage),
+        ]
+
+    def __iter__(self):
+        return iter(self._chunks)
+
+    def close(self):
+        self.closed = True
+
+
+class _RecordingInteractionLogger:
+    def __init__(self):
+        self.records = []
+
+    def clip(self, value):
+        return str(value)
+
+    def log(self, record):
+        self.records.append(record)
 
 
 def _api_status_error(status, message):
@@ -100,6 +137,59 @@ def test_raw_client_preserves_empty_success_for_scheduled_classification(monkeyp
     create = _FakeCreate([_Resp("")])
     client = _make(monkeypatch, create)
     assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == ""
+
+
+def test_streaming_requests_and_logs_exact_usage_trailer(monkeypatch):
+    usage = SimpleNamespace(
+        prompt_tokens=11,
+        completion_tokens=7,
+        total_tokens=18,
+    )
+    stream = _Stream(usage=usage)
+    create = _FakeCreate([stream])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    assert client.chat_json(
+        [{"role": "user", "content": "hi"}],
+        "{}",
+        cancel_event=threading.Event(),
+    ) == '{"ok":1}'
+
+    assert len(create.calls) == 1
+    assert create.calls[0]["stream"] is True
+    assert create.calls[0]["stream_options"] == {"include_usage": True}
+    assert stream.closed is True
+    assert logger.records[-1]["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+
+
+def test_stream_usage_option_rejection_falls_back_once_and_is_remembered(monkeypatch):
+    unsupported = _api_status_error(
+        400, "Unsupported parameter: stream_options.include_usage"
+    )
+    first = _Stream()
+    second = _Stream()
+    create = _FakeCreate([unsupported, first, second])
+    client = _make(monkeypatch, create)
+
+    for prompt in ("first", "second"):
+        assert client.chat_json(
+            [{"role": "user", "content": prompt}],
+            "{}",
+            cancel_event=threading.Event(),
+        ) == '{"ok":1}'
+
+    assert len(create.calls) == 3
+    assert create.calls[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in create.calls[1]
+    assert "stream_options" not in create.calls[2]
+    assert first.closed is True
+    assert second.closed is True
 
 
 def test_kg_llm_limits_have_bounded_defaults(monkeypatch):
