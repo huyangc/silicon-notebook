@@ -75,6 +75,15 @@ function answerFixture(): AskResponse {
     related_knowledge: [],
     citations: [],
     llm_mode: "reasoning",
+    // 站外来源建议（ask.gap_consult，X9 PR-A T3）：区块本身没有承接方门槛
+    // （不像保存到记忆/反馈那样整块隐藏），只有里面的「导入」按钮是可选交互——
+    // 只读排障视图仍应显示这份披露，只是没有导入入口。
+    gap_suggestions: [{
+      title: "站外相关文档",
+      url: "https://example.com/doc.pdf",
+      summary: "一句摘要",
+      source_label: "示例来源",
+    }],
     result_sets: [{
       kind: "knowhow",
       table_id: "table-1",
@@ -137,6 +146,15 @@ test("只读活动详情里不出现任何点了没反应的控件", async () =>
     .not.toBeInTheDocument();
   // 清单卡每行的跳转按钮（answer-panel.tsx 的 KnowhowResultSetCard）。
   expect(screen.queryAllByRole("button", { name: "在表格中查看" })).toHaveLength(0);
+
+  // 站外来源建议（ask.gap_consult）：区块本身没有承接方门槛——只读排障视图仍要
+  // 显示这份披露（不能因为没有导入回调就把整块隐藏，那会把「有站外建议」这件
+  // 事本身也藏起来）；唯一缺席的是「导入」按钮，因为没有回调可以承接它。
+  const gapSummary = screen.getByText("站外来源建议 · 1 条");
+  expect(gapSummary.closest("details")).not.toHaveAttribute("open"); // 默认折叠
+  await user.click(gapSummary);
+  expect(screen.getByText("站外相关文档")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "导入" })).not.toBeInTheDocument();
 
   // 引用浮层里的两颗：知识对象引用的「知识图谱」、命中 knowhow 格子的「在表格中查看」。
   await user.click(screen.getByRole("button", { name: "[1]" }));

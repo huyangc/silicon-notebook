@@ -289,9 +289,13 @@ const OWNER_LIFECYCLE_SCOPE_ALLOWLIST = {
   "<module>.Home.openAskSession": "切换 Ask 会话时保护 source-add lease。",
   "<module>.Home.startNewAskSession": "新建 Ask 会话时保护 source-add lease。",
   // 上传 / URL 导入来源的提交，是 sourceLibrary 自己的「新增来源」写入路径，与打开
-  // 笔记本无关。
+  // 笔记本无关。applyImportedUrlSources 是 URL 导入成功半的抽出函数(X9 PR-A T3)——
+  // submitUrlSources(粘贴链接框)与 importGapSuggestion(站外来源建议的「导入」按钮,
+  // ask.gap_consult)共用同一份提交逻辑，实际调用 sourceLibrary.commitUrlSources 的
+  // 作用域因此从 submitUrlSources 移到了这里。
   "<module>.Home.confirmUploadInner": "文件上传成功后提交新来源。",
-  "<module>.Home.submitUrlSources": "URL 导入成功后提交新来源。",
+  "<module>.Home.applyImportedUrlSources":
+    "URL 导入成功后提交新来源(submitUrlSources 与 importGapSuggestion 共用)。",
   // 会话重命名按钮直接内联写在 JSX 事件处理器里，不在任何具名函数体内，最近命名
   // 作用域因而就是 Home 本身；askSession.beginRenameSession/commitRenameSession 是
   // 会话重命名这个独立小功能的生命周期，与打开笔记本无关。

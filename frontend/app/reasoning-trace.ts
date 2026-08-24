@@ -38,6 +38,11 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
   synthesis: "作答",
   skip: "跳过",
+  // gap_consult = 缺口外扩检索(ask.gap_consult,X9 PR-A):这一轮结束前向部署
+  // 插件问了一次"笔记本之外有没有相关材料",与上面的 memory/experience/
+  // consult_memory 都是不同的东西——那三步问的是"这个库/这类问题以前怎么样",
+  // 这一步问的是"这个库以外还有什么"。零插件部署一步都不产生(见宿主 no-op)。
+  gap_consult: "外扩",
 };
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
@@ -150,6 +155,13 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   // 新条目)照常显示「0 条打法」,与 profile/experience 对 0 的处理方式一致。
   if (step.step_type === "consult_memory") {
     return typeof detail.entries === "number" ? `${detail.entries} 条打法` : "";
+  }
+  // gap_consult(ask.gap_consult,X9 PR-A):同一条理由,必须排在通用分支之前。
+  // detail.count 数的是插件给回的站外建议条数,不是"候选"——落到下面的通用
+  // 分支会渲染成"N 个候选",读起来像是又找到了一批本笔记本内的证据,而这些
+  // 建议从未参与检索、从未进入证据池。
+  if (step.step_type === "gap_consult") {
+    return typeof detail.count === "number" ? `${detail.count} 条建议` : "";
   }
   if (step.step_type === "memory") {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";

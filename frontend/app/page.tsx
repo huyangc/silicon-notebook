@@ -3496,6 +3496,34 @@ export default function Home() {
     setToast(outcome.toast);
   }
 
+  // 「新建来源」成功后的收尾半——commitUrlSources + 刷新清单/对话可用性/体检
+  // 铃铛。抽成独立函数是给 importGapSuggestion(X9 PR-A T3,站外来源建议的
+  // 「导入」按钮)复用同一条链路,行为逐字不变:三处早退(commit 失败 / 刷新期间
+  // owner 已变)在这里仍然只是让本函数提前返回 false,调用方(submitUrlSources)
+  // 拿到 false 时同样直接 return,与重构前「在 if 块内直接 return」的控制流
+  // 完全一致。
+  async function applyImportedUrlSources(
+    owner: NonNullable<ReturnType<typeof sourceLibrary.captureOwner>>,
+    created: readonly SourceSummary[],
+  ): Promise<boolean> {
+    if (!sourceLibrary.commitUrlSources(owner, created)) return false;
+    // Maintain only the Ask surfaces' count (notebookSourceTotal, unfiltered) optimistically.
+    // sourcesTotal (source-list pagination + Source Stack header) is deliberately left to
+    // re-sync on the next source-page fetch: it tracks the *applied* source-search filter, and
+    // there is no reliable applied-query signal here — sourceQuery is the editable draft (search
+    // applies only on Enter), not necessarily what produced the current page — so optimistically
+    // bumping it risks either a stale count or a phantom filtered page. This matches the pre-#332
+    // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
+    // bump is pre-existing and out of scope here. 文档上限门控也读 notebookSourceTotal，
+    // 故链接导入 +N 后满额判定同步跟进。
+    const stillOwned = () => sourceLibrary.captureOwner() === owner;
+    await loadNotebookCollection({ guard: stillOwned });
+    if (!stillOwned()) return false;
+    revalidateAskAvailability(); // P1:导入即产出可检索证据时解禁对话框(同 confirmUpload)
+    reloadCheckup(owner.notebookId);  // 同理刷新体检铃铛(codex 第5轮 P2)
+    return true;
+  }
+
   async function submitUrlSources() {
     const owner = sourceLibrary.captureOwner();
     if (!owner) return;
@@ -3511,21 +3539,7 @@ export default function Home() {
     try {
       const result = await importUrlSources(owner.notebookId, urls);
       if (result.created.length > 0) {
-        if (!sourceLibrary.commitUrlSources(owner, result.created)) return;
-        // Maintain only the Ask surfaces' count (notebookSourceTotal, unfiltered) optimistically.
-        // sourcesTotal (source-list pagination + Source Stack header) is deliberately left to
-        // re-sync on the next source-page fetch: it tracks the *applied* source-search filter, and
-        // there is no reliable applied-query signal here — sourceQuery is the editable draft (search
-        // applies only on Enter), not necessarily what produced the current page — so optimistically
-        // bumping it risks either a stale count or a phantom filtered page. This matches the pre-#332
-        // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
-        // bump is pre-existing and out of scope here. 文档上限门控也读 notebookSourceTotal，
-        // 故链接导入 +N 后满额判定同步跟进。
-        const stillOwned = () => sourceLibrary.captureOwner() === owner;
-        await loadNotebookCollection({ guard: stillOwned });
-        if (!stillOwned()) return;
-        revalidateAskAvailability(); // P1:导入即产出可检索证据时解禁对话框(同 confirmUpload)
-        reloadCheckup(owner.notebookId);  // 同理刷新体检铃铛(codex 第5轮 P2)
+        if (!(await applyImportedUrlSources(owner, result.created))) return;
       }
       if (sourceLibrary.captureOwner() !== owner) return;
       setUrlRejected(result.rejected);
@@ -3541,6 +3555,26 @@ export default function Home() {
         urlRequestOwnerRef.current = null;
         setUrlBusy(false);
       }
+    }
+  }
+
+  // 站外来源建议的「导入」按钮(ask.gap_consult,X9 PR-A T3):把这一条建议的
+  // URL 当一次普通链接来源添加进当前笔记本——核心 URL 端点,不打插件路由。
+  // 复用 applyImportedUrlSources 而不是自己重写一遍,是为了让「导入即解禁
+  // 对话框 / 刷新体检铃铛」这条既有链路对两个入口保持同一份实现。
+  async function importGapSuggestion(url: string): Promise<{ ok: boolean; message?: string }> {
+    const owner = sourceLibrary.captureOwner();
+    if (!owner) return { ok: false, message: "未能添加这个链接" };
+    try {
+      const result = await importUrlSources(owner.notebookId, [url]);
+      if (result.created.length > 0) {
+        await applyImportedUrlSources(owner, result.created);
+        return { ok: true };
+      }
+      return { ok: false, message: result.rejected[0]?.reason || "未能添加这个链接" };
+    } catch (error) {
+      // ⚠ 不读 error.message/.error——errors.ts 是错误人话层唯一的翻译入口。
+      return { ok: false, message: toUserMessage(error, "未能添加这个链接") };
     }
   }
 
@@ -5703,6 +5737,7 @@ export default function Home() {
                               throughAnswerId: answerId,
                             })) : undefined}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
+                            onImportGapSuggestion={importGapSuggestion}
                             onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
                             onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
                             testingModelServices={modelTestActivity.services}
