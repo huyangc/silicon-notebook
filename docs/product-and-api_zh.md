@@ -72,7 +72,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 
 重新解析保留 source 行与原始文件：替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。
 
-新解析或重新解析的来源在发布 element、chunk、embedding 与 source-derived knowledge 前，会先清理高置信度的跨页页眉/页脚：规范化后非空的 `heading`、`paragraph` 或内置 PDF parser 产出的 `page_text` 必须在至少 3 个有文本页上位于该页首个或末个文本元素，并覆盖全部有文本页的至少一半；仅删除第一次之后的边界副本。非边界同文、表格、公式、图片、代码、同页重复及低覆盖重复全部保留。历史数据与外部 parser 产物另有独立的检索期防线：chunk 与直接来源元素在候选/结果上限、跨查询累积、反思摘要以及 Ask/报告最终上下文预算之前，按 `(source_id, NFKC + 空白折叠 + 大小写折叠后的文本)` 去重。排序路径保留最高分代表，精确小节上下文保留文档顺序中的第一个代表；不同来源即使文字相同也绝不折叠，因为它们是独立出处。这两层规则同时防止同文副本占用上游检索坑位和下游合成坑位，但不会静默改写或全局去重作者正文。
+新解析或重新解析的来源在发布 element、chunk、embedding 与 source-derived knowledge 前，会先清理高置信度的跨页页眉/页脚：规范化后非空的 `heading`、`paragraph` 或内置 PDF parser 产出的 `page_text` 必须出现在至少 3 个有文本页并覆盖全部有文本页的至少一半，同时位于该页首末文本元素，或被 parser 明确标成 `header`、`footer`、`page_header`、`page_footer`；仅删除第一次之后的边界副本。非边界同文、表格、公式、图片、代码、同页重复及低覆盖重复全部保留。历史数据与外部 parser 产物另有独立的检索期防线：chunk 与直接来源元素在候选/结果上限、跨查询累积、反思摘要以及 Ask/报告最终上下文预算之前，按 `(source_id, NFKC + 空白折叠 + 大小写折叠后的文本)` 去重。排序路径保留最高分代表，精确小节上下文保留文档顺序中的第一个代表；不同来源即使文字相同也绝不折叠，因为它们是独立出处。这两层规则同时防止同文副本占用上游检索坑位和下游合成坑位，但不会静默改写或全局去重作者正文。
 
 可见导入来源计数与物理记账刻意分离：隐藏的 Memory/Knowhow 投影来源不会出现在来源栏或面向用户的计数中，但 `size.sources`、复制阈值、存储统计和后台调度仍按物理行计数。`has_unindexed_content` 也会在可见导入来源增量为零但派生内容发生变化时保留 scale-index 更新决策。
 

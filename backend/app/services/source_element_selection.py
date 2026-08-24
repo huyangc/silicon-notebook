@@ -19,6 +19,9 @@ _REPEATED_BOUNDARY_MIN_PAGES = 3
 _REPEATED_BOUNDARY_COVERAGE_NUMERATOR = 1
 _REPEATED_BOUNDARY_COVERAGE_DENOMINATOR = 2
 _PAGE_BOUNDARY_TEXT_TYPES = frozenset({"heading", "paragraph", "page_text"})
+_EXPLICIT_PAGE_BOUNDARY_BLOCK_TYPES = frozenset(
+    {"header", "footer", "page_header", "page_footer"}
+)
 
 
 def normalized_source_element_text(element: object) -> str:
@@ -167,17 +170,28 @@ def _page_number(element: object) -> int | None:
     return page if page > 0 else None
 
 
+def _is_explicit_page_boundary(element: object) -> bool:
+    metadata = getattr(element, "metadata", None)
+    if not isinstance(metadata, dict):
+        return False
+    block_type = str(metadata.get("block_type", "") or "")
+    normalized = block_type.strip().casefold().replace("-", "_").replace(" ", "_")
+    return normalized in _EXPLICIT_PAGE_BOUNDARY_BLOCK_TYPES
+
+
 def deduplicate_repeated_page_boundaries(
     elements: Sequence[object],
 ) -> tuple[list, int]:
     """Remove repeated running headers/footers while preserving one locator.
 
     Only normalized text that appears at a textual page boundary on at least
-    half of three or more represented pages is eligible.  Non-boundary copies,
-    repeated tables/formulas/images/code, and repetitions confined to one page
-    are preserved.  The first boundary occurrence remains available for source
-    browsing and provenance; downstream chunks, embeddings, and KG extraction
-    therefore receive one representative instead of one copy per page.
+    half of three or more represented pages is eligible.  A boundary is either
+    the page's first/last textual element or a parser-explicit header/footer.
+    Non-boundary copies, repeated tables/formulas/images/code, and repetitions
+    confined to one page are preserved.  The first boundary occurrence remains
+    available for source browsing and provenance; downstream chunks, embeddings,
+    and KG extraction therefore receive one representative instead of one copy
+    per page.
     """
     materialized = list(elements)
     textual_by_page: dict[int, list[int]] = {}
@@ -198,6 +212,11 @@ def deduplicate_repeated_page_boundaries(
     boundary_occurrences: dict[str, list[tuple[int, int]]] = {}
     for page, indices in textual_by_page.items():
         boundary_indices = {indices[0], indices[-1]}
+        boundary_indices.update(
+            index
+            for index in indices
+            if _is_explicit_page_boundary(materialized[index])
+        )
         for index in boundary_indices:
             normalized = normalized_source_element_text(materialized[index])
             boundary_occurrences.setdefault(normalized, []).append((page, index))
