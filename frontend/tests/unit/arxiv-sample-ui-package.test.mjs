@@ -36,6 +36,7 @@ import {
   FIRST_PAGE_START,
   MAX_IMPORT_URLS,
   MAX_QUERY_TERMS,
+  QUERY_MAX_CHARS,
   classifyImportReceipt,
   countQueryTerms,
   deselectPaper,
@@ -43,6 +44,7 @@ import {
   formatAuthors,
   mergeCatalog,
   nextPageStart,
+  queryExceedsCharLimit,
   selectPaper,
   selectedImportUrls,
 } from "../../../examples/extensions/arxiv-search/ui/arxiv-search/search-panel-model.ts";
@@ -195,6 +197,37 @@ test("search-panel-model：countQueryTerms 按空白分词计数，空串/纯空
   const atLimit = Array.from({ length: MAX_QUERY_TERMS }, (_, i) => `t${i}`).join(" ");
   assert.equal(countQueryTerms(atLimit), MAX_QUERY_TERMS);
   assert.equal(countQueryTerms(`${atLimit} one-too-many`), MAX_QUERY_TERMS + 1);
+});
+
+
+test("search-panel-model：检索关键词字符上限与插件路由同值", () => {
+  // 服务端真源是 routes.py::search 里的 QUERY_MAX_CHARS（超限即以 400 拒绝，
+  // 且这道闸排在词数检查**之前**运行）。与上面两条上限同一条口径——手抄一份而
+  // 不读 .py，抄写方向安全：服务端调高而这里没跟上只是更保守，调低了前端照发、
+  // 400 原样上屏。跨语言对账属于 backend 侧的
+  // test_the_ui_package_query_char_cap_matches_the_route_cap。
+  assert.equal(QUERY_MAX_CHARS, 200);
+});
+
+
+test("search-panel-model：queryExceedsCharLimit 先按服务端同款裁边，再按 Unicode 码点数判断（P2-3）", () => {
+  // 裁边对齐服务端 `routes.py::search` 的 `(q or "").strip()`：首尾空白不计入
+  // 长度，判据是 `>`（恰好等于上限不算超限）。
+  const padded = ` ${"a".repeat(QUERY_MAX_CHARS)} `;
+  assert.equal(queryExceedsCharLimit(padded), false);
+  assert.equal(queryExceedsCharLimit(`${padded}b`), true);
+  assert.equal(queryExceedsCharLimit("a".repeat(QUERY_MAX_CHARS)), false);
+  assert.equal(queryExceedsCharLimit("a".repeat(QUERY_MAX_CHARS + 1)), true);
+
+  // 按 Unicode **码点**数而非 UTF-16 code unit 数计——服务端 `len(str)` 数的是
+  // 码点（Python 字符串本就是码点序列）。这里用一个代理对 emoji（一个码点、两
+  // 个 UTF-16 code unit）钉住方向：QUERY_MAX_CHARS 个这样的字符恰好在码点上限，
+  // 但若误按 `.length` 算会得到 QUERY_MAX_CHARS*2，被错误判成超限。
+  const emoji = "\u{1F4A1}"; // 💡
+  assert.equal(emoji.length, 2, "夹具本身必须是一个代理对字符，否则这条测不出方向");
+  const atLimitEmoji = emoji.repeat(QUERY_MAX_CHARS);
+  assert.equal(queryExceedsCharLimit(atLimitEmoji), false);
+  assert.equal(queryExceedsCharLimit(`${atLimitEmoji}${emoji}`), true);
 });
 
 

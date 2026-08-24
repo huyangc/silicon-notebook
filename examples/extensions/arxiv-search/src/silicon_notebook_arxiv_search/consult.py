@@ -54,6 +54,8 @@ from app.extension_sdk import (
     ExtensionFailure,
     ExtensionFailureKind,
     ExtensionResultStatus,
+    GAP_SUGGESTION_SUMMARY_MAX_CHARS,
+    GAP_SUGGESTION_TITLE_MAX_CHARS,
     GapConsultExtensionContext,
     GapConsultQuery,
     GapSuggestion,
@@ -224,12 +226,31 @@ def _suggestion(paper: ArxivPaper) -> GapSuggestion:
     ``url`` is the PDF direct link, never the abstract page: core does not
     fetch the URL to find out what it is, and the import endpoint a reader
     might press probes exactly the address it is given.
+
+    ``title``/``summary`` are cut here to core's own
+    ``GAP_SUGGESTION_TITLE_MAX_CHARS``/``GAP_SUGGESTION_SUMMARY_MAX_CHARS`` —
+    imported (re-exported by ``app.extension_sdk`` from their defining
+    module, ``app.domain.gap_consult``), never hand-copied, so the two can
+    never drift apart. This is **not** the same bound ``paper.title``/
+    ``paper.summary`` were already cut to in :mod:`.atom`: that layer's
+    ``TITLE_MAX_CHARS``/``SUMMARY_MAX_CHARS`` are a wider, display-oriented
+    in-memory ceiling for the interactive ``/search`` page (see that
+    module's docstring) and are no longer sized to match core's gap-
+    suggestion limits, so a record reaching this function can still be wider
+    than what a suggestion may carry. Core's own admission host
+    (``_clean_text`` in ``app.extensions.gap_consult``) would cut an
+    over-long value anyway — this plugin is not relying on that as its only
+    line of defence, it is choosing to hand over an already-compliant value
+    rather than let an unbidden truncation happen a layer away, on a plugin
+    output core cannot label with *why* it was shortened. No ellipsis, for
+    the same reason :func:`.atom._collapse` uses none: an appended marker
+    would be indistinguishable from the record's own text.
     """
 
     return GapSuggestion(
-        title=paper.title,
+        title=paper.title[:GAP_SUGGESTION_TITLE_MAX_CHARS],
         url=paper.pdf_url,
-        summary=paper.summary,
+        summary=paper.summary[:GAP_SUGGESTION_SUMMARY_MAX_CHARS],
         source_label=SOURCE_LABEL,
     )
 

@@ -73,8 +73,8 @@ registered instead.
 
 | Constant | Value | Module | Notes |
 | --- | --- | --- | --- |
-| `TITLE_MAX_CHARS` | 200 | `atom.py` | See alignment note below |
-| `SUMMARY_MAX_CHARS` | 400 | `atom.py` | See alignment note below |
+| `TITLE_MAX_CHARS` | 500 | `atom.py` | Display ceiling, not core's limit — see note below |
+| `SUMMARY_MAX_CHARS` | 4000 | `atom.py` | Display ceiling, not core's limit — see note below |
 | `AUTHOR_MAX_CHARS` | 80 | `atom.py` | |
 | `PUBLISHED_MAX_CHARS` | 40 | `atom.py` | |
 | `MAX_AUTHORS` | 20 | `atom.py` | Extra authors on a feed entry are dropped |
@@ -87,12 +87,24 @@ registered instead.
 | `START_MAX` | 10,000 | `routes.py` | Paging ceiling |
 | `CONSULT_RETURN_MARGIN_SECONDS` | 0.25 | `consult.py` | See §4.1 |
 
-`TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` are deliberately the same values as
+`TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` used to be pinned to the same values as
 core's own `GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS`
-— this is a **chosen alignment**, so the plugin never has to truncate a
-value a second time on the way into a gap suggestion, **not a contract
-coupling**. Core owns its own independent limit; this plugin could raise or
-lower its own without breaking anything on core's side.
+(200/400) — **that alignment is retired.** These two constants are a
+display-oriented in-memory ceiling for the interactive `/search` results
+page (a person reading an abstract), not the gap-suggestion limit (an
+unbidden suggestion core hands to a model); sharing one number between them
+meant every search result's abstract was silently cut at 400 characters —
+unremarkable-looking, but real data loss on a page nobody asked to have
+shortened, with no ellipsis to say so (see `atom.py::_collapse`'s
+docstring). They are now sized generously enough that an ordinary arXiv
+title or abstract is never touched. The gap-suggestion-specific cut still
+happens, but it moved to where it is actually needed: `consult.py`'s
+`_suggestion` now truncates explicitly to core's own
+`GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS` (imported
+from `app.extension_sdk`, never hand-copied) on the way into a
+`GapSuggestion` — core's own admission host would cut an over-long value
+anyway, but this plugin hands over an already-compliant value rather than
+leaning on that as its only line of defence.
 
 **`MAX_QUERY_TERMS` is user-visible behaviour, and it must be understood as
 such.** `routes.py::search` rejects a search-box query of more than 8
@@ -107,6 +119,17 @@ extractor (`consult.py::_query_terms`) already bounds itself to
 `MAX_QUERY_TERMS` terms before calling in, because its query is a handful of
 terms this plugin derived from the question and gap phrases, not user-edited
 text passed straight through.
+
+**`QUERY_MAX_CHARS` is the same story, one layer earlier (P2-3).**
+`routes.py::search` checks a query's *length* — in Unicode code points —
+before it ever checks word count, rejecting anything past 200 characters
+with `检索关键词过长，请精简后再试`. The panel mirrors this bound too
+(`search-panel-model.ts::queryExceedsCharLimit`), disabling its submit
+button and showing that same sentence, separately from the word-count
+message, once the box holds more than 200 characters — counted the same way
+Python's `len(str)` counts (Unicode code points), not `string.length`
+(UTF-16 code units, which double-count anything outside the Basic
+Multilingual Plane).
 
 ## 4. Behaviour disclosures
 
@@ -179,6 +202,16 @@ genuinely creates a second source and parses it again. The panel's
 duplicate source has probably just been created") message reads from its
 own in-memory record of URLs it has already sent this session — it is a
 **warning**, not an assurance that the server reused anything.
+
+This is a different thing from the *within-one-request* de-duplication
+`routes.py::_import_urls` does (P2-2): a URL's second and later occurrences
+in the *same* `/import` payload are dropped, silently, before
+`url_sources.import_urls` is ever called — a feed that lists the same paper
+twice, or a client that double-submits a click, is an ordinary shape, not a
+caller mistake worth refusing the whole batch over. `MAX_IMPORT_URLS` is
+checked against this deduplicated count. It does not change the paragraph
+above: two *separate* `/import` requests naming the same URL still each
+reach core's non-content-addressed importer and still each create a source.
 
 ### 4.5 The sample's tests deliberately break with SOP §5.3
 

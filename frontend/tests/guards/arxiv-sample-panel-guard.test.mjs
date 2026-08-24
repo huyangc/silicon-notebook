@@ -185,3 +185,48 @@ test("runSearch 的防御性重检同样按检索词上限拒绝，而不是只�
     `runSearch 必须调用 countQueryTerms 做防御性重检 —— 实际调用集合：${JSON.stringify(called)}`,
   );
 });
+
+test("检索按钮在超过检索字符上限时禁用，并给出与词数护栏分开的提示（P2-3）", async () => {
+  // 服务端真源是 routes.py::search 现在对超过 QUERY_MAX_CHARS 个 Unicode 码点的
+  // 查询显式 400（"检索关键词过长，请精简后再试"），且这道闸排在词数检查**之前**
+  // 运行（见 routes.py 里两条检查的先后顺序）。面板必须提供同一道护栏：按钮禁用 +
+  // 文案，且文案必须与词数上限的提示分开——共用一句会让字数超限的用户读到"检索词
+  // 最多 N 个"这句风马牛不相及的提示。
+  const source = await panel();
+  const submit = jsxElements(source, "button").find(
+    (element) => element.attributes?.type === "submit",
+  );
+  assert.ok(submit, "找不到 type=\"submit\" 的检索按钮");
+
+  const disabled = submit.bindings?.disabled ?? "";
+  assert.ok(
+    disabled.includes("overQueryCharLimit"),
+    `检索按钮的 disabled 表达式必须包含 overQueryCharLimit —— 实际："${disabled}"`,
+  );
+
+  const texts = jsxTextValues(source);
+  assert.ok(
+    texts.some((value) => value.includes("检索关键词过长")),
+    "面板必须显式提示检索关键词字符上限，不能只让用户从服务端 400 里学到限制",
+  );
+
+  // 文案分开：字符上限的提示不能与词数上限的提示合并成同一句。
+  assert.ok(
+    texts
+      .filter((value) => value.includes("检索词最多"))
+      .every((value) => !value.includes("检索关键词过长")),
+    "字符上限与词数上限的提示必须是两句独立文案，不能合并成一句",
+  );
+});
+
+test("runSearch 的防御性重检同样按检索字符上限拒绝（P2-3）", async () => {
+  // 与上面 countQueryTerms 那条同一条口径——按钮已经在超限时禁用，这里兜底一次
+  // 绕过按钮的程序化调用。
+  const source = await panel();
+  const runSearch = findFunctionIn(source, COMPONENT, "runSearch");
+  const called = targets(runSearch);
+  assert.ok(
+    called.includes("queryExceedsCharLimit"),
+    `runSearch 必须调用 queryExceedsCharLimit 做防御性重检 —— 实际调用集合：${JSON.stringify(called)}`,
+  );
+});

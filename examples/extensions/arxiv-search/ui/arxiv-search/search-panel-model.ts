@@ -120,6 +120,44 @@ export function countQueryTerms(query: string): number {
 }
 
 /**
+ * The most Unicode code points an interactive `/search` query may carry.
+ *
+ * The **authoritative** bound is the plugin's own server-side
+ * `routes.py::search`, which rejects an over-length query with a 400
+ * (`检索关键词过长，请精简后再试`) — checked *before* {@link MAX_QUERY_TERMS}'s
+ * whitespace-split word count even runs, so a query long enough to trip both
+ * limits is refused for length first. This constant exists for the same
+ * reason {@link MAX_IMPORT_URLS} does: so the panel can disable its own
+ * submit button and say why, rather than letting someone paste a very long
+ * string and learn the limit from an error banner.
+ *
+ * The number is spelled twice, once per language, and drift is safe in only
+ * one direction — the same asymmetry {@link MAX_IMPORT_URLS}'s doc comment
+ * explains, and the same reason the two are reconciled by a regex test:
+ * `backend/tests/test_arxiv_sample_plugin.py::test_the_ui_package_query_char_cap_matches_the_route_cap`,
+ * in the G1 lane. Keep the `export const QUERY_MAX_CHARS = <n>;` shape it
+ * matches on.
+ */
+export const QUERY_MAX_CHARS = 200;
+
+/**
+ * True when `query`, after the same whitespace trim the route applies
+ * before its own length check (`routes.py::search`'s `(q or "").strip()`),
+ * carries more than {@link QUERY_MAX_CHARS} **Unicode code points**.
+ *
+ * Counted via `Array.from(...).length`, never `.length`: `.length` counts
+ * UTF-16 code units and double-counts any character outside the Basic
+ * Multilingual Plane (an emoji, say), which would make the panel refuse a
+ * query the server's own `len(str)` — Python strings are sequences of code
+ * points, not UTF-16 units — would still accept. `Array.from` iterates a
+ * string by code point (it splits surrogate pairs back into one entry),
+ * which is exactly the unit the server counts in.
+ */
+export function queryExceedsCharLimit(query: string): boolean {
+  return Array.from(query.trim()).length > QUERY_MAX_CHARS;
+}
+
+/**
  * Add `arxivId` to the selection. Idempotent: selecting an already-selected
  * id returns the very same `selected` reference rather than a new Set, so a
  * caller that stores this in `useState` does not trigger an extra render on

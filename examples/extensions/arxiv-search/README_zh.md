@@ -60,8 +60,8 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 
 | 常量 | 取值 | 所在模块 | 说明 |
 | --- | --- | --- | --- |
-| `TITLE_MAX_CHARS` | 200 | `atom.py` | 见下方「刻意对齐」说明 |
-| `SUMMARY_MAX_CHARS` | 400 | `atom.py` | 见下方「刻意对齐」说明 |
+| `TITLE_MAX_CHARS` | 500 | `atom.py` | 展示护栏，不是核心那道上限，见下方说明 |
+| `SUMMARY_MAX_CHARS` | 4000 | `atom.py` | 展示护栏，不是核心那道上限，见下方说明 |
 | `AUTHOR_MAX_CHARS` | 80 | `atom.py` | |
 | `PUBLISHED_MAX_CHARS` | 40 | `atom.py` | |
 | `MAX_AUTHORS` | 20 | `atom.py` | 一条记录里超出的作者会被丢弃 |
@@ -74,10 +74,18 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 | `START_MAX` | 10,000 | `routes.py` | 翻页上限 |
 | `CONSULT_RETURN_MARGIN_SECONDS` | 0.25 | `consult.py` | 见 4.1 节 |
 
-`TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` 刻意与核心自己的
-`GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS` 取相同值——这是
-**刻意对齐**（省掉了写进缺口建议时再截断一次的麻烦），**不是契约耦合**：核心有自己
-独立的一份上限，这个插件把它调高或调低都不会破坏核心那一侧。
+`TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` 此前刻意与核心自己的
+`GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS`（200/400）取相同
+值——**这条对齐已经取消**。这两个常量是交互式 `/search` 结果页给人看的展示护栏，
+不是缺口建议（核心塞给模型的一条主动建议）那道上限；两者共用一个数字的后果是每条
+检索结果的摘要都在 400 字符处被悄悄切断——看着不起眼，其实是用户没要求缩短的那个
+页面上真实的信息丢失，且没有省略号提示（见 `atom.py::_collapse` 的说明）。现在这两
+个常量放宽到「一篇普通 arXiv 标题/摘要绝不会被碰到」的量级。缺口建议专属的截断依然
+存在，只是挪到了真正需要它的地方：`consult.py` 的 `_suggestion` 现在显式按核心自己的
+`GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS`（从
+`app.extension_sdk` import，不再手抄数字）在构造 `GapSuggestion` 时切一刀——核心自己
+的准入宿主本来就会把超长值截掉，但这个插件选择主动交付一份已经合规的值，而不是把
+这当成唯一一道防线。
 
 **`MAX_QUERY_TERMS` 是用户可见的行为，必须按这个口径理解。** `routes.py::search`
 现在对超过 8 个空白分词的检索词直接以 400 拒绝（「检索词最多 8 个，请精简后重试」），
@@ -88,6 +96,14 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 （`consult.py::_query_terms`）在调用进来之前就已经把自己限制在 `MAX_QUERY_TERMS`
 个词以内，因为它的查询是这个插件从问题与缺口短语里派生出的少量词，不是用户逐字
 输入后原样传递的文本。
+
+**`QUERY_MAX_CHARS` 是同一个故事的前一层。** `routes.py::search` 先按**Unicode 码点**
+数检查检索词的长度，比词数检查还早一步，超过 200 个字符就以「检索关键词过长，请
+精简后再试」拒绝。面板现在同样镜像了这道护栏
+（`search-panel-model.ts::queryExceedsCharLimit`）：检索框超过 200 个字符时禁用检索
+按钮并给出同一句提示，与词数上限的提示是两句独立文案；计数口径与 Python 的
+`len(str)` 同一种单位（Unicode 码点），不是 `string.length`（UTF-16 code unit，对
+基本多语言平面之外的字符会数成两个）。
 
 ## 四、行为披露
 
@@ -144,6 +160,13 @@ politeness_interval_seconds + timeout_seconds + CONSULT_RETURN_MARGIN_SECONDS
 「本次已导入过，可能已产生重复来源」这句提示，读的是它自己在本次会话里记下的
 「已经发送过这个 URL」的记忆——它是一句**警告**，不是「服务端复用了同一个来源」
 的安抚。
+
+这与 `routes.py::_import_urls` 做的**单次请求内**去重（P2-2）是两件事：同一个
+`/import` 请求体里，一个 URL 第二次及以后的出现会被静默丢弃——不返回 400——才
+调用 `url_sources.import_urls`；同一份 feed 里重复出现的同一篇论文，或客户端
+重复提交同一次点击，都是正常形态，不值得为此拒绝整批请求。`MAX_IMPORT_URLS`
+上限检查按这份去重后的条数计。这条不改变上一段的结论：**两次**分开的
+`/import` 请求各自命中核心那条不按内容去重的导入器，各自仍会建出一份来源。
 
 ### 4.5 样板的测试刻意偏离 SOP §5.3
 

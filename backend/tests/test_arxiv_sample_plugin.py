@@ -52,6 +52,8 @@ from app.domain.extension_http import (
 from app.extension_sdk import (
     AvailabilityStatus,
     ExtensionResultStatus,
+    GAP_SUGGESTION_SUMMARY_MAX_CHARS,
+    GAP_SUGGESTION_TITLE_MAX_CHARS,
     GapConsultExtensionContext,
     GapConsultQuery,
 )
@@ -182,8 +184,12 @@ def test_title_and_summary_whitespace_is_collapsed_and_truncated(sample_feed):
     assert "\n" not in from_fixture.summary
     assert "  " not in from_fixture.summary
 
-    long_title = "title " * 200
-    long_summary = "summary " * 200
+    # 1000 repeats comfortably clears both of `.atom`'s now-generous ceilings
+    # (500/4000 — a display-oriented in-memory bound, not core's own
+    # gap-suggestion limit; see the module docstring and P2-1), so this still
+    # proves the parser's own hard cut fires, independent of that value.
+    long_title = "title " * 1000
+    long_summary = "summary " * 1000
     truncated = arxiv_atom.parse_atom(
         _feed_with(long_title, long_summary), limit=1
     )[0]
@@ -193,6 +199,39 @@ def test_title_and_summary_whitespace_is_collapsed_and_truncated(sample_feed):
     assert truncated.title == " ".join(long_title.split())[
         : arxiv_atom.TITLE_MAX_CHARS
     ]
+
+
+def test_search_route_returns_a_long_summary_without_truncating_it_to_cores_limit(
+    monkeypatch,
+):
+    """`.atom`'s display bound is no longer pinned to core's gap-suggestion one.
+
+    A summary comfortably past core's own ``GAP_SUGGESTION_SUMMARY_MAX_CHARS``
+    (400) but still well under ``.atom.SUMMARY_MAX_CHARS`` (4000) must reach
+    the interactive `/search` response whole — that page is what a person
+    reads results from, and cutting an abstract off mid-sentence with no
+    ellipsis is silent data loss on a page nobody asked to have shortened.
+    See P2-1: the gap-consult-specific cut moved to `.consult`, precisely so
+    this path would stop sharing it.
+    """
+
+    long_summary = "term " * 600
+    assert len(" ".join(long_summary.split())) > GAP_SUGGESTION_SUMMARY_MAX_CHARS
+    assert len(" ".join(long_summary.split())) < arxiv_atom.SUMMARY_MAX_CHARS
+
+    feed = _feed_with("A perfectly ordinary title", long_summary)
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: feed)
+
+    context, _ = _route_context(_test_settings(max_results=5))
+    search = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/search", "GET"
+    ).endpoint
+    body = search(notebook_id="nb-1", q="term")
+
+    assert len(body["items"]) == 1
+    returned_summary = body["items"][0]["summary"]
+    assert returned_summary == " ".join(long_summary.split())
+    assert len(returned_summary) > GAP_SUGGESTION_SUMMARY_MAX_CHARS
 
 
 def test_entry_count_is_capped_by_limit(sample_feed):
@@ -1560,7 +1599,18 @@ def test_import_route_rejects_an_empty_or_malformed_body():
         {"urls": ["   "]},
         {"urls": [None]},
         {"urls": [123]},
-        {"urls": ["https://arxiv.org/pdf/x"] * (arxiv_routes.MAX_IMPORT_URLS + 1)},
+        # Distinct URLs, not `MAX_IMPORT_URLS + 1` repeats of one: the batch
+        # ceiling below is now checked against the *deduplicated* count
+        # (P2-2), so `MAX_IMPORT_URLS + 1` copies of the same URL would fold
+        # to one and no longer trip it — see
+        # `test_import_route_checks_the_batch_ceiling_against_the_deduplicated_count`
+        # for that case on its own.
+        {
+            "urls": [
+                f"https://arxiv.org/pdf/x{i}"
+                for i in range(arxiv_routes.MAX_IMPORT_URLS + 1)
+            ]
+        },
         {"urls": ["https://arxiv.org/pdf/" + "x" * arxiv_routes.MAX_URL_CHARS]},
         [],
         None,
@@ -1571,6 +1621,94 @@ def test_import_route_rejects_an_empty_or_malformed_body():
         assert error.value.status_code == 400, body
 
     assert sources.calls == []
+
+
+def test_import_route_deduplicates_repeated_urls_before_calling_the_port():
+    """A URL's second and later occurrences are dropped, silently (P2-2).
+
+    Core's own `add_url_sources` is not content-addressed (see the module
+    docstring): sending the same URL twice would create two duplicate
+    sources for nothing.  Two identical entries in the same batch — a feed
+    that lists the same paper twice, or a client that double-submits — is an
+    ordinary shape, not a caller mistake, so the repeat is dropped rather
+    than answered with a 400, and the port is only ever handed one copy.
+    """
+
+    created = (
+        PluginImportedSource(
+            source_id="src-1", title="Paper A", url="https://arxiv.org/pdf/2401.00001v1"
+        ),
+    )
+    sources = _UrlSourcesSpy(created=created)
+    context, _ = _route_context(_test_settings(), url_sources=sources)
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    body = handler(
+        notebook_id="nb-1",
+        payload={
+            "urls": [
+                "https://arxiv.org/pdf/2401.00001v1",
+                "https://arxiv.org/pdf/2401.00002v2",
+                # A third, later repeat of the first URL — proves dedup keeps
+                # scanning past the first repeat rather than only catching an
+                # immediately-adjacent one.
+                "https://arxiv.org/pdf/2401.00001v1",
+            ]
+        },
+    )
+
+    assert len(sources.calls) == 1
+    _, forwarded = sources.calls[0]
+    # Order-preserving: the survivors keep the order they were first seen in.
+    assert forwarded == [
+        "https://arxiv.org/pdf/2401.00001v1",
+        "https://arxiv.org/pdf/2401.00002v2",
+    ]
+    # A repeat is dropped, not refused — the request still succeeds.
+    assert body["created"] == [
+        {
+            "source_id": "src-1",
+            "title": "Paper A",
+            "url": "https://arxiv.org/pdf/2401.00001v1",
+        }
+    ]
+
+
+def test_import_route_checks_the_batch_ceiling_against_the_deduplicated_count():
+    """`MAX_IMPORT_URLS` counts unique URLs, not raw list length (P2-2).
+
+    A caller who names the same handful of papers more times than the cap
+    must not be refused for a repetition that will not cost a second source
+    — the ceiling exists to bound how many *new* sources one request can
+    create, not how many times a URL may appear in the request body.
+    """
+
+    sources = _UrlSourcesSpy()
+    context, _ = _route_context(_test_settings(), url_sources=sources)
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    repeated = ["https://arxiv.org/pdf/2401.00001v1"] * (
+        arxiv_routes.MAX_IMPORT_URLS + 5
+    )
+    handler(notebook_id="nb-1", payload={"urls": repeated})
+
+    assert len(sources.calls) == 1
+    _, forwarded = sources.calls[0]
+    assert forwarded == ["https://arxiv.org/pdf/2401.00001v1"]
+
+    # Vacuity guard: the ceiling still fires once the *unique* count exceeds
+    # it, so the test above is not passing because the check was removed.
+    distinct_over_cap = [
+        f"https://arxiv.org/pdf/x{i}" for i in range(arxiv_routes.MAX_IMPORT_URLS + 1)
+    ]
+    with pytest.raises(_UserError) as error:
+        handler(notebook_id="nb-1", payload={"urls": distinct_over_cap})
+    assert error.value.status_code == 400
+    assert len(sources.calls) == 1
 
 
 def test_import_route_via_http_rejects_non_dict_bodies_with_422():
@@ -1657,6 +1795,29 @@ def test_the_ui_package_query_term_cap_matches_the_route_cap():
         "be there, just not in the exact form this regex expects"
     )
     assert int(match.group(1)) == arxiv_client.MAX_QUERY_TERMS
+
+
+def test_the_ui_package_query_char_cap_matches_the_route_cap():
+    """The query-length ceiling is spelled twice, once per language (P2-3).
+
+    Same shape as :func:`test_the_ui_package_query_term_cap_matches_the_route_cap`
+    above, for the same reason: ``routes.py::QUERY_MAX_CHARS`` is the
+    authoritative bound — the route answers an over-length query with a 400,
+    checked before the whitespace-split word count even runs — and the
+    TypeScript constant only exists so the panel can disable its submit
+    button and say why.
+    """
+
+    source = (
+        _PLUGIN_ROOT / "ui" / "arxiv-search" / "search-panel-model.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"export const QUERY_MAX_CHARS = (\d+);", source)
+    assert match is not None, (
+        "the UI package's source no longer matches the "
+        "`export const QUERY_MAX_CHARS = <n>;` shape — the export may still "
+        "be there, just not in the exact form this regex expects"
+    )
+    assert int(match.group(1)) == arxiv_routes.QUERY_MAX_CHARS
 
 
 def test_import_route_emits_only_whitelisted_event_fields():
@@ -1883,6 +2044,50 @@ def test_consult_maps_papers_to_pdf_direct_links(monkeypatch, sample_feed):
         assert suggestion.url.startswith("https://arxiv.org/pdf/")
         assert suggestion.source_label == "arXiv"
         assert suggestion.title
+
+
+def test_consult_truncates_title_and_summary_to_cores_gap_suggestion_limits(
+    monkeypatch,
+):
+    """`.consult` owns the gap-suggestion-specific cut now, not `.atom` (P2-1).
+
+    `.atom`'s own ``TITLE_MAX_CHARS``/``SUMMARY_MAX_CHARS`` are now a
+    generous, display-oriented in-memory ceiling (500/4000) and are no
+    longer pinned to core's own ``GAP_SUGGESTION_TITLE_MAX_CHARS``/
+    ``GAP_SUGGESTION_SUMMARY_MAX_CHARS`` (200/400). A record whose title and
+    summary sail past core's limits while staying comfortably under
+    `.atom`'s own proves the cut a suggestion actually gets happens in
+    `.consult`, not merely because the parser already trimmed it upstream.
+    """
+
+    long_title = " ".join(["term"] * 60)  # 299 chars: > core's 200, < atom's 500
+    long_summary = " ".join(["term"] * 600)  # 2999 chars: > core's 400, < atom's 4000
+    assert GAP_SUGGESTION_TITLE_MAX_CHARS < len(long_title) < arxiv_atom.TITLE_MAX_CHARS
+    assert (
+        GAP_SUGGESTION_SUMMARY_MAX_CHARS
+        < len(long_summary)
+        < arxiv_atom.SUMMARY_MAX_CHARS
+    )
+
+    feed = _feed_with(long_title, long_summary)
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: feed)
+
+    # The parser itself must not already have cut these — otherwise the
+    # assertions below would prove nothing about where the truncation
+    # actually happens.
+    parsed = arxiv_atom.parse_atom(feed, limit=1)[0]
+    assert parsed.title == long_title
+    assert parsed.summary == long_summary
+
+    result = _contributor().consult(_consult_context())
+
+    assert result.status is ExtensionResultStatus.AVAILABLE
+    assert len(result.items) == 1
+    suggestion = result.items[0]
+    assert len(suggestion.title) == GAP_SUGGESTION_TITLE_MAX_CHARS
+    assert suggestion.title == long_title[:GAP_SUGGESTION_TITLE_MAX_CHARS]
+    assert len(suggestion.summary) == GAP_SUGGESTION_SUMMARY_MAX_CHARS
+    assert suggestion.summary == long_summary[:GAP_SUGGESTION_SUMMARY_MAX_CHARS]
 
 
 def test_consult_drops_a_suggestion_from_a_foreign_host(monkeypatch):
