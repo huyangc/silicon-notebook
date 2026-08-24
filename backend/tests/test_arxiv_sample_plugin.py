@@ -118,6 +118,24 @@ def _feed_with(title: str, summary: str) -> bytes:
     ).encode("utf-8")
 
 
+def _feed_with_authors(count: int) -> bytes:
+    """One entry whose ``<author>`` elements are exactly ``count`` real names
+    (``Author 0`` .. ``Author {count-1}``), for exercising ``MAX_AUTHORS`` /
+    ``authors_total`` without dragging in the fixture's unrelated fields.
+    """
+    authors = "".join(
+        f"<author><name>Author {i}</name></author>" for i in range(count)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        "<id>http://arxiv.org/abs/2401.00099v1</id>"
+        "<title>A Very Collaborative Paper</title>"
+        f"{authors}"
+        "</entry></feed>"
+    ).encode("utf-8")
+
+
 def _search_kwargs(**overrides):
     defaults = {
         "base_url": "https://export.arxiv.example/api/query",
@@ -149,6 +167,9 @@ def test_atom_entries_parse_into_papers(sample_feed):
     first = papers[0]
     assert first.title == "Retrieval-Augmented Generation for Long Documents"
     assert first.authors == ("Ada Lovelace", "Alan Turing")
+    # Under `MAX_AUTHORS`, the total matches the kept list exactly — the
+    # over-cap case (where they diverge) is covered separately below.
+    assert first.authors_total == 2
     assert first.published == "2024-01-02T03:04:05Z"
     assert first.summary.startswith("We study retrieval-augmented generation")
     assert first.abs_url == "https://arxiv.org/abs/2401.00001v1"
@@ -199,6 +220,91 @@ def test_title_and_summary_whitespace_is_collapsed_and_truncated(sample_feed):
     assert truncated.title == " ".join(long_title.split())[
         : arxiv_atom.TITLE_MAX_CHARS
     ]
+
+
+def test_authors_beyond_the_display_cap_are_disclosed_not_dropped():
+    """`MAX_AUTHORS` still caps ``authors`` for memory/display, but
+    ``authors_total`` must report the true count.  Before this, an author
+    list past the cap was shortened with no way to tell — silently
+    truncating user-visible data is exactly the red line
+    ``authors_total`` closes (repo rule: "数值上限与截断").
+    """
+
+    papers = arxiv_atom.parse_atom(_feed_with_authors(21), limit=10)
+
+    assert len(papers) == 1
+    paper = papers[0]
+    assert len(paper.authors) == arxiv_atom.MAX_AUTHORS
+    assert paper.authors_total == 21
+    # The kept names are the *first* `MAX_AUTHORS`, in document order — a
+    # display cap should not reorder or sample the list it shortens.
+    assert paper.authors[0] == "Author 0"
+    assert paper.authors[-1] == f"Author {arxiv_atom.MAX_AUTHORS - 1}"
+
+
+def test_authors_total_matches_the_kept_count_at_exactly_the_cap():
+    """The boundary case: `count == MAX_AUTHORS` must not be treated as
+    "over" — `authors_total` and `len(authors)` agree, and no caller should
+    read this paper as having "and N more" authors it does not have.
+    """
+
+    papers = arxiv_atom.parse_atom(
+        _feed_with_authors(arxiv_atom.MAX_AUTHORS), limit=10
+    )
+
+    assert len(papers) == 1
+    assert papers[0].authors_total == arxiv_atom.MAX_AUTHORS
+    assert len(papers[0].authors) == arxiv_atom.MAX_AUTHORS
+
+
+def test_authors_total_ignores_author_elements_with_no_name():
+    """An `<author>` element with a blank or missing `<name>` is the same
+    "no name, no record" rule `_entry_to_paper` applies to the entry as a
+    whole (see `_arxiv_id`/`title` gating parse_atom's own drop decision) —
+    it must not inflate the total either.
+    """
+
+    feed = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        "<id>http://arxiv.org/abs/2401.00098v1</id>"
+        "<title>Blank Author Elements</title>"
+        "<author><name>Real Name</name></author>"
+        "<author><name></name></author>"
+        "<author></author>"
+        "</entry></feed>"
+    ).encode("utf-8")
+
+    papers = arxiv_atom.parse_atom(feed, limit=10)
+
+    assert len(papers) == 1
+    assert papers[0].authors_total == 1
+    assert papers[0].authors == ("Real Name",)
+
+
+def test_search_route_reports_the_true_author_count_alongside_the_capped_list(
+    monkeypatch,
+):
+    """The wire shape must carry ``authors_total`` — the panel's disclosure
+    ("等 N 人", see `search-panel-model.ts::formatAuthors`) reads it, and a
+    response that only ever sends the capped list has no way to tell a
+    twenty-author paper from a two-thousand-author one.
+    """
+
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: _feed_with_authors(21)
+    )
+
+    context, _ = _route_context(_test_settings(max_results=5))
+    search = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/search", "GET"
+    ).endpoint
+    body = search(notebook_id="nb-1", q="collaboration")
+
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert len(item["authors"]) == arxiv_atom.MAX_AUTHORS
+    assert item["authors_total"] == 21
 
 
 def test_search_route_returns_a_long_summary_without_truncating_it_to_cores_limit(

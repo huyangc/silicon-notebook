@@ -261,6 +261,7 @@ def _paper_row(
         "arxiv_id": paper.arxiv_id,
         "title": paper.title,
         "authors": list(paper.authors),
+        "authors_total": paper.authors_total,
         "published": paper.published,
         "summary": paper.summary,
         "pdf_url": pdf_url,

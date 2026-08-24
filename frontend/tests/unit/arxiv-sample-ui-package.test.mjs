@@ -188,9 +188,25 @@ test("search-panel-model：appendVisibleIds 按 id 去重、保持追加序，�
 
 
 test("search-panel-model：作者串按顿号拼接，折叠空白项，空表给空串", () => {
-  assert.equal(formatAuthors(["Alice Smith", "Bob Lee"]), "Alice Smith、Bob Lee");
-  assert.equal(formatAuthors(["  Carol  ", "", "  "]), "Carol");
-  assert.equal(formatAuthors([]), "");
+  assert.equal(formatAuthors(["Alice Smith", "Bob Lee"], 2), "Alice Smith、Bob Lee");
+  assert.equal(formatAuthors(["  Carol  ", "", "  "], 1), "Carol");
+  assert.equal(formatAuthors([], 0), "");
+});
+
+
+test("search-panel-model：作者数超出服务端展示上限时披露真实总数，不静默截断（codex #596 R4 P2）", () => {
+  // 服务端真源是 atom.py::MAX_AUTHORS（20）：`authors` 是已经截到 20 个的展示
+  // 列表，`authors_total` 是这条记录真实的作者总数。三支：
+  //   ① 总数等于已展示条数（未超上限）——原样拼接，不带披露；
+  //   ② 总数就是已展示条数（恰好未超，`total === authors.length`）——同①；
+  //   ③ 总数大于已展示条数——追加「等 N 人」，N 用的是**总数**而不是差值,
+  //      这是中文「甲、乙等21人」的既有惯用语序（「等」后面接的是总人数）。
+  const twenty = Array.from({ length: 20 }, (_, i) => `Author ${i}`);
+  assert.equal(formatAuthors(twenty, 20), twenty.join("、"));
+  assert.equal(formatAuthors(twenty, 21), `${twenty.join("、")}等21人`);
+  // 全空列表但总数非零（合成夹具，正常响应不会出现）也要给出披露，而不是把
+  // 「没有可展示的名字」误判成「没有作者」。
+  assert.equal(formatAuthors([], 3), "等3人");
 });
 
 

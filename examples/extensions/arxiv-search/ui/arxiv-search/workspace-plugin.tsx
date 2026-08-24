@@ -312,7 +312,7 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
                   <strong>{item.title}</strong>
                 </label>
                 <p>
-                  {formatAuthors(item.authors)}
+                  {formatAuthors(item.authors, item.authors_total)}
                   {item.published ? ` · ${item.published}` : ""}
                 </p>
                 {item.summary && <p>{item.summary}</p>}

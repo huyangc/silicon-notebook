@@ -58,6 +58,16 @@ SUMMARY_MAX_CHARS = 4000
 AUTHOR_MAX_CHARS = 80
 PUBLISHED_MAX_CHARS = 40
 ARXIV_ID_MAX_CHARS = 64
+# A large-collaboration paper (an ATLAS or CMS result, say) can carry several
+# thousand authors; keeping all of them in `ArxivPaper.authors` would push a
+# single record's memory footprint disproportionately, for a list a results
+# page cannot usefully render in full either. `MAX_AUTHORS` therefore still
+# bounds how many *names* the parser keeps — but it must never again be a
+# silent truncation (repo rule: "数值上限与截断" — user-facing data may not be
+# cut without disclosure). `ArxivPaper.authors_total` is the disclosure: it
+# counts every named author on the entry, independent of this cap, so a
+# caller can say "and N more" instead of quietly showing a shorter list than
+# the paper actually has. See `_authors` below.
 MAX_AUTHORS = 20
 
 _ABS_BASE = "https://arxiv.org/abs/"
@@ -72,11 +82,19 @@ _ID_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 @dataclass(frozen=True, slots=True)
 class ArxivPaper:
-    """One arXiv record, already bounded and whitespace-normalised."""
+    """One arXiv record, already bounded and whitespace-normalised.
+
+    ``authors`` is capped to :data:`MAX_AUTHORS` names — an in-memory/display
+    ceiling, not the truth about the paper.  ``authors_total`` is the truth:
+    the number of named authors on the entry, independent of that cap, so a
+    caller can disclose "and N more" rather than silently showing a shorter
+    author list than the paper actually has.
+    """
 
     arxiv_id: str
     title: str
     authors: tuple[str, ...]
+    authors_total: int
     published: str
     summary: str
     pdf_url: str
@@ -110,10 +128,12 @@ def _entry_to_paper(entry: ElementTree.Element) -> ArxivPaper | None:
     title = _collapse(_text(entry, "title"), TITLE_MAX_CHARS)
     if not arxiv_id or not title:
         return None
+    authors, authors_total = _authors(entry)
     return ArxivPaper(
         arxiv_id=arxiv_id,
         title=title,
-        authors=_authors(entry),
+        authors=authors,
+        authors_total=authors_total,
         published=_collapse(_text(entry, "published"), PUBLISHED_MAX_CHARS),
         summary=_collapse(_text(entry, "summary"), SUMMARY_MAX_CHARS),
         pdf_url=_pdf_link(entry) or (_PDF_BASE + arxiv_id),
@@ -141,15 +161,31 @@ def _collapse(value: str, limit: int) -> str:
     return " ".join(value.split())[:limit]
 
 
-def _authors(entry: ElementTree.Element) -> tuple[str, ...]:
-    names = []
+def _authors(entry: ElementTree.Element) -> tuple[tuple[str, ...], int]:
+    """Every named author on ``entry`` — the true count, and up to
+    :data:`MAX_AUTHORS` of the names themselves.
+
+    ``total`` counts every ``<author>`` element with a non-blank ``<name>``;
+    an author element that is present but empty contributes to neither the
+    kept names nor the total, the same "no name, no paper" rule
+    :func:`_entry_to_paper` applies to the entry as a whole.  The loop does
+    not stop once ``MAX_AUTHORS`` names are kept — it must see every author
+    to report an accurate total — but it also never holds more than one
+    collapsed name at a time beyond what it keeps, so a pathological entry
+    still costs no more memory than its own byte size already bounds (see
+    ``client.py::MAX_RESPONSE_BYTES``).
+    """
+
+    names: list[str] = []
+    total = 0
     for author in entry.findall(f"{_ATOM_NS}author"):
-        if len(names) >= MAX_AUTHORS:
-            break
         name = _collapse(author.findtext(f"{_ATOM_NS}name") or "", AUTHOR_MAX_CHARS)
-        if name:
+        if not name:
+            continue
+        total += 1
+        if len(names) < MAX_AUTHORS:
             names.append(name)
-    return tuple(names)
+    return tuple(names), total
 
 
 def _arxiv_id(raw: str) -> str:
