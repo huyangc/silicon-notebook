@@ -64,7 +64,7 @@ function anchorAnswerWithImages(answer = "第一段结论 [k1]。\n\n第二段�
 test("附图无需打开引用浮层，直接插在命中引用的段落之后", async () => {
   renderAnswer(anchorAnswerWithImages());
 
-  const imageRegion = await screen.findByRole("complementary", { name: "本段附图 [1]" });
+  const imageRegion = await screen.findByRole("complementary", { name: "引用图片 [1]" });
   const firstParagraph = screen.getByText(/第一段结论/).closest("p");
   const secondParagraph = screen.getByText("第二段继续说明。");
   expect(firstParagraph?.nextElementSibling).toBe(imageRegion);
@@ -77,7 +77,7 @@ test("caption 只作为图片 alt，不在正文或引用浮层重复显示", as
   const user = userEvent.setup();
   const { container } = renderAnswer(anchorAnswerWithImages());
 
-  const imageRegion = await screen.findByRole("complementary", { name: "本段附图 [1]" });
+  const imageRegion = await screen.findByRole("complementary", { name: "引用图片 [1]" });
   expect(within(imageRegion).getByRole("img", { name: "图 1：示意图" })).toBeInTheDocument();
   expect(imageRegion.textContent).not.toContain("图 1：示意图");
 
@@ -187,13 +187,13 @@ test("引用浮层打开预览后暂停外部关闭，Escape 关闭预览并把�
   await user.click(screen.getByRole("button", { name: "[1]" }));
   const thumbnailButton = await screen.findByTitle("放大查看这张附图");
   await user.click(thumbnailButton);
-  expect(screen.getByRole("dialog", { name: "[1]附图预览" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "引用 [1] 图片预览" })).toBeInTheDocument();
 
   document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
   expect(container.querySelector(".cite-popover")).not.toBeNull();
 
   await user.keyboard("{Escape}");
-  expect(screen.queryByRole("dialog", { name: "[1]附图预览" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "引用 [1] 图片预览" })).toBeNull();
   expect(container.querySelector(".cite-popover")).not.toBeNull();
   expect(screen.getByTitle("放大查看这张附图")).toHaveFocus();
 });
@@ -249,7 +249,7 @@ test("citation 回退编号携带 images 时也在正文引用位置插图", asy
   };
   renderAnswer(answer);
 
-  const region = await screen.findByRole("complementary", { name: "本段附图 [1]" });
+  const region = await screen.findByRole("complementary", { name: "引用图片 [1]" });
   expect(within(region).getByRole("img", { name: "图 2" })).toBeInTheDocument();
   expect(region.textContent).not.toContain("图 2");
 });
@@ -280,7 +280,7 @@ test("列表和引用中的图片跟随最小内部段落，表格图片等整�
   await screen.findByRole("img", { name: "表格图" });
   const listItem = screen.getByText(/列表结论/).closest("li");
   expect(listItem).not.toBeNull();
-  expect(within(listItem as HTMLElement).getByRole("complementary", { name: "本段附图 [1]" }))
+  expect(within(listItem as HTMLElement).getByRole("complementary", { name: "引用图片 [1]" }))
     .toHaveClass("answer-inline-images");
 
   const quoteParagraph = screen.getByText(/引用结论/).closest("p");

@@ -246,10 +246,12 @@ function PublicTurnView({
         .map(({ citationKey }) => markdownCitationRefs[citationKey]?.displayLabel)
         .filter((value): value is string => Boolean(value)))];
       return (
-        <aside className="answer-inline-images" aria-label="本段附图">
+        <aside
+          className="answer-inline-images"
+          aria-label={`引用图片${labels.length > 0 ? ` ${labels.join("、")}` : ""}`}
+        >
           <div className="answer-inline-images-heading">
-            <span>本段附图</span>
-            {labels.length > 0 && <span>{labels.join("、")}</span>}
+            <span>引用{labels.length > 0 ? ` ${labels.join("、")}` : ""}</span>
             <small>模型未直接读取图片</small>
           </div>
           <ul className="answer-inline-image-list">
@@ -326,9 +328,9 @@ function PublicTurnView({
           binding. Keep those images visible in an explicitly unpositioned,
           image-only fallback instead of guessing a reference or dropping them. */}
       {legacyImages.length > 0 && (
-        <aside className="answer-inline-images" aria-label="本段附图（旧分享）">
+        <aside className="answer-inline-images" aria-label="引用图片（旧分享）">
           <div className="answer-inline-images-heading">
-            <span>本段附图</span>
+            <span>引用图片</span>
             <small>旧分享未保留引用位置 · 模型未直接读取图片</small>
           </div>
           <ul className="answer-inline-image-list">

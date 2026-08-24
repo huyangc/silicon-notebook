@@ -793,10 +793,9 @@ function InlineCitationImages({
   if (rows.length === 0) return null;
   const labels = [...new Set(rows.map((row) => row.reference.displayLabel))];
   return (
-    <aside className="answer-inline-images" aria-label={`本段附图 ${labels.join("、")}`}>
+    <aside className="answer-inline-images" aria-label={`引用图片 ${labels.join("、")}`}>
       <div className="answer-inline-images-heading">
-        <span>本段附图</span>
-        <span>{labels.join("、")}</span>
+        <span>引用 {labels.join("、")}</span>
         <small title="模型可能读取过图注或图片描述，但没有直接读取图片">模型未直接读取图片</small>
       </div>
       <ul className="answer-inline-image-list">
