@@ -7,7 +7,7 @@
       "version": "0.1.0",
       "capability": "examples.arxiv_search.available",
       "slot": "workspace.side_panel",
-      "permission": "source:write",
+      "permission": "notebook:write",
       "mode": "all",
       "component": "ArxivSearchEntry"
     }

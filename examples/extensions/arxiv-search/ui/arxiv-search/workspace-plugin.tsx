@@ -7,6 +7,21 @@
  * `capability` / `slot` there and in `ui-plugin.json` must match character
  * for character (`test_ui_manifest_matches_the_backend_manifest`, T4).
  *
+ * **Why the manifest declares `notebook:write` and not `source:write`.** The
+ * permission name is resolved against a snapshot the host builds per slot
+ * (`features/extension-sdk/visibility.ts::permissionAllowed`). In the
+ * `workspace.side_panel` outlet the shell hard-codes `sourceRead: false` and
+ * `sourceWrite: false` (`app/page.tsx`'s `workspaceExtensionPermissions` —
+ * those two describe a *selected source*, and no source is selected out
+ * here), so a contribution declaring `source:write` is structurally
+ * unreachable: the entry button never renders, in any deployment, for any
+ * user. `notebook:write` maps to `snapshot.notebookWrite` →
+ * `capabilities.canWriteNotebook`, which is the browser-side mirror of the
+ * backend `sources:write` capability this plugin's `/import` route actually
+ * needs. Do not "correct" this back to `source:write`; the guard for it is
+ * `frontend/tests/unit/arxiv-sample-ui-package.test.mjs`, which pins the
+ * manifest field literally.
+ *
  * State ownership: everything the panel needs — query text, the running
  * catalog of results, the checkbox selection, the last import receipt — lives
  * in this one component's `useState`s. There is no core-owned data owner to
@@ -35,6 +50,7 @@ import type { WorkspaceExtensionProps } from "../extension-sdk/contracts.ts";
 import { ExtensionModal } from "../extension-sdk/ui.tsx";
 import {
   FIRST_PAGE_START,
+  MAX_IMPORT_URLS,
   classifyImportReceipt,
   deselectPaper,
   foldImportedUrls,
@@ -59,6 +75,10 @@ const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 
 export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) {
   const [query, setQuery] = useState("");
+  // The query the visible page was actually fetched with, frozen at the
+  // moment it was submitted. "Load more" pages forward on *this*, never on
+  // the live input box — see `handleLoadMore`.
+  const [executedQuery, setExecutedQuery] = useState("");
   const [start, setStart] = useState(FIRST_PAGE_START);
   const [hasMore, setHasMore] = useState(false);
   const [catalog, setCatalog] = useState(EMPTY_CATALOG);
@@ -79,20 +99,27 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   // anything the server says, is what "已复用" means here.
   const [alreadyImported, setAlreadyImported] = useState(EMPTY_SELECTION);
 
-  async function runSearch(nextStart: number) {
-    const trimmed = query.trim();
-    if (trimmed.length === 0 || searchBusy) return;
+  // `term` is passed in rather than read from `query` so that both callers are
+  // explicit about which query they mean: the submit handler means "whatever
+  // is in the box now", the pager means "the one that produced what is on
+  // screen". Reading state here would silently give the pager the former.
+  // `importBusy` also blocks: an import in flight ends by clearing `selected`,
+  // and letting a new page land underneath it would clear a selection the user
+  // made against results that no longer exist.
+  async function runSearch(term: string, nextStart: number) {
+    if (term.length === 0 || searchBusy || importBusy) return;
     setSearchBusy(true);
     setSearchError(null);
     try {
       const response = await actions.api.requestJson<ArxivSearchResponse>(
         `/notebooks/${context.notebook.id}/search`,
-        { query: { q: trimmed, start: nextStart } },
+        { query: { q: term, start: nextStart } },
       );
       setCatalog((previous) => mergeCatalog(previous, response.items));
       setVisibleIds(response.items.map((item) => item.arxiv_id));
       setStart(response.start);
       setHasMore(response.has_more);
+      setExecutedQuery(term);
       setSearched(true);
     } catch (error) {
       // A failed page load must not silently keep showing a stale one.
@@ -106,16 +133,26 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    // A fresh query starts a fresh session: an import receipt from a
-    // previous query no longer describes anything on screen.
+    // A fresh query starts a fresh session, and that has to mean all three
+    // of these, not just the receipt: the selection and the catalog both
+    // describe the previous query's results. Keeping `selected` would let a
+    // paper the user can no longer see ride along on the next import, and
+    // keeping `catalog` is precisely the mechanism that would still resolve
+    // its id to a URL. `alreadyImported` deliberately survives — it is the
+    // panel's session-long duplicate warning, not per-query state.
     setReceipt(null);
     setImportError(null);
-    void runSearch(FIRST_PAGE_START);
+    setSelected(EMPTY_SELECTION);
+    setCatalog(EMPTY_CATALOG);
+    void runSearch(query.trim(), FIRST_PAGE_START);
   }
 
   function handleLoadMore() {
-    if (!hasMore || searchBusy) return;
-    void runSearch(nextPageStart(start, visibleIds.length));
+    if (!hasMore || searchBusy || importBusy) return;
+    // The frozen query, not the input box: typing a new term without
+    // submitting must not make "load more" fetch that term's second page and
+    // append it under the previous term's results.
+    void runSearch(executedQuery, nextPageStart(start, visibleIds.length));
   }
 
   function toggle(arxivId: string, checked: boolean) {
@@ -124,7 +161,10 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
 
   async function handleImport() {
     const urls = selectedImportUrls(catalog, selected);
-    if (urls.length === 0 || importBusy) return;
+    // The button is already disabled past the cap; this re-check is the
+    // defensive half, so a stray programmatic call cannot spend a round trip
+    // on a batch the plugin's own route will answer with a 400.
+    if (urls.length === 0 || urls.length > MAX_IMPORT_URLS || importBusy) return;
     setImportBusy(true);
     setImportError(null);
     try {
@@ -153,6 +193,7 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
     if (item !== undefined) visibleItems.push(item);
   }
   const noResults = searched && !searchBusy && !searchError && visibleItems.length === 0;
+  const overImportLimit = selected.size > MAX_IMPORT_URLS;
 
   return (
     <>
@@ -181,7 +222,11 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
             placeholder="检索关键词，例如 diffusion model"
             aria-label="arXiv 检索关键词"
           />
-          <button type="submit" className="button" disabled={searchBusy || query.trim().length === 0}>
+          <button
+            type="submit"
+            className="button"
+            disabled={searchBusy || importBusy || query.trim().length === 0}
+          >
             {searchBusy ? "检索中…" : "检索"}
           </button>
         </form>
@@ -213,16 +258,30 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
             {searchBusy ? "加载中…" : "加载更多"}
           </button>
         )}
-        <button type="button" className="button" disabled={importBusy || selected.size === 0} onClick={() => void handleImport()}>
+        <button
+          type="button"
+          className="button"
+          disabled={importBusy || selected.size === 0 || overImportLimit}
+          onClick={() => void handleImport()}
+        >
           {importBusy ? "导入中…" : `导入所选（${selected.size}）`}
         </button>
+        {overImportLimit && <p>一次最多导入 {MAX_IMPORT_URLS} 篇，请先取消部分勾选。</p>}
         {importError && <p role="alert">{importError}</p>}
+        {receipt && receipt.size === 0 && (
+          // A non-null but empty receipt means the request succeeded and
+          // accounted for nothing at all. Silently resetting would read as
+          // "done" — say so instead and point at where the truth is.
+          <p role="status">本次导入没有收到任何结果，请到来源列表确认。</p>
+        )}
         {receipt && receipt.size > 0 && (
           <ul>
             {[...receipt.entries()].map(([url, entry]) => (
               <li key={url}>
                 {entry.status === "created" && <span>已创建：{entry.title}</span>}
-                {entry.status === "reused" && <span>已复用：{entry.title}</span>}
+                {entry.status === "repeat" && (
+                  <span>本次已导入过，可能已产生重复来源：{entry.title}</span>
+                )}
                 {entry.status === "rejected" && <span>未导入（{entry.reason}）：{url}</span>}
               </li>
             ))}

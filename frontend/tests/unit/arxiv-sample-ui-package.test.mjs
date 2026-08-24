@@ -28,10 +28,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
+import { parseText } from "../../test-support/semantic-source.mjs";
 import { inspectPackage, validateManifest } from "../../scripts/sync-ui-plugins.mjs";
 import {
   FIRST_PAGE_START,
+  MAX_IMPORT_URLS,
   classifyImportReceipt,
   deselectPaper,
   foldImportedUrls,
@@ -57,13 +60,26 @@ const PACKAGE_DIR = path.join(
 // file's copy is caught by a plain string comparison; the cross-language
 // round trip through a running backend belongs to T4's
 // `test_ui_manifest_matches_the_backend_manifest`.
+//
+// ⚠ `permission` is **not** one of the mirrored backend values — the backend's
+// `UiContributionDeclaration` has only `id`/`slot`/`capability`, so this field
+// exists on the front-end manifest alone and T4's parity test will never see
+// it. It must stay `notebook:write`: in the `workspace.side_panel` outlet the
+// shell hard-codes `sourceRead: false` / `sourceWrite: false`
+// (`app/page.tsx`'s `workspaceExtensionPermissions`, because those two describe
+// a *selected source* and none is selected out here), so a contribution
+// declaring `source:write` is structurally unreachable — the entry button would
+// never render for anyone. `notebook:write` maps to `snapshot.notebookWrite` →
+// `capabilities.canWriteNotebook`, the browser mirror of the backend
+// `sources:write` capability the plugin's `/import` route needs. This assertion
+// is what stops a future edit from "tidying" it back.
 const EXPECTED_CONTRIBUTION = Object.freeze({
   id: "examples.arxiv_search.panel",
   plugin_id: "examples.arxiv_search",
   version: "0.1.0",
   capability: "examples.arxiv_search.available",
   slot: "workspace.side_panel",
-  permission: "source:write",
+  permission: "notebook:write",
   mode: "all",
   component: "ArxivSearchEntry",
 });
@@ -144,7 +160,16 @@ test("search-panel-model：作者串按顿号拼接，折叠空白项，空表�
 });
 
 
-test("search-panel-model：导入回执三态——created / reused / rejected", () => {
+test("search-panel-model：一次导入的条数上限与插件路由同值", () => {
+  // 服务端真源是 routes.py::MAX_IMPORT_URLS（超限 400）。这里刻意是**手抄**一份
+  // 而不是去读那个 .py：样板插件不带跨语言契约测试（与上面 EXPECTED_CONTRIBUTION
+  // 同一条口径，真正的跨语言对账属于 T4）。抄写方向是安全的——服务端调高而这里
+  // 没跟上只是更严，调低了前端照发、400 原样上屏。
+  assert.equal(MAX_IMPORT_URLS, 20);
+});
+
+
+test("search-panel-model：导入回执三态——created / repeat / rejected", () => {
   const catalog = mergeCatalog(new Map(), [
     { arxiv_id: "a", title: "Paper A", authors: [], published: "", summary: "", pdf_url: "https://arxiv.org/pdf/a", abs_url: "https://arxiv.org/abs/a" },
     { arxiv_id: "b", title: "Paper B", authors: [], published: "", summary: "", pdf_url: "https://arxiv.org/pdf/b", abs_url: "https://arxiv.org/abs/b" },
@@ -176,10 +201,152 @@ test("search-panel-model：导入回执三态——created / reused / rejected",
   // 折同一份回执两次是幂等的（第二次没有新增，返回同一个引用）。
   assert.equal(foldImportedUrls(remembered, firstReceipt), remembered);
 
-  // 第二次导入同一批 URL（服务端仍把 a 报成 created——内容去重复用旧行）：
-  // 本会话已经见过它，这次读出来是「已复用」。
+  // 第二次导入同一批 URL。服务端**没有**内容去重（add_url_sources 无条件
+  // insert_source + 完整解析），所以 a 又被报成 created，且库里此刻多半真的多了
+  // 一份重复来源。第三态因此是本会话记忆给出的**警告**（repeat），不是「服务端
+  // 复用了旧行」那种保证——后者根本不会发生。
   const secondReceipt = classifyImportReceipt(response, remembered);
-  assert.deepEqual(secondReceipt.get("https://arxiv.org/pdf/a"), { status: "reused", title: "Paper A" });
+  assert.deepEqual(secondReceipt.get("https://arxiv.org/pdf/a"), { status: "repeat", title: "Paper A" });
+});
+
+
+/**
+ * 从 `./search-panel-model[.ts]` import 进来的名字（`{ imported, local }`）。
+ *
+ * 两种后缀写法都收：仓库里插件包写的是带 `.ts` 的说明符，但「有没有写后缀」不是
+ * 这条守卫要管的事，钉死一种写法只会在无关的改写上假红。type-only import 也照收
+ * ——它们本来就不会出现在「被调用的函数」那一侧，收进来不影响 ⊇ 判定。
+ */
+function importedFromModel(sourceFile) {
+  const names = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+    ) {
+      continue;
+    }
+    const specifier = statement.moduleSpecifier.text.replace(/\.ts$/, "");
+    if (specifier !== "./search-panel-model") continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      names.push({
+        imported: element.propertyName?.text ?? element.name.text,
+        local: element.name.text,
+      });
+    }
+  }
+  return names;
+}
+
+
+/** `search-panel-model.ts` 导出的**函数**名（不含 type / 常量）。 */
+function exportedModelFunctions(sourceFile) {
+  const names = new Set();
+  for (const statement of sourceFile.statements) {
+    const exported = ts.getCombinedModifierFlags(statement) & ts.ModifierFlags.Export;
+    if (!exported) continue;
+    if (ts.isFunctionDeclaration(statement) && statement.name) {
+      names.add(statement.name.text);
+    }
+  }
+  return names;
+}
+
+
+/** 入口 .tsx 里本地声明的函数名（函数声明 + 箭头/函数表达式赋给的变量）。 */
+function locallyDeclaredFunctions(sourceFile) {
+  const names = new Set();
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      names.add(node.name.text);
+    }
+    if (
+      ts.isVariableDeclaration(node)
+      && node.name && ts.isIdentifier(node.name)
+      && node.initializer
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+    ) {
+      names.add(node.name.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return names;
+}
+
+
+/** 整个 .tsx 里出现的调用目标名（只收裸标识符调用）。 */
+function calledIdentifiers(sourceFile) {
+  const names = new Set();
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      names.add(node.expression.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return names;
+}
+
+
+test("样板入口真的在用 search-panel-model，而不是自己内联一份分叉", async () => {
+  // 这条钉的是 T3 评审登记的那个缺口：纯函数层有单测、组件层没有（完整组件级行为
+  // 测试要能 mount .tsx，而这个包刻意不进默认测试树，登记给 T4）。中间地带是——
+  // 至少证明**组件确实消费这个模块**。否则「把模型模块原样留着当摆设、在 .tsx 里
+  // 内联一份分叉实现」会让上面那些纯函数用例全绿，而用户看到的是另一份代码。
+  const modelSource = parseText(
+    await readFile(path.join(PACKAGE_DIR, "search-panel-model.ts"), "utf8"),
+    "search-panel-model.ts",
+  );
+  const entrySource = parseText(
+    await readFile(path.join(PACKAGE_DIR, "workspace-plugin.tsx"), "utf8"),
+    "workspace-plugin.tsx",
+  );
+
+  const modelFunctions = exportedModelFunctions(modelSource);
+  // 非空性下限：模型模块被清空 / 判据挑不出东西时，下面两条都会对空集恒真。
+  assert.ok(
+    modelFunctions.size >= 8,
+    `search-panel-model.ts 的导出函数只剩 ${modelFunctions.size} 个（判据失效？）`,
+  );
+
+  const importedNames = new Set(
+    importedFromModel(entrySource).map((row) => row.imported),
+  );
+  const usedModelFunctions = [...calledIdentifiers(entrySource)]
+    .filter((name) => modelFunctions.has(name));
+
+  // ① 用到的每个模型函数都必须是从模型模块 import 进来的。
+  for (const name of usedModelFunctions) {
+    assert.ok(
+      importedNames.has(name),
+      `workspace-plugin.tsx 调用了模型函数 ${name}，却不是从 ./search-panel-model.ts import 的`,
+    );
+  }
+
+  // ①' 反过来，模型导出的每个函数都必须真的被入口调用到。① 只挡「分叉还叫原来
+  //     的名字」，改个名字（内联 formatAuthorsLocal 并删掉 import）就绕过去了——
+  //     那时 used 只是少一个，光靠下限阈值看不出来。按**集合相等**判就没有缝：
+  //     任何一个模型函数被分叉替换掉，它立刻变成没人用的导出而报红。
+  //     代价是模型模块不得留只给测试用的导出函数；这是个三文件样板，那种死代码
+  //     本来也该删，所以这条同时是它的看门人。
+  assert.deepEqual(
+    usedModelFunctions.sort(),
+    [...modelFunctions].sort(),
+    "search-panel-model.ts 的导出函数与 workspace-plugin.tsx 实际调用的那批对不上"
+      + "（入口内联了一份分叉？还是模型里留了没人用的死导出？）",
+  );
+
+  // ② 入口不得本地声明一个与模型导出同名的函数——那正是「内联分叉」的形状，且
+  //    改个名字就能绕过 ① 的那种变异也被这条挡住。
+  for (const name of locallyDeclaredFunctions(entrySource)) {
+    assert.ok(
+      !modelFunctions.has(name),
+      `workspace-plugin.tsx 本地声明了 ${name}，与 search-panel-model.ts 的导出同名（内联分叉？）`,
+    );
+  }
 });
 
 
@@ -203,12 +370,23 @@ test("门禁接线：check_contracts.sh 给 check_ui_vocabulary.py 传了样板�
   const content = await readFile(
     path.join(REPO_DIR, "scripts", "check_contracts.sh"), "utf8",
   );
-  // 判据是 check_ui_vocabulary.py 那条调用**紧接着**一行 --extra-root（`\`
-  // 续行——脚本里那次调用本来就是两行），不是「这两个子串各自在文件某处出现过」：
-  // 光子串判据会被「调用没带参数，但别处的注释里恰好各提过一次这两个词」悄悄骗过。
+  // 判据是**那一次调用自己的参数里**含这个 --extra-root，不是「文件某处出现过这
+  // 两个子串」（注释里各提一次就能骗过），也不是原先那条把 `\` 续行连同缩进一起
+  // 钉死的正则——那等于把脚本的**排版**写进断言：把两行并成一行、或在中间插一个
+  // 别的参数，守卫就假红，而接线其实一个字都没变。
+  //
+  // 于是从脚本路径起，只允许跨过「同一条逻辑命令」的字符——普通非换行字符，或
+  // `\` 续行——直到读到那个 --extra-root。单行写法与续行写法都过，同一条命令里
+  // 重排参数也过，而调用被删掉或参数被摘掉就一定不匹配（非空性由此自带：这条正则
+  // 本身就要求那次调用存在）。裸换行不在允许集里，所以别处另一条命令的参数不会被
+  // 误算进来。
+  //
+  // ⚠ 刻意不先把文件 split 成行再挑：`static-source-policy` 禁止对源文本用
+  // split/slice/indexOf 这类按位置取材的方法（本次真红过一轮），整段正则才是这个
+  // 仓库里对 .sh 断言的合法形状。
   assert.match(
     content,
-    /"\$ROOT_DIR\/scripts\/check_ui_vocabulary\.py" \\\n\s*--extra-root "\$ROOT_DIR\/examples\/extensions\/arxiv-search\/src"/,
-    "scripts/check_contracts.sh 里 check_ui_vocabulary.py 没有紧跟着带样板插件 src 目录的 --extra-root",
+    /check_ui_vocabulary\.py"(?:\\\n|[^\n])*--extra-root\s+"\$ROOT_DIR\/examples\/extensions\/arxiv-search\/src"/,
+    "scripts/check_contracts.sh 调用 check_ui_vocabulary.py 时没带样板插件 src 目录的 --extra-root",
   );
 });
