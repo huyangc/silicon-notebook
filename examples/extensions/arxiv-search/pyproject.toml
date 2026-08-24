@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silicon-notebook-arxiv-search"
+version = "0.1.0"
+description = "Sample deployment extension for Silicon Notebook: arXiv literature search and gap consultation"
+requires-python = ">=3.13"
+
+# Deliberately nothing from this repository.  The extension SDK
+# (`app.extension_sdk`) is imported from the backend environment the plugin is
+# installed into — vendoring it would freeze a copy of the API surface that the
+# `api_version` check exists to keep honest.  FastAPI likewise comes from that
+# environment.  `pydantic` is listed because the settings model is a plain
+# `BaseModel` that a plugin author could import without the backend present.
+dependencies = ["pydantic>=2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
