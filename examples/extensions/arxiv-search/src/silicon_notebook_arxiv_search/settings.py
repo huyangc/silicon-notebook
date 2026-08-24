@@ -125,6 +125,18 @@ class ArxivSearchSettings(BaseModel):
             raise ValueError("user_agent must not be blank")
         if any(char in _CONTROL_CHARS for char in value):
             raise ValueError("user_agent must not contain control characters")
+        # http.client encodes header values as Latin-1 at request time; a
+        # value it cannot encode (Chinese text, emoji, …) would turn EVERY
+        # search into the fixed 502 instead of failing here at startup —
+        # the exact silent-runtime-shape this validator exists to prevent
+        # (codex #596 R5).
+        try:
+            value.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "user_agent must be Latin-1 encodable (HTTP header values"
+                " are sent as Latin-1)"
+            ) from exc
         return value
 
 

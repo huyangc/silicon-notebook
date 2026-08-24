@@ -154,6 +154,15 @@ def _collapse(value: str, limit: int) -> str:
     text.  At this layer's now-generous ``limit`` (see the module-level
     constants above) the cut is essentially never reached by a real arXiv
     record; it exists as a memory ceiling, not a product-facing truncation.
+
+    Deliberately NOT disclosed per-field on the wire (codex #596 R5,
+    rejected): these ceilings bound third-party feed metadata, not this
+    deployment's user-authored data — the "never silently truncate what a
+    user typed" rail governs write/render paths of user-owned content.  The
+    ceilings sit several times above every real arXiv shape, so carrying a
+    truncation flag for each field through the wire and the panel would be
+    pure complexity spent on a pathological feed; a mirror whose records
+    genuinely exceed them should raise the ceilings in its fork instead.
     :mod:`.consult` applies its own, tighter, cut on the way into a gap
     suggestion (see ``.consult::_suggestion``) and is free to make the same
     no-ellipsis choice there, for the same reason.
