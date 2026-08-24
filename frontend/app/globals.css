@@ -287,6 +287,9 @@ button {
 }
 
 .brand-title {
+  /* ⚠ 群组页把它渲染成 <h1>(那里它就是页面标题,页面内已没有别的标题)。浏览器给 h1 的
+     默认外边距是 0.67em,不清零会把顶栏顶出高度、把徽标和标题错开。 */
+  margin: 0;
   font-size: 16px;
   font-weight: 700;
   line-height: 1.1;
@@ -965,7 +968,11 @@ button {
   }
 }
 
-.notebook-home {
+/* 「返回主页」在笔记本工作区与群组页是**同一个控件**:两处都调 showCollection()、都回到
+   笔记本列表。所以它只有一份声明和一个名字 —— 群组页此前自己长了一条灰色文字链,同一个
+   动作在两个页面上长成两种东西。改类名要同时改两个调用点(page.tsx / groups-page.tsx),
+   守卫会替你发现漏改的那个。 */
+.back-home-button {
   flex: 0 0 auto;
   height: 40px;
   padding: 0 14px;
@@ -983,7 +990,7 @@ button {
   box-shadow: 0 8px 20px rgba(16, 24, 32, 0.18);
 }
 
-.notebook-home:hover {
+.back-home-button:hover {
   background: #1f2b38;
 }
 
@@ -10780,6 +10787,10 @@ select.group-input {
      auto 行默认 stretch，短内容页（成员/设置）的页头就会被凭空撑开几十像素。 */
   align-content: start;
   gap: 18px;
+  /* `.page` 给的是 44px 顶部留白,那是为「开头一个 28px 标题」留的呼吸;群组页的标题
+     已经在顶栏,首行只剩一条 42px 的工具行,44px 就成了一整条没有内容的空带——这正是
+     把标题移上去要消除的东西。收到 24px,与顶栏仍有清楚的分隔。 */
+  padding-top: 24px;
   padding-bottom: 56px;
 }
 
@@ -10800,39 +10811,20 @@ select.group-input {
 /* 页头与「笔记本列表」同一档：28px 标题 + 一句灰色说明 + 右侧黑色主按钮。
    原来这里是 clamp(28px,4vw,42px)，在宽屏上比兄弟页的标题大一圈，读起来像另一
    个产品的落地页。 */
+/* 页面标题「群组」现在由顶栏的 .brand-title 承担(它就在 SN 徽标旁边),页面里因此不再
+   有第二处标题——否则顶栏刚说完「群组」,下面 44px 空白之后再用 28px 说一遍。页头只剩
+   一条工具行:返回在左、主操作在右。 */
 .group-page-head {
-  display: grid;
-  align-content: start;
-  gap: 10px;
-}
-
-.group-page-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  justify-self: start;
-  border: 0;
-  padding: 2px 0;
-  color: var(--muted);
-  background: transparent;
-  font: inherit;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.group-page-back:hover { color: var(--ink); }
-
-.group-page-head-row {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
+  /* 两枚按钮都不缩(back 是 flex:0 0 auto,new-pill 是 flex:none),320px 上算下来仍装得下
+     (272px 可用 vs 227px 需要);wrap 只是兜住更极端的字号/文案变化,装得下时不改变任何东西。 */
+  flex-wrap: wrap;
   gap: 18px;
 }
 
-.group-page-head-copy { min-width: 0; }
-.group-page-head-copy h1 { margin: 0; font-size: 28px; font-weight: 650; }
-.group-page-head-copy p { margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
-.group-page-head-row > .new-pill { flex: none; display: inline-flex; align-items: center; gap: 7px; }
+.group-page-head > .new-pill { flex: none; display: inline-flex; align-items: center; gap: 7px; }
 
 .group-page-status {
   margin: 0;
@@ -11401,8 +11393,8 @@ select.group-input {
 
 @media (max-width: 640px) {
   .group-page { gap: 14px; }
-  .group-page-head-row { align-items: stretch; flex-direction: column; gap: 12px; }
-  .group-page-head-row > .new-pill { justify-content: center; }
+  .group-page-head { gap: 10px; }
+  .group-page-head > .new-pill { padding: 0 16px; font-size: 15px; }
   .group-page-create { padding: 16px; }
   .group-page-create-actions { grid-column: auto; }
   .group-page-shell { border-radius: 14px; }

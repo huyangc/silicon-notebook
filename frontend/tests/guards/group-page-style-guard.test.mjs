@@ -23,8 +23,18 @@
 //   - `main.group-page` 会被 `.app` 的 1fr 行拉满视口高度;网格 auto 行默认 stretch,
 //     短内容的页签(成员/设置)页头会被凭空撑开几十像素。
 //
-// 覆盖边界(如实说明):本文件只覆盖 groups-page.tsx 的 class 名存在性与上面两条
-// 版式声明,不检查具体间距/配色数值(那属于设计取舍,不是不变量),也不声称覆盖
+// 第四条盯的是**同一个动作长成两种样子**:「返回」在笔记本工作区是黑色药丸
+// (`.back-home-button`),在群组页曾是一条灰色文字链(`.group-page-back`),而两处
+// 点下去调的都是 `showCollection()`、都回到笔记本列表。样式因此只有一份声明和一个
+// 名字,两个调用点共用;任一处改回自己的类名,或 CSS 里重新长出一份并列的返回样式,
+// 都在这里报红。
+//
+// 第五条盯标题层级:页面标题「群组」已移进顶栏的 `.brand-title`(SN 徽标旁边),所以
+// 群组页自己不再有 `<h1>`。这不是可选的整洁,而是「顶栏那一格现在是页面标题」这条
+// 设计的另一半 —— 两处都写就是同一句话说两遍,两处都不写则整页没有标题层级。
+//
+// 覆盖边界(如实说明):本文件只覆盖 groups-page.tsx 的 class 名存在性与上面这几条
+// 版式/结构声明,不检查具体间距/配色数值(那属于设计取舍,不是不变量),也不声称覆盖
 // 群组特性的其它渲染面。
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -38,8 +48,11 @@ import { parseText } from "../../test-support/semantic-source.mjs";
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../app");
 const VIEW = "groups-page.tsx";
+const SHELL = "page.tsx";
 
 const view = parseText(await readFile(path.join(APP_DIR, VIEW), "utf8"), VIEW);
+// 返回控件的另一个调用点在工作区顶栏里,共用同一份样式,所以这条守卫必须同时看两个文件。
+const shell = parseText(await readFile(path.join(APP_DIR, SHELL), "utf8"), SHELL);
 // 样式表没有可消费的 AST,jsdom 也不做级联,文本是唯一诚实的输入(与
 // group-layout-guard 同一条登记)。注释先剥掉,免得注释里写过的类名冒充规则。
 const CSS = (await readFile(path.join(APP_DIR, "globals.css"), "utf8"))
@@ -152,5 +165,53 @@ test(".group-page 的行不跟着视口拉伸", () => {
     ruleBody(".group-page"),
     /align-content:\s*start/,
     "main 会被 .app 的 1fr 行拉满视口高度,auto 行默认 stretch 会把短页签的页头凭空撑开",
+  );
+});
+
+
+/** 找出所有 <button>(或任意标签)上写死的 className 字面量。 */
+function buttonClassNames(sourceFile) {
+  const found = [];
+  function visit(node) {
+    if (ts.isJsxAttribute(node)
+      && node.name.getText(sourceFile) === "className"
+      && node.initializer
+      && ts.isStringLiteral(node.initializer)) {
+      found.push(node.initializer.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return found;
+}
+
+test("「返回主页」在两个页面上是同一个控件,不是两份长得不一样的样式", () => {
+  // 两处点下去都是 showCollection() → 笔记本列表。同一个动作只该有一份样式。
+  for (const [label, sourceFile] of [["群组页", view], ["工作区顶栏", shell]]) {
+    assert.ok(
+      buttonClassNames(sourceFile).includes("back-home-button"),
+      `${label}没有使用共享的 .back-home-button —— 同一个返回动作又长出了第二种样子`,
+    );
+  }
+  assert.match(ruleBody(".back-home-button"), /border-radius:\s*999px/, "共享控件仍是那枚药丸");
+  // 旧的灰色文字链必须真的消失,而不是留在样式表里等人再挂回去。
+  assert.equal(
+    /\.group-page-back(?![\w-])/.test(CSS),
+    false,
+    "globals.css 里仍有 .group-page-back —— 并列的第二份返回样式就是这次要消除的东西",
+  );
+});
+
+test("页面标题只出现一次:在顶栏,不在页面里", () => {
+  assert.equal(
+    view.text.includes("<h1"),
+    false,
+    "groups-page.tsx 里又出现了 <h1> —— 标题已移进顶栏的 .brand-title,两处都写就是说两遍",
+  );
+  // 反过来:顶栏那一格必须真的是 h1,否则整页没有标题层级(只是一个看起来像标题的 div)。
+  assert.match(
+    shell.text,
+    /<h1 className="brand-title">/,
+    "顶栏的群组标题不是 <h1> —— 页面里已经没有别的标题了,标题层级会整个消失",
   );
 });

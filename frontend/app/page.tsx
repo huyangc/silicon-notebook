@@ -4852,8 +4852,15 @@ export default function Home() {
         <div className="brand">
           <button className="brand-mark" onClick={showCollection} title="笔记本列表">SN</button>
           <div>
-            <div className="brand-title">silicon-notebook</div>
-            <div className="brand-subtitle">{isWorkspace ? "笔记本工作区" : outerView === "memory" ? "私有记忆" : outerView === "groups" ? "群组工作台" : "笔记本列表"}</div>
+            {/* 群组页把这一格当作页面标题:它是独立的集合层页面,标题「群组」原本以 28px
+                躺在顶栏下方 44px 空白之后,而顶栏同时还在说「群组工作台」——同一句话说了
+                两遍、中间隔着一大块空白。移上来之后页面里就没有别的标题了,所以这里必须
+                真的渲染成 <h1>(而不是看起来像标题的 div),否则整页没有标题层级。
+                字号不变,仍是 .brand-title 的 16px。 */}
+            {outerView === "groups" && !isWorkspace
+              ? <h1 className="brand-title">群组</h1>
+              : <div className="brand-title">silicon-notebook</div>}
+            <div className="brand-subtitle">{isWorkspace ? "笔记本工作区" : outerView === "memory" ? "私有记忆" : outerView === "groups" ? "成员、共享与审批" : "笔记本列表"}</div>
           </div>
         </div>
         <div className="topbar-right">
@@ -5059,7 +5066,7 @@ export default function Home() {
         <main className="notebook-view">
           <section className="workspace-header">
             <div className="workspace-title">
-              <button className="notebook-home" onClick={() => showCollection()}>
+              <button className="back-home-button" onClick={() => showCollection()}>
                 <ArrowLeft size={16} />
                 <span>返回主页</span>
               </button>
