@@ -127,3 +127,29 @@ test("page.tsx 传给 importGapSuggestionDisabledReason 的值读的是 docCapac
     "importGapSuggestionDisabledReason 恒为 undefined，等于没传",
   );
 });
+
+// 页级导入单飞（codex #584 R6）：后端的容量检查与插入不在一个原子里，同页并发
+// 两次导入能在只剩一个名额时各自快照到 capacity=1、双双入库越过上限。串行化关不
+// 掉跨标签页/跨用户的同一竞态（既有的全端点性质，另行登记），但必须关掉本面板让
+// 并发变得容易的那扇门。两半各钉一条：传值表达式读 in-flight 状态（其余按钮置灰
+// 有原因可看），importGapSuggestion 函数体自带 ref 判据的拒绝分支（state 更新是
+// 异步的，双击同一帧读到旧 state——ref 才是权威）。
+test("站外建议导入是页级单飞：传值读 in-flight 状态，函数体有 ref 拒绝分支", async () => {
+  const page = await parseModule("page.tsx");
+  const [callSite] = jsxElements(page, "AnswerView");
+  const bound = String(callSite.bindings?.importGapSuggestionDisabledReason ?? "");
+  assert.ok(
+    bound.includes("gapImportInFlight"),
+    `importGapSuggestionDisabledReason 的传值没有读 gapImportInFlight——实际：${bound}`,
+  );
+  const fn = findFunction(page, "importGapSuggestion");
+  assert.ok(fn, "page.tsx 里找不到 importGapSuggestion");
+  const body = fn.getText();
+  // 判据是「拒绝分支」而不是裸子串——finally 里的 `gapImportInFlightRef.current
+  // = false` 也含同一子串，只查子串会让删掉拒绝分支的变异照样绿。
+  assert.match(
+    body,
+    /if\s*\(\s*gapImportInFlightRef\.current\s*\)/,
+    "importGapSuggestion 没有按 ref 判据拒绝并发进入——双击可绕过单飞",
+  );
+});
