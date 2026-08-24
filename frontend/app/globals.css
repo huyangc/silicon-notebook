@@ -10647,19 +10647,26 @@ select.group-input {
    继续使用 collection 页的留白、ink/line/muted 变量与既有按钮，不另造一套后台
    模板皮肤。左侧是群组目录，右侧是一个群组的稳定工作区；窄屏时自然折成单列。 */
 .group-page {
-  /* 与「笔记本列表」同一条测量线（.collection-title / .notebook-grid 也是 1200）。
-     ⚠ 这里必须同时写 width:100%：main 是 .app 网格的子项，只给 max-width + auto
-     外边距会让它退回 fit-content（auto 外边距会关掉网格子项的 stretch），在宽屏上
-     缩成一条窄柱。 */
-  width: 100%;
-  max-width: 1200px;
-  margin: 0 auto;
   display: grid;
   /* ⚠ 必须写 align-content:start：main 会被 .app 的 1fr 行拉满视口高度，网格的
      auto 行默认 stretch，短内容页（成员/设置）的页头就会被凭空撑开几十像素。 */
   align-content: start;
   gap: 18px;
   padding-bottom: 56px;
+}
+
+/* 与「笔记本列表」同一条测量线：`.collection-title` / `.notebook-grid` 把 1200px
+   量在**不带内边距**的块上，`.page` 的 24px 左右留白留在它们外面。
+
+   ⚠ 所以这一条**不能**写在 `.group-page` 自己身上：全局 `* { box-sizing: border-box }`
+   会把那 48px 留白吃进 1200 里，内容只剩 1152，在 ≥1248px 的视口上比兄弟页每边窄
+   24px —— 看起来不像对齐，像缩了一档（codex #589 R1 P2）。
+   ⚠ 也必须显式写 width:100%：auto 外边距会关掉网格子项的 stretch，只给 max-width
+   会让子项退回 fit-content，在宽屏上缩成一条窄柱。 */
+.group-page > * {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
 }
 
 /* 页头与「笔记本列表」同一档：28px 标题 + 一句灰色说明 + 右侧黑色主按钮。
