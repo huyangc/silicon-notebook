@@ -6,6 +6,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
+from app.domain.cancellation import AskCancelled
 from app.services.kg.run_control import (
     MODEL_RESPONSE_INVALID_MESSAGE,
     MODEL_UNAVAILABLE_MESSAGE,
@@ -94,6 +95,24 @@ class _BlockingFailureClient:
         raise _connection_error()
 
 
+class _CancellationAwareClient:
+    configured = True
+    model = "test-model"
+
+    def __init__(self, entered):
+        self.entered = entered
+        self.cancel_event = None
+
+    def chat_json(
+        self, messages, response_schema_hint, *, cancel_event=None, **kwargs
+    ):
+        self.cancel_event = cancel_event
+        self.entered.set()
+        assert cancel_event is not None
+        assert cancel_event.wait(1)
+        raise AskCancelled()
+
+
 def test_transient_exhaustion_opens_only_its_run(monkeypatch):
     monkeypatch.setattr(
         "app.services.kg.run_control.random.uniform",
@@ -158,20 +177,19 @@ def test_other_http_rejection_is_immediate():
     assert delegate.calls == 1
 
 
-def test_malformed_response_is_an_actionable_model_failure():
+def test_malformed_response_outside_probe_remains_locally_isolated():
     control = KgExtractionRunControl("job-a")
     delegate = _SequenceClient([
         ModelProviderError("empty content", code="malformed_response")
     ])
     client = TaskScopedKgClient(delegate, _settings(retries=3), control)
 
-    with pytest.raises(KgBuildAborted) as raised:
+    with pytest.raises(ModelProviderError) as raised:
         client.chat_json([{"role": "user", "content": "x"}], "{}")
 
-    assert raised.value.failure.code == "model_response_invalid"
-    assert raised.value.failure.user_message == MODEL_RESPONSE_INVALID_MESSAGE
+    assert raised.value.code == "malformed_response"
     assert delegate.calls == 1
-    assert control.aborted is True
+    assert control.aborted is False
 
 
 @pytest.mark.parametrize(
@@ -217,6 +235,28 @@ def test_abort_wakes_retry_backoff(monkeypatch):
         with pytest.raises(KgBuildAborted):
             future.result(timeout=1)
     assert delegate.calls == 1
+
+
+def test_abort_interrupts_stream_and_preserves_kg_failure():
+    control = KgExtractionRunControl("job-a")
+    entered = threading.Event()
+    delegate = _CancellationAwareClient(entered)
+    client = TaskScopedKgClient(delegate, _settings(retries=3), control)
+    expected = KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            client.chat_json,
+            [{"role": "user", "content": "x"}],
+            "{}",
+        )
+        assert entered.wait(1)
+        assert delegate.cancel_event is control.cancel_event
+        control.abort(expected)
+        with pytest.raises(KgBuildAborted) as raised:
+            future.result(timeout=1)
+
+    assert raised.value.failure is expected
 
 
 def test_first_abort_failure_wins():
@@ -323,16 +363,32 @@ def test_probe_reuses_configured_short_output_budget_and_bypasses_cache():
     settings = _settings(retries=2)
     client = TaskScopedKgClient(delegate, settings, control)
     probe_kg_model(client)
-    assert delegate.kwargs == [
-        {
-            "bypass_cache": True,
-            "timeout": 60,
-            "max_retries": 0,
-        }
-    ]
+    assert len(delegate.kwargs) == 1
+    assert delegate.kwargs[0] == {
+        "bypass_cache": True,
+        "timeout": 60,
+        "max_retries": 0,
+        "cancel_event": control.cancel_event,
+    }
     assert client.configured is True
     assert client.model == "test-model"
     assert client.settings is settings
+
+
+def test_probe_classifies_malformed_response_without_widening_client_policy():
+    control = KgExtractionRunControl("job-a")
+    delegate = _SequenceClient([
+        ModelProviderError("empty content", code="malformed_response")
+    ])
+    client = TaskScopedKgClient(delegate, _settings(retries=3), control)
+
+    with pytest.raises(KgBuildAborted) as raised:
+        probe_kg_model(client)
+
+    assert raised.value.failure.code == "model_response_invalid"
+    assert raised.value.failure.user_message == MODEL_RESPONSE_INVALID_MESSAGE
+    assert delegate.calls == 1
+    assert control.aborted is True
 
 
 def test_kg_ingest_resolves_extract_refine_and_glean_before_window_submit(

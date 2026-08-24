@@ -86,6 +86,17 @@ class KgExtractionRunControl:
         return self._parent is not None and self._parent.aborted
 
     @property
+    def cancel_event(self) -> threading.Event:
+        """Expose the task signal to cancellation-aware model transports.
+
+        The shared OpenAI-compatible client uses a non-null cancellation signal
+        to select its streaming JSON path.  The signal stays owned by this run
+        control; callers may observe it but must open the circuit through
+        :meth:`abort` so the classified failure is published first.
+        """
+        return self._event
+
+    @property
     def failure(self) -> KgBuildFailure | None:
         with self._lock:
             if self._failure is not None:
@@ -159,10 +170,6 @@ def _failure_for(exc: Exception) -> KgBuildFailure | None:
         return KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
     if code == "provider_auth":
         return KgBuildFailure("model_auth_failed", MODEL_AUTH_FAILED_MESSAGE)
-    if code == "malformed_response":
-        return KgBuildFailure(
-            "model_response_invalid", MODEL_RESPONSE_INVALID_MESSAGE
-        )
     if code in {
         "unknown_model",
         "model_not_found",
@@ -222,6 +229,10 @@ class TaskScopedKgClient:
             **kwargs,
             "timeout": self._settings.kg_llm_timeout_seconds,
             "max_retries": 0,
+            # A non-null cancellation signal selects the shared client's
+            # streaming transport. Long KG replies then remain alive while
+            # chunks arrive and an opened circuit can stop sibling streams.
+            "cancel_event": self.control.cancel_event,
         }
         method = getattr(self._delegate, "chat_json", None)
         if not callable(method):
@@ -254,6 +265,12 @@ class TaskScopedKgClient:
             except KgBuildAborted:
                 raise
             except Exception as exc:
+                # A sibling may have opened the circuit while this request was
+                # consuming its stream. The transport reports cancellation;
+                # preserve the KG failure that caused it rather than leaking a
+                # generic AskCancelled from the shared client.
+                if self.control.aborted:
+                    self.control.raise_if_aborted()
                 failure = _failure_for(exc)
                 if failure is None:
                     raise
@@ -299,12 +316,26 @@ def probe_kg_model(client: TaskScopedKgClient) -> None:
         # when no extraction target existed. Production model clients always
         # implement chat_json and are still probed before any destructive work.
         return
-    client.chat_json(
-        [{"role": "user", "content": 'Return {"ok":true} and nothing else.'}],
-        '{"ok":true}',
-        # Do not impose a second, tiny completion budget here. Reasoning-capable
-        # providers may spend that entire budget before emitting visible JSON,
-        # yielding an HTTP-200 response with empty ``content``. Omitting the
-        # override reuses chat_json's single configured short-output budget.
-        bypass_cache=True,
-    )
+    try:
+        client.chat_json(
+            [{"role": "user", "content": 'Return {"ok":true} and nothing else.'}],
+            '{"ok":true}',
+            # Do not impose a second, tiny completion budget here. Reasoning-capable
+            # providers may spend that entire budget before emitting visible JSON,
+            # yielding an HTTP-200 response with empty ``content``. Omitting the
+            # override reuses chat_json's single configured short-output budget.
+            bypass_cache=True,
+        )
+    except Exception as exc:
+        # This classification is probe-only. Extraction windows intentionally
+        # isolate malformed JSON as a failed window, while optional refine/glean
+        # stages degrade best-effort; converting it in _failure_for() would turn
+        # all three into a notebook-wide circuit break.
+        if str(getattr(exc, "code", "") or "") != "malformed_response":
+            raise
+        failure = client.control.abort(
+            KgBuildFailure(
+                "model_response_invalid", MODEL_RESPONSE_INVALID_MESSAGE
+            )
+        )
+        raise KgBuildAborted(failure) from exc
