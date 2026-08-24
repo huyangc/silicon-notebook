@@ -53,6 +53,7 @@ from app.domain.gap_consult import (
     GAP_CONSULT_QUESTION_MAX_CHARS,
     GapConsultCallContext,
     GapConsultQuery,
+    GapSuggestion,
     gap_consult_host_is_dormant,
 )
 from app.models.ask import (
@@ -350,22 +351,58 @@ def _egress_phrase(value: object, limit: int) -> str:
 def _egress_question(prepared: object) -> str:
     """The single question string a gap-consult plugin gets to see.
 
-    Prefers the reviewed wording over the raw input — that is what this run
-    actually searched for — and falls back to the raw question when no intent
-    was confirmed.  Bounded by ``GAP_CONSULT_QUESTION_MAX_CHARS``, which is a
-    privacy rail rather than a budget: it is the ceiling on how much of the
-    user's own text leaves the deployment per consultation.
+    Exactly two candidates, in order, and both of them are the user's OWN
+    words: the reviewed wording (what this run actually searched for), then the
+    raw question when no intent was confirmed.  ``research_question`` is
+    deliberately not among them — it is the intent contract's composite string
+    (objective plus mandatory topics plus constraints plus assumptions), the
+    same shape ``_uncovered_directions_from_trace`` refuses to send outward.
+
+    Bounded by ``GAP_CONSULT_QUESTION_MAX_CHARS``, which is a privacy rail
+    rather than a budget: it is the ceiling on how much of the user's own text
+    leaves the deployment per consultation.
     """
     projection = getattr(prepared, "intent_projection", None)
     for candidate in (
         getattr(projection, "resolved_question", ""),
-        getattr(prepared, "research_question", ""),
         getattr(prepared, "question", ""),
     ):
         phrase = _egress_phrase(candidate, GAP_CONSULT_QUESTION_MAX_CHARS)
         if phrase:
             return phrase
     return ""
+
+
+def _admitted_gap_suggestions(raw: object) -> tuple[AskGapSuggestion, ...]:
+    """Whole-batch admission on whatever the gap-consult host answered.
+
+    The frozen host sanitizes each contributor's output, so a well-behaved one
+    can only ever answer a tuple of :class:`GapSuggestion`.  This is the check
+    on the host itself — the seat is public (``gap_consult_host=`` all the way
+    down the injection chain), so "the host is well behaved" is an assumption
+    about an injected object, not a property of this module.
+
+    Admission is all-or-nothing on purpose.  A batch with one wrong item is a
+    host answering a shape it was never asked for, and there is nothing to
+    learn from the items that happened to typecheck; keeping them would mean
+    passing a partially-understood payload to the disclosure the reader sees.
+    Rejection is silent by design: the batch is worth strictly less than the
+    answer it accompanies, and ``count: 0`` on the trace step already says
+    nothing came back.
+    """
+    if not isinstance(raw, tuple):
+        return ()
+    if any(type(item) is not GapSuggestion for item in raw):
+        return ()
+    return tuple(
+        AskGapSuggestion(
+            title=item.title,
+            url=item.url,
+            summary=item.summary,
+            source_label=item.source_label,
+        )
+        for item in raw
+    )
 
 
 def _uncovered_directions_from_trace(trace: object) -> tuple[str, ...]:
@@ -382,27 +419,38 @@ def _uncovered_directions_from_trace(trace: object) -> tuple[str, ...]:
     composite must not leave the deployment.  Labels are already bounded
     upstream; this re-bounds them anyway, because an egress rail that depends
     on its producer's rail is one refactor away from not being a rail.
+
+    The scan runs BACKWARDS and stops at the first hit, so the LAST such step
+    wins.  "Terminal" is the whole semantics of this read: a trace carrying
+    more than one of these steps is one where a later, more accurate account of
+    what stayed uncovered supersedes an earlier one, and taking the earliest
+    (or the union) would ask a third party about directions the run went on to
+    execute after all.
     """
     from app.services.reasoning_retrieval import (
         INTENT_COVERAGE_INCOMPLETE_REASON,
     )
 
-    gaps: list[str] = []
-    seen: set[str] = set()
-    for step in tuple(trace or ()):
+    terminal = None
+    for step in reversed(tuple(trace or ())):
         if getattr(step, "step_type", "") != "skip":
             continue
         detail = getattr(step, "detail", None)
         if not isinstance(detail, dict):
             continue
-        if detail.get("reason") != INTENT_COVERAGE_INCOMPLETE_REASON:
-            continue
-        directions = detail.get("directions")
-        for item in directions if isinstance(directions, (list, tuple)) else ():
-            phrase = _egress_phrase(item, GAP_CONSULT_PHRASE_MAX_CHARS)
-            if phrase and phrase not in seen:
-                seen.add(phrase)
-                gaps.append(phrase)
+        if detail.get("reason") == INTENT_COVERAGE_INCOMPLETE_REASON:
+            terminal = detail
+            break
+    if terminal is None:
+        return ()
+    gaps: list[str] = []
+    seen: set[str] = set()
+    directions = terminal.get("directions")
+    for item in directions if isinstance(directions, (list, tuple)) else ():
+        phrase = _egress_phrase(item, GAP_CONSULT_PHRASE_MAX_CHARS)
+        if phrase and phrase not in seen:
+            seen.add(phrase)
+            gaps.append(phrase)
     return tuple(gaps[:GAP_CONSULT_MAX_GAP_PHRASES])
 
 
@@ -2665,9 +2713,10 @@ class AskService:
 
         Every failure is fail-open and silent to the reader: no host, a
         dormant point, a malformed trace, a raising plugin, an exhausted
-        budget — all of them return ``()`` and leave the answer exactly as it
-        would otherwise have been.  Cancellation is the sole exception: it is
-        the caller's own signal and must keep propagating.
+        budget, a host answering a shape the port never promised — all of them
+        return ``()`` and leave the answer exactly as it would otherwise have
+        been.  Cancellation is the sole exception: it is the caller's own
+        signal and must keep propagating.
         """
         host = getattr(self, "gap_consult_host", None)
         if host is None or gap_consult_host_is_dormant(host):
@@ -2684,16 +2733,24 @@ class AskService:
             return ()
         started = time.monotonic()
         try:
-            raw = host.consult(
-                GapConsultCallContext(
-                    GapConsultQuery(
-                        question, gaps, GAP_CONSULT_MAX_SUGGESTIONS
+            # The guard spans the CONVERSION too, not just the call.  Building
+            # an ``AskGapSuggestion`` runs pydantic validation against the wire
+            # rails, so a host answering an over-long title raises here rather
+            # than inside ``consult`` — leaving that outside the guard would
+            # let a misbehaving host take down the whole Ask on the last step
+            # before the answer is drafted.
+            suggestions = _admitted_gap_suggestions(
+                host.consult(
+                    GapConsultCallContext(
+                        GapConsultQuery(
+                            question, gaps, GAP_CONSULT_MAX_SUGGESTIONS
+                        ),
+                        cancellation,
+                        self.retrieval_connection_probe,
+                        started + self.settings.ask_gap_consult_timeout_seconds,
                     ),
-                    cancellation,
-                    self.retrieval_connection_probe,
-                    started + self.settings.ask_gap_consult_timeout_seconds,
-                ),
-                event_sink=self.event_log.emit,
+                    event_sink=self.event_log.emit,
+                )
             )
         except AskCancelled:
             raise
@@ -2701,23 +2758,18 @@ class AskService:
             # Defence in depth: the host already fails open per contributor,
             # so reaching here means the host itself misbehaved.  A gap
             # suggestion is worth strictly less than the answer it accompanies.
-            raw = ()
-        suggestions = tuple(
-            AskGapSuggestion(
-                title=item.title,
-                url=item.url,
-                summary=item.summary,
-                source_label=item.source_label,
-            )
-            for item in raw
-        )
+            suggestions = ()
         step = TraceStep(
             step_type="gap_consult",
             summary=(
+                # Neither wording attributes a CAUSE.  The thin-evidence
+                # branch fires just as well when retrieval itself degraded
+                # fail-open, and telling the reader their notebook came up
+                # short would be this step inventing a diagnosis it never made.
                 f"已向站外来源询问 {len(gaps)} 个缺口，"
                 f"得到 {len(suggestions)} 条建议（不参与本次回答）"
                 if gaps
-                else f"库内证据偏少，已向站外来源询问，"
+                else f"已向站外来源询问相关资料，"
                      f"得到 {len(suggestions)} 条建议（不参与本次回答）"
             ),
             detail={

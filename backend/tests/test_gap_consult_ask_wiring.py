@@ -30,6 +30,7 @@ import json
 import re
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -383,11 +384,22 @@ def test_no_trigger_when_covered_and_above_floor(make_repo):
 # what leaves the deployment
 # --------------------------------------------------------------------------
 class _PreparedStub:
-    """The three fields ``_egress_question`` reads, and nothing else."""
+    """The two fields ``_egress_question`` reads, plus the one it must not.
 
-    def __init__(self, question: str = QUESTION, resolved: str = "") -> None:
+    ``research_question`` is present precisely because it is NOT a candidate:
+    it is the intent contract's composite (objective + topics + constraints +
+    assumptions), so a case that never carries it could not tell the difference
+    between "skipped" and "absent".
+    """
+
+    def __init__(
+        self,
+        question: str = QUESTION,
+        resolved: str = "",
+        research: str = "",
+    ) -> None:
         self.question = question
-        self.research_question = ""
+        self.research_question = research
         self.intent_projection = type(
             "_Projection", (), {"resolved_question": resolved}
         )()
@@ -461,6 +473,58 @@ def test_egress_strings_are_bounded_and_marker_free(make_repo):
     assert len(gaps) == GAP_CONSULT_MAX_GAP_PHRASES
     assert all(len(phrase) <= GAP_CONSULT_PHRASE_MAX_CHARS for phrase in gaps)
     assert all("k2" not in phrase for phrase in gaps)
+
+
+def test_egress_question_is_two_steps_and_skips_the_composite():
+    """Both candidates are the user's OWN words; the composite is not one.
+
+    ``research_question`` is the intent contract concatenated into a single
+    string — the same shape ``_uncovered_directions_from_trace`` refuses to
+    send outward — so it must not be reachable from either step, including the
+    step that runs when the reviewed wording is empty.
+    """
+    from app.services.ask_service import _egress_question
+
+    composite = "目标：X 必答主题：A;B 约束：C 假设：D"
+    assert _egress_question(_PreparedStub(
+        question="原始问题", resolved="审阅后问题", research=composite,
+    )) == "审阅后问题"
+
+    # A reviewed wording that is nothing but markers strips to empty, and the
+    # fallback is the RAW question — never the composite standing between them.
+    fell_back = _egress_question(_PreparedStub(
+        question="原始问题", resolved="[k1]【k2】", research=composite,
+    ))
+    assert fell_back == "原始问题"
+    assert composite not in fell_back
+
+
+def test_only_the_terminal_disclosure_step_decides_the_gaps():
+    """A later disclosure supersedes an earlier one; it is not unioned in.
+
+    ``run()`` recomputes what stayed uncovered at the END of its reflect loop.
+    Reading the earliest matching step would hand a third party the directions
+    the run went on to execute after that earlier account was written.
+    """
+    from app.models.ask import TraceStep
+    from app.services.ask_service import _uncovered_directions_from_trace
+
+    def _step(*directions: str) -> TraceStep:
+        return TraceStep(
+            step_type="skip",
+            summary="x",
+            detail={
+                "reason": "intent_coverage_incomplete",
+                "directions": list(directions),
+            },
+        )
+
+    gaps = _uncovered_directions_from_trace([
+        _step("早期方向一", "早期方向二"),
+        TraceStep(step_type="retrieve", summary="y", detail={}),
+        _step("终态方向"),
+    ])
+    assert gaps == ("终态方向",)
 
 
 def test_terminal_disclosure_reason_is_the_shared_constant(make_repo):
@@ -584,6 +648,107 @@ def test_a_misbehaving_host_still_leaves_the_answer_verbatim(make_repo):
 
     repo = make_repo(host=BrokenHost())
     _assert_answer_survived(_ask(repo, _seed(repo)), baseline)
+
+
+@pytest.mark.parametrize(
+    "answer, label",
+    [
+        ([{"url": "https://example.org/nope"}], "dict 列表"),
+        (None, "None"),
+        (
+            (GapSuggestion("题" * 500, "https://example.org/long.pdf"),),
+            "超长 title",
+        ),
+        (
+            (SimpleNamespace(
+                title="鸭子类型", url="https://example.org/duck.pdf",
+                summary="", source_label="",
+            ),),
+            "鸭子类型条目",
+        ),
+    ],
+)
+def test_a_host_answering_the_wrong_shape_is_dropped_as_a_batch(
+    make_repo, answer, label
+):
+    """The seat is public, so "the host is well behaved" is an assumption.
+
+    ``gap_consult_host=`` is threaded through five files and accepts whatever
+    it is given; the frozen host sanitizes its contributors, but nothing
+    sanitizes the host.  All four shapes here are ones a plausible injected
+    implementation produces, and they split across the two halves of the rail:
+    the list of dicts, the ``None`` and the well-typed item whose title is past
+    the wire rail all raise (the last one inside pydantic during CONVERSION,
+    not inside ``consult`` — which is why the guard has to span the conversion
+    too), while the duck-typed item raises nothing at all and is refused only
+    because whole-batch admission compares its TYPE.  Each must cost the batch
+    and nothing else: the answer stays verbatim and the step is still recorded,
+    because the run really did consult and the reader is owed that fact.
+    """
+    baseline = _answer_without_plugin(make_repo)
+
+    class _WrongShape:
+        def has_contributions(self):
+            return True
+
+        def consult(self, _call_context, **_kwargs):
+            return answer
+
+    repo = make_repo(host=_WrongShape())
+    response = _ask(repo, _seed(repo))
+
+    _assert_answer_survived(response, baseline)
+    step = _gap_step(response)
+    assert step is not None, f"{label}: 外扩确实发生过,步不能消失"
+    assert step.detail["count"] == 0
+
+
+def test_a_degraded_retrieval_still_consults_and_keeps_its_answer(
+    make_repo, monkeypatch
+):
+    """Retrieval failing open is a REGISTERED trigger path (plan risk R4).
+
+    ``_run_reasoning_stage`` catches a blown-up retrieval stage and continues
+    with empty evidence, which lands under every tier's floor — so the thin
+    branch fires on a run whose notebook may be perfectly well stocked.  That
+    is deliberate (the run genuinely has nothing to answer from), and it is
+    why the step's wording must not blame the corpus.  Pin all three halves:
+    the consultation happens exactly once, the degraded answer is untouched,
+    and the step is there.
+    """
+    from app.application import ask_reasoning
+
+    def _blow_up(*_args, **_kwargs):
+        raise RuntimeError("retrieval is down")
+
+    monkeypatch.setattr(
+        ask_reasoning, "execute_reasoning_retrieval_stage", _blow_up
+    )
+
+    bare = make_repo(host=None)
+    degraded = json.loads(
+        _ask(bare, _seed(bare)).model_dump_json(
+            exclude={"answer_id", "conversation_id"}
+        )
+    )
+
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin))
+    response = _ask(repo, _seed(repo))
+
+    assert len(plugin.contexts) == 1, "降级路径必须恰好外扩一次"
+    payload = json.loads(
+        response.model_dump_json(exclude={"answer_id", "conversation_id"})
+    )
+    assert payload["conclusion"] == degraded["conclusion"]
+    assert payload["answer"] == degraded["answer"]
+    assert payload["evidence_level"] == degraded["evidence_level"]
+    assert [item.url for item in response.gap_suggestions] == [SUGGESTION.url]
+
+    step = _gap_step(response)
+    assert step is not None and step.detail["reason"] == "thin_evidence"
+    # The corpus is not what failed here, so the reader must not be told it is.
+    assert "库内证据偏少" not in step.summary
 
 
 def test_cancellation_during_consult_propagates(make_repo):
@@ -812,6 +977,35 @@ def test_the_production_injection_chain_reaches_the_ask_service(make_repo):
     host = repo._runtime.gap_consult
     assert host is not None and host.has_contributions() is True
     assert repo._runtime.ask_service().gap_consult_host is host
+
+
+def test_the_factory_hop_is_covered_too(tmp_path):
+    """``create_repository`` is the hop the direct-constructor cases skip.
+
+    Every other case in this file builds ``SQLiteRepository`` itself, so the
+    factory's two forwarding lines are the one link in the chain nothing
+    exercises — and deleting them leaves a repository that constructs fine and
+    silently never consults.  ``app.bootstrap`` reaches the seat only through
+    here, so this is the production path, not a variant of it.
+    """
+    from app.repositories.factory import create_repository
+
+    host = build_extension_runtime((_bundle(_Recorder(SUGGESTION)),)).gap_consult
+    repository = create_repository(
+        Settings(
+            _env_file=None,
+            database_url=f"sqlite:///{tmp_path / 'factory-gap.db'}",
+            storage_dir=str(tmp_path / "factory-storage"),
+            event_log_enabled=False,
+            llm_log_enabled=False,
+        ),
+        gap_consult_host=host,
+    )
+    try:
+        assert repository._runtime.gap_consult is host
+        assert repository._runtime.ask_service().gap_consult_host is host
+    finally:
+        repository.close()
 
 
 def test_the_consultation_counts_post_activation_evidence(make_repo, monkeypatch):
