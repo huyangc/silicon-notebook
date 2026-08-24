@@ -1204,6 +1204,45 @@ def test_run_caps_repeated_element_search(rrepo, monkeypatch):
     assert res.trace[-1].step_type == "answer"
 
 
+def test_empty_fallback_element_search_count_reaches_reflect_loop(
+    rrepo, monkeypatch
+):
+    """首轮空证据兜底已消费的原文检索次数必须交给 reflect 循环。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = rrepo.create_notebook(NotebookCreate(name="empty"))
+    rrepo.settings.reasoning_max_element_searches = 1
+    calls = {"count": 0}
+
+    def fake_elements(self, notebook_id, query):
+        calls["count"] += 1
+        return []
+
+    monkeypatch.setattr(ReasoningRetriever, "search_elements", fake_elements)
+    bind_chat_client(
+        rrepo,
+        "reasoning_agent",
+        _SeqLLM(
+            plan={"sub_queries": [{"query": "库内容"}]},
+            reflects=[
+                {"next_action": "search_elements", "elements_query": "库内容"},
+                {"next_action": "answer", "sufficient": True},
+            ],
+        ),
+    )
+
+    result = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings
+    ).run(nb.id, "这个库里有什么", "")
+
+    assert calls["count"] == 1
+    assert any(
+        step.step_type == "skip"
+        and (step.detail or {}).get("reason") == "element_search_cap"
+        for step in result.trace
+    )
+
+
 def test_run_does_not_break_while_progressing(rrepo, monkeypatch):
     """熔断不误杀: 只要每轮 expand 带来新节点(有进展), stale 一直重置, 不提前终止
     —— 保证有效深挖不被熔断打断。"""
@@ -2290,6 +2329,55 @@ def test_run_terminal_disclosure_has_no_skip_when_reflect_covers_all_pending(
 
     assert not [s for s in result.trace
                 if (s.detail or {}).get("reason") == "intent_coverage_incomplete"]
+
+
+def test_coverage_steps_reduce_the_reflect_loop_budget(rrepo, monkeypatch):
+    """补种阶段消费的步数必须交给 reflect；两段合计不能越过 overview=4。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    probes = [f"预算探针{i}" for i in range(1, 5)]
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[
+            {"next_action": "add_subquery", "new_sub_query": {"query": query}}
+            for query in probes
+        ],
+    )
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rrepo.settings.reasoning_quota_enabled = False
+    calls: list[str] = []
+
+    def fake_search(notebook_id, query, types=None, prefer="balanced"):
+        calls.append(query)
+        return [_mk_rk(f"id-{query}", query)]
+
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(retriever, "search", fake_search)
+
+    result = retriever.run(
+        nb.id,
+        "综述这个库",
+        intent_queries=[
+            "MoE 架构",
+            "训练数据",
+            "推理成本",
+            "上下文长度",
+            "对齐方法",
+            "开源许可",
+        ],
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    assert probes[:2] == [query for query in calls if query in probes]
+    assert not any(query in calls for query in probes[2:])
+    coverage_steps = [
+        step for step in result.trace
+        if step.step_type == "retrieve"
+        and (step.detail or {}).get("source") == "confirmed_intent"
+    ]
+    assert len(coverage_steps) == 2
 
 
 @pytest.mark.parametrize("intent_queries", [None, ["完整问题", "方向一"]])

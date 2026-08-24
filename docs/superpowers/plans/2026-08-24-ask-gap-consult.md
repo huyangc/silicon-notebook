@@ -47,7 +47,7 @@
   终态 skip 步的 `directions` 已是注册表简称（≤60 字符、≤8 条）。
 - floor：`backend/app/core/ask_retrieval_policy.py:106-140`，`ranked_final_floor` 依次 8/20/24/32/40。
 - trace 惯例：`_TraceRecorder:1688-1721`；`TraceStep` 模型 `backend/app/models/ask.py:167-172`。
-- golden fixture 只录首轮（`test_reasoning_first_round_golden.py:1-31`）——本改动零影响（一行不落在 run() 里）。
+- 首轮合同由 `test_reasoning_retrieval.py` 的 intent/PPR/精查/空证据兜底/补种预算聚焦用例覆盖；本改动不触碰这些路径。
 - `AskResponse:582-647`；`exclude_if` 空缺省先例 `Citation.images:110-112`、`result_sets:622-627`。
 - 持久化：`sqlite/ask_state_store.py:733-761` `save_answer` 全量 `model_dump()`；`sanitize_answer_payload`
   （`core/internal_observability.py:46-55`）是黑名单——新字段自动持久化，**零 store 改动、零 migration**。
@@ -211,7 +211,7 @@ knowhow 补全、插件零调用）、`test_suggestions_survive_persistence_and_
 `test_an_injected_draft_stage_cannot_drop_the_suggestions`（注入裸 AskResponse 的 stage）。
 变异：删触发短路 → 红；public_turn 加键 + 删冻结断言 → 红；core 填充挪进 draft stage → 红；consult 调用挪到
 图激活之前 → thin 支红。
-验证：上述 pytest 集 + `test_ask_modes_api.py` + `test_reasoning_first_round_golden.py` +
+验证：上述 pytest 集 + `test_ask_modes_api.py` + `test_reasoning_retrieval.py` +
 `test_public_conversation_api.py`；守卫；`generate_repository_contract_fixtures.py`；`bash scripts/check.sh`。
 
 ### T3（sonnet）— 前端披露区块 + 导入按钮

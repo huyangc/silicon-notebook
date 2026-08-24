@@ -213,6 +213,72 @@ def test_rule2_single_token_short_concept_rejected():
     assert complete_isolated_edges(nodes, edges=[]) == []
 
 
+def test_rule2_multi_token_length_boundary_accepts_four_rejects_three():
+    nodes = [
+        _node("c1", "claim", "The a bc value rises here", element_ids={"E1"}),
+        _node("c2", "claim", "The a b value also appears", element_ids={"E2"}),
+        _node("k4", "concept", "a bc", element_ids={"EK4"}),
+        _node("k3", "concept", "a b", element_ids={"EK3"}),
+    ]
+
+    assert complete_isolated_edges(nodes, edges=[]) == [{
+        "source_object_id": "c1",
+        "target_object_id": "k4",
+        "edge_type": "about",
+        "basis": "relink:name-match",
+    }]
+
+
+def test_rule2_single_token_length_boundary_accepts_six_rejects_five():
+    nodes = [
+        _node("c1", "claim", "The tanhkx activation saturates", element_ids={"E1"}),
+        _node("c2", "claim", "The tanhk activation saturates too", element_ids={"E2"}),
+        _node("k6", "concept", "tanhkx", element_ids={"EK6"}),
+        _node("k5", "concept", "tanhk", element_ids={"EK5"}),
+    ]
+
+    assert complete_isolated_edges(nodes, edges=[]) == [{
+        "source_object_id": "c1",
+        "target_object_id": "k6",
+        "edge_type": "about",
+        "basis": "relink:name-match",
+    }]
+
+
+def test_rule2_matches_case_insensitive_hyphen_joined_text():
+    nodes = [
+        _node(
+            "c1",
+            "claim",
+            "The Open-Loop-GAIN increases with feedback",
+            element_ids={"E1"},
+        ),
+        _node("k1", "concept", "open loop gain", element_ids={"EK1"}),
+    ]
+
+    assert complete_isolated_edges(nodes, edges=[]) == [{
+        "source_object_id": "c1",
+        "target_object_id": "k1",
+        "edge_type": "about",
+        "basis": "relink:name-match",
+    }]
+
+
+def test_rule2_does_not_match_underscore_joined_text():
+    # `_` is a word character, so it does not create the required boundary.
+    nodes = [
+        _node(
+            "c1",
+            "claim",
+            "The Open_Loop_GAIN increases with feedback",
+            element_ids={"E1"},
+        ),
+        _node("k1", "concept", "open loop gain", element_ids={"EK1"}),
+    ]
+
+    assert complete_isolated_edges(nodes, edges=[]) == []
+
+
 def test_rule2_disabled_by_flag():
     nodes = [
         _node("c1", "claim", "DeepSeek-V4 uses hybrid CSA for attention",

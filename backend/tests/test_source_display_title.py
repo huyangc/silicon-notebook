@@ -243,8 +243,7 @@ def test_display_title_rule_has_exactly_one_implementation():
             # 先按原文筛一遍再解析。扫描只认字符串字面量,而字面量的字符必然
             # 出现在原文里,所以三个列名缺任何一个的文件都不可能命中——省掉
             # 全仓七百多次 ast.parse(实测 3.5s → 0.1s)。这不只是测试自己快
-            # 慢:后端泳道是并发跑的,一条烧 CPU 的守卫会把同批里靠墙钟判定
-            # 的用例(backend.sh 生命周期测试只给子进程 4 秒)挤到超时。
+            # 慢:后端泳道是并发跑的,一条烧 CPU 的守卫会抬高整条门禁的墙钟时间。
             # (唯一漏网形状是跨字面量拼接出的键名,`row["paper_" "title"]`;
             # 那已经不是「照着抄一份」会写出来的东西。)
             if not all(column in text for column in RULE_COLUMNS):
