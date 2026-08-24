@@ -6,7 +6,7 @@
  */
 "use client";
 
-import { MouseEvent } from "react";
+import { MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -21,6 +21,13 @@ import {
 import { remarkCitations } from "./answer-citations";
 import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
+import {
+  CITATION_IMAGE_SLOT_ATTRIBUTE,
+  citationImageSlotItems,
+  rehypeCitationImages,
+  type CitationImageIdsByKey,
+  type CitationImageSlotItem,
+} from "./rehype-citation-images";
 
 // Re-export types for external callers (page.tsx uses these).
 export type { AnswerReference };
@@ -40,6 +47,8 @@ export interface AnswerMarkdownProps {
   selectedReferenceId?: string | null;
   /** 点击引用徽章时的回调，传入 AnswerReference */
   onReferenceClick: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void;
+  /** 引用图片的块级渲染端口。缺省时不插入图片区（Memory 等纯 Markdown 消费面）。 */
+  renderCitationImages?: (items: CitationImageSlotItem[]) => ReactNode;
 }
 
 export function AnswerMarkdown({
@@ -48,10 +57,17 @@ export function AnswerMarkdown({
   citations = [],
   selectedReferenceId = null,
   onReferenceClick,
+  renderCitationImages,
 }: AnswerMarkdownProps) {
   // 构建 key→reference 映射，供 remarkCitations 插件和 <a> 组件使用
   const references = buildAnswerReferences(answer, anchors, citations);
   const refsByCitationKey = referenceByCitationKey(references);
+  const imageIdsByCitationKey: CitationImageIdsByKey = Object.fromEntries(
+    Object.entries(refsByCitationKey).map(([key, reference]) => [
+      key,
+      (reference.anchor?.images ?? reference.citation?.images ?? []).map((image) => image.asset_id),
+    ]),
+  );
 
   // -----------------------------------------------------------------------
   // 自定义 <a> 渲染：cite: 开头 → 引用徽章；其余 → 普通新标签链接
@@ -99,6 +115,12 @@ export function AnswerMarkdown({
         </div>
       );
     },
+    aside({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
+      const raw = node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE];
+      const items = citationImageSlotItems(raw);
+      if (items.length > 0) return renderCitationImages?.(items) ?? null;
+      return <aside>{children}</aside>;
+    },
   } as Parameters<typeof ReactMarkdown>[0]["components"];
 
   return (
@@ -109,7 +131,10 @@ export function AnswerMarkdown({
           remarkMath,
           [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
         ]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[
+          rehypeKatex,
+          [rehypeCitationImages, imageIdsByCitationKey] as [typeof rehypeCitationImages, CitationImageIdsByKey],
+        ]}
         // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
         // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
         urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}

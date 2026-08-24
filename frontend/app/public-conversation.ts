@@ -38,6 +38,7 @@ export type PublicReferenceT = {
 export type PublicImageT = {
   alias: string;
   caption: string;
+  reference_keys?: string[];
 };
 
 /** 一轮 Q&A 的公开投影。真源：`backend/app/models/ask.py PublicTurn`。 */

@@ -1,4 +1,5 @@
 import type { UploadedSource } from "./workspace-model.ts";
+import { findMarkdownImages } from "./md-bundle.ts";
 
 export const STAGED_FILE_NAME_MAX_LENGTH = 48;
 
@@ -33,6 +34,54 @@ export function splitFilesByUploadSize<T extends SizedSourceFile>(
 }
 
 export type SkippedStagedFile = { name: string; reason: string };
+export type StagedFileWarning = { name: string; reason: string };
+
+type MarkdownFileLike = {
+  name: string;
+  text(): Promise<string>;
+};
+
+/** Warn when a standalone Markdown file points at image bytes it does not carry.
+ *
+ * This is advisory, not an admission gate: text-only ingestion remains useful,
+ * but the user must not discover only after Ask that every relative image was
+ * absent. ZIP/folder intake has its own pairing receipt and is not passed here.
+ */
+export async function standaloneMarkdownImageWarnings(
+  file: MarkdownFileLike,
+): Promise<StagedFileWarning[]> {
+  if (!/\.(?:md|markdown)$/i.test(file.name)) return [];
+  let refs: ReturnType<typeof findMarkdownImages>;
+  try {
+    refs = findMarkdownImages(await file.text());
+  } catch {
+    // Advisory inspection must never turn an otherwise valid upload into a
+    // staging failure. The authoritative parser still handles the file.
+    return [];
+  }
+  let local = 0;
+  let remote = 0;
+  for (const ref of refs) {
+    const src = ref.src.trim();
+    if (!src || /^data:image\//i.test(src)) continue;
+    if (/^(?:https?:)?\/\//i.test(src)) remote += 1;
+    else local += 1;
+  }
+  const warnings: StagedFileWarning[] = [];
+  if (local > 0) {
+    warnings.push({
+      name: file.name,
+      reason: `检测到 ${local} 个本地图片引用；单个 Markdown 不包含图片文件，问答中将无法展示。请改用 ZIP 或拖入完整文件夹。`,
+    });
+  }
+  if (remote > 0) {
+    warnings.push({
+      name: file.name,
+      reason: `检测到 ${remote} 个远程图片引用；系统不会自动下载远程图片，问答中只保留相关文字。`,
+    });
+  }
+  return warnings;
+}
 
 function stagedFileExtension(name: string): string {
   const dot = name.lastIndexOf(".");

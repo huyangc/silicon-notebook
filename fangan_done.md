@@ -420,7 +420,10 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - **Markdown ZIP 后端摄取 + MCP 通用文件上传（§6.3 / §19.3，2026-08-24）**：`.zip` 从浏览器专属交换格式升级为 backend parser capability registry 的一等格式。原始压缩包按一个来源保存，builtin `markdown_bundle` 在后台稳定解析所有 `.md`/`.markdown`，逐元素记录 `bundle_path`，按每份 Markdown 自身目录解析相对图片并把 png/jpeg/gif/webp 字节写入既有来源资产；不解到宿主文件系统，危险/重复路径、加密/不支持压缩、无 Markdown、条目或解压总量超限整包拒绝，单图缺失/远程/损坏/不支持则保留图注/描述文字并无图降级。同一包内图片被多处引用时按归一化路径复用同一资产，成功和失败结果都缓存，避免重复消耗图片配额或放大解压负载。网页上传直接发送 ZIP 原字节，拖入文件夹继续保留浏览器 data-URI 兼容路径。MCP 新增第 23 个 core 工具 `add_source_file`：严格标准 base64 接受解析注册表支持的 PDF、DOCX、PPTX、XLS/XLSX、Markdown、CSV 与 ZIP，复用既有来源去重、文档数量上限、Agent 出处、owner-only `sources:write` 和后台解析调度；官方客户端示例新增 `--source-file`。专项后端及前端上传/配置测试通过；完整 `scripts/check.sh`（后端 9,173 项、前端 Node 2,425 项、组件 653 项、production build 与类型检查）及 `git diff --check` 通过。
 
+- **Ask 引用图片正文内联与页内预览（§6.5 / §11，2026-08-24）**：答案引用绑定到已持久化 `asset_id` 时，鉴权界面与公开会话都在该引用所在的最小完整 Markdown 块后显示图片，而非汇总到答案末尾：段落/标题紧随块后，列表项/引用块留在内部，表格等整表结束；复合引用按正文顺序合并，同一资产只在第一次引用处出现。图片块只展示图片与「本段附图 / 模型未直接读取图片」可信度提示，caption/图片描述仅保留为检索元数据和无障碍 alt，不重复占据正文或引用浮层。点击正文或引用浮层缩略图会进入统一的页内放大对话框，支持关闭按钮、背景点击、Escape、焦点归还及窄屏近全屏。公开会话投影新增不暴露内部引用 id 的 `reference_keys` 绑定，旧公开载荷仍兼容。MinerU 与内建解析器共用同一渲染合同：只有图片字节已落资产且元素带 `asset_id` 才能展示；孤立 Markdown 的相对/本地/远程图片在上传阶段给出非阻断警告，缺失字节不伪造图片。完整 `scripts/check.sh`、TypeScript 和 Next.js production build 已通过。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
+- **Deep Report 正文引用图片内联（第二期）**：本期只交付 Ask 与公开会话；Deep Report 仍沿用现有引用详情图片展示，后续再复用相同的块级定位、去重和页内预览合同。
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。
 - **深度报告来源身份缓存**：本轮只做单次有界解析，不增加 run 级来源族缓存。后续若缓存，应缓存原始身份行并在本轮触达集合上重新执行并查合并；不能直接缓存任意子集的最终 family key，否则后续出现哈希/标题桥接资料时会改变族归属。
 - **v0.4 Review Mode**：review session、场景 checklist sign-off、reviewer 评论、action items、导出 review 报告。

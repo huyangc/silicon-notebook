@@ -870,6 +870,11 @@ class PublicImage(BaseModel):
 
     alias: str = ""
     caption: str = ""
+    # Visible public reference keys (``k1`` or positional ``1``) that bind this
+    # image. They are already present on PublicReference and disclose no
+    # addressable internal id; the browser uses them only to place the image
+    # beside the matching marker in ``answer_md``.
+    reference_keys: List[str] = Field(default_factory=list)
 
 
 class PublicTurn(BaseModel):

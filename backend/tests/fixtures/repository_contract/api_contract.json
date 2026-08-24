@@ -7752,6 +7752,13 @@
               "default": "",
               "title": "Caption",
               "type": "string"
+            },
+            "reference_keys": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Reference Keys",
+              "type": "array"
             }
           },
           "title": "PublicImage",

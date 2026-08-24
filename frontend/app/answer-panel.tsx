@@ -21,12 +21,14 @@ import katex from "katex";
 import {
   buildAnswerReferences,
   computeSourceTierCounts,
+  referenceByCitationKey,
   renderTextWithReferenceNumbers,
   splitInlineLatex,
   type AnswerReference,
   type CitationImageLike,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import type { CitationImageSlotItem } from "./rehype-citation-images";
 import { GapSuggestionsPanel } from "./answer-gap-suggestions";
 import { AuthedImage } from "./authed-image";
 import { API_BASE } from "./api-config";
@@ -34,6 +36,7 @@ import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { copyTextSafely } from "./copy-text";
 import { FormulaView } from "./formula-view";
+import type { AnswerImagePreviewRequest } from "./image-preview";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { unwrapStandaloneLatex } from "./math-markdown";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
@@ -766,6 +769,60 @@ function referenceImages(reference: AnswerReference): CitationImageLike[] {
 }
 
 
+type ResolvedCitationImage = Readonly<{
+  reference: AnswerReference;
+  image: CitationImageLike;
+}>;
+
+
+function InlineCitationImages({
+  rows,
+  notebookId,
+  onPreviewImage,
+}: {
+  rows: readonly ResolvedCitationImage[];
+  notebookId: string;
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+}) {
+  if (rows.length === 0) return null;
+  const labels = [...new Set(rows.map((row) => row.reference.displayLabel))];
+  return (
+    <aside className="answer-inline-images" aria-label={`本段附图 ${labels.join("、")}`}>
+      <div className="answer-inline-images-heading">
+        <span>本段附图</span>
+        <span>{labels.join("、")}</span>
+        <small title="模型可能读取过图注或图片描述，但没有直接读取图片">模型未直接读取图片</small>
+      </div>
+      <ul className="answer-inline-image-list">
+        {rows.map(({ reference, image }) => {
+          const url = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
+          const alt = image.caption || `${reference.displayLabel} 的附图`;
+          return (
+            <li key={image.asset_id} className="answer-inline-image-item">
+              {url
+                ? <AuthedImage url={url} alt={alt} />
+                : <p className="tool-hint">图片不可用</p>}
+              {url && onPreviewImage && (
+                <button
+                  type="button"
+                  className="answer-inline-image-open"
+                  aria-label={`放大查看${reference.displayLabel}的附图`}
+                  onClick={() => onPreviewImage({
+                    assetId: image.asset_id,
+                    alt,
+                    referenceLabel: reference.displayLabel,
+                  })}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </aside>
+  );
+}
+
+
 function SelectedReferenceDetail({
   reference,
   notebookId,
@@ -773,6 +830,7 @@ function SelectedReferenceDetail({
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
   onOpenSource,
+  onPreviewImage,
 }: {
   reference: AnswerReference;
   /** 检索结果带图(T1/T2)：本段附图的资产 URL 恒用**当前 active notebook**——同
@@ -789,6 +847,7 @@ function SelectedReferenceDetail({
    *  可选：不传时该按钮不渲染。 */
   onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
 }) {
   const objectType = reference.anchor?.object_type || "";
   const title = referenceTitle(reference);
@@ -819,7 +878,6 @@ function SelectedReferenceDetail({
   // 后端 attach_citation_images 只从绑定证据自己所在 chunk/元素的候选里取图,
   // 因此一条引用下的全部附图恒与该引用同源,不存在附图跨到别的来源的情况。
   const images = referenceImages(reference);
-  const canOpenImageSource = Boolean(onOpenSource && sourceId);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
@@ -917,19 +975,20 @@ function SelectedReferenceDetail({
                 : <p className="tool-hint">图片不可用</p>;
               return (
                 <li key={image.element_id} className="cite-detail-image-item">
-                  {canOpenImageSource ? (
+                  {onPreviewImage ? (
                     <button
                       type="button"
                       className="cite-detail-image-button"
-                      onClick={() => onOpenSource!(sourceId, image.element_id)}
-                      title="在来源详情中查看这张附图"
+                      onClick={() => onPreviewImage({
+                        assetId: image.asset_id,
+                        alt: image.caption || `${reference.displayLabel} 的附图`,
+                        referenceLabel: reference.displayLabel,
+                      })}
+                      title="放大查看这张附图"
                     >
                       {thumbnail}
                     </button>
                   ) : thumbnail}
-                  {image.caption && (
-                    <small className="cite-detail-image-caption">{image.caption}</small>
-                  )}
                 </li>
               );
             })}
@@ -950,6 +1009,7 @@ function CitationPopover({
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
   onOpenSource,
+  onPreviewImage,
 }: {
   reference: AnswerReference;
   /** 检索结果带图(T1/T2)：透传给 SelectedReferenceDetail 拼装资产 URL,见其
@@ -961,6 +1021,8 @@ function CitationPopover({
   onOpenKnowledgeGraph?: (objectId?: string, sourceNotebookId?: string) => void;
   onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
+  /** 正文/引用浮层图片的页面内放大入口。没有承接方时图片仍显示但不可点击。 */
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ top: number; left: number }>(
@@ -1011,6 +1073,7 @@ function CitationPopover({
         onOpenKnowledgeGraph={onOpenKnowledgeGraph}
         onOpenKnowhowRow={onOpenKnowhowRow}
         onOpenSource={onOpenSource}
+        onPreviewImage={onPreviewImage}
       />
     </div>
   );
@@ -1184,6 +1247,7 @@ export function AnswerView({
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
   onOpenSource,
+  onPreviewImage,
   notebookId,
   notebookNames,
   onBuildScaleIndex,
@@ -1215,6 +1279,8 @@ export function AnswerView({
    * 调用，page.tsx 据此打开来源详情并高亮到该元素。可选——旧调用方/测试不传时
    * 清单卡的跳转按钮不渲染（同 onTestModel/onOpenModelStatus 的可选惯例）。 */
   onOpenSource?: (sourceId: string, elementId?: string) => void;
+  /** 正文/引用浮层图片的页面内放大入口。没有承接方时图片仍显示但不可点击。 */
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
   notebookId: string | null;
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，逐 turn 复用同一份，供引用徽章标来源库名。 */
@@ -1256,6 +1322,26 @@ export function AnswerView({
     () => buildAnswerReferences(answerText, answer.anchors, answer.citations),
     [answerText, answer.anchors, answer.citations]
   );
+  const referencesByCitationKey = useMemo(
+    () => referenceByCitationKey(references),
+    [references],
+  );
+  const renderCitationImages = (items: CitationImageSlotItem[]) => {
+    if (!notebookId) return null;
+    const rows = items.flatMap(({ citationKey, imageId }) => {
+      const reference = referencesByCitationKey[citationKey];
+      if (!reference) return [];
+      const image = referenceImages(reference).find((candidate) => candidate.asset_id === imageId);
+      return image ? [{ reference, image }] : [];
+    });
+    return (
+      <InlineCitationImages
+        rows={rows}
+        notebookId={notebookId}
+        onPreviewImage={onPreviewImage}
+      />
+    );
+  };
   useEffect(() => setCitePopover(null), [answer.answer_id]);
   useEffect(() => {
     if (!copied) return;
@@ -1367,6 +1453,7 @@ export function AnswerView({
           reference,
           rect: event.currentTarget.getBoundingClientRect(),
         })}
+        renderCitationImages={renderCitationImages}
       />
       <KnowhowResultSets
         resultSets={answer.result_sets}
@@ -1408,6 +1495,7 @@ export function AnswerView({
             setCitePopover(null);
             onOpenSource(sourceId, elementId);
           } : undefined}
+          onPreviewImage={onPreviewImage}
         />
       )}
       {/* 复制回答是自足动作（只读 DOM + 剪贴板），任何调用方都能承接，所以它不带

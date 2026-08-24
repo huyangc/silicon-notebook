@@ -12,6 +12,7 @@ import {
   applyTouchedUpdate,
   sourceUploadSizeLabel,
   splitFilesByUploadSize,
+  standaloneMarkdownImageWarnings,
 } from "../../app/source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
@@ -53,6 +54,40 @@ test("splitFilesByUploadSize: 配置尚未到达时不猜测旧上限，交给�
     accepted: files,
     rejected: [],
   });
+});
+
+test("standaloneMarkdownImageWarnings: 相对/本地图片提示改用 ZIP 或完整文件夹", async () => {
+  const warnings = await standaloneMarkdownImageWarnings({
+    name: "mineru.filled.md",
+    async text() {
+      return "![流程图](质量和流程/images/图片12.jpg)\n![另一张](./images/a.png)";
+    },
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].reason, /2 个本地图片引用/);
+  assert.match(warnings[0].reason, /ZIP 或拖入完整文件夹/);
+  assert.match(warnings[0].reason, /问答中将无法展示/);
+});
+
+test("standaloneMarkdownImageWarnings: 远程图片不自动下载，data URI 与普通文件不误报", async () => {
+  const remote = await standaloneMarkdownImageWarnings({
+    name: "note.markdown",
+    async text() {
+      return "![远程](https://example.test/a.png)\n![内嵌](data:image/png;base64,AAAA)";
+    },
+  });
+  assert.equal(remote.length, 1);
+  assert.match(remote[0].reason, /1 个远程图片引用/);
+  assert.match(remote[0].reason, /不会自动下载/);
+
+  assert.deepEqual(await standaloneMarkdownImageWarnings({
+    name: "note.txt",
+    async text() { throw new Error("非 Markdown 不应读取内容"); },
+  }), []);
+  assert.deepEqual(await standaloneMarkdownImageWarnings({
+    name: "unreadable.md",
+    async text() { throw new Error("advisory scan fails open"); },
+  }), []);
 });
 
 // ---------------- 追踪「用户是否动过类型下拉框」→ 上传发 per-file doc_type_explicit

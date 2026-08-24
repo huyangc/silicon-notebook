@@ -14,7 +14,7 @@
 //   * 表格/代码块沿用 `.answer-table-wrap` / `.answer-code`，宽内容才在自己的内容块
 //     里横向滚动，而不是把整页顶宽。
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
@@ -24,12 +24,20 @@ import "katex/dist/katex.min.css";
 import { remarkCitations } from "../../answer-citations";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
+import { ImagePreviewModal } from "../../image-preview-modal";
+import {
+  CITATION_IMAGE_SLOT_ATTRIBUTE,
+  citationImageSlotItems,
+  rehypeCitationImages,
+  type CitationImageIdsByKey,
+} from "../../rehype-citation-images";
 import {
   fetchPublicConversation,
   publicConversationCitationRefs,
   publicConversationImageUrl,
   publicConversationRefNumber,
   type PublicConversationT,
+  type PublicImageT,
   type PublicTurnT,
 } from "../../public-conversation";
 
@@ -38,6 +46,11 @@ type LoadState =
   | { kind: "missing" }
   | { kind: "error" }
   | { kind: "ready"; conversation: PublicConversationT };
+
+type PublicImagePreview = Readonly<{
+  image: PublicImageT;
+  referenceLabel: string;
+}>;
 
 const EVIDENCE_LABELS: Record<string, string> = {
   grounded: "有据",
@@ -134,8 +147,46 @@ function PublicTurnView({
   // 正文标记点开的那条引用：清单里高亮它。号段是**每轮独立**的，所以高亮态与
   // DOM id 都按本轮索引隔离，避免跨轮 k1 撞车。
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const citationRefs = publicConversationCitationRefs(turn.references);
+  const [previewImage, setPreviewImage] = useState<PublicImagePreview | null>(null);
+  const previewReturnFocusRef = useRef<string | null>(null);
+  const citationRefs = useMemo(
+    () => publicConversationCitationRefs(turn.references),
+    [turn.references],
+  );
+  const imagesByAlias = useMemo(
+    () => new Map(turn.images.map((image) => [image.alias, image])),
+    [turn.images],
+  );
+  const imageIdsByCitationKey: CitationImageIdsByKey = useMemo(() => {
+    const rows: Record<string, string[]> = {};
+    for (const image of turn.images) {
+      for (const key of image.reference_keys ?? []) {
+        (rows[key] ??= []).push(image.alias);
+      }
+    }
+    return rows;
+  }, [turn.images]);
+  const markdownCitationRefs = useMemo(() => {
+    const rows = { ...citationRefs };
+    for (const key of Object.keys(imageIdsByCitationKey)) {
+      if (rows[key]) continue;
+      const number = key.match(/^k?(\d+)$/)?.[1];
+      rows[key] = { id: `image:${key}`, displayLabel: number ? `[${number}]` : key };
+    }
+    return rows;
+  }, [citationRefs, imageIdsByCitationKey]);
   const refDomId = (key: string) => `ref-t${index}-${key}`;
+
+  useLayoutEffect(() => {
+    if (previewImage) return;
+    const targetKey = previewReturnFocusRef.current;
+    previewReturnFocusRef.current = null;
+    if (!targetKey) return;
+    const target = document.querySelector<HTMLElement>(
+      `[data-answer-image-preview-return="${targetKey}"]`,
+    );
+    if (target?.isConnected) target.focus({ preventScroll: true });
+  }, [previewImage]);
 
   const openReference = (key: string) => {
     setSelectedKey(key);
@@ -179,6 +230,52 @@ function PublicTurnView({
         </div>
       );
     },
+    aside({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
+      const items = citationImageSlotItems(node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE]);
+      if (items.length === 0) return <aside>{children}</aside>;
+      const rows = items.flatMap(({ citationKey, imageId }) => {
+        const image = imagesByAlias.get(imageId);
+        return image ? [{ citationKey, image }] : [];
+      });
+      if (rows.length === 0) return null;
+      const labels = [...new Set(rows
+        .map(({ citationKey }) => citationRefs[citationKey]?.displayLabel)
+        .filter((value): value is string => Boolean(value)))];
+      return (
+        <aside className="answer-inline-images" aria-label="本段附图">
+          <div className="answer-inline-images-heading">
+            <span>本段附图</span>
+            {labels.length > 0 && <span>{labels.join("、")}</span>}
+            <small>模型未直接读取图片</small>
+          </div>
+          <ul className="answer-inline-image-list">
+            {rows.map(({ citationKey, image }) => (
+              <li key={image.alias} className="answer-inline-image-item">
+                <img
+                  className="element-image"
+                  src={publicConversationImageUrl(token, image.alias)}
+                  alt={image.caption || `${citationRefs[citationKey]?.displayLabel || "引用"}的附图`}
+                  loading="lazy"
+                />
+                <button
+                  type="button"
+                  className="answer-inline-image-open"
+                  aria-label="放大查看本段附图"
+                  data-answer-image-preview-return={`${index}:${image.alias}`}
+                  onClick={(event) => {
+                    previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
+                    setPreviewImage({
+                      image,
+                      referenceLabel: citationRefs[citationKey]?.displayLabel || "",
+                    });
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+        </aside>
+      );
+    },
   } as Parameters<typeof ReactMarkdown>[0]["components"];
 
   const evidenceLabel = EVIDENCE_LABELS[turn.evidence_level];
@@ -205,9 +302,12 @@ function PublicTurnView({
           remarkPlugins={[
             remarkGfmPlugin,
             remarkMath,
-            [remarkCitations, citationRefs] as [typeof remarkCitations, typeof citationRefs],
+            [remarkCitations, markdownCitationRefs] as [typeof remarkCitations, typeof markdownCitationRefs],
           ]}
-          rehypePlugins={[rehypeKatex]}
+          rehypePlugins={[
+            rehypeKatex,
+            [rehypeCitationImages, imageIdsByCitationKey] as [typeof rehypeCitationImages, CitationImageIdsByKey],
+          ]}
           // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,其余仍走
           // 默认清洗(防 javascript: 等不安全协议)。
           urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
@@ -224,21 +324,16 @@ function PublicTurnView({
         </p>
       )}
 
-      {/* 「本段附图」是 **turn 级**展示，不依赖引用卡存在：被丢弃的空引用卡若带图仍会
-          发出别名，所以这里照常渲染。必须与引证内容视觉区分、标注它不是模型引用过的
-          证据（模型不看图）。 */}
-      {turn.images.length > 0 && (
-        <section className="public-turn-images" aria-label="本段附图">
-          <p className="public-turn-images-label">本段附图（模型未据此作答，仅供参考）</p>
-          <div className="public-turn-images-grid">
-            {turn.images.map((image, imageIndex) => (
-              <figure key={imageIndex} className="public-turn-figure">
-                <img src={publicConversationImageUrl(token, image.alias)} alt={image.caption || ""} />
-                {image.caption && <figcaption>{image.caption}</figcaption>}
-              </figure>
-            ))}
-          </div>
-        </section>
+      {previewImage && (
+        <ImagePreviewModal
+          referenceLabel={previewImage.referenceLabel}
+          onClose={() => setPreviewImage(null)}
+        >
+          <img
+            src={publicConversationImageUrl(token, previewImage.image.alias)}
+            alt={previewImage.image.caption || "本段附图"}
+          />
+        </ImagePreviewModal>
       )}
 
       {turn.references.length > 0 && (

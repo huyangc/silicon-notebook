@@ -172,6 +172,7 @@ test("every coordinated root surface leaves the interaction tree when it is cove
     ["ConversationShareModal", "conversation-share"],
     ["SourceDetailWindow", "source-detail"],
     ["KgAnalysisView", "kg-analysis"],
+    ["ImagePreviewModal", "answer-image-preview"],
   ];
   for (const [component, slot] of componentBindings) {
     const view = `rootModals\\.view\\("${slot}"\\)`;

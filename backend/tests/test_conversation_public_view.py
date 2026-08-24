@@ -290,8 +290,8 @@ def test_memory_citation_keeps_excerpt_but_strips_memory_id():
 
 
 def test_answer_images_are_projected_as_token_aliases_not_raw_ids():
-    """T4: an answer-attached image crosses as an opaque, token-derived alias +
-    caption — never its raw ``asset_id``/``element_id``. Emitting the raw
+    """T4: an answer-attached image crosses as an opaque, token-derived alias,
+    caption and visible reference key — never its raw ``asset_id``/``element_id``. Emitting the raw
     ``asset_id`` (or the ``element_id``) into ``PublicImage`` turns this red."""
     payload = {
         "answer": "带图证据 [k1]。",
@@ -303,6 +303,7 @@ def test_answer_images_are_projected_as_token_aliases_not_raw_ids():
     assert turn["images"] == [{
         "alias": conversation_asset_alias(_SHARE_TOKEN, "ASSET-k1"),
         "caption": "图注",
+        "reference_keys": ["k1"],
     }]
     # The raw handles never appear anywhere in the turn.
     haystack = _all_strings(turn)
@@ -341,6 +342,7 @@ def test_images_are_deduped_by_asset_id_across_selected_references():
     assert turn["images"] == [{
         "alias": conversation_asset_alias(_SHARE_TOKEN, "SHARED"),
         "caption": "甲",  # first-seen caption wins
+        "reference_keys": ["k1", "k2"],
     }]
 
 
@@ -385,7 +387,39 @@ def test_malformed_scalar_image_is_skipped_not_crashed():
     assert turn["images"] == [{
         "alias": conversation_asset_alias(_SHARE_TOKEN, "OK"),
         "caption": "c",
+        "reference_keys": ["k1"],
     }]
+
+
+def test_citation_fallback_images_carry_the_positional_body_key():
+    payload = {
+        "answer": "引用图见 [1]。",
+        "anchors": [],
+        "citations": [_citation(1, images=[{
+            "element_id": "E", "asset_id": "C-ASSET", "caption": "图",
+        }])],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert turn["images"][0]["reference_keys"] == ["1"]
+
+
+def test_image_keeps_its_body_key_when_the_empty_reference_card_is_filtered():
+    payload = {
+        "answer": "图片位置 [k4]。",
+        "anchors": [_anchor(
+            "k4",
+            source_title="",
+            label="",
+            name="",
+            source_file_name="",
+            snippet="",
+            images=[{"element_id": "E", "asset_id": "IMAGE-ONLY", "caption": "图"}],
+        )],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert turn["references"] == []
+    assert turn["images"][0]["reference_keys"] == ["k4"]
 
 
 # ---- T4:别名反查(端点侧)与投影共用同一份派生 --------------------------
