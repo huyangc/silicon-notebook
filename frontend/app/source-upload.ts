@@ -39,19 +39,14 @@ function stagedFileExtension(name: string): string {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
-/** 入列前的逐文件分类：可上传的进 accepted，其余逐条给出**面向用户的跳过原因**；
- *  `.zip` 单独进 bundles，既不进 accepted 也不进 skipped。
+/** 入列前的逐文件分类：可上传的进 accepted，其余逐条给出**面向用户的跳过原因**。
  *
  *  选择器与拖放两条路径共用。拖放拿到的 DataTransfer 列表不经 accept 过滤，而原生
  *  file input 会按 accept **静默**丢弃不支持的文件——所以拖放必须由我们自己接管并走
  *  这里，跳过的每个文件才有一条用户看得见的原因（否则就是「批量上传时不支持的文档
  *  无声消失」）。maxBytes 语义与 splitFilesByUploadSize 一致：null/非法 = 配置未到，
- *  不做客户端大小预判，交给服务端权威 413。
- *
- *  `.zip` 是前端交换格式（markdown + 图片打包上传），刻意不在后端 `supportedExtensions`
- *  白名单里——按普通「类型不支持」判就会把它错误地推进 skipped。它需要先解包、按
- *  弹窗内挑出的 markdown 重新入列，所以在这里就单独摘出来，不套大小上限（zip 本身的
- *  体积上限由解包管线自己的解压护栏把关，不是这里的单文件上传上限）。 */
+ *  不做客户端大小预判，交给服务端权威 413。`.zip` 与 PDF/PPTX 等格式一样来自后端
+ *  解析注册表，原始字节直接上传；解包、Markdown 路径解析与图片落资产均在后台完成。 */
 export function classifyStagedFiles<T extends SizedSourceFile>(
   files: readonly T[],
   opts: {
@@ -69,10 +64,6 @@ export function classifyStagedFiles<T extends SizedSourceFile>(
   const bundles: T[] = [];
   for (const file of files) {
     const ext = stagedFileExtension(file.name);
-    if (ext === "zip") {
-      bundles.push(file);
-      continue;
-    }
     if (!opts.supportedExtensions.includes(ext)) {
       skipped.push({
         name: file.name,

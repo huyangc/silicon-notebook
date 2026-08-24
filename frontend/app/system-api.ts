@@ -82,7 +82,7 @@ export type ParserEngineCapability = {
 };
 
 export const DEFAULT_SUPPORTED_SOURCE_EXTENSIONS = [
-  "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
+  "pdf", "md", "markdown", "zip", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
 ];
 
 const EXTENSION_UNAVAILABLE_REASONS = new Set(["disabled", "unavailable"]);

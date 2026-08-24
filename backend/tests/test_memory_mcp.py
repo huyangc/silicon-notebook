@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import pathlib
 from contextlib import AsyncExitStack
@@ -2186,6 +2187,69 @@ async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("file_name", "payload"),
+    [
+        ("manual.pdf", b"%PDF-1.7\nagent upload\n"),
+        ("slides.pptx", b"PK\x03\x04pptx-placeholder"),
+        ("workbook.xlsx", b"PK\x03\x04xlsx-placeholder"),
+        ("notes.zip", b"PK\x03\x04zip-placeholder"),
+    ],
+)
+async def test_add_source_file_accepts_registered_binary_formats(
+    mcp_env, scheduled_jobs, file_name, payload
+):
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = _payload(await client.call("add_source_file", {
+            "file_name": file_name,
+            "content_base64": base64.b64encode(payload).decode("ascii"),
+        }))
+
+    detail = repo.get_source(result["source_id"])
+    assert detail.file_name == file_name
+    assert detail.title == file_name
+    assert detail.agent_created is True
+    assert pathlib.Path(detail.file_path).read_bytes() == payload
+    assert scheduled_jobs[-1][1] == (result["source_id"],)
+
+
+@pytest.mark.anyio
+async def test_add_source_file_rejects_invalid_envelopes_before_repository_work(
+    mcp_env, monkeypatch, scheduled_jobs
+):
+    from app.api.mcp_tools import sources
+
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(
+        sources, "get_settings",
+        lambda: SimpleNamespace(source_upload_max_bytes=8),
+    )
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        for arguments in (
+            {"file_name": "bad.exe", "content_base64": "YQ=="},
+            {"file_name": "paper.pdf", "content_base64": "not base64"},
+            {"file_name": "paper.pdf", "content_base64": ""},
+            {
+                "file_name": "paper.pdf",
+                "content_base64": base64.b64encode(b"123456789").decode("ascii"),
+            },
+        ):
+            assert (await client.call("add_source_file", arguments)).isError
+
+    assert repo.list_sources(notebook_id) == []
+    assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
 async def test_add_source_text_reusing_a_user_source_does_not_claim_it(
     mcp_env, scheduled_jobs
 ):
@@ -2765,6 +2829,9 @@ async def test_source_scopes_do_not_imply_one_another(
             assert (await reader.call("add_source_text", {
                 "title": "无权", "content_md": "无权",
             })).isError
+            assert (await reader.call("add_source_file", {
+                "file_name": "无权.pdf", "content_base64": "YQ==",
+            })).isError
             assert (await reader.call(
                 "add_source_url", {"url": reachable_pdf_url}
             )).isError
@@ -2784,6 +2851,9 @@ async def test_source_scopes_do_not_imply_one_another(
             agent_source = _payload(await writer.call("add_source_text", {
                 "title": "可写", "content_md": "可写的正文",
             }))["source_id"]
+            assert not (await writer.call("add_source_file", {
+                "file_name": "可写.pdf", "content_base64": "YQ==",
+            })).isError
             # The same URL and the same source id the reader was refused.
             assert not (await writer.call(
                 "add_source_url", {"url": reachable_pdf_url}
@@ -2803,6 +2873,9 @@ async def test_source_scopes_do_not_imply_one_another(
             ))
             assert (await deleter.call("add_source_text", {
                 "title": "只许删", "content_md": "只许删",
+            })).isError, "sources:delete 不蕴含 sources:write"
+            assert (await deleter.call("add_source_file", {
+                "file_name": "只许删.pdf", "content_base64": "YQ==",
             })).isError, "sources:delete 不蕴含 sources:write"
             assert (await deleter.call(
                 "reparse_source", {"source_id": seeded}
@@ -2873,6 +2946,9 @@ async def test_source_tools_require_a_selected_notebook(mcp_env, scheduled_jobs)
         assert (await client.call("add_source_text", {
             "title": "未选库", "content_md": "未选库",
         })).isError
+        assert (await client.call("add_source_file", {
+            "file_name": "未选库.pdf", "content_base64": "YQ==",
+        })).isError
         assert (await client.call("add_source_url", {
             "url": "https://example.test/a.pdf",
         })).isError
@@ -2918,6 +2994,9 @@ async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
         )).isError
         assert (await client.call("add_source_text", {
             "title": "只读成员", "content_md": "只读成员写不进来",
+        })).isError
+        assert (await client.call("add_source_file", {
+            "file_name": "只读成员.pdf", "content_base64": "YQ==",
         })).isError
         assert (await client.call(
             "reparse_source", {"source_id": seeded["source_id"]}

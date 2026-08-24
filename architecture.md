@@ -38,6 +38,8 @@
 
 Parser ProviderChain 是生产 ingestion 的唯一解析路由，启动拓扑为 self-hosted MinerU → MinerU cloud → builtin 三环；链序用 `after`/`before` DAG 表达并以稳定 ID 处理并列，不允许整数 priority。`app.bootstrap` 把 host 经 repository/runtime 的 domain port 注入 service，service 不依赖 SDK/registry。Runner 在任何 provider I/O 前冻结全链 core route，随后才做实时 availability；配置 self-hosted 后只能降级到 builtin。插件 probe 与 core admission/materialization 物理分层，workbook 拒收前零资产写，accepted materializer 才替换资产。URL 的 self-hosted/builtin 共享一次临时下载，同一来源的锁覆盖资产替换、parse、element replacement 与 chunk marker 发布。旧 dispatcher 与 facade patch seam 已删除，不保留双路真源。
 
+`.zip` 由同一 backend parser capability registry 投影到上传校验、系统配置、前端格式提示与 MCP `add_source_file`，固定路由到 builtin `markdown_bundle`，不进入 MinerU。原始 ZIP 是一个来源；解析器只在内存中读取安全、唯一、stored/deflate 的包内成员，稳定遍历所有 Markdown，按每份 Markdown 自身目录解析相对图片并经既有 `persist_image` 端口落资产，从不把归档解到宿主文件系统。整包结构/总量错误原子拒绝，单图缺失或不支持只降级为图注/描述文本；重解析继续处于同一来源锁与资产代际替换边界内。
+
 Ask reasoning 与 Deep Report 的应用编排都已迁到 `backend/app/application` 的不可变 stage envelope。Ask 的 prepared input、retrieval evidence、response draft、committed answer 是四个所有权交接点，其中 response draft 由**可注入**的 `ResponseDraftStage`（入口 `execute_response_draft_stage`）产出、默认实现 `DefaultResponseDraftStage` 就是既有内联的合成/绑定逻辑，它只收冻结的 `ResponseDraftInput`（激活与 fail-open 降级之后的证据 + 检索前的披露事实）、只欠一份 `ReasoningResponseDraft`，取消在 seam 前与提交边界各检查一次；提交边界按 prepared 复核 mode 与身份元数据（`notebook_id`/`question`/`conversation_id`/`user_id`/`job_id`/`asked_at`，不一致即 `StageBoundaryError`），`model_errors` 由 core 在 stage 返回后、检索 ContextVar reset 之前统一填充；Report 明确交接 confirmed planning、generated sections、core final audit artifact 与 committed report。application 的精确 import allowlist 禁止 implementation/SDK/registry 反向依赖。两条流水都显式绑定 source scope、point-specific retrieval run、取消权威、非空 actor 与注入连接探针；retrieval run 仍是 embedding single-flight 与 leaf-I/O semaphore 的唯一所有者，stage wrapper 不占外层 slot，也不移动任何 KG/chunk/element/PPR leaf。Report planning 与 generation 各创建新 run，保留可变 `ReasoningResult` 作为 generation 内的独占工作副本，不做 evidence/id-map JSON 或递归 deep copy。多节 all-retrieval barrier → 至多一次 synthesis → 并行 drafting、单节零 synthesis、final editor、claim ledger、citation remap、整篇图片 batch、zero-body failed 与 retry 顺序均不变；final-audit 边界额外禁止改写 section Markdown。连接持有或 authority 漂移抛显式 boundary error，不能伪装成 optional retrieval miss。
 
 流式 Ask 的完成后扩展只有 `ask.completed_observer` 一个 point-specific host，它把既有 agent-profile、retrieval-experience 与 search-profile 三段后处理迁成三个内建 contribution。唯一组合根把 host 作为 domain port 注入 runtime，workflow 不 import SDK/registry。执行顺序保持 answer save → job done/unregister → browser final → agent-profile → reasoning-only retrieval-experience → search-profile → sentinel；三个 observer 仍串行、各自 fail-open，身份能力分别只有 notebook+actor、零身份、actor。入口/每贡献边界都用无 I/O connection probe 防止带 lease 调用插件；无插件或无适用 contribution 不触碰 clock/event/context/I/O。同步 POST Ask 与 MCP Ask 不进入该 streaming completion 口径，facade 没有新增公开插件 seat。
@@ -96,7 +98,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 
 ### 2.3 API、模型与领域服务
 
-- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供默认二十二个 core 工具（七个 Memory/context、四个 knowhow、一个引用点查、五个来源管理、三个构建与两个库理解）的 scoped Streamable HTTP 面；`CORE_TOOLS` 是默认二十二个内建前缀；`PUBLIC_TOOLS`、静态 guard 与默认 server-local discovery 均来自同一冻结组合目录；`deps.py` 承载访问控制依赖。
+- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供默认二十三个 core 工具（七个 Memory/context、四个 knowhow、一个引用点查、六个来源管理、三个构建与两个库理解）的 scoped Streamable HTTP 面；`CORE_TOOLS` 是默认二十三个内建前缀；`PUBLIC_TOOLS`、静态 guard 与默认 server-local discovery 均来自同一冻结组合目录；`deps.py` 承载访问控制依赖。
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑；`kg/maintenance_jobs.py` 独立拥有 relink/rebuild 的共享单飞槽和后台任务编排，算法仍归 `KnowledgeLifecycleService`。
@@ -309,7 +311,7 @@ run 收尾时，`outline_synthesis.plan_outline_sections` 把终态大纲的证�
 
 ### 3.4 Memory 与 Agent MCP
 
-`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 七个显式 registrar 捕获精确 22-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。
+`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 七个显式 registrar 捕获精确 23-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/scope/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
 使用确定性 preview。外部 Agent 通过 `propose_memory` 只能写 candidate；同一用户、同一 notebook
@@ -323,19 +325,19 @@ evidence，不提供原始 revision/provenance 浏览。批准前会重新校验
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
 
-默认 core 公开二十二个工具，`mcp_server.CORE_TOOLS` 由 registrar 捕获该前缀；`mcp_server.PUBLIC_TOOLS` 是同一默认冻结组合目录（含默认受信 provider）的权威清单：Memory/context 七工具
+默认 core 公开二十三个工具，`mcp_server.CORE_TOOLS` 由 registrar 捕获该前缀；`mcp_server.PUBLIC_TOOLS` 是同一默认冻结组合目录（含默认受信 provider）的权威清单：Memory/context 七工具
 `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、
 `get_memory`、`ask_notebook`、`propose_memory`；knowhow 四工具 `list_knowhow_tables`、
 `get_knowhow_discrimination`、`get_knowhow_row` 与 `put_knowhow_cell_code`；引用点查
-`get_cited_element`；来源管理五工具 `add_source_text`、`add_source_url`、
+`get_cited_element`；来源管理六工具 `add_source_text`、`add_source_file`、`add_source_url`、
 `get_source_status`、`reparse_source` 与 `delete_source`；构建三工具 `build_kg`、
 `build_retrieval_index` 与 `get_build_status`；库理解两工具 `get_notebook_profile` 与
 `add_observation`（Agentic Memory P3）。读取需相应 read scope，格子代码写入需
 `knowhow:code`，观察记录写入需 `agent_observation:write`。
 
-来源管理与构建工具的权限面刻意比浏览器窄（P2 后浏览器 HTTP 面的六个内容写能力已翻 admin、组管理员可写，MCP/Agent 面**仍恒 owner**、刻意不跟——长期 token 是独立凭据）。`add_source_text`/`add_source_url`/
+来源管理与构建工具的权限面刻意比浏览器窄（P2 后浏览器 HTTP 面的六个内容写能力已翻 admin、组管理员可写，MCP/Agent 面**仍恒 owner**、刻意不跟——长期 token 是独立凭据）。`add_source_text`/`add_source_file`/`add_source_url`/
 `reparse_source` 需 `sources:write`，`build_kg`/`build_retrieval_index` 需
-`maintenance:execute`，五者一律 **owner-only**：token 的白名单可能包含 owner 只是以只读成员
+`maintenance:execute`，六者一律 **owner-only**：token 的白名单可能包含 owner 只是以只读成员
 身份加入的笔记本，在那里发起写入或后台构建等于把共享的读侧升级成写侧。`delete_source` 另需
 `sources:delete`（`sources:write` 不蕴含它），并且**只能删除 Agent 添加的来源**——判据是 v48
 `sources.agent_profile_id` 非空的 `agent_created` 投影，与证明笔记本归属的是同一次单行读取；

@@ -13,11 +13,11 @@
 - 由部署者统一管理 OpenAI-compatible chat、embedding 与 rerank 服务；workload 绑定及每服务 `max_concurrency` 集中写入一个 TOML
 - 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
 - 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
-- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX、旧版二进制 XLS 的 multipart 文件上传（经共享 KG job scheduler 异步执行）。添加来源弹窗会从中间压缩过长的待上传文件名，保留末尾/扩展名并通过悬停显示全名；拖放与文件选择共用同一套入列校验——拖放由前端显式接管而不交给浏览器按 `accept` 静默过滤，入列时被跳过的文件（类型不支持——旧版 Office 另给「另存为」引导、超过单文件大小上限、超出单次批量上限）在弹窗内逐条持久列出文件名与原因，不允许只靠短暂 toast；有效文档上限判定会计入整个暂存批次，批次大于剩余名额时在提交前直接禁用上传，并说明剩余名额、超出数量和处理办法。
+- 支持 PDF、Markdown、Markdown 图片 ZIP、DOCX、PPTX、CSV、XLSX、旧版二进制 XLS 的 multipart 文件上传（经共享 KG job scheduler 异步执行）。添加来源弹窗会从中间压缩过长的待上传文件名，保留末尾/扩展名并通过悬停显示全名；拖放与文件选择共用同一套入列校验——拖放由前端显式接管而不交给浏览器按 `accept` 静默过滤，入列时被跳过的文件（类型不支持——旧版 Office 另给「另存为」引导、超过单文件大小上限、超出单次批量上限）在弹窗内逐条持久列出文件名与原因，不允许只靠短暂 toast；有效文档上限判定会计入整个暂存批次，批次大于剩余名额时在提交前直接禁用上传，并说明剩余名额、超出数量和处理办法。
 - **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
 - PDF/DOCX/PPTX/XLSX 走 MinerU（公式/表格/版面、内嵌图片）；MinerU 不可用或没有可用产出时各自回落本机库解析。每条本地链都是**分级降级**而不是一步跌到最粗的抽取器：PDF 走 PyMuPDF4LLM 版面感知 Markdown、pypdf 仅最后兜底；DOCX 走 mammoth，其语义化 HTML 保住标题层级、列表标记与表格结构（`table_html` 存入 metadata），python-docx 的逐段落/逐行拍平降为最后兜底；PPTX 走 python-pptx，连原始幻灯片 XML 抽取整块丢失的幻灯片表格、图表标题、组合形状与演讲者备注一并取回，原始 XML 抽取降为最后兜底；XLSX/XLSM 走 openpyxl。兜底路径不持久化 DOCX 内嵌图与 PPTX 图片（URL 来源可能只是个短命临时文件），mammoth 的 base64 data URI 直接丢弃、不塞进元素正文。这类降级对**每一种有损**兜底都会披露（PDF、DOCX、PPTX），不只 PDF；工作簿刻意排除——openpyxl 兜底对单元格值全保真，打警告是噪音，而且 MinerU 不支持工作簿的部署会得到一个用户永远消不掉的假警告。工作簿的 MinerU 非空产出还要先与工作簿自身的非空**行数与格数**做一次本地零模型覆盖对账才被采信，**任一维度**覆盖不足即整份丢弃、改用 openpyxl。两个维度缺一不可：只数行看不出宽表下最常见的那种残缺——MinerU 保住了每个 `<tr>`，却把渲染页宽之外的列整片丢掉；非表格文本元素每条最多只顶一行一格，图片块两个分子都不计入。采信阈值为 0.8，行与格两个维度共用（`backend/app/services/parsers.py` 的 `MINERU_WORKBOOK_MIN_ROW_COVERAGE`；数值仅在本节登记）。云端上传路径的工作簿走同一道对账，且内嵌图片只在产出被采信之后才持久化，被拒的产出不会留下孤儿资产。触发警告时来源仍为 `extracted`，对外只暴露 `parse_quality_warning`。旧版二进制 `.xls`（前 OOXML 时代的 BIFF 格式）没有任何 MinerU 分支——MinerU 根本不支持这种容器——一律直接走 `xlrd`（该格式唯一的纯 Python 读取器）；其余旧版二进制 Office 格式（`.doc`、`.ppt`）仍不受支持，界面会引导用户另存为 `.docx`/`.pptx`。
 - MinerU 抽取的内嵌图片在来源正文内联展示；图注与文字保持可搜索。**Markdown 来源的内嵌图片走同一套护栏**：`![alt](src)` 带 alt 文字时，alt 作为图注写入元素 `metadata.caption`，与 MinerU 解析出的 PDF 图注同等参与检索（进 chunk）；无 alt 的普通路径图片仍不产出元素（除非后面跟着下述「图片描述块」）。`src` 为 `data:image/{png,jpeg,gif,webp};base64,...`（与 MinerU 图片资产同一套 mime 白名单，识别不了的 mime 如 svg/bmp/avif 不会被解析为图片，其 `![alt](data:...)` 字面量无论独占一整段、与其他文字混排，还是出现在列表项/标题/表格单元格中，都会被剥离只留 alt 文本，base64 绝不进入元素文本）时，图片字节解码后落为来源图片资产、来源详情正常显示；单图字节上限与每源张数上限复用 MinerU 图片配置（`MINERU_MAX_IMAGE_BYTES` 默认 5MB、`MINERU_MAX_IMAGES_PER_SOURCE` 默认 200），`MINERU_RETURN_IMAGES=false` 时同样不落资产——该开关现在门控所有来源的图片持久化，不再只管 MinerU 解析出的文档。data URI 本身绝不写入元素 metadata；无 alt、未成功落资产、又没有图片描述块的 data URI 图片不产出元素。已知边界：只处理独占一整段的图片，列表项/表格单元格内的内嵌图片只保留 alt 文本、不落资产。**图片描述块**：图片行之后（中间可以隔空行，也可以紧贴着写——引用块能打断段落）紧跟一个引用块，块内第一行只有 `**图片描述**` 标记时，该引用块里**所有**引用行都是这张图的描述：描述文本折进图片元素的 `metadata.description`，并与图注一起构成元素文本进 chunk。因此**带描述的图片即使没有 alt 图注也可被检索**（导出工具产出的图往往没有 alt，描述块是它们唯一的入口），引用附图旁边的说明在没有图注时也回退显示这段描述（沿用同一个图注截断长度）。折叠掉的只是「引用块另成一条段落元素」这件事——同一段话不会占两个检索位；知识图谱抽取仍按普通段落读它的逐字原文。四条形状判据（判宽了就会把正常引用吞成描述）：标记行必须只有标记本身，粗体与行尾冒号可有可无，标记后面还跟正文时必须隔一个冒号（`> **图片描述**：正文`），所以「图片描述如下：……」这类正常引用不算；引用块里不能出现围栏代码块/缩进代码块/HTML 块（它们的正文不挂在 inline 节点上，折进去就是静默丢内容），而列表/标题/表格/嵌套引用照收——约定说的是「后续的**所有**引用行」，图片描述常带项目符号；标记之后必须还有**渲染后**非空的引用文本（只有一个光标记、或只有 `<br>`／空 alt 图片的引用块保持原样）；图片与引用块之间**按原文**不能隔着别的内容（链接引用定义 `[foo]: /url` 不产出任何 token，但它是原文里的内容）。一张图的多段描述折成**一个**元素，因此不再被600 字 chunk 切分——超长描述的向量只覆盖 embedding 截断长度之内那段（已登记的取舍，词法检索不受影响）。引用本机图片文件路径的 markdown 可先用 `scripts/embed_md_images.py` 就地转成 data URI 再上传（见 README「产品流程」一节）。
-- **Markdown + 图片压缩包上传**：添加来源弹窗还接受一个压缩包，或直接拖入一个文件夹——只要它把 markdown 与其引用的图片保持相对路径放在一起，也就是 Notion/语雀/HackMD 导出天然就是的形态。一套零依赖的浏览器端纯函数管线（`frontend/app/md-bundle.ts` / `bundle-intake.ts`）解析压缩包的 central directory、用浏览器原生 `DecompressionStream('deflate-raw')` 解压、按包内/文件夹相对路径解析每个 `![alt](src)`（处理 `./`、`../`、`%20` 等 URL 编码）、按**魔数**而非扩展名嗅探匹配到的文件、把匹配上的 png/jpeg/gif/webp 图片内联成 base64 `data:` URI——与上面 markdown 摄取护栏认的形态完全一致——最终把这份自包含 markdown 原样交给既有上传接口。`.zip` 只是前端的交换格式：它绝不进入后端的支持后缀白名单，且只有独占一整段的图片才会被内联，与服务端判据逐字镜像，避免前端配对成功而服务端悄悄丢弃。配对回执在弹窗内**持久**列出（不是一闪而过的 toast），分五类：已内联、未找到（附带若干条近似候选路径）、不支持（语法/位置/格式不符，或超过单图/单来源上限）、云端 `http(s)` 链接（v1 不拉取，原始 Markdown 文字保留）、无图注的图片（提示上传后无法被检索——图注是图片进入检索的唯一入口，见下文「引用附图（本段附图）」；紧跟着「图片描述」引用块的图片**不**报这一条，它已经可以被检索到）。`GET /system/config` 另发 `source_image_max_bytes` / `source_image_max_per_source`（镜像部署的 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`，旧后端缺字段时为 `null`——含义是「拿不到这个上限，不做本地预检，交给服务端护栏兜底」；显式下发的 `0` 是**合法值**且语义相反：一张都不持久化，浏览器按「图片存储已关闭」整体跳过内联）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为这个开关此前从不存在，不能让旧部署凭空弹出一条假警告），供配对阶段预检单图上限并在图片存储关闭时整体跳过内联、给出持久提示。精确护栏数值见[下表](#markdown-压缩包上传护栏)。
+- **Markdown + 图片压缩包上传**：`.zip` 已是内建解析器的一等格式。浏览器原样上传压缩包；后台把原包作为一个来源保存并独立于 MinerU 解析，按稳定的包内路径顺序处理所有 `.md`/`.markdown` 成员，并给元素写入 `metadata.bundle_path`。本地图片目标会先 URL 解码并去掉 query/fragment，再以引用它的 Markdown 成员所在目录为基准解析（也支持包根绝对路径），按 png/jpeg/gif/webp **魔数**准入后经既有来源图片资产端口落库。压缩包从不解到宿主文件系统。危险/重复路径、加密、不支持的压缩算法、没有 Markdown、保留文件数过多、压缩包损坏，或解压后总量超过普通单来源上传上限，都会拒绝整包。单张图片缺失、远程、损坏或格式不支持则逐图 fail-open：原 `src` 与图注/描述文字仍保留，有图注/描述时仍可检索，只是没有 `<img>` 可渲染。既有图片存储开关、单图大小与每来源图片数护栏继续在资产持久化时生效。直接拖入**文件夹**仍是兼容路径：零依赖浏览器管线（`frontend/app/md-bundle.ts` / `bundle-intake.ts`）解析相对路径、按魔数嗅探并内联 data URI，保留原来的五类持久配对回执以及偏保守的整段图片/图片描述镜像。后端 ZIP 与浏览器文件夹的精确护栏见[下表](#markdown-压缩包上传护栏)。
 - **精确短语（用户检索语法）**：用**英文半角双引号**括起来的内容整体参与检索，不做分词。`什么是 "static timing analysis" 的原理` 里那段短语会作为一个不可拆的词项进入词法候选（SQLite 走带引号的 FTS5 词项，PostgreSQL 走转义后的 `ILIKE` 子串），在关键词覆盖率里也只算**一项**——整段命中才得分，散落着 `static`/`timing`/`analysis` 的文档一分不给，因此含完整短语的原文会排在前面；同时这段短语无条件获得一次精确定位探测（下文的精确标识符通道），命中的小节整体取齐。引号是**强偏好**而不是硬过滤：语义检索照常进行，不会因为某篇文档缺这段短语就把它从结果里剔除。打分侧（关键词覆盖率与 BM25/RRF 排序）会归一空白，所以文档里跨换行、多空格写的同一段短语照样算命中；**候选生成侧做不到**——FTS5 trigram 短语与转义后的 `ILIKE` 都是字面连续匹配，写成 `static   timing\n analysis` 的文档若只靠这段短语就捞不上来（要抹平它得加一列归一化的索引文本，而无索引的正则扫描是本层禁止的全库扫）。这时查询里其余词项与语义召回照常工作。识别有三条边界：只认英文半角双引号（中文排版引号 `“…”` 在散文里是普通引用，认它会把大量既有提问悄悄变成带约束的提问）、引号内至少 3 个字（SQLite 的三字符索引更短的索引不到）、一段文本里**不同**的引号内容超过 4 段时整条语法不生效（那是 JSON 之类的机器文本，引号在那里是标点不是约束）；数的是不同内容而非出现次数——推理与报告的内部检索问题会把同一段短语在目标、规范化问题和每条必答主题里各留一份。提问框与深度报告输入框在你敲下引号的当下就回执识别结果——识别到哪几段、或为什么这次没识别——不会让一次没生效的约束静默通过。规划与反思提示语在问题真的带引号时才追加一句「原样保留引号内容」，因此模型改写子查询也不会把它拆散；笔记本搜索框只是整串子串匹配，本来就不分词，那里**被识别的**那几段的引号会被去掉（未被识别的引号原样保留，仍可用来搜字面 JSON/代码）。私有 Memory 的候选生成是把整串当一个短语探测，因此每段被识别的短语会作为额外的 OR 词项进同一条有界查询，让「只含该短语、不含整句」的记忆也能进候选池；评分侧仍拿原串，短语必须整段命中。
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 语义检索（每 notebook 独立缓存）。SQLite FTS5 保留整句精确匹配加分，同时以安全引用的 OR 词项召回拉丁字母/数字词、重叠中文三字片段，以及 `_`/`-`/`.` 连接的完整标识符（`set_db` 这类，受「须含字母、长度 ≥4、至多 16 个」约束）；PostgreSQL 在原生 trigram 候选生成前拆分同一组有界词项，并对 `ILIKE` 分支转义 LIKE 元字符，使 `set_db` 这类词项保持字面量，不会退化成通配把 `setXdb` 也拉进候选。带索引的 Chunk/KG 路径合并有界 ANN 与词法候选窗口，带索引的 Relation 检索按方向平衡补入与词法命中 KG 端点相邻的关系并保留端点顺序。纯词法候选按 keyword-only 参与融合，不会被写入伪造的零语义分。
 - 内置关系在抽取与图消费者之间共用同一套有向端点契约。违反核心类型配对的历史行仍可审计，但不能影响 graph/PPR/canonical/relation 检索；管理员定义对象类型可继续使用已知边 id 扩展。可选跨元素补全按来源代次的持久 keyset 水位推进有界页面，只使用同源索引候选并经过双阶段验证、代次复核与灰度闸，默认关闭；它不会做文档级或整书全表扫描。
@@ -558,7 +558,7 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
 检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 22 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 23 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -610,8 +610,8 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 `-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十二个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 22 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十三个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 23 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
@@ -620,7 +620,7 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | Knowhow 读取 | `list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` | `knowledge:read` |
 | Knowhow 代码写入 | `put_knowhow_cell_code` | `knowhow:code` |
 | 引用点查 | `get_cited_element` | `knowledge:read` |
-| 来源管理 | `add_source_text`、`add_source_url`、`reparse_source` | `sources:write`（owner-only） |
+| 来源管理 | `add_source_text`、`add_source_file`、`add_source_url`、`reparse_source` | `sources:write`（owner-only） |
 | 来源删除 | `delete_source` | `sources:delete`（owner-only，且仅限 Agent 添加的来源） |
 | 来源状态读取 | `get_source_status` | `knowledge:read` |
 | 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
@@ -628,7 +628,7 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-22 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+23 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/scope/allowlist/成员权，所有写 scope 都强制经过 owner-only
 notebook 闸。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
 先被完整构造出来才裁剪。这份有界拷贝随后被逐步、可见地压缩（先缩最长字符串，再丢 map 条目，
@@ -670,8 +670,14 @@ scope 时整行在结果截断**之前**被过滤，且不计入截断计数，�
 UTF-8 字节计）。提交的标题逐字存进来源行的标题；磁盘文件名是另一个**派生**值——经净化、压到
 200 UTF-8 字节（好让 `{source_id}_` 前缀与 `.md` 后缀一起仍装得进 255 字节的路径组件）、再缀上
 后缀——标题过长时被压缩的只有这个文件名，存下来的标题不受影响。重复提交
-逐字节相同的内容会复用既有来源并回传 `reused: true`，不产生重复行。`add_source_url` 按 URL
-添加 PDF，服务端会先探测，取不到或不是 PDF 一律拒绝。两者都受笔记本文档数量上限约束，唯一的
+逐字节相同的内容会复用既有来源并回传 `reused: true`，不产生重复行。`add_source_file` 通过
+`content_base64` 接收本地文件的精确字节，只允许严格标准 base64（无空白、无 data URI 前缀），
+同时接收原始 `file_name` 与可选标题。文件后缀准入直接来自后端解析注册表，因此与浏览器本地上传
+支持面一致：PDF、Markdown、DOCX、PPTX、CSV、XLSX/XLS 与 Markdown ZIP 均可上传。解码结果须
+非空且不超过部署普通单来源上限；文件名须装入一个 255-byte UTF-8 文件系统组件，可选标题沿用
+200 字符来源标题上限。MCP 层不会自己拆 ZIP：原字节进入普通上传/去重/后台调度路径，再由内建
+Markdown bundle 解析器按与浏览器上传完全相同的方式持久化相对路径图片。`add_source_url` 按 URL
+添加 PDF，服务端会先探测，取不到或不是 PDF 一律拒绝。三者都受笔记本文档数量上限约束，唯一的
 例外是「重复提交解析到既有来源」——它不新增文档，在已满时仍然放行，否则上面那条幂等承诺恰好
 会在最需要重试的时候失效。解析
 在后台进行，用 `get_source_status` 轮询：它返回 `parse_status`、`status`、`element_count`、
@@ -1608,16 +1614,15 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 | 上限 | 数值 |
 | --- | ---: |
-| `MD_BUNDLE_MAX_ENTRIES`（压缩包保留条目数，去掉目录条目/`__MACOSX` 资源叉/精确重复项之后） | 2,000 |
-| `MD_BUNDLE_MAX_DECLARED_ENTRIES`（EOCD 声明条目数的扫描前上限，`MD_BUNDLE_MAX_ENTRIES × 4`） | 8,000 |
-| `MD_BUNDLE_TOTAL_BYTES_FACTOR`（解压后总字节上限系数，`× source_upload_max_bytes`） | 4 |
-| 压缩输入上界（读进内存**之前**按 `File.size` 判定）：`min(source_upload_max_bytes × 4, 绝对顶) + 容器余量`。解压预算内 + 有界容器开销的包绝不在此被拒；压缩态超过绝对顶的归档一律拒绝——已登记的浏览器安全取舍（请把 md 拆出直接上传） | 见公式 |
-| `BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES`（双重身份：`source_upload_max_bytes` 未到达时的回退值——刻意不沿用「不预检」；**同时**是绝对浏览器安全顶——顶配部署按 `× 4` 公式会放行 4 GiB 整包分配；取值 = `SOURCE_UPLOAD_MAX_MB` 的协议最大值） | 1,024 MiB |
-| `BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES`（zip local/central 头、EOCD 与不可压数据 deflate 微膨胀的有界余量，保证贴着解压预算的合法包不因容器字节被误拒） | 4 MiB |
-| `MD_BUNDLE_MAX_SUGGESTIONS`（每张未匹配图片给出的近似候选路径数） | 3 |
-| `BUNDLE_DIR_MAX_DEPTH`（拖入文件夹的遍历深度） | 16 |
-| `BUNDLE_DIR_MAX_FILES`（拖入文件夹的文件数上限，与 `MD_BUNDLE_MAX_ENTRIES` 同值） | 2,000 |
-| 文件夹总量上界（读任何文件内容**之前**按累加的 `File.size` 判定）：`min(source_upload_max_bytes × 4, 绝对顶)`——与上面压缩输入上界共用同一条解压后总量线与同一个绝对顶，但**不加**容器余量（文件夹条目的 `File.size` 本就是真实内容字节数，没有 zip 头/deflate 微膨胀这层容器开销要抵消） | 见公式 |
+| `MARKDOWN_BUNDLE_MAX_ENTRIES`（后台保留的非目录文件数，已丢弃 `__MACOSX`） | 2,000 |
+| 原始 ZIP 上传大小 | 部署普通单来源的 `source_upload_max_bytes` 上限 |
+| 包内声明的解压后总字节数 | 同一个 `source_upload_max_bytes` 上限；逐成员读取另限制为其声明大小再加 1 字节 |
+| 允许的 ZIP 压缩 | 只接受 stored 或 deflate；加密成员拒绝 |
+| 允许的文档/图片成员 | `.md` / `.markdown`；图片按魔数只认 png/jpeg/gif/webp |
+| `BUNDLE_DIR_MAX_DEPTH`（浏览器拖入文件夹兼容路径） | 16 |
+| `BUNDLE_DIR_MAX_FILES`（拖入文件夹的文件数） | 2,000 |
+| 文件夹总量上界（读取内容前检查）：`min(source_upload_max_bytes × 4, 1,024 MiB)` | 见公式 |
+| `MD_BUNDLE_MAX_SUGGESTIONS`（每张未匹配文件夹图片的近似候选路径数） | 3 |
 | `INLINE_TOO_LARGE_IMAGE_LINES`（超限时逐条列出的图片明细行数，按体积降序） | 3 |
 | `BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH`（`source_upload_max_files_per_batch` 尚未到达时，**内联之前**那道名额闸的回退值；取值 = 后端固定的 `SOURCE_UPLOAD_MAX_FILES_PER_BATCH`） | 20 |
 

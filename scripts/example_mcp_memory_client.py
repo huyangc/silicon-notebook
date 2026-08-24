@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -29,6 +31,7 @@ REQUIRED_TOOLS = {
     "search_agent_memory",
     "search_notebook_context",
     "propose_memory",
+    "add_source_file",
 }
 
 
@@ -94,6 +97,19 @@ def _arguments() -> argparse.Namespace:
             "counts -- never the block text itself, since this script's "
             "output is meant to be pasted into chat/logs."
         ),
+    )
+    parser.add_argument(
+        "--source-file",
+        default="",
+        help=(
+            "Upload one local PDF/PPTX/DOCX/XLSX/Markdown/ZIP source through "
+            "add_source_file (requires sources:write)."
+        ),
+    )
+    parser.add_argument(
+        "--source-title",
+        default="",
+        help="Optional display title for --source-file; defaults to its file name.",
     )
     return parser.parse_args()
 
@@ -180,6 +196,23 @@ async def _run(args: argparse.Namespace) -> None:
             )
         )
         print(f"Selected {selected.get('name', notebook_id)} ({notebook_id}).")
+        if args.source_file:
+            source_path = Path(args.source_file).expanduser()
+            if not source_path.is_file():
+                raise RuntimeError(f"source file does not exist: {source_path}")
+            uploaded = _payload(
+                await session.call_tool(
+                    "add_source_file",
+                    {
+                        "file_name": source_path.name,
+                        "content_base64": base64.b64encode(
+                            source_path.read_bytes()
+                        ).decode("ascii"),
+                        "title": args.source_title,
+                    },
+                )
+            )
+            _print_result("Uploaded source (background parsing queued)", uploaded)
 
         formal = _payload(
             await session.call_tool(

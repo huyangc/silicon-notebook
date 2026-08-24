@@ -13,9 +13,11 @@ RED-first contracts frozen here:
 - pipeline status/event order equals the frozen transaction_phases.json.
 """
 import json
+import io
 import threading
 import time
 import types
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -79,6 +81,41 @@ def _element(text):
     return types.SimpleNamespace(
         element_type="paragraph", location_label="p1", text=text, metadata={}
     )
+
+
+def test_markdown_zip_upload_persists_relative_images_in_background_pipeline(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="bundle"))
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "质量和流程/notes.filled.md",
+            "![流程图](images/图片12.png)\n\n> **图片描述**\n> 后台持久化。\n",
+        )
+        archive.writestr("质量和流程/images/图片12.png", png)
+
+    created = repo.upload_sources(
+        notebook.id,
+        [UploadedSourceFile(
+            file_name="质量和流程.zip",
+            content_type="application/zip",
+            content=archive_bytes.getvalue(),
+        )],
+        scheduler=None,
+    )
+
+    source = repo.get_source(created[0].id)
+    assert source.parse_status == "extracted"
+    asset_ids = repo.source_asset_ids(source.id)
+    assert len(asset_ids) == 1
+    images = [
+        element for element in repo.source_elements(source.id)
+        if element.element_type == "image"
+    ]
+    assert len(images) == 1
+    assert images[0].metadata["asset_id"] == asset_ids[0]
+    assert images[0].metadata["bundle_path"] == "质量和流程/notes.filled.md"
+    assert images[0].metadata["description"] == "后台持久化。"
 
 
 def _seed_queued_source(repo, notebook_id, file_path="/tmp/s.md"):

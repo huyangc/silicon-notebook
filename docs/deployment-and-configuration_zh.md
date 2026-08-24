@@ -714,7 +714,7 @@ MINERU_TIMEOUT_SECONDS  # MinerU 调用超时
 MINERU_MAX_RETRIES      # 瞬态 HTTP 失败的额外尝试数，0..5（默认 2，即总共最多 3 次）
 MINERU_FORMULA_ENABLE   # true/false
 MINERU_TABLE_ENABLE     # true/false
-MINERU_RETURN_IMAGES    # 是否保留 PDF/DOCX/PPTX/XLSX 文档中的内嵌图片（默认开 true；设 0/false 仅保留文字与图注）
+MINERU_RETURN_IMAGES    # 是否保留来源图片资产，含 PDF/DOCX/PPTX/XLSX 与 Markdown data-URI/ZIP 图片（默认 true；设 0/false 仅保留文字与图注）
 MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出丢弃）
 MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
 ```

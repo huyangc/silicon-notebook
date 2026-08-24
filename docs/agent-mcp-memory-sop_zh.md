@@ -309,6 +309,8 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 
 加 `--profile`（需要 `agent_profile:read`）还会调用 `get_notebook_profile`，只打印块数与字符数——绝不打印正文，因为这个脚本的输出常被复制粘贴进聊天或日志。
 
+要验证非文本摄取，可加 `--source-file path/to/manual.pdf`（也可传 DOCX、PPTX、XLS/XLSX、Markdown、CSV 或 Markdown ZIP），并可选 `--source-title '显示标题'`。这需要 `sources:write`；脚本会把本地精确字节编码成 base64 交给 `add_source_file`，服务端随后排入与浏览器同一解析注册表路径。Markdown ZIP 中应按引用的相对路径保留所有 `.md`/`.markdown` 与图片；后台把原压缩包存为一个来源，并在解析时把命中图片落资产。
+
 ## 7. 回到界面确认候选 Memory
 
 1. 打开 **账户菜单 → 私有记忆**。
@@ -327,7 +329,7 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 - `search_notebook_context` 不返回未确认 candidate。
 - 具备 `memory:read_candidates` 时，`search_agent_memory` 能召回刚提交的 candidate。
 - candidate 在界面显示为“待确认 / Agent 提议”，确认前不进入正式 Ask/搜索/报告。
-- token 带 `sources:write` 时：`add_source_text` 返回来源 id，`get_source_status` 最终报告解析完成，来源列表把它显示为中性的「Agent 添加」徽标。
+- token 带 `sources:write` 时：`add_source_text` 接受 Agent 撰写的 Markdown，`add_source_file` 至少验证一份本地 PDF/PPTX/DOCX/工作簿或 Markdown ZIP；两者都返回来源 id，`get_source_status` 最终报告解析完成，来源列表把它显示为中性的「Agent 添加」徽标。
 - token 带 `maintenance:execute` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
 - `delete_source` 对用户上传的来源拒绝，只有 Agent 添加的来源才能删成功。
 - 带 `ask:execute` 时：`mode="reasoning"` 的 `ask_notebook` 能跑完，不会被客户端超时掐断——运行期间客户端应能看到周期性进度。
@@ -401,6 +403,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | 某个来源或构建写入工具在一个读得到的笔记本上被拒 | 来源管理与构建写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但这些写入永远进不去。唯一例外是 `knowhow:code` 的格子代码写入——它按设计由 scope 决定，只读成员也可写。 |
 | 笔记本复制之后，Agent 添加的来源删不掉了 | 设计如此。深拷贝会清空来源出处，副本里的每一份来源都算用户添加。 |
 | `add_source_text` 回传 `reused: true` | 本笔记本已有逐字节相同的内容，因此复用既有来源而不新建重复行。若那一行原本是用户上传的，它仍算用户添加，不能经 MCP 删除。 |
+| `add_source_file` 拒绝 base64 或 PDF/PPTX/DOCX/工作簿/ZIP 后缀 | 传严格标准 base64，不要空白或 `data:` 前缀，并在 `file_name` 保留原始受支持扩展名。解码后的文件须非空且不超过部署的单来源上传上限。 |
 | `reparse_source` 被拒绝 | 该来源正在解析中。轮询 `get_source_status`，等它稳定后再重试。 |
 | `get_notebook_profile` 返回 `enabled: false` | 部署开关 `AGENT_PROFILE_ENABLED` 关闭，或该笔记本尚未生成过理解——不是错误。 |
 | `add_observation` 报错「this capability is currently disabled」 | 部署开关 `AGENT_PROFILE_ENABLED` 关闭。与上面的读工具不同，写工具会直接拒绝，而不是静默收下一批永远不会被读取的数据。 |

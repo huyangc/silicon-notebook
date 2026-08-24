@@ -15,7 +15,7 @@ Ask 完成后扩展点使用部署配置的协作式 deadline：已开始的同�
 
 Report 完成后扩展点使用独立的部署 deadline。取消或失去终态认领权的旧 generation 不能伪造完成票据：SQLite/PostgreSQL 都用带状态谓词的同一原子 CAS 发布 `done`，只有提交成功才进入 observer host。
 
-外部 Agent MCP 由一个 API-owned tool host 发布启动期冻结目录：七个固定 capability bundle 的精确 22 个内建工具，schema、实时 token/成员权复核、owner-only 写闸、Memory candidate 审核边界、repository/model I/O 与「恰好一次 progress wrapper」不变量均保持不变。`mcp_server.PUBLIC_TOOLS` 就是这份活目录，仍是工具清单的唯一真源。
+外部 Agent MCP 由一个 API-owned tool host 发布启动期冻结目录：七个固定 capability bundle 的精确 23 个内建工具，实时 token/成员权复核、owner-only 写闸、Memory candidate 审核边界、repository/model I/O 与「恰好一次 progress wrapper」不变量均保持不变。来源面通过 `add_source_file` 接受与浏览器同一注册表里的本地格式，包括 PDF、DOCX、PPTX、表格与 Markdown ZIP；`mcp_server.PUBLIC_TOOLS` 就是这份活目录，仍是工具清单的唯一真源。
 
 已认证的深度报告批量导出现由启动冻结的 single `report.exporter` Provider 执行。默认内建 Markdown provider 只在 repository 连接释放后取得不可变、已完成授权收窄的报告视图；文件名和 `reports.zip` 外壳仍由 core 拥有，畸形批次整体拒绝。浏览器既有单篇 Markdown 下载仍只是对已授权详情的本地呈现，因此不增加请求。未来新增用户可见格式必须在同一个 PR 同步交付 backend provider 与 frontend/API parity。
 
@@ -133,7 +133,7 @@ bash scripts/check.sh
 6. 通过链接分享笔记本：小笔记本复制，大笔记本只读加入；组管理员也可以把它共享给整个群组（项目／部门／领域），它会进入每位成员笔记本列表的**「群组」分区**，成员可将其挂为参考库。beta 不提供实时协同编辑。共享库的顶栏标出它的来源（「只读／可管理 · 来自群组《X》」），库名本身始终可见；你自己退出群组、删组或撤销共享之后，如果正开着一本因此读不到的库，界面会当场把你带走；被别人移出或撤销时没有推送通道，会在你切回这个标签页时复核。删除群组只收回访问权，库本身仍属于原作者。
 7. 单份深度报告可另行发布为**免登录**的只读页面：链接由 owner 生成、随时可撤销，页面只含正文与「引用出处」（标题/位置/摘录），不含来源 id、不可打开原始资料。正文与站内共用同一套渲染（公式、表格、可点引用编号），编号点开跳到本页的摘录条目。研究问题原样呈现、不截断（创建时即有 4,000 字上限，前端同步显示护栏；只有该护栏上线前建的旧报告可能超限，那时会显式标注「已截断」）；引用的标题/原始文件名/摘录仍有长度上限，但一旦触顶会显式标注「已截断」，不静默丢尾。
 
-引用本地图片文件的 markdown 来源（例如导出笔记里的 `![alt](img.png)`），可以先用独立小工具 `python scripts/embed_md_images.py notes.md` 把本地图片就地内嵌成 base64 data URI，这样摄取流程无需依赖原始文件路径也能解码并存成资产。添加来源弹窗也能直接在浏览器里做这件事：把一个压缩包或整个文件夹拖进去（只要它把 markdown 与图片保持相对路径放在一起，就是 Notion/语雀/HackMD 导出天然的形态），前端会就地解包、按相对路径配对并内联，跳过的部分在弹窗内持久列出原因。图片行紧跟一个以 `**图片描述**` 起头的引用块时，块内所有引用行都会被当作这张图的描述折进图片元素，与图注一起进入检索——所以没有 alt 图注、只写了描述的图片同样能被搜到。
+引用本地图片文件的 markdown 来源（例如导出笔记里的 `![alt](img.png)`），现在可以直接上传保留这些相对路径的 ZIP。原始压缩包作为一个来源保存并在后台解析，其中每个 `.md`/`.markdown` 都会进入索引，匹配到的 png/jpeg/gif/webp 字节会持久化为来源资产；缺失或不支持的图片不会拖垮整包解析，图注/描述文字仍会保留。拖入文件夹继续使用既有浏览器端配对与 data URI 准备流程；单篇 Markdown 也仍可使用 `python scripts/embed_md_images.py notes.md`。图片行紧跟一个以 `**图片描述**` 起头的引用块时，块内所有引用行都会被当作这张图的描述折进图片元素，与图注一起进入检索——所以没有 alt 图注、只写了描述的图片同样能被搜到。
 
 笔记本内部保持两列布局：左侧是用户导入的来源，主区域依次为**问答**、**知识库**、**记忆**和**深度报告**。
 

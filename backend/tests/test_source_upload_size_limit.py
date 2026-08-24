@@ -1,6 +1,9 @@
 """Per-source file-size limit: one Settings value, one browser mirror, one 413 guard."""
 from __future__ import annotations
 
+import io
+import zipfile
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -83,7 +86,7 @@ def test_authenticated_system_config_exposes_upload_guards(client):
         "source_images_enabled": True,
     }
     assert payload["supported_source_extensions"] == [
-        "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"
+        "pdf", "md", "markdown", "zip", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"
     ]
     assert [row["id"] for row in payload["parser_engines"]] == [
         "mineru_self_hosted", "mineru_cloud", "builtin"
@@ -259,6 +262,25 @@ def test_upload_exactly_at_configured_single_file_limit_is_accepted(client):
 
     assert response.status_code == 200, response.text
     assert len(response.json()) == 1
+
+
+def test_browser_upload_accepts_raw_markdown_zip_for_background_parsing(client):
+    headers = _auth(client)
+    notebook = client.post("/api/notebooks", json={"name": "n"}, headers=headers).json()
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("notes.md", "![图](images/a.png)\n")
+        archive.writestr("images/a.png", b"\x89PNG\r\n\x1a\nbytes")
+
+    response = client.post(
+        f"/api/notebooks/{notebook['id']}/sources",
+        files=[("files", ("notes.zip", payload.getvalue(), "application/zip"))],
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()[0]["file_name"] == "notes.zip"
+    assert response.json()[0]["parse_status"] == "queued"
 
 
 def test_upload_over_configured_single_file_limit_is_authoritatively_rejected(

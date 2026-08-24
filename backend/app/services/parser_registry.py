@@ -71,6 +71,7 @@ PARSER_ENGINES: tuple[ParserEngineDefinition, ...] = (
             "pdf",
             "md",
             "markdown",
+            "zip",
             "docx",
             "pptx",
             "csv",
@@ -109,6 +110,8 @@ def builtin_parser_id(file_name: str) -> str:
     extension = source_extension(file_name)
     if extension in {"md", "markdown"}:
         return "markdown"
+    if extension == "zip":
+        return "markdown_bundle"
     if extension in {"xlsx", "xlsm"}:
         return "xlsx"
     if extension == "xls":
