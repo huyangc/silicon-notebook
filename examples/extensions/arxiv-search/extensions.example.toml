@@ -1,0 +1,77 @@
+# Sample EXTENSIONS_CONFIG for the arXiv sample plugin.
+#
+# Copy this file somewhere outside the checkout, edit it, and point the backend
+# at it:
+#
+#     EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml npm run start
+#
+# Nothing loads this file by itself. The plugin is off unless a deployment
+# names it here, and this repository ships no default that does.
+#
+# The plugin's `src/` must be importable by the backend's own interpreter —
+# either `pip install -e examples/extensions/arxiv-search` into `PYTHON_BIN`'s
+# environment, or that directory on `PYTHONPATH`.
+
+[extensions."examples.arxiv_search"]
+# Note the module path: the package's `__init__` deliberately does not
+# re-export `BUNDLE`, so this must name `bundle` itself.
+bundle = "silicon_notebook_arxiv_search.bundle:BUNDLE"
+enabled = true
+
+[extensions."examples.arxiv_search".settings]
+# Every key below is optional; the values shown are the defaults. Core computes
+# the accepted key set from the settings model itself, so a misspelled key is a
+# startup failure rather than a silently ignored line.
+
+# The arXiv API endpoint. Must be an absolute http(s) URL with no query string
+# and no fragment. Point it at an internal mirror if you have one — the
+# gap-consult path will then accept that mirror's host for its suggestions too.
+base_url = "https://export.arxiv.org/api/query"
+
+# Records per search page, 1–20.
+max_results = 10
+
+# Per-request read timeout in seconds, 0 < x ≤ 60.
+timeout_seconds = 10.0
+
+# Minimum seconds between two outbound requests, 0–30. arXiv's API terms ask
+# for at least three. Requests are serialised process-wide and spaced by this
+# interval; production pins the backend to one worker, so in that deployment it
+# is a global throttle. Multiple workers or replicas need external coordination
+# — this sample deliberately ships none.
+politeness_interval_seconds = 3.0
+
+# Sent as User-Agent. arXiv asks that automated callers identify themselves.
+user_agent = "silicon-notebook-arxiv-sample/0.1 (+https://arxiv.org/help/api)"
+
+# ---------------------------------------------------------------------------
+# Gap consultation (off by default)
+# ---------------------------------------------------------------------------
+# When a step-by-step answer comes up thin, core may ask installed plugins for
+# pointers to material outside the notebook. Installing this plugin is not the
+# same as agreeing to send question-derived keywords to arxiv.org, so this is a
+# separate, explicit yes. Turning it off leaves the search panel and the import
+# route exactly as they were.
+consult_enabled = false
+
+# Most suggestions one consultation may offer, 1–5. Core caps the run as a
+# whole separately; the smaller of the two wins.
+consult_max_suggestions = 3
+
+# ⚠ Enabling consultation takes TWO settings, and the second one is not here.
+#
+# Core gives the whole gap-consult point a hard deadline —
+# `ASK_GAP_CONSULT_TIMEOUT_SECONDS`, default 4.0 seconds — because it is spent
+# out of a reader's own answer latency. This plugin refuses to start a request
+# it cannot finish inside that deadline, and its own worst case is
+# `politeness_interval_seconds + timeout_seconds` plus a small return margin.
+#
+# With the defaults above that is 13.25 seconds against a 4-second deadline, so
+# consultation would never fire, however many times you set
+# `consult_enabled = true`. A deployment that wants it must also raise
+# `ASK_GAP_CONSULT_TIMEOUT_SECONDS` (accepted range: 0 < x ≤ 30) past that
+# worst case, or lower `timeout_seconds` far enough to fit under it.
+#
+# Refusing early is the intended behaviour, not a limitation to work around:
+# an answer that arrives after the deadline is read by nobody, so spending a
+# politeness slot and a round trip on one is pure waste.
