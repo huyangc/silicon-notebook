@@ -86,7 +86,9 @@ def test_deepseek_v4_uses_workload_thinking_defaults():
     finally:
         provider.close()
 
-    assert [call["kwargs"].get("thinking_mode") for call in raw.calls] == [
+    assert [
+        call["kwargs"].get("deepseek_thinking_mode") for call in raw.calls
+    ] == [
         "disabled", "disabled", "disabled", "disabled", "enabled", "enabled",
     ]
 
@@ -110,7 +112,9 @@ def test_workload_thinking_configuration_overrides_the_default():
     finally:
         provider.close()
 
-    assert [call["kwargs"].get("thinking_mode") for call in raw.calls] == [
+    assert [
+        call["kwargs"].get("deepseek_thinking_mode") for call in raw.calls
+    ] == [
         "disabled", None,
     ]
 
@@ -123,7 +127,7 @@ def test_non_deepseek_kg_service_does_not_receive_provider_specific_extension():
     finally:
         provider.close()
 
-    assert raw.calls[0]["kwargs"].get("thinking_mode") is None
+    assert raw.calls[0]["kwargs"].get("deepseek_thinking_mode") is None
 
 
 class _Chat:

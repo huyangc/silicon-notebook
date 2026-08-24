@@ -515,7 +515,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 cancel_event=cancel_event,
                 bypass_cache=bypass_cache,
                 response_validator=response_validator,
-                thinking_mode=_deepseek_thinking_mode_for(
+                deepseek_thinking_mode=_deepseek_thinking_mode_for(
                     runtime.service.model, configured_thinking_mode
                 ),
             )

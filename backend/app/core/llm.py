@@ -307,7 +307,9 @@ class OpenAICompatibleClient:
         cancel_event: CancelEvent = None,
         bypass_cache: bool = False,
         response_validator: Optional[Callable[[str], bool]] = None,
-        thinking_mode: Optional[Literal["enabled", "disabled"]] = None,
+        deepseek_thinking_mode: Optional[
+            Literal["enabled", "disabled"]
+        ] = None,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -324,6 +326,15 @@ class OpenAICompatibleClient:
             *messages,
         ]
         model = self.model
+        # Defense in depth at the final transport boundary: the OpenAI SDK is
+        # only the carrier for this DeepSeek-private extension.  Even if a new
+        # upstream adapter passes the option incorrectly, never send it to GPT
+        # or another OpenAI-compatible provider.
+        effective_deepseek_thinking_mode = (
+            deepseek_thinking_mode
+            if model.strip().lower().startswith("deepseek-v4-")
+            else None
+        )
         # Some OpenAI-compatible models accept only one provider-defined
         # nucleus-sampling value (for example top_p=0.95).  A physical-service
         # override is authoritative over per-workload call defaults so every
@@ -373,7 +384,7 @@ class OpenAICompatibleClient:
                     model, full_messages, response_schema_hint, self.base_url,
                     temperature=temperature, top_p=effective_top_p,
                     max_tokens=effective_max_tokens,
-                    thinking_mode=thinking_mode,
+                    deepseek_thinking_mode=effective_deepseek_thinking_mode,
                 )
                 # Opt-in HIT gate: only a validator-bearing caller may be served a
                 # cached reply, and only if the cached value still satisfies THAT
@@ -406,12 +417,14 @@ class OpenAICompatibleClient:
         # non-stream paths) uniformly.
         if effective_max_tokens is not None:
             kwargs["max_tokens"] = effective_max_tokens
-        if thinking_mode is not None:
+        if effective_deepseek_thinking_mode is not None:
             # DeepSeek V4 exposes its dual-mode switch as a provider-specific
             # request body field.  OpenAI's SDK deliberately carries such
             # extensions through ``extra_body``.  Callers opt in explicitly;
             # every other workload retains the provider default byte-for-byte.
-            kwargs["extra_body"] = {"thinking": {"type": thinking_mode}}
+            kwargs["extra_body"] = {
+                "thinking": {"type": effective_deepseek_thinking_mode}
+            }
         logger = self.interaction_logger
         record: Dict[str, Any] = {
             "ts": datetime.now().isoformat(),
@@ -425,8 +438,12 @@ class OpenAICompatibleClient:
                 ],
                 "schema_hint": logger.clip(response_schema_hint),
                 **(
-                    {"thinking_mode": thinking_mode}
-                    if thinking_mode is not None else {}
+                    {
+                        "deepseek_thinking_mode": (
+                            effective_deepseek_thinking_mode
+                        )
+                    }
+                    if effective_deepseek_thinking_mode is not None else {}
                 ),
             },
         }

@@ -127,7 +127,7 @@ def test_hot_reload_updates_thinking_policy_without_rebuilding_the_service(
     class ThinkingDelegate(_ChatDelegate):
         def chat_json(self, messages, response_schema_hint, **kwargs):
             del messages, response_schema_hint
-            modes.append(kwargs.get("thinking_mode"))
+            modes.append(kwargs.get("deepseek_thinking_mode"))
             return '{"ok":true}'
 
     provider = RuntimeModelProvider(
