@@ -3,7 +3,7 @@ import random
 import re
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
@@ -307,6 +307,7 @@ class OpenAICompatibleClient:
         cancel_event: CancelEvent = None,
         bypass_cache: bool = False,
         response_validator: Optional[Callable[[str], bool]] = None,
+        thinking_mode: Optional[Literal["enabled", "disabled"]] = None,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -372,6 +373,7 @@ class OpenAICompatibleClient:
                     model, full_messages, response_schema_hint, self.base_url,
                     temperature=temperature, top_p=effective_top_p,
                     max_tokens=effective_max_tokens,
+                    thinking_mode=thinking_mode,
                 )
                 # Opt-in HIT gate: only a validator-bearing caller may be served a
                 # cached reply, and only if the cached value still satisfies THAT
@@ -404,6 +406,12 @@ class OpenAICompatibleClient:
         # non-stream paths) uniformly.
         if effective_max_tokens is not None:
             kwargs["max_tokens"] = effective_max_tokens
+        if thinking_mode is not None:
+            # DeepSeek V4 exposes its dual-mode switch as a provider-specific
+            # request body field.  OpenAI's SDK deliberately carries such
+            # extensions through ``extra_body``.  Callers opt in explicitly;
+            # every other workload retains the provider default byte-for-byte.
+            kwargs["extra_body"] = {"thinking": {"type": thinking_mode}}
         logger = self.interaction_logger
         record: Dict[str, Any] = {
             "ts": datetime.now().isoformat(),
@@ -416,6 +424,10 @@ class OpenAICompatibleClient:
                     for m in full_messages
                 ],
                 "schema_hint": logger.clip(response_schema_hint),
+                **(
+                    {"thinking_mode": thinking_mode}
+                    if thinking_mode is not None else {}
+                ),
             },
         }
         start = time.perf_counter()

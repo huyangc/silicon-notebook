@@ -410,6 +410,40 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
+The optional `[deepseek_thinking]` table controls DeepSeek V4 thinking per
+**chat workload**, using `enabled`, `disabled`, or `provider_default`. The name
+is deliberately provider-specific: `thinking.type` is not an OpenAI Chat
+Completions field. The OpenAI SDK's `extra_body` merely passes DeepSeek's field
+through to its OpenAI-compatible endpoint; another provider implementing the
+same transport is not assumed to support it. The policy is workload-scoped
+rather than service-scoped because one physical chat service may carry both
+reasoning and mechanical structured-output calls.
+
+The checked-in example spells out every current default. `ask_answer`,
+`reasoning_agent`, `graph_chain_verify`, `report_outline`,
+`report_sufficiency`, `schema_induction`, `agent_profile_consolidate`, and
+`retrieval_experience_distill` are enabled. They are one-shot or bounded
+planning/judgement/synthesis calls whose result directly affects the user or a
+durable retrieval policy. Every other current chat workload is disabled. In
+particular, all KG extraction/governance/description passes, chunk-question
+generation, metadata/summary extraction, query/evidence rewriting, report
+section drafting/final audit, Memory preview, and Knowhow formatting/completion
+stay non-thinking. Those paths are mechanical, already receive an upstream
+plan, are human-reviewed, or multiply over windows/chunks/sections; hidden
+reasoning therefore has a much worse quality-per-token ratio. An omitted entry
+uses the same built-in default, while `provider_default` deliberately sends no
+override.
+
+Only for a model whose name starts with `deepseek-v4-`, an explicit mode is sent via
+DeepSeek's OpenAI-compatible
+`extra_body={"thinking":{"type":"enabled|disabled"}}`; no `reasoning_effort` is
+sent. Non-DeepSeek-V4 services do not receive that provider-specific field.
+Unknown workloads, non-chat workloads, and invalid values make configuration
+validation fail rather than being ignored. The resolved mode is frozen with the
+physical route when a call is submitted, so TOML hot reload affects new calls
+without changing queued ones. An explicit mode is part of the LLM response-cache
+identity; `provider_default` requests retain their historical cache keys.
+
 The optional generated-question index uses background chat workload
 `chunk_question_generation` plus the existing `chunk_embedding` workload. Bind both
 before running the offline `question-index` phase. Leaving the rollout mode off is the

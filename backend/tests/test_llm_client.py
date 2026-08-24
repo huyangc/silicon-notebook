@@ -143,6 +143,35 @@ def test_raw_client_preserves_empty_success_for_scheduled_classification(monkeyp
     assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == ""
 
 
+def test_explicit_non_thinking_mode_is_sent_and_logged(monkeypatch):
+    create = _FakeCreate([_Stream()])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    assert client.chat_json(
+        [{"role": "user", "content": "extract"}],
+        "{}",
+        cancel_event=threading.Event(),
+        thinking_mode="disabled",
+    ) == '{"ok":1}'
+
+    assert create.calls[0]["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
+    assert create.calls[0]["stream"] is True
+    assert logger.records[-1]["request"]["thinking_mode"] == "disabled"
+
+
+def test_provider_default_request_does_not_send_thinking_extension(monkeypatch):
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+
+    client.chat_json([{"role": "user", "content": "answer"}], "{}")
+
+    assert "extra_body" not in create.calls[0]
+
+
 def test_streaming_requests_and_logs_exact_usage_trailer(monkeypatch):
     usage = SimpleNamespace(
         prompt_tokens=11,

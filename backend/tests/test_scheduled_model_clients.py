@@ -24,14 +24,16 @@ class _EventLog:
         self.events.append(event)
 
 
-def _service(service_id: str, kind: str, maximum: int = 2) -> ModelServiceDefinition:
+def _service(
+    service_id: str, kind: str, maximum: int = 2, *, model: str = ""
+) -> ModelServiceDefinition:
     return ModelServiceDefinition(
         id=service_id,
         display_name=f"安全服务-{service_id}",
         kind=kind,
         protocol="openai",
         base_url=f"https://{service_id}.example/v1",
-        model=f"safe-{service_id}",
+        model=model or f"safe-{service_id}",
         api_key_env=f"{service_id.upper()}_KEY",
         api_key="sk-private",
         max_concurrency=maximum,
@@ -39,21 +41,89 @@ def _service(service_id: str, kind: str, maximum: int = 2) -> ModelServiceDefini
     )
 
 
-def _registry(*, maximum: int = 2) -> SystemModelServiceRegistry:
+def _registry(
+    *,
+    maximum: int = 2,
+    chat_model: str = "",
+    deepseek_thinking_modes=None,
+    bind_reasoning: bool = False,
+) -> SystemModelServiceRegistry:
     services = {
-        "chat": _service("chat", "chat", maximum),
+        "chat": _service("chat", "chat", maximum, model=chat_model),
         "embed": _service("embed", "embedding", maximum),
         "rerank": _service("rerank", "rerank", maximum),
     }
+    bindings = {
+        "ask_answer": "chat",
+        "query_rewrite": "chat",
+        "kg_extract": "chat",
+        "kg_glean": "chat",
+        "kg_refine": "chat",
+        "retrieval_query_embedding": "embed",
+        "retrieval_rerank": "rerank",
+    }
+    if bind_reasoning:
+        bindings["reasoning_agent"] = "chat"
     return SystemModelServiceRegistry(
-        services,
-        {
-            "ask_answer": "chat",
-            "query_rewrite": "chat",
-            "retrieval_query_embedding": "embed",
-            "retrieval_rerank": "rerank",
-        },
+        services, bindings, deepseek_thinking_modes
     )
+
+
+def test_deepseek_v4_uses_workload_thinking_defaults():
+    raw = _Chat()
+    provider = _provider(
+        registry=_registry(
+            chat_model="deepseek-v4-flash", bind_reasoning=True
+        ),
+        chat=raw,
+    )
+    try:
+        for workload_id in ("kg_extract", "kg_glean", "kg_refine"):
+            provider.chat(workload_id).chat_json([], "{}")
+        provider.chat("query_rewrite").chat_json([], "{}")
+        provider.chat("ask_answer").chat_json([], "{}")
+        provider.chat("reasoning_agent").chat_json([], "{}")
+    finally:
+        provider.close()
+
+    assert [call["kwargs"].get("thinking_mode") for call in raw.calls] == [
+        "disabled", "disabled", "disabled", "disabled", "enabled", "enabled",
+    ]
+
+
+def test_workload_thinking_configuration_overrides_the_default():
+    raw = _Chat()
+    provider = _provider(
+        registry=_registry(
+            chat_model="deepseek-v4-pro",
+            deepseek_thinking_modes={
+                "ask_answer": "disabled",
+                "reasoning_agent": "provider_default",
+            },
+            bind_reasoning=True,
+        ),
+        chat=raw,
+    )
+    try:
+        provider.chat("ask_answer").chat_json([], "{}")
+        provider.chat("reasoning_agent").chat_json([], "{}")
+    finally:
+        provider.close()
+
+    assert [call["kwargs"].get("thinking_mode") for call in raw.calls] == [
+        "disabled", None,
+    ]
+
+
+def test_non_deepseek_kg_service_does_not_receive_provider_specific_extension():
+    raw = _Chat()
+    provider = _provider(chat=raw)
+    try:
+        provider.chat("kg_extract").chat_json([], "{}")
+    finally:
+        provider.close()
+
+    assert raw.calls[0]["kwargs"].get("thinking_mode") is None
 
 
 class _Chat:

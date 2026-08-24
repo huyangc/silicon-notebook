@@ -1028,6 +1028,13 @@ The ingest-time decision is `KG_AUTO_EXTRACT or notebook-already-has-KG`:
 
 So you **opt in once** (build the KG, or set `KG_AUTO_EXTRACT=true`); after that, new documents are auto-extracted and fused. Re-extract a whole notebook from scratch with `POST /api/notebooks/{id}/kg/rebuild`. For bulk/offline builds, see [Offline batch ingestion](./operations.md#offline-batch-ingestion-directory--kg).
 
+For a DeepSeek V4 binding, all model-backed KG passes—initial extraction,
+gleaning, and refinement—explicitly set `thinking.type=disabled` through the
+provider's OpenAI-compatible `extra_body`. Their outputs are structured facts,
+not reasoning traces, so hidden thinking is neither read nor stored. This policy
+also applies to KG availability probes that use `kg_extract`; it does not alter
+Ask, Report, or any non-KG workload.
+
 ### KG build failure isolation
 
 Manual notebook builds/rebuilds create a durable, task-scoped `kg_build_jobs`
@@ -1713,6 +1720,8 @@ Retrieval source scope comes exclusively from the visible-source checkboxes desc
 An earlier revision let the intent planner emit a `source_refs` list that `/ask/intent` resolved against a bounded identity-only catalog by exact normalized match on stable id, display title, or original file name, gated behind a `source_scope_confirmation` review and a signed preview capability, with a `search_evidence(query, source_refs?)` Agent action able to narrow further inside a confirmed run. That whole contract is removed. Exact equality could not honor an abbreviation — asking about "pdagent" when the source is titled "PDAGENT-BENCH: Characterizing, Grounding, and Architecting LLM/VLM Agents for VLSI Physical Design" resolved to zero matches — and because the design failed closed, an ordinary question died with a deterministic 422 that no retry could clear. Since users already own the checkboxes, a second model-side guess added failure modes without adding reach.
 
 #### Model JSON recovery and stream liveness
+
+For DeepSeek V4, `ask_answer` explicitly keeps thinking enabled. It is the one bounded final synthesis call that must reconcile the selected evidence, conflicts, coverage disclosures, and citation wording into what the user reads; spending reasoning tokens there has materially higher leverage than spending them in every KG/chunk extraction window. A strict reasoning Ask may therefore use thinking both in its bounded `reasoning_agent` loop and in final synthesis, while the high-fan-out evidence-production paths stay non-thinking. Deployments may override this per workload in `[deepseek_thinking]`.
 
 `reasoning_agent` decisions and `ask_answer` synthesis are strict-JSON-first. If strict parsing fails, the shared repair seam may accept only a complete object-shaped response with recoverable syntax faults such as missing quotes/commas. The repaired object must stay within the schema example's top-level keys, actual booleans remain booleans, enum-like example values remain in vocabulary, non-finite values are refused, and every nonempty string value must still appear verbatim in the raw response. Truncated objects, arrays/scalars, unknown keys, type confusion, and string reconstruction remain malformed responses. A retriever failure degrades to a terminal persisted Ask response instead of aborting the orchestration on an absent result.
 

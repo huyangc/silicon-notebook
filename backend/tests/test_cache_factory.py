@@ -224,6 +224,18 @@ def test_llm_key_includes_generation_parameters():
     assert base == llm_key("m", msgs, "{}", u, temperature=1.0, top_p=1.0, max_tokens=8192)
 
 
+def test_llm_key_isolates_explicit_thinking_mode_without_colding_defaults():
+    """Provider-default and explicit non-thinking requests are distinct, while
+    omitting the new parameter preserves the historical key material."""
+    msgs = [{"role": "user", "content": "hello"}]
+    u = "https://llm.example.test"
+    default = llm_key("m", msgs, "{}", u)
+    assert default == llm_key("m", msgs, "{}", u, thinking_mode=None)
+    assert default != llm_key(
+        "m", msgs, "{}", u, thinking_mode="disabled"
+    )
+
+
 # --------------------------------------------------------------- fake upstream
 class _FakeStream:
     """流式替身：内容分两块发，finish_reason 只挂在最后一块（真实 SSE 的形状）。"""

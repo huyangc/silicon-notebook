@@ -113,6 +113,44 @@ def test_background_hot_reload_reroutes_an_existing_workload_adapter(
     assert delegates and all(delegate.closed for delegate in delegates)
 
 
+def test_hot_reload_updates_thinking_policy_without_rebuilding_the_service(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
+    path = tmp_path / "model-services.toml"
+    base = _config(
+        service_id="deepseek", model="deepseek-v4-flash", top_p=1.0
+    )
+    path.write_text(base, encoding="utf-8")
+    modes: list[str | None] = []
+
+    class ThinkingDelegate(_ChatDelegate):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            del messages, response_schema_hint
+            modes.append(kwargs.get("thinking_mode"))
+            return '{"ok":true}'
+
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, model_services_config=str(path)),
+        _EventLog(),
+        chat_factory=lambda service: ThinkingDelegate(service, []),
+    )
+    client = provider.chat("ask_answer")
+    try:
+        client.chat_json([], "{}")
+        path.write_text(
+            base + '\n[deepseek_thinking]\nask_answer = "disabled"\n',
+            encoding="utf-8",
+        )
+        assert provider.reload_if_changed(force=True) is True
+        assert provider.chat("ask_answer") is client
+        client.chat_json([], "{}")
+    finally:
+        provider.close()
+
+    assert modes == ["enabled", "disabled"]
+
+
 def test_watcher_waits_for_a_stable_file_signature_before_publish(
     monkeypatch, tmp_path
 ):

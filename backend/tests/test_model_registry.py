@@ -89,6 +89,32 @@ def test_workload_catalog_is_exact_and_has_fixed_chinese_labels():
     } == _EXPECTED_WORKLOADS
 
 
+def test_chat_workloads_make_an_exhaustive_thinking_default_choice():
+    enabled = {
+        "ask_answer",
+        "reasoning_agent",
+        "graph_chain_verify",
+        "report_outline",
+        "report_sufficiency",
+        "schema_induction",
+        "agent_profile_consolidate",
+        "retrieval_experience_distill",
+    }
+    chat_workloads = {
+        key for key, workload in WORKLOADS.items() if workload.kind == "chat"
+    }
+
+    assert {
+        key
+        for key in chat_workloads
+        if WORKLOADS[key].default_deepseek_thinking_mode == "enabled"
+    } == enabled
+    assert all(
+        WORKLOADS[key].default_deepseek_thinking_mode == "disabled"
+        for key in chat_workloads - enabled
+    )
+
+
 def test_empty_config_path_keeps_deterministic_offline_mode():
     registry = SystemModelServiceRegistry.load(_settings(), {})
 
@@ -113,6 +139,50 @@ source_summary = "general"''',
         WORKLOADS["ask_answer"],
         WORKLOADS["source_summary"],
     )
+
+
+def test_registry_accepts_per_workload_thinking_overrides(tmp_path):
+    path = _write_config(
+        tmp_path / "models.toml",
+        _service() + '''
+[bindings]
+ask_answer = "general"
+[deepseek_thinking]
+ask_answer = "disabled"
+report_outline = "provider_default"''',
+    )
+    registry = SystemModelServiceRegistry.load(
+        _settings(path), {"GENERAL_KEY": "secret"}
+    )
+
+    assert registry.deepseek_thinking_mode_for("ask_answer") == "disabled"
+    assert (
+        registry.deepseek_thinking_mode_for("report_outline")
+        == "provider_default"
+    )
+    assert registry.deepseek_thinking_mode_for("source_summary") == "disabled"
+
+
+@pytest.mark.parametrize(
+    ("thinking", "match"),
+    [
+        ('not_a_workload = "disabled"', "not_a_workload"),
+        ('retrieval_query_embedding = "disabled"', "only valid for chat"),
+        ('ask_answer = "high"', "invalid thinking mode"),
+    ],
+)
+def test_registry_rejects_invalid_thinking_configuration(
+    tmp_path, thinking, match
+):
+    path = _write_config(
+        tmp_path / "models.toml",
+        _service() + "\n[deepseek_thinking]\n" + thinking,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        SystemModelServiceRegistry.load(
+            _settings(path), {"GENERAL_KEY": "secret"}
+        )
 
 
 def test_chat_service_accepts_fixed_top_p_and_fingerprints_it(tmp_path):
