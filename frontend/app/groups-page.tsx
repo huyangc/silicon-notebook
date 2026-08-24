@@ -289,17 +289,17 @@ export function GroupsPage({
 
   return (
     <main className="page group-page">
+      {/* 页面标题「群组」在顶栏(page.tsx 的 .brand-title,就在 SN 徽标旁边),这里不再重复。
+          返回控件与笔记本工作区共用 .back-home-button —— 同一个动作(showCollection)不该
+          在两个页面上长成两种样子。 */}
       <header className="group-page-head">
-        <button className="group-page-back" onClick={onBack}><ArrowLeft size={16} />笔记本列表</button>
-        <div className="group-page-head-row">
-          <div className="group-page-head-copy">
-            <h1>群组</h1>
-            <p>集中管理成员、共享知识库和贡献审批。群组关系随成员加入与退出实时生效。</p>
-          </div>
-          <button className="new-pill" onClick={() => setCreating((value) => !value)}>
-            <Plus size={16} /> 新建群组
-          </button>
-        </div>
+        <button className="back-home-button" onClick={onBack}>
+          <ArrowLeft size={16} />
+          <span>返回主页</span>
+        </button>
+        <button className="new-pill" onClick={() => setCreating((value) => !value)}>
+          <Plus size={16} /> 新建群组
+        </button>
       </header>
 
       {error && <p className="password-change-status error group-page-status">{error}</p>}

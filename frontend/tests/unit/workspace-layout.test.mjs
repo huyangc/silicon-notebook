@@ -81,7 +81,7 @@ test("workspace has no retired Studio panel and keeps a labelled exit", () => {
   assert.equal(classes.includes("workspace-panel studio-panel"), false);
   assert.ok(
     jsxElements(page, "button")
-      .some(({ attributes }) => attributes.className === "notebook-home"),
+      .some(({ attributes }) => attributes.className === "back-home-button"),
   );
   assert.ok(jsxTextValues(page).includes("返回主页"));
 });
