@@ -13,6 +13,10 @@ owns three things no plugin can influence:
 3. **Sanitization.**  Titles, URLs, summaries and labels are validated and
    truncated here, after the plugin returns, so a hostile or sloppy plugin
    cannot put an unbounded string or a ``javascript:`` URL in front of a user.
+   The *work* of doing so is bounded in both dimensions — how many items are
+   examined and how much of each string is walked — so an unbounded payload
+   costs a bounded scan rather than an unbounded one on the request's critical
+   path, after the deadline above has already been honoured.
 
 Everything else fails open: a raising, hanging, or malformed contributor
 contributes nothing and the answer it was consulted for is unaffected.
@@ -64,6 +68,28 @@ _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
 # and the deadline, so both stay responsive against an uncooperative plugin.
 _JOIN_SLICE_SECONDS = 0.05
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+# How many items admission will EXAMINE, as a multiple of how many it could
+# still accept.  A contributor's payload is unbounded input: without a cap, a
+# tuple of a million rejects makes core walk all million of them on the
+# request's critical path — *after* the deadline that was supposed to bound
+# this contributor has already been honoured, so the budget above buys nothing.
+# The factor is deliberately generous rather than tight: the point is to deny
+# an unbounded scan, not to police sloppiness, so a plugin whose good items sit
+# behind a handful of malformed ones still gets them admitted.
+_ADMISSION_SCAN_FACTOR = 20
+# Re-read cancellation every this many examined items.  Belt and braces: the
+# scan above is short, but cancellation is the one signal this host never fails
+# open on, and it is set from another thread — it can flip after the join loop's
+# own read and before the last item is examined.
+_ADMISSION_CANCEL_STRIDE = 8
+# Slack allowed above a field's own limit before the raw contributor string is
+# cut.  This cut lands on PLUGIN OUTPUT, never on user data — the "never
+# silently truncate what a user typed" rail governs write and render paths —
+# and it exists so `str.strip()` can never be pointed at a 50 MB string.  The
+# headroom is wide enough that every realistic value stays byte-identical to an
+# unbounded strip; only a value whose LEADING whitespace alone exceeds it now
+# reads as empty, which drops the item — the safe direction.
+_ADMISSION_SLICE_HEADROOM_CHARS = 1024
 
 
 @dataclass
@@ -213,10 +239,26 @@ class GapConsultHost:
                     duration_ms=_elapsed_ms(self._clock, started),
                 )
                 continue
-            admitted = _sanitized(
-                result.items,
-                limit=query.max_suggestions - len(accepted),
-                seen_urls=seen_urls,
+            # An UNAVAILABLE result contributes nothing, items or not.  That
+            # status is the contributor's own statement that it could not serve
+            # this call; letting the payload it disclaimed reach a reader would
+            # put material in front of them that the plugin itself says is not
+            # an answer.  Skipping admission outright (rather than sanitizing
+            # and discarding) also keeps the disclaimed URLs out of `seen_urls`,
+            # so a later contributor that really can serve this call is not
+            # blocked by a link the first one withdrew.  PARTIAL stays admitted
+            # — it means "some of it", not "none of it".  The receipt below is
+            # unchanged: `status` already renders "unavailable" and carries the
+            # plugin's own stable failure code; only `count` moves, to 0.
+            admitted = (
+                ()
+                if result.status is ExtensionResultStatus.UNAVAILABLE
+                else _sanitized(
+                    result.items,
+                    limit=query.max_suggestions - len(accepted),
+                    seen_urls=seen_urls,
+                    cancellation=call_context.cancellation,
+                )
             )
             accepted.extend(admitted)
             _emit(
@@ -300,14 +342,22 @@ class GapConsultHost:
         worker.start()
         while True:
             worker.join(_JOIN_SLICE_SECONDS)
-            if not worker.is_alive():
-                break
+            finished = not worker.is_alive()
+            # Both reads happen on EVERY pass, the one that observes the worker
+            # finish included.  Reading them only while the thread was still
+            # alive made the outcome a property of scheduling: a plugin that
+            # answered *after* its budget was spent got accepted whenever the
+            # join slice happened to land on the far side of its last write,
+            # and abandoned when it did not.  "Past the deadline" is a fact
+            # about the clock, not about which slice noticed.
             if _is_cancelled(call_context.cancellation):
                 cell.abandoned = True
                 raise AskCancelled()
             if not _deadline_open(_safe_clock(self._clock), deadline):
                 cell.abandoned = True
                 return _Attempt("gap_consult_timeout", ends_budget=True)
+            if finished:
+                break
         if cell.failed or not cell.done:
             return _Attempt("gap_consult_failed")
         if cell.reason is not None:
@@ -357,13 +407,22 @@ def _failure_code(value: object) -> str:
 def _clean_text(value: object, limit: int) -> str | None:
     if type(value) is not str:
         return None
-    return value.strip()[:limit]
+    # Cut BEFORE stripping.  `str.strip()` allocates a full copy of whatever it
+    # is handed, so stripping first is an unbounded allocation driven by plugin
+    # output; the bound has to come first for it to be a bound at all.
+    return value[: limit + _ADMISSION_SLICE_HEADROOM_CHARS].strip()[:limit]
 
 
 def _clean_url(value: object) -> str | None:
     if type(value) is not str:
         return None
-    url = value.strip()
+    # Same cut-before-strip rule as `_clean_text`, and it does not weaken the
+    # rejection below: anything longer than the limit plus the headroom is
+    # still longer than the limit after the cut, so it is dropped exactly as it
+    # was before — never shortened into a different destination.
+    url = value[
+        : GAP_SUGGESTION_URL_MAX_CHARS + _ADMISSION_SLICE_HEADROOM_CHARS
+    ].strip()
     # A URL is the one field that must NOT be truncated to fit: a shortened URL
     # is a different, silently wrong destination.  Over-long ones are rejected.
     if not url or len(url) > GAP_SUGGESTION_URL_MAX_CHARS:
@@ -380,18 +439,32 @@ def _clean_url(value: object) -> str | None:
 
 
 def _sanitized(
-    items: tuple[object, ...], *, limit: int, seen_urls: set[str],
+    items: tuple[object, ...],
+    *,
+    limit: int,
+    seen_urls: set[str],
+    cancellation: object,
 ) -> tuple[GapSuggestion, ...]:
     """Core-owned admission: validate, bound, de-duplicate, cap.
 
     Nothing here touches the network or the database — whether a URL is
     reachable, or is really a PDF, is answered by the import endpoint's own
     probe when the user asks for it, not by speculatively fetching it now.
+
+    The work this does is bounded twice over, because ``items`` is plugin
+    output and therefore unbounded input: at most ``_ADMISSION_SCAN_FACTOR``
+    items per accepting slot are examined at all, and each string is cut to its
+    own limit plus headroom before anything walks it.  Cancellation is re-read
+    on a stride through that scan, and propagates rather than failing open —
+    the whole host treats it as the one signal it never swallows.
     """
     admitted: list[GapSuggestion] = []
-    for item in items:
-        if len(admitted) >= limit:
+    scan_budget = limit * _ADMISSION_SCAN_FACTOR
+    for scanned, item in enumerate(items):
+        if len(admitted) >= limit or scanned >= scan_budget:
             break
+        if scanned % _ADMISSION_CANCEL_STRIDE == 0:
+            _raise_if_cancelled(cancellation)
         if type(item) is not GapSuggestion:
             continue
         title = _clean_text(item.title, GAP_SUGGESTION_TITLE_MAX_CHARS)

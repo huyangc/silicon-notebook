@@ -361,6 +361,23 @@ def _egress_question(prepared: object) -> str:
     Bounded by ``GAP_CONSULT_QUESTION_MAX_CHARS``, which is a privacy rail
     rather than a budget: it is the ceiling on how much of the user's own text
     leaves the deployment per consultation.
+
+    That 300-character prefix is **egress minimization, not data loss**, and
+    the distinction is the whole reason it is allowed to exist (codex #584 R1
+    P2, rejected — see ``docs/superpowers/plans/2026-08-24-ask-gap-consult.md``
+    for the decision).  What this builds is a *retrieval hint* handed to a
+    third party; it is never stored, never rendered, and never read back.  The
+    "user data must not be silently truncated" rail governs write and render
+    paths — what gets persisted, and what the reader is shown — and the
+    question itself is untouched by this function on every one of them: the
+    full text is what the run searched with, what ``answers.question`` holds,
+    and what the conversation replays.  Shortening the hint costs the plugin
+    some context; lengthening it would send more of the user's words to a party
+    that has no need for them.  The limit is registered in
+    ``docs/product-and-api*.md``; the reverse guard that pins both halves of
+    this claim together is
+    ``test_gap_consult_ask_wiring.py::
+    test_egress_question_truncation_is_the_privacy_bound_not_data_loss``.
     """
     projection = getattr(prepared, "intent_projection", None)
     for candidate in (

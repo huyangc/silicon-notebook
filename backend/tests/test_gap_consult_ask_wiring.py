@@ -475,6 +475,47 @@ def test_egress_strings_are_bounded_and_marker_free(make_repo):
     assert all("k2" not in phrase for phrase in gaps)
 
 
+def test_egress_question_truncation_is_the_privacy_bound_not_data_loss(
+    make_repo,
+):
+    """Both halves of the rejected review point (codex #584 R1 P2), pinned
+    together in one run.
+
+    ``GAP_CONSULT_QUESTION_MAX_CHARS`` cuts the *retrieval hint* handed to a
+    third party — egress minimization.  The "user data must not be silently
+    truncated" rail governs write and render paths, and this case is the
+    standing proof that this function is on neither: the very run that sends a
+    300-character prefix outward stores and replays the question in full.
+    Whichever half regresses — an unbounded egress string, or a truncated
+    question reaching storage — lands here.
+    """
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin))
+    notebook = _seed(repo)
+    # No whitespace and no `[k]` markers, so the only transformation that could
+    # shorten this is the egress rail itself.
+    long_question = "为什么" + "甲" * 900
+
+    response = repo.ask(
+        notebook.id, AskRequest(question=long_question, mode="reasoning")
+    )
+    assert response.gap_suggestions, "这一轮必须真的发生了外扩询问"
+
+    # Outward: exactly the prefix, and no more of the user's words than that.
+    (query,) = plugin.queries
+    assert query.question == long_question[:GAP_CONSULT_QUESTION_MAX_CHARS]
+    assert len(query.question) == GAP_CONSULT_QUESTION_MAX_CHARS
+
+    # Inward: untouched everywhere it is persisted or replayed to the reader.
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT question FROM answers WHERE id=?", (response.answer_id,)
+        ).fetchone()
+    assert row["question"] == long_question
+    turn = repo.get_conversation(response.conversation_id).turns[0]
+    assert turn.question == long_question
+
+
 def test_egress_question_is_two_steps_and_skips_the_composite():
     """Both candidates are the user's OWN words; the composite is not one.
 
