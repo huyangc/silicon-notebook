@@ -716,6 +716,11 @@ def test_settings_accept_valid_base_url(base_url):
         # header value smuggles a second header line into the request.
         "silicon-notebook-arxiv-sample/0.1\r\nX-Injected: 1",
         "silicon-notebook-arxiv-sample/0.1\x00",
+        # http.client sends header values as Latin-1; a value it cannot
+        # encode would otherwise turn every search into the fixed 502 at
+        # request time instead of failing fast here (codex #596 R5).
+        "硅笔记本-检索/0.1",
+        "silicon-notebook/0.1 \U0001f680",
     ],
 )
 def test_settings_reject_blank_or_control_character_user_agent(user_agent):
