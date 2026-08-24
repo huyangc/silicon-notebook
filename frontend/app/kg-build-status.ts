@@ -101,9 +101,11 @@ export function kgBuildPresentation(
   }
 
   if (job.status === "failed") {
+    const responseInvalid = job.error_code === "model_response_invalid";
     return {
-      label:
-        `分析已中断 · 已完成 ${job.completed_sources}/${job.total_sources} 项内容`,
+      label: responseInvalid
+        ? `模型响应不可用 · 已完成 ${job.completed_sources}/${job.total_sources} 项内容`
+        : `分析已中断 · 已完成 ${job.completed_sources}/${job.total_sources} 项内容`,
       detail: job.user_message || "已完成内容已保留，可继续分析未完成内容。",
       tone: "error",
       actionLabel:

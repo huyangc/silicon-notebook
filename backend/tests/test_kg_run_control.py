@@ -7,6 +7,7 @@ import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from app.services.kg.run_control import (
+    MODEL_RESPONSE_INVALID_MESSAGE,
     MODEL_UNAVAILABLE_MESSAGE,
     KgBuildAborted,
     KgBuildFailure,
@@ -16,7 +17,10 @@ from app.services.kg.run_control import (
 )
 from tests.model_testkit import RecordingModelProvider
 from app.services.model_work import (
-    ModelQueueFull, ModelQueueTimeout, ModelServiceUnavailable,
+    ModelProviderError,
+    ModelQueueFull,
+    ModelQueueTimeout,
+    ModelServiceUnavailable,
 )
 
 
@@ -152,6 +156,22 @@ def test_other_http_rejection_is_immediate():
         client.chat_json([{"role": "user", "content": "x"}], "{}")
     assert raised.value.failure.code == "model_request_rejected"
     assert delegate.calls == 1
+
+
+def test_malformed_response_is_an_actionable_model_failure():
+    control = KgExtractionRunControl("job-a")
+    delegate = _SequenceClient([
+        ModelProviderError("empty content", code="malformed_response")
+    ])
+    client = TaskScopedKgClient(delegate, _settings(retries=3), control)
+
+    with pytest.raises(KgBuildAborted) as raised:
+        client.chat_json([{"role": "user", "content": "x"}], "{}")
+
+    assert raised.value.failure.code == "model_response_invalid"
+    assert raised.value.failure.user_message == MODEL_RESPONSE_INVALID_MESSAGE
+    assert delegate.calls == 1
+    assert control.aborted is True
 
 
 @pytest.mark.parametrize(
@@ -297,7 +317,7 @@ def test_malformed_json_result_remains_soft():
     assert control.aborted is False
 
 
-def test_probe_uses_small_bounded_request():
+def test_probe_reuses_configured_short_output_budget_and_bypasses_cache():
     control = KgExtractionRunControl("job-a")
     delegate = _SequenceClient(['{"ok":true}'])
     settings = _settings(retries=2)
@@ -305,7 +325,6 @@ def test_probe_uses_small_bounded_request():
     probe_kg_model(client)
     assert delegate.kwargs == [
         {
-            "max_tokens": 16,
             "bypass_cache": True,
             "timeout": 60,
             "max_retries": 0,

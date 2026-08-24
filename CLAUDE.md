@@ -555,3 +555,7 @@ KG 抽取必须在全局对象同一事务内发布不可变的来源事实和�
 | 测试怎么分层、测试根在哪、并发 worker | Test Architecture |
 | worktree、子代理逐任务、文件安全 | Git And File Safety |
 | 收尾提 PR 的标准流程 | Feature Completion (Finish With a PR) |
+
+## KG 探活响应合同
+
+KG 可用性探测必须绕过且不写入 LLM 响应缓存，并复用已配置的短输出预算，不能另塞更小的字面量上限；推理型 provider 可能在输出可见 JSON 前就耗完小预算。空白、截断或畸形探测结果必须落成可操作的 `model_response_invalid`，前端显示“模型响应不可用”而不是误称人工中断，并保留继续分析入口。

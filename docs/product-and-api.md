@@ -1038,7 +1038,12 @@ before either window- or source-level draining, and then drains calls already
 in flight. Other notebooks and later tasks are unaffected. The availability
 probe explicitly bypasses the LLM response cache and does not populate it, so a
 stale successful probe cannot authorize destructive rebuild work during a live
-outage.
+outage. It reuses the configured short-output budget instead of imposing a
+smaller probe-only cap, because reasoning-capable providers may consume a tiny
+cap before emitting visible JSON. An HTTP-success response with empty,
+truncated, or otherwise invalid JSON is recorded as `model_response_invalid`;
+the UI identifies it as an unusable model response rather than an operator
+interruption and preserves the retry action.
 
 **Offline skip mode (opt-in, CLI only).** Stopping the whole task is the right
 default for an interactive build, but it is the wrong trade for an unattended
