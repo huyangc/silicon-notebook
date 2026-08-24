@@ -100,6 +100,63 @@ def test_bundle_missing_or_unsupported_image_fails_open_to_caption(tmp_path):
     ]
 
 
+def test_bundle_persists_a_shared_image_member_only_once(tmp_path):
+    path = _zip(
+        tmp_path,
+        {
+            "a/one.md": b"![first](../shared/logo.png)\n",
+            "b/two.md": b"![second](../shared/logo.png)\n",
+            "shared/logo.png": PNG,
+        },
+    )
+    persisted: list[tuple[bytes, str]] = []
+
+    def persist(data: bytes, name: str) -> str:
+        persisted.append((data, name))
+        return "asset-shared"
+
+    elements = parse_markdown_bundle(
+        "src-1", path, persist_image=persist, max_uncompressed_bytes=4096
+    )
+
+    images = [element for element in elements if element.element_type == "image"]
+    assert [element.metadata["asset_id"] for element in images] == [
+        "asset-shared", "asset-shared"
+    ]
+    assert persisted == [(PNG, "bundle-img-1.png")]
+
+
+def test_bundle_caches_image_persistence_failure(tmp_path):
+    references = "\n\n".join(
+        f"![logo {index}](images/logo.png)" for index in range(50)
+    )
+    path = _zip(
+        tmp_path,
+        {
+            "notes.md": references.encode(),
+            "images/logo.png": PNG,
+        },
+    )
+    attempts = 0
+
+    def reject_oversized_image(_data: bytes, _name: str) -> str:
+        nonlocal attempts
+        attempts += 1
+        return ""
+
+    elements = parse_markdown_bundle(
+        "src-1",
+        path,
+        persist_image=reject_oversized_image,
+        max_uncompressed_bytes=4096,
+    )
+
+    images = [element for element in elements if element.element_type == "image"]
+    assert len(images) == 50
+    assert attempts == 1
+    assert all("asset_id" not in element.metadata for element in images)
+
+
 @pytest.mark.parametrize(
     "entries, message",
     [

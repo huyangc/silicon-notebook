@@ -743,29 +743,43 @@ def parse_markdown_bundle(
             return data
 
         elements: List[SourceElement] = []
+        # One archive member is one physical image asset even when several
+        # Markdown documents (or several positions in one document) reference
+        # it. Cache the final result, including an empty/failure result, so a
+        # repeated reference cannot consume the per-source image quota again or
+        # repeatedly inflate the same member after persistence rejects it.
+        image_assets: dict[str, str] = {}
         for markdown_path in markdown_paths:
             markdown_text = read_member(members[markdown_path]).decode(
                 "utf-8", errors="replace"
             )
 
-            def resolve_image(src: str, ordinal: int) -> str:
+            def resolve_image(src: str, _ordinal: int) -> str:
                 if persist_image is None:
                     return ""
                 image_path = _bundle_image_path(markdown_path, src)
-                info = members.get(image_path or "")
+                if image_path is None:
+                    return ""
+                if image_path in image_assets:
+                    return image_assets[image_path]
+                info = members.get(image_path)
                 if info is None:
+                    image_assets[image_path] = ""
                     return ""
                 try:
                     data = read_member(info)
-                except ValueError:
-                    return ""
-                extension = _bundle_image_extension(data)
-                if not extension:
-                    return ""
-                return persist_image(
-                    data,
-                    f"bundle-img-{ordinal}.{extension}",
-                ) or ""
+                    extension = _bundle_image_extension(data)
+                    if not extension:
+                        asset_id = ""
+                    else:
+                        asset_id = persist_image(
+                            data,
+                            f"bundle-img-{len(image_assets) + 1}.{extension}",
+                        ) or ""
+                except Exception:
+                    asset_id = ""
+                image_assets[image_path] = asset_id
+                return asset_id
 
             parsed = parse_markdown_text(
                 source_id,
