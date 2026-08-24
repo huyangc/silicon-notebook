@@ -311,6 +311,150 @@ def test_fields_are_truncated():
     assert item.url == "https://example.org/paper"
 
 
+def test_admission_examines_only_a_bounded_prefix():
+    """A contributor's payload is unbounded input; admitting it is not.
+
+    Without a cap the loop walks every item a plugin cares to return — a
+    million of them, on the request's critical path, *after* the deadline that
+    was supposed to bound this contributor has already been honoured.  Pinned
+    by outcome rather than wall clock: a good item parked past the prefix is
+    provably never reached, and one just inside it provably is (so the cap can
+    never be quietly tightened to zero either).
+    """
+    reject = GapSuggestion("no scheme", "example.org/nope")
+    good = GapSuggestion("good", "https://example.org/good")
+    one_slot = _call(query=_query(max_suggestions=1))
+
+    buried = ContributorResult(
+        (reject,) * 1_000_000 + (good,), ExtensionResultStatus.AVAILABLE
+    )
+    assert _host(_bundle("corp.gap", _Plugin(buried))).consult(one_slot) == ()
+
+    reachable = ContributorResult(
+        (reject,) * 8 + (good,), ExtensionResultStatus.AVAILABLE
+    )
+    assert _host(_bundle("corp.gap", _Plugin(reachable))).consult(one_slot) == (
+        good,
+    )
+
+
+def test_oversized_strings_are_cut_before_they_are_walked():
+    """`str.strip()` allocates a copy of whatever it is handed.
+
+    Stripping a 20 MB plugin string first and truncating afterwards is an
+    unbounded allocation driven by plugin output, so the cut has to come first.
+    The observable consequence — and the only way to pin the ORDER, since a
+    well-formed value reads identically either way — is the registered edge
+    below: leading whitespace wider than the headroom now reads as empty.
+    """
+    huge = "x" * 20_000_000
+    plugin = _Plugin(_suggestions(
+        GapSuggestion(huge, "https://example.org/paper", huge, huge),
+        # An over-long URL is still rejected outright, never shortened into a
+        # different destination — the cut does not weaken that.
+        GapSuggestion("long url", "https://example.org/" + huge),
+    ))
+    (item,) = _host(_bundle("corp.gap", plugin)).consult(_call())
+    assert item.title == "x" * GAP_SUGGESTION_TITLE_MAX_CHARS
+    assert item.summary == "x" * GAP_SUGGESTION_SUMMARY_MAX_CHARS
+    assert item.source_label == "x" * GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS
+    assert item.url == "https://example.org/paper"
+
+    spaced = _Plugin(_suggestions(GapSuggestion(
+        " " * (GAP_SUGGESTION_TITLE_MAX_CHARS + 4096) + "real title",
+        "https://example.org/spaced",
+    )))
+    # A strip-then-truncate implementation would admit this; the accepted cost
+    # of cutting first is that it drops instead, which is the safe direction.
+    assert _host(_bundle("corp.gap", spaced)).consult(_call()) == ()
+
+
+def test_admission_re_reads_cancellation():
+    """Cancellation is set from another thread, so it can flip after the join
+    loop's own read and before the last item is examined.
+
+    Exercised against the helper directly on purpose: reaching it through
+    ``consult`` would need cancellation to land inside a window of a few
+    instructions, and the join loop's post-finish read (tested above) covers
+    every deterministic ordering before it.
+    """
+    from app.extensions.gap_consult import _sanitized
+
+    good = GapSuggestion("good", "https://example.org/good")
+    seen: set[str] = set()
+    assert _sanitized(
+        (good,), limit=1, seen_urls=seen, cancellation=_Cancellation()
+    ) == (good,)
+
+    try:
+        _sanitized(
+            (good,), limit=1, seen_urls=set(),
+            cancellation=_Cancellation(cancelled=True),
+        )
+        raise AssertionError("admission must not swallow cancellation")
+    except AskCancelled:
+        pass
+
+
+def test_an_unavailable_result_contributes_nothing():
+    """A contributor that says it could not serve this call does not get to
+    contradict itself with a payload.
+
+    ``status`` is the plugin's own statement; admitting items it disclaimed
+    would put material in front of a reader that the plugin itself says is not
+    an answer.  PARTIAL is a different statement — "some of it", not "none of
+    it" — and is still admitted.
+    """
+    events: list[dict[str, object]] = []
+    stale = "https://example.org/stale"
+    disclaimed = _Plugin(ContributorResult(
+        (GapSuggestion("stale", stale),),
+        ExtensionResultStatus.UNAVAILABLE,
+        ExtensionFailure(ExtensionFailureKind.UNAVAILABLE, "corp_upstream_down"),
+    ))
+    later = _Plugin(_suggestions(
+        GapSuggestion("later", "https://example.org/later"),
+        # The disclaimed URL never entered `seen_urls`, so a contributor that
+        # really can serve this call is not blocked by a withdrawn link.
+        GapSuggestion("same link", stale),
+    ))
+    host = _host(
+        _bundle("corp.a_disclaimed", disclaimed),
+        _bundle("corp.b_later", later),
+        event_sink=events.append,
+    )
+
+    assert host.consult(_call()) == (
+        GapSuggestion("later", "https://example.org/later", "", ""),
+        GapSuggestion("same link", stale, "", ""),
+    )
+    # The receipt keeps the existing unavailable shape; only the count moves.
+    assert events[0]["status"] == "unavailable"
+    assert events[0]["reason_code"] == "corp_upstream_down"
+    assert events[0]["count"] == 0
+
+    # No failure attached is still unavailable, just without a stable code.
+    bare = _Plugin(ContributorResult(
+        (GapSuggestion("nope", "https://example.org/nope"),),
+        ExtensionResultStatus.UNAVAILABLE,
+    ))
+    bare_events: list[dict[str, object]] = []
+    assert _host(
+        _bundle("corp.bare", bare), event_sink=bare_events.append
+    ).consult(_call()) == ()
+    assert bare_events[-1]["status"] == "unavailable"
+    assert bare_events[-1]["count"] == 0
+    assert "reason_code" not in bare_events[-1]
+
+    partial = _Plugin(ContributorResult(
+        (GapSuggestion("partial", "https://example.org/partial"),),
+        ExtensionResultStatus.PARTIAL,
+    ))
+    assert _host(_bundle("corp.partial", partial)).consult(_call()) == (
+        GapSuggestion("partial", "https://example.org/partial", "", ""),
+    )
+
+
 def test_plugin_exception_is_fail_open():
     class Raising:
         def consult(self, _context):
@@ -385,6 +529,51 @@ def test_late_result_from_an_abandoned_plugin_is_inert():
     # claimed here is about THIS call's result and telemetry, not the host.)
     assert abandoned == ()
     assert events == events_at_abandon
+
+
+def test_a_result_that_lands_after_the_deadline_is_abandoned():
+    """A worker may finish *after* its budget is gone; that result is late.
+
+    The gap the join loop used to leave: it read the deadline only while the
+    thread was still alive, so a plugin that answered past its budget was
+    accepted whenever the 50ms slice happened to land on the far side of its
+    last write and abandoned when it did not.  Same plugin, same budget, two
+    different answers depending on the scheduler.
+
+    Made deterministic without a sleep: the plugin advances the fake clock past
+    the deadline *before* returning, so by the time any pass of the loop reads
+    the clock the budget is provably spent — whichever side of ``is_alive()``
+    that pass is on.
+    """
+    clock = _TrippableClock()
+    events: list[dict[str, object]] = []
+
+    class SpendsThenReturns:
+        def consult(self, _context):
+            clock.tripped = True
+            return _suggestions(
+                GapSuggestion("late", "https://example.org/late")
+            )
+
+    later = _Plugin(_suggestions(
+        GapSuggestion("later", "https://example.org/later")
+    ))
+    host = _host(
+        _bundle("corp.a_late", SpendsThenReturns()),
+        _bundle("corp.b_later", later),
+        event_sink=events.append,
+    )
+    host._clock = clock
+
+    # The answer path gets nothing, and the receipt is the same abandonment
+    # shape a plugin that never returned would have produced.
+    assert host.consult(_call(deadline=clock.deadline)) == ()
+    assert len(events) == 1
+    assert events[-1]["reason_code"] == "gap_consult_timeout"
+    assert events[-1]["status"] == "unavailable"
+    assert events[-1]["count"] == 0
+    # A spent deadline ends the point: there is no honest way to start another.
+    assert later.contexts == []
 
 
 def test_a_hung_availability_probe_is_inside_the_same_deadline():
@@ -522,6 +711,30 @@ def test_cancellation_propagates():
         pass
     finally:
         release.set()
+
+    # And cancellation that lands while the worker was FINISHING is still
+    # cancellation — the result does not get accepted just because it arrived
+    # first.  Two independent reads defend this outcome (the join loop's
+    # post-finish read and admission's own stride), which is deliberate: this
+    # case pins the outcome, and the two mechanisms are pinned separately by
+    # `test_a_result_that_lands_after_the_deadline_is_abandoned` and
+    # `test_admission_re_reads_cancellation`.
+    fast = _Cancellation()
+
+    class CancelsThenReturns:
+        def consult(self, _context):
+            fast.set()
+            return _suggestions(
+                GapSuggestion("raced", "https://example.org/raced")
+            )
+
+    try:
+        _host(_bundle("corp.raced", CancelsThenReturns())).consult(
+            _call(cancellation=fast)
+        )
+        raise AssertionError("cancellation on the finishing pass must propagate")
+    except AskCancelled:
+        pass
 
 
 def test_connection_lease_blocks_the_call():
