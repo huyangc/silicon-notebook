@@ -97,6 +97,18 @@ def _bundle(
     )
 
 
+class _TrippableClock:
+    """Fake monotonic clock that jumps past ``deadline`` once tripped."""
+
+    deadline = 1000.5
+
+    def __init__(self) -> None:
+        self.tripped = False
+
+    def __call__(self) -> float:
+        return 1002.0 if self.tripped else 1000.0
+
+
 class _Plugin:
     """Records the context it was handed and answers a canned result."""
 
@@ -375,6 +387,106 @@ def test_late_result_from_an_abandoned_plugin_is_inert():
     assert events == events_at_abandon
 
 
+def test_a_hung_availability_probe_is_inside_the_same_deadline():
+    # The probe is plugin-supplied too (manifest `provides`), so leaving it on
+    # the calling thread would make the hard deadline a promise about only half
+    # the call: measured at 2.01s against a 0.2s budget before the fix.
+    release = threading.Event()
+
+    def sleeping_decision(_context):
+        release.wait(30.0)
+        return Availability.available()
+
+    events: list[dict[str, object]] = []
+    plugin = _Plugin(_suggestions(
+        GapSuggestion("never", "https://example.org/never")
+    ))
+    host = _host(
+        _bundle("corp.slowprobe", plugin, requires=("corp.gap.slow",)),
+        event_sink=events.append,
+        capability_decisions={"corp.gap.slow": sleeping_decision},
+    )
+
+    started = time.monotonic()
+    try:
+        result = host.consult(_call(deadline=time.monotonic() + 0.2))
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert result == ()
+    assert elapsed < 1.0, elapsed
+    assert events[-1]["reason_code"] == "gap_consult_timeout"
+    assert plugin.contexts == []
+
+
+def test_base_exception_from_a_plugin_is_fail_open():
+    # `except Exception` would let this escape the worker target, leaving the
+    # cell empty and the failure mis-reported as a malformed result.
+    class Exiting:
+        def consult(self, _context):
+            raise SystemExit("plugin called sys.exit")
+
+    events: list[dict[str, object]] = []
+    host = _host(_bundle("corp.exit", Exiting()), event_sink=events.append)
+
+    assert host.consult(_call()) == ()
+    assert events[-1]["reason_code"] == "gap_consult_failed"
+    assert events[-1]["status"] == "unavailable"
+
+
+def test_budget_exhausted_skips_the_remaining_contributors():
+    first = _Plugin(_suggestions(
+        GapSuggestion("first", "https://example.org/first")
+    ))
+    second = _Plugin(_suggestions(
+        GapSuggestion("second", "https://example.org/second")
+    ))
+    clock = _TrippableClock()
+    events: list[dict[str, object]] = []
+
+    def sink(event: dict[str, object]) -> None:
+        events.append(event)
+        # Tripped from the sink rather than from the plugin so the spend lands
+        # deterministically AFTER the first receipt: the join loop reads the
+        # same clock, and a mid-flight trip would report a timeout instead.
+        clock.tripped = True
+
+    host = _host(
+        _bundle("corp.a_first", first),
+        _bundle("corp.b_second", second),
+        event_sink=sink,
+    )
+    host._clock = clock
+
+    assert host.consult(_call(deadline=clock.deadline)) == (
+        GapSuggestion("first", "https://example.org/first", "", ""),
+    )
+    assert second.contexts == []
+    assert events[-1]["reason_code"] == "gap_consult_budget_exhausted"
+    assert events[-1]["contribution_id"] == "corp.b_second"
+
+
+def test_duplicate_urls_are_dropped_across_contributors():
+    shared = "https://example.org/same-paper"
+    first = _Plugin(_suggestions(GapSuggestion("first", shared)))
+    second = _Plugin(_suggestions(
+        GapSuggestion("second", shared),
+        GapSuggestion("other", "https://example.org/other"),
+    ))
+    host = _host(
+        _bundle("corp.a_first", first),
+        _bundle("corp.b_second", second),
+    )
+
+    # One URL is one suggestion no matter how many plugins offer it; a
+    # per-contributor `seen_urls` would let the second re-seat the first's link.
+    assert host.consult(_call()) == (
+        GapSuggestion("first", shared, "", ""),
+        GapSuggestion("other", "https://example.org/other", "", ""),
+    )
+
+
 def test_cancellation_propagates():
     cancellation = _Cancellation(cancelled=True)
     plugin = _Plugin(_suggestions(
@@ -388,6 +500,9 @@ def test_cancellation_propagates():
         pass
     else:  # pragma: no cover - the assertion below reports the failure
         raise AssertionError("cancellation must propagate, never fail open")
+    # Cancellation is read before the contributor is started, so an already
+    # cancelled run sends nothing outward at all.
+    assert plugin.contexts == []
 
     # And cancellation raised mid-flight is not swallowed by the join loop.
     release = threading.Event()

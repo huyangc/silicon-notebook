@@ -6,8 +6,9 @@ owns three things no plugin can influence:
 1. **The egress surface.**  Contributors receive the frozen
    :class:`~app.domain.gap_consult.GapConsultQuery` the caller built and
    nothing else.
-2. **The deadline.**  Contributions run on a worker thread joined in slices, so
-   a plugin that never returns costs this request its remaining budget and
+2. **The deadline.**  A contribution's availability probe *and* its consult
+   call run together on one worker thread joined in slices, so a plugin that
+   never returns — in either half — costs this request its remaining budget and
    nothing more.
 3. **Sanitization.**  Titles, URLs, summaries and labels are validated and
    truncated here, after the plugin returns, so a hostile or sloppy plugin
@@ -67,7 +68,7 @@ _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
 @dataclass
 class _WorkerCell:
-    """Private mailbox for one contributor call.
+    """Private mailbox for one contributor attempt.
 
     ``abandoned`` is not a cancellation signal to the worker — nothing can stop
     a thread that refuses to return.  It records that the main thread has moved
@@ -76,8 +77,26 @@ class _WorkerCell:
 
     done: bool = False
     failed: bool = False
+    reason: str | None = None
+    ends_budget: bool = False
     result: object = None
     abandoned: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Attempt:
+    """What one contributor attempt produced.
+
+    ``reason`` is ``None`` exactly when the contributor ran to completion; its
+    (still unvalidated) return value is then in ``result``.  ``ends_budget`` is
+    core-owned and never derived from a plugin-supplied reason string, so a
+    plugin cannot cut the remaining contributors' turns short by naming its own
+    unavailability reason ``gap_consult_timeout``.
+    """
+
+    reason: str | None = None
+    result: object = None
+    ends_budget: bool = False
 
 
 class GapConsultHost:
@@ -137,17 +156,22 @@ class GapConsultHost:
             return ()
         if not _valid_deadline(call_context.deadline_monotonic):
             return ()
+        # The CALLER's own lease is checked here, on the calling thread — the
+        # only thread that can observe it, because both backends answer this
+        # probe from thread-local (SQLite) or ContextVar (PostgreSQL) state.
         if not _connection_clear(call_context.connection_probe):
             return ()
         sink = event_sink if event_sink is not None else self._event_sink
         accepted: list[GapSuggestion] = []
+        # Deliberately outside the loop: two contributors offering the same URL
+        # is one suggestion, not two.  Per-contributor de-duplication would let
+        # a second plugin re-seat a link the first already spent a slot on.
         seen_urls: set[str] = set()
         for item in self._contributors:
             if len(accepted) >= query.max_suggestions:
                 break
             _raise_if_cancelled(call_context.cancellation)
-            contribution = item.contribution
-            contribution_id = contribution.declaration.id
+            contribution_id = item.contribution.declaration.id
             plugin_id = item.plugin_id
             started = _safe_clock(self._clock)
             if not _deadline_open(started, call_context.deadline_monotonic):
@@ -160,57 +184,25 @@ class GapConsultHost:
                     duration_ms=0,
                 )
                 break
-            availability = self._registry.availability(
-                contribution_id,
-                GapConsultAvailabilityContext(
-                    contribution_id, call_context.deadline_monotonic
-                ),
+            attempt = self._execute(
+                item, call_context, query.max_suggestions - len(accepted)
             )
-            # A live decision must not have taken a core connection on the way.
-            if not _connection_clear(call_context.connection_probe):
+            if attempt.reason is not None:
                 _emit(
                     sink,
                     plugin_id=plugin_id,
                     contribution_id=contribution_id,
                     status="unavailable",
-                    reason_code="connection_lease_held",
+                    reason_code=attempt.reason,
                     duration_ms=_elapsed_ms(self._clock, started),
                 )
-                break
-            if availability.status is not AvailabilityStatus.AVAILABLE:
-                _emit(
-                    sink,
-                    plugin_id=plugin_id,
-                    contribution_id=contribution_id,
-                    status="unavailable",
-                    reason_code=availability.reason_code,
-                    duration_ms=_elapsed_ms(self._clock, started),
-                )
-                continue
-            context = GapConsultExtensionContext(
-                query,
-                call_context.cancellation,
-                query.max_suggestions - len(accepted),
-                call_context.deadline_monotonic,
-            )
-            outcome, result = self._execute(
-                contribution.implementation, context, call_context
-            )
-            if outcome != "ok":
-                _emit(
-                    sink,
-                    plugin_id=plugin_id,
-                    contribution_id=contribution_id,
-                    status="unavailable",
-                    reason_code=outcome,
-                    duration_ms=_elapsed_ms(self._clock, started),
-                )
-                # A timeout means the point budget is spent, so there is no
-                # honest way to start another contributor; a plugin fault is
+                # A spent deadline or a held lease ends the point: there is no
+                # honest way to start another contributor.  A plugin fault is
                 # local and the next one still gets its turn.
-                if outcome == "gap_consult_timeout":
+                if attempt.ends_budget:
                     break
                 continue
+            result = attempt.result
             if not _valid_result(result):
                 _emit(
                     sink,
@@ -240,11 +232,26 @@ class GapConsultHost:
 
     def _execute(
         self,
-        implementation: object,
-        context: GapConsultExtensionContext,
+        item: RegisteredContribution,
         call_context: GapConsultCallContext,
-    ) -> tuple[str, object]:
-        """Run one contributor on a throwaway daemon thread.
+        remaining: int,
+    ) -> _Attempt:
+        """Decide availability and run one contributor on one daemon thread.
+
+        The availability decision runs on the worker, inside the deadline, for
+        the same reason ``consult`` does: a plugin at this point supplies its
+        own probe through its manifest's ``provides``, so a slow or hung probe
+        spends the reader's latency exactly as effectively as a slow or hung
+        ``consult``.  Deciding on the calling thread made the "hard deadline" a
+        promise about only half the call — measured: a probe that sleeps 2s
+        pushed a ``consult()`` with a 0.2s budget to 2.01s of wall clock.
+
+        The post-decision connection re-check moves onto the worker with it,
+        and must: ``is_connection_held`` answers from thread-local (SQLite) or
+        ContextVar (PostgreSQL) state, so the only thread that can observe a
+        lease *the decision* took is the thread the decision ran on.  The
+        caller's own lease is checked before the loop, on the calling thread,
+        where it is likewise the only place it is visible.
 
         The thread is started WITHOUT ``contextvars.copy_context()`` and that
         omission is load-bearing, not an oversight — do not "fix" it.  A fresh
@@ -257,15 +264,35 @@ class GapConsultHost:
         deployment-wide outage.  The registered cost of a private daemon thread
         is that a genuinely hung plugin leaks one thread per affected request.
         """
+        contribution_id = item.contribution.declaration.id
+        implementation = item.contribution.implementation
+        deadline = call_context.deadline_monotonic
         cell = _WorkerCell()
 
         def _target() -> None:
             try:
-                value = implementation.consult(context)
+                availability = self._registry.availability(
+                    contribution_id,
+                    GapConsultAvailabilityContext(contribution_id, deadline),
+                )
+                # A live decision must not have taken a core connection on the
+                # way; this thread is where such a lease would be visible.
+                if not _connection_clear(call_context.connection_probe):
+                    cell.reason = "connection_lease_held"
+                    cell.ends_budget = True
+                elif availability.status is not AvailabilityStatus.AVAILABLE:
+                    cell.reason = availability.reason_code
+                else:
+                    cell.result = implementation.consult(
+                        GapConsultExtensionContext(
+                            call_context.query,
+                            call_context.cancellation,
+                            remaining,
+                            deadline,
+                        )
+                    )
             except BaseException:  # noqa: BLE001 — a plugin fault is fail-open
                 cell.failed = True
-            else:
-                cell.result = value
             finally:
                 cell.done = True
 
@@ -278,14 +305,14 @@ class GapConsultHost:
             if _is_cancelled(call_context.cancellation):
                 cell.abandoned = True
                 raise AskCancelled()
-            if not _deadline_open(
-                _safe_clock(self._clock), call_context.deadline_monotonic
-            ):
+            if not _deadline_open(_safe_clock(self._clock), deadline):
                 cell.abandoned = True
-                return "gap_consult_timeout", None
+                return _Attempt("gap_consult_timeout", ends_budget=True)
         if cell.failed or not cell.done:
-            return "gap_consult_failed", None
-        return "ok", cell.result
+            return _Attempt("gap_consult_failed")
+        if cell.reason is not None:
+            return _Attempt(cell.reason, ends_budget=cell.ends_budget)
+        return _Attempt(result=cell.result)
 
 
 def _valid_query(value: object) -> bool:
