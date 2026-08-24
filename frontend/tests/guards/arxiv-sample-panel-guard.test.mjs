@@ -22,9 +22,13 @@
 // 都跑）而不是 G2——被钉的这个文件在仓库里恒存在，读它不需要任何同步。
 //
 // 覆盖边界（如实说明）：钉的是「这几个 setter 在这个 handler 里被调到了/没被调到」
-// 与「这个参数是这个标识符」。抓不到的：把重置搬进一个自定义 helper 再调用它
-// （`callSitesIn` 只看直接调用形态，不跟进函数体）、或用运行时反射改这些状态。
-// 那些形态的兜底是评审，不是这份测试。
+// 与「这个参数是这个标识符」。把重置搬进一个自定义 helper 再调用它
+// （`callSitesIn` 只看直接调用形态，不跟进函数体）不是「抓不到」——是会**误报红**：
+// 脆而不瞎，一次行为不变的重构会被这份测试拉响警报，但不会放过一个真的漏调。
+// 真正的盲区是运行时反射（`obj["set" + "Selected"]()` 这类计算属性调用）：本文件里
+// 唯一的负向断言（`!called.includes("setAlreadyImported")`）在这种写法下会静默转绿——
+// AST 层面看不出那是一次调用，断言因而「通过」，而实际行为可能恰恰违反了它要钉的那条
+// 规则。那种形态的兜底是评审，不是这份测试。
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -34,6 +38,7 @@ import {
   findFunction,
   findFunctionIn,
   jsxElements,
+  jsxTextValues,
   parseRepositoryModule,
 } from "../../test-support/semantic-source.mjs";
 
@@ -134,5 +139,14 @@ test("一次什么都没记上的导入会出声，不是静默复位", async ()
   assert.ok(
     status,
     "空回执那一支必须落在一个 role=\"status\" 的元素上",
+  );
+
+  // 元素存在不等于出了声：`<p role="status" />` 或 `<p role="status">{""}</p>`
+  // 同样能通过上面那条断言，却是一段视觉与无障碍树上都空白的沉默复位。
+  assert.ok(
+    jsxTextValues(source).some(
+      (value) => value.includes("本次导入没有收到任何结果"),
+    ),
+    "role=\"status\" 元素必须携带非空提示文本，不能是一个空标签",
   );
 });

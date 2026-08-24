@@ -131,6 +131,7 @@ const AST_NODE_FACTORIES = new Set([
   "findFunction",
   "findFunctionIn",
   "parseModule",
+  "parseRepositoryModule",
   "parseText",
 ]);
 

@@ -25,12 +25,19 @@ the result lands — is already pinned by ``test_gap_consult_ask_wiring.py``
 this plugin is reachable by the host and answers honestly.  Assembling an Ask
 fixture to re-prove core's half would be a slower copy of an existing test.
 
-**Why ``slow``.**  Each test boots an application, so the file belongs in G2
-rather than on every edit.  It reuses the existing marker instead of adding a
-sixth one: a new marker would have to be added to both shell lanes' ``-m``
-expressions *and* to the two literals pinned in
-``test_test_architecture_policy.py``, which is a lot of shared-gate churn for
-one sample.
+**Not marked slow.**  Each test boots an application, but measured serial
+runtime for the whole file is ~2s — well inside G1's per-PR budget — so it
+runs on every edit rather than waiting for G2's nightly pass. An earlier
+revision of this file carried ``pytestmark = pytest.mark.slow`` on the
+reasoning that "boots an application" implied G2-only cost; that reasoning
+was never checked against a clock. T4 review measured it and moved the file
+into G1 instead of adding a sixth marker (which would have meant touching
+both shell lanes' ``-m`` expressions *and* the two literals pinned in
+``test_test_architecture_policy.py`` for one sample). ``check_sample_plugin.sh``
+(G2) still owns the separate, slower job of syncing this plugin into
+``frontend/features/ui-plugins`` and exercising it end to end as a synced
+package — that is a different kind of verification than "does this test file
+run fast enough for G1", and is unaffected by this file's marker.
 """
 from __future__ import annotations
 
@@ -53,9 +60,6 @@ from tests.test_extension_discovery import (
     _plugin_import_isolation,  # noqa: F401 -- autouse pytest fixture, resolved by name
     frozen_runtime_reset,  # noqa: F401 -- pytest fixture, resolved by name
 )
-
-pytestmark = pytest.mark.slow
-
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_ROOT = _REPO_ROOT / "examples" / "extensions" / "arxiv-search"
@@ -219,7 +223,7 @@ def _configure(
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("ASK_GAP_CONSULT_TIMEOUT_SECONDS", _GAP_CONSULT_TIMEOUT)
-    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
     _clear_caches()
 
 
@@ -488,7 +492,10 @@ def test_gap_consult_is_silent_when_consult_is_disabled(
     The router is still mounted and the panel capability still resolves — that
     separation is the whole reason this plugin gates consultation on a
     per-contribution ``availability`` probe rather than on ``manifest.requires``
-    — so this test also proves the plugin is loaded, not merely absent.
+    — so this test also proves the plugin is loaded, not merely absent. "Still
+    mounted" is checked mechanically, not just inferred from registry state: a
+    second ``TestClient`` calls the router's own ``GET /health`` over the wire
+    and gets a real 200 back.
     """
 
     _configure(tmp_path, monkeypatch, consult_enabled=False)
@@ -518,6 +525,16 @@ def test_gap_consult_is_silent_when_consult_is_disabled(
     runtime = default_extension_runtime()
     assert _PLUGIN_ID in runtime.plugin_settings
     assert runtime.gap_consult.has_contributions() is True
+
+    # Mechanically, not just by inspecting registry state: the router really
+    # answers a real request over the wire.
+    from app.main import create_app
+
+    router_client = TestClient(create_app())
+    headers = _auth(router_client, "x00880088")
+    response = router_client.get(f"{_MOUNT}/health", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"plugin_id": _PLUGIN_ID, "configured": True}
 
 
 # --------------------------------------------------------------------------

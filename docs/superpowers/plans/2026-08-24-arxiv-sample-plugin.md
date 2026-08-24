@@ -689,6 +689,13 @@ backend/tests/test_arxiv_sample_plugin_e2e.py`；
    放文档，不放 trace）。
 2. **e2e 停在宿主层：批准**。PR-A 的 `test_gap_consult_ask_wiring.py` 已钉 core 侧触发，
    PR-B 证「真装载下插件被调到并如实作答」即可，不重复装配 Ask fixture。
-3. **`slow` 复用：批准**（即裁决 8，关掉此项）。
+3. **`slow` 复用：批准**（即裁决 8，关掉此项）。**T4 评审修订**：实测 e2e 文件串行耗时
+   ~2s（9 个用例），远低于 G1 单文件预算；打 `slow` marker 换来的是「每次编辑都跳过它」，
+   而不是省下有意义的墙钟。最终没有给它打任何 marker——文件直接留在 G1 每次 PR 跑，
+   `pytest.ini` 的 `slow` 描述收回「plus deliberately-G2 end-to-end tests」半句，回到接入前
+   逐字。`check_sample_plugin.sh`（G2）继续做它本来该做的事：把插件真同步进
+   `frontend/features/ui-plugins` 再整链验证，这是 G1 测试文件本身够不到的另一件事，跟这份
+   文件挂不挂 `slow` 无关。理由与取舍详见
+   `backend/tests/test_arxiv_sample_plugin_e2e.py` 文件头的「Not marked slow.」段。
 4. **layout-guard 注释：顺带改**，按建议措辞（「G1 恒为空；G2 的 `check_sample_plugin.sh`
    会给它非空样本」），落进 T3 的文件清单。
