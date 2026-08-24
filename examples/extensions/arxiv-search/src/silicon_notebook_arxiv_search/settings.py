@@ -22,7 +22,9 @@ accepted so tests and mirrors are not forced to sleep.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ArxivSearchSettings(BaseModel):
@@ -40,3 +42,31 @@ class ArxivSearchSettings(BaseModel):
     # until a deployment says otherwise.
     consult_enabled: bool = False
     consult_max_suggestions: int = Field(3, ge=1, le=5)
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        """Reject anything that is not a plain ``http(s)://host/path`` URL.
+
+        ``base_url`` is a deployment configuration value, not user input, but
+        it still crosses a trust boundary: it is handed straight to
+        :func:`urllib.request.urlopen` by :mod:`.client`.  This mirrors the
+        core project's fail-fast validation of ``MCP_PUBLIC_URL`` — an
+        absolute ``http(s)`` URL with no query string and no fragment — rather
+        than trusting a TOML author not to paste a ``file://`` path or a
+        stray ``#fragment``. Query strings are rejected too:
+        :func:`~silicon_notebook_arxiv_search.client.build_query_url` decides
+        the separator (``?`` vs ``&``) from whether one is already present,
+        so a ``base_url`` carrying its own query string would silently change
+        that decision instead of failing loudly here.
+        """
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("base_url must be an absolute http:// or https:// URL")
+        if not parsed.netloc:
+            raise ValueError("base_url must include a host")
+        if parsed.query:
+            raise ValueError("base_url must not include a query string")
+        if parsed.fragment:
+            raise ValueError("base_url must not include a fragment")
+        return value

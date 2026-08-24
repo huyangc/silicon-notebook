@@ -85,6 +85,14 @@ def acquire_slot(interval_seconds: float, budget_seconds: float) -> bool:
         last = _LAST_REQUEST_AT
         wait = 0.0 if last is None else interval_seconds - (time.monotonic() - last)
         if wait > 0.0:
+            if budget_seconds <= 0.0:
+                # Defensive: an already-exhausted budget must never wait, even
+                # though the non-blocking acquire above (``max(0.0, ...)``)
+                # can still succeed instantly when the throttle happens to be
+                # free.  Spelled out explicitly rather than relying on the
+                # ``remaining`` subtraction below to land negative.
+                _THROTTLE.release()
+                return False
             remaining = budget_seconds - (time.monotonic() - started)
             if wait > remaining:
                 # The whole point: skip the request rather than oversleep.
@@ -116,7 +124,13 @@ def build_query_url(
     start: int,
     max_results: int,
 ) -> str:
-    """Build one arXiv API query URL.  Pure; raises on an empty term list."""
+    """Build one arXiv API query URL.  Pure; raises on an empty term list.
+
+    ``max_results`` is not clamped here — the only ceiling on it is the
+    settings model's ``le=20`` bound.  A caller that builds a URL directly
+    from this function (bypassing :class:`~.settings.ArxivSearchSettings`
+    validation) gets whatever value it passes, floored at 1 below.
+    """
     terms = query.split()[:MAX_QUERY_TERMS]
     if not terms:
         raise ValueError("arXiv query has no searchable terms")
@@ -147,7 +161,15 @@ def search(
 
     ``fetch`` is injectable so callers can be tested without a network — the
     same shape core's own URL probe uses.
+
+    A non-positive ``limit`` returns ``()`` immediately, before touching the
+    network or the throttle: :func:`~.atom.parse_atom` would discard whatever
+    came back anyway (its own ``limit <= 0`` guard), so spending a politeness
+    slot and a round trip on a result nobody wants is pure waste — and, worse,
+    it would burn part of a caller's throttle budget for nothing.
     """
+    if limit <= 0:
+        return ()
     url = build_query_url(
         query, base_url=base_url, start=start, max_results=limit
     )
@@ -169,9 +191,12 @@ def search(
 def _fetch(url: str, timeout: float, user_agent: str) -> bytes:
     """Read at most ``MAX_RESPONSE_BYTES`` of the response body.
 
-    The ceiling is one half of the XML-expansion mitigation described in
-    :mod:`.atom`: a truncated read yields an unparseable document, which the
-    caller reports as an upstream failure — never an unbounded parse.
+    This ceiling bounds network cost and turns a response the endpoint never
+    intended to send into an unparseable document, which the caller reports
+    as an upstream failure rather than an unbounded read.  It is *not* a
+    defence against XML entity expansion — a payload far under this ceiling
+    can still declare an expansion factor in the millions once parsed.  See
+    :mod:`.atom` for what actually guards against that attack class.
     """
     request = urllib.request.Request(
         url, method="GET", headers={"User-Agent": user_agent}
