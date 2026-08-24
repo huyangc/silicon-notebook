@@ -14,10 +14,12 @@ from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 from app.services.embedding import FakeEmbedder
 from app.services.kg import scheduler as kg_scheduler
 from app.services.kg.run_control import (
+    MODEL_RESPONSE_INVALID_MESSAGE,
     MODEL_UNAVAILABLE_MESSAGE,
     KgBuildAborted,
     KgBuildFailure,
 )
+from app.services.model_work import ModelProviderError
 from app.services.knowledge_lifecycle import ModelSkipPolicy
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import (
@@ -31,9 +33,16 @@ class _ControlledKgClient:
     configured = True
     model = "test-kg"
 
-    def __init__(self, *, fail_after_successful_sources=None, fail_probe=False):
+    def __init__(
+        self,
+        *,
+        fail_after_successful_sources=None,
+        fail_probe=False,
+        probe_error=None,
+    ):
         self.fail_after_successful_sources = fail_after_successful_sources
         self.fail_probe = fail_probe
+        self.probe_error = probe_error
         self.lock = threading.Lock()
         self.probes = 0
         self.source_calls = 0
@@ -51,6 +60,8 @@ class _ControlledKgClient:
         if prompt.startswith('Return {"ok":true}'):
             with self.lock:
                 self.probes += 1
+            if self.probe_error is not None:
+                raise self.probe_error
             if self.fail_probe:
                 raise self._connection_error()
             return '{"ok":true}'
@@ -289,6 +300,32 @@ def test_rebuild_probe_failure_happens_before_delete(repo, monkeypatch):
     saved = repo._runtime.kg_build_jobs.get(job["id"])
     assert saved["status"] == "failed"
     assert saved["error_code"] == "model_unavailable"
+
+
+def test_empty_probe_response_is_persisted_as_actionable_model_failure(repo):
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(
+        repo,
+        "kg_extract",
+        _ControlledKgClient(
+            probe_error=ModelProviderError(
+                "empty content", code="malformed_response"
+            )
+        ),
+    )
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted):
+        repo.execute_notebook_kg_job(
+            notebook.id, job["id"], "incremental"
+        )
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["stage"] == "finished"
+    assert saved["error_code"] == "model_response_invalid"
+    assert saved["error_message"] == MODEL_RESPONSE_INVALID_MESSAGE
+    assert saved["completed_sources"] == 0
 
 
 def test_job_enters_stopping_before_running_windows_are_drained(

@@ -91,6 +91,23 @@ test("model failure preserves progress and exposes continuation", () => {
   assert.equal(view.tone, "error");
 });
 
+test("invalid model response is not mislabeled as an operator interruption", () => {
+  const view = kgBuildPresentation(
+    job("failed", "finished", {
+      total_sources: 1,
+      error_code: "model_response_invalid",
+      user_message:
+        "模型服务未返回可解析的知识分析结果；请检查模型兼容性或输出 token 上限后重试。",
+    }),
+    1,
+    false,
+  );
+
+  assert.equal(view.label, "模型响应不可用 · 已完成 0/1 项内容");
+  assert.equal(view.detail.includes("输出 token 上限"), true);
+  assert.equal(view.actionLabel, "继续分析未完成内容");
+});
+
 test("successful completion with source warnings remains retryable", () => {
   const completed = job("succeeded", "finished", {
     completed_sources: 77,

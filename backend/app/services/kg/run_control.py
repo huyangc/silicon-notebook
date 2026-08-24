@@ -20,6 +20,10 @@ MODEL_AUTH_FAILED_MESSAGE = (
 MODEL_REQUEST_REJECTED_MESSAGE = (
     "模型服务拒绝了知识分析请求；请检查模型名称、地址和兼容性设置后重试。"
 )
+MODEL_RESPONSE_INVALID_MESSAGE = (
+    "模型服务未返回可解析的知识分析结果；"
+    "请检查模型兼容性或输出 token 上限后重试。"
+)
 
 
 @dataclass(frozen=True)
@@ -155,6 +159,10 @@ def _failure_for(exc: Exception) -> KgBuildFailure | None:
         return KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
     if code == "provider_auth":
         return KgBuildFailure("model_auth_failed", MODEL_AUTH_FAILED_MESSAGE)
+    if code == "malformed_response":
+        return KgBuildFailure(
+            "model_response_invalid", MODEL_RESPONSE_INVALID_MESSAGE
+        )
     if code in {
         "unknown_model",
         "model_not_found",
@@ -294,6 +302,9 @@ def probe_kg_model(client: TaskScopedKgClient) -> None:
     client.chat_json(
         [{"role": "user", "content": 'Return {"ok":true} and nothing else.'}],
         '{"ok":true}',
-        max_tokens=16,
+        # Do not impose a second, tiny completion budget here. Reasoning-capable
+        # providers may spend that entire budget before emitting visible JSON,
+        # yielding an HTTP-200 response with empty ``content``. Omitting the
+        # override reuses chat_json's single configured short-output budget.
         bypass_cache=True,
     )
