@@ -131,19 +131,20 @@ test("附图在正文引用段落后渲染、只显示图片，并可页内放�
   expect(img.getAttribute("src")).toContain("/public/conversations/ctok-test/assets/alias-1");
   const region = img.closest(".answer-inline-images");
   expect(region).not.toBeNull();
+  expect(screen.getByRole("complementary", { name: "引用图片 [1]" })).toBe(region);
   expect(region?.previousElementSibling?.tagName).toBe("P");
-  expect(region?.textContent).toContain("本段附图");
+  expect(region?.textContent).toContain("引用 [1]");
   expect(region?.textContent).toContain("模型未直接读取图片");
   expect(region?.textContent).not.toContain("架构示意");
 
   const openButton = screen.getByRole("button", { name: "放大查看本段附图" });
   await user.click(openButton);
-  const dialog = screen.getByRole("dialog", { name: "[1]附图预览" });
+  const dialog = screen.getByRole("dialog", { name: "引用 [1] 图片预览" });
   expect(dialog).toBeInTheDocument();
   expect(within(dialog).getByRole("img", { name: "架构示意" })).toBeInTheDocument();
   expect(dialog.textContent).not.toContain("架构示意");
   await user.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
-  expect(screen.queryByRole("dialog", { name: "[1]附图预览" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "引用 [1] 图片预览" })).toBeNull();
   expect(screen.getByRole("button", { name: "放大查看本段附图" })).toHaveFocus();
 });
 
@@ -173,7 +174,7 @@ test("引用卡因标题和摘录都为空而被过滤时，reference_keys 仍�
   expect(container.querySelector("#ref-t0-k4")).toBeNull();
   expect(screen.queryByRole("button", { name: "[4]" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "放大查看本段附图" }));
-  expect(screen.getByRole("dialog", { name: "[4]附图预览" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "引用 [4] 图片预览" })).toBeInTheDocument();
 });
 
 test("旧公开载荷缺 reference_keys 时图片不消失，以明确未定位的 image-only 区块降级", async () => {
@@ -186,7 +187,7 @@ test("旧公开载荷缺 reference_keys 时图片不消失，以明确未定位�
   });
   render(<PublicConversationPage />);
 
-  const region = await screen.findByRole("complementary", { name: "本段附图（旧分享）" });
+  const region = await screen.findByRole("complementary", { name: "引用图片（旧分享）" });
   expect(within(region).getByRole("img", { name: "旧版架构图" })).toBeInTheDocument();
   expect(region.textContent).toContain("旧分享未保留引用位置");
   expect(region.textContent).toContain("模型未直接读取图片");
