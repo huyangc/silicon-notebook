@@ -558,6 +558,20 @@ export type RetrievalScopeReceipt = {
   bases: { notebook_id: string; name: string; included: boolean }[];
 };
 
+/**
+ * A pointer to material OUTSIDE this notebook (``ask.gap_consult``, X9 PR-A).
+ * Deliberately just these four fields — no source_id/element_id/relevance/
+ * citation key, because nothing here was retrieved, cited, anchored, or
+ * shown to the answering model. Real source:
+ * `backend/app/models/ask.py AskGapSuggestion`.
+ */
+export type GapSuggestion = {
+  title: string;
+  url: string;
+  summary?: string;
+  source_label?: string;
+};
+
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
@@ -590,6 +604,9 @@ export type AskResponse = {
   result_sets?: (KnowhowResultSet | TypedCollectionResult)[];
   /** 整个请求范围的覆盖率；与每张已选表自身的 coverage 分开。 */
   result_coverage?: KnowhowBatchCoverage;
+  /** 站外来源建议（``ask.gap_consult``）：不是证据，缺席时后端按 `exclude_if`
+   *  惯例整键缺席（零插件部署与历史回答因此逐字节相同）。 */
+  gap_suggestions?: GapSuggestion[];
   model_errors?: {
     service_id: string;
     service_name: string;

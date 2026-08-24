@@ -146,6 +146,32 @@ test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达�
   assert.deepEqual(offenders, []);
 });
 
+// 站外来源建议的「导入」按钮(ask.gap_consult,X9 PR-A T3)不在 page.tsx 里——它是
+// answer-gap-suggestions.tsx 里独立组件的按钮,上面那两条测试按文件名钉死解析
+// page.tsx,天生看不到它。同一条理由(后端 POST /sources/url 没有单飞守卫,点完不
+// 禁用就是重复排入同一个链接),同一套判据(TRIVIALLY_FALSE),只是换一个要解析的
+// 文件。
+test("answer-gap-suggestions.tsx 的导入按钮同样带非平凡的 disabled(点完不能再点)", async () => {
+  const module = await parseModule("answer-gap-suggestions.tsx");
+  const buttons = jsxElements(module, "button");
+  const importButtons = buttonsMatching(buttons, "handleImport(");
+  // 匹配为 0 说明入口被改名/删了——同上面几条一样,必须响亮失败。
+  assert.ok(
+    importButtons.length > 0,
+    "没找到导入按钮（handleImport(...) 入口被改名或删除？守卫失效）",
+  );
+  const offenders = [];
+  for (const element of importButtons) {
+    const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
+    if (disabled === undefined) {
+      offenders.push("导入按钮缺 disabled —— 后端无单飞守卫，重复点=重复排入同一个链接来源");
+    } else if (TRIVIALLY_FALSE.has(String(disabled).trim())) {
+      offenders.push(`导入按钮 disabled=${disabled} 恒假，等于没写`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test("每个体检修复动作都有配套的进行态文案（否则按钮禁用了却仍显示原文案）", () => {
   // 用户的要求是「变成的内容要按原按钮的功能来」——所以进行态是一张与 CHECKUP_FIX 一一
   // 对应的表,不是一句通用的「处理中」。少一个键,那个动作就会禁用着却还写「补齐向量」。

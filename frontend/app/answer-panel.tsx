@@ -27,6 +27,7 @@ import {
   type CitationImageLike,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import { GapSuggestionsPanel } from "./answer-gap-suggestions";
 import { AuthedImage } from "./authed-image";
 import { API_BASE } from "./api-config";
 import { type ReasoningTraceStep } from "./ask-stream";
@@ -1190,6 +1191,7 @@ export function AnswerView({
   scaleIndexStatus,
   onSaveMemory,
   onShare,
+  onImportGapSuggestion,
   memorySaved,
   onTestModel,
   onOpenModelStatus,
@@ -1225,6 +1227,11 @@ export function AnswerView({
    *  得了「当前会话是哪一条」的调用方才传，dev/logs 的只读排障视图不传就不渲染
    *  （同 onSaveMemory / onFeedback 的既有惯例：写回服务端的动作没有回调就不出按钮）。 */
   onShare?: (answerId: string) => void;
+  /** 站外来源建议的「导入」按钮（``ask.gap_consult``）：把这个 URL 当一次普通
+   *  链接来源添加进当前笔记本。可选——没有承接方（只读排障视图）时导入按钮
+   *  一颗都不渲染，同 onSaveMemory 的既有惯例。返回值供该条目内联展示成功/
+   *  失败，绝不用 toast（长任务按钮红线：失败文案必须持久可见）。 */
+  onImportGapSuggestion?: (url: string) => Promise<{ ok: boolean; message?: string }>;
   memorySaved: boolean;
   onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
   onOpenModelStatus?: (serviceId: string) => void;
@@ -1362,6 +1369,10 @@ export function AnswerView({
         notebookId={notebookId}
         notebookNames={notebookNames}
         onOpenSource={onOpenSource}
+      />
+      <GapSuggestionsPanel
+        suggestions={answer.gap_suggestions ?? []}
+        onImport={onImportGapSuggestion}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />

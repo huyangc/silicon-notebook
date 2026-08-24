@@ -42,6 +42,7 @@ function optionalCallbackProps(sourceFile, componentName) {
 const KNOWN_OPTIONAL_CALLBACKS = [
   "onBuildScaleIndex",
   "onFeedback",
+  "onImportGapSuggestion",
   "onOpenKnowhowRow",
   "onOpenKnowledgeGraph",
   "onOpenSource",

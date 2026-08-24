@@ -40,6 +40,18 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "the password-reset catch reads only the forbidden control-flow sentinel",
   },
+  "answer-gap-suggestions.tsx|<module>.GapSuggestionsPanel|property|message": {
+    count: 1,
+    reason: "renders the per-item ImportState.message the panel itself constructed (a fixed "
+      + "Chinese fallback, or the already-humanized ImportOutcome.message an onImport caller "
+      + "returned) — never a raw caught exception",
+  },
+  "answer-gap-suggestions.tsx|<module>.GapSuggestionsPanel.handleImport|property|message": {
+    count: 1,
+    reason: "reads the typed ImportOutcome.message an onImport callback resolved with — "
+      + "page.tsx's importGapSuggestion already runs any caught exception through "
+      + "toUserMessage before this component ever sees it",
+  },
   "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
     count: 1,
     reason: "the activity view's shared predicate reads only the forbidden control-flow sentinel",

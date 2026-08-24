@@ -5885,6 +5885,143 @@ button.tag:hover {
   text-decoration: line-through;
 }
 
+/* 缺口外扩检索(ask.gap_consult, X9 PR-A)的披露区块。视觉形态照抄
+   .answer-retrieval-scope(details/summary,默认折叠),但这是完全独立的信息
+   类别——站外来源建议不是证据,从不进 [k] 引用编号,所以另开一套类名,免得
+   调整一处样式误伤另一处的语义。零颜色字面量:只用既有 :root token。 */
+.answer-gap-consult {
+  margin: 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--soft);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.answer-gap-consult > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  list-style: none;
+  color: var(--muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.answer-gap-consult > summary::-webkit-details-marker {
+  display: none;
+}
+
+.answer-gap-consult > summary svg {
+  flex: none;
+  transition: transform 0.12s ease;
+}
+
+.answer-gap-consult[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.answer-gap-consult-disclaimer {
+  margin: 0;
+  padding: 0 12px 8px 30px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.answer-gap-consult-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0 12px 10px 30px;
+  list-style: none;
+}
+
+.answer-gap-consult-item {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.answer-gap-consult-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.answer-gap-consult-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.answer-gap-consult-item-head a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--blue);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.answer-gap-consult-item-head a:hover {
+  text-decoration: underline;
+}
+
+.answer-gap-consult-source {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.answer-gap-consult-summary {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.answer-gap-consult-import {
+  justify-self: start;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: var(--blue);
+  background: var(--panel);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.answer-gap-consult-import:hover:not(:disabled) {
+  border-color: var(--blue);
+}
+
+.answer-gap-consult-import:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.answer-gap-consult-import.is-done {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+.answer-gap-consult-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .cite-chip-wrap {
   display: inline;
 }
