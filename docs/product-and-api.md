@@ -893,7 +893,11 @@ bytes enter the ordinary upload/dedup/background scheduler, then the built-in Ma
 parser persists its relative images exactly as a browser upload does. `add_source_url` adds a
 PDF by URL and refuses anything the server cannot reach or probe as a PDF. All three respect the notebook's document limit, except that a re-add which
 resolves to an existing source is still allowed at the limit — it adds no document, and
-refusing it would break the idempotence above exactly where a retry needs it most. Parsing runs in the background, so poll `get_source_status`, which returns
+refusing it would break the idempotence above exactly where a retry needs it most. The limit
+is enforced authoritatively inside the source-creation write transaction itself (the same gate
+the browser's upload and URL-import endpoints use), so two concurrent creates cannot both take
+a notebook's last slot; the metadata-only `/sources/import` endpoint alone keeps a pre-flight
+check only. Parsing runs in the background, so poll `get_source_status`, which returns
 `parse_status`, `status`, `element_count`, `kg_extracted` (whether the source has knowledge
 objects in the graph), `kg_analyzed_empty` (analysis DID complete and this document legitimately
 yielded no knowledge objects — a text-poor or image-only scan), `agent_created`, and — instead
