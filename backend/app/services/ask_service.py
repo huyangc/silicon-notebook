@@ -351,12 +351,19 @@ def _egress_phrase(value: object, limit: int) -> str:
 def _egress_question(prepared: object) -> str:
     """The single question string a gap-consult plugin gets to see.
 
-    Exactly two candidates, in order, and both of them are the user's OWN
-    words: the reviewed wording (what this run actually searched for), then the
-    raw question when no intent was confirmed.  ``research_question`` is
-    deliberately not among them — it is the intent contract's composite string
-    (objective plus mandatory topics plus constraints plus assumptions), the
-    same shape ``_uncovered_directions_from_trace`` refuses to send outward.
+    Exactly two candidates, in order, and both of them are wording the user
+    has actually SEEN: the reviewed final question, but only when a human
+    really reviewed it — the clarification gate ran (``needs_clarification``
+    on the confirmed contract), where the user answers the ambiguities and can
+    edit the final wording — and otherwise the raw question as typed.  A
+    clear-intent Ask is auto-confirmed without pausing, so its
+    ``resolved_question`` is a model rewrite (it may fold in earlier turns'
+    wording) that no human ever looked at; preferring it here would egress
+    model-composed text under the "reviewed question" label (codex #584 R5
+    P1).  ``research_question`` is deliberately not among the candidates
+    either — it is the intent contract's composite string (objective plus
+    mandatory topics plus constraints plus assumptions), the same shape
+    ``_uncovered_directions_from_trace`` refuses to send outward.
 
     Bounded by ``GAP_CONSULT_QUESTION_MAX_CHARS``, which is a privacy rail
     rather than a budget: it is the ceiling on how much of the user's own text
@@ -380,10 +387,19 @@ def _egress_question(prepared: object) -> str:
     test_egress_question_truncation_is_the_privacy_bound_not_data_loss``.
     """
     projection = getattr(prepared, "intent_projection", None)
-    for candidate in (
-        getattr(projection, "resolved_question", ""),
-        getattr(prepared, "question", ""),
-    ):
+    reviewed = ""
+    if projection is not None:
+        # ``intent_json`` is the confirmed contract verbatim; a truthy
+        # ``needs_clarification`` on it means the run could only have been
+        # confirmed through the human gate (required ambiguities must be
+        # answered before confirmation), so the resolved wording was reviewed.
+        try:
+            contract = json.loads(getattr(prepared, "intent_json", "") or "{}")
+            if isinstance(contract, dict) and contract.get("needs_clarification"):
+                reviewed = getattr(projection, "resolved_question", "")
+        except (ValueError, TypeError):
+            reviewed = ""
+    for candidate in (reviewed, getattr(prepared, "question", "")):
         phrase = _egress_phrase(candidate, GAP_CONSULT_QUESTION_MAX_CHARS)
         if phrase:
             return phrase

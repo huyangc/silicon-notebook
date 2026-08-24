@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 import threading
 import time
 
+import pytest
+
 from app.domain.cancellation import AskCancelled
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
@@ -556,6 +558,42 @@ def test_an_over_limit_query_is_refused_before_any_plugin_sees_it():
     )
     host.consult(_call(query=at_limit))
     assert len(plugin.contexts) == 1
+
+
+def test_a_compliant_plugin_may_call_raise_if_cancelled():
+    """The context carries the full SDK ``CancellationToken`` face.
+
+    Production hands the host a raw ``threading.Event`` (``is_set`` only), but
+    ``GapConsultExtensionContext.cancellation`` is typed as the SDK protocol,
+    whose face includes ``raise_if_cancelled()``.  Before the adapter, a
+    contributor following that contract hit an AttributeError that the worker's
+    fail-open guard recorded as a *plugin* failure — a compliant plugin lost
+    its suggestions for doing what the SDK told it to (codex #584 R5 P1).
+    The test doubles all implement both methods, which is exactly why only a
+    raw ``threading.Event`` can prove this.
+    """
+    from app.extension_sdk import CancellationToken
+
+    class Compliant:
+        def consult(self, context):
+            assert isinstance(context.cancellation, CancellationToken)
+            context.cancellation.raise_if_cancelled()
+            return _suggestions(
+                GapSuggestion("survey", "https://example.org/s.pdf")
+            )
+
+    host = _host(_bundle("corp.polite", Compliant()))
+    result = host.consult(_call(cancellation=threading.Event()))
+    assert [item.url for item in result] == ["https://example.org/s.pdf"]
+
+    # And when the event IS set, the compliant plugin's raise lands as this
+    # run's own cancellation, not as a swallowed plugin fault.
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(AskCancelled):
+        _host(_bundle("corp.polite2", Compliant())).consult(
+            _call(cancellation=cancelled)
+        )
 
 
 def test_late_result_from_an_abandoned_plugin_is_inert():

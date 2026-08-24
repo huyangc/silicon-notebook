@@ -94,6 +94,46 @@ _ADMISSION_CANCEL_STRIDE = 8
 _ADMISSION_SLICE_HEADROOM_CHARS = 1024
 
 
+class _SdkCancellation:
+    """Project the caller's raw cancel event onto the SDK's full token face.
+
+    ``GapConsultExtensionContext.cancellation`` is typed as the SDK
+    ``CancellationToken`` protocol, whose face is ``is_set()`` **and**
+    ``raise_if_cancelled()`` — but the production caller hands the host a raw
+    ``threading.Event``, which only has the first half.  A compliant plugin
+    calling ``raise_if_cancelled()`` on the raw event would AttributeError,
+    which the worker's fail-open guard then records as a plugin failure: a
+    well-behaved contributor loses its suggestions for following the contract
+    (codex #584 R5 P1).  This mirrors the established adapter in
+    ``generated_question_contribution._CancellationToken`` — monotonic caching
+    included, so an ``is_set()``/``raise_if_cancelled()`` sequence cannot be
+    turned into a hostile second-read type change — rather than inventing a
+    second cancellation shape.
+    """
+
+    __slots__ = ("_event", "_observed_cancelled")
+
+    def __init__(self, event: object) -> None:
+        self._event = event
+        self._observed_cancelled = False
+
+    def is_set(self) -> bool:
+        if self._observed_cancelled:
+            return True
+        if self._event is None:
+            return False
+        cancelled = self._event.is_set()
+        if type(cancelled) is not bool:
+            raise TypeError("malformed cancellation state")
+        if cancelled:
+            self._observed_cancelled = True
+        return cancelled
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_set():
+            raise AskCancelled()
+
+
 @dataclass
 class _WorkerCell:
     """Private mailbox for one contributor attempt.
@@ -330,7 +370,9 @@ class GapConsultHost:
                     cell.result = implementation.consult(
                         GapConsultExtensionContext(
                             call_context.query,
-                            call_context.cancellation,
+                            # The SDK face, not the raw event: a compliant
+                            # plugin may call ``raise_if_cancelled()``.
+                            _SdkCancellation(call_context.cancellation),
                             remaining,
                             deadline,
                         )

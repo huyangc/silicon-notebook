@@ -384,12 +384,15 @@ def test_no_trigger_when_covered_and_above_floor(make_repo):
 # what leaves the deployment
 # --------------------------------------------------------------------------
 class _PreparedStub:
-    """The two fields ``_egress_question`` reads, plus the one it must not.
+    """The fields ``_egress_question`` reads, plus the one it must not.
 
     ``research_question`` is present precisely because it is NOT a candidate:
     it is the intent contract's composite (objective + topics + constraints +
     assumptions), so a case that never carries it could not tell the difference
-    between "skipped" and "absent".
+    between "skipped" and "absent".  ``reviewed`` mirrors the human
+    clarification gate: only a contract whose ``needs_clarification`` is true
+    can have been confirmed by a person, so only then is ``resolved_question``
+    wording anyone actually saw (codex #584 R5 P1).
     """
 
     def __init__(
@@ -397,9 +400,11 @@ class _PreparedStub:
         question: str = QUESTION,
         resolved: str = "",
         research: str = "",
+        reviewed: bool = True,
     ) -> None:
         self.question = question
         self.research_question = research
+        self.intent_json = json.dumps({"needs_clarification": reviewed})
         self.intent_projection = type(
             "_Projection", (), {"resolved_question": resolved}
         )()
@@ -538,6 +543,33 @@ def test_egress_question_is_two_steps_and_skips_the_composite():
     ))
     assert fell_back == "原始问题"
     assert composite not in fell_back
+
+
+def test_an_unreviewed_model_rewrite_is_never_egressed():
+    """Auto-confirmed ``resolved_question`` is a model rewrite, not the user's.
+
+    A clear-intent Ask confirms without pausing, so nobody ever saw the
+    normalized wording — and it may fold in earlier turns' phrasing.  Only a
+    run that went through the clarification gate (``needs_clarification`` on
+    the confirmed contract) carries reviewed wording; every other run egresses
+    the raw question exactly as typed (codex #584 R5 P1).
+    """
+    from app.services.ask_service import _egress_question
+
+    # Auto-confirmed: the model rewrite is skipped even though it is nonblank.
+    assert _egress_question(_PreparedStub(
+        question="原始问题", resolved="模型改写过的问题", reviewed=False,
+    )) == "原始问题"
+
+    # Human-reviewed: the reviewed wording is preferred, as before.
+    assert _egress_question(_PreparedStub(
+        question="原始问题", resolved="审阅后问题", reviewed=True,
+    )) == "审阅后问题"
+
+    # A malformed contract payload fails toward LESS egress: raw question.
+    stub = _PreparedStub(question="原始问题", resolved="模型改写过的问题")
+    stub.intent_json = "not json"
+    assert _egress_question(stub) == "原始问题"
 
 
 def test_only_the_terminal_disclosure_step_decides_the_gaps():
