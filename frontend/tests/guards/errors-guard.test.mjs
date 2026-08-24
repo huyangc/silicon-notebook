@@ -42,15 +42,20 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   },
   "answer-gap-suggestions.tsx|<module>.GapSuggestionsPanel|property|message": {
     count: 1,
-    reason: "renders the per-item ImportState.message the panel itself constructed (a fixed "
-      + "Chinese fallback, or the already-humanized ImportOutcome.message an onImport caller "
-      + "returned) — never a raw caught exception",
+    reason: "renders the per-item ImportState.message the panel itself constructed: a fixed "
+      + "Chinese fallback the panel writes on its own catch, or the ImportOutcome.message an "
+      + "onImport caller resolved with — which is either a caught exception already run "
+      + "through toUserMessage, or the backend's own rejected[0].reason string shown verbatim "
+      + "(same posture as the existing URL-import rejected-list box at page.tsx's urlRejected "
+      + "rendering) — never a raw caught exception read directly by this component",
   },
   "answer-gap-suggestions.tsx|<module>.GapSuggestionsPanel.handleImport|property|message": {
     count: 1,
     reason: "reads the typed ImportOutcome.message an onImport callback resolved with — "
-      + "page.tsx's importGapSuggestion already runs any caught exception through "
-      + "toUserMessage before this component ever sees it",
+      + "page.tsx's importGapSuggestion returns either a caught exception already run through "
+      + "toUserMessage, or the backend's own rejected[0].reason string shown verbatim (same "
+      + "posture as the existing URL-import rejected-list box at page.tsx's urlRejected "
+      + "rendering), never a raw caught exception itself",
   },
   "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
     count: 1,

@@ -5972,7 +5972,11 @@ button.tag:hover {
 }
 
 .answer-gap-consult-source {
-  flex: none;
+  /* 与同一行的标题/摘要一致：不设 `flex: none`，让长（如 40 字 CJK）来源标签
+     能在窄列里收缩换行，而不是撑宽整个答案列（`.answer-gap-consult-item-head`
+     已是 flex-wrap，但一个不肯收缩的子项仍会把行撑爆）。 */
+  min-width: 0;
+  overflow-wrap: anywhere;
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 8px;

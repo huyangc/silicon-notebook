@@ -28,8 +28,16 @@
  * that one row immediately and swap in progress wording; success freezes it
  * into a terminal "已导入" state; failure surfaces the message persistently
  * under that row (never a toast) and leaves the button clickable again for a
- * retry. State is per-item, keyed by `url` (the admission rail already
- * de-duplicates suggestions by url, so it is a safe react key too).
+ * retry. State is per-item, keyed by array **index**, not by `url`: url
+ * de-duplication happens inside `GapConsultHost.consult()`'s `seen_urls` set
+ * (backend/app/extensions/gap_consult.py) — an injected seat this component
+ * cannot see the internals of — and the core code that hands the host's
+ * tuple straight into `AskResponse.gap_suggestions`
+ * (`ask_service.py::draft.response.gap_suggestions = list(gap_suggestions)`)
+ * never re-verifies that invariant. Keying UI state on a value whose
+ * uniqueness this component cannot itself prove is exactly the kind of
+ * assumption that quietly breaks when the host changes; keying on index is
+ * unconditionally safe regardless of what the host does or doesn't guarantee.
  */
 import { useState } from "react";
 import { ChevronRight, ExternalLink } from "lucide-react";
@@ -55,13 +63,13 @@ export function GapSuggestionsPanel({
    *  就不出按钮）——只读排障视图传不了这个回调，也就没有导入入口。 */
   onImport?: (url: string) => Promise<ImportOutcome>;
 }) {
-  const [states, setStates] = useState<Record<string, ImportState>>({});
+  const [states, setStates] = useState<Record<number, ImportState>>({});
 
   if (suggestions.length === 0) return null;
 
-  async function handleImport(url: string) {
+  async function handleImport(index: number, url: string) {
     if (!onImport) return;
-    setStates((previous) => ({ ...previous, [url]: { status: "busy" } }));
+    setStates((previous) => ({ ...previous, [index]: { status: "busy" } }));
     let outcome: ImportOutcome;
     try {
       outcome = await onImport(url);
@@ -70,7 +78,7 @@ export function GapSuggestionsPanel({
     }
     setStates((previous) => ({
       ...previous,
-      [url]: outcome.ok
+      [index]: outcome.ok
         ? { status: "done" }
         : { status: "failed", message: outcome.message || "未能添加这个链接" },
     }));
@@ -86,10 +94,10 @@ export function GapSuggestionsPanel({
         以下结果来自笔记本之外，没有参与本次回答，也不会被引用。导入后才会进入这个笔记本。
       </p>
       <ul className="answer-gap-consult-list">
-        {suggestions.map((suggestion) => {
-          const state = states[suggestion.url] ?? IDLE;
+        {suggestions.map((suggestion, index) => {
+          const state = states[index] ?? IDLE;
           return (
-            <li className="answer-gap-consult-item" key={suggestion.url}>
+            <li className="answer-gap-consult-item" key={`${suggestion.url}#${index}`}>
               <div className="answer-gap-consult-item-head">
                 <a href={suggestion.url} target="_blank" rel="noopener noreferrer">
                   {suggestion.title}
@@ -107,7 +115,7 @@ export function GapSuggestionsPanel({
                   type="button"
                   className={`answer-gap-consult-import ${state.status === "done" ? "is-done" : ""}`}
                   disabled={state.status === "busy" || state.status === "done"}
-                  onClick={() => handleImport(suggestion.url)}
+                  onClick={() => handleImport(index, suggestion.url)}
                 >
                   {state.status === "busy"
                     ? "导入中…"
