@@ -253,7 +253,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 ### 3.5 其它 contribution 类型
 
-其余五个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
+其余六个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
 
 | 扩展点常量 | kind | Protocol | 模块 |
 | --- | --- | --- | --- |
@@ -274,7 +274,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 - capability 名以 `.`/`_`/`-` 分隔；`:` 是 core 的。
 - 插件路由除真正的会话失效外不得抛 401——想要自己的措辞，就自己把上游 401 翻成 `502`/`424`。
 - 绝不在 `register()` 里 `raise ExtensionRegistryError`。它不在 SDK 公开面上，但 import 得到，而 core **刻意不脱敏**它——你写在那里的消息会逐字进运维日志。`register()` 抛出的其它任何异常都会被转成 `plugin_registration_failed`，只留类名。
-- `GapConsultContributor` 的可用性探测与 `consult` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束（见[缺口外扩检索](./product-and-api_zh.md#缺口外扩检索)）：不要依赖 `contextvars`、线程局部状态，或任何指望核心 ContextVar 能带进那条线程——按设计，一个都带不进去——也不要以为这次调用一定会被等到。超过 deadline 的 contribution 会被放弃：它最终的返回值不会被任何人读取，直接丢弃，绝不会迟到生效。只返回 `http`/`https` URL，且必须是**直接**指向一份 PDF 的链接——导入端点只探测你给的那个精确 URL，不会替你到落地页或摘要页里去找。
+- `GapConsultContributor` 的可用性探测与 `consult` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束（见[缺口外扩检索](./product-and-api_zh.md#缺口外扩检索)）：不要依赖 `contextvars`、线程局部状态，或任何指望核心 ContextVar 能带进那条线程——按设计，一个都带不进去。宿主会等你到 `ASK_GAP_CONSULT_TIMEOUT_SECONDS` 的 deadline 为止、期内返回即被采纳；超出即放弃这个 contribution——它最终的返回值不会被任何人读取，直接丢弃，绝不会迟到生效。只返回 `http`/`https` URL，且必须是**直接**指向一份 PDF 的链接——导入端点只探测你给的那个精确 URL，不会替你到落地页或摘要页里去找。
 
 ## 4. 第二步：写前端包
 
