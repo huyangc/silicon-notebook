@@ -9,7 +9,7 @@
 //   ⑥ 失败文案持久显示，不像即逝 toast 那样自动消失；
 //   ⑦ 没有 onImport 时一颗导入按钮都不出，但披露本身仍在；
 //   ⑧ 持久化（JSON 往返）的历史回答重新打开时同样渲染这份披露。
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -81,15 +81,24 @@ test("没有建议时区块不渲染", () => {
 
 test("默认折叠，展开后能看到免责句", async () => {
   const user = userEvent.setup();
-  render(<GapSuggestionsPanel suggestions={[suggestion()]} onImport={vi.fn()} />);
+  const { container } = render(<GapSuggestionsPanel suggestions={[suggestion()]} onImport={vi.fn()} />);
 
   const summary = screen.getByText("站外来源建议 · 1 条");
   expect(summary.closest("details")).not.toHaveAttribute("open");
 
   await user.click(summary);
+  const disclaimer = screen.getByText(
+    "以下结果来自笔记本之外，没有参与本次回答，也不会被引用。导入后才会进入这个笔记本。",
+  );
+  expect(disclaimer).toBeVisible();
+
+  // 免责句必须排在建议清单之前：这句话的存在意义是"点任何链接之前先看到它"，
+  // 排在清单下面就等于用户已经先扫过标题/摘要/导入按钮才读到这句免责声明。
+  const list = container.querySelector(".answer-gap-consult-list");
+  expect(list).not.toBeNull();
   expect(
-    screen.getByText("以下结果来自笔记本之外，没有参与本次回答，也不会被引用。导入后才会进入这个笔记本。"),
-  ).toBeVisible();
+    disclaimer.compareDocumentPosition(list!) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
 });
 
 
@@ -164,7 +173,12 @@ test("导入失败的提示持久显示，不会像即逝 toast 那样自动消�
     // 按钮回到可点（失败不像 busy/done 那样锁死，允许用户重试）。
     expect(screen.getByRole("button", { name: "导入" })).toBeEnabled();
 
-    await vi.advanceTimersByTimeAsync(2500);
+    // act 包裹是承重的:若组件哪天悄悄加一段定时自动清除,setTimeout 回调里的
+    // setState 需要被 flush 掉这次断言才靠得住——不包 act 时 React 的调度可能
+    // 落在这次断言之后才提交,DOM 还是旧的,让一次真实回归读成误通过。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
     expect(screen.getByText("这不是一个可解析的直链")).toBeInTheDocument();
   } finally {
     vi.useRealTimers();

@@ -630,6 +630,43 @@ test("consult_memory 分支先于通用 count 分支命中", () => {
   );
 });
 
+// 站外来源建议(ask.gap_consult,X9 PR-A T3):这一步问的是「这个库以外还有什么」,
+// 与 memory("记忆"/召回本笔记本内容)是完全不同的东西——同名会让轨迹读起来像是
+// 又召回了一批笔记本内证据,而这些建议从未参与检索。
+test("gap_consult 有自己的短标签,且与 memory 不同名,detail 说清带回了几条建议", () => {
+  const step = {
+    step_type: "gap_consult",
+    summary: "外扩检索:笔记本之外有 3 条相关建议",
+    detail: { count: 3 },
+  };
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "外扩");
+  assert.equal(getTraceStepDetail(step), "3 条建议");
+  assert.notEqual(TRACE_STEP_LABELS.gap_consult, TRACE_STEP_LABELS.memory);
+
+  // count 缺失/非数字时给空串,绝不上屏 "undefined 条建议"。
+  assert.equal(getTraceStepDetail({ step_type: "gap_consult", summary: "", detail: {} }), "");
+  assert.equal(
+    getTraceStepDetail({ step_type: "gap_consult", summary: "", detail: { count: "3" } }),
+    "",
+  );
+  // count=0(问过部署插件,一条建议都没拿回)仍是合法数字,照常渲染。
+  assert.equal(
+    getTraceStepDetail({ step_type: "gap_consult", summary: "", detail: { count: 0 } }),
+    "0 条建议",
+  );
+});
+
+// 分支顺序守卫(同 profile/experience/consult_memory 的理由):gap_consult 必须
+// 排在通用 `detail.count` 分支之前——它们读的恰好是同一个键名 `count`,但含义
+// 完全不同(站外建议数 vs 笔记本内候选数),顺序颠倒会让两者的措辞互相顶替而
+// 不是「静默多出一个键才会被顶替」,比 profile/experience 那几支更容易踩空。
+test("gap_consult 分支先于通用 count 分支命中(且两者共用同一个键名)", () => {
+  assert.equal(
+    getTraceStepDetail({ step_type: "gap_consult", summary: "", detail: { count: 3 } }),
+    "3 条建议",
+  );
+});
+
 // Agentic Memory P4(T1/T2):result_ids/anchor_evidence_ids 是 step→anchor 归因
 // 的原始材料,经 ports.py 的 project_run 无条件写进多类步骤的 detail(包括零命中
 // 的空列表)。它们只是不透明句柄,不该改变任何一步既有的折叠态展示——钉住"A 不

@@ -172,6 +172,41 @@ test("answer-gap-suggestions.tsx 的导入按钮同样带非平凡的 disabled(�
   assert.deepEqual(offenders, []);
 });
 
+// requires 字段同上面 LONG_TASK_BUTTONS 的加固理由:光断言「disabled 非平凡」拦不住
+// 「保留了别的条件、只把在飞标志摘掉」这类改动——比如把
+// `disabled={state.status === "busy" || state.status === "done"}` 改成
+// `disabled={state.status === "done"}`,disabled 表达式依旧非平凡(遗留了"已导入"
+// 那半的条件),上面那条"非平凡即通过"的测试照样绿,但按钮在请求还没返回的这段
+// 网络往返期间会重新可点,用户能在同一次导入进行中反复点、重复排入同一个链接。
+const GAP_CONSULT_IMPORT_BUTTON = {
+  match: "handleImport(",
+  why: "站外来源建议导入:后端无单飞守卫,重复点=重复排入同一个链接来源",
+  requires: "busy",
+};
+
+test("answer-gap-suggestions.tsx 的导入按钮 disabled 表达式必须含在飞判据(busy)", async () => {
+  const module = await parseModule("answer-gap-suggestions.tsx");
+  const buttons = jsxElements(module, "button");
+  const matched = buttonsMatching(buttons, GAP_CONSULT_IMPORT_BUTTON.match);
+  assert.ok(
+    matched.length > 0,
+    `${GAP_CONSULT_IMPORT_BUTTON.match}：没找到任何按钮（入口被改名或删除？守卫失效）`,
+  );
+  const offenders = [];
+  for (const element of matched) {
+    const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
+    if (disabled === undefined) {
+      offenders.push(`${GAP_CONSULT_IMPORT_BUTTON.match}：缺 disabled —— ${GAP_CONSULT_IMPORT_BUTTON.why}`);
+    } else if (!String(disabled).includes(GAP_CONSULT_IMPORT_BUTTON.requires)) {
+      offenders.push(
+        `${GAP_CONSULT_IMPORT_BUTTON.match}：disabled=${disabled} 里没有在飞标志 `
+          + `${GAP_CONSULT_IMPORT_BUTTON.requires} —— ${GAP_CONSULT_IMPORT_BUTTON.why}`,
+      );
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test("每个体检修复动作都有配套的进行态文案（否则按钮禁用了却仍显示原文案）", () => {
   // 用户的要求是「变成的内容要按原按钮的功能来」——所以进行态是一张与 CHECKUP_FIX 一一
   // 对应的表,不是一句通用的「处理中」。少一个键,那个动作就会禁用着却还写「补齐向量」。

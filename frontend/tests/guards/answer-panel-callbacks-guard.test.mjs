@@ -87,3 +87,19 @@ test("page.tsx 的生产 <AnswerView> 仍然传齐 answer-panel 的每一个可�
   }
   assert.deepEqual(offenders, []);
 });
+
+// 上面那条只证明「传了、且不是恒空」——分不清「传了 importGapSuggestion 本尊」
+// 与「传了一个只读态会收起它的三元」。站外来源建议的「导入」是一次写入
+// （POST /notebooks/{id}/sources/url），同「添加来源」弹窗既有的 `!readOnlyWorkspace`
+// 口径：只读成员能看到披露，看不到导入入口。这里没有可单独渲染的组件接缝
+// （AnswerView 直接嵌在 page.tsx 的生产 JSX 里，不像 dev/logs 活动详情那样另有
+// 一层只读专用组件），所以按源码语义钉（同 conversation-title-limit-guard 的钉法）。
+test("page.tsx 只读工作区收起 onImportGapSuggestion（导入是写操作，不能像其它可选回调一样恒传）", async () => {
+  const page = await parseModule("page.tsx");
+  const [callSite] = jsxElements(page, "AnswerView");
+  const bound = String(callSite.bindings?.onImportGapSuggestion ?? "");
+  assert.ok(
+    bound.includes("readOnlyWorkspace") && bound.includes("importGapSuggestion"),
+    `onImportGapSuggestion 的传值没有按 readOnlyWorkspace 三元收起——实际：${bound}`,
+  );
+});

@@ -3568,6 +3568,10 @@ export default function Home() {
     try {
       const result = await importUrlSources(owner.notebookId, [url]);
       if (result.created.length > 0) {
+        // 有意丢弃 applyImportedUrlSources 的布尔返回值:它只在 await 期间 owner
+        // 已换(切库/切用户)时才回 false,那种情形下服务端确实已经把来源添加
+        // 成功了——只是这个面板已经不在屏幕上,没有人会看到失败提示。报失败
+        // 反而是一次假红(用户会以为链接没导入,实际上已经进了笔记本)。
         await applyImportedUrlSources(owner, result.created);
         return { ok: true };
       }
@@ -5737,7 +5741,7 @@ export default function Home() {
                               throughAnswerId: answerId,
                             })) : undefined}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
-                            onImportGapSuggestion={importGapSuggestion}
+                            onImportGapSuggestion={readOnlyWorkspace ? undefined : importGapSuggestion}
                             onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
                             onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
                             testingModelServices={modelTestActivity.services}
