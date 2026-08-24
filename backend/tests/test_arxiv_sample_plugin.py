@@ -1474,7 +1474,11 @@ def test_the_ui_package_import_cap_matches_the_route_cap():
         _PLUGIN_ROOT / "ui" / "arxiv-search" / "search-panel-model.ts"
     ).read_text(encoding="utf-8")
     match = re.search(r"export const MAX_IMPORT_URLS = (\d+);", source)
-    assert match is not None, "the UI package no longer exports MAX_IMPORT_URLS"
+    assert match is not None, (
+        "the UI package's source no longer matches the "
+        "`export const MAX_IMPORT_URLS = <n>;` shape — the export may still "
+        "be there, just not in the exact form this regex expects"
+    )
     assert int(match.group(1)) == arxiv_routes.MAX_IMPORT_URLS
 
 

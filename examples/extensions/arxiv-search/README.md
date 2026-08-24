@@ -217,7 +217,7 @@ unbidden gap-consult suggestion nobody asked for gets the narrower one.
 - **XML entity expansion.** `xml.etree` parses through libexpat, which has
   shipped a built-in amplification-factor guard against entity-expansion
   ("billion laughs") payloads since libexpat 2.4 (bundled in CPython
-  3.9.5+/3.8.10+ and later). That guard, not anything in this plugin, is the
+  3.9.6+/3.8.11+/3.10.0b4+ and later). That guard, not anything in this plugin, is the
   actual defence on those runtimes. `MAX_RESPONSE_BYTES` (§3) is **not** a
   mitigation for this attack class — a payload of a few hundred bytes can
   still declare an expansion factor in the millions — it only bounds network
@@ -259,10 +259,13 @@ they were.
 
 ## 7. G2 lane and recovery
 
-This sample's UI package is **not** part of the default `npm run test` tree
-— `extension-ui-host.component.test.tsx` pins "the merged registry equals
-the built-in catalog, length 1, with zero plugins configured", and that
-must not be relaxed to accommodate this sample. Its own verification lane is
+This section is about the **UI package** half only — see §4.5 for the
+backend-side tests, which run in **G1** on every PR like any other test in
+the tree. This sample's UI package is **not** part of the default
+`npm run test` tree — `extension-ui-host.component.test.tsx` pins "the
+merged registry equals the built-in catalog, length 1, with zero plugins
+configured", and that must not be relaxed to accommodate this sample. Its
+own verification lane is
 [`bash scripts/check_sample_plugin.sh`](../../../scripts/check_sample_plugin.sh)
 (G2), which runs as part of `bash scripts/check_extended.sh`.
 

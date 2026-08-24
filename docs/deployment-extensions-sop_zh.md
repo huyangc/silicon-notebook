@@ -703,7 +703,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 ## 12. 样板插件（`examples/extensions/arxiv-search`）
 
-本仓库带一个完整的、**出厂关闭**的样板部署插件，好让上面每一节都有真实可读的代码可指：`examples/extensions/arxiv-search/`。没有任何东西会加载它。它不进任何默认部署、不进默认前端构建、不进默认测试泳道；启用它与启用一个真正的仓库外插件是同一个两变量决定——在你自己的 `EXTENSIONS_CONFIG` TOML 里点名它，再把 `SILICON_NOTEBOOK_UI_PLUGINS` 指向它的 `ui/arxiv-search` 包。
+本仓库带一个完整的、**出厂关闭**的样板部署插件，好让上面每一节都有真实可读的代码可指：`examples/extensions/arxiv-search/`。没有任何东西会默认加载它。验证分三层，把它们揉成一句「不进任何测试泳道」是错的：**插件包本身**不进任何默认部署、不进默认前端构建（启用它与启用一个真正的仓库外插件是同一个两变量决定——在你自己的 `EXTENSIONS_CONFIG` TOML 里点名它，再把 `SILICON_NOTEBOOK_UI_PLUGINS` 指向它的 `ui/arxiv-search` 包）；它的**源码级测试与守卫**随 **G1** 每次 PR 照常跑，与仓库里其它测试同待遇（见下面「[它刻意与真正的仓库外插件不同的两处](#它刻意与真正的仓库外插件不同的两处)」）；**同步进树后的整链验证**由 **G2** 的 `scripts/check_sample_plugin.sh` 泳道承担。
 
 它同时干两件事：
 
@@ -725,5 +725,5 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 ### 它刻意与真正的仓库外插件不同的两处
 
-- **它的测试放在 `backend/tests/`，不在包里。** 5.3 节要求真正的插件把测试留在自己的仓库里，那条要求依然有效。本仓库的后端泳道只收集 `backend/tests`，所以一个照 5.3 节字面执行的样板会交付一批永远不会被跑到的测试。**不要把这个安排照抄进真正的插件。**
+- **它的测试放在 `backend/tests/`，不在包里。** 5.3 节要求真正的插件把测试留在自己的仓库里，那条要求依然有效。本仓库的后端泳道只收集 `backend/tests`，所以一个照 5.3 节字面执行的样板会交付一批永远不会被跑到的测试。**不要把这个安排照抄进真正的插件。** 一旦落进 `backend/tests`，`backend/tests/test_arxiv_sample_plugin*.py` 与 `frontend/tests/{unit,guards}` 下的两份就是普通测试：随 **G1** 每次 PR 就跑，不是只在 G2 才跑。
 - **它的 UI 包有自己的 G2 泳道。** 因为配了插件的树跑不过基座的 `npm run test`（5.3 节），样板的前端那一半由 `scripts/check_sample_plugin.sh` 验证，它挂在 `scripts/check_extended.sh` 里跑：用真工具同步这个包，对着一个**非空**的 `frontend/features/ext-*/` 跑 node 泳道，跑界面词汇守卫，再做类型检查。它的退出 `trap` 会**恢复**调用者原本的 `SILICON_NOTEBOOK_UI_PLUGINS` 而不是清空它，这样一台本来就配了私有插件的机器不会因为一次被中断的运行而丢掉它们。
