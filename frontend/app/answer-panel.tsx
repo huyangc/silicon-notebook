@@ -1192,6 +1192,7 @@ export function AnswerView({
   onSaveMemory,
   onShare,
   onImportGapSuggestion,
+  importGapSuggestionDisabledReason,
   memorySaved,
   onTestModel,
   onOpenModelStatus,
@@ -1232,6 +1233,11 @@ export function AnswerView({
    *  一颗都不渲染，同 onSaveMemory 的既有惯例。返回值供该条目内联展示成功/
    *  失败，绝不用 toast（长任务按钮红线：失败文案必须持久可见）。 */
   onImportGapSuggestion?: (url: string) => Promise<{ ok: boolean; message?: string }>;
+  /** 非空时每一条站外来源建议的导入按钮都渲染为禁用态，`title` 提示这句话
+   *  ——「可写但已达文档数量上限」（红线：确认上传前必须把批次计入上限，
+   *  超额时按钮直接置灰并写明原因）。只读工作区不传 onImportGapSuggestion
+   *  时这个 prop 传不传都不影响渲染（按钮压根不出现）。 */
+  importGapSuggestionDisabledReason?: string;
   memorySaved: boolean;
   onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
   onOpenModelStatus?: (serviceId: string) => void;
@@ -1373,6 +1379,7 @@ export function AnswerView({
       <GapSuggestionsPanel
         suggestions={answer.gap_suggestions ?? []}
         onImport={onImportGapSuggestion}
+        importDisabledReason={importGapSuggestionDisabledReason}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />

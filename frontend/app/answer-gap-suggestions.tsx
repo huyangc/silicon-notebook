@@ -57,11 +57,20 @@ const IDLE: ImportState = { status: "idle" };
 export function GapSuggestionsPanel({
   suggestions,
   onImport,
+  importDisabledReason,
 }: {
   suggestions: GapSuggestion[];
   /** 缺省即不渲染导入按钮（onSaveMemory 的既有惯例：写回服务端的动作没有回调
    *  就不出按钮）——只读排障视图传不了这个回调，也就没有导入入口。 */
   onImport?: (url: string) => Promise<ImportOutcome>;
+  /** 非空时每一条建议的导入按钮都渲染为禁用态，并把这句话作为 `title` 提示
+   *  ——用于「可写但已达笔记本文档数量上限」：这种情形不必先发一次远端 PDF
+   *  探测再撞后端必然的容量拒绝，与「添加来源」弹窗满额时置灰同一形态
+   *  （复用同一份 `resolveDocumentCapacity` 判据，见 page.tsx）。已导入/导入中
+   *  两个终态/进行态的展示优先级高于它——那两态本身已经解释了按钮为什么
+   *  点不动，不需要再叠加这句话。区块与免责句照常渲染，用户仍应看见建议
+   *  本身。 */
+  importDisabledReason?: string;
 }) {
   const [states, setStates] = useState<Record<number, ImportState>>({});
 
@@ -114,7 +123,12 @@ export function GapSuggestionsPanel({
                 <button
                   type="button"
                   className={`answer-gap-consult-import ${state.status === "done" ? "is-done" : ""}`}
-                  disabled={state.status === "busy" || state.status === "done"}
+                  disabled={state.status === "busy" || state.status === "done" || Boolean(importDisabledReason)}
+                  title={
+                    importDisabledReason && state.status !== "busy" && state.status !== "done"
+                      ? importDisabledReason
+                      : undefined
+                  }
                   onClick={() => handleImport(index, suggestion.url)}
                 >
                   {state.status === "busy"

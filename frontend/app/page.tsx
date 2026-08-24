@@ -5742,6 +5742,12 @@ export default function Home() {
                             })) : undefined}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
                             onImportGapSuggestion={readOnlyWorkspace ? undefined : importGapSuggestion}
+                            // 站外来源建议导入复用「添加来源」弹窗同一份 docCapacity 判据
+                            // （红线：确认上传前必须把批次计入文档上限，超额时按钮直接置灰
+                            // 并写明原因）——不必先发一次远端 PDF 探测再撞后端必然的容量
+                            // 拒绝。onImportGapSuggestion 为 undefined（只读工作区）时按钮
+                            // 压根不渲染，这个 prop 传不传都不影响。
+                            importGapSuggestionDisabledReason={docCapacity.atCapacity ? atDocCapacityHint : undefined}
                             onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
                             onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
                             testingModelServices={modelTestActivity.services}
