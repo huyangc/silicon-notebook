@@ -54,8 +54,9 @@ class _FakeOpenAI:
 
 
 class _Stream:
-    def __init__(self, content='{"ok":1}', usage=None):
+    def __init__(self, content='{"ok":1}', usage=None, before_usage=None):
         self.closed = False
+        self.before_usage = before_usage
         self._chunks = [
             SimpleNamespace(
                 choices=[SimpleNamespace(
@@ -70,7 +71,10 @@ class _Stream:
         ]
 
     def __iter__(self):
-        return iter(self._chunks)
+        yield self._chunks[0]
+        if self.before_usage is not None:
+            self.before_usage()
+        yield self._chunks[1]
 
     def close(self):
         self.closed = True
@@ -190,6 +194,63 @@ def test_stream_usage_option_rejection_falls_back_once_and_is_remembered(monkeyp
     assert "stream_options" not in create.calls[2]
     assert first.closed is True
     assert second.closed is True
+
+
+def test_stream_usage_fallback_rechecks_cancellation_before_second_request(monkeypatch):
+    cancel_event = threading.Event()
+    unsupported = _api_status_error(
+        400, "Unsupported parameter: stream_options.include_usage"
+    )
+
+    class _CancelOnReject:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            cancel_event.set()
+            raise unsupported
+
+    create = _CancelOnReject()
+    client = _make(monkeypatch, create)
+
+    with pytest.raises(llm_mod.AskCancelled):
+        client.chat_json(
+            [{"role": "user", "content": "hi"}],
+            "{}",
+            cancel_event=cancel_event,
+        )
+
+    assert len(create.calls) == 1
+
+
+def test_stream_cancellation_preserves_already_received_usage_trailer(monkeypatch):
+    cancel_event = threading.Event()
+    usage = SimpleNamespace(
+        prompt_tokens=13,
+        completion_tokens=5,
+        total_tokens=18,
+    )
+    stream = _Stream(usage=usage, before_usage=cancel_event.set)
+    create = _FakeCreate([stream])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    with pytest.raises(llm_mod.AskCancelled):
+        client.chat_json(
+            [{"role": "user", "content": "hi"}],
+            "{}",
+            cancel_event=cancel_event,
+        )
+
+    assert stream.closed is True
+    assert logger.records[-1]["status"] == "cancelled"
+    assert logger.records[-1]["usage"] == {
+        "prompt_tokens": 13,
+        "completion_tokens": 5,
+        "total_tokens": 18,
+    }
 
 
 def test_kg_llm_limits_have_bounded_defaults(monkeypatch):
