@@ -275,6 +275,43 @@ def test_budget_caps_suggestions_and_phrases():
     assert len(greedy.contexts) == calls_before
 
 
+def test_a_plugin_authored_failure_code_is_length_bounded():
+    """The length gate precedes the regex on every plugin-authored code.
+
+    The stable-code scans run on the request thread after the worker already
+    spent its deadline, so an arbitrarily long preconstructed ``code`` must be
+    rejected in O(1), not by a full-string regex walk (codex #584 R9).  The
+    boundary itself is pinned: exactly at the cap passes, one over fails, and
+    a multi-megabyte code is refused outright (the whole result is invalid,
+    so nothing is admitted).
+    """
+    from app.extensions.gap_consult import (
+        _STABLE_CODE_MAX_CHARS,
+        _stable_code,
+        _valid_failure,
+    )
+
+    assert _stable_code("a" * _STABLE_CODE_MAX_CHARS) is True
+    assert _stable_code("a" * (_STABLE_CODE_MAX_CHARS + 1)) is False
+
+    huge = ExtensionFailure(
+        ExtensionFailureKind.UNAVAILABLE, "a" * 10_000_000
+    )
+    assert _valid_failure(huge) is False
+
+    events: list[dict[str, object]] = []
+    plugin = _Plugin(
+        ContributorResult((), ExtensionResultStatus.UNAVAILABLE, huge)
+    )
+    host = _host(_bundle("corp.huge", plugin), event_sink=events.append)
+    assert host.consult(_call()) == ()
+    # The malformed failure invalidates the result; no event carries the code.
+    assert all(
+        len(str(event.get("reason_code", ""))) <= _STABLE_CODE_MAX_CHARS
+        for event in events
+    )
+
+
 def test_malformed_items_are_dropped_not_fatal():
     plugin = _Plugin(_suggestions(
         GapSuggestion("no scheme", "example.org/paper"),

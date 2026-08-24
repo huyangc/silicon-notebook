@@ -66,6 +66,22 @@ from app.extensions.registry import (
 
 
 _STABLE_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
+# Length precedes the regex wherever a plugin-authored code is validated: the
+# scans run on the request thread after the worker already spent the deadline,
+# so an arbitrarily long preconstructed `code` must cost O(1) to reject, not a
+# full-string scan (codex #584 R9).  64 comfortably covers every stable code
+# this module and the SDK emit.
+_STABLE_CODE_MAX_CHARS = 64
+
+
+def _stable_code(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) <= _STABLE_CODE_MAX_CHARS
+        and bool(_STABLE_CODE.fullmatch(value))
+    )
+
+
 # The main thread never blocks longer than this without re-reading cancellation
 # and the deadline, so both stay responsive against an uncooperative plugin.
 _JOIN_SLICE_SECONDS = 0.05
@@ -444,8 +460,7 @@ def _valid_failure(value: object) -> bool:
     return value is None or (
         type(value) is ExtensionFailure
         and type(value.kind) is ExtensionFailureKind
-        and type(value.code) is str
-        and bool(_STABLE_CODE.fullmatch(value.code))
+        and _stable_code(value.code)
     )
 
 
@@ -634,7 +649,7 @@ def _emit(
         "duration_ms": duration_ms,
         "count": count,
     }
-    if reason_code and _STABLE_CODE.fullmatch(reason_code):
+    if reason_code and _stable_code(reason_code):
         event["reason_code"] = reason_code
     try:
         sink(event)
