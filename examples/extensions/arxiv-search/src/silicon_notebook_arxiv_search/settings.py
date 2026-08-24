@@ -28,12 +28,28 @@ model, so something above it has to name the transport's parameters, and that
 something must be exactly one function.  Two call sites spelling the same
 mapping by hand is how a plugin ends up sending its default user agent from one
 route and its configured one from another.
+
+:func:`egress_allowed` at the bottom is the same shape of argument applied to
+a different value: both ``.routes`` and ``.consult`` receive a URL parsed out
+of an untrusted upstream Atom feed (see :mod:`.atom`) and both have to decide
+whether that URL may reach a person before it does — one as a search result's
+``pdf_url``, the other as an unbidden gap-consult suggestion.  It lives here
+rather than in :mod:`.atom` for the same reason ``search_kwargs`` does: the
+parser is the layer an in-house variant replaces wholesale, so teaching it a
+hard-coded arxiv.org policy would mean the replacement inherits a policy that
+is wrong for it.  Policy belongs to the policy layer.
 """
 from __future__ import annotations
 
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Control characters a caller could use to smuggle a second header line into
+# the outbound request if ``user_agent`` were sent verbatim — CR and LF are
+# the classic request-splitting pair, but every C0 control and DEL are
+# refused on the same footing since none of them belongs in a header value.
+_CONTROL_CHARS = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
 
 
 class ArxivSearchSettings(BaseModel):
@@ -80,6 +96,28 @@ class ArxivSearchSettings(BaseModel):
             raise ValueError("base_url must not include a fragment")
         return value
 
+    @field_validator("user_agent")
+    @classmethod
+    def _validate_user_agent(cls, value: str) -> str:
+        """Reject a blank value or one carrying a control character.
+
+        ``user_agent`` is a deployment configuration value, not user input,
+        but it crosses the same kind of trust boundary ``base_url`` does
+        above: :mod:`.client` hands it straight to
+        ``urllib.request.Request(..., headers={"User-Agent": user_agent})``.
+        Fail-fast for the same reason — a TOML author's typo should not
+        become a silent runtime shape — rather than trusting the value.  A
+        bare CR or LF is the classic HTTP request-splitting pair (a second
+        header line smuggled in after the first), so every C0 control
+        character and DEL are refused on the same footing: none of them
+        belongs in a header value, and ``urllib`` does not itself reject one.
+        """
+        if not value.strip():
+            raise ValueError("user_agent must not be blank")
+        if any(char in _CONTROL_CHARS for char in value):
+            raise ValueError("user_agent must not contain control characters")
+        return value
+
 
 def search_kwargs(
     settings: ArxivSearchSettings,
@@ -111,3 +149,38 @@ def search_kwargs(
         "user_agent": settings.user_agent,
         "start": start,
     }
+
+
+# Egress hosts a URL parsed out of an untrusted upstream feed may point at
+# before this plugin shows it to a person — arXiv's own hosts, or the
+# deployment's own configured mirror.  Deliberately *narrower* than the
+# import route's subdomain rule in ``.routes`` (which accepts ``*.arxiv.org``
+# for a link a person picked off a result page they themselves asked for):
+# these two call sites both receive a value neither the caller nor the
+# reader chose, so the host it may carry is spelled out rather than pattern
+# matched.
+_EGRESS_HOSTS = frozenset({"arxiv.org", "export.arxiv.org"})
+
+
+def egress_allowed(url: str, base_url: str) -> bool:
+    """True when ``url``'s host is arXiv's, or the deployment's own mirror.
+
+    Shared by :mod:`.routes` (a search result's ``pdf_url``) and
+    :mod:`.consult` (a gap-consult suggestion's ``url``): both values come
+    from the same untrusted upstream feed parser (:mod:`.atom`), and both
+    call sites need the same answer to "may this reach a reader", even
+    though what they do with a ``False`` differs — one falls back to an
+    id-derived link, the other drops the suggestion outright.
+    """
+
+    try:
+        parsed = urlsplit(url)
+        base = urlsplit(base_url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname or ""
+    if not host:
+        return False
+    return host in _EGRESS_HOSTS or host == (base.hostname or "")

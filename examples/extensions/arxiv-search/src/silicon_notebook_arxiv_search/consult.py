@@ -48,7 +48,6 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable
-from urllib.parse import urlsplit
 
 from app.extension_sdk import (
     ContributorResult,
@@ -62,7 +61,7 @@ from app.extension_sdk import (
 
 from . import client as arxiv_client
 from .atom import ArxivPaper
-from .settings import ArxivSearchSettings, search_kwargs
+from .settings import ArxivSearchSettings, egress_allowed, search_kwargs
 
 # Plugin-private bounds; registered for operators in the package README.
 #
@@ -71,13 +70,6 @@ from .settings import ArxivSearchSettings, search_kwargs
 # slice core's join loop is sleeping in when the worker finishes.
 CONSULT_RETURN_MARGIN_SECONDS = 0.25
 SOURCE_LABEL = "arXiv"
-
-# Egress hosts a suggestion may point at.  Deliberately *narrower* than the
-# import route's subdomain rule: that route publishes links a person picked off
-# a result page they asked for, while these arrive unbidden in someone's answer
-# because retrieval came up thin.  A configured mirror is allowed because the
-# deployment chose it; nothing else is.
-_SUGGESTION_HOSTS = frozenset({"arxiv.org", "export.arxiv.org"})
 
 # A Latin word of two or more characters, allowing the punctuation that shows
 # up inside real identifiers (``GPT-4``, ``C++``, ``e.g``).
@@ -207,7 +199,7 @@ class ArxivGapConsultContributor:
         suggestions = tuple(
             _suggestion(paper)
             for paper in papers
-            if _egress_allowed(paper.pdf_url, settings.base_url)
+            if egress_allowed(paper.pdf_url, settings.base_url)
         )
         return ContributorResult(
             items=suggestions, status=ExtensionResultStatus.AVAILABLE
@@ -240,29 +232,6 @@ def _suggestion(paper: ArxivPaper) -> GapSuggestion:
         summary=paper.summary,
         source_label=SOURCE_LABEL,
     )
-
-
-def _egress_allowed(url: str, base_url: str) -> bool:
-    """True when ``url``'s host is arXiv's, or the deployment's own mirror.
-
-    The check lives here rather than in :mod:`.atom` on purpose.  The parser is
-    the layer an in-house variant replaces wholesale — teaching it a hard-coded
-    arxiv.org rule would mean the replacement inherits a policy that is wrong
-    for it.  Policy belongs to the policy layer; the parser only reports what
-    the feed said.
-    """
-
-    try:
-        parsed = urlsplit(url)
-        base = urlsplit(base_url)
-    except ValueError:
-        return False
-    if parsed.scheme not in ("http", "https"):
-        return False
-    host = parsed.hostname or ""
-    if not host:
-        return False
-    return host in _SUGGESTION_HOSTS or host == (base.hostname or "")
 
 
 def _query_terms(query: GapConsultQuery) -> tuple[str, ...]:

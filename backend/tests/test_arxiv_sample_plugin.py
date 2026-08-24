@@ -26,6 +26,7 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
+import re
 import sys
 import threading
 import time
@@ -35,9 +36,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.api.extension_routes import _event_emitter
+from app.core.config import Settings as CoreSettings
 from app.domain.extension_http import (
     PluginActor,
     PluginImportedSource,
@@ -556,6 +560,64 @@ def test_settings_accept_valid_base_url(base_url):
     assert ArxivSearchSettings(base_url=base_url).base_url == base_url
 
 
+@pytest.mark.parametrize(
+    "user_agent",
+    [
+        "",
+        "   ",
+        # The classic request-splitting pair: a bare CR/LF sent verbatim in a
+        # header value smuggles a second header line into the request.
+        "silicon-notebook-arxiv-sample/0.1\r\nX-Injected: 1",
+        "silicon-notebook-arxiv-sample/0.1\x00",
+    ],
+)
+def test_settings_reject_blank_or_control_character_user_agent(user_agent):
+    with pytest.raises(ValidationError):
+        ArxivSearchSettings(user_agent=user_agent)
+
+
+def test_settings_accept_an_ordinary_user_agent():
+    value = "some-deployment/2.0 (+https://example.com/bot)"
+    assert ArxivSearchSettings(user_agent=value).user_agent == value
+
+
+def test_example_toml_worst_case_arithmetic_matches_the_constants():
+    """The sample TOML's ⚠ block spells out arithmetic, not prose.
+
+    ``politeness_interval_seconds`` + ``timeout_seconds`` (both settings
+    defaults) plus :data:`arxiv_consult.CONSULT_RETURN_MARGIN_SECONDS` is the
+    plugin's own worst case, and core's default
+    ``ask_gap_consult_timeout_seconds`` is the deadline it is compared
+    against — together they are why gap consultation with every shipped
+    default never fires.  None of the three numbers has a test tying it to
+    this sentence, so a change to any of them would go stale in prose nobody
+    re-derives; this regenerates the figure from the real constants and greps
+    the file for the same digits, so drift fails here instead of only in a
+    future re-reading.
+    """
+
+    settings = ArxivSearchSettings()
+    worst_case = (
+        settings.politeness_interval_seconds
+        + settings.timeout_seconds
+        + arxiv_consult.CONSULT_RETURN_MARGIN_SECONDS
+    )
+    default_deadline = CoreSettings.model_fields[
+        "ask_gap_consult_timeout_seconds"
+    ].default
+
+    text = (_PLUGIN_ROOT / "extensions.example.toml").read_text(encoding="utf-8")
+    match = re.search(
+        r"that is ([\d.]+) seconds against a ([\d.]+)-second deadline", text
+    )
+    assert match is not None, "worst-case sentence not found in the sample TOML"
+    assert float(match.group(1)) == pytest.approx(worst_case)
+    assert float(match.group(2)) == pytest.approx(default_deadline)
+    # And it is genuinely bigger than the deadline it is compared against —
+    # that gap is the whole point of the paragraph.
+    assert worst_case > default_deadline
+
+
 def test_search_kwargs_covers_every_transport_parameter():
     """One mapper, and it must name *all* of ``search``'s keyword arguments.
 
@@ -847,14 +909,24 @@ def test_provides_and_capability_decisions_agree():
 
 
 def test_manifest_requires_is_empty_so_the_router_survives_a_disabled_consult():
-    """``requires`` is evaluated per *manifest*, not per contribution.
+    """``requires`` only gates whatever looks itself up via
+    ``registry.availability(contribution_id, ...)``.
 
-    ``ExtensionRegistry.availability`` iterates ``manifest.requires`` before it
-    ever reaches a contribution's own probe, so any capability named there
-    gates every contribution this plugin has.  Naming the consult gate there
-    would take the HTTP routes and the workspace entry down together with
-    ``consult_enabled = false`` — the exact opposite of what that setting
-    means.  The per-contribution probe below is where consultation is gated.
+    ``ExtensionRegistry.availability`` does iterate ``manifest.requires``
+    before it reaches a contribution's own probe — but that accessor is not
+    on the path HTTP route mounting takes (routers are mounted
+    unconditionally at startup from the registered contribution set) nor on
+    the one the workspace panel takes (its own ``capability`` is evaluated
+    directly via ``registry.capability_availability()``).  So naming the
+    consult gate in ``manifest.requires`` would *not* have taken the HTTP
+    routes or the workspace entry down with ``consult_enabled = false``,
+    contrary to what an earlier version of this docstring claimed.  It is
+    still left empty for precision (a manifest-wide gate would be silently
+    inherited by any contribution this plugin adds later that a future
+    consumer *does* look up that way) and because ``requires`` reads as an
+    overall precondition for the plugin instance, not a per-feature toggle.
+    The per-contribution probe below is where consultation is actually
+    gated.
     """
 
     assert BUNDLE.manifest.requires == ()
@@ -1018,6 +1090,40 @@ def test_search_route_rejects_blank_and_overlong_query(monkeypatch):
     assert calls == []
 
 
+def test_search_route_rejects_a_start_beyond_the_plugin_bound(monkeypatch):
+    """``start`` has an upper bound too, not just a lower one.
+
+    Nothing stopped a caller from asking for an arbitrarily deep page before
+    this: the request would still cost a full politeness slot and round trip
+    to prove there was nothing there.  ``START_MAX`` is a plugin-private,
+    order-of-magnitude ceiling — not an attempt to mirror arXiv's own paging
+    limit — and the refusal must be its own sentence rather than reusing the
+    one ``start < 0`` uses, so a caller (or an operator reading a log) can
+    tell which of the two bounds was crossed.
+    """
+
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    context, _ = _route_context(_test_settings())
+    search = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/search", "GET"
+    ).endpoint
+
+    with pytest.raises(_UserError) as negative_error:
+        search(notebook_id="nb-1", q="graph", start=-1)
+    with pytest.raises(_UserError) as overflow_error:
+        search(notebook_id="nb-1", q="graph", start=arxiv_routes.START_MAX + 1)
+
+    assert overflow_error.value.status_code == 400
+    assert overflow_error.value.detail != negative_error.value.detail
+
+    # A refusal is a refusal: zero network cost, zero throttle slot.
+    assert calls == []
+
+
 def test_search_route_returns_a_page_and_reports_has_more(monkeypatch, sample_feed):
     seen: list[str] = []
 
@@ -1043,6 +1149,39 @@ def test_search_route_returns_a_page_and_reports_has_more(monkeypatch, sample_fe
     query = parse_qs(urlsplit(seen[0]).query)
     assert query["max_results"] == ["2"]
     assert query["start"] == ["0"]
+
+
+def test_search_route_pdf_url_never_carries_a_feed_supplied_non_arxiv_link(
+    monkeypatch,
+):
+    """``/search``'s ``pdf_url`` gets the same egress policy gap-consult has.
+
+    ``pdf_url`` is parsed straight out of an upstream feed entry's ``href``
+    attribute; a compromised or merely misbehaving upstream can put anything
+    there — this feed puts a ``javascript:`` URL on it.  Unlike gap-consult,
+    which drops a suggestion outright on a foreign host because nobody asked
+    for it, ``/search`` is a page of results the caller *did* ask for, so the
+    row survives with the id-derived arXiv PDF url instead of the raw value.
+    """
+
+    feed = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        "<id>http://arxiv.org/abs/2401.99999v1</id>"
+        "<title>Malicious link</title>"
+        '<link title="pdf" href="javascript:alert(1)"/>'
+        "</entry></feed>"
+    ).encode("utf-8")
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: feed)
+
+    context, _ = _route_context(_test_settings(max_results=5))
+    search = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/search", "GET"
+    ).endpoint
+    body = search(notebook_id="nb-1", q="graph")
+
+    assert len(body["items"]) == 1
+    assert body["items"][0]["pdf_url"] == "https://arxiv.org/pdf/2401.99999v1"
 
 
 def test_search_route_maps_a_throttle_refusal_to_503(monkeypatch):
@@ -1126,8 +1265,12 @@ def test_import_route_rejects_a_non_arxiv_host_before_touching_the_port():
 
     foreign = [
         "https://evil.example/paper.pdf",
-        # Suffix-matching a bare string would accept this one; ``hostname``
-        # comparison does not.
+        # A bare substring or prefix check on the raw URL would accept this
+        # one — ``arxiv.org`` is a *prefix* of ``arxiv.org.evil.example``, not
+        # a suffix of it.  What actually tells them apart is the suffix check
+        # in ``_is_arxiv_url`` running against ``urlsplit(...).hostname``
+        # (which strips everything down to the host itself) rather than
+        # against the raw string.
         "https://arxiv.org.evil.example/paper.pdf",
         "ftp://arxiv.org/pdf/2401.00001v1",
         "https://arxiv.org@evil.example/paper.pdf",
@@ -1165,7 +1308,85 @@ def test_import_route_rejects_a_non_arxiv_host_before_touching_the_port():
     assert len(sources.calls) == 1
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # ``hostname`` lowercases the host.
+        "https://ARXIV.ORG/pdf/2401.00001v1",
+        # ``hostname`` drops the port.
+        "https://arxiv.org:8443/pdf/2401.00001v1",
+        # ``hostname`` drops a ``user@`` prefix — the mirror image of the
+        # foreign-host test above, where the *host itself* was
+        # ``evil.example`` and ``arxiv.org@`` was only ever the userinfo.
+        # Here the host really is arxiv.org.
+        "https://user@arxiv.org/pdf/2401.00001v1",
+    ],
+)
+def test_import_route_accepts_host_shapes_that_still_resolve_to_arxiv(url):
+    """The acceptance direction of hostname normalisation, not just refusal.
+
+    The test above exercises that a *foreign* host cannot be read as arXiv's
+    despite looking similar in the raw string; this is the other half — none
+    of these three shapes is itself a foreign host, and normalising them (case,
+    port, userinfo) must not turn a legitimate arXiv link into a refusal.
+    """
+
+    sources = _UrlSourcesSpy()
+    context, _ = _route_context(_test_settings(), url_sources=sources)
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    handler(notebook_id="nb-1", payload={"urls": [url]})
+    assert len(sources.calls) == 1
+
+
+def test_import_route_gives_a_distinct_message_for_an_overlong_legitimate_link():
+    """A legitimate-host link that is merely too long is not a foreign host.
+
+    Both used to share one sentence ("only arXiv PDF links may be
+    imported"), which tells a caller with a too-long *arxiv.org* link the
+    wrong thing to fix.  The host check runs first and independently of
+    length, so a foreign host is refused for what it is regardless of how
+    long it happens to be.
+    """
+
+    context, _ = _route_context(_test_settings())
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    overlong = "https://arxiv.org/pdf/" + "x" * arxiv_routes.MAX_URL_CHARS
+    with pytest.raises(_UserError) as overlong_error:
+        handler(notebook_id="nb-1", payload={"urls": [overlong]})
+    with pytest.raises(_UserError) as foreign_error:
+        handler(
+            notebook_id="nb-1", payload={"urls": ["https://evil.example/paper.pdf"]}
+        )
+
+    assert overlong_error.value.status_code == 400
+    assert foreign_error.value.status_code == 400
+    assert overlong_error.value.detail != foreign_error.value.detail
+    assert foreign_error.value.detail == "只能导入 arXiv 的 PDF 链接"
+
+
 def test_import_route_rejects_an_empty_or_malformed_body():
+    """Two layers refuse a malformed body, and they do different jobs.
+
+    ``[]`` and ``None`` here exercise the handler's own
+    ``isinstance(payload, dict)`` guard directly, by calling ``import_papers``
+    exactly the way every other test in this file does — bypassing FastAPI's
+    request parsing entirely.  Over the real wire those two shapes never
+    reach that guard at all: the route parameter is typed ``payload:
+    dict[str, Any]``, so a JSON body that is not an object is refused by
+    FastAPI's own validation (422) before the handler runs.  The `isinstance`
+    check is defense in depth for a caller that reaches the handler some
+    other way (a future non-HTTP entry point, a test double); it is not what
+    a real HTTP client sees for these two shapes.  See
+    ``test_import_route_via_http_rejects_non_dict_bodies_with_422`` below for
+    the wire-accurate version of the same two shapes.
+    """
+
     sources = _UrlSourcesSpy()
     context, _ = _route_context(_test_settings(), url_sources=sources)
     handler = _route(
@@ -1189,6 +1410,39 @@ def test_import_route_rejects_an_empty_or_malformed_body():
         with pytest.raises(_UserError) as error:
             handler(notebook_id="nb-1", payload=body)
         assert error.value.status_code == 400, body
+
+    assert sources.calls == []
+
+
+def test_import_route_via_http_rejects_non_dict_bodies_with_422():
+    """The real over-the-wire shape of "malformed body" for a non-dict payload.
+
+    ``payload: dict[str, Any]`` makes FastAPI treat the request body as a
+    JSON object; a JSON array, ``null``, a string or a bare number never
+    reaches ``import_papers`` at all — FastAPI's own request validation
+    refuses it first with 422, not this plugin's ``user_error(400, ...)``.
+    Only a real ``TestClient`` round trip proves that, so this is the one
+    test in this file that mounts the router into an actual ``FastAPI`` app
+    instead of calling the handler directly; the gates (``Depends(...)``)
+    are the same no-op stand-ins ``_route_context`` builds everywhere else,
+    so this is still not the real mounted-app wire (core's session guard,
+    ``mount_extension_routers``) — only the shape FastAPI itself accepts onto
+    a route with this parameter type.
+    """
+
+    sources = _UrlSourcesSpy()
+    context, _ = _route_context(_test_settings(), url_sources=sources)
+    app = FastAPI()
+    app.include_router(arxiv_routes.build_router(context))
+    client = TestClient(app)
+
+    for body_bytes in (b"[]", b"null", b'"a string"', b"123"):
+        response = client.post(
+            "/notebooks/nb-1/import",
+            content=body_bytes,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422, body_bytes
 
     assert sources.calls == []
 
