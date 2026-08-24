@@ -264,9 +264,6 @@ class OpenAICompatibleClient:
             call_kwargs.pop("stream_options", None)
             raise_if_cancelled(cancel_event)
             stream = self.client().chat.completions.create(**call_kwargs)
-        else:
-            if request_usage:
-                self._stream_usage_options_supported = True
         parts: List[str] = []
         finish_reason: Optional[str] = None
         usage: Optional[Dict[str, int]] = None

@@ -196,6 +196,74 @@ def test_stream_usage_option_rejection_falls_back_once_and_is_remembered(monkeyp
     assert second.closed is True
 
 
+def test_stream_usage_rejection_stays_monotonic_across_concurrent_calls(monkeypatch):
+    unsupported = _api_status_error(
+        400, "Unsupported parameter: stream_options.include_usage"
+    )
+    first_started = threading.Event()
+    rejection_seen = threading.Event()
+
+    class _ConcurrentCreate:
+        def __init__(self):
+            self.calls = []
+            self.usage_calls = 0
+            self.lock = threading.Lock()
+
+        def __call__(self, **kwargs):
+            with self.lock:
+                self.calls.append(kwargs)
+                if "stream_options" in kwargs:
+                    usage_call = self.usage_calls
+                    self.usage_calls += 1
+                else:
+                    usage_call = None
+            if usage_call == 0:
+                first_started.set()
+                assert rejection_seen.wait(timeout=2)
+                return _Stream()
+            if usage_call == 1:
+                rejection_seen.set()
+                raise unsupported
+            if usage_call is not None:
+                raise AssertionError("explicit rejection was overwritten")
+            return _Stream()
+
+    create = _ConcurrentCreate()
+    client = _make(monkeypatch, create)
+    results = []
+    errors = []
+
+    def call(prompt):
+        try:
+            results.append(client.chat_json(
+                [{"role": "user", "content": prompt}],
+                "{}",
+                cancel_event=threading.Event(),
+            ))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=call, args=("first",))
+    first.start()
+    assert first_started.wait(timeout=2)
+    second = threading.Thread(target=call, args=("second",))
+    second.start()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert errors == []
+    assert len(results) == 2
+    assert client._stream_usage_options_supported is False
+    assert client.chat_json(
+        [{"role": "user", "content": "third"}],
+        "{}",
+        cancel_event=threading.Event(),
+    ) == '{"ok":1}'
+    assert create.usage_calls == 2
+
+
 def test_stream_usage_fallback_rechecks_cancellation_before_second_request(monkeypatch):
     cancel_event = threading.Event()
     unsupported = _api_status_error(
