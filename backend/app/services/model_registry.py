@@ -20,6 +20,7 @@ from app.core.model_safety import safe_model_label
 
 ModelKind = Literal["chat", "embedding", "rerank"]
 ModelPriorityName = Literal["interactive", "report", "background"]
+DeepSeekThinkingMode = Literal["enabled", "disabled", "provider_default"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class WorkloadSpec:
     kind: ModelKind
     default_priority: ModelPriorityName
     display_label: str
+    default_deepseek_thinking_mode: DeepSeekThinkingMode = "provider_default"
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,52 @@ _WORKLOAD_LABELS = MappingProxyType({
     "retrieval_rerank": "检索结果重排",
 })
 
+# Every chat workload makes an explicit product-level choice.  The small set
+# below owns multi-step planning/judgement; all other structured extraction,
+# classification, rewriting, summarisation, and prose-rendering calls default
+# to non-thinking.  Keeping this exhaustive means a newly added chat workload
+# cannot silently inherit a provider's potentially expensive reasoning default.
+_CHAT_DEEPSEEK_THINKING_DEFAULTS: Mapping[
+    str, DeepSeekThinkingMode
+] = MappingProxyType({
+    # One final synthesis call has bounded fan-out and directly determines the
+    # answer users read.  Keep reasoning here even when retrieval itself was
+    # deterministic or already used the reasoning agent.
+    "ask_answer": "enabled",
+    "reasoning_agent": "enabled",
+    "query_rewrite": "disabled",
+    "evidence_refine": "disabled",
+    "graph_chain_verify": "enabled",
+    "report_outline": "enabled",
+    "report_sufficiency": "enabled",
+    "report_section": "disabled",
+    # Report sections already inherit a report-wide blueprint and fan out by
+    # section.  The final editor audits but cannot rewrite those bodies, so
+    # both stages remain non-thinking; reasoning is spent in outline and
+    # sufficiency planning instead.
+    "report_summary": "disabled",
+    "source_summary": "disabled",
+    "notebook_metadata": "disabled",
+    "paper_metadata": "disabled",
+    "chunk_question_generation": "disabled",
+    "kg_extract": "disabled",
+    "kg_refine": "disabled",
+    "kg_glean": "disabled",
+    "kg_merge_review": "disabled",
+    "kg_concept_description": "disabled",
+    "kg_community_summary": "disabled",
+    "kg_conflict_review": "disabled",
+    "schema_induction": "enabled",
+    "memory_preview": "disabled",
+    "knowhow_optimize": "disabled",
+    "knowhow_reformat": "disabled",
+    "knowhow_complete": "disabled",
+    # These are bounded, low-frequency synthesis calls whose persisted result
+    # affects later retrieval quality; reasoning has durable leverage here.
+    "agent_profile_consolidate": "enabled",
+    "retrieval_experience_distill": "enabled",
+})
+
 
 def workload_map(
     *,
@@ -94,6 +142,10 @@ def workload_map(
     rerank: Mapping[str, ModelPriorityName],
 ) -> Mapping[str, WorkloadSpec]:
     """Construct the immutable catalog from the only approved workload data."""
+    if set(chat) != set(_CHAT_DEEPSEEK_THINKING_DEFAULTS):
+        raise ValueError(
+            "chat workload catalog does not match DeepSeek thinking defaults"
+        )
     result: dict[str, WorkloadSpec] = {}
     for kind, items in (("chat", chat), ("embedding", embedding), ("rerank", rerank)):
         for workload_id, priority in items.items():
@@ -103,7 +155,15 @@ def workload_map(
                 label = _WORKLOAD_LABELS[workload_id]
             except KeyError as exc:
                 raise ValueError(f"missing workload display label: {workload_id}") from exc
-            result[workload_id] = WorkloadSpec(workload_id, kind, priority, label)  # type: ignore[arg-type]
+            result[workload_id] = WorkloadSpec(
+                workload_id,
+                kind,  # type: ignore[arg-type]
+                priority,
+                label,
+                _CHAT_DEEPSEEK_THINKING_DEFAULTS.get(
+                    workload_id, "provider_default"
+                ),
+            )
     if set(result) != set(_WORKLOAD_LABELS):
         raise ValueError("workload catalog does not match its display-label registry")
     return MappingProxyType(result)
@@ -152,7 +212,8 @@ _REQUIRED_SERVICE_KEYS = frozenset({
 })
 _OPTIONAL_SERVICE_KEYS = frozenset({"top_p"})
 _SERVICE_KEYS = _REQUIRED_SERVICE_KEYS | _OPTIONAL_SERVICE_KEYS
-_TOP_LEVEL_KEYS = frozenset({"services", "bindings"})
+_TOP_LEVEL_KEYS = frozenset({"services", "bindings", "deepseek_thinking"})
+_THINKING_MODES = frozenset({"enabled", "disabled", "provider_default"})
 _PROTOCOLS: Mapping[str, frozenset[str]] = MappingProxyType({
     "chat": frozenset({"openai"}),
     "embedding": frozenset({"openai", "dashscope"}),
@@ -189,9 +250,13 @@ class SystemModelServiceRegistry:
         self,
         services: Mapping[str, ModelServiceDefinition],
         bindings: Mapping[str, str],
+        deepseek_thinking_modes: Mapping[str, DeepSeekThinkingMode] | None = None,
     ) -> None:
         self._services = MappingProxyType(dict(services))
         self._bindings = MappingProxyType(dict(bindings))
+        self._deepseek_thinking_modes = MappingProxyType(
+            dict(deepseek_thinking_modes or {})
+        )
         grouped: dict[str, list[WorkloadSpec]] = {service_id: [] for service_id in services}
         for workload_id, service_id in bindings.items():
             grouped[service_id].append(WORKLOADS[workload_id])
@@ -226,8 +291,15 @@ class SystemModelServiceRegistry:
         _reject_unknown_keys(parsed, _TOP_LEVEL_KEYS, "MODEL_SERVICES_CONFIG")
         raw_services = parsed.get("services", {})
         raw_bindings = parsed.get("bindings", {})
-        if not isinstance(raw_services, dict) or not isinstance(raw_bindings, dict):
-            raise ValueError("MODEL_SERVICES_CONFIG services and bindings must be tables")
+        raw_deepseek_thinking = parsed.get("deepseek_thinking", {})
+        if not all(
+            isinstance(value, dict)
+            for value in (raw_services, raw_bindings, raw_deepseek_thinking)
+        ):
+            raise ValueError(
+                "MODEL_SERVICES_CONFIG services, bindings, and deepseek_thinking "
+                "must be tables"
+            )
 
         services: dict[str, ModelServiceDefinition] = {}
         physical_definitions: set[tuple[str, str, str, str, str]] = set()
@@ -259,7 +331,22 @@ class SystemModelServiceRegistry:
             if service.kind != WORKLOADS[workload_id].kind:
                 raise ValueError(f"model workload {workload_id} has a mismatched service kind")
             bindings[workload_id] = service_id
-        return cls(services, bindings)
+
+        deepseek_thinking_modes: dict[str, DeepSeekThinkingMode] = {}
+        for workload_id, raw_mode in raw_deepseek_thinking.items():
+            workload = WORKLOADS.get(workload_id)
+            if workload is None:
+                raise ValueError(f"unknown model thinking workload: {workload_id}")
+            if workload.kind != "chat":
+                raise ValueError(
+                    f"model thinking mode is only valid for chat workload {workload_id}"
+                )
+            if not isinstance(raw_mode, str) or raw_mode not in _THINKING_MODES:
+                raise ValueError(
+                    f"model workload {workload_id} has an invalid thinking mode"
+                )
+            deepseek_thinking_modes[workload_id] = raw_mode  # type: ignore[assignment]
+        return cls(services, bindings, deepseek_thinking_modes)
 
     def service(self, service_id: str) -> ModelServiceDefinition:
         return self._services[service_id]
@@ -273,6 +360,14 @@ class SystemModelServiceRegistry:
 
     def workload(self, workload_id: str) -> WorkloadSpec:
         return WORKLOADS[workload_id]
+
+    def deepseek_thinking_mode_for(
+        self, workload_id: str
+    ) -> DeepSeekThinkingMode:
+        workload = WORKLOADS[workload_id]
+        return self._deepseek_thinking_modes.get(
+            workload_id, workload.default_deepseek_thinking_mode
+        )
 
     def workloads_for(self, service_id: str) -> tuple[WorkloadSpec, ...]:
         return self._workloads_by_service.get(service_id, ())

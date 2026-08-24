@@ -106,9 +106,10 @@ def llm_key(
     temperature: float = 1.0,
     top_p: float = 1.0,
     max_tokens: Optional[int] = None,
+    deepseek_thinking_mode: Optional[str] = None,
 ) -> str:
     """LLM 响应的缓存键 = sha256(base_url + model + messages 全文 + schema_hint +
-    有效生成参数 temperature/top_p/max_tokens)。
+    有效生成参数 temperature/top_p/max_tokens/显式 DeepSeek thinking mode)。
 
     prompt 全文进 key 意味着改 prompt 即自动全冷，不需要维护版本号。
 
@@ -140,18 +141,23 @@ def llm_key(
     共用一条缓存），让调用方在签名层就无法忘记，与 is_cacheable_embedding 的
     expected_dim 同一防呆思路。
     """
-    payload = json.dumps(
-        {
-            "base_url": base_url,
-            "model": model,
-            "messages": messages,
-            "schema": schema_hint,
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-        },
-        sort_keys=True, ensure_ascii=False,
-    )
+    material = {
+        "base_url": base_url,
+        "model": model,
+        "messages": messages,
+        "schema": schema_hint,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+    }
+    # Preserve every provider-default cache key byte-for-byte.  An explicit
+    # thinking mode is a different upstream request, however, and must never
+    # reuse a response generated under the provider default (DeepSeek V4's
+    # default is thinking-enabled).  Conditional inclusion avoids a global
+    # cache cold-start for workloads whose request shape did not change.
+    if deepseek_thinking_mode is not None:
+        material["deepseek_thinking_mode"] = deepseek_thinking_mode
+    payload = json.dumps(material, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

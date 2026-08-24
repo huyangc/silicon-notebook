@@ -101,13 +101,13 @@ def _api_status_error(status, message):
     return APIStatusError(message, response=response, body=response.json())
 
 
-def _make(monkeypatch, create):
+def _make(monkeypatch, create, *, model="m"):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     c = OpenAICompatibleClient(
         Settings(_env_file=None),
         base_url="https://x",
         api_key="k",
-        model="m",
+        model=model,
     )
     monkeypatch.setattr(c, "client", lambda: _FakeOpenAI(create))
     return c
@@ -141,6 +141,53 @@ def test_raw_client_preserves_empty_success_for_scheduled_classification(monkeyp
     create = _FakeCreate([_Resp("")])
     client = _make(monkeypatch, create)
     assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == ""
+
+
+def test_explicit_non_thinking_mode_is_sent_and_logged(monkeypatch):
+    create = _FakeCreate([_Stream()])
+    client = _make(monkeypatch, create, model="deepseek-v4-pro")
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    assert client.chat_json(
+        [{"role": "user", "content": "extract"}],
+        "{}",
+        cancel_event=threading.Event(),
+        deepseek_thinking_mode="disabled",
+    ) == '{"ok":1}'
+
+    assert create.calls[0]["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
+    assert create.calls[0]["stream"] is True
+    assert (
+        logger.records[-1]["request"]["deepseek_thinking_mode"] == "disabled"
+    )
+
+
+def test_non_deepseek_model_never_sends_private_thinking_extension(monkeypatch):
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create, model="gpt-5")
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    client.chat_json(
+        [{"role": "user", "content": "answer"}],
+        "{}",
+        deepseek_thinking_mode="enabled",
+    )
+
+    assert "extra_body" not in create.calls[0]
+    assert "deepseek_thinking_mode" not in logger.records[-1]["request"]
+
+
+def test_provider_default_request_does_not_send_thinking_extension(monkeypatch):
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+
+    client.chat_json([{"role": "user", "content": "answer"}], "{}")
+
+    assert "extra_body" not in create.calls[0]
 
 
 def test_streaming_requests_and_logs_exact_usage_trailer(monkeypatch):

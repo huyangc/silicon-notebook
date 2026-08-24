@@ -76,7 +76,7 @@ mkdir -p .local
 cp model-services.example.toml .local/model-services.toml
 ```
 
-For model-backed answers and extraction, edit `.local/model-services.toml`, bind workloads to physical services, set each service's `max_concurrency` and optional chat-only fixed `top_p`, and place only the secrets named by `api_key_env` in `.env`. Valid TOML edits are hot-reloaded without restarting the backend.
+For model-backed answers and extraction, edit `.local/model-services.toml`, bind workloads to physical services, set each service's `max_concurrency` and optional chat-only fixed `top_p`, and place only the secrets named by `api_key_env` in `.env`. Valid TOML edits are hot-reloaded without restarting the backend. DeepSeek V4's provider-specific thinking switch is controlled per chat workload in `[deepseek_thinking]`: Ask's final synthesis and bounded reasoning/planning calls default on, while high-fan-out or mechanical calls—including all KG passes and report drafting—default off.
 
 To run explicitly with deterministic/offline fallbacks, leave this empty in `.env`:
 

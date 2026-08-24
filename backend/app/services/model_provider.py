@@ -11,7 +11,7 @@ import time
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from app.core.config import Settings
 from app.core.ask_context import _ASK_MODEL_ERRORS
@@ -34,6 +34,7 @@ from app.core.model_safety import (
 from app.services.cancellation import AskCancelled
 from app.services.embedding import FakeEmbedder
 from app.services.model_registry import (
+    DeepSeekThinkingMode,
     ModelServiceDefinition,
     SystemModelServiceRegistry,
     WorkloadSpec,
@@ -61,6 +62,24 @@ _MODEL_CONFIG_RELOAD_INTERVAL_SECONDS = 1.0
 logger = logging.getLogger("silicon_notebook.model_provider")
 
 _JSON_REPAIR_WORKLOADS = frozenset({"reasoning_agent", "ask_answer"})
+
+
+def _deepseek_thinking_mode_for(
+    model: str, configured_mode: DeepSeekThinkingMode
+) -> Literal["enabled", "disabled"] | None:
+    """Return the provider-specific thinking override this call can support.
+
+    DeepSeek V4 documents ``thinking.type`` on its OpenAI-compatible endpoint.
+    Other providers use different fields (or no switch at all), so sending the
+    DeepSeek extension based only on a workload policy would break a valid
+    deployment that binds that workload to another OpenAI-compatible model.
+    """
+    if (
+        configured_mode != "provider_default"
+        and model.strip().lower().startswith("deepseek-v4-")
+    ):
+        return configured_mode
+    return None
 
 
 def validate_process_local_scheduler_deployment(
@@ -469,7 +488,16 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         bypass_cache=False,
         response_validator: Callable[[str], bool] | None = None,
     ) -> str:
-        runtime = self._current_runtime()
+        # Freeze the physical runtime and its workload policy from the same
+        # hot-reloaded registry generation.  A queued call may then finish on
+        # that route even if the TOML changes while it waits for service capacity.
+        with self._provider._lock:
+            runtime = self._current_runtime()
+            configured_thinking_mode = (
+                self._provider.registry.deepseek_thinking_mode_for(
+                    self._workload.id
+                )
+            )
         if runtime is None:
             return self._provider._offline_chat.chat_json(
                 messages, response_schema_hint
@@ -487,6 +515,9 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 cancel_event=cancel_event,
                 bypass_cache=bypass_cache,
                 response_validator=response_validator,
+                deepseek_thinking_mode=_deepseek_thinking_mode_for(
+                    runtime.service.model, configured_thinking_mode
+                ),
             )
             repair_mode = (
                 self.settings.model_json_repair_mode

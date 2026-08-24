@@ -349,6 +349,29 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
+可选的 `[deepseek_thinking]` 表按 **chat workload** 控制 DeepSeek V4 思考模式，
+值只能是 `enabled`、`disabled` 或 `provider_default`。表名刻意标明 provider：
+`thinking.type` 不是 OpenAI Chat Completions 的通用字段；OpenAI SDK 的 `extra_body`
+只是把 DeepSeek 私有字段透传给它的 OpenAI-compatible endpoint，不能据此假设另一个
+兼容同一传输格式的 provider 也支持。策略按 workload 而非物理服务配置，因为同一个
+chat 服务可能同时承载推理任务与机械的结构化输出任务。
+
+仓库示例明确列出当前全部默认值：`ask_answer`、`reasoning_agent`、
+`graph_chain_verify`、`report_outline`、`report_sufficiency`、`schema_induction`、
+`agent_profile_consolidate` 与 `retrieval_experience_distill` 开启。它们是单次或有界的
+规划、判断、合成调用，结果会直接影响用户或持久检索策略。其余现有 chat workload 全部
+关闭；尤其是全部 KG 抽取/治理/描述阶段、chunk 问题生成、元数据/摘要抽取、查询/证据
+改写、报告分节撰写与最终审计、Memory 预览、Knowhow 格式整理/补全。这些路径要么偏机械，
+要么已有上游规划或人工审阅，要么按窗口/chunk/章节放大，隐藏推理的单位 token 质量收益
+明显更低。省略某项时使用同一套内建默认值；设为 `provider_default` 则刻意不发送覆盖值。
+
+只有模型名以 `deepseek-v4-` 开头时，显式模式才通过 DeepSeek 的 OpenAI-compatible
+`extra_body={"thinking":{"type":"enabled|disabled"}}` 发送，不再附带
+`reasoning_effort`。非 DeepSeek V4 服务不会收到该 provider 私有字段。未知 workload、
+非 chat workload 或非法值会使配置校验失败，而非静默忽略。调用提交时会把解析后的模式
+与物理路由一起冻结，所以 TOML 热加载只影响新调用，不改变已排队调用。显式模式属于
+LLM 响应缓存身份；`provider_default` 请求保留历史缓存键。
+
 可选生成问题索引使用后台 chat workload `chunk_question_generation` 与既有
 `chunk_embedding` workload；执行离线 `question-index` 前必须同时绑定。rollout mode
 保持关闭就是零成本默认；语义和全部数值护栏只在[产品与 API 参考](./product-and-api_zh.md#可选生成问题召回补充)登记。

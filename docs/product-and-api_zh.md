@@ -781,6 +781,12 @@ KB+confirmed-Memory 三种检索条件。
 
 即：**首次 opt-in**（构建 KG，或设 `KG_AUTO_EXTRACT=true`），之后新文档自动抽取 + 融合。整库重抽用 `POST /api/notebooks/{id}/kg/rebuild`；离线批量构建见[离线批量摄取](./operations_zh.md#离线批量摄取目录--kg)。
 
+当 workload 绑定 DeepSeek V4 时，全部模型型 KG 阶段——首次抽取、补充抽取和细化——
+都会通过 provider 的 OpenAI-compatible `extra_body` 显式设置
+`thinking.type=disabled`。它们产出的是结构化事实而非推理轨迹，隐藏思考既不会被读取，
+也不会被保存。复用 `kg_extract` 的 KG 可用性探测同样遵守该策略；Ask、Report 与任何
+非 KG workload 不受影响。
+
 ### KG 构建故障隔离
 
 手动整理/全部重新分析会创建持久化、任务级的 `kg_build_jobs` 记录；同一 notebook
@@ -1238,6 +1244,8 @@ Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EX
 早先的版本允许意图规划器输出 `source_refs`，由 `/ask/intent` 在有界、纯身份的来源目录里按稳定 id、显示标题或原始文件名做规范化**精确等值**匹配，配一道 `source_scope_confirmation` 审阅闸与签名预检能力，并提供 `search_evidence(query, source_refs?)` 动作在已确认 run 内继续收窄。这整套合同已移除。精确等值兑现不了简称——问「pdagent」而来源标题是「PDAGENT-BENCH: Characterizing, Grounding, and Architecting LLM/VLM Agents for VLSI Physical Design」时解析结果为零匹配——而该设计又是 fail closed 的，于是一句普通问题会以确定性 422 失败、重试无效。既然来源勾选本就在用户手里，模型再猜一遍只增加失败模式，不增加能力。
 
 #### 模型 JSON 恢复与流保活
+
+DeepSeek V4 的 `ask_answer` 默认显式开启思考。它是一条有界的最终合成调用，需要把已选证据、冲突、覆盖率披露与引用措辞整理成用户真正读到的答案；把推理 token 花在这里，比花在每一个 KG/chunk 抽取窗口有明显更高的杠杆。严格 reasoning Ask 因此可能同时在有界的 `reasoning_agent` 循环与最终合成中使用思考，而高扇出的证据生产路径仍关闭。部署可在 `[deepseek_thinking]` 中按 workload 覆盖。
 
 `reasoning_agent` 决策与 `ask_answer` 合成始终先走严格 JSON 解析。严格解析失败后，共享修复层只允许接收对象首尾完整、且仅有可恢复语法错误（如缺引号/逗号）的响应。修复结果不得超出 schema example 的顶层字段，布尔字段必须是真正的 JSON boolean，枚举样例值必须留在词表内，拒绝非有限数；每个非空字符串值还必须逐字存在于原始响应中。截断对象、数组/标量、未知字段、类型混淆和字符串重构仍视为畸形响应。检索器异常会降级成可持久化的终态 Ask 回答，不再因为不存在的 result 中止编排。
 
