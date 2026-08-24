@@ -14,6 +14,7 @@ from app.extensions.discovery import (
     discover_deployment_extensions,
 )
 from app.extensions.ask import AskCompletedObserverHost
+from app.extensions.gap_consult import GapConsultHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
@@ -28,6 +29,7 @@ __all__ = [
     "ExtensionRuntime",
     "CapabilityDecisionCatalog",
     "AskCompletedObserverHost",
+    "GapConsultHost",
     "ReportCompletedObserverHost",
     "ReportExporterHost",
     "ParserChainCancelled",

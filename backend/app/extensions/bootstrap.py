@@ -63,6 +63,7 @@ from app.extensions.registry import ExtensionRegistry, frozen_registry
 from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
 from app.extensions.ask import AskCompletedObserverHost
+from app.extensions.gap_consult import GapConsultHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
 
@@ -85,6 +86,11 @@ class ExtensionRuntime:
     ask_completed_observers: AskCompletedObserverHost
     report_completed_observers: ReportCompletedObserverHost
     report_exporter: ReportExporterHost
+    # Gap consultation has no built-in contribution and no core capability
+    # decision: it exists purely so a deployment plugin can answer "what is
+    # outside this notebook".  With no plugin configured the host is dormant
+    # and every consumer short-circuits before building a call context.
+    gap_consult: GapConsultHost
     # Validated settings instance per deployment plugin, keyed by plugin id.
     # Built-in bundles never appear here.  The mapping is read-only so a later
     # consumer (the plugin route host) cannot mutate the frozen composition.
@@ -152,12 +158,24 @@ def build_extension_runtime(
             registry,
             trusted_plugin_ids=trusted_report_exporter_plugins,
         ),
+        gap_consult=GapConsultHost(
+            registry,
+            event_sink=event_sink,
+        ),
     )
 
 
 @lru_cache(maxsize=1)
 def default_extension_runtime() -> ExtensionRuntime:
-    """The process-wide frozen topology shared by HTTP, CLI and workers."""
+    """The process-wide frozen topology shared by HTTP, CLI and workers.
+
+    ``ask.gap_consult`` appears in neither ``builtin_bundles`` nor
+    ``core_decisions``, and that is the intended shape rather than an omission:
+    it has no in-repo consumer.  A plugin at this point supplies its own
+    availability probe through its manifest's ``provides``, so core never has
+    to mint a decision for a capability only that plugin understands.  Until a
+    deployment configures one, the host built below is dormant.
+    """
 
     def selected_graph_access(context: object | None) -> Availability:
         if (
