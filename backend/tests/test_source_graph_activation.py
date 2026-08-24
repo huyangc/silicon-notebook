@@ -22,12 +22,24 @@ from app.services.sqlite_repository import SQLiteRepository
 def _without_timing(status):
     """Compare two independently timed activations without their wall clocks.
 
-    ``SourceGraphStatus.ppr_ms`` is measured separately for the legacy run and
-    the plugin run, so equality on the raw object is a race against the CI
-    machine (it failed on PR #571 with ``ppr_ms: 0 != 13``); every other
-    field is deterministic and is what the equivalence claim is about.
+    ``SourceGraphStatus.ppr_ms`` and ``build_ms`` are measured separately for
+    the legacy run and the plugin run, so equality on the raw object is a race
+    against the CI machine (it failed on PR #571 with ``ppr_ms: 0 != 13``);
+    every other field is deterministic and is what the equivalence claim is
+    about.
     """
-    return dataclasses.replace(status, ppr_ms=0)
+    return dataclasses.replace(status, ppr_ms=0, build_ms=0)
+
+
+def _rows_without_timing(rows):
+    """Event-row counterpart of ``_without_timing``.
+
+    ``selected_source_graph`` events copy ``ppr_ms``/``build_ms`` straight off
+    the status, so comparing raw rows races the same two wall clocks (observed
+    locally as ``ppr_ms: 4 != ...`` under a loaded G1 run); every other key is
+    compared verbatim.
+    """
+    return [{**row, "ppr_ms": 0, "build_ms": 0} for row in rows]
 
 
 
@@ -531,7 +543,9 @@ def test_builtin_plugin_preserves_shadow_status_and_single_graph_event(monkeypat
 
     assert plugin_chunks == list(legacy_result.chunks)
     assert _without_timing(plugin_status) == _without_timing(legacy_result.status)
-    assert plugin_events.rows == legacy_events.rows
+    assert _rows_without_timing(plugin_events.rows) == _rows_without_timing(
+        legacy_events.rows
+    )
     assert [row["state"] for row in plugin_events.rows] == ["shadow"]
 
 
@@ -596,7 +610,9 @@ def test_builtin_plugin_preserves_active_chunks_status_and_graph_event(monkeypat
 
     assert plugin_chunks == list(legacy_result.chunks)
     assert _without_timing(plugin_status) == _without_timing(legacy_result.status)
-    assert plugin_events.rows == legacy_events.rows
+    assert _rows_without_timing(plugin_events.rows) == _rows_without_timing(
+        legacy_events.rows
+    )
     assert [chunk.chunk_id for chunk in plugin_chunks] == ["b", "g"]
     assert plugin_chunks[0].retrieval_supports == (
         RetrievalSupport("ppr", "ppr", "", 0.95),
