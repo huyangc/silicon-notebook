@@ -46,13 +46,41 @@ def _is_non_http_response_format_rejection(exc: Exception) -> bool:
     )
 
 
+def _is_stream_usage_rejection(exc: Exception) -> bool:
+    """Whether an OpenAI-compatible server explicitly rejects usage streaming.
+
+    ``stream_options.include_usage`` is additive protocol metadata.  Thin or
+    older compatible servers may reject that parameter even though ordinary
+    streaming works, so only a parameter-specific 400/422 (or an equivalent
+    local ``ValueError``) is safe to remember as unsupported.
+    """
+    status = llm_status_code(exc)
+    text = str(exc).lower()
+    names_usage_option = (
+        "stream_options" in text
+        or "stream options" in text
+        or "include_usage" in text
+    )
+    return names_usage_option and (
+        status in (400, 422) or isinstance(exc, ValueError)
+    )
+
+
 def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
-    usage = getattr(response, "usage", None)
+    usage = (
+        response.get("usage")
+        if isinstance(response, dict)
+        else getattr(response, "usage", None)
+    )
     if usage is None:
         return None
     out: Dict[str, int] = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        value = getattr(usage, key, None)
+        value = (
+            usage.get(key)
+            if isinstance(usage, dict)
+            else getattr(usage, key, None)
+        )
         if value is not None:
             out[key] = value
     return out or None
@@ -138,6 +166,11 @@ class OpenAICompatibleClient:
         )
         self.top_p_override = top_p_override
         self._client: Optional[OpenAI] = None
+        # None = not probed yet; False is learned only from an explicit
+        # parameter rejection. Keeping the result on the physical client avoids
+        # doubling every later KG window for providers that support streaming
+        # content but not OpenAI's optional usage trailer.
+        self._stream_usage_options_supported: Optional[bool] = None
         self.interaction_logger = LLMInteractionLogger(settings)
         self._cache = None
         if cache is not None:
@@ -184,25 +217,44 @@ class OpenAICompatibleClient:
         *,
         json_mode: bool,
         cancel_event: CancelEvent,
-    ) -> tuple[str, Optional[str]]:
-        """Return ``(content, finish_reason)``.
+    ) -> tuple[str, Optional[str], Optional[Dict[str, int]]]:
+        """Return ``(content, finish_reason, usage)``.
 
         finish_reason rides along because the caller needs it to decide whether
         the reply is cacheable: a completion cut off by the token budget
         ("length") must never be frozen into the cache. It arrives on the final
         chunk, so it has to be captured here — by the time the joined string
-        gets back to chat_json the stream is already closed.
+        gets back to chat_json the stream is already closed. OpenAI-compatible
+        usage has the same lifetime and normally arrives on a final chunk whose
+        ``choices`` is empty, so it must be captured before that chunk is skipped.
         """
         raise_if_cancelled(cancel_event)
         call_kwargs: Dict[str, Any] = {**kwargs, **req_kwargs, "stream": True}
         if json_mode:
             call_kwargs["response_format"] = {"type": "json_object"}
-        stream = self.client().chat.completions.create(**call_kwargs)
+        request_usage = self._stream_usage_options_supported is not False
+        if request_usage:
+            call_kwargs["stream_options"] = {"include_usage": True}
+        try:
+            stream = self.client().chat.completions.create(**call_kwargs)
+        except Exception as exc:
+            if not request_usage or not _is_stream_usage_rejection(exc):
+                raise
+            self._stream_usage_options_supported = False
+            call_kwargs.pop("stream_options", None)
+            stream = self.client().chat.completions.create(**call_kwargs)
+        else:
+            if request_usage:
+                self._stream_usage_options_supported = True
         parts: List[str] = []
         finish_reason: Optional[str] = None
+        usage: Optional[Dict[str, int]] = None
         try:
             for chunk in stream:
                 raise_if_cancelled(cancel_event)
+                chunk_usage = _usage_dict(chunk)
+                if chunk_usage:
+                    usage = chunk_usage
                 if not getattr(chunk, "choices", None):
                     continue
                 choice = chunk.choices[0]
@@ -218,7 +270,7 @@ class OpenAICompatibleClient:
             if callable(close):
                 close()
         raise_if_cancelled(cancel_event)
-        return "".join(parts), finish_reason
+        return "".join(parts), finish_reason, usage
 
     def chat_json(
         self,
@@ -359,7 +411,9 @@ class OpenAICompatibleClient:
                 else self.max_retries
             )
             response = None
-            streamed: Optional[tuple[str, Optional[str]]] = None
+            streamed: Optional[
+                tuple[str, Optional[str], Optional[Dict[str, int]]]
+            ] = None
             for attempt in range(attempts):
                 raise_if_cancelled(cancel_event)
                 try:
@@ -413,7 +467,7 @@ class OpenAICompatibleClient:
                     backoff = min(2 ** attempt, 30)
                     sleep_or_cancel(backoff + random.uniform(0, backoff), cancel_event)
             if streamed is not None:
-                streamed_content, finish_reason = streamed
+                streamed_content, finish_reason, usage = streamed
                 content = strip_json_fences(streamed_content)
             else:
                 choice = response.choices[0]
@@ -422,6 +476,7 @@ class OpenAICompatibleClient:
                 # and is_cacheable_llm_response then falls back to parseability.
                 finish_reason = getattr(choice, "finish_reason", None)
                 content = strip_json_fences(choice.message.content or "")
+                usage = _usage_dict(response)
             # Best-effort write, and only of a reply that is actually usable —
             # the empty "{}" fallback, unparseable JSON and budget-truncated
             # completions are all excluded (see is_cacheable_llm_response for
@@ -467,7 +522,6 @@ class OpenAICompatibleClient:
                     pass
             record["status"] = "ok"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)
-            usage = _usage_dict(response)
             if usage:
                 record["usage"] = usage
             record["response"] = {"content": logger.clip(content)}

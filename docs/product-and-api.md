@@ -1050,7 +1050,14 @@ to the shared streaming JSON transport. The timeout therefore guards inactivity
 between received chunks (and initial response latency), rather than imposing a
 wall-clock cap on a long completion that continues to make progress; a gateway
 that buffers the stream or enforces its own hard request deadline remains outside
-this guarantee. Other notebooks and later tasks are unaffected. The availability
+this guarantee. The transport requests the optional OpenAI-compatible usage
+trailer and records exact prompt, completion, and total token counts from its
+final empty-choice chunk in the existing per-user LLM log. A provider that
+explicitly rejects that option falls back to ordinary streaming; the physical
+client remembers the rejection so later calls do not repeat it. If a provider
+accepts or ignores the option but emits no usage, the log leaves token counts
+unavailable rather than estimating them locally. Other notebooks and later tasks
+are unaffected. The availability
 probe explicitly bypasses the LLM response cache and does not populate it, so a
 stale successful probe cannot authorize destructive rebuild work during a live
 outage. It reuses the configured short-output budget instead of imposing a
