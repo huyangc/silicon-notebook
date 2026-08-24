@@ -19,7 +19,11 @@ from app.models.sources import (
     paper_meta_status,
 )
 from app.domain.source_display import summary_display_title
-from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
+from app.repositories.ports import (
+    SOURCE_PAPER_META_UNSET,
+    DocumentCapacityExceeded,
+    SourceElementWrite,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -259,11 +263,20 @@ class SourceStore:
         同口径(共用 VISIBLE_SOURCE_TYPES_PREDICATE),是文档数量上限强制的当前计数。
         排除 Memory 派生源与 knowhow 隐藏投影源;内部真集路径不走此方法。"""
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT COUNT(*) AS c FROM sources "
-                f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
-                (notebook_id,),
-            ).fetchone()
+            return self._visible_document_count_on(db, notebook_id)
+
+    @staticmethod
+    def _visible_document_count_on(db: sqlite3.Connection, notebook_id: str) -> int:
+        """The visible-document COUNT on a caller-provided connection — shared by
+        the read path (``visible_document_count``) and the atomic capacity gate
+        inside the creation write transactions (``insert_source`` /
+        ``insert_source_if_absent``), so the ceiling can never be enforced
+        against a different count than the one the UI reports."""
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM sources "
+            f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+            (notebook_id,),
+        ).fetchone()
         return int(row["c"])
 
     def get_source(self, source_id: str) -> SourceDetail:
@@ -1015,6 +1028,7 @@ class SourceStore:
         memory_id: str = "",
         agent_profile_id: str = "",
         connection: "sqlite3.Connection | None" = None,
+        capacity_limit: "int | None" = None,
     ) -> None:
         """Insert one sources row (created_at/updated_at minted via the ``now``
         seam). Pass ``connection`` to join a caller-owned write transaction —
@@ -1031,7 +1045,23 @@ class SourceStore:
         the value every pre-v48 row already carries and the one the delete
         permission check reads as "user-added, an Agent may never remove it",
         so a caller that omits the argument lands on exactly the same row shape
-        as the whole existing corpus."""
+        as the whole existing corpus.
+
+        ``capacity_limit`` (URL imports; None = exempt) enforces the notebook's
+        visible-document ceiling ATOMICALLY with this insert: COUNT and INSERT
+        run in one write transaction under BEGIN IMMEDIATE, so two concurrent
+        capacity-checked creators cannot both snapshot "one slot left" and both
+        land (the check-then-insert race the API pre-flight alone cannot
+        close). Over the ceiling raises ``DocumentCapacityExceeded`` and
+        inserts nothing. Only the own-transaction shape is supported: a joined
+        ``connection`` gives this method no say over when the transaction took
+        its write lock, so the count could predate it — refuse loudly rather
+        than enforce a limit that does not actually hold."""
+        if capacity_limit is not None and connection is not None:
+            raise ValueError(
+                "capacity_limit requires an owned write transaction; "
+                "it cannot join a caller-provided connection"
+            )
         now = self.now()
         statement = (
             """
@@ -1055,6 +1085,15 @@ class SourceStore:
             connection.execute(statement, values)
             return
         with self.database.write() as db:
+            if capacity_limit is not None:
+                # BEGIN IMMEDIATE before the COUNT: the RESERVED lock (plus the
+                # process-global write lock) makes count-then-insert one atomic
+                # step, and the fresh write connection reads the latest
+                # committed state — a concurrent creator's row is in the count.
+                self.database.begin_immediate(db)
+                current = self._visible_document_count_on(db, notebook_id)
+                if current >= capacity_limit:
+                    raise DocumentCapacityExceeded(current, capacity_limit)
             db.execute(statement, values)
 
     def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:
@@ -1137,11 +1176,23 @@ class SourceStore:
         summary: str,
         doc_type: str,
         agent_profile_id: str = "",
+        capacity_limit: "int | None" = None,
     ) -> Optional[str]:
         """Atomic content-dedup insert: if a same-content VISIBLE source already
         exists in this notebook return its id (the caller reuses it, no row is
         created); otherwise insert the new row (``file_hash=digest``) and return
         None.
+
+        ``capacity_limit`` (None = exempt) additionally enforces the notebook's
+        visible-document ceiling inside the SAME ``BEGIN IMMEDIATE`` write
+        transaction: after the dedup re-check misses, the visible-document
+        COUNT runs on this very connection and an at-or-over-limit notebook
+        raises ``DocumentCapacityExceeded`` instead of inserting — closing the
+        check-then-insert window in which two concurrent uploads both saw one
+        free slot (PR #584 codex R6). Order matters and is deliberate: the
+        dedup re-check runs FIRST, so re-uploading existing bytes into a full
+        notebook still reuses the row (a reuse adds no document and must never
+        be refused by the ceiling).
 
         ``agent_profile_id`` is written ONLY on the insert branch. Reusing an
         existing row must never restamp its provenance: a user-added source
@@ -1173,6 +1224,10 @@ class SourceStore:
             existing = self._source_id_by_hash_on(db, notebook_id, digest)
             if existing is not None:
                 return existing
+            if capacity_limit is not None:
+                current = self._visible_document_count_on(db, notebook_id)
+                if current >= capacity_limit:
+                    raise DocumentCapacityExceeded(current, capacity_limit)
             self.insert_source(
                 source_id=source_id,
                 notebook_id=notebook_id,

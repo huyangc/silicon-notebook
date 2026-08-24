@@ -13,7 +13,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.models.notebooks import NotebookCreate, NotebookUpdate, SharedByMeItem
-from app.repositories.ports import ChunkWrite, SourceElementWrite
+from app.repositories.ports import (
+    ChunkWrite,
+    DocumentCapacityExceeded,
+    SourceElementWrite,
+)
 from app.repositories.postgres.chunk_store import ChunkStore as PostgresChunkStore
 from app.repositories.postgres.identity_store import IdentityStore as PostgresIdentityStore
 from app.repositories.postgres.kg_build_job_store import (
@@ -2917,6 +2921,146 @@ def test_source_agent_provenance_matches_sqlite_semantics(core_stores: CoreStore
         "SELECT agent_profile_id FROM sources WHERE id=%s",
         ("src-agent-first",),
     )["agent_profile_id"] == "ap-agent-1"
+
+
+def _capacity_insert_kwargs(notebook_id: str, source_id: str, digest: str) -> dict:
+    return dict(
+        source_id=source_id,
+        notebook_id=notebook_id,
+        digest=digest,
+        title=source_id,
+        source_type="markdown",
+        status="queued",
+        parse_status="queued",
+        file_name=f"{source_id}.md",
+        file_path="",
+        file_size=1,
+        summary="",
+        doc_type="",
+        capacity_limit=1,
+    )
+
+
+def test_document_capacity_gate_matches_sqlite_semantics(core_stores: CoreStores):
+    """事务内文档容量闸(PR #584 codex R6)的 PG twin,与 SQLite 语义逐条对齐
+    (SQLite 侧在 tests/test_document_limit_atomicity.py):
+
+    * ``capacity_limit`` 满则拒(异常带事务内 current/limit),不插行;
+    * 去重重查在容量闸之前——满库重传相同字节复用既有行,绝不被上限拒绝;
+    * ``insert_source`` 自有事务分支同一把闸(URL 路径);joined connection +
+      capacity_limit 响亮拒绝(ValueError);
+    * 行锁找不到 notebook 行 → KeyError(与 get_row 同一个 not-found 信号)。
+    """
+    owner = core_stores.identity.create_user("k00123500", "password-13")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Capacity"), owner.id
+    )
+
+    assert core_stores.sources.insert_source_if_absent(
+        **_capacity_insert_kwargs(notebook_id, "src-cap-a", "digest-cap-a")
+    ) is None                                            # 0 < 1:入库
+    with pytest.raises(DocumentCapacityExceeded) as exc:
+        core_stores.sources.insert_source_if_absent(
+            **_capacity_insert_kwargs(notebook_id, "src-cap-b", "digest-cap-b")
+        )                                                # 1 >= 1:事务内拒绝
+    assert exc.value.current == 1 and exc.value.limit == 1
+    assert core_stores.sources.visible_document_count(notebook_id) == 1
+
+    # 判序:满库 + 相同 digest → 复用,不抛不插。
+    assert core_stores.sources.insert_source_if_absent(
+        **_capacity_insert_kwargs(notebook_id, "src-cap-retry", "digest-cap-a")
+    ) == "src-cap-a"
+
+    # insert_source(自有事务,URL 路径)同一把闸。
+    with pytest.raises(DocumentCapacityExceeded):
+        core_stores.sources.insert_source(
+            source_id="src-cap-url", notebook_id=notebook_id, title="u",
+            source_type="pdf", status="queued", parse_status="queued",
+            file_name="u.pdf", file_path="", file_size=0, file_hash="",
+            summary="", doc_type="", capacity_limit=1,
+        )
+    core_stores.sources.insert_source(
+        source_id="src-cap-url2", notebook_id=notebook_id, title="u2",
+        source_type="pdf", status="queued", parse_status="queued",
+        file_name="u2.pdf", file_path="", file_size=0, file_hash="",
+        summary="", doc_type="", capacity_limit=2,       # 1 < 2:放行
+    )
+    assert core_stores.sources.visible_document_count(notebook_id) == 2
+
+    # joined connection + capacity_limit:闸保证不了原子性,必须响亮拒绝。
+    with core_stores.database.write() as connection:
+        with pytest.raises(ValueError, match="owned write transaction"):
+            core_stores.sources.insert_source(
+                source_id="src-cap-x", notebook_id=notebook_id, title="x",
+                source_type="pdf", status="queued", parse_status="queued",
+                file_name="x.pdf", file_path="", file_size=0, file_hash="",
+                summary="", doc_type="", connection=connection, capacity_limit=1,
+            )
+
+    # 行锁找不到 notebook 行 → KeyError。⚠ **PG 专属**的顺带防御,不是跨后端
+    # parity 契约:行锁本来就要读该行,不在就当场按 not-found 收(路由翻成既有
+    # 404);SQLite 侧无行锁、刻意不加存在性探针(同场景走到 INSERT 撞外键)。
+    # 生产上两侧都在路由层 get_row/能力守卫处就已 404,这条深防路径不可达——
+    # 已在 _lock_notebook_row_for_capacity docstring 登记为后端差异。
+    with pytest.raises(KeyError):
+        core_stores.sources.insert_source_if_absent(
+            **_capacity_insert_kwargs("nb-missing", "src-cap-m", "digest-cap-m")
+        )
+
+
+def test_document_capacity_gate_serializes_concurrent_creators(
+    core_stores: CoreStores,
+):
+    """并发正身:PG 的 ``write()`` 没有进程级锁(READ COMMITTED 下两个事务各自
+    COUNT 都能看到「还剩 1」),串行化只能来自 notebook 行锁(FOR NO KEY UPDATE)。
+    Barrier 让两个线程同时发起、各持一条池连接;赢家提交后输家的 COUNT 才跑,
+    每局恰有一个入库。
+
+    ⚠ 检出力说明(codex 评审 P2):Barrier 在调用入口,BEGIN/加锁在其后——对
+    「删掉行锁」的变异,单局是**概率性**检出(输家的 COUNT 要恰好落进赢家
+    BEGIN→COMMIT 的窗口才会双插;实测该变异单局即红,但没有保证)。所以按局
+    重复、每局全新 notebook,任一局出现两行即红,把漏检压到可忽略;未变异代码
+    上每局都由行锁保证确定通过,无 sleep、无时序假设。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    owner = core_stores.identity.create_user("k00123501", "password-14")
+    for round_no in range(6):
+        notebook_id = core_stores.notebooks.create_row(
+            NotebookCreate(name=f"Capacity race {round_no}"), owner.id
+        )
+        barrier = threading.Barrier(2, timeout=10)
+        refused: list[DocumentCapacityExceeded] = []
+        inserted: list[str] = []
+        lock = threading.Lock()
+
+        def create(source_id: str, digest: str) -> None:
+            barrier.wait()
+            try:
+                outcome = core_stores.sources.insert_source_if_absent(
+                    **_capacity_insert_kwargs(notebook_id, source_id, digest)
+                )
+            except DocumentCapacityExceeded as exc:
+                with lock:
+                    refused.append(exc)
+                return
+            assert outcome is None
+            with lock:
+                inserted.append(source_id)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(create, f"src-race-a{round_no}", f"digest-race-a{round_no}"),
+                pool.submit(create, f"src-race-b{round_no}", f"digest-race-b{round_no}"),
+            ]
+            for future in futures:
+                future.result(timeout=30)
+
+        assert len(inserted) == 1, (
+            f"第 {round_no} 局:只剩 1 个名额必须恰好放行一个,实际 {inserted}"
+        )
+        assert len(refused) == 1
+        assert refused[0].current == 1 and refused[0].limit == 1
+        assert core_stores.sources.visible_document_count(notebook_id) == 1
 
 
 def test_typed_collection_catalog_primitives_match_sqlite_semantics(

@@ -424,9 +424,10 @@ class GroupStore:
         本来就要取的那把锁提前几条语句取到手,好让我们有机会当场返回 404,而不是等 INSERT
         炸出一个未处理异常。改成 `FOR SHARE` 就不一样了:它额外与 `FOR NO KEY UPDATE`
         冲突,也就是与**任何一次普通的** `UPDATE notebooks SET …`(改名、改状态、推
-        `updated_at`)互相阻塞——那是一整类今天根本不存在的阻塞关系,凭空造出新的死锁面。
-        而防住并发删库只需要与 `FOR UPDATE`(`DELETE FROM notebooks` 取的正是它)冲突,
-        `FOR KEY SHARE` 已经做到。
+        `updated_at`),以及建源容量闸的 `FOR NO KEY UPDATE`
+        (`source_store._lock_notebook_row_for_capacity`)互相阻塞——凭空把本路径拖进
+        一整类它不需要的阻塞关系。而防住并发删库只需要与 `FOR UPDATE`
+        (`DELETE FROM notebooks` 取的正是它)冲突,`FOR KEY SHARE` 已经做到。
 
         **锁序论证**(为什么在 `create_share_request` 里排在 `_lock_group_on` 之后是安全的):
 

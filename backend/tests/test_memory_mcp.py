@@ -2482,6 +2482,43 @@ async def test_add_source_text_honours_the_notebook_document_limit(
 
 
 @pytest.mark.anyio
+async def test_add_source_text_race_loser_is_refused_by_the_store_gate(
+    mcp_env, scheduled_jobs, monkeypatch
+):
+    """穿参守卫(codex 评审):关闭「预检与插入之间名额被并发占走 / 匹配行被删」
+    窗口的唯一代码是 `_upload_agent_source` 里的 `capacity_limit=` 穿参——上一个
+    用例只靠预检就能绿,证明不了它。这里把预检打桩成「不拒绝、只回上限」(模拟
+    输给并发的过期预检),工具必须**仍然**以同一句 document_capacity_message 报错
+    且不入库——报错只可能来自 store 的建源事务内闸。删掉穿参(变异)则第二篇
+    静默超限入库,本用例转红。"""
+    from app.api.mcp_tools import sources as mcp_sources
+
+    repo = repository()
+    identity = identity_repository()
+    notebook_id = mcp_env["notebook"].id
+    identity.set_user_document_limit_override("user-local", mcp_env["alice"].id, 1)
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert not (await client.call("add_source_text", {
+            "title": "第一篇", "content_md": "第一篇正文",
+        })).isError
+        monkeypatch.setattr(
+            mcp_sources, "_reject_when_notebook_is_full",
+            lambda repo, notebook_id, adding: 1,
+        )
+        full = await client.call("add_source_text", {
+            "title": "第二篇", "content_md": "第二篇正文",
+        })
+        assert full.isError
+        assert document_capacity_message(1, 1, 1) in full.content[0].text
+
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
 async def test_add_source_text_still_dedups_when_the_notebook_is_full(
     mcp_env, scheduled_jobs
 ):

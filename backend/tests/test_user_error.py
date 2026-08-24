@@ -190,6 +190,15 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "真实响应由 tests/test_document_limit.py 的 import/upload/url 三端点 409 用例"
         "覆盖(断言 X-User-Message 头 + 「文档」文案)。"
     ),
+    "app/api/source_routes.py::upload_sources": (
+        "detail 是 document_capacity_message(exc.current, exc.limit, 还没建成的"
+        "文件数) 的返回值——与 _enforce_document_capacity 登记的是同一个纯中文模板、"
+        "同一句话(见上条理由)。这里是它的竞态兜底出口:预检放行后名额被并发占走时,"
+        "store 在建源写事务内抛 DocumentCapacityExceeded(只带两个整数,无异常原文),"
+        "路由翻成与预检同一句 409。真实响应由 tests/test_document_limit_atomicity.py::"
+        "test_upload_endpoint_maps_the_race_loser_to_the_same_409 覆盖"
+        "(断言 409 + X-User-Message 头 + detail 逐字等于该模板)。"
+    ),
     "app/api/source_routes.py::_source_upload_too_large": (
         "detail 是纯中文的单文件大小上限模板，只插入部署配置派生的两个数值："
         "_format_upload_size_limit(max_bytes) 与 max_bytes 本身。max_bytes 一路来自 "

@@ -196,6 +196,30 @@ class CatalogJobAlreadyRunning(RuntimeError):
     """One source already has a durable queued/running command-catalog job."""
 
 
+class DocumentCapacityExceeded(RuntimeError):
+    """The per-notebook visible-document ceiling refused a source INSERT —
+    raised from INSIDE the creation write transaction, where the COUNT and the
+    INSERT are one atomic step (SQLite: process write lock + BEGIN IMMEDIATE;
+    PostgreSQL: a notebook-row lock serializes capacity-checked creators).
+
+    This is the atomic backstop behind the API layer's read-then-check
+    pre-flight: with one slot left, two concurrent creates could both snapshot
+    capacity and both land (PR #584 codex R6). The pre-flight still exists for
+    its cheap early 409 — this exception is what the LOSER of the race gets
+    instead of silently overshooting the limit. Carries the transaction-local
+    ``current`` count and the enforced ``limit`` so callers can phrase the same
+    user-facing sentence (``document_capacity_message``) the pre-flight uses.
+
+    Only raised when a caller passes ``capacity_limit`` — offline
+    ``batch_ingest``, Memory/knowhow projections, and admin-owned notebooks
+    keep passing None and pay zero extra queries."""
+
+    def __init__(self, current: int, limit: int) -> None:
+        super().__init__(f"notebook document capacity reached: {current}/{limit}")
+        self.current = current
+        self.limit = limit
+
+
 @dataclass(frozen=True)
 class ChunkWrite:
     id: str
@@ -535,8 +559,17 @@ class SourceRepository(Protocol):
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> list[SourceSummary]: ...
     # ``agent_profile_id`` non-empty stamps v48 Agent provenance on rows the call
     # CREATES ("" -> NULL = a person added it). Reused dedup rows keep theirs.
-    def add_url_sources(self, notebook_id: str, urls: Iterable[str], scheduler: SourceScheduler | None = None, capacity: "int | None" = None, agent_profile_id: str = "") -> AddUrlSourcesResult: ...
-    def upload_sources(self, notebook_id: str, files: Iterable[UploadedSourceFile], scheduler: SourceScheduler | None = None, agent_profile_id: str = "") -> list[UploadedSourceSummary]: ...
+    # ``capacity_limit`` is the notebook's ABSOLUTE visible-document ceiling
+    # (None = exempt/offline), re-counted atomically inside each creation write
+    # transaction — not a pre-computed remaining budget, which would re-open the
+    # check-then-insert race this parameter closes. Over-limit URLs land in
+    # ``rejected``; an over-limit upload raises ``DocumentCapacityExceeded``.
+    # Its parameter POSITION differs between the two methods on purpose:
+    # ``add_url_sources`` keeps it in the slot the retired ``capacity`` budget
+    # occupied, ``upload_sources`` appends it last — both choices exist so the
+    # positional callers each method already had keep their argument order.
+    def add_url_sources(self, notebook_id: str, urls: Iterable[str], scheduler: SourceScheduler | None = None, capacity_limit: "int | None" = None, agent_profile_id: str = "") -> AddUrlSourcesResult: ...
+    def upload_sources(self, notebook_id: str, files: Iterable[UploadedSourceFile], scheduler: SourceScheduler | None = None, agent_profile_id: str = "", capacity_limit: "int | None" = None) -> list[UploadedSourceSummary]: ...
     def get_source(self, source_id: str) -> SourceDetail: ...
     def process_source(self, source_id: str) -> SourceSummary: ...
     # Bounded probe of the per-source parse (chunk) lock: True while a parse is

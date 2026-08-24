@@ -18,7 +18,11 @@ from app.models.sources import (
     paper_meta_status,
 )
 from app.domain.source_display import summary_display_title
-from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
+from app.repositories.ports import (
+    SOURCE_PAPER_META_UNSET,
+    DocumentCapacityExceeded,
+    SourceElementWrite,
+)
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     execute_many,
@@ -249,12 +253,64 @@ class SourceStore:
 
     def visible_document_count(self, notebook_id: str) -> int:
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
-                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
-                (notebook_id,),
-            ).fetchone()
+            return self._visible_document_count_on(connection, notebook_id)
+
+    @staticmethod
+    def _visible_document_count_on(connection, notebook_id: str) -> int:
+        """The visible-document COUNT on a caller-provided connection — shared
+        by the read path and the atomic capacity gate inside the creation write
+        transactions (mirrors the SQLite twin)."""
+        row = connection.execute(
+            "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
+            f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+            (notebook_id,),
+        ).fetchone()
         return int(row["c"])
+
+    @staticmethod
+    def _lock_notebook_row_for_capacity(connection, notebook_id: str) -> None:
+        """Serialize capacity-checked source creators on the notebook row.
+
+        PostgreSQL's ``write()`` deliberately has no process-wide lock and runs
+        READ COMMITTED, so two concurrent transactions could each COUNT, each
+        see one free slot, and each INSERT — the transaction boundary alone
+        closes nothing. ``FOR NO KEY UPDATE`` makes the second capacity-checked
+        creator wait until the first commits; its COUNT (a fresh READ COMMITTED
+        snapshot per statement) then includes the winner's row.
+
+        Lock-mode conflict edges, stated precisely (do not paraphrase):
+
+        * NOT blocked: the ``FOR KEY SHARE`` a plain FK insert takes — exempt
+          writers (offline ``batch_ingest``, Memory/knowhow projection row
+          inserts) never queue behind a capacity-checked upload's INSERT.
+        * Blocked both ways, and NEW conflict edges this lock introduces:
+          ordinary ``UPDATE notebooks SET …`` (rename, tier/status flips,
+          ``updated_at`` bumps) takes FOR NO KEY UPDATE itself, and
+          ``memory_store``'s ``FOR SHARE`` ownership probes conflict with it
+          too. Both sides hold their locks for millisecond transactions, so
+          this is brief queueing, not a correctness issue.
+        * No deadlock by construction: this lock is the FIRST statement of its
+          transaction, and everything after it (one COUNT, one INSERT whose FK
+          check takes KEY SHARE on this very row, already held stronger) waits
+          on nothing — a cycle needs a transaction that waits while holding,
+          which this one never does. If ``postgres_lock_timeout_seconds``
+          still trips (a long-lived holder elsewhere), the failure shape is
+          psycopg's LockNotAvailable surfacing as a 500 — the pre-existing
+          shape of every notebook-row lock timeout, not a new path.
+
+        A vanished notebook raises ``KeyError`` (mapped to the existing 404).
+        This existence probe is a PG-only bonus — the lock has to read the row
+        anyway. The SQLite twin takes no row lock and deliberately adds no
+        probe: both routes 404 earlier via ``get_row``/capability guards, so
+        the divergence (SQLite would hit the FK on INSERT instead) is a
+        registered backend difference on a production-unreachable path, not a
+        parity contract."""
+        row = connection.execute(
+            "SELECT 1 FROM notebooks WHERE id=%s FOR NO KEY UPDATE",
+            (notebook_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(notebook_id)
 
     @staticmethod
     def clear_chunked_at(connection, source_id: str) -> None:
@@ -904,7 +960,19 @@ class SourceStore:
         memory_id: str = "",
         agent_profile_id: str = "",
         connection=None,
+        capacity_limit: "int | None" = None,
     ) -> None:
+        # ``capacity_limit`` (None = exempt): enforce the notebook's
+        # visible-document ceiling atomically with this insert — notebook-row
+        # lock, then COUNT, then INSERT, all in one owned transaction (see
+        # ``_lock_notebook_row_for_capacity`` for why the lock is the
+        # serialization). Own-transaction shape only, same rule and reason as
+        # the SQLite twin's docstring.
+        if capacity_limit is not None and connection is not None:
+            raise ValueError(
+                "capacity_limit requires an owned write transaction; "
+                "it cannot join a caller-provided connection"
+            )
         statement = (
             "INSERT INTO sources"
             "(id,notebook_id,title,source_type,status,parse_status,file_name,file_path,"
@@ -942,6 +1010,11 @@ class SourceStore:
             connection.execute(statement, values)
             return
         with self.database.write() as owned:
+            if capacity_limit is not None:
+                self._lock_notebook_row_for_capacity(owned, notebook_id)
+                current = self._visible_document_count_on(owned, notebook_id)
+                if current >= capacity_limit:
+                    raise DocumentCapacityExceeded(current, capacity_limit)
             owned.execute(statement, values)
 
     def source_id_for_memory(self, memory_id: str) -> str | None:
@@ -1088,6 +1161,7 @@ class SourceStore:
         summary: str,
         doc_type: str,
         agent_profile_id: str = "",
+        capacity_limit: "int | None" = None,
     ) -> str | None:
         """Atomic content-dedup insert (postgres): the whole ``write()`` block is
         one transaction, so the dedup re-check and the insert commit together —
@@ -1099,8 +1173,18 @@ class SourceStore:
         transaction boundary is the atomicity.
 
         ``agent_profile_id`` reaches the insert branch only — a reused row keeps
-        the provenance of whoever created it (see the SQLite twin)."""
+        the provenance of whoever created it (see the SQLite twin).
+
+        ``capacity_limit`` (None = exempt) enforces the visible-document
+        ceiling in this same transaction: the notebook-row lock is taken FIRST
+        (before even the dedup re-check, so both re-checks run after the
+        serialization point — see ``_lock_notebook_row_for_capacity``), the
+        COUNT runs on this connection, and an at-or-over-limit notebook raises
+        ``DocumentCapacityExceeded``. The dedup re-check still decides first:
+        re-uploaded existing bytes reuse their row even in a full notebook."""
         with self.database.write() as connection:
+            if capacity_limit is not None:
+                self._lock_notebook_row_for_capacity(connection, notebook_id)
             if digest:
                 row = connection.execute(
                     "SELECT id FROM sources WHERE notebook_id=%s AND file_hash=%s "
@@ -1110,6 +1194,10 @@ class SourceStore:
                 ).fetchone()
                 if row is not None:
                     return str(row["id"])
+            if capacity_limit is not None:
+                current = self._visible_document_count_on(connection, notebook_id)
+                if current >= capacity_limit:
+                    raise DocumentCapacityExceeded(current, capacity_limit)
             self.insert_source(
                 source_id=source_id,
                 notebook_id=notebook_id,

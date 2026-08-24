@@ -13,12 +13,13 @@ from mcp.server.fastmcp import Context, FastMCP
 from app.api.source_routes import (
     _HIDDEN_SOURCE_TYPES,
     _document_capacity,
+    _document_capacity_limit,
     document_capacity_message,
 )
 from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
 from app.models.sources import SourceDetail
-from app.repositories.ports import UploadedSourceFile
+from app.repositories.ports import DocumentCapacityExceeded, UploadedSourceFile
 from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
@@ -58,21 +59,43 @@ def _upload_agent_source(
     payload: bytes,
     title: str,
 ) -> Any:
-    """Use the one canonical source upload/dedup/background scheduling path."""
+    """Use the one canonical source upload/dedup/background scheduling path.
+
+    Both pre-probe branches thread the notebook's document ceiling into
+    ``upload_sources`` as ``capacity_limit``, where the store re-counts INSIDE
+    the creation write transaction: the once-documented "matched row deleted
+    between this probe and the upload" overshoot, and the browser's own
+    check-then-insert race, are both closed by that gate (PR #584 codex R6) --
+    the dedup re-check still runs first there, so a reuse is never refused at
+    the limit. The pre-flight refusal here stays as the cheap early error; a
+    racer that slips past it gets the SAME sentence from the except arm."""
     digest = hashlib.sha256(payload).hexdigest()
     if repo.source_id_by_hash(notebook_id, digest) is None:
-        _reject_when_notebook_is_full(repo, notebook_id, 1)
-    created = repo.upload_sources(
-        notebook_id,
-        [UploadedSourceFile(
-            file_name=file_name,
-            content_type=content_type,
-            content=payload,
-            title=title,
-        )],
-        lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
-        principal.profile_id,
-    )
+        capacity_limit = _reject_when_notebook_is_full(repo, notebook_id, 1)
+    else:
+        # Dedup hit: a reuse adds no document, so no refusal here — but the
+        # ceiling is still threaded through so the "matched row deleted before
+        # the upload" race cannot overshoot. Limit-only fetch on purpose (no
+        # COUNT): this is the Agent's idempotent-retry hot path, and the
+        # current count would be computed only to be thrown away.
+        capacity_limit = _document_capacity_limit(notebook_id, repo)
+    try:
+        created = repo.upload_sources(
+            notebook_id,
+            [UploadedSourceFile(
+                file_name=file_name,
+                content_type=content_type,
+                content=payload,
+                title=title,
+            )],
+            lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
+            principal.profile_id,
+            capacity_limit=capacity_limit,
+        )
+    except DocumentCapacityExceeded as exc:
+        raise ValueError(
+            document_capacity_message(exc.current, exc.limit, 1)
+        ) from None
     return created[0]
 
 
@@ -97,14 +120,21 @@ def _own_source(repo: Any, notebook_id: str, source_id: str) -> SourceDetail:
 
 def _reject_when_notebook_is_full(
     repo: Any, notebook_id: str, adding: int
-) -> None:
-    """Apply the browser route's canonical notebook document ceiling."""
+) -> "int | None":
+    """Apply the browser route's canonical notebook document ceiling.
+
+    Returns the owner's effective limit (None = admin-exempt) so the caller can
+    thread it into the creation call as ``capacity_limit`` — the pre-flight here
+    is only the cheap early error; the authoritative enforcement is the COUNT
+    inside the store's creation write transaction, mirroring the browser
+    route's ``_enforce_document_capacity``."""
     capacity = _document_capacity(notebook_id, repo)
     if capacity is None:
-        return
+        return None
     current, limit = capacity
     if current + adding > limit:
         raise ValueError(document_capacity_message(current, limit, adding))
+    return limit
 
 
 def _markdown_source_file_name(title: str) -> str:
@@ -170,13 +200,10 @@ def register_source_tools(
                 # fail exactly when a notebook was full -- the one state where
                 # an Agent most needs a repeat call to be a safe no-op.
                 #
-                # ⚠ Window between this probe and the upload: if the matched row
-                # is deleted in between, upload_sources creates a row and the
-                # notebook ends up one document over. Bounded to one, and the
-                # same shape as the browser's own check-then-insert TOCTOU
-                # (documented on `_enforce_document_capacity`) -- the next call
-                # refuses. Closing it would mean holding a write lock across the
-                # whole ingest.
+                # The ceiling itself is enforced atomically inside
+                # `_upload_agent_source` (its docstring has the mechanics);
+                # the once-documented "matched row deleted between the probe
+                # and the upload" one-over window is closed there.
                 source = _upload_agent_source(
                     repo,
                     notebook_id=notebook_id,
@@ -311,18 +338,18 @@ def register_source_tools(
                 # add_source_text uses -- one condition must not have two
                 # wordings. The browser's URL route cannot do this because a URL
                 # import is naturally partial (unreachable / non-PDF entries are
-                # skipped), so it charges the ceiling per successful probe and
-                # reports over-limit entries in `rejected`; with exactly one URL
-                # the two are equivalent.
-                _reject_when_notebook_is_full(repo, notebook_id, 1)
-                # Still passed as a BUDGET as well, keeping the service-level
-                # accounting identical to the browser route. It stays the
-                # authority if the count moves between the check and the call --
-                # in that race the reason comes from add_url_sources itself,
-                # which is that service's own user-facing wording (the browser
-                # shows it too), not a second spelling of the sentence above.
-                capacity = _document_capacity(notebook_id, repo)
-                budget = None if capacity is None else max(0, capacity[1] - capacity[0])
+                # skipped), so it reports over-limit entries in `rejected`; with
+                # exactly one URL the two are equivalent. The returned limit is
+                # threaded into the creation call as `capacity_limit`, where the
+                # store re-counts inside the INSERT's own write transaction --
+                # the authority if the count moves between this check and the
+                # insert. In that race the reason comes from add_url_sources'
+                # `rejected` entry, which is that service's own user-facing
+                # wording (the browser shows it too), not a second spelling of
+                # the sentence above.
+                capacity_limit = _reject_when_notebook_is_full(
+                    repo, notebook_id, 1
+                )
                 try:
                     result = repo.add_url_sources(
                         notebook_id,
@@ -330,7 +357,7 @@ def register_source_tools(
                         lambda source_id: kg_scheduler.submit_job(
                             repo.process_source, source_id
                         ),
-                        budget,
+                        capacity_limit,
                         principal.profile_id,
                     )
                 except MinerUCloudNotConfigured:

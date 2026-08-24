@@ -66,9 +66,10 @@ def test_endpoint_unknown_notebook_returns_404(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
-# --- 每笔记本文档数量上限:URL 导入按成功探测逐条扣减 capacity（收 codex 第 1 轮 P2）---
+# --- 每笔记本文档数量上限:URL 导入把绝对上限穿给逐条建源,store 在 INSERT 自己的
+# 写事务内重新计数(收 codex 第 1 轮 P2;PR #584 codex R6 原子化,冻结预算退役)---
 def test_add_url_sources_capacity_fills_remaining_then_rejects(tmp_path, monkeypatch):
-    """剩余额度 N:探测通过的 URL 建满 N 个,其余(仍通过探测)进 rejected(超限原因)。"""
+    """上限 N:探测通过的 URL 建到 N 个,其余(仍通过探测)进 rejected(超限原因)。"""
     _env(tmp_path, monkeypatch, token="tok")
     repo = SQLiteRepository(Settings())
     nb = repo.create_notebook(NotebookCreate(name="n"))
@@ -76,14 +77,14 @@ def test_add_url_sources_capacity_fills_remaining_then_rejects(tmp_path, monkeyp
                         lambda url, **kw: PdfProbe(True, "", 1, "d.pdf"))
     result = repo.add_url_sources(
         nb.id, ["https://a/1.pdf", "https://a/2.pdf", "https://a/3.pdf"],
-        scheduler=lambda sid: None, capacity=2)
+        scheduler=lambda sid: None, capacity_limit=2)
     assert len(result.created) == 2
     assert len(result.rejected) == 1
     assert "文档数量上限" in result.rejected[0].reason
 
 
 def test_add_url_sources_capacity_none_is_unlimited(tmp_path, monkeypatch):
-    """capacity=None(admin 笔记本豁免)→ 全部有效 URL 都建,无超限拒绝。"""
+    """capacity_limit=None(admin 笔记本豁免)→ 全部有效 URL 都建,无超限拒绝。"""
     _env(tmp_path, monkeypatch, token="tok")
     repo = SQLiteRepository(Settings())
     nb = repo.create_notebook(NotebookCreate(name="n"))
@@ -91,12 +92,12 @@ def test_add_url_sources_capacity_none_is_unlimited(tmp_path, monkeypatch):
                         lambda url, **kw: PdfProbe(True, "", 1, "d.pdf"))
     result = repo.add_url_sources(
         nb.id, ["https://a/1.pdf", "https://a/2.pdf", "https://a/3.pdf"],
-        scheduler=lambda sid: None, capacity=None)
+        scheduler=lambda sid: None, capacity_limit=None)
     assert len(result.created) == 3 and len(result.rejected) == 0
 
 
 def test_add_url_sources_capacity_ignores_invalid_urls(tmp_path, monkeypatch):
-    """codex 场景:剩余 1,[有效 PDF, 无效非 PDF] → 有效建成、无效按自身原因拒;无效
+    """codex 场景:上限 1,[有效 PDF, 无效非 PDF] → 有效建成、无效按自身原因拒;无效
     URL 不占配额,故不会让有效 URL 被误挡(修复前 len(urls)=2>1 会整批 409)。"""
     _env(tmp_path, monkeypatch, token="tok")
     repo = SQLiteRepository(Settings())
@@ -108,7 +109,7 @@ def test_add_url_sources_capacity_ignores_invalid_urls(tmp_path, monkeypatch):
                                    1, "d.pdf"))
     result = repo.add_url_sources(
         nb.id, ["https://a/valid.pdf", "https://b/invalid.html"],
-        scheduler=lambda sid: None, capacity=1)
+        scheduler=lambda sid: None, capacity_limit=1)
     assert len(result.created) == 1
     assert result.created[0].source_url == "https://a/valid.pdf"
     assert len(result.rejected) == 1

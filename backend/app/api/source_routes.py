@@ -33,7 +33,11 @@ from app.models.sources import (
     SourceSummary,
     UploadedSourceSummary,
 )
-from app.repositories.ports import SourceRepository, UploadedSourceFile
+from app.repositories.ports import (
+    DocumentCapacityExceeded,
+    SourceRepository,
+    UploadedSourceFile,
+)
 from app.services import background_jobs
 from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow.assets import AssetService
@@ -225,10 +229,25 @@ def _document_capacity(
     默认 None 保持浏览器侧三个调用点逐字不变。这个参数**不是**允许调用方另写一份上限
     规则的口子——上限判据只写在这里一次,Agent 侧上传/加链接也必须过这一道。"""
     repo = repo if repo is not None else source_repository()
+    limit = _document_capacity_limit(notebook_id, repo)
+    if limit is None:
+        return None
+    return repo.visible_document_count(notebook_id), limit
+
+
+def _document_capacity_limit(
+    notebook_id: str, repo: "SourceRepository | None" = None
+) -> "int | None":
+    """只取 owner 有效上限(admin 豁免 → None),**不数当前文档数**。
+
+    给只需要把上限穿进建源事务、不做预检的调用方(MCP add_source_text 的去重
+    命中分支——那条路预期复用既有行,COUNT 是白算的,而它是 Agent 幂等重试的
+    热路径)。admin 豁免判据只写在这一处,_document_capacity 在它之上补 COUNT。"""
+    repo = repo if repo is not None else source_repository()
     owner_id, owner_role = repo.notebook_owner(notebook_id)
     if owner_role == "admin":
         return None
-    return repo.visible_document_count(notebook_id), repo.effective_document_limit(owner_id)
+    return repo.effective_document_limit(owner_id)
 
 
 def document_capacity_message(current: int, limit: int, adding: int) -> str:
@@ -244,19 +263,28 @@ def document_capacity_message(current: int, limit: int, adding: int) -> str:
     )
 
 
-def _enforce_document_capacity(notebook_id: str, adding: int) -> None:
+def _enforce_document_capacity(notebook_id: str, adding: int) -> "int | None":
     """建源前批量预检(上传/导入:提交的每个文件/条目都会入库,故按总数一次性判)。超限
-    整批 409。URL 导入不用它——URL 天然部分成功(空白/不可达/非 PDF 跳过),改由
-    add_url_sources 按成功探测逐条扣减 capacity,详见该端点。
+    整批 409。URL 导入不用它——URL 天然部分成功(空白/不可达/非 PDF 跳过),由
+    import_url_sources 把上限穿给逐条建源,详见该端点。
 
-    check-then-insert 非原子:并发双提交存在极小 TOCTOU 窗口(可能略微超限)。这是刻意
-    取舍——为此加写锁/唯一约束不值当,偶尔多一两篇文档无害,下一次提交即被挡住。"""
+    返回 owner 有效上限(admin 豁免 → None),供上传路径把它穿进
+    ``upload_sources(capacity_limit=...)``:预检只是便宜的先手 409,权威强制在
+    store 的建源写事务内(COUNT+INSERT 同事务;SQLite BEGIN IMMEDIATE / PG
+    notebook 行锁)。此前这里登记过的 check-then-insert TOCTOU(两个并发请求都
+    快照到剩 1 个名额就都能入库)已由那道事务内闸关闭(PR #584 codex R6);预检
+    输给并发时,路由把 store 抛的 ``DocumentCapacityExceeded`` 翻成同一句 409。
+    唯一仍只走预检的是 ``/sources/import``(纯元数据登记、无前端调用方)——这是
+    **范围取舍**不是技术障碍:它的批量插入本就共享一个自有写事务,在里面补一次
+    COUNT 即可闭合,只是需要另一种穿参形状(批量 all-or-nothing 而非逐条),而该
+    端点没有并发双击的真实入口,故保留原竞态窗口、如实登记。"""
     cap = _document_capacity(notebook_id)
     if cap is None:
-        return
+        return None
     current, limit = cap
     if current + adding > limit:
         raise user_error(409, document_capacity_message(current, limit, adding))
+    return limit
 
 
 def _truthy_form_flag(raw: str) -> bool:
@@ -296,10 +324,12 @@ def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult
     ``PluginUrlSourceImportPort`` 适配器)复用**同一份**语义,而不是让插件自己
     再拼一遍——它拿不到 repository,也就不可能另写一份:
 
-    * **容量逐条扣减**:URL 导入天然部分成功(空白/不可达/非 PDF 会被跳过),故容量按
-      **成功探测逐条**核算:剩余额度 = 有效上限 − 当前数;超出的有效 URL 进 rejected
-      (不消耗配额、不整批 409),与「一个无效链接拖累整批」相反。
-    * **admin 豁免**:owner 是 admin 的笔记本 ``capacity=None``(不限)。
+    * **容量逐条核算**:URL 导入天然部分成功(空白/不可达/非 PDF 会被跳过),故容量按
+      **成功探测逐条**核算:超出的有效 URL 进 rejected(不消耗配额、不整批 409),与
+      「一个无效链接拖累整批」相反。这里穿下去的是**绝对上限** ``capacity_limit``
+      而不是请求开始时算好的剩余额度——当前数由 store 在每条 INSERT 自己的写事务内
+      重新 COUNT(冻结的剩余额度正是并发双请求都能花掉同一个名额的 TOCTOU)。
+    * **admin 豁免**:owner 是 admin 的笔记本 ``capacity_limit=None``(不限)。
     * **未配置解析服务 → 400**,且 ``detail`` 是服务层原文(``str(exc)``)而**不是**
       ``user_error()``:它带的是「本地 MINERU_MODE 或云端 MINERU_API_TOKEN」这类部署
       配置措辞,不是给终端用户看的中文文案,所以刻意不打 ``X-User-Message``。这条
@@ -314,13 +344,13 @@ def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult
     """
     repo = source_repository()
     cap = _document_capacity(notebook_id)
-    capacity = None if cap is None else max(0, cap[1] - cap[0])
+    capacity_limit = None if cap is None else cap[1]
     try:
         return repo.add_url_sources(
             notebook_id,
             urls,
             scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
-            capacity=capacity,
+            capacity_limit=capacity_limit,
         )
     except MinerUCloudNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -364,7 +394,9 @@ async def upload_sources(
         for file in files:
             file_name = file.filename or "source.bin"
             _validate_source_file(file_name, file.size)
-        _enforce_document_capacity(notebook_id, len(files))
+        # 预检整批(便宜的先手 409),并拿到 owner 有效上限穿给每条建源——真正的
+        # 强制在 store 的写事务内(见 _enforce_document_capacity docstring)。
+        capacity_limit = _enforce_document_capacity(notebook_id, len(files))
 
         uploaded: list[UploadedSourceSummary] = []
         for index, file in enumerate(files):
@@ -396,9 +428,19 @@ async def upload_sources(
                 scheduler=lambda source_id: kg_scheduler.submit_job(
                     repo.process_source, source_id
                 ),
+                capacity_limit=capacity_limit,
             )
             uploaded.extend(result)
         return uploaded
+    except DocumentCapacityExceeded as exc:
+        # 竞态兜底:预检放行后、这个文件插入前,并发请求占走了名额,store 在建源
+        # 写事务内拒绝(行没插、孤儿文件已清)。同一句 409 文案;adding 报本次还没
+        # 建成的文件数(len(files) - len(uploaded):含被拒的这一个;更早的文件已各自
+        # 提交并保留,与拆成多次请求提交同形,来源列表随轮询显现)。
+        raise user_error(
+            409,
+            document_capacity_message(exc.current, exc.limit, len(files) - len(uploaded)),
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     finally:
