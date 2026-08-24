@@ -410,14 +410,14 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
-The optional `[deepseek_thinking]` table controls DeepSeek V4 thinking per
-**chat workload**, using `enabled`, `disabled`, or `provider_default`. The name
-is deliberately provider-specific: `thinking.type` is not an OpenAI Chat
-Completions field. The OpenAI SDK's `extra_body` merely passes DeepSeek's field
-through to its OpenAI-compatible endpoint; another provider implementing the
-same transport is not assumed to support it. The policy is workload-scoped
+The optional `[thinking]` table controls thinking per **chat workload**, using
+`enabled`, `disabled`, or `provider_default`. The policy is workload-scoped
 rather than service-scoped because one physical chat service may carry both
-reasoning and mechanical structured-output calls.
+reasoning and mechanical structured-output calls. The configuration name is
+provider-neutral; the current transport maps it to DeepSeek V4's private
+`thinking.type` field through the OpenAI SDK's `extra_body`. Another provider
+implementing the same OpenAI-compatible transport is not assumed to support
+that field.
 
 The checked-in example spells out every current default. `ask_answer`,
 `reasoning_agent`, `graph_chain_verify`, `report_outline`,

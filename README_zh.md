@@ -76,7 +76,7 @@ mkdir -p .local
 cp model-services.example.toml .local/model-services.toml
 ```
 
-如需模型回答和知识抽取，编辑 `.local/model-services.toml`，把 workload 绑定到物理服务，设置每个服务的 `max_concurrency` 和可选的 chat 专用固定 `top_p`，并只把 `api_key_env` 指定的密钥放进 `.env`。合法的 TOML 修改会自动热加载，无需重启后端。DeepSeek V4 的 provider 私有思考开关由 `[deepseek_thinking]` 按 chat workload 控制：Ask 最终合成与有界推理/规划调用默认开启，高扇出或机械调用（包括全部 KG 阶段和报告正文撰写）默认关闭。
+如需模型回答和知识抽取，编辑 `.local/model-services.toml`，把 workload 绑定到物理服务，设置每个服务的 `max_concurrency` 和可选的 chat 专用固定 `top_p`，并只把 `api_key_env` 指定的密钥放进 `.env`。合法的 TOML 修改会自动热加载，无需重启后端。思考模式由 `[thinking]` 按 chat workload 控制：Ask 最终合成与有界推理/规划调用默认开启，高扇出或机械调用（包括全部 KG 阶段和报告正文撰写）默认关闭；当前传输层只对支持该开关的 DeepSeek V4 模型应用。
 
 若要明确使用确定性/离线降级，在 `.env` 中留空：
 

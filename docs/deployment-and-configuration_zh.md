@@ -349,12 +349,11 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
-可选的 `[deepseek_thinking]` 表按 **chat workload** 控制 DeepSeek V4 思考模式，
-值只能是 `enabled`、`disabled` 或 `provider_default`。表名刻意标明 provider：
-`thinking.type` 不是 OpenAI Chat Completions 的通用字段；OpenAI SDK 的 `extra_body`
-只是把 DeepSeek 私有字段透传给它的 OpenAI-compatible endpoint，不能据此假设另一个
-兼容同一传输格式的 provider 也支持。策略按 workload 而非物理服务配置，因为同一个
-chat 服务可能同时承载推理任务与机械的结构化输出任务。
+可选的 `[thinking]` 表按 **chat workload** 控制思考模式，值只能是 `enabled`、
+`disabled` 或 `provider_default`。策略按 workload 而非物理服务配置，因为同一个 chat
+服务可能同时承载推理任务与机械的结构化输出任务。配置名称与 provider 无关；当前传输层
+通过 OpenAI SDK 的 `extra_body` 把它映射到 DeepSeek V4 私有的 `thinking.type` 字段，
+不能据此假设另一个兼容同一传输格式的 provider 也支持该字段。
 
 仓库示例明确列出当前全部默认值：`ask_answer`、`reasoning_agent`、
 `graph_chain_verify`、`report_outline`、`report_sufficiency`、`schema_induction`、

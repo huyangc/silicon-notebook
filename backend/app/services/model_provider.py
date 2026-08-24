@@ -34,7 +34,7 @@ from app.core.model_safety import (
 from app.services.cancellation import AskCancelled
 from app.services.embedding import FakeEmbedder
 from app.services.model_registry import (
-    DeepSeekThinkingMode,
+    ThinkingMode,
     ModelServiceDefinition,
     SystemModelServiceRegistry,
     WorkloadSpec,
@@ -64,8 +64,8 @@ logger = logging.getLogger("silicon_notebook.model_provider")
 _JSON_REPAIR_WORKLOADS = frozenset({"reasoning_agent", "ask_answer"})
 
 
-def _deepseek_thinking_mode_for(
-    model: str, configured_mode: DeepSeekThinkingMode
+def _thinking_mode_for(
+    model: str, configured_mode: ThinkingMode
 ) -> Literal["enabled", "disabled"] | None:
     """Return the provider-specific thinking override this call can support.
 
@@ -494,7 +494,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         with self._provider._lock:
             runtime = self._current_runtime()
             configured_thinking_mode = (
-                self._provider.registry.deepseek_thinking_mode_for(
+                self._provider.registry.thinking_mode_for(
                     self._workload.id
                 )
             )
@@ -515,7 +515,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 cancel_event=cancel_event,
                 bypass_cache=bypass_cache,
                 response_validator=response_validator,
-                deepseek_thinking_mode=_deepseek_thinking_mode_for(
+                thinking_mode=_thinking_mode_for(
                     runtime.service.model, configured_thinking_mode
                 ),
             )

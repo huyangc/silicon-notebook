@@ -45,7 +45,7 @@ def _registry(
     *,
     maximum: int = 2,
     chat_model: str = "",
-    deepseek_thinking_modes=None,
+    thinking_modes=None,
     bind_reasoning: bool = False,
 ) -> SystemModelServiceRegistry:
     services = {
@@ -65,7 +65,7 @@ def _registry(
     if bind_reasoning:
         bindings["reasoning_agent"] = "chat"
     return SystemModelServiceRegistry(
-        services, bindings, deepseek_thinking_modes
+        services, bindings, thinking_modes
     )
 
 
@@ -87,7 +87,7 @@ def test_deepseek_v4_uses_workload_thinking_defaults():
         provider.close()
 
     assert [
-        call["kwargs"].get("deepseek_thinking_mode") for call in raw.calls
+        call["kwargs"].get("thinking_mode") for call in raw.calls
     ] == [
         "disabled", "disabled", "disabled", "disabled", "enabled", "enabled",
     ]
@@ -98,7 +98,7 @@ def test_workload_thinking_configuration_overrides_the_default():
     provider = _provider(
         registry=_registry(
             chat_model="deepseek-v4-pro",
-            deepseek_thinking_modes={
+            thinking_modes={
                 "ask_answer": "disabled",
                 "reasoning_agent": "provider_default",
             },
@@ -113,7 +113,7 @@ def test_workload_thinking_configuration_overrides_the_default():
         provider.close()
 
     assert [
-        call["kwargs"].get("deepseek_thinking_mode") for call in raw.calls
+        call["kwargs"].get("thinking_mode") for call in raw.calls
     ] == [
         "disabled", None,
     ]
@@ -127,7 +127,7 @@ def test_non_deepseek_kg_service_does_not_receive_provider_specific_extension():
     finally:
         provider.close()
 
-    assert raw.calls[0]["kwargs"].get("deepseek_thinking_mode") is None
+    assert raw.calls[0]["kwargs"].get("thinking_mode") is None
 
 
 class _Chat:
