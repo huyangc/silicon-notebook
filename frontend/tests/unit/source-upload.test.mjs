@@ -10,8 +10,11 @@ import {
   markTouched,
   markAllTouched,
   applyTouchedUpdate,
+  mergeLiveStagedFileWarnings,
   sourceUploadSizeLabel,
   splitFilesByUploadSize,
+  scanStandaloneMarkdownImageWarnings,
+  standaloneMarkdownImageWarnings,
 } from "../../app/source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
@@ -53,6 +56,96 @@ test("splitFilesByUploadSize: 配置尚未到达时不猜测旧上限，交给�
     accepted: files,
     rejected: [],
   });
+});
+
+test("standaloneMarkdownImageWarnings: 相对/本地图片提示改用 ZIP 或完整文件夹", async () => {
+  const warnings = await standaloneMarkdownImageWarnings({
+    name: "mineru.filled.md",
+    size: 120,
+    async text() {
+      return "![流程图](质量和流程/images/图片12.jpg)\n![另一张](./images/a.png)";
+    },
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].reason, /2 个本地图片引用/);
+  assert.match(warnings[0].reason, /ZIP 或拖入完整文件夹/);
+  assert.match(warnings[0].reason, /问答中将无法展示/);
+});
+
+test("standaloneMarkdownImageWarnings: 远程图片不自动下载，data URI 与普通文件不误报", async () => {
+  const remote = await standaloneMarkdownImageWarnings({
+    name: "note.markdown",
+    size: 140,
+    async text() {
+      return "![远程](https://example.test/a.png)\n![内嵌](data:image/png;base64,AAAA)";
+    },
+  });
+  assert.equal(remote.length, 1);
+  assert.match(remote[0].reason, /1 个远程图片引用/);
+  assert.match(remote[0].reason, /不会自动下载/);
+
+  assert.deepEqual(await standaloneMarkdownImageWarnings({
+    name: "note.txt",
+    size: 10,
+    async text() { throw new Error("非 Markdown 不应读取内容"); },
+  }), []);
+  assert.deepEqual(await standaloneMarkdownImageWarnings({
+    name: "unreadable.md",
+    size: 10,
+    async text() { throw new Error("advisory scan fails open"); },
+  }), []);
+});
+
+test("scanStandaloneMarkdownImageWarnings: 大批文件严格串行读取，warning 保留 name+size 身份", async () => {
+  let active = 0;
+  let peak = 0;
+  const readOrder = [];
+  const files = [
+    { name: "same.md", size: 10, body: "![a](a.png)" },
+    { name: "same.md", size: 20, body: "![b](b.png)" },
+    { name: "remote.md", size: 30, body: "![c](https://example.test/c.png)" },
+  ].map(({ name, size, body }) => ({
+    name,
+    size,
+    async text() {
+      active += 1;
+      peak = Math.max(peak, active);
+      readOrder.push(`start:${size}`);
+      await Promise.resolve();
+      readOrder.push(`end:${size}`);
+      active -= 1;
+      return body;
+    },
+  }));
+
+  const warnings = await scanStandaloneMarkdownImageWarnings(files);
+  assert.equal(peak, 1);
+  assert.deepEqual(readOrder, [
+    "start:10", "end:10", "start:20", "end:20", "start:30", "end:30",
+  ]);
+  assert.deepEqual(warnings.map(({ name, size }) => ({ name, size })), [
+    { name: "same.md", size: 10 },
+    { name: "same.md", size: 20 },
+    { name: "remote.md", size: 30 },
+  ]);
+});
+
+test("mergeLiveStagedFileWarnings: 删除中的迟到结果被拒绝，同名不同大小保持独立", () => {
+  const reason = "本地图片缺失";
+  const previous = [{ name: "same.md", size: 10, reason }];
+  const incoming = [
+    { name: "removed.md", size: 5, reason },
+    { name: "same.md", size: 10, reason },
+    { name: "same.md", size: 20, reason },
+  ];
+
+  assert.deepEqual(mergeLiveStagedFileWarnings(previous, incoming, [
+    { name: "same.md", size: 10 },
+    { name: "same.md", size: 20 },
+  ]), [
+    { name: "same.md", size: 10, reason },
+    { name: "same.md", size: 20, reason },
+  ]);
 });
 
 // ---------------- 追踪「用户是否动过类型下拉框」→ 上传发 per-file doc_type_explicit

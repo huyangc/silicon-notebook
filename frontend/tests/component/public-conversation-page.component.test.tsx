@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ fetchPublicConversation: vi.fn() }));
@@ -42,7 +43,7 @@ const CONVERSATION = {
       reference_count: 2,
       truncated_references: false,
       omitted_result_sets: 0,
-      images: [],
+      images: [{ alias: "alias-1", caption: "架构示意", reference_keys: ["k1"] }],
     },
     {
       question: "它们的区别是什么？",
@@ -60,8 +61,6 @@ const CONVERSATION = {
       images: [],
     },
     {
-      // 附图可能没有对应引用卡（被丢弃的空引用卡若带图仍发别名）：「本段附图」是
-      // turn 级展示，不依赖引用卡存在。
       question: "有示意图吗？",
       answer_md: "见下图。",
       asked_at: "2026-08-18T09:25:00Z",
@@ -71,7 +70,7 @@ const CONVERSATION = {
       reference_count: 0,
       truncated_references: false,
       omitted_result_sets: 0,
-      images: [{ alias: "alias-1", caption: "架构示意" }],
+      images: [],
     },
   ],
 };
@@ -123,23 +122,92 @@ test("宽表格与代码块走共用包装，才能在自己的内容块里横�
   expect(container.querySelector("pre.answer-code")).not.toBeNull();
 });
 
-test("附图渲染成图片、走别名地址、并标注「本段附图」，即使该轮没有引用卡", async () => {
+test("附图在正文引用段落后渲染、只显示图片，并可页内放大", async () => {
+  const user = userEvent.setup();
   const { container } = render(<PublicConversationPage />);
 
   const img = await screen.findByRole("img", { name: "架构示意" });
   // 别名地址，不是 asset_id：/public/conversations/<token>/assets/<alias>。
   expect(img.getAttribute("src")).toContain("/public/conversations/ctok-test/assets/alias-1");
-  // 必须与引证内容视觉区分、标注它不是模型引用过的证据。
-  expect(screen.getByText(/本段附图/)).toBeInTheDocument();
-  // 该轮没有引用卡，但附图照常渲染（turn 级，不依赖引用卡）。
-  const figure = img.closest(".public-turn-images");
-  expect(figure).not.toBeNull();
+  const region = img.closest(".answer-inline-images");
+  expect(region).not.toBeNull();
+  expect(region?.previousElementSibling?.tagName).toBe("P");
+  expect(region?.textContent).toContain("本段附图");
+  expect(region?.textContent).toContain("模型未直接读取图片");
+  expect(region?.textContent).not.toContain("架构示意");
+
+  const openButton = screen.getByRole("button", { name: "放大查看本段附图" });
+  await user.click(openButton);
+  const dialog = screen.getByRole("dialog", { name: "[1]附图预览" });
+  expect(dialog).toBeInTheDocument();
+  expect(within(dialog).getByRole("img", { name: "架构示意" })).toBeInTheDocument();
+  expect(dialog.textContent).not.toContain("架构示意");
+  await user.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
+  expect(screen.queryByRole("dialog", { name: "[1]附图预览" })).toBeNull();
+  expect(screen.getByRole("button", { name: "放大查看本段附图" })).toHaveFocus();
 });
 
 test("清单卡未公开时留一句可见说明，绝不静默丢弃", async () => {
   render(<PublicConversationPage />);
 
   expect(await screen.findByText(/未公开的清单内容（2 项）/)).toBeInTheDocument();
+});
+
+test("引用卡因标题和摘录都为空而被过滤时，reference_keys 仍能把图放到正文标记处", async () => {
+  const user = userEvent.setup();
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      answer_md: "只保留图片位置 [k4]。",
+      references: [],
+      reference_count: 1,
+      images: [{ alias: "alias-image-only", caption: "版图", reference_keys: ["k4"] }],
+    }],
+  });
+  const { container } = render(<PublicConversationPage />);
+
+  const img = await screen.findByRole("img", { name: "版图" });
+  expect(img.closest(".answer-inline-images")?.previousElementSibling?.textContent).toContain("[4]");
+  expect(img.closest(".answer-inline-images")?.textContent).toContain("[4]");
+  expect(container.querySelector("#ref-t0-k4")).toBeNull();
+  expect(screen.queryByRole("button", { name: "[4]" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "放大查看本段附图" }));
+  expect(screen.getByRole("dialog", { name: "[4]附图预览" })).toBeInTheDocument();
+});
+
+test("旧公开载荷缺 reference_keys 时图片不消失，以明确未定位的 image-only 区块降级", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      images: [{ alias: "legacy-alias", caption: "旧版架构图" }],
+    }],
+  });
+  render(<PublicConversationPage />);
+
+  const region = await screen.findByRole("complementary", { name: "本段附图（旧分享）" });
+  expect(within(region).getByRole("img", { name: "旧版架构图" })).toBeInTheDocument();
+  expect(region.textContent).toContain("旧分享未保留引用位置");
+  expect(region.textContent).toContain("模型未直接读取图片");
+  expect(region.textContent).not.toContain("旧版架构图");
+});
+
+test("公开引用本身是图片元素时不重复显示解析描述，普通文字引用仍显示摘录", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      references: [
+        { ...CONVERSATION.turns[0].references[0], snippet: "图片描述 blob", is_image_reference: true },
+        { ...CONVERSATION.turns[0].references[1], snippet: "文字证据摘录", is_image_reference: false },
+      ],
+    }],
+  });
+  render(<PublicConversationPage />);
+
+  await screen.findByText("文字证据摘录");
+  expect(screen.queryByText("图片描述 blob")).toBeNull();
 });
 
 test("撤销或不存在的链接给出可读的空态", async () => {

@@ -853,6 +853,10 @@ class PublicReference(BaseModel):
     title_truncated: bool = False
     snippet_truncated: bool = False
     file_name_truncated: bool = False
+    # Safe presentation flag only. True when the selected evidence element is
+    # itself one of the attached images, so anonymous UI can hide the parser's
+    # duplicated caption/description without receiving either internal id.
+    is_image_reference: bool = False
 
 
 class PublicImage(BaseModel):
@@ -870,6 +874,11 @@ class PublicImage(BaseModel):
 
     alias: str = ""
     caption: str = ""
+    # Visible public reference keys (``k1`` or positional ``1``) that bind this
+    # image. They are already present on PublicReference and disclose no
+    # addressable internal id; the browser uses them only to place the image
+    # beside the matching marker in ``answer_md``.
+    reference_keys: List[str] = Field(default_factory=list)
 
 
 class PublicTurn(BaseModel):

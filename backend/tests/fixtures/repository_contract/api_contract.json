@@ -7752,6 +7752,13 @@
               "default": "",
               "title": "Caption",
               "type": "string"
+            },
+            "reference_keys": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Reference Keys",
+              "type": "array"
             }
           },
           "title": "PublicImage",
@@ -7768,6 +7775,11 @@
             "file_name_truncated": {
               "default": false,
               "title": "File Name Truncated",
+              "type": "boolean"
+            },
+            "is_image_reference": {
+              "default": false,
+              "title": "Is Image Reference",
               "type": "boolean"
             },
             "key": {

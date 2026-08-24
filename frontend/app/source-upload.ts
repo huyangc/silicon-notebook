@@ -1,4 +1,5 @@
 import type { UploadedSource } from "./workspace-model.ts";
+import { findMarkdownImages } from "./md-bundle.ts";
 
 export const STAGED_FILE_NAME_MAX_LENGTH = 48;
 
@@ -33,6 +34,98 @@ export function splitFilesByUploadSize<T extends SizedSourceFile>(
 }
 
 export type SkippedStagedFile = { name: string; reason: string };
+export type StagedFileWarning = { name: string; size: number; reason: string };
+
+type MarkdownFileLike = {
+  name: string;
+  size: number;
+  text(): Promise<string>;
+};
+
+/** Warn when a standalone Markdown file points at image bytes it does not carry.
+ *
+ * This is advisory, not an admission gate: text-only ingestion remains useful,
+ * but the user must not discover only after Ask that every relative image was
+ * absent. ZIP/folder intake has its own pairing receipt and is not passed here.
+ */
+export async function standaloneMarkdownImageWarnings(
+  file: MarkdownFileLike,
+): Promise<StagedFileWarning[]> {
+  if (!/\.(?:md|markdown)$/i.test(file.name)) return [];
+  let refs: ReturnType<typeof findMarkdownImages>;
+  try {
+    refs = findMarkdownImages(await file.text());
+  } catch {
+    // Advisory inspection must never turn an otherwise valid upload into a
+    // staging failure. The authoritative parser still handles the file.
+    return [];
+  }
+  let local = 0;
+  let remote = 0;
+  for (const ref of refs) {
+    const src = ref.src.trim();
+    if (!src || /^data:image\//i.test(src)) continue;
+    if (/^(?:https?:)?\/\//i.test(src)) remote += 1;
+    else local += 1;
+  }
+  const warnings: StagedFileWarning[] = [];
+  if (local > 0) {
+    warnings.push({
+      name: file.name,
+      size: file.size,
+      reason: `检测到 ${local} 个本地图片引用；单个 Markdown 不包含图片文件，问答中将无法展示。请改用 ZIP 或拖入完整文件夹。`,
+    });
+  }
+  if (remote > 0) {
+    warnings.push({
+      name: file.name,
+      size: file.size,
+      reason: `检测到 ${remote} 个远程图片引用；系统不会自动下载远程图片，问答中只保留相关文字。`,
+    });
+  }
+  return warnings;
+}
+
+/** Sequential advisory inspection keeps peak text allocation bounded to one
+ * staged Markdown file. Deployments may admit very large batches, so a
+ * Promise.all over every File.text() would multiply that allocation by the
+ * whole batch even though these warnings are not on the upload critical path.
+ */
+export async function scanStandaloneMarkdownImageWarnings(
+  files: readonly MarkdownFileLike[],
+): Promise<StagedFileWarning[]> {
+  const warnings: StagedFileWarning[] = [];
+  for (const file of files) {
+    warnings.push(...await standaloneMarkdownImageWarnings(file));
+  }
+  return warnings;
+}
+
+type StagedWarningIdentity = { name: string; size: number };
+
+function stagedWarningIdentity(file: StagedWarningIdentity): string {
+  return `${file.name}\0${file.size}`;
+}
+
+/** Admit only warnings whose exact name+size file is still staged when the
+ * asynchronous scan completes. This also keeps same-name, different-size
+ * files independent instead of deleting or deduplicating them as one row. */
+export function mergeLiveStagedFileWarnings(
+  previous: readonly StagedFileWarning[],
+  incoming: readonly StagedFileWarning[],
+  liveFiles: readonly StagedWarningIdentity[],
+): StagedFileWarning[] {
+  const live = new Set(liveFiles.map(stagedWarningIdentity));
+  const next = [...previous];
+  for (const warning of incoming) {
+    if (!live.has(stagedWarningIdentity(warning))) continue;
+    if (!next.some((item) => stagedWarningIdentity(item) === stagedWarningIdentity(warning)
+      && item.reason === warning.reason)) {
+      next.push(warning);
+    }
+  }
+  return next;
+}
 
 function stagedFileExtension(name: string): string {
   const dot = name.lastIndexOf(".");

@@ -24,6 +24,7 @@ export type RootModalSlot =
   | "promotion-queue"
   | "promotion-target"
   | "edge-review"
+  | "answer-image-preview"
   // 部署插件的弹窗。**一个通用格子，不是"每个插件一个 slot"**：这条联合类型里不许
   // 出现任何插件名——插件是部署时装进来的（`SILICON_NOTEBOOK_UI_PLUGINS`），公网仓库
   // 的核心类型认不得它们，写进来就等于要求每装一个插件改一次基座（"零补丁"红线）。
@@ -117,6 +118,7 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "promotion-queue": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "promotion-target": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "edge-review": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
+  "answer-image-preview": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: true },
   // 与最接近的核心弹窗（`understanding`——内建插件打开的就是它）同一档：workspace 拥有、
   // primary 冲突组、layer 60、可点遮罩关闭、不接 Escape。`escape: false` 不是遗漏：
   // 除 `model-service` 外每个 primary 都是 false，给插件弹窗单独开 Escape 会让它比任何

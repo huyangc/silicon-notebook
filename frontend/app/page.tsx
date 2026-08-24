@@ -7,6 +7,7 @@ import dynamic from "next/dynamic";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
 import { FormulaView } from "./formula-view";
+import type { AnswerImagePreviewRequest } from "./image-preview";
 import { KgEvidenceBody } from "./kg-evidence-body";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
@@ -127,8 +128,8 @@ import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, f
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks } from "./notebook-api";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { sourceKgBadge } from "./source-kg-badge.ts";
-import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
-import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
+import { classifyStagedFiles, compactStagedFileName, mergeLiveStagedFileWarnings, scanStandaloneMarkdownImageWarnings, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile, type StagedFileWarning } from "./source-upload.ts";
+import { emptyStagedList, mergeStagedFiles, stagedFileKey, type StagedList } from "./staged-files.ts";
 import {
   bundleCapsFrom, bundleDirTotalBytesLimit, bundleErrorMessage, bundleFileNamesFor,
   bundleImagesEffectivelyEnabled,
@@ -154,6 +155,7 @@ import {
   testSystemModelService,
 } from "./model-services.ts";
 import { FloatingModalCard } from "./floating-modal-card";
+import { ImagePreviewModal } from "./image-preview-modal";
 import { ConversationShareModal } from "./conversation-share-modal";
 import {
   CommandCatalogReview,
@@ -842,6 +844,7 @@ export default function Home() {
   // 最近一次「添加文件」里被跳过的文件（类型不支持/超大小/超批量），在弹窗内持久展示。
   // 不能只发 toast：它 2.2 秒即逝，批量选文件时用户根本来不及看清哪些没进列表。
   const [stagedSkipped, setStagedSkipped] = useState<SkippedStagedFile[]>([]);
+  const [stagedWarnings, setStagedWarnings] = useState<StagedFileWarning[]>([]);
   // 文件夹兼容 intake（遍历目录、内联图片）或旧 ZIP intake 在飞：非 null 时整个
   // 添加文件入口必须禁用并换成该动作语义的进行态文案（普通 ZIP 上传不经过这里）。
   const [bundleBusyLabel, setBundleBusyLabel] = useState<string | null>(null);
@@ -979,6 +982,7 @@ export default function Home() {
     },
   });
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
+  const [answerImagePreview, setAnswerImagePreview] = useState<AnswerImagePreviewRequest | null>(null);
   // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
   // 开关状态与渲染都在这里,与成本预告 `infoModal`/`confirmCommandCatalog` 同构。
@@ -2924,6 +2928,7 @@ export default function Home() {
     bundleIntakeGenerationRef.current += 1;
     updateStaged(emptyStagedList());
     setStagedSkipped([]);
+    setStagedWarnings([]);
     setBundleReceipts([]);
     cancelBundleChoice();
   }
@@ -2982,7 +2987,15 @@ export default function Home() {
    *  管线仍会沿用这个异步边界。注册表准入的 ZIP 已进入 `accepted`，不会出现在
    *  `bundles`；保留后半段只为兼容旧分类结果，不能把正常 ZIP 改回浏览器解包。 */
   async function stageIncomingFiles(all: File[], expectedGeneration?: number): Promise<void> {
-    const { bundles } = stageIncomingFilesSync(all, expectedGeneration);
+    const generation = expectedGeneration ?? bundleIntakeGenerationRef.current;
+    const { added, bundles } = stageIncomingFilesSync(all, expectedGeneration);
+    if (added.length > 0) {
+      const warnings = await scanStandaloneMarkdownImageWarnings(added);
+      if (generation === bundleIntakeGenerationRef.current && warnings.length > 0) {
+        const liveFiles = stagedRef.current.files;
+        setStagedWarnings((previous) => mergeLiveStagedFileWarnings(previous, warnings, liveFiles));
+      }
+    }
     if (bundles.length > 0) await ingestBundleSources(bundles);
   }
 
@@ -3419,11 +3432,16 @@ export default function Home() {
   }
 
   function removeStagedFile(index: number) {
+    const removed = stagedRef.current.files[index];
     updateStaged((prev) => ({
       files: prev.files.filter((_, i) => i !== index),
       docTypes: prev.docTypes.filter((_, i) => i !== index),
       touched: prev.touched.filter((_, i) => i !== index),
     }));
+    if (removed) {
+      const removedKey = stagedFileKey(removed);
+      setStagedWarnings((rows) => rows.filter((row) => stagedFileKey(row) !== removedKey));
+    }
   }
 
   async function confirmUpload() {
@@ -4501,6 +4519,9 @@ export default function Home() {
       case "edge-review":
         setEdgeQueue(null);
         return;
+      case "answer-image-preview":
+        setAnswerImagePreview(null);
+        return;
       // 插件弹窗的持有者只在这里清空——关闭、被别的 primary 冲突顶掉、切库、换用户
       // 走的都是这条 close sink。少了它，一个已经没有 lease 的持有者会一直留在 state
       // 里（今天只是脏数据，但它正是「那一格归谁」的唯一记录，必须与 lease 同生共死）。
@@ -4528,6 +4549,12 @@ export default function Home() {
   function openMemorySave(answerId: string) {
     if (rootModals.open("memory-save", rootModals.captureWorkspaceOwner())) {
       setMemoryAnswerId(answerId);
+    }
+  }
+
+  function openAnswerImagePreview(request: AnswerImagePreviewRequest) {
+    if (rootModals.open("answer-image-preview", rootModals.captureWorkspaceOwner())) {
+      setAnswerImagePreview(request);
     }
   }
 
@@ -5749,6 +5776,8 @@ export default function Home() {
                             )}
                             onOpenKnowhowRow={openKnowhowAt}
                             onOpenSource={onOpenSourceElement}
+                            onPreviewImage={openAnswerImagePreview}
+                            imagePreviewOpen={rootModals.view("answer-image-preview").open}
                             notebookId={currentNotebookId}
                             notebookNames={notebookNames}
                             // 构建索引的 POST 走 kg:write(admin 档),只读成员点了必 403:
@@ -6291,6 +6320,22 @@ export default function Home() {
                 </div>
               </div>
             )}
+            {stagedWarnings.length > 0 && (
+              <div className="staged-skipped staged-warnings" role="status">
+                <div className="staged-skipped-head">
+                  <span>图片提示 {stagedWarnings.length} 条（文件仍可上传）</span>
+                  <button type="button" className="sort-button" onClick={() => setStagedWarnings([])}>知道了</button>
+                </div>
+                <div className="staged-skipped-rows">
+                  {stagedWarnings.map((item, index) => (
+                    <div className="staged-skipped-row" key={`${item.name}-${index}`}>
+                      <span className="staged-skipped-name" title={item.name}>{compactStagedFileName(item.name)}</span>
+                      <small className="staged-skipped-reason">{item.reason}</small>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {bundleChoice && (
               <BundleChoicePanel
                 choice={bundleChoice}
@@ -6617,6 +6662,19 @@ export default function Home() {
             </>)}
           </FloatingModalCard>
         </section>
+      )}
+      {rootModals.view("answer-image-preview").open && answerImagePreview && currentNotebookId && (
+        <ImagePreviewModal
+          referenceLabel={answerImagePreview.referenceLabel}
+          interactive={rootModals.view("answer-image-preview").topmost}
+          zIndex={rootModals.view("answer-image-preview").zIndex}
+          onClose={(reason) => rootModals.requestClose("answer-image-preview", reason)}
+        >
+          <AuthedImage
+            url={sourceImageAssetUrl(API_BASE, currentNotebookId, answerImagePreview.assetId)}
+            alt={answerImagePreview.alt}
+          />
+        </ImagePreviewModal>
       )}
 
       {rootModals.view("source-detail").open && sourceDetail && (

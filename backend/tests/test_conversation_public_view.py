@@ -250,6 +250,7 @@ def test_projection_keys_are_exactly_the_allowlist():
     assert set(turn["references"][0]) == {
         "key", "title", "file_name", "location", "snippet",
         "title_truncated", "snippet_truncated", "file_name_truncated",
+        "is_image_reference",
     }
     # And the turn itself exposes no reasoning/id surface. ``images`` is the
     # only T4 addition; it carries aliases + captions, never addressable ids.
@@ -290,8 +291,8 @@ def test_memory_citation_keeps_excerpt_but_strips_memory_id():
 
 
 def test_answer_images_are_projected_as_token_aliases_not_raw_ids():
-    """T4: an answer-attached image crosses as an opaque, token-derived alias +
-    caption — never its raw ``asset_id``/``element_id``. Emitting the raw
+    """T4: an answer-attached image crosses as an opaque, token-derived alias,
+    caption and visible reference key — never its raw ``asset_id``/``element_id``. Emitting the raw
     ``asset_id`` (or the ``element_id``) into ``PublicImage`` turns this red."""
     payload = {
         "answer": "带图证据 [k1]。",
@@ -303,6 +304,7 @@ def test_answer_images_are_projected_as_token_aliases_not_raw_ids():
     assert turn["images"] == [{
         "alias": conversation_asset_alias(_SHARE_TOKEN, "ASSET-k1"),
         "caption": "图注",
+        "reference_keys": ["k1"],
     }]
     # The raw handles never appear anywhere in the turn.
     haystack = _all_strings(turn)
@@ -341,6 +343,7 @@ def test_images_are_deduped_by_asset_id_across_selected_references():
     assert turn["images"] == [{
         "alias": conversation_asset_alias(_SHARE_TOKEN, "SHARED"),
         "caption": "甲",  # first-seen caption wins
+        "reference_keys": ["k1", "k2"],
     }]
 
 
@@ -385,7 +388,39 @@ def test_malformed_scalar_image_is_skipped_not_crashed():
     assert turn["images"] == [{
         "alias": conversation_asset_alias(_SHARE_TOKEN, "OK"),
         "caption": "c",
+        "reference_keys": ["k1"],
     }]
+
+
+def test_citation_fallback_images_carry_the_positional_body_key():
+    payload = {
+        "answer": "引用图见 [1]。",
+        "anchors": [],
+        "citations": [_citation(1, images=[{
+            "element_id": "E", "asset_id": "C-ASSET", "caption": "图",
+        }])],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert turn["images"][0]["reference_keys"] == ["1"]
+
+
+def test_image_keeps_its_body_key_when_the_empty_reference_card_is_filtered():
+    payload = {
+        "answer": "图片位置 [k4]。",
+        "anchors": [_anchor(
+            "k4",
+            source_title="",
+            label="",
+            name="",
+            source_file_name="",
+            snippet="",
+            images=[{"element_id": "E", "asset_id": "IMAGE-ONLY", "caption": "图"}],
+        )],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert turn["references"] == []
+    assert turn["images"][0]["reference_keys"] == ["k4"]
 
 
 # ---- T4:别名反查(端点侧)与投影共用同一份派生 --------------------------
@@ -566,6 +601,43 @@ def test_reference_within_caps_is_not_flagged_truncated():
     assert ref["title_truncated"] is False
     assert ref["snippet_truncated"] is False
     assert ref["file_name_truncated"] is False
+
+
+def test_image_reference_flag_compares_internal_ids_but_exposes_only_a_boolean():
+    """Direct image evidence lets the public UI suppress duplicated parser
+    description; nearby images on a text reference must not suppress the real
+    excerpt. Neither compared element id crosses the boundary."""
+    direct = public_turn(_turn("q", {
+        "answer": "图 [k1]。",
+        "anchors": [_anchor(
+            "k1",
+            element_id="DIRECT-IMAGE-ELEMENT",
+            images=[{
+                "element_id": "DIRECT-IMAGE-ELEMENT",
+                "asset_id": "DIRECT-ASSET",
+                "caption": "图注",
+            }],
+        )],
+        "citations": [],
+    }))["references"][0]
+    nearby = public_turn(_turn("q", {
+        "answer": "文 [k1]。",
+        "anchors": [_anchor(
+            "k1",
+            element_id="TEXT-ELEMENT",
+            images=[{
+                "element_id": "NEARBY-IMAGE-ELEMENT",
+                "asset_id": "NEARBY-ASSET",
+                "caption": "图注",
+            }],
+        )],
+        "citations": [],
+    }))["references"][0]
+
+    assert direct["is_image_reference"] is True
+    assert nearby["is_image_reference"] is False
+    assert "DIRECT-IMAGE-ELEMENT" not in _all_strings(direct)
+    assert "NEARBY-IMAGE-ELEMENT" not in _all_strings(nearby)
 
 
 def test_reference_list_is_bounded():

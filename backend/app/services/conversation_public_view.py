@@ -156,7 +156,7 @@ def referenced_asset_ids(
         if not isinstance(payload, dict):
             continue
         _answer_md, selected, _total = _turn_body_and_references(payload)
-        for asset_id, _image in _selected_images(selected):
+        for asset_id, _image, _reference_keys in _selected_images(selected):
             if asset_id in seen:
                 continue
             seen.add(asset_id)
@@ -374,6 +374,11 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
     file_name, file_name_truncated = _text_flag(
         row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS
     )
+    element_id = str(row.get("element_id") or "")
+    is_image_reference = bool(element_id) and any(
+        isinstance(image, dict) and str(image.get("element_id") or "") == element_id
+        for image in _as_list(row.get("images"))
+    )
     return {
         "key": _text(key, 24),
         "title": title,
@@ -383,6 +388,9 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
         "title_truncated": title_truncated,
         "snippet_truncated": snippet_truncated,
         "file_name_truncated": file_name_truncated,
+        # This boolean carries the rendering fact without exposing either side
+        # of the internal element-id comparison to the public response.
+        "is_image_reference": is_image_reference,
     }
 
 
@@ -460,10 +468,12 @@ def _turn_body_and_references(
 
 def _selected_images(
     selected: Sequence[tuple[str, Any]]
-) -> Iterator[tuple[str, dict]]:
-    """Distinct ``(asset_id, image)`` attached to a turn's SELECTED references,
+) -> Iterator[tuple[str, dict, list[str]]]:
+    """Distinct ``(asset_id, image, reference_keys)`` for SELECTED references,
     in first-seen order, deduped by ``asset_id`` (an image cited twice yields
-    once).
+    once). ``reference_keys`` preserves every visible citation position that
+    bound the image so the anonymous page can place it beside the same body
+    marker as the authenticated Ask view.
 
     The ONE image walk both the projection (``_public_images``, which aliases
     them) and the endpoint reverse-index (``referenced_asset_ids``, which decides
@@ -472,22 +482,27 @@ def _selected_images(
     ``asset_id`` (for dedup / alias); the image dict is yielded so the caller can
     pull its public ``caption``, and every other key is dropped by
     construction."""
-    seen: set[str] = set()
-    for _key, reference in selected:
+    rows: dict[str, tuple[dict, list[str]]] = {}
+    for key, reference in selected:
         row = reference if isinstance(reference, dict) else {}
         for image in _as_list(row.get("images")):
             if not isinstance(image, dict):
                 continue
             asset_id = str(image.get("asset_id") or "")
-            if not asset_id or asset_id in seen:
+            if not asset_id:
                 continue
-            seen.add(asset_id)
-            yield asset_id, image
+            if asset_id not in rows:
+                rows[asset_id] = (image, [])
+            keys = rows[asset_id][1]
+            if key and key not in keys:
+                keys.append(key)
+    for asset_id, (image, keys) in rows.items():
+        yield asset_id, image, keys
 
 
 def _public_images(
     selected: Sequence[tuple[str, Any]], share_token: str, images_enabled: bool
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """The token-aliased images for a turn's SELECTED references, deduped by
     ``asset_id`` (an image cited twice shows once) in first-seen order.
 
@@ -502,8 +517,9 @@ def _public_images(
         {
             "alias": conversation_asset_alias(share_token, asset_id),
             "caption": _text(image.get("caption"), MAX_CAPTION_CHARS),
+            "reference_keys": reference_keys,
         }
-        for asset_id, image in _selected_images(selected)
+        for asset_id, image, reference_keys in _selected_images(selected)
     ]
 
 

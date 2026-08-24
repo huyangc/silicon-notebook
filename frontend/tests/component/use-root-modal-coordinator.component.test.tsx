@@ -164,6 +164,24 @@ test("collection and KG presentation slots participate in the same primary water
   expect(value!.view("kg-analysis").open).toBe(true);
 });
 
+test("answer image preview is an Escape-closable workspace primary", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const actor = value!.captureActorOwner();
+  const workspace = value!.captureWorkspaceOwner();
+
+  expect(value!.open("answer-image-preview", actor)).toBeNull();
+  expect(value!.open("answer-image-preview", workspace)).not.toBeNull();
+  expect(value!.view("answer-image-preview").topmost).toBe(true);
+  expect(value!.requestClose("answer-image-preview", "escape")).toBe(true);
+  expect(closed).toHaveBeenCalledWith("answer-image-preview", "escape");
+
+  expect(value!.open("answer-image-preview", workspace)).not.toBeNull();
+  value!.beginWorkspaceTransition();
+  expect(value!.view("answer-image-preview").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("answer-image-preview", "owner-invalidated");
+});
+
 // codex #578 R1 P2 — 部署插件的弹窗接进来的那**一个通用格子**。它没有自己的 policy
 // 分档：与其它 primary 互斥、与 `info` 共存、workspace 拥有、切库同步撤销。这里钉的是
 // 它真的落在既有那套规则里，而不是被悄悄放宽成一个不参与冲突/层级的旁路。
