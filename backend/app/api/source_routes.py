@@ -277,7 +277,13 @@ def _enforce_document_capacity(notebook_id: str, adding: int) -> "int | None":
     唯一仍只走预检的是 ``/sources/import``(纯元数据登记、无前端调用方)——这是
     **范围取舍**不是技术障碍:它的批量插入本就共享一个自有写事务,在里面补一次
     COUNT 即可闭合,只是需要另一种穿参形状(批量 all-or-nothing 而非逐条),而该
-    端点没有并发双击的真实入口,故保留原竞态窗口、如实登记。"""
+    端点没有并发双击的真实入口,故保留原竞态窗口、如实登记。
+
+    **上限值是请求入口的快照,刻意不在事务内重读**(codex #590 R2 P2):事务内闸
+    关的是 COUNT-vs-INSERT 的完整性竞态(两个并发建源同抢最后名额);而 admin 在
+    预检与事务之间改 override/全局默认属于配置变更竞态——按新限重读要在每次建源
+    事务里多付 user_profiles/app_settings 两次读、还得与管理员写串行,买到的只是
+    一个自愈边界(下一次请求即按新限执行,偏差有界于在飞请求数)。"""
     cap = _document_capacity(notebook_id)
     if cap is None:
         return None
