@@ -19,6 +19,15 @@ Two absences are deliberate:
 callers to leave at least three seconds between requests.  Lowering it is a
 deployment's own decision against its own agreement with arXiv; ``0`` is
 accepted so tests and mirrors are not forced to sleep.
+
+:func:`search_kwargs` at the bottom is the one place deployment settings are
+mapped onto the transport's keyword arguments.  It belongs to the *adapter*
+half of this package (settings / routes / consult / bundle), not to the
+replaceable arXiv half: :mod:`.client` deliberately knows nothing about this
+model, so something above it has to name the transport's parameters, and that
+something must be exactly one function.  Two call sites spelling the same
+mapping by hand is how a plugin ends up sending its default user agent from one
+route and its configured one from another.
 """
 from __future__ import annotations
 
@@ -70,3 +79,35 @@ class ArxivSearchSettings(BaseModel):
         if parsed.fragment:
             raise ValueError("base_url must not include a fragment")
         return value
+
+
+def search_kwargs(
+    settings: ArxivSearchSettings,
+    *,
+    limit: int,
+    budget_seconds: float,
+    start: int = 0,
+) -> dict[str, object]:
+    """Map deployment settings onto :func:`.client.search`'s keyword arguments.
+
+    Both callers — the interactive search route and the gap-consult contributor
+    — go through here.  The three per-call values (``limit``, ``budget_seconds``
+    and ``start``) are arguments rather than settings because they are the two
+    callers' *only* legitimate difference: how many records this call wants,
+    how long it may spend, and where in the result set it starts.  Everything
+    else about how this deployment talks to arXiv is settings, and a call site
+    that reached past this function to restate one of them would be declaring
+    its own endpoint or its own user agent.
+
+    ``fetch`` is deliberately absent: it is a test seam on the transport, not a
+    deployment setting, so production callers never pass one.
+    """
+    return {
+        "base_url": settings.base_url,
+        "limit": limit,
+        "budget_seconds": budget_seconds,
+        "timeout_seconds": settings.timeout_seconds,
+        "politeness_interval_seconds": settings.politeness_interval_seconds,
+        "user_agent": settings.user_agent,
+        "start": start,
+    }

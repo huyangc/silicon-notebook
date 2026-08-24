@@ -16,8 +16,14 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-# `BUNDLE` — the object a deployment's `extensions.toml` points at — is added
-# here alongside `bundle.py`.  It is deliberately absent until then rather than
-# imported optimistically: a module-level import of a file that does not exist
-# would break `import silicon_notebook_arxiv_search` outright.
+# `BUNDLE` — the object a deployment's `extensions.toml` points at — lives in
+# `bundle.py` and is deliberately NOT re-exported here.  The config entry names
+# `silicon_notebook_arxiv_search.bundle:BUNDLE` for that reason.
+#
+# Re-exporting it would mean that `import silicon_notebook_arxiv_search` — the
+# harmless-looking thing a packaging check or a version probe does — pulls in
+# FastAPI and the whole extension SDK behind it, because `bundle` imports
+# `routes` which imports both.  Keeping this module free of them means the
+# package can be imported for its version, and its settings model validated,
+# without a backend present at all.
 __all__ = ["__version__"]
