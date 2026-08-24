@@ -22,6 +22,7 @@ from app.services.retrieval import (
 )
 from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
+from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import notebook_in_scope
 
 
@@ -406,6 +407,7 @@ class EvidenceContextService:
         """``id_offset`` 镜像 ``element_context``/``knowledge_context``:默认 0 保持
         chunk 段恒为 ``k1..kN``(所有既有调用方),按节合成给每节整体加一段偏移,
         让各节的 key 号段互不相交(见 ``outline_synthesis``)。"""
+        chunks = deduplicate_source_chunks_in_order(chunks)
         budget = (
             self.settings.chunk_answer_budget_chars
             if budget_chars is None

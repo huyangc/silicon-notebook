@@ -128,7 +128,7 @@ class _FakeRerank:
 
 def test_chunk_answer_context_budget_override(repo):
     chunks = [RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="D",
-                             section_path="1", text="x" * 500, relevance=0.5)
+                             section_path="1", text=str(i) * 500, relevance=0.5)
               for i in range(10)]
     _, idmap_small = repo._chunk_answer_context(chunks, budget_chars=100)
     _, idmap_big = repo._chunk_answer_context(chunks, budget_chars=10**9)

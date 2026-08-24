@@ -274,7 +274,9 @@ def test_copyable_selected_element_search_routes_scope_into_bounded_chunks(
     assert repo.retrieval.retrieve_elements(
         "nb", "target command", allowed_source_ids=("A", "B")
     ) == []
-    assert calls == [("nb", "target command", 32, ("A", "B"))]
+    assert calls == [(
+        "nb", "target command", repo.settings.chunk_recall, ("A", "B")
+    )]
 
 
 def test_copyable_selected_chunk_search_always_uses_bounded_fts(

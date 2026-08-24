@@ -268,6 +268,33 @@ def test_evidence_context_chunk_golden_matches_master():
     assert evidence["k2"]["notebook_id"] == "base"
 
 
+def test_chunk_context_duplicate_does_not_spend_the_character_budget():
+    chunks = [
+        RetrievedChunk(
+            chunk_id="header-1", source_id="s1", source_title="Paper",
+            section_path="1", text="Repeated header", relevance=0.9,
+            notebook_id="active",
+        ),
+        RetrievedChunk(
+            chunk_id="header-2", source_id="s1", source_title="Paper",
+            section_path="2", text=" repeated\nheader ", relevance=0.8,
+            notebook_id="active",
+        ),
+        RetrievedChunk(
+            chunk_id="body", source_id="s1", source_title="Paper",
+            section_path="2", text="Distinct body", relevance=0.7,
+            notebook_id="active",
+        ),
+    ]
+
+    block, evidence = _service().chunk_context(
+        chunks, notebook_id="active", budget_chars=100
+    )
+
+    assert block == "k1: Repeated header\nk2: Distinct body"
+    assert [row["object_id"] for row in evidence.values()] == ["header-1", "body"]
+
+
 def test_evidence_context_knowledge_golden_matches_master():
     hit = RetrievedKnowledge(
         object_id="o1", object_type="concept", payload={"name": "Cascode"},

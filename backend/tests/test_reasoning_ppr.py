@@ -427,6 +427,51 @@ def test_answer_reasoning_admits_top_elements_by_relevance_desc(repo, monkeypatc
     assert got_ids == ["el-a", "el-b", "el-e"]   # top-3 by score desc, tie-break element_id
 
 
+def test_answer_reasoning_backfills_body_after_duplicate_running_headers(repo, monkeypatch):
+    """Cosmos-3 regression: six physical copies of one paper title must occupy
+    one synthesis slot, leaving the bounded second slot for the abstract."""
+    from app.services.retrieval import RetrievedElement
+
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    elements = [
+        RetrievedElement(
+            element_id=f"header-{index}", source_id="paper", source_title="Paper",
+            location_label=f"p{index}", element_type="paragraph",
+            text="Cosmos 3: Omnimodal World Models for Physical AI",
+            score=0.99 - index / 100,
+        )
+        for index in range(6)
+    ] + [RetrievedElement(
+        element_id="abstract", source_id="paper", source_title="Paper",
+        location_label="p1", element_type="paragraph",
+        text="We introduce Cosmos 3, a family of omnimodal world models.",
+        score=0.70,
+    )]
+
+    ask = repo._runtime.ask_service()
+    captured = {}
+    real_element_context = ask.evidence_context.element_context
+
+    def _capture(elements_arg, **kwargs):
+        captured["ids"] = [element.element_id for element in elements_arg]
+        return real_element_context(elements_arg, **kwargs)
+
+    monkeypatch.setattr(ask.evidence_context, "element_context", _capture)
+
+    class _Echo:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"answer": "ok", "grounded": False})
+
+    bind_chat_client(repo, "ask_answer", _Echo())
+    repo.settings.kg_query_refine_enabled = False
+
+    ask._answer_reasoning(nb.id, "贡献", [], elements, "", element_items=2)
+
+    assert captured["ids"] == ["header-0", "abstract"]
+
+
 def test_answer_reasoning_reports_actual_included_counts(repo):
     """PR-1 code-quality-review 修复: _answer_reasoning 第 4 个返回值必须精确
     反映"真正进入 prompt"的计数,且在有非空 memory_hits/chains/超 cap
@@ -526,7 +571,8 @@ def test_answer_reasoning_reports_actual_included_counts(repo):
     # "kN:" 幸存;len(chunk_id_map) 口径会报 5) ---
     narrow_chunks = [
         RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="S",
-                       section_path=f"p{i}", text="A", relevance=0.9 - i * 0.1)
+                       section_path=f"p{i}", text=chr(ord("A") + i),
+                       relevance=0.9 - i * 0.1)
         for i in range(6)
     ]
     _, _, _, narrow_counts = ask._answer_reasoning(

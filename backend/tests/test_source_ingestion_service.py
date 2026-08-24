@@ -921,6 +921,55 @@ def test_process_source_persists_mineru_local_image_to_source_assets(tmp_path, m
     assert image_el.metadata.get("asset_id") == asset_ids[0]
 
 
+def test_process_source_removes_repeated_running_footer_before_indexing(
+    tmp_path, monkeypatch
+):
+    """Physical page copies are cleaned before persistence/chunking, not merely
+    after retrieval has already spent its candidate slots on them."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
+    repo = _repository(Settings())
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Cosmos", "pdf", "queued", "queued",
+             "cosmos.pdf", "/tmp/cosmos.pdf", 0, "", "", "academic_paper", now, now),
+        )
+
+    content_list = []
+    for page_index in range(6):
+        content_list.extend([
+            {"type": "text", "text": f"Unique body paragraph {page_index}.",
+             "page_idx": page_index},
+            {"type": "text",
+             "text": "Cosmos 3: Omnimodal World Models for Physical AI",
+             "page_idx": page_index},
+        ])
+    monkeypatch.setattr(
+        repo.mineru_client,
+        "parse_with_images",
+        lambda path, name: (content_list, {}),
+    )
+
+    repo.process_source(sid)
+
+    elements = repo.source_elements(sid)
+    assert sum(element.text.startswith("Cosmos 3:") for element in elements) == 1
+    assert sum(element.text.startswith("Unique body") for element in elements) == 6
+    chunks = repo._runtime.chunk_store.source_chunks(sid)
+    assert sum(chunk["text"].count("Cosmos 3:") for chunk in chunks) == 1
+
+
 def _seed_source_with_mineru_image(tmp_path, monkeypatch):
     """Shared setup (Task 8's e2e style): a real facade + a queued pdf source
     whose (fake) local MinerU parse yields one image block, so process_source

@@ -33,6 +33,20 @@ def test_score_chunks_caps_to_limit_sorted():
     assert all(out[i].score >= out[i+1].score for i in range(len(out)-1))
 
 
+def test_score_chunks_deduplicates_same_source_text_before_limit():
+    chunks = [
+        _ck("header-1", "Cosmos 3: Omnimodal World Models for Physical AI"),
+        _ck("header-2", "  Cosmos 3: Omnimodal\nWorld Models for Physical AI "),
+        _ck("abstract", "Cosmos 3 introduces an omnimodal architecture."),
+    ]
+
+    out = score_chunks("Cosmos 3 omnimodal", chunks, limit=2)
+
+    assert len(out) == 2
+    assert sum(chunk.chunk_id.startswith("header-") for chunk in out) == 1
+    assert "abstract" in {chunk.chunk_id for chunk in out}
+
+
 def test_score_chunks_uses_semantic_sims():
     chunks = [_ck("c1", "no keyword overlap here")]
     # 仅语义信号(关键词 0): chunk_sims 给高余弦 → 仍能过 floor。

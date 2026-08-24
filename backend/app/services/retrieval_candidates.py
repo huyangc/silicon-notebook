@@ -54,6 +54,10 @@ from app.services.retrieval_run import (
     memoized_query_embedding,
 )
 from app.services.source_display import source_display_title
+from app.services.source_element_selection import (
+    source_chunk_content_key,
+    source_element_content_key,
+)
 
 
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
@@ -1807,7 +1811,14 @@ class CandidateRetrievalService(_RetrievalState):
             # 小文件仍可以产生大量 element/vector，所以 copyable 不是
             # 选定来源的候选行数上限。
             chunks, _ids, _matrix = self._retrieve_chunks(
-                notebook_id, query, recall=max(limit * 4, limit),
+                notebook_id,
+                query,
+                # Direct-element fallback needs the configured broad chunk
+                # candidate pool too: a smaller limit-derived pool lets legacy
+                # repeated headers consume every upstream slot before content
+                # diversity can run.  ``chunk_recall`` is already the single
+                # deployment-owned quality/cost rail for this candidate family.
+                recall=max(self.settings.chunk_recall, limit * 4, limit),
                 allowed_source_ids=allowed_source_ids,
             )
             elements = self._retrieve_elements_from_chunks(
@@ -1919,6 +1930,9 @@ class CandidateRetrievalService(_RetrievalState):
                 query, candidates, limit=output_limit
             )
             seen = {item.element_id for item in lexical}
+            seen_content = {
+                source_element_content_key(item) for item in lexical
+            }
             by_id = {row["element_id"]: row for row in candidates}
             for element_id in selected:
                 if len(lexical) >= output_limit:
@@ -1926,7 +1940,7 @@ class CandidateRetrievalService(_RetrievalState):
                 if element_id in seen or element_id not in by_id:
                     continue
                 row = by_id[element_id]
-                lexical.append(RetrievedElement(
+                candidate = RetrievedElement(
                     element_id=element_id,
                     source_id=row["source_id"],
                     source_title=row["source_title"],
@@ -1934,7 +1948,12 @@ class CandidateRetrievalService(_RetrievalState):
                     element_type=row["element_type"],
                     text=row["text"],
                     score=coarse_scores.get(element_id, 0.0),
-                ))
+                )
+                content_key = source_element_content_key(candidate)
+                if content_key in seen_content:
+                    continue
+                lexical.append(candidate)
+                seen_content.add(content_key)
             return lexical
 
         primary = baseline or supplemental
@@ -2796,16 +2815,20 @@ class CandidateRetrievalService(_RetrievalState):
             return []
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
-        """Append `extra` RetrievedChunks to `base`, deduped by chunk_id (keep the
-        existing entry on collision — base already scored it with semantic signal).
-        Order-preserving. Used to fold the bilingual-keyword lexical hits into a
-        list-shaped candidate set (mix / single-subquery branches)."""
+        """Append ``extra`` while preserving one same-source text candidate.
+
+        The existing base representative wins because it already carries the
+        semantic score.  Exact id collisions also merge retrieval supports.
+        This happens before downstream selection so lexical duplicates cannot
+        spend candidate positions.
+        """
         if not extra:
             return base
         from app.services.retrieval import merge_retrieval_supports
 
         by_id = {c.chunk_id: c for c in base}
         seen = set(by_id)
+        seen_content = {source_chunk_content_key(c) for c in base}
         out = list(base)
         for c in extra:
             if c.chunk_id in seen:
@@ -2813,10 +2836,14 @@ class CandidateRetrievalService(_RetrievalState):
                 existing.retrieval_supports = merge_retrieval_supports(
                     existing.retrieval_supports, c.retrieval_supports
                 )
-            else:
-                seen.add(c.chunk_id)
-                out.append(c)
-                by_id[c.chunk_id] = c
+                continue
+            content_key = source_chunk_content_key(c)
+            if content_key in seen_content:
+                continue
+            seen.add(c.chunk_id)
+            seen_content.add(content_key)
+            out.append(c)
+            by_id[c.chunk_id] = c
         return out
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
         """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""

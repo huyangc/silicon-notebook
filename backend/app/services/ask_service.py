@@ -84,6 +84,7 @@ from app.services.source_graph_activation import (
     selected_source_graph_call_context,
 )
 from app.services.source_scope import source_scope_context, source_scope_restricted
+from app.services.source_element_selection import rank_source_elements
 
 # Matches both one provenance marker and the comma-group form models commonly
 # emit (`[k1, k3]`). A group binds only when every key exists in id_map.
@@ -1461,9 +1462,7 @@ class AskService:
         # insertion-order slice silently drops the most relevant elements
         # whenever the retriever collects more than the cap.
         if elements and len(source_context) < chunk_budget:
-            ranked_elements = sorted(
-                elements, key=lambda e: (-float(e.score or 0.0), e.element_id)
-            )[:element_items]
+            ranked_elements = rank_source_elements(elements, element_items)
             element_block, element_id_map = self.evidence_context.element_context(
                 ranked_elements, notebook_id=notebook_id,
                 id_offset=key_offset + self._ELEMENT_KEY_BASE,

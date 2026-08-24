@@ -44,6 +44,10 @@ from app.domain.retrieval import (
     W_SEMANTIC,
 )
 from app.models.common import Evidence  # compatibility re-export
+from app.services.source_element_selection import (
+    rank_source_chunks,
+    rank_source_elements,
+)
 
 
 # --- Tunable scoring constants (kept here so they can be tuned in one place) ---
@@ -698,8 +702,7 @@ def score_elements(
                 score=score,
             )
         )
-    scored.sort(key=lambda item: item.score, reverse=True)
-    return scored[:limit]
+    return rank_source_elements(scored, limit)
 
 
 _REVIEW_STRICTNESS = {"": 0, "verified": 1, "pending": 2, "rejected": 3}
@@ -1020,8 +1023,7 @@ def score_chunks(
             text=c["text"], element_ids=c.get("element_ids", []),
             score=score, relevance=score,
         ))
-    scored.sort(key=lambda x: x.score, reverse=True)
-    return scored[:limit]
+    return rank_source_chunks(scored, limit)
 
 
 def quota_fuse(collected, per_query, top_n, relevance=lambda h: h.relevance):
