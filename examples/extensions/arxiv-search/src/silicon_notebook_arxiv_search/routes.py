@@ -38,7 +38,7 @@ from app.extension_sdk.http import PluginRouteContext
 
 from . import client as arxiv_client
 from .atom import ArxivPaper
-from .settings import ArxivSearchSettings, search_kwargs
+from .settings import ArxivSearchSettings, egress_allowed, search_kwargs
 
 LOGGER = logging.getLogger("silicon_notebook_arxiv_search")
 
@@ -47,6 +47,13 @@ LOGGER = logging.getLogger("silicon_notebook_arxiv_search")
 QUERY_MAX_CHARS = 200
 MAX_IMPORT_URLS = 20
 MAX_URL_CHARS = 2048
+# arXiv's own API documents paging in the tens of thousands; this is a
+# conservative order-of-magnitude ceiling on how far a caller may page rather
+# than an attempt to mirror their exact limit.  Without it a caller could ask
+# for an arbitrarily deep page — zero results, one throttle slot and one
+# round trip spent proving that — with no cost to the caller and only cost to
+# the shared politeness budget.
+START_MAX = 10_000
 
 # Hosts this route will hand to core's importer.  ``export.arxiv.org`` serves
 # the API; PDFs live on ``arxiv.org`` itself, and the subdomain rule below is
@@ -94,6 +101,8 @@ def build_router(context: PluginRouteContext) -> APIRouter:
             raise context.user_error(400, "检索关键词过长，请精简后再试")
         if start < 0:
             raise context.user_error(400, "翻页位置不能为负数")
+        if start > START_MAX:
+            raise context.user_error(400, "翻页位置超出上限，请缩小检索范围后重试")
 
         # One extra record decides `has_more` without a second round trip.
         # Registered approximation: a malformed final entry is dropped by the
@@ -107,8 +116,13 @@ def build_router(context: PluginRouteContext) -> APIRouter:
             start=start,
         )
         items = page[: settings.max_results]
+        rows = [
+            row
+            for row in (_paper_row(paper, settings) for paper in items)
+            if row is not None
+        ]
         return {
-            "items": [_paper_row(paper) for paper in items],
+            "items": rows,
             "start": start,
             "has_more": len(page) > settings.max_results,
         }
@@ -206,14 +220,37 @@ def _search(
         raise context.user_error(502, "arXiv 检索暂时不可用，请稍后再试") from None
 
 
-def _paper_row(paper: ArxivPaper) -> dict[str, object]:
+def _paper_row(
+    paper: ArxivPaper, settings: ArxivSearchSettings
+) -> dict[str, object] | None:
+    """Map one parsed record onto the wire shape, with the same egress policy
+    gap-consult already applies to a suggestion's ``url``.
+
+    ``paper.pdf_url`` comes straight out of an upstream feed entry's ``href``
+    attribute (see :mod:`.atom`): a compromised or merely buggy upstream can
+    put anything there, ``javascript:`` included, and this route used to hand
+    that value to the browser unchecked.  ``egress_allowed`` is the same
+    check :mod:`.consult` uses to decide whether a suggestion may reach a
+    reader; unlike consult — which drops a suggestion outright on a foreign
+    host, because nobody asked for it — this is a page of results the caller
+    *did* ask for, so a link that fails the check is replaced with the
+    id-derived arXiv PDF url rather than silently shortening the page.  Only
+    when ``arxiv_id`` is itself missing (which the parser already refuses to
+    produce a paper without) does the row disappear instead.
+    """
+
+    pdf_url = paper.pdf_url
+    if not egress_allowed(pdf_url, settings.base_url):
+        if not paper.arxiv_id:
+            return None
+        pdf_url = f"https://arxiv.org/pdf/{paper.arxiv_id}"
     return {
         "arxiv_id": paper.arxiv_id,
         "title": paper.title,
         "authors": list(paper.authors),
         "published": paper.published,
         "summary": paper.summary,
-        "pdf_url": paper.pdf_url,
+        "pdf_url": pdf_url,
         "abs_url": paper.abs_url,
     }
 
@@ -240,8 +277,19 @@ def _import_urls(context: PluginRouteContext, payload: object) -> list[str]:
         if not isinstance(item, str) or not item.strip():
             raise context.user_error(400, "请先选择要导入的文献")
         url = item.strip()
-        if len(url) > MAX_URL_CHARS or not _is_arxiv_url(url):
+        # Host checked first, independent of length: a foreign host is
+        # refused for what it is, not for how long it happens to be.  Only a
+        # link that already cleared the host check gets the length message —
+        # a legitimate arXiv link that is merely too long is a different
+        # problem from one that was never going to arXiv at all, and sharing
+        # one sentence between them would tell a caller the wrong thing to
+        # fix.
+        if not _is_arxiv_url(url):
             raise context.user_error(400, "只能导入 arXiv 的 PDF 链接")
+        if len(url) > MAX_URL_CHARS:
+            raise context.user_error(
+                400, f"链接过长，最多支持 {MAX_URL_CHARS} 个字符"
+            )
         urls.append(url)
     return urls
 

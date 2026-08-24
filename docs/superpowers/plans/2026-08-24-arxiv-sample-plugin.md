@@ -20,11 +20,19 @@
    **入口二回答卡里的导入按钮是 core UI、走 core URL 端点**，不经插件（PR-A 已落地，本 PR 不碰）。
 6. **`consult_enabled` 默认 false**：装了插件 ≠ 同意把问题派生词发给 arXiv。
 7. **⚠ 与方案页的一处技术性偏离（必须照本文）**：方案页写「manifest `provides` 一个 capability
-   （如 `consult_enabled`）」来门控外扩。**不能这么做**——`registry.availability()` 迭代的是
-   **manifest 级** `manifest.requires`（`registry.py:480`），把 `consult_enabled` 放进去会连
-   HTTP 路由与侧栏入口一起关掉。改用**逐 contribution 的 `ExtensionContribution.availability` 探针**
-   （`contracts.py:179` → `registry.py:494-520`）门控外扩，`manifest.provides` 那一个 capability
-   只门控 UI 入口。详见 §1.5。
+   （如 `consult_enabled`）」来门控外扩。**不能这么做**——`provides` 不是开关，它是
+   `capability_decisions` 必须逐个配对探针的名字表（`contracts.py:165-168`），一个 capability
+   表达不了「router/UI 走一个门、gap-consult 走另一个门」。**也不该改用** `manifest.requires`
+   ——那是 `registry.availability(contribution_id, ...)` 这一个访问入口才会读取的字段
+   （`registry.py:480`），而 HTTP 路由挂载压根不经过这个入口（启动时按已注册 contribution 集合
+   无条件挂载），侧栏入口也只走自己声明的 `capability`（`registry.capability_availability()`），
+   两者都读不到 `manifest.requires`。把 `consult_enabled` 放进 `requires` **不会**连累路由或
+   侧栏，与本文早前版本的判断相反。真正的理由是精确性（`requires` 是 manifest 级、会被这份
+   manifest 将来任何经 `registry.availability()` 消费的 contribution 共享，放单一特性开关进去
+   等于让日后新增的 contribution 平白继承这个门）与语义（`requires` 表达插件实例整体的前置
+   条件，不是某个功能自己的开关）。改用**逐 contribution 的 `ExtensionContribution.availability`
+   探针**（`contracts.py:179` → `registry.py:494-520`）门控外扩，`manifest.provides` 那一个
+   capability 只门控 UI 入口。详见 §1.5。
 8. **G2 e2e 用 `pytest.mark.slow`**，同批把 `backend/pytest.ini` 的 `slow` 描述从「real HNSW/ANN」
    放宽一句。**不新增 marker**：新 marker 要同时改两个 shell 的 `-m` 表达式**和**
    `test_test_architecture_policy.py:195-205` 里钉死的两条字面量，为一个样板测试动 G1/G2 的
@@ -299,9 +307,13 @@ manifest = ExtensionManifest(
 )
 ```
 
-**`requires` 必须留空。** `registry.availability()` 迭代的是 manifest 级 `requires`
-（`registry.py:480`），任何放进去的 capability 会**同时**门控 router、gap-consult 与 UI 入口。
-外扩要单独可关（裁决 6），所以：
+**`requires` 必须留空。** `registry.availability(contribution_id, ...)` 才会迭代 manifest 级
+`requires`（`registry.py:480`），而这个插件的 router 挂载不经过这个入口（启动时无条件挂载），
+UI 侧栏也只走自己声明的 `capability`（`registry.capability_availability()`）——把
+`consult_enabled` 放进 `requires` 不会像早前判断的那样连累它们。留空是为了精确性（`requires`
+是 manifest 级，会被这份 manifest 将来任何经 `registry.availability()` 消费的 contribution
+共享）与语义（`requires` 表达的是插件整体前置条件，不是单个功能的开关）。外扩要单独可关
+（裁决 6），所以：
 
 - `capability_decisions = {"examples.arxiv_search.available": _configured}`，
   `_configured(_ctx)` = `settings is not None and bool(settings.base_url)` →
@@ -663,7 +675,7 @@ backend/tests/test_arxiv_sample_plugin_e2e.py`；
 | **R7** | **样板的测试放在 `backend/tests/`，偏离 SOP §5.3 第 1 项** | 刻意（裁决 10）：后端泳道只跑 `backend/tests`。README 点明真正的仓库外插件应放自己 repo 的 `tests/`。代价是「整包 `cp` 出去就能跑测试」这半不成立——但零补丁验收管的是**运行时**，由 §1.10 两半覆盖 |
 | **R8** | **样板 UI 包永远不在默认 `npm run test` 的树里** | 结构性事实（§0.4，SOP `:460`）。它的验证 = T3 的纯函数单测（G1）+ T3 的 G2 lane（真同步 + 五条守卫 + 类型检查）。副产品：`extension-ui-layout-guard` 那一档头一次拿到非空样本 |
 | **R9** | **导入路由的 `arxiv.org` 主机白名单比 core 端点更窄** | 刻意：不加这道闸插件路由就是通用 URL 导入代理。不是提权（core 端点本就收任意 URL），但样板该示范最窄形状。用例断言它排在端口调用**之前** |
-| **R10** | **方案页的「manifest `provides` 一个 capability 门控外扩」在现实里做不到** | 已在裁决 7 改掉：`requires` 是 manifest 级（`registry.py:480`），会连路由与侧栏一起关。改用逐 contribution 探针（`contracts.py:179`）。**这是方案与现实的实质冲突，已上报主 agent** |
+| **R10** | **方案页的「manifest `provides` 一个 capability 门控外扩」在现实里做不到** | 已在裁决 7 改掉：`provides` 是能力名表不是开关，且 `manifest.requires` 只门控经 `registry.availability(contribution_id, ...)` 消费的 contribution（`registry.py:480`）——路由挂载与侧栏探针都不经过那个入口，放进 `requires` 不会像早前判断的那样连累它们。改用逐 contribution 探针（`contracts.py:179`），理由是精确性（`requires` 是 manifest 级、会被这份 manifest 将来任何经 `registry.availability()` 消费的 contribution 共享）与 `requires` 的整体前置条件语义，不是「否则会连累路由/侧栏」。**这是方案与现实的实质冲突，已上报主 agent** |
 | **R11** | **e2e 的 `socket.getaddrinfo` 零网络断言可能被无关调用打中** | T4 实现时先验证；打中就退化成只 patch `client._fetch`，并在注释里登记为什么这条断言更弱 |
 | **R12** | **`examples/` 是仓库里第一个该目录** | 已核实无副作用：架构守卫只扫 `backend/app`（§0.5），`check_ui_vocabulary` 默认三根不含它（故 T3 显式加 `--extra-root`），packaging 是纯 shell 不做仓库 glob，后端泳道只跑 `backend/tests` |
 

@@ -12,15 +12,33 @@ probe might do — drag the whole backend in behind it.
 piece of the plugin whose shape is dictated by how core evaluates availability
 rather than by what arXiv needs:
 
-* ``manifest.requires`` is evaluated **per manifest**, so every capability
-  named there gates *every* contribution this plugin has.  Putting "gap
-  consultation is enabled" in it would take the HTTP routes and the workspace
-  entry down with the feature, which is the opposite of what
-  ``consult_enabled = false`` is supposed to mean.  It is therefore empty, and
-  that emptiness is asserted by a test rather than left to be re-derived.
-* ``ExtensionContribution.availability`` is evaluated **per contribution**.
-  That is where outbound consultation is gated, so turning it off leaves the
-  search panel and the import route exactly as they were.
+* ``manifest.requires`` only gates a contribution that some consumer looks up
+  through ``registry.availability(contribution_id, ...)`` — the one accessor
+  that walks ``manifest.requires`` before a contribution's own probe
+  (``registry.py``).  HTTP route mounting never calls that accessor: routers
+  are mounted unconditionally at startup from the registered contribution
+  set, with no availability check anywhere in that path.  The workspace
+  entry doesn't go through it either — a UI declaration's own ``capability``
+  is evaluated directly via ``registry.capability_availability()``,
+  bypassing ``manifest.requires`` entirely.  So putting "gap consultation is
+  enabled" there would *not* have taken the router or the panel down with
+  it, contrary to what an earlier version of this comment claimed.
+* It is still left empty, for two reasons that hold regardless of the above:
+  precision — ``requires`` is manifest-wide, so it would be silently
+  inherited by any contribution this plugin adds later that a future
+  consumer *does* look up through ``registry.availability()``, which is not
+  what a single feature's on/off switch should do — and semantics:
+  ``requires`` reads as an overall precondition for the plugin instance, not
+  a per-feature toggle, and ``consult_enabled`` is the latter.  That
+  emptiness is asserted by a test rather than left to be re-derived.
+* ``ExtensionContribution.availability`` is evaluated **per contribution**,
+  by whichever consumer calls ``registry.availability()`` for that specific
+  contribution id (core's gap-consult host, for this plugin's
+  ``ASK_GAP_CONSULT_POINT`` registration).  That is where outbound
+  consultation is actually gated, so turning it off leaves the search panel
+  and the import route exactly as they were — because each contribution is
+  gated on its own, not because ``manifest.requires`` would otherwise have
+  reached them.
 
 ``manifest.provides`` then carries a third, separate thing: the capability the
 *workspace UI entry* is gated on.  "This plugin is configured" is the honest

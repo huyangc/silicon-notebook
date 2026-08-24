@@ -23,6 +23,23 @@ backend to a single worker, so in that deployment it is a global throttle.  A
 multi-worker or multi-replica deployment needs external coordination; this
 sample deliberately does not ship one.
 
+**Registered limitation — ``timeout_seconds`` bounds one socket read, not the
+whole call.**  ``urllib.request.urlopen(..., timeout=timeout_seconds)``
+resets that clock on every individual socket operation (connect, and each
+partial ``read()``), not once for the call as a whole.  An upstream that
+never goes silent for longer than the timeout — trickling a few bytes at a
+time — can therefore hold the politeness throttle for far longer than
+``timeout_seconds`` implies, and because the throttle is process-wide (see
+above), every concurrent ``/search`` request sharing FastAPI's threadpool
+waits on it too.  Gap consultation is protected from this by its *caller*,
+not by this module: core's ``GapConsultHost`` bounds the whole
+probe-and-consult call on its own wall-clock deadline regardless of what the
+transport does underneath it.  The interactive ``/search`` route has no
+equivalent outer deadline — its budget
+(``timeout_seconds + politeness_interval_seconds``, see :mod:`.routes`) is a
+request handed to the throttle, not an upper bound this module enforces on
+the call itself.  This sample does not add one.
+
 **Registered limitation — no outbound address policy.**  ``base_url`` is
 deployment-configured rather than user input, so this module does not re-check
 that the host resolves to a public address the way core's URL ingestion does.
