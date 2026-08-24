@@ -2586,6 +2586,87 @@ def test_merge_element_hits_keeps_max_score_across_queries():
     assert {e.element_id: e.score for e in elements}["b"] == 0.5
 
 
+def test_merge_element_hits_collapses_same_source_text_across_queries():
+    """Repeated running headers returned under different physical element ids
+    are one new fact, while an identical line from another source remains an
+    independent provenance item."""
+    from app.services.reasoning_retrieval import merge_element_hits
+    from app.services.retrieval import RetrievedElement
+
+    def el(eid, source, text, score):
+        return RetrievedElement(
+            element_id=eid, source_id=source, source_title=source,
+            location_label=eid, element_type="paragraph", text=text, score=score)
+
+    elements = [el("page-1", "paper-a", "Paper Title", 0.3)]
+    added = merge_element_hits(elements, [
+        el("page-2", "paper-a", " paper\n title ", 0.9),
+        el("abstract", "paper-a", "We introduce the model.", 0.7),
+        el("other-paper", "paper-b", "Paper Title", 0.6),
+    ])
+
+    assert [item.element_id for item in added] == ["abstract", "other-paper"]
+    assert [item.element_id for item in elements] == [
+        "page-1", "abstract", "other-paper",
+    ]
+    assert elements[0].score == 0.9
+
+
+def test_chunk_accumulation_upgrades_duplicate_and_merges_supports():
+    from app.services.reasoning_retrieval import take_distinct_chunk_hits
+    from app.services.retrieval import RetrievedChunk, RetrievalSupport
+
+    def chunk(chunk_id, text, relevance, origin):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="paper", source_title="Paper",
+            section_path=chunk_id, text=text, relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, relevance),
+            ),
+        )
+
+    weak = chunk("header-ppr", "Paper title", 0.2, "ppr")
+    strong = chunk("header-exact", " paper\n title ", 1.0, "lexical")
+    existing = [weak]
+    seen_ids = {weak.chunk_id}
+
+    added = take_distinct_chunk_hits([strong], seen_ids, existing)
+
+    assert added == []
+    assert existing == [strong]
+    assert seen_ids == {"header-ppr", "header-exact"}
+    assert {support.origin for support in strong.retrieval_supports} == {
+        "ppr", "lexical",
+    }
+
+
+def test_reflection_summary_uses_the_same_diverse_element_cap_as_synthesis(rrepo):
+    """The agent must not declare sufficiency from passages that the final
+    single-synthesis cap will replace with duplicate running headers."""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.retrieval import RetrievedElement
+
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    elements = [RetrievedElement(
+        element_id=f"header-{index}", source_id="paper", source_title="Paper",
+        location_label=f"p{index}", element_type="paragraph",
+        text="Cosmos 3: Omnimodal World Models for Physical AI",
+        score=0.99 - index / 100,
+    ) for index in range(6)] + [RetrievedElement(
+        element_id="abstract", source_id="paper", source_title="Paper",
+        location_label="p1", element_type="paragraph",
+        text="We introduce Cosmos 3, a family of omnimodal world models.",
+        score=0.70,
+    )]
+
+    summary = retriever._summarize(
+        {}, elements, [], element_limit=2,
+    )
+
+    assert summary.count("Cosmos 3: Omnimodal World Models") == 1
+    assert "We introduce Cosmos 3" in summary
+
+
 # ----------------------------------------------------------- 精确查找(exact_lookup)
 # 命令类问题的确定性通道:seed pass 无条件按问题里的名称取齐整节(不赌 agent 选动作),
 # reflect 动作让模型补查证据里缺的名称。零模型调用、零 embedding。

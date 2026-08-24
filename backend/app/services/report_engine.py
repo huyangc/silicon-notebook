@@ -89,6 +89,10 @@ from app.services.source_graph_activation import (
     selected_evidence_lane_is_dormant,
     selected_source_graph_call_context,
 )
+from app.services.source_element_selection import (
+    rank_source_elements,
+    source_element_content_key,
+)
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -340,35 +344,33 @@ def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> 
             key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0),
         ) + [hit for hit in result.top_hits if _object_id(hit) in supplemental]
 
-    def _element_id(element) -> str:
-        return str(getattr(element, "element_id", "") or "")
-
-    if len(result.elements) > limits.answer_element_items:
-        # 绑定的元素**优先占**席位,但上限是**闭**的(codex PR#418 R6 P2):一份大纲
-        # 最多能绑 96 个键,而穷尽档的元素上限是 16 —— 全部豁免就等于宣布了一个
-        # 「至多 16 条」又送进去几十条。绑定内部同样按 (-score, id) 择优。
-        bound_elements = rank_elements(
-            [element for element in result.elements if _element_id(element) in bound],
+    if result.elements:
+        # 绑定元素优先占席位,但上限闭合；同一来源的规范化同文副本先折成一个席位。
+        # 即使候选条数没有越过 cap 也要做同文折叠，否则短报告仍可能把多个引用键
+        # 绑定到同一页眉，且后续方向补检索无法用正文替换那些冗余席位。
+        result.elements = rank_elements(
+            result.elements,
             limits.answer_element_items,
+            priority_element_ids=bound,
         )
-        others = [
-            element for element in result.elements if _element_id(element) not in bound
-        ]
-        room = max(0, limits.answer_element_items - len(bound_elements))
-        result.elements = bound_elements + rank_elements(others, room)
 
 
-def rank_elements(elements: Sequence[Any], keep: int) -> List[Any]:
-    """按检索相关度降序取前 ``keep`` 个直接原文段(tie-break `element_id`)。
+def rank_elements(
+    elements: Sequence[Any],
+    keep: int,
+    *,
+    priority_element_ids: set[str] | frozenset[str] = frozenset(),
+) -> List[Any]:
+    """按相关度取同源正文多样的前 ``keep`` 个直接原文段。
 
-    键与 `ask_service._answer_reasoning` 逐字相同:按插入序切片会在检索到的元素
-    多于上限时静默丢掉最相关的那几个。
+    共享 helper 与 Ask/反思阶段保持逐字同一选择口径；大纲绑定只获得席位优先，
+    不突破闭合上限。
     """
-    return sorted(
+    return rank_source_elements(
         elements,
-        key=lambda element: (-float(getattr(element, "score", 0.0) or 0.0),
-                             str(getattr(element, "element_id", ""))),
-    )[: max(0, int(keep))]
+        keep,
+        priority_element_ids=priority_element_ids,
+    )
 
 
 # --- 大纲绑定证据的 KG 上下文子预算(报告 PR-5)---------------------------
@@ -1863,6 +1865,9 @@ class ReportEngine:
         # direct KG/element results so replanning cannot silently drop one.
         seen_objects = {hit.object_id for hit in result.top_hits}
         seen_elements = {item.element_id for item in result.elements}
+        seen_element_content = {
+            source_element_content_key(item) for item in result.elements
+        }
         # 大纲绑上、却被最终相关性选集挤出 top_hits 的知识对象(仅穷尽档非空,见
         # reasoning_retrieval.outline_truncated_kg_evidence)。规则同 ask_service 的
         # 按节合成路径:它们是模型自己指名要的结构支撑,要能进本节上下文并计入
@@ -1932,10 +1937,16 @@ class ReportEngine:
                         notebook_id, str(query), limit=direction_elements
                     )
                 for element in elements:
-                    if element.element_id not in seen_elements:
-                        result.elements.append(element)
-                        seen_elements.add(element.element_id)
-                        new_count += 1
+                    content_key = source_element_content_key(element)
+                    if (
+                        element.element_id in seen_elements
+                        or content_key in seen_element_content
+                    ):
+                        continue
+                    result.elements.append(element)
+                    seen_elements.add(element.element_id)
+                    seen_element_content.add(content_key)
+                    new_count += 1
             except AskCancelled:
                 raise
             except Exception:
@@ -2022,6 +2033,15 @@ class ReportEngine:
         # 分区的一半,与 KG 侧的子预算同一个比例),chunk 只吃预留之外的部分。
         chunks = list(getattr(result, "chunks", None) or [])
         elements = list(getattr(result, "elements", []) or [])
+        if limits is not None:
+            # 与 `clamp_merged_evidence` 同一条规则:绑定优先占席位、上限闭合，
+            # 同源同文副本先折叠。必须在预留 element_reserve **之前**选定，
+            # 否则被折叠的页眉仍会虚占 chunk 字符预算。
+            elements = rank_elements(
+                elements,
+                limits.answer_element_items,
+                priority_element_ids=bound_keys,
+            )
         bound_elements = [
             element for element in elements
             if str(getattr(element, "element_id", "") or "") in bound_keys
@@ -2076,15 +2096,6 @@ class ReportEngine:
         # 绑定键横跨三个 id 空间,一个被 `answer_element_items` 截掉的绑定元素,在
         # `outline_structure_block` 里就是一个解析不出的绑定,子话题退成裸标题。
         # 排最前是因为字符预算仍按输入序消耗 —— 与 KG 那边的优先前缀同一个理由。
-        if limits is not None:
-            # 与 `clamp_merged_evidence` 同一条规则:绑定优先占席位,但上限是闭的。
-            kept_bound = rank_elements(bound_elements, limits.answer_element_items)
-            others = [
-                element for element in elements
-                if str(getattr(element, "element_id", "") or "") not in bound_keys
-            ]
-            elements = kept_bound + rank_elements(
-                others, max(0, limits.answer_element_items - len(kept_bound)))
         element_budget = (max(0, chunk_budget - len(chunk_block))
                           if limits is not None else max(2000, chunk_budget // 3))
         element_block, element_map = deps.evidence_context.element_context(

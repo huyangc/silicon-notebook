@@ -31,7 +31,7 @@ from app.services.reasoning_retrieval import (
 from app.services.report_engine import (
     REPORT_DEPTH_EFFORTS, ReportEngine, _STRUCTURE_MAX_CHARS,
     _STRUCTURE_MAX_LINES, _STRUCTURE_MAX_LINE_CHARS,
-    knowledge_context_with_outline, outline_structure_block,
+    clamp_merged_evidence, knowledge_context_with_outline, outline_structure_block,
     report_retrieval_effort, report_retrieval_limits,
 )
 from app.services.retrieval import (
@@ -338,6 +338,29 @@ def test_the_merged_directions_are_clamped_to_the_levels_final_cap(repo, monkeyp
     # `answer_element_items`(见下一条用例),不是接入前恒定的 20 + 8。
     assert [row["query"] for row in result.attempted] == ["a", "b", "c", "d"]
     assert [row["new"] for row in result.attempted] == [8, 8, 8, 8]
+
+
+def test_report_element_clamp_collapses_repeated_headers_before_cap():
+    limits = ask_retrieval_limits("overview")
+    headers = [RetrievedElement(
+        element_id=f"header-{index}", source_id="paper", source_title="Paper",
+        location_label=f"p{index}", element_type="paragraph",
+        text="Cosmos 3: Omnimodal World Models for Physical AI",
+        score=0.99 - index / 100,
+    ) for index in range(limits.answer_element_items)]
+    abstract = RetrievedElement(
+        element_id="abstract", source_id="paper", source_title="Paper",
+        location_label="p1", element_type="paragraph",
+        text="We introduce Cosmos 3, a family of omnimodal world models.",
+        score=0.70,
+    )
+    result = ReasoningResult(elements=[*headers, abstract])
+
+    clamp_merged_evidence(result, limits)
+
+    assert [element.element_id for element in result.elements] == [
+        "header-0", "abstract",
+    ]
 
 
 def test_each_direction_retrieves_at_the_levels_own_take(repo, monkeypatch):

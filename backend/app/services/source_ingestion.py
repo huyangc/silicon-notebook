@@ -55,6 +55,9 @@ from app.services.parser_chain_execution import (
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
+from app.services.source_element_selection import (
+    deduplicate_repeated_page_boundaries,
+)
 
 
 #: 「改了文档类型 → 只重抽 KG」失败时留给用户的说明。面向用户的文案，不带异常
@@ -1007,9 +1010,8 @@ class SourceIngestionService:
             )
             parsed = parser_execution.run()
             parsed_assets_pending = parser_execution.materialized
-            elements = list(parsed.elements)
-            mineru_error = parsed.mineru_error
-            parser_mode = parsed.parser_mode
+            elements, _ = deduplicate_repeated_page_boundaries(parsed.elements)
+            mineru_error, parser_mode = parsed.mineru_error, parsed.parser_mode
             parser_warning_code = parsed.warning_code
             element_parsers = sorted(
                 {

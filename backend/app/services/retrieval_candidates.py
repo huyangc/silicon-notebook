@@ -44,6 +44,7 @@ from app.services.retrieval import (
     is_process_query,
     keyword_basis,
     partition_generated_question_chunks,
+    prefer_stronger_chunk_candidate,
     rrf_fuse,
     score_elements,
     score_knowledge,
@@ -54,6 +55,10 @@ from app.services.retrieval_run import (
     memoized_query_embedding,
 )
 from app.services.source_display import source_display_title
+from app.services.source_element_selection import (
+    source_chunk_content_key,
+    source_element_content_key,
+)
 
 
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
@@ -1807,7 +1812,14 @@ class CandidateRetrievalService(_RetrievalState):
             # 小文件仍可以产生大量 element/vector，所以 copyable 不是
             # 选定来源的候选行数上限。
             chunks, _ids, _matrix = self._retrieve_chunks(
-                notebook_id, query, recall=max(limit * 4, limit),
+                notebook_id,
+                query,
+                # Direct-element fallback needs the configured broad chunk
+                # candidate pool too: a smaller limit-derived pool lets legacy
+                # repeated headers consume every upstream slot before content
+                # diversity can run.  ``chunk_recall`` is already the single
+                # deployment-owned quality/cost rail for this candidate family.
+                recall=max(self.settings.chunk_recall, limit * 4, limit),
                 allowed_source_ids=allowed_source_ids,
             )
             elements = self._retrieve_elements_from_chunks(
@@ -1919,6 +1931,9 @@ class CandidateRetrievalService(_RetrievalState):
                 query, candidates, limit=output_limit
             )
             seen = {item.element_id for item in lexical}
+            seen_content = {
+                source_element_content_key(item) for item in lexical
+            }
             by_id = {row["element_id"]: row for row in candidates}
             for element_id in selected:
                 if len(lexical) >= output_limit:
@@ -1926,7 +1941,7 @@ class CandidateRetrievalService(_RetrievalState):
                 if element_id in seen or element_id not in by_id:
                     continue
                 row = by_id[element_id]
-                lexical.append(RetrievedElement(
+                candidate = RetrievedElement(
                     element_id=element_id,
                     source_id=row["source_id"],
                     source_title=row["source_title"],
@@ -1934,7 +1949,12 @@ class CandidateRetrievalService(_RetrievalState):
                     element_type=row["element_type"],
                     text=row["text"],
                     score=coarse_scores.get(element_id, 0.0),
-                ))
+                )
+                content_key = source_element_content_key(candidate)
+                if content_key in seen_content:
+                    continue
+                lexical.append(candidate)
+                seen_content.add(content_key)
             return lexical
 
         primary = baseline or supplemental
@@ -2636,10 +2656,7 @@ class CandidateRetrievalService(_RetrievalState):
         """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
         ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
         from concurrent.futures import ThreadPoolExecutor
-        from app.services.retrieval import (
-            merge_retrieval_supports,
-            partition_generated_question_chunks,
-        )
+        from app.services.retrieval import partition_generated_question_chunks
 
         import contextvars as _cv
         tasks = [(q, _cv.copy_context()) for q in sub_queries]
@@ -2656,7 +2673,8 @@ class CandidateRetrievalService(_RetrievalState):
         if sub_queries:
             with ThreadPoolExecutor(max_workers=min(len(sub_queries), 8)) as ex:
                 results = list(ex.map(_one, tasks))
-        per_query, collected, supplemental_rows, ids, mat = [], {}, [], [], None
+        per_query, collected_by_content = [], {}
+        supplemental_rows, ids, mat = [], [], None
         for scored, qids, qmat in results:
             per_query.append({c.chunk_id: c for c in scored})
             baseline_rows, query_supplemental = partition_generated_question_chunks(
@@ -2668,31 +2686,31 @@ class CandidateRetrievalService(_RetrievalState):
             # from an early query can take the dict position/representative of a
             # semantic hit found by a later query and change feature-off order.
             for c in baseline_rows:
-                cur = collected.get(c.chunk_id)
+                content_key = source_chunk_content_key(c)
+                cur = collected_by_content.get(content_key)
                 if cur is None:
-                    collected[c.chunk_id] = c
+                    collected_by_content[content_key] = c
                 else:
-                    supports = merge_retrieval_supports(
-                        cur.retrieval_supports, c.retrieval_supports
+                    collected_by_content[content_key] = (
+                        prefer_stronger_chunk_candidate(cur, c)
                     )
-                    if c.relevance > cur.relevance:
-                        c.retrieval_supports = supports
-                        collected[c.chunk_id] = c
-                    else:
-                        cur.retrieval_supports = supports
             if mat is None and len(qids):
                 ids, mat = qids, qmat
         for c in supplemental_rows:
-            cur = collected.get(c.chunk_id)
+            content_key = source_chunk_content_key(c)
+            cur = collected_by_content.get(content_key)
             if cur is None:
-                collected[c.chunk_id] = c
+                collected_by_content[content_key] = c
                 continue
             # A historical representative always wins a collision.  The
             # generated-question support remains useful provenance but cannot
             # replace its relevance or insertion position.
-            cur.retrieval_supports = merge_retrieval_supports(
-                cur.retrieval_supports, c.retrieval_supports
+            collected_by_content[content_key] = prefer_stronger_chunk_candidate(
+                cur, c
             )
+        collected = {
+            chunk.chunk_id: chunk for chunk in collected_by_content.values()
+        }
         return collected, per_query, ids, mat
     def _keyword_chunk_candidates(self, notebook_id: str, keywords: str,
                                   recall: int = 0):
@@ -2796,27 +2814,36 @@ class CandidateRetrievalService(_RetrievalState):
             return []
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
-        """Append `extra` RetrievedChunks to `base`, deduped by chunk_id (keep the
-        existing entry on collision — base already scored it with semantic signal).
-        Order-preserving. Used to fold the bilingual-keyword lexical hits into a
-        list-shaped candidate set (mix / single-subquery branches)."""
+        """Append ``extra`` while preserving one same-source text candidate.
+
+        The existing base representative wins because it already carries the
+        semantic score.  Exact id collisions also merge retrieval supports.
+        This happens before downstream selection so lexical duplicates cannot
+        spend candidate positions.
+        """
         if not extra:
             return base
-        from app.services.retrieval import merge_retrieval_supports
-
-        by_id = {c.chunk_id: c for c in base}
-        seen = set(by_id)
         out = list(base)
+        by_id = {chunk.chunk_id: index for index, chunk in enumerate(out)}
+        by_content = {
+            source_chunk_content_key(chunk): index
+            for index, chunk in enumerate(out)
+        }
         for c in extra:
-            if c.chunk_id in seen:
-                existing = by_id[c.chunk_id]
-                existing.retrieval_supports = merge_retrieval_supports(
-                    existing.retrieval_supports, c.retrieval_supports
-                )
-            else:
-                seen.add(c.chunk_id)
-                out.append(c)
-                by_id[c.chunk_id] = c
+            content_key = source_chunk_content_key(c)
+            index = by_id.get(c.chunk_id)
+            if index is None:
+                index = by_content.get(content_key)
+            if index is not None:
+                chosen = prefer_stronger_chunk_candidate(out[index], c)
+                out[index] = chosen
+                by_id[c.chunk_id] = index
+                by_id[chosen.chunk_id] = index
+                by_content[content_key] = index
+                continue
+            by_id[c.chunk_id] = len(out)
+            by_content[content_key] = len(out)
+            out.append(c)
         return out
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
         """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
@@ -3100,8 +3127,9 @@ class CandidateRetrievalService(_RetrievalState):
             collected, _per, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
             seen, out = set(), []
             for c in collected.values():
-                if c.chunk_id not in seen:
-                    seen.add(c.chunk_id)
+                content_key = source_chunk_content_key(c)
+                if content_key not in seen:
+                    seen.add(content_key)
                     out.append(c)
             return out
         scored, _ids, _mat = self._retrieve_chunks(notebook_id, sub_queries[0])
@@ -3133,35 +3161,33 @@ class CandidateRetrievalService(_RetrievalState):
             and not self._unsafe_source_scope_restricted(notebook_id)
             else []
         )
-        from app.services.retrieval import merge_retrieval_supports
-
-        merged, seen, by_id = [], set(), {}
+        merged, by_content = [], {}
         for i in range(max(len(vector_chunks), len(kg_chunks), len(ppr_chunks))):
             for src in (vector_chunks, kg_chunks, ppr_chunks):
                 if i >= len(src):
                     continue
                 chunk = src[i]
-                if chunk.chunk_id in seen:
-                    existing = by_id[chunk.chunk_id]
-                    existing.retrieval_supports = merge_retrieval_supports(
-                        existing.retrieval_supports, chunk.retrieval_supports
+                content_key = source_chunk_content_key(chunk)
+                if content_key in by_content:
+                    index = by_content[content_key]
+                    merged[index] = prefer_stronger_chunk_candidate(
+                        merged[index], chunk
                     )
                     continue
-                seen.add(chunk.chunk_id)
-                by_id[chunk.chunk_id] = chunk
+                by_content[content_key] = len(merged)
                 merged.append(chunk)
         # Complete the historical vector/KG/PPR round-robin before optional
         # question-only chunks enter the pool.  A collision only enriches the
         # historical candidate's provenance; it never changes its position.
         for chunk in question_supplements:
-            if chunk.chunk_id in seen:
-                existing = by_id[chunk.chunk_id]
-                existing.retrieval_supports = merge_retrieval_supports(
-                    existing.retrieval_supports, chunk.retrieval_supports
+            content_key = source_chunk_content_key(chunk)
+            if content_key in by_content:
+                index = by_content[content_key]
+                merged[index] = prefer_stronger_chunk_candidate(
+                    merged[index], chunk
                 )
                 continue
-            seen.add(chunk.chunk_id)
-            by_id[chunk.chunk_id] = chunk
+            by_content[content_key] = len(merged)
             merged.append(chunk)
         return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
     def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:

@@ -44,6 +44,10 @@ from app.domain.retrieval import (
     W_SEMANTIC,
 )
 from app.models.common import Evidence  # compatibility re-export
+from app.services.source_element_selection import (
+    rank_source_chunks,
+    rank_source_elements,
+)
 
 
 # --- Tunable scoring constants (kept here so they can be tuned in one place) ---
@@ -698,8 +702,7 @@ def score_elements(
                 score=score,
             )
         )
-    scored.sort(key=lambda item: item.score, reverse=True)
-    return scored[:limit]
+    return rank_source_elements(scored, limit)
 
 
 _REVIEW_STRICTNESS = {"": 0, "verified": 1, "pending": 2, "rejected": 3}
@@ -828,6 +831,30 @@ def is_generated_question_only_chunk(chunk: "RetrievedChunk") -> bool:
     return bool(supports) and all(
         support.origin == "generated_question" for support in supports
     )
+
+
+def prefer_stronger_chunk_candidate(
+    existing: "RetrievedChunk", candidate: "RetrievedChunk"
+) -> "RetrievedChunk":
+    """Choose one duplicate-text representative and retain all provenance.
+
+    Historical evidence always wins over a generated-question-only supplement;
+    otherwise the higher-relevance representative wins and ties keep the
+    existing stable position. The chosen mutable retrieval object receives the
+    union of both support sets.
+    """
+    existing_optional = is_generated_question_only_chunk(existing)
+    candidate_optional = is_generated_question_only_chunk(candidate)
+    if existing_optional != candidate_optional:
+        chosen = candidate if existing_optional else existing
+    elif candidate.relevance > existing.relevance:
+        chosen = candidate
+    else:
+        chosen = existing
+    chosen.retrieval_supports = merge_retrieval_supports(
+        existing.retrieval_supports, candidate.retrieval_supports
+    )
+    return chosen
 
 
 def partition_generated_question_chunks(
@@ -1020,8 +1047,7 @@ def score_chunks(
             text=c["text"], element_ids=c.get("element_ids", []),
             score=score, relevance=score,
         ))
-    scored.sort(key=lambda x: x.score, reverse=True)
-    return scored[:limit]
+    return rank_source_chunks(scored, limit)
 
 
 def quota_fuse(collected, per_query, top_n, relevance=lambda h: h.relevance):

@@ -72,6 +72,8 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 
 重新解析保留 source 行与原始文件：替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。
 
+新解析或重新解析的来源在发布 element、chunk、embedding 与 source-derived knowledge 前，会先清理高置信度的跨页页眉/页脚：规范化后非空的 `heading`、`paragraph` 或内置 PDF parser 产出的 `page_text` 必须在至少 3 个有文本页上位于该页首个或末个文本元素，并覆盖全部有文本页的至少一半；仅删除第一次之后的边界副本。非边界同文、表格、公式、图片、代码、同页重复及低覆盖重复全部保留。历史数据与外部 parser 产物另有独立的检索期防线：chunk 与直接来源元素在候选/结果上限、跨查询累积、反思摘要以及 Ask/报告最终上下文预算之前，按 `(source_id, NFKC + 空白折叠 + 大小写折叠后的文本)` 去重。排序路径保留最高分代表，精确小节上下文保留文档顺序中的第一个代表；不同来源即使文字相同也绝不折叠，因为它们是独立出处。这两层规则同时防止同文副本占用上游检索坑位和下游合成坑位，但不会静默改写或全局去重作者正文。
+
 可见导入来源计数与物理记账刻意分离：隐藏的 Memory/Knowhow 投影来源不会出现在来源栏或面向用户的计数中，但 `size.sources`、复制阈值、存储统计和后台调度仍按物理行计数。`has_unindexed_content` 也会在可见导入来源增量为零但派生内容发生变化时保留 scale-index 更新决策。
 
 检索索引调度提供立即执行与低峰排队两种操作。没有构建正在运行时，`when=now` 会在认领立即构建的同一临界区内覆盖同 notebook 先前的 idle 项；认领后新加入的 idle 请求仍会保留，worker 启动失败也会恢复被覆盖项。调度 tick 会逐个认领队列项，忙碌 notebook 的后续任务继续排队，单项启动失败不会丢失或阻断其余项。`AskResponse.index_required` 只记录回答生成时的降级状态；问答界面还会读取实时 `ScaleIndexStatus.exists`，有界前台轮询结束后由 `index_done` 事件刷新当前 notebook，因此索引发布后无需改写历史回答即可同步移除旧提示。
@@ -1233,7 +1235,7 @@ Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EX
 
 档位在提问框里通过与深度报告「研究深度」**同一个**档位控件选择——共用一个组件，两处不会走样：一个带当前档名的 chip，点开是滑块弹层，显示该档档名与一句中性说明。界面只呈现档名与那句说明；精确上限在下面这张表（由 `frontend/app/ask-retrieval-effort.ts` 与 `backend/app/core/ask_retrieval_policy.py` 双向锁定），不铺在控件上。`answer_element_items` 与下表末三列的 `enum_*` 是这个镜像关系的例外——它们都是后端专有字段，前端没有对应消费者，只影响服务端最终合成 prompt 的组装与[集合枚举工具](#集合枚举工具)的预算。
 
-逐步推理接受下表五个稳定的 `retrieval_effort` 协议 id，默认 `standard`。证据充分时模型可以提前停止，但不能突破任一上限。“最终 floor / aspect / cap”的计算是 `min(cap, max(floor, aspect × 实际执行查询数))`。KG / 原文上下文是真正的证据字符硬上限：原文分区包含结构化预览、chunk 与直接来源元素；KG 分区包含 KG 对象/关系、已确认 Memory 与查询期推导链；最终证据块不超过两者之和。`answer_element_items` 是最终合成 prompt 里允许纳入的直接来源元素(公式/表格/图片等)条数上限，按检索相关度降序择优而非插入序，且仍占用上面同一份原文上下文预算。`enum_page_size` / `enum_pages_per_run` / `enum_rows_per_run` 约束下文的集合枚举工具（`enumerate_elements` / `enumerate_kg_objects` 两个动作及其 `collection="sources"` 参数值）：页大小各档相同，每 run 的额外翻页次数与累计行数随档位增长，与其他上限同一套增长节奏。
+逐步推理接受下表五个稳定的 `retrieval_effort` 协议 id，默认 `standard`。证据充分时模型可以提前停止，但不能突破任一上限。“最终 floor / aspect / cap”的计算是 `min(cap, max(floor, aspect × 实际执行查询数))`。KG / 原文上下文是真正的证据字符硬上限：原文分区包含结构化预览、chunk 与直接来源元素；KG 分区包含 KG 对象/关系、已确认 Memory 与查询期推导链；最终证据块不超过两者之和。`answer_element_items` 是最终合成 prompt 里允许纳入的直接来源元素(公式/表格/图片等)条数上限；同一来源的规范化同文副本先在上限前折叠，其余代表按检索相关度降序择优而非插入序，且仍占用上面同一份原文上下文预算。反思模型收到的也是这份有界多样元素视图，因此不能依据最终合成根本看不到的原文段判断证据充分。`enum_page_size` / `enum_pages_per_run` / `enum_rows_per_run` 约束下文的集合枚举工具（`enumerate_elements` / `enumerate_kg_objects` 两个动作及其 `collection="sources"` 参数值）：页大小各档相同，每 run 的额外翻页次数与累计行数随档位增长，与其他上限同一套增长节奏。
 
 | 档位 id | 界面名 | 每查询相关性结果 | 最终 floor / aspect / cap | 最大推理步骤 / 首轮子查询 | KG / 原文上下文字符 | 合成纳入的直接来源元素 | 枚举页大小 | 每 run 额外翻页 | 每 run 累计行数 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|

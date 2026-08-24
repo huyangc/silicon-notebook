@@ -51,9 +51,15 @@ from app.services.retrieval_experience_block import (
 from app.services.retrieval_experience_projection import current_situation
 from app.services.retrieval import (
     NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
+    prefer_stronger_chunk_candidate,
 )
 from app.services.retrieval_run import retrieval_fanout_slot
 from app.services.search_profile import render_style_block
+from app.services.source_element_selection import (
+    rank_source_elements,
+    source_chunk_content_key,
+    source_element_content_key,
+)
 from app.services.reports.policy import (
     DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR,
     DEFAULT_REASONING_MAX_EXACT_LOOKUPS,
@@ -1482,21 +1488,62 @@ def clean_exact_term(raw: str) -> str:
 def merge_element_hits(elements: list, found: list) -> list:
     """把一批 search_elements 结果合并进累计列表,返回真正新增的元素。
 
-    去重按 element_id;同一元素被后续查询以更高分再次命中时**就地保留最高分**
+    去重先按 element_id、再按同一来源的规范化正文；同一元素或同文副本被后续查询
+    以更高分再次命中时**就地保留最高分**
     ——合成阶段按分数降序裁 answer_element_items,若只保留首个(可能偏低的)
     查询专属分,弱查询先到会把强命中挤出上限(codex PR#391 round-2 P2)。
     跨查询分数只是大致可比,取 max 是保守选择:绝不让重复命中降低既有分。"""
     by_id = {e.element_id: e for e in elements}
+    by_content = {source_element_content_key(e): e for e in elements}
     added = []
     for e in found:
         prev = by_id.get(e.element_id)
         if prev is None:
+            prev = by_content.get(source_element_content_key(e))
+        if prev is None:
             by_id[e.element_id] = e
+            by_content[source_element_content_key(e)] = e
             added.append(e)
         elif e.score > prev.score:
             prev.score = e.score
     elements.extend(added)
     return added
+
+
+def take_distinct_chunk_hits(
+    found: list,
+    seen_chunk_ids: set,
+    existing_chunks: list,
+) -> list:
+    """Admit diverse chunks and upgrade an earlier duplicate in place."""
+    distinct: list = []
+    by_id = {
+        chunk.chunk_id: (existing_chunks, index)
+        for index, chunk in enumerate(existing_chunks)
+    }
+    by_content = {
+        source_chunk_content_key(chunk): (existing_chunks, index)
+        for index, chunk in enumerate(existing_chunks)
+    }
+    for chunk in found:
+        content_key = source_chunk_content_key(chunk)
+        location = by_id.get(chunk.chunk_id) or by_content.get(content_key)
+        if location is not None:
+            container, index = location
+            current = container[index]
+            chosen = prefer_stronger_chunk_candidate(current, chunk)
+            container[index] = chosen
+            by_id[chunk.chunk_id] = location
+            by_id[chosen.chunk_id] = location
+            by_content[content_key] = location
+            seen_chunk_ids.add(chunk.chunk_id)
+            continue
+        location = (distinct, len(distinct))
+        seen_chunk_ids.add(chunk.chunk_id)
+        distinct.append(chunk)
+        by_id[chunk.chunk_id] = location
+        by_content[content_key] = location
+    return distinct
 
 
 def effective_top_n(
@@ -2416,7 +2463,9 @@ class ReasoningRetriever:
 
     def _summarize(self, collected, elements, chunks, chains=(),
                    show_ids: bool = False,
-                   shown_binding_keys: Optional[set] = None):
+                   shown_binding_keys: Optional[set] = None,
+                   element_limit: Optional[int] = None,
+                   priority_element_ids: Optional[set] = None):
         """``show_ids`` = 给原文候选也标出 id(仅大纲便签在场时)。
 
         KG 候选的 id 一直都在——`expand_graph`/`follow_chain` 要拿它做参数。原文段
@@ -2441,10 +2490,18 @@ class ReasoningRetriever:
             return (f"- [chunk] {c.source_title} · {c.section_path}: "
                     f"{c.text[:80]}{tail}")
 
+        visible_elements = (
+            rank_source_elements(
+                elements,
+                element_limit,
+                priority_element_ids=priority_element_ids or frozenset(),
+            )
+            if element_limit is not None else elements
+        )
         for items, render, key_of, head_n, tail_n, noun in (
                 (list(collected.values()), _kg_line,
                  lambda item: item.object_id, 20, 10, "条较早候选"),
-                (elements, _el_line,
+                (visible_elements, _el_line,
                  lambda item: item.element_id, 6, 4, "段较早原文"),
                 (chunks, _ch_line,
                  lambda item: item.chunk_id, 6, 4, "段较早原文")):
@@ -2469,6 +2526,21 @@ class ReasoningRetriever:
             except Exception:
                 continue
         return "\n".join(lines) if lines else "(no candidates yet)"
+
+    def _reflection_summary(
+        self, collected, elements, chunks, chains, outline_active,
+        shown_binding_keys, limits, outline,
+    ) -> str:
+        """Project the exact direct-element view available to synthesis."""
+        return self._summarize(
+            collected, elements, chunks, chains,
+            show_ids=outline_active,
+            shown_binding_keys=shown_binding_keys if outline_active else None,
+            element_limit=limits.answer_element_items if limits else None,
+            priority_element_ids={
+                key for section in outline for key in section.evidence_keys
+            },
+        )
 
     def run_stage(self, stage, runtime):
         """Execute one explicitly bounded retrieval stage.
@@ -3116,9 +3188,9 @@ class ReasoningRetriever:
             raise_if_cancelled(self.cancel_event)
             ppr_all = (ppr_future.result() if ppr_future is not None
                        else self.ppr_retrieve(notebook_id, question))
-            seeded = [c for c in ppr_all if c.chunk_id not in seen_chunks]
-            for c in seeded:
-                seen_chunks.add(c.chunk_id)
+            seeded = take_distinct_chunk_hits(
+                ppr_all, seen_chunks, chunks
+            )
             chunks.extend(seeded)
             _result_ids, _result_ids_truncated = _capped_result_ids(
                 [c.chunk_id for c in seeded])
@@ -3159,11 +3231,11 @@ class ReasoningRetriever:
             # 逐个加引号而不是空格拼接:通道会对收到的串**重新**抽名称,
             # 「static timing analysis」这种多词短语裸拼进去就再也抽不回来,
             # 会被当成三个普通词丢掉。单词标识符经引号分支原样往返。
-            found = [c for c in self.exact_lookup(
-                         notebook_id, exact_probe_query(seed_terms))
-                     if c.chunk_id not in seen_chunks]
-            for c in found:
-                seen_chunks.add(c.chunk_id)
+            found = take_distinct_chunk_hits(
+                self.exact_lookup(notebook_id, exact_probe_query(seed_terms)),
+                seen_chunks,
+                chunks,
+            )
             chunks.extend(found)
             exact_terms_done.update(_norm_query(t) for t in seed_terms)
             exact_lookup_log.append(
@@ -3681,12 +3753,9 @@ class ReasoningRetriever:
                 outline_terminal_repair_used = True
                 forced_overflow_repair = False
             steps += 1
-            summary = self._summarize(collected, elements, chunks, chains,
-                                      show_ids=outline_active,
-                                      shown_binding_keys=(
-                                          ever_shown_outline_keys
-                                          if outline_active else None
-                                      ))
+            summary = self._reflection_summary(
+                collected, elements, chunks, chains, outline_active,
+                ever_shown_outline_keys, limits, outline)
             if no_progress:
                 summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
             # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -4580,10 +4649,8 @@ class ReasoningRetriever:
                 else:
                     ppr_searches += 1
                     pq = decision.ppr_query or question
-                    new = [c for c in self.ppr_retrieve(notebook_id, pq)
-                           if c.chunk_id not in seen_chunks]
-                    for c in new:
-                        seen_chunks.add(c.chunk_id)
+                    new = take_distinct_chunk_hits(
+                        self.ppr_retrieve(notebook_id, pq), seen_chunks, chunks)
                     chunks.extend(new)
                     # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,纯内存
                     # O(1),不改变本分支任何既有行为(除了让"连续"变真话)。
@@ -4675,11 +4742,10 @@ class ReasoningRetriever:
                         detail={"reason": "exact_lookup_cap", "term": term}))
                 else:
                     exact_lookups += 1
-                    new = [c for c in self.exact_lookup(
-                               notebook_id, exact_probe_query(fresh))
-                           if c.chunk_id not in seen_chunks]
-                    for c in new:
-                        seen_chunks.add(c.chunk_id)
+                    new = take_distinct_chunk_hits(
+                        self.exact_lookup(notebook_id, exact_probe_query(fresh)),
+                        seen_chunks, chunks,
+                    )
                     chunks.extend(new)
                     exact_terms_done.update(_norm_query(t) for t in fresh)
                     exact_lookup_log.append(

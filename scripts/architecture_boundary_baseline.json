@@ -352,11 +352,11 @@
     "backend/app/services/memory_service.py::MemoryService.transfer": 389,
     "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 660,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._new_run_state": 201,
-    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1708,
+    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1702,
     "backend/app/services/report_engine.py::ReportEngine._assemble": 457,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 349,
     "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 458,
     "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 118,
-    "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 373
+    "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 372
   }
 }

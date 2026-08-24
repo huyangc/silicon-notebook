@@ -111,6 +111,42 @@ def test_mix_round_robin_finishes_historical_streams_before_question_supplement(
     ]
 
 
+def test_mix_round_robin_collapses_text_before_rerank(repo, monkeypatch):
+    def chunk(chunk_id, text, relevance, origin):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="paper", source_title="Paper",
+            section_path=chunk_id, text=text, relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, relevance),
+            ),
+        )
+
+    weak_header = chunk("header-vector", "Paper title", 0.3, "semantic")
+    strong_header = chunk("header-kg", " paper\n title ", 0.9, "kg_source")
+    body = chunk("body", "Distinct body", 0.7, "ppr")
+    candidates = repo.retrieval.candidates
+    monkeypatch.setattr(candidates, "_gather_vector_chunks", lambda *args: [weak_header])
+    monkeypatch.setattr(candidates, "_notebook_has_kg", lambda _notebook_id: True)
+    monkeypatch.setattr(candidates, "_chunk_kg_overlay", lambda *args, **kwargs: (
+        "", {"k1001": {"object_id": "object-1"}}, [], {}
+    ))
+    monkeypatch.setattr(candidates, "_kg_source_chunks", lambda *args, **kwargs: [strong_header])
+    monkeypatch.setattr(candidates, "_ppr_retrieve", lambda *args, **kwargs: [body])
+    monkeypatch.setattr(
+        candidates, "_unsafe_source_scope_restricted", lambda _notebook_id: False
+    )
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
+
+    merged, _block, _id_map, _hits, _ppr_count = candidates._mix_retrieve(
+        "nb", "query", "", ["q1"]
+    )
+
+    assert [item.chunk_id for item in merged] == ["header-kg", "body"]
+    assert {support.origin for support in merged[0].retrieval_supports} == {
+        "semantic", "kg_source",
+    }
+
+
 class _AnswerLLM:
     configured = True
     def __init__(self, text): self.text = text; self.calls = 0
@@ -128,7 +164,7 @@ class _FakeRerank:
 
 def test_chunk_answer_context_budget_override(repo):
     chunks = [RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="D",
-                             section_path="1", text="x" * 500, relevance=0.5)
+                             section_path="1", text=str(i) * 500, relevance=0.5)
               for i in range(10)]
     _, idmap_small = repo._chunk_answer_context(chunks, budget_chars=100)
     _, idmap_big = repo._chunk_answer_context(chunks, budget_chars=10**9)
