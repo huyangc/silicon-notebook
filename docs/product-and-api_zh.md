@@ -1701,7 +1701,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`）、显式的建议式表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`），以及带全库推理取证的单行空列补全建议（`POST .../knowhow/{table_id}/rows/{row_id}/complete`，可选 `target_column_ids`，返回 `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`）
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask/intent` —— `reasoning` 的无语料意图预检；接收 `{question, conversation_id?}`，最多读取当前会话最近五个用户问题，不创建 conversation/job，返回可编辑的问题合同和阻断性歧义；客户端断开时向模型调用传递取消事件
-- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；`reasoning` 可传 `retrieval_effort`，默认 `standard`；官方网页端以带时区的 `asked_at` 传入只用于显示的提交时间；响应以 `answered_at` 返回权威持久化完成时间；集合型回答可带结构化 `result_sets` 与精确覆盖率；联合范围遵循上文各 mode 的边界）
+- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；`reasoning` 可传 `retrieval_effort`，默认 `standard`；官方网页端以带时区的 `asked_at` 传入只用于显示的提交时间；响应以 `answered_at` 返回权威持久化完成时间；集合型回答可带结构化 `result_sets` 与精确覆盖率；逐步推理回答还可能带 `gap_suggestions`——笔记本之外的非证据线索，见[缺口外扩检索](#缺口外扩检索)——没有该插件的部署此字段为空且不出现在 JSON payload 里；联合范围遵循上文各 mode 的边界）
 - `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（同样接受可选的带时区 `asked_at` 请求字段；先发带持久化 `job_id` 和 `conversation_id` 的 `started` 事件，再发进度/最终事件）；前端用该会话 id 在答案生成前立即入历史并支持重新打开。transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；job 必须属于路径中的 notebook 和当前用户；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；job 必须属于路径中的 notebook 和当前用户；设置取消事件并在保存被取消的最终回答前停止 worker
@@ -1743,6 +1743,34 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 `/api/extensions/{plugin_id}/…` 是部署插件自有 HTTP 路由的唯一挂载面：router 级会话依赖意味着没有匿名面，路由工厂拿到的是 8 个字段的 `PluginRouteContext`——`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`emit_event`——绝不给 repository、全局 `Settings`、model client、FastMCP host 或原始 bearer token。**这些接缝背后的每个 core 端口都自己给请求的当前用户做授权判定**——例如 `url_sources.import_urls` 会对调用用户核对 `sources:write` 能力,不通过就 404——所以挂载点自身的 `{notebook_id}` 路径形状守卫只是纵深防御,不是授权边界本身。URL 导入端口一份实现两种调用形态：同步 (`def`) handler 本来就在 FastAPI 线程池里、直接调 `import_urls`；`async def` handler 跑在事件循环线程上，必须 `await import_urls_async(...)`——它把同一份阻塞工作（数据库写入，外加每个 URL 一次串行远端探测）连同请求上下文一起挪进线程池，因此两条路的授权判定完全一致。从 async handler 调 `import_urls` 会在动任何东西之前抛 `RuntimeError`：这是开发者错误，以带 traceback 的 `500` 呈现（文案点名该 await 哪个方法），绝不作为面向用户的文案。插件代码**抛出**（`fastapi.HTTPException` 或 `starlette.exceptions.HTTPException` 皆可——前者是后者的子类，两者被接住的方式完全一样）**或返回**的 401 都会被翻译成 424（并记一条事件），不会被误当成会话失效。「插件代码」既指 handler，**也指插件自己的 `Depends(...)` 依赖（嵌套多少层都算）**：FastAPI 在调 endpoint 之前就把依赖解完了，所以把上游检查写进依赖（这是最常见的写法）否则会让一个真 401 漏到浏览器、把用户登出。依赖只覆盖「抛出」那一半——依赖的返回值是作为参数注入的，永远不会变成响应。core 自己的依赖按对象身份**加**定义所在模块双判排除在外，所以 core router 级会话门产生的真 401 仍然原样是 401；生成器（`yield`）依赖与 security scheme 不动。
 
 数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP——写后端 bundle 与构建期 UI 包、本地联调、打包、安装、启动校验、升级/回滚，以及完整拒绝码表：[部署插件 SOP](./deployment-extensions-sop_zh.md)。
+
+### 缺口外扩检索
+
+第五个生产扩展点，让部署插件在逐步推理问答自己的检索不够用时，提供笔记本**之外**的资料线索。它返回的内容绝不是证据：不检索、不打分、不绑定 `[k]` 锚点，不可能改动答案的任何一个字；读者要用它必须先把这条链接导入成一个普通来源，走它自己的解析与权限。
+
+**触发条件**：只在**逐步推理**问答生效——`ask_graph`、深度报告、Knowhow 行补全的检索都够不到这个调用点（它们都不经过 `_run_reasoning_stage`：报告与 Knowhow 各自构造自己的 `ReasoningRetriever` 并直接调 `run()`）；每个检索档位都生效；每次 run **恰好一次**：在检索定型之后（含所选来源图激活与检索器自身的 fail-open 降级）、response-draft 阶段把证据写成正文之前。两个条件之一，都是从这次 run 已经产出的东西里读出来的——零新增查询、零新增模型调用：这次 run 的终态披露步（就是轨迹里已经展示给读者的那条 `intent_coverage_incomplete` skip 步）仍列着一个确认过却从未执行的方向，**或者**证据池（`top_hits + chunks + elements`）薄于当前档位自己的 `ranked_final_floor`。两条都不成立就是零调用。检索本身 fail-open 降级也会落进「证据薄」这一支——轨迹步的措辞刻意不点名原因，因为笔记本确实证据稀薄、和检索自己降级触发的是同一句摘要。
+
+**外发面**：只有一个有界对象 `GapConsultQuery`——插件拿到的仅此而已。`question` 是本轮实际检索所用的审阅措辞（未确认意图时回退到原始问题），截到 `GAP_CONSULT_QUESTION_MAX_CHARS`；`gaps` 最多 `GAP_CONSULT_MAX_GAP_PHRASES` 条已确认却未执行方向的短标签，每条截到 `GAP_CONSULT_PHRASE_MAX_CHARS`。两者外发前都会剥除 `[k]`/【k】引用标记。意图契约的复合串 `research_question`（目标 + 必答主题 + 约束 + 假设）绝不外发——只有用户自己审阅过的原话才会。`GapConsultCallContext` 不携带 notebook id、actor id、source id、证据或检索范围：这一点上插件拿到的身份天生就是空的，靠字段集合本身保证，不靠谁记得去过滤。
+
+**预算与 fail-open**：冻结的 `GapConsultHost` 把一次 contribution 的可用性探测与它的 `consult` 调用一起放进一条私有 `daemon=True` 线程执行——不用线程池，一个挂死插件只在受影响的那次请求上泄漏一条线程，绝不占用全部署都依赖的共享 worker；也不 `contextvars.copy_context()`，插件不会因为跑在这条请求底下就继承它冻结的检索范围、检索 run 或叶子 I/O 扇出槽位——主线程按 50ms 分片 `join`，对着一个覆盖**整次调用**（探测与 `consult` 两半都算）的硬墙钟 deadline（`ASK_GAP_CONSULT_TIMEOUT_SECONDS`，默认 4.0 秒，`0 < x ≤ 30`）。这份预算花在读者拿到答案**之前**——与上文那些协作式的完成后 deadline 不同，这里每一秒都是答案的等待时间——所以默认值小、上限也收得紧。**一个真挂死的插件每次受影响的请求都会泄漏一条 daemon 线程；这是已登记、已接受的代价，不是缺陷——熔断器留待后续。** 除了干净、按时、形状正确的响应之外，其余一律 fail-open 且对读者静默：没有注册的 host、休眠的扩展点（`has_contributions()` 为 `False`）、畸形调用上下文、抛异常的 contributor、预算耗尽，或者 host 答出一个端口从未承诺过的形状——全部返回 `()`，答案与接入前逐字相同。唯一的例外是取消，它会继续传播（`AskCancelled`）。净化（title 非空；`url` 限定 `http`/`https`、host 非空、无控制字符，且绝不截断——截短的 URL 是一个悄悄指向别处的错误目的地，超长的直接丢弃；summary/source_label 裁剪截断）发生在 host 里、插件返回**之后**，插件自己够不到这一步。
+
+**可用性**：插件像其它任何 contributor 一样，经自己 manifest 的 `provides` 声明它探测的 capability；核心侧不新增专属开关，共用既有部署插件机制。没有注册任何 `ask.gap_consult` 插件的部署零时钟读取、零探测调用、零事件——`consult()` 在任何校验之前就是严格 no-op。
+
+**导入**：建议面板的「导入」按钮走与其它链接导入完全同一个核心 URL 导入端点（`POST /notebooks/{id}/sources/url`，`sources:write` 能力——只读成员看不到这个按钮）。端点只接受 PDF 直链（`remote_sources.probe_pdf`，跟随重定向，但要求最终 URL 是 `application/pdf`/`%PDF-`）：插件必须指向文件本身，不能是落地页或摘要页。拒绝原因逐字显示在面板里，与既有链接导入的交互一致；插件自己永远不知道导入是否成功。
+
+**从头到尾都不是证据**：`AskGapSuggestion`（`title`/`url`/`summary`/`source_label`——没有 `source_id`、`element_id`、相关度分数或引用键）挂在 `AskResponse.gap_suggestions` 上，`exclude_if` 空，所以没有插件的部署与所有历史 payload 逐字节相同。它由 core 在 response-draft 阶段返回**之后**填充——绝不经过 `ResponseDraftInput`——所以回答模型从未看到它，它既不进 `anchors` 也不进 `citations`，且像其它响应字段一样能扛过持久化/重开。`conversation_public_view` 的白名单投影不带它，公开分享的会话因此从不披露它。`gap_consult` 轨迹步（前端标签「外扩」）只记触发理由（`uncovered_directions`/`thin_evidence`）、发出了几个缺口短语、收到了几条建议——绝不记问题原文或某条建议的标题/URL。
+
+| 上限 | 取值 |
+| --- | ---: |
+| `GAP_CONSULT_MAX_GAP_PHRASES` | 2 |
+| `GAP_CONSULT_MAX_SUGGESTIONS` | 5 |
+| `GAP_CONSULT_QUESTION_MAX_CHARS` | 300 |
+| `GAP_CONSULT_PHRASE_MAX_CHARS` | 60 |
+| `GAP_SUGGESTION_TITLE_MAX_CHARS` | 200 |
+| `GAP_SUGGESTION_SUMMARY_MAX_CHARS` | 400 |
+| `GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS` | 40 |
+| `GAP_SUGGESTION_URL_MAX_CHARS` | 2,048 |
+| `ASK_GAP_CONSULT_TIMEOUT_SECONDS`（默认值；部署可配置，`0 < x ≤ 30`） | 4.0 |
 
 ## 管理员用户活动日志（`/dev/logs`）
 

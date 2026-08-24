@@ -15,6 +15,8 @@ Ask 完成后扩展点使用部署配置的协作式 deadline：已开始的同�
 
 Report 完成后扩展点使用独立的部署 deadline。取消或失去终态认领权的旧 generation 不能伪造完成票据：SQLite/PostgreSQL 都用带状态谓词的同一原子 CAS 发布 `done`，只有提交成功才进入 observer host。
 
+第五个扩展点 `ask.gap_consult` 让部署插件在逐步推理问答收尾时——遇到已确认却未执行的检索方向，或证据池薄于该档位自己的下限——提供笔记本之外的资料线索。返回内容绝不是证据：不检索、不打分、不可引用、不进公开会话分享，导入即走一次带自己解析与权限的普通 URL 来源添加。
+
 外部 Agent MCP 由一个 API-owned tool host 发布启动期冻结目录：七个固定 capability bundle 的精确 23 个内建工具，实时 token/成员权复核、owner-only 写闸、Memory candidate 审核边界、repository/model I/O 与「恰好一次 progress wrapper」不变量均保持不变。来源面通过 `add_source_file` 接受与浏览器同一注册表里的本地格式，包括 PDF、DOCX、PPTX、表格与 Markdown ZIP；`mcp_server.PUBLIC_TOOLS` 就是这份活目录，仍是工具清单的唯一真源。
 
 已认证的深度报告批量导出现由启动冻结的 single `report.exporter` Provider 执行。默认内建 Markdown provider 只在 repository 连接释放后取得不可变、已完成授权收窄的报告视图；文件名和 `reports.zip` 外壳仍由 core 拥有，畸形批次整体拒绝。浏览器既有单篇 Markdown 下载仍只是对已授权详情的本地呈现，因此不增加请求。未来新增用户可见格式必须在同一个 PR 同步交付 backend provider 与 frontend/API parity。
