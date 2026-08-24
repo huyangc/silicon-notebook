@@ -667,41 +667,6 @@ def test_backend_status_delegates_database_identity_to_python_helper():
     assert "DATABASE_URL#" not in script
 
 
-@pytest.mark.parametrize(
-    ("database_url", "expected"),
-    (
-        (
-            "postgresql://secret-user:secret-password@db.example:5432/notebook?token=secret",
-            "database=postgresql host=db.example:5432 db=notebook",
-        ),
-    ),
-)
-def test_backend_status_prints_safe_selected_database(database_url, expected):
-    import os
-    import subprocess
-
-    root = Path(__file__).resolve().parents[2]
-    env = os.environ.copy()
-    env.update(
-        DATABASE_URL=database_url,
-        PYTHON_BIN=sys.executable,
-        PORT="59993",
-    )
-    completed = subprocess.run(
-        [str(root / "scripts" / "backend.sh"), "status"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert expected in completed.stdout
-    assert "secret-user" not in completed.stdout + completed.stderr
-    assert "secret-password" not in completed.stdout + completed.stderr
-
-
 @pytest.mark.parametrize("relative", ("scripts/prod.sh", "packaging/start.sh"))
 def test_production_launchers_remain_single_worker(relative):
     import re

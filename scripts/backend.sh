@@ -26,14 +26,6 @@ LOG_FILE="${LOG_FILE:-$ROOT_DIR/.local/logs/backend.log}"
 # 大库启动会在 readiness gate 内加载多 GB scale/ANN/PPR 工件；默认允许 30 分钟。
 # 小库仍会立即就绪。可按磁盘/RAM 实测覆盖，脚本会持续打印 phase/detail。
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-1800}"
-# Private test controls keep lifecycle checks fast without changing shipped
-# timeouts or polling cadence when they are unset.
-_PROBE_TIMEOUT_SECONDS="${_SCRIPT_TEST_PROBE_TIMEOUT_SECONDS:-3}"
-_START_POLL_INTERVAL_SECONDS="${_SCRIPT_TEST_START_POLL_INTERVAL_SECONDS:-1}"
-_START_MAX_POLLS="${_SCRIPT_TEST_START_MAX_POLLS:-$START_TIMEOUT_SECONDS}"
-_STOP_POLL_INTERVAL_SECONDS="${_SCRIPT_TEST_STOP_POLL_INTERVAL_SECONDS:-0.5}"
-_TERMINATE_POLL_INTERVAL_SECONDS="${_SCRIPT_TEST_TERMINATE_POLL_INTERVAL_SECONDS:-0.1}"
-_FORCE_KILL_SETTLE_SECONDS="${_SCRIPT_TEST_FORCE_KILL_SETTLE_SECONDS:-1}"
 APP="app.main:app"
 
 if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
@@ -42,24 +34,17 @@ if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 port_pid() {
-  if [[ -n "${_SCRIPT_TEST_PORT_PID_FILE:-}" ]]; then
-    local test_pid
-    test_pid="$(head -1 "$_SCRIPT_TEST_PORT_PID_FILE" 2>/dev/null || true)"
-    [[ "$test_pid" =~ ^[0-9]+$ ]] || return 0
-    kill -0 "$test_pid" 2>/dev/null && echo "$test_pid"
-    return 0
-  fi
   lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
 }
 
 # Shipped auth makes /api/notebooks anonymous requests return 401. Service
 # identity therefore uses only the anonymous readiness document + exact
 # OpenAPI title; readiness=true is a separate start-success condition.
-svc_title() { curl -s -m "$_PROBE_TIMEOUT_SECONDS" "http://$HOST:$PORT/openapi.json" 2>/dev/null \
+svc_title() { curl -s -m 3 "http://$HOST:$PORT/openapi.json" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json;print(json.load(sys.stdin).get('info',{}).get('title','?'))" 2>/dev/null || echo "?"; }
-ready_state() { curl -s -m "$_PROBE_TIMEOUT_SECONDS" "http://$HOST:$PORT/api/ready" 2>/dev/null \
+ready_state() { curl -s -m 3 "http://$HOST:$PORT/api/ready" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json; v=json.load(sys.stdin); print('true' if v.get('ready') is True else 'false')" 2>/dev/null || echo "missing"; }
-ready_summary() { curl -s -m "$_PROBE_TIMEOUT_SECONDS" "http://$HOST:$PORT/api/ready" 2>/dev/null \
+ready_summary() { curl -s -m 3 "http://$HOST:$PORT/api/ready" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json; v=json.load(sys.stdin); print(str(v.get('phase','starting'))+':'+str(v.get('detail','')))" 2>/dev/null || echo "starting:"; }
 is_sn()       { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" != "missing" ]]; }
 is_sn_ready() { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" == "true" ]]; }
@@ -82,12 +67,12 @@ terminate_launched_pid() {
   kill "$pid" 2>/dev/null || true
   for _ in $(seq 1 20); do
     if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
-    sleep "$_TERMINATE_POLL_INTERVAL_SECONDS"
+    sleep 0.1
   done
   kill -9 "$pid" 2>/dev/null || true
   for _ in $(seq 1 20); do
     if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
-    sleep "$_TERMINATE_POLL_INTERVAL_SECONDS"
+    sleep 0.1
   done
   return 1
 }
@@ -117,8 +102,8 @@ cmd_stop() {
   local title; title="$(is_sn && echo silicon-notebook || svc_title)"
   echo "停止 :$PORT 上的服务:PID=$pid(\"$title\")…"
   kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 20); do [[ -z "$(port_pid)" ]] && { echo "✓ 已停止,:$PORT 释放。"; return 0; }; sleep "$_STOP_POLL_INTERVAL_SECONDS"; done
-  echo "  SIGTERM 未释放,强制 kill -9 $pid"; kill -9 "$pid" 2>/dev/null || true; sleep "$_FORCE_KILL_SETTLE_SECONDS"
+  for _ in $(seq 1 20); do [[ -z "$(port_pid)" ]] && { echo "✓ 已停止,:$PORT 释放。"; return 0; }; sleep 0.5; done
+  echo "  SIGTERM 未释放,强制 kill -9 $pid"; kill -9 "$pid" 2>/dev/null || true; sleep 1
   if [[ -z "$(port_pid)" ]]; then echo "✓ 已强制停止。"; else echo "✗ :$PORT 仍被占用,请手动检查。"; return 1; fi
 }
 
@@ -140,12 +125,9 @@ cmd_start() {
   local launched_pid
   ( cd "$ROOT_DIR/backend" && exec nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" ) >>"$LOG_FILE" 2>&1 &
   launched_pid="$!"
-  if [[ -n "${_SCRIPT_TEST_PORT_PID_FILE:-}" ]]; then
-    printf '%s\n' "$launched_pid" >"$_SCRIPT_TEST_PORT_PID_FILE"
-  fi
   echo "  等待就绪（最长 ${START_TIMEOUT_SECONDS}s）"
   local last_summary=""
-  for _ in $(seq 1 "$_START_MAX_POLLS"); do
+  for _ in $(seq 1 "$START_TIMEOUT_SECONDS"); do
     if is_sn_ready; then echo " ok"; echo "✅ 启动成功(PID $(port_pid)):ready=true。"; return 0; fi
     if ! kill -0 "$launched_pid" 2>/dev/null; then
       echo " 失败"; echo "✗ 后端进程提前退出,看日志排错:tail -50 $LOG_FILE"
@@ -162,7 +144,7 @@ cmd_start() {
       terminate_launched_pid "$launched_pid" || true
       return 1
     fi
-    sleep "$_START_POLL_INTERVAL_SECONDS"
+    sleep 1
   done
   echo " 超时"
   terminate_launched_pid "$launched_pid" || true

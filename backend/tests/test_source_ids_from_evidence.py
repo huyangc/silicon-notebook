@@ -6,8 +6,7 @@
 list is a fast path, str/bytes/None go through json.loads (only a malformed
 JSON *string* is swallowed into "no source ids"), and anything else is a
 caller bug that must raise loudly. This file is new — none of the touched
-files in this batch (backend/tests/kg/{test_relink.py,
-test_relink_differential.py}) are a natural home for a knowledge_store-level
+files in this batch (`backend/tests/kg/test_relink.py`) are a natural home for a knowledge_store-level
 pure-function test, so a small dedicated module was added instead of bolting
 an unrelated test onto the relink test files.
 """
