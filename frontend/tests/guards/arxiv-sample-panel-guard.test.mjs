@@ -150,3 +150,38 @@ test("一次什么都没记上的导入会出声，不是静默复位", async ()
     "role=\"status\" 元素必须携带非空提示文本，不能是一个空标签",
   );
 });
+
+test("检索按钮在超过检索词上限时禁用，并给出可见提示（P2-1）", async () => {
+  // 服务端真源是 routes.py::search 现在对超过 MAX_QUERY_TERMS 个词的查询显式
+  // 400（不再由 client.py::build_query_url 静默截断到第 8 个词）。面板必须提供
+  // 同一道护栏：按钮禁用 + 文案，而不是让用户提交后才在错误横幅里读到限制。
+  const source = await panel();
+  const submit = jsxElements(source, "button").find(
+    (element) => element.attributes?.type === "submit",
+  );
+  assert.ok(submit, "找不到 type=\"submit\" 的检索按钮");
+
+  const disabled = submit.bindings?.disabled ?? "";
+  assert.ok(
+    disabled.includes("overQueryTermLimit"),
+    `检索按钮的 disabled 表达式必须包含 overQueryTermLimit —— 实际："${disabled}"`,
+  );
+
+  assert.ok(
+    jsxTextValues(source).some((value) => value.includes("检索词最多")),
+    "面板必须显式提示检索词条数上限，不能只让用户从服务端 400 里学到限制",
+  );
+});
+
+test("runSearch 的防御性重检同样按检索词上限拒绝，而不是只靠按钮禁用态（P2-1）", async () => {
+  // 镜像 handleImport 对 MAX_IMPORT_URLS 的既有防御性重检——按钮已经在超限时
+  // 禁用，这里是给一次绕过按钮的程序化调用（或未来的第二个调用点）兜底，让它
+  // 也不会花一次round trip 去证明服务端会拒绝它。
+  const source = await panel();
+  const runSearch = findFunctionIn(source, COMPONENT, "runSearch");
+  const called = targets(runSearch);
+  assert.ok(
+    called.includes("countQueryTerms"),
+    `runSearch 必须调用 countQueryTerms 做防御性重检 —— 实际调用集合：${JSON.stringify(called)}`,
+  );
+});

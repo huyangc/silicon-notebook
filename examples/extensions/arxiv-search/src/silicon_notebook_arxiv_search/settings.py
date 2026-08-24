@@ -38,6 +38,15 @@ rather than in :mod:`.atom` for the same reason ``search_kwargs`` does: the
 parser is the layer an in-house variant replaces wholesale, so teaching it a
 hard-coded arxiv.org policy would mean the replacement inherits a policy that
 is wrong for it.  Policy belongs to the policy layer.
+
+:func:`mirror_host` is the host-extraction primitive :func:`egress_allowed`
+is built from, and ``.routes``'s import allow-list (``_is_arxiv_url``) shares
+it too — the deployment's own configured mirror should be importable by URL,
+not just quotable in a gap-consult suggestion.  Sharing the primitive is not
+the same as sharing the policy: the import route still layers its own
+arxiv.org-or-subdomain rule on top (a link a person clicked on themselves),
+so the mirror host is one *exact*-match addition to a *wider* base rule
+there, not the *whole* rule the way it is here.
 """
 from __future__ import annotations
 
@@ -151,6 +160,26 @@ def search_kwargs(
     }
 
 
+def mirror_host(base_url: str) -> str:
+    """The lowercase host ``base_url`` resolves to, or ``""`` if unparsable.
+
+    Extracted so nobody hand-rolls a second ``urlsplit(base_url).hostname``.
+    Both :func:`egress_allowed` below and :mod:`.routes`'s import allow-list
+    (``_is_arxiv_url``) need "what host is this deployment's configured
+    mirror" as a primitive — the former to widen its exact-match egress set
+    by one host, the latter to widen its own arxiv.org-or-subdomain rule by
+    the same one. They stay two different *policies* (an exact-match set
+    versus a suffix rule with one exact addition) built from one shared
+    host-extraction convention, not one policy reused twice — see
+    ``routes.py::_is_arxiv_url`` for why the two must not collapse into the
+    same acceptance surface.
+    """
+    try:
+        return urlsplit(base_url).hostname or ""
+    except ValueError:
+        return ""
+
+
 # Egress hosts a URL parsed out of an untrusted upstream feed may point at
 # before this plugin shows it to a person — arXiv's own hosts, or the
 # deployment's own configured mirror.  Deliberately *narrower* than the
@@ -175,7 +204,6 @@ def egress_allowed(url: str, base_url: str) -> bool:
 
     try:
         parsed = urlsplit(url)
-        base = urlsplit(base_url)
     except ValueError:
         return False
     if parsed.scheme not in ("http", "https"):
@@ -183,4 +211,4 @@ def egress_allowed(url: str, base_url: str) -> bool:
     host = parsed.hostname or ""
     if not host:
         return False
-    return host in _EGRESS_HOSTS or host == (base.hostname or "")
+    return host in _EGRESS_HOSTS or host == mirror_host(base_url)

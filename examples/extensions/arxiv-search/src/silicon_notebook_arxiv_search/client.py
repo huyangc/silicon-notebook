@@ -147,6 +147,24 @@ def build_query_url(
     settings model's ``le=20`` bound.  A caller that builds a URL directly
     from this function (bypassing :class:`~.settings.ArxivSearchSettings`
     validation) gets whatever value it passes, floored at 1 below.
+
+    The ``[:MAX_QUERY_TERMS]`` slice below is defence in depth, not the
+    enforcement point, for either caller that reaches this function today.
+    User-edited data must not be silently truncated (repo rule: "数值上限与
+    截断"), so the interactive ``/search`` route now rejects a query with
+    more than ``MAX_QUERY_TERMS`` whitespace-split words with an explicit 400
+    *before* calling here (``routes.py::search``) — the ninth word onward
+    used to vanish with no warning once this slice ran. Gap-consult's own
+    term extractor (``consult.py::_query_terms``) already returns at most
+    ``MAX_QUERY_TERMS`` terms on its own, because its query is a handful of
+    terms this plugin derived from the question and gap phrases, not
+    user-edited text passed straight through — bounding what it constructs is
+    a *construction* ceiling, not a truncation of anything a person typed,
+    the same distinction PR-A's egress minimisation draws for gap-consult's
+    outbound query. This slice exists so a caller that reaches this function
+    directly, bypassing both of the above, still gets a bounded query rather
+    than an unbounded one — not so either of them may rely on it to do their
+    own job.
     """
     terms = query.split()[:MAX_QUERY_TERMS]
     if not terms:

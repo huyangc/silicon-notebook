@@ -51,7 +51,9 @@ import { ExtensionModal } from "../extension-sdk/ui.tsx";
 import {
   FIRST_PAGE_START,
   MAX_IMPORT_URLS,
+  MAX_QUERY_TERMS,
   classifyImportReceipt,
+  countQueryTerms,
   deselectPaper,
   foldImportedUrls,
   formatAuthors,
@@ -107,7 +109,19 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   // and letting a new page land underneath it would clear a selection the user
   // made against results that no longer exist.
   async function runSearch(term: string, nextStart: number) {
-    if (term.length === 0 || searchBusy || importBusy) return;
+    // The submit button is already disabled past the cap (see
+    // `overQueryTermLimit` below); this re-check is the defensive half, the
+    // same shape `handleImport` uses for `MAX_IMPORT_URLS` — so a stray
+    // programmatic call cannot spend a round trip on a query the plugin's
+    // own route will now answer with a 400 instead of silently truncating.
+    if (
+      term.length === 0 ||
+      searchBusy ||
+      importBusy ||
+      countQueryTerms(term) > MAX_QUERY_TERMS
+    ) {
+      return;
+    }
     setSearchBusy(true);
     setSearchError(null);
     try {
@@ -194,6 +208,7 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   }
   const noResults = searched && !searchBusy && !searchError && visibleItems.length === 0;
   const overImportLimit = selected.size > MAX_IMPORT_URLS;
+  const overQueryTermLimit = countQueryTerms(query) > MAX_QUERY_TERMS;
 
   return (
     <>
@@ -225,11 +240,14 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
           <button
             type="submit"
             className="button"
-            disabled={searchBusy || importBusy || query.trim().length === 0}
+            disabled={
+              searchBusy || importBusy || query.trim().length === 0 || overQueryTermLimit
+            }
           >
             {searchBusy ? "检索中…" : "检索"}
           </button>
         </form>
+        {overQueryTermLimit && <p>检索词最多 {MAX_QUERY_TERMS} 个，请精简后重试。</p>}
         {searchError && <p role="alert">{searchError}</p>}
         {noResults && <p>没有找到相关文献，换个关键词试试。</p>}
         {visibleItems.length > 0 && (
