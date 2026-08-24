@@ -8,13 +8,20 @@ which is what makes it the layer an in-house variant replaces wholesale.
 dropped and the rest of the page is still returned.  One malformed record must
 never cost the user the nine good ones beside it.
 
-**Registered limitation — XML entity expansion.**  ``xml.etree`` has no
-defence against entity-expansion ("billion laughs") payloads.  The mitigation
-here is twofold and deliberate rather than complete: the endpoint is
-deployment-configured (it is not user input), and the caller reads the response
-under a byte ceiling, so the parser never sees an unbounded document.  A plugin
-pointed at an untrusted upstream should depend on ``defusedxml`` instead; this
-sample keeps a zero-third-party-dependency footprint on purpose.
+**Registered limitation — XML entity expansion.**  ``xml.etree`` parses through
+libexpat, which has shipped a built-in amplification-factor guard against
+entity-expansion ("billion laughs") payloads since libexpat 2.4 — bundled in
+CPython 3.9.5+, 3.8.10+, 3.7.10+ and 3.6.13+.  That guard, not this module, is
+the actual defence on those runtimes.  The byte ceiling the caller reads under
+(see :mod:`.client`) is *not* a mitigation for this attack class and must not
+be read as one: a payload of a few hundred bytes can still declare an
+expansion factor in the millions, so bounding the wire size bounds network
+cost, not the parser's expanded-memory cost. The one deliberate half of the
+mitigation this sample does own is that the endpoint is deployment-configured
+rather than user input — nobody can point this module at an untrusted URL
+without first editing a TOML file. A plugin pointed at an untrusted upstream
+should depend on ``defusedxml`` instead; this sample keeps a
+zero-third-party-dependency footprint on purpose.
 """
 from __future__ import annotations
 
@@ -31,6 +38,7 @@ TITLE_MAX_CHARS = 200
 SUMMARY_MAX_CHARS = 400
 AUTHOR_MAX_CHARS = 80
 PUBLISHED_MAX_CHARS = 40
+ARXIV_ID_MAX_CHARS = 64
 MAX_AUTHORS = 20
 
 _ABS_BASE = "https://arxiv.org/abs/"
@@ -134,6 +142,8 @@ def _arxiv_id(raw: str) -> str:
         value = value.split("/abs/", 1)[1]
     elif "/" in value:
         value = value.rsplit("/", 1)[1]
+    if len(value) > ARXIV_ID_MAX_CHARS:
+        return ""
     return value if _ID_SHAPE.match(value) else ""
 
 

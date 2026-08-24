@@ -159,6 +159,61 @@ def test_entry_count_is_capped_by_limit(sample_feed):
     assert arxiv_atom.parse_atom(sample_feed, limit=-3) == ()
 
 
+def test_parse_atom_short_circuits_on_nonpositive_limit_even_for_malformed_input():
+    # The ``limit <= 0`` guard must fire before ``ElementTree.fromstring`` ever
+    # sees the payload — proven here with input that would raise if parsed.
+    assert arxiv_atom.parse_atom(b"<truncated", limit=0) == ()
+    assert arxiv_atom.parse_atom(b"<truncated", limit=-1) == ()
+
+
+def test_arxiv_id_over_the_length_ceiling_is_dropped():
+    # A pathological <id> must not sail through unbounded: every other field
+    # on ArxivPaper is already capped, and the id was the one exception.
+    huge_id = "2401." + "0" * 5000 + "v1"
+    payload = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        "<entry>"
+        f"<id>http://arxiv.org/abs/{huge_id}</id>"
+        "<title>Oversized identifier</title>"
+        "</entry>"
+        "<entry>"
+        "<id>http://arxiv.org/abs/2401.00099v1</id>"
+        "<title>Ordinary identifier</title>"
+        "</entry>"
+        "</feed>"
+    ).encode("utf-8")
+
+    papers = arxiv_atom.parse_atom(payload, limit=10)
+
+    assert len(papers) == 1
+    assert papers[0].arxiv_id == "2401.00099v1"
+
+
+def test_pure_layer_cannot_reach_the_backend():
+    """Neither ``atom`` nor ``client`` may import anything under ``app.``.
+
+    ``test_parser_performs_no_io`` above already whitelists ``atom``'s exact
+    import set and is left untouched; this is a separate, narrower assertion
+    that covers both pure-layer modules against the one thing that would
+    actually breach the layering the package docstring promises — a plugin
+    author reaching for ``app.*`` for its side effects without ever calling
+    into it, which a behavioural "no I/O happens" test cannot see at all.
+    """
+    for module in (arxiv_atom, arxiv_client):
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+        backend_imports = {
+            name for name in imported if name == "app" or name.startswith("app.")
+        }
+        assert not backend_imports, (module.__name__, sorted(backend_imports))
+
+
 def test_parser_performs_no_io(sample_feed, monkeypatch):
     calls: list[tuple] = []
 
@@ -234,8 +289,13 @@ def test_throttle_serializes_and_spaces_requests(sample_feed):
     assert len(windows) == 2
     # Serialised: the lock spans the whole call, so the windows cannot overlap.
     assert windows[1][0] >= windows[0][1]
-    # Spaced: and the second one waited out the politeness interval too.
-    assert windows[1][0] - windows[0][0] >= interval
+    # Spaced: measured end-to-start, matching release_slot's own documented
+    # contract ("the interval is measured from the end of one request to the
+    # start of the next").  A start-to-start comparison here would still pass
+    # if the stamp were taken on acquire instead of release, because the first
+    # request's own 0.02s of work time gets silently credited toward the
+    # interval; end-to-start does not give that credit.
+    assert windows[1][0] - windows[0][1] >= interval
 
 
 def test_throttle_refuses_rather_than_sleeping_past_the_budget():
@@ -298,6 +358,95 @@ def test_throttle_lock_is_released_on_exception():
     arxiv_client.release_slot()
 
 
+def test_search_distinguishes_throttled_from_upstream_failure():
+    # Hold the throttle from another thread so this call's own acquire_slot
+    # has no way to succeed inside its tiny budget.
+    held = threading.Event()
+    may_release = threading.Event()
+    calls: list[tuple] = []
+
+    def spy(url, timeout, user_agent):
+        calls.append((url, timeout, user_agent))
+        return b""
+
+    def holder():
+        if arxiv_client.acquire_slot(0.0, 5.0):
+            held.set()
+            may_release.wait(5.0)
+            arxiv_client.release_slot()
+
+    holder_thread = threading.Thread(target=holder)
+    holder_thread.start()
+    assert held.wait(5.0)
+
+    try:
+        with pytest.raises(arxiv_client.ArxivThrottled):
+            arxiv_client.search(
+                "graph neural networks",
+                fetch=spy,
+                **_search_kwargs(budget_seconds=0.05, politeness_interval_seconds=0.0),
+            )
+    finally:
+        may_release.set()
+        holder_thread.join(5.0)
+
+    # The two outcomes must stay distinguishable at the ``search()`` boundary:
+    # a throttle refusal is diagnosed before ``fetch`` is ever called, unlike
+    # an ``ArxivUpstreamError`` raised by a failing ``fetch``.
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# search() with a non-positive limit
+# --------------------------------------------------------------------------
+
+
+def test_search_returns_empty_without_fetching_when_limit_is_not_positive():
+    calls: list[tuple] = []
+
+    def spy(url, timeout, user_agent):
+        calls.append((url, timeout, user_agent))
+        return b""
+
+    assert (
+        arxiv_client.search("graph neural networks", fetch=spy, **_search_kwargs(limit=0))
+        == ()
+    )
+    assert arxiv_client.search(
+        "graph neural networks", fetch=spy, **_search_kwargs(limit=-3)
+    ) == ()
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# _fetch()
+# --------------------------------------------------------------------------
+
+
+def test_fetch_reads_at_most_the_response_byte_ceiling(monkeypatch):
+    read_calls: list[int] = []
+
+    class _FakeResponse:
+        def read(self, n=-1):
+            read_calls.append(n)
+            return b"<feed></feed>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    arxiv_client._fetch("https://export.arxiv.example/api/query", 1.0, "test-agent")
+
+    assert read_calls == [arxiv_client.MAX_RESPONSE_BYTES]
+
+
 # --------------------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------------------
@@ -342,3 +491,30 @@ def test_settings_reject_an_unknown_key():
     # wrong shape to anyone copying it.
     with pytest.raises(ValidationError):
         ArxivSearchSettings(politeness_interval=1.0)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "file:///etc/passwd",
+        "",
+        "not a url",
+        "https://export.arxiv.org/api/query#frag",
+        "https://export.arxiv.org/api/query?x=1",
+    ],
+)
+def test_settings_reject_invalid_base_url(base_url):
+    with pytest.raises(ValidationError):
+        ArxivSearchSettings(base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://export.arxiv.org/api/query",
+        "https://export.arxiv.org/api/query",
+        "https://mirror.example.com:8443/api/query",
+    ],
+)
+def test_settings_accept_valid_base_url(base_url):
+    assert ArxivSearchSettings(base_url=base_url).base_url == base_url
