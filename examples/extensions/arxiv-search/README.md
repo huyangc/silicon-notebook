@@ -95,10 +95,18 @@ coupling**. Core owns its own independent limit; this plugin could raise or
 lower its own without breaking anything on core's side.
 
 **`MAX_QUERY_TERMS` is user-visible behaviour, and it must be understood as
-such.** When a user's search box query has more than 8 words, the ninth word
-onward is **silently dropped** before the request reaches arXiv
-(`build_query_url` takes `query.split()[:MAX_QUERY_TERMS]`). The interface
-gives no warning when this happens.
+such.** `routes.py::search` rejects a search-box query of more than 8
+whitespace-split words with an explicit 400 (`检索词最多 8 个，请精简后重试`),
+before the throttle or arXiv are touched, and the panel disables its submit
+button and shows the same message once the box holds more than 8 words. The
+ninth word onward is **not** silently dropped: `build_query_url`'s own
+`query.split()[:MAX_QUERY_TERMS]` slice still exists, but only as defence in
+depth for a caller that reaches it directly — the route already refused any
+input the slice would have had to truncate, and gap-consult's own term
+extractor (`consult.py::_query_terms`) already bounds itself to
+`MAX_QUERY_TERMS` terms before calling in, because its query is a handful of
+terms this plugin derived from the question and gap phrases, not user-edited
+text passed straight through.
 
 ## 4. Behaviour disclosures
 
@@ -208,9 +216,16 @@ deployment's own configured `base_url`**. So if `base_url` points at an
 internal mirror, and that mirror's Atom feed returns PDF links on a
 **third**, different host, those suggestions are **silently dropped**
 (fail-safe by design). Note that the import route's own allow-list is
-wider (any `*.arxiv.org` subdomain) — the two are deliberately different: a
-result the user clicked on themselves gets the more permissive check; an
-unbidden gap-consult suggestion nobody asked for gets the narrower one.
+wider (any `*.arxiv.org` subdomain, **plus an exact match of the
+deployment's own configured mirror host** — a mirror's own PDF links can be
+imported directly, not just quoted in a gap-consult suggestion) — the two
+are deliberately different: a result the user clicked on themselves gets
+the more permissive check; an unbidden gap-consult suggestion nobody asked
+for gets the narrower one. The mirror addition on the import side is
+strictly an **exact** host match, never a second suffix rule — widening it
+to `*.<mirror>` would let a caller import `<mirror>.evil.example` on the
+strength of a deployment's own configuration, so `sub.<mirror>` is refused
+the same as any other foreign host.
 
 ## 5. Other registered limitations
 

@@ -83,6 +83,43 @@ export const FIRST_PAGE_START = 0;
 export const MAX_IMPORT_URLS = 20;
 
 /**
+ * The most whitespace-split words a search query may carry.
+ *
+ * The **authoritative** bound is the plugin's own server-side
+ * `routes.py::search`, which rejects an over-limit query with a 400 —
+ * silently truncating user-edited input (what `client.py::build_query_url`'s
+ * `[:MAX_QUERY_TERMS]` slice used to do, with no warning) is a red line the
+ * server-side fix closes. This constant exists for the same reason
+ * {@link MAX_IMPORT_URLS} does: so the panel can disable its own submit
+ * button and say why, rather than letting someone submit a ten-word query
+ * and learn the limit from an error banner.
+ *
+ * The number is spelled twice, once per language, and drift is safe in only
+ * one direction (a panel stricter than the server is merely conservative; a
+ * panel looser than the server surfaces the 400 verbatim) — the same
+ * asymmetry {@link MAX_IMPORT_URLS}'s doc comment explains, and the same
+ * reason the two are reconciled by a regex test:
+ * `backend/tests/test_arxiv_sample_plugin.py::test_the_ui_package_query_term_cap_matches_the_route_cap`,
+ * in the G1 lane. Keep the `export const MAX_QUERY_TERMS = <n>;` shape it
+ * matches on.
+ */
+export const MAX_QUERY_TERMS = 8;
+
+/**
+ * The number of whitespace-split words in `query`, using the exact same
+ * splitting rule the server does (`client.py::build_query_url`'s bare
+ * `query.split()`, which Python defines as "split on runs of whitespace,
+ * ignoring leading/trailing whitespace, drop empty pieces"). A blank or
+ * whitespace-only query counts as zero words, matching Python's
+ * `"".split() == []` and `"   ".split() == []` rather than JavaScript's
+ * `"".split(/\s+/)`, which would otherwise report one (empty) word.
+ */
+export function countQueryTerms(query: string): number {
+  const trimmed = query.trim();
+  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
+}
+
+/**
  * Add `arxivId` to the selection. Idempotent: selecting an already-selected
  * id returns the very same `selected` reference rather than a new Set, so a
  * caller that stores this in `useState` does not trigger an extra render on

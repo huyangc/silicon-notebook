@@ -76,6 +76,8 @@ from silicon_notebook_arxiv_search.bundle import (  # noqa: E402
 )
 from silicon_notebook_arxiv_search.settings import (  # noqa: E402
     ArxivSearchSettings,
+    egress_allowed,
+    mirror_host,
     search_kwargs,
 )
 
@@ -579,6 +581,39 @@ def test_settings_reject_blank_or_control_character_user_agent(user_agent):
 def test_settings_accept_an_ordinary_user_agent():
     value = "some-deployment/2.0 (+https://example.com/bot)"
     assert ArxivSearchSettings(user_agent=value).user_agent == value
+
+
+def test_mirror_host_extracts_a_lowercase_host_and_is_blank_on_failure():
+    """The primitive :func:`egress_allowed` and ``routes.py::_is_arxiv_url``
+    now both build their mirror-host check from.
+
+    ``hostname`` lowercases and drops the port — the same normalisation the
+    import route's own arxiv.org suffix check already relies on (see
+    ``test_import_route_accepts_host_shapes_that_still_resolve_to_arxiv``) —
+    and an unparsable value degrades to ``""`` rather than raising, so a
+    caller comparing against it (never equal to a real hostname) fails safe.
+    """
+
+    assert mirror_host("https://export.arxiv.example/api/query") == "export.arxiv.example"
+    assert mirror_host("https://EXPORT.ARXIV.EXAMPLE:8443/x") == "export.arxiv.example"
+    assert mirror_host("") == ""
+
+
+def test_egress_allowed_still_accepts_only_arxivs_own_hosts_and_the_configured_mirror():
+    """The refactor that extracted :func:`mirror_host` must not widen or
+    narrow :func:`egress_allowed`'s own exact-match set — it is intentionally
+    narrower than the import route's suffix rule (see the module docstring).
+    """
+
+    base_url = "https://export.arxiv.example/api/query"
+    assert egress_allowed("https://arxiv.org/pdf/x", base_url) is True
+    assert egress_allowed("https://export.arxiv.org/pdf/x", base_url) is True
+    assert egress_allowed("https://export.arxiv.example/pdf/x", base_url) is True
+    # No suffix widening: a subdomain of the mirror is not the mirror.
+    assert egress_allowed("https://sub.export.arxiv.example/pdf/x", base_url) is False
+    assert egress_allowed("https://evil.example/pdf/x", base_url) is False
+    # An unparsable configured mirror must not make everything compare equal.
+    assert egress_allowed("https://evil.example/pdf/x", "not a url") is False
 
 
 def test_example_toml_worst_case_arithmetic_matches_the_constants():
@@ -1129,6 +1164,50 @@ def test_search_route_rejects_a_start_beyond_the_plugin_bound(monkeypatch):
     assert calls == []
 
 
+def test_search_route_rejects_over_limit_query_terms_instead_of_silently_dropping_them(
+    monkeypatch, sample_feed
+):
+    """Silent truncation of user-edited data is a red line this closes.
+
+    ``client.py::build_query_url`` slices to ``MAX_QUERY_TERMS`` internally —
+    that used to be the *only* enforcement, so the ninth word onward of a
+    query vanished with no warning by the time it reached arXiv. The route
+    must now refuse explicitly, before the throttle or the network are
+    touched, using the exact same whitespace-split counting rule the slice
+    uses; a query at the limit must still reach arXiv with every word intact.
+    """
+
+    calls: list[str] = []
+
+    def stub(url, timeout, user_agent):
+        calls.append(url)
+        return sample_feed
+
+    monkeypatch.setattr(arxiv_client, "_fetch", stub)
+
+    context, _ = _route_context(_test_settings(max_results=1))
+    search = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/search", "GET"
+    ).endpoint
+
+    over_limit = " ".join(f"term{i}" for i in range(arxiv_client.MAX_QUERY_TERMS + 1))
+    with pytest.raises(_UserError) as error:
+        search(notebook_id="nb-1", q=over_limit)
+    assert error.value.status_code == 400
+    # A refusal is a refusal: zero network cost, zero throttle slot.
+    assert calls == []
+
+    at_limit = " ".join(f"term{i}" for i in range(arxiv_client.MAX_QUERY_TERMS))
+    search(notebook_id="nb-1", q=at_limit)
+
+    assert len(calls) == 1
+    query = parse_qs(urlsplit(calls[0]).query)
+    # All eight words reached arXiv — none silently dropped.
+    assert query["search_query"] == [
+        " AND ".join(f"all:{term}" for term in at_limit.split())
+    ]
+
+
 def test_search_route_returns_a_page_and_reports_has_more(monkeypatch, sample_feed):
     seen: list[str] = []
 
@@ -1346,6 +1425,81 @@ def test_import_route_accepts_host_shapes_that_still_resolve_to_arxiv(url):
     assert len(sources.calls) == 1
 
 
+def test_import_route_accepts_the_configured_mirror_host():
+    """The import allow-list now also accepts this deployment's own mirror.
+
+    ``_test_settings()``'s ``base_url`` host is ``export.arxiv.example`` —
+    deliberately not a ``*.arxiv.org`` subdomain — so this exercises a
+    genuinely new acceptance, not one the pre-existing suffix rule already
+    covered.
+    """
+
+    sources = _UrlSourcesSpy()
+    context, _ = _route_context(_test_settings(), url_sources=sources)
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    handler(
+        notebook_id="nb-1",
+        payload={"urls": ["https://export.arxiv.example/pdf/2401.00001v1"]},
+    )
+    assert len(sources.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # A subdomain of the mirror is not the mirror: widening the addition
+        # to a suffix rule would let a caller import
+        # ``<mirror>.evil.example`` on the strength of a deployment's own
+        # configuration — the mirror addition must stay an *exact* match.
+        "https://sub.export.arxiv.example/pdf/x",
+        "https://export.arxiv.example.evil.example/pdf/x",
+        # The userinfo trick, mirrored against the configured host instead of
+        # arxiv.org (see ``test_import_route_rejects_a_non_arxiv_host_before_touching_the_port``):
+        # the *host* here is ``evil.example``, and ``export.arxiv.example@``
+        # is only ever the userinfo.
+        "https://export.arxiv.example@evil.example/pdf/x",
+    ],
+)
+def test_import_route_rejects_lookalikes_of_the_configured_mirror_host(url):
+    sources = _UrlSourcesSpy()
+    context, _ = _route_context(_test_settings(), url_sources=sources)
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    with pytest.raises(_UserError) as error:
+        handler(notebook_id="nb-1", payload={"urls": [url]})
+    assert error.value.status_code == 400
+    assert sources.calls == []
+
+
+def test_import_route_without_configured_settings_still_accepts_plain_arxiv_links():
+    """The mirror addition must not disturb the settings-less baseline.
+
+    This route has never required the plugin to be "configured" in order to
+    import a plain arxiv.org link — only ``/search`` requires settings (see
+    ``test_search_route_refuses_when_the_plugin_is_unconfigured``) — so a
+    ``None`` settings context (nothing to widen the allow-list with) must
+    fall back to exactly the pre-existing arxiv.org-or-subdomain behaviour
+    rather than erroring or rejecting.
+    """
+
+    sources = _UrlSourcesSpy()
+    context, _ = _route_context(None, url_sources=sources)
+    handler = _route(
+        arxiv_routes.build_router(context), "/notebooks/{notebook_id}/import", "POST"
+    ).endpoint
+
+    handler(
+        notebook_id="nb-1",
+        payload={"urls": ["https://arxiv.org/pdf/2401.00001v1"]},
+    )
+    assert len(sources.calls) == 1
+
+
 def test_import_route_gives_a_distinct_message_for_an_overlong_legitimate_link():
     """A legitimate-host link that is merely too long is not a foreign host.
 
@@ -1480,6 +1634,29 @@ def test_the_ui_package_import_cap_matches_the_route_cap():
         "be there, just not in the exact form this regex expects"
     )
     assert int(match.group(1)) == arxiv_routes.MAX_IMPORT_URLS
+
+
+def test_the_ui_package_query_term_cap_matches_the_route_cap():
+    """The query-term ceiling is spelled twice, once per language — same
+    shape as :func:`test_the_ui_package_import_cap_matches_the_route_cap`
+    above, for the same reason: ``client.py::MAX_QUERY_TERMS`` (the route
+    now rejects a query over this bound explicitly, before ever calling
+    ``build_query_url``) is the authoritative number, and the TypeScript
+    constant only exists so the panel can disable its submit button and say
+    why instead of letting someone submit a ten-word query and learn the
+    limit from an error banner.
+    """
+
+    source = (
+        _PLUGIN_ROOT / "ui" / "arxiv-search" / "search-panel-model.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"export const MAX_QUERY_TERMS = (\d+);", source)
+    assert match is not None, (
+        "the UI package's source no longer matches the "
+        "`export const MAX_QUERY_TERMS = <n>;` shape — the export may still "
+        "be there, just not in the exact form this regex expects"
+    )
+    assert int(match.group(1)) == arxiv_client.MAX_QUERY_TERMS
 
 
 def test_import_route_emits_only_whitelisted_event_fields():

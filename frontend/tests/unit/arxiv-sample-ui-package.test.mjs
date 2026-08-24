@@ -35,7 +35,9 @@ import { inspectPackage, validateManifest } from "../../scripts/sync-ui-plugins.
 import {
   FIRST_PAGE_START,
   MAX_IMPORT_URLS,
+  MAX_QUERY_TERMS,
   classifyImportReceipt,
+  countQueryTerms,
   deselectPaper,
   foldImportedUrls,
   formatAuthors,
@@ -166,6 +168,33 @@ test("search-panel-model：一次导入的条数上限与插件路由同值", ()
   // 同一条口径，真正的跨语言对账属于 T4）。抄写方向是安全的——服务端调高而这里
   // 没跟上只是更严，调低了前端照发、400 原样上屏。
   assert.equal(MAX_IMPORT_URLS, 20);
+});
+
+
+test("search-panel-model：检索词条数上限与插件路由同值", () => {
+  // 服务端真源是 client.py::MAX_QUERY_TERMS（routes.py::search 现在超限即以
+  // 400 拒绝，不再静默截断）。与上面 MAX_IMPORT_URLS 同一条口径——手抄一份而不
+  // 读 .py，抄写方向安全：服务端调高而这里没跟上只是更保守，调低了前端照发、
+  // 400 原样上屏。跨语言对账属于 backend 侧的
+  // test_the_ui_package_query_term_cap_matches_the_route_cap。
+  assert.equal(MAX_QUERY_TERMS, 8);
+});
+
+
+test("search-panel-model：countQueryTerms 按空白分词计数，空串/纯空白记零", () => {
+  // 与服务端 `client.py::build_query_url` 的裸 `query.split()` 同一条分词
+  // 口径：按任意空白游程切分，忽略首尾空白，空/纯空白记零个词（Python
+  // `"".split() == []`，而不是 JS 原生 `"".split(/\s+/)` 会给出的长度为 1）。
+  assert.equal(countQueryTerms(""), 0);
+  assert.equal(countQueryTerms("   "), 0);
+  assert.equal(countQueryTerms("diffusion"), 1);
+  assert.equal(countQueryTerms("diffusion model"), 2);
+  // 词间/首尾的多重空白（含制表符、换行）折叠——按词数而不是按空白字符数计。
+  assert.equal(countQueryTerms("  a\tb\n\nc   "), 3);
+
+  const atLimit = Array.from({ length: MAX_QUERY_TERMS }, (_, i) => `t${i}`).join(" ");
+  assert.equal(countQueryTerms(atLimit), MAX_QUERY_TERMS);
+  assert.equal(countQueryTerms(`${atLimit} one-too-many`), MAX_QUERY_TERMS + 1);
 });
 
 

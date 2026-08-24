@@ -12,10 +12,11 @@ of those would stall every other in-flight request in the process; core refuses
 the first one at runtime rather than letting it happen quietly.
 
 **The import allow-list runs before the port is touched.**  Core's own URL
-import accepts any public URL, so restricting this route to ``arxiv.org`` is
-not a privilege boundary — the port would authorize the caller either way.  It
-is a *shape*: a plugin route that forwards arbitrary URLs to core's importer is
-a general-purpose import proxy wearing an arXiv label, and a sample should
+import accepts any public URL, so restricting this route to ``arxiv.org`` (and
+this deployment's own configured mirror — see ``_is_arxiv_url``) is not a
+privilege boundary — the port would authorize the caller either way.  It is a
+*shape*: a plugin route that forwards arbitrary URLs to core's importer is a
+general-purpose import proxy wearing an arXiv label, and a sample should
 demonstrate the narrowest thing that does the job.
 
 **No exception text ever leaves this module.**  Upstream failures become one
@@ -38,7 +39,7 @@ from app.extension_sdk.http import PluginRouteContext
 
 from . import client as arxiv_client
 from .atom import ArxivPaper
-from .settings import ArxivSearchSettings, egress_allowed, search_kwargs
+from .settings import ArxivSearchSettings, egress_allowed, mirror_host, search_kwargs
 
 LOGGER = logging.getLogger("silicon_notebook_arxiv_search")
 
@@ -99,6 +100,18 @@ def build_router(context: PluginRouteContext) -> APIRouter:
             raise context.user_error(400, "请输入检索关键词")
         if len(query) > QUERY_MAX_CHARS:
             raise context.user_error(400, "检索关键词过长，请精简后再试")
+        # Silently truncating user-edited input is a red line (repo rule:
+        # "数值上限与截断" — the API must reject over-limit input explicitly,
+        # not clip it). This used to be exactly what happened here: the ninth
+        # word onward vanished with no warning, because ``build_query_url``
+        # slices to ``MAX_QUERY_TERMS`` internally. Reject explicitly, before
+        # the throttle or arXiv are touched, using the same whitespace-split
+        # counting rule ``build_query_url`` uses.
+        if len(query.split()) > arxiv_client.MAX_QUERY_TERMS:
+            raise context.user_error(
+                400,
+                f"检索词最多 {arxiv_client.MAX_QUERY_TERMS} 个，请精简后重试",
+            )
         if start < 0:
             raise context.user_error(400, "翻页位置不能为负数")
         if start > START_MAX:
@@ -138,7 +151,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
     ) -> dict[str, object]:
         """Import selected arXiv PDF links through core's own URL importer."""
 
-        urls = _import_urls(context, payload)
+        urls = _import_urls(context, payload, _settings(context))
         result = context.url_sources.import_urls(notebook_id, urls)
         context.emit_event(
             {"event": "arxiv_urls_imported", "count": len(result.created)}
@@ -255,12 +268,23 @@ def _paper_row(
     }
 
 
-def _import_urls(context: PluginRouteContext, payload: object) -> list[str]:
+def _import_urls(
+    context: PluginRouteContext,
+    payload: object,
+    settings: ArxivSearchSettings | None,
+) -> list[str]:
     """Validate the request body, or refuse before core's port is called.
 
     Every check here happens *before* ``url_sources`` is touched — that
     ordering is the point of the allow-list, not an optimisation, and it is
     asserted with a spy that must record zero calls.
+
+    ``settings`` is looked up via ``_settings(context)`` rather than
+    ``_require_settings`` at the call site: this route has never required
+    the plugin to be "configured" in order to import a plain arxiv.org link
+    (only ``/search`` does), and ``None`` here simply means there is no
+    configured mirror host to widen the allow-list with — see
+    ``_is_arxiv_url``.
     """
 
     if not isinstance(payload, dict):
@@ -284,7 +308,7 @@ def _import_urls(context: PluginRouteContext, payload: object) -> list[str]:
         # problem from one that was never going to arXiv at all, and sharing
         # one sentence between them would tell a caller the wrong thing to
         # fix.
-        if not _is_arxiv_url(url):
+        if not _is_arxiv_url(url, settings):
             raise context.user_error(400, "只能导入 arXiv 的 PDF 链接")
         if len(url) > MAX_URL_CHARS:
             raise context.user_error(
@@ -294,13 +318,27 @@ def _import_urls(context: PluginRouteContext, payload: object) -> list[str]:
     return urls
 
 
-def _is_arxiv_url(url: str) -> bool:
-    """True for an ``http(s)`` URL whose host is arxiv.org or a subdomain.
+def _is_arxiv_url(url: str, settings: ArxivSearchSettings | None) -> bool:
+    """True for an ``http(s)`` URL whose host is arxiv.org, a subdomain of
+    it, or this deployment's own configured mirror host.
 
     ``urlsplit(...).hostname`` is what makes the suffix test safe: it lowercases
     the host, drops any port, and drops any ``user@`` prefix, so neither
     ``https://arxiv.org@evil.example/x`` nor ``https://ARXIV.ORG.evil.example/x``
     can be read as an arXiv host.
+
+    The mirror branch reuses :func:`~.settings.mirror_host` — the same
+    host-extraction convention :func:`~.settings.egress_allowed` is built
+    from — rather than a third hand-rolled ``urlsplit(...).hostname`` in this
+    module. It is deliberately an *exact* match, not a second suffix rule:
+    widening it to ``*.<mirror>`` would let a caller import
+    ``<mirror>.evil.example`` on the strength of a deployment's own
+    configuration, the same shape of hostile input the arxiv.org branch above
+    is already careful about. ``settings`` may be ``None`` — this route has
+    never required the plugin to be "configured" to import a plain arxiv.org
+    link — in which case there is simply no mirror host to add and this
+    function falls back to exactly its pre-existing arxiv.org-or-subdomain
+    behaviour.
     """
 
     try:
@@ -310,4 +348,8 @@ def _is_arxiv_url(url: str) -> bool:
     if parsed.scheme not in ("http", "https"):
         return False
     host = parsed.hostname or ""
-    return host == _IMPORT_HOST or host.endswith(_IMPORT_HOST_SUFFIX)
+    if not host:
+        return False
+    if host == _IMPORT_HOST or host.endswith(_IMPORT_HOST_SUFFIX):
+        return True
+    return settings is not None and host == mirror_host(settings.base_url)
