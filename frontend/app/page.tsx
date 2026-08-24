@@ -5696,7 +5696,9 @@ export default function Home() {
                             onOpenSource={onOpenSourceElement}
                             notebookId={currentNotebookId}
                             notebookNames={notebookNames}
-                            onBuildScaleIndex={() => runScaleIndexOp("build")}
+                            // 构建索引的 POST 走 kg:write(admin 档),只读成员点了必 403:
+                            // 不下发承接方,AnswerView 会保留横幅诊断、只收起按钮。
+                            onBuildScaleIndex={readOnlyWorkspace ? undefined : (() => runScaleIndexOp("build"))}
                             buildingScaleIndex={buildingScaleIndex}
                             scaleIndexStatus={scaleIndexStatus}
                             onSaveMemory={openMemorySave}
