@@ -1661,11 +1661,11 @@ class RepositoryFacade:
         notebook_id: str,
         urls: Iterable[str],
         scheduler: Optional[Callable[[str], None]] = None,
-        capacity: Optional[int] = None,
+        capacity_limit: Optional[int] = None,
         agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
         return self._runtime.source_ingestion.add_url_sources_compat(
-            notebook_id, urls, scheduler, capacity, agent_profile_id
+            notebook_id, urls, scheduler, capacity_limit, agent_profile_id
         )
 
     def upload_sources(
@@ -1674,9 +1674,10 @@ class RepositoryFacade:
         files: Iterable[UploadedSourceFile],
         scheduler: Optional[Callable[[str], None]] = None,
         agent_profile_id: str = "",
+        capacity_limit: Optional[int] = None,
     ) -> List[UploadedSourceSummary]:
         return self._runtime.source_ingestion.upload_sources_compat(
-            notebook_id, files, scheduler, agent_profile_id
+            notebook_id, files, scheduler, agent_profile_id, capacity_limit
         )
 
     def _set_source_status(

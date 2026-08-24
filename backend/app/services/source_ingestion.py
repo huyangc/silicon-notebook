@@ -28,6 +28,7 @@ from app.models.sources import (
     UploadedSourceSummary,
 )
 from app.repositories.ports import (
+    DocumentCapacityExceeded,
     NotebookStorePort,
     SourceElementWrite,
     SourceScheduler,
@@ -372,7 +373,7 @@ class SourceIngestionService:
         notebook_id: str,
         urls: Iterable[str],
         scheduler=None,
-        capacity=None,
+        capacity_limit=None,
         agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
         return self.add_url_sources(
@@ -380,7 +381,7 @@ class SourceIngestionService:
             urls,
             scheduler,
             self.pipeline_hooks(),
-            capacity=capacity,
+            capacity_limit=capacity_limit,
             agent_profile_id=agent_profile_id,
         )
 
@@ -390,6 +391,7 @@ class SourceIngestionService:
         files: Iterable[UploadedSourceFile],
         scheduler=None,
         agent_profile_id: str = "",
+        capacity_limit=None,
     ) -> List[UploadedSourceSummary]:
         return self.upload_sources(
             notebook_id,
@@ -397,6 +399,7 @@ class SourceIngestionService:
             scheduler,
             self.pipeline_hooks(),
             agent_profile_id=agent_profile_id,
+            capacity_limit=capacity_limit,
         )
 
     def process_source_compat(self, source_id: str) -> SourceSummary:
@@ -501,15 +504,18 @@ class SourceIngestionService:
         urls: Iterable[str],
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
-        capacity: "int | None" = None,
+        capacity_limit: "int | None" = None,
         agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
         """逐 URL 初筛(空白跳过;非 PDF/不可达→rejected,不建来源);通过的建 source_url
         来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。
 
-        capacity 是「每笔记本文档数量上限」的剩余额度(None=不限,如 admin 笔记本):容量
-        按**成功探测逐条**扣减——探测通过但额度已用尽的 URL 进 rejected(超限原因),不消耗
-        配额。故一个无效链接不会拖累整批,接近上限时仍能建成额度内的有效来源。
+        capacity_limit 是「每笔记本文档数量上限」的**绝对上限**(None=不限,如 admin
+        笔记本),由 store 在每条 INSERT 自己的写事务内重新计数并强制(SQLite BEGIN
+        IMMEDIATE / PG notebook 行锁),不再是请求开始时冻结、循环里逐条扣减的剩余
+        额度——冻结预算正是 PR #584 codex R6 点名的 check-then-insert 竞态:两个并发
+        请求都快照到「还剩 1」就都能入库。对外语义不变:探测通过但已到上限的 URL 进
+        rejected(超限原因),一个无效链接仍不拖累整批。
 
         agent_profile_id 非空时把这批来源标成「Agent 添加」(v48 出处列),空串(所有既有
         调用方的默认值)落 NULL = 人添加的,行为逐位不变。"""
@@ -523,7 +529,11 @@ class SourceIngestionService:
             )
         created: List[SourceSummary] = []
         rejected: List[RejectedUrl] = []
-        budget = capacity  # None=不限;int=剩余可建数,每建成一个 -1
+        # 粘滞短路:本请求内第一次被容量闸拒绝后,后续探测通过的 URL 直接进
+        # rejected,不再逐条开写事务白付一次锁+COUNT(urls 无界,满库收到一批
+        # 长清单时旧的纯内存短路不该退化成 N 次短写事务)。只在本请求内粘滞,
+        # 仍比退役的「请求头冻结剩余额度」新鲜——中途释放的名额由下一次请求拿到。
+        capacity_exhausted = False
         for raw in urls:
             url = (raw or "").strip()
             if not url:
@@ -532,36 +542,62 @@ class SourceIngestionService:
             if not probe.ok:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
                 continue
-            if budget is not None and budget <= 0:
+            if capacity_exhausted:
                 rejected.append(
                     RejectedUrl(url=url, reason="已达该笔记本的文档数量上限，未添加")
                 )
                 continue
             source_id = self.new_id("src")
-            self.sources.insert_source(
-                source_id=source_id,
-                notebook_id=notebook_id,
-                title=probe.display_name,
-                source_type="pdf",
-                status="queued",
-                parse_status="queued",
-                file_name=probe.display_name,
-                file_path="",
-                source_url=url,
-                file_size=probe.content_length,
-                file_hash="",
-                summary="链接已添加，解析排队中。",
-                doc_type="",
-                agent_profile_id=agent_profile_id,
-            )
+            try:
+                self._insert_url_source(
+                    source_id, notebook_id, url, probe,
+                    capacity_limit=capacity_limit,
+                    agent_profile_id=agent_profile_id,
+                )
+            except DocumentCapacityExceeded:
+                capacity_exhausted = True
+                rejected.append(
+                    RejectedUrl(url=url, reason="已达该笔记本的文档数量上限，未添加")
+                )
+                continue
             if scheduler is not None:
                 scheduler(source_id)
             else:
                 self.process_source(source_id, hooks)
             created.append(self.sources.get_source(source_id))
-            if budget is not None:
-                budget -= 1
         return AddUrlSourcesResult(created=created, rejected=rejected)
+
+    def _insert_url_source(
+        self,
+        source_id: str,
+        notebook_id: str,
+        url: str,
+        probe,
+        *,
+        capacity_limit: "int | None",
+        agent_profile_id: str,
+    ) -> None:
+        """One URL source's INSERT, capacity enforced inside the store's own
+        write transaction (``insert_source(capacity_limit=...)``); raises
+        ``DocumentCapacityExceeded`` instead of inserting when the notebook is
+        at its ceiling at that instant."""
+        self.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=probe.display_name,
+            source_type="pdf",
+            status="queued",
+            parse_status="queued",
+            file_name=probe.display_name,
+            file_path="",
+            source_url=url,
+            file_size=probe.content_length,
+            file_hash="",
+            summary="链接已添加，解析排队中。",
+            doc_type="",
+            agent_profile_id=agent_profile_id,
+            capacity_limit=capacity_limit,
+        )
 
     def reuse_uploaded_source(
         self,
@@ -795,6 +831,7 @@ class SourceIngestionService:
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
         agent_profile_id: str = "",
+        capacity_limit: "int | None" = None,
     ) -> List[UploadedSourceSummary]:
         """Register uploaded files and kick off processing.
 
@@ -824,6 +861,18 @@ class SourceIngestionService:
         ``add_source_text``: the user supplies a title, the file name is derived
         from it) uses to keep the two apart. Empty falls back to ``file_name``,
         which is every browser/CLI caller.
+
+        ``capacity_limit`` (None = exempt: offline ``batch_ingest``, eval,
+        admin-owned notebooks) is the notebook's absolute visible-document
+        ceiling, re-enforced by the store INSIDE each file's creation write
+        transaction (``insert_source_if_absent(capacity_limit=...)``) — the
+        atomic backstop behind the API layer's pre-flight, which alone cannot
+        stop two concurrent uploads from both taking the last slot. A refused
+        file raises ``DocumentCapacityExceeded`` after this method removes the
+        just-written orphan disk file; files already created earlier in the
+        batch stay (they committed in their own transactions — the same
+        outcome as submitting them as separate requests). The dedup reuse
+        branch never consumes a slot and is never refused.
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         imported: List[UploadedSourceSummary] = []
@@ -857,25 +906,16 @@ class SourceIngestionService:
             stored_path = self.source_files.write_upload(
                 notebook_id, source_id, file_name, file.content
             )
-            reused_id = self.sources.insert_source_if_absent(
-                source_id=source_id,
-                notebook_id=notebook_id,
-                digest=digest,
-                # 显示标题优先用调用方给的那个;空串(浏览器上传、batch_ingest、eval
-                # ——那里用户给的本来就是文件名)落回 file_name,行为逐位不变。
-                # ⚠ 只在**新建**分支:上面两条 reuse 路径刻意不碰既有行的 title,
-                # 与 doc_type 的复用语义一致(复用不是重命名)。
-                title=file.title or file_name,
-                source_type=self.source_type_from_name(file_name),
-                status="queued",
-                parse_status="queued",
-                file_name=file_name,
-                file_path=str(stored_path),
-                file_size=len(file.content),
-                summary="Uploaded; parsing is queued.",
-                doc_type=self.normalize_doc_type(file.doc_type),
-                agent_profile_id=agent_profile_id,
-            )
+            try:
+                reused_id = self._insert_uploaded_source(
+                    source_id, notebook_id, digest, file, file_name,
+                    str(stored_path), agent_profile_id, capacity_limit,
+                )
+            except DocumentCapacityExceeded:
+                # 事务内容量闸拒绝(并发抢走了最后的名额):行没插,把刚落盘的
+                # 孤儿文件清掉再上抛——与下面「输给并发首传」分支同一条清理逻辑。
+                self.source_files.delete(str(stored_path))
+                raise
             if reused_id is not None:
                 # 输给了并发的另一次首传（它先插入并提交）→ 复用那一行，清掉孤儿文件。
                 self.source_files.delete(str(stored_path))
@@ -897,6 +937,41 @@ class SourceIngestionService:
                 )
             )
         return imported
+
+    def _insert_uploaded_source(
+        self,
+        source_id: str,
+        notebook_id: str,
+        digest: str,
+        file: UploadedSourceFile,
+        file_name: str,
+        stored_path: str,
+        agent_profile_id: str,
+        capacity_limit: "int | None",
+    ) -> "str | None":
+        """The atomic dedup-or-insert step of one uploaded file (see
+        ``insert_source_if_absent``); split out so the caller's loop reads as
+        its three outcomes — reuse / create / capacity-refused."""
+        return self.sources.insert_source_if_absent(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            digest=digest,
+            # 显示标题优先用调用方给的那个;空串(浏览器上传、batch_ingest、eval
+            # ——那里用户给的本来就是文件名)落回 file_name,行为逐位不变。
+            # ⚠ 只在**新建**分支:上面两条 reuse 路径刻意不碰既有行的 title,
+            # 与 doc_type 的复用语义一致(复用不是重命名)。
+            title=file.title or file_name,
+            source_type=self.source_type_from_name(file_name),
+            status="queued",
+            parse_status="queued",
+            file_name=file_name,
+            file_path=stored_path,
+            file_size=len(file.content),
+            summary="Uploaded; parsing is queued.",
+            doc_type=self.normalize_doc_type(file.doc_type),
+            agent_profile_id=agent_profile_id,
+            capacity_limit=capacity_limit,
+        )
 
     # ------------------------------------------------------------ pipeline
     def _emit_status(

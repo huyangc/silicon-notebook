@@ -151,6 +151,29 @@ def test_enforce_allows_under_and_at_limit_blocks_over(tmp_path, monkeypatch):
     assert "source" not in exc.detail.lower()
 
 
+def test_document_capacity_limit_resolves_without_counting(tmp_path, monkeypatch):
+    """只取上限的口(`_document_capacity_limit`,MCP 去重命中分支的穿参来源):
+    非 admin → 有效上限;admin → None(豁免);且**绝不数当前文档数**——那正是它
+    区别于 _document_capacity 的全部意义(去重命中路径的 COUNT 是白算的,而那是
+    Agent 幂等重试的热路径)。"""
+    from app.api import source_routes
+
+    repo = _repo(tmp_path, limit=5)
+    u = repo.create_user("b00000002", "pw")
+    set_request_user(u)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+
+    def boom(*_a, **_k):
+        raise AssertionError("limit-only 口不得数当前文档数")
+
+    monkeypatch.setattr(repo, "visible_document_count", boom)
+    assert source_routes._document_capacity_limit(nb.id, repo) == 5
+
+    set_request_user(UserProfile(id="user-local", email="", display_name="a", role="admin"))
+    nb_admin = repo.create_notebook(NotebookCreate(name="a"))
+    assert source_routes._document_capacity_limit(nb_admin.id, repo) is None
+
+
 def test_enforce_exempts_admin_owned_notebook(tmp_path, monkeypatch):
     repo = _repo(tmp_path, limit=1)
     # user-local 是 admin
@@ -240,10 +263,11 @@ def test_upload_endpoint_over_limit_blocks(client):
     assert "文档" in resp.json()["detail"]
 
 
-# URL 导入不做整批 409 —— 它天然部分成功(空白/不可达/非 PDF 跳过),容量改为按成功
-# 探测逐条扣减。逐条核算的服务级直测在 test_url_sources_api.py;这里做**路由级端到端**:
-# 非 admin owner 的笔记本占到 limit-1,提交 2 个有效 URL → 建 1 拒 1(超限),钉住路由的
-# capacity 计算(_document_capacity)与穿参(capacity=...),补上服务级直测绕过的这段接线。
+# URL 导入不做整批 409 —— 它天然部分成功(空白/不可达/非 PDF 跳过),容量按成功探测
+# 逐条核算(上限由 store 在每条 INSERT 的写事务内重新计数)。逐条核算的服务级直测在
+# test_url_sources_api.py;这里做**路由级端到端**:非 admin owner 的笔记本占到 limit-1,
+# 提交 2 个有效 URL → 建 1 拒 1(超限),钉住路由的 capacity 计算(_document_capacity)
+# 与穿参(capacity_limit=...),补上服务级直测绕过的这段接线。
 def test_url_endpoint_respects_owner_capacity_partial_success(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/http.db")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
