@@ -8,14 +8,16 @@ from app.services.source_element_selection import (
 )
 
 
-def _element(eid, source, page, text, score=0.0, element_type="paragraph"):
+def _element(
+    eid, source, page, text, score=0.0, element_type="paragraph", metadata=None
+):
     return SimpleNamespace(
         element_id=eid,
         source_id=source,
         element_type=element_type,
         text=text,
         score=score,
-        metadata={"page_number": page},
+        metadata={"page_number": page, **(metadata or {})},
     )
 
 
@@ -73,6 +75,30 @@ def test_ingestion_cleans_builtin_pdf_page_text_boundaries():
     assert suppressed == 3
     assert sum(item.text == "Repeated PDF footer" for item in kept) == 1
     assert sum(item.text.startswith("Built-in PDF body") for item in kept) == 4
+
+
+def test_ingestion_honors_explicit_parser_headers_away_from_textual_edges():
+    title = "Cosmos 3: Omnimodal World Models for Physical AI"
+    elements = [
+        _element("title", "s", 1, title, element_type="heading"),
+        _element("abstract", "s", 1, "Abstract body"),
+    ]
+    for page in range(2, 6):
+        elements.extend([
+            _element(f"caption-{page}", "s", page, f"Caption {page}"),
+            _element(
+                f"header-{page}", "s", page, title,
+                metadata={"block_type": "header"},
+            ),
+            _element(f"body-{page}", "s", page, f"Body {page}"),
+        ])
+
+    kept, suppressed = deduplicate_repeated_page_boundaries(elements)
+
+    assert suppressed == 4
+    assert [item.element_id for item in kept if item.text == title] == ["title"]
+    assert sum(item.text.startswith("Caption ") for item in kept) == 4
+    assert sum(item.text.startswith("Body ") for item in kept) == 4
 
 
 def test_ranked_elements_deduplicate_before_cap_but_preserve_cross_source_provenance():
