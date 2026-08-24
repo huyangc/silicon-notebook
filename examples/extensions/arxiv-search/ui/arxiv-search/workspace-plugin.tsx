@@ -52,6 +52,7 @@ import {
   FIRST_PAGE_START,
   MAX_IMPORT_URLS,
   MAX_QUERY_TERMS,
+  appendVisibleIds,
   classifyImportReceipt,
   countQueryTerms,
   deselectPaper,
@@ -83,12 +84,24 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   // the live input box — see `handleLoadMore`.
   const [executedQuery, setExecutedQuery] = useState("");
   const [start, setStart] = useState(FIRST_PAGE_START);
+  // How many records the *last* fetched page actually returned — not the
+  // same thing as `visibleIds.length` now that `visibleIds` accumulates
+  // across "load more" pages (see below). `nextPageStart` needs "how many
+  // did the last request return", and once pages stack up that is no longer
+  // recoverable from the accumulated list's size.
+  const [lastPageSize, setLastPageSize] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [catalog, setCatalog] = useState(EMPTY_CATALOG);
-  // The current page's papers, by id, in display order — kept separate from
-  // `catalog` because the catalog accumulates across pages while the visible
-  // list must not (a user paging forward should see the new page, not every
-  // page they have ever seen appended together).
+  // The ids of every paper fetched so far, in fetch order — "load more"
+  // appends onto this (`appendVisibleIds`) rather than replacing it, so a
+  // paper the user already checked on an earlier page stays visible (and
+  // checked) after paging forward. A *fresh* search does not need to clear
+  // this explicitly: `handleSubmit` already resets `catalog` to empty, the
+  // render loop below only shows an id it can resolve back to a catalog
+  // entry, and `runSearch`'s `mode === "replace"` branch replaces this array
+  // outright once the new page lands — so a stale id is never actually
+  // rendered, and the accumulated list is fully discarded the moment the new
+  // query's first page arrives.
   const [visibleIds, setVisibleIds] = useState(EMPTY_IDS);
   const [selected, setSelected] = useState(EMPTY_SELECTION);
   const [searchBusy, setSearchBusy] = useState(false);
@@ -106,10 +119,14 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
   // explicit about which query they mean: the submit handler means "whatever
   // is in the box now", the pager means "the one that produced what is on
   // screen". Reading state here would silently give the pager the former.
-  // `importBusy` also blocks: an import in flight ends by clearing `selected`,
-  // and letting a new page land underneath it would clear a selection the user
-  // made against results that no longer exist.
-  async function runSearch(term: string, nextStart: number) {
+  // `mode` says what this response does to the *previous* page's
+  // `visibleIds`: `"replace"` (a fresh query, from `handleSubmit`) discards
+  // it, `"append"` (paging forward, from `handleLoadMore`) keeps it and
+  // grows it (`appendVisibleIds`). `importBusy` also blocks: an import in
+  // flight ends by clearing `selected`, and letting a new page land
+  // underneath it would clear a selection the user made against results that
+  // no longer exist.
+  async function runSearch(term: string, nextStart: number, mode: "replace" | "append") {
     // The submit button is already disabled past either cap (see
     // `overQueryCharLimit`/`overQueryTermLimit` below); this re-check is the
     // defensive half, the same shape `handleImport` uses for
@@ -135,14 +152,27 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
         { query: { q: term, start: nextStart } },
       );
       setCatalog((previous) => mergeCatalog(previous, response.items));
-      setVisibleIds(response.items.map((item) => item.arxiv_id));
+      setVisibleIds((previous) =>
+        mode === "append"
+          ? appendVisibleIds(previous, response.items)
+          : response.items.map((item) => item.arxiv_id),
+      );
       setStart(response.start);
+      setLastPageSize(response.items.length);
       setHasMore(response.has_more);
       setExecutedQuery(term);
       setSearched(true);
     } catch (error) {
-      // A failed page load must not silently keep showing a stale one.
-      setVisibleIds(EMPTY_IDS);
+      // A failed page load must not silently keep showing a stale one — but
+      // "stale" means "the page this failed request was trying to fetch",
+      // not "every earlier page this session already successfully loaded".
+      // A fresh query's failure has nothing valid to protect (`handleSubmit`
+      // already cleared `catalog`, so nothing would resolve regardless); a
+      // failed "load more", left unguarded, would wipe every prior page that
+      // *did* load — un-rendering them while `selected` and `catalog` still
+      // point at them, exactly the checked-but-invisible state this file's
+      // append behavior exists to prevent.
+      if (mode === "replace") setVisibleIds(EMPTY_IDS);
       setHasMore(false);
       setSearchError(actions.api.userMessage(error, "arXiv 检索暂时不可用，请稍后再试"));
     } finally {
@@ -163,15 +193,17 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
     setImportError(null);
     setSelected(EMPTY_SELECTION);
     setCatalog(EMPTY_CATALOG);
-    void runSearch(query.trim(), FIRST_PAGE_START);
+    void runSearch(query.trim(), FIRST_PAGE_START, "replace");
   }
 
   function handleLoadMore() {
     if (!hasMore || searchBusy || importBusy) return;
     // The frozen query, not the input box: typing a new term without
     // submitting must not make "load more" fetch that term's second page and
-    // append it under the previous term's results.
-    void runSearch(executedQuery, nextPageStart(start, visibleIds.length));
+    // append it under the previous term's results. `lastPageSize`, not
+    // `visibleIds.length`, is the "how many did the last request return"
+    // `nextPageStart` needs — see the state's own comment above.
+    void runSearch(executedQuery, nextPageStart(start, lastPageSize), "append");
   }
 
   function toggle(arxivId: string, checked: boolean) {
@@ -186,6 +218,12 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
     if (urls.length === 0 || urls.length > MAX_IMPORT_URLS || importBusy) return;
     setImportBusy(true);
     setImportError(null);
+    // A new batch must not display alongside the *previous* batch's receipt
+    // — a prior success sitting next to this attempt's error (or vice versa)
+    // reads as though both belong to the same request. Cleared here, at the
+    // start of the request rather than only on success, so a failure does
+    // not leave a stale receipt on screen either.
+    setReceipt(null);
     try {
       const response = await actions.api.requestJson<ArxivImportResponse>(
         `/notebooks/${context.notebook.id}/import`,

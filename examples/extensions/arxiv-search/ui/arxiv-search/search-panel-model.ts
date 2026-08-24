@@ -213,6 +213,39 @@ export function mergeCatalog(
 }
 
 /**
+ * Fold one page of results into the panel's *visible* id list, in fetch
+ * order — "load more" appends onto what is already on screen rather than
+ * replacing it, so a paper the user checked on an earlier page stays both
+ * visible and checked after paging forward (a fresh query, by contrast,
+ * discards this entirely; see `mode === "replace"` at the one call site in
+ * `workspace-plugin.tsx`, which is why this function only ever needs to
+ * *add*, never to *clear*).
+ *
+ * Deduped by `arxiv_id`, keeping each id's first-seen position: an id that
+ * reappears on a later page (the underlying arXiv result set can shift
+ * between requests) is not appended a second time, so paging forward can
+ * only ever grow the list, never reorder or duplicate an entry already in
+ * it. A no-op call (nothing new to add — `items` empty, or every id in it
+ * already present) returns the same `previous` reference, mirroring
+ * {@link mergeCatalog}'s and {@link selectPaper}'s no-new-object-on-no-op
+ * discipline.
+ */
+export function appendVisibleIds(
+  previous: readonly string[],
+  items: readonly ArxivSearchResultItem[],
+): readonly string[] {
+  const seen = new Set(previous);
+  let next: string[] | null = null;
+  for (const item of items) {
+    if (seen.has(item.arxiv_id)) continue;
+    seen.add(item.arxiv_id);
+    if (next === null) next = [...previous];
+    next.push(item.arxiv_id);
+  }
+  return next ?? previous;
+}
+
+/**
  * The PDF URLs for the currently-selected papers, in catalog (== first-seen)
  * order — the same order `/import`'s request body will carry them in, so a
  * receipt list built by walking the response stays in a stable, predictable
