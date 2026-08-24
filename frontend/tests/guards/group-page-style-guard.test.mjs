@@ -12,13 +12,19 @@
 // class 名都必须在 globals.css 里真的作为类选择器出现过**。
 //
 // 第二、三条是这次改版踩到的两个布局陷阱,同样是「不报错、只是长错了」:
-//   - `main.group-page` 是 `.app` 网格的子项。只写 max-width + auto 外边距会关掉
-//     网格子项的 stretch,元素退回 fit-content —— 宽屏上整页缩成一条窄柱。
-//   - 同一个子项会被 `.app` 的 1fr 行拉满视口高度;网格 auto 行默认 stretch,短内容
-//     的页签(成员/设置)页头会被凭空撑开几十像素。
+//   - **1200px 那条测量线必须量在不带内边距的块上**。`.collection-title` /
+//     `.notebook-grid` 是 `.page` 的子块、自己没有内边距,所以 1200 就是 1200;而
+//     `.group-page` 继承着 `.page` 的 `padding: 44px 24px`,全局
+//     `* { box-sizing: border-box }` 会把那 48px 吃进 max-width 里,内容只剩 1152 ——
+//     ≥1248px 的视口上比兄弟页每边窄 24px,看起来不像对齐、像缩了一档
+//     (codex #589 R1 P2)。因此 cap 挂在 `.group-page > *` 上,不在 `.group-page` 上。
+//     子项还必须显式 `width: 100%`:auto 外边距会关掉网格子项的 stretch,只给
+//     max-width 会让它退回 fit-content,宽屏上缩成一条窄柱。
+//   - `main.group-page` 会被 `.app` 的 1fr 行拉满视口高度;网格 auto 行默认 stretch,
+//     短内容的页签(成员/设置)页头会被凭空撑开几十像素。
 //
-// 覆盖边界(如实说明):本文件只覆盖 groups-page.tsx 的 class 名存在性与 .group-page
-// 这三条声明,不检查具体间距/配色数值(那属于设计取舍,不是不变量),也不声称覆盖
+// 覆盖边界(如实说明):本文件只覆盖 groups-page.tsx 的 class 名存在性与上面两条
+// 版式声明,不检查具体间距/配色数值(那属于设计取舍,不是不变量),也不声称覆盖
 // 群组特性的其它渲染面。
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -123,13 +129,21 @@ function ruleBody(selector) {
   return bodies.join("\n");
 }
 
-test(".group-page 显式写出宽度,不靠网格子项的 stretch", () => {
-  const body = ruleBody(".group-page");
-  assert.match(body, /max-width:\s*1200px/, "与「笔记本列表」同一条测量线");
+test("1200px 测量线量在不带内边距的子项上,不量在继承了 .page 留白的 main 上", () => {
+  const child = ruleBody(".group-page > *");
+  assert.match(child, /max-width:\s*1200px/, "与「笔记本列表」同一条测量线");
   assert.match(
-    body,
+    child,
     /width:\s*100%/,
-    "只给 max-width + auto 外边距会关掉网格子项的 stretch —— 整页在宽屏上缩成一条窄柱",
+    "只给 max-width + auto 外边距会关掉网格子项的 stretch —— 在宽屏上缩成一条窄柱",
+  );
+  assert.match(child, /margin-inline:\s*auto/, "没有它子项会靠左而不是居中");
+  // 把 cap 挪回 .group-page 自己身上就会重新把 .page 的 48px 留白吃进 1200 里
+  // (全局 box-sizing: border-box),内容只剩 1152。
+  assert.doesNotMatch(
+    ruleBody(".group-page"),
+    /max-width/,
+    ".group-page 自己带着 .page 的 24px 左右留白,在它身上限宽会让内容比兄弟页每边窄 24px",
   );
 });
 
