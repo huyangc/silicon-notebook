@@ -54,6 +54,27 @@ def test_ingestion_keeps_low_coverage_boundary_repetitions():
     assert [item.element_id for item in kept] == [item.element_id for item in elements]
 
 
+def test_ingestion_cleans_builtin_pdf_page_text_boundaries():
+    elements = []
+    for page in range(1, 5):
+        elements.extend([
+            _element(
+                f"body-{page}", "s", page, f"Built-in PDF body {page}",
+                element_type="page_text",
+            ),
+            _element(
+                f"footer-{page}", "s", page, "Repeated PDF footer",
+                element_type="page_text",
+            ),
+        ])
+
+    kept, suppressed = deduplicate_repeated_page_boundaries(elements)
+
+    assert suppressed == 3
+    assert sum(item.text == "Repeated PDF footer" for item in kept) == 1
+    assert sum(item.text.startswith("Built-in PDF body") for item in kept) == 4
+
+
 def test_ranked_elements_deduplicate_before_cap_but_preserve_cross_source_provenance():
     candidates = [
         _element("h2", "paper-a", 2, "  PAPER\nTITLE ", 0.94),

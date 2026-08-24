@@ -172,6 +172,48 @@ def test_multi_query_aggregation_keeps_historical_collision_order(
     assert [chunk.chunk_id for chunk in selected] == ["a", "b"]
 
 
+def test_multi_query_aggregation_collapses_text_before_quota(repo, monkeypatch):
+    def chunk(chunk_id, text, relevance, origin):
+        return RetrievedChunk(
+            chunk_id=chunk_id,
+            source_id="paper",
+            source_title="Paper",
+            section_path=chunk_id,
+            text=text,
+            relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, relevance),
+            ),
+        )
+
+    weak_header = chunk("header-1", "Paper title", 0.4, "semantic")
+    strong_header = chunk("header-2", " paper\n title ", 0.9, "lexical")
+    abstract = chunk("abstract", "We introduce the model.", 0.7, "semantic")
+    results = {
+        "q1": ([weak_header], [], None),
+        "q2": ([strong_header, abstract], [], None),
+    }
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_retrieve_chunks",
+        lambda _notebook_id, query: results[query],
+    )
+
+    collected, per_query, _ids, _matrix = (
+        repo.retrieval.candidates._retrieve_chunks_multi("nb", ["q1", "q2"])
+    )
+
+    assert list(collected) == ["header-2", "abstract"]
+    assert collected["header-2"].relevance == 0.9
+    assert {support.origin for support in collected["header-2"].retrieval_supports} == {
+        "semantic", "lexical",
+    }
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    selected, _counts = quota_fuse_baseline_first(collected, per_query, 2)
+    assert {chunk.chunk_id for chunk in selected} == {"header-2", "abstract"}
+
+
 def test_multi_query_direct_collision_replaces_question_only_canonical():
     from app.services.ask_service import _merge_multi_direct_chunk_hits
     from app.services.retrieval import quota_fuse_baseline_first

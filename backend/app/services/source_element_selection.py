@@ -18,7 +18,7 @@ from typing import AbstractSet, Sequence
 _REPEATED_BOUNDARY_MIN_PAGES = 3
 _REPEATED_BOUNDARY_COVERAGE_NUMERATOR = 1
 _REPEATED_BOUNDARY_COVERAGE_DENOMINATOR = 2
-_PAGE_BOUNDARY_TEXT_TYPES = frozenset({"heading", "paragraph"})
+_PAGE_BOUNDARY_TEXT_TYPES = frozenset({"heading", "paragraph", "page_text"})
 
 
 def normalized_source_element_text(element: object) -> str:

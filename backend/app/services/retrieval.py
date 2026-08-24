@@ -833,6 +833,30 @@ def is_generated_question_only_chunk(chunk: "RetrievedChunk") -> bool:
     )
 
 
+def prefer_stronger_chunk_candidate(
+    existing: "RetrievedChunk", candidate: "RetrievedChunk"
+) -> "RetrievedChunk":
+    """Choose one duplicate-text representative and retain all provenance.
+
+    Historical evidence always wins over a generated-question-only supplement;
+    otherwise the higher-relevance representative wins and ties keep the
+    existing stable position. The chosen mutable retrieval object receives the
+    union of both support sets.
+    """
+    existing_optional = is_generated_question_only_chunk(existing)
+    candidate_optional = is_generated_question_only_chunk(candidate)
+    if existing_optional != candidate_optional:
+        chosen = candidate if existing_optional else existing
+    elif candidate.relevance > existing.relevance:
+        chosen = candidate
+    else:
+        chosen = existing
+    chosen.retrieval_supports = merge_retrieval_supports(
+        existing.retrieval_supports, candidate.retrieval_supports
+    )
+    return chosen
+
+
 def partition_generated_question_chunks(
     chunks: Sequence["RetrievedChunk"],
 ) -> tuple[List["RetrievedChunk"], List["RetrievedChunk"]]:

@@ -2612,6 +2612,34 @@ def test_merge_element_hits_collapses_same_source_text_across_queries():
     assert elements[0].score == 0.9
 
 
+def test_chunk_accumulation_upgrades_duplicate_and_merges_supports():
+    from app.services.reasoning_retrieval import take_distinct_chunk_hits
+    from app.services.retrieval import RetrievedChunk, RetrievalSupport
+
+    def chunk(chunk_id, text, relevance, origin):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="paper", source_title="Paper",
+            section_path=chunk_id, text=text, relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, relevance),
+            ),
+        )
+
+    weak = chunk("header-ppr", "Paper title", 0.2, "ppr")
+    strong = chunk("header-exact", " paper\n title ", 1.0, "lexical")
+    existing = [weak]
+    seen_ids = {weak.chunk_id}
+
+    added = take_distinct_chunk_hits([strong], seen_ids, existing)
+
+    assert added == []
+    assert existing == [strong]
+    assert seen_ids == {"header-ppr", "header-exact"}
+    assert {support.origin for support in strong.retrieval_supports} == {
+        "ppr", "lexical",
+    }
+
+
 def test_reflection_summary_uses_the_same_diverse_element_cap_as_synthesis(rrepo):
     """The agent must not declare sufficiency from passages that the final
     single-synthesis cap will replace with duplicate running headers."""

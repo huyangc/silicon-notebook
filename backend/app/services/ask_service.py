@@ -75,6 +75,7 @@ from app.services.retrieval import (
     classify_evidence,
     is_generated_question_only_chunk,
     merge_retrieval_supports,
+    prefer_stronger_chunk_candidate,
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
@@ -84,7 +85,10 @@ from app.services.source_graph_activation import (
     selected_source_graph_call_context,
 )
 from app.services.source_scope import source_scope_context, source_scope_restricted
-from app.services.source_element_selection import rank_source_elements
+from app.services.source_element_selection import (
+    rank_source_elements,
+    source_chunk_content_key,
+)
 
 # Matches both one provenance marker and the comma-group form models commonly
 # emit (`[k1, k3]`). A group binds only when every key exists in id_map.
@@ -112,26 +116,25 @@ def _merge_multi_direct_chunk_hits(collected: dict, direct_hits) -> None:
     reorder the baseline.  Collisions between historical producers retain the
     previous best-relevance behavior while preserving every provenance.
     """
+    by_content = {
+        source_chunk_content_key(chunk): chunk for chunk in collected.values()
+    }
     for candidate in direct_hits:
         current = collected.get(candidate.chunk_id)
         if current is None:
+            current = by_content.get(source_chunk_content_key(candidate))
+        if current is None:
             collected[candidate.chunk_id] = candidate
+            by_content[source_chunk_content_key(candidate)] = candidate
             continue
-        supports = merge_retrieval_supports(
-            current.retrieval_supports, candidate.retrieval_supports
-        )
-        if is_generated_question_only_chunk(current):
+        chosen = prefer_stronger_chunk_candidate(current, candidate)
+        if chosen is not current:
             # Reinsert at this direct producer's position.  Assigning over the
             # old key would retain the optional row's earlier dict position and
             # change stable tie ordering versus a feature-off direct stream.
-            collected.pop(candidate.chunk_id)
-            candidate.retrieval_supports = supports
-            collected[candidate.chunk_id] = candidate
-        elif candidate.relevance > current.relevance:
-            candidate.retrieval_supports = supports
-            collected[candidate.chunk_id] = candidate
-        else:
-            current.retrieval_supports = supports
+            collected.pop(current.chunk_id, None)
+            collected[chosen.chunk_id] = chosen
+        by_content[source_chunk_content_key(chosen)] = chosen
 
 
 def _merge_direct_chunk_hits(candidates: list, direct_hits) -> list:
@@ -148,12 +151,18 @@ def _merge_direct_chunk_hits(candidates: list, direct_hits) -> list:
     if not direct_hits:
         return candidates
     by_id = {candidate.chunk_id: candidate for candidate in candidates}
+    by_content = {
+        source_chunk_content_key(candidate): candidate for candidate in candidates
+    }
     out = list(candidates)
     for candidate in direct_hits:
         current = by_id.get(candidate.chunk_id)
         if current is None:
+            current = by_content.get(source_chunk_content_key(candidate))
+        if current is None:
             out.append(candidate)
             by_id[candidate.chunk_id] = candidate
+            by_content[source_chunk_content_key(candidate)] = candidate
             continue
         supports = merge_retrieval_supports(
             current.retrieval_supports, candidate.retrieval_supports
@@ -162,7 +171,9 @@ def _merge_direct_chunk_hits(candidates: list, direct_hits) -> list:
             out.remove(current)
             candidate.retrieval_supports = supports
             out.append(candidate)
+            by_id.pop(current.chunk_id, None)
             by_id[candidate.chunk_id] = candidate
+            by_content[source_chunk_content_key(candidate)] = candidate
         else:
             # Preserve the old list-union contract: the existing historical
             # semantic/lexical object stays canonical even when a later direct

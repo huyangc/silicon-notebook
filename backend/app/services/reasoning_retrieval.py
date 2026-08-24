@@ -51,6 +51,7 @@ from app.services.retrieval_experience_block import (
 from app.services.retrieval_experience_projection import current_situation
 from app.services.retrieval import (
     NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
+    prefer_stronger_chunk_candidate,
 )
 from app.services.retrieval_run import retrieval_fanout_slot
 from app.services.search_profile import render_style_block
@@ -1514,16 +1515,34 @@ def take_distinct_chunk_hits(
     seen_chunk_ids: set,
     existing_chunks: list,
 ) -> list:
-    """Admit unseen chunk ids and unseen same-source text in input order."""
-    seen_content_keys = {source_chunk_content_key(chunk) for chunk in existing_chunks}
+    """Admit diverse chunks and upgrade an earlier duplicate in place."""
     distinct: list = []
+    by_id = {
+        chunk.chunk_id: (existing_chunks, index)
+        for index, chunk in enumerate(existing_chunks)
+    }
+    by_content = {
+        source_chunk_content_key(chunk): (existing_chunks, index)
+        for index, chunk in enumerate(existing_chunks)
+    }
     for chunk in found:
         content_key = source_chunk_content_key(chunk)
-        if chunk.chunk_id in seen_chunk_ids or content_key in seen_content_keys:
+        location = by_id.get(chunk.chunk_id) or by_content.get(content_key)
+        if location is not None:
+            container, index = location
+            current = container[index]
+            chosen = prefer_stronger_chunk_candidate(current, chunk)
+            container[index] = chosen
+            by_id[chunk.chunk_id] = location
+            by_id[chosen.chunk_id] = location
+            by_content[content_key] = location
+            seen_chunk_ids.add(chunk.chunk_id)
             continue
+        location = (distinct, len(distinct))
         seen_chunk_ids.add(chunk.chunk_id)
-        seen_content_keys.add(content_key)
         distinct.append(chunk)
+        by_id[chunk.chunk_id] = location
+        by_content[content_key] = location
     return distinct
 
 
