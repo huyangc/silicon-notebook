@@ -6,19 +6,27 @@
  * `node --test` without a browser or a mounted component. The `.tsx` entry
  * only wires these to `useState` and to the two HTTP calls.
  *
- * **Why "reused" cannot come from the wire.** The plugin's own `/import`
- * route (`routes.py::import_papers`) forwards straight to core's
- * `PluginUrlSourceImportPort`, whose `created` rows
- * (`PluginImportedSource{source_id, title, url}`) carry no flag saying
- * whether a row is a brand-new source or an existing one core's own
- * content-hash de-duplication handed back unchanged — core deliberately
- * does not surface that distinction to a plugin. So "已复用" here is a
- * *client-side* fact, not a claim about what core did: it means "this
- * session already saw this exact URL come back as `created` once before".
- * `foldImportedUrls` is the one place that memory is updated, and
- * `classifyImportReceipt` is the one place it is read — a URL is graded
- * `"reused"` only on its second-or-later appearance in *this panel's*
- * accumulated memory, never on a guess about the backend's own de-dup.
+ * **What the third receipt state actually means — and what it must not
+ * claim.** Core's URL import path (`source_ingestion.py::add_url_sources`)
+ * does **not** de-duplicate by content: every URL that passes the PDF probe
+ * gets an unconditional `insert_source` with an empty `file_hash`, followed
+ * by a full parse. Importing the same PDF URL twice therefore creates two
+ * separate sources and parses both. (Content-hash de-duplication does exist
+ * in this product, but on the browser *upload* path, keyed by
+ * `(notebook_id, file_hash)`; the URL importer never reaches it.) The
+ * plugin's own `/import` route (`routes.py::import_papers`) forwards
+ * straight to that path through core's `PluginUrlSourceImportPort`, and its
+ * `created` rows (`PluginImportedSource{source_id, title, url}`) are always
+ * brand-new rows.
+ *
+ * So this panel cannot report "core reused an existing source" — that event
+ * does not occur. What it *can* report honestly is its own memory: "this
+ * panel already sent this exact URL earlier in this session, so a duplicate
+ * source has probably just been created." That is the `"repeat"` state, and
+ * it is a **warning**, not a reassurance; the earlier `"reused"` spelling
+ * asserted a backend behaviour that does not exist. `foldImportedUrls` is
+ * the one place that memory is written and `classifyImportReceipt` the one
+ * place it is read.
  */
 
 export type ArxivSearchResultItem = Readonly<{
@@ -46,12 +54,31 @@ export type ArxivImportResponse = Readonly<{
 
 export type ImportReceiptEntry = Readonly<
   | { status: "created"; title: string }
-  | { status: "reused"; title: string }
+  | { status: "repeat"; title: string }
   | { status: "rejected"; reason: string }
 >;
 
 /** The `start` value a fresh query (as opposed to "load more") begins at. */
 export const FIRST_PAGE_START = 0;
+
+/**
+ * The most URLs one import request may carry.
+ *
+ * The **authoritative** bound is the plugin's own server-side
+ * `routes.py::MAX_IMPORT_URLS`, which rejects an over-long batch with a 400.
+ * This constant exists so the panel can disable the button and say why,
+ * rather than letting someone tick thirty papers and learn the limit from an
+ * error banner.
+ *
+ * Registered trade-off: the number is spelled twice, once per language, with
+ * nothing mechanically keeping the two in step — a sample plugin deliberately
+ * ships no cross-language contract test, that machinery belongs to core rails.
+ * The drift is safe in only one direction: if the server raises its limit and
+ * this stays low the panel is merely stricter than it must be, whereas if the
+ * server lowers its limit the panel still lets the request go and the 400 is
+ * surfaced verbatim. Change one, grep for the other.
+ */
+export const MAX_IMPORT_URLS = 20;
 
 /**
  * Add `arxivId` to the selection. Idempotent: selecting an already-selected
@@ -132,8 +159,9 @@ export function selectedImportUrls(
  * — the caller decides whether that is worth surfacing (it should not
  * happen against a conforming server, so silently dropping it here is safe).
  *
- * See the module docstring for why `"reused"` is read from `alreadyImported`
- * (this panel's own memory) rather than from anything the response says.
+ * See the module docstring for why `"repeat"` is read from `alreadyImported`
+ * (this panel's own memory) rather than from anything the response says, and
+ * why it warns about a likely duplicate instead of claiming a reuse.
  */
 export function classifyImportReceipt(
   response: ArxivImportResponse,
@@ -144,7 +172,7 @@ export function classifyImportReceipt(
     receipt.set(
       row.url,
       alreadyImported.has(row.url)
-        ? { status: "reused", title: row.title }
+        ? { status: "repeat", title: row.title }
         : { status: "created", title: row.title },
     );
   }
