@@ -87,6 +87,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 打开被 import 到的每个文件——它只消费 import 说明符与文件扩展名，不做任何
   // 源码位置/顺序查询。
   "tests/guards/extension-module-graph-guard.test.mjs",
+  // 门禁接线断言(X9 PR-B T3):读 scripts/check_extended.sh 与 scripts/check_contracts.sh
+  // 两个 bash 脚本，确认样板 UI 守卫 lane 与 --extra-root 参数真的接上了。shell 脚本
+  // 没有可消费的 AST(与 globals.css 那批同一条理由),grep 式的字符串包含判据是唯一
+  // 诚实的输入;两条断言只判「子串是否存在」,不做任何位置/顺序查询。
+  "tests/unit/arxiv-sample-ui-package.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

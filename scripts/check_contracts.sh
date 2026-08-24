@@ -89,7 +89,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_enumeration_list_labels_contract.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
-  "$ROOT_DIR/scripts/check_ui_vocabulary.py"
+  "$ROOT_DIR/scripts/check_ui_vocabulary.py" \
+  --extra-root "$ROOT_DIR/examples/extensions/arxiv-search/src"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_architecture_boundaries.py" --root "$ROOT_DIR"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
