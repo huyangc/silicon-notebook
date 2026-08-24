@@ -166,7 +166,9 @@ class Settings(BaseSettings):
     # answer: gap consultation runs inside the answer's latency, so every
     # second here is a second the reader waits.  Hence the much smaller default
     # and the much tighter ceiling.  It is also a hard deadline rather than a
-    # cooperative one — the host abandons a contributor that overruns it.
+    # cooperative one, and it covers the whole call — a contribution's
+    # availability probe as well as its consult — because a plugin at this
+    # point supplies both halves and either can hang.
     ask_gap_consult_timeout_seconds: float = Field(
         4.0,
         gt=0,
