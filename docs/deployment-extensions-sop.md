@@ -253,7 +253,7 @@ The eight seams, and nothing else: `plugin_id`, `settings`, `require_notebook_ca
 
 ### 3.5 Other contribution kinds
 
-The four remaining production extension points are Protocols in the SDK; implement the Protocol, declare the matching `ContributionKind`, and register through the typed `add_*` helper.
+The five remaining production extension points are Protocols in the SDK; implement the Protocol, declare the matching `ContributionKind`, and register through the typed `add_*` helper.
 
 | Point constant | Kind | Protocol | Module |
 | --- | --- | --- | --- |
@@ -262,6 +262,7 @@ The four remaining production extension points are Protocols in the SDK; impleme
 | `ASK_COMPLETED_OBSERVER_POINT` | `OBSERVER` | `AskCompletedObserver` | `app/extension_sdk/ask.py` |
 | `REPORT_COMPLETED_OBSERVER_POINT` | `OBSERVER` | `ReportCompletedObserver` | `app/extension_sdk/report.py` |
 | `REPORT_EXPORTER_POINT` | `PROVIDER` | `ReportExporterProvider` | `app/extension_sdk/report_export.py` |
+| `ASK_GAP_CONSULT_POINT` (`ask.gap_consult`) | `CONTRIBUTOR` | `GapConsultContributor` | `app/extension_sdk/gap_consult.py` |
 
 Each point hands a narrow, point-specific context — never a universal service locator — and each declares the capabilities a contribution must `require` to receive its access port. Read the Protocol and its module docstring before writing against it; they carry the fail-open and cancellation rules for that point.
 
@@ -273,6 +274,7 @@ Each point hands a narrow, point-specific context — never a universal service 
 - Capability names are dot/underscore/hyphen separated; `:` is core's.
 - A plugin route must not raise 401 for anything other than a genuine session invalidation — translate an upstream 401 to `502`/`424` yourself if you want your own wording.
 - Never `raise ExtensionRegistryError` from `register()`. It is not on the SDK surface, but it is importable, and core deliberately leaves it *unsanitized* — a message you write there reaches the operator's log verbatim. Every other exception from `register()` is converted to `plugin_registration_failed` with only the class name.
+- A `GapConsultContributor` runs its availability probe and its `consult` call together on one private worker thread under a hard deadline (see [Gap consultation](./product-and-api.md#gap-consultation-askgap_consult)): do not rely on `contextvars`, thread-local state, or any core ContextVar surviving into that thread — none does, by design — and do not assume the call will be waited for. A contribution that outruns the deadline is abandoned; its eventual return value is read by no one and discarded, never applied late. Return only `http`/`https` URLs, and only ones that point directly at a PDF — the import endpoint probes the exact URL you give it and does not go looking for one on a landing or abstract page.
 
 ## 4. Step two — the frontend package
 
