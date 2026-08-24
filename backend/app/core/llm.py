@@ -85,6 +85,26 @@ def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
             out[key] = value
     return out or None
 
+
+class _StreamingAskCancelled(AskCancelled):
+    """Cancellation raised after a stream already supplied billed usage."""
+
+    def __init__(self, usage: Dict[str, int]):
+        super().__init__()
+        self.usage = usage
+
+
+def _raise_if_cancelled_with_usage(
+    cancel_event: CancelEvent,
+    usage: Optional[Dict[str, int]],
+) -> None:
+    try:
+        raise_if_cancelled(cancel_event)
+    except AskCancelled:
+        if usage:
+            raise _StreamingAskCancelled(usage) from None
+        raise
+
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 # Reasoning models (e.g. MiniMax-M2.7) emit a chain-of-thought block before the
 # JSON, inline in `content`, even under response_format=json_object.
@@ -242,6 +262,7 @@ class OpenAICompatibleClient:
                 raise
             self._stream_usage_options_supported = False
             call_kwargs.pop("stream_options", None)
+            raise_if_cancelled(cancel_event)
             stream = self.client().chat.completions.create(**call_kwargs)
         else:
             if request_usage:
@@ -251,10 +272,13 @@ class OpenAICompatibleClient:
         usage: Optional[Dict[str, int]] = None
         try:
             for chunk in stream:
-                raise_if_cancelled(cancel_event)
                 chunk_usage = _usage_dict(chunk)
                 if chunk_usage:
                     usage = chunk_usage
+                # The iterator has already delivered this chunk. Preserve any
+                # exact billed usage it contains before honoring a cancellation
+                # that raced with the final usage-only trailer.
+                _raise_if_cancelled_with_usage(cancel_event, usage)
                 if not getattr(chunk, "choices", None):
                     continue
                 choice = chunk.choices[0]
@@ -269,7 +293,7 @@ class OpenAICompatibleClient:
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
-        raise_if_cancelled(cancel_event)
+        _raise_if_cancelled_with_usage(cancel_event, usage)
         return "".join(parts), finish_reason, usage
 
     def chat_json(
@@ -527,9 +551,12 @@ class OpenAICompatibleClient:
             record["response"] = {"content": logger.clip(content)}
             logger.log(record)
             return content
-        except AskCancelled:
+        except AskCancelled as exc:
             record["status"] = "cancelled"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            usage = _usage_dict(exc)
+            if usage:
+                record["usage"] = usage
             logger.log(record)
             raise
         except Exception as exc:
