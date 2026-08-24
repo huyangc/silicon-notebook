@@ -154,6 +154,7 @@ test("清单卡未公开时留一句可见说明，绝不静默丢弃", async ()
 });
 
 test("引用卡因标题和摘录都为空而被过滤时，reference_keys 仍能把图放到正文标记处", async () => {
+  const user = userEvent.setup();
   mocks.fetchPublicConversation.mockResolvedValue({
     ...CONVERSATION,
     turns: [{
@@ -168,8 +169,45 @@ test("引用卡因标题和摘录都为空而被过滤时，reference_keys 仍�
 
   const img = await screen.findByRole("img", { name: "版图" });
   expect(img.closest(".answer-inline-images")?.previousElementSibling?.textContent).toContain("[4]");
+  expect(img.closest(".answer-inline-images")?.textContent).toContain("[4]");
   expect(container.querySelector("#ref-t0-k4")).toBeNull();
   expect(screen.queryByRole("button", { name: "[4]" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "放大查看本段附图" }));
+  expect(screen.getByRole("dialog", { name: "[4]附图预览" })).toBeInTheDocument();
+});
+
+test("旧公开载荷缺 reference_keys 时图片不消失，以明确未定位的 image-only 区块降级", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      images: [{ alias: "legacy-alias", caption: "旧版架构图" }],
+    }],
+  });
+  render(<PublicConversationPage />);
+
+  const region = await screen.findByRole("complementary", { name: "本段附图（旧分享）" });
+  expect(within(region).getByRole("img", { name: "旧版架构图" })).toBeInTheDocument();
+  expect(region.textContent).toContain("旧分享未保留引用位置");
+  expect(region.textContent).toContain("模型未直接读取图片");
+  expect(region.textContent).not.toContain("旧版架构图");
+});
+
+test("公开引用本身是图片元素时不重复显示解析描述，普通文字引用仍显示摘录", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      references: [
+        { ...CONVERSATION.turns[0].references[0], snippet: "图片描述 blob", is_image_reference: true },
+        { ...CONVERSATION.turns[0].references[1], snippet: "文字证据摘录", is_image_reference: false },
+      ],
+    }],
+  });
+  render(<PublicConversationPage />);
+
+  await screen.findByText("文字证据摘录");
+  expect(screen.queryByText("图片描述 blob")).toBeNull();
 });
 
 test("撤销或不存在的链接给出可读的空态", async () => {

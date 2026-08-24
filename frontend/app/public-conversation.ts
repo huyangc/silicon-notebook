@@ -32,6 +32,9 @@ export type PublicReferenceT = {
   title_truncated?: boolean;
   snippet_truncated?: boolean;
   file_name_truncated?: boolean;
+  /** The reference itself is an image element; its snippet is parser-generated
+   * caption/description and must not be repeated as visible prose. */
+  is_image_reference?: boolean;
 };
 
 /** 一张「本段附图」的公开投影。只带**按链接口令派生的不透明别名**，没有 asset_id。 */

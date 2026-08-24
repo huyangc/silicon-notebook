@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLayoutEffect, useRef, useState } from "react";
 import { beforeAll, beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("../../app/source-api", async (importOriginal) => {
@@ -11,6 +12,8 @@ vi.mock("../../app/source-api", async (importOriginal) => {
 });
 
 import { AnswerView } from "../../app/answer-panel";
+import { ImagePreviewModal } from "../../app/image-preview-modal";
+import type { AnswerImagePreviewRequest } from "../../app/image-preview";
 import { fetchInternalAssetBlob } from "../../app/source-api";
 import type { AskResponse } from "../../app/workspace-model";
 
@@ -85,6 +88,24 @@ test("caption 只作为图片 alt，不在正文或引用浮层重复显示", as
   expect(container.querySelector(".cite-detail-image-caption")).toBeNull();
 });
 
+test("引用本身是图片元素时隐藏其解析描述，文字证据附近带图时仍保留真实摘录", async () => {
+  const user = userEvent.setup();
+  const direct = anchorAnswerWithImages("图片结论 [k1]。");
+  direct.anchors[0].element_id = "img-el-1";
+  direct.anchors[0].snippet = "图注与 AI 图片描述";
+  const directView = renderAnswer(direct);
+
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  expect(screen.queryByText("图注与 AI 图片描述")).toBeNull();
+  directView.unmount();
+
+  const nearby = anchorAnswerWithImages("文字结论 [k1]。");
+  nearby.anchors[0].snippet = "真正被引用的文字摘录";
+  renderAnswer(nearby);
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  expect(screen.getByText("真正被引用的文字摘录")).toBeInTheDocument();
+});
+
 test("点击正文图片请求页面内放大，并保留 caption 作为预览 alt", async () => {
   const user = userEvent.setup();
   const onPreviewImage = vi.fn();
@@ -114,6 +135,67 @@ test("引用浮层里的缩略图也只打开页面内预览，不跳来源详�
     referenceLabel: "[1]",
   });
   expect(onOpenSource).not.toHaveBeenCalled();
+});
+
+test("引用浮层打开预览后暂停外部关闭，Escape 关闭预览并把焦点还给仍存活的缩略图", async () => {
+  function Harness() {
+    const [preview, setPreview] = useState<AnswerImagePreviewRequest | null>(null);
+    const returnFocusRef = useRef<HTMLElement | null>(null);
+    const restorePendingRef = useRef(false);
+    useLayoutEffect(() => {
+      if (preview || !restorePendingRef.current) return;
+      restorePendingRef.current = false;
+      if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus();
+    }, [preview]);
+    return (
+      <>
+        <AnswerView
+          answer={anchorAnswerWithImages()}
+          feedbackSent=""
+          onFeedback={() => undefined}
+          onOpenKnowledgeGraph={() => undefined}
+          onOpenKnowhowRow={() => undefined}
+          notebookId="nb-1"
+          notebookNames={{}}
+          onBuildScaleIndex={() => undefined}
+          buildingScaleIndex={false}
+          onSaveMemory={() => undefined}
+          memorySaved={false}
+          imagePreviewOpen={Boolean(preview)}
+          onPreviewImage={(request) => {
+            returnFocusRef.current = document.activeElement as HTMLElement;
+            setPreview(request);
+          }}
+        />
+        {preview && (
+          <ImagePreviewModal
+            referenceLabel={preview.referenceLabel}
+            onClose={() => {
+              restorePendingRef.current = true;
+              setPreview(null);
+            }}
+          >
+            <img src="blob:preview" alt={preview.alt} />
+          </ImagePreviewModal>
+        )}
+      </>
+    );
+  }
+
+  const user = userEvent.setup();
+  const { container } = render(<Harness />);
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  const thumbnailButton = await screen.findByTitle("放大查看这张附图");
+  await user.click(thumbnailButton);
+  expect(screen.getByRole("dialog", { name: "[1]附图预览" })).toBeInTheDocument();
+
+  document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+  expect(container.querySelector(".cite-popover")).not.toBeNull();
+
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "[1]附图预览" })).toBeNull();
+  expect(container.querySelector(".cite-popover")).not.toBeNull();
+  expect(screen.getByTitle("放大查看这张附图")).toHaveFocus();
 });
 
 test("旧答案缺 images 字段时不插入附图区，其余引用仍可打开", async () => {

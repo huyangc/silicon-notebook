@@ -250,6 +250,7 @@ def test_projection_keys_are_exactly_the_allowlist():
     assert set(turn["references"][0]) == {
         "key", "title", "file_name", "location", "snippet",
         "title_truncated", "snippet_truncated", "file_name_truncated",
+        "is_image_reference",
     }
     # And the turn itself exposes no reasoning/id surface. ``images`` is the
     # only T4 addition; it carries aliases + captions, never addressable ids.
@@ -600,6 +601,43 @@ def test_reference_within_caps_is_not_flagged_truncated():
     assert ref["title_truncated"] is False
     assert ref["snippet_truncated"] is False
     assert ref["file_name_truncated"] is False
+
+
+def test_image_reference_flag_compares_internal_ids_but_exposes_only_a_boolean():
+    """Direct image evidence lets the public UI suppress duplicated parser
+    description; nearby images on a text reference must not suppress the real
+    excerpt. Neither compared element id crosses the boundary."""
+    direct = public_turn(_turn("q", {
+        "answer": "图 [k1]。",
+        "anchors": [_anchor(
+            "k1",
+            element_id="DIRECT-IMAGE-ELEMENT",
+            images=[{
+                "element_id": "DIRECT-IMAGE-ELEMENT",
+                "asset_id": "DIRECT-ASSET",
+                "caption": "图注",
+            }],
+        )],
+        "citations": [],
+    }))["references"][0]
+    nearby = public_turn(_turn("q", {
+        "answer": "文 [k1]。",
+        "anchors": [_anchor(
+            "k1",
+            element_id="TEXT-ELEMENT",
+            images=[{
+                "element_id": "NEARBY-IMAGE-ELEMENT",
+                "asset_id": "NEARBY-ASSET",
+                "caption": "图注",
+            }],
+        )],
+        "citations": [],
+    }))["references"][0]
+
+    assert direct["is_image_reference"] is True
+    assert nearby["is_image_reference"] is False
+    assert "DIRECT-IMAGE-ELEMENT" not in _all_strings(direct)
+    assert "NEARBY-IMAGE-ELEMENT" not in _all_strings(nearby)
 
 
 def test_reference_list_is_bounded():

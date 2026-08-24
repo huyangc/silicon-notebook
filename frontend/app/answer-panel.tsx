@@ -768,6 +768,12 @@ function referenceImages(reference: AnswerReference): CitationImageLike[] {
   return reference.anchor?.images ?? reference.citation?.images ?? [];
 }
 
+function directlyReferencesImageElement(reference: AnswerReference): boolean {
+  const elementId = reference.anchor?.element_id || reference.citation?.element_id || "";
+  return Boolean(elementId) && referenceImages(reference)
+    .some((image) => image.element_id === elementId);
+}
+
 
 type ResolvedCitationImage = Readonly<{
   reference: AnswerReference;
@@ -851,7 +857,12 @@ function SelectedReferenceDetail({
 }) {
   const objectType = reference.anchor?.object_type || "";
   const title = referenceTitle(reference);
-  const snippet = referenceSnippet(reference);
+  // When the evidence row itself is the image element, its snippet/quoted_span
+  // is parser-generated caption + image description. The image already carries
+  // that caption as alt text, so repeating the blob as visible prose defeats the
+  // image-only contract. Text evidence that merely has a nearby image keeps its
+  // real excerpt.
+  const snippet = directlyReferencesImageElement(reference) ? "" : referenceSnippet(reference);
   const source = referenceSource(reference);
   const sourceFileName = referenceSourceFileName(reference);
   const location = referenceLocation(reference);
@@ -1010,6 +1021,7 @@ function CitationPopover({
   onOpenKnowhowRow,
   onOpenSource,
   onPreviewImage,
+  dismissSuspended = false,
 }: {
   reference: AnswerReference;
   /** 检索结果带图(T1/T2)：透传给 SelectedReferenceDetail 拼装资产 URL,见其
@@ -1023,6 +1035,9 @@ function CitationPopover({
   onOpenSource?: (sourceId: string, elementId?: string) => void;
   /** 正文/引用浮层图片的页面内放大入口。没有承接方时图片仍显示但不可点击。 */
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** Keep the thumbnail trigger mounted while its page-level preview is open,
+   * so the modal coordinator can return focus to a live element. */
+  dismissSuspended?: boolean;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ top: number; left: number }>(
@@ -1039,6 +1054,7 @@ function CitationPopover({
     ));
   }, [anchorRect]);
   useEffect(() => {
+    if (dismissSuspended) return;
     const onDown = (event: PointerEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) onClose();
     };
@@ -1058,7 +1074,7 @@ function CitationPopover({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
     };
-  }, [onClose]);
+  }, [dismissSuspended, onClose]);
   return (
     <div
       ref={ref}
@@ -1248,6 +1264,7 @@ export function AnswerView({
   onOpenKnowhowRow,
   onOpenSource,
   onPreviewImage,
+  imagePreviewOpen = false,
   notebookId,
   notebookNames,
   onBuildScaleIndex,
@@ -1281,6 +1298,8 @@ export function AnswerView({
   onOpenSource?: (sourceId: string, elementId?: string) => void;
   /** 正文/引用浮层图片的页面内放大入口。没有承接方时图片仍显示但不可点击。 */
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** True while the page-level image modal is holding the root lease. */
+  imagePreviewOpen?: boolean;
   notebookId: string | null;
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，逐 turn 复用同一份，供引用徽章标来源库名。 */
@@ -1496,6 +1515,7 @@ export function AnswerView({
             onOpenSource(sourceId, elementId);
           } : undefined}
           onPreviewImage={onPreviewImage}
+          dismissSuspended={imagePreviewOpen}
         />
       )}
       {/* 复制回答是自足动作（只读 DOM + 剪贴板），任何调用方都能承接，所以它不带

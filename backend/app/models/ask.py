@@ -853,6 +853,10 @@ class PublicReference(BaseModel):
     title_truncated: bool = False
     snippet_truncated: bool = False
     file_name_truncated: bool = False
+    # Safe presentation flag only. True when the selected evidence element is
+    # itself one of the attached images, so anonymous UI can hide the parser's
+    # duplicated caption/description without receiving either internal id.
+    is_image_reference: bool = False
 
 
 class PublicImage(BaseModel):

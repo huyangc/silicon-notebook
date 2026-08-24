@@ -7777,6 +7777,11 @@
               "title": "File Name Truncated",
               "type": "boolean"
             },
+            "is_image_reference": {
+              "default": false,
+              "title": "Is Image Reference",
+              "type": "boolean"
+            },
             "key": {
               "default": "",
               "title": "Key",

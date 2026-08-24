@@ -128,8 +128,8 @@ import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, f
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks } from "./notebook-api";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { sourceKgBadge } from "./source-kg-badge.ts";
-import { classifyStagedFiles, compactStagedFileName, standaloneMarkdownImageWarnings, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile, type StagedFileWarning } from "./source-upload.ts";
-import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
+import { classifyStagedFiles, compactStagedFileName, mergeLiveStagedFileWarnings, scanStandaloneMarkdownImageWarnings, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile, type StagedFileWarning } from "./source-upload.ts";
+import { emptyStagedList, mergeStagedFiles, stagedFileKey, type StagedList } from "./staged-files.ts";
 import {
   bundleCapsFrom, bundleDirTotalBytesLimit, bundleErrorMessage, bundleFileNamesFor,
   bundleImagesEffectivelyEnabled,
@@ -2990,17 +2990,10 @@ export default function Home() {
     const generation = expectedGeneration ?? bundleIntakeGenerationRef.current;
     const { added, bundles } = stageIncomingFilesSync(all, expectedGeneration);
     if (added.length > 0) {
-      const warnings = (await Promise.all(added.map(standaloneMarkdownImageWarnings))).flat();
+      const warnings = await scanStandaloneMarkdownImageWarnings(added);
       if (generation === bundleIntakeGenerationRef.current && warnings.length > 0) {
-        setStagedWarnings((previous) => {
-          const next = [...previous];
-          for (const warning of warnings) {
-            if (!next.some((item) => item.name === warning.name && item.reason === warning.reason)) {
-              next.push(warning);
-            }
-          }
-          return next;
-        });
+        const liveFiles = stagedRef.current.files;
+        setStagedWarnings((previous) => mergeLiveStagedFileWarnings(previous, warnings, liveFiles));
       }
     }
     if (bundles.length > 0) await ingestBundleSources(bundles);
@@ -3439,13 +3432,16 @@ export default function Home() {
   }
 
   function removeStagedFile(index: number) {
-    const removedName = stagedRef.current.files[index]?.name;
+    const removed = stagedRef.current.files[index];
     updateStaged((prev) => ({
       files: prev.files.filter((_, i) => i !== index),
       docTypes: prev.docTypes.filter((_, i) => i !== index),
       touched: prev.touched.filter((_, i) => i !== index),
     }));
-    if (removedName) setStagedWarnings((rows) => rows.filter((row) => row.name !== removedName));
+    if (removed) {
+      const removedKey = stagedFileKey(removed);
+      setStagedWarnings((rows) => rows.filter((row) => stagedFileKey(row) !== removedKey));
+    }
   }
 
   async function confirmUpload() {
@@ -5781,6 +5777,7 @@ export default function Home() {
                             onOpenKnowhowRow={openKnowhowAt}
                             onOpenSource={onOpenSourceElement}
                             onPreviewImage={openAnswerImagePreview}
+                            imagePreviewOpen={rootModals.view("answer-image-preview").open}
                             notebookId={currentNotebookId}
                             notebookNames={notebookNames}
                             // 构建索引的 POST 走 kg:write(admin 档),只读成员点了必 403:

@@ -374,6 +374,11 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
     file_name, file_name_truncated = _text_flag(
         row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS
     )
+    element_id = str(row.get("element_id") or "")
+    is_image_reference = bool(element_id) and any(
+        isinstance(image, dict) and str(image.get("element_id") or "") == element_id
+        for image in _as_list(row.get("images"))
+    )
     return {
         "key": _text(key, 24),
         "title": title,
@@ -383,6 +388,9 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
         "title_truncated": title_truncated,
         "snippet_truncated": snippet_truncated,
         "file_name_truncated": file_name_truncated,
+        # This boolean carries the rendering fact without exposing either side
+        # of the internal element-id comparison to the public response.
+        "is_image_reference": is_image_reference,
     }
 
 

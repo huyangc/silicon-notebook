@@ -166,6 +166,10 @@ function PublicTurnView({
     }
     return rows;
   }, [turn.images]);
+  const legacyImages = useMemo(
+    () => turn.images.filter((image) => !image.reference_keys?.length),
+    [turn.images],
+  );
   const markdownCitationRefs = useMemo(() => {
     const rows = { ...citationRefs };
     for (const key of Object.keys(imageIdsByCitationKey)) {
@@ -239,7 +243,7 @@ function PublicTurnView({
       });
       if (rows.length === 0) return null;
       const labels = [...new Set(rows
-        .map(({ citationKey }) => citationRefs[citationKey]?.displayLabel)
+        .map(({ citationKey }) => markdownCitationRefs[citationKey]?.displayLabel)
         .filter((value): value is string => Boolean(value)))];
       return (
         <aside className="answer-inline-images" aria-label="本段附图">
@@ -254,7 +258,7 @@ function PublicTurnView({
                 <img
                   className="element-image"
                   src={publicConversationImageUrl(token, image.alias)}
-                  alt={image.caption || `${citationRefs[citationKey]?.displayLabel || "引用"}的附图`}
+                  alt={image.caption || `${markdownCitationRefs[citationKey]?.displayLabel || "引用"}的附图`}
                   loading="lazy"
                 />
                 <button
@@ -266,7 +270,7 @@ function PublicTurnView({
                     previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
                     setPreviewImage({
                       image,
-                      referenceLabel: citationRefs[citationKey]?.displayLabel || "",
+                      referenceLabel: markdownCitationRefs[citationKey]?.displayLabel || "",
                     });
                   }}
                 />
@@ -317,6 +321,41 @@ function PublicTurnView({
         </ReactMarkdown>
       </article>
 
+      {/* Compatibility for snapshots produced before reference_keys existed:
+          the old payload has image bytes but no truthful citation-position
+          binding. Keep those images visible in an explicitly unpositioned,
+          image-only fallback instead of guessing a reference or dropping them. */}
+      {legacyImages.length > 0 && (
+        <aside className="answer-inline-images" aria-label="本段附图（旧分享）">
+          <div className="answer-inline-images-heading">
+            <span>本段附图</span>
+            <small>旧分享未保留引用位置 · 模型未直接读取图片</small>
+          </div>
+          <ul className="answer-inline-image-list">
+            {legacyImages.map((image) => (
+              <li key={image.alias} className="answer-inline-image-item">
+                <img
+                  className="element-image"
+                  src={publicConversationImageUrl(token, image.alias)}
+                  alt={image.caption || "引用附图"}
+                  loading="lazy"
+                />
+                <button
+                  type="button"
+                  className="answer-inline-image-open"
+                  aria-label="放大查看旧分享附图"
+                  data-answer-image-preview-return={`${index}:legacy:${image.alias}`}
+                  onClick={(event) => {
+                    previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
+                    setPreviewImage({ image, referenceLabel: "" });
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+        </aside>
+      )}
+
       {/* C-1：清单卡不进 v1，但绝不静默丢弃——留一句可见说明在原本的位置。 */}
       {turn.omitted_result_sets > 0 && (
         <p className="public-report-note public-turn-omitted">
@@ -362,8 +401,8 @@ function PublicTurnView({
                   {reference.file_name_truncated && (
                     <small className="public-report-truncated">（原始文件名过长，已截断）</small>
                   )}
-                  {reference.snippet && <blockquote>{reference.snippet}</blockquote>}
-                  {reference.snippet_truncated && (
+                  {!reference.is_image_reference && reference.snippet && <blockquote>{reference.snippet}</blockquote>}
+                  {!reference.is_image_reference && reference.snippet_truncated && (
                     <small className="public-report-truncated">（摘录过长，已截断）</small>
                   )}
                 </div>
