@@ -9,6 +9,8 @@ from app.domain.cancellation import AskCancelled
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
     GAP_CONSULT_MAX_SUGGESTIONS,
+    GAP_CONSULT_PHRASE_MAX_CHARS,
+    GAP_CONSULT_QUESTION_MAX_CHARS,
     GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
@@ -499,6 +501,61 @@ def test_hung_plugin_is_abandoned_within_the_deadline():
     assert result == ()
     assert elapsed < 1.0, elapsed
     assert events[-1]["reason_code"] == "gap_consult_timeout"
+
+
+def test_a_sub_slice_deadline_is_honored_for_a_hung_plugin():
+    # Deployments may configure the timeout below one join slice; each join
+    # must be bounded by the remaining budget, not the fixed slice width, or
+    # real latency becomes a multiple of the configured budget (codex #584 R2).
+    release = threading.Event()
+
+    class Hung:
+        def consult(self, _context):
+            release.wait(30.0)
+            return _suggestions(GapSuggestion("late", "https://example.org/l"))
+
+    events: list[dict[str, object]] = []
+    host = _host(_bundle("corp.hung", Hung()), event_sink=events.append)
+
+    started = time.monotonic()
+    try:
+        result = host.consult(_call(deadline=time.monotonic() + 0.01))
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert result == ()
+    # A fixed-width join spends at least the full 0.05s slice before it can
+    # notice the spent deadline; the bounded join returns in roughly the
+    # configured 10ms.  The threshold sits below one slice on purpose — the
+    # headroom above 10ms is scheduler jitter, not the property under test.
+    assert elapsed < 0.045, elapsed
+    assert events[-1]["reason_code"] == "gap_consult_timeout"
+
+
+def test_an_over_limit_query_is_refused_before_any_plugin_sees_it():
+    # The port is public: a manually built call context must not widen the
+    # egress surface past the documented bounds (AskService's own egress
+    # construction already stays inside them).  Length is validity here, so
+    # the over-limit query takes the same silent-skip path as any other
+    # malformed context (codex #584 R2).
+    plugin = _Plugin(_suggestions(GapSuggestion("t", "https://example.org/t")))
+    host = _host(_bundle("corp.gap", plugin))
+
+    long_question = "q" * (GAP_CONSULT_QUESTION_MAX_CHARS + 1)
+    assert host.consult(_call(query=_query(question=long_question))) == ()
+    long_phrase = "p" * (GAP_CONSULT_PHRASE_MAX_CHARS + 1)
+    assert host.consult(_call(query=_query(gaps=(long_phrase,)))) == ()
+    assert plugin.contexts == []
+
+    # At the bounds themselves the query is still valid — the rail rejects
+    # "over", not "at".
+    at_limit = _query(
+        question="q" * GAP_CONSULT_QUESTION_MAX_CHARS,
+        gaps=("p" * GAP_CONSULT_PHRASE_MAX_CHARS,),
+    )
+    host.consult(_call(query=at_limit))
+    assert len(plugin.contexts) == 1
 
 
 def test_late_result_from_an_abandoned_plugin_is_inert():
