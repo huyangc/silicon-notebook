@@ -6,6 +6,8 @@ This runbook takes one private feature from an empty directory to a running depl
 
 The authoritative contracts stay where they are — [Deployment and configuration → Deployment extensions](./deployment-and-configuration.md#deployment-extensions-extensions_config), [Product and API reference → Deployment extensions](./product-and-api.md#deployment-extensions), and the frontend registry rules in [Development and repository contracts](./development.md). This document does not restate them; it tells you what to do, in what order, and what each failure looks like.
 
+Everything below has a **runnable example** in this repository: `examples/extensions/arxiv-search/`, a complete, off-by-default sample plugin. It is not part of any default deployment; it exists so this document has working code to point at. See [§12](#12-the-sample-plugin-examplesextensionsarxiv-search).
+
 ## 1. Scope and trust model
 
 ```text
@@ -698,3 +700,30 @@ Every code below is stable, appears verbatim in the startup log, and carries at 
 - [ ] `/admin/extensions` lists the expected plugin, version and contributions.
 - [ ] One real user action works end to end.
 - [ ] The rollback path is written down: previous wheel + previous UI package, or `enabled = false`, plus a restart.
+
+## 12. The sample plugin (`examples/extensions/arxiv-search`)
+
+This repository ships one complete, **off-by-default** sample deployment plugin so that everything above has working code to read: `examples/extensions/arxiv-search/`. Nothing loads it. It is in no default deployment, no default frontend build, and no default test lane; enabling it is exactly the same two-variable decision as enabling a real out-of-tree plugin — name it in your own `EXTENSIONS_CONFIG` TOML, and point `SILICON_NOTEBOOK_UI_PLUGINS` at its `ui/arxiv-search` package.
+
+It exists for two jobs at once:
+
+1. **A runnable example of this SOP.** It uses the same seams §3 and §4 describe, in the same order: a backend bundle with a settings model and two capability gates (§3.1–§3.3), an HTTP router with core's own notebook gates (§3.4), a `GapConsultContributor` (§3.5, §3.6), and a flat build-time UI package with one `workspace.side_panel` entry (§4).
+2. **A machine-checked proof that a plugin needs no patch to the public tree.** `backend/tests/test_arxiv_sample_plugin_e2e.py::test_the_package_runs_from_outside_the_repository` copies the whole package to a temporary directory, puts only that copy on `sys.path`, boots a real application against a TOML naming it, and asserts every imported module's `__file__` is under the copy.
+
+### What it demonstrates
+
+| Entry point | Path | What it shows |
+| --- | --- | --- |
+| Human-driven search and import | Side-panel entry → dialog → the plugin's own `POST /import` route → core's URL import port | A plugin route delegating to a core port that authorizes the request's own user |
+| Agent-triggered gap consultation | Core's `ask.gap_consult` point asks the plugin for pointers outside the notebook | A `GapConsultContributor` under a hard deadline, gated separately from the panel |
+
+The two capability gates are deliberately different objects, and that is the sample's main teaching point about §3.3: `manifest.provides`'s capability gates only the side-panel entry ("is this plugin configured?"), while outbound consultation is gated per contribution through `ExtensionContribution.availability` ("has this deployment agreed to let it reach a third party?"). Turning consultation off leaves the panel and the import route untouched. `manifest.requires` is empty, and the sample's own comments record why.
+
+### Where its numbers are registered
+
+The sample's private limits — the politeness interval, page size, timeouts, query-term cap, import batch cap, suggestion cap and the consult return margin — are registered in **its own README pair**, `examples/extensions/arxiv-search/README.md` / `README_zh.md`, not in `docs/product-and-api*.md`. That pair registers core rails; a sample plugin's own numbers are not core rails, and putting them there would imply this build enforces them. The README pair is also where the sample's registered limitations live (the per-process throttle, the socket-level timeout, the XML entity-expansion note, and the fact that enabling gap consultation takes two settings rather than one).
+
+### Two ways it deliberately differs from a real out-of-tree plugin
+
+- **Its tests live in `backend/tests/`, not in the package.** §5.3 tells a real plugin to keep its tests in its own repository, and that instruction stands. This repository's backend lane only collects `backend/tests`, so a sample that followed §5.3 literally would ship tests that never run. Do not copy this arrangement into a real plugin.
+- **Its UI package has its own G2 lane.** Because a tree with plugins configured does not pass the base repository's `npm run test` (§5.3), the sample's frontend half is verified by `scripts/check_sample_plugin.sh`, which runs inside `scripts/check_extended.sh`: it syncs the package with the real tool, runs the node lane against a non-empty `frontend/features/ext-*/`, runs the vocabulary guard, and type-checks. Its exit trap **restores** the caller's original `SILICON_NOTEBOOK_UI_PLUGINS` rather than clearing it, so a box with its own private plugins does not lose them to an interrupted run.

@@ -6,6 +6,8 @@
 
 权威契约仍在原处——[部署与配置 → 部署插件](./deployment-and-configuration_zh.md)、[产品与 API 参考 → 部署插件](./product-and-api_zh.md#部署插件)，以及[开发与仓库契约](./development_zh.md)里的前端 registry 规则。本文不重复它们，只回答「按什么顺序做什么」和「每种失败长什么样」。
 
+下文所有内容在本仓库里都有一份**可运行范例**：`examples/extensions/arxiv-search/`，一个完整的、**出厂关闭**的样板插件。它不属于任何默认部署，存在的意义就是让本文有真实可读的代码可指。见[第 12 节](#12-样板插件examplesextensionsarxiv-search)。
+
 ## 1. 适用范围与信任模型
 
 ```text
@@ -698,3 +700,30 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 - [ ] `/admin/extensions` 列出预期的插件、版本与接入项。
 - [ ] 一次真实用户动作端到端跑通。
 - [ ] 回滚路径已经写下来：上一版 wheel + 上一版 UI 包，或 `enabled = false`，再加一次重启。
+
+## 12. 样板插件（`examples/extensions/arxiv-search`）
+
+本仓库带一个完整的、**出厂关闭**的样板部署插件，好让上面每一节都有真实可读的代码可指：`examples/extensions/arxiv-search/`。没有任何东西会加载它。它不进任何默认部署、不进默认前端构建、不进默认测试泳道；启用它与启用一个真正的仓库外插件是同一个两变量决定——在你自己的 `EXTENSIONS_CONFIG` TOML 里点名它，再把 `SILICON_NOTEBOOK_UI_PLUGINS` 指向它的 `ui/arxiv-search` 包。
+
+它同时干两件事：
+
+1. **本 SOP 的可运行范例。** 它用的就是第 3、4 节描述的那些接缝，顺序也一样：带设置模型与两道能力门的后端 bundle（3.1–3.3）、带 core 自己那套 notebook 门的 HTTP 路由（3.4）、一个 `GapConsultContributor`（3.5、3.6），以及一个扁平的、带一条 `workspace.side_panel` 入口的构建期 UI 包（第 4 节）。
+2. **「插件不需要给公网仓库打补丁」这句话的机器化证明。** `backend/tests/test_arxiv_sample_plugin_e2e.py::test_the_package_runs_from_outside_the_repository` 把整个包复制到一个临时目录，只把那份副本放上 `sys.path`，用一份点名它的 TOML 起一个真应用，并断言每个被 import 的模块的 `__file__` 都在副本目录之下。
+
+### 它演示了什么
+
+| 入口 | 路径 | 演示的是什么 |
+| --- | --- | --- |
+| 人工检索导入 | 侧栏入口 → 弹窗 → 插件自己的 `POST /import` 路由 → core 的 URL 导入端口 | 插件路由把活交给一个自己对请求用户做授权判定的 core 端口 |
+| Agent 触发的缺口外扩 | core 的 `ask.gap_consult` 点向插件要笔记本之外的线索 | 硬 deadline 下的 `GapConsultContributor`，与侧栏入口分开门控 |
+
+**两道能力门刻意是两个不同的对象**，这也是这个样板关于 3.3 节最主要的教学点：`manifest.provides` 里的那个能力只门控侧栏入口（「这个插件配好了吗？」），而对外咨询由逐 contribution 的 `ExtensionContribution.availability` 单独门控（「这次部署同意让它去联系第三方吗？」）。关掉外扩，面板与导入路由一个字都不变。`manifest.requires` 是空的，样板自己的注释里写了为什么。
+
+### 它的数值登记在哪
+
+样板的私有上限——礼貌性间隔、每页条数、超时、检索词上限、导入批次上限、建议条数上限与外扩返回余量——登记在**它自己的 README 对**里，即 `examples/extensions/arxiv-search/README.md` / `README_zh.md`，**不在** `docs/product-and-api*.md`。那对文档登记的是 core 的数值上限；一个样板插件自己的数字不是 core 的上限，写进去等于宣称这次构建会强制它们。样板的「已登记局限」同样在那份 README 对里（进程内节流、socket 级超时、XML 实体扩展那一条，以及「启用缺口外扩需要两个设置项而不是一个」）。
+
+### 它刻意与真正的仓库外插件不同的两处
+
+- **它的测试放在 `backend/tests/`，不在包里。** 5.3 节要求真正的插件把测试留在自己的仓库里，那条要求依然有效。本仓库的后端泳道只收集 `backend/tests`，所以一个照 5.3 节字面执行的样板会交付一批永远不会被跑到的测试。**不要把这个安排照抄进真正的插件。**
+- **它的 UI 包有自己的 G2 泳道。** 因为配了插件的树跑不过基座的 `npm run test`（5.3 节），样板的前端那一半由 `scripts/check_sample_plugin.sh` 验证，它挂在 `scripts/check_extended.sh` 里跑：用真工具同步这个包，对着一个**非空**的 `frontend/features/ext-*/` 跑 node 泳道，跑界面词汇守卫，再做类型检查。它的退出 `trap` 会**恢复**调用者原本的 `SILICON_NOTEBOOK_UI_PLUGINS` 而不是清空它，这样一台本来就配了私有插件的机器不会因为一次被中断的运行而丢掉它们。

@@ -10,6 +10,7 @@
 
 部署插件的 `trust` 是与既有 `builtin` contribution 并列的第三档信任级别：只从 `EXTENSIONS_CONFIG` 点名指向的一份 TOML 文件装载——不扫描目录、不读 Python entry points、不看第二个环境变量，被标为停用的插件条目根本不会被 import。任何发现、capability、settings 或路由挂载校验失败都在启动期 fail-closed——进程直接拒绝起来，绝不会带着半吊子拓扑跑起来；整套装载结果在进程生命周期内冻结，没有热加载，启用、停用或升级插件都必须重启进程。插件自己的 HTTP 路由（即它的 API extensions）只挂在 `/api/extensions/{plugin_id}` 之下，走与其余 API 相同的会话认证，它触达的每个 core 端口都自己对当前请求用户做授权判定。
 构建期经 `SILICON_NOTEBOOK_UI_PLUGINS`（`:` 分隔的本地插件包目录列表）把部署方私有 UI 插件包装进前端构建，每次 `dev`/`build`/`start`/`test` 运行前同步进 `frontend/features/ext-*/` 与生成的 `registry.local.ts`；插件包契约见 `docs/development.md`。
+仓库带一个完整但**出厂关闭**的样板部署插件 `examples/extensions/arxiv-search/`——没有任何东西会加载它，启用它与启用任何别的插件是同一个两变量决定：在你自己的 `EXTENSIONS_CONFIG` TOML 里点名它，再把 `SILICON_NOTEBOOK_UI_PLUGINS` 指向它的 UI 包。设置表与它的已登记局限见它自己的 README 对，它演示了什么见 `docs/deployment-extensions-sop_zh.md` 第 12 节。
 
 Ask 完成后扩展点使用部署配置的协作式 deadline：已开始的同步 callback 会安全完成，过期后不再启动后续 contribution。这些 final 之后的护栏不能改写持久答案、引用、检索输出或 job 终态。
 
