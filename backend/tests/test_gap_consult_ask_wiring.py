@@ -653,6 +653,17 @@ def test_timeout_leaves_the_answer_verbatim(make_repo):
 
 
 def test_plugin_raises_leaves_the_answer_verbatim(make_repo):
+    """Fail-open protects the ANSWER, not the disclosure step.
+
+    A codex #584 R4 review comment proposed suppressing the ``gap_consult``
+    trace step specifically when the host/plugin fails, reasoning it was
+    "failure noise".  That was reviewed and deliberately rejected: the step
+    is egress transparency (a bounded outside-the-notebook query happened at
+    all), not a diagnostic about whether it succeeded — the run genuinely
+    did consult, so the reader is still owed that fact even though it came
+    back with nothing.  See ``_consult_gap_sources``'s docstring and the
+    unconditional ``TraceStep`` build after its ``try``/``except``.
+    """
     baseline = _answer_without_plugin(make_repo)
 
     class Raising:
@@ -660,7 +671,17 @@ def test_plugin_raises_leaves_the_answer_verbatim(make_repo):
             raise RuntimeError("upstream is down")
 
     repo = make_repo(_bundle(Raising()))
-    _assert_answer_survived(_ask(repo, _seed(repo)), baseline)
+    response = _ask(repo, _seed(repo))
+    _assert_answer_survived(response, baseline)
+
+    step = _gap_step(response)
+    assert step is not None, "宿主/插件抛异常不能让披露步一并消失——外扩确实发生过"
+    assert step.detail["count"] == 0
+    # Cause-agnostic wording (see the step's own comment): it must read the
+    # same "已向站外来源询问…得到 0 条建议" it would on a thin-evidence run
+    # that never touched a raising plugin, never a failure/error word.
+    assert "失败" not in step.summary and "错误" not in step.summary
+    assert "0 条建议" in step.summary
 
 
 def test_malformed_result_leaves_the_answer_verbatim(make_repo):

@@ -103,3 +103,27 @@ test("page.tsx 只读工作区收起 onImportGapSuggestion（导入是写操作�
     `onImportGapSuggestion 的传值没有按 readOnlyWorkspace 三元收起——实际：${bound}`,
   );
 });
+
+// importGapSuggestionDisabledReason 不是回调（没有 `on` 前缀，上面两条派生清单都
+// 不覆盖它），所以单独钉一条：page.tsx 的传值必须真的读了「添加来源」弹窗同一份
+// docCapacity 判据，而不是恒 undefined——否则可写但已达文档上限的笔记本会先撞一次
+// 远端 PDF 探测才拿到后端必然的容量拒绝，违反「确认上传前必须把批次计入上限，超额
+// 时按钮直接置灰」那条红线。
+test("page.tsx 传给 importGapSuggestionDisabledReason 的值读的是 docCapacity.atCapacity（不是恒 undefined）", async () => {
+  const page = await parseModule("page.tsx");
+  const [callSite] = jsxElements(page, "AnswerView");
+  const bound = String(callSite.bindings?.importGapSuggestionDisabledReason ?? "");
+  assert.ok(
+    bound.length > 0,
+    "importGapSuggestionDisabledReason 没传——可写但已达文档上限的笔记本会先撞一次远端探测才拿到容量拒绝",
+  );
+  assert.ok(
+    bound.includes("docCapacity") && bound.includes("atCapacity"),
+    `importGapSuggestionDisabledReason 的传值没有读 docCapacity.atCapacity——实际：${bound}`,
+  );
+  assert.doesNotMatch(
+    bound.trim(),
+    /^undefined$/,
+    "importGapSuggestionDisabledReason 恒为 undefined，等于没传",
+  );
+});

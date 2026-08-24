@@ -2739,12 +2739,31 @@ class AskService:
         ``anchors`` nor ``citations``, and it cannot have moved a word of the
         answer.
 
-        Every failure is fail-open and silent to the reader: no host, a
-        dormant point, a malformed trace, a raising plugin, an exhausted
-        budget, a host answering a shape the port never promised — all of them
-        return ``()`` and leave the answer exactly as it would otherwise have
-        been.  Cancellation is the sole exception: it is the caller's own
-        signal and must keep propagating.
+        Every failure is fail-open: no host, a dormant point, a malformed
+        trace, a raising plugin, an exhausted budget, a host answering a
+        shape the port never promised — all of them return ``()`` and leave
+        the answer exactly as it would otherwise have been.  Cancellation is
+        the sole exception: it is the caller's own signal and must keep
+        propagating.
+
+        "Fail-open" here means the *answer* is untouched and no error state
+        is surfaced — it does NOT mean the disclosure step below disappears.
+        Two genuinely different things happen on the two sides of the
+        ``try``/``except`` below: before it, a ``return ()`` (no host, a
+        dormant point, neither trigger condition, an empty question) really
+        is zero attempt and correctly produces no step at all — nothing was
+        asked, so there is nothing to disclose.  Inside the ``try``, once
+        ``host.consult()`` has actually been called, a raise/timeout/malformed
+        result still falls through to the unconditional ``TraceStep`` build
+        below with ``suggestions = ()`` — the reader is entitled to know a
+        bounded egress attempt happened even when it came back with nothing,
+        exactly as much as when it came back with something.  A codex #584
+        R4 review comment proposed suppressing the step specifically on the
+        failure path; that was reviewed and deliberately rejected for this
+        reason (see the reverse-guard test
+        ``test_gap_consult_ask_wiring.py::
+        test_plugin_raises_leaves_the_answer_verbatim``, which pins the step
+        staying present with a zero count).
         """
         host = getattr(self, "gap_consult_host", None)
         if host is None or gap_consult_host_is_dormant(host):
@@ -2787,6 +2806,16 @@ class AskService:
             # so reaching here means the host itself misbehaved.  A gap
             # suggestion is worth strictly less than the answer it accompanies.
             suggestions = ()
+        # Deliberately unconditional: the step below is built and appended
+        # whether ``suggestions`` came from a clean call or from the
+        # ``except`` branch above.  This is egress transparency, not failure
+        # noise — the step's job is disclosing that a bounded outside-the-
+        # notebook query happened at all, and a reader is owed that even
+        # when it produced zero suggestions.  A codex #584 R4 review comment
+        # suggested suppressing this step on the failure path; reviewed and
+        # rejected (see the docstring above and
+        # ``test_gap_consult_ask_wiring.py::
+        # test_plugin_raises_leaves_the_answer_verbatim``).
         step = TraceStep(
             step_type="gap_consult",
             summary=(

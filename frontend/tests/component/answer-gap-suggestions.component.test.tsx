@@ -196,6 +196,48 @@ test("没有 onImport 时不出导入按钮，但披露本身仍在", async () =
 });
 
 
+// 文档容量满额（page.tsx 的 docCapacity.atCapacity）:导入按钮必须像「添加来源」
+// 弹窗满额时一样直接置灰,不能先撞一次远端 PDF 探测才拿到后端的容量拒绝。
+test("importDisabledReason 非空时导入按钮禁用、提示在场，点击零调用", async () => {
+  const user = userEvent.setup();
+  const onImport = vi.fn().mockResolvedValue({ ok: true });
+  render(
+    <GapSuggestionsPanel
+      suggestions={[suggestion()]}
+      onImport={onImport}
+      importDisabledReason="已达该笔记本的文档数量上限，无法继续添加文档。"
+    />,
+  );
+
+  await user.click(screen.getByText("站外来源建议 · 1 条"));
+  const button = screen.getByRole("button", { name: "导入" });
+  expect(button).toBeDisabled();
+  expect(button).toHaveAttribute("title", "已达该笔记本的文档数量上限，无法继续添加文档。");
+
+  // disabled 按钮上 userEvent.click 本就是 no-op，这里显式用 fireEvent 复核
+  // handleImport 真的没有被触发到 onImport 一步。
+  fireEvent.click(button);
+  expect(onImport).not.toHaveBeenCalled();
+});
+
+
+test("importDisabledReason 为空时导入按钮行为不变（回归）", async () => {
+  const user = userEvent.setup();
+  const onImport = vi.fn().mockResolvedValue({ ok: true });
+  render(
+    <GapSuggestionsPanel suggestions={[suggestion()]} onImport={onImport} importDisabledReason={undefined} />,
+  );
+
+  await user.click(screen.getByText("站外来源建议 · 1 条"));
+  const button = screen.getByRole("button", { name: "导入" });
+  expect(button).toBeEnabled();
+  expect(button).not.toHaveAttribute("title");
+
+  await user.click(button);
+  expect(onImport).toHaveBeenCalledWith("https://example.com/doc.pdf");
+});
+
+
 test("持久化(JSON 往返)的历史回答重新打开时同样渲染这份披露", async () => {
   const user = userEvent.setup();
   // 模拟从存储里重新读回的历史 payload —— 没有任何前端在写入时加工过的字段，
