@@ -225,6 +225,11 @@ class NotebookStore:
             # Empty is a complete provenance index.  Online KG mutations keep
             # knowledge_object_sources coherent; legacy imports/copies bypass
             # this seam and intentionally retain an unknown (false) marker.
+            # `last_rebuild_at` stays NULL: every reader goes through this
+            # store's `state_row`, whose `iso_timestamp` normalizes NULL to ""
+            # (pinned by test_new_notebook_status_is_typed_serializable), and
+            # the KG-analysis view maps this zero-history row to its row-absent
+            # shape (`_state_view`: present means "has KG history").
             connection.execute(
                 "INSERT INTO unified_kg_state"
                 "(notebook_id,dirty,kg_mutation_seq,source_index_backfilled,updated_at) "

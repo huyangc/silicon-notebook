@@ -106,6 +106,24 @@ def test_offline_lock_uses_non_pool_session_and_reports_contention(
 
 
 @pytest.mark.postgres_integration
+def test_new_notebook_status_is_typed_serializable(postgres_repository):
+    """codex #601 R2 rebuttal guard: the born `unified_kg_state` row leaves
+    `last_rebuild_at` NULL on PostgreSQL, but the status service reads it
+    through the PG `state_row`, whose `iso_timestamp` normalizes NULL to "".
+    A freshly created notebook must therefore keep `/unified-kg/status`
+    serializable through the typed model, byte-equal to the row-absent shape."""
+    from app.models.kg import UnifiedKgStatus
+    from app.models.schemas import NotebookCreate
+
+    nb = postgres_repository.create_notebook(NotebookCreate(name="fresh-status"))
+    status = postgres_repository.unified_kg_status(nb.id)
+    model = UnifiedKgStatus(**status)
+    assert model.last_rebuild_at == ""
+    assert model.dirty is False
+    assert (model.objects, model.relations, model.clusters) == (0, 0, 0)
+
+
+@pytest.mark.postgres_integration
 def test_source_index_backfill_is_bounded_restartable_and_marks_only_at_end(
     postgres_repository,
 ):
