@@ -7,12 +7,16 @@ from typing import Callable, Sequence
 
 from app.domain.vector_index import encode_vector
 from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
+from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.ports import (
     INDEXING_PIPELINE_PUBLISH_DELETE_BATCH,
     KgBuildAlreadyRunning,
 )
+
+# 协议边界:staged 回退警告码的最大长度(具名常量,不是可调预算)。
+_STAGE_FALLBACK_WARNING_MAX_CHARS = 200
 
 
 class KgBuildJobStore:
@@ -465,6 +469,12 @@ class KgBuildJobStore:
         }
         for source_id, payload in payloads:
             chunk_payload = payload["chunks"]
+            fallback_warning = chunk_payload.get("chunk_fallback_warning", "")
+            if (
+                type(fallback_warning) is not str
+                or len(fallback_warning) > _STAGE_FALLBACK_WARNING_MAX_CHARS
+            ):
+                raise ValueError("invalid staged chunk fallback warning")
             source_chunk_ids: set[str] = set()
             evidence_elements: set[str] = set()
             for row in chunk_payload["rows"]:
@@ -805,6 +815,29 @@ class KgBuildJobStore:
                     "UPDATE sources SET chunked_at=? WHERE id=? AND notebook_id=?",
                     (created_at, source_id, notebook_id),
                 )
+                # 每源回退徽标随本事务置/清(codex #602 R4 P2):非空写稳定前缀
+                # 诊断(不覆盖既有 MinerU 诊断),空则只清本前缀自己的旧诊断——
+                # 干净重建后不残留过期「降级整理」。
+                warning_code = str(
+                    chunk_payload.get("chunk_fallback_warning") or ""
+                )
+                prefix = INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
+                if warning_code:
+                    db.execute(
+                        "UPDATE sources SET error_message=? WHERE id=? "
+                        "AND notebook_id=? AND (error_message IS NULL "
+                        "OR error_message='' OR error_message LIKE ?)",
+                        (
+                            f"{prefix} {warning_code}", source_id,
+                            notebook_id, f"{prefix}%",
+                        ),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE sources SET error_message='' WHERE id=? "
+                        "AND notebook_id=? AND error_message LIKE ?",
+                        (source_id, notebook_id, f"{prefix}%"),
+                    )
 
             # Chunk publication invalidates every notebook-derived KG product
             # even when the selected pipeline preserves base KG rows.  Derived

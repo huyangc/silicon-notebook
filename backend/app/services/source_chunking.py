@@ -268,12 +268,14 @@ class SourceChunkingService:
                 source_ids,
             )
             rows_by_source: dict[str, list[ChunkWrite]] = {}
+            warnings_by_source: dict[str, str] = {}
             total_proposals = 0
             total_chars = 0
             warning_count = 0
             for source_id in source_ids:
                 elements = self.chunks.source_elements_for_chunking(source_id)
                 chunk_dicts, warning = self._chunk_dicts(elements, pipeline_id)
+                warnings_by_source[source_id] = warning
                 if warning:
                     warning_count += 1
                 total_proposals += len(chunk_dicts)
@@ -328,6 +330,13 @@ class SourceChunkingService:
                             for row in rows
                         ],
                         "vectors": vectors,
+                        # 每源回退警告随 payload 持久化(codex #602 R4 P2):发布器在
+                        # 同一原子事务里随 chunk 置/清来源徽标——重建是异步的,计数
+                        # 回不到发起请求,不staged 的话回退就对用户不可见,而干净
+                        # 重建也清不掉旧徽标。
+                        "chunk_fallback_warning": warnings_by_source.get(
+                            source_id, ""
+                        ),
                     },
                 )
                 if not staged:

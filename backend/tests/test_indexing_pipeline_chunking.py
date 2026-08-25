@@ -506,3 +506,71 @@ def test_builtin_desired_with_plugin_published_refuses_incremental_chunking(repo
         repo._runtime.source_chunking.build_chunks_for_source(source_id)
 
     assert _chunk_texts(repo, notebook.id) == {}
+
+
+def test_rebuild_publishes_and_clears_per_source_fallback_badges(repo, monkeypatch):
+    """全库重建的每源回退徽标随原子发布置/清(codex #602 R4 P2):重建是异步的,
+    不 staged 的话回退对用户不可见;切回内建的干净重建也必须清掉旧徽标。"""
+    from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
+
+    notebook = repo.create_notebook(NotebookCreate(name="rebuild badge"))
+    source_id = _insert_source(repo, notebook.id, "rebuild me")
+    repo._build_chunks_for_source(source_id)
+    host = repo._runtime.source_chunking.indexing_pipelines
+
+    def malformed(pipeline_id, elements, **_kwargs):
+        return IndexingPipelineChunkResult(
+            (
+                IndexingChunkProposal(
+                    text="ghost", element_ids=("el-not-here",), section_path="",
+                ),
+            )
+        )
+
+    monkeypatch.setattr(host, "build_chunks", malformed)
+    pipeline_id, version, generation = _intent(repo, notebook.id)
+    job_id = _attach_job(repo, notebook.id, generation)
+    repo._runtime.indexing_pipeline.rebuild(
+        notebook.id,
+        job_id=job_id,
+        pipeline_id=pipeline_id,
+        pipeline_version=version,
+        pipeline_generation=generation,
+    )
+    # 发布前不动 live 徽标。
+    with repo._connect() as db:
+        assert not str(db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["error_message"] or "")
+    repo._runtime.knowledge_lifecycle.finish_indexing_pipeline_job(
+        notebook.id, job_id, succeeded=True,
+        pipeline_identity=(pipeline_id, version, generation),
+    )
+    with repo._connect() as db:
+        stored = str(db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["error_message"] or "")
+    assert stored.startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX)
+
+    # 切回内建的干净重建清掉旧徽标(builtin 分支 warning 恒空)。
+    monkeypatch.undo()
+    result = repo._runtime.indexing_pipeline.begin(notebook.id, None)
+    builtin_generation = str(result["_pipeline_generation"])
+    builtin_job = _attach_job(repo, notebook.id, builtin_generation)
+    repo._runtime.indexing_pipeline.rebuild(
+        notebook.id,
+        job_id=builtin_job,
+        pipeline_id="",
+        pipeline_version=str(result["_pipeline_version"]),
+        pipeline_generation=builtin_generation,
+    )
+    repo._runtime.knowledge_lifecycle.finish_indexing_pipeline_job(
+        notebook.id, builtin_job, succeeded=True,
+        pipeline_identity=(
+            "", str(result["_pipeline_version"]), builtin_generation
+        ),
+    )
+    with repo._connect() as db:
+        assert str(db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["error_message"] or "") == ""
