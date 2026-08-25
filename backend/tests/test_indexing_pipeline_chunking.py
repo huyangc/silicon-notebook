@@ -487,3 +487,22 @@ def test_incremental_fallback_is_visible_on_the_source_and_clears_on_success(
             "SELECT error_message FROM sources WHERE id=?", (source_id,)
         ).fetchone()["error_message"]
     assert stored == f"{PDF_PYTHON_FALLBACK_WARNING_PREFIX} raw diag"
+
+
+def test_builtin_desired_with_plugin_published_refuses_incremental_chunking(repo):
+    """desired 已切回内建、published 仍是插件时,增量分块必须 fail-closed
+    (codex #602 R1 P2):worker 过写入闸后才发生的切换不复核 published,就会把
+    内建 chunk 写进 published=插件的库,重建失败后混代产物长期留在线上。"""
+    notebook = repo.create_notebook(NotebookCreate(name="toctou"))
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET indexing_pipeline_id='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE notebook_id=?",
+            (notebook.id,),
+        )
+    source_id = _insert_source(repo, notebook.id, "mid-switch upload")
+
+    with pytest.raises(IndexingPipelineUnavailableError):
+        repo._runtime.source_chunking.build_chunks_for_source(source_id)
+
+    assert _chunk_texts(repo, notebook.id) == {}

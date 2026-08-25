@@ -75,6 +75,24 @@ class SourceChunkingService:
         state = self.notebooks.indexing_pipeline_state(notebook_id)
         pipeline_id = str(state["pipeline_id"] or "")
         if not pipeline_id:
+            # 内建早退也要复核 published(镜像 source_ingestion._kg_strategy_for_notebook
+            # 的同名分支;codex #602 R1 P2):worker 过了写入闸之后、走到这里之前,owner
+            # 把 desired 从插件切回内建的话,不查 published 就会把内建 chunk 写进
+            # published 仍是插件的库——重建再失败,这份混代产物就长期留在线上。
+            published_id = str(state["published_pipeline_id"] or "")
+            desired_version = str(
+                state["pipeline_version"] or BUILTIN_INDEXING_PIPELINE_VERSION
+            )
+            published_version = str(
+                state["published_pipeline_version"]
+                or BUILTIN_INDEXING_PIPELINE_VERSION
+            )
+            if (
+                published_id
+                or desired_version != BUILTIN_INDEXING_PIPELINE_VERSION
+                or published_version != BUILTIN_INDEXING_PIPELINE_VERSION
+            ):
+                raise IndexingPipelineUnavailableError("")
             return "", BUILTIN_INDEXING_PIPELINE_VERSION
         if self.indexing_pipelines is None:
             raise IndexingPipelineUnavailableError(pipeline_id)
