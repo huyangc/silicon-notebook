@@ -248,7 +248,7 @@ class SourceChunkingService:
         source_id: str,
         *,
         frozen_identity: "tuple[str, str] | None" = None,
-    ) -> None:
+    ) -> str:
         """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
         幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。
         `frozen_identity` 是调用方在入场准入时经 `published_identity` 冻结的身份;
@@ -279,6 +279,10 @@ class SourceChunkingService:
             self.sources.mark_indexing_chunk_fallback(source_id, warning)
             # Every chunk-derived cache keys off this mutation sequence.
             self.mark_unified_dirty(notebook_id)
+            # 返回回退码给 process_source:终态状态写会覆写 error_message,上面的
+            # marker 在上传流水线里只是过渡态,徽标要活到终态得靠 terminal_msg 携带
+            # (codex #602 R13 P2)。直连/修复调用路没有后续状态写,marker 即终态。
+            return warning
 
     def rebuild_notebook_chunks(
         self,

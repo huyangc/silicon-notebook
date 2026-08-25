@@ -632,6 +632,9 @@ class RepositoryFacade:
                     source_id, extract, emit_terminal_status=True
                 )
             ),
+            # 同款晚绑定:发布器等在飞导入收敛(codex #602 R13 P1)。
+            wait_ingestion_drain=lambda nb, t: (
+                self._runtime.source_ingestion.wait_for_ingestion_drain(nb, t)),
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
             annotate_edge_support=lambda notebook_id, edges: (
                 self._annotate_edge_support(notebook_id, edges)

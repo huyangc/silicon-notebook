@@ -234,6 +234,12 @@ class Settings(BaseSettings):
         100_000_000, ge=1, le=2_000_000_000,
         validation_alias="INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS",
     )
+    # 管线切换发布前等在飞已准入导入收敛的上限(codex #602 R13 P1):超时 fail-closed
+    # (弃 stage、job 落 failed 可重试),绝不带着旧代在飞写发布。
+    indexing_pipeline_publish_drain_timeout_seconds: float = Field(
+        600.0, gt=0, le=3600,
+        validation_alias="INDEXING_PIPELINE_PUBLISH_DRAIN_TIMEOUT_SECONDS",
+    )
     indexing_pipeline_kg_max_messages: int = Field(
         8, ge=1, le=64,
         validation_alias="INDEXING_PIPELINE_KG_MAX_MESSAGES",

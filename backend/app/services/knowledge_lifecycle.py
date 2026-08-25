@@ -377,6 +377,9 @@ class KnowledgeLifecycleService:
         reconcile_extracted_terminal: Callable[
             [str, Callable[[str], None]], None
         ],
+        wait_ingestion_drain: Callable[[str, float], bool] = (
+            lambda _notebook_id, _timeout: True
+        ),
         cluster_map: Callable[[str], Dict[str, str]],
         annotate_edge_support: Callable[[str, List[dict]], List[dict]],
         decided_seed_pairs: Callable[[str], Dict[frozenset, str]],
@@ -426,6 +429,7 @@ class KnowledgeLifecycleService:
         # 'extracted' 事件。晚绑定到 source_ingestion（wire 顺序上它在本服务之后建，故
         # 只能 call-time 解析），与 run_extraction 同款。
         self._reconcile_extracted_terminal = reconcile_extracted_terminal
+        self._wait_ingestion_drain = wait_ingestion_drain
         self.cluster_map = cluster_map
         self._annotate_edge_support = annotate_edge_support
         self.decided_seed_pairs = decided_seed_pairs
@@ -2499,6 +2503,19 @@ class KnowledgeLifecycleService:
             raise
         return job
 
+    def _ingestion_drained_for_publish(self, notebook_id: str) -> bool:
+        """发布事务之前等在飞已准入写收敛(codex #602 R13 P1);纯等待不 settle。
+
+        写入闸(require_write_admission)自切换 pending 起就拦住新的 process_source
+        准入;存量在飞写持有冻结旧代身份,若在发布之后落地,会用旧代 chunk/KG 覆盖
+        刚发布的新代产物——source snapshot CAS 看不见它们(元素替换先于快照)。
+        超时返回 False,由各发布点按本地失败约定 fail-closed(弃 stage、job 落
+        failed 可重试),绝不带着未收敛的在飞写发布。"""
+        return self._wait_ingestion_drain(
+            notebook_id,
+            float(self.settings.indexing_pipeline_publish_drain_timeout_seconds),
+        )
+
     def finish_indexing_pipeline_job(
         self,
         notebook_id: str,
@@ -2521,6 +2538,20 @@ class KnowledgeLifecycleService:
             if pipeline_identity is None:
                 raise ValueError("successful indexing rebuild requires identity")
             pipeline_id, pipeline_version, pipeline_generation = pipeline_identity
+            if not self._ingestion_drained_for_publish(notebook_id):
+                self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+                self.kg_build_jobs.finish(
+                    job_id,
+                    "failed",
+                    error_code="indexing_pipeline_ingestion_active",
+                    error_message="重建完成前仍有资料在导入；请等它们完成后重试重建。",
+                )
+                self._emit_kg_build_event(
+                    "kg_build_failed", self.kg_build_jobs.get(job_id)
+                )
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+                raise IndexingPipelineStalePlanError(notebook_id)
             if not self.kg_build_jobs.complete_indexing_pipeline_stage_without_kg(
                 job_id
             ):
@@ -3106,6 +3137,9 @@ class KnowledgeLifecycleService:
                 pipeline_id, pipeline_version, pipeline_generation = (
                     indexing_pipeline_identity
                 )
+                if not self._ingestion_drained_for_publish(notebook_id):
+                    self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+                    raise IndexingPipelineStalePlanError(notebook_id)
                 if not self.kg_build_jobs.publish_indexing_pipeline_success(
                     job_id,
                     notebook_id,
