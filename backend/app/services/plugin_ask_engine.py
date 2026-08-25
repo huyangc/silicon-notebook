@@ -12,6 +12,7 @@ from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 import json
+import re
 from threading import RLock
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 from uuid import uuid4
@@ -91,6 +92,12 @@ class _TraceState:
     data_lock: Any = field(default_factory=RLock)
     lifecycle: _AuthorityLifecycle = field(default_factory=_AuthorityLifecycle)
 
+
+# 「引用样」残留探测:括号组里出现 k\d 即嫌疑,合法组由 LOOSE_MARKER_RE.fullmatch
+# 放行(见 admit_plugin_engine_result 的注释;codex #602 R6 P1)。
+_SUSPECT_MARKER_RE = re.compile(
+    r"\[[^\[\]\n]*\bk\d+[^\[\]\n]*\]|【[^【】\n]*\bk\d+[^【】\n]*】"
+)
 
 _State = TypeVar("_State")
 _STATE_LOCK = RLock()
@@ -517,6 +524,13 @@ def admit_plugin_engine_result(
             return "[" + ", ".join(keys) + "]"
 
         normalized = LOOSE_MARKER_RE.sub(normalize, answer_markdown)
+        # 残留的「引用样」括号组整份拒绝(codex #602 R6 P1):`[k1, nope]` 这类畸形
+        # 组不被 LOOSE_MARKER_RE 匹配、会原样留在正文里,渲染成一个从未被核验的
+        # 引用外观——与核心「复合组遇到未知键整体失败关闭」同一条纪律。归一化输出
+        # 自己写回的合法组恰好 fullmatch LOOSE_MARKER_RE,不会误伤。
+        for suspect in _SUSPECT_MARKER_RE.finditer(normalized):
+            if LOOSE_MARKER_RE.fullmatch(suspect.group(0)) is None:
+                raise AskEnginePortError("plugin_engine_unverified_citation")
         if cited_marker_indexes != set(range(1, len(records) + 1)):
             raise AskEnginePortError("plugin_engine_unverified_citation")
         return normalized, tuple(records)
