@@ -43,6 +43,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // consult_memory 都是不同的东西——那三步问的是"这个库/这类问题以前怎么样",
   // 这一步问的是"这个库以外还有什么"。零插件部署一步都不产生(见宿主 no-op)。
   gap_consult: "外扩",
+  plugin: "扩展",
 };
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
@@ -107,6 +108,12 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
 
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
   const detail = step.detail ?? {};
+  if (step.step_type === "plugin") {
+    const text = typeof detail.detail === "string" ? detail.detail : "";
+    return detail.truncated
+      ? [text, "后续步骤已截断"].filter(Boolean).join(" · ")
+      : text;
+  }
   if (step.step_type === "intent" && typeof detail.resolved_question === "string") {
     return detail.resolved_question;
   }

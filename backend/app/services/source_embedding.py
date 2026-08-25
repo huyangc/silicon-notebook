@@ -455,6 +455,115 @@ class SourceEmbeddingService:
             self._evict_matrix(notebook_id, "knowledge_embeddings")
         return written
 
+    def _compute_staged_vectors(
+        self,
+        notebook_id: str,
+        workload_id: str,
+        pending: List[tuple[str, str]],
+        *,
+        task_prefix: str,
+    ) -> List[dict]:
+        """Compute JSON-safe vectors without writing a live product table.
+
+        Notebook indexing rebuilds keep these rows in the durable stage until
+        the final generation CAS.  Per-batch failures retain the established
+        best-effort embedding contract; lexical/KG rows still publish.
+        """
+        embedder = self.embedder(workload_id)
+        if not pending or not getattr(embedder, "configured", True):
+            return []
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+        self._warm_up(embedder)
+
+        def _embed_only(batch) -> list:
+            try:
+                vectors = embedder.embed_texts([text for _, text in batch])
+            except Exception as exc:  # noqa: BLE001 - staged vectors are fail-open
+                self.event_log.logger.warning(
+                    "staged embedding batch failed (%d) for %s: %s",
+                    len(batch), notebook_id, exc,
+                )
+                return []
+            return [
+                {
+                    "id": row_id,
+                    "vector": [float(value) for value in vector],
+                    "created_at": self.now(),
+                }
+                for (row_id, _text), vector in zip(batch, vectors)
+            ]
+
+        output: List[dict] = []
+        page_size = max(1, self.settings.embed_commit_batches)
+        for offset in range(0, len(batches), page_size):
+            for part in self._map_embedding_batches(
+                _embed_only,
+                batches[offset:offset + page_size],
+                task_prefix=task_prefix,
+                workload_id=workload_id,
+            ):
+                output.extend(part)
+        return output
+
+    def compute_staged_object_vectors(
+        self, notebook_id: str, items: List[dict]
+    ) -> List[dict]:
+        pending = [
+            (
+                str(item["_oid"]),
+                _payload_text(item["payload"])[
+                    : self.settings.embed_truncate_chars
+                ],
+            )
+            for item in items
+            if _payload_text(item["payload"]).strip()
+        ]
+        return self._compute_staged_vectors(
+            notebook_id,
+            "knowledge_object_embedding",
+            pending,
+            task_prefix="stage-kg",
+        )
+
+    def compute_staged_relation_vectors(
+        self, notebook_id: str, items: List[dict]
+    ) -> List[dict]:
+        pending = [
+            (
+                str(item["_rid"]),
+                str(item.get("text") or "")[: self.settings.embed_truncate_chars],
+            )
+            for item in items
+            if str(item.get("text") or "").strip()
+        ]
+        return self._compute_staged_vectors(
+            notebook_id,
+            "relation_embedding",
+            pending,
+            task_prefix="stage-rel",
+        )
+
+    def compute_staged_chunk_vectors(
+        self, notebook_id: str, items: List[dict]
+    ) -> List[dict]:
+        pending = [
+            (
+                str(item["_oid"]),
+                str((item.get("payload") or {}).get("text") or "")[
+                    : self.settings.embed_truncate_chars
+                ],
+            )
+            for item in items
+            if str((item.get("payload") or {}).get("text") or "").strip()
+        ]
+        return self._compute_staged_vectors(
+            notebook_id,
+            "chunk_embedding",
+            pending,
+            task_prefix="stage-ck",
+        )
+
     def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
         rel_items: [{"_rid": str, "text": str}]。best-effort,失败跳过。"""

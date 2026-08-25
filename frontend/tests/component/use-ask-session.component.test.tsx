@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   bulkDeleteConversations: vi.fn(),
   cancelAskJob: vi.fn(),
   deleteConversation: vi.fn(),
+  fetchAskModes: vi.fn(),
   getAskJob: vi.fn(),
   getConversation: vi.fn(),
   listConversations: vi.fn(),
@@ -164,6 +165,7 @@ beforeEach(() => {
   for (const mock of Object.values(api)) mock.mockReset();
   vi.clearAllMocks();
   api.listConversations.mockResolvedValue([]);
+  api.fetchAskModes.mockResolvedValue([]);
   api.cancelAskJob.mockResolvedValue(undefined);
   api.deleteConversation.mockResolvedValue(undefined);
   api.renameConversation.mockResolvedValue(undefined);
@@ -181,9 +183,16 @@ test("notebook restore performs one list read and one latest-detail read", async
   api.getConversation.mockResolvedValue(detail("conversation-latest"));
   render(<Harness />);
 
-  const owner = beginOwnedNotebook();
+  let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+    });
+  });
   await act(async () => {
-    await value!.restoreNotebook(owner);
+    await value!.restoreNotebook(owner!);
   });
 
   expect(api.listConversations).toHaveBeenCalledTimes(1);
@@ -192,6 +201,147 @@ test("notebook restore performs one list read and one latest-detail read", async
   expect(api.getConversation).toHaveBeenCalledWith("conversation-latest");
   expect(value!.conversationId).toBe("conversation-latest");
   expect(value!.turns).toHaveLength(1);
+  expect(api.fetchAskModes).not.toHaveBeenCalled();
+
+  await act(async () => {
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(api.fetchAskModes).toHaveBeenCalledTimes(1);
+});
+
+test("runtime Ask modes load once per actor generation and restore the exact plugin mode", async () => {
+  api.fetchAskModes.mockResolvedValue([{
+    id: "corp.search",
+    group: "extension",
+    label: "企业检索",
+    desc: "使用部署内检索策略回答",
+    requires_kg: false,
+    streaming: false,
+    streams_trace: false,
+  }]);
+  api.listConversations.mockResolvedValue([summary("conversation-plugin")]);
+  const pluginDetail = detail("conversation-plugin");
+  pluginDetail.turns[0].response.mode = "corp.search";
+  api.getConversation.mockResolvedValue(pluginDetail);
+  render(<Harness />);
+
+  let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+    });
+  });
+  await act(async () => {
+    await value!.restoreNotebook(owner!);
+  });
+  expect(api.fetchAskModes).not.toHaveBeenCalled();
+  await act(async () => {
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(api.fetchAskModes).toHaveBeenCalledTimes(1);
+  expect(value!.askModes.map((candidate) => candidate.id)).toEqual([
+    "chunk", "reasoning", "graph", "corp.search",
+  ]);
+  expect(value!.mode).toBe("corp.search");
+
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 2,
+    })!;
+  });
+  await act(async () => {
+    await value!.restoreNotebook(owner!);
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(api.fetchAskModes).toHaveBeenCalledTimes(1);
+  expect(value!.mode).toBe("corp.search");
+});
+
+test("a failed Ask-mode projection retries on the next committed workspace", async () => {
+  api.fetchAskModes
+    .mockRejectedValueOnce(new Error("projection unavailable"))
+    .mockResolvedValueOnce([{
+      id: "corp.search",
+      group: "extension",
+      label: "企业检索",
+      desc: "使用部署内检索策略回答",
+      requires_kg: false,
+      streams_trace: false,
+    }]);
+  render(<Harness />);
+
+  let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+    });
+  });
+  await act(async () => {
+    await value!.restoreNotebook(owner!);
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(api.fetchAskModes).toHaveBeenCalledTimes(1);
+  expect(value!.askModes.map((candidate) => candidate.id)).toEqual([
+    "chunk", "reasoning", "graph",
+  ]);
+
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 2,
+    })!;
+  });
+  await act(async () => {
+    await value!.restoreNotebook(owner!);
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(api.fetchAskModes).toHaveBeenCalledTimes(2);
+  expect(value!.askModes.map((candidate) => candidate.id)).toEqual([
+    "chunk", "reasoning", "graph", "corp.search",
+  ]);
+});
+
+test("a rolled-back notebook transition performs no Ask-mode projection I/O", async () => {
+  render(<Harness />);
+
+  let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+    });
+  });
+  await act(async () => {
+    await value!.restoreNotebook(owner!);
+  });
+  expect(api.fetchAskModes).not.toHaveBeenCalled();
+
+  await act(async () => {
+    value!.finishNotebookTransition(owner!, false);
+  });
+  expect(api.fetchAskModes).not.toHaveBeenCalled();
+});
+
+test("a historical plugin mode falls back when that engine is not projected", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-disabled-plugin")]);
+  const disabled = detail("conversation-disabled-plugin");
+  disabled.turns[0].response.mode = "corp.disabled";
+  api.getConversation.mockResolvedValue(disabled);
+  render(<Harness />);
+
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+  });
+  expect(value!.mode).toBe("chunk");
 });
 
 test("empty restore skips detail and a foreign-notebook detail never commits", async () => {

@@ -9,19 +9,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from app.domain.ask_engine import (
+    AskEngineAvailabilityContext,
+    AskEngineContext,
+    AskEngineDescriptor,
+    AskEnginePortError,
+    AskEngineProvider,
+    AskEngineResult,
+    EngineEvidence,
+    EngineModelPort,
+    EngineTraceSink,
+    RetrievalAccessPort,
+)
 from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
-)
-from app.extension_sdk.contracts import (
     ActorRef,
     NotebookRef,
+)
+from app.extension_sdk.contracts import (
     ObserverReceipt,
 )
 
 
 ASK_COMPLETED_OBSERVER_POINT = "ask.completed_observer"
+ASK_ENGINE_POINT = "ask.engine"
 
 
 class AskCompletedAccess(Protocol):
@@ -56,10 +69,21 @@ class AskCompletedObserver(Protocol):
 __all__ = [
     "ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY",
     "ASK_COMPLETED_OBSERVER_POINT",
+    "ASK_ENGINE_POINT",
     "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY",
     "ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY",
     "AskCompletedAccess",
     "AskCompletedAvailabilityContext",
     "AskCompletedExtensionContext",
     "AskCompletedObserver",
+    "AskEngineAvailabilityContext",
+    "AskEngineContext",
+    "AskEngineDescriptor",
+    "AskEnginePortError",
+    "AskEngineProvider",
+    "AskEngineResult",
+    "EngineEvidence",
+    "EngineModelPort",
+    "EngineTraceSink",
+    "RetrievalAccessPort",
 ]

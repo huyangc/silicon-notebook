@@ -145,6 +145,7 @@ _REAL_SQLITE_MIGRATION_MODULES = {
     "test_agent_profile_job_overlay.py",
     "test_agent_profile_store.py",
     "test_catalog_store.py",
+    "test_indexing_pipeline_identity.py",
     "test_merge_dbs_taxonomy.py",
     "test_readiness_gate.py",
     "test_repository_snapshot_verifier.py",

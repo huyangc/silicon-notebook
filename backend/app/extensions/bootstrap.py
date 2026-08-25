@@ -63,6 +63,8 @@ from app.extensions.registry import ExtensionRegistry, frozen_registry
 from app.extensions.parser_chain import ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost
 from app.extensions.ask import AskCompletedObserverHost
+from app.extensions.ask_engine import AskEngineHost
+from app.extensions.indexing import IndexingPipelineHost
 from app.extensions.gap_consult import GapConsultHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
@@ -84,6 +86,8 @@ class ExtensionRuntime:
     retrieval_contributors: RetrievalContributorHost
     parser_chain: ParserProviderChainHost
     ask_completed_observers: AskCompletedObserverHost
+    ask_engines: AskEngineHost
+    indexing_pipelines: IndexingPipelineHost
     report_completed_observers: ReportCompletedObserverHost
     report_exporter: ReportExporterHost
     # Gap consultation has no built-in contribution and no core capability
@@ -150,6 +154,11 @@ def build_extension_runtime(
             registry,
             event_sink=event_sink,
         ),
+        ask_engines=AskEngineHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        indexing_pipelines=IndexingPipelineHost(registry),
         report_completed_observers=ReportCompletedObserverHost(
             registry,
             event_sink=event_sink,

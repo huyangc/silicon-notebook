@@ -52,6 +52,7 @@ class ModelServiceDefinition:
 
 _WORKLOAD_LABELS = MappingProxyType({
     "ask_answer": "问答回答",
+    "plugin_engine": "扩展问答引擎",
     "reasoning_agent": "逐步推理",
     "query_rewrite": "查询改写",
     "evidence_refine": "证据筛选",
@@ -100,6 +101,7 @@ _CHAT_THINKING_DEFAULTS: Mapping[
     # answer users read.  Keep reasoning here even when retrieval itself was
     # deterministic or already used the reasoning agent.
     "ask_answer": "enabled",
+    "plugin_engine": "disabled",
     "reasoning_agent": "enabled",
     "query_rewrite": "disabled",
     "evidence_refine": "disabled",
@@ -171,7 +173,8 @@ def workload_map(
 
 WORKLOADS = workload_map(
     chat={
-        "ask_answer": "interactive", "reasoning_agent": "interactive",
+        "ask_answer": "interactive", "plugin_engine": "interactive",
+        "reasoning_agent": "interactive",
         "query_rewrite": "interactive", "evidence_refine": "interactive",
         "graph_chain_verify": "interactive", "report_outline": "report",
         "report_sufficiency": "report", "report_section": "report",

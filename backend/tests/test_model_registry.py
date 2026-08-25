@@ -14,6 +14,7 @@ from app.services.model_registry import (
 
 _EXPECTED_WORKLOADS = {
     "ask_answer": ("chat", "interactive", "问答回答"),
+    "plugin_engine": ("chat", "interactive", "扩展问答引擎"),
     "reasoning_agent": ("chat", "interactive", "逐步推理"),
     "query_rewrite": ("chat", "interactive", "查询改写"),
     "evidence_refine": ("chat", "interactive", "证据筛选"),
@@ -255,6 +256,8 @@ def test_checked_in_example_is_credential_free_and_loads_when_keys_are_supplied(
 
     assert "general-secret" not in contents
     assert registry.service_for("ask_answer").id == "general"
+    assert registry.service_for("plugin_engine").id == "general"
+    assert registry.thinking_mode_for("plugin_engine") == "disabled"
     assert registry.service_for("retrieval_query_embedding").id == "embedding"
     assert registry.service_for("retrieval_rerank").id == "rerank"
     assert all(registry.service_for(workload_id) is not None for workload_id in WORKLOADS)

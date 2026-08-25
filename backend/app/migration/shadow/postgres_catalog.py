@@ -680,7 +680,7 @@ def validate_postgres_business_catalog(
     pins to ``RUNNING_SCHEMA_PAIR``; the name carries no schema version so it
     cannot go stale the way ``..._v11_catalog`` did across three bumps.
     """
-    catalog_tables = ("silicon_schema_migrations", *manifest.replicated_names)
+    catalog_tables = ("silicon_schema_migrations", *manifest.application_names)
     table_rows = conn.execute(
         "SELECT c.relname AS table_name,c.relkind,c.relpersistence,"
         "pg_get_userbyid(c.relowner) AS owner,current_user AS expected_owner,c.relacl,"

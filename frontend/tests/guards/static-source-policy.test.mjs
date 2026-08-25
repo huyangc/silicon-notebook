@@ -79,6 +79,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 第三列、来源栏收起态与移动端单列。jsdom 不执行 grid 布局，样式表文本是唯一
   // 可验证输入；组件测试另行证明无可见 contribution 时 host 返回 exact null。
   "tests/guards/extension-ui-layout-guard.test.mjs",
+  // 同上，只读 globals.css：extension SDK 的共享 UI 组件层新长了一组 `.extension-*`
+  // 基座类，这条守卫要逐个核对 `ui.tsx` 里出现的 className token 确实都在样式表里
+  // 有规则。className 字符串没有类型检查，jsdom 也量不出「挂了不存在的类」这种视觉
+  // 退化；文本因此是唯一诚实输入。对 `ui.tsx` 的 className 采集仍走 semantic-source。
+  "tests/guards/extension-ui-kit-style-guard.test.mjs",
   // 构建期装载仓库外 UI 插件的同步脚本：在临时目录里造插件包夹具、跑真同步、
   // 再读回自己刚生成的产物。读的全是测试自己写出来的临时文件，加上后端契约
   // 生成器里那一行排序键声明——没有一处是对生产源码的位置/顺序查询。

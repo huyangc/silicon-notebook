@@ -38,6 +38,7 @@ test("collection hook has a positive dependency allowlist and no cross-domain ow
   const allowed = new Set([
     "react",
     "./collection-search.ts",
+    "./indexing-pipeline-settings.ts",
     "./notebook-api.ts",
     "./notebook-bases.ts",
     "./notebook-creation.ts",

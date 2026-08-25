@@ -99,6 +99,7 @@
         "effective_schemas",
         "event_log",
         "evidence_elements",
+        "execute_indexing_pipeline_rebuild",
         "execute_notebook_kg_job",
         "export_reports",
         "extract_source",
@@ -129,6 +130,7 @@
         "hidden_source_ids",
         "import_sources",
         "incremental_fuse_source",
+        "indexing_pipeline_options",
         "index_status",
         "insert_notebook_asset",
         "is_member",
@@ -229,6 +231,7 @@
         "report_source_identity_rows",
         "report_source_rows",
         "require_agent_access",
+        "require_indexing_pipeline_write",
         "resolve_agent_token",
         "resolve_notebook_conflicts",
         "resolve_session",
@@ -248,6 +251,7 @@
         "search_notebook",
         "set_conflict_status",
         "set_edge_review",
+        "set_indexing_pipeline",
         "set_knowhow_anchor_column",
         "set_knowhow_column_kind",
         "set_knowhow_hidden_source",
@@ -336,7 +340,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "ports_protocol_method_count": 882,
+  "ports_protocol_method_count": 896,
   "function_length_ceiling": {
     "backend/app/api/mcp_tools/memory_context.py::register_memory_context_tools.ask_notebook": 157,
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 160,
@@ -355,8 +359,8 @@
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1702,
     "backend/app/services/report_engine.py::ReportEngine._assemble": 457,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 349,
-    "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 460,
-    "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 121,
-    "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 372
+    "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 467,
+    "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 128,
+    "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 373
   }
 }

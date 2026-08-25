@@ -47,7 +47,16 @@ import { useState, type FormEvent } from "react";
 import { Search } from "lucide-react";
 
 import type { WorkspaceExtensionProps } from "../extension-sdk/contracts.ts";
-import { ExtensionModal } from "../extension-sdk/ui.tsx";
+import {
+  ExtensionActions,
+  ExtensionAlert,
+  ExtensionEmptyState,
+  ExtensionFormRow,
+  ExtensionModal,
+  ExtensionResultItem,
+  ExtensionResultList,
+  ExtensionTextInput,
+} from "../extension-sdk/ui.tsx";
 import {
   FIRST_PAGE_START,
   MAX_IMPORT_URLS,
@@ -273,9 +282,8 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
         title="arXiv 文献检索（样板）"
         description="按关键词检索 arXiv 论文，勾选后导入这个笔记本。"
       >
-        <form onSubmit={handleSubmit}>
-          <input
-            type="text"
+        <ExtensionFormRow onSubmit={handleSubmit}>
+          <ExtensionTextInput
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="检索关键词，例如 diffusion model"
@@ -294,65 +302,77 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
           >
             {searchBusy ? "检索中…" : "检索"}
           </button>
-        </form>
-        {overQueryCharLimit && <p>检索关键词过长，请精简后再试。</p>}
-        {overQueryTermLimit && <p>检索词最多 {MAX_QUERY_TERMS} 个，请精简后重试。</p>}
-        {searchError && <p role="alert">{searchError}</p>}
-        {noResults && <p>没有找到相关文献，换个关键词试试。</p>}
+        </ExtensionFormRow>
+        {overQueryCharLimit ? (
+          <ExtensionAlert tone="warning">检索关键词过长，请精简后再试。</ExtensionAlert>
+        ) : null}
+        {overQueryTermLimit ? (
+          <ExtensionAlert tone="warning">检索词最多 {MAX_QUERY_TERMS} 个，请精简后重试。</ExtensionAlert>
+        ) : null}
+        {searchError ? <ExtensionAlert tone="error">{searchError}</ExtensionAlert> : null}
+        {noResults ? <ExtensionEmptyState>没有找到相关文献，换个关键词试试。</ExtensionEmptyState> : null}
         {visibleItems.length > 0 && (
-          <ul>
+          <ExtensionResultList>
             {visibleItems.map((item) => (
-              <li key={item.arxiv_id}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={selected.has(item.arxiv_id)}
-                    onChange={(event) => toggle(item.arxiv_id, event.target.checked)}
-                  />
-                  <strong>{item.title}</strong>
-                </label>
-                <p>
-                  {formatAuthors(item.authors, item.authors_total)}
-                  {item.published ? ` · ${item.published}` : ""}
-                </p>
-                {item.summary && <p>{item.summary}</p>}
-              </li>
+              <ExtensionResultItem
+                key={item.arxiv_id}
+                checkbox={{
+                  checked: selected.has(item.arxiv_id),
+                  onChange: (checked) => toggle(item.arxiv_id, checked),
+                  ariaLabel: `选择论文：${item.title}`,
+                }}
+                title={item.title}
+                meta={
+                  <>
+                    {formatAuthors(item.authors, item.authors_total)}
+                    {item.published ? ` · ${item.published}` : ""}
+                  </>
+                }
+                summary={item.summary || undefined}
+              />
             ))}
-          </ul>
+          </ExtensionResultList>
         )}
-        {hasMore && (
-          <button type="button" className="button secondary" disabled={searchBusy} onClick={handleLoadMore}>
-            {searchBusy ? "加载中…" : "加载更多"}
+        <ExtensionActions>
+          {hasMore ? (
+            <button type="button" className="button secondary" disabled={searchBusy} onClick={handleLoadMore}>
+              {searchBusy ? "加载中…" : "加载更多"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="button"
+            disabled={importBusy || selected.size === 0 || overImportLimit}
+            onClick={() => void handleImport()}
+          >
+            {importBusy ? "导入中…" : `导入所选（${selected.size}）`}
           </button>
-        )}
-        <button
-          type="button"
-          className="button"
-          disabled={importBusy || selected.size === 0 || overImportLimit}
-          onClick={() => void handleImport()}
-        >
-          {importBusy ? "导入中…" : `导入所选（${selected.size}）`}
-        </button>
-        {overImportLimit && <p>一次最多导入 {MAX_IMPORT_URLS} 篇，请先取消部分勾选。</p>}
-        {importError && <p role="alert">{importError}</p>}
-        {receipt && receipt.size === 0 && (
+        </ExtensionActions>
+        {overImportLimit ? (
+          <ExtensionAlert tone="warning">一次最多导入 {MAX_IMPORT_URLS} 篇，请先取消部分勾选。</ExtensionAlert>
+        ) : null}
+        {importError ? <ExtensionAlert tone="error">{importError}</ExtensionAlert> : null}
+        {receipt && receipt.size === 0 ? (
           // A non-null but empty receipt means the request succeeded and
           // accounted for nothing at all. Silently resetting would read as
           // "done" — say so instead and point at where the truth is.
-          <p role="status">本次导入没有收到任何结果，请到来源列表确认。</p>
-        )}
+          <ExtensionAlert tone="status">本次导入没有收到任何结果，请到来源列表确认。</ExtensionAlert>
+        ) : null}
         {receipt && receipt.size > 0 && (
-          <ul>
+          <ExtensionResultList>
             {[...receipt.entries()].map(([url, entry]) => (
-              <li key={url}>
-                {entry.status === "created" && <span>已创建：{entry.title}</span>}
-                {entry.status === "repeat" && (
-                  <span>本次已导入过，可能已产生重复来源：{entry.title}</span>
-                )}
-                {entry.status === "rejected" && <span>未导入（{entry.reason}）：{url}</span>}
-              </li>
+              <ExtensionResultItem
+                key={url}
+                title={
+                  entry.status === "created"
+                    ? `已创建：${entry.title}`
+                    : entry.status === "repeat"
+                      ? `本次已导入过，可能已产生重复来源：${entry.title}`
+                      : `未导入（${entry.reason}）：${url}`
+                }
+              />
             ))}
-          </ul>
+          </ExtensionResultList>
         )}
       </ExtensionModal>
     </>

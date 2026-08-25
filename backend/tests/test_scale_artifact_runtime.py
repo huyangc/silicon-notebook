@@ -424,6 +424,47 @@ def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch)
     assert scale.status(notebook.id)["state"] == "building"
 
 
+def test_post_publication_rebuild_coalesces_busy_full_followup(repo, monkeypatch):
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+
+    launched = []
+    builds = []
+    monkeypatch.setattr(
+        scale,
+        "_start_daemon",
+        lambda name, target: launched.append((name, target)),
+    )
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(
+        scale.builder,
+        "build",
+        lambda notebook_id, **_kwargs: builds.append(notebook_id) or {},
+    )
+    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
+
+    assert scale.rebuild_after_publication(notebook.id)["status"] == "building"
+    assert scale.rebuild_after_publication(notebook.id)["status"] == "queued_followup"
+    assert scale.idle_queue[notebook.id][0] == "full"
+
+    scale_targets = [
+        target for name, target in launched if name == f"scaleidx-{notebook.id}"
+    ]
+    assert len(scale_targets) == 1
+    scale_targets[0]()
+
+    scale_targets = [
+        target for name, target in launched if name == f"scaleidx-{notebook.id}"
+    ]
+    assert len(scale_targets) == 2
+    assert notebook.id not in scale.idle_queue
+    scale_targets[1]()
+    assert builds == [notebook.id, notebook.id]
+    assert notebook.id not in scale.building
+
+
 def test_requeue_updates_mode_but_keeps_first_queued_at(repo, monkeypatch):
     """重复排队(连续加来源触发 maybe_enqueue_fold 的常态)只更新 mode,保留首次
     入队时刻:dict 对既有 key 赋值不改插入序,位次锚定首次入队,时间戳必须与它

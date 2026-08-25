@@ -14,10 +14,17 @@ import {
 import {
   createNotebook,
   deleteNotebook,
+  fetchNotebookIndexingPipeline,
   getNotebook,
   listNotebooks,
+  setNotebookIndexingPipeline,
+  type IndexingPipelineResponse,
   updateNotebook,
 } from "./notebook-api.ts";
+import {
+  indexingPipelineIdsEqual,
+  normalizeIndexingPipelineId,
+} from "./indexing-pipeline-settings.ts";
 import { defaultNotebookPayload } from "./notebook-creation.ts";
 import type { NotebookSummary, SearchHit } from "./workspace-model.ts";
 
@@ -38,6 +45,7 @@ export type NotebookEditorPatch = Readonly<{
   expected_questions: string[];
   source_types: string[];
   taxonomy: string[];
+  indexing_pipeline_id?: string | null;
 }>;
 
 type CollectionEffects = {
@@ -61,9 +69,13 @@ type MenuPosition = { left: number; top: number };
 type EditorView = {
   owner: CollectionOwner;
   target: NotebookSummary;
+  canManageContent: boolean;
+  canConfigureNotebook: boolean;
   mountable: NotebookRef[];
   mountedIds: string[];
   mountEdges: MountedBase[];
+  indexingPipeline: IndexingPipelineResponse | null;
+  selectedPipelineId: string;
   busy: boolean;
 };
 
@@ -244,12 +256,20 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     return Boolean(row && (row.access ?? "owner") !== "reader");
   };
 
-  const rowCanRename = (id: string): boolean => {
+  const rowCanManageContent = (id: string): boolean => {
     const row = currentRow(id);
     return Boolean(row && (
       (row.access ?? "owner") !== "reader"
       || row.can_manage_content === true
     ));
+  };
+
+  const rowCanRename = (id: string): boolean => {
+    return rowCanManageContent(id);
+  };
+
+  const rowCanConfigure = (id: string): boolean => {
+    return rowIsOwner(id);
   };
 
   function activateActor(nextActorId: string) {
@@ -298,8 +318,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const ownerIds = new Set(next
       .filter((row) => (row.access ?? "owner") !== "reader")
       .map((row) => row.id));
+    const editorVisibleIds = new Set(next
+      .filter((row) => (row.access ?? "owner") !== "reader" || row.can_manage_content === true)
+      .map((row) => row.id));
     setEditor((current) => {
-      if (!current || ownerIds.has(current.target.id)) return current;
+      if (!current || editorVisibleIds.has(current.target.id)) return current;
       editorOperationRef.current = null;
       editorSavingRef.current = false;
       return null;
@@ -520,23 +543,41 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
 
   async function openEditor(notebookId: string): Promise<boolean> {
     const owner = captureOwner();
-    if (!owner || !rowIsOwner(notebookId)) return false;
+    if (!owner || !rowCanManageContent(notebookId)) return false;
     const operation = {};
     editorOperationRef.current = operation;
     try {
-      const [mountable, mountEdges] = await Promise.all([
-        listMountable(notebookId),
-        listBases(notebookId),
-      ]);
-      if (!owns(owner) || editorOperationRef.current !== operation || !rowIsOwner(notebookId)) return false;
       const target = currentRow(notebookId);
       if (!target) return false;
+      const canManageContent = rowCanManageContent(notebookId);
+      const canConfigureNotebook = rowCanConfigure(notebookId);
+      const indexingPipelinePromise = fetchNotebookIndexingPipeline(notebookId);
+      const [indexingPipeline, mountable, mountEdges] = canConfigureNotebook
+        ? await Promise.all([
+          indexingPipelinePromise,
+          listMountable(notebookId),
+          listBases(notebookId),
+        ])
+        : await Promise.all([
+          indexingPipelinePromise,
+          Promise.resolve([] as NotebookRef[]),
+          Promise.resolve([] as MountedBase[]),
+        ]);
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(notebookId)
+      ) return false;
       setEditor({
         owner,
         target,
+        canManageContent,
+        canConfigureNotebook,
         mountable,
         mountEdges,
         mountedIds: mountEdges.map((edge) => edge.id),
+        indexingPipeline,
+        selectedPipelineId: normalizeIndexingPipelineId(indexingPipeline.pipeline_id),
         busy: false,
       });
       closeMenu();
@@ -561,29 +602,79 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     } : current);
   }
 
+  function selectIndexingPipeline(pipelineId: string | null) {
+    setEditor((current) => current ? {
+      ...current,
+      selectedPipelineId: normalizeIndexingPipelineId(pipelineId),
+    } : current);
+  }
+
+  async function applyIndexingPipelineSelection(
+    current: EditorView,
+    desiredPipelineId: string,
+  ): Promise<IndexingPipelineResponse | null> {
+    if (
+      !current.canManageContent
+      || indexingPipelineIdsEqual(current.indexingPipeline?.pipeline_id, desiredPipelineId)
+    ) return current.indexingPipeline;
+    return setNotebookIndexingPipeline(current.target.id, desiredPipelineId || null);
+  }
+
   async function saveEditor(patch: NotebookEditorPatch): Promise<void> {
     const owner = captureOwner();
     const current = editor;
     if (!owner || !current || !owns(current.owner) || current.busy || editorSavingRef.current
-      || !rowIsOwner(current.target.id)) return;
+      || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
     if (!operation) return;
     editorSavingRef.current = true;
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
-      await updateNotebook(current.target.id, patch);
-      if (!owns(owner) || editorOperationRef.current !== operation
-        || !rowIsOwner(current.target.id)) return;
-      const bases = await setBases(current.target.id, current.mountedIds);
-      if (!owns(owner) || editorOperationRef.current !== operation
-        || !rowIsOwner(current.target.id)) return;
+      const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
+      await updateNotebook(current.target.id, notebookPatch);
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(current.target.id)
+      ) return;
+      const pipelineResult = await applyIndexingPipelineSelection(
+        current,
+        normalizeIndexingPipelineId(indexingPipelineId),
+      );
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(current.target.id)
+      ) return;
+      const bases = current.canConfigureNotebook
+        ? await setBases(current.target.id, current.mountedIds)
+        : current.mountEdges;
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(current.target.id)
+      ) return;
       const updated = await getNotebook(current.target.id);
-      if (!owns(owner) || editorOperationRef.current !== operation
-        || !rowIsOwner(current.target.id)) return;
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(current.target.id)
+      ) return;
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, bases);
       await effectsRef.current.refreshComposite(() => owns(owner));
-      if (owns(owner)) effectsRef.current.notify("笔记本信息已更新");
+      if (owns(owner)) {
+        if (pipelineResult?.changed) {
+          const warningCount = pipelineResult.warning_count ?? 0;
+          effectsRef.current.notify(
+            warningCount > 0
+              ? `索引管线已切换，正在重建全库索引；${warningCount} 项插件分块已回退到内建。`
+              : "索引管线已切换，正在重建全库索引。",
+          );
+        } else {
+          effectsRef.current.notify("笔记本信息已更新");
+        }
+      }
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
     } finally {
@@ -592,6 +683,69 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         setEditor((value) => value ? { ...value, busy: false } : value);
       }
     }
+  }
+
+  async function restartIndexingPipeline(
+    pipelineId: string | null,
+    successMessage: string,
+  ): Promise<void> {
+    const owner = captureOwner();
+    const current = editor;
+    if (!owner || !current || !owns(current.owner) || current.busy || editorSavingRef.current
+      || !rowCanManageContent(current.target.id)) return;
+    const operation = editorOperationRef.current;
+    if (!operation) return;
+    editorSavingRef.current = true;
+    setEditor((value) => value ? { ...value, busy: true } : value);
+    try {
+      const result = await setNotebookIndexingPipeline(current.target.id, pipelineId);
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(current.target.id)
+      ) return;
+      const updated = await getNotebook(current.target.id);
+      if (
+        !owns(owner)
+        || editorOperationRef.current !== operation
+        || !rowCanManageContent(current.target.id)
+      ) return;
+      setEditor((value) => value ? {
+        ...value,
+        target: updated,
+        indexingPipeline: result,
+        selectedPipelineId: normalizeIndexingPipelineId(pipelineId),
+      } : value);
+      effectsRef.current.onNotebookUpdated(updated, current.mountEdges);
+      await effectsRef.current.refreshComposite(() => owns(owner));
+      if (owns(owner)) effectsRef.current.notify(successMessage);
+    } catch (error) {
+      if (owns(owner) && editorOperationRef.current === operation) {
+        effectsRef.current.reportError(error);
+      }
+    } finally {
+      if (editorOperationRef.current === operation) editorSavingRef.current = false;
+      if (owns(owner) && editorOperationRef.current === operation) {
+        setEditor((value) => value ? { ...value, busy: false } : value);
+      }
+    }
+  }
+
+  async function revertIndexingPipelineToBuiltin(): Promise<void> {
+    await restartIndexingPipeline(
+      null,
+      "已切回内建索引管线，正在重建全库索引。",
+    );
+  }
+
+  async function retryIndexingPipelineRebuild(): Promise<void> {
+    const pipelineId = normalizeIndexingPipelineId(
+      editor?.indexingPipeline?.pipeline_id,
+    );
+    await restartIndexingPipeline(
+      pipelineId || null,
+      "已重新提交当前索引管线，正在重建全库索引。",
+    );
   }
 
   async function openDelete(notebookId: string): Promise<boolean> {
@@ -686,7 +840,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       position: menuNotebook ? menuPosition : null,
       ref: menuRef,
     },
-    editor: visible && editor && owns(editor.owner) && rowIsOwner(editor.target.id) ? editor : null,
+    editor: visible && editor && owns(editor.owner) && rowCanManageContent(editor.target.id)
+      ? editor
+      : null,
     deletion: visible && deletion && owns(deletion.owner) && rowIsOwner(deletion.target.id)
       ? deletion
       : null,
@@ -711,7 +867,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     openEditor,
     closeEditor,
     toggleMountedBase,
+    selectIndexingPipeline,
     saveEditor,
+    revertIndexingPipelineToBuiltin,
+    retryIndexingPipelineRebuild,
     openDelete,
     closeDelete,
     confirmDelete,

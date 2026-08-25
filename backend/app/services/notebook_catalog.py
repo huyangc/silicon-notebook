@@ -5,7 +5,13 @@ import shutil
 import weakref
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Mapping
+
+from app.domain.indexing_pipeline import (
+    BUILTIN_INDEXING_PIPELINE_VERSION,
+    IndexingPipelineHostPort,
+    IndexingPipelineOption,
+)
 
 from app.models.groups import GrantedGroupRef
 from app.models.kg import KgBuildJobStatus
@@ -113,10 +119,31 @@ class NotebookSummaryQuery:
         database: RepositoryDatabasePort,
         queries: QueryStorePort,
         kg_build_jobs: "KgBuildJobStorePort | None" = None,
+        indexing_pipelines: "IndexingPipelineHostPort | None" = None,
     ) -> None:
         self.database = database
         self.queries = queries
         self.kg_build_jobs = kg_build_jobs
+        self.indexing_pipelines = indexing_pipelines
+
+    def _indexing_option_map(self) -> dict[str, IndexingPipelineOption]:
+        """Resolve live availability once per summary/list projection."""
+        builtin = IndexingPipelineOption(
+            pipeline_id="",
+            label="内建管线",
+            description="",
+            version=BUILTIN_INDEXING_PIPELINE_VERSION,
+            overrides_chunking=False,
+            overrides_kg_extraction=False,
+            available=True,
+        )
+        options = {"": builtin}
+        if self.indexing_pipelines is not None:
+            options.update(
+                (option.pipeline_id, option)
+                for option in self.indexing_pipelines.options()
+            )
+        return options
 
     def count(
         self, db: object, table: str, column: str, value: str
@@ -198,6 +225,7 @@ class NotebookSummaryQuery:
         row: Any,
         *,
         memory_count: int = 0,
+        indexing_options: Mapping[str, IndexingPipelineOption] | None = None,
     ) -> NotebookSummary:
         # 注意:kg_building/paper_meta_backfilling 仅经 get(kg_building=...,
         # paper_meta_backfilling=...) 回填为真值;list_for_user 等走 from_row 的
@@ -221,6 +249,38 @@ class NotebookSummaryQuery:
         # 一次读取,两种投影:布尔 base_kg_available 与它的分解 base_kg_notebook_ids。
         # 自洽(非空 ⟺ 为真)因此是构造性的 —— 不存在两个独立求值的机会。
         base_refs, base_kg_ids = self.mounted_bases(row["id"], connection)
+        options = indexing_options or self._indexing_option_map()
+        desired_id = str(row["indexing_pipeline"] or "") if "indexing_pipeline" in keys else ""
+        desired_version = (
+            str(row["indexing_pipeline_version"] or BUILTIN_INDEXING_PIPELINE_VERSION)
+            if "indexing_pipeline_version" in keys
+            else BUILTIN_INDEXING_PIPELINE_VERSION
+        )
+        published_id = (
+            str(row["_published_pipeline_id"] or "")
+            if "_published_pipeline_id" in keys
+            else ""
+        )
+        published_version = (
+            str(
+                row["_published_pipeline_version"]
+                or BUILTIN_INDEXING_PIPELINE_VERSION
+            )
+            if "_published_pipeline_version" in keys
+            else BUILTIN_INDEXING_PIPELINE_VERSION
+        )
+        job_id = (
+            str(row["indexing_pipeline_job_id"] or "")
+            if "indexing_pipeline_job_id" in keys
+            else ""
+        )
+        selected = options.get(desired_id)
+        selected_version = selected.version if selected is not None else desired_version
+        stale = (
+            desired_id != published_id
+            or desired_version != selected_version
+            or selected_version != published_version
+        )
         return NotebookSummary(
             id=row["id"],
             name=row["name"],
@@ -258,6 +318,12 @@ class NotebookSummaryQuery:
                 (bool(row["is_shared"]) if "is_shared" in keys else False)
                 or ("_shared_to_groups" in keys and bool(row["_shared_to_groups"]))
             ),
+            indexing_pipeline_id=desired_id or None,
+            indexing_pipeline_version=selected_version,
+            indexing_pipeline_available=bool(selected and selected.available),
+            indexing_pipeline_missing=bool(desired_id and selected is None),
+            indexing_pipeline_pending=bool(job_id) or stale,
+            indexing_pipeline_stale=stale,
         )
 
     def _fill_viewer_relation(
@@ -365,6 +431,7 @@ class NotebookSummaryQuery:
         are treated as not-yet-existing: every catalog mutation guards with
         get(...) before acting, and a half-copied notebook must not be usable
         by any of them until the copy finishes."""
+        indexing_options = self._indexing_option_map()
         with self.database.connect() as db:
             row = self.queries.summary_notebook_row(db, notebook_id)
             if row is None:
@@ -378,6 +445,7 @@ class NotebookSummaryQuery:
                 db,
                 row,
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
+                indexing_options=indexing_options,
             )
             self._fill_viewer_relation(db, summary, row, user_id)
             # ask_available: 该库能否在任一模式下产出有据回答(见 NotebookSummary 字段注释)。
@@ -467,6 +535,7 @@ class NotebookSummaryQuery:
         """
         out: List[NotebookSummary] = []
         seen: set[str] = set()
+        indexing_options = self._indexing_option_map()
         with self.database.connect() as db:
             memory_counts = self.queries.memory_counts_by_owner_notebook(db, user_id)
             rows = self.queries.owned_notebook_rows(db, user_id)
@@ -475,6 +544,7 @@ class NotebookSummaryQuery:
                     db,
                     row,
                     memory_count=memory_counts.get((user_id, row["id"]), 0),
+                    indexing_options=indexing_options,
                 )
                 nb.access = "owner"
                 nb.can_manage_content = True
@@ -486,6 +556,7 @@ class NotebookSummaryQuery:
                     db,
                     row,
                     memory_count=memory_counts.get((user_id, row["id"]), 0),
+                    indexing_options=indexing_options,
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
@@ -515,6 +586,7 @@ class NotebookSummaryQuery:
                     db,
                     row,
                     memory_count=memory_counts.get((user_id, notebook_id), 0),
+                    indexing_options=indexing_options,
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""

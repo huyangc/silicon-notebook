@@ -158,6 +158,34 @@ def test_relink_kg_200_launches_background_and_returns_relinking(client, monkeyp
     assert called[0][2]["name"] == f"relinkkg-{nb}"
 
 
+def test_relink_refuses_pending_pipeline_before_claim_or_submit(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "pending"}).json()["id"]
+    from app.api import deps
+    from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
+    from app.services import background_jobs
+
+    real_repo = deps.repository()
+    with real_repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline_job_id=? WHERE id=?",
+            ("pending:generation", nb),
+        )
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs, "submit", lambda *args, **kwargs: submitted.append(args)
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    response = client.post(f"/api/notebooks/{nb}/kg/relink")
+    assert response.status_code == 409
+    assert submitted == []
+    assert real_repo._runtime.knowledge_lifecycle.notebook_relink_status(nb)[
+        "status"
+    ] == "idle"
+    with pytest.raises(IndexingPipelineUnavailableError):
+        real_repo.run_notebook_relink_job(nb, "rlj-never-started")
+
+
 def test_relink_kg_no_llm_check(client, monkeypatch):
     """relink is deterministic — it must succeed even with no LLM configured."""
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
@@ -444,6 +472,7 @@ def test_repo_rebuild_notebook_kg_delegates_to_lifecycle_runner(
         calls.append(notebook_id)
         return build_result
 
+    repo._runtime.indexing_pipeline.require_write_admission = lambda _notebook_id: None
     repo._runtime.knowledge_lifecycle.rebuild_notebook_kg = fake_rebuild
 
     result = repo.rebuild_notebook_kg("nb-123")

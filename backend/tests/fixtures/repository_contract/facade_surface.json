@@ -479,7 +479,7 @@
     "owner": "KnowledgeStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, source_id: 'str', notebook_id: 'str', run_id: 'str', created_at: 'str', *, preserve_existing: 'bool' = False) -> 'None'"
+    "signature": "(self, source_id: 'str', notebook_id: 'str', run_id: 'str', created_at: 'str', *, preserve_existing: 'bool' = False, indexing_pipeline_id: 'str' = '', indexing_pipeline_version: 'str' = 'builtin.chunk.v1') -> 'None'"
   },
   "_bump_cluster_mutation_seq": {
     "consumers": [
@@ -3154,6 +3154,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.execute_indexing_pipeline_rebuild",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.execute_notebook_kg_job",
         "target": "_runtime"
       },
@@ -3323,6 +3329,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.index_status",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.indexing_pipeline_options",
         "target": "_runtime"
       },
       {
@@ -3910,6 +3922,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.require_indexing_pipeline_write",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.resolve_agent_token",
         "target": "_runtime"
       },
@@ -4007,6 +4025,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.set_edge_review",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.set_indexing_pipeline",
         "target": "_runtime"
       },
       {
@@ -4585,7 +4609,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>.add_url_sources",
+        "scope": "<module>.import_url_sources",
         "target": "add_url_sources"
       }
     ],
@@ -4593,7 +4617,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity: 'Optional[int]' = None, agent_profile_id: 'str' = '') -> 'AddUrlSourcesResult'"
+    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity_limit: 'Optional[int]' = None, agent_profile_id: 'str' = '') -> 'AddUrlSourcesResult'"
   },
   "agent_memory_hits": {
     "consumers": [
@@ -6024,7 +6048,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._document_capacity",
+        "scope": "<module>._document_capacity_limit",
         "target": "effective_document_limit"
       }
     ],
@@ -6078,6 +6102,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, element_ids: 'Sequence[str]') -> 'Dict[str, Dict[str, Any]]'"
+  },
+  "execute_indexing_pipeline_rebuild": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.set_indexing_pipeline",
+        "target": "execute_indexing_pipeline_rebuild"
+      }
+    ],
+    "kind": "method",
+    "owner": "ScaleArtifactRuntime",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str', pipeline_id: 'str', pipeline_version: 'str', pipeline_generation: 'str') -> 'dict'"
   },
   "execute_notebook_kg_job": {
     "consumers": [
@@ -6825,6 +6864,21 @@
     ],
     "kind": "method",
     "owner": "ScaleArtifactRuntime",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
+  "indexing_pipeline_options": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/notebook_routes.py",
+        "scope": "<module>.get_indexing_pipeline",
+        "target": "indexing_pipeline_options"
+      }
+    ],
+    "kind": "method",
+    "owner": "RepositoryRuntime.indexing_pipeline",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
@@ -7795,7 +7849,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._document_capacity",
+        "scope": "<module>._document_capacity_limit",
         "target": "notebook_owner"
       }
     ],
@@ -7971,7 +8025,7 @@
       }
     ],
     "kind": "method",
-    "owner": "KnowledgeLifecycleService",
+    "owner": "NotebookCatalogService",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', mode: 'str', *, target_limit: 'int | None' = None, retry_partial: 'bool' = False) -> 'dict'"
@@ -7996,7 +8050,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
-        "scope": "<module>.register_source_tools.add_source_text.run.<lambda>",
+        "scope": "<module>._upload_agent_source.<lambda>",
         "target": "process_source"
       },
       {
@@ -8014,7 +8068,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>.add_url_sources.<lambda>",
+        "scope": "<module>.import_url_sources.<lambda>",
         "target": "process_source"
       },
       {
@@ -8605,6 +8659,87 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, principal: 'AgentPrincipal', scope: 'str', notebook_id: 'str') -> 'None'"
+  },
+  "require_indexing_pipeline_write": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._build_chunks_for_source",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._chunk_and_embed_source",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.add_url_sources",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.build_notebook_kg",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.import_sources",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.prepare_notebook_kg_job",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.process_source",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.rebuild_notebook_kg",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.rebuild_unified_kg",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_unified_kg_rebuild",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.trigger_scale_index_rebuild",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.upload_sources",
+        "target": "require_indexing_pipeline_write"
+      }
+    ],
+    "kind": "method",
+    "owner": "RepositoryRuntime.indexing_pipeline",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'None'"
   },
   "reset_request_user": {
     "consumers": [
@@ -9203,6 +9338,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', rel_id: 'str', status: 'str') -> 'None'"
   },
+  "set_indexing_pipeline": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/notebook_routes.py",
+        "scope": "<module>.set_indexing_pipeline",
+        "target": "set_indexing_pipeline"
+      }
+    ],
+    "kind": "method",
+    "owner": "ScaleArtifactRuntime",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', pipeline_id: 'str | None') -> 'dict'"
+  },
   "set_knowhow_anchor_column": {
     "consumers": [
       {
@@ -9409,7 +9559,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
-        "scope": "<module>.register_source_tools.add_source_text.run",
+        "scope": "<module>._upload_agent_source",
         "target": "source_id_by_hash"
       }
     ],
@@ -9916,7 +10066,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
-        "scope": "<module>.register_source_tools.add_source_text.run",
+        "scope": "<module>._upload_agent_source",
         "target": "upload_sources"
       },
       {
@@ -9981,7 +10131,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None, agent_profile_id: 'str' = '') -> 'List[UploadedSourceSummary]'"
+    "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None, agent_profile_id: 'str' = '', capacity_limit: 'Optional[int]' = None) -> 'List[UploadedSourceSummary]'"
   },
   "upsert_knowhow_cell_code": {
     "consumers": [
@@ -10110,11 +10260,26 @@
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>._document_capacity",
         "target": "visible_document_count"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_document_limit.py",
+        "scope": "<module>.test_document_capacity_limit_resolves_without_counting",
+        "target": "visible_document_count"
       }
     ],
     "kind": "method",
     "owner": "SourceStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_document_limit.py",
+        "scope": "<module>.test_document_capacity_limit_resolves_without_counting",
+        "target": "visible_document_count"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'int'"
   },

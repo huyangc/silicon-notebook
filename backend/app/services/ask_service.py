@@ -58,6 +58,7 @@ from app.domain.gap_consult import (
 )
 from app.models.ask import (
     TRACE_ANCHOR_EVIDENCE_IDS_MAX,
+    AnswerAnchor,
     AskGapSuggestion,
     AskRequest,
     AskResponse,
@@ -566,6 +567,16 @@ class AskService:
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
         response_draft_stage: "ResponseDraftStage | None" = None,
         gap_consult_host=None,
+        ask_engine_host=None,
+        ask_engine_participant_notebooks: Callable[[str], Sequence[str]] = (
+            lambda notebook_id: (notebook_id,)
+        ),
+        ask_engine_visible_sources: Callable[[str], Sequence[str]] = (
+            lambda _notebook_id: ()
+        ),
+        ask_engine_hidden_sources: Callable[[str, str], Sequence[str]] = (
+            lambda _notebook_id, _actor_id: ()
+        ),
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
@@ -627,6 +638,24 @@ class AskService:
         # with no deployment plugin behind it) means this run is byte-identical
         # to the one before the point existed — see ``_consult_gap_sources``.
         self.gap_consult_host = gap_consult_host
+        self.ask_engine_host = ask_engine_host
+        self.ask_engine_participant_notebooks = ask_engine_participant_notebooks
+        self.ask_engine_visible_sources = ask_engine_visible_sources
+        self.ask_engine_hidden_sources = ask_engine_hidden_sources
+
+    def _ask_modes(self):
+        host = getattr(self, "ask_engine_host", None)
+        if host is None:
+            return ()
+        modes = host.modes()
+        if type(modes) is not tuple:
+            return ()
+        return tuple(mode for mode in modes if host.is_available(mode.id))
+
+    def _resolve_ask_mode(self, mode: str | None):
+        from app.services.ask_modes import resolve_mode
+
+        return resolve_mode(mode, self._ask_modes())
 
     def _activate_selected_source_graph(
         self,
@@ -761,17 +790,24 @@ class AskService:
         frozen ask_modes registry (fast/global aliases included). Unknown modes
         raise UnknownAskMode — never a silent fall-through. on_trace only
         reaches streaming engines (mirrors the frozen route-runner split)."""
-        from app.services.ask_modes import resolve_mode
         from app.services.retrieval_run import retrieval_run
 
-        spec = resolve_mode(getattr(payload, "mode", None))
+        spec = self._resolve_ask_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
         with source_scope_context(
             notebook_id,
             getattr(payload, "source_scope", None),
             getattr(payload, "base_scope", None),
         ):
-            # All Ask modes now share the same request-local query-embedding
+            # Plugin engines construct their own stable-kind retrieval run in
+            # ``ask_plugin_engine`` so plugin mode ids never enter the allowed
+            # observability vocabulary. Built-ins keep their frozen path.
+            if spec.handler == "ask_plugin_engine":
+                return handler(
+                    notebook_id, payload, user_id=user_id, job_id=job_id,
+                    cancel_event=cancel_event,
+                )
+            # All built-in Ask modes share the same request-local query-embedding
             # memo.  Ask keeps its historical internal concurrency: the
             # report-only database fan-out gate is deliberately absent here.
             with retrieval_run(
@@ -799,10 +835,8 @@ class AskService:
         pass the job into the engine's atomic final save, then finalize and
         unregister. The job id remains internal to this blocking protocol.
         """
-        from app.services.ask_modes import resolve_mode
-
         user_id = self.current_user_id()
-        mode = resolve_mode(getattr(payload, "mode", None))
+        mode = self._resolve_ask_mode(getattr(payload, "mode", None))
         self.validate_reasoning_submission(notebook_id, payload)
         cancel_event = threading.Event()
         job_id, _conversation_id = self.begin_job_current(
@@ -1071,9 +1105,7 @@ class AskService:
         by ``source_scope_context`` at retrieval boundaries, and the
         model-inferred scope this used to cross-check is gone.
         """
-        from app.services.ask_modes import resolve_mode
-
-        if resolve_mode(getattr(payload, "mode", None)).id != "reasoning":
+        if self._resolve_ask_mode(getattr(payload, "mode", None)).id != "reasoning":
             return
         if payload.intent is None:
             return
@@ -1255,6 +1287,287 @@ class AskService:
         if answer_id is None:
             raise AskCancelled()
         return answer_id
+
+    def ask_plugin_engine(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        *,
+        user_id: str,
+        job_id: str = "",
+        cancel_event: CancelEvent = None,
+    ) -> AskResponse:
+        """Run one deployment engine while core retains every authority.
+
+        v1 deliberately supplies neither conversation history nor intent/KG
+        ports. The provider returns prose plus opaque run-issued handles; this
+        method alone admits citations, constructs response objects and saves.
+        """
+        from app.application.ask_plugin import PreparedPluginAsk, PluginResponseDraft
+        from app.application.ask_reasoning import StageBoundaryError
+        from app.domain.ask_engine import (
+            AskEngineContext,
+            AskPluginEngineError,
+            safe_plugin_engine_error_code,
+        )
+        from app.domain.extensions import ActorRef, NotebookRef
+        from app.services.plugin_ask_engine import (
+            PluginCancellationToken,
+            PluginEngineModelAccess,
+            PluginEngineTrace,
+            PluginRetrievalAccess,
+            admit_plugin_engine_result,
+            plugin_engine_trace_steps,
+            release_plugin_engine_ports,
+        )
+        from app.services.retrieval_run import current_retrieval_run, retrieval_run
+        from app.services.source_scope import current_source_scope
+
+        host = self.ask_engine_host
+        mode_id = str(payload.mode or "")
+        if host is None or host.mode(mode_id) is None:
+            raise AskPluginEngineError("plugin_engine_unavailable")
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            payload.question,
+            user_id=user_id,
+            job_id=job_id,
+        )
+        prepared = PreparedPluginAsk(
+            mode_id=mode_id,
+            notebook_id=notebook_id,
+            question=payload.question,
+            conversation_id=turn.conversation_id,
+            user_id=user_id,
+            job_id=job_id,
+            asked_at=payload.asked_at,
+        )
+        with retrieval_run(
+            run_kind="ask_plugin_engine",
+            event_log=getattr(self, "event_log", None),
+            correlation_id=job_id,
+            actor_id=user_id,
+            cancel_event=cancel_event,
+        ):
+            run = current_retrieval_run()
+            if (
+                run is None
+                or run.run_kind != "ask_plugin_engine"
+                or run.actor_id != prepared.user_id
+                or run.correlation_id != prepared.job_id
+                or run.cancel_event is not cancel_event
+            ):
+                raise StageBoundaryError("invalid plugin Ask retrieval authority")
+            scope = current_source_scope()
+            if scope is not None and scope.notebook_id != prepared.notebook_id:
+                raise StageBoundaryError("plugin Ask source scope changed")
+            owned_ports: list[object] = []
+            try:
+                retrieval = PluginRetrievalAccess(
+                    active_notebook_id=prepared.notebook_id,
+                    actor_id=prepared.user_id,
+                    cancellation=cancel_event,
+                    participant_notebook_ids=(
+                        self.ask_engine_participant_notebooks
+                    ),
+                    all_visible_source_ids=self.ask_engine_visible_sources,
+                    hidden_source_ids=self.ask_engine_hidden_sources,
+                    search_elements=(
+                        self.retrieval.federated_retrieve_elements
+                    ),
+                    source_info=self.evidence_context.citation_source_info,
+                    max_k=self.settings.ask_plugin_engine_retrieval_max_k,
+                    max_calls=self.settings.ask_plugin_engine_search_max_calls,
+                    evidence_chars=(
+                        self.settings.ask_plugin_engine_evidence_max_chars
+                    ),
+                    query_chars=(
+                        self.settings.ask_plugin_engine_prompt_max_chars
+                    ),
+                )
+                owned_ports.append(retrieval)
+                model_client = self.model_clients.chat("plugin_engine")
+                model = PluginEngineModelAccess(
+                    model_client,
+                    cancellation=cancel_event,
+                    max_calls=self.settings.ask_plugin_engine_model_max_calls,
+                    max_chars=self.settings.ask_plugin_engine_prompt_max_chars,
+                )
+                owned_ports.append(model)
+                trace = PluginEngineTrace(
+                    max_steps=self.settings.ask_plugin_engine_trace_max_steps,
+                    label_chars=(
+                        self.settings.ask_plugin_engine_trace_label_max_chars
+                    ),
+                    detail_chars=(
+                        self.settings.ask_plugin_engine_trace_detail_max_chars
+                    ),
+                )
+                owned_ports.append(trace)
+                cancellation = PluginCancellationToken(cancel_event)
+                owned_ports.append(cancellation)
+                engine_context = AskEngineContext(
+                    notebook=NotebookRef(prepared.notebook_id),
+                    actor=ActorRef(prepared.user_id),
+                    question=prepared.question,
+                    cancellation=cancellation,
+                )
+                result = host.answer(
+                    mode_id,
+                    engine_context,
+                    retrieval,
+                    model,
+                    trace,
+                    event_sink=getattr(self.event_log, "emit", None),
+                )
+                if (
+                    engine_context.notebook.id != prepared.notebook_id
+                    or engine_context.actor.id != prepared.user_id
+                    or engine_context.question != prepared.question
+                    or engine_context.cancellation is not cancellation
+                ):
+                    raise StageBoundaryError(
+                        "plugin Ask request identity changed"
+                    )
+                answer, records = admit_plugin_engine_result(
+                    retrieval, result.answer_markdown, result.citations
+                )
+                trace_steps = plugin_engine_trace_steps(trace)
+            except AskCancelled:
+                raise
+            except StageBoundaryError:
+                raise
+            except AskPluginEngineError:
+                raise
+            except Exception as exc:
+                code = safe_plugin_engine_error_code(
+                    getattr(exc, "code", "plugin_engine_failed")
+                )
+                raise AskPluginEngineError(code) from None
+            finally:
+                release_plugin_engine_ports(*owned_ports)
+
+            tier_map = self._tier_map_for(
+                {record.notebook_id for record in records}
+            )
+            knowhow_refs = self.evidence_context.knowhow_refs_for(
+                record.element_id for record in records
+            )
+            citations: list[Citation] = []
+            for record in records:
+                evidence = record.evidence
+                citations.append(Citation(
+                    label=(
+                        f"{evidence.source_title} · {evidence.location_label}"
+                    ).strip(" ·"),
+                    source_id=record.source_id,
+                    element_id=record.element_id,
+                    location_label=evidence.location_label,
+                    quoted_span=evidence.text,
+                    source_file_name=record.source_file_name,
+                    tier=tier_map.get(record.notebook_id, "personal"),
+                    notebook_id=(
+                        record.notebook_id
+                        if record.notebook_id != prepared.notebook_id else ""
+                    ),
+                    knowhow=knowhow_refs.get(record.element_id),
+                ))
+            anchors: list[AnswerAnchor] = []
+            seen_indices: set[int] = set()
+            for marker in _MARKER_GROUP_RE.findall(answer):
+                for key in marker_keys(marker):
+                    index = int(key[1:])
+                    if index in seen_indices:
+                        continue
+                    seen_indices.add(index)
+                    record = records[index - 1]
+                    evidence = record.evidence
+                    anchors.append(AnswerAnchor(
+                        key=f"k{index}",
+                        object_id=record.element_id,
+                        object_type="element",
+                        label=evidence.source_title or f"k{index}",
+                        snippet=evidence.text,
+                        source_title=evidence.source_title,
+                        source_file_name=record.source_file_name,
+                        location_label=evidence.location_label,
+                        source_id=record.source_id,
+                        element_id=record.element_id,
+                        tier=tier_map.get(record.notebook_id, "personal"),
+                        notebook_id=(
+                            record.notebook_id
+                            if record.notebook_id != prepared.notebook_id else ""
+                        ),
+                        knowhow=knowhow_refs.get(record.element_id),
+                    ))
+            self.evidence_context.attach_citation_images([
+                *((anchor, (anchor.element_id,)) for anchor in anchors),
+                *((citation, (citation.element_id,)) for citation in citations),
+            ])
+            grounded = bool(records)
+            response = AskResponse(
+                conclusion=answer,
+                answer=answer,
+                grounded=grounded,
+                evidence_level="grounded" if grounded else "inferred",
+                anchors=anchors,
+                citations=citations,
+                llm_mode=str(getattr(model_client, "model", "") or ""),
+                mode=prepared.mode_id,
+                conversation_id=prepared.conversation_id,
+                retrieval_query=prepared.question,
+                top_relevance=max(
+                    (record.score for record in records), default=0.0
+                ),
+                reasoning_trace=list(trace_steps),
+            )
+            draft = PluginResponseDraft(
+                mode_id=prepared.mode_id,
+                notebook_id=prepared.notebook_id,
+                question=prepared.question,
+                conversation_id=prepared.conversation_id,
+                user_id=prepared.user_id,
+                job_id=prepared.job_id,
+                asked_at=prepared.asked_at,
+                response=response,
+            )
+            if type(draft) is not PluginResponseDraft or type(response) is not AskResponse:
+                raise StageBoundaryError("invalid plugin Ask response draft")
+            for field in (
+                "mode_id", "notebook_id", "question", "conversation_id",
+                "user_id", "job_id", "asked_at",
+            ):
+                if getattr(draft, field) != getattr(prepared, field):
+                    raise StageBoundaryError(
+                        f"plugin Ask response changed {field}"
+                    )
+            if (
+                response.mode != prepared.mode_id
+                or response.conversation_id != prepared.conversation_id
+            ):
+                raise StageBoundaryError("plugin Ask response identity changed")
+            if (
+                current_retrieval_run() is not run
+                or run.actor_id != prepared.user_id
+                or run.correlation_id != prepared.job_id
+                or run.cancel_event is not cancel_event
+            ):
+                raise StageBoundaryError("plugin Ask retrieval authority changed")
+            current_scope = current_source_scope()
+            if current_scope is not scope:
+                raise StageBoundaryError("plugin Ask source scope authority changed")
+            raise_if_cancelled(cancel_event)
+            response.answer_id = self._save_answer(
+                prepared.notebook_id,
+                prepared.question,
+                response,
+                prepared.conversation_id,
+                user_id=prepared.user_id,
+                job_id=prepared.job_id,
+                asked_at=prepared.asked_at,
+            )
+            return response
 
     # ------------------------------------------------------------------
     # synthesis helpers

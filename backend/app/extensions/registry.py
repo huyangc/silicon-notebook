@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Iterable
 
 from app.extension_sdk import (
+    ASK_ENGINE_POINT,
     EXTENSION_API_VERSION,
     Availability,
     AvailabilityStatus,
@@ -308,7 +309,10 @@ class ExtensionRegistry:
                 for item in registrations
                 if item.contribution.declaration.kind is ContributionKind.PROVIDER
             ]
-            if len(providers) > 1:
+            # ``ask.engine`` is a provider *set*: one provider contribution is
+            # one independently selectable mode. Every other provider point
+            # keeps the original exactly-one topology rule.
+            if len(providers) > 1 and point != ASK_ENGINE_POINT:
                 raise ExtensionRegistryError(
                     f"extension point {point!r} has multiple single providers"
                 )

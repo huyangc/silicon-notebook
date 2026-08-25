@@ -374,6 +374,12 @@
       ],
       "granted_via": [],
       "id": "<nb-id-1>",
+      "indexing_pipeline_available": true,
+      "indexing_pipeline_id": null,
+      "indexing_pipeline_missing": false,
+      "indexing_pipeline_pending": false,
+      "indexing_pipeline_stale": false,
+      "indexing_pipeline_version": "builtin.chunk.v1",
       "is_shared": true,
       "kg_build": null,
       "kg_building": false,
@@ -878,6 +884,10 @@
           "Why is gain stable?"
         ],
         "id": "<nb-id-1>",
+        "indexing_pipeline": null,
+        "indexing_pipeline_generation": "",
+        "indexing_pipeline_job_id": "",
+        "indexing_pipeline_version": "builtin.chunk.v1",
         "is_shared": 1,
         "name": "Repository contract fixture",
         "primary_domain": "Analog IC",
@@ -1015,6 +1025,8 @@
         "cluster_mutation_seq": 1,
         "community_seq": -1,
         "dirty": 0,
+        "indexing_pipeline_id": "",
+        "indexing_pipeline_version": "builtin.chunk.v1",
         "kg_mutation_seq": 3,
         "last_rebuild_at": "<timestamp>",
         "mention_seq": -1,
@@ -1321,6 +1333,16 @@
       {
         "name": "idx_groups_invite_token",
         "sql_sha256": "22ee8150665e648be5677db99d05fda249443985b0839574699abc94f891b3da",
+        "type": "index"
+      },
+      {
+        "name": "idx_indexing_pipeline_stage_sources_source",
+        "sql_sha256": "52d4202e41249d98dd9ab3b54bd5c36d000ea24df240b14ed9a95bce6b0dae22",
+        "type": "index"
+      },
+      {
+        "name": "idx_indexing_pipeline_stages_notebook",
+        "sql_sha256": "29d2f062fbf9c5e0e65edc5aa673a3bda597736e5869ef11fe129afd4b8502d8",
         "type": "index"
       },
       {
@@ -1880,7 +1902,7 @@
       },
       {
         "name": "extraction_runs",
-        "sql_sha256": "250b627fc6817b094f9fab0ec1d320fe8d87b5ad265674c03baa02f3a814be04",
+        "sql_sha256": "e4a76c5b05e5cf3e6e54557ec64f6d04aa955a39f1f61085a460edf6776e938b",
         "type": "table"
       },
       {
@@ -1896,6 +1918,16 @@
       {
         "name": "groups",
         "sql_sha256": "10eb141e7313e947783f0b23bcce654388e5bf44c83b0f06e9e48b284d9f8d99",
+        "type": "table"
+      },
+      {
+        "name": "indexing_pipeline_stage_sources",
+        "sql_sha256": "ded0d56855353ab799316499a59a104e684dffb002b734e21436e5409fcfd06f",
+        "type": "table"
+      },
+      {
+        "name": "indexing_pipeline_stages",
+        "sql_sha256": "ba76bddf03175eb301aa4fceaa1da82f6e590643e03daf24538456ecb8c54c37",
         "type": "table"
       },
       {
@@ -2135,7 +2167,7 @@
       },
       {
         "name": "notebooks",
-        "sql_sha256": "28665711d4b06b89aa1be3f04cbeafe7221b5abc877b0f16ca4fd89a7349ca19",
+        "sql_sha256": "c46eab0ea63914cf5c936ed4a458e96e84860ea8173dbe87b3ebb539921dbca4",
         "type": "table"
       },
       {
@@ -2205,7 +2237,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "228fb5d8c9227c8e05a0f6a255c0ff280f7f5451dc17a69391346f200c96844b",
+        "sql_sha256": "4fc341956336913aae3c213682046e6dd4a7cb8a990c5648cee9ec1dc7503e22",
         "type": "table"
       },
       {
@@ -2234,6 +2266,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 57
+    "user_version": 59
   }
 }

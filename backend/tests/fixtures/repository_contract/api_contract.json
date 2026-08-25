@@ -3736,6 +3736,133 @@
           "title": "HTTPValidationError",
           "type": "object"
         },
+        "IndexingPipelineOptionResponse": {
+          "description": "Sanitized deployment option; never exposes loader or availability internals.",
+          "properties": {
+            "available": {
+              "default": true,
+              "title": "Available",
+              "type": "boolean"
+            },
+            "description": {
+              "title": "Description",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "overrides_chunking": {
+              "default": false,
+              "title": "Overrides Chunking",
+              "type": "boolean"
+            },
+            "overrides_kg_extraction": {
+              "default": false,
+              "title": "Overrides Kg Extraction",
+              "type": "boolean"
+            },
+            "pipeline_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pipeline Id"
+            },
+            "selected": {
+              "default": false,
+              "title": "Selected",
+              "type": "boolean"
+            },
+            "version": {
+              "title": "Version",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "description",
+            "version"
+          ],
+          "title": "IndexingPipelineOptionResponse",
+          "type": "object"
+        },
+        "IndexingPipelineResponse": {
+          "properties": {
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "changed": {
+              "default": false,
+              "title": "Changed",
+              "type": "boolean"
+            },
+            "job_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Id"
+            },
+            "missing": {
+              "title": "Missing",
+              "type": "boolean"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/components/schemas/IndexingPipelineOptionResponse"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "pending": {
+              "title": "Pending",
+              "type": "boolean"
+            },
+            "pipeline_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pipeline Id"
+            },
+            "rebuild_status": {
+              "default": "idle",
+              "title": "Rebuild Status",
+              "type": "string"
+            },
+            "version": {
+              "title": "Version",
+              "type": "string"
+            },
+            "warning_count": {
+              "default": 0,
+              "title": "Warning Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version",
+            "available",
+            "missing",
+            "pending"
+          ],
+          "title": "IndexingPipelineResponse",
+          "type": "object"
+        },
         "KgAnalysisResponse": {
           "description": "总览。``artifacts`` **恒为五条、恒定顺序**,缺席的那几份也在里面(带 absence),\n这样「少了一份产物」不会表现成「少了一张卡片、没有任何提示」。\n\n``ledger_consistent=false`` = 在场的产物不是同一轮预计算的(正常写路径不可能产生,\n只可能是库被手工改过);此时报告里的数字互相不可比。",
           "properties": {
@@ -6712,6 +6839,42 @@
               "title": "Id",
               "type": "string"
             },
+            "indexing_pipeline_available": {
+              "default": true,
+              "title": "Indexing Pipeline Available",
+              "type": "boolean"
+            },
+            "indexing_pipeline_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Indexing Pipeline Id"
+            },
+            "indexing_pipeline_missing": {
+              "default": false,
+              "title": "Indexing Pipeline Missing",
+              "type": "boolean"
+            },
+            "indexing_pipeline_pending": {
+              "default": false,
+              "title": "Indexing Pipeline Pending",
+              "type": "boolean"
+            },
+            "indexing_pipeline_stale": {
+              "default": false,
+              "title": "Indexing Pipeline Stale",
+              "type": "boolean"
+            },
+            "indexing_pipeline_version": {
+              "default": "builtin.chunk.v1",
+              "title": "Indexing Pipeline Version",
+              "type": "string"
+            },
             "is_shared": {
               "default": false,
               "title": "Is Shared",
@@ -9096,6 +9259,24 @@
             }
           },
           "title": "SetBasesRequest",
+          "type": "object"
+        },
+        "SetIndexingPipelineRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "pipeline_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pipeline Id"
+            }
+          },
+          "title": "SetIndexingPipelineRequest",
           "type": "object"
         },
         "SetTierRequest": {
@@ -12530,7 +12711,7 @@
       },
       "/api/ask-modes": {
         "get": {
-          "description": "User-facing ask modes (single source: app/services/ask_modes.py).\nCopy/labels live in the frontend; this exposes ids + behavioural flags.",
+          "description": "Sanitized built-in truth plus live deployment-engine projection.",
           "operationId": "ask_modes_api_ask_modes_get",
           "responses": {
             "200": {
@@ -16414,6 +16595,94 @@
             }
           },
           "summary": "Index Status"
+        }
+      },
+      "/api/notebooks/{notebook_id}/indexing-pipeline": {
+        "get": {
+          "description": "Return only the sanitized frozen registry projection for this notebook.",
+          "operationId": "get_indexing_pipeline_api_notebooks__notebook_id__indexing_pipeline_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/IndexingPipelineResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Indexing Pipeline"
+        },
+        "patch": {
+          "description": "Build all source chunks first, then atomically publish the whole notebook.",
+          "operationId": "set_indexing_pipeline_api_notebooks__notebook_id__indexing_pipeline_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetIndexingPipelineRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/IndexingPipelineResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Set Indexing Pipeline"
         }
       },
       "/api/notebooks/{notebook_id}/kg-analysis": {
@@ -23461,6 +23730,12 @@
       "expected_questions": [],
       "granted_via": [],
       "id": "nb-api",
+      "indexing_pipeline_available": true,
+      "indexing_pipeline_id": null,
+      "indexing_pipeline_missing": false,
+      "indexing_pipeline_pending": false,
+      "indexing_pipeline_stale": false,
+      "indexing_pipeline_version": "builtin.chunk.v1",
       "is_shared": true,
       "kg_build": null,
       "kg_building": false,

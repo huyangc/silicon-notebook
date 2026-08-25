@@ -15,6 +15,16 @@ This document is written for the operator who enables it, not for someone
 extending the sample's own code — for that, read the source docstrings and
 the SOP.
 
+## 0. UI sample shape
+
+The sample panel now uses the shared UI kit exported from
+`frontend/features/extension-sdk/ui.tsx` for its content as well as its modal
+shell. Concretely, the search row, result list, action row, alerts and empty
+state all come from the SDK layer; the package still ships **no CSS of its
+own** and still uses **no inline colour styling**. That split is deliberate:
+deployment plugins keep passing structure and copy, while the repository-owned
+SDK keeps the visual contract aligned with core modal surfaces.
+
 ## 1. Three steps to enable it
 
 1. **Install the Python package into the backend's interpreter.** Either

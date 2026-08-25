@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 
 
 RetrievalInvocation = Literal["selected_evidence", "chunk_candidates"]
@@ -15,6 +15,23 @@ SELECTED_SOURCE_GRAPH_ACCESS_CAPABILITY = (
     "retrieval:selected_source_graph_access"
 )
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class ActorRef:
+    id: str
+
+
+@dataclass(frozen=True)
+class NotebookRef:
+    id: str
+
+
+@runtime_checkable
+class CancellationToken(Protocol):
+    def is_set(self) -> bool: ...
+
+    def raise_if_cancelled(self) -> None: ...
 
 
 @dataclass(frozen=True)

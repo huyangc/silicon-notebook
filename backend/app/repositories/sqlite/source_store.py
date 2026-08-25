@@ -323,13 +323,16 @@ class SourceStore:
 
     @staticmethod
     def source_exists_for_update_tx(
-        connection: sqlite3.Connection, source_id: str
+        connection: sqlite3.Connection,
+        source_id: str,
+        notebook_id: str | None = None,
     ) -> bool:
         """Lock-order seam shared with PostgreSQL projection teardown.
 
         SQLite's caller has already acquired ``BEGIN IMMEDIATE``, so a plain
         existence probe runs under the database-wide write reservation.
         """
+        del notebook_id
         return connection.execute(
             "SELECT 1 FROM sources WHERE id = ?", (source_id,)
         ).fetchone() is not None

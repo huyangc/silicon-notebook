@@ -27,7 +27,7 @@ _SAFE_FRAME = re.compile(
 _SAFE_ROUTE_SEGMENTS = frozenset({
     "", "api", "analytics", "ask", "cancel", "cells", "conversations",
     "deep-report", "diagnostics", "download", "events", "export", "graph",
-    "health", "jobs", "knowledge", "memory", "notebooks", "preview",
+    "health", "indexing-pipeline", "jobs", "knowledge", "memory", "notebooks", "preview",
     "ready", "reports", "search", "shared", "sources", "status", "stream",
     "tables", "unified-kg",
 })

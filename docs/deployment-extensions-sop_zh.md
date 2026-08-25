@@ -255,7 +255,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 ### 3.5 其它 contribution 类型
 
-其余六个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
+其余八个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
 
 | 扩展点常量 | kind | Protocol | 模块 |
 | --- | --- | --- | --- |
@@ -265,8 +265,16 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 | `REPORT_COMPLETED_OBSERVER_POINT` | `OBSERVER` | `ReportCompletedObserver` | `app/extension_sdk/report.py` |
 | `REPORT_EXPORTER_POINT` | `PROVIDER` | `ReportExporterProvider` | `app/extension_sdk/report_export.py` |
 | `ASK_GAP_CONSULT_POINT`（`ask.gap_consult`） | `CONTRIBUTOR` | `GapConsultContributor` | `app/extension_sdk/gap_consult.py` |
+| `ASK_ENGINE_POINT`（`ask.engine`） | `PROVIDER` | `AskEngineProvider` | `app/extension_sdk/ask.py` |
+| `INDEXING_PIPELINE_POINT`（`indexing.pipeline`） | `CONTRIBUTOR` | `IndexingPipelineProvider` | `app/extension_sdk/indexing.py` |
 
 每个扩展点给的是窄的、point-specific 的 context——绝不是万能 service locator——并各自声明了 contribution 必须 `require` 哪些 capability 才拿得到访问端口。动手前先读那份 Protocol 与它的模块 docstring：该扩展点的 fail-open 与取消规则写在那里。
+
+`ask.engine` provider 登记一份 `mode_id` 以自身插件 id 开头的描述符，并返回 `AskEngineResult(answer_markdown, citations)`。它只收到当前问题及检索、模型、轨迹、取消端口。检索返回有界证据和本次 run 内的不透明句柄；只能引用本次调用中由同一端口签发的句柄，并在 Markdown 放入对应 `[kN]` 或 `【kN】` 标记。核心对整份引用 fail-closed 校验、自己构造 durable citations，并在保存前复核 run 身份。v1 刻意没有会话历史、意图预检、KG/PPR、repository、settings、连接、raw model client、MCP、Report 或实时轨迹接口；只有实时可用性通过时，才在浏览器高级模式的第三分组出现。
+
+`indexing.pipeline` contribution 可以在自己插件 id 命名空间下登记一个或多个按笔记本选择的 pipeline 描述符，并从不可变 source-element 视图返回有界 chunk proposal。PR-1 只把 chunking 策略权交给插件；parser 路由、schema 权、持久化与新 `(pipeline_id, pipeline_version)` 身份的发布仍归 core。浏览器里的笔记本设置按权限拆面：owner 与组内容管理员都可切换当前管线，并必须看到“将重建全库索引”的明确确认；参考库挂载配置仍是 owner-only；纯 reader 只有只读的当前管线/状态视图。选中的插件缺席或不可用时，响应只能退化成净化后的 `missing` / `available=false` 状态，并提供“切回内建”的恢复路径；普通读取继续使用最后一次已发布产物，而新的索引写入会在重建发布前被阻止。
+
+部署插件是在后端进程里运行的受信代码。窄 Protocol 是受支持的能力面，避免普通插件实现依赖核心内部；它不是用来抵御 Python introspection 的恶意代码沙箱。只安装经过审查的包。未来若要支持不受信插件，必须采用进程隔离与 IPC，而不是继续扩大同进程包装层。
 
 ### 3.6 后端红线
 
@@ -277,6 +285,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 - 插件路由除真正的会话失效外不得抛 401——想要自己的措辞，就自己把上游 401 翻成 `502`/`424`。
 - 绝不在 `register()` 里 `raise ExtensionRegistryError`。它不在 SDK 公开面上，但 import 得到，而 core **刻意不脱敏**它——你写在那里的消息会逐字进运维日志。`register()` 抛出的其它任何异常都会被转成 `plugin_registration_failed`，只留类名。
 - `GapConsultContributor` 的可用性探测与 `consult` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束（见[缺口外扩检索](./product-and-api_zh.md#缺口外扩检索)）：不要依赖 `contextvars`、线程局部状态，或任何指望核心 ContextVar 能带进那条线程——按设计，一个都带不进去。宿主会等你到 `ASK_GAP_CONSULT_TIMEOUT_SECONDS` 的 deadline 为止、期内返回即被采纳；超出即放弃这个 contribution——它最终的返回值不会被任何人读取，直接丢弃，绝不会迟到生效。只返回 `http`/`https` URL，且必须是**直接**指向一份 PDF 的链接——导入端点只探测你给的那个精确 URL，不会替你到落地页或摘要页里去找。
+- `AskEngineProvider` 只能引用自己那次 `retrieval` 端口返回的证据句柄。伪造、过期或跨 run 的句柄都会拒绝整份答案；不得捕获该拒绝并以无接地正文重试。
 
 ## 4. 第二步：写前端包
 
@@ -364,6 +373,8 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 ```
 
 *core 替你做的：* 注入一份按**本条 contribution 的** `pluginId` 绑定的 `actions.api`，因此每次请求都限定在 `/api/extensions/<plugin id>/` 之下、你设的 `authorization`/`cookie` 头会被剥掉、`tag`/`auth`/`unauthorized` 由 core 写死。`ExtensionModal` 白送系统弹窗外壳、标题栏拖动，以及一格按插件分段的窗口位置记忆。
+
+弹窗内容也有一层推荐使用的 SDK 组件，同样从 `ui.tsx` 导出：`ExtensionFormRow`、`ExtensionTextInput`、`ExtensionResultList`、`ExtensionResultItem`、`ExtensionActions`、`ExtensionAlert` 与 `ExtensionEmptyState`。它们提供与基座一致、只使用 token 的表单、结果列表、动作行、提示条和空态，不要求插件自带 CSS 或内联颜色。这一层是推荐而非强制——语义正确的裸 HTML 仍然合规——但插件应优先复用这些组件，而不是另起一套无样式的视觉词汇。
 
 *弹窗归 core 管。* 你手上没有一个 `open` 布尔：`actions.openDialog()` 只是向 core 的 root-dialog 协调器**申请**那唯一一格通用 `extension` slot，`context.dialog` 是答复，`ExtensionModal` 在 `context.dialog.open` 为真之前什么都不渲染。另一个 primary 弹窗打开、用户切库、登出，core 都会替你关掉它；`actions.closeDialog()` 是**你**关它的唯一途径。两条要知道的后果：同一时刻只有一个插件弹窗可见（那一格按 **contribution** 认领，所以同一个插件的两条 contribution 不会一起开），而被更高层盖住的弹窗会变成 `inert`/`aria-hidden`，不会在背后继续可聚焦。**另一条 contribution 调 `openDialog()` 会先关掉当前持有者的弹窗，再把那一格重新登记给它**——焦点归还目标也随之换成新持有者自己的触发按钮，而不是旧持有者的（codex #578 R7 P2）。自己留一个 `useState` 只会与这一切分叉——它关不掉一个协调器已经收回去的弹窗。
 

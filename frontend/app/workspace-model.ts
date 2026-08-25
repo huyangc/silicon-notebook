@@ -1,4 +1,3 @@
-import type { AskModeId } from "./ask-modes";
 import type { ReasoningTraceStep } from "./ask-stream";
 import type { GrantedGroupRef } from "./group-api";
 import type { NotebookRef } from "./notebook-bases";
@@ -96,6 +95,12 @@ export type NotebookSummary = {
    * 二十几份。
    */
   can_manage_content?: boolean;
+  indexing_pipeline_id?: string | null;
+  indexing_pipeline_version?: string | null;
+  indexing_pipeline_available?: boolean;
+  indexing_pipeline_missing?: boolean;
+  indexing_pipeline_pending?: boolean;
+  indexing_pipeline_stale?: boolean;
   paper_meta_backfilling?: boolean;
   /**
    * 是否存在缺论文元数据的合规候选源(后端按「补全论文信息」真正会排队的同一
@@ -589,7 +594,7 @@ export type AskResponse = {
   top_relevance?: number;
   reasoning_trace?: ReasoningTraceStep[];
   intent?: import("./ask-intent-model").QueryIntentContract;
-  mode?: AskModeId;
+  mode?: string;
   /** 提交本轮时选的 reasoning 检索档位；历史打开时据此恢复。 */
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
   /** 本轮实际获准的检索范围；后端只在确有收窄时下发，缺席即不渲染。 */

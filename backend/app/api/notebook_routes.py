@@ -12,15 +12,22 @@ from app.api.deps import (
     user_error,
 )
 from app.core.audit_actor import session_audit_principal
+from app.domain.indexing_pipeline import (
+    IndexingPipelineStalePlanError,
+    IndexingPipelineRebuildFailedError,
+    IndexingPipelineUnavailableError,
+)
 from app.models.identity import UserProfile
 from app.models.notebooks import (
     MountableNotebook,
     MountedBase,
     MountedByCount,
+    IndexingPipelineResponse,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSummary,
     NotebookUpdate,
+    SetIndexingPipelineRequest,
     SetBasesRequest,
     SetTierRequest,
     ShareResponse,
@@ -28,6 +35,7 @@ from app.models.notebooks import (
     SharedByMeItem,
     SharedPreview,
 )
+from app.repositories.ports import KgBuildAlreadyRunning
 
 
 router = APIRouter()
@@ -63,6 +71,48 @@ def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
         return notebook_catalog_repository().notebook_analytics(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get(
+    "/notebooks/{notebook_id}/indexing-pipeline",
+    response_model=IndexingPipelineResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_indexing_pipeline(notebook_id: str) -> IndexingPipelineResponse:
+    """Return only the sanitized frozen registry projection for this notebook."""
+    try:
+        return IndexingPipelineResponse(**repository().indexing_pipeline_options(notebook_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.patch(
+    "/notebooks/{notebook_id}/indexing-pipeline",
+    response_model=IndexingPipelineResponse,
+    dependencies=[Depends(require_notebook_capability("kg:write"))],
+)
+def set_indexing_pipeline(
+    notebook_id: str,
+    payload: SetIndexingPipelineRequest,
+) -> IndexingPipelineResponse:
+    """Build all source chunks first, then atomically publish the whole notebook."""
+    try:
+        return IndexingPipelineResponse(
+            **repository().set_indexing_pipeline(notebook_id, payload.pipeline_id)
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    except IndexingPipelineUnavailableError:
+        raise user_error(
+            409,
+            "所选索引管线当前不可用；旧索引仍可读取。请切回内建管线后重试。",
+        )
+    except IndexingPipelineStalePlanError:
+        raise user_error(409, "索引内容在重建期间发生变化，请重试切换。")
+    except IndexingPipelineRebuildFailedError:
+        raise user_error(409, "索引管线已保存但重建未完成；旧索引仍可读取，请重试或切回内建管线。")
+    except KgBuildAlreadyRunning:
+        raise user_error(409, "索引管线已保存；请等待当前知识图谱任务结束后重试重建。")
 
 
 @router.patch("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_capability("notebook:manage"))])

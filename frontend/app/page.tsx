@@ -55,7 +55,7 @@ import { withoutDecidedMerge } from "./kg-merge-model";
 import {
   ASK_MODE_GROUPS,
   groupOf, groupLabel, modesInGroup, defaultModeForGroup,
-  streamsTrace,
+  requiresKg, streamsTrace,
 } from "./ask-modes";
 import {
   ASK_RETRIEVAL_EFFORT_OPTIONS,
@@ -110,6 +110,13 @@ import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edg
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
+import {
+  describeIndexingPipelineState,
+  indexingPipelineConfirmMessage,
+  indexingPipelineIdsEqual,
+  notebookIndexingPipelineReadOnlySummary,
+  selectedIndexingPipelineOption,
+} from "./indexing-pipeline-settings.ts";
 import { useSourceLibrary } from "./use-source-library.ts";
 import { useAskSession } from "./use-ask-session.ts";
 import { useReportWorkspace } from "./use-report-workspace.ts";
@@ -2115,6 +2122,7 @@ export default function Home() {
     pendingAskedAt,
     pendingMode,
     pendingTrace,
+    askModes,
     mode: askMode,
     retrievalEffort: askRetrievalEffort,
     sessionPanelOpen,
@@ -2614,7 +2622,10 @@ export default function Home() {
         name: "ask-session",
         begin: () => askSession.beginNotebookTransition(owner),
         commit: (ticket) => askSession.restoreNotebook(ticket),
-        settle: (ticket) => askSession.finishNotebookTransition(ticket),
+        settle: (ticket, outcome) => askSession.finishNotebookTransition(
+          ticket,
+          outcome !== null,
+        ),
       }),
     ];
   }
@@ -2855,10 +2866,24 @@ export default function Home() {
 
   function submitNotebookEditor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!notebookCollection.editor?.target) return;
+    if (!notebookCollection.editor?.target || !notebookCollection.editor) return;
     const formData = new FormData(event.currentTarget);
     const splitLines = (value: string) =>
       value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
+    const nextPipelineId = notebookCollection.editor.selectedPipelineId || null;
+    if (
+      notebookCollection.editor.canManageContent
+      && !indexingPipelineIdsEqual(
+        notebookCollection.editor.indexingPipeline?.pipeline_id,
+        nextPipelineId,
+      )
+    ) {
+      const selectedOption = selectedIndexingPipelineOption(
+        notebookCollection.editor.indexingPipeline,
+        nextPipelineId,
+      );
+      if (!window.confirm(indexingPipelineConfirmMessage(selectedOption))) return;
+    }
     const patch: NotebookEditorPatch = {
       name: formData.get("name"),
       purpose: formData.get("purpose"),
@@ -2868,6 +2893,7 @@ export default function Home() {
       expected_questions: splitLines(String(formData.get("expected_questions") || "")),
       source_types: splitLines(String(formData.get("source_types") || "")),
       taxonomy: splitLines(String(formData.get("taxonomy") || "")),
+      indexing_pipeline_id: nextPipelineId,
     };
     void notebookCollection.saveEditor(patch);
   }
@@ -2876,6 +2902,15 @@ export default function Home() {
     const lease = rootModals.issue("notebook-editor", rootModals.captureActorOwner());
     if (!lease) return;
     if (await notebookCollection.openEditor(notebookId)) rootModals.publish(lease);
+  }
+
+  function openReadOnlyNotebookSettings() {
+    const summary = notebookIndexingPipelineReadOnlySummary(currentNotebook);
+    openInfoModal({
+      title: "设置",
+      message: `当前笔记本为只读。当前索引管线：${summary.label}。${summary.detail} 参考库挂载与链接分享由库主管理。`,
+      actions: [],
+    });
   }
 
   async function presentNotebookDelete(notebookId: string) {
@@ -4720,6 +4755,13 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
   );
+  const notebookEditorIndexingNotice = describeIndexingPipelineState(
+    notebookCollection.editor?.indexingPipeline ?? null,
+  );
+  const notebookEditorSelectedPipeline = selectedIndexingPipelineOption(
+    notebookCollection.editor?.indexingPipeline ?? null,
+    notebookCollection.editor?.selectedPipelineId,
+  );
   const workspaceExtensionPermissions = {
     notebookRead: Boolean(currentNotebookId && currentNotebook),
     notebookWrite: capabilities.canWriteNotebook,
@@ -5164,22 +5206,14 @@ export default function Home() {
                   <Cpu size={17} />
                   <span>模型服务</span>
                 </button>
-                {/* 设置直接进入笔记本编辑器(去掉原先「设置弹窗 → 编辑当前笔记本」的二级跳转)。
-                    编辑器拉/写挂载配置(listMountable/listBases/setBases),这些是
-                    notebook:configure(**恒 owner**,P2-T2 评审 P0)——组管理员即便有内容管理
-                    权也 404。故门控用 canConfigureNotebook 而非 canWriteNotebook:非 owner
-                    (含组管理员)退回一句说明,不打开编辑器(打开就会在 listMountable 上 404)。 */}
+                {/* 设置弹窗现在分成两档：内容管理者可改笔记本信息与索引管线，owner 额外
+                    看到参考库挂载。这样 group admin 能完成 indexing-pipeline 选择，而
+                    owner-only 的 configure I/O 仍不会对他发起。 */}
                 <button className="workspace-nav-button" onClick={() => {
-                  if (capabilities.canConfigureNotebook) {
+                  if (capabilities.canWriteNotebook) {
                     void presentNotebookEditor(currentNotebook.id);
                   } else {
-                    openInfoModal({
-                      title: "设置",
-                      message: capabilities.canWriteNotebook
-                        ? "参考库挂载与笔记本信息由库主配置；你可以管理来源与图谱内容。"
-                        : "当前笔记本为只读；模型服务由系统统一管理。",
-                      actions: []
-                    });
+                    openReadOnlyNotebookSettings();
                   }
                 }}>
                   <Settings size={17} />
@@ -5838,7 +5872,7 @@ export default function Home() {
                           {/* 按引擎是否流式推轨迹判断,不按分组:深入分析组里只有
                               逐步推理会流轨迹,关联追溯挂上去只会让用户从头到尾
                               盯着一句「等待后端事件…」。 */}
-                          {streamsTrace(pendingMode) ? (
+                          {streamsTrace(pendingMode, askModes) ? (
                             <ReasoningTracePanel steps={pendingTrace} live />
                           ) : "思考中…"}
                         </div>
@@ -5936,28 +5970,38 @@ export default function Home() {
                     <span className="chat-hint">{askQuotedPhraseHint}</span>
                   ) : null}
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
-                    {ASK_MODE_GROUPS.map((g) => (
+                    {ASK_MODE_GROUPS.filter((group) => (
+                      group.id !== "extension"
+                      || (isAdvanced(uiMode) && modesInGroup("extension", askModes).length > 0)
+                    )).map((g) => (
                       <button
                         key={g.id}
                         type="button"
-                        className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
+                        className={`mode-tab${groupOf(askMode, askModes) === g.id ? " active" : ""}`}
                         disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
-                        onClick={() => askSession.selectMode(defaultModeForGroup(g.id))}
+                        onClick={() => askSession.selectMode(defaultModeForGroup(g.id, askModes))}
                       >
                         {g.label}
                       </button>
                     ))}
                     {/* 自动模式下深入分析固定走「逐步推理」，引擎子切换与检索档位这两个
                         配置面整个不渲染（不是禁用——禁用还是把控件摆在那儿）。 */}
-                    {isAdvanced(uiMode) && groupOf(askMode) === "strict" && (
+                    {isAdvanced(uiMode) && (
+                      groupOf(askMode, askModes) === "strict"
+                      || groupOf(askMode, askModes) === "extension"
+                    ) && (
                       <span className="mode-engines">
-                        {modesInGroup("strict").map((m) => (
+                        {modesInGroup(groupOf(askMode, askModes), askModes).map((m) => (
                           <button
                             key={m.id}
                             type="button"
                             className={`mode-engine${askMode === m.id ? " active" : ""}`}
                             title={m.desc}
-                            disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
+                            disabled={
+                              asking || intentChecking || sessionLoading
+                              || Boolean(askIntentReview)
+                              || (m.requiresKg && !kgAvailable)
+                            }
                             onClick={() => askSession.selectMode(m.id)}
                           >
                             {m.label}
@@ -5980,7 +6024,7 @@ export default function Home() {
                         />
                       </span>
                     )}
-                    {groupOf(askMode) === "strict" && !kgAvailable && (
+                    {groupOf(askMode, askModes) === "strict" && !kgAvailable && (
                       kgBlockedByScope ? (
                         // 出路是把勾选点回来,不是花钱整理一次整库图谱 —— 这一支
                         // 刻意不给「整理知识图谱」按钮。
@@ -6002,8 +6046,15 @@ export default function Home() {
                         </span>
                       )
                     )}
+                    {groupOf(askMode, askModes) === "extension"
+                      && requiresKg(askMode, askModes)
+                      && !kgAvailable && (
+                        <span className="chat-hint">
+                          当前扩展引擎需要知识图谱，请先整理本笔记本或重新勾选带图谱的参考库
+                        </span>
+                    )}
                     {shouldShowBorrowedBaseHint({
-                      strict: groupOf(askMode) === "strict",
+                      strict: groupOf(askMode, askModes) === "strict",
                       kgAvailable,
                       // 两个参考库维度的入参都按**本轮勾选集**给:借用的是这次真的
                       // 参与、且已建图谱的那几个库,不是「挂了几个」。
@@ -6485,7 +6536,10 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>笔记本设置</h2>
-                <p>编辑当前笔记本的信息与参考库。模型服务由系统统一管理。</p>
+                <p>{notebookCollection.editor?.canConfigureNotebook
+                  ? "编辑当前笔记本的信息、索引管线与参考库。模型服务由系统统一管理。"
+                  : "编辑当前笔记本的信息与索引管线。参考库挂载仍由库主配置。"}
+                </p>
               </div>
               <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")} title="Close">×</button>
             </div>
@@ -6498,6 +6552,88 @@ export default function Home() {
               </section>
               <section className="settings-section">
                 <div className="settings-section-head">
+                  <h3>索引管线</h3>
+                  <p>按笔记本选择用于分块与索引构建的管线；parser 仍由系统自动路由，不在这里配置。</p>
+                </div>
+                {notebookEditorIndexingNotice && (
+                  <div className={`extension-alert extension-alert--${notebookEditorIndexingNotice.tone}`}>
+                    <p>{notebookEditorIndexingNotice.detail}</p>
+                    {notebookEditorIndexingNotice.canRetry && (
+                      <button
+                        type="button"
+                        className="sort-button compact"
+                        disabled={notebookCollection.editor?.busy}
+                        onClick={() => {
+                          const projection = notebookCollection.editor?.indexingPipeline ?? null;
+                          const option = selectedIndexingPipelineOption(projection);
+                          if (!window.confirm(indexingPipelineConfirmMessage(option))) return;
+                          void notebookCollection.retryIndexingPipelineRebuild();
+                        }}
+                      >
+                        重试重建
+                      </button>
+                    )}
+                    {notebookEditorIndexingNotice.canRevert && (
+                      <button
+                        type="button"
+                        className="sort-button compact"
+                        disabled={notebookCollection.editor?.busy}
+                        onClick={() => {
+                          const projection = notebookCollection.editor?.indexingPipeline ?? null;
+                          const option = selectedIndexingPipelineOption(projection, null);
+                          if (!window.confirm(indexingPipelineConfirmMessage(option))) return;
+                          void notebookCollection.revertIndexingPipelineToBuiltin();
+                        }}
+                      >
+                        切回内建
+                      </button>
+                    )}
+                  </div>
+                )}
+                <div className="indexing-pipeline-list" role="radiogroup" aria-label="索引管线">
+                  {(notebookCollection.editor?.indexingPipeline?.options ?? []).map((option) => {
+                    const optionId = option.pipeline_id ?? "";
+                    const checked = optionId === (notebookCollection.editor?.selectedPipelineId ?? "");
+                    return (
+                      <label
+                        className={`indexing-pipeline-option${checked ? " is-selected" : ""}${option.available === false ? " is-unavailable" : ""}`}
+                        key={`${option.pipeline_id ?? "builtin"}:${option.version}`}
+                      >
+                        <input
+                          type="radio"
+                          name="indexing-pipeline"
+                          checked={checked}
+                          disabled={notebookCollection.editor?.busy || option.available === false}
+                          onChange={() => notebookCollection.selectIndexingPipeline(option.pipeline_id ?? null)}
+                        />
+                        <span className="indexing-pipeline-copy">
+                          <span className="indexing-pipeline-head">
+                            <strong>{option.label}</strong>
+                            <small>v{option.version}</small>
+                          </span>
+                          <span>{option.description}</span>
+                          <span className="indexing-pipeline-flags">
+                            {option.overrides_chunking ? "自定义分块" : "内建分块"}
+                            {option.overrides_kg_extraction ? " · 自定义知识分析" : ""}
+                            {option.available === false ? " · 当前不可用" : ""}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="base-picker-hint">
+                  {indexingPipelineIdsEqual(
+                    notebookCollection.editor?.indexingPipeline?.pipeline_id,
+                    notebookCollection.editor?.selectedPipelineId,
+                  )
+                    ? "当前选择保持不变时，不会触发额外重建。"
+                    : `保存后将切换到“${notebookEditorSelectedPipeline?.label ?? "所选索引管线"}”，并重建全库索引。`}
+                </p>
+              </section>
+              {notebookCollection.editor?.canConfigureNotebook && (
+                <section className="settings-section">
+                  <div className="settings-section-head">
                   <h3>参考库</h3>
                   <p>检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
                 </div>
@@ -6555,7 +6691,8 @@ export default function Home() {
                   <p className="base-picker-hint">{mountCostHint((notebookCollection.editor?.mountedIds ?? []).length)}</p>
                 )}
                 </div>
-              </section>
+                </section>
+              )}
               <section className="settings-section">
                 <div className="settings-section-head"><h3>更多信息</h3></div>
                 <div className="settings-grid-2">

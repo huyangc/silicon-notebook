@@ -1214,9 +1214,9 @@ Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EX
 
 ### id 与显示名
 
-上表的 id（`chunk` / `reasoning` / `graph`，以及分组 id `general` / `strict`）是**协议**：`POST /ask` 收的是它，历史会话与书签存的是它，后端注册表 `backend/app/services/ask_modes.py` 声明的也是它。它们是稳定量，不因为「名字不好听」而改。
+上表的内建 id（`chunk` / `reasoning` / `graph`，以及分组 id `general` / `strict`）是**协议**：`POST /ask` 收的是它，历史会话与书签存的是它，后端注册表 `backend/app/services/ask_modes.py` 声明的也是它。它们是稳定量，不因为「名字不好听」而改。部署方的 `ask.engine` 以「本插件 id + `.`」为前缀增加命名空间化 mode id；该 id 在引擎存续期间同样进入持久会话，但只能运行时发现，绝不编进公网前端。
 
-界面上**显示**的名字是另一层，纯 UI，归前端注册表 `frontend/app/ask-modes.ts` 所有：
+界面上**显示**的名字是另一层，纯 UI。`frontend/app/ask-modes.ts` 仍是三个内建引擎的静态真源，并在运行时合并 `GET /api/ask-modes` 返回的脱敏部署投影：
 
 | 协议 id | 问答面板显示名 |
 |---|---|
@@ -1224,8 +1224,9 @@ Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EX
 | 分组 `strict`（选择器给出的入口，组内默认引擎是 `reasoning`） | 深入分析 |
 | `reasoning` | 逐步推理 |
 | `graph` | 关联追溯 |
+| 运行时分组 `extension` | 扩展功能 |
 
-该注册表的 `groupLabel()` / `modeLabel()` 是唯一读取口：前端任何其它文件都不得硬编码显示名，散文里提到就用模板插值。两边由 `ask-modes.test.mjs` 强制——它递归扫描 `frontend/app`，当前显示名出现在注册表之外即失败，退休名（严格推理 / 深挖推理 / 图谱多跳）复活也失败。因此改显示名只是改注册表一行，不动任何 id、请求/响应载荷或已存会话；id 集合另由 `scripts/check_ask_modes_contract.py` 跨前后端锁同步。
+该注册表的 `groupLabel()` / `modeLabel()` 是内建文案的唯一读取口：前端任何其它文件都不得硬编码内建显示名，散文里提到就用模板插值；插件 label/description 只能来自实时脱敏投影。两边由 `ask-modes.test.mjs` 强制——它递归扫描 `frontend/app`，当前内建显示名出现在注册表之外即失败，退休名（严格推理 / 深挖推理 / 图谱多跳）复活也失败。因此改内建显示名只是改注册表一行，不动任何 id、请求/响应载荷或已存会话；`scripts/check_ask_modes_contract.py` 继续跨栈锁住内建 id 集合，并拒绝把插件 mode 字面量编进前端。
 
 **`chunk` —— chunk-native，含可选 chunk×graph mix。**
 - *基线：* chunk 大召回（`CHUNK_RECALL`）→ MMR / 多子查询配额多样性选择（`CHUNK_MMR_K`）→ 长上下文综合，不碰 KG。
@@ -1759,6 +1760,54 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 `/api/extensions/{plugin_id}/…` 是部署插件自有 HTTP 路由的唯一挂载面：router 级会话依赖意味着没有匿名面，路由工厂拿到的是 8 个字段的 `PluginRouteContext`——`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`emit_event`——绝不给 repository、全局 `Settings`、model client、FastMCP host 或原始 bearer token。**这些接缝背后的每个 core 端口都自己给请求的当前用户做授权判定**——例如 `url_sources.import_urls` 会对调用用户核对 `sources:write` 能力,不通过就 404——所以挂载点自身的 `{notebook_id}` 路径形状守卫只是纵深防御,不是授权边界本身。URL 导入端口一份实现两种调用形态：同步 (`def`) handler 本来就在 FastAPI 线程池里、直接调 `import_urls`；`async def` handler 跑在事件循环线程上，必须 `await import_urls_async(...)`——它把同一份阻塞工作（数据库写入，外加每个 URL 一次串行远端探测）连同请求上下文一起挪进线程池，因此两条路的授权判定完全一致。从 async handler 调 `import_urls` 会在动任何东西之前抛 `RuntimeError`：这是开发者错误，以带 traceback 的 `500` 呈现（文案点名该 await 哪个方法），绝不作为面向用户的文案。插件代码**抛出**（`fastapi.HTTPException` 或 `starlette.exceptions.HTTPException` 皆可——前者是后者的子类，两者被接住的方式完全一样）**或返回**的 401 都会被翻译成 424（并记一条事件），不会被误当成会话失效。「插件代码」既指 handler，**也指插件自己的 `Depends(...)` 依赖（嵌套多少层都算）**：FastAPI 在调 endpoint 之前就把依赖解完了，所以把上游检查写进依赖（这是最常见的写法）否则会让一个真 401 漏到浏览器、把用户登出。依赖只覆盖「抛出」那一半——依赖的返回值是作为参数注入的，永远不会变成响应。core 自己的依赖按对象身份**加**定义所在模块双判排除在外，所以 core router 级会话门产生的真 401 仍然原样是 401；生成器（`yield`）依赖与 security scheme 不动。
 
 数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP——写后端 bundle 与构建期 UI 包、本地联调、打包、安装、启动校验、升级/回滚，以及完整拒绝码表：[部署插件 SOP](./deployment-extensions-sop_zh.md)。
+
+### 部署问答引擎（`ask.engine`）
+
+部署插件可以注册一个或多个完整、非流式的问答引擎。每个 `PROVIDER` 暴露冻结描述符（`mode_id`、面向用户的名称/说明、`requires_kg`）和一个同步 `answer()` 方法。`mode_id` 必须以该插件自己的 id 加 `.` 为前缀；重复、畸形、空值或超限描述符都会让启动 fail-closed。内建和已退役 mode id 都不含点号，而插件 id 本身全局唯一，因此插件前缀就是防碰撞边界，不另维护第二份保留字表。
+
+provider 只收到当前问题和三个由核心拥有的端口。`RetrievalAccessPort.search()` 包裹既有带范围候选路径：冻结的来源范围、挂载公共库范围和按 actor 隔离的私有 Memory 谓词会在 SQLite/PostgreSQL 的候选 `LIMIT` 之前生效；结果只暴露有界正文、标题、位置和本次 run 内的不透明证据句柄，不暴露 notebook/source/element/chunk id。`fetch()` 只认同一端口已经签发过的句柄。`EngineModelPort.complete()` 通过常规模型 registry、调度、熔断、日志和取消路径使用 `plugin_engine` chat workload，不暴露 URL、密钥、raw client 或物理 binding。`EngineTraceSink.step()` 持久化有界的通用 `plugin` 轨迹步骤；v1 不提供实时轨迹流。
+
+provider 返回 Markdown 和按顺序排列的已签发句柄。核心会对每个句柄及每个 `[kN]`/`【kN】` 标记做 fail-closed 校验，再从私有账本构造 `Citation` 与 `AnswerAnchor`；在复核 mode/notebook/question/conversation/actor/job/run/scope 身份后，仍经普通 durable answer 接缝保存。伪造或跨 run 句柄会以稳定的用户可见失败拒绝整份答案，不能通过删除坏锚点让无根据正文看起来已接地。公开会话投影继续使用原白名单。v1 不接收历史、意图预检、KG/PPR 端口、repository、`Settings`、连接或 service locator；它只进入浏览器 Ask，不进入 MCP Ask 或 Deep Report。自动 UI 模式隐藏扩展分组并提交内建默认模式；高级模式把可用引擎作为第三分组。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
+
+| 问答引擎护栏 | 默认值 | 合法范围 / 结构上限 |
+| --- | ---: | ---: |
+| `ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K` | 20 | `1..500` |
+| `ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS` | 8 | `1..100` |
+| `ASK_PLUGIN_ENGINE_EVIDENCE_MAX_CHARS` | 4,000 | `100..50,000` |
+| `ASK_PLUGIN_ENGINE_PROMPT_MAX_CHARS`（同时限制端口检索 query） | 32,000 | `1..1,000,000` |
+| `ASK_PLUGIN_ENGINE_MODEL_MAX_CALLS` | 4 | `1..32` |
+| `ASK_PLUGIN_ENGINE_TRACE_MAX_STEPS` | 32 | `1..256` |
+| `ASK_PLUGIN_ENGINE_TRACE_LABEL_MAX_CHARS` | 160 | `1..1,000` |
+| `ASK_PLUGIN_ENGINE_TRACE_DETAIL_MAX_CHARS` | 1,000 | `1..10,000` |
+| 描述符 `mode_id` / 名称 / 说明 | — | 128 / 80 / 300 字符 |
+
+### 部署索引管线（`indexing.pipeline`）
+
+部署插件可以贡献按笔记本选择的索引管线；其 `pipeline_id` 以插件 id 命名空间化，描述符只暴露 label、description、version 与两个 override flag。parser 路由仍由启动时冻结的 ProviderChain 自动决定，用户只能选择 indexing pipeline，不能选择 parser。`GET /api/notebooks/{id}/indexing-pipeline` 对 reader 可读，返回净化后的当前选择、该笔记本可见的 option 列表，以及 `available` / `missing` / `pending` 等状态布尔；绝不泄露插件路径、capability 名、异常栈或 loader reason。`PATCH /api/notebooks/{id}/indexing-pipeline` 挂 `kg:write`，因此 owner 与组内容管理员都可切换 desired pipeline，纯 reader 保持只读。
+
+笔记本设置界面刻意拆成两档：owner 与内容管理员都能编辑笔记本元数据并切换索引管线，但只有 owner 能读取/修改参考库挂载，因为 `notebook:configure` 仍然是 owner-only。纯只读成员也能通过同一个“设置”入口看到当前索引管线与状态的只读视图。任何管线切换都必须明确确认“将重建全库索引”。PATCH 先独立提交 desired `(pipeline_id, version, 不透明 generation)`，再认领既有持久 `kg_build_jobs` rebuild 单飞并立即返回 `pending + job_id`；worker 依次执行有界的整库 chunk 计划、可选的 core-owned KG 运行，以及合格库的 scale rebuild。迟到 worker 只有仍持有完全相同 generation 时才能发布；超界/失败会把 desired 代次保留为 pending，GET 投影 `rebuild_status=failed`，设置界面同时提供同管线重试与一键切回内建。
+
+处于 `pending` 时，普通来源上传/重解析、手工 KG build 与 scale rebuild 写入全部 fail-closed。worker 会校验所有用户可见导入来源的有界 chunk proposal，在发布事务外计算 embedding，再把每个来源的 chunks、反向行、向量、KG payload、来源事实与抽取结果写入不可见的 durable notebook stage。隐藏 Memory/Knowhow 合成产物由 core 管理、读取时按 actor SQL 隔离，不进入可选策略，也不进入 stage。单来源畸形 chunk proposal 会带一条稳定且无内容的 warning 回退内建 chunker；整库护栏超限不会写入 live product。若当前选中的插件缺席或不可用，界面会给出“切回内建”的恢复路径，同时不影响对旧已发布产物的普通读取。
+
+当 `overrides_kg_extraction` 启用时，插件只拥有窗口 prompt builder 与模型响应 mapper。窗口切分、`kg_extract` workload/client 与输出上限、取消、schema 准入、证据绑定、持久化、durable job 状态都归 core。core 为每个窗口铸造不透明证据 handle；未知 handle/object type/edge type、非法端点组合、畸形 prompt/fragment、插件异常或配置护栏超限都会让该来源 fail-closed。笔记本 durable job 落 terminal `failed`，但 live extraction history、来源/parser 状态、图、chunks、来源事实与 published identity 保持逐字节不变；失败 stage 被丢弃。覆盖 KG 的管线不能走无模型成功路径。
+
+只有全部 staged source 完成后才会进入发布。SQLite/PostgreSQL 事务在第一次 live mutation 前复核 running job、desired generation、精确可见来源/元素 snapshot、stage 来源集合、向量形状、端点闭包与证据的来源内归属；随后在同一事务内替换可见来源的 chunks/反向行/FTS/向量和来源派生 KG/事实/extraction state，失效整本派生 KG 及其 mutation sequence，只更新与 parser 无关的 `chunked_at`，发布 unified identity、清 job authority、写 `succeeded` 并删除 stage。无 KG/model 路径显式保留 live KG、只发布 staged chunks。失败、取消、启动恢复或迟到/混代 generation 只删除 stage，因此读侧会一直看到一份完整旧代次，直到完整新代次提交。
+
+| 护栏 | 默认值 | 合法范围 |
+|---|---:|---:|
+| `INDEXING_PIPELINE_MAX_PROPOSALS_PER_SOURCE` | 2,000 | `1..100,000` |
+| `INDEXING_PIPELINE_MAX_TEXT_CHARS`（proposal 文本与 section path） | 20,000 | `1..1,000,000` |
+| `INDEXING_PIPELINE_MAX_ELEMENT_REFS` | 500 | `1..100,000` |
+| `INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS` | 50,000 | `1..2,000,000` |
+| `INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS` | 100,000,000 | `1..2,000,000,000` |
+| `INDEXING_PIPELINE_KG_MAX_MESSAGES` | 8 | `1..64` |
+| `INDEXING_PIPELINE_KG_PROMPT_MAX_CHARS` | 64,000 | `1..2,000,000` |
+| `INDEXING_PIPELINE_KG_SCHEMA_HINT_MAX_CHARS` | 16,000 | `0..250,000` |
+| `INDEXING_PIPELINE_KG_MAX_OBJECTS_PER_WINDOW` | 512 | `1..10,000` |
+| `INDEXING_PIPELINE_KG_MAX_EDGES_PER_WINDOW` | 1,024 | `0..20,000` |
+| `INDEXING_PIPELINE_KG_MAX_EVIDENCE_HANDLES` | 32 | `1..1,000` |
+| `INDEXING_PIPELINE_KG_MAX_STEPS_PER_OBJECT` | 128 | `0..2,000` |
+| `INDEXING_PIPELINE_KG_NAME_MAX_CHARS` | 8,000 | `1..100,000` |
 
 ### 缺口外扩检索
 

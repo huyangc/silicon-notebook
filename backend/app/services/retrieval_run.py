@@ -25,6 +25,7 @@ _RUN_KINDS = frozenset({
     "ask_chunk",
     "ask_graph",
     "ask_reasoning",
+    "ask_plugin_engine",
     "report_generation",
     "report_planning",
 })

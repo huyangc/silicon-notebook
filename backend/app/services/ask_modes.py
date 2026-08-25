@@ -34,17 +34,34 @@ DEFAULT_MODE = "chunk"
 _RETIRED_MODES = {"fast": "chunk", "global": "chunk"}
 
 
-def resolve_mode(mode: str | None) -> AskMode:
+def resolve_mode(
+    mode: str | None,
+    extension_modes: tuple[AskMode, ...] = (),
+) -> AskMode:
     """Return the AskMode for `mode` (DEFAULT_MODE when None/empty).
     Raise UnknownAskMode for anything not registered."""
     key = mode or DEFAULT_MODE
     key = _RETIRED_MODES.get(key, key)
-    try:
-        return ASK_MODES[key]
-    except KeyError as exc:
-        raise UnknownAskMode(key) from exc
+    builtin = ASK_MODES.get(key)
+    if builtin is not None:
+        return builtin
+    for extension_mode in extension_modes:
+        if extension_mode.id == key:
+            return extension_mode
+    raise UnknownAskMode(key)
 
 
 def user_facing_mode_ids() -> list[str]:
     """Mode ids the UI may expose, in registry order."""
     return [m.id for m in ASK_MODES.values() if m.user_facing]
+
+
+def user_facing_modes(
+    extension_modes: tuple[AskMode, ...] = (),
+) -> tuple[AskMode, ...]:
+    """Built-ins first, then the startup-frozen deployment projection."""
+
+    return (
+        *(mode for mode in ASK_MODES.values() if mode.user_facing),
+        *(mode for mode in extension_modes if mode.user_facing),
+    )

@@ -195,9 +195,9 @@ def test_delete_locks_source_before_projection_cleanup(repo, monkeypatch):
     original_lock = store.source_exists_for_update_tx
     original_clear = ingestion.clear_source_extraction_state
 
-    def observe_lock(db, source_id):
+    def observe_lock(db, source_id, notebook_id=None):
         events.append("lock")
-        return original_lock(db, source_id)
+        return original_lock(db, source_id, notebook_id)
 
     def observe_clear(*args, **kwargs):
         events.append("clear")

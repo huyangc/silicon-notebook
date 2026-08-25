@@ -515,6 +515,7 @@ class PostgresMaintenanceAdapter:
                 "updated_at=%s,finished_at=%s WHERE status='running'",
                 (now, now),
             )
+            db.execute("DELETE FROM indexing_pipeline_stages")
             # Mirrors the SQLite sweep: the command-catalog single-flight
             # predicate covers queued AND running, so a row stranded before its
             # worker thread started would otherwise hold that source's guard

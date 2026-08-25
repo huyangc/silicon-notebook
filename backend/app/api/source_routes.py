@@ -504,6 +504,9 @@ def reparse_sources(
             detail=f"too many sources to reparse at once (max {_REPARSE_MAX})",
         )
     repo = source_repository()
+    # Reject before any background submission; process_source repeats the
+    # admission inside the worker to close the queue-to-execution race.
+    repo.require_indexing_pipeline_write(notebook_id)
     scheduled: List[str] = []
     for source_id in unique_ids:
         try:
@@ -582,6 +585,7 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
     发现查询 ``missing_*_vector_source_ids`` 保持原样:它只投影 DISTINCT source_id、不物化正文,
     其 btrim/TRIM 全表评估是**判据本身**(与 rows/count/page/ids 四处逐字一致),没有索引可
     依托,也省不掉这一次扫描——登记为已知代价,不在本次改动范围。"""
+    repo.require_indexing_pipeline_write(notebook_id)
     mnt = repo.maintenance
     ingestion = repo._runtime.source_ingestion
     chunk_ok = repo.configured("chunk_embedding")
@@ -598,6 +602,10 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
     page = _backfill_page_rows(repo)
     for source_id in sources:
         with ingestion.hold_source_chunk_lock(source_id):
+            # Recheck after queueing and again at each source-generation lock;
+            # a pipeline switch aborts the job rather than being swallowed as
+            # one source's best-effort embedding failure.
+            repo.require_indexing_pipeline_write(notebook_id)
             try:
                 if chunk_ok:
                     ids = mnt.missing_chunk_embedding_ids(
@@ -645,6 +653,7 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     凡调 embedding 的修复不自动)。补完后 H4/H5 计数下降,前端重拉 checkup 反映。
     用完整 facade(``repository()``)——backfill 需要 maintenance/configured(BatchIngestRepository)。"""
     repo = repository()
+    repo.require_indexing_pipeline_write(notebook_id)
     mnt = repo.maintenance
     # 按**损坏所属的 workload** 精判受理(codex P2):某类缺向量确实存在**且**其嵌入 workload 已配,
     # job 才补得动该类。粗判 `configured(chunk) or configured(element)` 会在「损坏是 element、却只配

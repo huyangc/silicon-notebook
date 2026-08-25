@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 _NOW = "2026-01-01T00:00:00"
@@ -128,6 +129,77 @@ def test_reparse_dedupes_and_bounds(tmp_path, monkeypatch):
     )
     assert over.status_code == 400  # 超上限拒绝
     assert len(calls) == 1  # 一个都没多排
+
+
+def test_reparse_refuses_pending_and_missing_pipeline_before_submit(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "p00300309")
+    nb = _notebook(client, headers, "pipeline admission")
+
+    from app.api.deps import repository
+
+    repo = repository()
+    _seed_source(repo, nb, "src-gated")
+    calls = _spy_submit_job(monkeypatch)
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline_job_id=? WHERE id=?",
+            ("pending:generation", nb),
+        )
+    pending = client.post(
+        f"/api/notebooks/{nb}/sources/reparse",
+        headers=headers,
+        json={"source_ids": ["src-gated"]},
+    )
+    assert pending.status_code == 409
+    assert calls == []
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline=?,"
+            "indexing_pipeline_version=?,indexing_pipeline_job_id='' WHERE id=?",
+            ("removed.pipeline", "v1", nb),
+        )
+    missing = client.post(
+        f"/api/notebooks/{nb}/sources/reparse",
+        headers=headers,
+        json={"source_ids": ["src-gated"]},
+    )
+    assert missing.status_code == 409
+    assert calls == []
+
+
+def test_backfill_refuses_pending_pipeline_before_submit(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "v00300310")
+    nb = _notebook(client, headers, "backfill admission")
+
+    from app.api.deps import repository
+
+    repo = repository()
+    _seed_source_with_elements(repo, nb, "src-vector-gated")
+    monkeypatch.setattr(repo, "configured", lambda _workload: True)
+    calls = _spy_submit_job(monkeypatch)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline_job_id=? WHERE id=?",
+            ("pending:generation", nb),
+        )
+
+    response = client.post(
+        f"/api/notebooks/{nb}/backfill-vectors", headers=headers
+    )
+    assert response.status_code == 409
+    assert calls == []
+
+    from app.api.source_routes import _backfill_vectors_job
+    from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
+
+    with pytest.raises(IndexingPipelineUnavailableError):
+        _backfill_vectors_job(repo, nb)
 
 
 def test_backfill_vectors_accepts_and_schedules(tmp_path, monkeypatch):

@@ -9,15 +9,33 @@ import math
 import re
 from typing import Any, List, Tuple
 
+from app.core.llm import cap_kwargs
+from app.domain.indexing_pipeline import (
+    IndexingKgEdgeProposal,
+    IndexingKgFragment,
+    IndexingKgMessage,
+    IndexingKgObjectProposal,
+    IndexingKgPrompt,
+    IndexingKgStepProposal,
+    IndexingPipelineKgLimits,
+)
 from app.services.kg.windowing import windows_with_elements
 from app.services.kg.extract import extract_window
+from app.services.kg.extract import _parse_validity_scope
 from app.services.kg.canonicalize import canonicalize
 from app.services.kg.filters import should_extract_window, is_noise_concept, is_meta_claim
-from app.services.kg.models import Edge, KnowledgeGraph, Node
+from app.services.kg.models import Edge, Evidence, KnowledgeGraph, Node, Step
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg.scheduler import submit_window
+from app.services.kg.edge_schema import VALID_EDGE_TYPES, is_queryable_edge_pair
 
 DOC_TYPE_MAP = {"academic_paper": "academic", "article": "academic", "textbook": "textbook"}
+_CORE_PLUGIN_NODE_TYPES = {
+    "concept": "Concept",
+    "claim": "Claim",
+    "formula": "Formula",
+    "procedure": "Procedure",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +296,232 @@ def _ev(el, quote: str, source_id: str, source_title: str) -> dict:
     }
 
 
+def _window_evidence(el) -> Evidence:
+    return Evidence(
+        file=el.file,
+        char_start=el.char_start,
+        char_end=el.char_end,
+        line_start=el.line_start,
+        line_end=el.line_end,
+        quote=el.text,
+    )
+
+
+def _plugin_kg_fragment_to_window(
+    fragment: IndexingKgFragment,
+    elements,
+    *,
+    section_path: str,
+    win_idx: int,
+    object_types: tuple[str, ...],
+    limits: IndexingPipelineKgLimits,
+) -> Tuple[List[Node], List[Edge]]:
+    """Admit one plugin-mapped KG fragment into the core node/edge contract."""
+    if type(fragment.objects) is not tuple or type(fragment.edges) is not tuple:
+        raise ValueError("invalid plugin KG fragment")
+    if (
+        len(fragment.objects) > limits.max_objects
+        or len(fragment.edges) > limits.max_edges
+    ):
+        raise ValueError("plugin KG fragment exceeds configured bounds")
+    allowed_types = dict(_CORE_PLUGIN_NODE_TYPES)
+    ambiguous_types: set[str] = set()
+    for item in object_types:
+        if type(item) is not str or not item.strip():
+            continue
+        canonical = item.strip()
+        key = canonical.lower()
+        existing = allowed_types.get(key)
+        if existing is not None and existing != canonical and key not in _CORE_PLUGIN_NODE_TYPES:
+            ambiguous_types.add(key)
+            continue
+        if key not in _CORE_PLUGIN_NODE_TYPES:
+            allowed_types[key] = canonical
+    for key in ambiguous_types:
+        allowed_types.pop(key, None)
+    handle_map = {f"e{index}": element for index, element in enumerate(elements)}
+    nodes: List[Node] = []
+    by_local: dict[str, str] = {}
+    type_by_node_id: dict[str, str] = {}
+    for proposal in fragment.objects:
+        if type(proposal) is not IndexingKgObjectProposal:
+            raise ValueError("invalid plugin KG object proposal")
+        if (
+            type(proposal.local_id) is not str
+            or not proposal.local_id.strip()
+            or proposal.local_id in by_local
+            or type(proposal.object_type) is not str
+            or proposal.object_type.strip().lower() not in allowed_types
+            or type(proposal.name) is not str
+            or not proposal.name.strip()
+            or len(proposal.name) > limits.max_name_chars
+            or type(proposal.evidence_handles) is not tuple
+            or not proposal.evidence_handles
+            or len(proposal.evidence_handles) > limits.max_evidence_handles
+            or any(type(handle) is not str for handle in proposal.evidence_handles)
+        ):
+            raise ValueError("invalid plugin KG object proposal")
+        canonical_type = allowed_types[proposal.object_type.strip().lower()]
+        evidence = []
+        for handle in proposal.evidence_handles:
+            element = handle_map.get(handle)
+            if element is None:
+                raise ValueError("invalid plugin KG evidence handle")
+            evidence.append(_window_evidence(element))
+        node_id = f"W{win_idx}-{len(nodes)}"
+        node = Node(
+            id=node_id,
+            type=canonical_type,
+            name=proposal.name.strip(),
+            section_path=(
+                proposal.section_path
+                if type(proposal.section_path) is str and proposal.section_path
+                else section_path
+            ),
+            evidence=evidence,
+        )
+        if canonical_type in {"Claim", "Formula"}:
+            node.validity_scope = _parse_validity_scope(proposal.validity_scope)
+        if canonical_type == "Procedure":
+            if (
+                type(proposal.steps) is not tuple
+                or len(proposal.steps) > limits.max_steps_per_object
+            ):
+                raise ValueError("invalid plugin KG steps")
+            steps: list[Step] = []
+            for step in proposal.steps:
+                if (
+                    type(step) is not IndexingKgStepProposal
+                    or type(step.name) is not str
+                    or not step.name.strip()
+                    or len(step.name) > limits.max_name_chars
+                    or type(step.evidence_handles) is not tuple
+                    or not step.evidence_handles
+                    or len(step.evidence_handles) > limits.max_evidence_handles
+                    or any(
+                        type(handle) is not str
+                        for handle in step.evidence_handles
+                    )
+                ):
+                    raise ValueError("invalid plugin KG step")
+                step_evidence = []
+                for handle in step.evidence_handles:
+                    element = handle_map.get(handle)
+                    if element is None:
+                        raise ValueError("invalid plugin KG evidence handle")
+                    step_evidence.append(_window_evidence(element))
+                steps.append(Step(name=step.name.strip(), evidence=step_evidence))
+            node.steps = steps
+        nodes.append(node)
+        by_local[proposal.local_id] = node_id
+        type_by_node_id[node_id] = canonical_type
+
+    edges: List[Edge] = []
+    for proposal in fragment.edges:
+        if type(proposal) is not IndexingKgEdgeProposal:
+            raise ValueError("invalid plugin KG edge proposal")
+        if (
+            type(proposal.edge_type) is not str
+            or proposal.edge_type not in VALID_EDGE_TYPES
+            or type(proposal.source_local_id) is not str
+            or type(proposal.target_local_id) is not str
+            or type(proposal.evidence_handles) is not tuple
+            or not proposal.evidence_handles
+            or len(proposal.evidence_handles) > limits.max_evidence_handles
+            or any(type(handle) is not str for handle in proposal.evidence_handles)
+        ):
+            raise ValueError("invalid plugin KG edge proposal")
+        source_id = by_local.get(proposal.source_local_id)
+        target_id = by_local.get(proposal.target_local_id)
+        if not source_id or not target_id or source_id == target_id:
+            raise ValueError("invalid plugin KG edge endpoints")
+        if not is_queryable_edge_pair(
+            proposal.edge_type,
+            type_by_node_id.get(source_id),
+            type_by_node_id.get(target_id),
+        ):
+            raise ValueError("invalid plugin KG edge endpoint pair")
+        evidence = []
+        for handle in proposal.evidence_handles:
+            element = handle_map.get(handle)
+            if element is None:
+                raise ValueError("invalid plugin KG evidence handle")
+            evidence.append(_window_evidence(element))
+        edges.append(
+            Edge(
+                id=f"E{win_idx}-{len(edges)}",
+                type=proposal.edge_type,
+                source_id=source_id,
+                target_id=target_id,
+                evidence=evidence,
+            )
+        )
+    return nodes, edges
+
+
+def _plugin_extract_window(
+    client: Any,
+    kg_strategy: Any,
+    pipeline_id: str,
+    elements,
+    section_path: str,
+    doc_type: str,
+    win_idx: int,
+    object_types: tuple[str, ...],
+    limits: IndexingPipelineKgLimits,
+) -> Tuple[List[Node], List[Edge]]:
+    prompt_result = kg_strategy.build_kg_prompt(
+        pipeline_id,
+        elements,
+        doc_type=doc_type,
+        section_path=section_path,
+        object_types=object_types,
+    )
+    prompt = prompt_result.prompt
+    if type(prompt) is not IndexingKgPrompt:
+        raise ValueError(prompt_result.warning_code or "invalid plugin KG prompt")
+    if (
+        len(prompt.messages) > limits.max_messages
+        or len(prompt.response_schema_hint) > limits.max_schema_hint_chars
+        or sum(len(message.content) for message in prompt.messages)
+        > limits.max_prompt_chars
+    ):
+        raise ValueError("plugin KG prompt exceeds configured bounds")
+    messages = [
+        {"role": message.role, "content": message.content}
+        for message in prompt.messages
+        if type(message) is IndexingKgMessage
+    ]
+    if len(messages) != len(prompt.messages):
+        raise ValueError("invalid plugin KG prompt message")
+    raw = client.chat_json(
+        messages,
+        prompt.response_schema_hint,
+        **cap_kwargs(client, "kg_extract_max_tokens"),
+    )
+    if type(raw) is not str:
+        raise ValueError("invalid plugin KG model response")
+    mapped = kg_strategy.map_kg_response(
+        pipeline_id,
+        raw,
+        elements,
+        doc_type=doc_type,
+        section_path=section_path,
+        object_types=object_types,
+    )
+    fragment = mapped.fragment
+    if type(fragment) is not IndexingKgFragment:
+        raise ValueError(mapped.warning_code or "invalid plugin KG fragment")
+    return _plugin_kg_fragment_to_window(
+        fragment,
+        elements,
+        section_path=section_path,
+        win_idx=win_idx,
+        object_types=object_types,
+        limits=limits,
+    )
+
+
 def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
                   elements) -> Tuple[List[dict], List[dict]]:
     """KG graph -> (objects, relations) with product evidence bound to elements.
@@ -409,7 +653,11 @@ def drop_meta_claims(nodes: List[Node], edges: List[Edge]) -> Tuple[List[Node], 
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                   n: int = 9000, m: int = 450, whitelist=frozenset(),
                   refine: bool = False, gleaning_rounds: int = 0,
-                  base_filter: bool = False) -> KnowledgeGraph:
+                  base_filter: bool = False, kg_strategy: Any | None = None,
+                  pipeline_id: str = "",
+                  plugin_object_types: tuple[str, ...] = (),
+                  plugin_limits: IndexingPipelineKgLimits | None = None,
+                  ) -> KnowledgeGraph:
     """Window the text, extract a KG fragment per window concurrently, denoise,
     then canonicalize. 抽取前按 should_extract_window 跳过低价值窗口；抽取后按
     is_noise_concept 丢弃噪声 Concept（连带删悬空边）。Ungroundable nodes are
@@ -434,13 +682,32 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
     edges: List[Edge] = []
     failed = 0
     if pairs:
-        futs = [submit_window(extract_window, extract_client, els, w.section_path,
-                              doc_type, idx, refine=refine,
-                              gleaning_rounds=gleaning_rounds,
-                              base_filter=base_filter,
-                              refine_client=refine_client,
-                              glean_client=glean_client)
-                for idx, (w, els) in enumerate(pairs)]
+        if kg_strategy is not None and pipeline_id:
+            if plugin_limits is None:
+                raise ValueError("plugin KG extraction requires validated limits")
+            futs = [
+                submit_window(
+                    _plugin_extract_window,
+                    extract_client,
+                    kg_strategy,
+                    pipeline_id,
+                    els,
+                    w.section_path,
+                    doc_type,
+                    idx,
+                    plugin_object_types,
+                    plugin_limits,
+                )
+                for idx, (w, els) in enumerate(pairs)
+            ]
+        else:
+            futs = [submit_window(extract_window, extract_client, els, w.section_path,
+                                  doc_type, idx, refine=refine,
+                                  gleaning_rounds=gleaning_rounds,
+                                  base_filter=base_filter,
+                                  refine_client=refine_client,
+                                  glean_client=glean_client)
+                    for idx, (w, els) in enumerate(pairs)]
         # Production submit_window returns concurrent.futures.Future. Some
         # synchronous compatibility/test schedulers return a minimal
         # result()-only object; preserve that supported path.

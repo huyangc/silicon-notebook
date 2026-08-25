@@ -47,17 +47,32 @@ const OUTLET_TOKEN = "workspace-extension-outlet";
 /** 插件唯一能 import 的共享 UI；它替插件写 JSX，所以它自己也在「不许内联颜色」之内。 */
 const SHARED_PLUGIN_UI = "features/extension-sdk/ui.tsx";
 /**
- * `ui.tsx` 允许出现的 className 字面量。全是既有系统弹窗骨架类（`utility-modal` 系
- * 与 `source-modal-header` / `source-detail-body` / `icon-button`），一个新类都不加：
- * 共享 UI 一旦能带自己的类，插件就有了绕过「不许写 CSS」的口子——它只要请求在这里
- * 加一条类，样式表就得为它加一条规则。
+ * `ui.tsx` 允许出现的 className 字面量：系统弹窗骨架类 + SDK 内容组件层的
+ * `.extension-*` 基座类。前者承载共享 modal shell，后者承载经评审进入 SDK 的内容
+ * 结构；除此之外不再给它第三类 className 逃逸口。
  */
-const MODAL_SKELETON_CLASSES = new Set([
+const SHARED_UI_CLASSES = new Set([
   "utility-modal",
   "utility-modal-card",
   "source-modal-header",
   "source-detail-body",
   "icon-button",
+  "extension-form-row",
+  "extension-input",
+  "extension-result-list",
+  "extension-result-item",
+  "extension-result-item-row",
+  "extension-result-item-checkbox",
+  "extension-result-item-copy",
+  "extension-result-item-title",
+  "extension-result-item-meta",
+  "extension-result-item-summary",
+  "extension-actions",
+  "extension-alert",
+  "extension-alert--error",
+  "extension-alert--warning",
+  "extension-alert--status",
+  "extension-empty",
 ]);
 
 /**
@@ -268,7 +283,7 @@ test("ui.tsx 的内联 style 例外只放行 zIndex 这一个键", () => {
 });
 
 
-test("扩展弹窗只用系统弹窗骨架类", async () => {
+test("扩展 SDK 只用系统弹窗骨架类与已登记的 extension-ui-kit 基座类", async () => {
   const modules = await appSourceModules();
   const shared = modules.find((row) => row.path === SHARED_PLUGIN_UI);
   assert.ok(shared, `没找到 ${SHARED_PLUGIN_UI}(改名或删除？守卫失效)`);
@@ -296,9 +311,9 @@ test("扩展弹窗只用系统弹窗骨架类", async () => {
   // 非空:扫不出任何 className 说明组件被改写成别的形态,守卫会静默变成空断言。
   assert.ok(classNames.length > 0, `${SHARED_PLUGIN_UI} 里一个 className 都没扫到(守卫失效)`);
   assert.deepEqual(
-    [...new Set(classNames)].filter((name) => !MODAL_SKELETON_CLASSES.has(name)).sort(),
+    [...new Set(classNames)].filter((name) => !SHARED_UI_CLASSES.has(name)).sort(),
     [],
-    "扩展弹窗只能用既有系统弹窗骨架类;需要新类就等于要给插件开一条写样式的口子",
+    "扩展 SDK 只能用系统弹窗骨架类与已登记的 extension-ui-kit 基座类;需要新类就等于要给插件开一条写样式的口子",
   );
   // 存储键的两段都由 SDK 拼、插件改不了。`extension.` 前缀隔离的是「插件 vs 核心
   // 弹窗」;插件**之间**靠 `pluginId` 那一段隔离——少了它,两个插件各写一个

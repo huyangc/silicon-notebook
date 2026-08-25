@@ -97,6 +97,32 @@ test("notebook type APIs stay separate from the global baseline APIs", async () 
   assert.equal(calls[2].init.body, JSON.stringify({ label: "项目结论" }));
 });
 
+test("indexing pipeline notebook APIs use the notebook-scoped routes", async () => {
+  installWindow();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({
+      pipeline_id: null,
+      version: "builtin-v1",
+      available: true,
+      missing: false,
+      pending: false,
+      options: [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  await notebook.fetchNotebookIndexingPipeline("nb-1");
+  await notebook.setNotebookIndexingPipeline("nb-1", "plugin.arxiv");
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].url, /\/notebooks\/nb-1\/indexing-pipeline$/);
+  assert.equal(calls[0].init?.method ?? "GET", "GET");
+  assert.match(calls[1].url, /\/notebooks\/nb-1\/indexing-pipeline$/);
+  assert.equal(calls[1].init.method, "PATCH");
+  assert.equal(calls[1].init.body, JSON.stringify({ pipeline_id: "plugin.arxiv" }));
+});
+
 test("Ask stream consumes started progress final events and yields for paint", async () => {
   const { paints } = installWindow();
   const progress = [];
@@ -187,6 +213,15 @@ test("Ask stream maps stream errors and cancellation to safe outcomes", async ()
   await assert.rejects(
     ask.runAskStream("nb-1", {}, () => {}),
     { message: "回答没能完成，请重试" },
+  );
+
+  globalThis.fetch = async () => streamResponse(JSON.stringify({
+    event: "error",
+    error: "AskPluginEngineError: plugin_engine_unverified_citation",
+  }));
+  await assert.rejects(
+    ask.runAskStream("nb-1", {}, () => {}),
+    { message: "扩展引擎返回了无法核验的引用" },
   );
 
   globalThis.fetch = async () => streamResponse(JSON.stringify({ event: "cancelled" }));

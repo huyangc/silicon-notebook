@@ -74,6 +74,7 @@ LIFECYCLE_STORE_CALLS = {
         "mark_source_index_backfilled",
         "unified_graph_rows",
         "validate_source_fact_publish",
+        "validate_stage_source_elements",
     },
     "governance_store": {
         # Rebuild must re-read live decisions inside the pending-publication

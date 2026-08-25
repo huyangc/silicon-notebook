@@ -6,8 +6,10 @@ import type { NotebookSummary } from "../../app/workspace-model";
 const notebookApi = vi.hoisted(() => ({
   createNotebook: vi.fn(),
   deleteNotebook: vi.fn(),
+  fetchNotebookIndexingPipeline: vi.fn(),
   getNotebook: vi.fn(),
   listNotebooks: vi.fn(),
+  setNotebookIndexingPipeline: vi.fn(),
   updateNotebook: vi.fn(),
 }));
 const basesApi = vi.hoisted(() => ({
@@ -64,6 +66,39 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function indexingProjection(overrides: Record<string, unknown> = {}) {
+  return {
+    pipeline_id: null,
+    version: "builtin-v1",
+    available: true,
+    missing: false,
+    pending: false,
+    options: [
+      {
+        pipeline_id: null,
+        label: "内建管线",
+        description: "builtin",
+        version: "builtin-v1",
+        available: true,
+        selected: true,
+      },
+      {
+        pipeline_id: "plugin.arxiv",
+        label: "arXiv 管线",
+        description: "plugin",
+        version: "2026.08",
+        available: true,
+        selected: false,
+      },
+    ],
+    changed: false,
+    warning_count: 0,
+    rebuild_status: "idle",
+    job_id: null,
+    ...overrides,
+  };
+}
+
 const effects: HookOptions["effects"] = {
   reportError: vi.fn(),
   notify: vi.fn(),
@@ -106,6 +141,15 @@ beforeEach(() => {
   notebookApi.createNotebook.mockResolvedValue(notebook("created"));
   notebookApi.updateNotebook.mockResolvedValue(notebook("a"));
   notebookApi.getNotebook.mockResolvedValue(notebook("a"));
+  notebookApi.fetchNotebookIndexingPipeline.mockResolvedValue(indexingProjection());
+  notebookApi.setNotebookIndexingPipeline.mockResolvedValue(indexingProjection({
+    pipeline_id: "plugin.arxiv",
+    version: "2026.08",
+    pending: true,
+    changed: true,
+    rebuild_status: "pending",
+    job_id: "job-1",
+  }));
   notebookApi.deleteNotebook.mockResolvedValue(undefined);
   basesApi.listMountable.mockResolvedValue([]);
   basesApi.listBases.mockResolvedValue([]);
@@ -249,7 +293,7 @@ test("default creation releases its single-flight authority after failure", asyn
   expect(effects.onNotebookCreated).toHaveBeenCalledTimes(1);
 });
 
-test("group administrators retain PATCH-only inline rename without gaining owner actions", async () => {
+test("group administrators retain PATCH-only rename and can open settings without owner-only reference I/O", async () => {
   const renamed = notebook("shared", "reader", true);
   renamed.name = "renamed";
   notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
@@ -264,13 +308,91 @@ test("group administrators retain PATCH-only inline rename without gaining owner
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
   expect(notebookApi.updateNotebook).toHaveBeenCalledWith("shared", { name: "renamed" });
   expect((result as NotebookSummary | null)?.name).toBe("renamed");
-  expect(basesApi.listMountable).not.toHaveBeenCalled();
   await act(async () => value!.openEditor("shared"));
-  expect(value!.editor).toBeNull();
+  expect(value!.editor?.target.id).toBe("shared");
+  expect(notebookApi.fetchNotebookIndexingPipeline).toHaveBeenCalledWith("shared");
   expect(basesApi.listMountable).not.toHaveBeenCalled();
+  expect(basesApi.listBases).not.toHaveBeenCalled();
   await act(async () => value!.openDelete("shared"));
   expect(value!.deletion).toBeNull();
   expect(basesApi.mountedByCount).not.toHaveBeenCalled();
+});
+
+test("one-click revert to builtin uses only indexing pipeline APIs", async () => {
+  notebookApi.fetchNotebookIndexingPipeline.mockResolvedValueOnce(indexingProjection({
+    pipeline_id: "plugin.missing",
+    version: "2026.08",
+    available: false,
+    missing: true,
+    options: [
+      {
+        pipeline_id: null,
+        label: "内建管线",
+        description: "builtin",
+        version: "builtin-v1",
+        available: true,
+        selected: false,
+      },
+      {
+        pipeline_id: "plugin.missing",
+        label: "已停用的索引管线",
+        description: "missing",
+        version: "2026.08",
+        available: false,
+        selected: true,
+      },
+    ],
+  }));
+  notebookApi.setNotebookIndexingPipeline.mockResolvedValueOnce(indexingProjection({
+    pipeline_id: null,
+    version: "builtin-v1",
+    available: true,
+    missing: false,
+    pending: true,
+    changed: true,
+    rebuild_status: "pending",
+    job_id: "job-built-in",
+  }));
+  render(<Harness />);
+  publish([notebook("shared", "reader", true)]);
+
+  await act(async () => value!.openEditor("shared"));
+  await act(async () => value!.revertIndexingPipelineToBuiltin());
+
+  expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith("shared", null);
+  expect(basesApi.listMountable).not.toHaveBeenCalled();
+  expect(basesApi.listBases).not.toHaveBeenCalled();
+});
+
+test("failed indexing rebuild can retry the same selected pipeline", async () => {
+  notebookApi.fetchNotebookIndexingPipeline.mockResolvedValueOnce(indexingProjection({
+    pipeline_id: "plugin.arxiv",
+    version: "2026.08",
+    available: true,
+    missing: false,
+    pending: true,
+    rebuild_status: "failed",
+  }));
+  notebookApi.setNotebookIndexingPipeline.mockResolvedValueOnce(indexingProjection({
+    pipeline_id: "plugin.arxiv",
+    version: "2026.08",
+    available: true,
+    missing: false,
+    pending: true,
+    changed: true,
+    rebuild_status: "pending",
+    job_id: "job-retry",
+  }));
+  render(<Harness />);
+  publish([notebook("shared", "reader", true)]);
+
+  await act(async () => value!.openEditor("shared"));
+  await act(async () => value!.retryIndexingPipelineRebuild());
+
+  expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith(
+    "shared",
+    "plugin.arxiv",
+  );
 });
 
 test("rename cannot return a stale writable detail after the composite refresh revokes manage access", async () => {
@@ -319,12 +441,16 @@ test("rename is single-flight and releases its key after both success and failur
 test("editor open is latest-wins and a permission downgrade blocks the second write", async () => {
   const mountableA = deferred<never[]>();
   const basesA = deferred<never[]>();
+  const pipelineA = deferred<ReturnType<typeof indexingProjection>>();
   basesApi.listMountable
     .mockReturnValueOnce(mountableA.promise)
     .mockResolvedValueOnce([]);
   basesApi.listBases
     .mockReturnValueOnce(basesA.promise)
     .mockResolvedValueOnce([]);
+  notebookApi.fetchNotebookIndexingPipeline
+    .mockReturnValueOnce(pipelineA.promise)
+    .mockResolvedValueOnce(indexingProjection());
   render(<Harness />);
   publish([notebook("a"), notebook("b")]);
 
@@ -333,6 +459,7 @@ test("editor open is latest-wins and a permission downgrade blocks the second wr
   await act(async () => value!.openEditor("b"));
   expect(value!.editor?.target.id).toBe("b");
   await act(async () => {
+    pipelineA.resolve(indexingProjection());
     mountableA.resolve([]);
     basesA.resolve([]);
   });

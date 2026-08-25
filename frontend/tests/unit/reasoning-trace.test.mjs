@@ -25,6 +25,17 @@ test("summarizes the latest reasoning step for a collapsed trace row", () => {
   });
 });
 
+test("plugin trace uses the generic label and discloses bounded truncation", () => {
+  const step = {
+    step_type: "plugin",
+    summary: "部署检索",
+    detail: { detail: "完成企业检索", truncated: true },
+  };
+  assert.equal(TRACE_STEP_LABELS.plugin, "扩展");
+  assert.equal(getReasoningTraceSummary([step], false).latestLabel, "扩展");
+  assert.equal(getTraceStepDetail(step), "完成企业检索 · 后续步骤已截断");
+});
+
 test("expand_community/ppr 有短标签(不回退长英文串→徽章不溢出压摘要)", () => {
   assert.equal(
     getReasoningTraceSummary(

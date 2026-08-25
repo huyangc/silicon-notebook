@@ -287,6 +287,88 @@ class NotebookStore:
                 (tier, self.now(), notebook_id),
             )
 
+    def indexing_pipeline_state(self, notebook_id: str) -> dict[str, str]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(n.indexing_pipeline,'') AS pipeline_id,"
+                "COALESCE(n.indexing_pipeline_version,'builtin.chunk.v1') "
+                "AS pipeline_version,"
+                "COALESCE(n.indexing_pipeline_generation,'') "
+                "AS pipeline_generation,"
+                "COALESCE(n.indexing_pipeline_job_id,'') AS pipeline_job_id,"
+                "COALESCE(j.status,'') AS pipeline_job_status,"
+                "COALESCE(u.indexing_pipeline_id,'') AS published_pipeline_id,"
+                "COALESCE(u.indexing_pipeline_version,'builtin.chunk.v1') "
+                "AS published_pipeline_version "
+                "FROM notebooks n LEFT JOIN unified_kg_state u "
+                "ON u.notebook_id=n.id LEFT JOIN kg_build_jobs j "
+                "ON j.id=n.indexing_pipeline_job_id "
+                "WHERE n.id=%s AND n.status<>'copying'",
+                (notebook_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(notebook_id)
+        return {
+            "pipeline_id": str(row["pipeline_id"] or ""),
+            "pipeline_version": str(
+                row["pipeline_version"] or "builtin.chunk.v1"
+            ),
+            "pipeline_generation": str(row["pipeline_generation"] or ""),
+            "pipeline_job_id": str(row["pipeline_job_id"] or ""),
+            "pipeline_job_status": str(row["pipeline_job_status"] or ""),
+            "published_pipeline_id": str(row["published_pipeline_id"] or ""),
+            "published_pipeline_version": str(
+                row["published_pipeline_version"] or "builtin.chunk.v1"
+            ),
+        }
+
+    def set_indexing_pipeline_desired(
+        self, notebook_id: str, pipeline_id: str, pipeline_version: str
+    ) -> str:
+        generation = self.new_id("ipg")
+        with self.database.write() as connection:
+            changed = connection.execute(
+                "UPDATE notebooks SET indexing_pipeline=%s,"
+                "indexing_pipeline_version=%s,indexing_pipeline_generation=%s,"
+                "indexing_pipeline_job_id=%s,"
+                "updated_at=%s WHERE id=%s AND status<>'copying'",
+                (
+                    pipeline_id or None,
+                    pipeline_version,
+                    generation,
+                    f"pending:{generation}",
+                    self.now(),
+                    notebook_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise KeyError(notebook_id)
+        return generation
+
+    def attach_indexing_pipeline_job(
+        self, notebook_id: str, generation: str, job_id: str
+    ) -> bool:
+        with self.database.write() as connection:
+            changed = connection.execute(
+                "UPDATE notebooks SET indexing_pipeline_job_id=%s "
+                "WHERE id=%s AND indexing_pipeline_generation=%s "
+                "AND indexing_pipeline_job_id=%s",
+                (job_id, notebook_id, generation, f"pending:{generation}"),
+            )
+        return changed.rowcount == 1
+
+    def clear_indexing_pipeline_job(
+        self, notebook_id: str, generation: str, job_id: str
+    ) -> bool:
+        with self.database.write() as connection:
+            changed = connection.execute(
+                "UPDATE notebooks SET indexing_pipeline_job_id='' "
+                "WHERE id=%s AND indexing_pipeline_generation=%s "
+                "AND indexing_pipeline_job_id=%s",
+                (notebook_id, generation, job_id),
+            )
+        return changed.rowcount == 1
+
     def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
         with self.database.write() as connection:
             rows = connection.execute(
