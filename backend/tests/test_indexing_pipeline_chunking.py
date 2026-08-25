@@ -645,3 +645,36 @@ def test_frozen_identity_lets_inflight_extraction_finish_across_a_switch(repo):
         notebook.id, frozen_identity=frozen
     )
     assert (pipeline_id, version, strategy) == ("", "builtin.chunk.v1", None)
+
+
+def test_probe_flap_on_chunk_overriding_pipeline_falls_back_with_badge(
+    repo, monkeypatch
+):
+    """分块-覆盖管线的探针在准入之后跌落 → 走回退而不是破坏性 raise(codex #602
+    R11 P1):内建分块落地 + 「降级整理」徽标,而不是 chunked_at 空缺/陈旧 chunk。"""
+    from dataclasses import replace
+
+    from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
+
+    host = repo._runtime.source_chunking.indexing_pipelines
+    down = replace(host.option_row, available=False)
+    monkeypatch.setattr(host, "option", lambda pid: (
+        down if pid == down.pipeline_id else None
+    ))
+    monkeypatch.setattr(host, "build_chunks", lambda *_a, **_k: (
+        IndexingPipelineChunkResult(None, "indexing_pipeline_unavailable")
+    ))
+
+    notebook = repo.create_notebook(NotebookCreate(name="probe flap"))
+    source_id = _insert_source(repo, notebook.id, "flap text")
+    # 在飞解析持有的冻结身份(准入时探针还是 available)。
+    repo._runtime.source_chunking.build_chunks_for_source(
+        source_id, frozen_identity=("test.pipeline", "v1")
+    )
+
+    assert _chunk_texts(repo, notebook.id)[source_id] == ["flap text"]
+    with repo._connect() as db:
+        stored = str(db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["error_message"] or "")
+    assert stored.startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX)
