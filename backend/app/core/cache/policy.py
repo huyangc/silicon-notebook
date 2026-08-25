@@ -152,8 +152,8 @@ def llm_key(
     }
     # Preserve every provider-default cache key byte-for-byte.  An explicit
     # thinking mode is a different upstream request, however, and must never
-    # reuse a response generated under the provider default (DeepSeek V4's
-    # default is thinking-enabled).  Conditional inclusion avoids a global
+    # reuse a response generated under the endpoint's provider default.
+    # Conditional inclusion avoids a global
     # cache cold-start for workloads whose request shape did not change.
     if thinking_mode is not None:
         material["thinking_mode"] = thinking_mode

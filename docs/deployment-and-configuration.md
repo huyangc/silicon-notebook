@@ -413,11 +413,11 @@ gate.
 The optional `[thinking]` table controls thinking per **chat workload**, using
 `enabled`, `disabled`, or `provider_default`. The policy is workload-scoped
 rather than service-scoped because one physical chat service may carry both
-reasoning and mechanical structured-output calls. The configuration name is
-provider-neutral; the current transport maps it to DeepSeek V4's private
-`thinking.type` field through the OpenAI SDK's `extra_body`. Another provider
-implementing the same OpenAI-compatible transport is not assumed to support
-that field.
+reasoning and mechanical structured-output calls. The resolved policy is the
+only switch: the transport sends `enabled` or `disabled` as `thinking.type`
+through the OpenAI SDK's `extra_body`, while `provider_default` sends no
+override. Neither the provider nor transport layer inspects the configured
+model name.
 
 The checked-in example spells out every current default. `ask_answer`,
 `reasoning_agent`, `graph_chain_verify`, `report_outline`,
@@ -434,18 +434,18 @@ reasoning therefore has a much worse quality-per-token ratio. An omitted entry
 uses the same built-in default, while `provider_default` deliberately sends no
 override.
 
-Only for a model whose name starts with `deepseek-v4-`, an explicit mode is sent via
-DeepSeek's OpenAI-compatible
+For every bound chat service, an explicit mode is sent via the OpenAI-compatible
 `extra_body={"thinking":{"type":"enabled|disabled"}}`; no `reasoning_effort` is
-sent. Non-DeepSeek-V4 services do not receive that provider-specific field.
+sent. The `model` value remains an opaque endpoint routing identifier and never
+controls whether thinking is applied.
 Unknown workloads, non-chat workloads, and invalid values make configuration
 validation fail rather than being ignored. The resolved mode is frozen with the
 physical route when a call is submitted, so TOML hot reload affects new calls
 without changing queued ones. An explicit mode is part of the LLM response-cache
 identity; `provider_default` requests retain their historical cache keys.
 Chat health checks are outside the workload policy: they always send
-`thinking_mode="disabled"`, bypass the response cache, and cannot be overridden
-through `[thinking]`.
+`thinking_mode="disabled"` regardless of model name, bypass the response cache,
+and cannot be overridden through `[thinking]`.
 
 The optional generated-question index uses background chat workload
 `chunk_question_generation` plus the existing `chunk_embedding` workload. Bind both

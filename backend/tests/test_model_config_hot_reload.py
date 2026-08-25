@@ -119,7 +119,7 @@ def test_hot_reload_updates_thinking_policy_without_rebuilding_the_service(
     monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
     path = tmp_path / "model-services.toml"
     base = _config(
-        service_id="deepseek", model="deepseek-v4-flash", top_p=1.0
+        service_id="chat", model="gateway-model-alias", top_p=1.0
     )
     path.write_text(base, encoding="utf-8")
     modes: list[str | None] = []

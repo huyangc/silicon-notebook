@@ -306,6 +306,7 @@ class JsonChatClientPort(Protocol):
         cancel_event: CancelEvent = None,
         bypass_cache: bool = False,
         response_validator: Optional[Callable[[str], bool]] = None,
+        thinking_mode: Optional[Literal["enabled", "disabled"]] = None,
     ) -> str: ...
 
 

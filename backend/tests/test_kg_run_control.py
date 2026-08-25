@@ -366,6 +366,7 @@ def test_probe_reuses_configured_short_output_budget_and_bypasses_cache():
     assert len(delegate.kwargs) == 1
     assert delegate.kwargs[0] == {
         "bypass_cache": True,
+        "thinking_mode": "disabled",
         "timeout": 60,
         "max_retries": 0,
         "cancel_event": control.cancel_event,

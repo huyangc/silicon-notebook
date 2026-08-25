@@ -351,9 +351,9 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 
 可选的 `[thinking]` 表按 **chat workload** 控制思考模式，值只能是 `enabled`、
 `disabled` 或 `provider_default`。策略按 workload 而非物理服务配置，因为同一个 chat
-服务可能同时承载推理任务与机械的结构化输出任务。配置名称与 provider 无关；当前传输层
-通过 OpenAI SDK 的 `extra_body` 把它映射到 DeepSeek V4 私有的 `thinking.type` 字段，
-不能据此假设另一个兼容同一传输格式的 provider 也支持该字段。
+服务可能同时承载推理任务与机械的结构化输出任务。解析后的策略是唯一开关：传输层通过
+OpenAI SDK 的 `extra_body` 把 `enabled` 或 `disabled` 发送为 `thinking.type`，
+`provider_default` 则不发送覆盖。provider 与 transport 两层都不检查配置的模型名。
 
 仓库示例明确列出当前全部默认值：`ask_answer`、`reasoning_agent`、
 `graph_chain_verify`、`report_outline`、`report_sufficiency`、`schema_induction`、
@@ -364,14 +364,15 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 要么已有上游规划或人工审阅，要么按窗口/chunk/章节放大，隐藏推理的单位 token 质量收益
 明显更低。省略某项时使用同一套内建默认值；设为 `provider_default` 则刻意不发送覆盖值。
 
-只有模型名以 `deepseek-v4-` 开头时，显式模式才通过 DeepSeek 的 OpenAI-compatible
+每个已绑定 chat 服务的显式模式都通过 OpenAI-compatible
 `extra_body={"thinking":{"type":"enabled|disabled"}}` 发送，不再附带
-`reasoning_effort`。非 DeepSeek V4 服务不会收到该 provider 私有字段。未知 workload、
+`reasoning_effort`。`model` 值只是不透明的 endpoint 路由标识，绝不决定 thinking
+是否生效。未知 workload、
 非 chat workload 或非法值会使配置校验失败，而非静默忽略。调用提交时会把解析后的模式
 与物理路由一起冻结，所以 TOML 热加载只影响新调用，不改变已排队调用。显式模式属于
 LLM 响应缓存身份；`provider_default` 请求保留历史缓存键。
-chat 健康检查不进入 workload 策略：它固定发送 `thinking_mode="disabled"`、绕过响应
-缓存，也不能通过 `[thinking]` 覆盖。
+chat 健康检查不进入 workload 策略：无论模型名是什么，它都固定发送
+`thinking_mode="disabled"`、绕过响应缓存，也不能通过 `[thinking]` 覆盖。
 
 可选生成问题索引使用后台 chat workload `chunk_question_generation` 与既有
 `chunk_embedding` workload；执行离线 `question-index` 前必须同时绑定。rollout mode
