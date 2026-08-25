@@ -49,10 +49,17 @@ def _seed_source_and_objects(repository, notebook_id: str) -> None:
                     now,
                 ),
             )
+        # Upsert, not a bare INSERT: create_notebook now seeds this row at
+        # birth (certified-empty reverse index), so the legacy fixture must
+        # overwrite that row rather than collide with it on the primary key.
         db.execute(
             "INSERT INTO unified_kg_state "
             "(notebook_id,dirty,kg_mutation_seq,updated_at,source_index_backfilled) "
-            "VALUES (%s,0,0,%s,1)",
+            "VALUES (%s,0,0,%s,1) "
+            "ON CONFLICT (notebook_id) DO UPDATE SET "
+            "dirty=excluded.dirty,kg_mutation_seq=excluded.kg_mutation_seq,"
+            "updated_at=excluded.updated_at,"
+            "source_index_backfilled=excluded.source_index_backfilled",
             (notebook_id, now),
         )
         db.execute(

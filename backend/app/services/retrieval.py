@@ -235,19 +235,15 @@ def _tokens(text: str) -> List[str]:
     tokens: List[str] = []
     for chunk in cleaned.split():
         tokens.extend(_segment_tokens(chunk))
-    aliases = _model_name_aliases(text)
-    if aliases:
-        # The separated spelling is one model-name unit, not two independent
-        # query requirements.  Drop its component runs from the loose basis so
-        # ``Cosmos 3`` and ``Cosmos3`` both receive full (not half) coverage.
-        components = {
-            part.lower()
-            for match in spaced_model_name_parts(text)
-            for part in match
-            if len(part) > 1
-        }
-        tokens = [token for token in tokens if token not in components]
-        tokens.extend(aliases)
+    # Append-only aliasing: a haystack token set must stay a SUPERSET of the
+    # plain segmentation.  Dropping the component runs here would run on BOTH
+    # sides of every comparison (documents, evidence spans, relation names, not
+    # just queries), so a document saying "Cosmos 3" would stop matching a
+    # bare-stem query ("cosmos"), and ordinary prose ("scored 3 points") would
+    # lose its verb.  The query-side half of the normalization — counting a
+    # spaced model name as ONE requirement — lives in keyword_basis, the only
+    # query-side entry point.
+    tokens.extend(_model_name_aliases(text))
     return tokens
 
 
@@ -348,9 +344,21 @@ def keyword_basis(query: str, *, honor_quotes: bool = True) -> KeywordBasis:
     """
     phrases = tuple(_normalize(p) for p in quoted_phrases(query)) if honor_quotes else ()
     body = unquoted_remainder(query) if phrases else query
-    return KeywordBasis(
-        frozenset(t for t in _tokens(body) if t not in _STOPWORDS), phrases
-    )
+    tokens = {t for t in _tokens(body) if t not in _STOPWORDS}
+    # Query-side half of model-name aliasing: "Cosmos 3" is ONE requirement,
+    # not two.  _tokens appended the compact alias; dropping the component runs
+    # HERE (and only here) keeps the coverage denominator honest while every
+    # haystack keeps its stems — this function is never used to tokenize a
+    # document, so bare-stem queries still match spaced-name documents.
+    components = {
+        part.lower()
+        for match in spaced_model_name_parts(body)
+        for part in match
+        if len(part) > 1
+    }
+    if components:
+        tokens -= components
+    return KeywordBasis(frozenset(tokens), phrases)
 
 
 def probe_keyword_basis(terms: Sequence[str]) -> KeywordBasis:
