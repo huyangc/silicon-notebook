@@ -778,7 +778,7 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     """`all` 现在走 run_all(process_source/extract_source + rebuild_unified_kg),
     不再走 build_notebook_kg。无向量模式下抽取 no-op,但 parse 流程跑通,3 个 source 建成。"""
     d = _make_md_dir(tmp_path, n=2)
-    monkeypatch.setattr("app.services.source_ingestion.SourceIngestionService.run_extraction", lambda self, sid: None)
+    monkeypatch.setattr("app.services.source_ingestion.SourceIngestionService.run_extraction", lambda self, sid, **_kw: None)
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg",
                         lambda self, nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
@@ -1876,7 +1876,7 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)                        # 2 个 docN.md + 1 个 nested.md = 3
     nb_id = bi.ensure_notebook(repo, None, "nb-all")
     extracted = []
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid, **_kw: extracted.append(sid))
     rebuild_calls = []
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: (rebuild_calls.append(nb), 5)[1])

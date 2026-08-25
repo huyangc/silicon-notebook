@@ -628,3 +628,20 @@ def test_kg_only_pipeline_keeps_builtin_chunking_when_probe_flaps(repo, monkeypa
     repo._runtime.source_chunking.build_chunks_for_source(source_id)
 
     assert _chunk_texts(repo, notebook.id)[source_id] == ["kg only text"]
+
+
+def test_frozen_identity_lets_inflight_extraction_finish_across_a_switch(repo):
+    """冻结身份同样贯穿 KG 抽取解析(codex #602 R10 P1):切换把 desired 置成
+    pending 后,_kg_strategy_for_notebook 的 frozen 口径仍按原代放行,而实时口径
+    拒绝——已获准入的在飞写在它自己的原代下跑完。"""
+    notebook = repo.create_notebook(NotebookCreate(name="frozen extract"))
+    frozen = repo._runtime.source_chunking.published_identity(notebook.id)
+    _intent(repo, notebook.id)
+
+    ingestion = repo._runtime.source_ingestion
+    with pytest.raises(IndexingPipelineUnavailableError):
+        ingestion._kg_strategy_for_notebook(notebook.id)
+    pipeline_id, version, strategy = ingestion._kg_strategy_for_notebook(
+        notebook.id, frozen_identity=frozen
+    )
+    assert (pipeline_id, version, strategy) == ("", "builtin.chunk.v1", None)

@@ -2655,7 +2655,10 @@ class KnowledgeLifecycleService:
                 else:
                     self._reconcile_extracted_terminal(
                         source_id,
-                        lambda sid: self._run_extraction(
+                        # **_kw 收下 reconciling 透传的 frozen_pipeline_identity:
+                        # 这条批处理路自己带 authorized extraction_kwargs,不用冻结
+                        # 口径(两口径互斥,见 _kg_strategy_for_notebook)。
+                        lambda sid, **_kw: self._run_extraction(
                             sid, **extraction_kwargs,
                         ),
                     )

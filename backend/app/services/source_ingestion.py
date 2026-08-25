@@ -277,6 +277,7 @@ class SourceIngestionService:
         authorized_pipeline_id: str | None = None,
         authorized_pipeline_version: str = "",
         authorized_pipeline_generation: str = "",
+        frozen_identity: "tuple[str, str] | None" = None,
     ) -> tuple[str, str, Any | None]:
         """Resolve one exact desired/published pipeline without fallback.
 
@@ -284,7 +285,27 @@ class SourceIngestionService:
         durable switch worker may instead present the opaque desired-generation
         authority it captured before doing work; A→B→A late workers then fail
         before a model call or source-graph mutation.
+
+        ``frozen_identity``(codex #602 R10 P1)是第三种口径:process_source 在
+        入场准入同刻冻结的 published 身份。解析期间发生的管线切换不再让抽取步
+        在破坏性清态之后重读 pending desired 而拒绝——已获准入的写在**它自己的
+        原代**下跑完;切换重建随后整库替换(或 CAS 失败重试)。不与 authorized_*
+        同用。
         """
+        if frozen_identity is not None:
+            frozen_id, frozen_version = frozen_identity
+            if not frozen_id:
+                return "", BUILTIN_INDEXING_PIPELINE_VERSION, None
+            if self.indexing_pipelines is None:
+                raise IndexingPipelineUnavailableError(frozen_id)
+            option = self.indexing_pipelines.option(frozen_id)
+            if option is None or frozen_version != option.version:
+                raise IndexingPipelineUnavailableError(frozen_id)
+            if not option.overrides_kg_extraction:
+                return frozen_id, option.version, None
+            if not option.available:
+                raise IndexingPipelineUnavailableError(frozen_id)
+            return frozen_id, option.version, self.indexing_pipelines
         state = self.notebooks.indexing_pipeline_state(notebook_id)
         pipeline_id = (
             str(authorized_pipeline_id or "")
@@ -842,8 +863,9 @@ class SourceIngestionService:
         hooks.maybe_enqueue_scale_fold(notebook_id)
 
     def _extract_reconciling_doc_type(
-        self, source_id: str, extract: Callable[[str], None],
+        self, source_id: str, extract: Callable[..., None],
         *, terminal_error_message: str = "", emit_terminal_status: bool = False,
+        frozen_pipeline_identity: "tuple[str, str] | None" = None,
     ) -> None:
         """抽取，并把「标记 extracted」原子地与 doc_type 的最终比对合成一步。
 
@@ -885,7 +907,8 @@ class SourceIngestionService:
             used = self.normalize_doc_type(
                 getattr(self.sources.get_source(source_id), "doc_type", "") or ""
             )
-            extract(source_id)
+            # 冻结身份透传进抽取(codex #602 R10 P1;论证见 _kg_strategy_for_notebook)。
+            extract(source_id, frozen_pipeline_identity=frozen_pipeline_identity)
             if self.sources.mark_extracted_if_doc_type(
                 source_id, used, error_message=terminal_error_message
             ):
@@ -1391,6 +1414,7 @@ class SourceIngestionService:
                 self._extract_reconciling_doc_type(
                     source_id, hooks.extract_source,
                     terminal_error_message=terminal_msg,
+                    frozen_pipeline_identity=frozen_pipeline_identity,
                 )
                 stage("extract", "done", t)
                 # reconcile 已原子落 'extracted'（DB）；这里补发 status 事件，放在
@@ -1939,6 +1963,7 @@ class SourceIngestionService:
         indexing_pipeline_version: str = "",
         indexing_pipeline_generation: str = "",
         indexing_stage_job_id: str = "",
+        frozen_pipeline_identity: "tuple[str, str] | None" = None,
     ) -> None:
         control = getattr(kg_client, "control", None)
         if control is not None:
@@ -1963,6 +1988,7 @@ class SourceIngestionService:
             authorized_pipeline_id=indexing_pipeline_id,
             authorized_pipeline_version=indexing_pipeline_version,
             authorized_pipeline_generation=indexing_pipeline_generation,
+            frozen_identity=frozen_pipeline_identity,
         )
         plugin_kg_active = kg_strategy is not None
         preserve_source_graph = preserve_existing_until_complete or plugin_kg_active
