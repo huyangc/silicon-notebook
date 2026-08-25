@@ -869,3 +869,18 @@ def test_zero_element_source_stages_empty_replacement_and_publishes(
     assert (state["published_pipeline_id"], state["published_pipeline_version"]) == (
         "test.pipeline", "v1"
     )
+
+
+def test_bounded_validity_scope_drops_oversized_plugin_annotations():
+    """插件 mapper 的 validity_scope 套核心围栏(codex #602 R3 P2):列表条数复用
+    max_steps_per_object、每个字符串复用 max_name_chars,越界丢标注保对象。"""
+    from app.services.kg_ingest import _bounded_validity_scope
+
+    limits = _limits()
+    ok = {"region": ["a", "b"], "approximation": "small"}
+    assert _bounded_validity_scope(dict(ok), limits) == ok
+    long_text = "x" * (limits.max_name_chars + 1)
+    assert _bounded_validity_scope({"region": [long_text]}, limits) == {}
+    assert _bounded_validity_scope({"range": long_text}, limits) == {}
+    too_many = {"assumptions": ["a"] * (limits.max_steps_per_object + 1)}
+    assert _bounded_validity_scope(too_many, limits) == {}
