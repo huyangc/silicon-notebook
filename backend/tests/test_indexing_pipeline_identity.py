@@ -100,12 +100,15 @@ def test_startup_recovery_discards_unpublished_stage_and_keeps_live_identity(
         notebook.id, "recovery-test", "rebuild", 0
     )
     with repo._write() as db:
-        db.execute(
-            "INSERT INTO unified_kg_state "
-            "(notebook_id,dirty,updated_at,indexing_pipeline_id,"
-            "indexing_pipeline_version) VALUES (?,?,?,?,?)",
-            (notebook.id, 0, _now(), "old.pipeline", "v1"),
+        # create_notebook already seeds this notebook's unified_kg_state row
+        # (the provenance reverse-index marker), so stamp the live identity
+        # onto the existing row instead of inserting a second one.
+        stamped = db.execute(
+            "UPDATE unified_kg_state SET indexing_pipeline_id=?,"
+            "indexing_pipeline_version=?,updated_at=? WHERE notebook_id=?",
+            ("old.pipeline", "v1", _now(), notebook.id),
         )
+        assert stamped.rowcount == 1
         db.execute(
             "INSERT INTO indexing_pipeline_stages "
             "(job_id,notebook_id,pipeline_id,pipeline_version,"
