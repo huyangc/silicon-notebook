@@ -354,6 +354,26 @@ def test_service_refuses_to_run_inside_a_write_transaction(repo):
 # ------------------------------------------------------------ §3.3 逐指标新鲜度
 
 
+def test_born_state_row_reports_like_a_never_written_notebook(repo):
+    """codex #601 R1 P2: create_notebook now seeds a `unified_kg_state` row at
+    birth (the provenance certificate). ``present`` means "has KG history",
+    never "the row exists" — the frontend renders 「上次整理时的规模:0·0·0」
+    off ``state.present``, so a zero-history row must produce an overview
+    byte-identical to the historical row-absent shape."""
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="fresh"))
+    born = _service(repo).overview(nb.id)
+    assert born.state.present is False
+
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        )
+    absent = _service(repo).overview(nb.id)
+    assert born == absent
+
+
 def test_every_artifact_kind_is_reported_even_when_absent(repo):
     """`artifacts` 恒为五条、恒定顺序。缺席的那几份也在列表里。
 

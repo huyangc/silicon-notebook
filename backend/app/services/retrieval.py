@@ -308,12 +308,21 @@ class KeywordBasis:
     a third of the credit for `"static timing analysis"`, which is the dilution
     the quotes exist to forbid.
 
+    `alias_units` are the model-name spelling groups ("Cosmos 3" ↔ "cosmos3"):
+    each is ONE unit of the basis, covered by max(compact alias present,
+    fraction of its component runs present).  The max — not a replacement — is
+    what keeps every word-plus-digit phrase at least as covered as its plain
+    tokenization: "priority 1" still fully matches a document spelling it
+    "priority: 1" through the `priority` component, while the alias arm alone
+    lifts the cross-spelling case to full credit (codex #601 R1 P2).
+
     Built once per query and reused across a candidate pool: the parse and the
     query-side tokenization are per-query work, not per-candidate work.
     """
 
     tokens: FrozenSet[str]
     phrases: tuple[str, ...] = ()
+    alias_units: tuple[tuple[str, FrozenSet[str]], ...] = ()
 
     def coverage(self, haystack_tokens: AbstractSet[str], haystack_text: str = "") -> float:
         """Covered fraction of the basis (0..1).
@@ -322,13 +331,20 @@ class KeywordBasis:
         callers holding a cached token set pay nothing for the parameter until a
         user asks for one.
         """
-        total = len(self.tokens) + len(self.phrases)
+        total = len(self.tokens) + len(self.phrases) + len(self.alias_units)
         if not total:
             return 0.0
-        hits = sum(1 for token in self.tokens if token in haystack_tokens)
+        hits: float = sum(1 for token in self.tokens if token in haystack_tokens)
         if self.phrases:
             haystack = _normalize(haystack_text)
             hits += sum(1 for phrase in self.phrases if phrase in haystack)
+        for alias, components in self.alias_units:
+            if alias in haystack_tokens:
+                hits += 1
+            elif components:
+                hits += sum(
+                    1 for part in components if part in haystack_tokens
+                ) / len(components)
         return hits / total
 
 
@@ -346,19 +362,27 @@ def keyword_basis(query: str, *, honor_quotes: bool = True) -> KeywordBasis:
     body = unquoted_remainder(query) if phrases else query
     tokens = {t for t in _tokens(body) if t not in _STOPWORDS}
     # Query-side half of model-name aliasing: "Cosmos 3" is ONE requirement,
-    # not two.  _tokens appended the compact alias; dropping the component runs
-    # HERE (and only here) keeps the coverage denominator honest while every
-    # haystack keeps its stems — this function is never used to tokenize a
-    # document, so bare-stem queries still match spaced-name documents.
-    components = {
-        part.lower()
-        for match in spaced_model_name_parts(body)
-        for part in match
-        if len(part) > 1
-    }
-    if components:
-        tokens -= components
-    return KeywordBasis(frozenset(tokens), phrases)
+    # not two.  The alias and its component runs move out of the loose tokens
+    # into ONE alias unit scored max(alias hit, component fraction) — see
+    # KeywordBasis.  Only here: this function is never used to tokenize a
+    # document, so haystacks keep their stems and a bare-stem query still
+    # matches a spaced-name document.  A stopword stem ("in 3 days") keeps the
+    # historical behavior: no unit, the stopword stays dropped.
+    units: list[tuple[str, FrozenSet[str]]] = []
+    seen_aliases: set[str] = set()
+    for stem, suffix in spaced_model_name_parts(body):
+        alias = f"{stem}{suffix}".lower()
+        # A skipped stopword stem still sheds its _tokens-appended alias below,
+        # so "in 3 days" scores exactly as it did before aliasing existed.
+        if alias not in seen_aliases and stem.lower() not in _STOPWORDS:
+            units.append((alias, frozenset(
+                part.lower() for part in (stem, suffix) if len(part) > 1
+            )))
+        seen_aliases.add(alias)
+    if seen_aliases:
+        tokens -= seen_aliases
+        tokens -= {part for _, components in units for part in components}
+    return KeywordBasis(frozenset(tokens), phrases, tuple(units))
 
 
 def probe_keyword_basis(terms: Sequence[str]) -> KeywordBasis:

@@ -396,6 +396,17 @@ def test_model_name_alias_keeps_haystack_stems_for_bare_queries():
     assert {"cosmos", "cosmos3"} <= doc_tokens
 
 
+def test_word_number_query_keeps_component_credit():
+    """codex #601 R1 P2: the alias is an OR-arm, never a replacement.
+
+    A word-plus-digit query phrase ("priority 1") must still fully match a
+    document that spells it with punctuation the alias regex does not join
+    ("priority: 1") — coverage is max(alias hit, component fraction)."""
+    assert keyword_score("priority 1", "priority: 1 blocker") == 1.0
+    # Cross-spelling still reaches full credit through the alias arm.
+    assert keyword_score("priority 1", "priority1 blocker") == 1.0
+
+
 def test_contract_remains_in_recall_but_not_keyword_basis(repo, monkeypatch):
     from app.models.schemas import NotebookCreate
 
