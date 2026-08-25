@@ -25,17 +25,20 @@ export type AskModeProjection = Readonly<{
   streams_trace?: unknown;
 }>;
 
-export const ASK_MODES: AskModeDef[] = [
-  { id: "chunk", group: "general", label: "通用问答",
+// Object.freeze:本数组被 owner hook 当「隐藏态稳定引用」原样返回,也被
+// normalizeAskModeProjection 的失败分支直接交出去——任一消费方 push 都会
+// 污染全局真源,冻结让那种写法当场 TypeError 而不是静默漂移。
+export const ASK_MODES: readonly AskModeDef[] = Object.freeze([
+  Object.freeze({ id: "chunk", group: "general", label: "通用问答",
     desc: "默认。大范围检索原文，适合综述、对比、找事实。",
-    requiresKg: false, streamsTrace: false, groupDefault: true },
-  { id: "reasoning", group: "strict", label: "逐步推理",
+    requiresKg: false, streamsTrace: false, groupDefault: true } as AskModeDef),
+  Object.freeze({ id: "reasoning", group: "strict", label: "逐步推理",
     desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。",
-    requiresKg: true, streamsTrace: true, groupDefault: true },
-  { id: "graph", group: "strict", label: "关联追溯",
+    requiresKg: true, streamsTrace: true, groupDefault: true } as AskModeDef),
+  Object.freeze({ id: "graph", group: "strict", label: "关联追溯",
     desc: "顺着资料之间的关联往外找，列出牵连到的内容；适合理清一件事的来龙去脉。",
-    requiresKg: true, streamsTrace: false },
-];
+    requiresKg: true, streamsTrace: false } as AskModeDef),
+]);
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";
 
@@ -48,7 +51,7 @@ export const ASK_MODE_GROUPS: { id: AskModeGroup; label: string }[] = [
 const BUILTIN_IDS = new Set(ASK_MODES.map((mode) => mode.id));
 const DEPLOYMENT_MODE_ID = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
 
-export function normalizeAskModeProjection(value: unknown): AskModeDef[] {
+export function normalizeAskModeProjection(value: unknown): readonly AskModeDef[] {
   if (!Array.isArray(value)) return ASK_MODES;
   const extensions: AskModeDef[] = [];
   const seen = new Set<string>(BUILTIN_IDS);

@@ -6570,7 +6570,7 @@ export default function Home() {
                           void notebookCollection.retryIndexingPipelineRebuild();
                         }}
                       >
-                        重试重建
+                        {notebookCollection.editor?.busy ? "提交重建中…" : "重试重建"}
                       </button>
                     )}
                     {notebookEditorIndexingNotice.canRevert && (
@@ -6585,7 +6585,7 @@ export default function Home() {
                           void notebookCollection.revertIndexingPipelineToBuiltin();
                         }}
                       >
-                        切回内建
+                        {notebookCollection.editor?.busy ? "切回中…" : "切回内建"}
                       </button>
                     )}
                   </div>
@@ -6603,7 +6603,13 @@ export default function Home() {
                           type="radio"
                           name="indexing-pipeline"
                           checked={checked}
-                          disabled={notebookCollection.editor?.busy || option.available === false}
+                          // 重建进行中整组禁用:后端 begin() 对活跃 rebuild 一律 409
+                          // (改选会作废正在跑的整轮重建),界面不给一条必然失败的路。
+                          disabled={
+                            notebookCollection.editor?.busy
+                            || option.available === false
+                            || notebookCollection.editor?.indexingPipeline?.rebuild_status === "pending"
+                          }
                           onChange={() => notebookCollection.selectIndexingPipeline(option.pipeline_id ?? null)}
                         />
                         <span className="indexing-pipeline-copy">

@@ -20,7 +20,7 @@ function addTokens(target, classList) {
   }
 }
 
-function collectClassTokens() {
+function collectClassTokens(module) {
   const tokens = new Set();
   function collectFromExpression(node) {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
@@ -45,7 +45,7 @@ function collectClassTokens() {
   function visit(node) {
     if (
       ts.isJsxAttribute(node)
-      && node.name.getText(source) === "className"
+      && node.name.getText(module) === "className"
       && node.initializer
     ) {
       if (ts.isStringLiteral(node.initializer)) addTokens(tokens, node.initializer.text);
@@ -55,21 +55,48 @@ function collectClassTokens() {
     }
     ts.forEachChild(node, visit);
   }
-  visit(source);
+  visit(module);
   return [...tokens].sort();
 }
 
 function hasClassRule(token) {
+  // 以 `-` 结尾的 token 是模板串的静态前缀(`extension-alert--${tone}`):按前缀
+  // 判「存在以它开头的类」;完整 token 按精确类名判。
+  if (token.endsWith("-")) {
+    return new RegExp(`\\.${token.replace(/[-]/g, "\\-")}[\\w-]`).test(CSS);
+  }
   return new RegExp(`\\.${token.replace(/[-]/g, "\\-")}(?![\\w-])`).test(CSS);
 }
 
 test("extension-sdk/ui.tsx 里出现的每个 className token 都在 globals.css 里有对应规则", () => {
-  const tokens = collectClassTokens();
+  const tokens = collectClassTokens(source);
   assert.ok(tokens.length > 0, "ui.tsx 没解析出任何 className token（守卫失效）");
   const missing = tokens.filter((token) => !hasClassRule(token));
   assert.deepEqual(
     missing,
     [],
     `ui.tsx 挂了 globals.css 里不存在的类：${missing.join("、")}`,
+  );
+});
+
+test("全部生产模块里的 extension-* className token 同样必须在 globals.css 里存在", () => {
+  // 核心 UI 也在复用 kit 命名空间的类(如笔记本设置里的 extension-alert)——
+  // 只对账 ui.tsx 时,将来重命名 kit 类会让核心那处静默失去样式(评审 P2)。
+  const offenders = [];
+  let scanned = 0;
+  for (const entry of modules) {
+    const tokens = collectClassTokens(entry.module)
+      .filter((token) => token.startsWith("extension-"));
+    if (tokens.length === 0) continue;
+    scanned += 1;
+    for (const token of tokens) {
+      if (!hasClassRule(token)) offenders.push(`${entry.path}: ${token}`);
+    }
+  }
+  assert.ok(scanned > 0, "没有任何模块用到 extension-* 类(守卫失效?)");
+  assert.deepEqual(
+    offenders,
+    [],
+    `extension-* 类在 globals.css 里没有对应规则：${offenders.join("、")}`,
   );
 });

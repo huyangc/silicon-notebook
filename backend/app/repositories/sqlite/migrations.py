@@ -243,8 +243,6 @@ class SqliteMigrator:
                   run_type TEXT NOT NULL,
                   status TEXT NOT NULL,
                   error_message TEXT NOT NULL DEFAULT '',
-                  indexing_pipeline_id TEXT NOT NULL DEFAULT '',
-                  indexing_pipeline_version TEXT NOT NULL DEFAULT 'builtin.chunk.v1',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );

@@ -19,7 +19,14 @@ from app.services.ask_modes import user_facing_mode_ids  # noqa: E402
 
 def _mode_entries() -> list[str]:
     text = (ROOT / "frontend/app/ask-modes.ts").read_text(encoding="utf-8")
-    m = re.search(r"export const ASK_MODES[^\[]*\[(.*?)\];", text, re.S)
+    # 锚定在赋值号上,而不是第一个 `[`:声明是
+    # `export const ASK_MODES: readonly AskModeDef[] = Object.freeze([...]);`,
+    # 类型注解里的 `[` 会让旧锚点把捕获区错位到 ASK_MODE_GROUPS。
+    m = re.search(
+        r"export const ASK_MODES[^=]*=\s*(?:Object\.freeze\()?\s*\[(.*?)\]\s*\)?;",
+        text,
+        re.S,
+    )
     if not m:
         raise SystemExit("ask-modes.ts: ASK_MODES array not found")
     # One entry per `{ ... }` object literal; the array holds no nested braces.
@@ -76,8 +83,16 @@ def hard_coded_plugin_modes() -> list[str]:
     """
 
     offenders: list[str] = []
-    app_root = ROOT / "frontend/app"
-    for path in sorted((*app_root.rglob("*.ts"), *app_root.rglob("*.tsx"))):
+    # 扫描面覆盖 app 与 features 两个生产目录(features 里住着 extension SDK 与
+    # 同步进来的 ext-* 包,同样不许写死部署 mode id)。已知边界(如实登记,不是
+    # 承诺):判据是上下文正则,`const M = "x.y"` 先存变量再用的形态覆盖不到——
+    # 那类间接写死靠评审,不靠本闸。
+    scan_roots = (ROOT / "frontend/app", ROOT / "frontend/features")
+    for path in sorted(
+        p
+        for root in scan_roots
+        for p in (*root.rglob("*.ts"), *root.rglob("*.tsx"))
+    ):
         text = path.read_text(encoding="utf-8")
         for lineno, line in enumerate(text.splitlines(), 1):
             for pattern in _MODE_LITERAL_CONTEXTS:

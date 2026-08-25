@@ -40,6 +40,8 @@ const LONG_TASK_BUTTONS = [
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
   { match: "runMerge(", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重" },
   { match: "reviewAllMerges", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "kgGraph.reviewAllStarting" },
+  { match: "retryIndexingPipelineRebuild(", why: "索引管线重试重建:排全库重建 job,成功后按钮随投影翻 pending 卸载,失败态可再点是合法重试", requires: "editor?.busy" },
+  { match: "revertIndexingPipelineToBuiltin(", why: "切回内建索引管线:同上,排全库重建 job", requires: "editor?.busy" },
 ];
 
 // 长任务入口的另一种形态：**file input**。外层 label 无法 :disabled,所以禁用位落在

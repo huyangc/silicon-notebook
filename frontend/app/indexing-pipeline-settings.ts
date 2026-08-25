@@ -102,7 +102,9 @@ export function notebookIndexingPipelineReadOnlySummary(
 ): { label: string; detail: string } {
   const pipelineId = notebook?.indexing_pipeline_id ?? "";
   const version = notebook?.indexing_pipeline_version ?? "builtin-v1";
-  const label = pipelineId ? `${pipelineId} · v${version}` : `内建管线 · v${version}`;
+  // 只有 summary、没有 options 投影时拿不到 descriptor 的 label——上通用界面词,
+  // 不把 `acme.fast` 这种内部 id 当文案上屏(词汇守卫扫不到运行时数据,这里自守)。
+  const label = pipelineId ? `部署插件提供的索引管线 · v${version}` : `内建管线 · v${version}`;
   if (notebook?.indexing_pipeline_missing) {
     return {
       label,

@@ -203,9 +203,9 @@ def test_packaged_index_migration_phases_are_exact():
         (33, "agent_observations"),
         (34, "group_owner"),
         (35, "group_invite"),
-            (36, "pluggable_indexing_pipeline"),
-            (37, "indexing_pipeline_staging"),
-        ]
+        (36, "pluggable_indexing_pipeline"),
+        (37, "indexing_pipeline_staging"),
+    ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
         return [
