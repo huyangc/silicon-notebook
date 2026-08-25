@@ -120,3 +120,44 @@ def test_missing_selected_plugin_keeps_get_readable_and_new_index_write_is_409(
     assert summary["indexing_pipeline_missing"] is True
     assert summary["indexing_pipeline_pending"] is False
     assert summary["indexing_pipeline_stale"] is False
+
+
+def test_switch_is_refused_while_a_rebuild_worker_is_active(client):
+    """活跃 rebuild 期间的再次切换必须在改 desired 之前被拒绝。
+
+    旧行为先铸新 generation 再撞 KgBuildAlreadyRunning:正在跑的 worker 花完整库
+    模型/embedding 开销后输掉 publish CAS(整轮作废),而提交者只读到一句无害 409,
+    且 job authority 永远停在 pending:<新代>。判据是「desired 列一个字没动」。
+    """
+    notebook_id = _notebook(client)
+    from app.api.deps import repository
+
+    repo = repository()
+    job = repo._runtime.kg_build_jobs.create_job(
+        notebook_id, "active-rebuild", "rebuild", 0
+    )
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline_generation='g-active',"
+            "indexing_pipeline_job_id=? WHERE id=?",
+            (job["id"], notebook_id),
+        )
+
+    refused = client.patch(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline",
+        json={"pipeline_id": None},
+    )
+
+    assert refused.status_code == 409
+    assert refused.headers["X-User-Message"] == "1"
+    assert "索引重建正在进行" in refused.json()["detail"]
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT indexing_pipeline_generation,indexing_pipeline_job_id "
+            "FROM notebooks WHERE id=?",
+            (notebook_id,),
+        ).fetchone()
+    assert dict(row) == {
+        "indexing_pipeline_generation": "g-active",
+        "indexing_pipeline_job_id": job["id"],
+    }

@@ -5,6 +5,7 @@ from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
     IndexingPipelineHostPort,
     IndexingPipelineOption,
+    IndexingPipelineRebuildActiveError,
     IndexingPipelineRebuildFailedError,
     IndexingPipelineUnavailableError,
 )
@@ -142,6 +143,11 @@ class IndexingPipelineService:
             and not before["pending"]
         ):
             return {**before, "changed": False, "warning_count": 0}
+        # 活跃 rebuild 期间拒绝在改 desired 之前：铸新 generation 会让正在跑的
+        # worker 在花完整库模型/embedding 开销之后输掉 publish CAS(整轮作废),
+        # 而提交者只读到一句无害的 409。失败态(retryable)不拦——那正是重试入口。
+        if before["rebuild_status"] == "pending":
+            raise IndexingPipelineRebuildActiveError(notebook_id)
         generation = self.notebooks.set_indexing_pipeline_desired(
             notebook_id, desired, option.version
         )

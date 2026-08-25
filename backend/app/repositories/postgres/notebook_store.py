@@ -357,18 +357,6 @@ class NotebookStore:
             )
         return changed.rowcount == 1
 
-    def clear_indexing_pipeline_job(
-        self, notebook_id: str, generation: str, job_id: str
-    ) -> bool:
-        with self.database.write() as connection:
-            changed = connection.execute(
-                "UPDATE notebooks SET indexing_pipeline_job_id='' "
-                "WHERE id=%s AND indexing_pipeline_generation=%s "
-                "AND indexing_pipeline_job_id=%s",
-                (notebook_id, generation, job_id),
-            )
-        return changed.rowcount == 1
-
     def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
         with self.database.write() as connection:
             rows = connection.execute(

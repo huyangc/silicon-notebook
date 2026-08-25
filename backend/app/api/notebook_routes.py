@@ -13,6 +13,7 @@ from app.api.deps import (
 )
 from app.core.audit_actor import session_audit_principal
 from app.domain.indexing_pipeline import (
+    IndexingPipelineRebuildActiveError,
     IndexingPipelineStalePlanError,
     IndexingPipelineRebuildFailedError,
     IndexingPipelineUnavailableError,
@@ -107,12 +108,15 @@ def set_indexing_pipeline(
             409,
             "所选索引管线当前不可用；旧索引仍可读取。请切回内建管线后重试。",
         )
+    except IndexingPipelineRebuildActiveError:
+        # begin() 在改 desired 之前就拒绝了——什么都没保存,正在跑的重建不受影响。
+        raise user_error(409, "索引重建正在进行；等它完成后再调整索引管线。")
     except IndexingPipelineStalePlanError:
         raise user_error(409, "索引内容在重建期间发生变化，请重试切换。")
     except IndexingPipelineRebuildFailedError:
         raise user_error(409, "索引管线已保存但重建未完成；旧索引仍可读取，请重试或切回内建管线。")
     except KgBuildAlreadyRunning:
-        raise user_error(409, "索引管线已保存；请等待当前知识图谱任务结束后重试重建。")
+        raise user_error(409, "索引管线已保存，但另一项知识图谱任务正在运行；请稍后在设置中点「重试重建」。")
 
 
 @router.patch("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_capability("notebook:manage"))])

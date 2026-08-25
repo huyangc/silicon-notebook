@@ -405,18 +405,6 @@ class NotebookStore:
             )
         return changed.rowcount == 1
 
-    def clear_indexing_pipeline_job(
-        self, notebook_id: str, generation: str, job_id: str
-    ) -> bool:
-        with self.database.write() as db:
-            changed = db.execute(
-                "UPDATE notebooks SET indexing_pipeline_job_id='' "
-                "WHERE id=? AND indexing_pipeline_generation=? "
-                "AND indexing_pipeline_job_id=?",
-                (notebook_id, generation, job_id),
-            )
-        return changed.rowcount == 1
-
     def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
         """Delete the notebooks row in ONE committed transaction and return the
         source file paths for the caller to remove AFTER the commit (DB first,
