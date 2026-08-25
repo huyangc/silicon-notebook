@@ -325,6 +325,9 @@ def probe_kg_model(client: TaskScopedKgClient) -> None:
             # yielding an HTTP-200 response with empty ``content``. Omitting the
             # override reuses chat_json's single configured short-output budget.
             bypass_cache=True,
+            # Availability checks validate the service, not workload quality;
+            # keep them cheap and deterministic regardless of TOML policy.
+            thinking_mode="disabled",
         )
     except Exception as exc:
         # This classification is probe-only. Extraction windows intentionally

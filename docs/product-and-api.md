@@ -1028,12 +1028,13 @@ The ingest-time decision is `KG_AUTO_EXTRACT or notebook-already-has-KG`:
 
 So you **opt in once** (build the KG, or set `KG_AUTO_EXTRACT=true`); after that, new documents are auto-extracted and fused. Re-extract a whole notebook from scratch with `POST /api/notebooks/{id}/kg/rebuild`. For bulk/offline builds, see [Offline batch ingestion](./operations.md#offline-batch-ingestion-directory--kg).
 
-For a DeepSeek V4 binding, all model-backed KG passes—initial extraction,
-gleaning, and refinement—explicitly set `thinking.type=disabled` through the
-provider's OpenAI-compatible `extra_body`. Their outputs are structured facts,
-not reasoning traces, so hidden thinking is neither read nor stored. This policy
-also applies to KG availability probes that use `kg_extract`; it does not alter
-Ask, Report, or any non-KG workload.
+All model-backed KG passes—initial extraction, gleaning, and refinement—default
+to `thinking.type=disabled` through the OpenAI-compatible `extra_body`, without
+inspecting the bound model name. Their outputs are structured facts, not
+reasoning traces, so hidden thinking is neither read nor stored. Deployments may
+override those workload defaults in `[thinking]`; the KG availability probe is
+the exception and always forces thinking off. This policy does not alter Ask,
+Report, or any non-KG workload.
 
 ### KG build failure isolation
 
@@ -1721,7 +1722,7 @@ An earlier revision let the intent planner emit a `source_refs` list that `/ask/
 
 #### Model JSON recovery and stream liveness
 
-`ask_answer` explicitly keeps thinking enabled. It is the one bounded final synthesis call that must reconcile the selected evidence, conflicts, coverage disclosures, and citation wording into what the user reads; spending reasoning tokens there has materially higher leverage than spending them in every KG/chunk extraction window. A strict reasoning Ask may therefore use thinking both in its bounded `reasoning_agent` loop and in final synthesis, while the high-fan-out evidence-production paths stay non-thinking. Deployments may override this per workload in `[thinking]`; the current transport applies explicit modes only to supported DeepSeek V4 models.
+`ask_answer` explicitly keeps thinking enabled. It is the one bounded final synthesis call that must reconcile the selected evidence, conflicts, coverage disclosures, and citation wording into what the user reads; spending reasoning tokens there has materially higher leverage than spending them in every KG/chunk extraction window. A strict reasoning Ask may therefore use thinking both in its bounded `reasoning_agent` loop and in final synthesis, while the high-fan-out evidence-production paths stay non-thinking. Deployments may override this per workload in `[thinking]`; the current transport applies the resolved explicit mode to every bound chat service without inspecting its model name.
 
 `reasoning_agent` decisions and `ask_answer` synthesis are strict-JSON-first. If strict parsing fails, the shared repair seam may accept only a complete object-shaped response with recoverable syntax faults such as missing quotes/commas. The repaired object must stay within the schema example's top-level keys, actual booleans remain booleans, enum-like example values remain in vocabulary, non-finite values are refused, and every nonempty string value must still appear verbatim in the raw response. Truncated objects, arrays/scalars, unknown keys, type confusion, and string reconstruction remain malformed responses. A retriever failure degrades to a terminal persisted Ask response instead of aborting the orchestration on an absent result.
 

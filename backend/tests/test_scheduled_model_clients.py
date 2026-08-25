@@ -10,6 +10,11 @@ import pytest
 from app.core.config import Settings
 from app.core.event_logging import get_log_owner, reset_log_owner, set_log_owner
 from app.services.cancellation import AskCancelled
+from app.services.kg.run_control import (
+    KgExtractionRunControl,
+    TaskScopedKgClient,
+    probe_kg_model,
+)
 from app.services import model_provider as provider_mod
 from app.services.model_registry import ModelServiceDefinition, SystemModelServiceRegistry
 
@@ -69,12 +74,10 @@ def _registry(
     )
 
 
-def test_deepseek_v4_uses_workload_thinking_defaults():
+def test_any_chat_model_uses_workload_thinking_defaults():
     raw = _Chat()
     provider = _provider(
-        registry=_registry(
-            chat_model="deepseek-v4-flash", bind_reasoning=True
-        ),
+        registry=_registry(chat_model="gateway-model-alias", bind_reasoning=True),
         chat=raw,
     )
     try:
@@ -97,7 +100,7 @@ def test_workload_thinking_configuration_overrides_the_default():
     raw = _Chat()
     provider = _provider(
         registry=_registry(
-            chat_model="deepseek-v4-pro",
+            chat_model="gateway-model-alias",
             thinking_modes={
                 "ask_answer": "disabled",
                 "reasoning_agent": "provider_default",
@@ -119,7 +122,7 @@ def test_workload_thinking_configuration_overrides_the_default():
     ]
 
 
-def test_non_deepseek_kg_service_does_not_receive_provider_specific_extension():
+def test_generic_chat_model_receives_configured_thinking_mode():
     raw = _Chat()
     provider = _provider(chat=raw)
     try:
@@ -127,7 +130,30 @@ def test_non_deepseek_kg_service_does_not_receive_provider_specific_extension():
     finally:
         provider.close()
 
-    assert raw.calls[0]["kwargs"].get("thinking_mode") is None
+    assert raw.calls[0]["kwargs"].get("thinking_mode") == "disabled"
+
+
+def test_kg_availability_probe_forces_thinking_off_through_scheduler():
+    raw = _Chat()
+    provider = _provider(
+        registry=_registry(
+            chat_model="gateway-model-alias",
+            thinking_modes={"kg_extract": "enabled"},
+        ),
+        chat=raw,
+    )
+    control = KgExtractionRunControl("job-probe")
+    client = TaskScopedKgClient(
+        provider.chat("kg_extract"),
+        Settings(_env_file=None),
+        control,
+    )
+    try:
+        probe_kg_model(client)
+    finally:
+        provider.close()
+
+    assert raw.calls[0]["kwargs"]["thinking_mode"] == "disabled"
 
 
 class _Chat:

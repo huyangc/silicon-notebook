@@ -781,11 +781,11 @@ KB+confirmed-Memory 三种检索条件。
 
 即：**首次 opt-in**（构建 KG，或设 `KG_AUTO_EXTRACT=true`），之后新文档自动抽取 + 融合。整库重抽用 `POST /api/notebooks/{id}/kg/rebuild`；离线批量构建见[离线批量摄取](./operations_zh.md#离线批量摄取目录--kg)。
 
-当 workload 绑定 DeepSeek V4 时，全部模型型 KG 阶段——首次抽取、补充抽取和细化——
-都会通过 provider 的 OpenAI-compatible `extra_body` 显式设置
-`thinking.type=disabled`。它们产出的是结构化事实而非推理轨迹，隐藏思考既不会被读取，
-也不会被保存。复用 `kg_extract` 的 KG 可用性探测同样遵守该策略；Ask、Report 与任何
-非 KG workload 不受影响。
+全部模型型 KG 阶段——首次抽取、补充抽取和细化——默认都会通过 OpenAI-compatible
+`extra_body` 设置 `thinking.type=disabled`，不检查绑定的模型名。它们产出的是结构化
+事实而非推理轨迹，隐藏思考既不会被读取，也不会被保存。部署可在 `[thinking]` 中覆盖
+这些 workload 默认值；KG 可用性探测是例外，它始终强制关闭 thinking。Ask、Report 与
+任何非 KG workload 不受影响。
 
 ### KG 构建故障隔离
 
@@ -1245,7 +1245,7 @@ Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EX
 
 #### 模型 JSON 恢复与流保活
 
-`ask_answer` 默认显式开启思考。它是一条有界的最终合成调用，需要把已选证据、冲突、覆盖率披露与引用措辞整理成用户真正读到的答案；把推理 token 花在这里，比花在每一个 KG/chunk 抽取窗口有明显更高的杠杆。严格 reasoning Ask 因此可能同时在有界的 `reasoning_agent` 循环与最终合成中使用思考，而高扇出的证据生产路径仍关闭。部署可在 `[thinking]` 中按 workload 覆盖；当前传输层只对支持该开关的 DeepSeek V4 模型应用显式模式。
+`ask_answer` 默认显式开启思考。它是一条有界的最终合成调用，需要把已选证据、冲突、覆盖率披露与引用措辞整理成用户真正读到的答案；把推理 token 花在这里，比花在每一个 KG/chunk 抽取窗口有明显更高的杠杆。严格 reasoning Ask 因此可能同时在有界的 `reasoning_agent` 循环与最终合成中使用思考，而高扇出的证据生产路径仍关闭。部署可在 `[thinking]` 中按 workload 覆盖；当前传输层不检查模型名，直接把解析后的显式模式应用到每个已绑定 chat 服务。
 
 `reasoning_agent` 决策与 `ask_answer` 合成始终先走严格 JSON 解析。严格解析失败后，共享修复层只允许接收对象首尾完整、且仅有可恢复语法错误（如缺引号/逗号）的响应。修复结果不得超出 schema example 的顶层字段，布尔字段必须是真正的 JSON boolean，枚举样例值必须留在词表内，拒绝非有限数；每个非空字符串值还必须逐字存在于原始响应中。截断对象、数组/标量、未知字段、类型混淆和字符串重构仍视为畸形响应。检索器异常会降级成可持久化的终态 Ask 回答，不再因为不存在的 result 中止编排。
 

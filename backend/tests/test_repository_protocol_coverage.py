@@ -274,12 +274,9 @@ def test_model_client_ports_match_concrete_call_signatures():
     assert _parameter_contract(JsonChatClientPort.chat_json) == _parameter_contract(
         ScheduledJsonChatClient.chat_json
     )
-    raw_chat_contract = [
-        parameter
-        for parameter in _parameter_contract(OpenAICompatibleClient.chat_json)
-        if parameter[0] != "thinking_mode"
-    ]
-    assert _parameter_contract(JsonChatClientPort.chat_json) == raw_chat_contract
+    assert _parameter_contract(JsonChatClientPort.chat_json) == _parameter_contract(
+        OpenAICompatibleClient.chat_json
+    )
     assert get_type_hints(JsonChatClientPort.chat_json)["messages"] == (
         get_type_hints(OpenAICompatibleClient.chat_json)["messages"]
     )

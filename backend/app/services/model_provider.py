@@ -34,7 +34,6 @@ from app.core.model_safety import (
 from app.services.cancellation import AskCancelled
 from app.services.embedding import FakeEmbedder
 from app.services.model_registry import (
-    ThinkingMode,
     ModelServiceDefinition,
     SystemModelServiceRegistry,
     WorkloadSpec,
@@ -62,24 +61,6 @@ _MODEL_CONFIG_RELOAD_INTERVAL_SECONDS = 1.0
 logger = logging.getLogger("silicon_notebook.model_provider")
 
 _JSON_REPAIR_WORKLOADS = frozenset({"reasoning_agent", "ask_answer"})
-
-
-def _thinking_mode_for(
-    model: str, configured_mode: ThinkingMode
-) -> Literal["enabled", "disabled"] | None:
-    """Return the provider-specific thinking override this call can support.
-
-    DeepSeek V4 documents ``thinking.type`` on its OpenAI-compatible endpoint.
-    Other providers use different fields (or no switch at all), so sending the
-    DeepSeek extension based only on a workload policy would break a valid
-    deployment that binds that workload to another OpenAI-compatible model.
-    """
-    if (
-        configured_mode != "provider_default"
-        and model.strip().lower().startswith("deepseek-v4-")
-    ):
-        return configured_mode
-    return None
 
 
 def validate_process_local_scheduler_deployment(
@@ -487,6 +468,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         cancel_event=None,
         bypass_cache=False,
         response_validator: Callable[[str], bool] | None = None,
+        thinking_mode: Literal["enabled", "disabled"] | None = None,
     ) -> str:
         # Freeze the physical runtime and its workload policy from the same
         # hot-reloaded registry generation.  A queued call may then finish on
@@ -515,8 +497,14 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 cancel_event=cancel_event,
                 bypass_cache=bypass_cache,
                 response_validator=response_validator,
-                thinking_mode=_thinking_mode_for(
-                    runtime.service.model, configured_thinking_mode
+                thinking_mode=(
+                    thinking_mode
+                    if thinking_mode is not None
+                    else (
+                        None
+                        if configured_thinking_mode == "provider_default"
+                        else configured_thinking_mode
+                    )
                 ),
             )
             repair_mode = (
