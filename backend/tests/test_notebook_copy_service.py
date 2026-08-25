@@ -256,6 +256,11 @@ def test_copy_resets_indexing_pipeline_columns_to_builtin(repo):
     published identity 住在 unified_kg_state 而它刻意不进深拷贝:照抄 desired 会让
     副本天生 desired≠published、每次写入 409 直到手动全库重建;照抄 job_id 会让副本
     的状态投影 join 到源库正在跑的 job 行。与 share_token/agent_profile_id 同款清洗。
+
+    反向护栏(codex #602 R7 P2 驳回):复位到内建是**拍板取舍**,不是漏拷——副本里
+    插件 chunk 与后续内建 chunk 的粒度异质已登记接受(所有身份消费方在副本上从零
+    开始,详见 _reset_copied_notebook_row 的 docstring)。想改回「继承/种 published
+    identity」的人必须先推翻那段论证,而不是把这里的断言当 bug 修掉。
     """
     from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
 

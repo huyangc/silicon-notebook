@@ -66,6 +66,17 @@ def _reset_copied_notebook_row(
     *源库*正在跑的 job 行。与「授权边/share_token/agent_profile_id 不随副本走」
     同一条论证——副本由新 owner 重新选择并显式重建（既有 chunk 是核心 schema，
     照常可读）。
+
+    已登记接受（codex #602 R7 P2 驳回）：插件管线库的副本里，拷来的插件 chunk 与
+    此后按内建增量分块的新 chunk 会共存。这不触犯全库原子发布不变量——那条不变量
+    保护的是**切换操作**的身份消费方（scale manifest identity、published KG identity、
+    fold/full 判定），而副本这些面全部从零开始（unified_kg_state 缺席、scale 工件
+    不拷、首次重建必然 full），没有任何消费方会据错误身份做决策；extraction_runs
+    随行拷贝、逐 run 保留真实的 (pipeline_id, version) 出处。剩下的只是 chunk
+    粒度异质——与「部署中途调 chunk_target_chars 后新旧来源粒度不同」这一既有
+    合法情形同类，从来不要求全库重建。另两个选项都更糟：种 published identity
+    需要给副本造 unified_kg_state 行（与 chunk_elements 标记语义的既有红线冲突）；
+    强制先重建再可写等于让每一次插件库拷贝都先付一轮全库模型钱。
     """
     notebook_row.update(
         id=new_id,
