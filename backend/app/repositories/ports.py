@@ -1218,6 +1218,15 @@ class SourceStorePort(Protocol):
         self, source_ids: Sequence[str]
     ) -> list[dict[str, Any]]: ...
     def get_source(self, source_id: str) -> SourceDetail: ...
+    def mark_indexing_chunk_fallback(self, source_id: str, warning_code: str) -> None:
+        """Persist/clear the visible chunk-fallback marker on the source row.
+
+        Non-empty ``warning_code`` writes the stable
+        ``INDEXING_CHUNK_FALLBACK_WARNING_PREFIX`` diagnostic only when
+        ``error_message`` is empty or already carries this prefix (a MinerU
+        degradation diagnostic must not be clobbered); empty ``warning_code``
+        clears only this prefix's own diagnostic."""
+        ...
     @staticmethod
     def source_exists_tx(connection: object, source_id: str) -> bool: ...
     @staticmethod

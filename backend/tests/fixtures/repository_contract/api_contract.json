@@ -9022,6 +9022,11 @@
               "title": "Id",
               "type": "string"
             },
+            "indexing_chunk_fallback": {
+              "default": false,
+              "title": "Indexing Chunk Fallback",
+              "type": "boolean"
+            },
             "kg_analyzed_empty": {
               "default": false,
               "title": "Kg Analyzed Empty",
@@ -9618,6 +9623,11 @@
               "title": "Id",
               "type": "string"
             },
+            "indexing_chunk_fallback": {
+              "default": false,
+              "title": "Indexing Chunk Fallback",
+              "type": "boolean"
+            },
             "kg_analyzed_empty": {
               "default": false,
               "title": "Kg Analyzed Empty",
@@ -10059,6 +10069,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "indexing_chunk_fallback": {
+              "default": false,
+              "title": "Indexing Chunk Fallback",
+              "type": "boolean"
             },
             "kg_analyzed_empty": {
               "default": false,
@@ -11126,6 +11141,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "indexing_chunk_fallback": {
+              "default": false,
+              "title": "Indexing Chunk Fallback",
+              "type": "boolean"
             },
             "kg_analyzed_empty": {
               "default": false,
@@ -23852,6 +23872,7 @@
       "file_path": "<fixture-root>/storage/notebooks/nb-api/src-api_fixture.md",
       "file_size": 52,
       "id": "src-api",
+      "indexing_chunk_fallback": false,
       "kg_analyzed_empty": false,
       "kg_extracted": true,
       "notebook_id": "nb-api",

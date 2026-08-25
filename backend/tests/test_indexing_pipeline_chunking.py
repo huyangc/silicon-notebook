@@ -6,6 +6,7 @@ import pytest
 
 from app.core.config import Settings
 from app.domain.indexing_pipeline import (
+    BUILTIN_INDEXING_PIPELINE_VERSION,
     IndexingPipelineChunkResult,
     IndexingPipelineOption,
     IndexingPipelineRebuildFailedError,
@@ -202,9 +203,12 @@ def test_late_generation_rolls_back_without_mixing(repo):
     old_chunks = _chunk_texts(repo, notebook.id)
     pipeline_id, version, generation = _intent(repo, notebook.id)
     job_id = _attach_job(repo, notebook.id, generation)
-    # A later revert owns a new opaque generation even if a worker from the
-    # first request is still computing proposals (A→B / A→B→A safe).
-    repo._runtime.indexing_pipeline.begin(notebook.id, None)
+    # begin() 现在对活跃 worker 直接 409(见 IndexingPipelineRebuildActiveError),
+    # 所以这里用 store 级授权改写模拟**残余竞态**——desired 授权在 worker 的
+    # stage 与 publish 之间被换代(A→B / A→B→A),CAS 兜底层必须仍然安全。
+    repo._runtime.notebook_store.set_indexing_pipeline_desired(
+        notebook.id, "", BUILTIN_INDEXING_PIPELINE_VERSION
+    )
 
     with pytest.raises(IndexingPipelineStalePlanError):
         repo._runtime.indexing_pipeline.rebuild(
@@ -239,8 +243,11 @@ def test_fully_staged_late_generation_is_discarded_without_live_mutation(repo):
         pipeline_version=version,
         pipeline_generation=generation,
     )
-    # A newer A→builtin selection takes authority after every payload is staged.
-    repo._runtime.indexing_pipeline.begin(notebook.id, None)
+    # 同上:store 级授权改写模拟「全部 payload 已 staged 之后授权被换代」的
+    # 残余竞态(begin() 对活跃 worker 已是 409,不再是用户可走的路)。
+    repo._runtime.notebook_store.set_indexing_pipeline_desired(
+        notebook.id, "", BUILTIN_INDEXING_PIPELINE_VERSION
+    )
 
     with pytest.raises(IndexingPipelineStalePlanError):
         repo._runtime.knowledge_lifecycle.finish_indexing_pipeline_job(
@@ -405,3 +412,78 @@ def test_scale_build_and_idle_recovery_fail_before_writer_claim(repo, monkeypatc
     assert scale.idle_queue[notebook.id] == queued
     assert notebook.id not in scale.building
     assert calls == []
+
+
+def test_incremental_fallback_is_visible_on_the_source_and_clears_on_success(
+    repo, monkeypatch
+):
+    """畸形提案回退内建必须在来源上可见(spec:「可见 parse_quality_warning 同级
+    提示」),而不是只发一条内部观测事件;健康的下一轮清掉本前缀自己的诊断;
+    既有 MinerU 降级诊断绝不被覆盖。"""
+    from app.models.sources import (
+        INDEXING_CHUNK_FALLBACK_WARNING_PREFIX,
+        PDF_PYTHON_FALLBACK_WARNING_PREFIX,
+    )
+
+    notebook = repo.create_notebook(NotebookCreate(name="fallback visible"))
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE id=?",
+            (notebook.id,),
+        )
+        db.execute(
+            "UPDATE unified_kg_state SET indexing_pipeline_id='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE notebook_id=?",
+            (notebook.id,),
+        )
+    source_id = _insert_source(repo, notebook.id, "hello fallback")
+    chunking = repo._runtime.source_chunking
+    host = chunking.indexing_pipelines
+
+    def malformed(pipeline_id, elements, **_kwargs):
+        return IndexingPipelineChunkResult(
+            (
+                IndexingChunkProposal(
+                    text="ghost", element_ids=("el-not-in-source",),
+                    section_path="",
+                ),
+            )
+        )
+
+    monkeypatch.setattr(host, "build_chunks", malformed)
+    chunking.build_chunks_for_source(source_id)
+
+    summary = next(
+        s for s in repo.list_sources(notebook.id) if s.id == source_id
+    )
+    assert summary.indexing_chunk_fallback is True
+    with repo._connect() as db:
+        stored = db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["error_message"]
+    assert stored.startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX)
+    # 回退用的是内建分块——正文仍然入库,不静默丢内容。
+    assert _chunk_texts(repo, notebook.id)[source_id] == ["hello fallback"]
+
+    # 健康的一轮清掉本前缀诊断。
+    monkeypatch.undo()
+    chunking.build_chunks_for_source(source_id)
+    summary = next(
+        s for s in repo.list_sources(notebook.id) if s.id == source_id
+    )
+    assert summary.indexing_chunk_fallback is False
+
+    # 既有 MinerU 降级诊断在场时,marker 绝不覆盖它(该来源仍显示降级解析)。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET error_message=? WHERE id=?",
+            (f"{PDF_PYTHON_FALLBACK_WARNING_PREFIX} raw diag", source_id),
+        )
+    monkeypatch.setattr(host, "build_chunks", malformed)
+    chunking.build_chunks_for_source(source_id)
+    with repo._connect() as db:
+        stored = db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["error_message"]
+    assert stored == f"{PDF_PYTHON_FALLBACK_WARNING_PREFIX} raw diag"
