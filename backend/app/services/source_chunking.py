@@ -97,7 +97,11 @@ class SourceChunkingService:
         if self.indexing_pipelines is None:
             raise IndexingPipelineUnavailableError(pipeline_id)
         option = self.indexing_pipelines.option(pipeline_id)
-        if option is None or not option.available:
+        if option is None:
+            raise IndexingPipelineUnavailableError(pipeline_id)
+        # KG-only 管线的分块身份不要求活探针(镜像 _chunk_dicts 的次序;codex #602
+        # R9 P2):它的分块本来就是内建,探针中途跌落只该拦真正需要 provider 的路。
+        if option.overrides_chunking and not option.available:
             raise IndexingPipelineUnavailableError(pipeline_id)
         desired_version = str(
             state["pipeline_version"] or BUILTIN_INDEXING_PIPELINE_VERSION
@@ -186,8 +190,12 @@ class SourceChunkingService:
         if self.indexing_pipelines is None:
             raise IndexingPipelineUnavailableError(pipeline_id)
         option = self.indexing_pipelines.option(pipeline_id)
-        if option is None or not option.available:
+        if option is None:
             raise IndexingPipelineUnavailableError(pipeline_id)
+        # overrides_chunking 判定在 availability **之前**(codex #602 R9 P2):它是
+        # 启动冻结描述符的静态元数据,KG-only 管线的分块本来就是内建——请求时探针
+        # 中途跌落不该把与 provider 无关的分块一起拖死(reparse 会在换完 elements
+        # 之后留下 chunked_at 空缺 + 陈旧 chunk)。
         if not option.overrides_chunking:
             return (
                 build_chunks(
@@ -197,6 +205,8 @@ class SourceChunkingService:
                 ),
                 "",
             )
+        if not option.available:
+            raise IndexingPipelineUnavailableError(pipeline_id)
         outcome = self.indexing_pipelines.build_chunks(
             pipeline_id,
             elements,
