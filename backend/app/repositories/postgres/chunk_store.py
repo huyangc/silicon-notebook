@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Mapping, Sequence
+from typing import Sequence
 
 from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.ports import ChunkWrite
@@ -231,107 +231,6 @@ class ChunkStore:
                     "UPDATE sources SET chunked_at=%s WHERE id=%s",
                     (normalize_timestamp(mark_chunked_at), source_id),
                 )
-
-    def replace_notebook_chunks(
-        self,
-        notebook_id: str,
-        chunks_by_source: Mapping[str, Sequence[ChunkWrite]],
-        *,
-        created_at: TimestampInput,
-        pipeline_id: str,
-        pipeline_version: str,
-        pipeline_generation: str,
-    ) -> None:
-        created = normalize_timestamp(created_at)
-        rows = [
-            (
-                chunk.id,
-                notebook_id,
-                source_id,
-                chunk.text,
-                chunk.section_path,
-                jsonb(list(chunk.element_ids)),
-                created,
-            )
-            for source_id, chunks in chunks_by_source.items()
-            for chunk in chunks
-        ]
-        source_ids = list(chunks_by_source)
-        with self.database.write() as connection:
-            desired = connection.execute(
-                "SELECT 1 FROM notebooks WHERE id=%s "
-                "AND COALESCE(indexing_pipeline,'')=%s "
-                "AND indexing_pipeline_version=%s "
-                "AND indexing_pipeline_generation=%s "
-                "AND status<>'copying' FOR UPDATE",
-                (
-                    notebook_id,
-                    pipeline_id,
-                    pipeline_version,
-                    pipeline_generation,
-                ),
-            ).fetchone()
-            if desired is None:
-                raise IndexingPipelineStalePlanError(notebook_id)
-            current_source_ids = {
-                str(row["id"])
-                for row in connection.execute(
-                    "SELECT id FROM sources WHERE notebook_id=%s AND "
-                    f"{VISIBLE_SOURCE_TYPES_PREDICATE}",
-                    (notebook_id,),
-                ).fetchall()
-            }
-            if current_source_ids != set(source_ids):
-                raise IndexingPipelineStalePlanError(notebook_id)
-            if source_ids:
-                locked = connection.execute(
-                    "SELECT id,notebook_id FROM sources WHERE id=ANY(%s) FOR UPDATE",
-                    (source_ids,),
-                ).fetchall()
-                current = {row["id"]: row["notebook_id"] for row in locked}
-                if any(current.get(source_id) != notebook_id for source_id in source_ids):
-                    raise IndexingPipelineStalePlanError(notebook_id)
-                connection.execute(
-                    "DELETE FROM chunks WHERE source_id=ANY(%s)", (source_ids,)
-                )
-            execute_many(
-                connection,
-                "INSERT INTO chunks"
-                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                rows,
-            )
-            for source_id, chunks in chunks_by_source.items():
-                self._insert_chunk_element_rows(connection, notebook_id, chunks)
-            if source_ids:
-                connection.execute(
-                    "UPDATE sources SET chunked_at=%s WHERE id=ANY(%s)",
-                    (created, source_ids),
-                )
-            changed = connection.execute(
-                "UPDATE notebooks SET updated_at=%s WHERE id=%s "
-                "AND COALESCE(indexing_pipeline,'')=%s "
-                "AND indexing_pipeline_version=%s "
-                "AND indexing_pipeline_generation=%s",
-                (
-                    created,
-                    notebook_id,
-                    pipeline_id,
-                    pipeline_version,
-                    pipeline_generation,
-                ),
-            )
-            if changed.rowcount != 1:
-                raise IndexingPipelineStalePlanError(notebook_id)
-            connection.execute(
-                "INSERT INTO unified_kg_state "
-                "(notebook_id,dirty,kg_mutation_seq,updated_at) "
-                "VALUES (%s,1,1,%s) "
-                "ON CONFLICT(notebook_id) DO UPDATE SET "
-                "dirty=1,kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,"
-                "updated_at=EXCLUDED.updated_at",
-                (notebook_id, created),
-            )
 
     def _insert_fts_rows(self, connection, rows: list) -> None:
         # PostgreSQL's GIN/trigram indexes update with chunks themselves.

@@ -187,18 +187,5 @@ class IndexingPipelineService:
             "warning_count": int(outcome.get("warning_count", 0)),
         }
 
-    def apply(self, notebook_id: str, pipeline_id: str | None) -> dict:
-        """Synchronous compatibility path; HTTP scheduling uses begin/rebuild."""
-        intent = self.begin(notebook_id, pipeline_id)
-        if not intent["changed"]:
-            return intent
-        return self.rebuild(
-            notebook_id,
-            job_id=str(intent.get("job_id") or ""),
-            pipeline_id=str(intent.pop("_pipeline_id")),
-            pipeline_version=str(intent.pop("_pipeline_version")),
-            pipeline_generation=str(intent.pop("_pipeline_generation")),
-        )
-
 
 __all__ = ["IndexingPipelineService"]
