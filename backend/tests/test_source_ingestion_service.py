@@ -756,7 +756,7 @@ def test_fresh_hooks_preserve_post_construction_component_monkeypatch(
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id)
     calls = []
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid, **_kw: calls.append(sid))
     repo.process_source(sid)
     assert calls == [sid], "hooks must re-resolve the component seam on every call"
     assert repo.get_source(sid).parse_status == "extracted"
@@ -835,7 +835,7 @@ def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeyp
     )
     repo.settings.kg_auto_extract = True
     monkeypatch.setattr(
-        repo._runtime.source_ingestion, "run_extraction", lambda sid: None
+        repo._runtime.source_ingestion, "run_extraction", lambda sid, **_kw: None
     )
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id)

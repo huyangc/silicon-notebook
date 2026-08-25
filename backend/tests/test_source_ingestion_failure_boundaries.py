@@ -91,7 +91,7 @@ def test_chunk_failure_does_not_abort_extraction(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id)
 
-    def boom(source_id):
+    def boom(source_id, **_kwargs):
         raise RuntimeError("chunk build boom")
 
     monkeypatch.setattr(repo._runtime.source_chunking, "build_chunks_for_source", boom)
@@ -99,7 +99,7 @@ def test_chunk_failure_does_not_abort_extraction(repo, monkeypatch):
     monkeypatch.setattr(
         repo._runtime.source_ingestion,
         "run_extraction",
-        lambda sid: extracted.append(sid),
+        lambda sid, **_kw: extracted.append(sid),
     )
     repo.process_source(sid)
     assert extracted == [sid], "chunk failure must not skip extraction"
@@ -139,7 +139,7 @@ def test_extraction_failure_sets_failed_and_persists_error_message(repo, monkeyp
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id)
 
-    def boom(source_id):
+    def boom(source_id, **_kwargs):
         raise RuntimeError("extract boom")
 
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", boom)
