@@ -1310,7 +1310,6 @@ class AskService:
             AskPluginEngineError,
             safe_plugin_engine_error_code,
         )
-        from app.domain.extensions import ActorRef, NotebookRef
         from app.services.plugin_ask_engine import (
             PluginCancellationToken,
             PluginEngineModelAccess,
@@ -1408,8 +1407,6 @@ class AskService:
                 cancellation = PluginCancellationToken(cancel_event)
                 owned_ports.append(cancellation)
                 engine_context = AskEngineContext(
-                    notebook=NotebookRef(prepared.notebook_id),
-                    actor=ActorRef(prepared.user_id),
                     question=prepared.question,
                     cancellation=cancellation,
                 )
@@ -1422,9 +1419,7 @@ class AskService:
                     event_sink=getattr(self.event_log, "emit", None),
                 )
                 if (
-                    engine_context.notebook.id != prepared.notebook_id
-                    or engine_context.actor.id != prepared.user_id
-                    or engine_context.question != prepared.question
+                    engine_context.question != prepared.question
                     or engine_context.cancellation is not cancellation
                 ):
                     raise StageBoundaryError(
