@@ -574,3 +574,22 @@ def test_rebuild_publishes_and_clears_per_source_fallback_badges(repo, monkeypat
         assert str(db.execute(
             "SELECT error_message FROM sources WHERE id=?", (source_id,)
         ).fetchone()["error_message"] or "") == ""
+
+
+def test_frozen_identity_lets_inflight_parse_finish_across_a_switch(repo):
+    """在飞解析用入场冻结的身份跑完分块(codex #602 R5 P1):切换把 desired 置成
+    pending 之后,冻结身份仍能落 chunk——不冻结的话破坏性清态已发生、分块却被
+    pending 拒绝,来源裸奔到下一次手动重解析。"""
+    notebook = repo.create_notebook(NotebookCreate(name="frozen inflight"))
+    source_id = _insert_source(repo, notebook.id, "inflight text")
+    frozen = repo._runtime.source_chunking.published_identity(notebook.id)
+    # 解析进行中,owner 发起切换:desired 变 pending。
+    _intent(repo, notebook.id)
+    # 实时读会拒绝……
+    with pytest.raises(IndexingPipelineUnavailableError):
+        repo._runtime.source_chunking.build_chunks_for_source(source_id)
+    # ……而冻结身份让在飞操作按旧 published 身份完成,不留裸奔来源。
+    repo._runtime.source_chunking.build_chunks_for_source(
+        source_id, frozen_identity=frozen
+    )
+    assert _chunk_texts(repo, notebook.id)[source_id] == ["inflight text"]

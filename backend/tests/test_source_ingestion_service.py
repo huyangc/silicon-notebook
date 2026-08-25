@@ -204,7 +204,7 @@ def test_parsed_source_and_elements_commit_before_chunk_build(repo, monkeypatch)
     sid = _seed_queued_source(repo, nb.id)
     observed = {}
 
-    def probe(source_id):
+    def probe(source_id, **_kwargs):
         with repo._connect() as db:
             n = db.execute(
                 "SELECT COUNT(*) c FROM source_elements WHERE source_id=?",
@@ -245,7 +245,7 @@ def test_process_source_zeroes_chunked_at_when_writing_new_elements(
 
     observed = {}
 
-    def probe(source_id):
+    def probe(source_id, **_kwargs):
         with repo._connect() as db:
             observed["chunked_at_at_chunk_time"] = db.execute(
                 "SELECT chunked_at FROM sources WHERE id=?", (source_id,)
@@ -274,7 +274,7 @@ def test_active_lease_held_during_processing_and_released_after(
 
     seen = {}
 
-    def probe(source_id):
+    def probe(source_id, **_kwargs):
         # 分块时刻(进入之后、返回之前):租约本体的浅拷贝定格这一刻。
         seen["during"] = dict(service._active_sources)
 
@@ -549,7 +549,7 @@ def test_active_lease_is_refcounted_across_overlapping_invocations(
     sid = _seed_queued_source(repo, nb.id, file_path=str(md))
     service = repo._runtime.source_ingestion
 
-    def probe(source_id):
+    def probe(source_id, **_kwargs):
         # 模拟另一个并发 invocation 也进入了(第二次 stamp,计数 1→2)。
         with service._active_sources_lock:
             service._active_sources[source_id] = (
@@ -609,7 +609,7 @@ def test_concurrent_same_source_reparse_serializes_element_swap_and_chunk_build(
             owner["tid"] = threading.get_ident()
         return real_replace(db, source_id, elements, created_at=created_at)
 
-    def probe_build(source_id):
+    def probe_build(source_id, **_kwargs):
         time.sleep(0.05)  # 放大 replace→build 区间,让窄锁/无锁变异可靠交错
         real_build(source_id)
         with probe_lock:  # 释放临界区所有权(区间结束)
