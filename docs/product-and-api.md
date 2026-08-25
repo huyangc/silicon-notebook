@@ -2295,6 +2295,7 @@ Publication begins only after every staged source is complete. Before its first 
 | `INDEXING_PIPELINE_MAX_ELEMENT_REFS` | 500 | `1..100,000` |
 | `INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS` | 50,000 | `1..2,000,000` |
 | `INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS` | 100,000,000 | `1..2,000,000,000` |
+| `INDEXING_PIPELINE_PUBLISH_DRAIN_TIMEOUT_SECONDS` (publisher waits for in-flight admitted ingestion to drain before the atomic publish; on timeout the stage is discarded and the job fails retryably) | 600 | `0<x..3,600` |
 | `INDEXING_PIPELINE_KG_MAX_MESSAGES` | 8 | `1..64` |
 | `INDEXING_PIPELINE_KG_PROMPT_MAX_CHARS` | 64,000 | `1..2,000,000` |
 | `INDEXING_PIPELINE_KG_SCHEMA_HINT_MAX_CHARS` | 16,000 | `0..250,000` |

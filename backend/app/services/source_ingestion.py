@@ -26,6 +26,7 @@ from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
     KG_RUN_MESSAGE_OBJECTS_PREFIX,
+    INDEXING_CHUNK_FALLBACK_WARNING_PREFIX,
     PDF_PYTHON_FALLBACK_WARNING_PREFIX,
     RejectedUrl,
     SourceDetail,
@@ -254,6 +255,12 @@ class SourceIngestionService:
         # 分开(那是 process_source 生命周期 + 分块锁的引用计数,嵌入 worker 晚于它结束);两者的并集
         # 由 _active_source_ids_snapshot 出给体检。同一 _active_sources_lock 守护(都是小 dict)。
         self._embedding_sources: dict[str, int] = {}
+        # notebook_id → 活跃 process_source invocation 数(codex #602 R13 P1)。
+        # 管线切换的发布器在发布事务**之前**等它归零:写入闸已拦住新准入,存量
+        # 在飞的已准入写(带冻结旧代身份)必须先收敛,否则它们会在发布之后落地、
+        # 用旧代 chunk/KG 覆盖刚发布的新代产物。Condition 供有界等待。
+        self._active_notebooks: dict[str, int] = {}
+        self._active_notebooks_cond = threading.Condition()
         # Relation-completion pages are durable; this set is only a process-local
         # single-flight guard for their resumable drain jobs. Startup repopulates
         # work from the persisted pending rows after a crash/restart.
@@ -1112,6 +1119,59 @@ class SourceIngestionService:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
 
+    def _note_notebook_ingestion(self, notebook_id: str, delta: int) -> None:
+        with self._active_notebooks_cond:
+            count = self._active_notebooks.get(notebook_id, 0) + delta
+            if count > 0:
+                self._active_notebooks[notebook_id] = count
+            else:
+                self._active_notebooks.pop(notebook_id, None)
+            self._active_notebooks_cond.notify_all()
+
+    def wait_for_ingestion_drain(
+        self, notebook_id: str, timeout_seconds: float
+    ) -> bool:
+        """有界等待该 notebook 的在飞 process_source 收敛(codex #602 R13 P1)。
+
+        供管线切换的发布器在发布事务之前调用:写入闸已拦新准入,这里只等存量。
+        超时返回 False——发布方 fail-closed(弃 stage、job 落 failed 可重试),
+        绝不带着未收敛的旧代在飞写发布。"""
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        with self._active_notebooks_cond:
+            while self._active_notebooks.get(notebook_id, 0) > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._active_notebooks_cond.wait(remaining)
+        return True
+
+    def _chunk_step_with_fallback_hint(
+        self,
+        source_id: str,
+        notebook_id: str,
+        frozen_identity: tuple[str, str],
+    ) -> str:
+        """chunk-native 分块步(best-effort,失败不阻塞 parse→extract 流水线)。
+
+        返回终态要携带的回退 hint(codex #602 R13 P2):终态状态写无条件覆写
+        error_message(set_status),标记只有随终态写自己携带才活得到用户可见的
+        稳定态——与 MinerU fallback_hint 同款机制。异常路照旧丢 seq-gated
+        chunk/pending memo(chunk 可能已提交、kg_mutation_seq 未 bump,不丢会
+        一直读到陈旧计数)。"""
+        try:
+            warning = self.chunking.build_chunks_for_source(
+                source_id, frozen_identity=frozen_identity
+            )
+        except Exception:  # noqa: BLE001 - best-effort step, never blocks parse
+            self.event_log.logger.exception(
+                "chunk build failed for %s", source_id
+            )
+            self.invalidate_knowledge_counts(notebook_id)
+            return ""
+        if warning:
+            return f"{INDEXING_CHUNK_FALLBACK_WARNING_PREFIX} {warning}"
+        return ""
+
     def _admit_and_freeze_pipeline(self, notebook_id: str) -> tuple[str, str]:
         """写入准入 + 同刻冻结管线身份,配对不可拆(codex #602 R5 P1)。
 
@@ -1146,6 +1206,9 @@ class SourceIngestionService:
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
         frozen_pipeline_identity = self._admit_and_freeze_pipeline(notebook_id)
+        # 准入通过即计入笔记本级在飞集(finally 配对递减):管线切换的发布器靠它
+        # 等存量已准入写收敛(codex #602 R13 P1;见 wait_for_ingestion_drain)。
+        self._note_notebook_ingestion(notebook_id, +1)
         now = self.now()
         pipeline_started = time.perf_counter()
 
@@ -1275,19 +1338,9 @@ class SourceIngestionService:
                 # 失败不阻塞流水线。落库在终态转换前,前端轮询随状态变化带到。
                 self.ensure_paper_metadata(source, elements=elements, force=True)
 
-                # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
-                # best-effort: 失败不阻塞既有 parse->extract 流水线。
-                try:
-                    self.chunking.build_chunks_for_source(
-                        source_id, frozen_identity=frozen_pipeline_identity
-                    )
-                except Exception:
-                    self.event_log.logger.exception("chunk build failed for %s", source_id)
-                    # Chunk build may have committed chunks (source now parsed =>
-                    # pending KG) then failed before its kg_mutation_seq bump; with
-                    # auto-extract off no later write bumps it. Drop the seq-gated
-                    # chunk/pending memos so the next open recomputes, not serves stale.
-                    self.invalidate_knowledge_counts(notebook_id)
+                chunk_fallback_hint = self._chunk_step_with_fallback_hint(
+                    source_id, notebook_id, frozen_pipeline_identity
+                )
 
             source_parse_lock.release()
             source_parse_lock_acquired = False
@@ -1336,7 +1389,9 @@ class SourceIngestionService:
             # `empty_hint or fallback_hint` hides the fallback fact and clients
             # lose parse_quality_warning + the reparse/delete recovery actions.
             terminal_msg = " ".join(
-                message for message in (fallback_hint, empty_hint) if message
+                message
+                for message in (fallback_hint, empty_hint, chunk_fallback_hint)
+                if message
             )
             # Auto-fill notebook name/description from sources (only while name is a
             # default placeholder / purpose is still auto). Persist BEFORE the
@@ -1475,6 +1530,7 @@ class SourceIngestionService:
                         source_parse_lock.release()
                 finally:
                     self._release_source_lease(source_id)
+                    self._note_notebook_ingestion(notebook_id, -1)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many

@@ -678,3 +678,113 @@ def test_probe_flap_on_chunk_overriding_pipeline_falls_back_with_badge(
             "SELECT error_message FROM sources WHERE id=?", (source_id,)
         ).fetchone()["error_message"] or "")
     assert stored.startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX)
+
+
+def test_publisher_waits_for_inflight_ingestion_and_fails_closed_on_timeout(repo):
+    """发布器在原子发布前等在飞已准入导入收敛(codex #602 R13 P1):超时弃 stage、
+    job 落 failed(indexing_pipeline_ingestion_active)可重试,绝不带旧代在飞写发布。"""
+    ingestion = repo._runtime.source_ingestion
+    notebook = repo.create_notebook(NotebookCreate(name="drain gate"))
+
+    # 计数语义:有在飞即 False(有界等待),收敛即 True。
+    ingestion._note_notebook_ingestion(notebook.id, +1)
+    assert ingestion.wait_for_ingestion_drain(notebook.id, 0.05) is False
+    ingestion._note_notebook_ingestion(notebook.id, -1)
+    assert ingestion.wait_for_ingestion_drain(notebook.id, 0.05) is True
+
+    # 发布点:排空超时 → 弃 stage + failed 可重试。
+    source_id = _insert_source(repo, notebook.id, "drain text")
+    repo._build_chunks_for_source(source_id)
+    pipeline_id, version, generation = _intent(repo, notebook.id)
+    job_id = _attach_job(repo, notebook.id, generation)
+    repo._runtime.indexing_pipeline.rebuild(
+        notebook.id,
+        job_id=job_id,
+        pipeline_id=pipeline_id,
+        pipeline_version=version,
+        pipeline_generation=generation,
+    )
+    ingestion._note_notebook_ingestion(notebook.id, +1)
+    try:
+        repo._runtime.knowledge_lifecycle._wait_ingestion_drain = (
+            lambda nb, _t: ingestion.wait_for_ingestion_drain(nb, 0.05)
+        )
+        with pytest.raises(IndexingPipelineStalePlanError):
+            repo._runtime.knowledge_lifecycle.finish_indexing_pipeline_job(
+                notebook.id, job_id, succeeded=True,
+                pipeline_identity=(pipeline_id, version, generation),
+            )
+    finally:
+        ingestion._note_notebook_ingestion(notebook.id, -1)
+    job = repo._runtime.kg_build_jobs.get(job_id)
+    assert job["status"] == "failed"
+    assert job["error_code"] == "indexing_pipeline_ingestion_active"
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stages WHERE job_id=?",
+            (job_id,),
+        ).fetchone()["c"] == 0
+
+
+def test_incremental_fallback_badge_survives_to_the_terminal_status(
+    repo, monkeypatch, tmp_path
+):
+    """回退徽标活到终态(codex #602 R13 P2):终态状态写覆写 error_message,标记
+    必须随 terminal_msg 携带;MinerU 降级 hint 在场时保持其优先级。"""
+    from uuid import uuid4 as _uuid4
+
+    from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
+    import app.services.parser_chain_execution as parser_execution
+
+    notebook = repo.create_notebook(NotebookCreate(name="terminal badge"))
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE id=?",
+            (notebook.id,),
+        )
+        db.execute(
+            "UPDATE unified_kg_state SET indexing_pipeline_id='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE notebook_id=?",
+            (notebook.id,),
+        )
+    sid = f"src-{_uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, notebook.id, "Doc", "markdown", "queued", "queued",
+             "doc.md", str(tmp_path / "doc.md"), 0, "", "", "academic_paper", now, now))
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        parser_execution,
+        "parse_builtin_source_file",
+        lambda *a, **k: [SimpleNamespace(
+            element_type="paragraph", location_label="p1",
+            text="terminal badge text", metadata={},
+        )],
+    )
+    host = repo._runtime.source_chunking.indexing_pipelines
+    monkeypatch.setattr(host, "build_chunks", lambda *a, **k: (
+        IndexingPipelineChunkResult(
+            (
+                IndexingChunkProposal(
+                    text="ghost", element_ids=("el-none",), section_path="",
+                ),
+            )
+        )
+    ))
+
+    summary = repo.process_source(sid)
+
+    assert summary.parse_status == "extracted"
+    with repo._connect() as db:
+        stored = str(db.execute(
+            "SELECT error_message FROM sources WHERE id=?", (sid,)
+        ).fetchone()["error_message"] or "")
+    assert stored.startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX), stored
+    refreshed = next(s for s in repo.list_sources(notebook.id) if s.id == sid)
+    assert refreshed.indexing_chunk_fallback is True
