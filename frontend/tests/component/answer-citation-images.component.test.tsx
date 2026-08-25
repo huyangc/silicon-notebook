@@ -172,6 +172,53 @@ test("正文多图时交出整本画册，顺序与正文里的图片区块一�
   expect(onPreviewImage).toHaveBeenLastCalledWith({ items: expectedItems, index: 0 });
 });
 
+// codex #599 R1 P2：没有 anchor 时 references 回退成 `citations` 数组顺序,而正文完全
+// 可以先写 [2] 再写 [1]。画册顺序过去是按 references 数组自己推导的,于是「→」翻出来的
+// 顺序与眼睛看到的相反;从未在正文出现过的引用的图片也会被算进画册。现在顺序由渲染管线
+// 记账(citationImageOrder)提供,这条用例按 DOM 顺序对账它。
+test("回退引用路径下,画册跟随正文顺序而不是 citations 数组顺序", async () => {
+  const user = userEvent.setup();
+  const onPreviewImage = vi.fn();
+  const body = "先引用后面那条 [2]。\n\n再引用前面那条 [1]。\n\n这条引用没在正文出现过。";
+  const citation = (n: number, assetId: string) => ({
+    label: `来源 ${n}`,
+    source_id: `source-${n}`,
+    element_id: `el-${n}`,
+    location_label: `p. ${n}`,
+    quoted_span: "",
+    tier: "personal",
+    images: [{ element_id: `img-el-${n}`, asset_id: assetId, caption: `图 ${n}` }],
+  });
+  const { container } = renderAnswer({
+    answer_id: "answer-fallback-order",
+    conversation_id: "conversation-1",
+    conclusion: body,
+    answer: body,
+    grounded: true,
+    anchors: [],
+    related_knowledge: [],
+    citations: [citation(1, "asset-1"), citation(2, "asset-2"), citation(3, "asset-3")],
+    llm_mode: "chunk",
+  } as unknown as AskResponse, { onPreviewImage });
+
+  await screen.findByRole("img", { name: "图 2" });
+  const openButtons = [...container.querySelectorAll(".answer-inline-image-open")];
+  expect(openButtons.map((button) => button.getAttribute("aria-label"))).toEqual([
+    "放大查看[2]的附图",
+    "放大查看[1]的附图",
+  ]);
+
+  // 画册 = 正文顺序（[2] 在前），且不含从未在正文出现过的 [3] 的图片。
+  const expectedItems = [
+    { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
+    { assetId: "asset-1", alt: "图 1", referenceLabel: "[1]" },
+  ];
+  await user.click(openButtons[0]);
+  expect(onPreviewImage).toHaveBeenCalledWith({ items: expectedItems, index: 0 });
+  await user.click(openButtons[1]);
+  expect(onPreviewImage).toHaveBeenLastCalledWith({ items: expectedItems, index: 1 });
+});
+
 // 引用浮层里的缩略图与正文图片是同一批资产,点开后左右切换必须能走遍整条回答,
 // 而不是被关在「这条引用的附图」里。
 test("引用浮层里的缩略图打开的也是整本画册", async () => {

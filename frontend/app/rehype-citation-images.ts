@@ -7,6 +7,18 @@ export type CitationImageSlotItem = Readonly<{
 
 export type CitationImageIdsByKey = Readonly<Record<string, readonly string[]>>;
 
+/**
+ * 收集本次渲染实际插进正文的全部图片条目，按它们在正文里出现的先后。
+ *
+ * 「左右切换」的顺序必须**就是**正文里看到的顺序。它曾经由调用方按引用数组顺序
+ * 另行推导一遍——在 anchor 路径上碰巧一致，但回退到 `citations` 列表时（正文先写
+ * `[2]` 后写 `[1]`，而列表按检索序给出 `[1]`、`[2]`）两者就反了,还会把压根没在正文
+ * 出现过的引用的图片算进去。所以顺序不再推导:插件一边落位一边记账,调用方读这本账。
+ *
+ * 每次 transform 开始时整本清空重记;读取发生在点击那一刻(此时本次渲染早已跑完)。
+ */
+export type CitationImageOrder = { items: CitationImageSlotItem[] };
+
 const SLOT_ATTRIBUTE = "data-citation-image-items";
 
 function isElement(node: Parent["children"][number]): node is Element {
@@ -60,9 +72,13 @@ function isDirectCitationBlock(node: Element): boolean {
  * slot after the complete table, never inside a cell.  Repeated assets are
  * emitted only at their first visible citation in document order.
  */
-export function rehypeCitationImages(imageIdsByKey: CitationImageIdsByKey) {
+export function rehypeCitationImages(
+  imageIdsByKey: CitationImageIdsByKey,
+  order?: CitationImageOrder,
+) {
   return (tree: Root) => {
     const seenImages = new Set<string>();
+    if (order) order.items = [];
 
     const itemsFor = (node: Element): CitationImageSlotItem[] => {
       const items: CitationImageSlotItem[] = [];
@@ -73,6 +89,9 @@ export function rehypeCitationImages(imageIdsByKey: CitationImageIdsByKey) {
           items.push({ citationKey: key, imageId });
         }
       }
+      // 落位顺序即记账顺序：块级槽位紧跟在它所属的块之后，列表项的槽位追加在该项
+      // 末尾，所以这里的调用先后与 DOM 里的先后逐条对应。
+      if (order) order.items.push(...items);
       return items;
     };
 
