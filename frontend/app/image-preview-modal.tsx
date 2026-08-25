@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Minus, Plus, RotateCcw, X } from "lucide-react";
 import {
   TransformComponent,
@@ -48,7 +48,12 @@ export function ImagePreviewModal({
   // key：重挂载会让关闭按钮上的 autoFocus 每翻一页就把焦点抢回去,鼠标用户连点
   // 「下一张」时焦点会悄悄挪到「关闭」上,下一次空格/回车就把预览关了。
   // `0` 是动画时长——换图是瞬时的,补间只会让新图带着上一张的缩放闪一下。
-  useEffect(() => {
+  //
+  // 必须是 layout 相位：被动 effect 要等这一帧画完才跑,新图已经提交、旧 transform
+  // 还在,浏览器就会实打实画出一帧「新图片 + 上一张的缩放与偏移」(codex #599 R3 P2)。
+  // 首次挂载时库自己的 init 还没跑,`wrapperComponent` 为空,库内部直接早退——那一刻
+  // 本来也没有东西要复位。
+  useLayoutEffect(() => {
     transformRef.current?.resetTransform(0);
     setScale(IMAGE_PREVIEW_MIN_SCALE);
   }, [imageIndex]);

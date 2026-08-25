@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { callbackFlowsIn, findFunction, parseModule } from "../../test-support/semantic-source.mjs";
+
 // 2026-08-25 用户反馈:点开引用附图,图片贴在屏幕左上角而不是正中。
 //
 // 数据没问题,声明的 CSS 也「看起来」是对的——`.answer-image-preview-zoom-content`
@@ -52,4 +54,23 @@ test("到头/到尾的切换按钮必须看得出来按不动", () => {
   // (与 .icon-button/.sort-button/.ghost-button 同一条既有理由)。
   const rule = block(".answer-image-preview-step:disabled");
   assert.match(rule, /opacity:\s*0?\.\d+/, "只挂 disabled 而不变灰,按钮看起来还是可点的");
+});
+
+
+// codex #599 R3 P2：换图时的 transform 复位必须发生在**绘制之前**。被动 effect 要等
+// 这一帧画完才跑——新图已经提交、上一张的 transform 还在，浏览器就会实打实画出一帧
+// 「新图片 + 上一张的缩放与偏移」。jsdom 不绘制，组件测试量不到相位差（RTL 的 act
+// 会把两类 effect 一起冲掉），所以这条只能钉在源码语义上。
+test("换图复位挂在 layout 相位，不是被动 effect", async () => {
+  const source = await parseModule("image-preview-modal.tsx");
+  const modal = findFunction(source, "ImagePreviewModal");
+  assert.ok(modal, "找不到 ImagePreviewModal —— 组件被搬走了?");
+
+  const resets = callbackFlowsIn(modal, "useLayoutEffect")
+    .filter((callback) => JSON.stringify(callback.flow).includes("resetTransform"));
+  assert.equal(resets.length, 1, "换图复位必须恰好挂在一个 useLayoutEffect 里");
+
+  const passive = callbackFlowsIn(modal, "useEffect")
+    .filter((callback) => JSON.stringify(callback.flow).includes("resetTransform"));
+  assert.deepEqual(passive, [], "复位挪回被动 effect 会让新图先带着上一张的缩放画出一帧");
 });
