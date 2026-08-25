@@ -6379,6 +6379,66 @@ button.tag:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* 多图预览：计数留在控制条左端(toolbar 是 flex-end,靠 auto 外边距推到最左),
+   左右切换按钮贴舞台两侧竖直居中。两者都盖在图片之上——与控制条同一条既有取舍:
+   图片按视口尺寸铺满,留白给控件就等于把每张图都缩小一圈。 */
+.answer-image-preview-count {
+  margin-right: auto;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.answer-image-preview-step {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.answer-image-preview-step.prev {
+  left: 0;
+}
+
+.answer-image-preview-step.next {
+  right: 0;
+}
+
+.answer-image-preview-step:hover:not(:disabled) {
+  background: var(--soft);
+}
+
+/* 显式写死了 background/color 的按钮,浏览器默认的 :disabled 变灰对它无效
+   (与上面 .icon-button/.sort-button/.ghost-button 同一条理由)——到头/到尾时
+   必须看得出来按不动。 */
+.answer-image-preview-step:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.answer-image-preview-step:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 .answer-image-preview-control-divider {
   width: 1px;
   height: 22px;
@@ -6398,11 +6458,19 @@ button.tag:hover {
   cursor: grabbing;
 }
 
+/* 缩放层的内容盒必须铺满舞台并把图片居中——否则库自己的 CSS module 规则
+   (`display:flex` + `width/height: fit-content`)生效，内容盒就退化成图片大小，
+   再配上库固定的 `transform-origin: 0% 0%` 与初始 translate(0,0)，图片会贴死在
+   舞台**左上角**。`!important` 不是保险起见:库把样式在运行时 append 到 <head>
+   末尾,同为单类选择器时它排在 globals.css 之后就赢——与上面
+   `.answer-image-preview-zoom` 的 width/height/overflow 是同一条理由。
+   内容盒铺满舞台还顺带让缩放/平移边界(库按 offsetWidth 算)与舞台同尺寸:
+   scale=1 时上下界都是 0(钉在居中位置、拖不动),放大后才产生可平移范围。 */
 .answer-image-preview-zoom-content {
-  display: grid;
+  display: grid !important;
   place-items: center;
-  width: 100%;
-  height: 100%;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .answer-image-preview-content,

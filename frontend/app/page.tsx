@@ -7,7 +7,10 @@ import dynamic from "next/dynamic";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
 import { FormulaView } from "./formula-view";
-import type { AnswerImagePreviewRequest } from "./image-preview";
+import {
+  currentPreviewImage,
+  type AnswerImagePreviewRequest,
+} from "./image-preview";
 import { KgEvidenceBody } from "./kg-evidence-body";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
@@ -983,6 +986,8 @@ export default function Home() {
   });
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   const [answerImagePreview, setAnswerImagePreview] = useState<AnswerImagePreviewRequest | null>(null);
+  // 快照里当前这一张。打开时冻结整份清单,左右切换只动 index(见 image-preview.ts)。
+  const answerImagePreviewImage = currentPreviewImage(answerImagePreview);
   // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
   // 开关状态与渲染都在这里,与成本预告 `infoModal`/`confirmCommandCatalog` 同构。
@@ -6670,16 +6675,20 @@ export default function Home() {
           </FloatingModalCard>
         </section>
       )}
-      {rootModals.view("answer-image-preview").open && answerImagePreview && currentNotebookId && (
+      {rootModals.view("answer-image-preview").open && answerImagePreview && answerImagePreviewImage && currentNotebookId && (
         <ImagePreviewModal
-          referenceLabel={answerImagePreview.referenceLabel}
+          referenceLabel={answerImagePreviewImage.referenceLabel}
           interactive={rootModals.view("answer-image-preview").topmost}
           zIndex={rootModals.view("answer-image-preview").zIndex}
+          imageIndex={answerImagePreview.index}
+          imageCount={answerImagePreview.items.length}
+          // 左右切换只在打开时冻结的那份快照里走,不重取回答:换的只是 index。
+          onSelectImage={(index) => setAnswerImagePreview((prev) => (prev ? { ...prev, index } : prev))}
           onClose={(reason) => rootModals.requestClose("answer-image-preview", reason)}
         >
           <AuthedImage
-            url={sourceImageAssetUrl(API_BASE, currentNotebookId, answerImagePreview.assetId)}
-            alt={answerImagePreview.alt}
+            url={sourceImageAssetUrl(API_BASE, currentNotebookId, answerImagePreviewImage.assetId)}
+            alt={answerImagePreviewImage.alt}
           />
         </ImagePreviewModal>
       )}

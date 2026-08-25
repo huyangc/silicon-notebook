@@ -75,3 +75,178 @@ test("被更高层弹窗覆盖时退出交互树", () => {
   expect(dialog).toHaveAttribute("inert");
   expect(dialog).toHaveStyle({ zIndex: "60" });
 });
+
+test("单张图片时不出现任何切换控件，方向键也不做任何事", async () => {
+  const onSelectImage = vi.fn();
+  render(
+    <ImagePreviewModal referenceLabel="[1]" onClose={() => undefined} onSelectImage={onSelectImage}>
+      <img src="/preview.png" alt="唯一一张" />
+    </ImagePreviewModal>,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "引用 [1] 图片预览" });
+  expect(screen.queryByRole("button", { name: "上一张图片" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "下一张图片" })).toBeNull();
+  expect(screen.queryByText("1 / 1")).toBeNull();
+  fireEvent.keyDown(dialog, { key: "ArrowRight" });
+  fireEvent.keyDown(dialog, { key: "ArrowLeft" });
+  expect(onSelectImage).not.toHaveBeenCalled();
+});
+
+test("多张图片时左右按键与切换按钮都翻页，计数如实显示当前位置", async () => {
+  const user = userEvent.setup();
+  const onSelectImage = vi.fn();
+  const { rerender } = render(
+    <ImagePreviewModal
+      referenceLabel="[2]"
+      onClose={() => undefined}
+      imageIndex={1}
+      imageCount={3}
+      onSelectImage={onSelectImage}
+    >
+      <img src="/preview-2.png" alt="第二张" />
+    </ImagePreviewModal>,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "引用 [2] 图片预览" });
+  expect(screen.getByText("2 / 3")).toBeInTheDocument();
+
+  fireEvent.keyDown(dialog, { key: "ArrowRight" });
+  expect(onSelectImage).toHaveBeenLastCalledWith(2);
+  fireEvent.keyDown(dialog, { key: "ArrowLeft" });
+  expect(onSelectImage).toHaveBeenLastCalledWith(0);
+
+  await user.click(screen.getByRole("button", { name: "下一张图片" }));
+  expect(onSelectImage).toHaveBeenLastCalledWith(2);
+  await user.click(screen.getByRole("button", { name: "上一张图片" }));
+  expect(onSelectImage).toHaveBeenLastCalledWith(0);
+  expect(onSelectImage).toHaveBeenCalledTimes(4);
+
+  rerender(
+    <ImagePreviewModal
+      referenceLabel="[3]"
+      onClose={() => undefined}
+      imageIndex={2}
+      imageCount={3}
+      onSelectImage={onSelectImage}
+    >
+      <img src="/preview-3.png" alt="第三张" />
+    </ImagePreviewModal>,
+  );
+  expect(screen.getByText("3 / 3")).toBeInTheDocument();
+});
+
+test("到头/到尾按钮禁用，方向键原地不动，切换按钮不会被当成点遮罩关闭", async () => {
+  const user = userEvent.setup();
+  const onClose = vi.fn();
+  const onSelectImage = vi.fn();
+  const { rerender } = render(
+    <ImagePreviewModal
+      referenceLabel="[1]"
+      onClose={onClose}
+      imageIndex={0}
+      imageCount={2}
+      onSelectImage={onSelectImage}
+    >
+      <img src="/preview.png" alt="第一张" />
+    </ImagePreviewModal>,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "引用 [1] 图片预览" });
+  expect(screen.getByRole("button", { name: "上一张图片" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "下一张图片" })).toBeEnabled();
+  fireEvent.keyDown(dialog, { key: "ArrowLeft" });
+  expect(onSelectImage).not.toHaveBeenCalled();
+
+  // 切换按钮落在舞台里,点它绝不能被 pointerup 的「点遮罩关闭」判据吃掉。
+  await user.click(screen.getByRole("button", { name: "下一张图片" }));
+  expect(onSelectImage).toHaveBeenLastCalledWith(1);
+  expect(onClose).not.toHaveBeenCalled();
+
+  rerender(
+    <ImagePreviewModal
+      referenceLabel="[2]"
+      onClose={onClose}
+      imageIndex={1}
+      imageCount={2}
+      onSelectImage={onSelectImage}
+    >
+      <img src="/preview-2.png" alt="第二张" />
+    </ImagePreviewModal>,
+  );
+  expect(screen.getByRole("button", { name: "下一张图片" })).toBeDisabled();
+  fireEvent.keyDown(dialog, { key: "ArrowRight" });
+  expect(onSelectImage).toHaveBeenCalledTimes(1);
+});
+
+test("换图后缩放回到 100%，上一张的放大倍数不会带到下一张", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(
+    <ImagePreviewModal
+      referenceLabel="[1]"
+      onClose={() => undefined}
+      imageIndex={0}
+      imageCount={2}
+      onSelectImage={() => undefined}
+    >
+      <img src="/preview.png" alt="第一张" />
+    </ImagePreviewModal>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "放大图片" }));
+  await waitFor(() => expect(screen.queryByText("100%")).toBeNull());
+
+  rerender(
+    <ImagePreviewModal
+      referenceLabel="[2]"
+      onClose={() => undefined}
+      imageIndex={1}
+      imageCount={2}
+      onSelectImage={() => undefined}
+    >
+      <img src="/preview-2.png" alt="第二张" />
+    </ImagePreviewModal>,
+  );
+  await waitFor(() => expect(screen.getByText("100%")).toBeInTheDocument());
+});
+
+test("被更高层弹窗覆盖时不接方向键，正在输入的地方也不抢方向键", async () => {
+  const onSelectImage = vi.fn();
+  const covered = render(
+    <ImagePreviewModal
+      referenceLabel="[1]"
+      interactive={false}
+      onClose={() => undefined}
+      imageIndex={0}
+      imageCount={3}
+      onSelectImage={onSelectImage}
+    >
+      <img src="/preview.png" alt="被盖住的" />
+    </ImagePreviewModal>,
+  );
+  fireEvent.keyDown(window, { key: "ArrowRight" });
+  expect(onSelectImage).not.toHaveBeenCalled();
+  covered.unmount();
+
+  // 预览没有焦点陷阱：Tab 出去落到页面里的输入框时，方向键属于光标移动。
+  render(
+    <>
+      <textarea aria-label="提问" />
+      <ImagePreviewModal
+        referenceLabel="[1]"
+        onClose={() => undefined}
+        imageIndex={0}
+        imageCount={3}
+        onSelectImage={onSelectImage}
+      >
+        <img src="/preview.png" alt="第一张" />
+      </ImagePreviewModal>
+    </>,
+  );
+  fireEvent.keyDown(screen.getByLabelText("提问"), { key: "ArrowRight" });
+  expect(onSelectImage).not.toHaveBeenCalled();
+
+  // 同一次挂载下,预览自己身上的方向键照常翻页——上面两条不是「整个功能没接上」。
+  fireEvent.keyDown(screen.getByRole("dialog", { name: "引用 [1] 图片预览" }), { key: "ArrowRight" });
+  expect(onSelectImage).toHaveBeenLastCalledWith(1);
+});
