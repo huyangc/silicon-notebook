@@ -14,6 +14,7 @@ from app.repositories.lexical_query import (
     exact_probe_terms,
     identifier_terms,
     lexical_recall_terms,
+    model_name_alias_terms,
     sqlite_fts_match_expression,
 )
 
@@ -143,6 +144,13 @@ def test_exact_probe_terms_keeps_hyphen_forms_that_carry_a_digit():
     # 不是对语义的猜测:英文合成词不带数字,版本/型号名基本都带。
     assert exact_probe_terms("GPT-4 和 v1-2 的差异") == ["GPT-4", "v1-2"]
     assert exact_probe_terms("跑 llama-3 还是 qwen3-8b") == ["llama-3", "qwen3-8b"]
+
+
+def test_model_alias_terms_exclude_numbered_prose_labels():
+    assert model_name_alias_terms("cosmos3 and Cosmos 3") == [
+        "cosmos 3", "Cosmos3",
+    ]
+    assert model_name_alias_terms("chapter 4 and version 3") == []
 
 
 def test_exact_probe_terms_is_a_subset_of_identifier_terms_in_order():

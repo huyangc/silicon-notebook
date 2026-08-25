@@ -37,6 +37,36 @@ CJK_RESERVED_TERMS = 8
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9]+(?:[._\-][A-Za-z0-9]+)+")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 _DIGIT_RE = re.compile(r"[0-9]")
+_COMPACT_MODEL_NAME_RE = re.compile(
+    r"(?i)(?<![a-z0-9])([a-z]{2,})([0-9][a-z]*)(?![a-z0-9])"
+)
+_SPACED_MODEL_NAME_RE = re.compile(
+    r"(?i)(?<![a-z0-9])([a-z]{2,})[\s._-]+([0-9][a-z]*)(?![a-z0-9])"
+)
+_NUMBERED_PROSE_LABELS = frozenset({
+    "book", "chapter", "example", "figure", "item", "level", "page",
+    "part", "phase", "point", "rule", "section", "step", "table",
+    "version", "volume",
+})
+
+
+def spaced_model_name_parts(text: str) -> list[tuple[str, str]]:
+    """High-confidence separated product-name parts, excluding prose labels."""
+    return [
+        (match.group(1), match.group(2))
+        for match in _SPACED_MODEL_NAME_RE.finditer(text or "")
+        if match.group(1).casefold() not in _NUMBERED_PROSE_LABELS
+    ]
+
+
+def model_name_alias_terms(text: str) -> list[str]:
+    """Return separator variants for mixed ASCII letter/digit model names."""
+    aliases: list[str] = []
+    for match in _COMPACT_MODEL_NAME_RE.finditer(text or ""):
+        aliases.append(f"{match.group(1)} {match.group(2)}")
+    for stem, suffix in spaced_model_name_parts(text):
+        aliases.append(f"{stem}{suffix}")
+    return aliases
 
 
 def identifier_terms(text: str) -> list[str]:
@@ -189,6 +219,9 @@ def _recall_terms_with_head(query: str) -> tuple[list[str], int]:
     priority_count = len(raw_terms)
     ident_terms = identifier_terms(remainder)
     raw_terms.extend(ident_terms)
+    # Candidate recall mirrors scoring's compact alias.  Both spellings enter
+    # the bounded shared term budget; neither becomes an exact-section probe.
+    raw_terms.extend(model_name_alias_terms(remainder))
 
     run: list[str] = []
     run_kind = ""

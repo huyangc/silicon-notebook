@@ -807,12 +807,12 @@ class SqliteMigrator:
             # mention_seq: mention_edges/concept_comentions 上次重建时的 kg_mutation_seq。
             # -1 默认 → 首次必建(同 canonical_rel_seq 语义)。
             self.add_column_if_missing(db, "unified_kg_state", "mention_seq", "INTEGER NOT NULL DEFAULT -1")
-            # source_index_backfilled: 0/1 marker — once set, _clear_source_extraction_state
-            # trusts knowledge_object_sources for this notebook and skips the legacy
-            # full-evidence-scan fallback. Set by the backfill-on-first-use scan itself
-            # (the scan callers were already paying becomes the LAST one) or by the
-            # standalone `backfill-source-index` CLI. Additive; pre-existing DBs start
-            # at 0 (never backfilled), so they correctly take the legacy-scan path once.
+            # source_index_backfilled: a completeness certificate, not an
+            # emptiness bit.  Pre-existing rows start false/unknown and use the
+            # authoritative evidence compatibility path until explicit offline
+            # backfill certifies them.  New notebooks are inserted as certified
+            # empty by NotebookStore and online KG writers maintain the reverse
+            # rows transactionally thereafter.
             self.add_column_if_missing(
                 db, "unified_kg_state", "source_index_backfilled", "INTEGER NOT NULL DEFAULT 0"
             )

@@ -441,6 +441,7 @@ def _candidate_rows_for_terms(
     per_term_limit: int,
     live_only: bool = False,
     allowed_source_ids: list[str] | None = None,
+    authoritative_source_filter: bool = False,
 ):
     """Run one indexed LATERAL probe per term in a single PostgreSQL query."""
     if not terms or per_term_limit <= 0:
@@ -466,11 +467,19 @@ def _candidate_rows_for_terms(
         if not allowed_source_ids:
             return []
         if target.table == "knowledge_objects":
-            predicates.append(
-                f"EXISTS (SELECT 1 FROM knowledge_object_sources kos "
-                f"WHERE kos.notebook_id={table_sql}.notebook_id "
-                f"AND kos.object_id={table_sql}.{id_sql} AND kos.source_id=ANY(%s))"
-            )
+            if authoritative_source_filter:
+                predicates.append(
+                    f"EXISTS (SELECT 1 FROM jsonb_array_elements("
+                    f"CASE WHEN jsonb_typeof({table_sql}.evidence)='array' "
+                    f"THEN {table_sql}.evidence ELSE '[]'::jsonb END) ev "
+                    f"WHERE ev->>'source_id'=ANY(%s))"
+                )
+            else:
+                predicates.append(
+                    f"EXISTS (SELECT 1 FROM knowledge_object_sources kos "
+                    f"WHERE kos.notebook_id={table_sql}.notebook_id "
+                    f"AND kos.object_id={table_sql}.{id_sql} AND kos.source_id=ANY(%s))"
+                )
         elif target.table == "chunks":
             predicates.append(f"{table_sql}.source_id=ANY(%s)")
         else:
@@ -511,6 +520,7 @@ def _candidate_rows_for_terms(
 def knowledge_candidate_rows_for_terms(
     connection, notebook_id: str, terms: list[str], per_term_limit: int,
     allowed_source_ids: list[str] | None = None, *, allow_knn: bool = False,
+    authoritative_source_filter: bool = False,
 ):
     # `allow_knn` is a hint, not a command: it engages only when the run is
     # unscoped (the source-scoped statement carries an EXISTS predicate the KNN
@@ -536,18 +546,20 @@ def knowledge_candidate_rows_for_terms(
         per_term_limit=per_term_limit,
         live_only=True,
         allowed_source_ids=allowed_source_ids,
+        authoritative_source_filter=authoritative_source_filter,
     )
 
 
 def chunk_candidate_rows_for_terms(
     connection, notebook_id: str, terms: list[str], per_term_limit: int,
     allowed_source_ids: list[str] | None = None, *, allow_knn: bool = False,
+    authoritative_source_filter: bool = False,
 ):
     # Accepted and deliberately ignored: whole-chunk text vs a short term is a
     # different length regime (trigram signatures degrade, similarity ordering
     # is near-noise) with no bench behind it yet.  Taking the kwarg keeps the
     # two candidate producers signature-compatible for the shared union seam.
-    del allow_knn
+    del allow_knn, authoritative_source_filter
     return _candidate_rows_for_terms(
         connection,
         table="chunks",

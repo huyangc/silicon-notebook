@@ -335,7 +335,9 @@ def test_hidden_source_excluded_from_source_listing(repo, projector, table_id, n
 # ---------------------------------------------------------------------------
 
 
-def test_project_table_twice_produces_identical_id_sets(repo, projector, table_id, embedder):
+def test_project_table_twice_produces_identical_id_sets(
+    repo, projector, table_id, notebook_id, embedder
+):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
@@ -350,6 +352,17 @@ def test_project_table_twice_produces_identical_id_sets(repo, projector, table_i
     elements_1 = _row_element_ids(repo, row_id)
     chunks_1 = _row_chunk_ids(repo, row_id)
     objects_1 = _row_object_ids(repo, row_id)
+    source_id = projector.ensure_hidden_source(table_id)
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, notebook_id)
+        indexed = {
+            row["object_id"] for row in db.execute(
+                "SELECT object_id FROM knowledge_object_sources "
+                "WHERE notebook_id=? AND source_id=?",
+                (notebook_id, source_id),
+            ).fetchall()
+        }
+    assert indexed == objects_1
 
     projector.project_table(table_id)
     elements_2 = _row_element_ids(repo, row_id)
@@ -710,6 +723,21 @@ def test_project_table_sweeps_chunks_for_a_column_removed_from_the_table(
     # The remaining two cells' own chunks are untouched.
     assert set(chunks_after) == set(chunks_before) - {fix_chunk_id}
 
+    with repo._connect() as db:
+        live_ids = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM knowledge_objects WHERE source_id=?", (source_id,)
+            ).fetchall()
+        }
+        indexed_ids = {
+            row["object_id"] for row in db.execute(
+                "SELECT object_id FROM knowledge_object_sources "
+                "WHERE notebook_id=? AND source_id=?",
+                (repo._runtime.source_store.get_source(source_id).notebook_id, source_id),
+            ).fetchall()
+        }
+    assert indexed_ids == live_ids
+
 
 def test_overlong_cell_splits_into_multiple_chunk_parts(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
@@ -967,7 +995,7 @@ def test_table_without_anchor_column_projects_zero_kos_but_chunks_exist(
 
 
 def test_anchor_removed_after_being_set_clears_all_kos_on_reproject(
-    repo, projector, table_id, embedder
+    repo, projector, table_id, notebook_id, embedder
 ):
     """design doc §① transitional case: a table that HAD an anchor column,
     then had it cleared (set_knowhow_anchor_column(table_id, None) — T1
@@ -990,6 +1018,12 @@ def test_anchor_removed_after_being_set_clears_all_kos_on_reproject(
         assert db.execute(
             "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?", (source_id,)
         ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources "
+            "WHERE notebook_id=? AND source_id=?",
+            (notebook_id, source_id),
+        ).fetchone()["c"] == 0
+        assert repo._source_index_backfilled(db, notebook_id)
         # chunks are untouched by the anchor removal — still a valid
         # retrieval-only table.
         assert db.execute(
@@ -1434,6 +1468,12 @@ def test_delete_table_projection_clears_all_artifacts(repo, projector, table_id,
         assert db.execute(
             "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?", (source_id,)
         ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources "
+            "WHERE notebook_id=? AND source_id=?",
+            (notebook_id, source_id),
+        ).fetchone()["c"] == 0
+        assert repo._source_index_backfilled(db, notebook_id)
 
 
 def test_delete_table_projection_is_a_noop_for_none_or_missing_id(repo, projector):

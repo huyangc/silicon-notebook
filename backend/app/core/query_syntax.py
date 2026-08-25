@@ -55,6 +55,35 @@ MIN_LEXICAL_TERM_CHARS = 3
 # in a pasted block from swallowing the paragraph after it.
 _QUOTED_RE = re.compile(r'"([^"\n]+)"')
 
+# Confirmed-intent planning keeps the reviewed contract attached to each
+# direction so later orchestration can audit it.  That envelope is not search
+# material: feeding it to lexical decomposition / keyword coverage dilutes a
+# short direction with the same boilerplate on every query.  Retrieval leaves
+# the public/trace string intact and reads only the prefix before one of these
+# service-owned separators.
+_RETRIEVAL_CONTRACT_MARKERS = (
+    "\n\n检索必须服从以下已确认问题契约：",
+    "\n\n用户确认的补充信息与问题契约：",
+)
+
+
+def retrieval_query_head(text: str) -> str:
+    """Return the actual search direction, excluding intent-contract text.
+
+    The markers are service-generated exact separators, not user syntax.  An
+    ordinary question that merely mentions the same words without the blank
+    line + full marker stays unchanged.  Empty/malformed envelopes fail open to
+    the original text so this helper can never erase a query.
+    """
+    source = text or ""
+    cut = len(source)
+    for marker in _RETRIEVAL_CONTRACT_MARKERS:
+        index = source.find(marker)
+        if index >= 0:
+            cut = min(cut, index)
+    head = source[:cut].strip()
+    return head or source.strip()
+
 
 def split_quoted_phrases(text: str) -> tuple[list[str], str]:
     """Split user-declared atomic phrases off the rest of the query.

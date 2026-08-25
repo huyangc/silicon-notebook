@@ -68,6 +68,10 @@ LIFECYCLE_STORE_CALLS = {
         "relink_source_is_live",
         "relink_source_page",
         "source_build_state_page",
+        # Notebook graph clears preserve (but never invent) the source-index
+        # completeness certificate around the store-owned state-row deletion.
+        "source_index_backfilled",
+        "mark_source_index_backfilled",
         "unified_graph_rows",
         "validate_source_fact_publish",
     },

@@ -523,6 +523,18 @@ class KnowhowProjector:
                     self.knowledge.delete_objects_by_source(db, source_id)
                     if object_rows:
                         self.knowledge.insert_object_chunk(db, object_rows)
+                        # Knowhow uses stable object ids and writes the graph
+                        # through lower-level chunk primitives, so it must
+                        # maintain the provenance reverse index explicitly in
+                        # this same publication transaction.  A newly created
+                        # notebook is certified-empty; leaving these rows out
+                        # would make that certificate lie after the first
+                        # projection and source-restricted retrieval could
+                        # safely-but-incorrectly omit every Knowhow object.
+                        for row in object_rows:
+                            self.knowledge.replace_object_sources(
+                                db, row[0], notebook_id, row[5]
+                            )
                     if edge_rows:
                         self.knowledge.insert_relation_chunk(db, edge_rows)
 

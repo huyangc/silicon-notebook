@@ -106,6 +106,20 @@ def test_source_scope_is_inside_each_postgres_candidate_limit():
     ]
 
     connection = _Connection()
+    knowledge_candidate_rows_for_terms(
+        connection, "nb", ["target command"], per_term_limit=2,
+        allowed_source_ids=["A", "B"], authoritative_source_filter=True,
+    )
+    statement, params = connection.calls[0]
+    lateral = statement.split("CROSS JOIN LATERAL", 1)[1]
+    assert "jsonb_array_elements" in lateral
+    assert "knowledge_object_sources" not in lateral
+    assert lateral.index("jsonb_array_elements") < lateral.index("LIMIT %s")
+    assert params == [
+        0, "target command", "%target command%", "nb", ["A", "B"], 2
+    ]
+
+    connection = _Connection()
     chunk_candidate_rows_for_terms(
         connection, "nb", ["target command"], per_term_limit=2,
         allowed_source_ids=["A", "B"],

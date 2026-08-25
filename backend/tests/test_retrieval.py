@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from app.services.retrieval import keyword_score
 from tests.model_testkit import bind_all_embedding_clients
@@ -201,13 +203,249 @@ def test_source_scoped_kg_candidates_do_not_starve_or_hydrate_third_source(
     )
 
 
-def test_source_scoped_kg_fails_closed_without_reverse_index(repo):
+def test_source_scoped_kg_uses_evidence_fallback_without_reverse_index(repo):
+    """Unknown legacy marker reads authoritative evidence before LIMIT."""
     from app.models.schemas import NotebookCreate
 
     nb = repo.create_notebook(NotebookCreate(name="legacy"))
-    assert repo.retrieval.retrieve_scored(
-        nb.id, "target command", allowed_source_ids=("A",)
-    ) == []
+
+    def evidence(source_id):
+        return [{
+            "source_id": source_id,
+            "source_title": source_id,
+            "element_id": f"el-{source_id}",
+            "element_type": "paragraph",
+            "location_label": "Commands",
+            "quoted_span": "target command",
+            "confidence": 1.0,
+        }]
+
+    repo.store_kg(nb.id, None, [
+        {
+            "local_id": "allowed",
+            "object_type": "concept",
+            "payload": {"name": "target command allowed"},
+            "evidence": evidence("A"),
+        },
+        {
+            "local_id": "blocked",
+            "object_type": "concept",
+            "payload": {"name": "target command blocked"},
+            "evidence": evidence("C"),
+        },
+    ], [])
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES (?,?, 'concept','approved','',?,?,'A',?,?)",
+            (
+                "malformed-evidence",
+                nb.id,
+                '{"name":"target command malformed"}',
+                "not-json",
+                "2026-08-25T00:00:00",
+                "2026-08-25T00:00:00",
+            ),
+        )
+        db.execute(
+            "INSERT INTO kg_objects_fts(object_id,notebook_id,name) VALUES (?,?,?)",
+            ("malformed-evidence", nb.id, "target command malformed"),
+        )
+        allowed_id = db.execute(
+            "SELECT id FROM knowledge_objects "
+            "WHERE notebook_id=? AND json_extract(payload,'$.name')=?",
+            (nb.id, "target command allowed"),
+        ).fetchone()["id"]
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=? WHERE id=?",
+            (json.dumps([evidence("A")[0], "legacy scalar"]), allowed_id),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES (?,?, 'concept','approved','',?,?,'A',?,?)",
+            (
+                "scalar-array-evidence",
+                nb.id,
+                '{"name":"target command scalar"}',
+                '["legacy scalar"]',
+                "2026-08-25T00:00:00",
+                "2026-08-25T00:00:00",
+            ),
+        )
+        db.execute(
+            "INSERT INTO kg_objects_fts(object_id,notebook_id,name) VALUES (?,?,?)",
+            ("scalar-array-evidence", nb.id, "target command scalar"),
+        )
+        db.execute(
+            "DELETE FROM knowledge_object_sources WHERE notebook_id=?", (nb.id,)
+        )
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?",
+            (nb.id,),
+        )
+
+    events = []
+    repo.event_log.emit = events.append
+    hits = repo.retrieval.retrieve_scored(
+        nb.id,
+        "target command\n\n检索必须服从以下已确认问题契约：\n"
+        + "与候选节点无关的固定模板" * 100,
+        allowed_source_ids=("A",),
+    )
+    assert [hit.payload["name"] for hit in hits] == ["target command allowed"]
+    fallback = next(
+        event for event in events if event.get("kind") == "source_index_fallback"
+    )
+    assert fallback["candidate_count"] == 1
+    # The interactive fallback is read-only; explicit maintenance remains the
+    # only way to certify an unknown historical notebook as fully indexed.
+    with repo._connect() as db:
+        assert not repo._source_index_backfilled(db, nb.id)
+
+
+def test_all_selected_ceiling_keeps_ann_when_reverse_index_is_unknown(repo):
+    """A frozen default scope is a result ceiling, not a selected-source lane."""
+    from app.models.schemas import NotebookCreate
+    from app.models.source_scope import SourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb = repo.create_notebook(NotebookCreate(name="all selected"))
+    now = "2026-08-25T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("A", nb.id, "paper", "pdf", "ready", now, now),
+        )
+    evidence = [{
+        "source_id": "A",
+        "source_title": "paper",
+        "element_id": "el-a",
+        "element_type": "paragraph",
+        "location_label": "Abstract",
+        "quoted_span": "Cosmos 3 is an omnimodal world model",
+        "confidence": 1.0,
+    }]
+    repo.store_kg(nb.id, "A", [{
+        "local_id": "cosmos",
+        "object_type": "concept",
+        "payload": {"name": "Cosmos 3"},
+        "evidence": evidence,
+    }], [])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    with repo._write() as db:
+        # Simulate a pre-fix notebook: the maintained rows may be complete, but
+        # the historical completion certificate was never latched.
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?",
+            (nb.id,),
+        )
+
+    events = []
+    repo.event_log.emit = events.append
+    with source_scope_context(
+        nb.id, SourceScope(mode="include", source_ids=["A"], narrowed=False)
+    ):
+        hits = repo.retrieval.candidates.federated_retrieve(nb.id, "cosmos3")
+
+    assert [hit.payload["name"] for hit in hits] == ["Cosmos 3"]
+    stage = next(event for event in events if event.get("kind") == "ask_stage")
+    assert stage["source_candidates_restricted"] is False
+    assert stage["ann_gated"] is True
+    assert not any(
+        event.get("kind") == "source_index_fallback" for event in events
+    )
+
+
+def test_keyword_coverage_normalizes_compact_model_name_spacing():
+    assert keyword_score("cosmos3", "Cosmos 3 is an omnimodal model") == 1.0
+    assert keyword_score("Cosmos 3", "cosmos3 is an omnimodal model") == 1.0
+
+
+def test_model_name_alias_does_not_rewrite_numbered_prose_labels():
+    assert keyword_score("chapter 4", "chapter overview") == 1.0
+    assert keyword_score(
+        "Python version 3 compatibility",
+        "Python version compatibility",
+    ) == 1.0
+
+
+def test_contract_remains_in_recall_but_not_keyword_basis(repo, monkeypatch):
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="contract"))
+    evidence = [{
+        "source_id": "A", "source_title": "paper", "element_id": "el-a",
+        "element_type": "paragraph", "location_label": "p1",
+        "quoted_span": "target command", "confidence": 1.0,
+    }]
+    repo.store_kg(nb.id, None, [{
+        "local_id": "target", "object_type": "concept",
+        "payload": {"name": "target command"}, "evidence": evidence,
+    }], [])
+    with repo._connect() as db:
+        object_id = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["id"]
+
+    contract_query = (
+        "target command\n\n检索必须服从以下已确认问题契约：\n"
+        "排除其他产品；用户确认只讨论部署约束"
+    )
+    embedded = []
+    lexical = []
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_embed_query",
+        lambda query: embedded.append(query) or None,
+    )
+
+    def lexical_hits(_db, _notebook_id, query, _recall, **_kwargs):
+        lexical.append(query)
+        return [{"object_id": object_id, "name": "target command", "score": 1.0}]
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_object_hits", lexical_hits
+    )
+    hits = repo.retrieval.retrieve_scored(
+        nb.id, contract_query, allowed_source_ids=("A",)
+    )
+
+    assert embedded == [contract_query]
+    assert lexical == [contract_query]
+    assert [hit.payload["name"] for hit in hits] == ["target command"]
+
+
+def test_source_scoped_kg_recalls_compact_model_name_against_spaced_node(repo):
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="models"))
+    evidence = [{
+        "source_id": "A",
+        "source_title": "paper",
+        "element_id": "el-a",
+        "element_type": "paragraph",
+        "location_label": "Abstract",
+        "quoted_span": "Cosmos 3 is an omnimodal world model",
+        "confidence": 1.0,
+    }]
+    repo.store_kg(nb.id, None, [{
+        "local_id": "cosmos",
+        "object_type": "concept",
+        "payload": {"name": "Cosmos 3"},
+        "evidence": evidence,
+    }], [])
+
+    hits = repo.retrieval.retrieve_scored(
+        nb.id, "cosmos3", allowed_source_ids=("A",)
+    )
+    assert [hit.payload["name"] for hit in hits] == ["Cosmos 3"]
 
 
 def test_source_scoped_chunk_fts_filters_before_limit(repo):

@@ -10,12 +10,33 @@ from app.core.query_syntax import (
     MIN_LEXICAL_TERM_CHARS,
     exact_probe_query,
     quoted_phrases,
+    retrieval_query_head,
     split_quoted_phrases,
     strip_accepted_quote_markers,
     strip_quote_markers,
     unquoted_remainder,
 )
 from app.repositories.lexical_query import exact_probe_terms, lexical_recall_terms
+
+
+def test_retrieval_query_head_removes_only_service_contract_envelopes():
+    head = "cosmos3 主要贡献"
+    assert retrieval_query_head(
+        head + "\n\n检索必须服从以下已确认问题契约：\n" + "契约" * 100
+    ) == head
+    assert retrieval_query_head(
+        head + "\n\n用户确认的补充信息与问题契约：\n研究对象：cosmos3"
+    ) == head
+    # Ordinary user prose is not a service envelope.
+    prose = "请解释检索必须服从以下已确认问题契约是什么意思"
+    assert retrieval_query_head(prose) == prose
+
+
+def test_mixed_letter_digit_model_names_get_symmetric_lexical_aliases():
+    compact = {term.casefold() for term in lexical_recall_terms("cosmos3")}
+    spaced = {term.casefold() for term in lexical_recall_terms("Cosmos 3")}
+    assert "cosmos 3" in compact
+    assert "cosmos3" in spaced
 
 
 # --- 跨端契约:这份表 frontend/app/query-syntax.test.mjs 必须逐条相同 -----------
