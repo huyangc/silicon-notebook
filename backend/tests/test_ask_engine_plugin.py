@@ -739,3 +739,26 @@ def test_ask_modes_projection_is_sanitized_and_availability_filtered(monkeypatch
             "nb", AskRequest(question="question", mode="secret.search"),
             user_id="user",
         )
+
+
+def test_citation_admission_rejects_residual_citation_like_markers():
+    """畸形「引用样」括号组整份拒绝(codex #602 R6 P1):`[k1, nope]` 不被
+    LOOSE_MARKER_RE 匹配、会原样留在正文里,渲染成从未被核验的引用外观。"""
+    access = _retrieval_access()
+    key = access.search("evidence", 1)[0].evidence_key
+
+    with pytest.raises(AskEnginePortError) as malformed:
+        admit_plugin_engine_result(access, "合法 [k1] 加畸形 [k1, nope]", (key,))
+    assert malformed.value.code == "plugin_engine_unverified_citation"
+
+    cjk = _retrieval_access(hit=_hit(element_id="element-cjk"))
+    cjk_key = cjk.search("evidence", 1)[0].evidence_key
+    with pytest.raises(AskEnginePortError) as cjk_malformed:
+        admit_plugin_engine_result(cjk, "【k1】与【k2、nope】", (cjk_key,))
+    assert cjk_malformed.value.code == "plugin_engine_unverified_citation"
+
+    # 合法组照常通过——归一化输出自己写回的组不被残留扫描误伤。
+    ok = _retrieval_access(hit=_hit(element_id="element-ok"))
+    ok_key = ok.search("evidence", 1)[0].evidence_key
+    answer, _records = admit_plugin_engine_result(ok, "正文 [k1] 结尾", (ok_key,))
+    assert answer == "正文 [k1] 结尾"

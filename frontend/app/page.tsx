@@ -2907,6 +2907,10 @@ export default function Home() {
 
   async function openReadOnlyNotebookSettings() {
     const notebookId = currentNotebook?.id ?? null;
+    // await 之前冻结 modal owner(codex #602 R6 P2):只比 notebook id 会放过
+    // A→B→A——回到同一本库时 workspace 世代已换,迟到响应不该在新世代里开弹窗。
+    // 冻结的 owner 交给 openInfoModal → rootModals.open 按世代拒绝陈旧认领。
+    const owner = rootModals.captureWorkspaceOwner() ?? rootModals.captureActorOwner();
     // 先按 NotebookSummary 派生兜底文案,再尽力换成实时投影:摘要只有 pending
     // 布尔,分不出「重建中」与「重建失败」——失败后 job authority 保留(那是重试
     // 入口),只看摘要会对只读成员永远显示「正在重建」(codex #602 R3 P2)。
@@ -2925,7 +2929,7 @@ export default function Home() {
       title: "设置",
       message: `当前笔记本为只读。当前索引管线：${summary.label}。${summary.detail} 参考库挂载与链接分享由库主管理。`,
       actions: [],
-    });
+    }, owner);
   }
 
   async function presentNotebookDelete(notebookId: string) {
