@@ -248,3 +248,48 @@ def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
     assert store_dbs[0] is summary_dbs[0]  # MUT
     assert result.id == notebook_id
     assert result.access == "reader"
+
+
+def test_copy_resets_indexing_pipeline_columns_to_builtin(repo):
+    """深拷贝复位索引管线四列(desired/version/generation/job authority)。
+
+    published identity 住在 unified_kg_state 而它刻意不进深拷贝:照抄 desired 会让
+    副本天生 desired≠published、每次写入 409 直到手动全库重建;照抄 job_id 会让副本
+    的状态投影 join 到源库正在跑的 job 行。与 share_token/agent_profile_id 同款清洗。
+    """
+    from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
+
+    _seed_user(repo, "user-bob")
+    src = _seed(repo, n=1)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline='p.foo',"
+            "indexing_pipeline_version='p.foo/v9',"
+            "indexing_pipeline_generation='gen-1',"
+            "indexing_pipeline_job_id='job-of-source-nb' WHERE id=?",
+            (src,),
+        )
+    copied = repo.copy_notebook(src, new_owner_id="user-bob")
+    with repo._runtime.database.connect() as db:
+        copy_row = db.execute(
+            "SELECT indexing_pipeline,indexing_pipeline_version,"
+            "indexing_pipeline_generation,indexing_pipeline_job_id "
+            "FROM notebooks WHERE id=?",
+            (copied.id,),
+        ).fetchone()
+        source_row = db.execute(
+            "SELECT indexing_pipeline,indexing_pipeline_job_id "
+            "FROM notebooks WHERE id=?",
+            (src,),
+        ).fetchone()
+    assert dict(copy_row) == {
+        "indexing_pipeline": None,
+        "indexing_pipeline_version": BUILTIN_INDEXING_PIPELINE_VERSION,
+        "indexing_pipeline_generation": "",
+        "indexing_pipeline_job_id": "",
+    }
+    # 源库自己的选择与在飞授权一个字不动。
+    assert dict(source_row) == {
+        "indexing_pipeline": "p.foo",
+        "indexing_pipeline_job_id": "job-of-source-nb",
+    }
