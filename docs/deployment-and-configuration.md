@@ -443,6 +443,9 @@ validation fail rather than being ignored. The resolved mode is frozen with the
 physical route when a call is submitted, so TOML hot reload affects new calls
 without changing queued ones. An explicit mode is part of the LLM response-cache
 identity; `provider_default` requests retain their historical cache keys.
+Chat health checks are outside the workload policy: they always send
+`thinking_mode="disabled"`, bypass the response cache, and cannot be overridden
+through `[thinking]`.
 
 The optional generated-question index uses background chat workload
 `chunk_question_generation` plus the existing `chunk_embedding` workload. Bind both
