@@ -228,6 +228,11 @@ class PluginRetrievalAccess:
         source_keys: list[tuple[str, str]] = []
         source_origin: dict[str, str] = {}
         raise_if_cancelled(cancellation)
+        # 已登记性能边界(评审存疑项):端口构造在**每次**插件引擎提问时枚举全部
+        # 参与库的可见+隐藏来源 id,并把完整 id 清单逐次下推进 search SQL——这是
+        # 「把整库来源行搬回热路径」的形状,万级来源的库上每问多付一批 id 物化与
+        # 大 IN 清单。正解是让端口在未收窄时走谓词而不是显式清单(镜像内建路径),
+        # 需要 search 接缝支持「无清单 + 私有 Memory 谓词」模式,留作后续独立一件事。
         participants = scoped_participants(
             participant_notebook_ids(active_notebook_id)
         )

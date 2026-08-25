@@ -58,6 +58,10 @@ class SourceChunkingService:
         self._notebook_locks_guard = threading.Lock()
 
     def _notebook_lock(self, notebook_id: str) -> threading.RLock:
+        # 已登记两条边界(评审 P2):①字典按 notebook 只增不淘汰——RLock 极小,
+        # 万级笔记本也只是几 MB,进程重启即清;②rebuild 持锁跨整库 embedding I/O
+        # 是刻意的 per-notebook 单飞(同库增量分块必须等,而那些调用多半已先被
+        # facade 写入闸 409 掉)。
         with self._notebook_locks_guard:
             lock = self._notebook_locks.get(notebook_id)
             if lock is None:

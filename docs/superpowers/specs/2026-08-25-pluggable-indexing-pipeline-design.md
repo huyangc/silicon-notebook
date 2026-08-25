@@ -63,8 +63,13 @@ class IndexingPipelineDescriptor:
 ## 三、选择与权限
 
 - `notebooks` 加可空列 `indexing_pipeline`（NULL = 内建；追加迁移 + bump
-  `SCHEMA_VERSION`，双后端同修，正向 shadow 只加列不加表/FK/唯一面——迁移编号以
-  动工时的当前版本为准，不在本文预写）。
+  `SCHEMA_VERSION`，双后端同修）。~~正向 shadow 只加列不加表/FK/唯一面~~——
+  **实现期修订**：为兑现「重建完成前读旧产物/绝不混用」，v59/v37 增加了两张
+  durable staging 表（`indexing_pipeline_stages`/`indexing_pipeline_stage_sources`），
+  在 shadow manifest 里归 `TableClass.LOCAL_EPHEMERAL`：进 schema totality、
+  **不进** COPY/capture/apply 与停车分析（stage 行是单后端 worker 的租约状态；
+  其入向 FK 若进停车分析会让 `kg_build_jobs` 唯一面不可停车——目标侧恒空，排除
+  安全）。复制面不变量 82 表/113 面/12 槽不变。详见 CLAUDE.md/AGENTS.md schema 条。
 - 选择入口：笔记本设置区新增「索引管线」选择（只列 descriptor 的 label/description，
   不泄漏模块路径/endpoint）；能力档位 = **admin 档**（与内容六格同档：换管线是内容
   管理动作，不是 owner 独占的对外处置——与 `notebook:configure` 的安全论证无关），
@@ -72,7 +77,12 @@ class IndexingPipelineDescriptor:
 - 换选流程：确认弹窗写明「将重建全库索引」→ 落列 → 标记重建待执行 → 复用
   `mode="rebuild"` 全量重抽 + 检索索引重建的既有 job 链。**重建完成前检索继续用旧
   产物**（可用性优先于纯净，登记取舍）；重建中的单飞/终态纪律照 `kg_build_jobs` 现行。
-- 深拷贝：副本继承 `indexing_pipeline` 列值；目标部署缺该插件时按 §四的缺席规则处理。
+- 深拷贝：~~副本继承 `indexing_pipeline` 列值~~——**实现期修订（评审 P0）**：副本
+  的 published identity 住在 `unified_kg_state` 而它刻意不进深拷贝，继承 desired
+  会让副本天生 desired≠published、每次写入 409 直到手动全库重建；继承 job authority
+  更会让副本的状态投影 join 到源库正在跑的 job。故四列一律复位成内建（与「授权边/
+  share_token/agent_profile_id 不随副本走」同一条论证），副本由新 owner 重新选择并
+  显式重建；既有 chunk 是核心 schema、照常可读。
 
 ## 四、代次身份与缺席语义
 
