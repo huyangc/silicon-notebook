@@ -332,7 +332,8 @@ class LastRebuild:
 class KgState:
     """`unified_kg_state` —— 全部新鲜度判断的参照系。
 
-    ``present=False`` 表示这个 notebook 连 `unified_kg_state` 行都没有(从没写过 KG)。
+    ``present=False`` 表示这个 notebook 从没写过 KG——行缺失,或只有零历史的行
+    (出生即认证的出处证书行、graph 清空后为保 certificate 重铸的行)。
     此时所有计数都是 0、所有 seq 都是 0/-1,报告仍然出得来,只是每一格都在说「没有」。
     """
 
@@ -680,8 +681,18 @@ def _state_view(row: Any) -> KgState:
 
     行缺失(从没写过 KG)不是错误:报告照出,每一格都在说「没有」。此时
     ``community_seq`` 取 -1(与列的默认值一致 = 从没建过社区),其余取 0。
+
+    ``present`` 的语义是「有过 KG 历史」而**不是**「行存在」:自从
+    create_notebook 在建库事务里写出生行(出处证书 source_index_backfilled,
+    codex #601 R1 P2),零历史的行(kg_mutation_seq=0 且从未 rebuild)与行缺失
+    对本视图是同一件事——按行存在判会让每个新建笔记本在分析页谎报一次
+    「上次整理时的规模:0·0·0」,而前端正是用 ``present`` 区分「没有记录」
+    与「规模是 0」的(kg-analysis-view.tsx 的 state.present 分支)。同一判据
+    也覆盖 delete_notebook_kg 之后为保 certificate 重铸的行。
     """
-    if row is None:
+    if row is None or (
+        int(row["kg_mutation_seq"]) == 0 and not (row["last_rebuild_at"] or "")
+    ):
         return KgState(
             present=False,
             kg_mutation_seq=0,
