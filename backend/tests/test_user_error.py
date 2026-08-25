@@ -177,6 +177,12 @@ def test_no_bare_chinese_4xx_http_exception():
 # 写清楚为什么它仍然满足「中文用户文案」这个契约、以及谁在覆盖它。
 # 键用「文件::函数名」而不是行号——行号会被无关改动推移。
 ALLOWED_DYNAMIC_USER_ERROR = {
+    "app/api/ask_routes.py::_plugin_engine_http_error": (
+        "detail 是同函数内两个中文字面量的三元选择(「扩展引擎返回了无法核验的引用」/"
+        "「扩展引擎暂时无法完成回答,请重试」),按稳定错误码 exc.code 分类,异常原文"
+        "不外泄。与 auth_routes::register 同一形状;真实响应由 "
+        "tests/test_ask_engine_plugin.py 的引用准入用例覆盖。"
+    ),
     "app/api/auth_routes.py::register": (
         "detail 是同函数内两个中文字面量的三元选择（「用户名已被占用」/"
         "「用户名不合法」），异常原文只用于分类、不外泄。真实响应由 "
