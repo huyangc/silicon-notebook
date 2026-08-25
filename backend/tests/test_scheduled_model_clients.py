@@ -604,7 +604,8 @@ def test_scheduler_event_has_safe_correlation_and_no_content_or_endpoint():
 
 
 def test_probe_uses_the_named_service_scheduler_and_returns_safe_observation():
-    provider = _provider()
+    raw = _Chat()
+    provider = _provider(chat=raw)
     try:
         observation = provider.probe("chat", actor_id="admin", allow_half_open=True)
         assert observation.service_id == "chat"
@@ -615,6 +616,11 @@ def test_probe_uses_the_named_service_scheduler_and_returns_safe_observation():
         assert observation.support_id.startswith("mdl-")
         assert observation.latency_ms >= 0
         assert observation.occurred_at.endswith("+00:00")
+        assert raw.calls[0]["kwargs"] == {
+            "max_retries": 0,
+            "bypass_cache": True,
+            "thinking_mode": "disabled",
+        }
     finally:
         provider.close()
 

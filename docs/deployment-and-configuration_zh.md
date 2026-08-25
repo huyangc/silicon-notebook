@@ -370,6 +370,8 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 非 chat workload 或非法值会使配置校验失败，而非静默忽略。调用提交时会把解析后的模式
 与物理路由一起冻结，所以 TOML 热加载只影响新调用，不改变已排队调用。显式模式属于
 LLM 响应缓存身份；`provider_default` 请求保留历史缓存键。
+chat 健康检查不进入 workload 策略：它固定发送 `thinking_mode="disabled"`、绕过响应
+缓存，也不能通过 `[thinking]` 覆盖。
 
 可选生成问题索引使用后台 chat workload `chunk_question_generation` 与既有
 `chunk_embedding` workload；执行离线 `question-index` 前必须同时绑定。rollout mode

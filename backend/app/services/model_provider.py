@@ -1153,6 +1153,7 @@ class RuntimeModelProvider:
                     '{"ok":true}',
                     max_retries=0,
                     bypass_cache=True,
+                    thinking_mode="disabled",
                 ))
             if service.kind == "embedding":
                 return runtime.raw.embed_query("health check")
