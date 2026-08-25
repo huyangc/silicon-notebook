@@ -1089,6 +1089,17 @@ class SourceIngestionService:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
 
+    def _clear_state_of_present_source_tx(
+        self, db, source_id: str, notebook_id: str, *, clear_embeddings: bool
+    ) -> None:
+        """清旧态前在同一写事务内复核来源仍存在——并发删除若落在 parse 与这次写入
+        之间,这里响亮失败(KeyError → 上层按来源已删收尾),而不是把幽灵行写回。"""
+        if not self.sources.source_exists_for_update_tx(db, source_id, notebook_id):
+            raise KeyError(source_id)
+        self.clear_source_extraction_state(
+            db, source_id, notebook_id, clear_embeddings=clear_embeddings
+        )
+
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -1198,15 +1209,8 @@ class SourceIngestionService:
             with nullcontext():
                 # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
                 with self.write() as db:
-                    if not self.sources.source_exists_for_update_tx(
-                        db, source_id, source.notebook_id
-                    ):
-                        raise KeyError(source_id)
-                    self.clear_source_extraction_state(
-                        db,
-                        source_id,
-                        source.notebook_id,
-                        clear_embeddings=True,
+                    self._clear_state_of_present_source_tx(
+                        db, source_id, source.notebook_id, clear_embeddings=True
                     )
                     self.sources.replace_elements(
                         db,
