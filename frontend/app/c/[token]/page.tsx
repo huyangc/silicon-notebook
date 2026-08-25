@@ -47,9 +47,15 @@ type LoadState =
   | { kind: "error" }
   | { kind: "ready"; conversation: PublicConversationT };
 
-type PublicImagePreview = Readonly<{
+type PublicPreviewImage = Readonly<{
   image: PublicImageT;
   referenceLabel: string;
+}>;
+
+/** 打开预览时冻结的一份本轮附图清单 + 当前位置（与 Ask 侧 image-preview.ts 同构）。 */
+type PublicImagePreview = Readonly<{
+  items: readonly PublicPreviewImage[];
+  index: number;
 }>;
 
 const EVIDENCE_LABELS: Record<string, string> = {
@@ -181,6 +187,26 @@ function PublicTurnView({
   }, [citationRefs, imageIdsByCitationKey]);
   const refDomId = (key: string) => `ref-t${index}-${key}`;
 
+  // 本轮可以左右切换的全部附图。快照按 payload 顺序,与正文里图片区块的出现顺序
+  // 一致(区块按引用首次出现落位,而 turn.images 就是按引用顺序发下来的);正文内联
+  // 与旧分享兜底区互斥,所以一轮只有一份清单。标签取该图第一条引用键,与点开时看到
+  // 的那一条保持同一个来源,不另立第二套。
+  const previewGallery = useMemo<readonly PublicPreviewImage[]>(
+    () => turn.images.map((image) => ({
+      image,
+      referenceLabel: markdownCitationRefs[image.reference_keys?.[0] ?? ""]?.displayLabel || "",
+    })),
+    [turn.images, markdownCitationRefs],
+  );
+  const previewCurrent = previewImage?.items[previewImage.index] ?? null;
+  // 定位不到就退化成只有这一张的快照(切换控件随之消失),绝不改开另一张。
+  const openPreview = (image: PublicImageT, referenceLabel: string) => {
+    const at = previewGallery.findIndex((row) => row.image.alias === image.alias);
+    setPreviewImage(at >= 0
+      ? { items: previewGallery, index: at }
+      : { items: [{ image, referenceLabel }], index: 0 });
+  };
+
   useLayoutEffect(() => {
     if (previewImage) return;
     const targetKey = previewReturnFocusRef.current;
@@ -270,10 +296,7 @@ function PublicTurnView({
                   data-answer-image-preview-return={`${index}:${image.alias}`}
                   onClick={(event) => {
                     previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
-                    setPreviewImage({
-                      image,
-                      referenceLabel: markdownCitationRefs[citationKey]?.displayLabel || "",
-                    });
+                    openPreview(image, markdownCitationRefs[citationKey]?.displayLabel || "");
                   }}
                 />
               </li>
@@ -349,7 +372,7 @@ function PublicTurnView({
                   data-answer-image-preview-return={`${index}:legacy:${image.alias}`}
                   onClick={(event) => {
                     previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
-                    setPreviewImage({ image, referenceLabel: "" });
+                    openPreview(image, "");
                   }}
                 />
               </li>
@@ -365,14 +388,17 @@ function PublicTurnView({
         </p>
       )}
 
-      {previewImage && (
+      {previewImage && previewCurrent && (
         <ImagePreviewModal
-          referenceLabel={previewImage.referenceLabel}
+          referenceLabel={previewCurrent.referenceLabel}
+          imageIndex={previewImage.index}
+          imageCount={previewImage.items.length}
+          onSelectImage={(next) => setPreviewImage((prev) => (prev ? { ...prev, index: next } : prev))}
           onClose={() => setPreviewImage(null)}
         >
           <img
-            src={publicConversationImageUrl(token, previewImage.image.alias)}
-            alt={previewImage.image.caption || "本段附图"}
+            src={publicConversationImageUrl(token, previewCurrent.image.alias)}
+            alt={previewCurrent.image.caption || "本段附图"}
           />
         </ImagePreviewModal>
       )}

@@ -114,9 +114,80 @@ test("点击正文图片请求页面内放大，并保留 caption 作为预览 a
   await screen.findByRole("img", { name: "图 1：示意图" });
   await user.click(screen.getByRole("button", { name: "放大查看[1]的附图" }));
   expect(onPreviewImage).toHaveBeenCalledWith({
-    assetId: "asset-1",
-    alt: "图 1：示意图",
-    referenceLabel: "[1]",
+    items: [{ assetId: "asset-1", alt: "图 1：示意图", referenceLabel: "[1]" }],
+    index: 0,
+  });
+});
+
+function twoImageAnswer(): AskResponse {
+  const answer = "先说第一点 [k1]。\n\n再说第二点 [k2]。";
+  return {
+    answer_id: "answer-two-images",
+    conversation_id: "conversation-1",
+    conclusion: answer,
+    answer,
+    grounded: true,
+    anchors: [
+      {
+        key: "k1", object_id: "el-1", object_type: "element",
+        label: "一", name: "一", source_title: "来源甲", location_label: "p. 1",
+        source_id: "source-1", element_id: "el-1", tier: "personal",
+        images: [{ element_id: "img-el-1", asset_id: "asset-1", caption: "图 1" }],
+      },
+      {
+        key: "k2", object_id: "el-2", object_type: "element",
+        label: "二", name: "二", source_title: "来源乙", location_label: "p. 2",
+        source_id: "source-2", element_id: "el-2", tier: "personal",
+        images: [{ element_id: "img-el-2", asset_id: "asset-2", caption: "图 2" }],
+      },
+    ],
+    related_knowledge: [], citations: [], llm_mode: "reasoning",
+  };
+}
+
+// 顺序对账：左右切换走的画册（buildImageGallery，按引用首次出现排序）必须与
+// rehypeCitationImages 实际插进正文的图片区块顺序逐条一致。两处是各自独立推导出
+// 来的顺序，这条用例是它们唯一的对账点——分叉了，按「→」翻到的就不是正文里的
+// 下一张。
+test("正文多图时交出整本画册，顺序与正文里的图片区块一致", async () => {
+  const user = userEvent.setup();
+  const onPreviewImage = vi.fn();
+  const { container } = renderAnswer(twoImageAnswer(), { onPreviewImage });
+
+  await screen.findByRole("img", { name: "图 1" });
+  const openButtons = [...container.querySelectorAll(".answer-inline-image-open")];
+  expect(openButtons.map((button) => button.getAttribute("aria-label"))).toEqual([
+    "放大查看[1]的附图",
+    "放大查看[2]的附图",
+  ]);
+
+  const expectedItems = [
+    { assetId: "asset-1", alt: "图 1", referenceLabel: "[1]" },
+    { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
+  ];
+  await user.click(openButtons[1]);
+  expect(onPreviewImage).toHaveBeenCalledWith({ items: expectedItems, index: 1 });
+
+  await user.click(openButtons[0]);
+  expect(onPreviewImage).toHaveBeenLastCalledWith({ items: expectedItems, index: 0 });
+});
+
+// 引用浮层里的缩略图与正文图片是同一批资产,点开后左右切换必须能走遍整条回答,
+// 而不是被关在「这条引用的附图」里。
+test("引用浮层里的缩略图打开的也是整本画册", async () => {
+  const user = userEvent.setup();
+  const onPreviewImage = vi.fn();
+  renderAnswer(twoImageAnswer(), { onPreviewImage });
+
+  await user.click(screen.getByRole("button", { name: "[2]" }));
+  const popover = screen.getByRole("dialog");
+  await user.click(await within(popover).findByTitle("放大查看这张附图"));
+  expect(onPreviewImage).toHaveBeenCalledWith({
+    items: [
+      { assetId: "asset-1", alt: "图 1", referenceLabel: "[1]" },
+      { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
+    ],
+    index: 1,
   });
 });
 
@@ -130,9 +201,8 @@ test("引用浮层里的缩略图也只打开页面内预览，不跳来源详�
   const popover = screen.getByRole("dialog");
   await user.click(await within(popover).findByTitle("放大查看这张附图"));
   expect(onPreviewImage).toHaveBeenCalledWith({
-    assetId: "asset-1",
-    alt: "图 1：示意图",
-    referenceLabel: "[1]",
+    items: [{ assetId: "asset-1", alt: "图 1：示意图", referenceLabel: "[1]" }],
+    index: 0,
   });
   expect(onOpenSource).not.toHaveBeenCalled();
 });
@@ -169,13 +239,16 @@ test("引用浮层打开预览后暂停外部关闭，Escape 关闭预览并把�
         />
         {preview && (
           <ImagePreviewModal
-            referenceLabel={preview.referenceLabel}
+            referenceLabel={preview.items[preview.index].referenceLabel}
+            imageIndex={preview.index}
+            imageCount={preview.items.length}
+            onSelectImage={(index) => setPreview((prev) => (prev ? { ...prev, index } : prev))}
             onClose={() => {
               restorePendingRef.current = true;
               setPreview(null);
             }}
           >
-            <img src="blob:preview" alt={preview.alt} />
+            <img src="blob:preview" alt={preview.items[preview.index].alt} />
           </ImagePreviewModal>
         )}
       </>

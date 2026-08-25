@@ -69,6 +69,12 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // AST,jsdom 又不做布局(量出来的 rect 恒为 0),文本是唯一诚实的输入;组件那侧的结构前提
   // 由 tests/component/notebook-reader-actions.component.test.tsx 真渲染断言。
   "tests/guards/reader-badge-layout-guard.test.mjs",
+  // 同上,只读 globals.css:断言引用附图预览的缩放内容盒以 !important 铺满舞台。这条守卫
+  // 存在的理由就是一个真实缺陷——react-zoom-pan-pinch 把自己那份单类 CSS module 在运行时
+  // 注入 <head> 末尾,同特指度下它赢,声明好的居中规则整条失效,图片钉死在舞台左上角。
+  // 样式表没有可消费的 AST,jsdom 既不注入那份库样式也不做布局,文本是唯一诚实的输入;
+  // 切换行为那侧由 tests/component/image-preview-modal.component.test.tsx 真渲染断言。
+  "tests/guards/image-preview-stage-guard.test.mjs",
   // 同上，只读 globals.css：首个真实 workspace side-panel contribution 需要条件
   // 第三列、来源栏收起态与移动端单列。jsdom 不执行 grid 布局，样式表文本是唯一
   // 可验证输入；组件测试另行证明无可见 contribution 时 host 返回 exact null。

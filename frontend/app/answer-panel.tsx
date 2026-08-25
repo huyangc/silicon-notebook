@@ -36,7 +36,12 @@ import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { copyTextSafely } from "./copy-text";
 import { FormulaView } from "./formula-view";
-import type { AnswerImagePreviewRequest } from "./image-preview";
+import {
+  buildImageGallery,
+  imagePreviewRequest,
+  type AnswerImagePreviewItem,
+  type AnswerImagePreviewRequest,
+} from "./image-preview";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { unwrapStandaloneLatex } from "./math-markdown";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
@@ -788,7 +793,9 @@ function InlineCitationImages({
 }: {
   rows: readonly ResolvedCitationImage[];
   notebookId: string;
-  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** 点开这一张附图。左右切换用的画册由 AnswerView 统一定位（见其 imageGallery）,
+   *  所以这里只报「点的是哪一张」。没有承接方时图片仍显示但不可点击。 */
+  onPreviewImage?: (image: AnswerImagePreviewItem) => void;
 }) {
   if (rows.length === 0) return null;
   const labels = [...new Set(rows.map((row) => row.reference.displayLabel))];
@@ -852,7 +859,9 @@ function SelectedReferenceDetail({
    *  可选：不传时该按钮不渲染。 */
   onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
-  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** 点开这一张附图。左右切换用的画册由 AnswerView 统一定位（见其 imageGallery）,
+   *  所以这里只报「点的是哪一张」。没有承接方时图片仍显示但不可点击。 */
+  onPreviewImage?: (image: AnswerImagePreviewItem) => void;
 }) {
   const objectType = reference.anchor?.object_type || "";
   const title = referenceTitle(reference);
@@ -1032,8 +1041,9 @@ function CitationPopover({
   onOpenKnowledgeGraph?: (objectId?: string, sourceNotebookId?: string) => void;
   onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
-  /** 正文/引用浮层图片的页面内放大入口。没有承接方时图片仍显示但不可点击。 */
-  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** 点开这一张附图。左右切换用的画册由 AnswerView 统一定位（见其 imageGallery）,
+   *  所以这里只报「点的是哪一张」。没有承接方时图片仍显示但不可点击。 */
+  onPreviewImage?: (image: AnswerImagePreviewItem) => void;
   /** Keep the thumbnail trigger mounted while its page-level preview is open,
    * so the modal coordinator can return focus to a live element. */
   dismissSuspended?: boolean;
@@ -1344,6 +1354,19 @@ export function AnswerView({
     () => referenceByCitationKey(references),
     [references],
   );
+  // 本条回答里可以左右切换的全部附图，按正文显示顺序。正文图片区块与引用浮层
+  // 缩略图共用同一份——预览打开后左右切换走遍的就是它，而不是「点进去的那一组」。
+  const imageGallery = useMemo(
+    () => buildImageGallery(references.map((reference) => ({
+      displayLabel: reference.displayLabel,
+      images: referenceImages(reference),
+    }))),
+    [references],
+  );
+  // 定位只做一次:两个点击入口都只报「点的是哪一张」,由这里把它放回画册里。
+  const previewImage = onPreviewImage
+    ? (image: AnswerImagePreviewItem) => onPreviewImage(imagePreviewRequest(imageGallery, image))
+    : undefined;
   const renderCitationImages = (items: CitationImageSlotItem[]) => {
     if (!notebookId) return null;
     const rows = items.flatMap(({ citationKey, imageId }) => {
@@ -1356,7 +1379,7 @@ export function AnswerView({
       <InlineCitationImages
         rows={rows}
         notebookId={notebookId}
-        onPreviewImage={onPreviewImage}
+        onPreviewImage={previewImage}
       />
     );
   };
@@ -1513,7 +1536,7 @@ export function AnswerView({
             setCitePopover(null);
             onOpenSource(sourceId, elementId);
           } : undefined}
-          onPreviewImage={onPreviewImage}
+          onPreviewImage={previewImage}
           dismissSuspended={imagePreviewOpen}
         />
       )}
