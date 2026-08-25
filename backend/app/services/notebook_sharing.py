@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
+from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
 from app.models.notebooks import NotebookSummary
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.ports import (
@@ -146,6 +147,16 @@ class NotebookCopyService:
                 status="copying",
                 created_at=now,
                 updated_at=now,
+                # 索引管线四列一律复位成内建：published identity 住在 unified_kg_state
+                # 里而它刻意不进深拷贝，照抄 desired 选择会让副本天生 desired≠published、
+                # 每一次写入 409 直到手动全库重建；照抄 generation/job_id 更会让副本的
+                # 状态投影 join 到*源库*正在跑的 job 行。与「授权边/share_token/
+                # agent_profile_id 不随副本走」同一条论证——副本由新 owner 重新选择并
+                # 显式重建（既有 chunk 是核心 schema，照常可读）。
+                indexing_pipeline=None,
+                indexing_pipeline_version=BUILTIN_INDEXING_PIPELINE_VERSION,
+                indexing_pipeline_generation="",
+                indexing_pipeline_job_id="",
             )
             self._store.insert_copy_rows(
                 "notebooks", [notebook_row], chunk_size=chunk_size
