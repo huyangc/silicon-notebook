@@ -205,8 +205,12 @@ class SourceChunkingService:
                 ),
                 "",
             )
-        if not option.available:
-            raise IndexingPipelineUnavailableError(pipeline_id)
+        # 刻意**不**在这里对 availability 先行 raise(codex #602 R11 P1):探针在
+        # 准入之后、分块之前跌落时,raise 会在元素已替换之后被 process_source 吞掉,
+        # 留下 chunked_at 空缺/陈旧 chunk。host.build_chunks 自己对 unavailable 返回
+        # (None, "indexing_pipeline_unavailable"),走下面的回退分支——内建分块 +
+        # 可见「降级整理」徽标,可经重解析/重建恢复。注册面启动冻结,插件不可能在
+        # 进程内消失,上面的 option None 防御分支实际不可达。
         outcome = self.indexing_pipelines.build_chunks(
             pipeline_id,
             elements,
