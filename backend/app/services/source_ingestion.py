@@ -1173,13 +1173,23 @@ class SourceIngestionService:
         return ""
 
     def _admit_and_freeze_pipeline(self, notebook_id: str) -> tuple[str, str]:
-        """写入准入 + 同刻冻结管线身份,配对不可拆(codex #602 R5 P1)。
+        """注册 → 准入 → 冻结,三步配对不可拆(codex #602 R5/R14 P1)。
 
-        分块步凭这份冻结身份跨管线切换跑完(完整论证见
-        SourceChunkingService.published_identity 的 docstring);准入与冻结分开
-        取就会重新打开「过闸之后、冻结之前」的竞态窗口。"""
-        self.require_indexing_write(notebook_id)
-        return self.chunking.published_identity(notebook_id)
+        **注册严格先于准入读**(R14):若先准入后注册,worker 在两步之间让位时,
+        切换可在零计数下发布,worker 恢复后按冻结旧代覆盖新代产物。注册在前则
+        排空检查一旦读到零,任何后来者的准入必然读到 post-begin 的 pending 而
+        失败——发布绝不会漏掉一个已准入写者。准入失败配对递减;成功路径的递减
+        在 process_source 的 finally(与租约释放同点)。
+
+        分块/抽取步凭冻结身份跨切换跑完(论证见
+        SourceChunkingService.published_identity 的 docstring)。"""
+        self._note_notebook_ingestion(notebook_id, +1)
+        try:
+            self.require_indexing_write(notebook_id)
+            return self.chunking.published_identity(notebook_id)
+        except BaseException:
+            self._note_notebook_ingestion(notebook_id, -1)
+            raise
 
     def _clear_state_of_present_source_tx(
         self, db, source_id: str, notebook_id: str, *, clear_embeddings: bool
@@ -1205,10 +1215,9 @@ class SourceIngestionService:
         """
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
+        # 注册+准入+冻结在 helper 内配对完成;成功即已计入笔记本级在飞集,
+        # 由下面 finally 配对递减(codex #602 R13/R14 P1)。
         frozen_pipeline_identity = self._admit_and_freeze_pipeline(notebook_id)
-        # 准入通过即计入笔记本级在飞集(finally 配对递减):管线切换的发布器靠它
-        # 等存量已准入写收敛(codex #602 R13 P1;见 wait_for_ingestion_drain)。
-        self._note_notebook_ingestion(notebook_id, +1)
         now = self.now()
         pipeline_started = time.perf_counter()
 

@@ -788,3 +788,18 @@ def test_incremental_fallback_badge_survives_to_the_terminal_status(
     assert stored.startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX), stored
     refreshed = next(s for s in repo.list_sources(notebook.id) if s.id == sid)
     assert refreshed.indexing_chunk_fallback is True
+
+
+def test_admission_registers_before_it_reads_and_never_leaks_on_refusal(repo):
+    """注册严格先于准入读(codex #602 R14 P1):被拒的准入不留在飞计数泄漏——
+    否则一次 409 会让发布器永远等不到排空;而注册在前保证排空读到零之后,任何
+    后来者的准入必然读到 post-begin 的 pending 而失败。"""
+    ingestion = repo._runtime.source_ingestion
+    notebook = repo.create_notebook(NotebookCreate(name="atomic admission"))
+    _intent(repo, notebook.id)  # desired 置 pending → 准入必拒
+
+    with pytest.raises(IndexingPipelineUnavailableError):
+        ingestion._admit_and_freeze_pipeline(notebook.id)
+
+    # 失败路径配对递减:计数回零,排空立即通过。
+    assert ingestion.wait_for_ingestion_drain(notebook.id, 0.05) is True
