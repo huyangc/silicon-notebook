@@ -593,3 +593,38 @@ def test_frozen_identity_lets_inflight_parse_finish_across_a_switch(repo):
         source_id, frozen_identity=frozen
     )
     assert _chunk_texts(repo, notebook.id)[source_id] == ["inflight text"]
+
+
+def test_kg_only_pipeline_keeps_builtin_chunking_when_probe_flaps(repo, monkeypatch):
+    """KG-only 管线的探针中途跌落不拖死内建分块(codex #602 R9 P2):
+    overrides_chunking 是启动冻结的静态元数据,先于 availability 判定。"""
+    from dataclasses import replace
+
+    host = repo._runtime.source_chunking.indexing_pipelines
+    kg_only_down = replace(
+        host.option_row,
+        overrides_chunking=False,
+        overrides_kg_extraction=True,
+        available=False,
+    )
+    monkeypatch.setattr(host, "option", lambda pid: (
+        kg_only_down if pid == kg_only_down.pipeline_id else None
+    ))
+
+    notebook = repo.create_notebook(NotebookCreate(name="kg only flap"))
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE id=?",
+            (notebook.id,),
+        )
+        db.execute(
+            "UPDATE unified_kg_state SET indexing_pipeline_id='test.pipeline',"
+            "indexing_pipeline_version='v1' WHERE notebook_id=?",
+            (notebook.id,),
+        )
+    source_id = _insert_source(repo, notebook.id, "kg only text")
+
+    repo._runtime.source_chunking.build_chunks_for_source(source_id)
+
+    assert _chunk_texts(repo, notebook.id)[source_id] == ["kg only text"]
