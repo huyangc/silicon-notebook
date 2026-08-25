@@ -219,13 +219,34 @@ class SourceChunkingService:
             warning or "indexing_pipeline_chunk_failed",
         )
 
-    def build_chunks_for_source(self, source_id: str) -> None:
+    def published_identity(self, notebook_id: str) -> tuple[str, str]:
+        """当前已验证的 (pipeline_id, version)——给在飞解析在**入场准入时**冻结用。
+
+        codex #602 R5 P1:reparse 过了写入闸之后、分块之前发生的管线切换,若让
+        分块步重读实时状态,就会在破坏性清态**之后**被 pending 拒绝——来源裸奔
+        (无 chunk、无 KG)直到下一次手动重解析。在飞操作必须在冻结的 published
+        身份下跑完;切换 worker 的 source-snapshot CAS 会看见元素漂移并如实失败
+        (可重试),旧读不变量两侧都保住。"""
+        return self._pipeline_identity(notebook_id)
+
+    def build_chunks_for_source(
+        self,
+        source_id: str,
+        *,
+        frozen_identity: "tuple[str, str] | None" = None,
+    ) -> None:
         """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
-        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。"""
+        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。
+        `frozen_identity` 是调用方在入场准入时经 `published_identity` 冻结的身份;
+        给了就不再重读实时状态(见 published_identity 的 docstring)。"""
         src = self.sources.get_source(source_id)
         notebook_id = src.notebook_id
         with self._notebook_lock(notebook_id):
-            pipeline_id, _pipeline_version = self._pipeline_identity(notebook_id)
+            pipeline_id, _pipeline_version = (
+                frozen_identity
+                if frozen_identity is not None
+                else self._pipeline_identity(notebook_id)
+            )
             elements = self.chunks.source_elements_for_chunking(source_id)
             chunk_dicts, warning = self._chunk_dicts(elements, pipeline_id)
             rows = [ChunkWrite(id=self.new_id("ck"), text=c["text"],

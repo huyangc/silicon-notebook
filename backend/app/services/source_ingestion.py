@@ -1114,6 +1114,10 @@ class SourceIngestionService:
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
         self.require_indexing_write(notebook_id)
+        # 入场准入即冻结管线身份(codex #602 R5 P1):解析期间发生的管线切换不能
+        # 让本次在飞解析在破坏性清态之后才被 pending 拒绝——分块用这份冻结身份跑
+        # 完,切换 worker 的 source-snapshot CAS 会看见元素漂移并如实失败(可重试)。
+        frozen_pipeline_identity = self.chunking.published_identity(notebook_id)
         now = self.now()
         pipeline_started = time.perf_counter()
 
@@ -1246,7 +1250,9 @@ class SourceIngestionService:
                 # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
                 # best-effort: 失败不阻塞既有 parse->extract 流水线。
                 try:
-                    self.chunking.build_chunks_for_source(source_id)
+                    self.chunking.build_chunks_for_source(
+                        source_id, frozen_identity=frozen_pipeline_identity
+                    )
                 except Exception:
                     self.event_log.logger.exception("chunk build failed for %s", source_id)
                     # Chunk build may have committed chunks (source now parsed =>
