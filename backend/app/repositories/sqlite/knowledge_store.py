@@ -29,6 +29,26 @@ from app.repositories.sqlite.mount_sql import (
 _DELETE_OBJECT_BATCH_SIZE = 500
 
 
+def _retrieval_evidence(raw: object) -> list[Evidence]:
+    """Hydrate valid evidence cards while tolerating malformed legacy items."""
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = json.loads(raw or "[]")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    evidence: list[Evidence] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            evidence.append(Evidence(**item))
+        except (TypeError, ValueError):
+            continue
+    return evidence
+
+
 def _completion_generation_is_current(
     connection: sqlite3.Connection,
     notebook_id: str,
@@ -1053,7 +1073,7 @@ class KnowledgeStore:
         return [{
             "id": row["id"],
             "payload": json.loads(row["payload"] or "{}"),
-            "evidence": [Evidence(**item) for item in json.loads(row["evidence"] or "[]")],
+            "evidence": _retrieval_evidence(row["evidence"]),
             "status": row["status"],
             "owner": row["owner"],
             "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
@@ -1773,6 +1793,12 @@ class KnowledgeStore:
         is unindexed but source_id narrows the scan first (idx_knowledge_
         objects_source), acceptable at this feature's bounded scale."""
         connection.execute(
+            "DELETE FROM knowledge_object_sources WHERE object_id IN ("
+            "SELECT id FROM knowledge_objects WHERE source_id = ? "
+            "AND json_extract(payload, '$.row_id') = ?)",
+            (source_id, row_id),
+        )
+        connection.execute(
             "DELETE FROM knowledge_objects WHERE source_id = ? "
             "AND json_extract(payload, '$.row_id') = ?",
             (source_id, row_id),
@@ -1788,6 +1814,11 @@ class KnowledgeStore:
         than the row-scoped variant above, so a stale/orphaned tool (or a
         procedure whose column has since been deleted) never survives a full
         rebuild."""
+        connection.execute(
+            "DELETE FROM knowledge_object_sources WHERE object_id IN ("
+            "SELECT id FROM knowledge_objects WHERE source_id = ?)",
+            (source_id,),
+        )
         connection.execute(
             "DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,)
         )
@@ -2298,6 +2329,7 @@ class KnowledgeStore:
         allowed_source_ids: Sequence[str] | None = None,
         corpus_langs: Sequence[str] | None = None,
         allow_knn: bool = False,
+        authoritative_source_filter: bool = False,
     ) -> List[Dict]:
         """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
         [{object_id, name, score, match:'lexical'}]。q 空 → []。
@@ -2317,16 +2349,31 @@ class KnowledgeStore:
             if not source_ids:
                 return []
             placeholders = ",".join("?" for _ in source_ids)
-            rows = db.execute(
-                "SELECT object_id,name,bm25(kg_objects_fts) AS rank "
-                "FROM kg_objects_fts WHERE notebook_id=? "
-                "AND kg_objects_fts MATCH ? AND EXISTS ("
-                "SELECT 1 FROM knowledge_object_sources kos "
-                "WHERE kos.notebook_id=? AND kos.object_id=kg_objects_fts.object_id "
-                f"AND kos.source_id IN ({placeholders})) "
-                "ORDER BY rank LIMIT ?",
-                (notebook_id, match_query, notebook_id, *source_ids, k),
-            ).fetchall()
+            if authoritative_source_filter:
+                rows = db.execute(
+                    "SELECT f.object_id,f.name,bm25(kg_objects_fts) AS rank "
+                    "FROM kg_objects_fts f JOIN knowledge_objects ko ON ko.id=f.object_id "
+                    "WHERE f.notebook_id=? AND kg_objects_fts MATCH ? AND EXISTS ("
+                    "SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
+                    "THEN CASE WHEN json_type(ko.evidence)='array' "
+                    "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
+                    "WHERE ev.type='object' AND json_extract("
+                    "CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
+                    f"'$.source_id') IN ({placeholders})) "
+                    "ORDER BY rank LIMIT ?",
+                    (notebook_id, match_query, *source_ids, k),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT object_id,name,bm25(kg_objects_fts) AS rank "
+                    "FROM kg_objects_fts WHERE notebook_id=? "
+                    "AND kg_objects_fts MATCH ? AND EXISTS ("
+                    "SELECT 1 FROM knowledge_object_sources kos "
+                    "WHERE kos.notebook_id=? AND kos.object_id=kg_objects_fts.object_id "
+                    f"AND kos.source_id IN ({placeholders})) "
+                    "ORDER BY rank LIMIT ?",
+                    (notebook_id, match_query, notebook_id, *source_ids, k),
+                ).fetchall()
         else:
             rows = db.execute(
             "SELECT object_id, name, bm25(kg_objects_fts) AS rank "

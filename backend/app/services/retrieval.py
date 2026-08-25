@@ -44,6 +44,7 @@ from app.domain.retrieval import (
     W_SEMANTIC,
 )
 from app.models.common import Evidence  # compatibility re-export
+from app.repositories.lexical_query import spaced_model_name_parts
 from app.services.source_element_selection import (
     rank_source_chunks,
     rank_source_elements,
@@ -218,11 +219,35 @@ def _segment_tokens(chunk: str) -> List[str]:
     return tokens
 
 
+def _model_name_aliases(text: str) -> List[str]:
+    """Compact mixed letter/digit names across cosmetic separators.
+
+    Product/model names are routinely written both as ``Cosmos3`` and
+    ``Cosmos 3`` (also ``GPT-4o``/``GPT4o``).  Only mixed ASCII letter+digit
+    shapes qualify; ordinary prose words and section numbers gain no alias.
+    """
+    return [f"{stem}{suffix}".lower()
+            for stem, suffix in spaced_model_name_parts(text)]
+
+
 def _tokens(text: str) -> List[str]:
     cleaned = "".join(ch if ch.isalnum() else " " for ch in (text or "").lower())
     tokens: List[str] = []
     for chunk in cleaned.split():
         tokens.extend(_segment_tokens(chunk))
+    aliases = _model_name_aliases(text)
+    if aliases:
+        # The separated spelling is one model-name unit, not two independent
+        # query requirements.  Drop its component runs from the loose basis so
+        # ``Cosmos 3`` and ``Cosmos3`` both receive full (not half) coverage.
+        components = {
+            part.lower()
+            for match in spaced_model_name_parts(text)
+            for part in match
+            if len(part) > 1
+        }
+        tokens = [token for token in tokens if token not in components]
+        tokens.extend(aliases)
     return tokens
 
 

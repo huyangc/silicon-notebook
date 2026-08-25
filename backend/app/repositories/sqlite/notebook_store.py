@@ -252,6 +252,18 @@ class NotebookStore:
                     purpose_auto,
                 ),
             )
+            # A brand-new notebook has an empty, therefore complete, KG
+            # provenance reverse index.  Every online KG writer maintains
+            # knowledge_object_sources transactionally from this point on.
+            # Historical databases and deep copies do not pass through this
+            # creation seam, so their marker remains false/unknown and readers
+            # use the authoritative compatibility path.
+            db.execute(
+                "INSERT INTO unified_kg_state "
+                "(notebook_id,dirty,kg_mutation_seq,source_index_backfilled,updated_at) "
+                "VALUES (?,0,0,1,?)",
+                (notebook_id, now),
+            )
         return notebook_id
 
     def get_row(

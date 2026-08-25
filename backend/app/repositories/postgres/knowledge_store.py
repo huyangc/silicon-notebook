@@ -57,6 +57,22 @@ _GRAPH_RESET_TABLES = frozenset({
 _DELETE_OBJECT_BATCH_SIZE = 500
 
 
+def _retrieval_evidence(raw: object) -> list[Evidence]:
+    """Hydrate valid evidence cards while tolerating malformed legacy items."""
+    items = json_value(raw, [])
+    if not isinstance(items, list):
+        return []
+    evidence: list[Evidence] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            evidence.append(Evidence(**item))
+        except (TypeError, ValueError):
+            continue
+    return evidence
+
+
 def _lexical_candidate_union(
     db: Any,
     notebook_id: str,
@@ -70,6 +86,7 @@ def _lexical_candidate_union(
     allowed_source_ids: Sequence[str] | None = None,
     corpus_langs: Sequence[str] | None = None,
     allow_knn: bool = False,
+    authoritative_source_filter: bool = False,
 ) -> list[dict]:
     """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query.
 
@@ -99,6 +116,7 @@ def _lexical_candidate_union(
             db, notebook_id, terms, per_term_limit,
             list(dict.fromkeys(allowed_source_ids)),
             allow_knn=allow_knn,
+            authoritative_source_filter=authoritative_source_filter,
         )
     if not candidates:
         return []
@@ -1226,7 +1244,7 @@ class KnowledgeStore:
         return [{
             "id": row["id"],
             "payload": json_value(row["payload"], {}),
-            "evidence": [Evidence(**item) for item in json_value(row["evidence"], [])],
+            "evidence": _retrieval_evidence(row["evidence"]),
             "status": row["status"],
             "owner": row["owner"],
             "last_reviewed": iso_timestamp(row["last_reviewed"])
@@ -1976,6 +1994,12 @@ class KnowledgeStore:
         is unindexed but source_id narrows the scan first (idx_knowledge_
         objects_source), acceptable at this feature's bounded scale."""
         connection.execute(
+            "DELETE FROM knowledge_object_sources WHERE object_id IN ("
+            "SELECT id FROM knowledge_objects WHERE source_id = %s "
+            "AND (payload ->> 'row_id') COLLATE \"C\" = %s)",
+            (source_id, row_id),
+        )
+        connection.execute(
             "DELETE FROM knowledge_objects WHERE source_id = %s "
             "AND (payload ->> 'row_id') COLLATE \"C\" = %s",
             (source_id, row_id),
@@ -1991,6 +2015,11 @@ class KnowledgeStore:
         than the row-scoped variant above, so a stale/orphaned tool (or a
         procedure whose column has since been deleted) never survives a full
         rebuild."""
+        connection.execute(
+            "DELETE FROM knowledge_object_sources WHERE object_id IN ("
+            "SELECT id FROM knowledge_objects WHERE source_id = %s)",
+            (source_id,),
+        )
         connection.execute(
             "DELETE FROM knowledge_objects WHERE source_id = %s", (source_id,)
         )
@@ -2440,6 +2469,7 @@ class KnowledgeStore:
         allowed_source_ids: Sequence[str] | None = None,
         corpus_langs: Sequence[str] | None = None,
         allow_knn: bool = False,
+        authoritative_source_filter: bool = False,
     ) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
@@ -2455,6 +2485,7 @@ class KnowledgeStore:
             allowed_source_ids=allowed_source_ids,
             corpus_langs=corpus_langs,
             allow_knn=allow_knn,
+            authoritative_source_filter=authoritative_source_filter,
         )
 
     @staticmethod

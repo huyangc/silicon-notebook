@@ -630,6 +630,12 @@ class SQLiteMaintenanceAdapter:
                     now,
                 ),
             )
+            self._runtime.knowledge.replace_object_sources(
+                db,
+                object_id,
+                notebook_id,
+                json.dumps(evidence, ensure_ascii=False),
+            )
         self.invalidate_unified_cache(notebook_id)
         return object_id
 

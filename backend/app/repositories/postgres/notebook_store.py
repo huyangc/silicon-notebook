@@ -222,6 +222,15 @@ class NotebookStore:
                     0 if purpose else 1,
                 ),
             )
+            # Empty is a complete provenance index.  Online KG mutations keep
+            # knowledge_object_sources coherent; legacy imports/copies bypass
+            # this seam and intentionally retain an unknown (false) marker.
+            connection.execute(
+                "INSERT INTO unified_kg_state"
+                "(notebook_id,dirty,kg_mutation_seq,source_index_backfilled,updated_at) "
+                "VALUES (%s,0,0,1,%s)",
+                (notebook_id, now),
+            )
         return notebook_id
 
     def get_row(self, notebook_id: str, *, include_copying: bool = False) -> dict:

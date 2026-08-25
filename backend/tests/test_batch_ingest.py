@@ -2495,6 +2495,15 @@ def _seed_node_with_evidence(repo, nb_id, oid, source_ids):
             (oid, nb_id, "concept", "active",
              json.dumps({"name": f"name-{oid}"}),
              json.dumps(evidence), source_ids[0] if source_ids else "", now, now))
+        # This helper deliberately bypasses the online KG writer and models a
+        # historical row.  New notebooks are born with a certified empty
+        # reverse index, so the raw legacy fixture must explicitly invalidate
+        # that certificate before exercising the offline backfill.
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?",
+            (nb_id,),
+        )
 
 
 def test_run_backfill_source_index_populates_reverse_index_and_marks(repo):

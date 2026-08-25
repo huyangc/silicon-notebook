@@ -839,6 +839,7 @@ class CandidateRetrievalService(_RetrievalState):
         corpus_langs,
         allowed_source_ids=None,
         allow_knn: bool = False,
+        authoritative_source_filter: bool = False,
     ) -> list[dict]:
         """Fail-open bounded lexical object recall shared by KG and relations.
 
@@ -869,6 +870,7 @@ class CandidateRetrievalService(_RetrievalState):
                 db, notebook_id, query, k=recall,
                 allowed_source_ids=allowed_source_ids,
                 corpus_langs=corpus_langs,
+                authoritative_source_filter=authoritative_source_filter,
             )
         except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
             self.event_log.emit({
@@ -1293,6 +1295,14 @@ class CandidateRetrievalService(_RetrievalState):
         per-sub-query `prefer` bias."""
         # ask_stage 埋点(纯观测):阶段墙钟拆解,生产诊断 20-30s 级检索用。
         t0 = time.perf_counter()
+        from app.core.query_syntax import retrieval_query_head
+
+        # Candidate generation and the semantic query retain the reviewed
+        # contract so confirmed clarifications/constraints still influence
+        # recall.  Only keyword/RRF coverage uses the concise direction: the
+        # repeated envelope is retrieval context, not dozens of independent
+        # keyword requirements.
+        scoring_query = retrieval_query_head(query)
         # gate i (type widening): flag-off / non-knowhow ⇒ historical filter,
         # byte-identical. flag-on + knowhow present ⇒ column-name types join
         # the fetch set (see _scored_types).
@@ -1303,6 +1313,11 @@ class CandidateRetrievalService(_RetrievalState):
         # non-knowhow ⇒ empty ⇒ pure no-op, no bridge query, no injection.
         from app.services.source_scope import scoped_allowed_source_ids
 
+        # Keep the caller's intent separate from the frozen request ceiling.
+        # ``scoped_allowed_source_ids`` intentionally returns a tuple for both
+        # a genuinely narrowed run and an API-resolved "all selected" snapshot;
+        # candidate routing must not infer channel safety from that shape.
+        explicit_source_filter = allowed_source_ids is not None
         allowed_source_ids = scoped_allowed_source_ids(
             notebook_id, allowed_source_ids
         )
@@ -1312,6 +1327,13 @@ class CandidateRetrievalService(_RetrievalState):
         )
         if source_filter is not None and not source_filter:
             return []
+        source_candidates_restricted = bool(
+            source_filter is not None
+            and (
+                explicit_source_filter
+                or self._unsafe_source_scope_restricted(notebook_id)
+            )
+        )
         knowhow_on = bool(set(type_list) & set(knowhow_types)) and source_filter is None
         query_vector = self._embed_query(query)
         t_embed = time.perf_counter()
@@ -1320,26 +1342,41 @@ class CandidateRetrievalService(_RetrievalState):
         cand_sims: Optional[dict[str, float]] = None
         candidate_filter: Optional[set[str]] = None
         lexical_candidate_count = 0
-        if source_filter is not None:
-            # Selected-source runs never enter a notebook-wide fallback.  The
-            # indexed provenance table gates completeness, while lexical SQL
-            # applies the source predicate before LIMIT.  This path deliberately
-            # skips the notebook-wide ANN until artifacts carry an aligned
-            # source partition, so out-of-scope labels cannot occupy its top-K.
+        source_index_fallback = False
+        if source_candidates_restricted:
+            # Truly source-restricted runs never enter a notebook-wide fallback.
+            # Lexical SQL applies the source predicate before LIMIT; a ready
+            # reverse index supplies the fast predicate, while an unknown
+            # legacy marker reads authoritative evidence instead.  This path
+            # deliberately skips notebook-wide ANN until artifacts carry an
+            # aligned source partition, so out-of-scope labels cannot occupy
+            # its top-K.
             # 语言探针在外层连接之前(冷缓存时它自己要开连接;嵌套获取会在并发
             # 下坐死连接池)。这条是**选定来源**分支:词法是它唯一的候选来源,
             # 一律不过滤(见 `_lexical_corpus_langs` 的 source_scoped 说明)。
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=True)
             with self._connect() as db:
-                if not self.knowledge.source_index_backfilled(db, notebook_id):
-                    return []
+                source_index_fallback = not self.knowledge.source_index_backfilled(
+                    db, notebook_id
+                )
                 lexical_hits = self._lexical_object_hits(
                     db, notebook_id, query, self.settings.chunk_recall,
                     site="kg_source_scoped_fts",
                     corpus_langs=corpus_langs,
                     allowed_source_ids=source_filter,
+                    # False means legacy/unknown, not "there are no rows".
+                    # Read authoritative evidence before LIMIT instead of
+                    # silently returning an empty candidate set.
+                    authoritative_source_filter=source_index_fallback,
                 )
+            if source_index_fallback:
+                self.event_log.emit({
+                    "kind": "source_index_fallback",
+                    "notebook_id": notebook_id,
+                    "site": "kg_source_scoped_fts",
+                    "candidate_count": len(lexical_hits),
+                })
             lexical_ids = [hit["object_id"] for hit in lexical_hits]
             lexical_candidate_count = len(lexical_ids)
             cand_sims = {}
@@ -1358,15 +1395,15 @@ class CandidateRetrievalService(_RetrievalState):
             elif getattr(idx, "ann_labels", None):
                 ann_sims = self._kg_object_candidates(
                     notebook_id, query_vector, idx, self.settings.chunk_recall)
-                # `source_filter is None` on this branch; spelled out rather
-                # than assumed so restructuring cannot silently start gating a
-                # source-scoped run.
+                # This is a whole-notebook candidate branch.  A frozen
+                # all-selected ceiling may still be present, but it applies
+                # only at hydration/result boundaries after the ANN+FTS union.
                 corpus_langs = self._lexical_corpus_langs(
-                    notebook_id, source_scoped=source_filter is not None)
+                    notebook_id, source_scoped=False)
                 # KNN 判定与语言探针同一约定:连接之前算(它读 copy-stats 的
                 # 版本信号,自己要开连接)。source_filter 显式传入,与上面同理。
                 allow_knn = self._lexical_knn_allowed(
-                    notebook_id, allowed_source_ids=source_filter)
+                    notebook_id, allowed_source_ids=None)
                 with self._connect() as db:
                     lexical_hits = self._lexical_object_hits(
                         db,
@@ -1390,9 +1427,13 @@ class CandidateRetrievalService(_RetrievalState):
             # 全部对象(含 delta),候选的语义分仍由下方按候选 evidence 元素向量
             # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
             corpus_langs = self._lexical_corpus_langs(
-                notebook_id, source_scoped=source_filter is not None)
+                notebook_id, source_scoped=source_candidates_restricted)
             allow_knn = self._lexical_knn_allowed(
-                notebook_id, allowed_source_ids=source_filter)
+                notebook_id,
+                allowed_source_ids=(
+                    source_filter if source_candidates_restricted else None
+                ),
+            )
             with self._connect() as db:
                 lex = self._lexical_object_hits(
                     db,
@@ -1420,7 +1461,9 @@ class CandidateRetrievalService(_RetrievalState):
             # chunk vectors → {ko_id: sim}. Computed once, folded into whichever
             # scoring path this retrieval is on. Empty (no cost) unless knowhow_on.
             knowhow_sims = (
-                self._knowhow_ko_candidates(db, notebook_id, query, query_vector)
+                self._knowhow_ko_candidates(
+                    db, notebook_id, query, query_vector
+                )
                 if knowhow_on else {})
             if knowhow_sims and candidate_filter is not None:
                 # Bounded path: union into the candidate set BEFORE id_filter so
@@ -1505,7 +1548,9 @@ class CandidateRetrievalService(_RetrievalState):
         t_hydrate = time.perf_counter()
         penalty = self.settings.kg_isolated_rank_penalty
         if self.settings.retrieval_rrf_enabled:
-            scored = self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
+            scored = self._rrf_scored(
+                scoring_query, kg_objs, knowledge_sims, element_sims
+            )
         else:
             scored = []
             for t in type_list:
@@ -1513,7 +1558,7 @@ class CandidateRetrievalService(_RetrievalState):
                 if not objs:
                     continue
                 scored.extend(score_knowledge(
-                    query, objs, t, query_vector, None, None,
+                    scoring_query, objs, t, query_vector, None, None,
                     element_sims=element_sims, knowledge_sims=knowledge_sims,
                     w_keyword=w_keyword, w_semantic=w_semantic,
                     keyword_token_sets=token_sets,
@@ -1542,6 +1587,8 @@ class CandidateRetrievalService(_RetrievalState):
             "candidates": len(all_kg_objs),
             "ann_gated": candidate_filter is not None,
             "lexical_candidates": lexical_candidate_count,
+            "source_index_fallback": source_index_fallback,
+            "source_candidates_restricted": source_candidates_restricted,
         })
         return scored
     def _federated_retrieve_impl(
@@ -1578,20 +1625,11 @@ class CandidateRetrievalService(_RetrievalState):
             for source_notebook_id, source_id in allowed_source_keys:
                 if source_notebook_id and source_id:
                     sources_by_notebook.setdefault(source_notebook_id, []).append(source_id)
-        from app.services.source_scope import (
-            notebook_in_scope, scoped_allowed_source_ids,
-        )
+        from app.services.source_scope import notebook_in_scope
 
         for nid in notebook_ids:
-            # Library dimension, stated in the loop that owns it. Belt and
-            # braces: `scoped_allowed_source_ids` below already answers `()`
-            # for an unchecked library and this loop already `continue`s on a
-            # falsy allow-list, so no behavioural test can tell the two apart
-            # -- deleting either one alone changes nothing observable (deleting
-            # BOTH reopens the library). It stays because the library question
-            # is the one this loop is being asked, and reading it off the
-            # source-allow-list's emptiness is a `None`-vs-`()` subtlety one
-            # refactor away from silently reopening an unchecked library.
+            # Library dimension is decided here; local source ceilings are
+            # intersected exactly once inside `_retrieve_scored`.
             if not notebook_in_scope(nid):
                 continue
             explicit_allowed = (
@@ -1600,13 +1638,14 @@ class CandidateRetrievalService(_RetrievalState):
             )
             if sources_by_notebook is not None and not explicit_allowed:
                 continue
-            allowed = scoped_allowed_source_ids(nid, explicit_allowed)
-            if allowed is not None:
-                if not allowed:
-                    continue
+            # Preserve whether the producer supplied a real allow-list.  The
+            # inner retrieval owns the ContextVar ceiling intersection; doing
+            # it here first would turn a default all-selected snapshot into an
+            # apparently explicit filter and incorrectly disable ANN.
+            if explicit_allowed is not None:
                 hits = self._retrieve_scored(
                     nid, query, types=types, w_keyword=w_keyword,
-                    w_semantic=w_semantic, allowed_source_ids=allowed,
+                    w_semantic=w_semantic, allowed_source_ids=explicit_allowed,
                 )
             else:
                 hits = self._retrieve_scored(

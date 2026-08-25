@@ -472,7 +472,18 @@ class KnowledgeLifecycleService:
         elements. Returns {table: rows_deleted}."""
         self.get_notebook(notebook_id)
         with self._write() as db:
+            source_index_was_certified = self.knowledge.source_index_backfilled(
+                db, notebook_id
+            )
             counts = self.knowledge.delete_notebook_graph_rows(db, notebook_id)
+            # delete_notebook_graph_rows removes unified_kg_state while keeping
+            # Memory/Knowhow objects and their forward-maintained provenance.
+            # Preserve an existing completeness certificate, but never promote
+            # a legacy/unknown notebook merely because its user-document graph
+            # was cleared: historical hidden projections may also predate
+            # forward maintenance.
+            if source_index_was_certified:
+                self.knowledge.mark_source_index_backfilled(db, notebook_id)
         self._invalidate_unified_cache(notebook_id)
         # delete_notebook_graph_rows drops the unified_kg_state row, so the count
         # cache's seq reads 0 afterward — which ALIASES with a genuine seq 0 (e.g.

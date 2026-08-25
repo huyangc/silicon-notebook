@@ -66,6 +66,62 @@ def _legacy_scan_oracle(repo, notebook_id: str, source_id: str) -> set:
     return out
 
 
+def test_new_notebook_starts_with_complete_empty_source_index(repo):
+    nb = repo.create_notebook(NotebookCreate(name="new"))
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, nb.id)
+
+    source_id = _insert_source(repo, nb.id)
+    repo.store_kg(nb.id, source_id, [{
+        "local_id": "A",
+        "object_type": "concept",
+        "payload": {"name": "Cosmos 3"},
+        "evidence": [_ev(source_id)],
+    }], [])
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, nb.id)
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_object_sources "
+            "WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()["c"] == 1
+
+
+def test_smoke_seed_maintains_certified_source_index(repo):
+    nb = repo.create_notebook(NotebookCreate(name="seed"))
+    source_id = _insert_source(repo, nb.id)
+    object_id = repo.maintenance.seed_rule_object(
+        nb.id,
+        payload={"name": "seeded rule"},
+        evidence=[_ev(source_id)],
+        source_id=source_id,
+    )
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, nb.id)
+        row = db.execute(
+            "SELECT source_id FROM knowledge_object_sources "
+            "WHERE notebook_id=? AND object_id=?",
+            (nb.id, object_id),
+        ).fetchone()
+    assert row["source_id"] == source_id
+
+
+def test_graph_clear_preserves_unknown_source_index_state(repo):
+    """Clearing user KG cannot certify surviving historical projections."""
+    nb = repo.create_notebook(NotebookCreate(name="legacy"))
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?",
+            (nb.id,),
+        )
+
+    repo.delete_notebook_kg(nb.id)
+
+    with repo._connect() as db:
+        assert not repo._source_index_backfilled(db, nb.id)
+
+
 def test_reverse_lookup_matches_legacy_scan_oracle_multi_source_evidence(repo):
     """An object whose evidence spans TWO sources (a merged object) must be
     found by a lookup on EITHER source_id — same as the legacy scan."""
@@ -156,7 +212,11 @@ def test_unbackfilled_lookup_only_expands_valid_top_level_arrays(repo):
                 ("top-string", nb.id, json.dumps(s1), now, now),
                 ("top-number", nb.id, "3", now, now),
                 ("top-null", nb.id, "null", now, now),
-            ],
+                ],
+            )
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 WHERE notebook_id=?",
+            (nb.id,),
         )
     with repo._write() as db:
         found = repo._find_stale_knowledge_ids_for_source(db, s1, nb.id)
@@ -262,7 +322,11 @@ def test_unbackfilled_clear_advances_the_legacy_scan_cursor(repo):
             [
                 (f"legacy-{idx:04d}", nb.id, json.dumps([_ev(s1)]), now, now)
                 for idx in range(1100)
-            ],
+                ],
+            )
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 WHERE notebook_id=?",
+            (nb.id,),
         )
         db.set_trace_callback(statements.append)
         repo._clear_source_extraction_state(db, s1, nb.id, clear_embeddings=False)
