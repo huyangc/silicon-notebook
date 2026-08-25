@@ -175,6 +175,97 @@ class Settings(BaseSettings):
         le=30,
         validation_alias="ASK_GAP_CONSULT_TIMEOUT_SECONDS",
     )
+    # Deployment Ask engines receive only bounded core-owned ports. These
+    # values govern result-changing retrieval/model budgets and plugin-authored
+    # trace egress, so none of their call sites may substitute literals.
+    ask_plugin_engine_retrieval_max_k: int = Field(
+        20, ge=1, le=500,
+        validation_alias="ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K",
+    )
+    ask_plugin_engine_search_max_calls: int = Field(
+        8, ge=1, le=100,
+        validation_alias="ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS",
+    )
+    ask_plugin_engine_evidence_max_chars: int = Field(
+        4000, ge=100, le=50_000,
+        validation_alias="ASK_PLUGIN_ENGINE_EVIDENCE_MAX_CHARS",
+    )
+    ask_plugin_engine_prompt_max_chars: int = Field(
+        32_000, ge=1, le=1_000_000,
+        validation_alias="ASK_PLUGIN_ENGINE_PROMPT_MAX_CHARS",
+    )
+    ask_plugin_engine_model_max_calls: int = Field(
+        4, ge=1, le=32,
+        validation_alias="ASK_PLUGIN_ENGINE_MODEL_MAX_CALLS",
+    )
+    ask_plugin_engine_trace_max_steps: int = Field(
+        32, ge=1, le=256,
+        validation_alias="ASK_PLUGIN_ENGINE_TRACE_MAX_STEPS",
+    )
+    ask_plugin_engine_trace_label_max_chars: int = Field(
+        160, ge=1, le=1000,
+        validation_alias="ASK_PLUGIN_ENGINE_TRACE_LABEL_MAX_CHARS",
+    )
+    ask_plugin_engine_trace_detail_max_chars: int = Field(
+        1000, ge=1, le=10_000,
+        validation_alias="ASK_PLUGIN_ENGINE_TRACE_DETAIL_MAX_CHARS",
+    )
+
+    # A deployment indexing strategy is pure computation, but its iterable is
+    # still untrusted input.  Per-source proposal rails and whole-notebook
+    # staging rails bound validation before the atomic publication transaction.
+    indexing_pipeline_max_proposals_per_source: int = Field(
+        2000, ge=1, le=100_000,
+        validation_alias="INDEXING_PIPELINE_MAX_PROPOSALS_PER_SOURCE",
+    )
+    indexing_pipeline_max_text_chars: int = Field(
+        20_000, ge=1, le=1_000_000,
+        validation_alias="INDEXING_PIPELINE_MAX_TEXT_CHARS",
+    )
+    indexing_pipeline_max_element_refs: int = Field(
+        500, ge=1, le=100_000,
+        validation_alias="INDEXING_PIPELINE_MAX_ELEMENT_REFS",
+    )
+    indexing_pipeline_rebuild_max_proposals: int = Field(
+        50_000, ge=1, le=2_000_000,
+        validation_alias="INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS",
+    )
+    indexing_pipeline_rebuild_max_text_chars: int = Field(
+        100_000_000, ge=1, le=2_000_000_000,
+        validation_alias="INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS",
+    )
+    indexing_pipeline_kg_max_messages: int = Field(
+        8, ge=1, le=64,
+        validation_alias="INDEXING_PIPELINE_KG_MAX_MESSAGES",
+    )
+    indexing_pipeline_kg_prompt_max_chars: int = Field(
+        64_000, ge=1, le=2_000_000,
+        validation_alias="INDEXING_PIPELINE_KG_PROMPT_MAX_CHARS",
+    )
+    indexing_pipeline_kg_schema_hint_max_chars: int = Field(
+        16_000, ge=0, le=250_000,
+        validation_alias="INDEXING_PIPELINE_KG_SCHEMA_HINT_MAX_CHARS",
+    )
+    indexing_pipeline_kg_max_objects_per_window: int = Field(
+        512, ge=1, le=10_000,
+        validation_alias="INDEXING_PIPELINE_KG_MAX_OBJECTS_PER_WINDOW",
+    )
+    indexing_pipeline_kg_max_edges_per_window: int = Field(
+        1024, ge=0, le=20_000,
+        validation_alias="INDEXING_PIPELINE_KG_MAX_EDGES_PER_WINDOW",
+    )
+    indexing_pipeline_kg_max_evidence_handles: int = Field(
+        32, ge=1, le=1_000,
+        validation_alias="INDEXING_PIPELINE_KG_MAX_EVIDENCE_HANDLES",
+    )
+    indexing_pipeline_kg_max_steps_per_object: int = Field(
+        128, ge=0, le=2_000,
+        validation_alias="INDEXING_PIPELINE_KG_MAX_STEPS_PER_OBJECT",
+    )
+    indexing_pipeline_kg_name_max_chars: int = Field(
+        8_000, ge=1, le=100_000,
+        validation_alias="INDEXING_PIPELINE_KG_NAME_MAX_CHARS",
+    )
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(

@@ -1691,9 +1691,9 @@ The offline builder requires chat workload `chunk_question_generation` and embed
 
 ### Ids vs. display names
 
-The ids above (`chunk` / `reasoning` / `graph`, and the group ids `general` / `strict`) are the **protocol**: they are what `POST /ask` accepts, what persisted sessions and bookmarks store, and what the backend registry `backend/app/services/ask_modes.py` declares. They are stable and are not renamed for cosmetic reasons.
+The built-in ids above (`chunk` / `reasoning` / `graph`, and the group ids `general` / `strict`) are the **protocol**: they are what `POST /ask` accepts, what persisted sessions and bookmarks store, and what the backend registry `backend/app/services/ask_modes.py` declares. They are stable and are not renamed for cosmetic reasons. A deployment `ask.engine` adds namespaced mode ids beginning with its own plugin id plus `.`; those ids are durable for that engine but are discovered at runtime, never compiled into the public frontend.
 
-What the Ask panel *shows* is a separate, UI-only layer owned by the front-end registry `frontend/app/ask-modes.ts`:
+What the Ask panel *shows* is a separate, UI-only layer. `frontend/app/ask-modes.ts` remains the static truth for the three built-ins and merges the sanitized deployment projection returned by `GET /api/ask-modes` at runtime:
 
 | Protocol id | Ask-panel display name |
 |---|---|
@@ -1701,8 +1701,9 @@ What the Ask panel *shows* is a separate, UI-only layer owned by the front-end r
 | group `strict` (what the picker offers; its default engine is `reasoning`) | 深入分析 |
 | `reasoning` | 逐步推理 |
 | `graph` | 关联追溯 |
+| runtime group `extension` | 扩展功能 |
 
-`groupLabel()` / `modeLabel()` in that registry are the only read path: no other front-end file may hardcode a display name, and prose that mentions one interpolates it. `ask-modes.test.mjs` enforces both halves — it recursively scans `frontend/app` and fails if a current display name appears outside the registry, or if a retired name (严格推理 / 深挖推理 / 图谱多跳) reappears. Renaming a display name is therefore a one-line registry edit that changes no id, request/response payload, or stored session; `scripts/check_ask_modes_contract.py` separately pins the id set across the two stacks.
+`groupLabel()` / `modeLabel()` in that registry are the only read path for built-in copy: no other front-end file may hardcode a built-in display name, and prose that mentions one interpolates it. Plugin labels/descriptions come only from the live sanitized projection. `ask-modes.test.mjs` enforces both halves — it recursively scans `frontend/app` and fails if a current built-in display name appears outside the registry, or if a retired name (严格推理 / 深挖推理 / 图谱多跳) reappears. Renaming a built-in display name is therefore a one-line registry edit that changes no id, request/response payload, or stored session; `scripts/check_ask_modes_contract.py` separately pins the built-in id set across the two stacks and rejects compiled plugin-mode literals.
 
 **`chunk` — chunk-native, with optional chunk×graph mix.**
 - *Baseline:* large chunk recall (`CHUNK_RECALL`) → MMR / multi-sub-query quota diversity selection (`CHUNK_MMR_K`) → long-context synthesis. The KG is not touched.
@@ -2254,6 +2255,54 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 `/api/extensions/{plugin_id}/…` is the only mount point for a deployment plugin's own HTTP routes: a router-level session dependency means no anonymous face, and the router factory receives an eight-field `PluginRouteContext` — `plugin_id`, `settings`, `require_notebook_capability`, `require_notebook_read`, `current_actor`, `user_error`, `url_sources`, `emit_event` — never the repository, global `Settings`, a model client, the FastMCP host, or a raw bearer token. **Every core port reached through those seams authorizes the request's own user itself** — e.g. `url_sources.import_urls` checks the `sources:write` capability for the calling user and 404s otherwise — so the mount's own `{notebook_id}` path-shape guard is defence in depth, not the authorization boundary. The URL import port has two call shapes for one implementation: a sync (`def`) handler is already in FastAPI's threadpool and calls `import_urls`, while an `async def` handler is on the event loop thread and must `await import_urls_async(...)`, which offloads the same blocking work (database writes plus one serial remote probe per URL) to the threadpool along with the request context, so authorization is identical on both paths. Calling `import_urls` from an async handler raises `RuntimeError` before doing any work — a developer error surfaced as a `500` with a traceback naming the method to await, never as user-facing copy. A 401 plugin code raises — as either `fastapi.HTTPException` or `starlette.exceptions.HTTPException` (the former is a subclass of the latter; both are caught identically) — *or returns* is translated to 424 (with a logged event) so it cannot be mistaken for a dead session. "Plugin code" covers the handler **and the plugin's own `Depends(...)` callables at any nesting depth**: FastAPI solves dependencies before it calls the endpoint, so an upstream check written as a dependency — the ordinary shape — would otherwise leak a real 401 to the browser and sign the user out. Dependencies get the raised half only, since a dependency's return value is injected as a parameter and never becomes the response. Core's own dependencies are excluded by object identity *and* by defining module, so a genuine 401 from core's router-level session gate still surfaces as 401; generator (`yield`) dependencies and security schemes are left untouched.
 
 Registered limits: the plugin observability-event whitelist accepts exactly four fields (`event`/`outcome`/`count`/`elapsed_ms`); `count`/`elapsed_ms` must be integers in `0..1e9`; a stable code (event name, outcome, or discovery/mount rejection reason) is at most 64 characters; each plugin may declare at most one HTTP route contribution. New-plugin onboarding SOP — writing the backend bundle and the build-time UI package, local integration, packaging, install, startup validation, upgrade/rollback, and the full rejection-code table: [Deployment extensions SOP](./deployment-extensions-sop.md).
+
+### Deployment Ask engines (`ask.engine`)
+
+A deployment plugin may register one or more complete, non-streaming Ask engines. Each `PROVIDER` exposes a frozen descriptor (`mode_id`, user-facing label/description, and `requires_kg`) plus one synchronous `answer()` method. The mode id must begin with that plugin's own id followed by `.`, and duplicate, malformed, empty, or over-limit descriptors fail startup closed. Built-in and retired ids contain no dot, while plugin ids are already unique, so the namespace prefix is the collision proof rather than a second reserved-word list.
+
+The provider receives the current question and only three core-owned ports. `RetrievalAccessPort.search()` wraps the existing scoped candidate path: the frozen source scope, mounted-base scope, and actor-specific private-Memory predicate reach SQLite/PostgreSQL before candidate `LIMIT`; results expose bounded text/title/location plus a run-local opaque evidence handle, never a notebook/source/element/chunk id. `fetch()` recognizes only a handle already issued by that same port. `EngineModelPort.complete()` uses the `plugin_engine` chat workload through the normal registry, scheduler, circuit breaker, logging, and cancellation path without exposing a URL, key, raw client, or physical binding. `EngineTraceSink.step()` persists bounded generic `plugin` trace steps; v1 has no live trace stream.
+
+The provider returns Markdown plus an ordered tuple of issued handles. Core validates every handle and every `[kN]`/`【kN】` marker fail-closed, then builds `Citation` and `AnswerAnchor` from its private ledger and saves through the ordinary durable answer seam after rechecking mode/notebook/question/conversation/actor/job/run/scope identity. A forged or cross-run handle rejects the whole answer with a stable user-facing failure; bad anchors are never stripped to make unverified prose look grounded. Public conversation projection remains on its existing whitelist. v1 deliberately receives no history, intent preflight, KG/PPR port, repository, `Settings`, connection, or service locator; it is browser-only and does not enter MCP Ask or Deep Report. Automatic UI mode hides the extension group and submits the built-in default; advanced mode projects available engines as the third group. A failed `/ask-modes` read leaves all built-ins usable and retries after the next committed workspace.
+
+| Ask-engine rail | Default | Valid range / structural cap |
+| --- | ---: | ---: |
+| `ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K` | 20 | `1..500` |
+| `ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS` | 8 | `1..100` |
+| `ASK_PLUGIN_ENGINE_EVIDENCE_MAX_CHARS` | 4,000 | `100..50,000` |
+| `ASK_PLUGIN_ENGINE_PROMPT_MAX_CHARS` (also bounds a port search query) | 32,000 | `1..1,000,000` |
+| `ASK_PLUGIN_ENGINE_MODEL_MAX_CALLS` | 4 | `1..32` |
+| `ASK_PLUGIN_ENGINE_TRACE_MAX_STEPS` | 32 | `1..256` |
+| `ASK_PLUGIN_ENGINE_TRACE_LABEL_MAX_CHARS` | 160 | `1..1,000` |
+| `ASK_PLUGIN_ENGINE_TRACE_DETAIL_MAX_CHARS` | 1,000 | `1..10,000` |
+| descriptor `mode_id` / label / description | — | 128 / 80 / 300 characters |
+
+### Deployment indexing pipelines (`indexing.pipeline`)
+
+Deployment plugins may contribute notebook-scoped indexing pipelines whose ids are namespaced under their plugin id and whose descriptors expose only label, description, version, and the two override flags. Parser routing stays on the startup-frozen ProviderChain; users choose only the indexing pipeline, never a parser. `GET /api/notebooks/{id}/indexing-pipeline` is reader-visible and returns the sanitized current selection plus the notebook-local option list and booleans such as `available`, `missing`, and `pending`; it never leaks plugin paths, capability names, stack traces, or loader reasons. `PATCH /api/notebooks/{id}/indexing-pipeline` is admitted by `kg:write`, so owners and group content-managers may switch the desired pipeline while pure readers remain read-only.
+
+The notebook settings surface is intentionally split. Owners and content-managers may edit notebook metadata and switch the indexing pipeline, but only owners may load or mutate mounted reference libraries because `notebook:configure` remains owner-only. Pure readers still get a read-only settings view that shows the current pipeline and status. Any pipeline change requires an explicit full-rebuild confirmation. PATCH first commits desired `(pipeline_id, version, opaque generation)`, then claims the existing durable `kg_build_jobs` rebuild single-flight and returns `pending` plus its `job_id`; the worker performs the bounded whole-notebook chunk plan, optional core-owned KG run, and eligible scale rebuild. A late worker can publish only while its exact generation still owns the selection. A failed/oversized plan leaves the desired generation pending; GET projects `rebuild_status=failed`, and notebook settings offers both same-pipeline retry and one-click builtin recovery.
+
+While `pending`, ordinary source upload/reparse, manual KG build, and scale rebuild writes fail closed. The worker validates bounded chunk proposals for every user-visible ingestion source, computes embeddings outside any publication transaction, and persists each source's chunks, reverse rows, vectors, KG payload, source facts, and extraction outcome into an invisible durable notebook stage. Hidden Memory/Knowhow synthetic products are core-owned, actor-scoped at read time, excluded from the selectable strategy, and never enter that stage. A malformed per-source chunk proposal degrades that source to the builtin chunker with a stable content-free warning; a whole-notebook bound breach writes no live product. A missing or unavailable selected plugin exposes a revert-to-builtin path without preventing ordinary reads of the previously published artifacts.
+
+When `overrides_kg_extraction` is enabled, the plugin owns only a window prompt builder and model-response mapper. Core still owns windowing, the `kg_extract` workload/client and output cap, cancellation, schema admission, evidence binding, persistence, and durable job state. Core mints window-local opaque evidence handles; an unknown handle, object type, edge type, illegal endpoint pair, malformed prompt/fragment, plugin exception, or configured bound breach fails that source closed. The durable notebook job reaches terminal `failed`, but the live extraction history, source/parser status, graph, chunks, source facts, and published identity remain byte-for-byte unchanged; the failed stage is discarded. A pipeline that overrides KG cannot take the no-model success path.
+
+Publication begins only after every staged source is complete. Before its first live mutation, the SQLite/PostgreSQL transaction revalidates the running job, desired generation, exact visible-source/element snapshot, staged source set, vector shape, endpoint closure, and source-local evidence ownership. It then replaces visible-source chunks/reverse rows/FTS/vectors and source-derived KG/facts/extraction state, invalidates notebook-derived KG products and their mutation sequences, updates only parser-independent `chunked_at`, publishes the unified identity, clears job authority, records `succeeded`, and deletes the stage in that same transaction. A no-KG/model path explicitly preserves live KG while publishing staged chunks. Failure, cancellation, startup recovery, or a late/mixed generation deletes only the stage, so readers continue to see one complete old generation until a complete new one commits.
+
+| Rail | Default | Valid range |
+|---|---:|---:|
+| `INDEXING_PIPELINE_MAX_PROPOSALS_PER_SOURCE` | 2,000 | `1..100,000` |
+| `INDEXING_PIPELINE_MAX_TEXT_CHARS` (proposal text and section path) | 20,000 | `1..1,000,000` |
+| `INDEXING_PIPELINE_MAX_ELEMENT_REFS` | 500 | `1..100,000` |
+| `INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS` | 50,000 | `1..2,000,000` |
+| `INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS` | 100,000,000 | `1..2,000,000,000` |
+| `INDEXING_PIPELINE_KG_MAX_MESSAGES` | 8 | `1..64` |
+| `INDEXING_PIPELINE_KG_PROMPT_MAX_CHARS` | 64,000 | `1..2,000,000` |
+| `INDEXING_PIPELINE_KG_SCHEMA_HINT_MAX_CHARS` | 16,000 | `0..250,000` |
+| `INDEXING_PIPELINE_KG_MAX_OBJECTS_PER_WINDOW` | 512 | `1..10,000` |
+| `INDEXING_PIPELINE_KG_MAX_EDGES_PER_WINDOW` | 1,024 | `0..20,000` |
+| `INDEXING_PIPELINE_KG_MAX_EVIDENCE_HANDLES` | 32 | `1..1,000` |
+| `INDEXING_PIPELINE_KG_MAX_STEPS_PER_OBJECT` | 128 | `0..2,000` |
+| `INDEXING_PIPELINE_KG_NAME_MAX_CHARS` | 8,000 | `1..100,000` |
 
 ### Gap consultation (`ask.gap_consult`)
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import Settings
+from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -619,6 +620,57 @@ def test_pending_completion_drains_across_bounded_jobs_and_restart_entrypoint(
         ).fetchone()
     assert dict(state) == {"status": "completed", "next_object_id": "ko-0004"}
     assert hydrated_counts and max(hydrated_counts) <= 4
+
+
+def test_pending_completion_recovery_admits_before_submit_and_worker(
+    repo, monkeypatch
+):
+    notebook = repo.create_notebook(NotebookCreate(name="completion admission"))
+    source_id, run_id = _seed_resumable_source(repo, notebook.id, count=5)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    _configure_completion(monkeypatch, lifecycle, notebook.id, mode="shadow")
+    first = lifecycle.complete_relations_for_source(
+        notebook.id, source_id, "Large Book", run_id, [], [], []
+    )
+    assert not first["exhausted"]
+
+    queued = []
+    from app.services.kg import scheduler as kg_scheduler
+
+    monkeypatch.setattr(
+        kg_scheduler,
+        "submit_job",
+        lambda fn, *args, **kwargs: queued.append(lambda: fn(*args, **kwargs)),
+    )
+    ingestion = repo._runtime.source_ingestion
+    monkeypatch.setattr(
+        ingestion,
+        "require_indexing_write",
+        lambda _notebook_id: (_ for _ in ()).throw(
+            IndexingPipelineUnavailableError("pending.pipeline")
+        ),
+    )
+    assert ingestion.resume_pending_relation_completions(page_size=1) == 0
+    assert queued == []
+
+    monkeypatch.setattr(ingestion, "require_indexing_write", lambda _notebook_id: None)
+    assert ingestion.resume_pending_relation_completions(page_size=1) == 1
+    assert len(queued) == 1
+    completed = []
+    monkeypatch.setattr(
+        lifecycle,
+        "complete_relations_for_source",
+        lambda *_args, **_kwargs: completed.append(True),
+    )
+    monkeypatch.setattr(
+        ingestion,
+        "require_indexing_write",
+        lambda _notebook_id: (_ for _ in ()).throw(
+            IndexingPipelineUnavailableError("pending.pipeline")
+        ),
+    )
+    queued.pop()()
+    assert completed == []
 
 
 def test_completion_ignores_transient_full_source_objects(repo, monkeypatch):

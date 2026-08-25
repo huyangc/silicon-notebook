@@ -357,7 +357,9 @@ class SourceStore:
         )
 
     @staticmethod
-    def source_exists_for_update_tx(connection, source_id: str) -> bool:
+    def source_exists_for_update_tx(
+        connection, source_id: str, notebook_id: str | None = None
+    ) -> bool:
         """Take the aggregate lock before deleting projection children.
 
         Project completion takes ``FOR KEY SHARE`` on this row.  Teardown
@@ -365,6 +367,8 @@ class SourceStore:
         gives both paths one source -> derived-row lock order and prevents a
         deadlock or a projection resurrecting children after deletion.
         """
+        if notebook_id is not None:
+            SourceStore._lock_notebook_row_for_capacity(connection, notebook_id)
         return (
             connection.execute(
                 "SELECT 1 FROM sources WHERE id=%s FOR UPDATE", (source_id,)
@@ -1006,12 +1010,16 @@ class SourceStore:
             now,
             now,
         )
+        visible = source_type not in {"memory", "knowhow"}
         if connection is not None:
+            if visible:
+                self._lock_notebook_row_for_capacity(connection, notebook_id)
             connection.execute(statement, values)
             return
         with self.database.write() as owned:
-            if capacity_limit is not None:
+            if visible:
                 self._lock_notebook_row_for_capacity(owned, notebook_id)
+            if capacity_limit is not None:
                 current = self._visible_document_count_on(owned, notebook_id)
                 if current >= capacity_limit:
                     raise DocumentCapacityExceeded(current, capacity_limit)
@@ -1183,7 +1191,7 @@ class SourceStore:
         ``DocumentCapacityExceeded``. The dedup re-check still decides first:
         re-uploaded existing bytes reuse their row even in a full notebook."""
         with self.database.write() as connection:
-            if capacity_limit is not None:
+            if source_type not in {"memory", "knowhow"}:
                 self._lock_notebook_row_for_capacity(connection, notebook_id)
             if digest:
                 row = connection.execute(
@@ -1229,6 +1237,22 @@ class SourceStore:
         generation (see the SQLite docstring for why it exists and why it is
         harmless)."""
         created_at = normalize_timestamp(created_at)
+        source = connection.execute(
+            "SELECT notebook_id,source_type FROM sources WHERE id=%s", (source_id,)
+        ).fetchone()
+        if source is None:
+            raise KeyError(source_id)
+        if source["source_type"] not in {"memory", "knowhow"}:
+            self._lock_notebook_row_for_capacity(
+                connection, str(source["notebook_id"])
+            )
+        # Fixed writer order is notebook -> source, matching the generation
+        # publisher and closing both phantom-source and element-swap races.
+        locked = connection.execute(
+            "SELECT id FROM sources WHERE id=%s FOR UPDATE", (source_id,)
+        ).fetchone()
+        if locked is None:
+            raise KeyError(source_id)
         connection.execute("DELETE FROM source_elements WHERE source_id=%s", (source_id,))
         execute_many(
             connection,

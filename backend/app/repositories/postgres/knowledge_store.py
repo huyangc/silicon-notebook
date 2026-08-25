@@ -791,6 +791,8 @@ class KnowledgeStore:
         created_at: str,
         *,
         preserve_existing: bool = False,
+        indexing_pipeline_id: str = "",
+        indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None:
         with self.database.write() as db:
             self.begin_extraction_run(
@@ -800,6 +802,8 @@ class KnowledgeStore:
                 run_id,
                 created_at,
                 preserve_existing=preserve_existing,
+                indexing_pipeline_id=indexing_pipeline_id,
+                indexing_pipeline_version=indexing_pipeline_version,
             )
 
     def finish_extraction(self, run_id: str, status: str, message: str) -> None:
@@ -1615,6 +1619,30 @@ class KnowledgeStore:
             raise RuntimeError("source fact evidence crosses source generation boundary")
 
     @staticmethod
+    def validate_stage_source_elements(
+        connection: Any,
+        notebook_id: str,
+        source_id: str,
+        element_ids: Sequence[str],
+    ) -> None:
+        source = connection.execute(
+            "SELECT id FROM sources WHERE id=%s AND notebook_id=%s",
+            (source_id, notebook_id),
+        ).fetchone()
+        if source is None:
+            raise RuntimeError("stale indexing stage source")
+        expected = list(dict.fromkeys(str(value) for value in element_ids if value))
+        if not expected:
+            return
+        owned = int(connection.execute(
+            "SELECT COUNT(*) AS c FROM source_elements "
+            "WHERE source_id=%s AND id=ANY(%s)",
+            (source_id, expected),
+        ).fetchone()["c"])
+        if owned != len(expected):
+            raise RuntimeError("staged evidence crosses source boundary")
+
+    @staticmethod
     def insert_source_fact_rows(
         connection: Any,
         rows: Sequence[tuple],
@@ -2426,6 +2454,8 @@ class KnowledgeStore:
         created_at: str,
         *,
         preserve_existing: bool = False,
+        indexing_pipeline_id: str = "",
+        indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None:
         """Open a run, optionally retaining the current graph until replacement."""
         # Same transaction lock as completion_validate_scope/advance_state: a
@@ -2443,12 +2473,15 @@ class KnowledgeStore:
             )
         db.execute(
             """INSERT INTO extraction_runs
-               (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
-               VALUES (%s, %s, %s, 'kg', 'running', '', %s, %s)""",
+               (id, notebook_id, source_id, run_type, status, error_message,
+                indexing_pipeline_id, indexing_pipeline_version, created_at, updated_at)
+               VALUES (%s, %s, %s, 'kg', 'running', '', %s, %s, %s, %s)""",
             (
                 run_id,
                 notebook_id,
                 source_id,
+                indexing_pipeline_id,
+                indexing_pipeline_version,
                 normalize_timestamp(created_at),
                 normalize_timestamp(created_at),
             ))

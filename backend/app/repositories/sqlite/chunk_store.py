@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.domain.vector_index import encode_vector
+from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 
 
 # Bounded IN(...) fan-out for the element -> chunk point lookup. SQLite's
@@ -209,6 +211,118 @@ class ChunkStore:
                 db.execute(
                     "UPDATE sources SET chunked_at = ? WHERE id = ?",
                     (mark_chunked_at, source_id))
+
+    def replace_notebook_chunks(
+        self,
+        notebook_id: str,
+        chunks_by_source: Mapping[str, Sequence[ChunkWrite]],
+        *,
+        created_at: str,
+        pipeline_id: str,
+        pipeline_version: str,
+        pipeline_generation: str,
+    ) -> None:
+        """Atomically publish one complete visible-source chunk generation.
+
+        Proposals are fully computed and admitted before this method starts.
+        Readers therefore see either every old source generation or every new
+        one; the transaction never exposes a source-by-source midpoint.
+        Hidden Memory/Knowhow sources are absent from ``chunks_by_source`` and
+        deliberately retain their core-owned chunks.
+        """
+        flat_rows: list[tuple] = []
+        for source_id, chunks in chunks_by_source.items():
+            flat_rows.extend(
+                (
+                    chunk.id,
+                    notebook_id,
+                    source_id,
+                    chunk.text,
+                    chunk.section_path,
+                    json.dumps(list(chunk.element_ids)),
+                    created_at,
+                )
+                for chunk in chunks
+            )
+        with self.database.write() as db:
+            desired = db.execute(
+                "SELECT 1 FROM notebooks WHERE id=? "
+                "AND COALESCE(indexing_pipeline,'')=? "
+                "AND indexing_pipeline_version=? "
+                "AND indexing_pipeline_generation=? AND status!='copying'",
+                (
+                    notebook_id,
+                    pipeline_id,
+                    pipeline_version,
+                    pipeline_generation,
+                ),
+            ).fetchone()
+            if desired is None:
+                raise IndexingPipelineStalePlanError(notebook_id)
+            current_source_ids = {
+                str(row["id"])
+                for row in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=? AND "
+                    f"{VISIBLE_SOURCE_TYPES_PREDICATE}",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            if current_source_ids != set(chunks_by_source):
+                raise IndexingPipelineStalePlanError(notebook_id)
+            # A source deleted while the bounded plan was being computed must
+            # abort the whole publication, including zero-chunk sources whose
+            # missing FK would otherwise not be exercised by an INSERT.
+            for source_id in chunks_by_source:
+                current = db.execute(
+                    "SELECT notebook_id FROM sources WHERE id=?", (source_id,)
+                ).fetchone()
+                if current is None or current["notebook_id"] != notebook_id:
+                    raise IndexingPipelineStalePlanError(source_id)
+                db.execute(
+                    "DELETE FROM chunks_fts WHERE chunk_id IN "
+                    "(SELECT id FROM chunks WHERE source_id=?)",
+                    (source_id,),
+                )
+                db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
+            db.executemany(
+                "INSERT INTO chunks "
+                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                flat_rows,
+            )
+            self._insert_fts_rows(
+                db, [(row[0], row[1], row[3]) for row in flat_rows]
+            )
+            for source_id, chunks in chunks_by_source.items():
+                self._insert_chunk_element_rows(db, notebook_id, chunks)
+                db.execute(
+                    "UPDATE sources SET chunked_at=? WHERE id=?",
+                    (created_at, source_id),
+                )
+            changed = db.execute(
+                "UPDATE notebooks SET updated_at=? WHERE id=? "
+                "AND COALESCE(indexing_pipeline,'')=? "
+                "AND indexing_pipeline_version=? "
+                "AND indexing_pipeline_generation=?",
+                (
+                    created_at,
+                    notebook_id,
+                    pipeline_id,
+                    pipeline_version,
+                    pipeline_generation,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise IndexingPipelineStalePlanError(notebook_id)
+            db.execute(
+                "INSERT INTO unified_kg_state "
+                "(notebook_id,dirty,kg_mutation_seq,updated_at) "
+                "VALUES (?,1,1,?) "
+                "ON CONFLICT(notebook_id) DO UPDATE SET "
+                "dirty=1,kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,"
+                "updated_at=excluded.updated_at",
+                (notebook_id, created_at),
+            )
 
     def _insert_fts_rows(self, connection: sqlite3.Connection, rows: list) -> None:
         connection.executemany(

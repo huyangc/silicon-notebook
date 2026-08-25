@@ -7,6 +7,7 @@ import {
   cancelAskJob,
   conversationTitleLimitHint,
   deleteConversation,
+  fetchAskModes,
   getAskJob,
   getConversation,
   listConversations,
@@ -16,10 +17,13 @@ import {
   submitFeedback as submitAnswerFeedback,
 } from "./ask-api.ts";
 import {
+  ASK_MODES,
   DEFAULT_ASK_MODE,
+  groupOf,
   groupLabel,
+  normalizeAskModeProjection,
   requiresKg,
-  type AskModeId,
+  type AskModeDef,
   modeFromTurn,
 } from "./ask-modes.ts";
 import {
@@ -131,6 +135,16 @@ type SessionRequest = {
   promise: Promise<ConversationSummary[]>;
 };
 
+type AskModeCache = {
+  ownerKey: string;
+  modes: AskModeDef[];
+};
+
+type AskModeRequest = {
+  ownerKey: string;
+  promise: Promise<unknown>;
+};
+
 function sameNotebookOwner(
   current: AskSessionOwner | null,
   expected: Pick<AskSessionOwner, "actorId" | "notebookId" | "notebookGeneration">,
@@ -197,9 +211,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const [sessionLoading, setSessionLoading] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
   const [pendingAskedAt, setPendingAskedAt] = useState("");
-  const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
+  const [pendingMode, setPendingMode] = useState<string>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
-  const [mode, setMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
+  const [mode, setMode] = useState<string>(DEFAULT_ASK_MODE);
+  const [askModes, setAskModes] = useState<AskModeDef[]>(ASK_MODES);
   const [retrievalEffort, setRetrievalEffort] = useState<AskRetrievalEffortId>(
     DEFAULT_ASK_RETRIEVAL_EFFORT,
   );
@@ -209,6 +224,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
   const [ownerSerial, setOwnerSerial] = useState(0);
+  const [askModeProjectionSerial, setAskModeProjectionSerial] = useState(0);
 
   const policyRef = useRef(policy);
   policyRef.current = policy;
@@ -219,13 +235,21 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   notebookIdRef.current = notebookId;
   const propActorIdRef = useRef(actorId);
   const pendingActorIdRef = useRef<string | null>(null);
+  const actorGenerationRef = useRef(0);
   const ownerRef = useRef<AskSessionOwner | null>(null);
+  const committedOwnerRef = useRef<AskSessionOwner | null>(null);
   const notebookGenerationRef = useRef(0);
   const viewGenerationRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
+  const turnsRef = useRef<ChatTurn[]>(turns);
   const modeRef = useRef(mode);
+  const askModesRef = useRef<AskModeDef[]>(askModes);
+  const modeChoiceVersionRef = useRef(0);
+  const pendingModeSourceRef = useRef<string | null>(null);
   conversationIdRef.current = conversationId;
+  turnsRef.current = turns;
   modeRef.current = mode;
+  askModesRef.current = askModes;
 
   const askAbortRef = useRef<AbortController | null>(null);
   const askIntentAbortRef = useRef<AbortController | null>(null);
@@ -246,6 +270,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const renameViewGenerationRef = useRef(0);
   const feedbackRequestRef = useRef<Map<string, number>>(new Map());
   const deletedConversationIdsRef = useRef<Map<string, Set<string>>>(new Map());
+  const askModeCacheRef = useRef<AskModeCache | null>(null);
+  const askModeRequestRef = useRef<AskModeRequest | null>(null);
 
   if (pendingActorIdRef.current === actorId) pendingActorIdRef.current = null;
   if (propActorIdRef.current !== actorId) {
@@ -255,9 +281,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       actorIdRef.current = actorId;
       if (ownerRef.current && ownerRef.current.actorId !== actorId) {
         ownerRef.current = null;
+        committedOwnerRef.current = null;
         notebookGenerationRef.current += 1;
         viewGenerationRef.current += 1;
       }
+      actorGenerationRef.current += 1;
+      askModeCacheRef.current = null;
+      askModeRequestRef.current = null;
     }
   } else if (!pendingActorIdRef.current) {
     actorIdRef.current = actorId;
@@ -272,7 +302,78 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     ownerRef.current && ownerRef.current.actorId === actorIdRef.current,
   );
 
+  useEffect(() => {
+    // Match the workspace-extension projection cadence: an Ask-mode request is
+    // permitted only after the notebook transition has settled successfully.
+    // Failed/refused/superseded transitions therefore perform no projection I/O
+    // and the conversation restore is never blocked on this deployment surface.
+    const owner = committedOwnerRef.current;
+    if (
+      !owner
+      || !sameViewOwner(ownerRef.current, owner)
+      || owner.actorId !== actorId
+      || owner.notebookId !== notebookId
+    ) return;
+
+    const projectionOwnerKey = `${owner.actorId}\u0000${actorGenerationRef.current}`;
+    const choiceVersion = modeChoiceVersionRef.current;
+    let alive = true;
+
+    const applyProjection = (modes: AskModeDef[]) => {
+      if (
+        !alive
+        || `${actorIdRef.current ?? ""}\u0000${actorGenerationRef.current}` !== projectionOwnerKey
+        || !sameViewOwner(ownerRef.current, owner)
+        || !sameViewOwner(committedOwnerRef.current, owner)
+        || notebookIdRef.current !== owner.notebookId
+      ) return;
+      askModesRef.current = modes;
+      setAskModes(modes);
+      setMode((current) => {
+        if (modeChoiceVersionRef.current !== choiceVersion) {
+          return modeFromTurn({ response: { mode: current } }, modes);
+        }
+        return modeFromTurn(turnsRef.current[turnsRef.current.length - 1], modes);
+      });
+      if (pendingModeSourceRef.current) {
+        setPendingMode(modeFromTurn(
+          { response: { mode: pendingModeSourceRef.current } },
+          modes,
+        ));
+      }
+    };
+
+    const cached = askModeCacheRef.current;
+    if (cached?.ownerKey === projectionOwnerKey) {
+      applyProjection(cached.modes);
+      return () => { alive = false; };
+    }
+
+    let request = askModeRequestRef.current;
+    if (!request || request.ownerKey !== projectionOwnerKey) {
+      request = { ownerKey: projectionOwnerKey, promise: fetchAskModes() };
+      askModeRequestRef.current = request;
+    }
+    request.promise.then(
+      (raw) => {
+        const modes = normalizeAskModeProjection(raw);
+        if (`${actorIdRef.current ?? ""}\u0000${actorGenerationRef.current}` === projectionOwnerKey) {
+          askModeCacheRef.current = { ownerKey: projectionOwnerKey, modes };
+        }
+        applyProjection(modes);
+      },
+      () => {
+        // Do not cache failures. This committed workspace degrades to built-ins;
+        // the next successful workspace commit for the actor re-issues one call.
+        if (askModeRequestRef.current === request) askModeRequestRef.current = null;
+        applyProjection(ASK_MODES);
+      },
+    );
+    return () => { alive = false; };
+  }, [actorId, askModeProjectionSerial, notebookId]);
+
   function clearPendingTurn() {
+    pendingModeSourceRef.current = null;
     setPendingQuestion("");
     setPendingAskedAt("");
     setPendingMode(DEFAULT_ASK_MODE);
@@ -313,6 +414,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   function resetConversationView() {
+    modeChoiceVersionRef.current += 1;
+    turnsRef.current = [];
+    modeRef.current = DEFAULT_ASK_MODE;
     setQuestion("");
     setTurns([]);
     setConversationId(null);
@@ -330,9 +434,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     actorIdRef.current = nextActorId;
     propActorIdRef.current = nextActorId;
     pendingActorIdRef.current = nextActorId;
+    actorGenerationRef.current += 1;
     ownerRef.current = null;
+    committedOwnerRef.current = null;
     notebookGenerationRef.current += 1;
     viewGenerationRef.current += 1;
+    askModeCacheRef.current = null;
+    askModeRequestRef.current = null;
+    askModesRef.current = ASK_MODES;
+    setAskModes(ASK_MODES);
   }
 
   function beginNotebookTransition(input: {
@@ -345,12 +455,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     notebookGenerationRef.current += 1;
     optimisticConversationIdsRef.current.clear();
     latestSessionListRef.current = null;
+    committedOwnerRef.current = null;
     const owner: AskSessionOwner = {
       ...input,
       notebookGeneration: notebookGenerationRef.current,
       viewGeneration: viewGenerationRef.current,
     };
     ownerRef.current = owner;
+    const projectionOwnerKey = `${input.actorId}\u0000${actorGenerationRef.current}`;
+    const cachedModes = askModeCacheRef.current?.ownerKey === projectionOwnerKey
+      ? askModeCacheRef.current.modes
+      : ASK_MODES;
+    askModesRef.current = cachedModes;
+    setAskModes(cachedModes);
     setSessionLoading(true);
     setSessions([]);
     resetConversationView();
@@ -358,13 +475,17 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return owner;
   }
 
-  function finishNotebookTransition(owner: AskNotebookTransition) {
-    if (sameViewOwner(ownerRef.current, owner)) setSessionLoading(false);
+  function finishNotebookTransition(owner: AskNotebookTransition, succeeded = true) {
+    if (!sameViewOwner(ownerRef.current, owner)) return;
+    setSessionLoading(false);
+    committedOwnerRef.current = succeeded ? owner : null;
+    setAskModeProjectionSerial((value) => value + 1);
   }
 
   function leaveWorkspace() {
     detachVisibleRun();
     ownerRef.current = null;
+    committedOwnerRef.current = null;
     notebookGenerationRef.current += 1;
     setSessionLoading(false);
     setSessions([]);
@@ -376,6 +497,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askIntentAbortRef.current?.abort();
     askAbortRef.current?.abort();
     leaveWorkspace();
+    actorGenerationRef.current += 1;
+    askModeCacheRef.current = null;
+    askModeRequestRef.current = null;
+    askModesRef.current = ASK_MODES;
+    setAskModes(ASK_MODES);
   }
 
   function currentNotebookOwner(): AskSessionOwner | null {
@@ -455,12 +581,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setSessions((current) => current.some((session) => session.id === detail.id)
       ? current.map((session) => session.id === detail.id ? summary : session)
       : [summary, ...current]);
-    setTurns(detail.turns.map((turn) => ({
+    const nextTurns = detail.turns.map((turn) => ({
       question: turn.question,
       response: turn.response,
       askedAt: turn.asked_at,
-    })));
-    setMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
+    }));
+    turnsRef.current = nextTurns;
+    setTurns(nextTurns);
+    const restoredMode = modeFromTurn(
+      detail.turns[detail.turns.length - 1],
+      askModesRef.current,
+    );
+    modeRef.current = restoredMode;
+    setMode(restoredMode);
     setRetrievalEffort(retrievalEffortFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
     clearPendingTurn();
@@ -470,9 +603,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askAbortRef.current = null;
     const active = detail.active_job;
     if (active) {
+      pendingModeSourceRef.current = active.mode;
       setPendingQuestion(active.question);
       setPendingAskedAt(active.asked_at);
-      setPendingMode(modeFromTurn({ response: { mode: active.mode } }));
+      setPendingMode(modeFromTurn(
+        { response: { mode: active.mode } },
+        askModesRef.current,
+      ));
       setPendingTrace(active.trace ?? []);
       setAsking(true);
       askJobIdRef.current = active.job_id;
@@ -545,8 +682,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setQuestion(value);
   }
 
-  function selectMode(next: AskModeId) {
+  function selectMode(next: string) {
     if (!currentNotebookOwner()) return;
+    if (!askModesRef.current.some((candidate) => candidate.id === next)) return;
+    modeChoiceVersionRef.current += 1;
+    modeRef.current = next;
     setMode(next);
   }
 
@@ -556,7 +696,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   useEffect(() => {
-    if (!policy.advanced && mode === "graph") setMode("reasoning");
+    const replacement = !policy.advanced && mode === "graph"
+      ? "reasoning"
+      : !policy.advanced && mode.includes(".")
+        ? DEFAULT_ASK_MODE
+        : null;
+    if (replacement) {
+      modeChoiceVersionRef.current += 1;
+      modeRef.current = replacement;
+      setMode(replacement);
+    }
   }, [policy.advanced, mode]);
 
   useEffect(() => {
@@ -565,7 +714,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
 
   async function executeAsk(
     nextQuestion: string,
-    selectedMode: AskModeId,
+    selectedMode: string,
     intent: AskIntentConfirmation | undefined,
     traceSeed: ReasoningTraceStep[] = [],
     askedAt = new Date().toISOString(),
@@ -585,8 +734,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return false;
     }
-    if (requiresKg(selectedMode) && !currentPolicy.kgAvailable) {
-      effectsRef.current.notify(`${groupLabel("strict")}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
+    if (requiresKg(selectedMode, askModesRef.current) && !currentPolicy.kgAvailable) {
+      effectsRef.current.notify(`${groupLabel(groupOf(selectedMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return false;
     }
     const runOwner = owner;
@@ -597,6 +746,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setQuestion("");
     setPendingQuestion(q);
     setPendingAskedAt(askedAt);
+    pendingModeSourceRef.current = selectedMode;
     setPendingMode(selectedMode);
     setPendingTrace(traceSeed);
     setAsking(true);
@@ -680,7 +830,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         }
         return true;
       }
-      setTurns((previous) => [...previous, { question: q, response, askedAt }]);
+      setTurns((previous) => {
+        const next = [...previous, { question: q, response, askedAt }];
+        turnsRef.current = next;
+        return next;
+      });
       setConversationId(response.conversation_id);
     } catch (error) {
       if (!ownsRun()) {
@@ -727,9 +881,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
-    const submitMode = !currentPolicy.advanced && mode === "graph" ? "reasoning" : mode;
-    if (requiresKg(submitMode) && !currentPolicy.kgAvailable) {
-      effectsRef.current.notify(`${groupLabel("strict")}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
+    const submitMode = !currentPolicy.advanced
+      ? (mode === "graph" ? "reasoning" : mode.includes(".") ? DEFAULT_ASK_MODE : mode)
+      : mode;
+    if (requiresKg(submitMode, askModesRef.current) && !currentPolicy.kgAvailable) {
+      effectsRef.current.notify(`${groupLabel(groupOf(submitMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
     }
     const askedAt = new Date().toISOString();
@@ -754,6 +910,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setQuestion("");
     setPendingQuestion(q);
     setPendingAskedAt(askedAt);
+    pendingModeSourceRef.current = "reasoning";
     setPendingMode("reasoning");
     setPendingTrace(askIntentTraceRef.current);
     setIntentChecking(true);
@@ -1225,6 +1382,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     pendingAskedAt: ownerIsVisible ? pendingAskedAt : "",
     pendingMode: ownerIsVisible ? pendingMode : DEFAULT_ASK_MODE,
     pendingTrace: ownerIsVisible ? pendingTrace : NO_PENDING_TRACE,
+    askModes: ownerIsVisible ? askModes : ASK_MODES,
     mode: ownerIsVisible ? mode : DEFAULT_ASK_MODE,
     retrievalEffort: ownerIsVisible ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
     sessionPanelOpen: ownerIsVisible ? sessionPanelOpen : false,

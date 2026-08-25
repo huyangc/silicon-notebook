@@ -67,5 +67,7 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         parser_provider_chain_host=runtime.parser_chain,
         ask_completed_observer_host=runtime.ask_completed_observers,
         report_completed_observer_host=runtime.report_completed_observers,
+        ask_engine_host=runtime.ask_engines,
+        indexing_pipeline_host=runtime.indexing_pipelines,
         gap_consult_host=runtime.gap_consult,
     )

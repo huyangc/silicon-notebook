@@ -107,14 +107,34 @@ class IndexProjectionStore:
         )
         with self.connect() as db:
             st = db.execute(
-                "SELECT kg_mutation_seq, cluster_mutation_seq, mention_seq FROM unified_kg_state "
+                "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,"
+                "indexing_pipeline_id,indexing_pipeline_version FROM unified_kg_state "
                 "WHERE notebook_id=%s",
                 (notebook_id,),
             ).fetchone()
             seq = int(st["kg_mutation_seq"]) if st else 0
             cseq = int(st["cluster_mutation_seq"]) if st else 0
             mseq = int(st["mention_seq"]) if (st and st["mention_seq"] is not None) else -1
-        return seq, cseq, settings_tail + (mseq,)
+            pipeline_id = str(st["indexing_pipeline_id"] or "") if st else ""
+            pipeline_version = (
+                str(st["indexing_pipeline_version"] or "builtin.chunk.v1")
+                if st else "builtin.chunk.v1"
+            )
+        return seq, cseq, settings_tail + (mseq, pipeline_id, pipeline_version)
+
+    def pipeline_identity(self, notebook_id: str) -> tuple[str, str]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT indexing_pipeline_id,indexing_pipeline_version "
+                "FROM unified_kg_state WHERE notebook_id=%s",
+                (notebook_id,),
+            ).fetchone()
+        if row is None:
+            return "", "builtin.chunk.v1"
+        return (
+            str(row["indexing_pipeline_id"] or ""),
+            str(row["indexing_pipeline_version"] or "builtin.chunk.v1"),
+        )
 
     def version_facts(self, notebook_id: str) -> list:
         """Cold-path five-table COUNT/MAX aggregates. Returns the version-list
@@ -137,6 +157,10 @@ class IndexProjectionStore:
             emb_ver = db.execute(
                 "SELECT COUNT(*) AS c, MAX(created_at) AS ts "
                 "FROM knowledge_embeddings WHERE notebook_id=%s", (notebook_id,)).fetchone()
+            state = db.execute(
+                "SELECT indexing_pipeline_id,indexing_pipeline_version "
+                "FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+            ).fetchone()
         return [
             notebook_id,
             int(obj_ver["c"]), iso_timestamp(obj_ver["ts"]),
@@ -144,6 +168,10 @@ class IndexProjectionStore:
             int(chunk_ver["c"]), iso_timestamp(chunk_ver["ts"]),
             int(clu_ver["c"]), iso_timestamp(clu_ver["ts"]),
             int(emb_ver["c"]), iso_timestamp(emb_ver["ts"]),
+            "indexing_pipeline",
+            str(state["indexing_pipeline_id"] or "") if state else "",
+            str(state["indexing_pipeline_version"] or "builtin.chunk.v1")
+            if state else "builtin.chunk.v1",
         ]
 
     def version_with_settings(self, notebook_id: str, settings_tail: tuple) -> list:

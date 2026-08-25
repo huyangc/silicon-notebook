@@ -49,6 +49,13 @@ def test_facade_lifecycle_delegates_to_same_service(repo, monkeypatch):
 def test_facade_lifecycle_methods_delegate_to_the_runtime_instance(repo, monkeypatch):
     lifecycle = repo._runtime.knowledge_lifecycle
     sentinel = object()
+    # Index-mutating facade calls now run the notebook pipeline write gate
+    # before their lifecycle delegate.  This characterization owns only the
+    # delegate target, so keep admission orthogonal (the indexing-pipeline API
+    # tests exercise the real gate and its 409 semantics).
+    monkeypatch.setattr(
+        repo, "require_indexing_pipeline_write", lambda _notebook_id: None
+    )
     for name, call in (
         ("delete_notebook_kg", lambda: repo.delete_notebook_kg("nb")),
         ("build_notebook_kg", lambda: repo.build_notebook_kg("nb")),

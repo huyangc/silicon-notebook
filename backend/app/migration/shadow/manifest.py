@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=57, postgres_version=35, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=59, postgres_version=37, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -724,6 +724,25 @@ _TABLES = (
         87,
         "timestamptz",
     ),
+    # Notebook rebuild stages are durable crash-safety state for one live
+    # backend, not published products.  Copying or replaying them would carry
+    # a worker/job lease across the backend cutover and, more subtly, would
+    # turn their FK onto kg_build_jobs into an incoming dependency that makes
+    # that table's existing one-running-job unique surface unparkable.
+    TableSpec(
+        "indexing_pipeline_stages",
+        TableClass.LOCAL_EPHEMERAL,
+        (),
+        ReplicationKeyKind.DECLARED_PK,
+        88,
+    ),
+    TableSpec(
+        "indexing_pipeline_stage_sources",
+        TableClass.LOCAL_EPHEMERAL,
+        (),
+        ReplicationKeyKind.DECLARED_PK,
+        89,
+    ),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
@@ -788,7 +807,7 @@ def validate_manifest(manifest: Manifest) -> None:
                 name not in COLUMN_TRANSFORMS for name in names_in_pipeline
             ):
                 raise ValueError(f"unknown transform pipeline: {pipeline!r}")
-    if frozenset(manifest.replicated_names) != frozenset(POSTGRES_BUSINESS_TABLES):
+    if frozenset(manifest.application_names) != frozenset(POSTGRES_BUSINESS_TABLES):
         raise ValueError(
             "manifest does not match the paired PostgreSQL business tables"
         )
@@ -937,11 +956,12 @@ def validate_sqlite_schema(
             f"expected {expected_pair.sqlite_version}"
         )
     ordinary, rebuilt_roots, internal_tables = _sqlite_schema_sets(conn, manifest)
-    if ordinary != set(manifest.replicated_names):
+    expected_ordinary = set(manifest.application_names)
+    if ordinary != expected_ordinary:
         raise ValueError(
             "SQLite ordinary-table totality mismatch: "
-            f"missing={sorted(set(manifest.replicated_names) - ordinary)}, "
-            f"unknown={sorted(ordinary - set(manifest.replicated_names))}"
+            f"missing={sorted(expected_ordinary - ordinary)}, "
+            f"unknown={sorted(ordinary - expected_ordinary)}"
         )
     if rebuilt_roots != set(manifest.rebuilt_names):
         raise ValueError("SQLite rebuilt-family totality mismatch")
@@ -1061,7 +1081,7 @@ def validate_postgres_schema(
             f"expected {expected_pair.postgres_version}"
         )
     ordinary = set(tables)
-    expected = set(manifest.replicated_names)
+    expected = set(manifest.application_names)
     if ordinary != expected:
         raise ValueError(
             "PostgreSQL ordinary-table totality mismatch: "

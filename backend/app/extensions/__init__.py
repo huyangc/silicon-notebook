@@ -14,6 +14,8 @@ from app.extensions.discovery import (
     discover_deployment_extensions,
 )
 from app.extensions.ask import AskCompletedObserverHost
+from app.extensions.ask_engine import AskEngineHost
+from app.extensions.indexing import IndexingPipelineHost
 from app.extensions.gap_consult import GapConsultHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
@@ -29,6 +31,8 @@ __all__ = [
     "ExtensionRuntime",
     "CapabilityDecisionCatalog",
     "AskCompletedObserverHost",
+    "AskEngineHost",
+    "IndexingPipelineHost",
     "GapConsultHost",
     "ReportCompletedObserverHost",
     "ReportExporterHost",

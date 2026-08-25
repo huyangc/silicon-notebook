@@ -565,8 +565,12 @@ class QueryStore:
         # `notebooks.id`,而 SQLite/PG 一旦给表起了别名,原表名就不再可用。
         return db.execute(
             "SELECT notebooks.*, u.username AS _owner_username, "
+            "COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,"
+            "COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') "
+            "AS _published_pipeline_version, "
             + SHARED_TO_GROUPS_COLUMN
             + " FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by "
+            "LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id "
             "WHERE notebooks.id = ? AND notebooks.status != 'copying'",
             (notebook_id,),
         ).fetchone()
@@ -574,8 +578,13 @@ class QueryStore:
     @staticmethod
     def owned_notebook_rows(db: sqlite3.Connection, user_id: str):
         return db.execute(
-            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
-            + " FROM notebooks WHERE created_by = ? AND status != 'copying' "
+            "SELECT notebooks.*,"
+            "COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,"
+            "COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') "
+            "AS _published_pipeline_version, " + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks LEFT JOIN unified_kg_state ip "
+            "ON ip.notebook_id=notebooks.id "
+            "WHERE created_by = ? AND status != 'copying' "
             "ORDER BY created_at ASC",
             (user_id,),
         ).fetchall()
@@ -594,9 +603,13 @@ class QueryStore:
         point_filter = "" if notebook_id is None else "AND m.notebook_id = ? "
         params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return db.execute(
-            "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
+            "SELECT nb.*, u.username AS _owner_username,"
+            "COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,"
+            "COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') "
+            "AS _published_pipeline_version FROM notebook_members m "
             "JOIN notebooks nb ON nb.id = m.notebook_id "
             "LEFT JOIN users u ON u.id = nb.created_by "
+            "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
             "WHERE m.user_id = ? " + point_filter
             + "AND nb.status != 'copying' "
             "ORDER BY m.added_at ASC",
@@ -665,13 +678,17 @@ class QueryStore:
         return db.execute(
             "SELECT nb.*, u.username AS _owner_username, "
             "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
-            "ng.role AS _grant_role "
+            "ng.role AS _grant_role,"
+            "COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,"
+            "COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') "
+            "AS _published_pipeline_version "
             "FROM group_members gm "
             "CROSS JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
             "AND ng.principal_type IN ('group', 'group_admins') "
             "JOIN groups g ON g.id = gm.group_id "
             "JOIN notebooks nb ON nb.id = ng.notebook_id "
             "LEFT JOIN users u ON u.id = nb.created_by "
+            "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
             "WHERE gm.user_id = ? " + point_filter
             + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
             "AND nb.status != 'copying' "

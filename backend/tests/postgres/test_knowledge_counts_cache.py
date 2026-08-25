@@ -70,7 +70,7 @@ def _insert_run(
 
 
 def test_pending_query_preserves_latest_run_and_visibility_semantics(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 35
+    assert PostgresMigrator(postgres_database).migrate() == 37
     now = datetime(2026, 8, 4, tzinfo=timezone.utc)
 
     with postgres_database.write() as connection:

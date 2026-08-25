@@ -264,7 +264,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 35
+    assert len(PostgresMigrator(postgres_database).migrations) == 37
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 35
+    assert migrator.migrate() == 37
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -332,8 +332,53 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_groups_invite_token" in final_indexes
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
     ]
+
+
+def test_indexing_pipeline_migration_upgrades_v35_without_rewriting_products(
+    postgres_database,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=35) == 35
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-pipeline-v35", "legacy", "2026-01-01", "2026-01-01"),
+        )
+        connection.execute(
+            "INSERT INTO unified_kg_state(notebook_id,dirty,updated_at) "
+            "VALUES (%s,%s,%s)",
+            ("nb-pipeline-v35", 0, "2026-01-01"),
+        )
+
+    assert migrator.migrate(target_version=36) == 36
+    with postgres_database.connect() as connection:
+        notebook = connection.execute(
+            "SELECT name,indexing_pipeline,indexing_pipeline_version,"
+            "indexing_pipeline_generation,indexing_pipeline_job_id "
+            "FROM notebooks WHERE id=%s",
+            ("nb-pipeline-v35",),
+        ).fetchone()
+        product = connection.execute(
+            "SELECT indexing_pipeline_id,indexing_pipeline_version "
+            "FROM unified_kg_state WHERE notebook_id=%s",
+            ("nb-pipeline-v35",),
+        ).fetchone()
+    assert notebook == {
+        "name": "legacy",
+        "indexing_pipeline": None,
+        "indexing_pipeline_version": "builtin.chunk.v1",
+        "indexing_pipeline_generation": "",
+        "indexing_pipeline_job_id": "",
+    }
+    assert product == {
+        "indexing_pipeline_id": "",
+        "indexing_pipeline_version": "builtin.chunk.v1",
+    }
 
 
 def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_database):
@@ -357,7 +402,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 35
+    assert migrator.migrate() == 37
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -420,7 +465,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 35
+    assert migrator.migrate() == 37
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -495,7 +540,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 35
+    assert migrator.migrate() == 37
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

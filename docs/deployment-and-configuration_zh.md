@@ -378,6 +378,29 @@ chat 健康检查不进入 workload 策略：无论模型名是什么，它都�
 `chunk_embedding` workload；执行离线 `question-index` 前必须同时绑定。rollout mode
 保持关闭就是零成本默认；语义和全部数值护栏只在[产品与 API 参考](./product-and-api_zh.md#可选生成问题召回补充)登记。
 
+部署问答引擎使用 interactive chat workload `plugin_engine`。仓库示例把它绑定到
+`general` 并关闭 provider thinking，因为提示与调用循环由插件掌控。它的 completion
+输出预算有意继承所绑定模型客户端的普通回答上限；`.env.example` 中独立的
+`ASK_PLUGIN_ENGINE_*` 设置限制检索次数、证据与 prompt 大小、模型调用次数和轨迹形态。
+精确默认值与合法范围只登记在
+[产品与 API 参考](./product-and-api_zh.md#部署问答引擎-askengine)中。
+
+部署索引管线在 PR-1 不新增独立模型 workload。插件可通过 `indexing.pipeline`
+贡献按笔记本选择的分块/索引策略；parser 路由仍是自动的。浏览器里的笔记本设置会把
+当前管线只读展示给纯 reader，对 owner 与组内容管理员提供带“将重建全库索引”明确
+确认的切换入口，同时继续把参考库挂载管理保持为 owner-only。`pending` /
+`missing` / `unavailable` 的语义与净化后的 API 面只在
+[产品与 API 参考](./product-and-api_zh.md#部署索引管线-indexingpipeline)登记。
+运维可调 `INDEXING_PIPELINE_MAX_PROPOSALS_PER_SOURCE`、
+`INDEXING_PIPELINE_MAX_TEXT_CHARS`、`INDEXING_PIPELINE_MAX_ELEMENT_REFS`、
+`INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS` 与
+`INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS`；精确默认值/范围只在上述产品参考登记。
+切换即便没有绑定 KG 模型也复用同一条持久 KG rebuild job。重建工作先持久化到不可见的
+notebook stage；模型与 embedding I/O 都在最终事务外，只有精确 job/generation/source-snapshot
+CAS 成功才会一起发布全部可见来源的 chunks 与可选 KG 产物。失败、取消、启动恢复或迟到 worker
+只丢弃 stage，live generation 完全不动。未绑定 KG 模型时，同一 publisher 会显式保留 live KG、
+发布 core chunk 代次，并在笔记本合格时做 scale full 代次。
+
 Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_agent` 对当前 notebook 与当前有效
 挂载参考库的联邦证据做规划和反思检索，`knowhow_complete` 再把这些证据与同表参考合成为结构化建议。
 需要此功能时必须把两者都绑定到兼容的 chat 服务；任一未绑定或任一阶段 provider 失败时都不返回建议，

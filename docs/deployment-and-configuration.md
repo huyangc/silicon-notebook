@@ -453,6 +453,33 @@ before running the offline `question-index` phase. Leaving the rollout mode off 
 zero-cost default; deployment rollout semantics and all numeric rails live in the
 [Product and API reference](./product-and-api.md#optional-generated-question-recall-supplement).
 
+Deployment Ask engines use the interactive chat workload `plugin_engine`. The checked-in
+example binds it to `general` and disables provider thinking because the plugin owns its
+prompting loop. Its completion output budget deliberately inherits the bound model
+client's ordinary answer cap; the independent `ASK_PLUGIN_ENGINE_*` settings in
+`.env.example` bound retrieval calls, evidence and prompt size, model calls, and trace
+shape. Exact defaults and valid ranges live only in the
+[Product and API reference](./product-and-api.md#deployment-ask-engines-askengine).
+
+Deployment indexing pipelines do not add a separate model workload in PR-1. A plugin may
+contribute notebook-scoped chunk/index strategies through `indexing.pipeline`; parser
+routing remains automatic. The browser's notebook settings now show the current pipeline
+read-only to pure readers, allow owners and group content-managers to switch it with an
+explicit full-rebuild confirmation, and still keep mounted reference-library management
+owner-only. The pending/missing/unavailable rails and sanitized API surface are specified
+in the [Product and API reference](./product-and-api.md#deployment-indexing-pipelines-indexingpipeline).
+Operators may tune `INDEXING_PIPELINE_MAX_PROPOSALS_PER_SOURCE`,
+`INDEXING_PIPELINE_MAX_TEXT_CHARS`, `INDEXING_PIPELINE_MAX_ELEMENT_REFS`,
+`INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS`, and
+`INDEXING_PIPELINE_REBUILD_MAX_TEXT_CHARS`. The exact defaults/ranges stay in that
+product reference. A switch reuses the durable KG rebuild job row even when no KG model
+is bound. Rebuild work is persisted into an unpublished notebook stage; model and embedding
+I/O stay outside the final transaction, and only an exact job/generation/source-snapshot CAS
+publishes all visible-source chunks and optional KG products together. Failure, cancellation,
+startup recovery, or a late worker discards only that stage and leaves the live generation
+unchanged. With no KG model, the same publisher explicitly preserves the live KG while
+publishing the core chunk generation (and a full scale generation when eligible).
+
 Knowhow row completion uses two interactive chat workloads: `reasoning_agent`
 plans and reflects over federated evidence from the active notebook and its
 valid mounted reference libraries, then `knowhow_complete` turns that evidence

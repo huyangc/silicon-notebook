@@ -48,6 +48,10 @@ from typing import (
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.domain.indexing_pipeline import (
+    IndexingPipelineKgExtractionFailedError,
+    IndexingPipelineStalePlanError,
+)
 from app.models.sources import kg_analyzed_without_objects
 from app.repositories.ports import (
     GovernanceStorePort,
@@ -491,6 +495,162 @@ class KnowledgeLifecycleService:
         # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
         self._invalidate_knowledge_counts(notebook_id)
         return counts
+
+    def prepare_indexing_pipeline_kg(
+        self,
+        notebook_id: str,
+        source_id: str,
+        objects: List[dict],
+        relations: List[dict],
+        *,
+        source_generation: str,
+    ) -> tuple[dict, List[dict], List[dict]]:
+        """Map one extracted graph to unpublished core-schema payload rows.
+
+        This is the preparation half of ``store_kg``: ids, relation endpoints,
+        evidence reverse rows and source-local facts are all minted by core,
+        but no live table is mutated.  The caller computes embeddings from the
+        returned inputs and persists the resulting payload in the durable
+        notebook stage.
+        """
+        now = self._now()
+        local_to_id: Dict[str, str] = {}
+        for obj in objects:
+            local_to_id[obj["local_id"]] = self._new_id("ko")
+            obj["_oid"] = local_to_id[obj["local_id"]]
+        from app.services.retrieval import relation_embed_text, _payload_text
+
+        local_to_name = {
+            obj["local_id"]: _payload_text(obj["payload"])[:80]
+            for obj in objects
+        }
+        relation_inputs: List[dict] = []
+        relation_rows: List[dict] = []
+        for relation in relations:
+            source_object_id = local_to_id.get(relation["source_local_id"])
+            target_object_id = local_to_id.get(relation["target_local_id"])
+            if not source_object_id or not target_object_id:
+                continue
+            relation_id = self._new_id("rel")
+            spans = [
+                evidence.get("quoted_span", "")
+                for evidence in relation.get("evidence", [])
+                if isinstance(evidence, dict)
+            ]
+            relation_inputs.append(
+                {
+                    "_rid": relation_id,
+                    "text": relation_embed_text(
+                        local_to_name.get(relation["source_local_id"], "?"),
+                        relation["edge_type"],
+                        local_to_name.get(relation["target_local_id"], "?"),
+                        spans,
+                    ),
+                }
+            )
+            relation_rows.append(
+                {
+                    "id": relation_id,
+                    "source_object_id": source_object_id,
+                    "target_object_id": target_object_id,
+                    "edge_type": relation["edge_type"],
+                    "evidence": relation.get("evidence", []),
+                    "created_at": now,
+                }
+            )
+
+        with self._connect() as db:
+            notebook = self.knowledge.notebook_tier_row(db, notebook_id)
+            self.knowledge.validate_stage_source_elements(
+                db,
+                notebook_id,
+                source_id,
+                [
+                    str(evidence.get("element_id") or "")
+                    for obj in objects
+                    for evidence in (obj.get("evidence") or ())
+                    if isinstance(evidence, dict)
+                    and str(evidence.get("element_id") or "")
+                ],
+            )
+        status = "reviewed" if notebook and notebook["tier"] == "base" else "approved"
+        object_rows: List[dict] = []
+        object_sources: List[dict] = []
+        facts: List[dict] = []
+        fact_elements: List[dict] = []
+        for obj in objects:
+            object_id = obj["_oid"]
+            evidence = obj.get("evidence") or []
+            object_rows.append(
+                {
+                    "id": object_id,
+                    "object_type": obj["object_type"],
+                    "status": status,
+                    "payload": obj["payload"],
+                    "evidence": evidence,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            object_sources.extend(
+                {"object_id": object_id, "source_id": evidence_source_id}
+                for evidence_source_id in sorted(
+                    self._source_ids_from_evidence(evidence)
+                )
+            )
+            element_ids: List[str] = []
+            for evidence_item in evidence:
+                if not isinstance(evidence_item, dict):
+                    continue
+                evidence_source_id = str(evidence_item.get("source_id") or "")
+                if evidence_source_id and evidence_source_id != source_id:
+                    raise ValueError(
+                        "source-local fact evidence must belong to its source"
+                    )
+                element_id = str(evidence_item.get("element_id") or "")
+                if element_id and element_id not in element_ids:
+                    element_ids.append(element_id)
+            if not element_ids:
+                continue
+            fact_id = "ksf-" + hashlib.sha256(
+                f"{source_id}\0{source_generation}\0{obj['local_id']}".encode("utf-8")
+            ).hexdigest()[:32]
+            facts.append(
+                {
+                    "id": fact_id,
+                    "source_generation": source_generation,
+                    "local_object_id": obj["local_id"],
+                    "global_object_id": object_id,
+                    "object_type": obj["object_type"],
+                    "payload": obj["payload"],
+                    "evidence": evidence,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            fact_elements.extend(
+                {
+                    "fact_id": fact_id,
+                    "source_generation": source_generation,
+                    "element_id": element_id,
+                    "created_at": now,
+                }
+                for element_id in element_ids
+            )
+        return (
+            {
+                "mode": "replace",
+                "objects": object_rows,
+                "relations": relation_rows,
+                "object_sources": object_sources,
+                "facts": facts,
+                "fact_elements": fact_elements,
+                "object_vectors": [],
+                "relation_vectors": [],
+            },
+            objects,
+            relation_inputs,
+        )
 
     def store_kg(
         self,
@@ -2279,11 +2439,15 @@ class KnowledgeLifecycleService:
         *,
         target_limit: int | None = None,
         retry_partial: bool = False,
+        allow_without_model: bool = False,
     ) -> dict:
         if mode not in {"incremental", "rebuild"}:
             raise ValueError("unsupported KG build mode")
         self.get_notebook(notebook_id)
-        if not self.model_clients.configured("kg_extract"):
+        if (
+            not allow_without_model
+            and not self.model_clients.configured("kg_extract")
+        ):
             raise RuntimeError("LLM not configured; cannot build KG")
         target_count = self._kg_target_count(
             notebook_id,
@@ -2327,6 +2491,72 @@ class KnowledgeLifecycleService:
             raise
         return job
 
+    def finish_indexing_pipeline_job(
+        self,
+        notebook_id: str,
+        job_id: str,
+        *,
+        succeeded: bool,
+        pipeline_identity: tuple[str, str, str] | None = None,
+    ) -> None:
+        """Settle a reused durable rebuild job when KG extraction was skipped.
+
+        A deployment without ``kg_extract`` can still finalize a pipeline that
+        does not override KG extraction. The same durable single-flight row
+        remains the authority/status surface; identity publication and the job
+        terminal are committed together here.
+        """
+        job = self.kg_build_jobs.get(job_id)
+        if job["notebook_id"] != notebook_id or job["mode"] != "rebuild":
+            raise RuntimeError("KG build job does not match indexing rebuild")
+        if succeeded:
+            if pipeline_identity is None:
+                raise ValueError("successful indexing rebuild requires identity")
+            pipeline_id, pipeline_version, pipeline_generation = pipeline_identity
+            if not self.kg_build_jobs.complete_indexing_pipeline_stage_without_kg(
+                job_id
+            ):
+                self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+                raise IndexingPipelineStalePlanError(notebook_id)
+            changed = self.kg_build_jobs.publish_indexing_pipeline_success(
+                job_id,
+                notebook_id,
+                pipeline_id,
+                pipeline_version,
+                pipeline_generation,
+            )
+            if not changed:
+                self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+                self.kg_build_jobs.finish(
+                    job_id,
+                    "failed",
+                    error_code="indexing_pipeline_stale",
+                    error_message="索引管线重建已被更新的选择替代。",
+                )
+                self._emit_kg_build_event(
+                    "kg_build_failed", self.kg_build_jobs.get(job_id)
+                )
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+                raise IndexingPipelineStalePlanError(notebook_id)
+            event_kind = "kg_build_succeeded"
+        else:
+            self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+            changed = self.kg_build_jobs.finish(
+                job_id,
+                "failed",
+                error_code="indexing_pipeline_rebuild_failed",
+                error_message="索引管线重建未完成，请稍后重试。",
+            )
+            event_kind = "kg_build_failed"
+        if changed:
+            self._emit_kg_build_event(event_kind, self.kg_build_jobs.get(job_id))
+            if succeeded:
+                self._invalidate_unified_cache(notebook_id)
+                self._invalidate_knowledge_counts(notebook_id)
+        with self.kg_building_lock:
+            self.kg_building.discard(notebook_id)
+
     def fail_notebook_kg_job_submission(self, job_id: str) -> bool:
         try:
             job = self.kg_build_jobs.get(job_id)
@@ -2366,6 +2596,7 @@ class KnowledgeLifecycleService:
         progress=None,
         on_abort=None,
         skip_policy: "ModelSkipPolicy | None" = None,
+        indexing_pipeline_identity: tuple[str, str, str] | None = None,
     ) -> dict:
         import concurrent.futures as _cf
         from app.services.kg import scheduler as _kg_scheduler
@@ -2379,7 +2610,9 @@ class KnowledgeLifecycleService:
 
         def _extract_one(source_id: str, preserve_existing: bool) -> bool:
             control.raise_if_aborted()
-            self._set_source_status(source_id, "extracting")
+            staged_indexing = indexing_pipeline_identity is not None
+            if not staged_indexing:
+                self._set_source_status(source_id, "extracting")
             # 跳过模式:本来源用自己的子控制器,模型不可用只掐这一路的在飞窗口。
             # 关闭时逐位复用任务级控制器与它那份已解析的 client 缓存(零行为差异)。
             source_control = (
@@ -2401,25 +2634,43 @@ class KnowledgeLifecycleService:
                 # 带新类型重跑（轮数上限），并原子补发 'extracted' 事件——终态与事件都由
                 # 收口负责，这里不再单独 _set_source_status('extracted')（那次无条件 DB 写
                 # 会在守卫落终态后的窗口里把并发 retype 翻起的 'extracting' 冲回旧类型）。
-                self._reconcile_extracted_terminal(
-                    source_id,
-                    lambda sid: self._run_extraction(
-                        sid,
-                        kg_client=source_clients,
-                        preserve_existing_until_complete=preserve_existing,
-                    ),
-                )
+                extraction_kwargs: dict[str, object] = {
+                    "kg_client": source_clients,
+                    "preserve_existing_until_complete": preserve_existing,
+                }
+                if indexing_pipeline_identity is not None:
+                    (
+                        pipeline_id,
+                        pipeline_version,
+                        pipeline_generation,
+                    ) = indexing_pipeline_identity
+                    extraction_kwargs.update(
+                        indexing_pipeline_id=pipeline_id,
+                        indexing_pipeline_version=pipeline_version,
+                        indexing_pipeline_generation=pipeline_generation,
+                        indexing_stage_job_id=job_id,
+                    )
+                if staged_indexing:
+                    self._run_extraction(source_id, **extraction_kwargs)
+                else:
+                    self._reconcile_extracted_terminal(
+                        source_id,
+                        lambda sid: self._run_extraction(
+                            sid, **extraction_kwargs,
+                        ),
+                    )
                 if preserve_existing:
                     partial_retried.append(source_id)
                 if skip_policy is not None:
                     skip_policy.record_success()
                 return True
             except KgBuildAborted as exc:
-                self._set_source_status(
-                    source_id,
-                    "extracted" if preserve_existing else "parsed",
-                    error_message="",
-                )
+                if not staged_indexing:
+                    self._set_source_status(
+                        source_id,
+                        "extracted" if preserve_existing else "parsed",
+                        error_message="",
+                    )
                 if preserve_existing:
                     partial_failed_preserved.append(source_id)
                 # 任务级熔断(Ctrl-C、探测失败、别的线程已升级)一律原样上抛;
@@ -2436,20 +2687,22 @@ class KnowledgeLifecycleService:
             except (KeyboardInterrupt, SystemExit):
                 # 与上一支同一件事,只是中断继承 BaseException 接不到:不退回 'parsed'
                 # 这一篇来源就会一直显示「分析中」,直到后端重启才被兜底清理。
-                self._set_source_status(
-                    source_id,
-                    "extracted" if preserve_existing else "parsed",
-                    error_message="",
-                )
+                if not staged_indexing:
+                    self._set_source_status(
+                        source_id,
+                        "extracted" if preserve_existing else "parsed",
+                        error_message="",
+                    )
                 if preserve_existing:
                     partial_failed_preserved.append(source_id)
                 raise
             except Exception:  # noqa: BLE001 - isolate non-model source failure
-                self._set_source_status(
-                    source_id,
-                    "extracted" if preserve_existing else "parsed",
-                    error_message="",
-                )
+                if not staged_indexing:
+                    self._set_source_status(
+                        source_id,
+                        "extracted" if preserve_existing else "parsed",
+                        error_message="",
+                    )
                 if preserve_existing:
                     partial_failed_preserved.append(source_id)
                 self.event_log.logger.exception(
@@ -2669,6 +2922,8 @@ class KnowledgeLifecycleService:
         retry_partial: bool = False,
         finalize: Callable[[dict], dict | None] | None = None,
         skip_policy: "ModelSkipPolicy | None" = None,
+        preserve_existing_rebuild: bool = False,
+        indexing_pipeline_identity: tuple[str, str, str] | None = None,
     ) -> dict:
         job = self.kg_build_jobs.get(job_id)
         if (
@@ -2737,7 +2992,8 @@ class KnowledgeLifecycleService:
         try:
             if mode == "rebuild":
                 probe_kg_model(controlled_client)
-                self.delete_notebook_kg(notebook_id)
+                if not preserve_existing_rebuild:
+                    self.delete_notebook_kg(notebook_id)
             total_targets = int(job["total_sources"])
             if mode != "rebuild" and total_targets:
                 # 起始探测**刻意不受跳过模式影响**(codex 第 1 轮 P2,驳回)。它是"服务
@@ -2760,13 +3016,36 @@ class KnowledgeLifecycleService:
                 "model_skipped": [],
             }
             processed = 0
+            target_mode = (
+                "rebuild"
+                if mode == "rebuild" and preserve_existing_rebuild
+                else "incremental"
+            )
             for targets, skipped, skipped_no_elements in self._kg_target_batches(
                 notebook_id,
-                "incremental",
+                target_mode,
                 target_limit=target_limit,
                 retry_partial=retry_partial,
             ):
+                if mode == "rebuild" and preserve_existing_rebuild:
+                    targets = [(source_id, True) for source_id, _preserve in targets]
                 self._warn_skipped_sources(skipped_no_elements)
+                if indexing_pipeline_identity is not None:
+                    empty_kg = {
+                        "mode": "replace",
+                        "objects": [],
+                        "relations": [],
+                        "object_sources": [],
+                        "facts": [],
+                        "fact_elements": [],
+                        "object_vectors": [],
+                        "relation_vectors": [],
+                    }
+                    for source_id in skipped_no_elements:
+                        if not self.kg_build_jobs.stage_indexing_pipeline_kg(
+                            job_id, source_id, empty_kg
+                        ):
+                            raise IndexingPipelineStalePlanError(notebook_id)
 
                 def _page_progress(
                     index: int,
@@ -2795,18 +3074,43 @@ class KnowledgeLifecycleService:
                     _page_progress if progress is not None else None,
                     _mark_stopping,
                     skip_policy=skip_policy,
+                    indexing_pipeline_identity=indexing_pipeline_identity,
                 )
                 for key in result:
                     result[key].extend(page_result[key])
                 processed += len(targets)
-            self._run_success_side_effects(
-                notebook_id, result, enqueue_fold=finalize is None
-            )
+            if indexing_pipeline_identity is not None and result["failed"]:
+                raise IndexingPipelineKgExtractionFailedError()
+            if indexing_pipeline_identity is None:
+                self._run_success_side_effects(
+                    notebook_id, result, enqueue_fold=finalize is None
+                )
             if finalize is not None:
                 finalized = finalize(result)
                 if finalized:
                     result.update(finalized)
-            self.kg_build_jobs.finish(job_id, "succeeded")
+            if indexing_pipeline_identity is None:
+                self.kg_build_jobs.finish(job_id, "succeeded")
+            else:
+                pipeline_id, pipeline_version, pipeline_generation = (
+                    indexing_pipeline_identity
+                )
+                if not self.kg_build_jobs.publish_indexing_pipeline_success(
+                    job_id,
+                    notebook_id,
+                    pipeline_id,
+                    pipeline_version,
+                    pipeline_generation,
+                ):
+                    raise IndexingPipelineStalePlanError(notebook_id)
+                # Publication already dirtied and advanced the persistent
+                # generation. Drop only process-local read caches before the
+                # ordinary fail-open derived-product tail runs.
+                self._invalidate_unified_cache(notebook_id)
+                self._invalidate_knowledge_counts(notebook_id)
+                self._run_success_side_effects(
+                    notebook_id, result, enqueue_fold=finalize is None
+                )
             self._emit_kg_build_event(
                 "kg_build_succeeded",
                 self.kg_build_jobs.get(job_id),
@@ -2891,6 +3195,19 @@ class KnowledgeLifecycleService:
                 job_id, _settle_reporting_failures
             )
             raise
+        except IndexingPipelineKgExtractionFailedError:
+            self.kg_build_jobs.finish(
+                job_id,
+                "failed",
+                error_code="indexing_pipeline_kg_failed",
+                error_message="索引管线知识抽取未通过校验，旧知识仍保留。",
+            )
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
+            )
+            raise
         except Exception:
             self.kg_build_jobs.finish(
                 job_id,
@@ -2905,6 +3222,13 @@ class KnowledgeLifecycleService:
             )
             raise
         finally:
+            if indexing_pipeline_identity is not None:
+                try:
+                    self.kg_build_jobs.discard_indexing_pipeline_stage(job_id)
+                except Exception:  # noqa: BLE001 - terminal cleanup is retryable
+                    self.event_log.logger.exception(
+                        "failed to discard indexing pipeline stage %s", job_id
+                    )
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
 
@@ -2995,6 +3319,8 @@ class KnowledgeLifecycleService:
         target_limit: int | None = None,
         retry_partial: bool = False,
         finalize: Callable[[dict], dict | None] | None = None,
+        preserve_existing_rebuild: bool = False,
+        indexing_pipeline_identity: tuple[str, str, str] | None = None,
     ) -> dict:
         if mode == "incremental":
             return self.build_notebook_kg(
@@ -3007,12 +3333,22 @@ class KnowledgeLifecycleService:
             )
         if mode == "rebuild":
             return self.rebuild_notebook_kg(
-                notebook_id, job_id=job_id
+                notebook_id,
+                job_id=job_id,
+                finalize=finalize,
+                preserve_existing=preserve_existing_rebuild,
+                indexing_pipeline_identity=indexing_pipeline_identity,
             )
         raise ValueError("unsupported KG build mode")
 
     def rebuild_notebook_kg(
-        self, notebook_id: str, *, job_id: str | None = None
+        self,
+        notebook_id: str,
+        *,
+        job_id: str | None = None,
+        finalize: Callable[[dict], dict | None] | None = None,
+        preserve_existing: bool = False,
+        indexing_pipeline_identity: tuple[str, str, str] | None = None,
     ) -> dict:
         if job_id is None:
             job_id = self.prepare_notebook_kg_job(
@@ -3020,13 +3356,23 @@ class KnowledgeLifecycleService:
             )["id"]
             try:
                 return self._run_notebook_kg_job(
-                    notebook_id, job_id, "rebuild"
+                    notebook_id,
+                    job_id,
+                    "rebuild",
+                    finalize=finalize,
+                    preserve_existing_rebuild=preserve_existing,
+                    indexing_pipeline_identity=indexing_pipeline_identity,
                 )
             except (KeyboardInterrupt, SystemExit):
                 self._settle_unentered_job(job_id, notebook_id)
                 raise
         return self._run_notebook_kg_job(
-            notebook_id, job_id, "rebuild"
+            notebook_id,
+            job_id,
+            "rebuild",
+            finalize=finalize,
+            preserve_existing_rebuild=preserve_existing,
+            indexing_pipeline_identity=indexing_pipeline_identity,
         )
 
     # ------------------------------------------------------------------

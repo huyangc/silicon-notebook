@@ -452,6 +452,9 @@ class ScaleIndexBuilder:
         # freed (see above).
         manifest = {
             "version": self.version(notebook_id),
+            "pipeline_identity": list(
+                self.projections.pipeline_identity(notebook_id)
+            ),
             "dim": built_dim,
             "n_nodes": len(node_ids),
             "n_kg_nodes": len(kg_node_ids),
@@ -583,6 +586,19 @@ class ScaleIndexBuilder:
         fold_started = time.perf_counter()
         idx = self.load_scale(notebook_id)
         if idx is None:
+            return self.build(notebook_id)
+
+        pipeline_identity = list(
+            self.projections.pipeline_identity(notebook_id)
+        )
+        if idx.manifest.get("pipeline_identity") != pipeline_identity:
+            self.event_log.emit(
+                {
+                    "kind": "scale_fold_refused",
+                    "notebook_id": notebook_id,
+                    "reason": "pipeline_mismatch",
+                }
+            )
             return self.build(notebook_id)
 
         from app.services.vector_index import resolve_runtime_dim
@@ -773,6 +789,7 @@ class ScaleIndexBuilder:
             manifest.update(
                 {
                     "version": self.version(notebook_id),
+                    "pipeline_identity": pipeline_identity,
                     "watermark_sources": sorted(
                         self.projections.source_ids(notebook_id)
                     ),

@@ -211,11 +211,15 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     parser_host = object()
     observer_host = object()
     gap_host = object()
+    ask_engine_host = object()
+    indexing_pipeline_host = object()
     runtime = SimpleNamespace(
         retrieval_contributors=host,
         parser_chain=parser_host,
         ask_completed_observers=observer_host,
         report_completed_observers=observer_host,
+        ask_engines=ask_engine_host,
+        indexing_pipelines=indexing_pipeline_host,
         gap_consult=gap_host,
     )
     captured = {}
@@ -240,6 +244,8 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         "parser_provider_chain_host": parser_host,
         "ask_completed_observer_host": observer_host,
         "report_completed_observer_host": observer_host,
+        "ask_engine_host": ask_engine_host,
+        "indexing_pipeline_host": indexing_pipeline_host,
         "gap_consult_host": gap_host,
     }
 

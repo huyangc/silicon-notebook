@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import {
   ASK_MODES, DEFAULT_ASK_MODE, ASK_MODE_GROUPS,
   askModeIds, askModeLabels, groupOf, groupLabel, modeLabel,
-  defaultModeForGroup, requiresKg, canUseMode, modeFromTurn, streamsTrace,
+  defaultModeForGroup, normalizeAskModeProjection, requiresKg, canUseMode,
+  modeFromTurn, streamsTrace,
 } from "../../app/ask-modes.ts";
 import {
   appSourceModules,
@@ -24,7 +25,48 @@ async function appSourceCopy({ exclude = [] } = {}) {
 test("user-facing ids and default", () => {
   assert.deepEqual(askModeIds(), ["chunk", "reasoning", "graph"]);
   assert.equal(DEFAULT_ASK_MODE, "chunk");
-  assert.deepEqual(ASK_MODE_GROUPS.map((g) => g.id), ["general", "strict"]);
+  assert.deepEqual(ASK_MODE_GROUPS.map((g) => g.id), ["general", "strict", "extension"]);
+});
+
+test("deployment mode projection is data-driven, strict, and restorable", () => {
+  const modes = normalizeAskModeProjection([
+    { id: "chunk", group: "general", requires_kg: false, streams_trace: false },
+    {
+      id: "corp.search", group: "extension", label: "企业检索",
+      desc: "使用部署内检索策略回答", requires_kg: true,
+      streaming: false, streams_trace: false,
+    },
+    // Duplicate and malformed entries are ignored rather than replacing a live mode.
+    {
+      id: "corp.search", group: "extension", label: "覆盖",
+      desc: "覆盖", requires_kg: false, streams_trace: false,
+    },
+    {
+      id: "corp.streaming", group: "extension", label: "不支持",
+      desc: "v1 不能流式", requires_kg: false, streams_trace: true,
+    },
+    {
+      id: "corp.inconsistent", group: "extension", label: "不一致",
+      desc: "旧字段不能覆盖 v1 契约", requires_kg: false,
+      streaming: true, streams_trace: false,
+    },
+    {
+      id: "corp.非法", group: "extension", label: "非法标识",
+      desc: "浏览器也执行稳定标识守卫", requires_kg: false,
+      streams_trace: false,
+    },
+    {
+      id: "hardcoded", group: "extension", label: "无前缀",
+      desc: "无点号", requires_kg: false, streams_trace: false,
+    },
+  ]);
+  assert.deepEqual(askModeIds(modes), ["chunk", "reasoning", "graph", "corp.search"]);
+  assert.equal(groupOf("corp.search", modes), "extension");
+  assert.equal(requiresKg("corp.search", modes), true);
+  assert.equal(canUseMode("corp.search", false, modes), false);
+  assert.equal(streamsTrace("corp.search", modes), false);
+  assert.equal(modeFromTurn({ response: { mode: "corp.search" } }, modes), "corp.search");
+  assert.equal(modeFromTurn({ response: { mode: "corp.disabled" } }, modes), "chunk");
 });
 
 test("grouping + default engine per group", () => {

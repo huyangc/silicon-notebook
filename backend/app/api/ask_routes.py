@@ -9,6 +9,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import get_settings
+from app.bootstrap import application_extension_runtime
+from app.domain.ask_engine import AskPluginEngineError
 
 from app.api.deps import (
     get_current_user,
@@ -50,7 +52,12 @@ from app.repositories.ports import (
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
 )
-from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
+from app.services.ask_modes import (
+    ASK_MODES,
+    UnknownAskMode,
+    resolve_mode,
+    user_facing_modes,
+)
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
     finalize_query_intent,
@@ -75,6 +82,29 @@ router = APIRouter()
 # visitors this endpoint exists for. ``main.py`` includes this router WITHOUT
 # that dependency (mirrors ``report_routes.public_router``).
 public_router = APIRouter()
+
+
+def _extension_ask_modes():
+    host = application_extension_runtime().ask_engines
+    return tuple(
+        mode for mode in host.modes() if host.is_available(mode.id)
+    )
+
+
+def _valid_ask_mode_ids() -> list[str]:
+    return [mode.id for mode in user_facing_modes(_extension_ask_modes())]
+
+
+def _plugin_engine_http_error(exc: AskPluginEngineError) -> HTTPException:
+    message = (
+        "扩展引擎返回了无法核验的引用"
+        if exc.code == "plugin_engine_unverified_citation"
+        else "扩展引擎暂时无法完成回答，请重试"
+    )
+    return HTTPException(
+        status_code=502,
+        detail={"error": exc.code, "message": message},
+    )
 
 
 def _validate_source_scope(repo, notebook: NotebookSummary,
@@ -555,10 +585,11 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=404, detail="Notebook not found")
     # 先校验模式(422 malformed 请求),再查可用性(409 前置条件不满足),口径与 stream 一致。
     try:
-        spec = resolve_mode(payload.mode)
+        spec = resolve_mode(payload.mode, _extension_ask_modes())
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+            "error": "unknown ask mode", "mode": exc.mode,
+            "valid": _valid_ask_mode_ids()})
     _validate_confirmed_reasoning_intent(payload, spec)
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
@@ -575,22 +606,44 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
             return repo.ask(notebook_id, payload)
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+            "error": "unknown ask mode", "mode": exc.mode,
+            "valid": _valid_ask_mode_ids()})
     except AskCancelled:
         raise HTTPException(status_code=409, detail="Ask cancelled")
+    except AskPluginEngineError as exc:
+        raise _plugin_engine_http_error(exc)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get("/ask-modes")
 def ask_modes() -> list[dict[str, Any]]:
-    """User-facing ask modes (single source: app/services/ask_modes.py).
-    Copy/labels live in the frontend; this exposes ids + behavioural flags."""
-    return [
-        {"id": m.id, "group": m.group,
-         "requires_kg": m.requires_kg, "streaming": m.streaming}
-        for m in ASK_MODES.values() if m.user_facing
+    """Sanitized built-in truth plus live deployment-engine projection."""
+    builtins = [
+        {
+            "id": mode.id,
+            "group": mode.group,
+            "requires_kg": mode.requires_kg,
+            "streaming": mode.streaming,
+            "streams_trace": mode.streaming,
+        }
+        for mode in ASK_MODES.values() if mode.user_facing
     ]
+    host = application_extension_runtime().ask_engines
+    extensions = [
+        {
+            "id": item.descriptor.mode_id,
+            "group": "extension",
+            "label": item.descriptor.label,
+            "desc": item.descriptor.description,
+            "requires_kg": item.descriptor.requires_kg,
+            "streaming": False,
+            "streams_trace": False,
+        }
+        for item in host.registrations()
+        if host.is_available(item.descriptor.mode_id)
+    ]
+    return [*builtins, *extensions]
 
 
 def _ndjson_line(payload: dict[str, Any]) -> str:
@@ -655,10 +708,11 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     try:
-        spec = resolve_mode(payload.mode)
+        spec = resolve_mode(payload.mode, _extension_ask_modes())
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+            "error": "unknown ask mode", "mode": exc.mode,
+            "valid": _valid_ask_mode_ids()})
     _validate_confirmed_reasoning_intent(payload, spec)
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope

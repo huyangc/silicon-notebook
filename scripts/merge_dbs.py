@@ -28,7 +28,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
 )
 
-# --- 表分类(SCHEMA_VERSION=55) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=59) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -191,6 +191,11 @@ SKIP_SECONDARY_TABLES = [
     # 同类:一次运行的进程状态外加阈值计数器,合进来等于把副库的活动记在主库账上。
     # 留白 = 「还没巡固过」的诚实表达,合并后由正常触发重新算出来。
     "agent_notebook_profile", "agent_profile_jobs",
+    # v59 notebook indexing rebuild stage: unpublished worker-local payloads
+    # are valid only for their exact durable job/generation/source snapshot.
+    # A merge cannot resume that authority, so keep only the primary DB's
+    # in-flight state just like the other process/job tables above.
+    "indexing_pipeline_stages", "indexing_pipeline_stage_sources",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

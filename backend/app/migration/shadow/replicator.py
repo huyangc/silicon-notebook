@@ -557,9 +557,15 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
     checked_columns: set[tuple[str, str]] = set()
     incoming_fk_tables: set[str] = set()
     for constraint in EXPECTED_CONSTRAINTS.values():
+        # Backend-local ephemeral tables are present in the paired catalog but
+        # deliberately absent from shadow COPY/capture/apply.  Their keys,
+        # checks, and outgoing FKs therefore cannot constrain parking a
+        # replicated event.
+        if constraint.table not in specs:
+            continue
         if constraint.kind == "f":
             fk_columns.update((constraint.table, name) for name in constraint.columns)
-            if constraint.referenced_table is not None:
+            if constraint.referenced_table in specs:
                 incoming_fk_tables.add(constraint.referenced_table)
                 fk_columns.update(
                     (constraint.referenced_table, name)
@@ -574,10 +580,12 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
 
     raw: list[tuple[str, str, tuple[str, ...], str | None]] = []
     for name, constraint in EXPECTED_CONSTRAINTS.items():
-        if constraint.kind in {"p", "u"}:
+        if constraint.table in specs and constraint.kind in {"p", "u"}:
             raw.append((name, constraint.table, constraint.columns, None))
     seen_predicates: set[str] = set()
     for name, index in EXPECTED_OPERATIONAL_INDEXES.items():
+        if index.table not in specs:
+            continue
         if not index.unique:
             continue
         columns: list[str] = []

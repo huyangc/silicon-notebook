@@ -463,6 +463,9 @@ def register_source_tools(
         def run() -> dict[str, Any]:
             with _owner_request_context(principal):
                 _own_source(repo, notebook_id, source_id)
+                # Fail before reporting a queued success. The worker repeats
+                # this gate so a pipeline switch after submit is still closed.
+                repo.require_indexing_pipeline_write(notebook_id)
                 # There is no single-flight guard behind process_source: the
                 # browser's re-parse route submits unconditionally, so calling
                 # this in a loop would queue N full parse+embed+extract

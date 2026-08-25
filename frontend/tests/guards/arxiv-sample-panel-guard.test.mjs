@@ -132,13 +132,16 @@ test("一次什么都没记上的导入会出声，不是静默复位", async ()
       + "什么都没记上，静默复位会被读成「做完了」",
   );
 
-  // 出声要出在无障碍树里看得见的地方，否则「出声」只是一段视觉文本。
-  const status = jsxElements(source, "p").find(
-    (element) => element.attributes?.role === "status",
-  );
+  // 出声要出在无障碍树里看得见的地方，否则「出声」只是一段视觉文本。实现可以是
+  // 直接的 `<p role="status">`，也可以是 SDK 包出来的 `ExtensionAlert tone="status"`；
+  // 钉的是「有一条 status 语气的宿主」，不是旧 DOM 标签名本身。
+  const status = [
+    ...jsxElements(source, "p").filter((element) => element.attributes?.role === "status"),
+    ...jsxElements(source, "ExtensionAlert").filter((element) => element.attributes?.tone === "status"),
+  ][0];
   assert.ok(
     status,
-    "空回执那一支必须落在一个 role=\"status\" 的元素上",
+    "空回执那一支必须落在一个 status 语气的元素上",
   );
 
   // 元素存在不等于出了声：`<p role="status" />` 或 `<p role="status">{""}</p>`

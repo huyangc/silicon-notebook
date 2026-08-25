@@ -672,8 +672,17 @@ class KnowledgeLifecycleRepository(Protocol):
         *,
         target_limit: int | None = None,
         retry_partial: bool = False,
+        allow_without_model: bool = False,
     ) -> dict: ...
     def fail_notebook_kg_job_submission(self, job_id: str) -> bool: ...
+    def finish_indexing_pipeline_job(
+        self,
+        notebook_id: str,
+        job_id: str,
+        *,
+        succeeded: bool,
+        pipeline_identity: tuple[str, str, str] | None = None,
+    ) -> None: ...
     def execute_notebook_kg_job(
         self,
         notebook_id: str,
@@ -684,6 +693,8 @@ class KnowledgeLifecycleRepository(Protocol):
         target_limit: int | None = None,
         retry_partial: bool = False,
         finalize: Callable[[dict], dict | None] | None = None,
+        preserve_existing_rebuild: bool = False,
+        indexing_pipeline_identity: tuple[str, str, str] | None = None,
     ) -> dict: ...
     def build_notebook_kg(
         self,
@@ -857,6 +868,21 @@ class NotebookStorePort(Protocol):
     def meta_for_notebook(self, notebook_id: str) -> dict | None: ...
     def apply_meta_for_notebook(self, notebook_id: str, *, guard_name: str, name: str, purpose: str) -> None: ...
     def tier(self, notebook_id: str) -> str: ...
+    def indexing_pipeline_state(self, notebook_id: str) -> dict[str, str]: ...
+    def set_indexing_pipeline_desired(
+        self, notebook_id: str, pipeline_id: str, pipeline_version: str
+    ) -> str: ...
+    def attach_indexing_pipeline_job(
+        self, notebook_id: str, generation: str, job_id: str
+    ) -> bool: ...
+    def clear_indexing_pipeline_job(
+        self, notebook_id: str, generation: str, job_id: str
+    ) -> bool: ...
+
+# Stable database-write page shared by both indexing-stage publishers.  This
+# bounds transient id lists; it never truncates a product because publishers
+# continue until the matching set is empty.
+INDEXING_PIPELINE_PUBLISH_DELETE_BATCH = 500
 
 
 @runtime_checkable
@@ -892,6 +918,33 @@ class KgBuildJobStorePort(Protocol):
         error_code: str = "",
         error_message: str = "",
     ) -> bool: ...
+    def begin_indexing_pipeline_stage(
+        self,
+        job_id: str,
+        notebook_id: str,
+        pipeline_id: str,
+        pipeline_version: str,
+        pipeline_generation: str,
+        source_ids: Sequence[str],
+    ) -> None: ...
+    def stage_indexing_pipeline_chunks(
+        self, job_id: str, source_id: str, payload: dict
+    ) -> bool: ...
+    def stage_indexing_pipeline_kg(
+        self, job_id: str, source_id: str, payload: dict
+    ) -> bool: ...
+    def complete_indexing_pipeline_stage_without_kg(self, job_id: str) -> bool: ...
+    def discard_indexing_pipeline_stage(self, job_id: str) -> None: ...
+    def publish_indexing_pipeline_success(
+        self,
+        job_id: str,
+        notebook_id: str,
+        pipeline_id: str,
+        pipeline_version: str,
+        pipeline_generation: str,
+    ) -> bool:
+        """Atomically publish staged products, identity and job terminal."""
+        ...
     def fail_submission(self, job_id: str) -> bool: ...
 
 
@@ -1171,7 +1224,9 @@ class SourceStorePort(Protocol):
     @staticmethod
     def source_exists_tx(connection: object, source_id: str) -> bool: ...
     @staticmethod
-    def source_exists_for_update_tx(connection: object, source_id: str) -> bool: ...
+    def source_exists_for_update_tx(
+        connection: object, source_id: str, notebook_id: str | None = None
+    ) -> bool: ...
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_elements_page(self, source_id: str, offset: int = 0, limit: int = 40, anchor_element_id: str = "") -> PaginatedSourceElements: ...
     def source_elements_after(
@@ -1402,6 +1457,16 @@ class SourceStorePort(Protocol):
 
 @runtime_checkable
 class ChunkStorePort(Protocol):
+    def replace_notebook_chunks(
+        self,
+        notebook_id: str,
+        chunks_by_source: Mapping[str, Sequence[ChunkWrite]],
+        *,
+        created_at: str,
+        pipeline_id: str,
+        pipeline_version: str,
+        pipeline_generation: str,
+    ) -> None: ...
     def question_index_chunk_page(
         self,
         notebook_id: str,
@@ -1555,6 +1620,11 @@ class KnowledgeStorePort(Protocol):
     def validate_source_fact_publish(
         connection: object, notebook_id: str, source_id: str,
         source_generation: str, element_ids: Sequence[str]
+    ) -> None: ...
+    @staticmethod
+    def validate_stage_source_elements(
+        connection: object, notebook_id: str, source_id: str,
+        element_ids: Sequence[str]
     ) -> None: ...
     @staticmethod
     def insert_source_fact_rows(
@@ -1718,6 +1788,8 @@ class KnowledgeStorePort(Protocol):
         created_at: str,
         *,
         preserve_existing: bool = False,
+        indexing_pipeline_id: str = "",
+        indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None: ...
     def finish_extraction(self, run_id: str, status: str, message: str) -> None: ...
     def add_relations_current(self, notebook_id: str, source_id: str, relations: list[dict]) -> int: ...
@@ -3560,6 +3632,7 @@ class IndexProjectionStorePort(Protocol):
     ) -> None: ...
     def version_signal(self, notebook_id: str) -> tuple[int, int, tuple]: ...
     def version_facts(self, notebook_id: str) -> list[Any]: ...
+    def pipeline_identity(self, notebook_id: str) -> tuple[str, str]: ...
     def version_with_settings(self, notebook_id: str, settings_tail: tuple) -> list: ...
     def graph_rows(
         self,

@@ -255,7 +255,7 @@ The eight seams, and nothing else: `plugin_id`, `settings`, `require_notebook_ca
 
 ### 3.5 Other contribution kinds
 
-The six remaining production extension points are Protocols in the SDK; implement the Protocol, declare the matching `ContributionKind`, and register through the typed `add_*` helper.
+The eight remaining production extension points are Protocols in the SDK; implement the Protocol, declare the matching `ContributionKind`, and register through the typed `add_*` helper.
 
 | Point constant | Kind | Protocol | Module |
 | --- | --- | --- | --- |
@@ -265,8 +265,16 @@ The six remaining production extension points are Protocols in the SDK; implemen
 | `REPORT_COMPLETED_OBSERVER_POINT` | `OBSERVER` | `ReportCompletedObserver` | `app/extension_sdk/report.py` |
 | `REPORT_EXPORTER_POINT` | `PROVIDER` | `ReportExporterProvider` | `app/extension_sdk/report_export.py` |
 | `ASK_GAP_CONSULT_POINT` (`ask.gap_consult`) | `CONTRIBUTOR` | `GapConsultContributor` | `app/extension_sdk/gap_consult.py` |
+| `ASK_ENGINE_POINT` (`ask.engine`) | `PROVIDER` | `AskEngineProvider` | `app/extension_sdk/ask.py` |
+| `INDEXING_PIPELINE_POINT` (`indexing.pipeline`) | `CONTRIBUTOR` | `IndexingPipelineProvider` | `app/extension_sdk/indexing.py` |
 
 Each point hands a narrow, point-specific context — never a universal service locator — and each declares the capabilities a contribution must `require` to receive its access port. Read the Protocol and its module docstring before writing against it; they carry the fail-open and cancellation rules for that point.
+
+An `ask.engine` provider registers a descriptor whose `mode_id` starts with its own plugin id and returns `AskEngineResult(answer_markdown, citations)`. It receives only the current question plus retrieval, model, trace, and cancellation ports. Retrieval returns bounded evidence with opaque run-local handles; cite only handles issued during that same invocation and place matching `[kN]` or `【kN】` markers in the Markdown. Core validates the whole citation set fail-closed, constructs durable citations itself, and rechecks run identity before saving. The v1 port deliberately has no conversation history, intent preflight, KG/PPR, repository, settings, connection, raw model client, MCP, Report, or live-trace surface. Its mode is shown only in the browser's advanced-mode third group when live availability passes.
+
+An `indexing.pipeline` contribution registers one or more notebook-scoped pipeline descriptors under its own plugin-id namespace and returns bounded chunk proposals from immutable source-element views. PR-1 lets the plugin own chunking strategy while core keeps parser routing, schema ownership, durability, and publication of the new `(pipeline_id, pipeline_version)` identity. The browser's notebook settings split by authority: owners and group content-managers may switch the pipeline with an explicit full-rebuild confirmation, but mounted reference-library configuration remains owner-only and pure readers get only a read-only current-pipeline/status view. Missing or unavailable selections must degrade to sanitized `missing` / `available=false` states and offer a revert-to-builtin path; ordinary reads keep using the last published artifacts while new indexing writes are blocked until the rebuild publishes.
+
+Deployment plugins execute as trusted code in the backend process. The narrow Protocols are the supported capability surface and keep ordinary plugin implementations from depending on core internals; they are not a hostile-code sandbox against Python introspection. Install only reviewed packages. A future untrusted-plugin tier would require process isolation and IPC rather than broader in-process wrappers.
 
 ### 3.6 Backend red lines
 
@@ -277,6 +285,7 @@ Each point hands a narrow, point-specific context — never a universal service 
 - A plugin route must not raise 401 for anything other than a genuine session invalidation — translate an upstream 401 to `502`/`424` yourself if you want your own wording.
 - Never `raise ExtensionRegistryError` from `register()`. It is not on the SDK surface, but it is importable, and core deliberately leaves it *unsanitized* — a message you write there reaches the operator's log verbatim. Every other exception from `register()` is converted to `plugin_registration_failed` with only the class name.
 - A `GapConsultContributor` runs its availability probe and its `consult` call together on one private worker thread under a hard deadline (see [Gap consultation](./product-and-api.md#gap-consultation-askgap_consult)): do not rely on `contextvars`, thread-local state, or any core ContextVar surviving into that thread — none does, by design. The host waits up to `ASK_GAP_CONSULT_TIMEOUT_SECONDS` and accepts whatever you return within that window; exceed it and the contribution is abandoned outright — its eventual return value is read by no one and discarded, never applied late. Return only `http`/`https` URLs, and only ones that point directly at a PDF — the import endpoint probes the exact URL you give it and does not go looking for one on a landing or abstract page.
+- An `AskEngineProvider` must cite only evidence handles returned by its own `retrieval` port. Forged, stale, or cross-run handles reject the answer; do not catch that rejection and retry with ungrounded prose.
 
 ## 4. Step two — the frontend package
 
@@ -364,6 +373,8 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 ```
 
 *Core does for you:* injects `actions.api` bound to **this contribution's** `pluginId`, so every request is confined under `/api/extensions/<plugin id>/`, `authorization`/`cookie` headers you set are stripped, and `tag`/`auth`/`unauthorized` are fixed. `ExtensionModal` gives you the system dialog shell, the drag handle, and a per-plugin window-position key.
+
+For the dialog body, the SDK also exports a recommended content layer from the same `ui.tsx` module: `ExtensionFormRow`, `ExtensionTextInput`, `ExtensionResultList`, `ExtensionResultItem`, `ExtensionActions`, `ExtensionAlert`, and `ExtensionEmptyState`. They provide the base application's token-backed form, result-list, action-row, alert, and empty-state language without requiring plugin CSS or inline colours. Their use is recommended rather than mandatory—plain semantic HTML remains valid—but a plugin should reach for these components before inventing an unstyled parallel vocabulary.
 
 *The dialog is core-owned.* You do not hold an `open` boolean. `actions.openDialog()` **asks** for the one generic `extension` slot in core's root-dialog coordinator; `context.dialog` is the answer, and `ExtensionModal` renders nothing until `context.dialog.open` is true. Core closes it for you when another primary dialog opens, when the user switches notebooks, and on sign-out; `actions.closeDialog()` is the only way *you* close it. Two consequences worth knowing: one plugin dialog is visible at a time (the slot is claimed per **contribution**, so two contributions of the same plugin do not both open), and a dialog covered by a higher layer becomes `inert`/`aria-hidden` instead of quietly staying focusable behind it. **A different contribution calling `openDialog()` closes the current holder's dialog first, then re-registers the slot to itself** — the focus-return target moves to the new holder's own trigger, not the previous holder's (codex #578 R7 P2). A local `useState` for the dialog would only diverge from all of that — it cannot close a dialog the coordinator already took away.
 

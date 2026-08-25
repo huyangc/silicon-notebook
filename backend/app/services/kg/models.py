@@ -1,9 +1,9 @@
 """KG data model. 4 node types, typed edges, verbatim evidence spans."""
 from __future__ import annotations
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 
-NodeType = Literal["Concept", "Claim", "Formula", "Procedure"]
+NodeType = str
 
 class Evidence(BaseModel):
     file: str

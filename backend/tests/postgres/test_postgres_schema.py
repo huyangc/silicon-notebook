@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 35
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 37
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 35
-    assert migrator.migrate() == 35
-    assert migrator.current_version() == 35
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 35
+    assert migrator.migrate() == 37
+    assert migrator.migrate() == 37
+    assert migrator.current_version() == 37
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 37
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 35
+    assert migrator.migrate() == 37
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 35
+        assert PostgresMigrator(databases[1]).migrate() == 37
     finally:
         for database in databases:
             database.close()
@@ -202,7 +202,10 @@ def test_packaged_index_migration_phases_are_exact():
         (32, "retrieval_experiences"),
         (33, "agent_observations"),
         (34, "group_owner"),
-    ]
+        (35, "group_invite"),
+            (36, "pluggable_indexing_pipeline"),
+            (37, "indexing_pipeline_staging"),
+        ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
         return [
@@ -378,6 +381,18 @@ def test_packaged_index_migration_phases_are_exact():
     assert (
         "ADD COLUMN chunk_elements_indexed bigint NOT NULL DEFAULT 0"
         in migrations[24].sql
+    )
+
+    # Migration 36 mirrors SQLite v58. Desired selection and its generation
+    # live on the notebook, while readers keep using the independently
+    # published product identity until the whole-notebook swap succeeds.
+    assert index_declarations(36) == []
+    assert "ADD COLUMN indexing_pipeline text COLLATE \"C\"" in migrations[36].sql
+    assert "ADD COLUMN indexing_pipeline_generation text COLLATE \"C\"" in (
+        migrations[36].sql
+    )
+    assert "ADD COLUMN indexing_pipeline_id text COLLATE \"C\"" in (
+        migrations[36].sql
     )
 
 

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Any, Callable, Generic, Literal, Protocol, TypeVar
 
+from app.domain.extensions import ActorRef, CancellationToken, NotebookRef
 from app.extension_sdk.ui import UiContributionDeclaration
 
 
@@ -49,23 +50,6 @@ class ExtensionFailureKind(str, Enum):
     CANCELLED = "cancelled"
     INVALID_RESULT = "invalid_result"
     FAILED = "failed"
-
-
-@dataclass(frozen=True)
-class ActorRef:
-    id: str
-
-
-@dataclass(frozen=True)
-class NotebookRef:
-    id: str
-
-
-@runtime_checkable
-class CancellationToken(Protocol):
-    def is_set(self) -> bool: ...
-
-    def raise_if_cancelled(self) -> None: ...
 
 
 @dataclass(frozen=True)

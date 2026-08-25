@@ -70,7 +70,7 @@ from app.domain.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_T
 # v57 adds one revocable group invitation capability to each group. The token
 # is nullable (no active link), unique while present, and deleted with the
 # group because it lives on the aggregate root.
-SCHEMA_VERSION = 57
+SCHEMA_VERSION = 59
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -243,6 +243,8 @@ class SqliteMigrator:
                   run_type TEXT NOT NULL,
                   status TEXT NOT NULL,
                   error_message TEXT NOT NULL DEFAULT '',
+                  indexing_pipeline_id TEXT NOT NULL DEFAULT '',
+                  indexing_pipeline_version TEXT NOT NULL DEFAULT 'builtin.chunk.v1',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -3125,6 +3127,105 @@ class SqliteMigrator:
                 "ON groups(invite_token) WHERE invite_token IS NOT NULL"
             )
 
+    def _migration_58(self) -> None:
+        """Persist desired and published notebook indexing-pipeline identity.
+
+        The desired selection is nullable on ``notebooks`` (NULL = builtin).
+        Its version and opaque generation make the later whole-notebook
+        publication a CAS: a late worker can never publish after a newer
+        selection (including an A→B→A sequence) has taken authority.
+        Published identity stays on the existing product-state row so a
+        deployment plugin can be removed without making old core-schema
+        artifacts unreadable.  The whole-notebook chunk publisher changes the
+        selection and these two identity columns in its atomic swap.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "notebooks", "indexing_pipeline", "TEXT")
+            self.add_column_if_missing(
+                db,
+                "notebooks",
+                "indexing_pipeline_version",
+                "TEXT NOT NULL DEFAULT 'builtin.chunk.v1'",
+            )
+            self.add_column_if_missing(
+                db,
+                "notebooks",
+                "indexing_pipeline_generation",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self.add_column_if_missing(
+                db,
+                "notebooks",
+                "indexing_pipeline_job_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self.add_column_if_missing(
+                db,
+                "unified_kg_state",
+                "indexing_pipeline_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self.add_column_if_missing(
+                db,
+                "unified_kg_state",
+                "indexing_pipeline_version",
+                "TEXT NOT NULL DEFAULT 'builtin.chunk.v1'",
+            )
+            self.add_column_if_missing(
+                db,
+                "extraction_runs",
+                "indexing_pipeline_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self.add_column_if_missing(
+                db,
+                "extraction_runs",
+                "indexing_pipeline_version",
+                "TEXT NOT NULL DEFAULT 'builtin.chunk.v1'",
+            )
+
+    def _migration_59(self) -> None:
+        """Durable, unpublished notebook indexing generations.
+
+        A stage is owned by the durable rebuild job.  Per-source JSON payloads
+        contain only already-computed core-schema rows; the final publisher
+        validates the frozen visible-source snapshot and moves every product
+        into the live tables in one transaction.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS indexing_pipeline_stages (
+                  job_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES kg_build_jobs(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  pipeline_id TEXT NOT NULL DEFAULT '',
+                  pipeline_version TEXT NOT NULL,
+                  pipeline_generation TEXT NOT NULL,
+                  source_snapshot TEXT NOT NULL DEFAULT '[]',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_indexing_pipeline_stages_notebook
+                  ON indexing_pipeline_stages(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS indexing_pipeline_stage_sources (
+                  job_id TEXT NOT NULL
+                    REFERENCES indexing_pipeline_stages(job_id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','completed','failed')),
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (job_id, source_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_indexing_pipeline_stage_sources_source
+                  ON indexing_pipeline_stage_sources(source_id);
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -3177,6 +3278,11 @@ class SqliteMigrator:
                 "updated_at=?, finished_at=? WHERE status='running'",
                 (now, now),
             )
+            # Staged products are unpublished scratch owned by those running
+            # jobs.  No worker survives process restart, so retaining them can
+            # only waste space or tempt a later generation to consume stale
+            # payload.  The live chunk/KG tables were never touched.
+            db.execute("DELETE FROM indexing_pipeline_stages")
             # 命令目录抽取同理,且**必须连 'queued' 一起收**:单飞守卫的谓词是
             # `status IN ('queued','running')`,只扫 running 会让一行崩在「已建行、
             # 线程未起」窗口里的 queued 永久占住该来源的守卫,用户既看不到进度也

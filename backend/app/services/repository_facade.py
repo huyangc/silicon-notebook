@@ -25,6 +25,12 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.ask_engine import AskEngineHostPort
+from app.domain.indexing_pipeline import (
+    IndexingPipelineHostPort,
+    IndexingPipelineStalePlanError,
+    IndexingPipelineUnavailableError,
+)
 from app.core.request_context import (
     _REQUEST_USER,
     get_request_user,
@@ -291,6 +297,8 @@ class RepositoryFacade:
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        ask_engine_host: AskEngineHostPort | None = None,
+        indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
         self.settings = settings
@@ -325,6 +333,8 @@ class RepositoryFacade:
             parser_provider_chain_host=parser_provider_chain_host,
             ask_completed_observer_host=ask_completed_observer_host,
             report_completed_observer_host=report_completed_observer_host,
+            ask_engine_host=ask_engine_host,
+            indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
@@ -694,13 +704,16 @@ class RepositoryFacade:
                 )
             ),
             begin_extraction_run=lambda source_id, notebook_id, run_id, created_at,
-            preserve_existing=False: (
+            preserve_existing=False, indexing_pipeline_id="",
+            indexing_pipeline_version="builtin.chunk.v1": (
                 self._begin_extraction_run(
                     source_id,
                     notebook_id,
                     run_id,
                     created_at,
                     preserve_existing=preserve_existing,
+                    indexing_pipeline_id=indexing_pipeline_id,
+                    indexing_pipeline_version=indexing_pipeline_version,
                 )
             ),
             finish_extraction_run=lambda run_id, status, message: (
@@ -1610,6 +1623,149 @@ class RepositoryFacade:
         """Return the current notebook's complete user-visible source id set."""
         return self._runtime.source_store.all_visible_source_ids(notebook_id)
 
+    def indexing_pipeline_options(self, notebook_id: str) -> dict:
+        """Project the frozen registry and this notebook's published choice."""
+        return self._runtime.indexing_pipeline.projection(notebook_id)
+
+    def set_indexing_pipeline(self, notebook_id: str, pipeline_id: str | None) -> dict:
+        """Persist desired intent, claim one durable rebuild job, then return."""
+        intent = self._runtime.indexing_pipeline.begin(notebook_id, pipeline_id)
+        if not intent["changed"]:
+            return {**intent, "rebuild_status": "idle", "job_id": None}
+        pipeline_id = str(intent.pop("_pipeline_id"))
+        pipeline_version = str(intent.pop("_pipeline_version"))
+        pipeline_generation = str(intent.pop("_pipeline_generation"))
+        # Reuse the existing durable notebook rebuild row/single-flight even
+        # when this deployment has no KG model. In that case the worker skips
+        # only PR-2's model-dependent middle stage; chunk + scale remain durable.
+        job = self._runtime.knowledge_lifecycle.prepare_notebook_kg_job(
+            notebook_id,
+            "rebuild",
+            allow_without_model=True,
+        )
+        if not self._runtime.notebook_store.attach_indexing_pipeline_job(
+            notebook_id, pipeline_generation, job["id"]
+        ):
+            self._runtime.knowledge_lifecycle.fail_notebook_kg_job_submission(
+                job["id"]
+            )
+            raise IndexingPipelineStalePlanError(notebook_id)
+        from app.services import background_jobs
+
+        try:
+            background_jobs.submit(
+                self.execute_indexing_pipeline_rebuild,
+                notebook_id,
+                job["id"],
+                pipeline_id,
+                pipeline_version,
+                pipeline_generation,
+                name=f"index-pipeline-{notebook_id}",
+                notify_pending=True,
+            )
+        except Exception:
+            self._runtime.knowledge_lifecycle.fail_notebook_kg_job_submission(
+                job["id"]
+            )
+            raise
+        return {
+            **intent,
+            "rebuild_status": "pending",
+            "job_id": job["id"],
+        }
+
+    def execute_indexing_pipeline_rebuild(
+        self,
+        notebook_id: str,
+        job_id: str,
+        pipeline_id: str,
+        pipeline_version: str,
+        pipeline_generation: str,
+    ) -> dict:
+        """Authorized durable worker: chunks → optional KG → atomic success tail."""
+        lifecycle = self._runtime.knowledge_lifecycle
+        try:
+            rebuilt = self._runtime.indexing_pipeline.rebuild(
+                notebook_id,
+                job_id=job_id,
+                pipeline_id=pipeline_id,
+                pipeline_version=pipeline_version,
+                pipeline_generation=pipeline_generation,
+            )
+        except BaseException:
+            lifecycle.finish_indexing_pipeline_job(
+                notebook_id, job_id, succeeded=False
+            )
+            raise
+
+        def finalize(_result: dict) -> dict:
+            return {
+                "indexing_pipeline_rebuilt": True,
+                "indexing_pipeline_warning_count": int(
+                    rebuilt.get("warning_count", 0)
+                ),
+            }
+
+        if self._runtime.models.configured("kg_extract"):
+            result = lifecycle.execute_notebook_kg_job(
+                notebook_id,
+                job_id,
+                "rebuild",
+                finalize=finalize,
+                preserve_existing_rebuild=True,
+                indexing_pipeline_identity=(
+                    pipeline_id,
+                    pipeline_version,
+                    pipeline_generation,
+                ),
+            )
+        else:
+            option = (
+                self._runtime.indexing_pipelines.option(pipeline_id)
+                if pipeline_id and self._runtime.indexing_pipelines is not None
+                else None
+            )
+            if option is not None and option.overrides_kg_extraction:
+                lifecycle.finish_indexing_pipeline_job(
+                    notebook_id, job_id, succeeded=False
+                )
+                raise RuntimeError(
+                    "selected indexing pipeline requires the KG model"
+                )
+            try:
+                result = finalize({})
+            except BaseException:
+                lifecycle.finish_indexing_pipeline_job(
+                    notebook_id, job_id, succeeded=False
+                )
+                raise
+            lifecycle.finish_indexing_pipeline_job(
+                notebook_id,
+                job_id,
+                succeeded=True,
+                pipeline_identity=(
+                    pipeline_id,
+                    pipeline_version,
+                    pipeline_generation,
+                ),
+            )
+        if self._runtime.scale_artifacts.eligible(notebook_id):
+            try:
+                # Full scale artifacts share one staging directory per notebook.
+                # Enter through the runtime claim instead of calling the builder
+                # directly so concurrent rebuilds cannot corrupt that staging
+                # area or race their atomic publication.
+                self._runtime.scale_artifacts.rebuild_after_publication(notebook_id)
+            except Exception:
+                self._runtime.event_log.logger.exception(
+                    "post-publication scale rebuild failed for indexing pipeline"
+                )
+        return {**rebuilt, **result, "job_id": job_id}
+
+    def require_indexing_pipeline_write(self, notebook_id: str) -> None:
+        """Fail closed before an operation can create a new index artifact."""
+        self._runtime.indexing_pipeline.require_write_admission(notebook_id)
+
     def hidden_source_ids(self, notebook_id: str, owner_id: str) -> List[str]:
         """Hidden Memory/Knowhow projection participants for ONE user.
         Knowhow projections are notebook-wide; a Memory projection belongs
@@ -1654,6 +1810,7 @@ class RepositoryFacade:
         return self._runtime.source_ingestion.pipeline_hooks()
 
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]:
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.source_ingestion.import_sources_compat(notebook_id, payload)
 
     def add_url_sources(
@@ -1664,6 +1821,7 @@ class RepositoryFacade:
         capacity_limit: Optional[int] = None,
         agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.source_ingestion.add_url_sources_compat(
             notebook_id, urls, scheduler, capacity_limit, agent_profile_id
         )
@@ -1676,6 +1834,7 @@ class RepositoryFacade:
         agent_profile_id: str = "",
         capacity_limit: Optional[int] = None,
     ) -> List[UploadedSourceSummary]:
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.source_ingestion.upload_sources_compat(
             notebook_id, files, scheduler, agent_profile_id, capacity_limit
         )
@@ -1722,6 +1881,7 @@ class RepositoryFacade:
 
         skip_policy 只由离线批量的显式跳过模式传入(见 ModelSkipPolicy);
         API 路径一律省略,保持"模型不可用即熔断整个任务"的既有契约。"""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.build_notebook_kg(
             notebook_id,
             progress=progress,
@@ -1735,6 +1895,7 @@ class RepositoryFacade:
     def rebuild_notebook_kg(self, notebook_id: str) -> dict:
         """Full re-extract (delete+build, kg_building 覆盖 delete 阶段) —
         KnowledgeLifecycleService owns the orchestration (Task 15)."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.rebuild_notebook_kg(notebook_id)
 
     def _parse_url_via_local(
@@ -1745,6 +1906,8 @@ class RepositoryFacade:
         )
 
     def process_source(self, source_id: str) -> SourceSummary:
+        source = self._runtime.source_store.get_source(source_id)
+        self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_ingestion.process_source_compat(source_id)
 
     def source_parse_busy(self, source_id: str, *, timeout: float = 0.0) -> bool:
@@ -1777,6 +1940,8 @@ class RepositoryFacade:
             return not acquired
 
     def parse_source(self, source_id: str) -> SourceSummary:
+        source = self._runtime.source_store.get_source(source_id)
+        self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_ingestion.parse_source_compat(source_id)
 
     def _augment_notebook_meta(self, notebook_id: str, pending_source_id: str = "") -> None:
@@ -1867,6 +2032,8 @@ class RepositoryFacade:
         _run_extraction, which deletes the source's prior KG objects/relations/
         embeddings and re-runs extraction (idempotent per source). Used by
         reextract_notebook and maintenance scripts."""
+        source = self._runtime.source_store.get_source(source_id)
+        self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_ingestion.run_extraction(source_id)
 
     def _relink_extra_relations(
@@ -1891,6 +2058,8 @@ class RepositoryFacade:
         created_at: str,
         *,
         preserve_existing: bool = False,
+        indexing_pipeline_id: str = "",
+        indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None:
         """Open one source run, optionally retaining its graph for safe retry."""
         return self._runtime.knowledge.begin_extraction(
@@ -1899,6 +2068,8 @@ class RepositoryFacade:
             run_id,
             created_at,
             preserve_existing=preserve_existing,
+            indexing_pipeline_id=indexing_pipeline_id,
+            indexing_pipeline_version=indexing_pipeline_version,
         )
 
     def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:
@@ -1941,12 +2112,16 @@ class RepositoryFacade:
         )
 
     def _build_chunks_for_source(self, source_id: str) -> None:
+        source = self._runtime.source_store.get_source(source_id)
+        self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_chunking.build_chunks_for_source(source_id)
 
     def _embed_chunks_for_source(self, source_id: str) -> None:
         return self._runtime.source_embedding.embed_chunks_for_source(source_id)
 
     def _chunk_and_embed_source(self, source_id: str) -> None:
+        source = self._runtime.source_store.get_source(source_id)
+        self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_chunking.chunk_and_embed_source(source_id)
 
     def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
@@ -2103,10 +2278,12 @@ class RepositoryFacade:
     def relink_notebook_kg(self, notebook_id: str) -> dict:
         """Backfill relink of degree-0 KG nodes — KnowledgeLifecycleService
         owns the orchestration (Task 15); frozen-signature delegate."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.relink_notebook_kg(notebook_id)
 
     def start_notebook_relink(self, notebook_id: str) -> dict:
         """Claim the notebook's relink slot (409 source) — Task-15 delegate."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.start_notebook_relink(notebook_id)
 
     def notebook_relink_status(self, notebook_id: str) -> dict:
@@ -2115,6 +2292,7 @@ class RepositoryFacade:
 
     def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
         """Background relink entry point — Task-15 delegate."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.run_notebook_relink_job(
             notebook_id, job_id
         )
@@ -2139,12 +2317,14 @@ class RepositoryFacade:
         A slot of its own, separate from relink/rebuild — see
         ``KgMaintenanceJobs``' module docstring.
         """
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.start_conflict_resolution(
             notebook_id
         )
 
     def run_conflict_resolution_job(self, notebook_id: str, job_id: str) -> dict:
         """Background conflict-detection entry point (settles on every exit)."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.run_conflict_resolution_job(
             notebook_id, job_id
         )
@@ -2602,11 +2782,13 @@ class RepositoryFacade:
         force=force or fresh boundary self-defense, checkpoint GC after the
         gate and the merge-review/concept-desc/node-vector resume semantics
         are preserved verbatim in the service."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.rebuild_unified_kg(
             notebook_id, progress, force, fresh
         )
     def start_unified_kg_rebuild(self, notebook_id: str) -> dict:
         """Claim the shared KG-maintenance slot for a rebuild (409 source)."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.start_unified_kg_rebuild(notebook_id)
 
     def unified_kg_rebuild_status(self, notebook_id: str) -> dict:
@@ -2615,6 +2797,7 @@ class RepositoryFacade:
 
     def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int:
         """Background unified-rebuild entry point."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.run_unified_kg_rebuild_job(
             notebook_id, job_id
         )
@@ -2993,6 +3176,7 @@ class RepositoryFacade:
         on_stage: Optional[Callable[[str, int], None]] = None,
     ) -> dict:
         """Compatibility delegate to the runtime-owned full builder."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.scale_artifacts.build(
             notebook_id, on_stage=on_stage
         )
@@ -3001,6 +3185,7 @@ class RepositoryFacade:
         self, notebook_id: str, _assume_locked: bool = False
     ) -> dict:
         """Compatibility delegate to the runtime-owned delta folder."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.scale_artifacts.fold(
             notebook_id, assume_locked=_assume_locked
         )
@@ -3056,6 +3241,7 @@ class RepositoryFacade:
     def trigger_scale_index_rebuild(self, notebook_id: str, when: str = "now",
                                     mode: str = "auto") -> dict:
         """Compatibility delegate to runtime rebuild scheduling."""
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.scale_artifacts.trigger(
             notebook_id, when=when, mode=mode
         )
@@ -4219,6 +4405,7 @@ class RepositoryFacade:
         target_limit: int | None = None,
         retry_partial: bool = False,
     ) -> dict:
+        self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.prepare_notebook_kg_job(
             notebook_id,
             mode,

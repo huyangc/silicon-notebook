@@ -33,6 +33,38 @@ class NotebookUpdate(BaseModel):
     access_scope: Optional[str] = None
 
 
+class IndexingPipelineOptionResponse(BaseModel):
+    """Sanitized deployment option; never exposes loader or availability internals."""
+
+    pipeline_id: Optional[str] = None
+    label: str
+    description: str
+    version: str
+    overrides_chunking: bool = False
+    overrides_kg_extraction: bool = False
+    available: bool = True
+    selected: bool = False
+
+
+class IndexingPipelineResponse(BaseModel):
+    pipeline_id: Optional[str] = None
+    version: str
+    available: bool
+    missing: bool
+    pending: bool
+    options: List[IndexingPipelineOptionResponse] = Field(default_factory=list)
+    changed: bool = False
+    warning_count: int = 0
+    rebuild_status: str = "idle"
+    job_id: Optional[str] = None
+
+
+class SetIndexingPipelineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pipeline_id: Optional[str] = None
+
+
 class NotebookRef(BaseModel):
     """轻量 notebook 引用 —— 参考库挂载相关接口共用。"""
     id: str
@@ -191,6 +223,15 @@ class NotebookSummary(BaseModel):
     # (`require_notebook_capability` / `notebook_capability_allowed`)。方向上宁可少给
     # ——投影漏判只是少画一个按钮,多判才会让用户点进一个必然 404 的动作。
     can_manage_content: bool = False
+    # Sanitized per-notebook indexing selection. These fields are read-only;
+    # availability is resolved from the startup-frozen host and never exposes
+    # loader paths, capability names, reasons, credentials, or exceptions.
+    indexing_pipeline_id: Optional[str] = None
+    indexing_pipeline_version: str = "builtin.chunk.v1"
+    indexing_pipeline_available: bool = True
+    indexing_pipeline_missing: bool = False
+    indexing_pipeline_pending: bool = False
+    indexing_pipeline_stale: bool = False
     # owner 视角:本 notebook 是否已开启分享(存在有效 share_token 或 notebook_members)。
     # 驱动前端卡片右下角的「已分享」小人徽标(仿 NotebookLM);reader 看到的原库 is_shared
     # 也为 True,但 reader 卡片本身已带「来自 X」不再重复标记。

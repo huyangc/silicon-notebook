@@ -38,6 +38,7 @@ from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
 from app.bootstrap import (
     application_extension_admin_projection,
     application_extension_runtime,
@@ -269,6 +270,19 @@ def create_app() -> FastAPI:
     app.state.extension_admin_projection = application_extension_admin_projection(
         extension_runtime
     )
+
+    @app.exception_handler(IndexingPipelineUnavailableError)
+    async def indexing_pipeline_unavailable_handler(
+        _request: Request, _exc: IndexingPipelineUnavailableError
+    ) -> JSONResponse:
+        # The selected id and loader failure are intentionally not projected.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "所选索引管线当前不可用；旧索引仍可读取。请切回内建管线后重试。"
+            },
+            headers={USER_MESSAGE_HEADER: "1"},
+        )
 
     request_log = EventLogger(settings, channel="requests")
 

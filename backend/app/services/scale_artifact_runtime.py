@@ -97,6 +97,7 @@ class ScaleArtifactRuntime:
         notebooks,
         facts_repo,
         snapshots,
+        require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -125,6 +126,14 @@ class ScaleArtifactRuntime:
         self.notebooks = notebooks
         self.facts_repo = facts_repo
         self.snapshots = snapshots
+        if getattr(require_indexing_write, "__self__", None) is not None:
+            self._require_indexing_write_ref = weakref.WeakMethod(
+                require_indexing_write
+            )
+            self._require_indexing_write_fn = None
+        else:
+            self._require_indexing_write_ref = None
+            self._require_indexing_write_fn = require_indexing_write
         self._lifecycle_ref: weakref.ReferenceType | None = None
 
         # Retarget Task 18/19 to this owner's canonical state and methods.
@@ -146,6 +155,15 @@ class ScaleArtifactRuntime:
 
     def get_notebook(self, notebook_id: str):
         return self.notebooks.get_notebook(notebook_id)
+
+    def require_indexing_write(self, notebook_id: str) -> None:
+        callback = self._require_indexing_write_fn
+        if self._require_indexing_write_ref is not None:
+            callback = self._require_indexing_write_ref()
+        if callback is None:
+            # A detached runtime cannot safely authorize a new writer.
+            raise RuntimeError("indexing write admission is unavailable")
+        callback(notebook_id)
 
     @property
     def lifecycle(self):
@@ -849,6 +867,7 @@ class ScaleArtifactRuntime:
         *,
         supersede_idle: bool = False,
         claim_idle: bool = False,
+        queue_full_if_busy: bool = False,
     ) -> bool:
         """Claim and launch one scale-index operation.
 
@@ -867,9 +886,21 @@ class ScaleArtifactRuntime:
         building.  Likewise, an already-running build keeps its queued
         follow-up because this call did not actually start a replacement.
         """
+        # The admission check belongs at the runtime claim boundary, not only
+        # at HTTP/facade entry points: startup idle drains, automatic folds and
+        # daemon follow-ups all converge here.  Check before consuming an idle
+        # entry or claiming ``building`` so a pending/missing pipeline leaves
+        # durable queued work untouched and starts no artifact writer.
+        self.require_indexing_write(notebook_id)
         removed_idle_entry = None
         with self.building_lock:
             if notebook_id in self.building:
+                if queue_full_if_busy:
+                    prior = self.idle_queue.get(notebook_id)
+                    self.idle_queue[notebook_id] = (
+                        "full",
+                        prior[1] if prior is not None else _utc_now_iso(),
+                    )
                 return False
             if claim_idle:
                 removed_idle_entry = self.idle_queue.pop(notebook_id, None)
@@ -907,6 +938,21 @@ class ScaleArtifactRuntime:
                     self.building.discard(notebook_id)
                 if succeeded:
                     self.notify_index_done(notebook_id)
+                # A corpus publication that landed while this build was
+                # running records a coalesced full follow-up. Claim it
+                # immediately rather than waiting for the off-peak scheduler;
+                # the completed artifact may span the old and new generations.
+                try:
+                    self._run_scale_op(
+                        notebook_id, "auto", claim_idle=True
+                    )
+                except Exception:  # noqa: BLE001 - daemon tail stays fail-open
+                    try:
+                        self.event_log.logger.exception(
+                            "scale follow-up start failed for %s", notebook_id
+                        )
+                    except Exception:
+                        pass
 
         try:
             self._start_daemon(f"scaleidx-{notebook_id}", run)
@@ -920,6 +966,26 @@ class ScaleArtifactRuntime:
                     self.idle_queue.setdefault(notebook_id, removed_idle_entry)
             raise
         return True
+
+    def rebuild_after_publication(self, notebook_id: str) -> dict:
+        """Start a full build or coalesce one immediate post-build follow-up."""
+        self.get_notebook(notebook_id)
+        if not self.eligible(notebook_id):
+            return {"status": "not_applicable", "notebook_id": notebook_id}
+        started = self._run_scale_op(
+            notebook_id,
+            "full",
+            supersede_idle=True,
+            queue_full_if_busy=True,
+        )
+        if not started:
+            # Backup recovery if the current daemon/process does not reach its
+            # immediate finally-tail; the normal path claims the entry first.
+            self._ensure_scheduler()
+        return {
+            "status": "building" if started else "queued_followup",
+            "notebook_id": notebook_id,
+        }
 
     def _process_idle_queue(self, force: bool = False) -> None:
         if not force:

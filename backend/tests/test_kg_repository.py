@@ -1,4 +1,6 @@
 import json
+from types import SimpleNamespace
+
 import pytest
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
@@ -504,9 +506,21 @@ def test_whitelist_add_list_remove(repo):
 
 def test_extract_source_delegates_to_run_extraction(repo, monkeypatch):
     called = []
+    monkeypatch.setattr(
+        repo._runtime.source_store,
+        "get_source",
+        lambda source_id: SimpleNamespace(
+            id=source_id, notebook_id="nb-admitted"
+        ),
+    )
+    monkeypatch.setattr(
+        repo,
+        "require_indexing_pipeline_write",
+        lambda notebook_id: called.append(("admit", notebook_id)),
+    )
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: called.append(sid))
     repo.extract_source("src-z")
-    assert called == ["src-z"]
+    assert called == [("admit", "nb-admitted"), "src-z"]
 
 
 def test_delete_notebook_kg_clears_kg_but_keeps_elements(repo):

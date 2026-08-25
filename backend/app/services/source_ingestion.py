@@ -13,6 +13,13 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.domain.indexing_pipeline import (
+    BUILTIN_INDEXING_PIPELINE_VERSION,
+    IndexingPipelineHostPort,
+    IndexingPipelineKgExtractionFailedError,
+    IndexingPipelineKgLimits,
+    IndexingPipelineUnavailableError,
+)
 from app.core.llm import cap_kwargs
 from app.domain.extensions import ParserProviderChainHostPort
 from app.models.sources import (
@@ -177,6 +184,9 @@ class SourceIngestionService:
         # composing this service unchanged, and "no consolidation chain" is a
         # complete, correct behaviour (it is exactly the kill-switch-off path).
         note_corpus_change: Callable[[str], None] = lambda _notebook_id: None,
+        require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
+        indexing_pipelines: IndexingPipelineHostPort | None = None,
+        effective_object_types: Callable[[str], Iterable[str]] = lambda _notebook_id: (),
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -215,6 +225,9 @@ class SourceIngestionService:
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         self.invalidate_knowledge_counts = invalidate_knowledge_counts
         self.note_corpus_change = note_corpus_change
+        self.require_indexing_write = require_indexing_write
+        self.indexing_pipelines = indexing_pipelines
+        self.effective_object_types = effective_object_types
         # 论文元数据 backfill 进程内状态镜像 kg_building（重启即清）
         # nb_id → {"total": N, "done": k, "_gen": G}
         self._paper_meta_backfilling: dict[str, dict] = {}
@@ -256,6 +269,70 @@ class SourceIngestionService:
         # get-or-create 在 _active_sources_lock 下做,但**获取锁本身**在该 meta 锁之外
         # (否则持 meta 锁等 per-source 锁会死锁)。
         self._source_chunk_locks: dict[str, threading.Lock] = {}
+
+    def _kg_strategy_for_notebook(
+        self,
+        notebook_id: str,
+        *,
+        authorized_pipeline_id: str | None = None,
+        authorized_pipeline_version: str = "",
+        authorized_pipeline_generation: str = "",
+    ) -> tuple[str, str, Any | None]:
+        """Resolve one exact desired/published pipeline without fallback.
+
+        Ordinary writes must match the published product identity.  The one
+        durable switch worker may instead present the opaque desired-generation
+        authority it captured before doing work; A→B→A late workers then fail
+        before a model call or source-graph mutation.
+        """
+        state = self.notebooks.indexing_pipeline_state(notebook_id)
+        pipeline_id = (
+            str(authorized_pipeline_id or "")
+            if authorized_pipeline_id is not None
+            else str(state["pipeline_id"] or "")
+        )
+        desired_version = str(
+            state["pipeline_version"] or BUILTIN_INDEXING_PIPELINE_VERSION
+        )
+        if authorized_pipeline_id is not None and (
+            pipeline_id != str(state["pipeline_id"] or "")
+            or authorized_pipeline_version != desired_version
+            or authorized_pipeline_generation
+            != str(state["pipeline_generation"] or "")
+        ):
+            raise IndexingPipelineUnavailableError(pipeline_id)
+        if not pipeline_id:
+            if authorized_pipeline_id is None:
+                published_id = str(state["published_pipeline_id"] or "")
+                published_version = str(
+                    state["published_pipeline_version"]
+                    or BUILTIN_INDEXING_PIPELINE_VERSION
+                )
+                if (
+                    published_id
+                    or desired_version != BUILTIN_INDEXING_PIPELINE_VERSION
+                    or published_version != BUILTIN_INDEXING_PIPELINE_VERSION
+                ):
+                    raise IndexingPipelineUnavailableError("")
+            return "", BUILTIN_INDEXING_PIPELINE_VERSION, None
+        if self.indexing_pipelines is None:
+            raise IndexingPipelineUnavailableError(pipeline_id)
+        option = self.indexing_pipelines.option(pipeline_id)
+        if option is None or not option.available:
+            raise IndexingPipelineUnavailableError(pipeline_id)
+        if desired_version != option.version:
+            raise IndexingPipelineUnavailableError(pipeline_id)
+        if authorized_pipeline_id is None:
+            published_id = str(state["published_pipeline_id"] or "")
+            published_version = str(
+                state["published_pipeline_version"]
+                or BUILTIN_INDEXING_PIPELINE_VERSION
+            )
+            if pipeline_id != published_id or option.version != published_version:
+                raise IndexingPipelineUnavailableError(pipeline_id)
+        if not option.overrides_kg_extraction:
+            return pipeline_id, option.version, None
+        return pipeline_id, option.version, self.indexing_pipelines
 
     def _source_chunk_lock(self, source_id: str) -> threading.Lock:
         """取(或懒创建)某源的分块串行锁。仅在 _active_sources_lock 下 get-or-create
@@ -474,6 +551,7 @@ class SourceIngestionService:
         权限，也让「这份来源是谁加的」在同一张表里分叉。
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
+        self.require_indexing_write(notebook_id)
         source_ids: List[str] = []
         with self.write() as db:
             # One shared transaction for the whole batch — all-or-nothing,
@@ -520,6 +598,7 @@ class SourceIngestionService:
         agent_profile_id 非空时把这批来源标成「Agent 添加」(v48 出处列),空串(所有既有
         调用方的默认值)落 NULL = 人添加的,行为逐位不变。"""
         self.notebooks.get_row(notebook_id)  # KeyError if missing
+        self.require_indexing_write(notebook_id)
         # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
         if not (
             self.mineru_client().configured or self.mineru_cloud_client().configured
@@ -875,6 +954,7 @@ class SourceIngestionService:
         branch never consumes a slot and is never refused.
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
+        self.require_indexing_write(notebook_id)
         imported: List[UploadedSourceSummary] = []
         for file in files:
             source_id = self.new_id("src")
@@ -1022,6 +1102,7 @@ class SourceIngestionService:
         """
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
+        self.require_indexing_write(notebook_id)
         now = self.now()
         pipeline_started = time.perf_counter()
 
@@ -1117,6 +1198,10 @@ class SourceIngestionService:
             with nullcontext():
                 # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
                 with self.write() as db:
+                    if not self.sources.source_exists_for_update_tx(
+                        db, source_id, source.notebook_id
+                    ):
+                        raise KeyError(source_id)
                     self.clear_source_extraction_state(
                         db,
                         source_id,
@@ -1460,7 +1545,9 @@ class SourceIngestionService:
             # Extraction's terminal write holds a KEY SHARE lock on this row.
             # Take the conflicting aggregate lock before scanning/deleting any
             # projections so extraction cannot publish KG after our cursor.
-            if self.sources.source_exists_for_update_tx(db, source_id):
+            if self.sources.source_exists_for_update_tx(
+                db, source_id, source.notebook_id
+            ):
                 self.clear_source_extraction_state(
                     db,
                     source_id,
@@ -1554,6 +1641,10 @@ class SourceIngestionService:
             now = self.now()
             with self.write() as db:
                 if existing_id is not None:
+                    if not self.sources.source_exists_for_update_tx(
+                        db, source_id, notebook_id
+                    ):
+                        raise KeyError(source_id)
                     # Reparse semantics: drop this source's prior extraction
                     # derivatives (KG objects/relations/embeddings/extraction
                     # runs) in the SAME transaction as the element swap below —
@@ -1672,6 +1763,11 @@ class SourceIngestionService:
 
         if expected_mode not in {"shadow", "write"}:
             return False
+        # Recovery is another indexing writer.  Admit before creating the
+        # in-process claim or submitting work so a pending pipeline schedules
+        # nothing; the worker repeats the check because selection can change
+        # after submission but before execution.
+        self.require_indexing_write(notebook_id)
         key = (source_id, run_id, expected_mode)
         with self._relation_completion_schedule_lock:
             if key in self._relation_completion_scheduled:
@@ -1681,6 +1777,7 @@ class SourceIngestionService:
         def _run() -> None:
             stats: dict | None = None
             try:
+                self.require_indexing_write(notebook_id)
                 stats = self.knowledge_lifecycle.complete_relations_for_source(
                     notebook_id, source_id, source_title, run_id, [], [], [],
                     expected_mode=expected_mode,
@@ -1740,6 +1837,12 @@ class SourceIngestionService:
                 break
             for row in rows:
                 notebook_id = str(row["notebook_id"])
+                try:
+                    self.require_indexing_write(notebook_id)
+                except IndexingPipelineUnavailableError:
+                    # Startup recovery is fail-open across notebooks, while
+                    # the selected notebook remains fail-closed for writes.
+                    continue
                 source_id = str(row["source_id"])
                 source_title = str(row.get("title") or "")
                 run_id = str(row["source_generation"])
@@ -1817,21 +1920,37 @@ class SourceIngestionService:
         *,
         kg_client: Any | None = None,
         preserve_existing_until_complete: bool = False,
+        indexing_pipeline_id: str | None = None,
+        indexing_pipeline_version: str = "",
+        indexing_pipeline_generation: str = "",
+        indexing_stage_job_id: str = "",
     ) -> None:
         control = getattr(kg_client, "control", None)
         if control is not None:
             control.raise_if_aborted()
         source: SourceDetail = self.sources.get_source(source_id)
         elements = self.source_elements(source_id)
+        staged_indexing = bool(indexing_stage_job_id)
         # 历史源 catch-up:补论文元数据(幂等,有行即跳)。ensure_paper_metadata 的
         # try/except 包住幂等读之后的整个方法体(不止 LLM 调用),保证它绝不向外
         # 抛异常——失败真正不影响 KG 抽取(不会中断下面紧接着的抽取流程),而不只
         # 是注释里的一句希望。
-        self.ensure_paper_metadata(source, elements=elements, force=False)
+        # A notebook rebuild stage must not mutate any live source-derived row
+        # before publication, including this best-effort metadata sidecar.
+        if not staged_indexing:
+            self.ensure_paper_metadata(source, elements=elements, force=False)
         if control is not None:
             control.raise_if_aborted()
         now = self.now()
         run_id = self.new_id("run")
+        pipeline_id, pipeline_version, kg_strategy = self._kg_strategy_for_notebook(
+            source.notebook_id,
+            authorized_pipeline_id=indexing_pipeline_id,
+            authorized_pipeline_version=indexing_pipeline_version,
+            authorized_pipeline_generation=indexing_pipeline_generation,
+        )
+        plugin_kg_active = kg_strategy is not None
+        preserve_source_graph = preserve_existing_until_complete or plugin_kg_active
         doc_type_id = (
             self.normalize_doc_type(getattr(source, "doc_type", "") or "")
             or "academic_paper"
@@ -1840,14 +1959,17 @@ class SourceIngestionService:
         # Normal extraction resets the old source graph up front. A partial-KG
         # repair instead opens a run while retaining the old graph; only a
         # zero-failed-window replacement may swap it later.
-        self.begin_extraction_run(
-            source_id,
-            source.notebook_id,
-            run_id,
-            now,
-            preserve_existing=preserve_existing_until_complete,
-        )
-        self.invalidate_knowledge_counts(source.notebook_id)
+        if not staged_indexing:
+            self.begin_extraction_run(
+                source_id,
+                source.notebook_id,
+                run_id,
+                now,
+                preserve_existing=preserve_source_graph,
+                indexing_pipeline_id=pipeline_id,
+                indexing_pipeline_version=pipeline_version,
+            )
+            self.invalidate_knowledge_counts(source.notebook_id)
         try:
             kg_llm_client = kg_client if kg_client is not None else self.model_clients
             if not (
@@ -1855,6 +1977,8 @@ class SourceIngestionService:
                 if callable(getattr(kg_llm_client, "configured", None))
                 else getattr(kg_llm_client, "configured", False)
             ):
+                if staged_indexing:
+                    raise RuntimeError("staged KG extraction requires a model")
                 if preserve_existing_until_complete:
                     message = (
                         "partial KG retry incomplete; existing KG preserved "
@@ -1879,6 +2003,30 @@ class SourceIngestionService:
             )
             whitelist = self.concept_whitelist_terms()
             base_filter = self.notebook_tier(source.notebook_id) == "base"
+            plugin_object_types = tuple(
+                str(item)
+                for item in self.effective_object_types(source.notebook_id)
+                if str(item).strip()
+            )
+            plugin_limits = IndexingPipelineKgLimits(
+                max_messages=self.settings.indexing_pipeline_kg_max_messages,
+                max_prompt_chars=self.settings.indexing_pipeline_kg_prompt_max_chars,
+                max_schema_hint_chars=(
+                    self.settings.indexing_pipeline_kg_schema_hint_max_chars
+                ),
+                max_objects=(
+                    self.settings.indexing_pipeline_kg_max_objects_per_window
+                ),
+                max_edges=self.settings.indexing_pipeline_kg_max_edges_per_window,
+                max_evidence_handles=(
+                    self.settings.indexing_pipeline_kg_max_evidence_handles
+                ),
+                max_steps_per_object=(
+                    self.settings.indexing_pipeline_kg_max_steps_per_object
+                ),
+                max_name_chars=self.settings.indexing_pipeline_kg_name_max_chars,
+            )
+            plugin_started = time.perf_counter()
             graph = kg_ingest.extract_graph(
                 kg_llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
                 n=n_chars,
@@ -1890,7 +2038,29 @@ class SourceIngestionService:
                     if self.settings.kg_gleaning_enabled else 0
                 ),
                 base_filter=base_filter,
+                kg_strategy=kg_strategy,
+                pipeline_id=pipeline_id,
+                plugin_object_types=plugin_object_types,
+                plugin_limits=plugin_limits if plugin_kg_active else None,
             )
+            if plugin_kg_active:
+                self.event_log.emit(
+                    {
+                        "kind": "indexing_pipeline_kg_strategy",
+                        "pipeline_id": pipeline_id,
+                        "stage": "extract",
+                        "status": (
+                            "failed" if graph.failed_windows else "succeeded"
+                        ),
+                        "window_count": int(graph.total_windows),
+                        "failed_count": int(graph.failed_windows),
+                        "latency_ms": round(
+                            (time.perf_counter() - plugin_started) * 1000
+                        ),
+                    }
+                )
+                if graph.failed_windows:
+                    raise IndexingPipelineKgExtractionFailedError()
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
                 self.event_log.logger.warning(
@@ -1909,7 +2079,9 @@ class SourceIngestionService:
                     objects, relations, source.id
                 )
             fw, tw = graph.failed_windows, graph.total_windows
-            if preserve_existing_until_complete and (fw > 0 or not objects):
+            if preserve_existing_until_complete and (
+                fw > 0 or (not objects and not staged_indexing)
+            ):
                 message = (
                     "partial KG retry incomplete; existing KG preserved "
                     "retry_incomplete=1 "
@@ -1918,16 +2090,53 @@ class SourceIngestionService:
                     f"candidate_objects={len(objects)} "
                     f"candidate_relations={len(relations)}"
                 )
-                self.finish_extraction_run(run_id, "completed", message)
+                if not staged_indexing:
+                    self.finish_extraction_run(run_id, "completed", message)
                 raise PartialKgRetryIncomplete(message)
             if control is not None:
                 control.raise_if_aborted()
+            if staged_indexing:
+                kg_payload, object_inputs, relation_inputs = (
+                    self.knowledge_lifecycle.prepare_indexing_pipeline_kg(
+                        source.notebook_id,
+                        source.id,
+                        objects,
+                        relations,
+                        source_generation=run_id,
+                    )
+                )
+                kg_payload["object_vectors"] = (
+                    self.embedding.compute_staged_object_vectors(
+                        source.notebook_id, object_inputs
+                    )
+                )
+                kg_payload["relation_vectors"] = (
+                    self.embedding.compute_staged_relation_vectors(
+                        source.notebook_id, relation_inputs
+                    )
+                )
+                kg_payload["extraction"] = {
+                    "id": run_id,
+                    "error_message": (
+                        f"{KG_RUN_MESSAGE_OBJECTS_PREFIX}{len(objects)} "
+                        f"relations={len(kg_payload['relations'])} "
+                        f"doc_type={kg_doc_type} windows_failed={fw}/{tw}"
+                    ),
+                    "created_at": now,
+                    "updated_at": self.now(),
+                }
+                if not self.knowledge_lifecycle.kg_build_jobs.stage_indexing_pipeline_kg(
+                    indexing_stage_job_id, source_id, kg_payload
+                ):
+                    raise IndexingPipelineKgExtractionFailedError()
+                return
+
             n_obj, n_rel = self.knowledge_lifecycle.store_kg(
                 source.notebook_id,
                 source.id,
                 objects,
                 relations,
-                replace_source=preserve_existing_until_complete,
+                replace_source=preserve_source_graph,
                 source_generation=run_id,
             )
             try:
@@ -1990,11 +2199,20 @@ class SourceIngestionService:
                     "partial KG retry incomplete; existing KG preserved "
                     f"retry_incomplete=1 {message}"
                 )
-            self.finish_extraction_run(
-                run_id,
-                status,
-                message,
-            )
+            if not staged_indexing:
+                self.finish_extraction_run(run_id, status, message)
+            raise
+        except IndexingPipelineKgExtractionFailedError:
+            # A plugin mapper/prompt/admission failure is a real failed source
+            # attempt even though its previously published graph is retained.
+            # Marking this run completed would let product/status readers mistake
+            # a fail-closed retry for a newly published source generation.
+            if not staged_indexing:
+                self.finish_extraction_run(
+                    run_id,
+                    "failed",
+                    "indexing_pipeline_kg_failed",
+                )
             raise
         except PartialKgRetryIncomplete:
             raise
@@ -2007,7 +2225,8 @@ class SourceIngestionService:
                     "partial KG retry incomplete; existing KG preserved "
                     f"retry_incomplete=1 {message}"
                 )
-            self.finish_extraction_run(run_id, status, message)
+            if not staged_indexing:
+                self.finish_extraction_run(run_id, status, message)
             raise
 
     # ---------------------------------------------------- paper metadata

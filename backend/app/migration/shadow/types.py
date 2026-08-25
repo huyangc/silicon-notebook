@@ -6,6 +6,10 @@ from enum import StrEnum
 
 class TableClass(StrEnum):
     REPLICATED = "replicated"
+    # Durable only for the lifetime of one backend-local worker.  These tables
+    # exist in both paired schemas and remain part of schema totality, but a
+    # shadow migration must neither snapshot nor capture/apply their rows.
+    LOCAL_EPHEMERAL = "local-ephemeral"
     REBUILT = "rebuilt"
     SHARED_FILESYSTEM = "shared-filesystem"
     SHADOW_INTERNAL = "shadow-internal"
@@ -72,3 +76,16 @@ class Manifest:
         return tuple(
             spec.name for spec in self.tables if spec.table_class is TableClass.REBUILT
         )
+
+    @property
+    def local_ephemeral_names(self) -> tuple[str, ...]:
+        return tuple(
+            spec.name
+            for spec in self.tables
+            if spec.table_class is TableClass.LOCAL_EPHEMERAL
+        )
+
+    @property
+    def application_names(self) -> tuple[str, ...]:
+        """Physical application tables, including non-replicated local stages."""
+        return (*self.replicated_names, *self.local_ephemeral_names)

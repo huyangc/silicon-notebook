@@ -138,6 +138,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("reports", None, "outline"),
     ("reports", None, "generate"),
     ("reports", None, "cancel"),
+    ("indexing-pipeline",),
     # 公开分享链接的发布/撤销。第三段之后是固定字面量，token 只出现在
     # `/api/public/reports/{token}`（另一张模板表），不进这条路径。
     ("reports", None, "share"),

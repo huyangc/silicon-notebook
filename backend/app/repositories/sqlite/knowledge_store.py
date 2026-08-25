@@ -636,6 +636,8 @@ class KnowledgeStore:
         created_at: str,
         *,
         preserve_existing: bool = False,
+        indexing_pipeline_id: str = "",
+        indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None:
         with self.database.write() as db:
             self.begin_extraction_run(
@@ -645,6 +647,8 @@ class KnowledgeStore:
                 run_id,
                 created_at,
                 preserve_existing=preserve_existing,
+                indexing_pipeline_id=indexing_pipeline_id,
+                indexing_pipeline_version=indexing_pipeline_version,
             )
 
     def finish_extraction(self, run_id: str, status: str, message: str) -> None:
@@ -1436,6 +1440,32 @@ class KnowledgeStore:
         ).fetchone()["c"])
         if owned != len(expected):
             raise RuntimeError("source fact evidence crosses source generation boundary")
+
+    @staticmethod
+    def validate_stage_source_elements(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str,
+        element_ids: Sequence[str],
+    ) -> None:
+        source = connection.execute(
+            "SELECT 1 FROM sources WHERE id=? AND notebook_id=?",
+            (source_id, notebook_id),
+        ).fetchone()
+        if source is None:
+            raise RuntimeError("stale indexing stage source")
+        expected = list(dict.fromkeys(str(value) for value in element_ids if value))
+        if not expected:
+            return
+        payload = json.dumps(expected, ensure_ascii=False)
+        owned = int(connection.execute(
+            "WITH requested(id) AS (SELECT CAST(value AS TEXT) FROM json_each(?)) "
+            "SELECT COUNT(*) AS c FROM requested JOIN source_elements se "
+            "ON se.id=requested.id WHERE se.source_id=?",
+            (payload, source_id),
+        ).fetchone()["c"])
+        if owned != len(expected):
+            raise RuntimeError("staged evidence crosses source boundary")
 
     @staticmethod
     def insert_source_fact_rows(
@@ -2301,6 +2331,8 @@ class KnowledgeStore:
         created_at: str,
         *,
         preserve_existing: bool = False,
+        indexing_pipeline_id: str = "",
+        indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None:
         """Open a run, optionally retaining the current graph until replacement."""
         if not preserve_existing:
@@ -2309,9 +2341,18 @@ class KnowledgeStore:
             )
         db.execute(
             """INSERT INTO extraction_runs
-               (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
-               VALUES (?, ?, ?, 'kg', 'running', '', ?, ?)""",
-            (run_id, notebook_id, source_id, created_at, created_at))
+               (id, notebook_id, source_id, run_type, status, error_message,
+                indexing_pipeline_id, indexing_pipeline_version, created_at, updated_at)
+               VALUES (?, ?, ?, 'kg', 'running', '', ?, ?, ?, ?)""",
+            (
+                run_id,
+                notebook_id,
+                source_id,
+                indexing_pipeline_id,
+                indexing_pipeline_version,
+                created_at,
+                created_at,
+            ))
 
     @staticmethod
     def finish_extraction_run(

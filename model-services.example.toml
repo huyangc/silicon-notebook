@@ -43,6 +43,7 @@ max_concurrency = 8
 
 [bindings]
 ask_answer = "general"
+plugin_engine = "general"
 query_rewrite = "general"
 evidence_refine = "general"
 graph_chain_verify = "reasoning"
@@ -84,6 +85,7 @@ retrieval_rerank = "rerank"
 # deployments can review and override them in one place.
 [thinking]
 ask_answer = "enabled"
+plugin_engine = "disabled"
 reasoning_agent = "enabled"
 query_rewrite = "disabled"
 evidence_refine = "disabled"

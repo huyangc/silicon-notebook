@@ -56,7 +56,14 @@
  * ownerKey，切库/换用户时整棵子树连同这个弹窗一起卸载。它与协调器的 owner 失效是
  * 同向的两条路，组件测试两条都钉住了。
  */
-import { useEffect, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  type ComponentPropsWithoutRef,
+  type FormEventHandler,
+  type ReactNode,
+} from "react";
 
 import type {
   WorkspaceExtensionContext,
@@ -108,6 +115,170 @@ export type ExtensionModalProps = Readonly<{
   description?: string;
   children: ReactNode;
 }>;
+
+/**
+ * SDK 内容组件层：把「插件不能写 CSS / 不能写内联颜色」这条视觉红线继续往面板内容里
+ * 推进。插件仍然只传结构与文案；输入框、清单、提示条这些基础版式由宿主统一提供，
+ * 这样仓库外插件就不会因为守规而退化成浏览器默认样式。
+ */
+
+export type ExtensionFormRowProps = Readonly<{
+  children: ReactNode;
+  onSubmit?: FormEventHandler<HTMLFormElement>;
+} & Omit<ComponentPropsWithoutRef<"form">, "children" | "className" | "onSubmit">>;
+
+export function ExtensionFormRow({
+  children,
+  onSubmit,
+  ...props
+}: ExtensionFormRowProps) {
+  return (
+    <form
+      {...props}
+      className="extension-form-row"
+      onSubmit={onSubmit}
+    >
+      {children}
+    </form>
+  );
+}
+
+export type ExtensionTextInputProps = Omit<
+  ComponentPropsWithoutRef<"input">,
+  "className" | "type"
+>;
+
+export function ExtensionTextInput(props: ExtensionTextInputProps) {
+  return <input {...props} type="text" className="extension-input" />;
+}
+
+export type ExtensionResultListProps = Readonly<{
+  children: ReactNode;
+} & Omit<ComponentPropsWithoutRef<"ul">, "children" | "className">>;
+
+export function ExtensionResultList({
+  children,
+  ...props
+}: ExtensionResultListProps) {
+  return (
+    <ul {...props} className="extension-result-list">
+      {children}
+    </ul>
+  );
+}
+
+export type ExtensionResultCheckbox = Readonly<{
+  checked: boolean;
+  onChange(checked: boolean): void;
+  ariaLabel: string;
+}>;
+
+export type ExtensionResultItemProps = Readonly<{
+  checkbox?: ExtensionResultCheckbox;
+  title: ReactNode;
+  meta?: ReactNode;
+  summary?: ReactNode;
+  children?: ReactNode;
+} & Omit<ComponentPropsWithoutRef<"li">, "children" | "className">>;
+
+export function ExtensionResultItem({
+  checkbox,
+  title,
+  meta,
+  summary,
+  children,
+  ...props
+}: ExtensionResultItemProps) {
+  const checkboxId = useId();
+  return (
+    <li {...props} className="extension-result-item">
+      <div className="extension-result-item-row">
+        {checkbox ? (
+          <input
+            type="checkbox"
+            id={checkboxId}
+            className="extension-result-item-checkbox"
+            checked={checkbox.checked}
+            aria-label={checkbox.ariaLabel}
+            onChange={(event) => checkbox.onChange(event.target.checked)}
+          />
+        ) : null}
+        <div className="extension-result-item-copy">
+          {checkbox ? (
+            <label htmlFor={checkboxId} className="extension-result-item-title">{title}</label>
+          ) : (
+            <div className="extension-result-item-title">{title}</div>
+          )}
+          {meta ? <div className="extension-result-item-meta">{meta}</div> : null}
+          {summary ? <div className="extension-result-item-summary">{summary}</div> : null}
+          {children}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+export type ExtensionActionsProps = Readonly<{
+  children: ReactNode;
+} & Omit<ComponentPropsWithoutRef<"div">, "children" | "className">>;
+
+export function ExtensionActions({
+  children,
+  ...props
+}: ExtensionActionsProps) {
+  return (
+    <div {...props} className="extension-actions">
+      {children}
+    </div>
+  );
+}
+
+export type ExtensionAlertTone = "error" | "warning" | "status";
+export type ExtensionAlertProps = Readonly<{
+  tone: ExtensionAlertTone;
+  children: ReactNode;
+} & Omit<ComponentPropsWithoutRef<"div">, "children" | "className" | "role">>;
+
+export function ExtensionAlert({
+  tone,
+  children,
+  ...props
+}: ExtensionAlertProps) {
+  if (tone === "error") {
+    return (
+      <div {...props} role="alert" className="extension-alert extension-alert--error">
+        {children}
+      </div>
+    );
+  }
+  if (tone === "warning") {
+    return (
+      <div {...props} role="alert" className="extension-alert extension-alert--warning">
+        {children}
+      </div>
+    );
+  }
+  return (
+    <div {...props} role="status" className="extension-alert extension-alert--status">
+      {children}
+    </div>
+  );
+}
+
+export type ExtensionEmptyStateProps = Readonly<{
+  children: ReactNode;
+} & Omit<ComponentPropsWithoutRef<"p">, "children" | "className">>;
+
+export function ExtensionEmptyState({
+  children,
+  ...props
+}: ExtensionEmptyStateProps) {
+  return (
+    <p {...props} className="extension-empty">
+      {children}
+    </p>
+  );
+}
 
 
 export function ExtensionModal({

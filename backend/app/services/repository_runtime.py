@@ -21,6 +21,8 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.ask_engine import AskEngineHostPort
+from app.domain.indexing_pipeline import IndexingPipelineHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -70,6 +72,7 @@ from app.services.scale_artifact_runtime import ScaleArtifactRuntime
 from app.services.scale_index_builder import ScaleIndexBuilder
 from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
+from app.services.indexing_pipeline import IndexingPipelineService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
 from app.services.chunk_question_index import ChunkQuestionIndexService
@@ -165,6 +168,8 @@ class _ProcessFoundation:
     retrieval_contributors: RetrievalContributorHostPort | None
     ask_completed_observers: AskCompletedObserverHostPort | None
     report_completed_observers: ReportCompletedObserverHostPort | None
+    ask_engines: AskEngineHostPort | None
+    indexing_pipelines: IndexingPipelineHostPort | None
     # Gap consultation is the one host with no built-in contribution at all:
     # an empty seat here is the shipped shape, not an unwired deployment.
     gap_consult: GapConsultHostPort | None
@@ -183,6 +188,8 @@ def _build_process_foundation(
     retrieval_contributor_host: RetrievalContributorHostPort | None,
     ask_completed_observer_host: AskCompletedObserverHostPort | None,
     report_completed_observer_host: ReportCompletedObserverHostPort | None,
+    ask_engine_host: AskEngineHostPort | None,
+    indexing_pipeline_host: IndexingPipelineHostPort | None,
     gap_consult_host: GapConsultHostPort | None,
     parser_provider_chain_host: ParserProviderChainHostPort | None,
 ) -> _ProcessFoundation:
@@ -218,6 +225,8 @@ def _build_process_foundation(
         retrieval_contributors=retrieval_contributor_host,
         ask_completed_observers=ask_completed_observer_host,
         report_completed_observers=report_completed_observer_host,
+        ask_engines=ask_engine_host,
+        indexing_pipelines=indexing_pipeline_host,
         gap_consult=gap_consult_host,
         parser_provider_chain=(
             parser_provider_chain_host or BuiltinParserChainHost()
@@ -402,7 +411,10 @@ def _build_notebook_domain(
     """
 
     summaries = NotebookSummaryQuery(
-        seats.database, seats.queries, seats.kg_build_jobs
+        seats.database,
+        seats.queries,
+        seats.kg_build_jobs,
+        foundation.indexing_pipelines,
     )
     # Source files resolve storage_dir through the database. Construct
     # BEFORE the catalog so its storage_dir callable can bind THIS store
@@ -925,6 +937,8 @@ class RepositoryRuntime:
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        ask_engine_host: AskEngineHostPort | None = None,
+        indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
         """Call the domain builders in order, then mount their fields: the
@@ -934,6 +948,8 @@ class RepositoryRuntime:
             retrieval_contributor_host=retrieval_contributor_host,
             ask_completed_observer_host=ask_completed_observer_host,
             report_completed_observer_host=report_completed_observer_host,
+            ask_engine_host=ask_engine_host,
+            indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
             parser_provider_chain_host=parser_provider_chain_host,
         )
@@ -944,6 +960,8 @@ class RepositoryRuntime:
         self.retrieval_contributors = foundation.retrieval_contributors
         self.ask_completed_observers = foundation.ask_completed_observers
         self.report_completed_observers = foundation.report_completed_observers
+        self.ask_engines = foundation.ask_engines
+        self.indexing_pipelines = foundation.indexing_pipelines
         self.gap_consult = foundation.gap_consult
         self.parser_provider_chain = foundation.parser_provider_chain
         self.models = foundation.models
@@ -990,6 +1008,7 @@ class RepositoryRuntime:
         self.chunk_question_index = pipeline.chunk_question_index
         self.source_embedding = pipeline.source_embedding
         self.source_chunking = pipeline.source_chunking
+        self.indexing_pipeline = None
         self.source_ingestion = pipeline.source_ingestion
         report = _build_report_domain(seats, notebook)
         self.report_application = report.report_application
@@ -1350,6 +1369,15 @@ class RepositoryRuntime:
             new_id=self.seams.new_id,
             now=self.seams.now,
             mark_unified_dirty=mark_unified_dirty,
+            notebooks=self.notebook_store,
+            indexing_stage_store=self.kg_build_jobs,
+            indexing_pipelines=self.indexing_pipelines,
+            event_log=self.event_log,
+        )
+        self.indexing_pipeline = IndexingPipelineService(
+            self.notebook_store,
+            self.source_chunking,
+            self.indexing_pipelines,
         )
         return self.source_embedding, self.source_chunking
 
@@ -1437,6 +1465,11 @@ class RepositoryRuntime:
             apply_notebook_meta=apply_notebook_meta,
             maybe_enqueue_scale_fold=self.scale_artifacts.maybe_enqueue_fold,
             note_corpus_change=self.agent_profile_jobs.note_corpus_change,
+            require_indexing_write=self.indexing_pipeline.require_write_admission,
+            indexing_pipelines=self.indexing_pipelines,
+            effective_object_types=lambda notebook_id: (
+                self.schema_registry.effective_schemas(notebook_id).keys()
+            ),
             make_persist_image=make_persist_image,
             delete_source_images=delete_source_images,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
@@ -1674,6 +1707,7 @@ class RepositoryRuntime:
             notebooks=self.catalog,
             facts_repo=self.queries,
             snapshots=self.retrieval_snapshots,
+            require_indexing_write=self.indexing_pipeline.require_write_admission,
         )
         return self.scale_artifacts
 
@@ -2088,6 +2122,12 @@ class RepositoryRuntime:
                 # plugin sees a bounded question and nothing about who asked
                 # it or which notebook it came from.
                 gap_consult_host=self.gap_consult,
+                ask_engine_host=self.ask_engines,
+                ask_engine_participant_notebooks=(
+                    self.notebook_store.participant_notebook_ids
+                ),
+                ask_engine_visible_sources=self.source_store.all_visible_source_ids,
+                ask_engine_hidden_sources=self.source_store.hidden_source_ids,
             )
         return self.ask
 

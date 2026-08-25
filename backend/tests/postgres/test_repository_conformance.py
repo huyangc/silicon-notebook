@@ -456,6 +456,14 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
                 (notebook.id, notebook.id),
             )
             db.execute(
+                "INSERT INTO indexing_pipeline_stages "
+                "(job_id,notebook_id,pipeline_id,pipeline_version,"
+                "pipeline_generation,source_snapshot,created_at,updated_at) "
+                "VALUES ('kg-running',%s,'test.pipeline','v2','late',%s,"
+                "'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (notebook.id, jsonb([])),
+            )
+            db.execute(
                 "INSERT INTO catalog_jobs "
                 "(id,notebook_id,source_id,created_by,status,failure_reason,diagnostic,"
                 "created_at,updated_at,finished_at) VALUES "
@@ -508,6 +516,11 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
                     row["id"]: row
                     for row in db.execute("SELECT * FROM catalog_jobs").fetchall()
                 }
+                stage_count = int(
+                    db.execute(
+                        "SELECT COUNT(*) AS c FROM indexing_pipeline_stages"
+                    ).fetchone()["c"]
+                )
             assert merge_rows[notebook.id]["status"] == "failed"
             assert merge_rows[notebook.id]["error"] == "中断:服务重启"
             assert merge_rows[f"{notebook.id}-terminal"]["status"] == "done"
@@ -546,6 +559,7 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
             assert kg_rows["kg-done"]["status"] == "done"
             assert kg_rows["kg-done"]["error_code"] == "kept"
             assert kg_rows["kg-done"]["updated_at"].year == 2020
+            assert stage_count == 0
             assert catalog_rows["catalog-running"]["status"] == "failed"
             assert catalog_rows["catalog-running"]["diagnostic"] == "worker_interrupted"
             # 措辞钉死: 与 app/services/catalog_job.py 的 INTERRUPTED_MESSAGE 同口径

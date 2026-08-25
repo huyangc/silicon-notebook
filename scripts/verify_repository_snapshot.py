@@ -3457,5 +3457,112 @@ MIGRATION_MANIFEST[(56, 57)] = {
 }
 
 
+# v58: desired/published notebook indexing-pipeline identity.  These are bare
+# columns on existing tables; the migration performs no row rewrite beyond
+# SQLite materializing each declared default for historical rows.
+INDEXING_PIPELINE_IDENTITY_COLUMNS = {
+    "notebooks": {
+        "indexing_pipeline": ("indexing_pipeline", "TEXT", 0, None, 0),
+        "indexing_pipeline_version": (
+            "indexing_pipeline_version", "TEXT", 1, "'builtin.chunk.v1'", 0
+        ),
+        "indexing_pipeline_generation": (
+            "indexing_pipeline_generation", "TEXT", 1, "''", 0
+        ),
+        "indexing_pipeline_job_id": (
+            "indexing_pipeline_job_id", "TEXT", 1, "''", 0
+        ),
+    },
+    "unified_kg_state": {
+        "indexing_pipeline_id": ("indexing_pipeline_id", "TEXT", 1, "''", 0),
+        "indexing_pipeline_version": (
+            "indexing_pipeline_version", "TEXT", 1, "'builtin.chunk.v1'", 0
+        ),
+    },
+    "extraction_runs": {
+        "indexing_pipeline_id": ("indexing_pipeline_id", "TEXT", 1, "''", 0),
+        "indexing_pipeline_version": (
+            "indexing_pipeline_version", "TEXT", 1, "'builtin.chunk.v1'", 0
+        ),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 58, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {
+                    **manifest["columns"].get(table, {}),
+                    **columns,
+                }
+                for table, columns in INDEXING_PIPELINE_IDENTITY_COLUMNS.items()
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(57, 58)] = {
+    "tables": {},
+    "columns": INDEXING_PIPELINE_IDENTITY_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
+# v59: durable unpublished rebuild payloads.  They are empty on migration and
+# startup recovery may only delete abandoned rows, so no data normalization is
+# admitted here.
+INDEXING_PIPELINE_STAGE_TABLES = {
+    "indexing_pipeline_stages": """CREATE TABLE indexing_pipeline_stages (
+                  job_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES kg_build_jobs(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  pipeline_id TEXT NOT NULL DEFAULT '',
+                  pipeline_version TEXT NOT NULL,
+                  pipeline_generation TEXT NOT NULL,
+                  source_snapshot TEXT NOT NULL DEFAULT '[]',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "indexing_pipeline_stage_sources": """CREATE TABLE indexing_pipeline_stage_sources (
+                  job_id TEXT NOT NULL
+                    REFERENCES indexing_pipeline_stages(job_id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','completed','failed')),
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (job_id, source_id)
+                )""",
+}
+INDEXING_PIPELINE_STAGE_INDEXES = {
+    "idx_indexing_pipeline_stages_notebook":
+        "CREATE INDEX idx_indexing_pipeline_stages_notebook\n"
+        "                  ON indexing_pipeline_stages(notebook_id)",
+    "idx_indexing_pipeline_stage_sources_source":
+        "CREATE INDEX idx_indexing_pipeline_stage_sources_source\n"
+        "                  ON indexing_pipeline_stage_sources(source_id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 59, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **INDEXING_PIPELINE_STAGE_TABLES},
+        "indexes": {**manifest["indexes"], **INDEXING_PIPELINE_STAGE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(58, 59)] = {
+    "tables": INDEXING_PIPELINE_STAGE_TABLES,
+    "columns": {},
+    "indexes": INDEXING_PIPELINE_STAGE_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

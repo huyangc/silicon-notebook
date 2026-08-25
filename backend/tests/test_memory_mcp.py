@@ -2778,6 +2778,31 @@ async def test_reparse_source_queues_one_job_and_refuses_a_source_being_parsed(
 
 
 @pytest.mark.anyio
+async def test_reparse_source_refuses_pipeline_pending_before_queue(
+    mcp_env, scheduled_jobs
+):
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "pipeline-pending")
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET indexing_pipeline_job_id=? WHERE id=?",
+            ("pending:generation", notebook_id),
+        )
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = await client.call(
+            "reparse_source", {"source_id": seeded["source_id"]}
+        )
+
+    assert result.isError
+    assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
 async def test_delete_source_removes_an_agent_source_but_never_a_user_one(
     mcp_env, scheduled_jobs
 ):

@@ -15,6 +15,8 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.ask_engine import AskEngineHostPort
+from app.domain.indexing_pipeline import IndexingPipelineHostPort
 from app.core.request_context import (
     _REQUEST_USER,
     reset_request_user,
@@ -59,6 +61,8 @@ class SQLiteRepository(RepositoryFacade):
         parser_provider_chain_host: ParserProviderChainHostPort | None = None,
         ask_completed_observer_host: AskCompletedObserverHostPort | None = None,
         report_completed_observer_host: ReportCompletedObserverHostPort | None = None,
+        ask_engine_host: AskEngineHostPort | None = None,
+        indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
         super().__init__(
@@ -69,6 +73,8 @@ class SQLiteRepository(RepositoryFacade):
             parser_provider_chain_host=parser_provider_chain_host,
             ask_completed_observer_host=ask_completed_observer_host,
             report_completed_observer_host=report_completed_observer_host,
+            ask_engine_host=ask_engine_host,
+            indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
