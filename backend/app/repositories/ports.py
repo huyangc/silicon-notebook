@@ -1457,16 +1457,6 @@ class SourceStorePort(Protocol):
 
 @runtime_checkable
 class ChunkStorePort(Protocol):
-    def replace_notebook_chunks(
-        self,
-        notebook_id: str,
-        chunks_by_source: Mapping[str, Sequence[ChunkWrite]],
-        *,
-        created_at: str,
-        pipeline_id: str,
-        pipeline_version: str,
-        pipeline_generation: str,
-    ) -> None: ...
     def question_index_chunk_page(
         self,
         notebook_id: str,
