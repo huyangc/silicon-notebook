@@ -716,6 +716,11 @@ class KgBuildJobStore:
                 }
                 for row in current_rows
             ]
+            # 已登记内存边界(评审 P1,后续独立一件事):发布事务把整本库的 staged
+            # chunk+向量 JSON 一次读进内存并在写锁内解析——部署上限拉满
+            # (`indexing_pipeline_rebuild_max_*`)的最坏情形是 GB 级瞬时驻留。
+            # 正解是 staging 向量改存 encode_vector 的 bytes 并按 source keyset
+            # 分页读取/校验;当前默认上限下的典型库远小于最坏值,先如实登记。
             staged = db.execute(
                 "SELECT source_id,status,payload "
                 "FROM indexing_pipeline_stage_sources WHERE job_id=? "

@@ -1767,7 +1767,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 provider 只收到当前问题和三个由核心拥有的端口。`RetrievalAccessPort.search()` 包裹既有带范围候选路径：冻结的来源范围、挂载公共库范围和按 actor 隔离的私有 Memory 谓词会在 SQLite/PostgreSQL 的候选 `LIMIT` 之前生效；结果只暴露有界正文、标题、位置和本次 run 内的不透明证据句柄，不暴露 notebook/source/element/chunk id。`fetch()` 只认同一端口已经签发过的句柄。`EngineModelPort.complete()` 通过常规模型 registry、调度、熔断、日志和取消路径使用 `plugin_engine` chat workload，不暴露 URL、密钥、raw client 或物理 binding。`EngineTraceSink.step()` 持久化有界的通用 `plugin` 轨迹步骤；v1 不提供实时轨迹流。
 
-provider 返回 Markdown 和按顺序排列的已签发句柄。核心会对每个句柄及每个 `[kN]`/`【kN】` 标记做 fail-closed 校验，再从私有账本构造 `Citation` 与 `AnswerAnchor`；在复核 mode/notebook/question/conversation/actor/job/run/scope 身份后，仍经普通 durable answer 接缝保存。伪造或跨 run 句柄会以稳定的用户可见失败拒绝整份答案，不能通过删除坏锚点让无根据正文看起来已接地。公开会话投影继续使用原白名单。v1 不接收历史、意图预检、KG/PPR 端口、repository、`Settings`、连接或 service locator；它只进入浏览器 Ask，不进入 MCP Ask 或 Deep Report。自动 UI 模式隐藏扩展分组并提交内建默认模式；高级模式把可用引擎作为第三分组。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
+provider 返回 Markdown 和按顺序排列的已签发句柄。核心会对每个句柄及每个 `[kN]`/`【kN】` 标记做 fail-closed 校验，再从私有账本构造 `Citation` 与 `AnswerAnchor`；在复核 mode/notebook/question/conversation/actor/job/run/scope 身份后，仍经普通 durable answer 接缝保存。伪造或跨 run 句柄会以稳定的用户可见失败拒绝整份答案，不能通过删除坏锚点让无根据正文看起来已接地。准入刻意比「不认未知句柄」更严：返回的 citations 元组必须被**恰好**引用——每一条都要以标记出现在正文里（`1..N` 全覆盖）——检索到却未被引用的条目同样整份拒绝，防止插件把没有任何句子支撑的引用垫进参考列表。公开会话投影继续使用原白名单。v1 不接收历史、意图预检、KG/PPR 端口、repository、`Settings`、连接或 service locator；它只进入浏览器 Ask，不进入 MCP Ask 或 Deep Report。自动 UI 模式隐藏扩展分组并提交内建默认模式；高级模式把可用引擎作为第三分组。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
 
 | 问答引擎护栏 | 默认值 | 合法范围 / 结构上限 |
 | --- | ---: | ---: |
