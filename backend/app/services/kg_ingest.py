@@ -389,7 +389,9 @@ def _plugin_kg_fragment_to_window(
             evidence=evidence,
         )
         if canonical_type in {"Claim", "Formula"}:
-            node.validity_scope = _parse_validity_scope(proposal.validity_scope)
+            node.validity_scope = _bounded_validity_scope(
+                _parse_validity_scope(proposal.validity_scope), limits
+            )
         if canonical_type == "Procedure":
             if (
                 type(proposal.steps) is not tuple
@@ -465,6 +467,30 @@ def _plugin_kg_fragment_to_window(
             )
         )
     return nodes, edges
+
+
+def _bounded_validity_scope(scope: dict, limits: "IndexingPipelineKgLimits") -> dict:
+    """插件 mapper 的 validity_scope 套核心围栏(codex #602 R3 P2)。
+
+    `_parse_validity_scope` 是与核心抽取路径共享的归一化,不做长度界;插件产出在
+    进 staging/库之前必须有界——列表条数复用 `max_steps_per_object`(同为「每对象
+    列表」轨)、每个字符串复用 `max_name_chars`。任一越界即整个丢弃(返回 {}):
+    它是论断/公式的补充标注,不是身份或证据,丢标注保对象。
+    """
+    for key in ("region", "assumptions"):
+        items = scope.get(key)
+        if items is None:
+            continue
+        if (
+            len(items) > limits.max_steps_per_object
+            or any(len(item) > limits.max_name_chars for item in items)
+        ):
+            return {}
+    for key in ("approximation", "range"):
+        value = scope.get(key)
+        if value is not None and len(value) > limits.max_name_chars:
+            return {}
+    return scope
 
 
 def _plugin_extract_window(

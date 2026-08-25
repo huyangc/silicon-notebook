@@ -114,6 +114,7 @@ import {
   describeIndexingPipelineState,
   indexingPipelineConfirmMessage,
   indexingPipelineIdsEqual,
+  indexingPipelineReadOnlySummary,
   notebookIndexingPipelineReadOnlySummary,
   selectedIndexingPipelineOption,
 } from "./indexing-pipeline-settings.ts";
@@ -135,7 +136,7 @@ import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
-import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks } from "./notebook-api";
+import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { sourceKgBadge } from "./source-kg-badge.ts";
 import { classifyStagedFiles, compactStagedFileName, mergeLiveStagedFileWarnings, scanStandaloneMarkdownImageWarnings, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile, type StagedFileWarning } from "./source-upload.ts";
@@ -2904,8 +2905,22 @@ export default function Home() {
     if (await notebookCollection.openEditor(notebookId)) rootModals.publish(lease);
   }
 
-  function openReadOnlyNotebookSettings() {
-    const summary = notebookIndexingPipelineReadOnlySummary(currentNotebook);
+  async function openReadOnlyNotebookSettings() {
+    const notebookId = currentNotebook?.id ?? null;
+    // 先按 NotebookSummary 派生兜底文案,再尽力换成实时投影:摘要只有 pending
+    // 布尔,分不出「重建中」与「重建失败」——失败后 job authority 保留(那是重试
+    // 入口),只看摘要会对只读成员永远显示「正在重建」(codex #602 R3 P2)。
+    // 投影端点 reader 可读;取不到就用兜底,一次网络抖动不该挡住设置说明。
+    let summary = notebookIndexingPipelineReadOnlySummary(currentNotebook);
+    if (notebookId) {
+      try {
+        const projection = await fetchNotebookIndexingPipeline(notebookId);
+        if (activeNotebookIdRef.current !== notebookId) return;
+        summary = indexingPipelineReadOnlySummary(projection);
+      } catch {
+        if (activeNotebookIdRef.current !== notebookId) return;
+      }
+    }
     openInfoModal({
       title: "设置",
       message: `当前笔记本为只读。当前索引管线：${summary.label}。${summary.detail} 参考库挂载与链接分享由库主管理。`,
@@ -5213,7 +5228,7 @@ export default function Home() {
                   if (capabilities.canWriteNotebook) {
                     void presentNotebookEditor(currentNotebook.id);
                   } else {
-                    openReadOnlyNotebookSettings();
+                    void openReadOnlyNotebookSettings();
                   }
                 }}>
                   <Settings size={17} />
