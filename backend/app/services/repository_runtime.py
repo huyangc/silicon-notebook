@@ -1588,6 +1588,7 @@ class RepositoryRuntime:
             load_lock=load_lock,
             load_locks=load_locks,
             note_model_error=note_model_error,
+            pipeline_identity=self.index_projections.pipeline_identity,
         )
         return self.scale_catalog
 

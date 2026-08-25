@@ -1089,6 +1089,15 @@ class SourceIngestionService:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
 
+    def _admit_and_freeze_pipeline(self, notebook_id: str) -> tuple[str, str]:
+        """写入准入 + 同刻冻结管线身份,配对不可拆(codex #602 R5 P1)。
+
+        分块步凭这份冻结身份跨管线切换跑完(完整论证见
+        SourceChunkingService.published_identity 的 docstring);准入与冻结分开
+        取就会重新打开「过闸之后、冻结之前」的竞态窗口。"""
+        self.require_indexing_write(notebook_id)
+        return self.chunking.published_identity(notebook_id)
+
     def _clear_state_of_present_source_tx(
         self, db, source_id: str, notebook_id: str, *, clear_embeddings: bool
     ) -> None:
@@ -1113,11 +1122,7 @@ class SourceIngestionService:
         """
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
-        self.require_indexing_write(notebook_id)
-        # 入场准入即冻结管线身份(codex #602 R5 P1):解析期间发生的管线切换不能
-        # 让本次在飞解析在破坏性清态之后才被 pending 拒绝——分块用这份冻结身份跑
-        # 完,切换 worker 的 source-snapshot CAS 会看见元素漂移并如实失败(可重试)。
-        frozen_pipeline_identity = self.chunking.published_identity(notebook_id)
+        frozen_pipeline_identity = self._admit_and_freeze_pipeline(notebook_id)
         now = self.now()
         pipeline_started = time.perf_counter()
 

@@ -43,6 +43,7 @@ class ScaleArtifactCatalog:
         load_lock: Callable,
         load_locks: Callable,
         note_model_error: Callable,
+        pipeline_identity: "Callable | None" = None,
     ) -> None:
         self.artifacts = artifacts
         self.settings = settings
@@ -51,7 +52,37 @@ class ScaleArtifactCatalog:
         self.load_lock = load_lock
         self.load_locks = load_locks
         self.note_model_error = note_model_error
+        self.pipeline_identity = pipeline_identity
         self._ann_lock_guard = threading.Lock()
+
+    def _stale_manifest_admissible(self, notebook_id: str) -> "dict | None":
+        """allow_stale 的磁盘 manifest 读取 + 管线身份闸(codex #602 R8 P1)。
+
+        普通 stale(摄取造成的 kg_mutation_seq 漂移)刻意可服务——ANN 核=磁盘已
+        索引部分,delta 由检索侧补。但**管线切换发布**不是普通 stale:全库 chunk id
+        已重铸,旧工件的 ANN 命中指向已删行,喂它等于把检索打残到异步重建完成(或
+        它失败后永远)。工件 manifest 的 `pipeline_identity` ≠ 当前已发布身份时按
+        「无工件」处理,调用方回落 live 检索路径。legacy 工件缺该键——它们必然
+        建于插件管线存在之前——按内建身份放行;corrupt manifest 保持 fail-soft。
+        """
+        try:
+            manifest = self.artifacts.read_manifest(
+                self.artifacts.scale_dir(notebook_id))
+        except (OSError, ValueError):
+            return None
+        if manifest is None or manifest.get("version") is None:
+            return None
+        if self.pipeline_identity is not None:
+            from app.domain.indexing_pipeline import (
+                BUILTIN_INDEXING_PIPELINE_VERSION,
+            )
+            artifact_identity = list(
+                manifest.get("pipeline_identity")
+                or ["", BUILTIN_INDEXING_PIPELINE_VERSION]
+            )
+            if artifact_identity != list(self.pipeline_identity(notebook_id)):
+                return None
+        return manifest
 
     def load(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex or None.
@@ -80,11 +111,12 @@ class ScaleArtifactCatalog:
                 return idx
             return None
         # allow_stale:按磁盘身份复用。cached 若仍是当前磁盘索引(其 version == 磁盘
-        # manifest version)→ 直接返回(handle 存活,零重载)。
-        disk_ver = self.artifacts.read_manifest_version(
-            self.artifacts.scale_dir(notebook_id))
-        if disk_ver is None:
-            return None   # 无索引
+        # manifest version)→ 直接返回(handle 存活,零重载)。管线身份闸见
+        # _stale_manifest_admissible。
+        disk_manifest = self._stale_manifest_admissible(notebook_id)
+        if disk_manifest is None:
+            return None   # 无索引 / 工件与已发布管线不同代
+        disk_ver = disk_manifest.get("version")
         if cached is not None and cached.manifest.get("version") == disk_ver:
             return cached
         # cold:单飞加载。全局锁只护锁表,load 在 per-nb 锁内、不持全局锁。
@@ -97,10 +129,10 @@ class ScaleArtifactCatalog:
         with nb_lock:
             # double-check:等锁期间别的线程可能已加载好当前磁盘索引。
             cached = self.scale_cache().get(notebook_id)
-            disk_ver = self.artifacts.read_manifest_version(
-                self.artifacts.scale_dir(notebook_id))
-            if disk_ver is None:
+            disk_manifest = self._stale_manifest_admissible(notebook_id)
+            if disk_manifest is None:
                 return None
+            disk_ver = disk_manifest.get("version")
             if cached is not None and cached.manifest.get("version") == disk_ver:
                 return cached
             idx = self.artifacts.load_scale(notebook_id)

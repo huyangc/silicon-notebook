@@ -847,3 +847,57 @@ def test_status_queued_legacy_manifest_without_total_build_ms_defaults_zero(
     assert status["state"] == "queued"
     assert status["last_build_ms"] == 0
     assert status["last_built_at"] == "2020-01-01T00:00:00"
+
+
+def test_allow_stale_rejects_artifacts_from_another_pipeline_generation():
+    """管线切换发布后,旧代 scale 工件不得再经 allow_stale 服务(codex #602 R8 P1):
+    chunk id 已重铸,旧 ANN 命中指向已删行——按「无工件」回落 live 检索;legacy
+    工件缺 pipeline_identity 键按内建身份放行。"""
+    import threading
+    from types import SimpleNamespace
+
+    from app.services.scale_artifact_catalog import ScaleArtifactCatalog
+
+    def catalog(manifest, current_identity, load_calls):
+        artifacts = SimpleNamespace(
+            scale_dir=lambda _nb: "/nonexistent",
+            read_manifest=lambda _d: manifest,
+            load_scale=lambda _nb: (
+                load_calls.append(True) or SimpleNamespace(manifest=manifest)
+            ),
+        )
+        return ScaleArtifactCatalog(
+            artifacts=artifacts,
+            settings=None,
+            version=lambda _nb: ["v-current"],
+            scale_cache=lambda: {},
+            load_lock=threading.Lock,
+            load_locks=lambda: {},
+            note_model_error=lambda *a, **k: None,
+            pipeline_identity=lambda _nb: current_identity,
+        )
+
+    # 不同代:拒绝且连 load_scale 都不发生(闸在冷加载之前)。
+    calls: list = []
+    stale = catalog(
+        {"version": ["v-old"], "pipeline_identity": ["p.x", "v2"]},
+        ("", "builtin.chunk.v1"),
+        calls,
+    )
+    assert stale.load("nb", allow_stale=True) is None
+    assert calls == []
+
+    # legacy 工件缺键 + 当前内建:照常服务。
+    calls = []
+    legacy = catalog({"version": ["v-old"]}, ("", "builtin.chunk.v1"), calls)
+    assert legacy.load("nb", allow_stale=True) is not None
+    assert calls == [True]
+
+    # 同代插件身份:照常服务。
+    calls = []
+    matched = catalog(
+        {"version": ["v-old"], "pipeline_identity": ["p.x", "v2"]},
+        ("p.x", "v2"),
+        calls,
+    )
+    assert matched.load("nb", allow_stale=True) is not None
