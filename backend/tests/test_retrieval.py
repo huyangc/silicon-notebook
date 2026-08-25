@@ -376,6 +376,26 @@ def test_model_name_alias_does_not_rewrite_numbered_prose_labels():
     ) == 1.0
 
 
+def test_model_name_alias_keeps_haystack_stems_for_bare_queries():
+    """Aliasing is append-only on the haystack side (PR #601 review P1).
+
+    _tokens runs on BOTH sides of every comparison; dropping the component
+    runs there made a document saying "Cosmos 3" invisible to a bare-stem
+    query, and stripped ordinary prose verbs ("scored 3 points" lost
+    "scored").  Only keyword_basis — the query-side entry — may unit-ify."""
+    from app.services.retrieval import _tokens
+
+    assert keyword_score("cosmos", "Cosmos 3 is an omnimodal model") == 1.0
+    # Ordinary prose keeps its stem even when a number happens to follow it.
+    assert keyword_score("supports languages", "supports 4 languages") == 1.0
+    assert keyword_score(
+        "team points", "the team scored 3 points yesterday"
+    ) == 1.0
+    # The haystack token list is a superset: stems stay, the alias is added.
+    doc_tokens = set(_tokens("Cosmos 3 is an omnimodal model"))
+    assert {"cosmos", "cosmos3"} <= doc_tokens
+
+
 def test_contract_remains_in_recall_but_not_keyword_basis(repo, monkeypatch):
     from app.models.schemas import NotebookCreate
 
