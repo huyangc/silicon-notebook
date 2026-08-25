@@ -714,6 +714,11 @@ def _payload_text(payload: Dict[str, object]) -> str:
     return " ".join(parts)
 
 
+# 关系 embedding 输入里端点名的截断上限——协议边界的具名常量,live store_kg 与
+# staged indexing 发布两条路共用,不许各写一份字面量(codex #602 R12 P2)。
+RELATION_NAME_EMBED_CHARS = 80
+
+
 def relation_embed_text(src_name: str, edge_type: str, tgt_name: str,
                         evidence_spans: Sequence[str],
                         max_evidence_chars: int = 400) -> str:

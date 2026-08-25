@@ -44,8 +44,9 @@ class AskEngineDescriptor:
 
 @dataclass(frozen=True)
 class AskEngineContext:
-    notebook: NotebookRef
-    actor: ActorRef
+    # 实现期修订(codex #602 R12 P2):notebook/actor 引用已从上下文删除——
+    # 稳定身份 id 交给插件只会打开跨 run 关联的口子,范围与归属全部由核心在
+    # 端口构造时预绑定;provider 只收当前问题与四个端口。
     question: str
     cancellation: CancellationToken
 

@@ -518,10 +518,14 @@ class KnowledgeLifecycleService:
         for obj in objects:
             local_to_id[obj["local_id"]] = self._new_id("ko")
             obj["_oid"] = local_to_id[obj["local_id"]]
-        from app.services.retrieval import relation_embed_text, _payload_text
+        from app.services.retrieval import (
+            RELATION_NAME_EMBED_CHARS,
+            relation_embed_text,
+            _payload_text,
+        )
 
         local_to_name = {
-            obj["local_id"]: _payload_text(obj["payload"])[:80]
+            obj["local_id"]: _payload_text(obj["payload"])[:RELATION_NAME_EMBED_CHARS]
             for obj in objects
         }
         relation_inputs: List[dict] = []
@@ -676,8 +680,12 @@ class KnowledgeLifecycleService:
         for obj in objects:
             local_to_id[obj["local_id"]] = self._new_id("ko")
             obj["_oid"] = local_to_id[obj["local_id"]]   # _embed_objects_batch 依赖
-        from app.services.retrieval import relation_embed_text, _payload_text
-        local_to_name = {o["local_id"]: _payload_text(o["payload"])[:80] for o in objects}
+        from app.services.retrieval import (
+            RELATION_NAME_EMBED_CHARS,
+            relation_embed_text,
+            _payload_text,
+        )
+        local_to_name = {o["local_id"]: _payload_text(o["payload"])[:RELATION_NAME_EMBED_CHARS] for o in objects}
         db_relations = []
         for rel in relations:
             s = local_to_id.get(rel["source_local_id"])
