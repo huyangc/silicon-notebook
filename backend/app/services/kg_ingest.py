@@ -373,9 +373,17 @@ def _plugin_kg_fragment_to_window(
             id=node_id,
             type=canonical_type,
             name=proposal.name.strip(),
+            # 插件给的 section_path 套与 name 同一条 max_name_chars 轨(codex #602
+            # R2 P2:不设界的话每窗最多 max_objects 个超长值绕过 KG 载荷全部围栏、
+            # 直进 staging/库)。超限**回落核心算出的 section_path** 而不是整源否决:
+            # 它是展示性元数据,不是身份/证据。
             section_path=(
                 proposal.section_path
-                if type(proposal.section_path) is str and proposal.section_path
+                if (
+                    type(proposal.section_path) is str
+                    and proposal.section_path
+                    and len(proposal.section_path) <= limits.max_name_chars
+                )
                 else section_path
             ),
             evidence=evidence,

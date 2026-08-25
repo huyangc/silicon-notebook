@@ -16,7 +16,6 @@ from threading import RLock
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 from uuid import uuid4
 
-from app.core.llm import cap_kwargs
 from app.domain.ask_engine import AskEnginePortError, EngineEvidence
 from app.domain.cancellation import AskCancelled
 from app.domain.retrieval import RetrievedElement
@@ -391,11 +390,13 @@ class PluginEngineModelAccess:
             if getattr(state.client, "configured", True) is not True:
                 raise AskEnginePortError("plugin_engine_model_unconfigured")
             try:
+                # 刻意**不**传 cap_kwargs:合同(AGENTS.md ask.engine 条)写明输出
+                # cap「继承绑定客户端的普通输出上限」——显式塞 answer_max_tokens 会
+                # 在部署给 plugin_engine 绑了小 cap 客户端时越过它(codex #602 R2 P2)。
                 raw = state.client.chat_json(
                     [{"role": "user", "content": prompt}],
                     '{"text":"string"}',
                     cancel_event=state.cancellation,
-                    **cap_kwargs(state.client, "answer_max_tokens"),
                 )
                 parsed = json.loads(raw)
                 text = parsed.get("text") if isinstance(parsed, dict) else None
