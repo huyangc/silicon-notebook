@@ -127,3 +127,25 @@ test("加载失败时显示失败文案,而不是无限期停在加载中", asyn
   render(<AuthedImage url="/assets/7" alt="test" />);
   await screen.findByText("图片加载失败");
 });
+
+
+// codex #599 R2 P2：图片放大预览的左右切换换的是**同一个** AuthedImage 实例的 url。
+// 状态不跟着换就有两个后果：上一张失败后,后面每一张都永久停在「图片加载失败」;
+// 而在新图取回来之前,渲染的还是上一张那个刚被 revoke 的 objectURL（坏图）。
+test("换 url 时丢掉上一张的状态：失败不粘住,新图取回前不显示上一张", async () => {
+  vi.mocked(fetchInternalAssetBlob).mockRejectedValueOnce(new Error("network"));
+  const { rerender } = render(<AuthedImage url="/assets/first" alt="第一张" />);
+  await screen.findByText("图片加载失败");
+
+  rerender(<AuthedImage url="/assets/second" alt="第二张" />);
+  // 换过去的那一帧：既不是上一张的失败态,也不是上一张的图。
+  expect(screen.queryByText("图片加载失败")).toBeNull();
+  expect(screen.getByText("图片加载中…")).toBeInTheDocument();
+  expect(await screen.findByRole("img", { name: "第二张" })).toBeInTheDocument();
+
+  // 反向:成功之后再换一张,同样不会先闪一帧上一张。
+  rerender(<AuthedImage url="/assets/third" alt="第三张" />);
+  expect(screen.queryByRole("img")).toBeNull();
+  expect(screen.getByText("图片加载中…")).toBeInTheDocument();
+  expect(await screen.findByRole("img", { name: "第三张" })).toBeInTheDocument();
+});
