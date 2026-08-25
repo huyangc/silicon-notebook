@@ -28,6 +28,21 @@ export function AuthedImage({ url, alt }: { url: string; alt: string }) {
   const [src, setSrc] = useState<string>("");
   const [failed, setFailed] = useState(false);
 
+  // url 换了就把上一张的状态丢干净。放在**渲染期**而不是 effect 里，是 React 文档
+  // 「props 变化时调整 state」的写法：effect 要等这一帧画完才跑，中间会实打实画出
+  // 一帧上一张图——而那一帧里的 `src` 已经是下面 cleanup 即将 revoke（或刚刚
+  // revoke）的 objectURL，画出来的是一个坏图，不只是「旧图片」。
+  //
+  // 承重的是第二条：`failed` 不清就会永久粘住。图片放大预览可以左右切换同一个
+  // AuthedImage 实例的 url（codex #599 R2 P2），一张图失败之后，后面每一张都会停在
+  // 「图片加载失败」，哪怕它自己取得好好的。
+  const [loadedUrl, setLoadedUrl] = useState(url);
+  if (loadedUrl !== url) {
+    setLoadedUrl(url);
+    setSrc("");
+    setFailed(false);
+  }
+
   // 可见性观察:只在尚不可见、且当前环境真的有 IntersectionObserver 时才装。
   // 一旦触发过一次可见就不再需要继续观察(visible 变 true 后这个 effect 提前
   // return,不重新创建 observer);组件卸载时无条件 disconnect,不留下悬挂的
