@@ -96,6 +96,10 @@ test("notebookIndexingPipelineReadOnlySummary exposes the projected pipeline for
     indexing_pipeline_missing: false,
     indexing_pipeline_pending: true,
   });
-  assert.match(summary.label, /plugin\.arxiv/);
+  // summary 路径拿不到 descriptor label,上通用界面词——绝不把 `plugin.arxiv`
+  // 这种内部 id 当文案上屏(评审 P2:词汇守卫扫不到运行时数据)。
+  assert.ok(!summary.label.includes("plugin.arxiv"), summary.label);
+  assert.match(summary.label, /部署插件提供的索引管线/);
+  assert.match(summary.label, /v2026\.08/);
   assert.match(summary.detail, /正在重建全库索引/);
 });

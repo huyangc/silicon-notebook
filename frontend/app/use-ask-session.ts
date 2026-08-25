@@ -137,7 +137,7 @@ type SessionRequest = {
 
 type AskModeCache = {
   ownerKey: string;
-  modes: AskModeDef[];
+  modes: readonly AskModeDef[];
 };
 
 type AskModeRequest = {
@@ -214,7 +214,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const [pendingMode, setPendingMode] = useState<string>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
   const [mode, setMode] = useState<string>(DEFAULT_ASK_MODE);
-  const [askModes, setAskModes] = useState<AskModeDef[]>(ASK_MODES);
+  const [askModes, setAskModes] = useState<readonly AskModeDef[]>(ASK_MODES);
   const [retrievalEffort, setRetrievalEffort] = useState<AskRetrievalEffortId>(
     DEFAULT_ASK_RETRIEVAL_EFFORT,
   );
@@ -243,7 +243,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const conversationIdRef = useRef(conversationId);
   const turnsRef = useRef<ChatTurn[]>(turns);
   const modeRef = useRef(mode);
-  const askModesRef = useRef<AskModeDef[]>(askModes);
+  const askModesRef = useRef<readonly AskModeDef[]>(askModes);
   const modeChoiceVersionRef = useRef(0);
   const pendingModeSourceRef = useRef<string | null>(null);
   conversationIdRef.current = conversationId;
@@ -319,7 +319,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const choiceVersion = modeChoiceVersionRef.current;
     let alive = true;
 
-    const applyProjection = (modes: AskModeDef[]) => {
+    const applyProjection = (modes: readonly AskModeDef[]) => {
       if (
         !alive
         || `${actorIdRef.current ?? ""}\u0000${actorGenerationRef.current}` !== projectionOwnerKey

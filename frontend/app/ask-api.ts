@@ -7,6 +7,7 @@ import { countCodePoints } from "./input-limits.ts";
 import {
   humanizedError,
   logDiagnostic,
+  pluginEngineFailureMessage,
   throwHumanizedHttpError,
 } from "./errors.ts";
 import {
@@ -35,25 +36,6 @@ export {
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
 export const fetchAskModes = () => requestJson<unknown>("/ask-modes", options);
-
-function pluginEngineFailureMessage(raw: string): string | null {
-  const match = /^AskPluginEngineError: ([a-z0-9_]+)$/.exec(raw.trim());
-  if (!match) return null;
-  if (match[1] === "plugin_engine_unverified_citation") {
-    return "扩展引擎返回了无法核验的引用";
-  }
-  if (match[1] === "plugin_engine_unavailable") {
-    return "所选扩展引擎当前不可用，请切换引擎后重试";
-  }
-  if ([
-    "plugin_engine_citation_limit",
-    "plugin_engine_model_call_limit",
-    "plugin_engine_search_call_limit",
-  ].includes(match[1])) {
-    return "扩展引擎超过了本次调用预算，请重试或切换引擎";
-  }
-  return "扩展引擎没能完成回答，请重试或切换引擎";
-}
 
 // --- 输入护栏 ---------------------------------------------------------------
 

@@ -359,20 +359,28 @@ export function ArxivSearchEntry({ context, actions }: WorkspaceExtensionProps) 
           <ExtensionAlert tone="status">本次导入没有收到任何结果，请到来源列表确认。</ExtensionAlert>
         ) : null}
         {receipt && receipt.size > 0 && (
-          <ExtensionResultList>
+          // 回执三态各配各的 tone(created→status / repeat→warning / rejected→error),
+          // 让「没导入成」不必读完整句话才看得出来——与核心异常分级同一套 token。
+          <div>
             {[...receipt.entries()].map(([url, entry]) => (
-              <ExtensionResultItem
+              <ExtensionAlert
                 key={url}
-                title={
+                tone={
                   entry.status === "created"
-                    ? `已创建：${entry.title}`
+                    ? "status"
                     : entry.status === "repeat"
-                      ? `本次已导入过，可能已产生重复来源：${entry.title}`
-                      : `未导入（${entry.reason}）：${url}`
+                      ? "warning"
+                      : "error"
                 }
-              />
+              >
+                {entry.status === "created"
+                  ? `已创建：${entry.title}`
+                  : entry.status === "repeat"
+                    ? `本次已导入过，可能已产生重复来源：${entry.title}`
+                    : `未导入（${entry.reason}）：${url}`}
+              </ExtensionAlert>
             ))}
-          </ExtensionResultList>
+          </div>
         )}
       </ExtensionModal>
     </>

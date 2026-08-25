@@ -115,6 +115,29 @@ function isCompliantUserCopy(text: string): boolean {
 
 // 造一个「已翻译」的错误——本模块之外没有第二个地方盖这个章。可选 `status`:
 // HTTP 失败经此抛出时挂上原始状态码,供 httpErrorStatus 读回做状态码分流。
+// 扩展引擎的 stream/job 失败码 → 固定中文文案。住在本模块是红线要求(「前端翻译
+// 只在 errors.ts」):它匹配的是**我们自己后端**异常序列化出的稳定形状
+// `AskPluginEngineError: <code>`,原文永不上屏——未知码只落通用文案。调用方
+// (ask-api.ts 的 stream error 分支)拿到译文后仍经 humanizedError 打品牌。
+export function pluginEngineFailureMessage(raw: string): string | null {
+  const match = /^AskPluginEngineError: ([a-z0-9_]+)$/.exec(raw.trim());
+  if (!match) return null;
+  if (match[1] === "plugin_engine_unverified_citation") {
+    return "扩展引擎返回了无法核验的引用";
+  }
+  if (match[1] === "plugin_engine_unavailable") {
+    return "所选扩展引擎当前不可用，请切换引擎后重试";
+  }
+  if ([
+    "plugin_engine_citation_limit",
+    "plugin_engine_model_call_limit",
+    "plugin_engine_search_call_limit",
+  ].includes(match[1])) {
+    return "扩展引擎超过了本次调用预算，请重试或切换引擎";
+  }
+  return "扩展引擎没能完成回答，请重试或切换引擎";
+}
+
 export function humanizedError(message: string, status?: number): Error {
   const error = new Error(message);
   Object.defineProperty(error, HUMANIZED, { value: true, enumerable: false });

@@ -179,7 +179,12 @@ class IndexingPipelineHost:
         if not self._available(contribution_id, pipeline_id):
             return IndexingPipelineChunkResult(None, "indexing_pipeline_unavailable")
         if not descriptor.overrides_chunking:
-            return IndexingPipelineChunkResult(())
+            # None(而不是空 tuple):调用方对 None 走内建 chunker 回退,而空 tuple
+            # 会被当成「合法地提议零个 chunk」直接采纳——这条分支当前在调用侧更早
+            # 处已短路、不可达,但一旦可达,() 就是整来源静默零 chunk(评审 P2)。
+            return IndexingPipelineChunkResult(
+                None, "indexing_pipeline_not_chunking"
+            )
         try:
             projected = tuple(
                 IndexingSourceElement(

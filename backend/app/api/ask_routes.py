@@ -101,10 +101,11 @@ def _plugin_engine_http_error(exc: AskPluginEngineError) -> HTTPException:
         if exc.code == "plugin_engine_unverified_citation"
         else "扩展引擎暂时无法完成回答，请重试"
     )
-    return HTTPException(
-        status_code=502,
-        detail={"error": exc.code, "message": message},
-    )
+    # user_error() 打 X-User-Message 头——错误文案红线按**出处**放行:没有这个头,
+    # 前端只显示按状态码泛化的通用文案,这两句中文永远上不了屏。detail 必须是纯
+    # 文案字符串(前端展示闸拒绝带花括号的形态);exc.code 只进诊断通道,同步路
+    # 的调用方不需要它(stream 路的 code 翻译在 frontend/app/errors.ts)。
+    return user_error(502, message)
 
 
 def _validate_source_scope(repo, notebook: NotebookSummary,
