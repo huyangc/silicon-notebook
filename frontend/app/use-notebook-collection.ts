@@ -698,7 +698,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     editorSavingRef.current = true;
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
-      const result = await setNotebookIndexingPipeline(current.target.id, pipelineId);
+      await setNotebookIndexingPipeline(current.target.id, pipelineId);
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
@@ -710,12 +710,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         || editorOperationRef.current !== operation
         || !rowCanManageContent(current.target.id)
       ) return;
-      setEditor((value) => value ? {
-        ...value,
-        target: updated,
-        indexingPipeline: result,
-        selectedPipelineId: normalizeIndexingPipelineId(pipelineId),
-      } : value);
+      // 成功即关弹窗(镜像 saveEditor):弹窗没有活状态轮询,留着只会把一次性的
+      // pending 响应冻在屏上——后台重建早已结束,界面还写着「重建中」并禁用整组
+      // 单选,直到用户自己关掉重开(codex #602 R1 P2)。toast 已说明重建在进行;
+      // 重开设置时会重新取一次实时投影。
+      setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, current.mountEdges);
       await effectsRef.current.refreshComposite(() => owns(owner));
       if (owns(owner)) effectsRef.current.notify(successMessage);
