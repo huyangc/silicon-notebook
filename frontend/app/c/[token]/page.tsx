@@ -30,6 +30,7 @@ import {
   citationImageSlotItems,
   rehypeCitationImages,
   type CitationImageIdsByKey,
+  type CitationImageOrder,
 } from "../../rehype-citation-images";
 import {
   fetchPublicConversation,
@@ -187,24 +188,28 @@ function PublicTurnView({
   }, [citationRefs, imageIdsByCitationKey]);
   const refDomId = (key: string) => `ref-t${index}-${key}`;
 
-  // 本轮可以左右切换的全部附图。快照按 payload 顺序,与正文里图片区块的出现顺序
-  // 一致(区块按引用首次出现落位,而 turn.images 就是按引用顺序发下来的);正文内联
-  // 与旧分享兜底区互斥,所以一轮只有一份清单。标签取该图第一条引用键,与点开时看到
-  // 的那一条保持同一个来源,不另立第二套。
-  const previewGallery = useMemo<readonly PublicPreviewImage[]>(
-    () => turn.images.map((image) => ({
-      image,
-      referenceLabel: markdownCitationRefs[image.reference_keys?.[0] ?? ""]?.displayLabel || "",
-    })),
-    [turn.images, markdownCitationRefs],
-  );
+  // 本轮可以左右切换的全部附图,顺序就是正文里看到的顺序:渲染管线一边把图片区块插进
+  // 正文一边记账(citationImageOrder),这里读那本账,而不是按 `turn.images` 的下发顺序
+  // 另行推导(那份顺序与正文并不保证一致,codex #599 R1 P2)。旧分享兜底区排在正文之后,
+  // 所以它那批图片接在账目末尾——两者互斥,正常一轮只会有其中一种。
+  const citationImageOrder = useRef<CitationImageOrder>({ items: [] }).current;
   const previewCurrent = previewImage?.items[previewImage.index] ?? null;
-  // 定位不到就退化成只有这一张的快照(切换控件随之消失),绝不改开另一张。
+  const previewGallery = (): PublicPreviewImage[] => {
+    const rows: PublicPreviewImage[] = [];
+    for (const { citationKey, imageId } of citationImageOrder.items) {
+      const image = imagesByAlias.get(imageId);
+      if (!image) continue;
+      rows.push({ image, referenceLabel: markdownCitationRefs[citationKey]?.displayLabel || "" });
+    }
+    for (const image of legacyImages) rows.push({ image, referenceLabel: "" });
+    return rows;
+  };
+  // 读发生在点击那一刻(此时本轮渲染早已跑完并记好账)。定位不到就退化成只有这一张的
+  // 快照(切换控件随之消失),绝不改开另一张。
   const openPreview = (image: PublicImageT, referenceLabel: string) => {
-    const at = previewGallery.findIndex((row) => row.image.alias === image.alias);
-    setPreviewImage(at >= 0
-      ? { items: previewGallery, index: at }
-      : { items: [{ image, referenceLabel }], index: 0 });
+    const items = previewGallery();
+    const at = items.findIndex((row) => row.image.alias === image.alias);
+    setPreviewImage(at >= 0 ? { items, index: at } : { items: [{ image, referenceLabel }], index: 0 });
   };
 
   useLayoutEffect(() => {
@@ -335,7 +340,9 @@ function PublicTurnView({
           ]}
           rehypePlugins={[
             rehypeKatex,
-            [rehypeCitationImages, imageIdsByCitationKey] as [typeof rehypeCitationImages, CitationImageIdsByKey],
+            [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
+              typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder,
+            ],
           ]}
           // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,其余仍走
           // 默认清洗(防 javascript: 等不安全协议)。

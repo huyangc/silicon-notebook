@@ -28,7 +28,7 @@ import {
   type CitationImageLike,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
-import type { CitationImageSlotItem } from "./rehype-citation-images";
+import type { CitationImageOrder, CitationImageSlotItem } from "./rehype-citation-images";
 import { GapSuggestionsPanel } from "./answer-gap-suggestions";
 import { AuthedImage } from "./authed-image";
 import { API_BASE } from "./api-config";
@@ -1354,18 +1354,22 @@ export function AnswerView({
     () => referenceByCitationKey(references),
     [references],
   );
-  // 本条回答里可以左右切换的全部附图，按正文显示顺序。正文图片区块与引用浮层
-  // 缩略图共用同一份——预览打开后左右切换走遍的就是它，而不是「点进去的那一组」。
-  const imageGallery = useMemo(
-    () => buildImageGallery(references.map((reference) => ({
-      displayLabel: reference.displayLabel,
-      images: referenceImages(reference),
-    }))),
-    [references],
-  );
-  // 定位只做一次:两个点击入口都只报「点的是哪一张」,由这里把它放回画册里。
+  // 本条回答里可以左右切换的全部附图。顺序不在这里推导——渲染管线一边把图片区块
+  // 插进正文一边记账(citationImageOrder),这里读的就是那本账,所以左右切换走的必然
+  // 是眼睛看到的顺序。正文图片区块与引用浮层缩略图共用同一份画册,预览打开后走遍
+  // 整条回答,而不是「点进去的那一组」。
+  const citationImageOrder = useRef<CitationImageOrder>({ items: [] }).current;
+  // 读发生在点击那一刻(此时本次渲染早已跑完并记好账),不是渲染期读。
   const previewImage = onPreviewImage
-    ? (image: AnswerImagePreviewItem) => onPreviewImage(imagePreviewRequest(imageGallery, image))
+    ? (image: AnswerImagePreviewItem) => onPreviewImage(imagePreviewRequest(
+      buildImageGallery(citationImageOrder.items, (key) => {
+        const reference = referencesByCitationKey[key];
+        return reference
+          ? { displayLabel: reference.displayLabel, images: referenceImages(reference) }
+          : undefined;
+      }),
+      image,
+    ))
     : undefined;
   const renderCitationImages = (items: CitationImageSlotItem[]) => {
     if (!notebookId) return null;
@@ -1495,6 +1499,7 @@ export function AnswerView({
           rect: event.currentTarget.getBoundingClientRect(),
         })}
         renderCitationImages={renderCitationImages}
+        citationImageOrder={citationImageOrder}
       />
       <KnowhowResultSets
         resultSets={answer.result_sets}

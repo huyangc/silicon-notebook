@@ -24,31 +24,33 @@ type GalleryReference = Readonly<{
   images: readonly Readonly<{ asset_id: string; caption?: string | null }>[];
 }>;
 
+type GallerySlot = Readonly<{ citationKey: string; imageId: string }>;
+
 /**
  * 一条回答里可切换的附图清单。
  *
- * 顺序与去重规则必须与 `rehypeCitationImages` 插入图片区块的规则逐条对应——
- * 按引用**首次出现**的先后、同一 asset 只留第一次。调用方传进来的
- * `references` 就是 `buildAnswerReferences` 的输出，它本身已按正文里第一次出现
- * 该引用标记的顺序排列，所以这里只需要再做一次 asset 去重。两处若哪天分叉，
- * 左右切换的顺序会与正文里看到的顺序对不上（这正是
- * `answer-citation-images.component.test.tsx` 里那条按 DOM 顺序对账的用例钉住的）。
+ * 顺序**不在这里推导**：`slots` 就是 `rehypeCitationImages` 本次渲染真正插进正文的
+ * 那些条目，按正文顺序、且已按资产去重。早先版本按引用数组顺序自己排一遍——anchor
+ * 路径上碰巧一致，但回退到 `citations` 列表时（正文先写 `[2]` 后写 `[1]`，而列表按
+ * 检索序给出 `[1]`、`[2]`）左右切换的顺序就与眼睛看到的相反，还会把从未在正文出现过
+ * 的引用的图片算进画册（codex #599 R1 P2）。这里只负责把每条落位记录翻成预览要用的
+ * 标签与 alt，用的是与 `InlineCitationImages` 渲染时**同一条**取值规则。
  */
 export function buildImageGallery(
-  references: readonly GalleryReference[],
+  slots: readonly GallerySlot[],
+  resolveReference: (citationKey: string) => GalleryReference | undefined,
 ): AnswerImagePreviewItem[] {
-  const seen = new Set<string>();
   const items: AnswerImagePreviewItem[] = [];
-  for (const reference of references) {
-    for (const image of reference.images) {
-      if (!image.asset_id || seen.has(image.asset_id)) continue;
-      seen.add(image.asset_id);
-      items.push({
-        assetId: image.asset_id,
-        alt: image.caption || `${reference.displayLabel} 的附图`,
-        referenceLabel: reference.displayLabel,
-      });
-    }
+  for (const { citationKey, imageId } of slots) {
+    const reference = resolveReference(citationKey);
+    if (!reference) continue;
+    const image = reference.images.find((candidate) => candidate.asset_id === imageId);
+    if (!image) continue;
+    items.push({
+      assetId: image.asset_id,
+      alt: image.caption || `${reference.displayLabel} 的附图`,
+      referenceLabel: reference.displayLabel,
+    });
   }
   return items;
 }

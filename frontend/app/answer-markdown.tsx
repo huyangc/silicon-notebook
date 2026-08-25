@@ -26,6 +26,7 @@ import {
   citationImageSlotItems,
   rehypeCitationImages,
   type CitationImageIdsByKey,
+  type CitationImageOrder,
   type CitationImageSlotItem,
 } from "./rehype-citation-images";
 
@@ -49,6 +50,9 @@ export interface AnswerMarkdownProps {
   onReferenceClick: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void;
   /** 引用图片的块级渲染端口。缺省时不插入图片区（Memory 等纯 Markdown 消费面）。 */
   renderCitationImages?: (items: CitationImageSlotItem[]) => ReactNode;
+  /** 记账本：本次渲染实际插进正文的图片条目按正文顺序写进它，供放大预览的左右切换
+   *  取用（见 rehype-citation-images.ts 里 CitationImageOrder 的完整理由）。 */
+  citationImageOrder?: CitationImageOrder;
 }
 
 export function AnswerMarkdown({
@@ -58,6 +62,7 @@ export function AnswerMarkdown({
   selectedReferenceId = null,
   onReferenceClick,
   renderCitationImages,
+  citationImageOrder,
 }: AnswerMarkdownProps) {
   // 构建 key→reference 映射，供 remarkCitations 插件和 <a> 组件使用
   const references = buildAnswerReferences(answer, anchors, citations);
@@ -133,7 +138,9 @@ export function AnswerMarkdown({
         ]}
         rehypePlugins={[
           rehypeKatex,
-          [rehypeCitationImages, imageIdsByCitationKey] as [typeof rehypeCitationImages, CitationImageIdsByKey],
+          [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
+            typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder | undefined,
+          ],
         ]}
         // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
         // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
