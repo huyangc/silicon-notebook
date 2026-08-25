@@ -875,9 +875,6 @@ class NotebookStorePort(Protocol):
     def attach_indexing_pipeline_job(
         self, notebook_id: str, generation: str, job_id: str
     ) -> bool: ...
-    def clear_indexing_pipeline_job(
-        self, notebook_id: str, generation: str, job_id: str
-    ) -> bool: ...
 
 # Stable database-write page shared by both indexing-stage publishers.  This
 # bounds transient id lists; it never truncates a product because publishers

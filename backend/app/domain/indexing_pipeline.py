@@ -20,6 +20,16 @@ class IndexingPipelineStalePlanError(RuntimeError):
     """A notebook/source generation changed while a whole-notebook plan ran."""
 
 
+class IndexingPipelineRebuildActiveError(RuntimeError):
+    """A rebuild worker is active; desired intent must not be re-minted.
+
+    Raised by ``begin()`` BEFORE any desired-columns write: advancing the
+    generation while a worker is mid-rebuild would doom that worker's publish
+    CAS after it has already spent the whole notebook's model/embedding cost,
+    while the second submitter reads an innocent-looking 409.
+    """
+
+
 class IndexingPipelineRebuildFailedError(RuntimeError):
     """A bounded desired generation remains pending after rebuild rejection."""
 
