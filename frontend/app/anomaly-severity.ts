@@ -31,6 +31,10 @@ const EXTRACTION_WARNING_LABEL = "部分内容未分析";
 const PARSE_QUALITY_WARNING_LABEL = "降级解析";
 const PARSE_QUALITY_WARNING_TOOLTIP = "MinerU 暂时不可用，已改用本地解析器；版面、公式、表格或扫描内容可能不完整。可重新解析，不满意可删除来源。";
 
+const INDEXING_CHUNK_FALLBACK_LABEL = "降级整理";
+const INDEXING_CHUNK_FALLBACK_TOOLTIP =
+  "这份来源没能按所选索引管线整理，已改用内建方式；它的检索效果可能与库内其它来源不一致。可重新解析重试。";
+
 const PAPER_META_MISSING_LABEL = "待补全";
 const PAPER_META_MISSING_TOOLTIP = "论文作者/机构等信息尚未补全";
 
@@ -178,6 +182,7 @@ export function sourceAnomalies(source: {
   status?: string | null;
   extraction_warning?: string | null;
   parse_quality_warning?: boolean;
+  indexing_chunk_fallback?: boolean;
   paper_meta_status?: string | null;
 }): Anomaly[] {
   const anomalies: Anomaly[] = [];
@@ -204,6 +209,14 @@ export function sourceAnomalies(source: {
       severity: "retrieval",
       label: PARSE_QUALITY_WARNING_LABEL,
       tooltip: PARSE_QUALITY_WARNING_TOOLTIP,
+    });
+  }
+
+  if (source.indexing_chunk_fallback) {
+    anomalies.push({
+      severity: "retrieval",
+      label: INDEXING_CHUNK_FALLBACK_LABEL,
+      tooltip: INDEXING_CHUNK_FALLBACK_TOOLTIP,
     });
   }
 

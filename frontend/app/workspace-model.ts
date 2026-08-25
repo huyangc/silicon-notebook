@@ -275,6 +275,8 @@ export type SourceSummary = {
   extraction_warning?: string | null;
   /** MinerU 重试耗尽后由该格式对应的本地解析器完成；原始上游错误不对外暴露。 */
   parse_quality_warning?: boolean;
+  /** 所选索引管线对这份来源的提案畸形/失败,内容已按内建策略回退整理。 */
+  indexing_chunk_fallback?: boolean;
   kg_extracted?: boolean;
   // 分析跑完了、这份文档里确实没有可整理成知识图谱的内容。与 kg_extracted
   // 并列的互斥态,合起来给来源徽标三态(见 source-kg-badge.ts)。旧后端不发

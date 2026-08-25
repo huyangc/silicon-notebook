@@ -15,6 +15,8 @@ from app.models.sources import (
     SourceSummary,
     extraction_warning_text,
     kg_analyzed_without_objects,
+    INDEXING_CHUNK_FALLBACK_WARNING_PREFIX,
+    has_indexing_chunk_fallback_warning,
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
@@ -1282,6 +1284,24 @@ class SourceStore:
                 (*params, source_id),
             )
 
+
+    def mark_indexing_chunk_fallback(self, source_id: str, warning_code: str) -> None:
+        """见 SourceStorePort:非空写稳定前缀诊断(不覆盖既有 MinerU 诊断),空只清自己。"""
+        prefix = INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
+        with self.database.write() as db:
+            if warning_code:
+                db.execute(
+                    "UPDATE sources SET error_message=? WHERE id=? AND "
+                    "(error_message IS NULL OR error_message='' OR error_message LIKE ?)",
+                    (f"{prefix} {warning_code}", source_id, f"{prefix}%"),
+                )
+            else:
+                db.execute(
+                    "UPDATE sources SET error_message='' WHERE id=? "
+                    "AND error_message LIKE ?",
+                    (source_id, f"{prefix}%"),
+                )
+
     def clear_chunked_at(
         self, connection: sqlite3.Connection, source_id: str
     ) -> None:
@@ -1629,6 +1649,7 @@ class SourceStore:
             ),
             extraction_warning=extraction_warning_text(latest_run_error),
             parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
+            indexing_chunk_fallback=has_indexing_chunk_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
             kg_analyzed_empty=kg_analyzed_without_objects(
                 latest_run_status, latest_run_error
@@ -1741,6 +1762,7 @@ class SourceStore:
                 ),
                 extraction_warning=_warning(sid),
                 parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
+            indexing_chunk_fallback=has_indexing_chunk_fallback_warning(row["error_message"]),
                 kg_extracted=sid in kg_extracted_ids,
                 kg_analyzed_empty=kg_analyzed_without_objects(
                     latest_status.get(sid, ""), latest_error.get(sid, "")

@@ -6,10 +6,22 @@ from pydantic import BaseModel, Field
 
 PDF_PYTHON_FALLBACK_WARNING_PREFIX = "[pdf-python-fallback]"
 
+# 所选索引管线对该来源的分块提案畸形/失败、已按内建策略回退时,写进
+# sources.error_message 的稳定前缀(同 PDF_PYTHON_FALLBACK_WARNING_PREFIX 的
+# 机制:原始 warning code 只留在这条诊断里,对外只投影布尔)。写者是
+# SourceChunkingService.build_chunks_for_source;为不覆盖 MinerU 降级诊断,
+# 只在 error_message 为空或已是本前缀时写入。
+INDEXING_CHUNK_FALLBACK_WARNING_PREFIX = "[indexing-chunk-fallback]"
+
 
 def has_pdf_python_fallback_warning(error_message: object) -> bool:
     """Return only the safe public fact, never the stored MinerU diagnostic."""
     return str(error_message or "").startswith(PDF_PYTHON_FALLBACK_WARNING_PREFIX)
+
+
+def has_indexing_chunk_fallback_warning(error_message: object) -> bool:
+    """Return only the safe public fact, never the stored warning code."""
+    return str(error_message or "").startswith(INDEXING_CHUNK_FALLBACK_WARNING_PREFIX)
 
 
 _WINDOWS_FAILED = re.compile(r"windows_failed=(\d+)/(\d+)")
@@ -177,6 +189,9 @@ class SourceSummary(BaseModel):
     # remains private in SourceDetail.error_message; clients receive only this
     # stable safe fact.
     parse_quality_warning: bool = False
+    # 所选索引管线对这份来源的提案畸形/失败、内容已按内建策略回退整理(派生自
+    # error_message 的 INDEXING_CHUNK_FALLBACK_WARNING_PREFIX,同上一条的机制)。
+    indexing_chunk_fallback: bool = False
     # 该 source 是否已抽取 KG / 已入图
     kg_extracted: bool = False
     # 最近一次分析**跑完了、而这篇文档里确实没有可整理成知识图谱的内容**(正文极少、

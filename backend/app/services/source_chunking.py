@@ -151,8 +151,6 @@ class SourceChunkingService:
         self,
         elements: list[dict],
         pipeline_id: str,
-        *,
-        allow_unpublished: bool = False,
     ) -> tuple[list[dict], str]:
         if not pipeline_id:
             return (
@@ -207,7 +205,7 @@ class SourceChunkingService:
         with self._notebook_lock(notebook_id):
             pipeline_id, _pipeline_version = self._pipeline_identity(notebook_id)
             elements = self.chunks.source_elements_for_chunking(source_id)
-            chunk_dicts, _warning = self._chunk_dicts(elements, pipeline_id)
+            chunk_dicts, warning = self._chunk_dicts(elements, pipeline_id)
             rows = [ChunkWrite(id=self.new_id("ck"), text=c["text"],
                                section_path=c["section_path"],
                                element_ids=tuple(c["element_ids"])) for c in chunk_dicts]
@@ -217,6 +215,11 @@ class SourceChunkingService:
             self.chunks.replace_source_chunks(
                 source_id, notebook_id, rows, created_at=now, mark_chunked_at=now
             )
+            # 畸形提案回退内建不能只发内部观测事件——用户必须在来源徽标上看得见
+            # (spec:「可见 parse_quality_warning 同级提示」)。marker 在 replace
+            # 之后单独一笔写(它描述已提交的结局);warning 为空清掉本前缀自己的
+            # 旧诊断,MinerU 降级诊断由写入侧的条件谓词保护、绝不覆盖。
+            self.sources.mark_indexing_chunk_fallback(source_id, warning)
             # Every chunk-derived cache keys off this mutation sequence.
             self.mark_unified_dirty(notebook_id)
 
@@ -248,9 +251,7 @@ class SourceChunkingService:
             warning_count = 0
             for source_id in source_ids:
                 elements = self.chunks.source_elements_for_chunking(source_id)
-                chunk_dicts, warning = self._chunk_dicts(
-                    elements, pipeline_id, allow_unpublished=True
-                )
+                chunk_dicts, warning = self._chunk_dicts(elements, pipeline_id)
                 if warning:
                     warning_count += 1
                 total_proposals += len(chunk_dicts)

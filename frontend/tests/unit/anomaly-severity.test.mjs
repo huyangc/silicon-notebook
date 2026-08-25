@@ -47,6 +47,20 @@ test("MinerU 降级到本地解析器 → retrieval，并提示可重新解析�
   );
 });
 
+test("索引管线分块回退内建 → retrieval(降级整理),与降级解析并存不互斥", () => {
+  const anomalies = sourceAnomalies({ indexing_chunk_fallback: true });
+  assert.equal(anomalies.length, 1);
+  assert.equal(anomalies[0].severity, "retrieval");
+  assert.equal(anomalies[0].label, "降级整理");
+  assert.match(anomalies[0].tooltip, /已改用内建方式/);
+  assert.match(anomalies[0].tooltip, /可重新解析重试/);
+  const both = sourceAnomalies({
+    parse_quality_warning: true,
+    indexing_chunk_fallback: true,
+  });
+  assert.deepEqual(both.map((a) => a.label), ["降级解析", "降级整理"]);
+});
+
 test("paper_meta_status=missing → info(待补全，非 amber，是刻意的重新分类)", () => {
   const anomalies = sourceAnomalies({ paper_meta_status: "missing" });
   assert.equal(anomalies.length, 1);
