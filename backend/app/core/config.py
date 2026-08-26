@@ -186,6 +186,10 @@ class Settings(BaseSettings):
         8, ge=1, le=100,
         validation_alias="ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS",
     )
+    ask_plugin_engine_kg_search_max_calls: int = Field(
+        16, ge=1, le=100,
+        validation_alias="ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS",
+    )
     ask_plugin_engine_evidence_max_chars: int = Field(
         4000, ge=100, le=50_000,
         validation_alias="ASK_PLUGIN_ENGINE_EVIDENCE_MAX_CHARS",
