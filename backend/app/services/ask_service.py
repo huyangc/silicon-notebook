@@ -1397,33 +1397,43 @@ class AskService:
                 return ids
 
             scope_stack = ExitStack()
-            if scope is None:
-                # Scope-less callers (MCP, legacy direct calls) get the same
-                # frozen all-selected ceiling shape the browser freezes for
-                # every request, so the KG candidate seam behaves identically
-                # on every face: ANN arm on, snapshot applied at evidence
-                # hydrate. narrowed=False keeps every channel open, and the
-                # display receipt is a separate ContextVar only the API route
-                # sets on real narrowing — nothing user-visible is produced.
-                # The hidden half is the plugin universe's own (Memory already
-                # excluded), deliberately stricter than the browser snapshot;
-                # the port's out-of-universe drop rule stays the authority.
-                scope_stack.enter_context(source_scope_context(
-                    prepared.notebook_id,
-                    {
-                        "mode": "include",
-                        "source_ids": list(self.ask_engine_visible_sources(
-                            prepared.notebook_id
-                        )),
-                        "hidden_source_ids": list(plugin_hidden_sources(
-                            prepared.notebook_id, prepared.user_id
-                        )),
-                        "narrowed": False,
-                        "owner_id": prepared.user_id,
-                    },
-                    None,
-                ))
             try:
+                if scope is None:
+                    # Scope-less callers (MCP, legacy direct calls) get the
+                    # same frozen all-selected ceiling shape the browser
+                    # freezes for every request, so the KG candidate seam
+                    # behaves identically on every face: ANN arm on, snapshot
+                    # applied at evidence hydrate. narrowed=False keeps every
+                    # channel open, and the display receipt is a separate
+                    # ContextVar only the API route sets on real narrowing —
+                    # nothing user-visible is produced. The hidden half MUST
+                    # be the RAW set (the caller's Memory projections
+                    # included, exactly what the browser snapshot carries):
+                    # the seam's universe-drift probe compares it against the
+                    # live `hidden_source_ids` read, and a Memory-stripped
+                    # copy would never match — silently re-closing the ANN
+                    # arm for every user who has one confirmed Memory
+                    # (ANN-arm review P2-1). Memory exclusion is NOT this
+                    # ceiling's job; its authorities are the port universe
+                    # (`plugin_hidden_sources`) and the out-of-universe drop
+                    # rule in `_issue_kg_evidence`.
+                    scope_stack.enter_context(source_scope_context(
+                        prepared.notebook_id,
+                        {
+                            "mode": "include",
+                            "source_ids": list(self.ask_engine_visible_sources(
+                                prepared.notebook_id
+                            )),
+                            "hidden_source_ids": list(
+                                self.ask_engine_hidden_sources(
+                                    prepared.notebook_id, prepared.user_id
+                                )
+                            ),
+                            "narrowed": False,
+                            "owner_id": prepared.user_id,
+                        },
+                        None,
+                    ))
                 retrieval = PluginRetrievalAccess(
                     active_notebook_id=prepared.notebook_id,
                     actor_id=prepared.user_id,
