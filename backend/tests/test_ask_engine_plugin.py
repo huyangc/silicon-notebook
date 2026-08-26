@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, fields
-from threading import Event, Thread
+from threading import Barrier, Event, Lock, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -148,8 +149,16 @@ def _object(
     object_type: str = "concept",
     name: str = "退火",
     evidence=None,
-    notebook_id: str = "notebook-1",
+    notebook_id: str = "",
 ):
+    """``notebook_id`` defaults to "" (the ``RetrievedKnowledge`` field
+    default) to mirror the production seam this double stands in for MOST
+    often: `_retrieve_neighbors` (the `kg_neighbors` seat) never sets
+    `.notebook_id`. `search_kg` callers must pass it explicitly — production
+    `federated_retrieve` always tags every hit with a real participant
+    library (`_federated_retrieve_impl`), so a search_kg double that left it
+    at "" would silently mask the P1 origin bug this file's cross-library
+    tests exist to catch."""
     return RetrievedKnowledge(
         object_id=object_id,
         object_type=object_type,
@@ -839,7 +848,9 @@ def test_citation_admission_rejects_residual_citation_like_markers():
 
 
 def test_search_kg_issues_element_addressed_handles_admitted_as_citations():
-    access = _kg_access(search_knowledge=lambda *_args, **_kwargs: [_object()])
+    access = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")]
+    )
 
     hits = access.search_kg("退火", 2)
 
@@ -877,7 +888,7 @@ def test_search_kg_pushes_the_frozen_source_keys_into_the_candidate_seam():
 
 def test_knowledge_hit_without_a_live_source_is_context_only():
     access = _kg_access(
-        search_knowledge=lambda *_args, **_kwargs: [_object()],
+        search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")],
         source_info=lambda _source_ids: {},
     )
 
@@ -894,9 +905,40 @@ def test_knowledge_hit_without_a_live_source_is_context_only():
     assert access.kg_neighbors("", 2) == ()
 
 
+def test_bound_evidence_requires_the_source_to_be_in_the_frozen_snapshot_not_just_resolvable():
+    """P1: `_bound_evidence` 的两个判据必须都是承重的——快照成员判定
+    (`state.source_origin.get(source_id) != origin`)必须在元数据解析之前
+    生效。一个证据来源即使仍能被 `source_info` 解析出元数据(比如它仍然
+    真实存在于数据库里),只要不在这个 run 冻结的 `source_keys` 集合内,
+    就必须判越界、不可引用——不能靠“元数据解析不出来”这唯一一条判据兜底。
+    删掉 `_bound_evidence` 的这道 origin 比对(保留元数据解析)会让全部
+    既有用例通过,只有这条新用例能钉住它。"""
+    access = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object(
+            notebook_id="notebook-1",
+            evidence=[_evidence(source_id="source-outside-scope")],
+        )],
+        # source_info 仍能解析出元数据(该来源本身仍然存在),但它压根不在
+        # 这个 run 冻结的可见来源集合(visible=("source-1",))内——正是
+        # `source_origin` 判据要拦的那种「resolvable 但不在快照里」的证据。
+        source_info=lambda source_ids: {
+            source_id: {"title": "越界来源", "file_name": "outside.pdf"}
+            for source_id in source_ids
+        },
+    )
+
+    hits = access.search_kg("退火", 2)
+
+    assert hits[0].evidence_key == ""
+    assert hits[0].source_title == "" and hits[0].location_label == ""
+    with pytest.raises(AskEnginePortError) as rejected:
+        admit_plugin_engine_result(access, "结论 [k1]", ("",))
+    assert rejected.value.code == "plugin_engine_unverified_citation"
+
+
 def test_kg_budget_is_shared_and_early_exits_never_spend_it():
     access = _kg_access(
-        search_knowledge=lambda *_args, **_kwargs: [_object()],
+        search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")],
         kg_max_calls=1,
     )
 
@@ -913,6 +955,57 @@ def test_kg_budget_is_shared_and_early_exits_never_spend_it():
     assert also_exhausted.value.code == "plugin_engine_kg_call_limit"
 
 
+def test_search_kg_rejects_malformed_object_types_before_spending_budget():
+    """P3: 容器必须是 tuple/list、元素必须是 str。裸字符串本身就是
+    「字符组成的可迭代对象」,`tuple("concept")` 会被拆成
+    `('c','o','n','c','e','p','t')`——不是「未知类型名被静默丢弃」,而是
+    请求本身就不是模型想表达的样子,必须响亮拒绝。两次畸形调用都不能消耗
+    共享 KG 预算(校验必须排在 `_claim_kg_call` 之前)。"""
+    access = _kg_access(kg_max_calls=2)
+
+    with pytest.raises(AskEnginePortError) as bare_string:
+        access.search_kg("退火", 1, object_types="concept")
+    assert bare_string.value.code == "plugin_engine_invalid_kg_request"
+
+    with pytest.raises(AskEnginePortError) as non_str_element:
+        access.search_kg("退火", 1, object_types=(1,))
+    assert non_str_element.value.code == "plugin_engine_invalid_kg_request"
+
+    # Neither malformed call spent the shared KG budget: exactly
+    # `kg_max_calls` well-formed calls still succeed before exhaustion.
+    assert access.search_kg("退火", 1) == ()
+    assert access.search_kg("退火", 1) == ()
+    with pytest.raises(AskEnginePortError) as exhausted:
+        access.search_kg("退火", 1)
+    assert exhausted.value.code == "plugin_engine_kg_call_limit"
+
+
+def test_search_kg_all_empty_text_hit_is_context_only_not_a_ledger_entry():
+    """P3: name/definition/quoted_span 全空时 `_kg_text` 组出空串——即使
+    证据来源仍然存活,也没有任何用户可核验的文字,因此不能签发可引用 key、
+    不能进 ledger、也不能当 `kg_neighbors` 的锚点。"""
+    empty_evidence = Evidence(
+        source_id="source-1", source_title="", element_id="element-1",
+        element_type="paragraph", location_label="第 3 页",
+        quoted_span="", confidence=0.9,
+    )
+    empty_hit = RetrievedKnowledge(
+        object_id="ko-empty", object_type="concept",
+        payload={}, evidence=[empty_evidence], score=0.8,
+        notebook_id="notebook-1",
+    )
+    access = _kg_access(search_knowledge=lambda *_args, **_kwargs: [empty_hit])
+
+    hits = access.search_kg("退火", 1)
+
+    assert hits[0].evidence_key == "" and hits[0].text == ""
+    with pytest.raises(AskEnginePortError) as rejected:
+        admit_plugin_engine_result(access, "结论 [k1]", ("",))
+    assert rejected.value.code == "plugin_engine_unverified_citation"
+    # Not registered as a `kg_neighbors` anchor either.
+    assert access.kg_neighbors("", 2) == ()
+
+
 def test_kg_neighbors_resolves_only_object_anchors_and_validates_its_request():
     forwarded: list[tuple] = []
     neighbor = _object(
@@ -926,7 +1019,7 @@ def test_kg_neighbors_resolves_only_object_anchors_and_validates_its_request():
         return NeighborExpansion([neighbor], False)
 
     access = _kg_access(
-        search_knowledge=lambda *_args, **_kwargs: [_object()],
+        search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")],
         object_neighbors=object_neighbors,
         kg_max_calls=4,
     )
@@ -955,6 +1048,92 @@ def test_kg_neighbors_resolves_only_object_anchors_and_validates_its_request():
     assert records[0].element_id == "element-2"
 
 
+def test_kg_neighbors_resolves_origin_against_the_anchors_own_library_not_active():
+    """P1(codex 双评审复现):生产 seam `_retrieve_neighbors` 构造的
+    `RetrievedKnowledge` 不设 `.notebook_id`(默认 ""),旧的 `_hit_origin` 会
+    回退 active 库——挂载参考库锚点的每个邻居因此被 `_bound_evidence` 误判
+    越界、evidence_key 全部降级为 ""(context-only、不可引用)。此用例的两个
+    participant(active="notebook-1"、base="base-1")互不相同,才会真正暴露
+    这个 bug:单 participant 场景下「回退 active」与「回退锚点自己的库」永远
+    算出同一个值,盖不住它。"""
+    anchor_object = _object(
+        object_id="ko-anchor", name="基座锚点",
+        evidence=[_evidence(source_id="source-base", element_id="element-anchor")],
+        notebook_id="base-1",
+    )
+    # 生产形状:kg_neighbors 命中不带 notebook_id——它的证据来源属于 base-1,
+    # 但 hit 本身对这一点保持沉默,必须靠端口从锚点自己的库推出正确 origin。
+    shared_object_via_neighbors = _object(
+        object_id="ko-shared", name="共享概念",
+        evidence=[_evidence(source_id="source-base", element_id="element-shared")],
+    )
+
+    def object_neighbors(_notebook_id, _object_id, _edge_type, _direction):
+        return NeighborExpansion([shared_object_via_neighbors], False)
+
+    calls = {"n": 0}
+
+    def search_knowledge(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [anchor_object]
+        # 第二次调用模拟 federated_retrieve 命中同一个对象——生产上它总是
+        # 标注真实 notebook_id(`_federated_retrieve_impl`)。
+        return [_object(
+            object_id="ko-shared", name="共享概念",
+            evidence=[_evidence(source_id="source-base", element_id="element-shared")],
+            notebook_id="base-1",
+        )]
+
+    access = PluginRetrievalAccess(
+        active_notebook_id="notebook-1",
+        actor_id="user-1",
+        cancellation=None,
+        participant_notebook_ids=lambda _notebook_id: ("notebook-1", "base-1"),
+        all_visible_source_ids=lambda notebook_id: (
+            ("source-1",) if notebook_id == "notebook-1" else ("source-base",)
+        ),
+        hidden_source_ids=lambda _notebook_id, _actor_id: (),
+        search_elements=lambda *_args, **_kwargs: [],
+        source_info=lambda source_ids: {
+            source_id: {"title": "基座来源", "file_name": "base.pdf"}
+            for source_id in source_ids
+            if source_id in ("source-1", "source-base")
+        },
+        search_knowledge=search_knowledge,
+        object_neighbors=object_neighbors,
+        collection_overview=lambda _notebook_id: "",
+        kg_max_calls=4,
+        max_k=2,
+        max_calls=2,
+        evidence_chars=100,
+        query_chars=100,
+    )
+
+    anchor_key = access.search_kg("查询", 1)[0].evidence_key
+    assert anchor_key, "the base-1 anchor itself must be citable"
+
+    neighbor_hits = access.kg_neighbors(anchor_key, 1)
+    assert len(neighbor_hits) == 1
+    neighbor_key = neighbor_hits[0].evidence_key
+    assert neighbor_key, (
+        "a mounted-base anchor's neighbor must resolve against the anchor's "
+        "own participant library (base-1), not the active notebook "
+        "(notebook-1) -- otherwise its base-1 evidence source is judged "
+        "out of the frozen snapshot and the neighbor is silently downgraded "
+        "to context-only"
+    )
+
+    # Same knowledge object reached via search_kg and kg_neighbors reuses one
+    # run-local handle (the `kg_reverse` identity is keyed on the resolved
+    # origin, so a wrong origin would also break this dedup).
+    reused_key = access.search_kg("查询二", 1)[0].evidence_key
+    assert reused_key == neighbor_key, (
+        "the same knowledge object reached through search_kg and "
+        "kg_neighbors must share one evidence handle"
+    )
+
+
 def test_kg_overview_is_bounded_and_computed_once_per_run():
     calls: list[str] = []
 
@@ -972,9 +1151,62 @@ def test_kg_overview_is_bounded_and_computed_once_per_run():
     assert len(first) == plugin_ports.KG_OVERVIEW_MAX_CHARS
 
 
+def test_kg_overview_is_single_flight_under_concurrent_first_calls():
+    """P2:读 memo→计算→写 memo 此前不在同一临界区,并发首调各自观察到空
+    memo、各自重复触发底层全量计数(生产实测 8 并发线程 8 次调用)。用 Event
+    卡住第一个调用者、Barrier 让 8 个线程一起起跑,证明底层 callable 只被
+    真正调用一次。gate 之后的短暂 `time.sleep` 只是给其余线程一个排到锁
+    后面的机会(镜像 `test_scale_index_version_singleflight.py` 里同一类
+    并发首调证明手法),真正的判据是 `calls`/`outcomes` 的确定性断言,不是
+    计时本身。"""
+    calls: list[str] = []
+    gate = Event()
+    release = Event()
+
+    def collection_overview(notebook_id: str) -> str:
+        calls.append(notebook_id)
+        gate.set()
+        assert release.wait(2), "single-flight loader stuck waiting on release"
+        return "地图"
+
+    access = _kg_access(collection_overview=collection_overview)
+    worker_count = 8
+    barrier = Barrier(worker_count)
+    outcomes: list[str] = []
+    outcomes_lock = Lock()
+
+    def worker() -> None:
+        barrier.wait(timeout=5)
+        value = access.kg_overview()
+        with outcomes_lock:
+            outcomes.append(value)
+
+    threads = [Thread(target=worker, daemon=True) for _ in range(worker_count)]
+    for thread in threads:
+        thread.start()
+
+    assert gate.wait(2), "no caller ever entered the underlying computation"
+    # Give the other barrier-released callers a chance to queue behind the
+    # per-run overview lock before releasing the one in-flight computation.
+    time.sleep(0.05)
+    release.set()
+
+    for thread in threads:
+        thread.join(2)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert calls == ["notebook-1"], (
+        "kg_overview's read-compute-write must be one atomic critical "
+        "section: any second call must observe the already-filled memo "
+        "rather than recomputing"
+    )
+    assert outcomes == ["地图"] * worker_count
+
+
 def test_the_same_knowledge_object_reuses_one_handle_across_calls():
     access = _kg_access(
-        search_knowledge=lambda *_args, **_kwargs: [_object()], kg_max_calls=3
+        search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")],
+        kg_max_calls=3,
     )
 
     first = access.search_kg("退火", 1)[0].evidence_key
@@ -990,6 +1222,69 @@ def test_ask_service_wires_the_kg_seats_and_persists_object_citations():
         hits = retrieval.search_kg("图谱问题", 2)
         seen.append(hits)
         trace.step("图谱检索", f"概览 {len(retrieval.kg_overview())} 字")
+        # Exercises the `object_neighbors` seat too (P3): a typo in the
+        # `getattr(self.retrieval, "retrieve_neighbors", None)` attribute
+        # name in ask_service.py would otherwise resolve silently to `None`
+        # and only surface as a generic `plugin_engine_failed` the first time
+        # some provider actually calls `kg_neighbors` -- which no test here
+        # exercised before this addition.
+        neighbor_hits = retrieval.kg_neighbors(hits[0].evidence_key, 1)
+        seen.append(neighbor_hits)
+        return AskEngineResult(
+            "结论 [k1][k2]",
+            (hits[0].evidence_key, neighbor_hits[0].evidence_key),
+        )
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.kg", answer=answer)),
+    ))
+    service = _minimal_ask_service(
+        ask_engine_host=runtime.ask_engines,
+        ask_engine_participant_notebooks=lambda _notebook_id: ("nb",),
+        ask_engine_visible_sources=lambda _notebook_id: ("source-1",),
+        ask_engine_hidden_sources=lambda _notebook_id, _actor_id: (),
+    )
+    service.retrieval.federated_retrieve_elements = lambda *_args, **_kwargs: []
+    service.retrieval.federated_retrieve = lambda *_args, **_kwargs: [
+        _object(notebook_id="nb")
+    ]
+    service.retrieval.retrieve_neighbors = lambda *_args, **_kwargs: NeighborExpansion(
+        [_object(
+            object_id="ko-2", name="淬火",
+            evidence=[_evidence(element_id="element-2")],
+        )],
+        False,
+    )
+    service.collection_catalog = SimpleNamespace(
+        collection_map_text=lambda _notebook_id: "[Collections in scope] …"
+    )
+    service.evidence_context.citation_source_info = lambda _ids: {
+        "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
+    }
+
+    response = service.ask(
+        "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
+    )
+
+    assert response.mode == "alpha.kg"
+    assert seen[0][0].object_type == "concept"
+    assert seen[1][0].object_type == "concept"
+    assert response.answer == "结论 [k1][k2]"
+    assert response.citations[0].source_id == "source-1"
+    assert response.citations[0].element_id == "element-1"
+    assert response.citations[1].element_id == "element-2"
+    assert response.anchors[0].key == "k1"
+    assert response.anchors[1].key == "k2"
+
+
+def test_kg_citation_and_anchor_carry_the_verbatim_grounding_excerpt_not_the_model_summary():
+    """P2: `_kg_text` 的组合文本(模型抽取产物的 name+definition)此前原样
+    进了持久化 Citation.quoted_span 与 anchor.snippet——用户会把一句模型
+    撰写的话当成原文引文。绑定证据自己的 `quoted_span`(逐字原文)必须
+    优先;anchor.object_type 也必须是真实节点类型而不是硬编码 "element"。"""
+
+    def answer(_context, retrieval, _model, _trace):
+        hits = retrieval.search_kg("退火", 1)
         return AskEngineResult("结论 [k1]", (hits[0].evidence_key,))
 
     runtime = build_extension_runtime((
@@ -1006,7 +1301,7 @@ def test_ask_service_wires_the_kg_seats_and_persists_object_citations():
         _object(notebook_id="nb")
     ]
     service.collection_catalog = SimpleNamespace(
-        collection_map_text=lambda _notebook_id: "[Collections in scope] …"
+        collection_map_text=lambda _notebook_id: ""
     )
     service.evidence_context.citation_source_info = lambda _ids: {
         "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
@@ -1016,9 +1311,11 @@ def test_ask_service_wires_the_kg_seats_and_persists_object_citations():
         "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
     )
 
-    assert response.mode == "alpha.kg"
-    assert seen[0][0].object_type == "concept"
-    assert response.answer == "结论 [k1]"
-    assert response.citations[0].source_id == "source-1"
-    assert response.citations[0].element_id == "element-1"
-    assert response.anchors[0].key == "k1"
+    # `_evidence()`'s quoted_span ("对象出处摘录") is the verbatim excerpt;
+    # `_object()`'s payload name/definition ("退火"/"把材料缓慢冷却的热处理")
+    # is the model-authored summary that must NOT leak into either field.
+    assert response.citations[0].quoted_span == "对象出处摘录"
+    assert "退火" not in response.citations[0].quoted_span
+    assert "缓慢冷却" not in response.citations[0].quoted_span
+    assert response.anchors[0].snippet == "对象出处摘录"
+    assert response.anchors[0].object_type == "concept"
