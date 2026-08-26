@@ -955,6 +955,46 @@ async def test_ask_notebook_translates_the_availability_race(
 
 
 @pytest.mark.anyio
+async def test_ask_notebook_translates_the_hosts_own_unavailable_recheck(
+    mcp_env, monkeypatch
+):
+    """codex #603 R3 P2: the host re-checks availability inside dispatch and
+    loses the same race as UnknownAskMode, surfacing as
+    AskPluginEngineError("plugin_engine_unavailable"). That must render the
+    same switch-modes guidance as every other unavailable branch -- not the
+    generic retry sentence."""
+    from app.domain.ask_engine import AskPluginEngineError
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    monkeypatch.setattr(
+        "app.bootstrap.application_extension_runtime",
+        lambda: SimpleNamespace(
+            ask_engines=_FakeAskEngineHost({"niuma.analog": True})
+        ),
+    )
+
+    def unavailable_ask(*_a, **_k):
+        raise AskPluginEngineError("plugin_engine_unavailable")
+
+    monkeypatch.setattr(service, "ask", unavailable_ask)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        failed = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+        )
+    assert failed.isError
+    text = failed.content[0].text
+    assert "暂不可用" in text
+    assert "请重试" not in text
+
+
+@pytest.mark.anyio
 async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
     mcp_env, monkeypatch
 ):
