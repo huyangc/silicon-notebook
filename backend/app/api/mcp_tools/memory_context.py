@@ -151,6 +151,13 @@ def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
             f"mode '{payload.mode}' {_ENGINE_UNAVAILABLE_TEXT}"
         ) from None
     except AskPluginEngineError as exc:
+        if exc.code == "plugin_engine_unavailable":
+            # The host's own availability re-check lost the same race the
+            # UnknownAskMode branch above covers; the Agent needs the same
+            # switch-modes guidance, not a generic retry.
+            raise ValueError(
+                f"mode '{payload.mode}' {_ENGINE_UNAVAILABLE_TEXT}"
+            ) from None
         message = (
             "扩展引擎返回了无法核验的引用"
             if exc.code == "plugin_engine_unverified_citation"
