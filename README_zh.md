@@ -10,7 +10,7 @@
 
 部署插件的 `trust` 是与既有 `builtin` contribution 并列的第三档信任级别：只从 `EXTENSIONS_CONFIG` 点名指向的一份 TOML 文件装载——不扫描目录、不读 Python entry points、不看第二个环境变量，被标为停用的插件条目根本不会被 import。任何发现、capability、settings 或路由挂载校验失败都在启动期 fail-closed——进程直接拒绝起来，绝不会带着半吊子拓扑跑起来；整套装载结果在进程生命周期内冻结，没有热加载，启用、停用或升级插件都必须重启进程。插件自己的 HTTP 路由（即它的 API extensions）只挂在 `/api/extensions/{plugin_id}` 之下，走与其余 API 相同的会话认证，它触达的每个 core 端口都自己对当前请求用户做授权判定。
 构建期经 `SILICON_NOTEBOOK_UI_PLUGINS`（`:` 分隔的本地插件包目录列表）把部署方私有 UI 插件包装进前端构建，每次 `dev`/`build`/`start`/`test` 运行前同步进 `frontend/features/ext-*/` 与生成的 `registry.local.ts`；插件包契约见 `docs/development.md`。
-Extension SDK 还导出一套只使用 token 的表单、结果、动作、告警与空状态 UI 组件，让私有包无需自带 CSS 也能复用核心布局。部署插件可通过 `ask.engine` 提供完整的非流式问答引擎；实时可用的引擎在高级模式第三分组出现，部署放行时也会作为 MCP `ask_notebook` 的一个 mode id 出现，经核心拥有的带范围检索／模型／轨迹端口（现含有界 KG 读端口）运行，并只能引用本次 run 签发的不透明证据句柄。引擎投影失败不影响内建模式。
+Extension SDK 还导出一套只使用 token 的表单、结果、动作、告警与空状态 UI 组件，让私有包无需自带 CSS 也能复用核心布局。部署插件可通过 `ask.engine` 提供完整的非流式问答引擎；实时可用的引擎在高级模式第三分组出现，部署放行时也会作为 MCP `ask_notebook` 的一个 mode id 出现，经核心拥有的带范围检索／模型／轨迹端口（现含有界 KG 读端口；未收窄 run 在冻结天花板下保留 ANN＋词法融合——无 scope 调用面获得合成天花板——真收窄 run 把谓词下推到候选上限之前）运行，并只能引用本次 run 签发的不透明证据句柄。引擎投影失败不影响内建模式。
 部署插件也可通过 `indexing.pipeline` 提供按笔记本选择的索引管线。笔记本设置里，内容管理者可以切换当前管线并看到“将重建全库索引”的明确确认；参考库挂载仍是 owner-only，而纯只读成员也能以只读方式看到当前管线与状态。重建会先持久 stage 全部可见来源，再以一次 generation-CAS 事务共同发布 chunks、可选 KG 产物、identity 与 job 成功终态，因此失败或取消不会改变上一份 live generation。
 仓库带一个完整但**出厂关闭**的样板部署插件 `examples/extensions/arxiv-search/`——没有任何东西会加载它，启用它与启用任何别的插件是同一个两变量决定：在你自己的 `EXTENSIONS_CONFIG` TOML 里点名它，再把 `SILICON_NOTEBOOK_UI_PLUGINS` 指向它的 UI 包。设置表与它的已登记局限见它自己的 README 对，它演示了什么见 `docs/deployment-extensions-sop_zh.md` 第 12 节。
 

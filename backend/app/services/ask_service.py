@@ -1432,7 +1432,26 @@ class AskService:
                             "narrowed": False,
                             "owner_id": prepared.user_id,
                         },
-                        None,
+                        # The library half must freeze too (codex #604 R1 P2):
+                        # a None base scope leaves `base_ceiling_active` false,
+                        # so a reference library mounted between port
+                        # construction and the provider's search would join the
+                        # un-narrowed seam path mid-run — exactly what the
+                        # browser's frozen base snapshot prevents. include of
+                        # the mounted set at synthesis time; empty set means
+                        # "no bases participate", matching a freeze with
+                        # nothing mounted.
+                        {
+                            "mode": "include",
+                            "notebook_ids": [
+                                participant for participant in
+                                self.ask_engine_participant_notebooks(
+                                    prepared.notebook_id
+                                )
+                                if participant != prepared.notebook_id
+                            ],
+                            "narrowed": False,
+                        },
                     ))
                 retrieval = PluginRetrievalAccess(
                     active_notebook_id=prepared.notebook_id,

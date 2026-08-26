@@ -1083,7 +1083,7 @@ def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
     ))
     service = _minimal_ask_service(
         ask_engine_host=runtime.ask_engines,
-        ask_engine_participant_notebooks=lambda _nb: ("nb",),
+        ask_engine_participant_notebooks=lambda _nb: ("nb", "base-1"),
         ask_engine_visible_sources=lambda _nb: ("source-doc",),
         ask_engine_hidden_sources=lambda _nb, _actor: (
             "hidden-knowhow", "hidden-memory",
@@ -1121,6 +1121,19 @@ def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
     assert not scope.restricted, (
         "the synthesized ceiling is a FILTERING snapshot, never a narrowing -- "
         "restricted would wrongly close graph channels"
+    )
+    # The library half freezes too (codex #604 R1 P2): a None base scope
+    # leaves base_ceiling_active false, letting a base mounted mid-run join
+    # the un-narrowed seam path. include of the mounted-at-synthesis set.
+    assert scope.base_mode == "include"
+    assert scope.base_notebook_ids == {"base-1"}
+    assert scope.covers_notebook("base-1")
+    assert not scope.covers_notebook("drifted-base"), (
+        "a reference library mounted after synthesis must stay outside the "
+        "frozen run"
+    )
+    assert not scope.base_restricted, (
+        "an all-mounted include freeze must not read as a base narrowing"
     )
     assert response.retrieval_scope is None, (
         "synthesis must not fabricate a user-visible scope receipt"
