@@ -1398,27 +1398,40 @@ class AskService:
 
             scope_stack = ExitStack()
             try:
-                if scope is None:
-                    # Scope-less callers (MCP, legacy direct calls) get the
-                    # same frozen all-selected ceiling shape the browser
-                    # freezes for every request, so the KG candidate seam
-                    # behaves identically on every face: ANN arm on, snapshot
-                    # applied at evidence hydrate. narrowed=False keeps every
-                    # channel open, and the display receipt is a separate
-                    # ContextVar only the API route sets on real narrowing —
-                    # nothing user-visible is produced. The hidden half MUST
-                    # be the RAW set (the caller's Memory projections
-                    # included, exactly what the browser snapshot carries):
-                    # the seam's universe-drift probe compares it against the
-                    # live `hidden_source_ids` read, and a Memory-stripped
-                    # copy would never match — silently re-closing the ANN
-                    # arm for every user who has one confirmed Memory
-                    # (ANN-arm review P2-1). Memory exclusion is NOT this
-                    # ceiling's job; its authorities are the port universe
-                    # (`plugin_hidden_sources`) and the out-of-universe drop
-                    # rule in `_issue_kg_evidence`.
-                    scope_stack.enter_context(source_scope_context(
-                        prepared.notebook_id,
+                # The two scope dimensions are independently optional, so
+                # every OMITTED dimension is synthesized on its own while a
+                # supplied one passes through field-faithfully (codex #604
+                # R2 P2: a base-only or local-only submission left the other
+                # dimension unfrozen for the un-narrowed KG lane). The result
+                # is the frozen all-selected snapshot shape the browser
+                # freezes for every request, so the KG candidate seam behaves
+                # identically on every face: ANN arm on, snapshot applied at
+                # evidence hydrate. narrowed=False keeps every channel open,
+                # and the display receipt is a separate ContextVar only the
+                # API route sets on real narrowing — nothing user-visible is
+                # produced (this is per-run internal freezing, deliberately
+                # unlike persisted report scopes where an omitted dimension
+                # must stay omitted). The local hidden half MUST be the RAW
+                # set (the caller's Memory projections included, exactly what
+                # the browser snapshot carries): the seam's universe-drift
+                # probe compares it against the live `hidden_source_ids`
+                # read, and a Memory-stripped copy would never match —
+                # silently re-closing the ANN arm for every user who has one
+                # confirmed Memory (ANN-arm review P2-1). Memory exclusion is
+                # NOT this ceiling's job; its authorities are the port
+                # universe (`plugin_hidden_sources`) and the out-of-universe
+                # drop rule in `_issue_kg_evidence`. The library half freezes
+                # as include of the mounted-at-synthesis set (codex #604 R1
+                # P2): a None base scope leaves `base_ceiling_active` false
+                # and a library mounted mid-run would join the seam path.
+                # The supplied-half pass-through rebuilds raw dicts from the
+                # live scope object rather than the persistence payload
+                # helpers — those deliberately drop hidden ids, which would
+                # re-break the drift-probe equality.
+                needs_local = scope is None or not scope.source_provided
+                needs_base = scope is None or not scope.base_provided
+                if needs_local or needs_base:
+                    local_raw = (
                         {
                             "mode": "include",
                             "source_ids": list(self.ask_engine_visible_sources(
@@ -1431,16 +1444,17 @@ class AskService:
                             ),
                             "narrowed": False,
                             "owner_id": prepared.user_id,
-                        },
-                        # The library half must freeze too (codex #604 R1 P2):
-                        # a None base scope leaves `base_ceiling_active` false,
-                        # so a reference library mounted between port
-                        # construction and the provider's search would join the
-                        # un-narrowed seam path mid-run — exactly what the
-                        # browser's frozen base snapshot prevents. include of
-                        # the mounted set at synthesis time; empty set means
-                        # "no bases participate", matching a freeze with
-                        # nothing mounted.
+                        }
+                        if needs_local else
+                        {
+                            "mode": scope.mode,
+                            "source_ids": list(scope.source_ids),
+                            "narrowed": scope.narrowed,
+                            "hidden_source_ids": list(scope.hidden_source_ids),
+                            "owner_id": scope.owner_id,
+                        }
+                    )
+                    base_raw = (
                         {
                             "mode": "include",
                             "notebook_ids": [
@@ -1451,7 +1465,16 @@ class AskService:
                                 if participant != prepared.notebook_id
                             ],
                             "narrowed": False,
-                        },
+                        }
+                        if needs_base else
+                        {
+                            "mode": scope.base_mode,
+                            "notebook_ids": list(scope.base_notebook_ids),
+                            "narrowed": scope.base_narrowed,
+                        }
+                    )
+                    scope_stack.enter_context(source_scope_context(
+                        prepared.notebook_id, local_raw, base_raw
                     ))
                 retrieval = PluginRetrievalAccess(
                     active_notebook_id=prepared.notebook_id,

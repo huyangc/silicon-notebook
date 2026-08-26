@@ -1140,6 +1140,98 @@ def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
     )
 
 
+def test_plugin_ask_synthesizes_each_omitted_scope_dimension_independently():
+    """codex #604 R2 P2:两个维度各自可选,只提交一维时 `current_source_scope()`
+    非空、整体合成分支会跳过,缺的那一维留着不冻结。现在按维度独立合成:已提交
+    的半逐字段忠实透传(不得走会丢 hidden ids 的持久化 payload helper),缺失的
+    半按浏览器快照形状补齐。"""
+    from app.services.source_scope import current_source_scope
+
+    captured: list[object] = []
+
+    def capture_scope(_nb, _query, **_kwargs):
+        captured.append(current_source_scope())
+        return []
+
+    def answer(_context, retrieval, _model, _trace):
+        retrieval.search_kg("查询", 1)
+        return AskEngineResult("无引用回答", ())
+
+    def build_service():
+        runtime = build_extension_runtime((
+            _bundle("alpha", _Provider("alpha.kg", answer=answer)),
+        ))
+        service = _minimal_ask_service(
+            ask_engine_host=runtime.ask_engines,
+            ask_engine_participant_notebooks=lambda _nb: ("nb", "base-1"),
+            ask_engine_visible_sources=lambda _nb: ("source-doc",),
+            ask_engine_hidden_sources=lambda _nb, _actor: (
+                "hidden-knowhow", "hidden-memory",
+            ),
+        )
+        service.retrieval.federated_retrieve = capture_scope
+        service.retrieval.federated_retrieve_elements = lambda *_a, **_k: []
+        service.evidence_context.evidence_elements = _all_live
+        service.evidence_context.source_metadata = lambda _ids: {
+            "hidden-knowhow": {"source_type": "knowhow"},
+            "hidden-memory": {"source_type": "memory"},
+        }
+        service.evidence_context.citation_source_info = lambda _ids: {}
+        service.collection_catalog = SimpleNamespace(
+            collection_map_text=lambda _nb: ""
+        )
+        return service
+
+    # 只提交库维度(本地半省略):本地半被合成,库半逐字段保留(含 narrowed=True
+    # 的收窄语义)。
+    service = build_service()
+    base_only = BaseNotebookScope(
+        mode="include", notebook_ids=["base-1"], narrowed=True
+    )
+    with source_scope_context("nb", None, base_only):
+        service.ask(
+            "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
+        )
+    scope = captured[-1]
+    assert scope is not None
+    assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}
+    assert not scope.restricted
+    assert scope.base_mode == "include"
+    assert scope.base_notebook_ids == {"base-1"}
+    assert scope.base_restricted, (
+        "a supplied base narrowing must survive the local-half synthesis "
+        "field-faithfully"
+    )
+
+    # 只提交本地维度(库半省略):本地半逐字段保留(含 hidden ids),库半被合成
+    # 为「合成时已挂载集合」的 include 冻结。
+    service = build_service()
+    local_only = ResolvedSourceScope(
+        mode="include", source_ids=["source-doc"], narrowed=False,
+    )
+    # 生产接线（ask_routes）就是这样附着隐藏半与 owner 的：私有属性直赋，
+    # 公开序列化刻意不带它们，_scope_dict 再从属性读回。
+    local_only._hidden_source_ids = ["hidden-knowhow", "hidden-memory"]
+    local_only._scope_owner_id = "user"
+    with source_scope_context("nb", local_only, None):
+        service.ask(
+            "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
+        )
+    scope = captured[-1]
+    assert scope is not None
+    assert scope.source_ids == {"source-doc"}
+    assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}, (
+        "the supplied local half must pass through with its hidden ids intact "
+        "-- the persistence payload helpers drop them and would re-break the "
+        "drift-probe equality"
+    )
+    assert scope.base_mode == "include"
+    assert scope.base_notebook_ids == {"base-1"}
+    assert not scope.covers_notebook("drifted-base"), (
+        "the omitted library half must freeze to the mounted-at-synthesis set"
+    )
+
+
 def test_kg_budget_is_shared_and_early_exits_never_spend_it():
     access = _kg_access(
         search_knowledge=lambda *_args, **_kwargs: [_object(notebook_id="notebook-1")],
