@@ -71,6 +71,47 @@ def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
     return resolve_agent_profile_names(service.list_agent_profiles, owner_id)
 
 
+def _validate_ask_mode(mode: str) -> None:
+    """Allow the two built-in modes plus a registered, live-available plugin engine.
+
+    Mirrors the HTTP entry point's split (``app.api.ask_routes._extension_ask_modes``
+    / ``UnknownAskMode``) but must speak in ``ValueError`` text an Agent can act on --
+    the same reason ``ask_notebook`` validates ``question``/``conversation_id`` HERE
+    rather than leaving it to ``AskRequest``'s validator: a pydantic ``ValidationError``
+    raised deep in ``repo.ask`` surfaces to an Agent as an opaque model dump.
+
+    The ``app.bootstrap`` import is lazy (function-body, not module-level) to keep
+    ``app.api.mcp_tools`` from acquiring a module-level dependency on the extension
+    composition root. Any failure resolving the runtime this early (startup ordering,
+    etc.) is treated as "mode not registered" rather than propagated -- the caller
+    gets an actionable list of legal modes instead of an internal traceback.
+    """
+    if mode in {"chunk", "reasoning"}:
+        return
+    try:
+        from app.bootstrap import application_extension_runtime
+        host = application_extension_runtime().ask_engines
+    except Exception:
+        host = None
+    if host is not None and host.mode(mode) is not None:
+        if host.is_available(mode):
+            return
+        raise ValueError(
+            f"mode '{mode}' 对应的扩展引擎暂不可用（部署未配置或未就绪），"
+            "请改用 chunk/reasoning 或联系部署管理员"
+        )
+    legal_modes = ["chunk", "reasoning"]
+    if host is not None:
+        legal_modes.extend(
+            sorted(
+                item.descriptor.mode_id
+                for item in host.registrations()
+                if host.is_available(item.descriptor.mode_id)
+            )
+        )
+    raise ValueError(f"mode must be one of: {', '.join(legal_modes)}")
+
+
 def register_memory_context_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
@@ -260,15 +301,19 @@ def register_memory_context_tools(
             "another Agent profile or in the web UI. If the id belongs to a "
             "different notebook or owner, the server silently starts a new "
             "conversation instead of erroring -- compare the returned "
-            "conversation_id against the one you sent to detect that."
+            "conversation_id against the one you sent to detect that. The mode "
+            "parameter accepts \"chunk\" (default) or \"reasoning\", plus the "
+            "mode id of any deployment-installed ask.engine plugin that is "
+            "currently registered and available. Plugin engines can run for a "
+            "long time -- configure the MCP client's read timeout generously; "
+            "the server never gives up on a call it is still executing."
         )
     )
     async def ask_notebook(
         question: str, ctx: Context, mode: str = "chunk",
         conversation_id: str = "",
     ) -> dict[str, Any]:
-        if mode not in {"chunk", "reasoning"}:
-            raise ValueError("mode must be chunk or reasoning")
+        _validate_ask_mode(mode)
         # Same rail the HTTP entry points enforce, checked HERE rather than left
         # to `AskRequest`'s validator below, for the reason `conversation_id`
         # already has its own check: a pydantic ValidationError raised deep in

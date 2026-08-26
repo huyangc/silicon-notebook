@@ -722,6 +722,131 @@ async def test_ask_notebook_rejects_a_question_over_max_length(mcp_env):
         assert "来源" in at_cap.content[0].text
 
 
+class _FakeAskEngineHost:
+    """Stand-in for extensions.ask_engine.AskEngineHost's read surface only --
+    the three methods _validate_ask_mode actually calls."""
+
+    def __init__(self, availability: dict[str, bool]):
+        self._availability = availability
+
+    def mode(self, mode_id: str):
+        return SimpleNamespace(id=mode_id) if mode_id in self._availability else None
+
+    def is_available(self, mode_id: str) -> bool:
+        return self._availability.get(mode_id, False)
+
+    def registrations(self):
+        return tuple(
+            SimpleNamespace(descriptor=SimpleNamespace(mode_id=mode_id))
+            for mode_id in self._availability
+        )
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_rejects_an_unregistered_mode(mcp_env, monkeypatch):
+    """Unknown mode id -> actionable error listing the built-in modes.
+
+    The runtime accessor itself is made to raise, exercising
+    ``_validate_ask_mode``'s documented fallback for "cannot resolve the
+    runtime this early" (startup ordering etc.): that failure must be treated
+    as "mode not registered", not propagated as an internal traceback.
+    """
+    def boom():
+        raise RuntimeError("extension runtime not ready")
+
+    monkeypatch.setattr("app.bootstrap.application_extension_runtime", boom)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "unknown.engine"}
+        )
+    assert rejected.isError
+    text = rejected.content[0].text
+    assert "mode must be one of" in text
+    assert "chunk" in text
+    assert "reasoning" in text
+    # Distinguishable from the "registered but unavailable" wording below.
+    assert "暂不可用" not in text
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_accepts_a_registered_available_plugin_mode(
+    mcp_env, monkeypatch
+):
+    """A live plugin ask.engine mode passes validation and reaches AskRequest
+    unchanged; the dispatch to ``ask_plugin_engine`` itself is
+    ``ask_service.py``'s job, not this tool's -- this only proves the mode
+    string is not rewritten or rejected on the way in."""
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    monkeypatch.setattr(
+        "app.bootstrap.application_extension_runtime",
+        lambda: SimpleNamespace(
+            ask_engines=_FakeAskEngineHost({"niuma.analog": True})
+        ),
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_ask(_notebook_id, payload, **_kwargs):
+        captured["mode"] = payload.mode
+        return SimpleNamespace(
+            answer_id="ans-plugin",
+            answer="Plugin answer.",
+            conclusion="Plugin answer.",
+            grounded=True,
+            evidence_level="grounded",
+            mode="niuma.analog",
+            conversation_id="conv-plugin",
+            anchors=[],
+            citations=[],
+        )
+
+    monkeypatch.setattr(service, "ask", fake_ask)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": notebook_id}
+        ))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "plugin engine", "mode": "niuma.analog"}
+        ))
+
+    assert captured["mode"] == "niuma.analog"
+    assert answer["mode"] == "niuma.analog"
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_rejects_a_registered_but_unavailable_plugin_mode(
+    mcp_env, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.bootstrap.application_extension_runtime",
+        lambda: SimpleNamespace(
+            ask_engines=_FakeAskEngineHost({"niuma.analog": False})
+        ),
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+        )
+    assert rejected.isError
+    text = rejected.content[0].text
+    assert "暂不可用" in text
+    # Distinguishable from the "not registered" wording above.
+    assert "mode must be one of" not in text
+
+
 @pytest.mark.anyio
 async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
     mcp_env, monkeypatch
