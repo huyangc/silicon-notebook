@@ -25,7 +25,11 @@ from app.models.ask import TraceStep
 from app.services.cancellation import raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE, marker_keys
 from app.services.retrieval_run import retrieval_fanout_slot
-from app.services.source_scope import scoped_allowed_source_ids, scoped_participants
+from app.services.source_scope import (
+    scoped_allowed_source_ids,
+    scoped_participants,
+    source_scope_restricted,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +79,11 @@ class _RetrievalState:
     object_neighbors: Callable[..., Any] | None = None
     collection_overview: Callable[[str], str] | None = None
     kg_max_calls: int = 0
+    # Frozen at construction, inside the request's scope context: whether the
+    # ACTIVE notebook's source selection is genuinely narrowed (the CHANNEL
+    # question, `source_scope_restricted()` — not the ceiling/FILTERING
+    # question, which is true for every frozen all-selected snapshot).
+    active_scope_restricted: bool = False
     search_calls: int = 0
     kg_calls: int = 0
     ledger: dict[str, PluginEvidenceRecord] = field(default_factory=dict)
@@ -480,6 +489,7 @@ class PluginRetrievalAccess:
                 object_neighbors=object_neighbors,
                 collection_overview=collection_overview,
                 kg_max_calls=kg_max_calls,
+                active_scope_restricted=source_scope_restricted(),
             ),
         )
 
@@ -654,20 +664,39 @@ class PluginRetrievalAccess:
             # knowledge hit are all simply "not an anchor" here.
             if anchor is None:
                 return ()
+            notebook_id, object_id = anchor
+            # Channel gate for genuinely narrowed runs (codex #603 R1 P2):
+            # one-hop expansion has no source predicate below its bounded
+            # read, so in a narrowed ACTIVE-notebook run out-of-scope
+            # neighbours could consume the whole window and filter-after can
+            # never recover rows that were not returned. Mirroring the
+            # built-in discipline (restricted runs close graph channels
+            # instead of filtering after the LIMIT), the channel closes and
+            # returns empty. Anchors in a mounted base stay open — the
+            # library dimension is whole-notebook checkboxes, there is no
+            # per-source narrowing inside a base for the window to collide
+            # with, and folding the two dimensions together is exactly what
+            # the scope-orthogonality contract forbids.
+            if (
+                notebook_id == state.active_notebook_id
+                and state.active_scope_restricted
+            ):
+                return ()
             if object_neighbors is None:
                 raise AskEnginePortError("plugin_engine_failed")
             _claim_kg_call(state)
             limit = min(k, state.max_k)
-            notebook_id, object_id = anchor
             raise_if_cancelled(state.cancellation)
 
             def _expand_in_request_context():
                 with retrieval_fanout_slot():
                     raise_if_cancelled(state.cancellation)
-                    # One-hop expansion has no source-key parameter; the frozen
-                    # scope reaches it through the request context exactly as it
-                    # does for the built-in expand action, and `_bound_evidence`
-                    # re-checks the snapshot before issuing any handle.
+                    # One-hop expansion has no source-key parameter. Narrowed
+                    # active-notebook runs never reach this point (channel
+                    # gate above); for the runs that do, the frozen ceiling
+                    # still reaches the wrapper's result filter through the
+                    # request context, and `_bound_evidence` re-checks the
+                    # snapshot before issuing any handle.
                     expansion = object_neighbors(
                         notebook_id, object_id, edge_type or None, direction
                     )

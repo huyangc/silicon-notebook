@@ -1134,6 +1134,76 @@ def test_kg_neighbors_resolves_origin_against_the_anchors_own_library_not_active
     )
 
 
+def test_kg_neighbors_channel_closes_for_narrowed_active_runs_but_not_base_anchors():
+    """codex #603 R1 P2:一跳展开的有界读取之下没有来源谓词,真收窄的 active run
+    里界外邻居会占满窗口、filter-after 救不回没被返回的行。通道按内建纪律整体
+    关闭:active 锚点返回空、零底层调用、零预算;参考库锚点不受本地收窄影响
+    (库维度是整库勾选,库内没有逐源收窄,两维正交是登记契约)。"""
+    active_object = _object(
+        object_id="ko-active", name="本库概念",
+        evidence=[_evidence(source_id="source-1", element_id="element-a")],
+        notebook_id="notebook-1",
+    )
+    base_object = _object(
+        object_id="ko-base", name="基座概念",
+        evidence=[_evidence(source_id="source-base", element_id="element-b")],
+        notebook_id="base-1",
+    )
+    neighbor_calls: list[str] = []
+
+    def object_neighbors(notebook_id, _object_id, _edge_type, _direction):
+        neighbor_calls.append(notebook_id)
+        return NeighborExpansion([_object(
+            object_id="ko-neighbor", name="基座邻居",
+            evidence=[_evidence(source_id="source-base", element_id="element-n")],
+        )], False)
+
+    local = ResolvedSourceScope(
+        mode="include", source_ids=["source-1"], narrowed=True
+    )
+    with source_scope_context("notebook-1", local, None):
+        access = PluginRetrievalAccess(
+            active_notebook_id="notebook-1",
+            actor_id="user-1",
+            cancellation=None,
+            participant_notebook_ids=lambda _nb: ("notebook-1", "base-1"),
+            all_visible_source_ids=lambda notebook_id: (
+                ("source-1",) if notebook_id == "notebook-1"
+                else ("source-base",)
+            ),
+            hidden_source_ids=lambda _nb, _actor: (),
+            search_elements=lambda *_args, **_kwargs: [],
+            source_info=lambda source_ids: {
+                source_id: {"title": "来源", "file_name": "f.pdf"}
+                for source_id in source_ids
+            },
+            search_knowledge=lambda *_a, **_k: [active_object, base_object],
+            object_neighbors=object_neighbors,
+            collection_overview=lambda _nb: "",
+            kg_max_calls=4,
+            max_k=2,
+            max_calls=2,
+            evidence_chars=100,
+            query_chars=100,
+        )
+        hits = access.search_kg("查询", 2)
+        active_key, base_key = hits[0].evidence_key, hits[1].evidence_key
+        assert active_key and base_key
+
+        assert access.kg_neighbors(active_key, 1) == ()
+        assert neighbor_calls == [], (
+            "a narrowed active-notebook anchor must close the channel before "
+            "any underlying expansion I/O"
+        )
+
+        base_neighbors = access.kg_neighbors(base_key, 1)
+        assert len(base_neighbors) == 1 and base_neighbors[0].evidence_key
+        assert neighbor_calls == ["base-1"], (
+            "a mounted-base anchor stays open under LOCAL narrowing -- the "
+            "library dimension is orthogonal to source_scope_restricted"
+        )
+
+
 def test_kg_overview_is_bounded_and_computed_once_per_run():
     calls: list[str] = []
 
