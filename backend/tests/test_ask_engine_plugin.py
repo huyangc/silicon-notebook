@@ -879,21 +879,40 @@ def test_search_kg_issues_element_addressed_handles_admitted_as_citations():
     assert records[0].source_file_name == "paper.pdf"
 
 
-def test_search_kg_pushes_the_frozen_source_keys_into_the_candidate_seam():
-    """其他成员私有 Memory 派生的对象结构上不进结果:端口冻结的 source key 必须
-    原样下推进候选接缝(在它的 LIMIT 之前),不能靠事后过滤。"""
+def test_search_kg_two_lane_routing_mirrors_the_built_in_ask():
+    """ANN 臂债务清偿（原契约点④）:未收窄的 run **不**下推显式清单——接缝据此
+    保持 notebook ANN 臂、把冻结天花板留到证据 hydrate（内建未收窄语义）;真收窄
+    的 run 仍原样下推冻结 source key,走「词法谓词在 LIMIT 前」的受限 lane。两个
+    方向各自变异可验:恒传清单让未收窄半红,恒传 None 让收窄半红。"""
     seen: list[object] = []
 
     def search_knowledge(_active_notebook_id, _query, **kwargs):
         seen.append(kwargs.get("allowed_source_keys", "MISSING"))
         return []
 
-    access = _kg_access(
+    unnarrowed = _kg_access(
         search_knowledge=search_knowledge, visible=("source-1", "source-2")
     )
+    assert unnarrowed.search_kg("退火", 2) == ()
+    assert seen == [None], (
+        "an un-narrowed run must pass NO explicit list -- that is what keeps "
+        "the seam's notebook ANN arm on"
+    )
 
-    assert access.search_kg("退火", 2) == ()
-    assert seen == [(("notebook-1", "source-1"), ("notebook-1", "source-2"))]
+    seen.clear()
+    local = ResolvedSourceScope(
+        mode="include", source_ids=["source-1"], narrowed=True
+    )
+    with source_scope_context("notebook-1", local, None):
+        narrowed = _kg_access(
+            search_knowledge=search_knowledge,
+            visible=("source-1", "source-2"),
+        )
+        assert narrowed.search_kg("退火", 2) == ()
+    assert seen == [(("notebook-1", "source-1"),)], (
+        "a genuinely narrowed run must push its frozen keys so the seam takes "
+        "the source-restricted lane (predicate before LIMIT)"
+    )
 
 
 def test_knowledge_hit_without_a_live_source_is_context_only():
@@ -1037,6 +1056,70 @@ def test_search_kg_slices_after_the_seams_ranking_and_pushes_no_limit_down():
     assert "limit" not in seen_kwargs and "k" not in seen_kwargs, (
         "deliberately NO limit push-down -- the seam's recall rails bound the "
         "work; see the rebuttal comment at the search_kg call site"
+    )
+
+
+def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
+    """MCP 与旧直调不带 scope。若不合成天花板,未收窄 run 传 None 时接缝就没有
+    任何 hydrate 上限——所以 ask_plugin_engine 为无 scope 的调用合成与浏览器冻结
+    快照同形状的 include 天花板(narrowed=False、hidden 半是已剔除 Memory 的插件
+    宇宙),让 KG 接缝在每个调用面上行为一致。展示回执是另一个只由 API 路由在真
+    收窄时设置的 ContextVar,合成不产生任何用户可见 scope。"""
+    from app.services.source_scope import current_source_scope
+
+    captured: list[object] = []
+
+    def capture_scope(_nb, _query, **_kwargs):
+        captured.append(current_source_scope())
+        return []
+
+    def answer(_context, retrieval, _model, _trace):
+        retrieval.search_kg("查询", 1)
+        return AskEngineResult("无引用回答", ())
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.kg", answer=answer)),
+    ))
+    service = _minimal_ask_service(
+        ask_engine_host=runtime.ask_engines,
+        ask_engine_participant_notebooks=lambda _nb: ("nb",),
+        ask_engine_visible_sources=lambda _nb: ("source-doc",),
+        ask_engine_hidden_sources=lambda _nb, _actor: (
+            "hidden-knowhow", "hidden-memory",
+        ),
+    )
+    service.retrieval.federated_retrieve = capture_scope
+    service.retrieval.federated_retrieve_elements = lambda *_a, **_k: []
+    service.evidence_context.evidence_elements = _all_live
+    service.evidence_context.source_metadata = lambda _ids: {
+        "hidden-knowhow": {"source_type": "knowhow"},
+        "hidden-memory": {"source_type": "memory"},
+    }
+    service.evidence_context.citation_source_info = lambda _ids: {}
+    service.collection_catalog = SimpleNamespace(
+        collection_map_text=lambda _nb: ""
+    )
+
+    response = service.ask(
+        "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
+    )
+
+    scope = captured[0]
+    assert scope is not None, (
+        "a scope-less caller must retrieve under a synthesized frozen ceiling"
+    )
+    assert scope.mode == "include"
+    assert "source-doc" in scope.source_ids
+    assert "hidden-knowhow" in scope.hidden_source_ids
+    assert "hidden-memory" not in scope.hidden_source_ids, (
+        "the synthesized ceiling reuses the Memory-excluded plugin universe"
+    )
+    assert not scope.restricted, (
+        "the synthesized ceiling is a FILTERING snapshot, never a narrowing -- "
+        "restricted would wrongly close graph channels"
+    )
+    assert response.retrieval_scope is None, (
+        "synthesis must not fabricate a user-visible scope receipt"
     )
 
 
