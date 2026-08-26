@@ -1318,4 +1318,11 @@ def test_kg_citation_and_anchor_carry_the_verbatim_grounding_excerpt_not_the_mod
     assert "退火" not in response.citations[0].quoted_span
     assert "缓慢冷却" not in response.citations[0].quoted_span
     assert response.anchors[0].snippet == "对象出处摘录"
-    assert response.anchors[0].object_type == "concept"
+    # Same-sourcing guard: anchor.object_id IS an element id (the object's
+    # first surviving evidence element — the registered citation contract:
+    # a cited KG handle opens that element, never a graph node view), so
+    # object_type must stay "element". Any non-element value here makes the
+    # browser render a "在知识图谱中定位" button that feeds an element id to
+    # the graph as a node id — a click that can never succeed.
+    assert response.anchors[0].object_type == "element"
+    assert response.anchors[0].object_id == response.anchors[0].element_id
