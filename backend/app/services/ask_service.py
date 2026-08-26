@@ -1472,9 +1472,12 @@ class AskService:
                 # `record.quoted_span` is the bound evidence element's own
                 # verbatim excerpt; `evidence.text` for a KG hit is a
                 # model-authored name+definition summary, not a quote from
-                # the source. Prefer the verbatim excerpt whenever one was
-                # captured (the element path never fills `quoted_span`, so it
-                # falls back to its own already-verbatim `evidence.text`).
+                # the source. The fallback re-admits the summary only when the
+                # KG evidence binding carried no excerpt — every current
+                # producer writes a non-empty quote, so this is not an
+                # invariant, just the least-bad rendering for legacy rows.
+                # The element path never fills `quoted_span` and falls back to
+                # its own already-verbatim `evidence.text`.
                 citations.append(Citation(
                     label=(
                         f"{evidence.source_title} · {evidence.location_label}"
@@ -1504,11 +1507,16 @@ class AskService:
                     anchors.append(AnswerAnchor(
                         key=f"k{index}",
                         object_id=record.element_id,
-                        # "" (element hit) -> "element"; a KG hit carries its
-                        # real node type ("concept"/"claim"/"formula"/
-                        # "procedure") instead of the previously-hardcoded
-                        # "element" for every plugin-engine anchor.
-                        object_type=evidence.object_type or "element",
+                        # Deliberately "element" even for KG hits: object_id
+                        # above is an ELEMENT id (the object's first surviving
+                        # evidence element — the registered citation contract),
+                        # and any non-element object_type makes the browser
+                        # offer "在知识图谱中定位" and feed that element id to
+                        # the graph as a node id, a click that can never
+                        # succeed. object_type and object_id must stay
+                        # same-sourced; the KG node type still reaches the
+                        # plugin via EngineEvidence.object_type.
+                        object_type="element",
                         label=evidence.source_title or f"k{index}",
                         snippet=record.quoted_span or evidence.text,
                         source_title=evidence.source_title,
