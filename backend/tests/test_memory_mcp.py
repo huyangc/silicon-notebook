@@ -848,6 +848,113 @@ async def test_ask_notebook_rejects_a_registered_but_unavailable_plugin_mode(
 
 
 @pytest.mark.anyio
+async def test_ask_notebook_unregistered_mode_lists_only_live_plugin_modes(
+    mcp_env, monkeypatch
+):
+    """The advertised legal-mode list must include live plugin modes and must
+    NOT include registered-but-unavailable ones -- listing a dead mode sends
+    the Agent straight into a guaranteed failure."""
+    monkeypatch.setattr(
+        "app.bootstrap.application_extension_runtime",
+        lambda: SimpleNamespace(
+            ask_engines=_FakeAskEngineHost(
+                {"corp.alive": True, "corp.dead": False}
+            )
+        ),
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "unknown.engine"}
+        )
+    assert rejected.isError
+    text = rejected.content[0].text
+    assert "mode must be one of" in text
+    assert "corp.alive" in text
+    assert "corp.dead" not in text
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_translates_plugin_engine_failures(
+    mcp_env, monkeypatch
+):
+    """A plugin failure must reach the Agent as an actionable sentence plus
+    the stable reason code -- not as the bare code string, which is what a raw
+    AskPluginEngineError would render as (its message IS the code)."""
+    from app.domain.ask_engine import AskPluginEngineError
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    monkeypatch.setattr(
+        "app.bootstrap.application_extension_runtime",
+        lambda: SimpleNamespace(
+            ask_engines=_FakeAskEngineHost({"niuma.analog": True})
+        ),
+    )
+
+    def failing_ask(*_a, **_k):
+        raise AskPluginEngineError("plugin_engine_unverified_citation")
+
+    monkeypatch.setattr(service, "ask", failing_ask)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        failed = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+        )
+    assert failed.isError
+    text = failed.content[0].text
+    assert "无法核验的引用" in text
+    assert "plugin_engine_unverified_citation" in text
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_translates_the_availability_race(
+    mcp_env, monkeypatch
+):
+    """Mode passes _validate_ask_mode, then the dispatcher's own re-check
+    raises UnknownAskMode (availability flipped in between). The raw message
+    of that exception is just the mode string; the Agent must instead get the
+    same wording as the pre-dispatch unavailable rejection."""
+    from app.services.ask_modes import UnknownAskMode
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    monkeypatch.setattr(
+        "app.bootstrap.application_extension_runtime",
+        lambda: SimpleNamespace(
+            ask_engines=_FakeAskEngineHost({"niuma.analog": True})
+        ),
+    )
+
+    def racing_ask(*_a, **_k):
+        raise UnknownAskMode("niuma.analog")
+
+    monkeypatch.setattr(service, "ask", racing_ask)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        failed = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "niuma.analog"}
+        )
+    assert failed.isError
+    text = failed.content[0].text
+    assert "暂不可用" in text
+    assert text != "niuma.analog"
+
+
+@pytest.mark.anyio
 async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
     mcp_env, monkeypatch
 ):

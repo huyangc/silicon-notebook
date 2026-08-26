@@ -1,9 +1,13 @@
 """Memory recall, formal context, Ask, and Memory proposal MCP tools."""
 
+import logging
 from typing import Any, Callable, Mapping, Sequence
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
+
+from app.domain.ask_engine import AskPluginEngineError
+from app.services.ask_modes import UnknownAskMode
 
 from app.core.memory_inputs import (
     normalize_client_request_id,
@@ -71,14 +75,30 @@ def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
     return resolve_agent_profile_names(service.list_agent_profiles, owner_id)
 
 
+logger = logging.getLogger(__name__)
+
+# The gate and the advertised legal-mode list must never drift apart, so both
+# read this one constant. ``graph`` and the retired ``fast``/``global`` aliases
+# are deliberately absent: this Agent face offers only the two supported
+# built-ins plus live plugin engines, unlike the browser registry.
+_BUILTIN_ASK_MODES = ("chunk", "reasoning")
+
+_ENGINE_UNAVAILABLE_TEXT = (
+    "对应的扩展引擎暂不可用（部署未配置或未就绪），"
+    "请改用 chunk/reasoning 或联系部署管理员"
+)
+
+
 def _validate_ask_mode(mode: str) -> None:
     """Allow the two built-in modes plus a registered, live-available plugin engine.
 
-    Mirrors the HTTP entry point's split (``app.api.ask_routes._extension_ask_modes``
-    / ``UnknownAskMode``) but must speak in ``ValueError`` text an Agent can act on --
-    the same reason ``ask_notebook`` validates ``question``/``conversation_id`` HERE
-    rather than leaving it to ``AskRequest``'s validator: a pydantic ``ValidationError``
-    raised deep in ``repo.ask`` surfaces to an Agent as an opaque model dump.
+    Deliberately finer than the HTTP entry point: ``ask_routes`` folds
+    "registered but unavailable" and "unregistered" into one ``UnknownAskMode``
+    422, while an Agent needs the two told apart to act. It must speak in
+    ``ValueError`` text -- the same reason ``ask_notebook`` validates
+    ``question``/``conversation_id`` HERE rather than leaving it to
+    ``AskRequest``'s validator: a pydantic ``ValidationError`` raised deep in
+    ``repo.ask`` surfaces to an Agent as an opaque model dump.
 
     The ``app.bootstrap`` import is lazy (function-body, not module-level) to keep
     ``app.api.mcp_tools`` from acquiring a module-level dependency on the extension
@@ -86,21 +106,24 @@ def _validate_ask_mode(mode: str) -> None:
     etc.) is treated as "mode not registered" rather than propagated -- the caller
     gets an actionable list of legal modes instead of an internal traceback.
     """
-    if mode in {"chunk", "reasoning"}:
+    if mode in _BUILTIN_ASK_MODES:
         return
     try:
         from app.bootstrap import application_extension_runtime
         host = application_extension_runtime().ask_engines
-    except Exception:
+    except Exception as exc:
+        # Silent fallback would make "plugins installed but runtime broken"
+        # byte-identical to "no plugins installed"; log the class name only.
+        logger.warning(
+            "ask mode validation could not resolve the extension runtime (%s)",
+            type(exc).__name__,
+        )
         host = None
     if host is not None and host.mode(mode) is not None:
         if host.is_available(mode):
             return
-        raise ValueError(
-            f"mode '{mode}' 对应的扩展引擎暂不可用（部署未配置或未就绪），"
-            "请改用 chunk/reasoning 或联系部署管理员"
-        )
-    legal_modes = ["chunk", "reasoning"]
+        raise ValueError(f"mode '{mode}' {_ENGINE_UNAVAILABLE_TEXT}")
+    legal_modes = [*_BUILTIN_ASK_MODES]
     if host is not None:
         legal_modes.extend(
             sorted(
@@ -110,6 +133,30 @@ def _validate_ask_mode(mode: str) -> None:
             )
         )
     raise ValueError(f"mode must be one of: {', '.join(legal_modes)}")
+
+
+def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
+    """Translate ask failures the way ``ask_routes._plugin_engine_http_error``
+    does for the browser -- an MCP tool error IS the Agent-facing copy, and a
+    bare stable code (``plugin_engine_failed``) or a bare mode id (the
+    ``UnknownAskMode`` message is just the mode string) is not actionable.
+    ``AskCancelled`` and every other exception pass through untouched.
+    """
+    try:
+        return repo.ask(notebook_id, payload)
+    except UnknownAskMode:
+        # Availability flipped between _validate_ask_mode and dispatch; same
+        # wording as the pre-dispatch "registered but unavailable" rejection.
+        raise ValueError(
+            f"mode '{payload.mode}' {_ENGINE_UNAVAILABLE_TEXT}"
+        ) from None
+    except AskPluginEngineError as exc:
+        message = (
+            "扩展引擎返回了无法核验的引用"
+            if exc.code == "plugin_engine_unverified_citation"
+            else "扩展引擎暂时无法完成回答，请重试"
+        )
+        raise ValueError(f"{message}（reason: {exc.code}）") from None
 
 
 def register_memory_context_tools(
@@ -351,7 +398,8 @@ def register_memory_context_tools(
                         "该笔记本还没有可用于回答的内容，请先添加来源，"
                         "或在「设置 → 编辑当前笔记本」里挂载一个参考库。"
                     )
-                return repo.ask(
+                return _ask_actionable(
+                    repo,
                     notebook_id,
                     AskRequest(
                         question=question,
