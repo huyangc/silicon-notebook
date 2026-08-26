@@ -1033,10 +1033,11 @@ def test_plugin_port_universe_excludes_the_callers_memory_projections():
 
 def test_search_kg_slices_after_the_seams_ranking_and_pushes_no_limit_down():
     """codex #603 R4 P2 的驳回护栏(三件套之一):k 是呈现截断不是工作量界。
-    融合 top-k 必须先对有界候选窗完整打分(窗界在接缝自己的 recall rails 上,
-    插件恒传显式 source keys、恒走「词法谓词在 LIMIT 前」的受限 lane),所以
-    切片刻意发生在接缝排序之后,且**不向接缝下推 limit**——谁把 limit 推下去,
-    这条用例就要求他先回答排序正确性从哪来。"""
+    融合 top-k 必须先对有界候选窗完整打分——窗界在接缝自己的 recall rails 上,
+    两条 lane 都成立(真收窄:显式 keys 的受限词法 lane、谓词在 LIMIT 前;未收窄:
+    ANN+词法窗、冻结天花板在 hydrate 应用)。所以切片刻意发生在接缝排序之后,
+    且**不向接缝下推 limit**——谁把 limit 推下去,这条用例就要求他先回答排序
+    正确性从哪来。"""
     seen_kwargs: dict = {}
 
     def ranked_seam(_nb, _query, **kwargs):
@@ -1110,9 +1111,12 @@ def test_plugin_ask_synthesizes_an_unnarrowed_ceiling_for_scopeless_callers():
     )
     assert scope.mode == "include"
     assert "source-doc" in scope.source_ids
-    assert "hidden-knowhow" in scope.hidden_source_ids
-    assert "hidden-memory" not in scope.hidden_source_ids, (
-        "the synthesized ceiling reuses the Memory-excluded plugin universe"
+    assert scope.hidden_source_ids == {"hidden-knowhow", "hidden-memory"}, (
+        "the ceiling's hidden half must be the RAW set (Memory included, the "
+        "exact browser-snapshot shape): the seam's universe-drift probe "
+        "compares it against the live hidden_source_ids read, and a "
+        "Memory-stripped copy never matches -- which would silently re-close "
+        "the ANN arm for every user holding one confirmed Memory (P2-1)"
     )
     assert not scope.restricted, (
         "the synthesized ceiling is a FILTERING snapshot, never a narrowing -- "
