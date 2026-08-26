@@ -1376,6 +1376,23 @@ class AskService:
                         self.retrieval.federated_retrieve_elements
                     ),
                     source_info=self.evidence_context.citation_source_info,
+                    # Injected callables, not imports: the KG read port must not
+                    # give this module a retrieval-layer dependency edge. Missing
+                    # seats resolve to None and fail only if a plugin actually
+                    # calls that capability, so an unwired seat cannot turn a run
+                    # that never touches KG into a failure.
+                    search_knowledge=getattr(
+                        self.retrieval, "federated_retrieve", None
+                    ),
+                    object_neighbors=getattr(
+                        self.retrieval, "retrieve_neighbors", None
+                    ),
+                    collection_overview=getattr(
+                        self.collection_catalog, "collection_map_text", None
+                    ),
+                    kg_max_calls=(
+                        self.settings.ask_plugin_engine_kg_search_max_calls
+                    ),
                     max_k=self.settings.ask_plugin_engine_retrieval_max_k,
                     max_calls=self.settings.ask_plugin_engine_search_max_calls,
                     evidence_chars=(

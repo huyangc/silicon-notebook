@@ -14,9 +14,11 @@ PLUGIN_ENGINE_ERROR_CODES = frozenset({
     "plugin_engine_failed",
     "plugin_engine_invalid_cancellation",
     "plugin_engine_invalid_evidence_key",
+    "plugin_engine_invalid_kg_request",
     "plugin_engine_invalid_prompt",
     "plugin_engine_invalid_query",
     "plugin_engine_invalid_retrieval_limit",
+    "plugin_engine_kg_call_limit",
     "plugin_engine_model_call_limit",
     "plugin_engine_model_failed",
     "plugin_engine_model_unconfigured",
@@ -78,6 +80,10 @@ class EngineEvidence:
     text: str
     source_title: str
     location_label: str
+    # "" = source-element hit; one of the four core node types = knowledge
+    # object hit. Appended with a default so v1 providers that build the
+    # four-positional form stay valid.
+    object_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +104,20 @@ class RetrievalAccessPort(Protocol):
     def search(self, query: str, k: int) -> tuple[EngineEvidence, ...]: ...
 
     def fetch(self, evidence_key: str) -> EngineEvidence | None: ...
+
+    def search_kg(
+        self, query: str, k: int, object_types: tuple[str, ...] = ()
+    ) -> tuple[EngineEvidence, ...]: ...
+
+    def kg_neighbors(
+        self,
+        evidence_key: str,
+        k: int,
+        edge_type: str = "",
+        direction: str = "both",
+    ) -> tuple[EngineEvidence, ...]: ...
+
+    def kg_overview(self) -> str: ...
 
 
 class EngineModelPort(Protocol):

@@ -10,7 +10,12 @@ from app.api import ask_routes
 from app.application.ask_reasoning import StageBoundaryError
 from app.core.config import Settings
 from app.domain.ask_engine import AskPluginEngineError
-from app.domain.retrieval import RetrievedElement
+from app.domain.retrieval import (
+    NeighborExpansion,
+    RetrievedElement,
+    RetrievedKnowledge,
+)
+from app.models.common import Evidence
 from app.extension_sdk import (
     ASK_ENGINE_POINT,
     EXTENSION_API_VERSION,
@@ -125,6 +130,72 @@ def _hit(*, element_id: str = "element-1", source_id: str = "source-1"):
     )
 
 
+def _evidence(*, element_id: str = "element-1", source_id: str = "source-1"):
+    return Evidence(
+        source_id=source_id,
+        source_title="权威来源",
+        element_id=element_id,
+        element_type="paragraph",
+        location_label="第 3 页",
+        quoted_span="对象出处摘录",
+        confidence=0.9,
+    )
+
+
+def _object(
+    *,
+    object_id: str = "ko-1",
+    object_type: str = "concept",
+    name: str = "退火",
+    evidence=None,
+    notebook_id: str = "notebook-1",
+):
+    return RetrievedKnowledge(
+        object_id=object_id,
+        object_type=object_type,
+        payload={"name": name, "definition": "把材料缓慢冷却的热处理"},
+        evidence=list(evidence if evidence is not None else [_evidence()]),
+        score=0.8,
+        notebook_id=notebook_id,
+    )
+
+
+def _kg_access(
+    *,
+    search_knowledge=None,
+    object_neighbors=None,
+    collection_overview=None,
+    search_elements=None,
+    source_info=None,
+    visible: tuple[str, ...] = ("source-1",),
+    kg_max_calls: int = 2,
+) -> PluginRetrievalAccess:
+    return PluginRetrievalAccess(
+        active_notebook_id="notebook-1",
+        actor_id="user-1",
+        cancellation=None,
+        participant_notebook_ids=lambda _notebook_id: ("notebook-1",),
+        all_visible_source_ids=lambda _notebook_id: visible,
+        hidden_source_ids=lambda _notebook_id, _actor_id: (),
+        search_elements=search_elements or (lambda *_args, **_kwargs: [_hit()]),
+        source_info=source_info or (lambda source_ids: {
+            source_id: {"title": "权威来源", "file_name": "paper.pdf"}
+            for source_id in source_ids
+            if source_id in visible
+        }),
+        search_knowledge=search_knowledge or (lambda *_args, **_kwargs: []),
+        object_neighbors=object_neighbors or (
+            lambda *_args, **_kwargs: NeighborExpansion([], False)
+        ),
+        collection_overview=collection_overview or (lambda _notebook_id: ""),
+        kg_max_calls=kg_max_calls,
+        max_k=2,
+        max_calls=2,
+        evidence_chars=100,
+        query_chars=100,
+    )
+
+
 def _retrieval_access(*, hit=None, max_calls: int = 2) -> PluginRetrievalAccess:
     value = hit or _hit()
     return PluginRetrievalAccess(
@@ -178,11 +249,14 @@ def test_ask_engine_registry_allows_a_provider_set_and_rejects_bad_identity():
 
 def test_sdk_evidence_surface_is_frozen_and_has_no_addressable_ids():
     assert {field.name for field in fields(EngineEvidence)} == {
-        "evidence_key", "text", "source_title", "location_label",
+        "evidence_key", "text", "source_title", "location_label", "object_type",
     }
     assert EngineEvidence.__dataclass_params__.frozen is True
     assert "__dict__" not in EngineEvidence.__slots__
+    # The KG field carries a default so a v1 provider that builds the
+    # four-positional form keeps working.
     evidence = EngineEvidence("pe-test", "text", "title", "page")
+    assert evidence.object_type == ""
     for forbidden in (
         "source_id", "element_id", "notebook_id", "chunk_id", "repository",
     ):
@@ -762,3 +836,189 @@ def test_citation_admission_rejects_residual_citation_like_markers():
     ok_key = ok.search("evidence", 1)[0].evidence_key
     answer, _records = admit_plugin_engine_result(ok, "正文 [k1] 结尾", (ok_key,))
     assert answer == "正文 [k1] 结尾"
+
+
+def test_search_kg_issues_element_addressed_handles_admitted_as_citations():
+    access = _kg_access(search_knowledge=lambda *_args, **_kwargs: [_object()])
+
+    hits = access.search_kg("退火", 2)
+
+    assert len(hits) == 1
+    assert hits[0].object_type == "concept"
+    assert hits[0].evidence_key
+    assert "退火" in hits[0].text and "缓慢冷却" in hits[0].text
+    assert hits[0].location_label == "第 3 页"
+    answer, records = admit_plugin_engine_result(
+        access, "结论 [k1]", (hits[0].evidence_key,)
+    )
+    assert answer == "结论 [k1]"
+    # A cited knowledge object opens its first live evidence ELEMENT.
+    assert records[0].element_id == "element-1"
+    assert records[0].source_id == "source-1"
+    assert records[0].source_file_name == "paper.pdf"
+
+
+def test_search_kg_pushes_the_frozen_source_keys_into_the_candidate_seam():
+    """其他成员私有 Memory 派生的对象结构上不进结果:端口冻结的 source key 必须
+    原样下推进候选接缝(在它的 LIMIT 之前),不能靠事后过滤。"""
+    seen: list[object] = []
+
+    def search_knowledge(_active_notebook_id, _query, **kwargs):
+        seen.append(kwargs.get("allowed_source_keys", "MISSING"))
+        return []
+
+    access = _kg_access(
+        search_knowledge=search_knowledge, visible=("source-1", "source-2")
+    )
+
+    assert access.search_kg("退火", 2) == ()
+    assert seen == [(("notebook-1", "source-1"), ("notebook-1", "source-2"))]
+
+
+def test_knowledge_hit_without_a_live_source_is_context_only():
+    access = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object()],
+        source_info=lambda _source_ids: {},
+    )
+
+    hits = access.search_kg("退火", 2)
+
+    assert hits[0].evidence_key == ""
+    assert hits[0].source_title == "" and hits[0].location_label == ""
+    assert "退火" in hits[0].text
+    # Not citable ...
+    with pytest.raises(AskEnginePortError) as rejected:
+        admit_plugin_engine_result(access, "结论 [k1]", ("",))
+    assert rejected.value.code == "plugin_engine_unverified_citation"
+    # ... and not an expansion anchor either.
+    assert access.kg_neighbors("", 2) == ()
+
+
+def test_kg_budget_is_shared_and_early_exits_never_spend_it():
+    access = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object()],
+        kg_max_calls=1,
+    )
+
+    assert access.search_kg("退火", 1, ("not-a-type",)) == ()
+    assert access.kg_neighbors("pe-unknown", 1) == ()
+    assert access.kg_neighbors("pe-unknown", 1, edge_type="not-an-edge") == ()
+
+    anchor = access.search_kg("退火", 1)[0].evidence_key
+    with pytest.raises(AskEnginePortError) as exhausted:
+        access.kg_neighbors(anchor, 1)
+    assert exhausted.value.code == "plugin_engine_kg_call_limit"
+    with pytest.raises(AskEnginePortError) as also_exhausted:
+        access.search_kg("退火", 1)
+    assert also_exhausted.value.code == "plugin_engine_kg_call_limit"
+
+
+def test_kg_neighbors_resolves_only_object_anchors_and_validates_its_request():
+    forwarded: list[tuple] = []
+    neighbor = _object(
+        object_id="ko-2",
+        name="淬火",
+        evidence=[_evidence(element_id="element-2")],
+    )
+
+    def object_neighbors(*args):
+        forwarded.append(args)
+        return NeighborExpansion([neighbor], False)
+
+    access = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object()],
+        object_neighbors=object_neighbors,
+        kg_max_calls=4,
+    )
+    anchor = access.search_kg("退火", 1)[0].evidence_key
+    element_key = access.search("evidence", 1)[0].evidence_key
+
+    assert element_key != anchor
+    assert access.kg_neighbors(element_key, 1) == ()
+    assert access.kg_neighbors("pe-forged", 1) == ()
+    assert access.kg_neighbors(anchor, 1, edge_type="knows_about") == ()
+    with pytest.raises(AskEnginePortError) as bad_direction:
+        access.kg_neighbors(anchor, 1, direction="downstream")
+    assert bad_direction.value.code == "plugin_engine_invalid_kg_request"
+    with pytest.raises(AskEnginePortError) as bad_key:
+        access.kg_neighbors(None, 1)
+    assert bad_key.value.code == "plugin_engine_invalid_evidence_key"
+    assert forwarded == []
+
+    hits = access.kg_neighbors(anchor, 1, edge_type="depends_on", direction="out")
+
+    assert forwarded == [("notebook-1", "ko-1", "depends_on", "out")]
+    assert hits[0].object_type == "concept" and hits[0].evidence_key
+    _answer, records = admit_plugin_engine_result(
+        access, "邻居 [k1]", (hits[0].evidence_key,)
+    )
+    assert records[0].element_id == "element-2"
+
+
+def test_kg_overview_is_bounded_and_computed_once_per_run():
+    calls: list[str] = []
+
+    def collection_overview(notebook_id: str) -> str:
+        calls.append(notebook_id)
+        return "地图" * 1000
+
+    access = _kg_access(collection_overview=collection_overview)
+
+    first = access.kg_overview()
+    second = access.kg_overview()
+
+    assert calls == ["notebook-1"]
+    assert first == second
+    assert len(first) == plugin_ports.KG_OVERVIEW_MAX_CHARS
+
+
+def test_the_same_knowledge_object_reuses_one_handle_across_calls():
+    access = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object()], kg_max_calls=3
+    )
+
+    first = access.search_kg("退火", 1)[0].evidence_key
+    second = access.search_kg("annealing", 1)[0].evidence_key
+
+    assert first and first == second
+
+
+def test_ask_service_wires_the_kg_seats_and_persists_object_citations():
+    seen: list[tuple] = []
+
+    def answer(_context, retrieval, _model, trace):
+        hits = retrieval.search_kg("图谱问题", 2)
+        seen.append(hits)
+        trace.step("图谱检索", f"概览 {len(retrieval.kg_overview())} 字")
+        return AskEngineResult("结论 [k1]", (hits[0].evidence_key,))
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.kg", answer=answer)),
+    ))
+    service = _minimal_ask_service(
+        ask_engine_host=runtime.ask_engines,
+        ask_engine_participant_notebooks=lambda _notebook_id: ("nb",),
+        ask_engine_visible_sources=lambda _notebook_id: ("source-1",),
+        ask_engine_hidden_sources=lambda _notebook_id, _actor_id: (),
+    )
+    service.retrieval.federated_retrieve_elements = lambda *_args, **_kwargs: []
+    service.retrieval.federated_retrieve = lambda *_args, **_kwargs: [
+        _object(notebook_id="nb")
+    ]
+    service.collection_catalog = SimpleNamespace(
+        collection_map_text=lambda _notebook_id: "[Collections in scope] …"
+    )
+    service.evidence_context.citation_source_info = lambda _ids: {
+        "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
+    }
+
+    response = service.ask(
+        "nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user"
+    )
+
+    assert response.mode == "alpha.kg"
+    assert seen[0][0].object_type == "concept"
+    assert response.answer == "结论 [k1]"
+    assert response.citations[0].source_id == "source-1"
+    assert response.citations[0].element_id == "element-1"
+    assert response.anchors[0].key == "k1"
