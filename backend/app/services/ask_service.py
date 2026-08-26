@@ -1362,6 +1362,30 @@ class AskService:
             if scope is not None and scope.notebook_id != prepared.notebook_id:
                 raise StageBoundaryError("plugin Ask source scope changed")
             owned_ports: list[object] = []
+
+            def plugin_hidden_sources(
+                notebook_id: str, actor_id: str
+            ) -> tuple[str, ...]:
+                # Structural Memory exclusion (codex #603 R4 P1): a plugin
+                # citation cannot carry Memory identity (`Citation.memory_id`
+                # is what the MCP memory:read filter recognizes, and the port
+                # has no channel to mint it), so the caller's own Memory
+                # projection sources never enter the plugin retrieval face at
+                # all — filtering the frozen universe here beats trying to
+                # re-identify Memory-backed rows after the fact. Knowhow
+                # projections stay: the grid is notebook-shared content.
+                ids = tuple(
+                    self.ask_engine_hidden_sources(notebook_id, actor_id)
+                )
+                if not ids:
+                    return ()
+                metadata = self.evidence_context.source_metadata(ids)
+                return tuple(
+                    source_id for source_id in ids
+                    if (metadata.get(source_id) or {}).get("source_type")
+                    != "memory"
+                )
+
             try:
                 retrieval = PluginRetrievalAccess(
                     active_notebook_id=prepared.notebook_id,
@@ -1371,7 +1395,7 @@ class AskService:
                         self.ask_engine_participant_notebooks
                     ),
                     all_visible_source_ids=self.ask_engine_visible_sources,
-                    hidden_source_ids=self.ask_engine_hidden_sources,
+                    hidden_source_ids=plugin_hidden_sources,
                     search_elements=(
                         self.retrieval.federated_retrieve_elements
                     ),

@@ -344,6 +344,19 @@ def _issue_kg_evidence(
 
     issued: list[EngineEvidence] = []
     for hit in hits:
+        items = _evidence_items(hit)
+        # A hit with bindings but not ONE source inside the frozen universe is
+        # dropped outright, not surfaced as context-only: with the caller's
+        # own Memory projections structurally excluded from that universe
+        # (codex #603 R4 P1), such a hit is Memory-derived (or a post-freeze
+        # drift addition), and even its NAME is content the frozen scope never
+        # admitted. Context-only remains for binding-free objects and for
+        # known-source bindings that merely fail liveness/metadata.
+        if items and not any(
+            str(getattr(item, "source_id", "") or "") in state.source_origin
+            for item in items
+        ):
+            continue
         origin = _hit_origin(hit, default_origin)
         identity = (origin, str(getattr(hit, "object_id", "") or ""))
         key = state.kg_reverse.get(identity)
@@ -359,8 +372,8 @@ def _issue_kg_evidence(
         if bound_pair is None:
             # Context-only hit: no ledger record and no anchor registration, so
             # it can be neither cited nor used as a `kg_neighbors` anchor.
-            # Reached when every binding's element is gone, its source left the
-            # frozen snapshot, or its source no longer resolves.
+            # Reached when every binding's element is gone or its source no
+            # longer resolves (all-out-of-universe hits were dropped above).
             issued.append(EngineEvidence(
                 evidence_key="",
                 text=_kg_text(name, summary, "", state.evidence_chars),
@@ -646,6 +659,17 @@ class PluginRetrievalAccess:
                     # reach the candidate seam before its LIMIT, so another
                     # member's private-Memory-derived objects are structurally
                     # absent rather than filtered out afterwards.
+                    # Rank-then-slice is deliberate (codex #603 R4 P2,
+                    # rebutted): fused BM25+semantic top-k cannot be computed
+                    # without scoring the whole candidate window, and that
+                    # window is bounded by the seam's own recall rails — the
+                    # explicit source keys above force the source-restricted
+                    # lane whose lexical SQL applies its predicate before
+                    # LIMIT and "never enter[s] a notebook-wide fallback"
+                    # (retrieval_candidates.py, `source_candidates_restricted`
+                    # branch). Pushing `k` into the seam could not reduce that
+                    # work; it would only change which correctness-bearing
+                    # ranking the slice is taken from.
                     hits = list(search_knowledge(
                         state.active_notebook_id,
                         query,

@@ -916,34 +916,128 @@ def test_knowledge_hit_without_a_live_source_is_context_only():
 
 
 def test_bound_evidence_requires_the_source_to_be_in_the_frozen_snapshot_not_just_resolvable():
-    """P1: `_bound_evidence` 的两个判据必须都是承重的——快照成员判定
-    (`state.source_origin.get(source_id) != origin`)必须在元数据解析之前
-    生效。一个证据来源即使仍能被 `source_info` 解析出元数据(比如它仍然
-    真实存在于数据库里),只要不在这个 run 冻结的 `source_keys` 集合内,
-    就必须判越界、不可引用——不能靠“元数据解析不出来”这唯一一条判据兜底。
-    删掉 `_bound_evidence` 的这道 origin 比对(保留元数据解析)会让全部
-    既有用例通过,只有这条新用例能钉住它。"""
-    access = _kg_access(
+    """P1 + codex #603 R4 P1: 证据来源全部落在冻结宇宙之外的命中,现在**整体
+    不返回**——连名字都不当 context-only 交出去(该形态在生产上就是 Memory
+    派生对象或冻结后漂移新增,名字本身就是内容)。混合形态(一条界外 + 一条
+    界内)仍走快照判定:界外那条被跳过,界内那条签发。两个方向合起来钉住
+    `_bound_evidence` 的 origin 比对与 `_issue_kg_evidence` 的整体丢弃规则。"""
+    outside_only = _kg_access(
         search_knowledge=lambda *_args, **_kwargs: [_object(
             notebook_id="notebook-1",
             evidence=[_evidence(source_id="source-outside-scope")],
         )],
         # source_info 仍能解析出元数据(该来源本身仍然存在),但它压根不在
-        # 这个 run 冻结的可见来源集合(visible=("source-1",))内——正是
-        # `source_origin` 判据要拦的那种「resolvable 但不在快照里」的证据。
+        # 这个 run 冻结的可见来源集合(visible=("source-1",))内。
         source_info=lambda source_ids: {
             source_id: {"title": "越界来源", "file_name": "outside.pdf"}
             for source_id in source_ids
         },
     )
+    assert outside_only.search_kg("退火", 2) == ()
 
-    hits = access.search_kg("退火", 2)
+    mixed = _kg_access(
+        search_knowledge=lambda *_args, **_kwargs: [_object(
+            notebook_id="notebook-1",
+            evidence=[
+                _evidence(
+                    source_id="source-outside-scope",
+                    element_id="element-outside",
+                ),
+                _evidence(source_id="source-1", element_id="element-in"),
+            ],
+        )],
+        source_info=lambda source_ids: {
+            source_id: {"title": "来源", "file_name": "f.pdf"}
+            for source_id in source_ids
+        },
+    )
+    hits = mixed.search_kg("退火", 2)
+    assert hits[0].evidence_key, "the in-snapshot binding must still be citable"
+    _, records = admit_plugin_engine_result(
+        mixed, "结论 [k1]", (hits[0].evidence_key,)
+    )
+    assert records[0].source_id == "source-1"
+    assert records[0].element_id == "element-in"
 
-    assert hits[0].evidence_key == ""
-    assert hits[0].source_title == "" and hits[0].location_label == ""
-    with pytest.raises(AskEnginePortError) as rejected:
-        admit_plugin_engine_result(access, "结论 [k1]", ("",))
-    assert rejected.value.code == "plugin_engine_unverified_citation"
+
+def test_plugin_port_universe_excludes_the_callers_memory_projections():
+    """codex #603 R4 P1:MCP 的 memory:read 过滤只认 `Citation.memory_id`,而
+    插件引用没有渠道携带 Memory 身份——所以调用者自己的 Memory 投影源在
+    ask_service 接线处就被结构性排除出冻结宇宙,Knowhow 投影保留(表格是
+    notebook 级共享内容)。删掉接线处的 source_type 过滤必须让本用例变红。"""
+    seen_keys: list[tuple[str, str]] = []
+
+    def capture_elements(_nb, _query, *, allowed_source_keys, limit):
+        del limit
+        seen_keys.extend(allowed_source_keys)
+        return []
+
+    def answer(_context, retrieval, _model, _trace):
+        retrieval.search("查询", 1)
+        return AskEngineResult("无引用回答", ())
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.kg", answer=answer)),
+    ))
+    service = _minimal_ask_service(
+        ask_engine_host=runtime.ask_engines,
+        ask_engine_participant_notebooks=lambda _nb: ("nb",),
+        ask_engine_visible_sources=lambda _nb: ("source-doc",),
+        ask_engine_hidden_sources=lambda _nb, _actor: (
+            "hidden-knowhow", "hidden-memory",
+        ),
+    )
+    service.retrieval.federated_retrieve_elements = capture_elements
+    service.evidence_context.evidence_elements = _all_live
+    service.evidence_context.source_metadata = lambda _ids: {
+        "hidden-knowhow": {"source_type": "knowhow"},
+        "hidden-memory": {"source_type": "memory"},
+    }
+    service.evidence_context.citation_source_info = lambda _ids: {}
+    service.collection_catalog = SimpleNamespace(
+        collection_map_text=lambda _nb: ""
+    )
+
+    service.ask("nb", AskRequest(question="问题", mode="alpha.kg"), user_id="user")
+
+    sources = {source_id for _nb, source_id in seen_keys}
+    assert "source-doc" in sources
+    assert "hidden-knowhow" in sources, (
+        "notebook-shared Knowhow projections must stay in the plugin universe"
+    )
+    assert "hidden-memory" not in sources, (
+        "the caller's own Memory projection must never enter the plugin "
+        "retrieval face -- plugin citations cannot carry the memory identity "
+        "the MCP memory:read filter recognizes"
+    )
+
+
+def test_search_kg_slices_after_the_seams_ranking_and_pushes_no_limit_down():
+    """codex #603 R4 P2 的驳回护栏(三件套之一):k 是呈现截断不是工作量界。
+    融合 top-k 必须先对有界候选窗完整打分(窗界在接缝自己的 recall rails 上,
+    插件恒传显式 source keys、恒走「词法谓词在 LIMIT 前」的受限 lane),所以
+    切片刻意发生在接缝排序之后,且**不向接缝下推 limit**——谁把 limit 推下去,
+    这条用例就要求他先回答排序正确性从哪来。"""
+    seen_kwargs: dict = {}
+
+    def ranked_seam(_nb, _query, **kwargs):
+        seen_kwargs.update(kwargs)
+        return [
+            _object(object_id="ko-high", name="高分", notebook_id="notebook-1"),
+            _object(object_id="ko-low", name="低分", notebook_id="notebook-1"),
+        ]
+
+    access = _kg_access(search_knowledge=ranked_seam, kg_max_calls=4)
+    hits = access.search_kg("查询", 1)
+    assert len(hits) == 1
+    assert "高分" in hits[0].text, (
+        "the slice must preserve the seam's ranking: k=1 takes the seam's "
+        "top-ranked hit"
+    )
+    assert "limit" not in seen_kwargs and "k" not in seen_kwargs, (
+        "deliberately NO limit push-down -- the seam's recall rails bound the "
+        "work; see the rebuttal comment at the search_kg call site"
+    )
 
 
 def test_kg_budget_is_shared_and_early_exits_never_spend_it():
