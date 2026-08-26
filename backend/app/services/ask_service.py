@@ -1390,6 +1390,9 @@ class AskService:
                     collection_overview=getattr(
                         self.collection_catalog, "collection_map_text", None
                     ),
+                    evidence_elements=getattr(
+                        self.evidence_context, "evidence_elements", None
+                    ),
                     kg_max_calls=(
                         self.settings.ask_plugin_engine_kg_search_max_calls
                     ),

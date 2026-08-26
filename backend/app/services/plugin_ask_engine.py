@@ -78,6 +78,12 @@ class _RetrievalState:
     search_knowledge: Callable[..., list[RetrievedKnowledge]] | None = None
     object_neighbors: Callable[..., Any] | None = None
     collection_overview: Callable[[str], str] | None = None
+    # Bounded PK hydration of source_elements rows — the same seam the
+    # collection-enumeration citations use to select "the first SURVIVING
+    # evidence element". It is the element-liveness half of the citability
+    # contract: source metadata alone cannot prove the element a citation
+    # would open still exists (codex #603 R2 P1).
+    evidence_elements: Callable[[Sequence[str]], dict[str, dict]] | None = None
     kg_max_calls: int = 0
     # Frozen at construction, inside the request's scope context: whether the
     # ACTIVE notebook's source selection is genuinely narrowed (the CHANNEL
@@ -255,30 +261,52 @@ def _kg_source_ids(hits: Sequence[object]) -> list[str]:
     ]
 
 
+def _kg_element_ids(hits: Sequence[object]) -> list[str]:
+    return [
+        str(getattr(item, "element_id", "") or "")
+        for hit in hits
+        for item in _evidence_items(hit)
+    ]
+
+
 def _bound_evidence(
     state: _RetrievalState,
     hit: object,
     origin: str,
     info: dict[str, dict[str, str]],
-) -> object | None:
-    """The first evidence element this object may legitimately be cited by.
+    live: dict[str, dict],
+) -> tuple[object, str] | None:
+    """The first SURVIVING evidence element this object may be cited by.
 
-    Both predicates are load-bearing. Frozen-snapshot membership is the
-    post-hydration source-scope re-check: a knowledge object admitted by the
-    candidate predicate can still carry evidence from sources this run may not
-    read, and that is the element a citation would open. Metadata resolution
-    then proves the source itself still exists.
+    Three predicates, all load-bearing. Element liveness comes first: `live`
+    is the bounded PK hydration of the candidate element ids, so an element
+    removed or replaced (reparse rotates element ids while the source row
+    stays) is simply absent and can never become a citation that opens
+    nothing (codex #603 R2 P1). The hydrated row's own `source_id` is then
+    the AUTHORITATIVE source for the two source predicates — mirroring the
+    enumeration citations, which also trust the hydrated row over the
+    persisted binding's claim. Frozen-snapshot membership is the
+    post-hydration source-scope re-check; metadata resolution proves the
+    source itself still exists. Returns ``(binding, source_id)``.
     """
 
     for item in _evidence_items(hit):
-        source_id = str(getattr(item, "source_id", "") or "")
         element_id = str(getattr(item, "element_id", "") or "")
-        if not source_id or not element_id:
+        if not element_id:
+            continue
+        row = live.get(element_id)
+        if row is None:
+            continue
+        source_id = (
+            str(row.get("source_id") or "")
+            or str(getattr(item, "source_id", "") or "")
+        )
+        if not source_id:
             continue
         if state.source_origin.get(source_id) != origin:
             continue
         if source_id in info:
-            return item
+            return item, source_id
     return None
 
 
@@ -304,6 +332,7 @@ def _issue_kg_evidence(
     state: _RetrievalState,
     hits: Sequence[object],
     info: dict[str, dict[str, str]],
+    live: dict[str, dict],
     *,
     default_origin: str,
 ) -> tuple[EngineEvidence, ...]:
@@ -326,12 +355,12 @@ def _issue_kg_evidence(
         name = _payload_text(payload, "name")
         summary = _payload_text(payload, "definition", "evidence")
         object_type = str(getattr(hit, "object_type", "") or "")
-        bound = _bound_evidence(state, hit, origin, info)
-        if bound is None:
+        bound_pair = _bound_evidence(state, hit, origin, info, live)
+        if bound_pair is None:
             # Context-only hit: no ledger record and no anchor registration, so
-            # it can be neither cited nor used as a `kg_neighbors` anchor. Only
-            # the SOURCE is proven live here; per-element liveness is not
-            # checked (registered v1 limit, same as the element path).
+            # it can be neither cited nor used as a `kg_neighbors` anchor.
+            # Reached when every binding's element is gone, its source left the
+            # frozen snapshot, or its source no longer resolves.
             issued.append(EngineEvidence(
                 evidence_key="",
                 text=_kg_text(name, summary, "", state.evidence_chars),
@@ -340,6 +369,7 @@ def _issue_kg_evidence(
                 object_type=object_type,
             ))
             continue
+        bound, bound_source_id = bound_pair
         quoted_span = str(getattr(bound, "quoted_span", "") or "")
         text = _kg_text(name, summary, quoted_span, state.evidence_chars)
         if not text:
@@ -355,7 +385,7 @@ def _issue_kg_evidence(
                 object_type=object_type,
             ))
             continue
-        source_id = str(getattr(bound, "source_id", "") or "")
+        source_id = bound_source_id
         metadata = info.get(source_id) or {}
         key = f"pe-{uuid4().hex}"
         evidence = EngineEvidence(
@@ -443,6 +473,7 @@ class PluginRetrievalAccess:
         search_knowledge: Callable[..., list[RetrievedKnowledge]] | None = None,
         object_neighbors: Callable[..., Any] | None = None,
         collection_overview: Callable[[str], str] | None = None,
+        evidence_elements: Callable[[Sequence[str]], dict] | None = None,
         kg_max_calls: int = 0,
     ) -> None:
         source_keys: list[tuple[str, str]] = []
@@ -488,6 +519,7 @@ class PluginRetrievalAccess:
                 search_knowledge=search_knowledge,
                 object_neighbors=object_neighbors,
                 collection_overview=collection_overview,
+                evidence_elements=evidence_elements,
                 kg_max_calls=kg_max_calls,
                 active_scope_restricted=source_scope_restricted(),
             ),
@@ -600,7 +632,8 @@ class PluginRetrievalAccess:
                 # spend this run's shared KG budget on proving that.
                 return ()
             search_knowledge = state.search_knowledge
-            if search_knowledge is None:
+            evidence_elements = state.evidence_elements
+            if search_knowledge is None or evidence_elements is None:
                 raise AskEnginePortError("plugin_engine_failed")
             _claim_kg_call(state)
             limit = min(k, state.max_k)
@@ -621,9 +654,10 @@ class PluginRetrievalAccess:
                     ) or ())[:limit]
                     _ensure_live(state)
                     info = state.source_info(_kg_source_ids(hits))
-                return hits, info
+                    live = evidence_elements(_kg_element_ids(hits)) or {}
+                return hits, info, live
 
-            hits, info = state.request_context.copy().run(
+            hits, info, live = state.request_context.copy().run(
                 _retrieve_in_request_context
             )
             _ensure_live(state)
@@ -633,7 +667,8 @@ class PluginRetrievalAccess:
                 # (see `_hit_origin`'s docstring); the active notebook here is
                 # only ever a defensive fallback, never load-bearing.
                 return _issue_kg_evidence(
-                    state, hits, info, default_origin=state.active_notebook_id
+                    state, hits, info, live,
+                    default_origin=state.active_notebook_id,
                 )
 
     def kg_neighbors(
@@ -682,7 +717,8 @@ class PluginRetrievalAccess:
                 and state.active_scope_restricted
             ):
                 return ()
-            if object_neighbors is None:
+            evidence_elements = state.evidence_elements
+            if object_neighbors is None or evidence_elements is None:
                 raise AskEnginePortError("plugin_engine_failed")
             _claim_kg_call(state)
             limit = min(k, state.max_k)
@@ -707,9 +743,10 @@ class PluginRetrievalAccess:
                     hits = list(getattr(expansion, "hits", ()) or ())[:limit]
                     _ensure_live(state)
                     info = state.source_info(_kg_source_ids(hits))
-                return hits, info
+                    live = evidence_elements(_kg_element_ids(hits)) or {}
+                return hits, info, live
 
-            hits, info = state.request_context.copy().run(
+            hits, info, live = state.request_context.copy().run(
                 _expand_in_request_context
             )
             _ensure_live(state)
@@ -731,12 +768,21 @@ class PluginRetrievalAccess:
                 # citability — this is not the disallowed unbounded cross-tier
                 # graph walk that decision forbids.
                 return _issue_kg_evidence(
-                    state, hits, info, default_origin=notebook_id
+                    state, hits, info, live, default_origin=notebook_id
                 )
 
     def kg_overview(self) -> str:
         state = _lookup(_RETRIEVAL_STATES, self.__authority_token)
         with _authority_use(state):
+            # A genuinely narrowed run gets no overview: the collection map
+            # counts the WHOLE active notebook (its counting seam applies only
+            # the library dimension), so handing it out under a narrowed scope
+            # would leak out-of-scope aggregate counts and mislead the model
+            # about what this run may actually read (codex #603 R2 P2). The
+            # format is contractually unparseable, so an empty string is a
+            # valid "nothing to show" shape for providers.
+            if state.active_scope_restricted:
+                return ""
             # `overview_lock` brackets the WHOLE read-compute-write critical
             # section (not just the final write) so concurrent first callers
             # cannot each observe an empty memo and each pay for
