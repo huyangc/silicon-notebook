@@ -36,6 +36,11 @@ class PluginEvidenceRecord:
     notebook_id: str
     source_file_name: str
     score: float
+    # Verbatim grounding excerpt (the bound evidence element's own
+    # `quoted_span`), separate from `evidence.text` which is a KG hit's
+    # model-authored name+definition summary. Empty for element-path records
+    # (the element path already puts verbatim text in `evidence.text`).
+    quoted_span: str = ""
 
 
 @dataclass(slots=True)
@@ -81,6 +86,13 @@ class _RetrievalState:
     kg_reverse: dict[tuple[str, str], str] = field(default_factory=dict)
     kg_objects: dict[str, tuple[str, str]] = field(default_factory=dict)
     overview_cache: str | None = None
+    # Dedicated lock for `kg_overview`'s read-compute-write, deliberately
+    # separate from `data_lock`: the computation it must wrap crosses raw I/O
+    # (`collection_overview`), and holding `data_lock` across that would block
+    # every `search`/`search_kg`/`kg_neighbors`/`fetch` call on this run for
+    # the duration of that I/O. See `kg_overview`'s docstring for why this
+    # cannot deadlock against revoke.
+    overview_lock: Any = field(default_factory=RLock)
     data_lock: Any = field(default_factory=RLock)
     lifecycle: _AuthorityLifecycle = field(default_factory=_AuthorityLifecycle)
 
@@ -201,8 +213,24 @@ def _claim_kg_call(state: _RetrievalState) -> None:
         state.kg_calls += 1
 
 
-def _hit_origin(state: _RetrievalState, hit: object) -> str:
-    return str(getattr(hit, "notebook_id", "") or state.active_notebook_id)
+def _hit_origin(hit: object, default_origin: str) -> str:
+    """Resolve one KG hit's library id, falling back to a caller-supplied
+    default rather than unconditionally the active notebook.
+
+    ``search_kg`` hits come from ``federated_retrieve``, which always tags
+    ``.notebook_id`` with the real participant library
+    (``retrieval_candidates.py::_federated_retrieve_impl``), so its default
+    (the active notebook) is only ever a defensive fallback there.
+    ``kg_neighbors`` hits come from the one-hop expansion seam
+    (``_retrieve_neighbors``), which leaves ``.notebook_id`` unset (production
+    default ``""``) — the anchor's OWN library is the only correct default at
+    that call site. Falling back to the active notebook there would silently
+    misattribute every neighbor of a mounted-base anchor to a library that may
+    not even contain its evidence source, and ``_bound_evidence``'s
+    frozen-snapshot recheck would then downgrade all of them to context-only
+    (``evidence_key == ""``).
+    """
+    return str(getattr(hit, "notebook_id", "") or default_origin)
 
 
 def _evidence_items(hit: object) -> tuple[object, ...]:
@@ -267,12 +295,18 @@ def _issue_kg_evidence(
     state: _RetrievalState,
     hits: Sequence[object],
     info: dict[str, dict[str, str]],
+    *,
+    default_origin: str,
 ) -> tuple[EngineEvidence, ...]:
-    """Issue (or replay) one run-local handle per knowledge-object hit."""
+    """Issue (or replay) one run-local handle per knowledge-object hit.
+
+    ``default_origin`` is call-site-specific — see `_hit_origin`'s docstring;
+    it is never the same constant for `search_kg` and `kg_neighbors`.
+    """
 
     issued: list[EngineEvidence] = []
     for hit in hits:
-        origin = _hit_origin(state, hit)
+        origin = _hit_origin(hit, default_origin)
         identity = (origin, str(getattr(hit, "object_id", "") or ""))
         key = state.kg_reverse.get(identity)
         if key is not None:
@@ -297,17 +331,27 @@ def _issue_kg_evidence(
                 object_type=object_type,
             ))
             continue
+        quoted_span = str(getattr(bound, "quoted_span", "") or "")
+        text = _kg_text(name, summary, quoted_span, state.evidence_chars)
+        if not text:
+            # name/definition/quoted_span all empty: there is nothing a user
+            # could verify, so this hit must not be signed as citable even
+            # though its evidence element is live. Same non-registration shape
+            # as the `bound is None` branch above (no ledger, no anchor).
+            issued.append(EngineEvidence(
+                evidence_key="",
+                text="",
+                source_title="",
+                location_label="",
+                object_type=object_type,
+            ))
+            continue
         source_id = str(getattr(bound, "source_id", "") or "")
         metadata = info.get(source_id) or {}
         key = f"pe-{uuid4().hex}"
         evidence = EngineEvidence(
             evidence_key=key,
-            text=_kg_text(
-                name,
-                summary,
-                str(getattr(bound, "quoted_span", "") or ""),
-                state.evidence_chars,
-            ),
+            text=text,
             source_title=(
                 metadata.get("title")
                 or str(getattr(bound, "source_title", "") or "")
@@ -322,6 +366,7 @@ def _issue_kg_evidence(
             notebook_id=origin,
             source_file_name=metadata.get("file_name", ""),
             score=float(getattr(hit, "score", 0.0) or 0.0),
+            quoted_span=quoted_span,
         )
         state.kg_reverse[identity] = key
         state.kg_objects[key] = identity
@@ -525,10 +570,20 @@ class PluginRetrievalAccess:
                 raise AskEnginePortError(
                     "plugin_engine_invalid_retrieval_limit"
                 )
-            requested = tuple(object_types or ())
+            # Container/element shape is validated BEFORE the budget claim
+            # below (contract §3.1): a malformed request must never spend the
+            # shared KG call budget. Only tuple/list are accepted — a bare
+            # str like "concept" is itself iterable-of-str and would
+            # otherwise silently explode into single characters
+            # (`tuple("concept")` == `('c','o','n','c','e','p','t')`), turning
+            # a plugin's missing-comma bug into a request nobody can debug.
+            if type(object_types) not in (tuple, list):
+                raise AskEnginePortError("plugin_engine_invalid_kg_request")
+            if any(type(value) is not str for value in object_types):
+                raise AskEnginePortError("plugin_engine_invalid_kg_request")
+            requested = tuple(object_types)
             types = tuple(
-                value for value in requested
-                if type(value) is str and value in NODE_TYPES
+                value for value in requested if value in NODE_TYPES
             )
             if requested and not types:
                 # An impossible filter cannot produce a hit, so it must not
@@ -564,7 +619,12 @@ class PluginRetrievalAccess:
             _ensure_live(state)
             raise_if_cancelled(state.cancellation)
             with state.data_lock:
-                return _issue_kg_evidence(state, hits, info)
+                # `federated_retrieve` hits always carry a real `.notebook_id`
+                # (see `_hit_origin`'s docstring); the active notebook here is
+                # only ever a defensive fallback, never load-bearing.
+                return _issue_kg_evidence(
+                    state, hits, info, default_origin=state.active_notebook_id
+                )
 
     def kg_neighbors(
         self,
@@ -611,6 +671,10 @@ class PluginRetrievalAccess:
                     expansion = object_neighbors(
                         notebook_id, object_id, edge_type or None, direction
                     )
+                    # `expansion.truncated` is deliberately discarded — the
+                    # port contract (§3.2) already tells providers that a full
+                    # page must be assumed to have more, so there is no signal
+                    # left to add here.
                     hits = list(getattr(expansion, "hits", ()) or ())[:limit]
                     _ensure_live(state)
                     info = state.source_info(_kg_source_ids(hits))
@@ -622,34 +686,63 @@ class PluginRetrievalAccess:
             _ensure_live(state)
             raise_if_cancelled(state.cancellation)
             with state.data_lock:
-                return _issue_kg_evidence(state, hits, info)
+                # Deliberate divergence from the built-in reasoning engine's
+                # expand/neighbors, which pins `notebook_id` to the ACTIVE
+                # notebook only (reasoning_retrieval.py:4086-4088: a base-tier
+                # hit's neighbors live in the base notebook, so deep cross-tier
+                # graph walks are graph mode's job, not reasoning mode).  This
+                # port's contract instead promises a one-hop take within the
+                # anchor's OWN participant library: `notebook_id` here is that
+                # library (unpacked from the anchor identity above), not
+                # `state.active_notebook_id`. Authorization is not weakened by
+                # this: `notebook_id` can only be a library this run's
+                # participant-set already resolved (it came from a handle this
+                # same run issued), and `_bound_evidence`'s frozen
+                # source-key recheck is still the backstop that decides
+                # citability — this is not the disallowed unbounded cross-tier
+                # graph walk that decision forbids.
+                return _issue_kg_evidence(
+                    state, hits, info, default_origin=notebook_id
+                )
 
     def kg_overview(self) -> str:
         state = _lookup(_RETRIEVAL_STATES, self.__authority_token)
         with _authority_use(state):
-            with state.data_lock:
+            # `overview_lock` brackets the WHOLE read-compute-write critical
+            # section (not just the final write) so concurrent first callers
+            # cannot each observe an empty memo and each pay for
+            # `collection_overview`'s underlying full-notebook count — that
+            # was the bug (8 concurrent callers measured as 8 real calls).
+            # This cannot deadlock against a concurrent revoke: `_release`
+            # never waits on `in_flight` (this call is already counted via
+            # `_authority_use`'s bracket above), and `_ensure_live` only ever
+            # takes `state.lifecycle.lock` for one instantaneous read — it is
+            # never held while acquiring `overview_lock`, so the two locks are
+            # never nested in the reverse order.
+            with state.overview_lock:
                 cached = state.overview_cache
-            if cached is not None:
-                return cached
-            collection_overview = state.collection_overview
-            if collection_overview is None:
-                raise AskEnginePortError("plugin_engine_failed")
-            raise_if_cancelled(state.cancellation)
+                if cached is not None:
+                    return cached
+                collection_overview = state.collection_overview
+                if collection_overview is None:
+                    raise AskEnginePortError("plugin_engine_failed")
+                raise_if_cancelled(state.cancellation)
 
-            def _read_in_request_context():
-                # Deliberately no fan-out slot: the collection map is a counting
-                # read behind its own memo, not a retrieval leaf, and the
-                # built-in reasoning path builds the same map without a slot.
-                return collection_overview(state.active_notebook_id)
+                def _read_in_request_context():
+                    # Deliberately no fan-out slot: the collection map is a
+                    # counting read behind its own memo, not a retrieval leaf,
+                    # and the built-in reasoning path builds the same map
+                    # without a slot.
+                    return collection_overview(state.active_notebook_id)
 
-            text = state.request_context.copy().run(_read_in_request_context)
-            _ensure_live(state)
-            raise_if_cancelled(state.cancellation)
-            value = str(text or "")[:KG_OVERVIEW_MAX_CHARS]
-            with state.data_lock:
-                if state.overview_cache is None:
-                    state.overview_cache = value
-                return state.overview_cache
+                text = state.request_context.copy().run(
+                    _read_in_request_context
+                )
+                _ensure_live(state)
+                raise_if_cancelled(state.cancellation)
+                value = str(text or "")[:KG_OVERVIEW_MAX_CHARS]
+                state.overview_cache = value
+                return value
 
     def fetch(self, evidence_key: str) -> EngineEvidence | None:
         if type(evidence_key) is not str:

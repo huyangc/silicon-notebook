@@ -132,6 +132,7 @@ export function pluginEngineFailureMessage(raw: string): string | null {
     "plugin_engine_citation_limit",
     "plugin_engine_model_call_limit",
     "plugin_engine_search_call_limit",
+    "plugin_engine_kg_call_limit",
   ].includes(match[1])) {
     return "扩展引擎超过了本次调用预算，请重试或切换引擎";
   }

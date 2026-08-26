@@ -1469,6 +1469,12 @@ class AskService:
             citations: list[Citation] = []
             for record in records:
                 evidence = record.evidence
+                # `record.quoted_span` is the bound evidence element's own
+                # verbatim excerpt; `evidence.text` for a KG hit is a
+                # model-authored name+definition summary, not a quote from
+                # the source. Prefer the verbatim excerpt whenever one was
+                # captured (the element path never fills `quoted_span`, so it
+                # falls back to its own already-verbatim `evidence.text`).
                 citations.append(Citation(
                     label=(
                         f"{evidence.source_title} · {evidence.location_label}"
@@ -1476,7 +1482,7 @@ class AskService:
                     source_id=record.source_id,
                     element_id=record.element_id,
                     location_label=evidence.location_label,
-                    quoted_span=evidence.text,
+                    quoted_span=record.quoted_span or evidence.text,
                     source_file_name=record.source_file_name,
                     tier=tier_map.get(record.notebook_id, "personal"),
                     notebook_id=(
@@ -1498,9 +1504,13 @@ class AskService:
                     anchors.append(AnswerAnchor(
                         key=f"k{index}",
                         object_id=record.element_id,
-                        object_type="element",
+                        # "" (element hit) -> "element"; a KG hit carries its
+                        # real node type ("concept"/"claim"/"formula"/
+                        # "procedure") instead of the previously-hardcoded
+                        # "element" for every plugin-engine anchor.
+                        object_type=evidence.object_type or "element",
                         label=evidence.source_title or f"k{index}",
-                        snippet=evidence.text,
+                        snippet=record.quoted_span or evidence.text,
                         source_title=evidence.source_title,
                         source_file_name=record.source_file_name,
                         location_label=evidence.location_label,

@@ -7,6 +7,7 @@ import {
   humanizeHttpError,
   httpErrorStatus,
   logDiagnostic,
+  pluginEngineFailureMessage,
   readHttpError,
   throwHumanizedHttpError,
   toUserMessage,
@@ -709,6 +710,19 @@ test("fetch 自身 reject:用户看到中文,「Failed to fetch」只在 console
   assert.ok(!shown.includes("Failed to fetch"));
   assert.ok(!/[A-Za-z]/.test(shown), "用户文案里不该有英文");
   assert.match(logs[0], /Failed to fetch/, "原文必须留在 console");
+});
+
+// P2 修复:kg_neighbors/search_kg 共享的 KG 预算耗尽码此前不在预算文案清单
+// 里,会落进兜底「没能完成回答」——用户读不出「超预算」这个可操作信息。
+test("扩展引擎 KG 预算耗尽码归入既有预算文案", () => {
+  assert.equal(
+    pluginEngineFailureMessage("AskPluginEngineError: plugin_engine_kg_call_limit"),
+    "扩展引擎超过了本次调用预算，请重试或切换引擎",
+  );
+  assert.equal(
+    pluginEngineFailureMessage("AskPluginEngineError: plugin_engine_citation_limit"),
+    "扩展引擎超过了本次调用预算，请重试或切换引擎",
+  );
 });
 
 test("流式 error 事件 / 后台 job 的英文 error → 中文", async () => {
