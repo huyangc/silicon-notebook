@@ -492,11 +492,15 @@ class PluginRetrievalAccess:
         source_keys: list[tuple[str, str]] = []
         source_origin: dict[str, str] = {}
         raise_if_cancelled(cancellation)
-        # 已登记性能边界(评审存疑项):端口构造在**每次**插件引擎提问时枚举全部
-        # 参与库的可见+隐藏来源 id,并把完整 id 清单逐次下推进 search SQL——这是
-        # 「把整库来源行搬回热路径」的形状,万级来源的库上每问多付一批 id 物化与
-        # 大 IN 清单。正解是让端口在未收窄时走谓词而不是显式清单(镜像内建路径),
-        # 需要 search 接缝支持「无清单 + 私有 Memory 谓词」模式,留作后续独立一件事。
+        # 已登记性能边界(评审存疑项,KG 半已清偿):端口构造在**每次**插件引擎
+        # 提问时枚举全部参与库的可见+隐藏来源 id——这份枚举现在只服务两件事:
+        # 冻结宇宙(`source_origin` 的签发后复核/丢弃规则)与收窄 run 的显式下推。
+        # **KG 检索**在未收窄时已改走「无清单 + ContextVar 天花板」(接缝保持
+        # ANN 臂、hydrate 时应用快照,见 `search_kg`);**元素检索**仍逐次下推
+        # 完整清单——元素接缝的联邦入口按 (notebook, source) 键分桶迭代、结构上
+        # 要求清单,且它的 chunk ANN 经来源 sidecar 在 HNSW 内过滤、并不因显式
+        # 清单而关臂,剩余代价只是万级来源库上的 id 物化与大 IN 清单,留作后续
+        # 独立一件事。
         participants = scoped_participants(
             participant_notebook_ids(active_notebook_id)
         )
@@ -655,26 +659,33 @@ class PluginRetrievalAccess:
             def _retrieve_in_request_context():
                 with retrieval_fanout_slot():
                     raise_if_cancelled(state.cancellation)
-                    # The frozen source keys are the isolation predicate: they
-                    # reach the candidate seam before its LIMIT, so another
-                    # member's private-Memory-derived objects are structurally
-                    # absent rather than filtered out afterwards.
+                    # Two lanes, mirroring the built-in ask exactly:
+                    # * genuinely narrowed run — push the explicit frozen keys
+                    #   so the seam takes its source-restricted lane (lexical
+                    #   predicate before LIMIT, never a notebook-wide
+                    #   fallback);
+                    # * un-narrowed run — pass NO list so the seam keeps its
+                    #   notebook ANN arm and applies the run's frozen ceiling
+                    #   at evidence hydrate (the ContextVar snapshot; for
+                    #   scope-less callers ask_plugin_engine synthesizes it).
+                    # Memory never enters either way: the universe list has it
+                    # structurally excluded, and `_issue_kg_evidence` drops any
+                    # hit whose evidence lies wholly outside that universe.
                     # Rank-then-slice is deliberate (codex #603 R4 P2,
                     # rebutted): fused BM25+semantic top-k cannot be computed
                     # without scoring the whole candidate window, and that
-                    # window is bounded by the seam's own recall rails — the
-                    # explicit source keys above force the source-restricted
-                    # lane whose lexical SQL applies its predicate before
-                    # LIMIT and "never enter[s] a notebook-wide fallback"
-                    # (retrieval_candidates.py, `source_candidates_restricted`
-                    # branch). Pushing `k` into the seam could not reduce that
+                    # window is bounded by the seam's own recall rails on both
+                    # lanes. Pushing `k` into the seam could not reduce that
                     # work; it would only change which correctness-bearing
                     # ranking the slice is taken from.
                     hits = list(search_knowledge(
                         state.active_notebook_id,
                         query,
                         types=types or None,
-                        allowed_source_keys=state.source_keys,
+                        allowed_source_keys=(
+                            state.source_keys
+                            if state.active_scope_restricted else None
+                        ),
                     ) or ())[:limit]
                     _ensure_live(state)
                     info = state.source_info(_kg_source_ids(hits))

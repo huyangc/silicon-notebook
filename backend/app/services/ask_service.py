@@ -1319,8 +1319,13 @@ class AskService:
             plugin_engine_trace_steps,
             release_plugin_engine_ports,
         )
+        from contextlib import ExitStack
+
         from app.services.retrieval_run import current_retrieval_run, retrieval_run
-        from app.services.source_scope import current_source_scope
+        from app.services.source_scope import (
+            current_source_scope,
+            source_scope_context,
+        )
 
         host = self.ask_engine_host
         mode_id = str(payload.mode or "")
@@ -1362,6 +1367,7 @@ class AskService:
             if scope is not None and scope.notebook_id != prepared.notebook_id:
                 raise StageBoundaryError("plugin Ask source scope changed")
             owned_ports: list[object] = []
+            hidden_cache: dict[tuple[str, str], tuple[str, ...]] = {}
 
             def plugin_hidden_sources(
                 notebook_id: str, actor_id: str
@@ -1374,18 +1380,49 @@ class AskService:
                 # all — filtering the frozen universe here beats trying to
                 # re-identify Memory-backed rows after the fact. Knowhow
                 # projections stay: the grid is notebook-shared content.
+                cached = hidden_cache.get((notebook_id, actor_id))
+                if cached is not None:
+                    return cached
                 ids = tuple(
                     self.ask_engine_hidden_sources(notebook_id, actor_id)
                 )
-                if not ids:
-                    return ()
-                metadata = self.evidence_context.source_metadata(ids)
-                return tuple(
-                    source_id for source_id in ids
-                    if (metadata.get(source_id) or {}).get("source_type")
-                    != "memory"
-                )
+                if ids:
+                    metadata = self.evidence_context.source_metadata(ids)
+                    ids = tuple(
+                        source_id for source_id in ids
+                        if (metadata.get(source_id) or {}).get("source_type")
+                        != "memory"
+                    )
+                hidden_cache[(notebook_id, actor_id)] = ids
+                return ids
 
+            scope_stack = ExitStack()
+            if scope is None:
+                # Scope-less callers (MCP, legacy direct calls) get the same
+                # frozen all-selected ceiling shape the browser freezes for
+                # every request, so the KG candidate seam behaves identically
+                # on every face: ANN arm on, snapshot applied at evidence
+                # hydrate. narrowed=False keeps every channel open, and the
+                # display receipt is a separate ContextVar only the API route
+                # sets on real narrowing — nothing user-visible is produced.
+                # The hidden half is the plugin universe's own (Memory already
+                # excluded), deliberately stricter than the browser snapshot;
+                # the port's out-of-universe drop rule stays the authority.
+                scope_stack.enter_context(source_scope_context(
+                    prepared.notebook_id,
+                    {
+                        "mode": "include",
+                        "source_ids": list(self.ask_engine_visible_sources(
+                            prepared.notebook_id
+                        )),
+                        "hidden_source_ids": list(plugin_hidden_sources(
+                            prepared.notebook_id, prepared.user_id
+                        )),
+                        "narrowed": False,
+                        "owner_id": prepared.user_id,
+                    },
+                    None,
+                ))
             try:
                 retrieval = PluginRetrievalAccess(
                     active_notebook_id=prepared.notebook_id,
@@ -1486,6 +1523,7 @@ class AskService:
                 raise AskPluginEngineError(code) from None
             finally:
                 release_plugin_engine_ports(*owned_ports)
+                scope_stack.close()
 
             tier_map = self._tier_map_for(
                 {record.notebook_id for record in records}
