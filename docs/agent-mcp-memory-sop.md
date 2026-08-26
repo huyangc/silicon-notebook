@@ -213,9 +213,12 @@ credential: short expiry, least privilege, rotate and revoke.
 
 `ask_notebook` with `mode="reasoning"` is a minutes-long call: planning, federated
 retrieval, the reflect loop and answer synthesis all happen inside that one tool call, and
-nothing returns until the answer does. MCP clients do not wait indefinitely for a tool, so
-this is the one part of the surface where client configuration still matters after the
-token works.
+nothing returns until the answer does. `mode` also admits any registered, live-available
+deployment `ask.engine` mode id, and a plugin engine's own retrieval/tool-use loop can run
+considerably longer than the built-in modes — how long is deployment-specific, so budget
+generous headroom rather than assuming the built-in defaults suffice. MCP clients do not wait
+indefinitely for a tool, so this is the one part of the surface where client configuration
+still matters after the token works.
 
 The server does its half automatically, and there is nothing to enable. Every tool emits an
 MCP progress notification every 5 seconds while its work runs — carrying only the tool name
@@ -252,7 +255,9 @@ What remains is the client's own ceiling, which a server cannot raise:
   enough for nginx; a proxy that ignores that header needs response buffering turned off
   for the `/mcp` location and a read timeout above the longest answer expected. A proxy
   that buffers the stream defeats the heartbeat *silently* — the call still succeeds on the
-  server and the client still gives up.
+  server and the client still gives up. This matters more, not less, once a deployment adds
+  an `ask.engine` mode: a longer-running plugin call makes a proxy's own default read
+  timeout more likely to be the thing that actually cuts the call off.
 
 If answers are routinely longer than a client is willing to wait, the durable fix is to
 make the tool call short rather than to keep raising ceilings: ask in `mode="chunk"`, or

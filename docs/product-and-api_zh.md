@@ -643,6 +643,15 @@ audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默
 服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
 
+`ask_notebook` 的 `mode` 参数接受 `"chunk"`、`"reasoning"`，或任何已注册且实时可用的部署
+`ask.engine` mode id（详见[部署问答引擎](#部署问答引擎-askengine)一节）；校验方式与
+`question`/`conversation_id` 相同——给一句直白可操作的文案，而不是抛一个不可读的
+`ValidationError` 转储。传一个未注册的 mode 会收到列出当前合法 mode id 的报错；传一个
+已注册但暂不可用的 mode（例如插件密钥未配置）会收到独立的文案，不与前者混同；调用过程中
+插件引擎自身失败同样如此呈现——一句可读文案后跟括注的稳定 reason code。插件引擎单次调用
+可能比内建 mode 长得多，客户端的读超时需要留出相应余量；心跳/超时机制与本节其余工具共用，
+见上文「长任务发心跳，传输走 SSE」一段。
+
 `ask_notebook` 接受可选的 `conversation_id`（至多 200 字符，与 `AskIntentPreviewRequest.conversation_id`
 同一上限），并回传本次答案实际记入的 `conversation_id`。传入 id 即接续该会话跨轮对话——包括
 另一个 Agent profile 或网页端开启的会话——前提是它属于同一 owner 且同一个已选笔记本。属于
@@ -1767,12 +1776,15 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 provider 只收到当前问题和三个由核心拥有的端口。`RetrievalAccessPort.search()` 包裹既有带范围候选路径：冻结的来源范围、挂载公共库范围和按 actor 隔离的私有 Memory 谓词会在 SQLite/PostgreSQL 的候选 `LIMIT` 之前生效；结果只暴露有界正文、标题、位置和本次 run 内的不透明证据句柄，不暴露 notebook/source/element/chunk id。`fetch()` 只认同一端口已经签发过的句柄。`EngineModelPort.complete()` 通过常规模型 registry、调度、熔断、日志和取消路径使用 `plugin_engine` chat workload，不暴露 URL、密钥、raw client 或物理 binding。`EngineTraceSink.step()` 持久化有界的通用 `plugin` 轨迹步骤；v1 不提供实时轨迹流。
 
-provider 返回 Markdown 和按顺序排列的已签发句柄。核心会对每个句柄及每个 `[kN]`/`【kN】` 标记做 fail-closed 校验，再从私有账本构造 `Citation` 与 `AnswerAnchor`；在复核 mode/notebook/question/conversation/actor/job/run/scope 身份后，仍经普通 durable answer 接缝保存。伪造或跨 run 句柄会以稳定的用户可见失败拒绝整份答案，不能通过删除坏锚点让无根据正文看起来已接地。准入刻意比「不认未知句柄」更严：返回的 citations 元组必须被**恰好**引用——每一条都要以标记出现在正文里（`1..N` 全覆盖）——检索到却未被引用的条目同样整份拒绝，防止插件把没有任何句子支撑的引用垫进参考列表。公开会话投影继续使用原白名单。v1 不接收历史、意图预检、KG/PPR 端口、repository、`Settings`、连接或 service locator；它只进入浏览器 Ask，不进入 MCP Ask 或 Deep Report。自动 UI 模式隐藏扩展分组并提交内建默认模式；高级模式把可用引擎作为第三分组。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
+`RetrievalAccessPort` 现在还暴露一套有界 KG 读端口，覆盖当前 notebook 加已挂载参考库。`search_kg(query, k, object_types=())` 对知识对象跑 BM25+语义融合。`object_types` 必须是元素全为 `str` 的 `tuple`/`list`；否则——裸 `str`（如 `"concept"`，会被当容器逐字符拆开而不是命中一个类型名）、非 `str` 元素，或任何其他容器形态——在花掉预算之前就抛 `plugin_engine_invalid_kg_request`。形状合法的请求里，只有命中 `concept`/`claim`/`formula`/`procedure` 四类之一的条目会保留；未知类型名会被静默丢弃，若过滤器起初非空但最终一个都没留下，调用直接返回 `()`、不消耗预算。`kg_neighbors(evidence_key, k, edge_type="", direction="both")` 以本 run 内 `search_kg`/`kg_neighbors` 已签发过的 KG 句柄为锚展开一跳；元素句柄、别的 run 的句柄、空字符串，或 `edge_type` 不在核心 KG 边 schema 定义的十二类之内（`defines`/`about`/`supports`/`derived_from`/`depends_on`/`contrasts_with`/`prerequisite_of`/`part_of`/`composed_of`/`kind_of`/`used_in`/`precedes`）都一律返回 `()`、不计入预算，而 `direction` 取值不是 `both`/`out`/`in` 之一会抛 `plugin_engine_invalid_kg_request`。两个调用共享一份预算 `ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`，与 `search()` 自己的池子相互独立；超限抛 `plugin_engine_kg_call_limit`。四条契约插件必须遵守：**①可引用性**——KG 命中的 `evidence_key` 只有在对象至少有一条来源与元素仍存活、且能给出名称/定义/原文摘录里至少一样可展示内容的证据绑定时才非空、才能进 `citations`（三者都拿不到的罕见情形同样按仅供上下文处理）；空 key（「仅供上下文」）可以喂给模型的推理，但既进不了任何引用登记表，也不会被注册成 `kg_neighbors` 的合法锚点——把它塞进 citations 会像伪造句柄一样拒绝整份答案；**②引用落点**——被引用的 KG 句柄，其持久化 `Citation` 打开的是该对象**首条存活证据元素**，不是图谱节点视图；**③不带边标签与截断信号**——`kg_neighbors` 不会告诉你某个邻居来自哪类边（要按边归因就按 `edge_type` 逐类各调一次）也不会告诉你满页是否代表还有更多（应假定还有），且每个方向另受核心自己的展开上限约束、与请求的 `k` 无关；**④词法优先候选（已登记债务）**——v1 插件 run 上 KG 候选生成以词法召回为主、语义 ANN 臂关闭，provider 给模型的工具说明应引导它用精确关键词/概念名而非模糊语义式长句。`kg_overview()` 返回与内建 reasoning 引擎注入自己 prompt 的**同一份**有界（≤ 600 字符，`KG_OVERVIEW_MAX_CHARS`）集合地图文本——各可枚举集合计数、知识对象四类分类计数与当前范围的来源数——每 run 只算一次（memo，重复调用拿到同一份字符串），格式不属于契约、不应被解析；无图的库返回的文本自然不含知识对象那一行，插件应把它当作「该少走 KG 通道」的信号。
+
+provider 返回 Markdown 和按顺序排列的已签发句柄。核心会对每个句柄及每个 `[kN]`/`【kN】` 标记做 fail-closed 校验，再从私有账本构造 `Citation` 与 `AnswerAnchor`；在复核 mode/notebook/question/conversation/actor/job/run/scope 身份后，仍经普通 durable answer 接缝保存。伪造或跨 run 句柄会以稳定的用户可见失败拒绝整份答案，不能通过删除坏锚点让无根据正文看起来已接地。准入刻意比「不认未知句柄」更严：返回的 citations 元组必须被**恰好**引用——每一条都要以标记出现在正文里（`1..N` 全覆盖）——检索到却未被引用的条目同样整份拒绝，防止插件把没有任何句子支撑的引用垫进参考列表。citations 元组长度还有一道 sanity 上限（`plugin_engine_citation_limit`），按两个检索池合算——`(ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS + ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS) × ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K`——因为两个池子的每次调用都可能签发到单次上限那么多句柄。公开会话投影继续使用原白名单。v1 刻意不接收历史、意图预检、PPR/社区/图漫游、repository、`Settings`、连接或 service locator，Deep Report 也仍够不到它。自动 UI 模式隐藏扩展分组并提交内建默认模式；高级模式把可用引擎作为第三分组；MCP 的 `ask_notebook` 把同一个已注册且实时可用的 mode id 同样接纳为其 `mode` 参数取值，与内建的 `chunk`/`reasoning` 并列——响应形状（`answer_markdown` 的标记归一化为 `[kN]`，加一份 `citations` 列表）与内建模式相同，会话历史仍不进插件引擎，`conversation_id` 只影响 UI 侧的轮次分组。`mode` 传一个未注册的 id 会收到列出当前合法 mode id 的报错；已注册但暂不可用的 id（例如插件密钥未配置）会收到独立的可操作文案，不与前者混同；调用过程中插件引擎自身失败同样如此呈现——一句可读文案后跟括注的稳定 reason code，绝不是裸 code 或一段无法理解的 traceback。`/ask-modes` 失败时全部内建模式仍可用，并在下一个真正提交成功的工作区重试。
 
 | 问答引擎护栏 | 默认值 | 合法范围 / 结构上限 |
 | --- | ---: | ---: |
 | `ASK_PLUGIN_ENGINE_RETRIEVAL_MAX_K` | 20 | `1..500` |
 | `ASK_PLUGIN_ENGINE_SEARCH_MAX_CALLS` | 8 | `1..100` |
+| `ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`（`search_kg` 与 `kg_neighbors` 共享） | 16 | `1..100` |
 | `ASK_PLUGIN_ENGINE_EVIDENCE_MAX_CHARS` | 4,000 | `100..50,000` |
 | `ASK_PLUGIN_ENGINE_PROMPT_MAX_CHARS`（同时限制端口检索 query） | 32,000 | `1..1,000,000` |
 | `ASK_PLUGIN_ENGINE_MODEL_MAX_CALLS` | 4 | `1..32` |
@@ -1780,6 +1792,7 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心会对每�
 | `ASK_PLUGIN_ENGINE_TRACE_LABEL_MAX_CHARS` | 160 | `1..1,000` |
 | `ASK_PLUGIN_ENGINE_TRACE_DETAIL_MAX_CHARS` | 1,000 | `1..10,000` |
 | 描述符 `mode_id` / 名称 / 说明 | — | 128 / 80 / 300 字符 |
+| `kg_overview()` 输出（`KG_OVERVIEW_MAX_CHARS`，契约边界非部署护栏） | — | 600 字符 |
 
 ### 部署索引管线（`indexing.pipeline`）
 
