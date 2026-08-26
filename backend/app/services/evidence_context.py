@@ -192,6 +192,18 @@ class EvidenceContextService:
         """Return bounded source classification for retrieval-only consumers."""
         return self.sources.source_metadata(source_ids)
 
+    def evidence_elements(
+        self, element_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Bounded PK hydration of evidence-element rows by id.
+
+        The same store seam `collection_item_citations` uses to select "the
+        first surviving evidence element"; the plugin KG port injects this as
+        its element-liveness probe — an id absent from the returned map is a
+        removed/replaced element that must never back a citation.
+        """
+        return self.sources.evidence_elements(element_ids)
+
     def citation_titles(self, source_ids: Iterable[str]) -> dict[str, str]:
         """Resolve user-facing citation titles in one bounded source lookup.
 

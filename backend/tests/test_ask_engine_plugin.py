@@ -169,6 +169,13 @@ def _object(
     )
 
 
+def _all_live(element_ids):
+    """Element-liveness fake: every requested id is live, with no source
+    override (empty rows make `_bound_evidence` fall back to the binding's
+    own source claim, preserving each test's evidence wiring verbatim)."""
+    return {element_id: {} for element_id in element_ids}
+
+
 def _kg_access(
     *,
     search_knowledge=None,
@@ -176,6 +183,7 @@ def _kg_access(
     collection_overview=None,
     search_elements=None,
     source_info=None,
+    evidence_elements=None,
     visible: tuple[str, ...] = ("source-1",),
     kg_max_calls: int = 2,
 ) -> PluginRetrievalAccess:
@@ -197,6 +205,7 @@ def _kg_access(
             lambda *_args, **_kwargs: NeighborExpansion([], False)
         ),
         collection_overview=collection_overview or (lambda _notebook_id: ""),
+        evidence_elements=evidence_elements or _all_live,
         kg_max_calls=kg_max_calls,
         max_k=2,
         max_calls=2,
@@ -712,6 +721,7 @@ def test_full_plugin_ask_admits_core_citations_and_persists_mode():
     service.retrieval.federated_retrieve_elements = (
         lambda *_args, **_kwargs: [_hit()]
     )
+    service.evidence_context.evidence_elements = _all_live
     service.evidence_context.citation_source_info = lambda _ids: {
         "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
     }
@@ -1103,6 +1113,7 @@ def test_kg_neighbors_resolves_origin_against_the_anchors_own_library_not_active
         search_knowledge=search_knowledge,
         object_neighbors=object_neighbors,
         collection_overview=lambda _notebook_id: "",
+        evidence_elements=_all_live,
         kg_max_calls=4,
         max_k=2,
         max_calls=2,
@@ -1180,6 +1191,7 @@ def test_kg_neighbors_channel_closes_for_narrowed_active_runs_but_not_base_ancho
             search_knowledge=lambda *_a, **_k: [active_object, base_object],
             object_neighbors=object_neighbors,
             collection_overview=lambda _nb: "",
+            evidence_elements=_all_live,
             kg_max_calls=4,
             max_k=2,
             max_calls=2,
@@ -1202,6 +1214,72 @@ def test_kg_neighbors_channel_closes_for_narrowed_active_runs_but_not_base_ancho
             "a mounted-base anchor stays open under LOCAL narrowing -- the "
             "library dimension is orthogonal to source_scope_restricted"
         )
+
+
+def test_kg_evidence_requires_the_element_itself_to_survive_not_just_the_source():
+    """codex #603 R2 P1:source 元数据只证明来源行还在;重解析会整批轮换元素 id
+    而来源行不动,引用绝不能打开一个已被移除的元素。首条绑定元素已死 → 落到
+    第二条存活绑定;全部死 → context-only(空 key、不进 ledger)。"""
+    hit = _object(
+        evidence=[
+            _evidence(element_id="element-dead", source_id="source-1"),
+            _evidence(element_id="element-live", source_id="source-1"),
+        ],
+        notebook_id="notebook-1",
+    )
+    access = _kg_access(
+        search_knowledge=lambda *_a, **_k: [hit],
+        evidence_elements=lambda ids: {
+            element_id: {"source_id": "source-1"}
+            for element_id in ids
+            if element_id == "element-live"
+        },
+        kg_max_calls=4,
+    )
+    key = access.search_kg("查询", 1)[0].evidence_key
+    assert key, "a hit with one surviving binding must stay citable"
+    _, records = admit_plugin_engine_result(access, "回答 [k1]", (key,))
+    assert records[0].element_id == "element-live", (
+        "the citation must bind the first SURVIVING evidence element, not the "
+        "first listed one"
+    )
+
+    all_dead = _object(
+        object_id="ko-dead",
+        evidence=[_evidence(element_id="element-gone", source_id="source-1")],
+        notebook_id="notebook-1",
+    )
+    orphaned = _kg_access(
+        search_knowledge=lambda *_a, **_k: [all_dead],
+        evidence_elements=lambda _ids: {},
+        kg_max_calls=4,
+    ).search_kg("查询", 1)
+    assert orphaned[0].evidence_key == "", (
+        "an object whose every evidence element is gone must degrade to "
+        "context-only -- a durable citation must never open a missing element"
+    )
+
+
+def test_kg_overview_is_suppressed_for_narrowed_active_runs():
+    """codex #603 R2 P2:集合地图的计数接缝只认库维度,本地真收窄的 run 里把
+    整库计数交给插件就是把界外聚合信息漏出去——通道镜像 kg_neighbors 的收窄
+    闸,直接返回空串且零底层调用。"""
+    calls: list[str] = []
+
+    def collection_overview(notebook_id: str) -> str:
+        calls.append(notebook_id)
+        return "整库计数"
+
+    local = ResolvedSourceScope(
+        mode="include", source_ids=["source-1"], narrowed=True
+    )
+    with source_scope_context("notebook-1", local, None):
+        access = _kg_access(collection_overview=collection_overview)
+    assert access.kg_overview() == ""
+    assert calls == [], (
+        "a narrowed run must not pay for -- or receive -- the whole-notebook "
+        "collection map"
+    )
 
 
 def test_kg_overview_is_bounded_and_computed_once_per_run():
@@ -1328,6 +1406,7 @@ def test_ask_service_wires_the_kg_seats_and_persists_object_citations():
     service.collection_catalog = SimpleNamespace(
         collection_map_text=lambda _notebook_id: "[Collections in scope] …"
     )
+    service.evidence_context.evidence_elements = _all_live
     service.evidence_context.citation_source_info = lambda _ids: {
         "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
     }
@@ -1373,6 +1452,7 @@ def test_kg_citation_and_anchor_carry_the_verbatim_grounding_excerpt_not_the_mod
     service.collection_catalog = SimpleNamespace(
         collection_map_text=lambda _notebook_id: ""
     )
+    service.evidence_context.evidence_elements = _all_live
     service.evidence_context.citation_source_info = lambda _ids: {
         "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
     }
