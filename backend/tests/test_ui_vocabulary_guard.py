@@ -6,7 +6,7 @@
 回归——事实上它当时就漏了自己声明的词表的一大半(抽取 / 入图 / 预审 / 晋升 / Memory /
 schema / deprecated 全没进黑名单),而守卫退出码仍是 0。所以这里钉三件事:
 
-  1. **词表覆盖**:AGENTS.md「界面词汇表」第一列的每个词,要么被某条黑名单规则命中,
+  1. **词表覆盖**:`docs/ui-vocabulary.md`「界面词汇表」第一列的每个词,要么被某条黑名单规则命中,
      要么在 NOT_LINTABLE 里有白纸黑字的豁免理由。新增一行却不加规则 → 红。
   2. **正例**:每个黑名单词在渲染文本里都真的会被抓到(没有写了不生效的死规则)。
   3. **反例**:注释 / 标识符 / 插值 / 纯 ASCII / 豁免上下文都不误报。
@@ -46,7 +46,7 @@ def scan_src(tmp_path: pathlib.Path, code: str, name: str = "sample.tsx") -> lis
 
 
 # --------------------------------------------------------------------------
-# 1. 词表覆盖:守卫 ⊇ AGENTS.md 词汇表
+# 1. 词表覆盖:守卫 ⊇ docs/ui-vocabulary.md 词汇表
 # --------------------------------------------------------------------------
 
 # 词汇表里**刻意不做 lint** 的词 → 理由。每一条都是评审过的决定,不是遗漏。
@@ -66,8 +66,8 @@ NOT_LINTABLE = {
 
 
 def table_tokens() -> list[str]:
-    """AGENTS.md 界面词汇表第一列(内部 / 黑话)拆成单个词。"""
-    text = (_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    """docs/ui-vocabulary.md 界面词汇表第一列(内部 / 黑话)拆成单个词。"""
+    text = (_ROOT / "docs/ui-vocabulary.md").read_text(encoding="utf-8")
     section = text.split("## 界面词汇表")[1].split("\n## ")[0]
     rows = [ln for ln in section.splitlines() if ln.startswith("|") and "---" not in ln]
     assert len(rows) > 10, "词汇表没解析出足够的行——表格结构变了,本测试需同步"
@@ -76,6 +76,22 @@ def table_tokens() -> list[str]:
         col = re.sub(r"[（(][^）)]*[）)]", "", row.split("|")[1])  # 去括注
         tokens += [t.strip() for t in re.split(r"[/／、·]|：", col) if t.strip()]
     return tokens
+
+
+def test_词汇文档与守卫登记相同的前端生产扫描面():
+    expected = {
+        _ROOT / "frontend" / "app",
+        _ROOT / "frontend" / "features",
+    }
+    assert set(guard.FRONTEND_PRODUCTION_DIRS) == expected
+    for relative_path in (
+        "docs/ui-vocabulary.md",
+        "docs/product-and-api.md",
+        "docs/product-and-api_zh.md",
+    ):
+        text = (_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "frontend/app" in text
+        assert "frontend/features" in text
 
 
 def test_每个词表条目要么被守卫覆盖要么有豁免理由():
@@ -159,7 +175,7 @@ def test_图谱Schema放行但裸schema仍抓(tmp_path):
     只剥这个复合短语,裸 schema / 裸 Schema(不带「图谱」前缀)照抓,否则守卫被掏空。
 
     没有这条,「放行了图谱 Schema」与「把整条 schema 规则删了」在绿灯下无法区分。
-    真源:AGENTS.md schema 行放行注记 + check_ui_vocabulary.SANCTIONED_UI。"""
+    真源:docs/ui-vocabulary.md schema 行放行注记 + check_ui_vocabulary.SANCTIONED_UI。"""
     # 1) 放行:界面名「图谱 Schema」及其常见后缀不报
     assert scan_src(tmp_path, 'const a = "图谱 Schema";') == []
     assert scan_src(tmp_path, 'const b = "图谱 Schema 已更新";') == []

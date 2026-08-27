@@ -96,7 +96,7 @@ def resolve_agent_profile_names(list_profiles, owner_id: str) -> dict:
     more than ``AGENT_PROFILE_NAME_PAGE`` Agent profiles saw observations from
     the older ones attributed to the unknown-Agent fallback. There is no
     protocol cap on an owner's profile count, so a fixed result-changing page
-    was exactly the numeric-limit shape CLAUDE.md's red line forbids. Paging
+    was exactly the numeric-limit shape AGENTS.md's production rule forbids. Paging
     is bounded by the owner's own roster size (each page issues one bounded
     query); both consumers (``mcp_server._profile_names`` and
     ``agent_profile_routes._observation_agent_names``) call THIS helper so the

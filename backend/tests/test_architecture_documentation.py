@@ -3,6 +3,7 @@ import inspect
 import re
 from pathlib import Path
 
+from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services import report_engine, report_execution, repository_runtime
 
 
@@ -26,13 +27,12 @@ DOCUMENTATION_BUNDLES = {
 CONTRACT_DOCS = (
     "README.md",
     "README_zh.md",
-    "AGENTS.md",
     "architecture.md",
     "fangan_done.md",
     "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md",
     "docs/superpowers/plans/2026-07-10-architecture-contract-alignment.md",
 )
-LIVE_REFERENCE_DOCS = ("README.md", "README_zh.md", "AGENTS.md", "architecture.md")
+LIVE_REFERENCE_DOCS = ("README.md", "README_zh.md", "architecture.md")
 COMPOSITION_HISTORY_DOCS = (
     "docs/superpowers/plans/2026-07-10-repository-composition-refactor.md",
     "docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md",
@@ -172,6 +172,138 @@ def test_root_readmes_are_entrypoints_for_complete_language_doc_bundles():
             assert (ROOT / detail_path).is_file()
 
 
+def test_agents_entrypoint_stays_concise_and_routes_canonical_documents():
+    """AGENTS.md is an operating index, not a second product/architecture manual."""
+    text = _read_file("AGENTS.md")
+    assert len(text.encode("utf-8")) <= 20_000, (
+        "AGENTS.md exceeded its entrypoint budget; move detailed contracts to "
+        "their canonical documents and keep a route here"
+    )
+    for retired_detail_heading in (
+        "## Product Flow",
+        "## MVP Scope",
+        "## Architecture Baseline",
+        "## Frontend/UI",
+        "## LLM Configuration",
+        "## Logging / Observability",
+        "## 界面词汇表",
+    ):
+        assert retired_detail_heading not in text
+    for path in (
+        "docs/product-and-api.md",
+        "architecture.md",
+        "docs/deployment-and-configuration.md",
+        "docs/operations.md",
+        "docs/development.md",
+        "docs/ui-vocabulary.md",
+        "docs/agent-mcp-memory-sop.md",
+        "silicon_notebook_fangan.md",
+        "fangan_done.md",
+    ):
+        assert path in text, f"AGENTS.md does not route agents to {path}"
+        assert (ROOT / path).is_file(), f"AGENTS.md links missing document {path}"
+
+
+def test_claude_entrypoint_stays_claude_specific_and_routes_shared_contracts():
+    """CLAUDE.md retains transport-specific rules without copying product contracts."""
+    text = _read_file("CLAUDE.md")
+    assert len(text.encode("utf-8")) <= 25_000, (
+        "CLAUDE.md exceeded its resident-instruction budget; move shared product, "
+        "architecture, and development contracts to their canonical documents"
+    )
+    for retired_detail_heading in (
+        "## Extension UI Kit 与部署问答引擎",
+        "### 交付完整性",
+        "## 四、深度报告与逐步推理准确性契约",
+        "## KG 探活响应合同",
+        "## KG 检索查询材料",
+    ):
+        assert retired_detail_heading not in text
+    for phrase in (
+        "AGENTS.md",
+        "docs/development.md",
+        ".claude/hooks/require-subagent-model.py",
+        "codex exec review --base <base>",
+        "gh pr checks <PR号>",
+        "gh pr merge <PR号> --rebase",
+    ):
+        assert phrase in text
+
+
+def test_development_docs_require_guard_mutation_verification():
+    english = _read_file("docs/development.md")
+    chinese = _read_file("docs/development_zh.md")
+    for phrase in ("mutation-verified", "deleting", "moving", "actually changed"):
+        assert phrase in english
+    for phrase in ("变异验证", "删除", "移动", "确实命中"):
+        assert phrase in chinese
+
+
+def test_development_docs_keep_efficiency_as_a_first_class_constraint():
+    english = _read_file("docs/development.md")
+    chinese = _read_file("docs/development_zh.md")
+    for phrase in ("first-class engineering constraint", "LLM", "cached", "gated", "low-overhead"):
+        assert phrase in english
+    for phrase in ("一等工程约束", "LLM", "缓存", "门控", "低开销"):
+        assert phrase in chinese
+
+
+def test_development_docs_keep_cross_cutting_frontend_guardrails():
+    english = _read_file("docs/development.md")
+    chinese = _read_file("docs/development_zh.md")
+    for phrase in (
+        "long-running action",
+        "disabled immediately",
+        "FloatingModalCard",
+        "AnomalyBadge",
+        "sourceAnomalies()",
+        "effort-picker.tsx::EffortPicker",
+    ):
+        assert phrase in english
+    for phrase in (
+        "长任务",
+        "立即禁用",
+        "FloatingModalCard",
+        "AnomalyBadge",
+        "sourceAnomalies()",
+        "effort-picker.tsx::EffortPicker",
+    ):
+        assert phrase in chinese
+
+
+def test_development_docs_own_current_schema_migration_rules():
+    english = _read_file("docs/development.md")
+    chinese = _read_file("docs/development_zh.md")
+    agents = _read_file("AGENTS.md")
+    assert (
+        "| Operations, diagnostics, ingestion, migration execution, backfills | "
+        "`docs/operations.md` and `_zh.md` | Paired operations reference |"
+    ) in agents
+    assert (
+        "| Development workflow, architecture guardrails, schema/migration "
+        "authoring, tests, CI, PR policy | `docs/development.md` and `_zh.md` | "
+        "Paired development reference |"
+    ) in agents
+    for phrase in (
+        f"The current schema version is {SCHEMA_VERSION}",
+        "_migration_N",
+        "SCHEMA_VERSION",
+        "SQLite v58 / PostgreSQL v36",
+        "indexing_pipeline_stages",
+        "PostgreSQL 37",
+    ):
+        assert phrase in english
+    for phrase in (
+        f"当前 schema 版本为 {SCHEMA_VERSION}",
+        "_migration_N",
+        "SCHEMA_VERSION",
+        "SQLite v58 / PostgreSQL v36",
+        "indexing_pipeline_stages",
+        "PostgreSQL v37",
+    ):
+        assert phrase in chinese
+
+
 def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own():
     """The cutover runbook follows the single-Chinese-file runbook precedent
     (docs/runtime-dim-truncation-runbook.md) rather than the paired bundles in
@@ -262,7 +394,6 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         {
             "README.md": "domain FastAPI routers composed by `backend/app/api/routes.py`",
             "README_zh.md": "由 `backend/app/api/routes.py` 组合的领域 FastAPI router",
-            "AGENTS.md": "New backend endpoints go to the owning domain router, never `routes.py`.",
             "architecture.md": "`backend/app/api/routes.py` composes the domain FastAPI routers",
         }
     )
@@ -270,7 +401,6 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         {
             "README.md": "aggregate is composition-only",
             "README_zh.md": "聚合层只负责 composition/order",
-            "AGENTS.md": "`routes.py` is composition-only.",
             "architecture.md": "aggregate 只负责组合顺序",
         }
     )
@@ -286,7 +416,6 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         {
             "README.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",
             "README_zh.md": "`backend/app/models/schemas.py` 是旧导入的兼容 facade",
-            "AGENTS.md": "`schemas.py` is legacy compatibility only.",
             "architecture.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",
         }
     )
@@ -294,7 +423,6 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         {
             "README.md": "shared `frontend/app/api-client.ts` transport",
             "README_zh.md": "共享 `frontend/app/api-client.ts` transport",
-            "AGENTS.md": "Frontend HTTP mechanics go through `api-client.ts`",
             "architecture.md": "`frontend/app/api-client.ts` is the shared transport",
         }
     )
@@ -302,17 +430,15 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         {
             "README.md": "default 12 backend pytest workers",
             "README_zh.md": "默认使用 12 个 backend pytest worker",
-            "AGENTS.md": "default 12 backend pytest workers",
             "architecture.md": "默认使用 12 个 backend pytest worker",
         }
     )
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md"):
+    for name in ("README.md", "README_zh.md", "architecture.md"):
         assert "`BACKEND_PYTEST_WORKERS`" in _read(name)
     _assert_phrases(
         {
             "README.md": "CI lane timings are observational only",
             "README_zh.md": "CI 各 lane 时长仅作观察",
-            "AGENTS.md": "CI lane timings are observational only",
             "architecture.md": "CI 各 lane 时长仅作观察",
         }
     )
@@ -320,7 +446,6 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         {
             "README.md": "warm gate hard target is at most 60 seconds",
             "README_zh.md": "warm gate 硬目标是不超过 60 秒",
-            "AGENTS.md": "warm gate hard target is at most 60 seconds",
             "architecture.md": "warm gate 硬目标是不超过 60 秒",
         }
     )
@@ -331,7 +456,6 @@ def test_ask_disconnect_documentation_matches_detached_worker_contract():
         {
             "README.md": "A transport disconnect stops delivery to that client only",
             "README_zh.md": "transport 断连只停止向当前客户端继续推送",
-            "AGENTS.md": "A transport disconnect only stops delivery to that client",
             "architecture.md": "transport 断连只停止向该客户端继续推送",
             "fangan_done.md": "transport 断连只停止向该客户端推送",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -351,7 +475,6 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         {
             "README.md": "Baseline `chunk` retrieval reads chunks from the active notebook only",
             "README_zh.md": "`chunk` 基线只从当前 active notebook 读取 chunk",
-            "AGENTS.md": "Baseline `chunk` retrieval is active-notebook-only",
             "architecture.md": "`chunk` 基线只读取 active notebook 的 chunk",
             "fangan_done.md": "`chunk` 基线只读 active notebook 的 chunk",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -364,7 +487,6 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         {
             "README.md": "The exact-score `base` tie-break applies only to knowledge-object hits",
             "README_zh.md": "exact-score 的 `base` 次序只适用于知识对象命中",
-            "AGENTS.md": "The exact-score `base` tie-break applies only to knowledge-object hits",
             "architecture.md": "exact-score 的 `base` 次序只适用于知识对象命中",
             "fangan_done.md": "exact-score 的 `base` 次序只适用于知识对象命中",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -377,7 +499,6 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         {
             "README.md": "`federated_retrieve_relations()` remains score-only",
             "README_zh.md": "`federated_retrieve_relations()` 的关系命中仍只按 score 排序",
-            "AGENTS.md": "`federated_retrieve_relations()` sorts relation hits by score only",
             "architecture.md": "`federated_retrieve_relations()` 的关系命中只按 score 降序",
             "fangan_done.md": "`federated_retrieve_relations()` 的关系命中仍只按 score 排序",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -409,7 +530,6 @@ def test_mount_documentation_describes_explicit_reference_library_model_and_zero
         {
             "README.md": "every pre-existing notebook starts with zero mounted reference libraries",
             "README_zh.md": "所有既有笔记本挂载数清零",
-            "AGENTS.md": "every pre-existing notebook starts with zero mounted reference libraries",
             "architecture.md": "所有既有笔记本挂载数清零",
         }
     )
@@ -424,7 +544,6 @@ def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
         {
             "README.md": "four tabs — **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report)",
             "README_zh.md": "四个 tab——**问答**（Ask）、**知识库**（Knowledge）、**记忆**（Memory）、**深度报告**（Deep Report）",
-            "AGENTS.md": "four tabs: **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report)",
             "architecture.md": "问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab",
             "fangan_done.md": "问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab",
             "silicon_notebook_fangan.md": "问答 (Ask) | 知识库 (Knowledge) | 记忆 (Memory) | 深度报告 (Deep Report)",
@@ -442,7 +561,6 @@ def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
         {
             "README.md": "The Analysis menu itself contains only the promotion queue",
             "README_zh.md": "「分析」菜单本身只包含晋升队列",
-            "AGENTS.md": "The Analysis menu itself contains only the promotion queue",
             "architecture.md": "「分析」菜单本身只含晋升队列",
             "fangan_done.md": "「分析」菜单当前只含晋升队列",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -474,7 +592,6 @@ def test_live_workspace_docs_have_no_memory_omitting_tab_contracts():
     live_docs = (
         "README.md",
         "README_zh.md",
-        "AGENTS.md",
         "architecture.md",
         "fangan_done.md",
         "silicon_notebook_fangan.md",
@@ -509,7 +626,6 @@ def test_current_memory_docs_describe_sanitized_multi_object_promotion_contract(
     sections = {
         "README.md": _between("README.md", "## Memory and Agent MCP", "## KG extraction trigger"),
         "README_zh.md": _between("README_zh.md", "## Memory 与 Agent MCP", "## KG 抽取触发"),
-        "AGENTS.md": _read("AGENTS.md"),
         "architecture.md": _between("architecture.md", "### 3.4 Memory 与 Agent MCP", "### 3.5 KG 与索引维护"),
         "silicon_notebook_fangan.md": _between("silicon_notebook_fangan.md", "# 19. Agent Memory 系统"),
         "fangan_done.md": _between("fangan_done.md", "## 27. Agent Memory 与 MCP", "## 20. 当前边界"),
@@ -525,12 +641,6 @@ def test_current_memory_docs_describe_sanitized_multi_object_promotion_contract(
             "脱敏后的结构化提取候选与服务端验证过的 evidence",
             "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
             "一个或多个 Base KG 对象",
-            "`base_object_ids`",
-        ),
-        "AGENTS.md": (
-            "sanitized extraction candidates and server-validated evidence",
-            "revalidates current confirmed status and creator access",
-            "one or more Base KG objects",
             "`base_object_ids`",
         ),
         "architecture.md": (
@@ -580,7 +690,6 @@ def test_source_cleanup_documentation_matches_reparse_and_delete_boundaries():
         {
             "README.md": "Reparse preserves the source row and original file",
             "README_zh.md": "重新解析保留 source 行与原始文件",
-            "AGENTS.md": "Reparse preserves the source row and original file",
             "architecture.md": "重新解析保留 source 行与原始文件",
             "fangan_done.md": "重新解析保留 source 行与原始文件",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -593,7 +702,6 @@ def test_source_cleanup_documentation_matches_reparse_and_delete_boundaries():
         {
             "README.md": "deletes the source row",
             "README_zh.md": "删除 source 行",
-            "AGENTS.md": "deletes the source row",
             "architecture.md": "删除 source 行",
             "fangan_done.md": "删除 source 行",
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
@@ -625,20 +733,19 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
 
     readme = _read("README.md")
     readme_zh = _read("README_zh.md")
-    agents = _read("AGENTS.md")
     fangan_done = _read("fangan_done.md")
     assert "`reports` table and `/reports` APIs" in readme
     assert "`reports` 表与 `/reports` API" in readme_zh
-    assert "`reports` table and `/reports` APIs" in agents
-    assert "small notebooks can be copied; large notebooks can be joined read-only" in agents
-    assert "There is no live collaborative editing" in agents
     # 改密流程已上线:旧的「no ... change-password flow」反向陈述必须消失,
-    # 且密码合同(内置管理员拒绝 + 会话吊销范围)必须在 AGENTS.md 登记。
-    assert "or change-password flow" not in agents
-    assert "reject the built-in `user-local` administrator with 409" in agents
-    assert "revokes every other `auth_sessions` row" in agents
-    assert "Single-user mode for now" not in agents
-    assert "no change-password / sharing / collaboration" not in agents
+    # 且密码合同(内置管理员拒绝 + 会话吊销范围)必须在权威产品/开发文档登记。
+    product = _read_file("docs/product-and-api.md")
+    product_zh = _read_file("docs/product-and-api_zh.md")
+    assert "or change-password flow" not in product
+    assert "no change-password / sharing / collaboration" not in product
+    assert "The built-in `admin` account is rejected by both paths (409)" in product
+    assert "every other browser session of that user is revoked" in product
+    assert "内置 `admin` 账号在两条路径都被拒绝（409）" in product_zh
+    assert "该用户其他浏览器会话全部吊销" in product_zh
     assert "更新日期：2026-08-04" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
@@ -679,7 +786,6 @@ def test_completed_repository_boundary_claims_remain_documented():
         {
             "README.md": "Application services do not assemble product SQL",
             "README_zh.md": "application service 不拼装主业务库 SQL",
-            "AGENTS.md": "Application services do not assemble product SQL",
             "architecture.md": "application service 不拼装主业务库 SQL",
             "fangan_done.md": "application service 不再拼装主业务库 SQL",
         }
@@ -688,7 +794,6 @@ def test_completed_repository_boundary_claims_remain_documented():
         {
             "README.md": "one-hop delegates",
             "README_zh.md": "单跳委托",
-            "AGENTS.md": "one-hop delegates",
             "architecture.md": "单跳委托",
             "fangan_done.md": "单跳委托",
         }
@@ -700,7 +805,6 @@ def test_repository_runtime_and_verifier_completion_claims_are_synchronized():
         {
             "README.md": "Synchronous Ask/report submission failures",
             "README_zh.md": "Ask/report 同步提交失败",
-            "AGENTS.md": "Synchronous Ask/report submission failures",
             "architecture.md": "Ask/report 同步提交失败",
             "fangan_done.md": "Ask/report 同步提交失败",
         }
@@ -709,7 +813,6 @@ def test_repository_runtime_and_verifier_completion_claims_are_synchronized():
         {
             "README.md": "only SHM mtime is exempt",
             "README_zh.md": "只豁免 SHM mtime",
-            "AGENTS.md": "only SHM mtime is exempt",
             "architecture.md": "只豁免 SHM mtime",
             "fangan_done.md": "只豁免 SHM mtime",
         }
@@ -738,10 +841,6 @@ def test_projection_ownership_claim_matches_sql_and_application_boundaries():
     _assert_phrases(
         {
             "README.md": (
-                "Stores own product SQL and raw row selection; established "
-                "application/query components may assemble domain/application projections"
-            ),
-            "AGENTS.md": (
                 "Stores own product SQL and raw row selection; established "
                 "application/query components may assemble domain/application projections"
             ),
@@ -792,10 +891,6 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
     _assert_phrases(
         {
             "README.md": (
-                "`RepositoryRuntime` owns or references composed runtime state; "
-                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
-            ),
-            "AGENTS.md": (
                 "`RepositoryRuntime` owns or references composed runtime state; "
                 "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
             ),
@@ -859,7 +954,6 @@ def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
         {
             "README.md": "Retired ids `fast` and `global` are transparently remapped to `chunk`",
             "README_zh.md": "退役 id `fast`、`global` 透明映射到 `chunk`",
-            "AGENTS.md": "retired `fast`/`global` ids map to `chunk` only for persisted-session compatibility",
             "architecture.md": "退役 mode id 只保留兼容映射",
             "fangan_done.md": "KG-native Ask（chunk / graph / reasoning",
         }
@@ -893,19 +987,6 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
             "格子照常切成 chunk 供问答使用，但不建任何图谱节点",
             "绝不自动触发",
         ),
-        "AGENTS.md": (
-            "Cell code attachments are stored per cell but never executed, indexed, embedded, "
-            "FTS'd, projected into the KG, or included in Ask context",
-            # NOTE: the enumerated scope list used to be pinned here as a
-            # literal. It now lives in
-            # `test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface`,
-            # DERIVED from `AGENT_SCOPES` and checked for set equality — which
-            # is strictly stronger and, unlike a literal, cannot itself go
-            # stale. Keeping a second hand-copied spelling here would mean two
-            # places to update and one of them silently authoritative.
-            "plus the four knowhow tools `list_knowhow_tables`, `get_knowhow_discrimination`, "
-            "`get_knowhow_row`, and `put_knowhow_cell_code`",
-        ),
         "architecture.md": (
             "唯一零 LLM 的 KG 写入方",
             "代码只存不执行，永不进 element/chunk/embedding/FTS/KG",
@@ -926,11 +1007,6 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
 
     # The pre-knowhow scope/tool lists must not resurface as current contract.
     assert "精确七工具" not in _read("fangan_done.md")
-    for name in ("AGENTS.md",):
-        compact_text = "".join(_read(name).split())
-        assert "".join("`memory:propose`, and `ask:execute`.".split()) not in compact_text, (
-            f"{name} retains the retired five-scope list as current"
-        )
 
 
 def _chinese_number(value: int) -> str:
@@ -1003,7 +1079,7 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
     expected_tools = set(PUBLIC_TOOLS)
     count_word = _chinese_number(len(PUBLIC_TOOLS))
     chinese_docs = ("architecture.md", "README_zh.md")
-    english_docs = ("AGENTS.md", "README.md")
+    english_docs = ("README.md",)
 
     # Existence check across every doc that claims to describe the surface.
     for name in chinese_docs + english_docs:
@@ -1018,7 +1094,7 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
     # discusses the write boundary rather than enumerating auth scopes, so
     # demanding the whole set there would push reference material into an
     # architecture document to satisfy a test.
-    for name in ("AGENTS.md", "README.md", "README_zh.md"):
+    for name in ("README.md", "README_zh.md"):
         text = _read(name)
         for scope in sorted(AGENT_SCOPES):
             assert f"`{scope}`" in text, (
@@ -1063,19 +1139,6 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
             f"{_where(name)} must describe the complete "
             f"{len(PUBLIC_TOOLS)}-tool MCP surface"
         )
-
-    # The AGENTS.md scope sentence must equal the runtime vocabulary exactly.
-    # Derived from `AGENT_SCOPES`, so adding a tenth scope without touching
-    # the docs fails here rather than silently shipping an undocumented one.
-    sentence = re.search(
-        r"The only scopes are [^.]+\.", _read_file("AGENTS.md")
-    )
-    assert sentence, "AGENTS.md lost its authoritative Agent-scope sentence"
-    assert _scope_names(sentence.group(0)) == set(AGENT_SCOPES), (
-        "AGENTS.md's 'The only scopes are ...' sentence does not equal "
-        f"AGENT_SCOPES; documented={sorted(_scope_names(sentence.group(0)))}, "
-        f"actual={sorted(AGENT_SCOPES)}"
-    )
 
     # `fangan_done.md` / `silicon_notebook_fangan.md` are dated accounting:
     # "十一个工具" is a true statement about what the 2026-07-16 feature
@@ -1158,19 +1221,13 @@ def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferre
         )
 
 
-def test_deployment_extension_boundary_is_in_all_agent_entry_documents():
-    """部署插件（`EXTENSIONS_CONFIG`）是部署时装载面，必须同时进四份 agent 入口
-    文档：README.md、README_zh.md、AGENTS.md、CLAUDE.md。前三份来自 Documentation
-    Sync 规则；CLAUDE.md 则是那条规则**登记在案的例外**——它已不属于常规同步集合
-    （见 AGENTS.md「Documentation Sync」：特性级契约一律进 AGENTS.md/docs，且
-    scripts/check_claude_md_budget.py 钉住它的体量），但扩展点是跨改动的架构边界，
-    而 CLAUDE.md 是 Claude Code 会话唯一实际加载的规范，所以这一组关键词刻意留在
-    它的「扩展点边界」一条里。改那一条时要连本用例一起跑。casefold + `_`/`-` 折成
-    空格后做子串匹配，两侧措辞不必逐字相同（中英文各自撰写），只要求同一组事实
-    各自可查。
-    """
+def test_deployment_extension_boundary_is_in_canonical_deployment_docs():
+    """Deployment details live in the paired deployment references, not agent entry files."""
 
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+    for name in (
+        "docs/deployment-and-configuration.md",
+        "docs/deployment-and-configuration_zh.md",
+    ):
         normalized = (
             (ROOT / name)
             .read_text(encoding="utf-8")
@@ -1180,18 +1237,36 @@ def test_deployment_extension_boundary_is_in_all_agent_entry_documents():
         )
         assert "extensions config" in normalized, name
         assert "deployment" in normalized, name
-        assert "trust" in normalized, name
         assert "restart" in normalized or "重启" in normalized, name
-        assert "api extensions" in normalized, name
+    for name in (
+        "docs/deployment-extensions-sop.md",
+        "docs/deployment-extensions-sop_zh.md",
+    ):
+        assert "/api/extensions/{plugin_id}" in _read_file(name), name
 
 
-def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
-    """界面词汇守卫是**开发约束**变更(新增硬门 + AGENTS.md 词汇契约),按仓库
-    Documentation Sync 规则必须同步两份 README:守卫存在、怎么单独跑、契约在哪。
+def test_plugin_admission_degradation_timing_lives_in_product_docs():
+    english = _read_file("docs/product-and-api.md")
+    chinese = _read_file("docs/product-and-api_zh.md")
+    for phrase in (
+        "same core-owned trace callback",
+        "without `duration_ms`",
+        "immediately before the timed terminal step",
+        "durable rows",
+    ):
+        assert phrase in english
+    for phrase in (
+        "同一个 core-owned 轨迹回调",
+        "不带",
+        "`duration_ms`",
+        "终止步骤之前",
+        "durable 轨迹行",
+    ):
+        assert phrase in chinese
 
-    review 阻塞 5:PR 把 check_ui_vocabulary.py 挂进了 check.sh 并在 AGENTS.md 立了
-    强制词汇契约,却只改了 AGENTS.md,两份 README 的开发/验证说明没跟。
-    """
+
+def test_user_facing_vocabulary_guard_is_documented_in_both_product_bundles():
+    """The README bundles link the dedicated vocabulary source and explain its guard."""
     _assert_phrases(
         {
             "README.md": "PYTHONPATH=backend python scripts/check_ui_vocabulary.py",
@@ -1200,8 +1275,8 @@ def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
     )
     _assert_phrases(
         {
-            "README.md": "`AGENTS.md`「界面词汇表」is its single source of truth",
-            "README_zh.md": "真源是 `AGENTS.md`「界面词汇表」",
+            "README.md": "[the UI vocabulary](./ui-vocabulary.md) is its single source of truth",
+            "README_zh.md": "真源是[界面词汇约定](./ui-vocabulary.md)",
         }
     )
     # 守卫的两条独立检查都要在文档里露出,否则「兜底即原值」会被当成风格建议。
@@ -1215,8 +1290,8 @@ def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
     # 否则「同一脚本里的第二条检查」这句会把人带到早已删掉的正则上。
     _assert_phrases(
         {
-            "README.md": "`frontend/app/raw-enum-fallback.test.mjs`",
-            "README_zh.md": "`frontend/app/raw-enum-fallback.test.mjs`",
+            "README.md": "`frontend/tests/guards/raw-enum-fallback.test.mjs`",
+            "README_zh.md": "`frontend/tests/guards/raw-enum-fallback.test.mjs`",
         }
     )
     _assert_phrases(
@@ -1234,17 +1309,17 @@ def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
     )
     # 第二轮 review 阻塞 2:守卫作用域从「frontend/app 目录」改成「信任边界」——
     # 后端 user_error() 的文案会被前端原样上屏,所以同样受词表约束。这是开发者
-    # 写后端错误文案时必须知道的约束,三份文档都要说明白。
+    # 写后端错误文案时必须知道的约束,词汇真源与产品文档都要说明白。
     _assert_phrases(
         {
-            "AGENTS.md": "作用域跟着信任边界走，不跟着目录走",
+            "docs/ui-vocabulary.md": "守卫作用域跟着信任边界走",
             "README.md": "scope follows the **trust boundary rather than the directory tree**",
             "README_zh.md": "作用域跟着信任边界走、不跟着目录树走",
         }
     )
     _assert_phrases(
         {
-            "AGENTS.md": '后端 `user_error(status, "…")` 的消息字面量',
+            "docs/ui-vocabulary.md": '`user_error(status, "…")` 的消息字面量',
             "README.md": 'the message literals of every backend `user_error(status, "…")` call',
             "README_zh.md": '后端每处 `user_error(status, "…")` 的消息字面量',
         }
@@ -1252,7 +1327,7 @@ def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
     # 反向边界同样要写明,否则下一个人会顺手把 str(exc) 也纳进来。
     _assert_phrases(
         {
-            "AGENTS.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
+            "docs/ui-vocabulary.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
             "README.md": "Bare `HTTPException(detail=str(exc))` stays outside the scan on purpose",
             "README_zh.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
         }
@@ -1269,7 +1344,7 @@ def test_default_notebook_name_is_documented_as_a_contract_not_copy():
             "README_zh.md": "属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们",
         }
     )
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md", "fangan_done.md"):
+    for name in ("README.md", "README_zh.md", "architecture.md", "fangan_done.md"):
         assert "Untitled notebook" in _read(name), (
             f"{name} 不再钉着默认库名 Untitled notebook——文档与代码已失配"
         )

@@ -215,7 +215,7 @@ def test_sources_scoped_to_owned_notebooks_only(repo):
 def test_ask_and_reports_are_owner_only_like_sources(repo):
     """三类**统一**按该用户自有的笔记本收窄(owner-only)。
 
-    共享库里该用户自己提的问 / 生成的报告不进这份清单:设计稿 §5 与 CLAUDE.md
+    共享库里该用户自己提的问 / 生成的报告不进这份清单:设计稿 §5 与 `docs/product-and-api.md`
     红线的口径是「用量合计包含共享库提交，但展开清单刻意沿用 owner-only」，而活动
     流就是展开清单。此前 ask/report 只按 created_by 过滤，于是同一次会话里出现两种
     口径——不带 notebook_id 时吐出别人库里的行，客户端按那个 notebook_id 收窄却又

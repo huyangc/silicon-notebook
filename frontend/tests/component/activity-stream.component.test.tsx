@@ -97,7 +97,7 @@ test("三类活动条目各自渲染类型、状态与标题", () => {
 });
 
 
-// CLAUDE.md 红线:来源异常小字唯一渲染路径是 AnomalyBadge + sourceAnomalies()。
+// `docs/product-and-api.md` 契约:来源异常小字唯一渲染路径是 AnomalyBadge + sourceAnomalies()。
 // 断言按 class 判定而不是按文字——手搓一个写着同样文字的 <span> 不会带这些 class。
 test("来源行的异常小字经 AnomalyBadge 渲染，并保持 integrity → retrieval → info 的顺序", () => {
   const { container } = stream([
@@ -126,7 +126,7 @@ test("无异常的来源行不挂任何异常小字", () => {
 });
 
 
-// ⚠ CLAUDE.md 红线:报告耗时只能是 generation_started_at → updated_at。旧报告缺
+// ⚠ `docs/product-and-api.md` 契约:报告耗时只能是 generation_started_at → updated_at。旧报告缺
 // 开始戳时**不编造耗时**——绝不能退回 updated_at - created_at,那会把用户确认大纲
 // 的等待算进去。把实现改成 created_at→updated_at 时,下面这条会因为读到
 // 「总耗时 20 分钟」而报红。

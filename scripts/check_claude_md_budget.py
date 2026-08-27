@@ -4,13 +4,13 @@
 这个门存在的理由是实测的棘轮：`CLAUDE.md` 在 2026-07-24 到 2026-08-27 之间从
 20 KB 涨到 307 KB（约 16 万字符、每次会话固定注入约 9 万 token），315 次提交里
 没有一次是净删——每个 PR 往里追加一段特性结论，从不回收。抽样统计显示，这些段落
-里**中位 98.5%** 的标识符在 `AGENTS.md` + `docs/` 里已经有更全的版本，也就是说
+里**中位 98.5%** 的标识符在其他仓库文档里已经有更全的版本，也就是说
 增长的几乎全部是第三份副本，而不是新信息。
 
 `CLAUDE.md` 与别的文档不同：它是 Claude Code **每次请求**都要重新付费的固定成本，
 所以它的判据不是「这条规则对不对」，而是「与该特性无关的下一个改动还需要它吗」。
-不需要，就写进 `AGENTS.md` / `docs/`——那两处不进 Claude Code 的常驻上下文，且随
-代码一起维护。
+不需要，就写进负责该主题的 canonical document；只有仓库级 Agent 工作流或路由变化
+才更新 `AGENTS.md`。这些文档不进 Claude Code 的常驻上下文，且随代码一起维护。
 
 因此这里钉两个数：
 
@@ -45,16 +45,17 @@ ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "CLAUDE.md"
 
 # 精确等于当前实际值。只许降——降了必须在同一个 PR 里把这两个数一起降。
-BASELINE_CHARS = 14_638
-BASELINE_LINE_CHARS = 823
+BASELINE_CHARS = 3_399
+BASELINE_LINE_CHARS = 79
 
 _GREW_ADVICE = """
 涨了多半是「这段内容放错文件」而不是「baseline 该调大」。先回答判据：
   与该特性无关的下一个改动，还需要这条规则吗？
-  否 → 写进 AGENTS.md（开发契约真源）或 docs/ 下负责该主题的中英文权威文档；
+  否 → 写进 architecture.md 或 docs/ 下负责该主题的中英文权威文档；只有仓库级
+       Agent 工作流或文档路由变化时才更新 AGENTS.md；
        精确数值上限一律只登记在 docs/product-and-api.md / _zh.md。
-  是 → 用一句话写进 CLAUDE.md 的对应红线，细节仍然留在 AGENTS.md，并在第四章
-       的路由表里给出去处；确实净增长了，就在**同一个 PR 里**把下面报出的新值
+  是 → 用一句话写进 CLAUDE.md 的对应规则，细节仍然留在 owning document，并在
+       路由表里给出去处；确实净增长了，就在**同一个 PR 里**把下面报出的新值
        写回 baseline，并在 PR 里说明为什么这条规则对未来所有改动都成立。
        那一行 diff 就是评审信号。
 """.rstrip()

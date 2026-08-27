@@ -18,7 +18,7 @@
 //
 // This file does **not** touch the file tree (no copy into
 // `frontend/features/ext-arxiv-search/`, no env var) — the sample package
-// deliberately never enters the default `npm run test` tree (CLAUDE.md
+// deliberately never enters the default `npm run test` tree (`docs/development.md`
 // "Workspace UI registry": `extension-ui-host.component.test.tsx`'s
 // "length 1 with zero plugins" must stay green). The G2-only lane that
 // actually synchronizes it and exercises the five `extension-*.test.mjs`

@@ -246,6 +246,7 @@ Contributor safety: any task that will write repository code, tests, documentati
 | Need | Document |
 | --- | --- |
 | Product behavior, retrieval modes, Memory/MCP, knowhow, APIs, current limitations | [Product and API reference](./docs/product-and-api.md) |
+| User-visible Chinese terminology | [UI vocabulary contract](./docs/ui-vocabulary.md) |
 | Step-by-step external Agent setup, Codex/Claude CLI, and runnable MCP/Memory example | [Agent MCP and Memory onboarding SOP](./docs/agent-mcp-memory-sop.md) |
 | Building, integrating and operating an out-of-tree deployment plugin (backend bundle, build-time UI package, install, rejection codes) | [Deployment extensions SOP](./docs/deployment-extensions-sop.md) |
 | Installation, source/production deployment, model services, settings | [Deployment and configuration](./docs/deployment-and-configuration.md) |
@@ -274,6 +275,4 @@ Chinese counterparts are linked from the top of each split document.
 
 ## Documentation maintenance
 
-Keep this README as the concise project entry point. Detailed behavior belongs in the owning document listed above, and English/Chinese counterparts must remain aligned. Changes to setup, product behavior, architecture, or development constraints still update `README.md`, `README_zh.md`, and `AGENTS.md` together, plus the relevant canonical detail document.
-
-`CLAUDE.md` is deliberately outside that set. Claude Code auto-loads it every session, so it is scoped to cross-cutting constraints plus the procedures that exist only in that context, and it routes to `AGENTS.md` / `docs/` for feature-level contracts; `scripts/check_claude_md_budget.py` pins its size in the G1 contracts lane. Update it only when a change alters a cross-cutting constraint it already states. See `AGENTS.md` → Documentation Sync.
+Keep this README as the concise project entry point. Detailed behavior belongs in the owning document listed above, and English/Chinese counterparts must remain aligned. Update this README pair only when entry-point material changes; update `AGENTS.md` only for repository-wide agent workflow/routing changes and `CLAUDE.md` only for Claude Code-specific resident rules. Ordinary product, architecture, deployment, operations, and development changes update their owning canonical documents instead of being copied into every entry file.

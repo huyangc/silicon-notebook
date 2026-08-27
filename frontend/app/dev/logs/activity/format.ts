@@ -29,7 +29,7 @@ const NO_TITLE = "（无标题）";
 // 返回空串(见其测试 test_whitespace_only_source_title_still_beats_the_file_name)
 // ——它代表"这份来源的显示名就是没有",不是"没有就换个名字凑合"。如果这里
 // 再加一层 `|| file_name`,同一篇 title="   " 的来源在引用卡上是"无名"、
-// 在活动流里却叫 q3-report.pdf,正是 CLAUDE.md 红线要防的"同一批来源两个
+// 在活动流里却叫 q3-report.pdf，正是 `docs/product-and-api.md` 契约要防的"同一批来源两个
 // 名字"。前端把空标题渲染成占位符是合法的展示决策,但那个决策(NO_TITLE)
 // 必须发生在 display_title 已经确定为空**之后**,不能在它之前塞进一个
 // 不同的回退来源。

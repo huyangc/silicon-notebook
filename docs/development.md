@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [中文说明](./development_zh.md)
 
-This document preserves the contributor-facing architecture summary, verification gate, workflow, test architecture, and documentation-maintenance contract. [AGENTS.md](../AGENTS.md) remains the full agent/developer contract and [architecture.md](../architecture.md) the detailed runtime architecture.
+This document preserves the contributor-facing architecture summary, verification gate, workflow, test architecture, and documentation-maintenance contract. [AGENTS.md](../AGENTS.md) is the short coding-agent entry point and document router; [architecture.md](../architecture.md) owns the detailed runtime architecture.
 
 The external-Agent MCP surface has one API-owned registration host and a startup-frozen catalog: the fixed bundles under `app.api.mcp_tools` captured as the exact 23-tool surface. `mcp_server.PUBLIC_TOOLS` is that live catalog, and `CORE_TOOLS` is the same list under its structural name -- there is no second, hand-maintained copy. Core handlers preserve their validation/auth/I/O order and use the same live authority, owner-write, progress, and output boundaries. Exceptions map to stable public codes. Registration/listing performs zero repository/model work. The former external `agent.tool_provider` descriptor-append half had no consumer and has been removed.
 
@@ -39,8 +39,13 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 57. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v57 and remains readable. Those migrations
+Schema changes remain version-gated behind `SqliteMigrator`: append a new
+`_migration_N`, bump `SCHEMA_VERSION`, and never modify a sealed migration.
+Startup recovery, stable seeds, and administrator upgrades run every boot
+outside that version gate.
+
+The current schema version is 59. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v59 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -380,6 +385,22 @@ No table or foreign key is added; the forward-shadow invariants are 82 business
 tables, 113 unique surfaces, and 12 row slots. The current pairing is SQLite 57
 / PostgreSQL 35 / epoch 1.
 
+SQLite v58 / PostgreSQL v36 adds the pluggable-indexing-pipeline columns:
+`notebooks.indexing_pipeline` is the nullable desired selection (`NULL` means
+builtin), while `indexing_pipeline_version`, `indexing_pipeline_generation`,
+and `indexing_pipeline_job_id` are non-null authority columns. The published
+product identity pair `(indexing_pipeline_id, indexing_pipeline_version)` is
+also added to `unified_kg_state` and `extraction_runs`. This migration adds no
+table, foreign key, or unique surface.
+
+SQLite v59 / PostgreSQL v37 adds durable `indexing_pipeline_stages` and
+`indexing_pipeline_stage_sources`. Both are `TableClass.LOCAL_EPHEMERAL`: they
+exist in both schemas and count toward schema totality, but forward-shadow
+copy/capture/apply never transfers a backend-local worker's lease state. The
+current pairing is SQLite 59 / PostgreSQL 37 / epoch 1, with 84 application
+tables (82 replicated plus 2 local staging tables), 113 replicated unique
+surfaces, and a 12-row-slot branch-counted foreign-key bound.
+
 Run it only while application/background writers are stopped:
 
 ```bash
@@ -617,13 +638,36 @@ Developer-only gold-generation/build/validation scripts that consume external
 PDF parse output remain outside `scripts/check.sh`; that exception never
 applies to committed tests.
 
+Efficiency is a first-class engineering constraint. Before adding an LLM,
+embedding, or database call, evaluate whether the work can be combined,
+cached, deferred, made asynchronous, or gated until the user-visible surface
+needs it. Strong consistency and eager computation are explicit opt-ins;
+ordinary paths stay low-overhead by default.
+
+Cross-cutting frontend interaction guardrails stay small but explicit:
+
+- A control that starts a long-running action becomes disabled immediately and
+  shows a busy label or spinner until that action settles; server-side
+  single-flight is not a substitute for local double-submit protection. When a
+  new entry point falls outside the bounded long-task guard, extend the guard
+  or record the gap in review.
+- New centered or draggable dialogs reuse `FloatingModalCard` and publish
+  through the root modal coordinator instead of recreating overlay, dragging,
+  focus, palette, border, or radius behavior.
+- Source-activity anomalies render only through `AnomalyBadge` backed by
+  `sourceAnomalies()`; do not hand-roll inline warning styles or symbols.
+- Five-grade effort selectors reuse
+  `frontend/app/effort-picker.tsx::EffortPicker`; do not duplicate the range
+  control or recreate its popover. `frontend/tests/unit/effort-picker.test.mjs`
+  guards the shared implementation and its callers.
+
 ## Development Workflow
 
 For every task that will write repository code, tests, documentation, or configuration, create a new linked git worktree and branch before the first write, complete and verify the work there, and open any resulting PR from that branch. The main local checkout stays read-only for the task; tiny fixes are not exempt. If the current directory is already an isolated linked worktree, keep working there. Pure research, design, status, and review-only work does not require a worktree.
 
 For approved multi-step implementation plans, use subagent-driven development by default: assign each task to a fresh implementation subagent and require task-scoped specification and code-quality review before moving on. Research, design, status, and review-only work does not require a worktree or subagents.
 
-`CLAUDE.md` is the Claude Code operating standard for this repository. Claude Code auto-loads only `CLAUDE.md` and `.claude/rules/`, never `AGENTS.md`, so that file carries the cross-cutting constraints that must stay resident plus the procedures unique to that context, and routes to the `AGENTS.md` sections and `docs/` pairs to consult on demand; `AGENTS.md` remains the source of truth where the two disagree, and `CLAUDE.md` enumerates the few deliberate exceptions. Because every character in it is a fixed per-request cost, feature-level contracts stay out of it and `scripts/check_claude_md_budget.py` pins its size in the G1 contracts lane — see Documentation Maintenance above for the placement test. Its hardest rule is that **spawning a subagent must state the model explicitly instead of inheriting the main agent's** — tiered by how much judgment the task needs: `opus` for judgment work (writing plans, review, architectural trade-offs, hard diagnoses), `sonnet` for transcription-shaped implementation whose spec is already pinned down, `haiku` for pure search and location. The PreToolUse gate `.claude/hooks/require-subagent-model.py` enforces it: a call that passes no `model` and whose `subagent_type` is not pinned to a model in `.claude/agents/` is denied. Three pinned roles ship in `.claude/agents/`: `impl-task` (sonnet), `spec-review` (opus), and `code-quality-review` (opus). `backend/tests/test_claude_subagent_model_hook.py` is the hook's regression net — it runs the real script over a subprocess boundary and covers both directions, the bypasses that would let an inherited-model call through and the false denials that would push people to work around the gate.
+`CLAUDE.md` is the Claude Code operating standard for this repository. Claude Code auto-loads only `CLAUDE.md` and `.claude/rules/`, so it keeps Claude-specific resident rules and routes product, architecture, deployment, operations, and development questions to the same canonical documents listed by `AGENTS.md`. Neither file is a duplicate product or architecture reference. Its hardest rule is that **spawning a subagent must state the model explicitly instead of inheriting the main agent's** — tiered by how much judgment the task needs: `opus` for judgment work (writing plans, review, architectural trade-offs, hard diagnoses), `sonnet` for transcription-shaped implementation whose spec is already pinned down, `haiku` for pure search and location. The PreToolUse gate `.claude/hooks/require-subagent-model.py` enforces it: a call that passes no `model` and whose `subagent_type` is not pinned to a model in `.claude/agents/` is denied. Three pinned roles ship in `.claude/agents/`: `impl-task` (sonnet), `spec-review` (opus), and `code-quality-review` (opus). `backend/tests/test_claude_subagent_model_hook.py` is the hook's regression net — it runs the real script over a subprocess boundary and covers both directions, the bypasses that would let an inherited-model call through and the false denials that would push people to work around the gate.
 
 A pull request must be reviewed by codex before it is merged, and **every round's raw output is posted verbatim to the PR** — rounds that raise nothing included, rounds run by hand included — alongside the trigger, the exact command, the head SHA, and the exit code with output size, so a reader can confirm the run happened and was not paraphrased away. A round counts as successful only when the exit code is zero **and** the output is non-empty: a review killed by SIGTERM also exits zero, and trusting the exit code alone posts an empty comment that reads as a pass. P0/P1 findings block: verify them, fix what holds up, and re-review until the verdict is non-blocking — stop for a human decision only when the finding does not hold up (then follow the rejection rule below) or when the fix itself needs a human call; P2/P3 do not block and may be declined with a stated reason; output whose priority tags cannot be parsed blocks conservatively instead of defaulting to a pass. A finding may be rejected on the merits — codex reviews the diff and does not always know the runtime facts — but a rejection must carry its reasoning and evidence on the PR, a comment recording the trade-off in the code, and a regression test pinning the behavior that was kept. Merging does not require a fresh approval on every PR: once the review is non-blocking **and** CI is fully green, merge with `--rebase`. Never merge while findings block or the review output cannot be parsed — fix and re-review first — and never merge when CI is not green or the user has said they will merge it themselves. CI counts as green only when `gh pr checks` reports every check as `pass` — `mergeStateStatus: CLEAN` means nothing is blocking the merge, not that the checks ran green. Before merging, confirm on the PR itself that a review for the PR's **remote** head (`headRefOid`, never local `git rev-parse HEAD` — a stale local checkout matches an older review while the merge takes the unreviewed remote head) has been posted: review automation that silently never fired looks exactly like one that passed, and neither the agent's report nor the hook's local state is evidence — only the comment on the PR is. The review automation itself is a per-developer Claude Code hook rather than a repository artifact, so a fresh clone will not have it; the rule stands regardless, and `CLAUDE.md` documents the manual command.
 
@@ -633,18 +677,13 @@ A pull request must be reviewed by codex before it is merged, and **every round'
 - Backend and frontend static contracts use semantic identities such as module path, qualified scope, operation kind, target, and reviewed count. Source positions are diagnostic metadata only; line numbers, source offsets, CSS order, and source slices must never identify an expected site.
 - Frontend tests never live beside production code: `frontend/tests/unit` contains `node:test` pure-logic cases, `frontend/tests/guards` contains architecture/security/vocabulary/entry contracts, and `frontend/tests/component` contains Vitest/jsdom/Testing Library behavior tests. Shared setup and semantic source adapters live in `frontend/test-support`; the runners recursively collect these directories, and a location guard rejects tests under `frontend/app` or `frontend/features`.
 - Component behavior must not be pinned through CSS geometry or source layout. A routine feature refactor should change tests only when its observable contract changes.
+- Every new static or semantic guard must be mutation-verified before landing: prove that both deleting the protected behavior and moving the violation to another relevant site make the guard fail, and first confirm that each mutation actually changed the intended site. Remove the mutations after recording the result; a green test against an ineffective mutation is not evidence.
 - Committed tests may not be disabled with skip/xfail/todo/only. Repository policy tests enforce this across test entrypoints and their helper modules, and prevent direct production-source reads outside the shared semantic-source adapter.
 - The frontend source policy is intentionally bounded: it rejects AST position/collection-order APIs and source-named text position operations syntactically, while the shared `semantic-source.mjs` adapter may expose AST semantics but may not use text slicing, splitting, indexing, or length as a contract. Do not replace this with whole-JavaScript data-flow interpretation; ordinary array operations stay valid.
 - Backend test startup prewarms one repo-local Matplotlib font cache before xdist workers start. Keep that controller boundary: letting each graph worker enumerate macOS fonts independently adds avoidable multi-second cold starts.
 
 ## Documentation Maintenance
 
-When product behavior, setup, architecture, or development constraints change, update all of these files together:
+Update every canonical document whose owned surface actually changes; one change may affect product, deployment, operations, and development surfaces together. Maintain English/Chinese pairs together: `product-and-api`, `deployment-and-configuration`, `operations`, or `development`. Update the root README pair only when its quick start, high-level current boundaries, or navigation changes. Update `AGENTS.md` only for repository-wide agent workflow/routing rules and `CLAUDE.md` only for Claude Code-specific resident rules. Tests must validate each canonical owner rather than requiring detailed facts to be duplicated in entry files.
 
-- `README.md`
-- `README_zh.md`
-- `AGENTS.md`
-
-Keep the root READMEs concise. Also update the owning English/Chinese canonical pair under `docs/`: `product-and-api`, `deployment-and-configuration`, `operations`, or `development`.
-
-`CLAUDE.md` is deliberately outside that set, because Claude Code auto-loads it on every session and every character is a fixed per-request cost. It carries only constraints that hold for the next unrelated change plus the procedures unique to that context, and routes to `AGENTS.md` / `docs/` for feature-level contracts. `scripts/check_claude_md_budget.py` (G1 contracts lane) pins its total character count and longest line as exact baselines, a decrease-only ratchet that fails in both directions: growth must answer the placement test, and a shrink must lower the baseline in the same PR so no unaccounted headroom accumulates. Update it when a change alters a cross-cutting constraint it already states — and note that four G1 guards assert extension/stage boundary keywords appear in its text, so run them when editing that bullet.
+Because Claude Code auto-loads `CLAUDE.md`, `scripts/check_claude_md_budget.py` pins its total character count and longest line as exact baselines in the G1 contracts lane. Any size change must update those baselines in the same PR so no unaccounted headroom accumulates. Keep feature-level contracts in their canonical documents; change `CLAUDE.md` only when its Claude-specific resident rules or routing change.

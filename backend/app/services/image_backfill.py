@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 # ---------------------------------------------------------------- 协议边界常量
-# 这些不是"可调预算"，而是对齐算法自身的形状约束（见 CLAUDE.md「数值上限与截断」：
+# 这些不是"可调预算"，而是对齐算法自身的形状约束（见 AGENTS.md「Production code」：
 # 不可调的协议边界复用具名常量，部署需要调整的预算才进 Settings）。图片张数与
 # 单图字节这两个**真正的部署预算**一律读 Settings 现值，本模块不重新定义。
 

@@ -7,8 +7,8 @@
 // `frontend/features/extension-sdk` 那份既有守卫（extension-plugin-package-guard /
 // extension-ui-boundary）只扫描 `features/ext-*` 与 `features/agent-profile` 这两类
 // 插件包，本组件与它的调用点都在 `frontend/app/` 下——不在那两份守卫的扫描面里，
-// 一次把导入悄悄换成 `/api/extensions/*` 不会被它们抓到。这是 CLAUDE.md T3 变异
-// 清单第 4 条钉的那个"不红则补一条"缺口。
+// 一次把导入悄悄换成 `/api/extensions/*` 不会被它们抓到。这是按
+// `docs/development.md` 通用变异验证规则在评审中发现并补上的缺口。
 //
 // 覆盖边界（如实说明，不声称全覆盖）：本守卫按 AST 认**调用名**与**字符串字面量**
 // 两种形态——`fetch("/api/extensions/...")`、`someExtensionApi()` 这类都能抓到。

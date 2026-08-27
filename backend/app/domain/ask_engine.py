@@ -63,7 +63,7 @@ class AskEngineDescriptor:
 class AskEngineContext:
     """The complete request projection visible to a plugin engine in v1.
 
-    刻意**不带** notebook/actor id(codex #602 R12 P2):合同(AGENTS.md ask.engine
+    刻意**不带** notebook/actor id(codex #602 R12 P2):合同(docs/product-and-api*.md ask.engine
     条)写明 provider 只收当前问题与四个端口——稳定身份 id 交给插件只会打开跨 run
     关联/自记日志的口子,范围与归属全部由核心在端口构造时预绑定,插件不需要它们。
     """

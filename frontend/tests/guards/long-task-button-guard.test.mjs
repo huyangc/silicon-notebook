@@ -16,7 +16,7 @@
 //     的那几颗才是 disabled 形态,已由既有测试与本文件外的人工评审覆盖。
 //
 // 覆盖边界(如实说明,不声称全覆盖):本守卫只钉「已知的这几个长任务入口」。**新增**一个
-// 长任务按钮却忘了带 disabled,不撞任何一条断言,仍是假阴性——那类兜底是 CLAUDE.md 的
+// 长任务按钮却忘了带 disabled,不撞任何一条断言,仍是假阴性——那类兜底是 `docs/development.md` 的
 // 工程约束 + 代码评审,不是这份测试。
 import test from "node:test";
 import assert from "node:assert/strict";

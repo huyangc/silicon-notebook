@@ -336,7 +336,7 @@ def _require_self_or_admin(user: UserProfile, user_id: str) -> None:
 def _activity_source_item(row: dict) -> ActivitySource:
     """把 list_user_activity 的原始 source 行(带 title/file_name/is_paper/
     paper_title 四个原始列)合成出前端契约要的 display_title —— 论文标题优先,
-    唯一实现是 source_display_title(CLAUDE.md 红线:所有为用户命名来源的路径
+    唯一实现是 source_display_title（`docs/product-and-api.md` 契约:所有为用户命名来源的路径
     共用同一份实现)。刻意保留 source_display_title 可能返回的空串,不在这里
     造占位符,前端已按空串处理。"""
     return ActivitySource(

@@ -93,8 +93,8 @@ from app.repositories.ports import (
 
 router = APIRouter()
 
-# 群组名/说明的长度上限。约束的是**用户编辑的数据**,所以按 CLAUDE.md 的「数值上限
-# 与截断」红线:超限**明确拒绝**,绝不静默截断。
+# 群组名/说明的长度上限。约束的是**用户编辑的数据**,所以按 AGENTS.md 的 production
+# code 规则:超限**明确拒绝**,绝不静默截断。
 # ⚠ 精确数值**待 T5 登记**进 docs/product-and-api*.md 的群组章节(本轮只落代码,
 # 文档批次在 T5;别把这条注释读成「已经登记过了」)。
 _MAX_GROUP_NAME_CHARS = 120

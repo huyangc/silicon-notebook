@@ -168,7 +168,7 @@ test("展开笔记本取回该库的来源清单，异常小字同样经 Anomaly
 });
 
 
-// ⚠ CLAUDE.md 红线:所有为用户命名来源的路径共用 source_display_title 这一个真源。
+// ⚠ `docs/product-and-api.md` 契约:所有为用户命名来源的路径共用 source_display_title 这一个真源。
 // 已接地的论文 title 仍是上传文件名(1706.03762.pdf),显示名在后端合成好的
 // display_title 里。左栏改回读 `source.title` 时,这条会读到文件名而报红——那正是
 // 「同一篇论文在同一屏里有两个名字」(左栏文件名 / 中栏论文标题)的原形。

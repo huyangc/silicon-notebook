@@ -12,7 +12,7 @@ bash "$ROOT_DIR/scripts/check_backend_extended.sh"
 # arXiv sample plugin's front-end half: the one lane that synchronizes a UI
 # package into frontend/features/ext-*/ and exercises the five
 # extension-*.test.mjs guards against a non-empty sample (X9 PR-B T3,
-# AGENTS.md §0.4 / R8). Deliberately not part of G1 — see
+# docs/development*.md 的扩展门约定). Deliberately not part of G1 — see
 # scripts/check_sample_plugin.sh's own header comment for why.
 bash "$ROOT_DIR/scripts/check_sample_plugin.sh"
 
