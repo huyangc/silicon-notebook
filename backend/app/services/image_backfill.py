@@ -279,8 +279,8 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
     lines: list[MarkdownLine] = []
     refs: list[ImageRef] = []
     fence: str | None = None
-    html_table = False
-    prev_kind = ""
+    in_html_block = False
+    prev_pipe = False
     ordinal = 0
     for index, raw in enumerate((text or "").splitlines()):
         fence_match = _FENCE_RE.match(raw)
@@ -291,27 +291,30 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
                 fence_match.group("fence")
             ) >= len(fence):
                 fence = None
-            prev_kind = "code"
+            prev_pipe = False
             continue
         if fence_match:
+            # **开栏行无条件是新结构块的起点**——判据是显式的开/闭状态，不是"上一行
+            # 是不是 code"。两个围栏块相邻无空行时，第一个闭栏之后"上一行仍是 code"
+            # 依然成立，于是第二个块拿不到 `block_start`，对齐只跨一个 code_block
+            # 元素，紧随第二个块之后的图片静默锚到**第一个**块上（coverage 仍是
+            # 100%，一个信号都没有）。
             fence = fence_match.group("fence")
-            lines.append(
-                MarkdownLine(
-                    index, raw, "code", "", "" if prev_kind == "code" else "code_block"
-                )
-            )
-            prev_kind = "code"
+            lines.append(MarkdownLine(index, raw, "code", "", "code_block"))
+            prev_pipe = False
             continue
 
-        # HTML 表格块的状态机（围栏之后判，好让围栏里的 `<table>` 保持 code）。
-        lowered = raw.lower()
-        in_html_table = html_table
-        if html_table:
-            if "</table>" in lowered:
-                html_table = False
+        # HTML 块的状态机（围栏之后判，好让围栏里的 `<table>` 保持 code）。终止判据
+        # 是**空行**而不是 `</table>`：markdown-it 的 HTML 块规则一直吃到空行为止，
+        # 实测紧跟在 `</table>` 后面（无空行）的正文会被折进同一条 table 元素——按
+        # `</table>` 收尾就会把那一行当成永远匹配不上的正文行，白掉一格覆盖率。
+        html_open = False
+        if in_html_block:
+            if not raw.strip():
+                in_html_block = False  # 空行终止 HTML 块；这一行自己是 blank
         elif raw.strip().lower().startswith("<table"):
-            in_html_table = True
-            html_table = "</table>" not in lowered
+            html_open = True
+            in_html_block = True
 
         # 「这一行只有图片」按**原始**行判：剥掉全部图片引用后还剩下什么。刻意
         # 不复用 `normalize_text`——它会先剥掉行首的列表/引用/标题标记，于是
@@ -334,8 +337,9 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
         refs.extend(line_refs)
 
         stripped = raw.strip()
-        if in_html_table:
-            # HTML 表格块整块归 table（含块内空行）：元素侧它只是一条 table。
+        pipe = False
+        if html_open or in_html_block:
+            # HTML 块整块归 table：元素侧它只是一条 table 元素。
             kind = "table"
         elif not stripped:
             kind = "blank"
@@ -346,11 +350,19 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
             kind = "image"
         elif stripped.startswith("|"):
             kind = "table"
+            pipe = True
         else:
             kind = "text"
 
         block_start = ""
-        if kind == "table" and prev_kind != "table":
+        if html_open:
+            # 一个 HTML 块的开头。**不能**按"上一行是不是 table"判：`| a |` 管道表格
+            # 紧跟一个 `<table>` 时两者是**两条**元素（实测），而上一行正是 table。
+            block_start = "table"
+        elif pipe and not prev_pipe:
+            # 连续管道行折成一条 table 元素，所以只在这一串的**第一行**起块。反过来
+            # 说，`<table>` 之后紧跟的管道行属于那个 HTML 块（上面 kind 已归 table、
+            # pipe 保持 False），不会重复起块。
             block_start = "table"
         elif kind == "image" and any(ref.alt for ref in line_refs):
             # 只对**带 alt** 的独立图片行跨越：空 alt、无描述、无资产的图片被
@@ -367,7 +379,7 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
                 block_start,
             )
         )
-        prev_kind = kind
+        prev_pipe = pipe
     return lines, refs
 
 
@@ -435,11 +447,18 @@ def build_image_index(roots: Sequence[Path]) -> ImageIndex:
 
 @dataclass(frozen=True)
 class ElementView:
-    """既有元素在对齐里用到的那一小部分。"""
+    """既有元素在对齐与预算里用到的那一小部分。"""
 
     id: str
     element_type: str
     norm: str
+
+    has_asset: bool = False
+    """这条 image 元素已经挂着一个资产（``metadata.asset_id`` 非空）。
+
+    每源图片上限数的是**已持久化的图片**（在线路径的 `persist_image` 闭包按落资产
+    次数计数），所以只有它才是预算的分母；带图注却没挂资产的历史元素既显示不出来
+    也没占用配额，要等被补齐时才计入。"""
 
 
 def _matches(line_norm: str, element_norm: str) -> bool:
@@ -710,8 +729,14 @@ def plan_source_images(
     # 完全不碰 markdown 对齐（`elements` 已按 id 序读回，那就是文档序）。
     element_positions = {element.id: index for index, element in enumerate(elements)}
 
+    # 每源图片预算：**插入与补齐共用**这一份。分母是已经挂着资产的既有 image 元素
+    # （= 已持久化的图片），因为上限约束的正是"这个来源存了多少张图"。补齐不吃预算
+    # 的话，一个既有未挂资产元素多于上限的来源会被整批放行，直接越过
+    # `MINERU_MAX_IMAGES_PER_SOURCE`。
     remaining = max_images - sum(
-        1 for element in elements if element.element_type == "image"
+        1
+        for element in elements
+        if element.element_type == "image" and element.has_asset
     )
     for ref in refs:
         if ref.kind != "relative":
@@ -732,6 +757,12 @@ def plan_source_images(
             continue
         if entry.size > max_bytes:
             plan.skip("image_too_large")
+            continue
+
+        if remaining <= 0:
+            # 插入与补齐共用同一份预算，所以这道闸排在两条路**之前**，reason code
+            # 也共用一个：无论哪种方式，结论都是"这个来源的图片配额满了"。
+            plan.skip("per_source_cap")
             continue
 
         existing_id = existing_unassigned_srcs.get(ref.src)
@@ -775,6 +806,7 @@ def plan_source_images(
             )
             if plan.enriched[-1].has_caption:
                 plan.captions += 1
+            remaining -= 1
             continue
 
         if drifted:
@@ -784,9 +816,6 @@ def plan_source_images(
             # 的 `alignment_drifted` 与其它 reason code 同口径（都是"多少张图没补
             # 上"）。
             plan.skip("alignment_drifted")
-            continue
-        if remaining <= 0:
-            plan.skip("per_source_cap")
             continue
         anchor = _anchor_for(plan, alignment, ref, chunk_by_element)
         if anchor is None:

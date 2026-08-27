@@ -173,6 +173,9 @@ def _element_views(elements: Sequence[dict]) -> list[ElementView]:
             id=element["id"],
             element_type=element["element_type"],
             norm=normalize_text(element["text"]),
+            # 每源图片预算的分母（见 `ElementView.has_asset`）：只有已经挂着资产的
+            # image 元素才算"这个来源已经存了一张图"。
+            has_asset=bool(element["metadata"].get("asset_id")),
         )
         for element in elements
     ]

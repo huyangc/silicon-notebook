@@ -490,6 +490,69 @@ def test_an_image_right_after_a_structural_block_anchors_on_that_block(
     assert [image.chunk_id for image in plan.images] == [f"c-el-{SID}-0002"]
 
 
+@pytest.mark.parametrize(
+    "blocks,expected_types",
+    [
+        # 两个围栏块相邻、中间没有空行。
+        (
+            "```python\nfirst = 1\n```\n```python\nsecond = 2\n```",
+            ["code_block", "code_block"],
+        ),
+        # 管道表格紧跟一个 HTML 表格：实测是**两条** table 元素（反过来会折成一条）。
+        (
+            "| 甲 | 乙 |\n| --- | --- |\n<table><tr><td>丙</td></tr></table>",
+            ["table", "table"],
+        ),
+    ],
+)
+def test_adjacent_structural_blocks_are_each_crossed(blocks, expected_types):
+    """相邻结构块的起点判据不能靠「上一行是不是同类」推断。
+
+    两个围栏块相邻时，第一个闭栏之后"上一行仍是 code"依然成立，于是第二个块拿不到
+    `block_start`，对齐只跨**一个** code_block 元素——紧随第二个块之后的图片就静默
+    锚到第一个块上，而 coverage 仍可以是 100%。管道表格紧跟 HTML 表格是同一形状的
+    另一格（上一行正是 table，但两者是两条元素）。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        + blocks
+        + "\n\n![](images/z.jpg)\n\n第二段正文继续往下说明细节。\n"
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == (
+        ["paragraph"] + expected_types + ["paragraph"]
+    )
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: f"c-{element.id}" for element in elements},
+        _index("z.jpg"),
+    )
+    assert plan.coverage == 1.0
+    # 锚点必须是**第二个**结构块，不是第一个。
+    assert [image.anchor_element_id for image in plan.images] == [f"el-{SID}-0003"]
+    assert [image.chunk_id for image in plan.images] == [f"c-el-{SID}-0003"]
+
+
+def test_text_glued_to_a_closing_html_table_tag_is_not_a_matchable_line():
+    """markdown-it 的 HTML 块吃到**空行**为止，不是到 `</table>`：紧跟在 `</table>`
+    后面（无空行）的正文会被折进同一条 table 元素（实测）。按 `</table>` 收尾就会
+    把那一行当成一条永远匹配不上的正文行，白掉一格覆盖率。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        "<table>\n<tr><td>甲</td></tr>\n</table>\n这一段被折进表格元素里了。\n\n"
+        "第二段正文继续往下说明细节。\n"
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == [
+        "paragraph",
+        "table",
+        "paragraph",
+    ]
+    lines, _ = scan_markdown(markdown)
+    assert [line.kind for line in lines[2:6]] == ["table"] * 4
+    assert align(lines, elements).coverage == 1.0
+
+
 def test_a_structural_block_is_crossed_once_not_once_per_line():
     """一整张表在元素侧只是**一条**元素，所以只该推进一格。按行跨越会把指针推过
     头，后面每一条元素都错位。"""
@@ -899,7 +962,27 @@ def test_per_source_cap_truncates_in_markdown_order_and_is_accounted():
     assert plan.skipped == {"per_source_cap": 1}
 
 
-def test_existing_image_elements_count_against_the_per_source_cap():
+def test_existing_image_elements_with_an_asset_count_against_the_per_source_cap():
+    """预算的分母是**已经挂着资产**的既有 image 元素——上限约束的是「这个来源存了
+    多少张图」（在线路径的 persist 闭包也是按落资产次数计数的）。"""
+    elements = _els("第一段正文写了一些内容。")
+    elements.append(
+        ElementView(id=f"el-{SID}-0002", element_type="image", norm="", has_asset=True)
+    )
+    plan = _plan(
+        "第一段正文写了一些内容。\n\n![](images/a.jpg)\n",
+        elements,
+        {f"el-{SID}-0001": "c1"},
+        _index("a.jpg"),
+        max_images=1,
+    )
+    assert plan.images == []
+    assert plan.skipped == {"per_source_cap": 1}
+
+
+def test_an_existing_image_without_an_asset_does_not_consume_the_cap_by_itself():
+    """反向：没挂资产的历史元素既显示不出来、也没占掉配额，不该先把预算吃掉——
+    否则本工具连它自己都补不了。"""
     elements = _els("第一段正文写了一些内容。")
     elements.append(ElementView(id=f"el-{SID}-0002", element_type="image", norm=""))
     plan = _plan(
@@ -909,7 +992,52 @@ def test_existing_image_elements_count_against_the_per_source_cap():
         _index("a.jpg"),
         max_images=1,
     )
+    assert [image.src for image in plan.images] == ["images/a.jpg"]
+    assert plan.skipped == {}
+
+
+def test_enrichment_shares_the_per_source_budget_with_insertion():
+    """上限为 N、既有未挂资产的带图注元素多于 N 时，补齐若不吃预算就会被整批放行，
+    直接越过 `MINERU_MAX_IMAGES_PER_SOURCE`。"""
+    markdown = "\n\n".join(
+        f"![图 {n} 第 {n} 张示意图](images/p{n}.jpg)" for n in range(1, 4)
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == ["image"] * 3
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("p1.jpg", "p2.jpg", "p3.jpg"),
+        existing_unassigned_srcs={
+            f"images/p{n}.jpg": f"el-{SID}-{n:04d}" for n in range(1, 4)
+        },
+        max_images=1,
+    )
+    assert [item.element_id for item in plan.enriched] == [f"el-{SID}-0001"]
     assert plan.images == []
+    assert plan.skipped == {"per_source_cap": 2}
+
+
+def test_a_mixed_run_spends_one_shared_budget_across_both_paths():
+    """一次补齐 + 一次插入，预算只有 2：两条路加起来正好花完，第三张被截断。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        "![图 1 系统总体架构](images/a.jpg)\n\n"
+        "![](images/b.jpg)\n\n"
+        "![](images/c.jpg)\n"
+    )
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg", "b.jpg", "c.jpg"),
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+        max_images=2,
+    )
+    assert [item.src for item in plan.enriched] == ["images/a.jpg"]
+    assert [image.src for image in plan.images] == ["images/b.jpg"]
     assert plan.skipped == {"per_source_cap": 1}
 
 
