@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
+from app.repositories.image_backfill_rows import image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maintenance 共用
     asset_ref_tokens,
     collect_change_payload_tokens,
@@ -1815,6 +1816,135 @@ class SQLiteMaintenanceAdapter:
     def chunk_elements_indexed(self, notebook_id: str) -> bool:
         with self._runtime.database.connect() as db:
             return self._runtime.knowledge.chunk_elements_indexed(db, notebook_id)
+
+    # ------------------------------------------------- backfill-images (离线)
+    # `batch_ingest backfill-images` 的三个读写口。刻意不进 `ports.py` 的
+    # Protocol：那个文件的方法总数钉在零余量上限上（只许降），而这三个方法只有
+    # 一个离线阶段消费——它按自己模块里的窄 Protocol
+    # (`image_backfill_phase.ImageBackfillPort`) 结构化依赖它们，PostgreSQL 侧
+    # 逐字对等。
+
+    def image_backfill_source_page(
+        self, notebook_id: str, after_id: str, limit: int
+    ) -> list[dict]:
+        """一页 markdown 候选来源（keyset，按 id）。
+
+        判据是「用户可见来源 + 文件名以 .md/.markdown 结尾」，**不**筛"零元素"：
+        本阶段修的正是已经解析成功、只是丢了图的来源。"""
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT id, file_name, file_path FROM sources "
+                "WHERE notebook_id=? AND source_type NOT IN ('memory','knowhow') "
+                "AND (lower(file_name) LIKE '%.md' OR lower(file_name) LIKE '%.markdown') "
+                "AND id > ? ORDER BY id LIMIT ?",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "file_name": row["file_name"] or "",
+                "file_path": row["file_path"] or "",
+            }
+            for row in rows
+        ]
+
+    def image_backfill_source_state(self, source_id: str) -> dict:
+        """回填一个来源所需的全部既有状态，一次读完。
+
+        元素按 ``ORDER BY id`` —— 与 `source_elements_for_chunking` 同一口径
+        （id 字典序即文档序），对齐算法依赖的就是这个顺序。``element_created_at``
+        是该来源既有元素批次的时间戳：新图片元素必须回填成它，否则来源详情
+        按 ``(created_at,id)`` 分页会把图片全部沉底，命令目录的
+        ``source_element_generation``（= MAX(created_at)）也会平白漂移，把每一份
+        待审候选作废掉。"""
+        with self._runtime.database.connect() as db:
+            element_rows = db.execute(
+                "SELECT id, element_type, text, metadata, created_at "
+                "FROM source_elements WHERE source_id=? ORDER BY id",
+                (source_id,),
+            ).fetchall()
+            chunk_rows = db.execute(
+                "SELECT id, element_ids FROM chunks WHERE source_id=? ORDER BY id",
+                (source_id,),
+            ).fetchall()
+        return image_backfill_state(element_rows, chunk_rows)
+
+    def apply_image_backfill(
+        self,
+        notebook_id: str,
+        source_id: str,
+        elements: Sequence[dict],
+        chunk_element_ids: dict[str, list[str]],
+        *,
+        created_at: str,
+        updated_at: str,
+    ) -> None:
+        """一个来源的全部插入，**一个写事务**。
+
+        `chunk_element_ids` 是受影响 chunk 的**完整**新 element_ids 列表；
+        `chunks.text` 与 chunk id 逐字节不变，所以 `chunk_embeddings`
+        （`ON DELETE CASCADE` 挂在 chunk 行上）一行都不会动。反查行
+        `chunk_elements` 与它们描述的那次 chunk 写入同事务（v46 红线），
+        `sources.updated_at` 也在同一事务里推进（元素换代的变更信号）。"""
+        with self._runtime.database.write() as db:
+            db.executemany(
+                "INSERT INTO source_elements "
+                "(id, source_id, element_type, location_label, text, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        element["id"],
+                        source_id,
+                        element["element_type"],
+                        element["location_label"],
+                        element["text"],
+                        json.dumps(dict(element["metadata"]), ensure_ascii=False),
+                        created_at,
+                    )
+                    for element in elements
+                ],
+            )
+            for chunk_id, element_ids in chunk_element_ids.items():
+                db.execute(
+                    "UPDATE chunks SET element_ids=? WHERE id=? AND source_id=?",
+                    (json.dumps(list(element_ids)), chunk_id, source_id),
+                )
+            rows = chunk_element_reverse_rows(
+                notebook_id,
+                [
+                    {"id": chunk_id, "element_ids": list(element_ids)}
+                    for chunk_id, element_ids in chunk_element_ids.items()
+                ],
+            )
+            if rows:
+                db.executemany(
+                    "INSERT OR IGNORE INTO chunk_elements "
+                    "(notebook_id,element_id,chunk_id) VALUES (?,?,?)",
+                    rows,
+                )
+            db.execute(
+                "UPDATE sources SET updated_at=? WHERE id=?",
+                (updated_at, source_id),
+            )
+
+    def image_backfill_discard_assets(self, asset_ids: Sequence[str]) -> list[dict]:
+        """删掉这一批 ``notebook_assets`` 行并原样返回，供调用方 unlink 文件。
+
+        只在"资产已写、元素事务失败"这条回滚路径上用。资产必须先落库（
+        `AssetService.save_source_image` 有自己的事务），所以那一步与元素事务之间
+        存在一个失败窗口；`sweep_orphan_assets` 明确排除 ``source_id`` 非空的行
+        （来源插图只经来源级联清理），孤儿行不会被任何后台扫回收，因此这条回滚
+        必须自己删干净。"""
+        ids = [asset_id for asset_id in dict.fromkeys(asset_ids) if asset_id]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._runtime.database.write() as db:
+            rows = db.execute(
+                f"DELETE FROM notebook_assets WHERE id IN ({placeholders}) RETURNING *",
+                ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def clear_source_index(self, notebook_id: str) -> int:
         """Reset knowledge_object_sources for one notebook; returns the

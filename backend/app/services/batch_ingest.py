@@ -37,6 +37,10 @@ from app.core.request_context import (
 from app.models.notebooks import NotebookCreate, NotebookSummary
 from app.models.sources import SourceSummary
 from app.models.identity import UserProfile
+from app.services.image_backfill_phase import (
+    ImageBackfillDisabled,
+    run_backfill_images,
+)
 from app.services.knowledge_lifecycle import ModelSkipPolicy
 from app.services.repository import UploadedSourceFile
 from app.services.maintenance_cli import (
@@ -1777,7 +1781,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
                                       "backfill-source-index", "backfill-source-facts",
-                                      "backfill-chunk-elements",
+                                      "backfill-chunk-elements", "backfill-images",
                                       "metadata", "question-index", "reparse"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
@@ -1831,6 +1835,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--pool-report-interval", type=int, default=15,
                    help="每 N 秒自报 producer/source 业务线程池占用;0 关闭。"
                         "all/kg/reparse 阶段生效")
+    p.add_argument("--mineru-output", type=Path, action="append", default=None,
+                   help="backfill-images 专用:MinerU output 树根目录,可重复。"
+                        "启动时整树扫描建「文件名 → 路径」索引(只认父目录名为 "
+                        "images/ 的文件,兼容 auto/ocr/txt 方法目录)。")
+    p.add_argument("--source-id", default=None,
+                   help="backfill-images 专用:只处理这一个来源(试点用)")
+    p.add_argument("--report", type=Path, default=None,
+                   help="backfill-images 专用:逐源 JSONL 明细路径"
+                        "(只写计数与稳定 reason code,不写图片字节或正文)")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
     p.add_argument(
         "--confirm-service-stopped",
@@ -1893,6 +1906,22 @@ def _dispatch_main(
             f"({time.perf_counter() - _t:.1f}s)",
             flush=True,
         )
+        return 0
+
+    if args.phase == "backfill-images":
+        # 外科式补图:零模型、零 embedding 重算、零 KG 变动,chunk id 与 chunk.text
+        # 逐字节不变(见 app/services/image_backfill_phase.py 的模块 docstring)。
+        _t = time.perf_counter()
+        run_backfill_images(
+            repo,
+            args.notebook_id,
+            mineru_outputs=args.mineru_output or [],
+            source_id=args.source_id,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            report_path=args.report,
+        )
+        print(f"backfill-images elapsed {time.perf_counter() - _t:.1f}s", flush=True)
         return 0
 
     if args.phase == "backfill-source-facts":
@@ -2211,6 +2240,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: backfill-source-facts 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
         return 2
 
+    if args.phase == "backfill-images":
+        if not args.notebook_id:
+            print("error: backfill-images 需要 --notebook-id", file=sys.stderr)
+            return 2
+        if not args.mineru_output:
+            print(
+                "error: backfill-images 需要至少一个 --mineru-output <dir>",
+                file=sys.stderr,
+            )
+            return 2
+
     settings = Settings()
     try:
         effective = _resolve_effective_concurrency(args, settings, args.phase)
@@ -2226,7 +2266,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             update={"kg_job_concurrency": effective.workers}
         )
 
-    if args.dry_run:
+    # backfill-images 的 --dry-run 是一次**只读的数据库**演练(每源可回填数/锚定
+    # 成功数/缺图数/图注命中数),不是"列出待摄取的文件",所以它不能走下面这条
+    # 输入目录预览的早退——那会让 dry-run 静默变成一次什么都没检查的空跑。
+    if args.dry_run and args.phase != "backfill-images":
         files, excluded = (
             discover_files(args.input_dir) if args.input_dir else ([], {})
         )
@@ -2273,7 +2316,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 2
             finally:
                 reset_request_user(user_token)
-    except MaintenanceCliError as exc:
+    except (MaintenanceCliError, ImageBackfillDisabled) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
