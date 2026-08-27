@@ -153,13 +153,17 @@ _MARKER_SEGMENT_SPLIT_RE = re.compile(r"[,，、]")
 
 def _marker_like(group: str) -> bool:
     """True when a bracket group READS as a citation marker: some
-    separator-delimited segment is exactly ``k<digits>``. ``[k1, nope]`` and a
-    deletion-formed ``[k2]`` qualify; ``[k8s 官方文档]`` and ``[k1000 档]`` are
-    ordinary prose and must survive."""
-    return any(
-        _EXACT_KEY_RE.fullmatch(part.strip())
-        for part in _MARKER_SEGMENT_SPLIT_RE.split(group[1:-1])
-    )
+    separator-delimited segment consists solely of whitespace-separated
+    ``k<digits>`` tokens. ``[k1, nope]``, a deletion-formed ``[k2]`` and the
+    comma-less ``[k1 k2]`` qualify; ``[k8s 官方文档]`` and ``[k1000 档]`` are
+    ordinary prose and must survive. Semicolon-joined forms like ``[k1;k2]``
+    are deliberately NOT covered — the browser does not linkify them, so they
+    never wear a citation's appearance."""
+    for part in _MARKER_SEGMENT_SPLIT_RE.split(group[1:-1]):
+        tokens = part.split()
+        if tokens and all(_EXACT_KEY_RE.fullmatch(token) for token in tokens):
+            return True
+    return False
 
 
 # Protocol boundary: the collection overview crosses to plugin prompts as one
@@ -1090,9 +1094,16 @@ def admit_plugin_engine_result(
             nonlocal dropped_markers
             kept: list[str] = []
             for key in marker_keys(match.group(0)):
-                # Keys are structurally ``k<digits>`` (LOOSE_MARKER_RE), so
-                # int() cannot fail here.
-                mapped = index_map.get(int(key[1:]))
+                try:
+                    # ``k<digits>`` is structurally guaranteed, but int() still
+                    # raises past CPython's int-str digit limit (4300), so a
+                    # grotesquely long key degrades to one dropped marker, not
+                    # a whole-answer failure.
+                    index = int(key[1:])
+                except ValueError:
+                    dropped_markers += 1
+                    continue
+                mapped = index_map.get(index)
                 if mapped is None:
                     dropped_markers += 1
                     continue
@@ -1112,6 +1123,14 @@ def admit_plugin_engine_result(
         # 拼接出新组,而删除只会缩短文本,所以迭代到不动点必然终止。判据经
         # `_marker_like` 收窄——普通括号散文(markdown 链接文字、【…】夹注)不再
         # 被误杀。
+        #
+        # 循环里必须**两条正则都跑**:`_SUSPECT_MARKER_RE` 的两个字符类都排除
+        # `\n`,而 `LOOSE_MARKER_RE` 经 `\s*` 接受跨行空白,前端 linkify 与
+        # `MARKER_RE` 锚点解析同样接受——所以 `[k1,\n[k9]k2]` 删掉内层后拼出的
+        # `[k1,\nk2]` 对疑似正则完全隐形,却会被渲染成引用并绑定到模型从未引用
+        # 的 record。反过来,哨兵化之后正文里按构造不存在任何合法标记,所以这里
+        # 每一个 LOOSE 命中都必然是删除拼接的残留,一律摘除即可。不给
+        # `_SUSPECT_MARKER_RE` 的字符类加 `\n`——那会让它跨段落误吞普通散文。
         suspect_markers = 0
 
         def strip_suspect(match) -> str:
@@ -1122,8 +1141,14 @@ def admit_plugin_engine_result(
             suspect_markers += 1
             return ""
 
+        def strip_residual_marker(match) -> str:
+            nonlocal suspect_markers
+            suspect_markers += 1
+            return ""
+
         while True:
             stripped = _SUSPECT_MARKER_RE.sub(strip_suspect, normalized)
+            stripped = LOOSE_MARKER_RE.sub(strip_residual_marker, stripped)
             if stripped == normalized:
                 break
             normalized = stripped
@@ -1132,9 +1157,17 @@ def admit_plugin_engine_result(
                 f"正文中 {suspect_markers} 处疑似引用标记无法解析，已移除"
             )
 
-        normalized = _SENTINEL_RE.sub(
-            lambda match: kept_groups[int(match.group(1))], normalized
-        )
+        def restore_sentinel(match) -> str:
+            slot = int(match.group(1))
+            if slot >= len(kept_groups):
+                # Structurally unreachable (core writes every slot before it
+                # writes the sentinel naming it, and plugin text is pre-cleaned
+                # of both sentinel characters); kept so a future bug degrades
+                # to a dropped marker rather than an uncaught IndexError.
+                return ""
+            return kept_groups[slot]
+
+        normalized = _SENTINEL_RE.sub(restore_sentinel, normalized)
 
         # Recomputed from the FINAL text (review P2-1): a suspect strip can
         # take a verified sentinel down with it, so the normalize-time tally
@@ -1142,7 +1175,13 @@ def admit_plugin_engine_result(
         cited: set[int] = set()
         for match in LOOSE_MARKER_RE.finditer(normalized):
             for key in marker_keys(match.group(0)):
-                cited.add(int(key[1:]))
+                try:
+                    # Only core-authored groups can survive to here, so the
+                    # digit limit cannot bite; mirrors the same defence the
+                    # anchor loop applies at the ask_service boundary.
+                    cited.add(int(key[1:]))
+                except ValueError:
+                    continue
         uncited = len(records) - len(cited)
         if uncited > 0:
             notes.append(f"{uncited} 条引用未在正文中被引用，仅列入引用列表")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, fields
 from threading import Barrier, Event, Lock, Thread
@@ -1090,6 +1091,96 @@ def test_citation_admission_never_mints_a_marker_by_deleting_around_it():
     assert "1 条引用未在正文中被引用，仅列入引用列表" in notes
 
 
+def test_citation_admission_strips_newline_joined_marker_residue():
+    """跨行拼接组对疑似正则隐形(复核 P1):`_SUSPECT_MARKER_RE` 的字符类排除
+    `\\n`,而 `LOOSE_MARKER_RE` 经 `\\s*` 接受它,前端 linkify 与 `MARKER_RE`
+    锚点解析同样接受。所以 `[k1,\\n[k9]k2]` 删掉内层后拼出的 `[k1,\\nk2]` 会被
+    渲染成引用、并绑定到模型从未引用的 record——摘除循环必须同时跑 LOOSE。"""
+    two, keys = _two_record_access()
+    answer, records, notes = admit_plugin_engine_result(
+        two, "结论 [k1,\n[k9]k2] 说明", keys
+    )
+    assert answer == "结论  说明"
+    assert LOOSE_MARKER_RE.findall(answer) == []
+    assert len(records) == 2
+    assert "正文中 1 处疑似引用标记无法解析，已移除" in notes
+    assert "2 条引用未在正文中被引用，仅列入引用列表" in notes
+
+    # 拼接出的序号越界时同样必须消失,而不是靠 ask_service 的边界检查兜底——
+    # 标记文本本身仍会被浏览器 linkify 成一个点不开的引用。
+    out_of_range, oor_keys = _two_record_access()
+    answer, records, notes = admit_plugin_engine_result(
+        out_of_range, "结论 [k5,\n[k9]k6] 说明", oor_keys
+    )
+    assert answer == "结论  说明"
+    assert LOOSE_MARKER_RE.findall(answer) == []
+    assert "正文中 1 处疑似引用标记无法解析，已移除" in notes
+
+    # 「未被引用」重算不得被拼接组投毒:`[k1,\nk5]` 若留在正文里,重算会把 1
+    # 和 5 都算成已引用,让真正没被引用的第 3 条永远不被披露。
+    hits = iter((
+        _hit(element_id="element-A"),
+        _hit(element_id="element-B"),
+        _hit(element_id="element-C"),
+    ))
+    triple = PluginRetrievalAccess(
+        active_notebook_id="notebook-1",
+        actor_id="user-1",
+        cancellation=None,
+        participant_notebook_ids=lambda _notebook_id: ("notebook-1",),
+        all_visible_source_ids=lambda _notebook_id: ("source-1",),
+        hidden_source_ids=lambda _notebook_id, _actor_id: (),
+        search_elements=lambda *_args, **_kwargs: [next(hits)],
+        source_info=lambda _source_ids: {"source-1": {"title": "权威来源"}},
+        max_k=3,
+        max_calls=3,
+        evidence_chars=100,
+        query_chars=100,
+    )
+    triple_keys = tuple(
+        triple.search(query, 1)[0].evidence_key
+        for query in ("first", "second", "third")
+    )
+    answer, records, notes = admit_plugin_engine_result(
+        triple, "结论 [k1,\n[k9]k5] 与 [k2] 说明", triple_keys
+    )
+    assert answer == "结论  与 [k2] 说明"
+    assert len(records) == 3
+    # 只有 k2 真的留在正文里,所以 A 与 C 两条必须被如实报为未引用。
+    assert "2 条引用未在正文中被引用，仅列入引用列表" in notes
+
+
+def test_citation_admission_strips_a_comma_less_marker_group():
+    """漏逗号的复合引用是常见模型笔误(复核 P2):`[k1 k2]` 未过 index_map,却
+    长得像引用,判据必须放宽到「片段由空白分隔的 k<数字> 词构成」。"""
+    access = _retrieval_access()
+    key = access.search("evidence", 1)[0].evidence_key
+
+    answer, records, notes = admit_plugin_engine_result(
+        access, "结论 [k1 k2] 说明 [k1]", (key,)
+    )
+
+    assert answer == "结论  说明 [k1]"
+    assert len(records) == 1
+    assert notes == ("正文中 1 处疑似引用标记无法解析，已移除",)
+
+
+def test_citation_admission_survives_a_key_past_the_int_digit_limit():
+    """`k\\d+` 的位数无上限,而 CPython 的 int(str) 有 4300 位上限(复核 P2-5):
+    裸 int() 会抛 ValueError,被 ask_service 吞成整份拒绝——恰是逐项降级要
+    消灭的行为。超长键必须降级成一个被丢弃的标记。"""
+    access = _retrieval_access()
+    key = access.search("evidence", 1)[0].evidence_key
+
+    answer, records, notes = admit_plugin_engine_result(
+        access, "结论 [k1] 与 [k" + "9" * 5000 + "] 完毕", (key,)
+    )
+
+    assert answer == "结论 [k1] 与  完毕"
+    assert len(records) == 1
+    assert notes == ("正文中 1 个引用标记无法核验，已移除",)
+
+
 def test_citation_admission_keeps_ordinary_bracket_prose():
     """疑似判据收窄(评审 P1):旧角色是「命中即整份拒绝」(响亮),新角色是就地
     删正文(静默),所以判据必须精确到「某个分隔片段恰好是 k<数字>」,否则普通
@@ -1242,6 +1333,12 @@ def test_admitted_markers_always_name_a_surviving_record():
         "文字 [k1] 与 [k9[k8]9] 与【k7、k1】",
         "[k9][k8][k7]",
         "【k1，k9】与 [k2, k9]",
+        # 跨行形态:`_SUSPECT_MARKER_RE` 看不见它们,只有 LOOSE 那一半关得住。
+        "结论 [k1,\n[k9]k2] 说明",
+        "结论 [k5,\n[k9]k6] 说明",
+        "[k1,\n[k9]k2]",
+        "前 [k1,\n\t[k9]k9] 后",
+        "[k1 k2] 与 [k1,\nk9]",
     )
     for source in hostile:
         access, keys = _two_record_access()
@@ -1253,10 +1350,18 @@ def test_admitted_markers_always_name_a_surviving_record():
             # 摘空拒绝也满足不变量:根本没有正文上屏。
             assert rejected.code == "plugin_engine_unverified_citation", source
             continue
+        groups = [match.group(0) for match in LOOSE_MARKER_RE.finditer(answer)]
+        # Range alone is too weak: a newline-joined `[k1,\nk2]` names indexes
+        # that ARE in range while naming a binding the model never authored.
+        # Core only ever writes back the canonical `[k1]` / `[k1, k2]` form, so
+        # every surviving group must wear exactly that shape.
+        assert all(
+            re.fullmatch(r"\[k\d+(?:, k\d+)*\]", group) for group in groups
+        ), (source, answer, groups)
         indexes = [
             int(key[1:])
-            for match in LOOSE_MARKER_RE.finditer(answer)
-            for key in marker_keys(match.group(0))
+            for group in groups
+            for key in marker_keys(group)
         ]
         assert all(1 <= index <= len(records) for index in indexes), (
             source, answer, indexes
