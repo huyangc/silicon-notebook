@@ -447,6 +447,96 @@ def test_an_image_only_line_stays_unmatched_even_when_it_carries_an_alt():
     assert lines[0].norm == ""
 
 
+@pytest.mark.parametrize(
+    "block,expected_type",
+    [
+        ("| 甲 | 乙 |\n| --- | --- |\n| 丙 | 丁 |", "table"),
+        ("<table>\n<tr><td>甲</td><td>乙</td></tr>\n</table>", "table"),
+        ("```python\nprint('这是一段代码不是正文')\n```", "code_block"),
+        ("![图 1 一张带图注的示意图](images/p1.jpg)", "image"),
+    ],
+)
+def test_an_image_right_after_a_structural_block_anchors_on_that_block(
+    block, expected_type
+):
+    """结构行不参与匹配，结构元素原先要等到**后面**某个文本行命中才被顺带并进
+    `matched`——于是紧跟结构块之后的独立图片锚到结构块**之前**的那个段落、被 append
+    进错误的 chunk，而覆盖率仍是 100%，一个信号都没有（实测：表格后的
+    `![](z.jpg)` 锚到 el-0001 而不是 el-0002）。扫描侧必须**即时**跨越。
+
+    HTML `<table>` 那一格另有一层：MinerU/PyMuPDF4LLM 会产出它，`parse_blocks` 同样
+    折成一条 table 元素，但它不以 `|` 开头——分类器不专门认它，整块就变成一串永远
+    匹配不上的正文行。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        + block
+        + "\n\n![](images/z.jpg)\n\n第二段正文继续往下说明细节。\n"
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == [
+        "paragraph",
+        expected_type,
+        "paragraph",
+    ]
+    plan = _plan(
+        markdown,
+        elements,
+        # 每条元素各自一个 chunk：锚错就一定挂错 chunk。
+        {element.id: f"c-{element.id}" for element in elements},
+        _index("z.jpg"),
+    )
+    assert plan.coverage == 1.0
+    assert [image.anchor_element_id for image in plan.images] == [f"el-{SID}-0002"]
+    assert [image.chunk_id for image in plan.images] == [f"c-el-{SID}-0002"]
+
+
+def test_a_structural_block_is_crossed_once_not_once_per_line():
+    """一整张表在元素侧只是**一条**元素，所以只该推进一格。按行跨越会把指针推过
+    头，后面每一条元素都错位。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        "| 甲 | 乙 |\n| --- | --- |\n| 丙 | 丁 |\n| 戊 | 己 |\n\n"
+        "第二段正文继续往下说明细节。\n\n"
+        "![](images/z.jpg)\n"
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == [
+        "paragraph",
+        "table",
+        "paragraph",
+    ]
+    lines, _ = scan_markdown(markdown)
+    assert [line.block_start for line in lines if line.kind == "table"] == [
+        "table",
+        "",
+        "",
+        "",
+    ]
+    alignment = align(lines, elements)
+    assert alignment.matched == [f"el-{SID}-{n:04d}" for n in (1, 2, 3)]
+    assert alignment.coverage == 1.0
+
+
+def test_an_alt_less_image_line_does_not_consume_a_later_image_element():
+    """空 alt、无描述、无资产的图片被 `parse_markdown_text` 整块丢弃，元素侧根本
+    没有它——对这种行跨越就会吃掉**后面**某张图的元素，把其后的锚点全推错一格。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        "![](images/a.jpg)\n\n"
+        "![图 2 真正有元素的那张](images/b.jpg)\n\n"
+        "第二段正文继续往下说明细节。\n"
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == [
+        "paragraph",
+        "image",
+        "paragraph",
+    ]
+    lines, _ = scan_markdown(markdown)
+    assert [line.block_start for line in lines if line.kind == "image"] == ["", "image"]
+    assert align(lines, elements).coverage == 1.0
+
+
 def test_crossed_elements_are_visible_to_the_chunk_walk_back():
     """跨过的不可匹配元素也进 `matched`：带图注的历史图片元素是**进过 chunk**
     的，它比更早那条段落离图更近，锚点回退理应先看见它。"""
