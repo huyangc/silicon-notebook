@@ -34,37 +34,38 @@ test("deployment mode projection is data-driven, strict, and restorable", () => 
     {
       id: "corp.search", group: "extension", label: "企业检索",
       desc: "使用部署内检索策略回答", requires_kg: true,
-      streaming: false, streams_trace: false,
+      streaming: true, streams_trace: true,
     },
     // Duplicate and malformed entries are ignored rather than replacing a live mode.
     {
       id: "corp.search", group: "extension", label: "覆盖",
-      desc: "覆盖", requires_kg: false, streams_trace: false,
+      desc: "覆盖", requires_kg: false, streaming: true, streams_trace: true,
     },
     {
-      id: "corp.streaming", group: "extension", label: "不支持",
-      desc: "v1 不能流式", requires_kg: false, streams_trace: true,
+      id: "corp.blocking", group: "extension", label: "旧阻塞投影",
+      desc: "扩展引擎必须声明实时轨迹", requires_kg: false,
+      streaming: false, streams_trace: false,
     },
     {
       id: "corp.inconsistent", group: "extension", label: "不一致",
-      desc: "旧字段不能覆盖 v1 契约", requires_kg: false,
+      desc: "两个流式字段必须同时为真", requires_kg: false,
       streaming: true, streams_trace: false,
     },
     {
       id: "corp.非法", group: "extension", label: "非法标识",
       desc: "浏览器也执行稳定标识守卫", requires_kg: false,
-      streams_trace: false,
+      streaming: true, streams_trace: true,
     },
     {
       id: "hardcoded", group: "extension", label: "无前缀",
-      desc: "无点号", requires_kg: false, streams_trace: false,
+      desc: "无点号", requires_kg: false, streaming: true, streams_trace: true,
     },
   ]);
   assert.deepEqual(askModeIds(modes), ["chunk", "reasoning", "graph", "corp.search"]);
   assert.equal(groupOf("corp.search", modes), "extension");
   assert.equal(requiresKg("corp.search", modes), true);
   assert.equal(canUseMode("corp.search", false, modes), false);
-  assert.equal(streamsTrace("corp.search", modes), false);
+  assert.equal(streamsTrace("corp.search", modes), true);
   assert.equal(modeFromTurn({ response: { mode: "corp.search" } }, modes), "corp.search");
   assert.equal(modeFromTurn({ response: { mode: "corp.disabled" } }, modes), "chunk");
 });

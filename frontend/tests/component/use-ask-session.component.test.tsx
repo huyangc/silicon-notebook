@@ -216,8 +216,8 @@ test("runtime Ask modes load once per actor generation and restore the exact plu
     label: "企业检索",
     desc: "使用部署内检索策略回答",
     requires_kg: false,
-    streaming: false,
-    streams_trace: false,
+    streaming: true,
+    streams_trace: true,
   }]);
   api.listConversations.mockResolvedValue([summary("conversation-plugin")]);
   const pluginDetail = detail("conversation-plugin");
@@ -261,6 +261,86 @@ test("runtime Ask modes load once per actor generation and restore the exact plu
   expect(value!.mode).toBe("corp.search");
 });
 
+test("a deployment Ask engine uses the durable Ask stream and receives live plugin trace", async () => {
+  const stream = deferred<AskResponse>();
+  api.fetchAskModes.mockResolvedValue([{
+    id: "corp.search",
+    group: "extension",
+    label: "企业检索",
+    desc: "使用部署内检索策略回答",
+    requires_kg: false,
+    streaming: true,
+    streams_trace: true,
+  }]);
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    onProgress: (step: {
+      step_type: string;
+      summary: string;
+      detail: Record<string, unknown>;
+      duration_ms?: number;
+    }) => void,
+  ) => {
+    onProgress({
+      step_type: "plugin",
+      summary: "检索",
+      detail: { detail: "命中一条" },
+      duration_ms: 125,
+    });
+    return stream.promise;
+  });
+  render(<Harness />);
+  let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+    });
+  });
+  await act(async () => {
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(value!.askModes.some((candidate) => candidate.id === "corp.search")).toBe(true);
+
+  act(() => value!.selectMode("corp.search"));
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("插件问题");
+  });
+  expect(value!.pendingTrace).toEqual([{
+    step_type: "plugin",
+    summary: "检索",
+    detail: { detail: "命中一条" },
+    duration_ms: 125,
+  }]);
+  expect(value!.asking).toBe(true);
+  stream.resolve({
+    ...answer("conversation-plugin"),
+    mode: "corp.search",
+    reasoning_trace: [{
+      step_type: "plugin",
+      summary: "检索",
+      detail: { detail: "命中一条" },
+      duration_ms: 125,
+    }],
+  });
+  await act(async () => {
+    await submitting;
+  });
+
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[0]).toBe("notebook-a");
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "插件问题",
+    mode: "corp.search",
+  });
+  expect(value!.turns[0]?.response.mode).toBe("corp.search");
+  expect(value!.turns[0]?.response.reasoning_trace?.[0]?.duration_ms).toBe(125);
+});
+
 test("a failed Ask-mode projection retries on the next committed workspace", async () => {
   api.fetchAskModes
     .mockRejectedValueOnce(new Error("projection unavailable"))
@@ -270,7 +350,8 @@ test("a failed Ask-mode projection retries on the next committed workspace", asy
       label: "企业检索",
       desc: "使用部署内检索策略回答",
       requires_kg: false,
-      streams_trace: false,
+      streaming: true,
+      streams_trace: true,
     }]);
   render(<Harness />);
 

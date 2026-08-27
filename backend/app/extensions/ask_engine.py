@@ -134,7 +134,7 @@ class AskEngineHost:
                 item.descriptor.mode_id,
                 "ask_plugin_engine",
                 "extension",
-                False,
+                True,
                 item.descriptor.requires_kg,
                 True,
             )
@@ -150,7 +150,7 @@ class AskEngineHost:
             descriptor.mode_id,
             "ask_plugin_engine",
             "extension",
-            False,
+            True,
             descriptor.requires_kg,
             True,
         )

@@ -805,7 +805,7 @@ class AskService:
             if spec.handler == "ask_plugin_engine":
                 return handler(
                     notebook_id, payload, user_id=user_id, job_id=job_id,
-                    cancel_event=cancel_event,
+                    on_trace=on_trace, cancel_event=cancel_event,
                 )
             # All built-in Ask modes share the same request-local query-embedding
             # memo.  Ask keeps its historical internal concurrency: the
@@ -1296,6 +1296,7 @@ class AskService:
         user_id: str,
         job_id: str = "",
         cancel_event: CancelEvent = None,
+        on_trace: "Callable[[Any], None] | None" = None,
     ) -> AskResponse:
         """Run one deployment engine while core retains every authority.
 
@@ -1316,6 +1317,9 @@ class AskService:
             PluginEngineTrace,
             PluginRetrievalAccess,
             admit_plugin_engine_result,
+            append_plugin_engine_trace_disclosure,
+            complete_plugin_engine_trace,
+            finish_plugin_engine_trace,
             plugin_engine_trace_steps,
             release_plugin_engine_ports,
         )
@@ -1527,6 +1531,15 @@ class AskService:
                     max_chars=self.settings.ask_plugin_engine_prompt_max_chars,
                 )
                 owned_ports.append(model)
+                cancellation = PluginCancellationToken(cancel_event)
+                owned_ports.append(cancellation)
+                engine_context = AskEngineContext(
+                    question=prepared.question,
+                    cancellation=cancellation,
+                )
+                # Construct the recorder immediately before the host call so
+                # its wall clock covers the extension-engine stage itself,
+                # not unrelated port/context setup above it.
                 trace = PluginEngineTrace(
                     max_steps=self.settings.ask_plugin_engine_trace_max_steps,
                     label_chars=(
@@ -1535,45 +1548,56 @@ class AskService:
                     detail_chars=(
                         self.settings.ask_plugin_engine_trace_detail_max_chars
                     ),
+                    on_trace=on_trace,
                 )
                 owned_ports.append(trace)
-                cancellation = PluginCancellationToken(cancel_event)
-                owned_ports.append(cancellation)
-                engine_context = AskEngineContext(
-                    question=prepared.question,
-                    cancellation=cancellation,
-                )
-                result = host.answer(
-                    mode_id,
-                    engine_context,
-                    retrieval,
-                    model,
-                    trace,
-                    event_sink=getattr(self.event_log, "emit", None),
-                )
-                if (
-                    engine_context.question != prepared.question
-                    or engine_context.cancellation is not cancellation
-                ):
-                    raise StageBoundaryError(
-                        "plugin Ask request identity changed"
+                try:
+                    result = host.answer(
+                        mode_id,
+                        engine_context,
+                        retrieval,
+                        model,
+                        trace,
+                        event_sink=getattr(self.event_log, "emit", None),
                     )
-                answer, records, admission_notes = admit_plugin_engine_result(
-                    retrieval, result.answer_markdown, result.citations
-                )
-                trace_steps = plugin_engine_trace_steps(trace)
+                except AskCancelled:
+                    raise
+                except BaseException:
+                    try:
+                        finish_plugin_engine_trace(trace)
+                        complete_plugin_engine_trace(trace, status="failed")
+                    except BaseException:
+                        # Preserve the provider/host error as the authority.
+                        pass
+                    raise
+                else:
+                    finish_plugin_engine_trace(trace)
+                try:
+                    if (
+                        engine_context.question != prepared.question
+                        or engine_context.cancellation is not cancellation
+                    ):
+                        raise StageBoundaryError(
+                            "plugin Ask request identity changed"
+                        )
+                    answer, records, admission_notes = admit_plugin_engine_result(
+                        retrieval, result.answer_markdown, result.citations
+                    )
+                except BaseException:
+                    try:
+                        complete_plugin_engine_trace(trace, status="failed")
+                    except BaseException:
+                        # Preserve identity/admission failure as authoritative.
+                        pass
+                    raise
                 if admission_notes:
-                    # Accepted cosmetic wrinkle: when the plugin's own trace
-                    # was truncated, its last step carries `truncated` and this
-                    # disclosure step still renders after it. The truncation
-                    # marker describes the PLUGIN's step sequence; admission is
-                    # a separate core-owned stage that runs after it, so the
-                    # step genuinely belongs here.
-                    trace_steps = (*trace_steps, TraceStep(
-                        step_type="plugin",
+                    append_plugin_engine_trace_disclosure(
+                        trace,
                         summary="引用核验未全部通过",
-                        detail={"detail": "；".join(admission_notes)},
-                    ))
+                        detail="；".join(admission_notes),
+                    )
+                complete_plugin_engine_trace(trace, status="completed")
+                trace_steps = plugin_engine_trace_steps(trace)
             except AskCancelled:
                 raise
             except StageBoundaryError:
