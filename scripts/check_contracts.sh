@@ -91,6 +91,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_ui_vocabulary.py" \
   --extra-root "$ROOT_DIR/examples/extensions/arxiv-search/src"
+"$PYTHON_BIN" \
+  "$ROOT_DIR/scripts/check_claude_md_budget.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_architecture_boundaries.py" --root "$ROOT_DIR"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \

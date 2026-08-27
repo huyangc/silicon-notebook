@@ -14,14 +14,19 @@ Deployment `indexing.pipeline` contributions are notebook-scoped selectable chun
 
 ## Documentation Sync
 
-When making changes that affect setup, product behavior, architecture, or development constraints, update all four files together:
+When making changes that affect setup, product behavior, architecture, or development constraints, update all three files together:
 
 - `README.md`
 - `README_zh.md`
 - `AGENTS.md`
-- `CLAUDE.md`
 
-Do not update only one language README when the same information should be available in both. `CLAUDE.md` belongs in this set because Claude Code loads it and not this file: leave it out of a constraint change and the standard that actually reaches the agent goes stale while these three look current.
+Do not update only one language README when the same information should be available in both.
+
+`CLAUDE.md` is deliberately **not** in that set. Claude Code auto-loads it on every session, so every character in it is a fixed per-request cost, and it is scoped to two things only: constraints that hold for the *next, unrelated* change, and procedures that exist only in the Claude Code context (worktree discipline, subagent policy, the codex review loop). Feature-level contracts — a specific endpoint's rails, a migration's details, a page's layout invariants, a trade-off recorded during review — belong here in `AGENTS.md` and in `docs/`, with `CLAUDE.md` carrying only a routing table to them. The test is one question: *would a change unrelated to this feature still need the rule?* If not, it does not go in `CLAUDE.md`.
+
+This is a correction, not a relaxation. Between 2026-07-24 and 2026-08-27 `CLAUDE.md` grew from 20 KB to 307 KB across 315 commits with no net deletion, because a four-file sync rule reads as "append a paragraph here too". Sampling showed a median 98.5% of the identifiers in those paragraphs already had fuller treatments in `AGENTS.md` + `docs/`; the growth was a third copy, not new information. `scripts/check_claude_md_budget.py` (G1 contracts lane) now pins a total-character and a per-line budget on that file; both limits are decrease-only.
+
+Touch `CLAUDE.md` when a change alters a cross-cutting constraint it already states. One exception is load-bearing: four G1 guards assert that extension/stage boundary keywords appear in `CLAUDE.md` itself (`backend/tests/test_phase0_architecture_guard.py` ×3, `backend/tests/test_architecture_documentation.py` ×1), so its "扩展点边界" bullet must keep those terms and those guards must run when it is edited.
 
 Keep the root READMEs as concise project entry points. Detailed behavior belongs in the paired canonical references under `docs/`: `product-and-api`, `deployment-and-configuration`, `operations`, and `development`. A change must also update the owning English/Chinese detail pair; do not copy the full detail back into the root READMEs.
 

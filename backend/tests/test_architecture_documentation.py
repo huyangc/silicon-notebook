@@ -1159,11 +1159,15 @@ def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferre
 
 
 def test_deployment_extension_boundary_is_in_all_agent_entry_documents():
-    """部署插件（`EXTENSIONS_CONFIG`）是新增的部署时装载面，按 Documentation Sync
-    规则必须同时进四份 agent 入口文档：README.md、README_zh.md、AGENTS.md、
-    CLAUDE.md（后两者是 Claude Code 会话实际加载的规范，`docs/product-and-api*.md`
-    的详细契约不能替代它们）。casefold + `_`/`-` 折成空格后做子串匹配，两侧措辞
-    不必逐字相同（中英文各自撰写），只要求同一组事实各自可查。
+    """部署插件（`EXTENSIONS_CONFIG`）是部署时装载面，必须同时进四份 agent 入口
+    文档：README.md、README_zh.md、AGENTS.md、CLAUDE.md。前三份来自 Documentation
+    Sync 规则；CLAUDE.md 则是那条规则**登记在案的例外**——它已不属于常规同步集合
+    （见 AGENTS.md「Documentation Sync」：特性级契约一律进 AGENTS.md/docs，且
+    scripts/check_claude_md_budget.py 钉住它的体量），但扩展点是跨改动的架构边界，
+    而 CLAUDE.md 是 Claude Code 会话唯一实际加载的规范，所以这一组关键词刻意留在
+    它的「扩展点边界」一条里。改那一条时要连本用例一起跑。casefold + `_`/`-` 折成
+    空格后做子串匹配，两侧措辞不必逐字相同（中英文各自撰写），只要求同一组事实
+    各自可查。
     """
 
     for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):

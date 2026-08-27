@@ -274,4 +274,6 @@ Chinese counterparts are linked from the top of each split document.
 
 ## Documentation maintenance
 
-Keep this README as the concise project entry point. Detailed behavior belongs in the owning document listed above, and English/Chinese counterparts must remain aligned. Changes to setup, product behavior, architecture, or development constraints still update `README.md`, `README_zh.md`, `AGENTS.md`, and `CLAUDE.md` together, plus the relevant canonical detail document.
+Keep this README as the concise project entry point. Detailed behavior belongs in the owning document listed above, and English/Chinese counterparts must remain aligned. Changes to setup, product behavior, architecture, or development constraints still update `README.md`, `README_zh.md`, and `AGENTS.md` together, plus the relevant canonical detail document.
+
+`CLAUDE.md` is deliberately outside that set. Claude Code auto-loads it every session, so it is scoped to cross-cutting constraints plus the procedures that exist only in that context, and it routes to `AGENTS.md` / `docs/` for feature-level contracts; `scripts/check_claude_md_budget.py` pins its size in the G1 contracts lane. Update it only when a change alters a cross-cutting constraint it already states. See `AGENTS.md` → Documentation Sync.
