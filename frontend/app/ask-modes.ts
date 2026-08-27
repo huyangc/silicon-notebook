@@ -71,8 +71,8 @@ export function normalizeAskModeProjection(value: unknown): readonly AskModeDef[
       || typeof desc !== "string"
       || !desc.trim()
       || typeof raw.requires_kg !== "boolean"
-      || raw.streams_trace !== false
-      || (raw.streaming !== undefined && raw.streaming !== false)
+      || raw.streams_trace !== true
+      || raw.streaming !== true
     ) continue;
     seen.add(id);
     extensions.push({
@@ -81,7 +81,7 @@ export function normalizeAskModeProjection(value: unknown): readonly AskModeDef[
       label,
       desc,
       requiresKg: raw.requires_kg,
-      streamsTrace: false,
+      streamsTrace: true,
       groupDefault: extensions.length === 0,
     });
   }

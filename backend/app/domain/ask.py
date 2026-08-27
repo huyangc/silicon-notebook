@@ -8,7 +8,7 @@ from dataclasses import dataclass
 class AskMode:
     id: str
     handler: str  # method name on SQLiteRepository
-    group: str  # "general" | "strict" | "legacy" | "global"
+    group: str  # "general" | "strict" | "extension"
     streaming: bool  # handler accepts on_trace and emits stream progress
     requires_kg: bool
     user_facing: bool

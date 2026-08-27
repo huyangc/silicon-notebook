@@ -43,6 +43,8 @@ from app.services.plugin_ask_engine import (
     PluginEngineTrace,
     PluginRetrievalAccess,
     admit_plugin_engine_result,
+    complete_plugin_engine_trace,
+    finish_plugin_engine_trace,
     plugin_engine_trace_steps,
     release_plugin_engine_ports,
 )
@@ -245,6 +247,8 @@ def test_ask_engine_registry_allows_a_provider_set_and_rejects_bad_identity():
         registration.descriptor.mode_id
         for registration in runtime.ask_engines.registrations()
     ] == ["alpha.search", "beta.search"]
+    assert all(mode.streaming for mode in runtime.ask_engines.modes())
+    assert runtime.ask_engines.mode("alpha.search").streaming is True
 
     with pytest.raises(ExtensionDiscoveryError) as rejected:
         build_extension_runtime((
@@ -754,16 +758,127 @@ def test_model_and_trace_ports_enforce_budgets_without_leaking_raw_errors():
         model.complete("再次")
     assert exhausted.value.code == "plugin_engine_model_call_limit"
 
-    trace = PluginEngineTrace(max_steps=2, label_chars=3, detail_chars=4)
+    streamed = []
+    trace = PluginEngineTrace(
+        max_steps=2,
+        label_chars=3,
+        detail_chars=4,
+        on_trace=streamed.append,
+    )
     trace.step("abcdef", "123456")
     trace.step("ok", "done")
     trace.step("discarded", "secret tail")
+    trace.step("discarded again", "another secret")
     steps = plugin_engine_trace_steps(trace)
-    assert len(steps) == 2
+    assert len(steps) == 3
     assert steps[0].summary == "abc"
     assert steps[0].detail == {"detail": "1234", "truncated": True}
-    assert steps[-1].detail["truncated"] is True
+    assert steps[-1].summary == "扩展引擎步骤已截断"
+    assert steps[-1].detail == {"truncated": True}
     assert "secret tail" not in str(steps)
+    assert streamed == list(steps)
+    assert "discarded" not in str(streamed)
+    assert "another secret" not in str(streamed)
+
+
+def test_plugin_trace_core_timing_covers_steps_and_terminal_tail():
+    now = [10.0]
+    streamed = []
+    trace = PluginEngineTrace(
+        max_steps=2,
+        label_chars=20,
+        detail_chars=20,
+        on_trace=streamed.append,
+        clock=lambda: now[0],
+    )
+
+    now[0] = 10.125
+    trace.step("检索")
+    now[0] = 10.5
+    trace.step("生成")
+    now[0] = 11.25
+    finish_plugin_engine_trace(trace)
+    now[0] = 99.0  # Core admission time is not plugin execution time.
+    terminal = complete_plugin_engine_trace(trace, status="completed")
+
+    steps = plugin_engine_trace_steps(trace)
+    assert [step.duration_ms for step in steps] == [125, 375, 750]
+    assert sum(step.duration_ms or 0 for step in steps) == 1250
+    assert terminal.summary == "扩展引擎执行完成"
+    assert streamed == list(steps)
+    with pytest.raises(AskEnginePortError) as closed:
+        trace.step("late")
+    assert closed.value.code == "plugin_engine_failed"
+
+
+def test_plugin_trace_terminal_step_times_provider_that_emits_no_steps():
+    now = [20.0]
+    streamed = []
+    trace = PluginEngineTrace(
+        max_steps=1,
+        label_chars=20,
+        detail_chars=20,
+        on_trace=streamed.append,
+        clock=lambda: now[0],
+    )
+    now[0] = 22.5
+
+    finish_plugin_engine_trace(trace)
+    complete_plugin_engine_trace(trace, status="failed")
+
+    steps = plugin_engine_trace_steps(trace)
+    assert len(steps) == 1
+    assert steps[0].summary == "扩展引擎执行失败"
+    assert steps[0].duration_ms == 2500
+    assert streamed == list(steps)
+
+
+def test_plugin_trace_preserves_append_and_delivery_order_across_threads():
+    first_entered = Event()
+    release_first = Event()
+    second_calling = Event()
+    second_delivered = Event()
+    streamed: list[str] = []
+
+    def on_trace(step) -> None:
+        if step.summary == "first":
+            first_entered.set()
+            assert release_first.wait(2), "first trace delivery was not released"
+        if step.summary == "second":
+            second_delivered.set()
+        streamed.append(step.summary)
+
+    trace = PluginEngineTrace(
+        max_steps=2,
+        label_chars=20,
+        detail_chars=20,
+        on_trace=on_trace,
+    )
+    first = Thread(target=lambda: trace.step("first"), daemon=True)
+    def send_second() -> None:
+        second_calling.set()
+        trace.step("second")
+
+    second = Thread(target=send_second, daemon=True)
+    first.start()
+    assert first_entered.wait(2), "first trace delivery never started"
+    second.start()
+    try:
+        assert second_calling.wait(2), "second trace call never started"
+        assert not second_delivered.wait(0.05), (
+            "a later trace callback overtook the earlier in-flight delivery"
+        )
+        assert [step.summary for step in plugin_engine_trace_steps(trace)] == [
+            "first"
+        ]
+    finally:
+        release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert streamed == ["first", "second"]
+    assert [step.summary for step in plugin_engine_trace_steps(trace)] == streamed
 
 
 def test_full_plugin_ask_admits_core_citations_and_persists_mode():
@@ -789,8 +904,12 @@ def test_full_plugin_ask_admits_core_citations_and_persists_mode():
         "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
     }
 
+    streamed = []
     response = service.ask(
-        "nb", AskRequest(question="问题", mode="alpha.search"), user_id="user"
+        "nb",
+        AskRequest(question="问题", mode="alpha.search"),
+        user_id="user",
+        on_trace=streamed.append,
     )
     assert response.answer_id == "answer-1"
     assert response.mode == "alpha.search"
@@ -800,9 +919,12 @@ def test_full_plugin_ask_admits_core_citations_and_persists_mode():
     assert response.anchors[0].key == "k1"
     assert response.reasoning_trace[0].step_type == "plugin"
     # Clean admission (every citation verified, every marker bound) must not
-    # add noise: no synthetic "引用核验未全部通过" step beyond the provider's
-    # own trace step.
-    assert len(response.reasoning_trace) == 1
+    # add verification noise. The only core-authored step is the timed engine
+    # terminal that keeps the whole provider tail visible.
+    assert len(response.reasoning_trace) == 2
+    assert response.reasoning_trace[-1].summary == "扩展引擎执行完成"
+    assert all(step.duration_ms is not None for step in response.reasoning_trace)
+    assert streamed == response.reasoning_trace
 
 
 def test_plugin_ask_admits_partial_citations_and_discloses_degraded_verification():
@@ -830,17 +952,26 @@ def test_plugin_ask_admits_partial_citations_and_discloses_degraded_verification
         "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
     }
 
+    streamed = []
     response = service.ask(
-        "nb", AskRequest(question="问题", mode="alpha.search"), user_id="user"
+        "nb",
+        AskRequest(question="问题", mode="alpha.search"),
+        user_id="user",
+        on_trace=streamed.append,
     )
     assert response.answer == "结论 [k1] 与 "
     assert response.anchors[0].key == "k1"
     assert len(response.citations) == 1
     assert response.answer_id == "answer-1"
-    last_step = response.reasoning_trace[-1]
-    assert last_step.step_type == "plugin"
-    assert last_step.summary == "引用核验未全部通过"
-    assert "无法核验" in last_step.detail["detail"]
+    disclosure = next(
+        step for step in response.reasoning_trace
+        if step.summary == "引用核验未全部通过"
+    )
+    assert disclosure.step_type == "plugin"
+    assert "无法核验" in disclosure.detail["detail"]
+    assert disclosure.duration_ms is None
+    assert response.reasoning_trace[-1].summary == "扩展引擎执行完成"
+    assert streamed == response.reasoning_trace
 
 
 def test_plugin_ask_renumbers_a_middle_drop_onto_the_right_record_end_to_end():
@@ -888,9 +1019,12 @@ def test_plugin_ask_renumbers_a_middle_drop_onto_the_right_record_end_to_end():
     assert [anchor.element_id for anchor in response.anchors] == [
         "element-A", "element-B"
     ]
-    last_step = response.reasoning_trace[-1]
-    assert last_step.summary == "引用核验未全部通过"
-    assert "1 条引用无法核验，已移除" in last_step.detail["detail"]
+    disclosure = next(
+        step for step in response.reasoning_trace
+        if step.summary == "引用核验未全部通过"
+    )
+    assert "1 条引用无法核验，已移除" in disclosure.detail["detail"]
+    assert response.reasoning_trace[-1].summary == "扩展引擎执行完成"
 
 
 def test_plugin_cannot_mutate_the_core_request_identity_before_commit():
@@ -907,11 +1041,15 @@ def test_plugin_cannot_mutate_the_core_request_identity_before_commit():
     )
     service.retrieval.federated_retrieve_elements = lambda *_args, **_kwargs: []
 
+    streamed = []
     with pytest.raises(StageBoundaryError, match="request identity changed"):
         service.ask(
             "nb", AskRequest(question="original", mode="alpha.mutating"),
             user_id="user",
+            on_trace=streamed.append,
         )
+    assert [step.summary for step in streamed] == ["扩展引擎执行失败"]
+    assert streamed[0].duration_ms is not None
 
 
 def test_host_sanitizes_plugin_authored_port_codes_and_observability():
@@ -966,8 +1104,8 @@ def test_ask_modes_projection_is_sanitized_and_availability_filtered(monkeypatch
         "label": "企业检索",
         "desc": "使用部署内检索策略回答",
         "requires_kg": True,
-        "streaming": False,
-        "streams_trace": False,
+        "streaming": True,
+        "streams_trace": True,
     }
     assert not ({"plugin_id", "contribution_id", "reason", "endpoint"} & plugin.keys())
 

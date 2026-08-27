@@ -13,8 +13,9 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 import json
 import re
+import time
 from threading import RLock
-from typing import Any, Callable, Iterable, Sequence, TypeVar
+from typing import Any, Callable, Iterable, Literal, Sequence, TypeVar
 from uuid import uuid4
 
 from app.domain.ask_engine import AskEnginePortError, EngineEvidence
@@ -128,7 +129,15 @@ class _TraceState:
     max_steps: int
     label_chars: int
     detail_chars: int
+    on_trace: Callable[[TraceStep], None] | None = None
+    clock: Callable[[], float] = time.perf_counter
+    last_recorded_at: float = 0.0
+    finished_at: float | None = None
+    completed: bool = False
+    provider_steps: int = 0
+    truncation_emitted: bool = False
     steps: list[TraceStep] = field(default_factory=list)
+    delivery_lock: Any = field(default_factory=RLock)
     data_lock: Any = field(default_factory=RLock)
     lifecycle: _AuthorityLifecycle = field(default_factory=_AuthorityLifecycle)
 
@@ -962,33 +971,67 @@ class PluginEngineModelAccess:
 class PluginEngineTrace:
     __slots__ = ("__authority_token",)
 
-    def __init__(self, *, max_steps: int, label_chars: int, detail_chars: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_steps: int,
+        label_chars: int,
+        detail_chars: int,
+        on_trace: Callable[[TraceStep], None] | None = None,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        started_at = clock()
         self.__authority_token = _install(
-            _TRACE_STATES, _TraceState(max_steps, label_chars, detail_chars)
+            _TRACE_STATES,
+            _TraceState(
+                max_steps,
+                label_chars,
+                detail_chars,
+                on_trace,
+                clock,
+                started_at,
+            ),
         )
 
     def step(self, label: str, detail: str = "") -> None:
         state = _lookup(_TRACE_STATES, self.__authority_token)
         with _authority_use(state):
-            with state.data_lock:
-                malformed = type(label) is not str or type(detail) is not str
-                if malformed:
-                    _mark_trace_truncated(state)
-                    return
-                clipped_label = label[: state.label_chars]
-                clipped_detail = detail[: state.detail_chars]
-                clipped = clipped_label != label or clipped_detail != detail
-                if len(state.steps) >= state.max_steps:
-                    _mark_trace_truncated(state)
-                    return
-                state.steps.append(TraceStep(
-                    step_type="plugin",
-                    summary=clipped_label,
-                    detail={
-                        "detail": clipped_detail,
-                        **({"truncated": True} if clipped else {}),
-                    },
-                ))
+            # Keep append + delivery in one total order even if trusted plugin
+            # code calls this thread-safe port concurrently. ``delivery_lock``
+            # may span the core sink's bounded persistence I/O; ``data_lock``
+            # deliberately does not, so trace snapshots remain independently
+            # readable and no other port state is held across that I/O.
+            with state.delivery_lock:
+                emitted: TraceStep | None = None
+                with state.data_lock:
+                    if state.finished_at is not None or state.completed:
+                        raise AskEnginePortError("plugin_engine_failed")
+                    malformed = type(label) is not str or type(detail) is not str
+                    if malformed:
+                        emitted = _trace_truncation_step(state)
+                    elif state.provider_steps >= state.max_steps:
+                        emitted = _trace_truncation_step(state)
+                    else:
+                        clipped_label = label[: state.label_chars]
+                        clipped_detail = detail[: state.detail_chars]
+                        clipped = (
+                            clipped_label != label or clipped_detail != detail
+                        )
+                        now = state.clock()
+                        emitted = TraceStep(
+                            step_type="plugin",
+                            summary=clipped_label,
+                            detail={
+                                "detail": clipped_detail,
+                                **({"truncated": True} if clipped else {}),
+                            },
+                            duration_ms=_trace_duration_ms(state, now),
+                        )
+                        state.last_recorded_at = now
+                        state.provider_steps += 1
+                        state.steps.append(emitted)
+                if emitted is not None and state.on_trace is not None:
+                    state.on_trace(emitted)
 
     def __del__(self) -> None:
         try:
@@ -997,15 +1040,132 @@ class PluginEngineTrace:
             return
 
 
-def _mark_trace_truncated(state: _TraceState) -> None:
-    if not state.steps:
-        return
-    last = state.steps[-1]
-    state.steps[-1] = TraceStep(
+def _trace_duration_ms(state: _TraceState, now: float) -> int:
+    return max(0, round((now - state.last_recorded_at) * 1000))
+
+
+def _trace_truncation_step(state: _TraceState) -> TraceStep | None:
+    """Return the run's one append-only omission marker, if still needed."""
+
+    if state.truncation_emitted:
+        return None
+    now = state.clock()
+    emitted = TraceStep(
         step_type="plugin",
-        summary=last.summary,
-        detail={**last.detail, "truncated": True},
+        summary="扩展引擎步骤已截断",
+        detail={"truncated": True},
+        duration_ms=_trace_duration_ms(state, now),
     )
+    state.last_recorded_at = now
+    state.truncation_emitted = True
+    state.steps.append(emitted)
+    return emitted
+
+
+_TRACE_COMPLETION_SUMMARIES = {
+    "completed": "扩展引擎执行完成",
+    "failed": "扩展引擎执行失败",
+}
+
+
+def append_plugin_engine_trace_disclosure(
+    trace: PluginEngineTrace,
+    *,
+    summary: str,
+    detail: str,
+) -> TraceStep:
+    """Append one core-authored post-provider disclosure without timing it.
+
+    Result admission happens after provider wall clock is frozen.  Its bounded
+    disclosure must use the same live/durable trace channel, but must not add
+    admission latency to the frontend's sum of plugin execution durations.
+    """
+
+    if (
+        type(trace) is not PluginEngineTrace
+        or type(summary) is not str
+        or type(detail) is not str
+    ):
+        raise AskEnginePortError("plugin_engine_failed")
+    token = object.__getattribute__(trace, "_PluginEngineTrace__authority_token")
+    state = _lookup(_TRACE_STATES, token)
+    with _authority_use(state):
+        with state.delivery_lock:
+            with state.data_lock:
+                if state.finished_at is None or state.completed:
+                    raise AskEnginePortError("plugin_engine_failed")
+                emitted = TraceStep(
+                    step_type="plugin",
+                    summary=summary,
+                    detail={"detail": detail},
+                )
+                state.steps.append(emitted)
+            if state.on_trace is not None:
+                state.on_trace(emitted)
+            return emitted
+
+
+def finish_plugin_engine_trace(trace: PluginEngineTrace) -> None:
+    """Freeze provider wall clock without publishing a terminal outcome.
+
+    Core performs request-identity and result/citation admission after the
+    synchronous provider returns.  Separating the timestamp from the terminal
+    event keeps that admission latency out of plugin execution time while also
+    preventing a premature user-visible "completed" step.
+    """
+
+    if type(trace) is not PluginEngineTrace:
+        raise AskEnginePortError("plugin_engine_failed")
+    token = object.__getattribute__(trace, "_PluginEngineTrace__authority_token")
+    state = _lookup(_TRACE_STATES, token)
+    with _authority_use(state):
+        with state.delivery_lock:
+            with state.data_lock:
+                if state.finished_at is not None or state.completed:
+                    raise AskEnginePortError("plugin_engine_failed")
+                state.finished_at = state.clock()
+
+
+def complete_plugin_engine_trace(
+    trace: PluginEngineTrace,
+    *,
+    status: Literal["completed", "failed"],
+) -> TraceStep:
+    """Close one provider run with a core-authored, timed terminal step.
+
+    ``finish_plugin_engine_trace`` has already frozen provider wall clock.
+    Provider-authored steps keep their configured budget.  This single
+    structural step is appended by core outside that budget after result
+    admission decides the truthful status, so even a provider that emits no
+    steps, or spends its whole budget, still discloses the full wall-clock tail
+    between its last step and return/raise.  It is delivered through the same
+    callback as ordinary steps, keeping the durable stream and final
+    ``AskResponse.reasoning_trace`` byte-for-byte aligned.
+    """
+
+    if (
+        type(trace) is not PluginEngineTrace
+        or status not in _TRACE_COMPLETION_SUMMARIES
+    ):
+        raise AskEnginePortError("plugin_engine_failed")
+    token = object.__getattribute__(trace, "_PluginEngineTrace__authority_token")
+    state = _lookup(_TRACE_STATES, token)
+    with _authority_use(state):
+        with state.delivery_lock:
+            with state.data_lock:
+                if state.finished_at is None or state.completed:
+                    raise AskEnginePortError("plugin_engine_failed")
+                emitted = TraceStep(
+                    step_type="plugin",
+                    summary=_TRACE_COMPLETION_SUMMARIES[status],
+                    duration_ms=_trace_duration_ms(state, state.finished_at),
+                )
+                state.last_recorded_at = state.finished_at
+                state.completed = True
+                state.steps.append(emitted)
+            if state.on_trace is not None:
+                state.on_trace(emitted)
+            return emitted
 
 
 def admit_plugin_engine_result(
@@ -1241,6 +1401,9 @@ __all__ = [
     "PluginEvidenceRecord",
     "PluginRetrievalAccess",
     "admit_plugin_engine_result",
+    "append_plugin_engine_trace_disclosure",
+    "complete_plugin_engine_trace",
+    "finish_plugin_engine_trace",
     "plugin_engine_trace_steps",
     "release_plugin_engine_ports",
 ]

@@ -701,19 +701,22 @@ def ask_modes() -> list[dict[str, Any]]:
         for mode in ASK_MODES.values() if mode.user_facing
     ]
     host = application_extension_runtime().ask_engines
-    extensions = [
-        {
+    extensions: list[dict[str, Any]] = []
+    for item in host.registrations():
+        if not host.is_available(item.descriptor.mode_id):
+            continue
+        mode = host.mode(item.descriptor.mode_id)
+        if mode is None:  # Defensive only; registrations and modes share one host.
+            continue
+        extensions.append({
             "id": item.descriptor.mode_id,
             "group": "extension",
             "label": item.descriptor.label,
             "desc": item.descriptor.description,
             "requires_kg": item.descriptor.requires_kg,
-            "streaming": False,
-            "streams_trace": False,
-        }
-        for item in host.registrations()
-        if host.is_available(item.descriptor.mode_id)
-    ]
+            "streaming": mode.streaming,
+            "streams_trace": mode.streaming,
+        })
     return [*builtins, *extensions]
 
 
