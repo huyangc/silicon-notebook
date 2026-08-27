@@ -660,6 +660,42 @@ def test_an_enrichment_target_without_its_own_text_is_not_counted_as_a_caption()
     assert plan.captions == 0
 
 
+def test_a_src_with_query_and_fragment_matches_its_existing_element():
+    """解析路径把 target **原样全量**存进 `metadata.src`（实测
+    ``![Figure 1](images/a.jpg?raw=1#x)`` → ``metadata.src == 'images/a.jpg?raw=1#x'``），
+    而扫描侧剥了 query/fragment。只在一侧规范化，这条既有元素就永远匹配不上：既补
+    不上 asset_id，还会被当成全新的图再插一条重复元素。规范形必须两侧共用。"""
+    markdown = "正文一段足够长的话在这里说明。\n\n![Figure 1](images/a.jpg?raw=1#x)\n"
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == ["paragraph", "image"]
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg"),
+        # 键按规范形（`_unassigned_image_srcs` 会把库里的全量 src 规范化成它）。
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+    )
+    assert plan.images == []  # 不重复插入
+    assert [item.element_id for item in plan.enriched] == [f"el-{SID}-0002"]
+
+
+def test_a_src_with_query_and_fragment_is_idempotent_once_assigned():
+    """同一条规范形也必须让「已补过」那半认得出来，否则重跑会再插一遍。"""
+    markdown = "正文一段足够长的话在这里说明。\n\n![Figure 1](images/a.jpg?raw=1#x)\n"
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg"),
+        existing_image_srcs=["images/a.jpg"],
+    )
+    assert plan.images == []
+    assert plan.enriched == []
+    assert plan.skipped == {"already_backfilled": 1}
+
+
 def test_the_same_src_referenced_twice_is_enriched_once():
     """一个 src 在文档里被引用两次，但只有一条既有元素可补。补两遍会把同一个
     element id append 进 chunk 两次（`element_ids` 里出现重复），而"再插一条新

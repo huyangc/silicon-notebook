@@ -512,6 +512,268 @@ def test_a_repo_root_relative_file_path_reads_from_any_working_directory(
     assert result["images_inserted"] == 2
 
 
+# ------------------------------------------------------- 并发重解析（CAS）
+
+def _reparse_in_place(repo, notebook_id, source_id):
+    """模拟一次并发重新解析：换掉该来源的全部元素与 chunk（新 id、新 created_at）。
+
+    这正是活服务上 `replace_elements` + 重新分块做的事——SQLite 侧的 maintenance
+    CLI 没有停服 preflight，所以它可以恰好落在本阶段的 plan 与 apply 之间。"""
+    with repo._connect() as db:
+        db.execute("DELETE FROM chunk_elements WHERE notebook_id=?", (notebook_id,))
+        db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
+        db.execute("DELETE FROM source_elements WHERE source_id=?", (source_id,))
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id, source_id, element_type, location_label, text, metadata, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                f"el-{source_id}-9001",
+                source_id,
+                "paragraph",
+                "Markdown paragraph 1",
+                "重新解析之后的全新正文。",
+                json.dumps({"parser": "markdown"}),
+                "2099-01-01T00:00:00+00:00",
+            ),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            (
+                "ck-reparsed",
+                notebook_id,
+                source_id,
+                "重新解析之后的全新正文。",
+                "",
+                json.dumps([f"el-{source_id}-9001"]),
+                "2099-01-01T00:00:00+00:00",
+            ),
+        )
+        db.commit()
+
+
+def _concurrent_reparse_run(repo, notebook_id, source_id, outputs, **kwargs):
+    """在 plan 之后、apply 之前插一次并发重解析，然后跑完整趟。"""
+    original = phase.plan_for_source
+    fired: list[int] = []
+
+    def _plan_then_reparse(repo_arg, source, image_index):
+        result = original(repo_arg, source, image_index)
+        if source["id"] == source_id and not fired:
+            fired.append(1)
+            _reparse_in_place(repo, notebook_id, source_id)
+        return result
+
+    phase.plan_for_source = _plan_then_reparse
+    try:
+        result = _run(repo, notebook_id, outputs, **kwargs)
+    finally:
+        phase.plan_for_source = original
+    assert fired, "变异守护：并发重解析没有真的发生，这个用例什么都没验证"
+    return result
+
+
+def test_a_concurrent_reparse_makes_the_source_fall_through_without_dirty_writes(
+    repo, seeded, outputs
+):
+    """SQLite 侧 maintenance CLI 没有停服强制，所以计划阶段的元素/chunk 快照可能
+    在写事务开始前就已作废。照它写下去会把旧 `element_ids` 整份盖回换代后的 chunk、
+    把新图挂到已删的锚点 id 上——三种都不报错，只是把库写脏。写事务里的 CAS 必须
+    让整源安全落空。"""
+    notebook_id, source_id = seeded
+    result = _concurrent_reparse_run(repo, notebook_id, source_id, outputs)
+
+    assert result["sources_concurrent_change"] == 1
+    assert result["sources_failed"] == 0        # 不是"坏了"，是"稍后重跑"
+    assert result["images_inserted"] == 0
+    assert result["skipped"].get("concurrent_change") == 2
+
+    # 库里零脏写：重解析后的那条元素/ chunk 原样，没有多出图片元素或反查行。
+    assert _rows(
+        repo,
+        "SELECT id FROM source_elements WHERE source_id=? AND element_type='image'",
+        source_id,
+    ) == []
+    chunks = _rows(repo, "SELECT id, element_ids FROM chunks WHERE source_id=?", source_id)
+    assert [row["id"] for row in chunks] == ["ck-reparsed"]
+    assert json.loads(chunks[0]["element_ids"]) == [f"el-{source_id}-9001"]
+    # 本趟落下的资产也被清扫掉了，不留孤儿。
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []
+
+
+def _replace_elements_only(repo, source_id):
+    """只换元素、**不动 chunk**——这是 ingestion 真实存在的中间窗口。
+
+    `replace_elements` 与 `replace_source_chunks` 是两次独立的仓储写（中间那把
+    `_source_chunk_lock` 是**进程内**锁，离线 CLI 是另一个进程，拿不到它），所以
+    "元素已经换代、chunk 还是旧的"这个状态是可达的。这一格恰恰是 chunk CAS
+    **看不见**的：目标 chunk 的 id 与 element_ids 都没变。"""
+    with repo._connect() as db:
+        db.execute("DELETE FROM source_elements WHERE source_id=?", (source_id,))
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id, source_id, element_type, location_label, text, metadata, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                f"el-{source_id}-9001",
+                source_id,
+                "paragraph",
+                "Markdown paragraph 1",
+                "重新解析之后的全新正文。",
+                json.dumps({"parser": "markdown"}),
+                "2099-01-01T00:00:00+00:00",
+            ),
+        )
+        db.commit()
+
+
+def test_elements_replaced_but_chunks_not_yet_rewritten_is_also_refused(
+    repo, seeded, outputs
+):
+    """元素代次 CAS 单独承重的那一格：chunk 的 id 与 element_ids 一个字节没变，
+    只有元素换了代——chunk CAS 完全看不见它。少了元素代次比对，本趟就会把图挂到
+    一批**已经被删掉**的锚点 id 上。"""
+    notebook_id, source_id = seeded
+    original = phase.plan_for_source
+    fired: list[int] = []
+
+    def _plan_then_replace(repo_arg, source, image_index):
+        result = original(repo_arg, source, image_index)
+        if not fired:
+            fired.append(1)
+            _replace_elements_only(repo, source_id)
+        return result
+
+    chunks_before = _rows(
+        repo, "SELECT id, element_ids FROM chunks WHERE source_id=?", source_id
+    )
+    phase.plan_for_source = _plan_then_replace
+    try:
+        result = _run(repo, notebook_id, outputs)
+    finally:
+        phase.plan_for_source = original
+
+    assert fired, "变异守护：元素替换没有真的发生"
+    assert result["sources_concurrent_change"] == 1
+    assert result["sources_failed"] == 0
+    assert result["images_inserted"] == 0
+    # chunk 一个字节没动，也没有图片元素挂到已删的锚点上。
+    assert _rows(
+        repo, "SELECT id, element_ids FROM chunks WHERE source_id=?", source_id
+    ) == chunks_before
+    assert _rows(
+        repo,
+        "SELECT id FROM source_elements WHERE source_id=? AND element_type='image'",
+        source_id,
+    ) == []
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []
+
+
+def test_a_chunk_that_moved_without_any_element_change_is_also_refused(
+    repo, seeded, outputs
+):
+    """chunk CAS 单独承重的那一格：元素代次信号**一个字节都没变**（COUNT 与
+    MAX(created_at) 都不动），只有 chunk 的 `element_ids` 被另一个写者改了。
+
+    这不是构造出来的形态：本命令**自己**的就地补齐就长这样——补一条未入 chunk 的
+    既有元素时它只 append `chunks.element_ids`，不新增任何元素行。两个 backfill
+    进程（或一次重叠的重跑）撞到同一个来源就正好落在这一格。少了 chunk CAS，本趟
+    会把计划时读到的旧列表整份盖回去，把对方刚 append 的那条**默默抹掉**。"""
+    notebook_id, source_id = seeded
+    original = phase.plan_for_source
+    fired: list[int] = []
+
+    def _plan_then_touch_chunk(repo_arg, source, image_index):
+        result = original(repo_arg, source, image_index)
+        if not fired:
+            fired.append(1)
+            with repo._connect() as db:
+                row = db.execute(
+                    "SELECT id, element_ids FROM chunks WHERE source_id=? "
+                    "ORDER BY id LIMIT 1",
+                    (source_id,),
+                ).fetchone()
+                # 另一个写者 append 了一条**既有**元素 id：source_elements 不动。
+                db.execute(
+                    "UPDATE chunks SET element_ids=? WHERE id=?",
+                    (
+                        json.dumps(
+                            json.loads(row["element_ids"])
+                            + [f"el-{source_id}-9999"]
+                        ),
+                        row["id"],
+                    ),
+                )
+                db.commit()
+        return result
+
+    signature_before = _rows(
+        repo,
+        "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM source_elements "
+        "WHERE source_id=?",
+        source_id,
+    )[0]
+    phase.plan_for_source = _plan_then_touch_chunk
+    try:
+        result = _run(repo, notebook_id, outputs)
+    finally:
+        phase.plan_for_source = original
+
+    assert fired, "变异守护：并发 chunk 改写没有真的发生"
+    signature_after = _rows(
+        repo,
+        "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM source_elements "
+        "WHERE source_id=?",
+        source_id,
+    )[0]
+    assert dict(signature_after) == dict(signature_before), (
+        "前置条件：元素代次信号必须没变，否则这个用例验的是元素 CAS 而不是 chunk CAS"
+    )
+    assert result["sources_concurrent_change"] == 1
+    assert result["sources_failed"] == 0
+    assert result["images_inserted"] == 0
+    # 对方 append 的那条还在——没有被旧快照盖掉。
+    kept = [
+        json.loads(row["element_ids"])
+        for row in _rows(
+            repo, "SELECT element_ids FROM chunks WHERE source_id=? ORDER BY id", source_id
+        )
+    ]
+    assert any(f"el-{source_id}-9999" in ids for ids in kept)
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []
+
+
+def test_a_concurrent_reparse_does_not_stop_the_rest_of_the_run(
+    repo, seeded, outputs, tmp_path
+):
+    """单源收编：被并发改掉的那个源落空，后面的源照常补。"""
+    notebook_id, source_id = seeded
+    docs = tmp_path / "second"
+    docs.mkdir()
+    (docs / "other.md").write_text(
+        MD + "\n第二篇文档独有的收尾段落。\n", encoding="utf-8"
+    )
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    other = next(
+        row["id"]
+        for row in _rows(repo, "SELECT id FROM sources ORDER BY id")
+        if row["id"] != source_id
+    )
+
+    result = _concurrent_reparse_run(repo, notebook_id, source_id, outputs)
+    assert result["sources_scanned"] == 2
+    assert result["sources_concurrent_change"] == 1
+    assert result["images_inserted"] == 2  # 另一个源照常补上
+    owners = {
+        row["source_id"]
+        for row in _rows(
+            repo, "SELECT source_id FROM source_elements WHERE element_type='image'"
+        )
+    }
+    assert owners == {other}
+
+
 def test_an_asset_row_orphaned_mid_pass_is_swept_by_that_same_pass(
     repo, seeded, outputs, monkeypatch
 ):
@@ -1005,6 +1267,93 @@ def test_cli_dry_run_is_a_database_pass_not_an_input_dir_preview(
     out = capsys.readouterr().out
     assert "backfill-images done" in out
     assert _rows(repo, "SELECT id FROM notebook_assets") == []
+
+
+def test_a_query_string_src_is_enriched_end_to_end_not_duplicated(
+    repo, outputs, tmp_path
+):
+    """端到端的 query/fragment 形态：解析路径存全量 src，回填两侧共用规范形。"""
+    docs = tmp_path / "qs"
+    docs.mkdir()
+    (docs / "qs.md").write_text(
+        "正文一段足够长的话在这里说明系统设计。\n\n"
+        "![图 1 系统总体架构](images/aaa.jpg?raw=1#anchor)\n",
+        encoding="utf-8",
+    )
+    notebook_id = bi.ensure_notebook(repo, None, "nb-qs")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["id"]
+    before = _image_elements(repo, source_id)
+    assert len(before) == 1
+    assert json.loads(before[0]["metadata"])["src"] == "images/aaa.jpg?raw=1#anchor"
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_enriched"] == 1
+    assert result["images_inserted"] == 0
+
+    after = _image_elements(repo, source_id)
+    assert len(after) == 1  # 没有重复行
+    assert json.loads(after[0]["metadata"])["asset_id"]
+    # 重跑幂等：规范形同样让「已补过」那半认得出来。
+    assert _run(repo, notebook_id, outputs)["images_enriched"] == 0
+
+
+def test_cli_exits_non_zero_when_a_source_fails(repo, seeded, outputs, monkeypatch):
+    """丢掉汇总、恒返回 0 会让编排脚本把一次「写事务炸了」的运行当成完全成功。"""
+    notebook_id, _ = seeded
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(repo.maintenance, "apply_image_backfill", _boom, raising=True)
+    code = bi.main(
+        [
+            "backfill-images",
+            "--notebook-id",
+            notebook_id,
+            "--mineru-output",
+            str(outputs[0]),
+            "--confirm-service-stopped",
+        ]
+    )
+    assert code == 1
+
+
+def test_cli_exits_zero_when_a_source_is_only_concurrently_changed(
+    repo, seeded, outputs
+):
+    """`concurrent_change` 是「稍后重跑」不是「坏了」：它不进退出码，否则活服务上
+    的正常运维跑会恒定非零。"""
+    notebook_id, source_id = seeded
+    original = phase.plan_for_source
+    fired: list[int] = []
+
+    def _plan_then_reparse(repo_arg, source, image_index):
+        result = original(repo_arg, source, image_index)
+        if not fired:
+            fired.append(1)
+            _reparse_in_place(repo, notebook_id, source_id)
+        return result
+
+    phase.plan_for_source = _plan_then_reparse
+    try:
+        code = bi.main(
+            [
+                "backfill-images",
+                "--notebook-id",
+                notebook_id,
+                "--mineru-output",
+                str(outputs[0]),
+                "--confirm-service-stopped",
+            ]
+        )
+    finally:
+        phase.plan_for_source = original
+    assert fired, "变异守护：并发重解析没有真的发生"
+    assert code == 0
 
 
 def test_cli_applies_the_backfill(repo, seeded, outputs):

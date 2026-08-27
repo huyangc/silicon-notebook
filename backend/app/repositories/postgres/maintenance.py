@@ -16,7 +16,9 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     sqlite_compatible_row,
 )
+from app.domain.image_backfill import ImageBackfillConcurrentChange
 from app.repositories.chunk_elements import (
+    decode_element_ids,
     reverse_rows as chunk_element_reverse_rows,
     reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
 )
@@ -1857,19 +1859,49 @@ class PostgresMaintenanceAdapter:
         notebook_id: str,
         source_id: str,
         elements: Sequence[dict],
-        chunk_element_ids: dict[str, list[str]],
+        chunk_updates: Sequence[dict],
         metadata_updates: Sequence[dict] = (),
         *,
         created_at: Any,
+        expected_element_count: int,
     ) -> None:
         """一个来源的全部插入与就地补齐，一个写事务（SQLite 侧的对等半）。
 
         `chunks.text` 与 chunk id 不变，所以 `chunk_embeddings` 一行不动；反查行
         与 `sources.updated_at` 同事务，后者的时间戳同样由仓储自己的时钟给。
         ``metadata_updates`` 只补既有 image 元素的 ``metadata.asset_id``
-        （见 SQLite 侧同名方法的 docstring 与 `image_backfill.EnrichedImage`）。"""
+        （见 SQLite 侧同名方法的 docstring 与 `image_backfill.EnrichedImage`）。
+
+        事务里的第一件事同样是 CAS：重读元素代次信号与每个目标 chunk 的现值，与计划
+        快照不一致就抛 `ImageBackfillConcurrentChange`（见 SQLite 侧的完整论证）。
+        PostgreSQL 有 `--confirm-service-stopped` preflight，这道 CAS 在这一侧是纵深
+        防御，但两个后端必须逐字对等——判据分叉会让"并发时安全落空"这条保证只在一个
+        后端成立。"""
         stamp = normalize_timestamp(created_at)
         with self._runtime.database.write() as db:
+            signature = db.execute(
+                "SELECT COUNT(*) AS n, MAX(created_at) AS newest "
+                "FROM source_elements WHERE source_id=%s",
+                (source_id,),
+            ).fetchone()
+            if int(signature["n"]) != int(expected_element_count) or signature[
+                "newest"
+            ] != created_at:
+                raise ImageBackfillConcurrentChange(
+                    f"source {source_id} changed generation between plan and apply"
+                )
+            for update in chunk_updates:
+                current = db.execute(
+                    "SELECT element_ids FROM chunks WHERE id=%s AND source_id=%s",
+                    (update["id"], source_id),
+                ).fetchone()
+                if current is None or decode_element_ids(
+                    current["element_ids"]
+                ) != list(update["expected"]):
+                    raise ImageBackfillConcurrentChange(
+                        f"chunk {update['id']} of source {source_id} changed "
+                        "between plan and apply"
+                    )
             execute_many(
                 db,
                 "INSERT INTO source_elements "
@@ -1894,13 +1926,14 @@ class PostgresMaintenanceAdapter:
                     "WHERE id=%s AND source_id=%s",
                     (jsonb(dict(update["metadata"])), update["id"], source_id),
                 )
-            for chunk_id, element_ids in chunk_element_ids.items():
+            for update in chunk_updates:
                 db.execute(
                     "UPDATE chunks SET element_ids=%s WHERE id=%s AND source_id=%s",
-                    (jsonb(list(element_ids)), chunk_id, source_id),
+                    (jsonb(list(update["element_ids"])), update["id"], source_id),
                 )
             rows = chunk_element_reverse_rows_for_writes(
-                notebook_id, list(chunk_element_ids.items())
+                notebook_id,
+                [(update["id"], update["element_ids"]) for update in chunk_updates],
             )
             if rows:
                 execute_many(

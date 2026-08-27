@@ -41,9 +41,17 @@ ADAPTERS = {
     / "app/repositories/postgres/maintenance.py",
 }
 
-#: 必须落在同一个写事务里的五条写。按 SQL 片段判而不是按行号——占位符方言不同，
+#: 必须落在同一个写事务里的语句。按 SQL 片段判而不是按行号——占位符方言不同，
 #: 但语句形状两侧逐字对等。
+#:
+#: 前两条是 **CAS 读**：它们证明"计划快照到此刻仍然成立"，所以必须与它们授权的那
+#: 批写在**同一个**事务里。挪到事务外（哪怕只早一个语句）就退化成一次 TOCTOU 检查
+#: ——并发重解析恰好落在读与写之间时，检查通过而写下去的仍是脏数据。
 REQUIRED_WRITES = (
+    # 元素代次信号：COUNT + MAX(created_at) 一次读回。
+    "MAX(created_at) AS newest",
+    # 每个目标 chunk 的现值，与计划快照里的旧 element_ids 比对。
+    "SELECT element_ids FROM chunks WHERE id=",
     "INTO source_elements",  # SQLite/PG 的 INSERT 前缀不同（OR IGNORE / ON CONFLICT）
     # 就地补齐（`image_backfill.EnrichedImage`）：它描述的资产行已经写进
     # `notebook_assets` 了，落在第二个事务里就会留下"资产在、元素还指不到它"的
