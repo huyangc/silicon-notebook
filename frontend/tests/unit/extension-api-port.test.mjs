@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { requestBlob, requestJson, requestVoid } from "../../app/api-client.ts";
 import { toUserMessage } from "../../app/errors.ts";
+import { requestTaskStream } from "../../app/request-task-stream.ts";
 import {
   EXTENSION_API_TRANSPORT,
   createWorkspaceExtensionApi,
@@ -27,6 +28,10 @@ function recordingTransport() {
       requestBlob: (path, options) => {
         calls.push({ method: "requestBlob", path, options });
         return Promise.resolve("blob");
+      },
+      requestTask: (path, options, callbacks) => {
+        calls.push({ method: "requestTask", path, options, callbacks });
+        return Promise.resolve({ streamed: true });
       },
       toUserMessage: (error, fallback) => {
         calls.push({ method: "toUserMessage", error, fallback });
@@ -152,18 +157,29 @@ test("the port confines the path and freezes the core request identity", async (
 });
 
 
-test("all three verbs and the message translator go through the same confinement", async () => {
+test("all four request modes and the message translator go through the same confinement", async () => {
   const { calls, transport } = recordingTransport();
   const api = createWorkspaceExtensionApi("ieee", transport);
   await api.requestVoid("/items");
   await api.requestBlob("/items/export");
+  const onHeartbeat = () => {};
+  assert.deepEqual(
+    await api.requestTask("/items/search", undefined, {
+      onHeartbeat,
+      fallbackMessage: "检索失败，请重试",
+    }),
+    { streamed: true },
+  );
   assert.equal(api.userMessage(new TypeError("boom"), "回退文案"), "translated");
   assert.deepEqual(calls.map((entry) => [entry.method, entry.path]), [
     ["requestVoid", "/extensions/ieee/items"],
     ["requestBlob", "/extensions/ieee/items/export"],
+    ["requestTask", "/extensions/ieee/items/search"],
     ["toUserMessage", undefined],
   ]);
-  assert.equal(calls[2].fallback, "回退文案");
+  assert.equal(calls[2].callbacks.onHeartbeat, onHeartbeat);
+  assert.equal(calls[2].callbacks.fallbackMessage, "检索失败，请重试");
+  assert.equal(calls[3].fallback, "回退文案");
   // 无 init 时也不得漏掉核心身份（`?? {}` 那条分支同样要固定三项）。
   assert.equal(calls[0].options.tag, "extension");
   assert.equal(calls[0].options.auth, "required");
@@ -175,7 +191,7 @@ test("all three verbs and the message translator go through the same confinement
   // 处理器里就是整棵子树的错误边界)。限定本身没变——它仍发生在碰 transport 之前,
   // 下一条 `calls.length` 断言钉的就是这一点。
   await assert.rejects(api.requestVoid("/../notebooks/x"), TypeError);
-  assert.equal(calls.length, 3, "拒绝的请求一个字节都不许到达 transport");
+  assert.equal(calls.length, 4, "拒绝的请求一个字节都不许到达 transport");
   assert.equal(Object.isFrozen(api), true);
 });
 
@@ -195,9 +211,10 @@ test("a refused path reaches a .catch() handler instead of throwing past it", as
   assert.equal(caught.length, 1);
   assert.ok(caught[0] instanceof TypeError);
   assert.equal(calls.length, 0, "拒绝的请求一个字节都不许到达 transport");
-  // 三个请求方法都是同一条路:同步抛会让其中任何一个漏掉 `.catch`。
+  // 四个请求方法都是同一条路:同步抛会让其中任何一个漏掉 `.catch`。
   await assert.rejects(api.requestJson("/x?y=1"), TypeError);
   await assert.rejects(api.requestBlob("//evil/x"), TypeError);
+  await assert.rejects(api.requestTask("/../x"), TypeError);
   // 头部剥离那道闸同样在 transport 之前跑,它抛的东西也必须是 rejection。
   await assert.rejects(api.requestJson("/x", { headers: { "破 header": "v" } }));
   assert.equal(calls.length, 0);
@@ -228,6 +245,7 @@ test("the default transport is the core api client itself, not a shadow copy", (
   assert.equal(EXTENSION_API_TRANSPORT.requestJson, requestJson);
   assert.equal(EXTENSION_API_TRANSPORT.requestVoid, requestVoid);
   assert.equal(EXTENSION_API_TRANSPORT.requestBlob, requestBlob);
+  assert.equal(EXTENSION_API_TRANSPORT.requestTask, requestTaskStream);
   assert.equal(EXTENSION_API_TRANSPORT.toUserMessage, toUserMessage);
   assert.equal(Object.isFrozen(EXTENSION_API_TRANSPORT), true);
 });

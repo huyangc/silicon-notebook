@@ -75,6 +75,25 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     assert preview.status_code == 200
     contract = preview.json()
     assert contract["resolved_question"].startswith("RTL 到 GDSII")
+    streamed_preview = client.post(
+        f"/api/notebooks/{notebook_id}/ask/intent/stream",
+        json={"question": "RTL到GDSII流程"},
+    )
+    assert streamed_preview.status_code == 200
+    preview_events = [
+        json.loads(line)
+        for line in streamed_preview.text.splitlines()
+        if line.strip()
+    ]
+    assert preview_events[0] == {
+        "event": "started",
+        "stage": "ask_intent",
+        "elapsed_ms": 0,
+    }
+    assert preview_events[-1]["event"] == "final"
+    assert preview_events[-1]["result"]["resolved_question"].startswith(
+        "RTL 到 GDSII"
+    )
     # 意图预检不能提前创建会话或 Ask job。
     assert client.get(
         f"/api/notebooks/{notebook_id}/conversations"

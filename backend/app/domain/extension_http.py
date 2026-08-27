@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import threading
 from typing import Any, Protocol
 
 
@@ -129,13 +130,40 @@ class PluginUrlSourceImportPort(Protocol):
         ...
 
 
+class PluginTaskStreamPort(Protocol):
+    """Core-owned request-local NDJSON transport for plugin HTTP work.
+
+    A plugin route uses this only when the browser is waiting directly for a
+    slow, synchronous operation such as an upstream model/search call. Core
+    runs ``work`` off the event-loop thread, sends the shared
+    ``started``/``heartbeat``/``final`` protocol, and turns every worker
+    exception into a stable, content-free error frame. The event passed to
+    ``work`` is set when the browser disconnects, so a cooperative upstream
+    client can stop promptly.
+
+    Durable/background work does not belong here: it must persist its own job
+    state and let the browser reconnect or poll instead of tying its lifetime
+    to this response.
+    """
+
+    def response(
+        self,
+        request: Any,
+        work: Callable[[threading.Event], Any],
+        *,
+        stage: str,
+    ) -> Any:
+        """Return the shared NDJSON response for one synchronous callable."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class PluginRouteContext:
     """Everything a deployment plugin's router factory is given — nothing more.
 
     Deliberately excludes the repository, global Settings, a model client,
     the FastMCP host, and any raw bearer token. A plugin router can only
-    reach core through these eight narrow seams.
+    reach core through these nine narrow seams.
     """
 
     plugin_id: str
@@ -156,6 +184,10 @@ class PluginRouteContext:
     # the same UI-copy rules as core endpoints.
     user_error: Callable[[int, str], Exception]
     url_sources: PluginUrlSourceImportPort
+    # Request-local interactive work only. It keeps the browser connection
+    # alive, runs a synchronous callable off the event loop, and propagates a
+    # cooperative disconnect signal without exposing core's model client.
+    task_stream: PluginTaskStreamPort
     # Emits one whitelisted observability event; malformed payloads are
     # dropped by core rather than raised back into the plugin.
     emit_event: Callable[[Mapping[str, object]], None]

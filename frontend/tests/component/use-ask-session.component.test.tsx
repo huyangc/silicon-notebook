@@ -1191,6 +1191,7 @@ test("intent confirmation reuses the exact preview scope snapshot", async () => 
     expect.any(AbortSignal),
     originalPolicy.sourceScope,
     originalPolicy.baseScope,
+    expect.any(Function),
   );
 
   view.rerender(<Harness policy={changedPolicy} />);

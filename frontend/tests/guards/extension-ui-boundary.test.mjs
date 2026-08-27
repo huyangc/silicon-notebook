@@ -266,16 +266,22 @@ test("extension SDK remains static, narrow, and free of domain owners or remote 
   const registry = modules.find((row) => row.path === "features/extension-sdk/registry.ts");
   assert.ok(registry);
   // api 端口是插件唯一的 HTTP 出口，所以它自己的依赖面必须窄到可以一眼看完：核心
-  // api 客户端（唯一允许发请求的模块）、错误人性化（插件读不得 `error.message`——
-  // errors-guard 是精确计数普查，仓库外的包登记不进那份清单）、以及 SDK 合同。
+  // api 客户端（唯一允许发请求的模块）、共享请求任务流消费者、错误人性化（插件
+  // 读不得 `error.message`——errors-guard 是精确计数普查，仓库外的包登记不进那份
+  // 清单）、以及 SDK 合同。
   // 多出任何一条——尤其是 `../../app/source-api.ts` 这种领域 API——就等于让插件端口
   // 顺带成为某个领域能力的转发器，而它本该只会拼路径。
   const port = modules.find((row) => row.path === "features/extension-sdk/api.ts");
   assert.ok(port, "features/extension-sdk/api.ts must remain the plugin HTTP port");
   assert.deepEqual(
     [...new Set(importsIn(port.module).map((row) => row.module))].sort(),
-    ["../../app/api-client.ts", "../../app/errors.ts", "./contracts.ts"],
-    "api.ts may import only the core api client, the error humanizer and the SDK contracts",
+    [
+      "../../app/api-client.ts",
+      "../../app/errors.ts",
+      "../../app/request-task-stream.ts",
+      "./contracts.ts",
+    ],
+    "api.ts may import only the core api client, task stream, error humanizer and SDK contracts",
   );
   const merged = modules.find((row) => row.path === "features/extension-sdk/workspace-registry.ts");
   assert.ok(merged, "workspace-registry.ts must remain the single merged registry module");

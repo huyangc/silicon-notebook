@@ -15,6 +15,7 @@ import { API_BASE } from "./api-config.ts";
 import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
+import { requestTaskStream } from "./request-task-stream.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
 
@@ -734,10 +735,12 @@ export const optimizeKnowhowCell = (
   tableId: string,
   rowId: string,
   columnId: string,
+  signal?: AbortSignal,
 ): Promise<{ suggestionMd: string }> =>
-  requestJson<{ suggestion_md: string }>(
-    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/optimize`,
-    { method: "POST", tag: "knowhow" },
+  requestTaskStream<{ suggestion_md: string }>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/optimize/stream`,
+    { method: "POST", signal, tag: "knowhow" },
+    { fallbackMessage: "优化失败，请重试" },
   ).then((wire) => ({ suggestionMd: wire.suggestion_md }));
 
 // --- 单行空列智能补全（显式触发、只返回建议）----------------------------------
@@ -761,16 +764,19 @@ export const completeKnowhowRow = (
   tableId: string,
   rowId: string,
   targetColumnIds?: string[],
+  signal?: AbortSignal,
 ): Promise<KnowhowRowCompletion> =>
-  requestJson<WireKnowhowRowCompletion>(
-    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/complete`,
+  requestTaskStream<WireKnowhowRowCompletion>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/complete/stream`,
     {
       method: "POST",
       body: JSON.stringify(
         targetColumnIds === undefined ? {} : { target_column_ids: targetColumnIds },
       ),
+      signal,
       tag: "knowhow",
     },
+    { fallbackMessage: "生成建议失败，请稍后重试" },
   ).then((wire) => ({
     retrievalMode: wire.retrieval_mode,
     retrievalScope: wire.retrieval_scope,
@@ -805,9 +811,10 @@ export const reformatKnowhowCell = (
   columnId: string,
   signal?: AbortSignal,
 ) =>
-  requestJson<{ candidate_md: string; source: string; changed: boolean; source_md: string }>(
-    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/reformat`,
+  requestTaskStream<{ candidate_md: string; source: string; changed: boolean; source_md: string }>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/reformat/stream`,
     { method: "POST", signal, tag: "knowhow" },
+    { fallbackMessage: "格式化失败，请重试" },
   ).then((w) => ({ candidateMd: w.candidate_md, source: w.source, changed: w.changed, sourceMd: w.source_md }));
 
 // --- 格子级代码附件（Task 10；HTTP 端点 session/agent token 皆可访问，本文件

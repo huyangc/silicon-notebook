@@ -16,9 +16,22 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+vi.mock("../../app/knowhow-model.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../app/knowhow-model.ts")>();
+  return {
+    ...actual,
+    optimizeKnowhowCell: vi.fn(),
+    reformatKnowhowCell: vi.fn(),
+  };
+});
+
 import { KnowhowCellEditor } from "../../app/knowhow-cell-editor.tsx";
 import { DRAFT_FLUSH_FAILED_MESSAGE } from "../../app/knowhow-cell-editor-logic.ts";
-import type { KnowhowTableDetail } from "../../app/knowhow-model.ts";
+import {
+  optimizeKnowhowCell,
+  reformatKnowhowCell,
+  type KnowhowTableDetail,
+} from "../../app/knowhow-model.ts";
 
 let unexpectedConsoleErrors: unknown[][] = [];
 
@@ -118,4 +131,34 @@ test("B. 落盘失败：首次点历史拦下+警告，二次强制放行", asyn
 
   await user.click(screen.getByRole("button", { name: "历史" }));
   expect(onHistory).toHaveBeenCalledTimes(1);  // 二次强制放行
+});
+
+test("关闭单格编辑器会取消仍在等待的优化请求", async () => {
+  const user = userEvent.setup();
+  vi.mocked(optimizeKnowhowCell).mockReturnValue(new Promise(() => undefined));
+  const onClose = vi.fn();
+  renderEditor(vi.fn(), onClose);
+
+  await user.click(screen.getByRole("button", { name: "优化表达" }));
+  const signal = vi.mocked(optimizeKnowhowCell).mock.calls[0][4];
+  expect(signal?.aborted).toBe(false);
+  await user.click(screen.getByTitle("关闭"));
+
+  expect(onClose).toHaveBeenCalledTimes(1);
+  expect(signal?.aborted).toBe(true);
+});
+
+test("关闭单格编辑器会取消仍在等待的规整格式请求", async () => {
+  const user = userEvent.setup();
+  vi.mocked(reformatKnowhowCell).mockReturnValue(new Promise(() => undefined));
+  const onClose = vi.fn();
+  renderEditor(vi.fn(), onClose);
+
+  await user.click(screen.getByRole("button", { name: "规整格式" }));
+  const signal = vi.mocked(reformatKnowhowCell).mock.calls[0][4];
+  expect(signal?.aborted).toBe(false);
+  await user.click(screen.getByTitle("关闭"));
+
+  expect(onClose).toHaveBeenCalledTimes(1);
+  expect(signal?.aborted).toBe(true);
 });

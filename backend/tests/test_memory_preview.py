@@ -156,6 +156,16 @@ def test_preview_llm_failure_uses_same_fallback(
     assert preview.json()["content_md"] == "Fallback body"
     assert preview.json()["kg_extract_eligible"] is False
     assert "memory_preview" in repo._runtime.models._test_chat_calls
+    streamed = client.post(
+        f"/api/answers/{answer_id}/memory-preview/stream", headers=headers
+    )
+    assert streamed.status_code == 200
+    events = [
+        json.loads(line) for line in streamed.text.splitlines() if line.strip()
+    ]
+    assert events[0]["event"] == "started"
+    assert events[-1]["event"] == "final"
+    assert events[-1]["result"]["title"] == "Fallback title"
 
 
 def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(

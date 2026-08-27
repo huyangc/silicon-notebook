@@ -8,7 +8,7 @@ rule holds on the other side — ``app.extensions.http_router`` may not import
 ``app.api.*`` — so neither package can reach the other and the two halves meet
 in ``app.domain``.
 
-What a plugin gets is the whole of :class:`PluginRouteContext`: eight seams,
+What a plugin gets is the whole of :class:`PluginRouteContext`: nine seams,
 none of which is the repository, global ``Settings``, a model client, the
 FastMCP host, or a raw bearer token. What it gets *around* those seams is
 nothing: the router is mounted with a router-level ``Depends(get_current_user)``
@@ -50,11 +50,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from functools import wraps
+import inspect
 import logging
 import re
+import threading
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
 from fastapi.security.base import SecurityBase
 from starlette.concurrency import run_in_threadpool
@@ -63,6 +65,7 @@ from starlette.responses import Response
 
 from app.api import deps as core_deps
 from app.api import source_routes
+from app.api.task_stream import task_stream_response
 from app.api.deps import (
     get_current_user,
     notebook_capability_allowed,
@@ -182,6 +185,17 @@ _EVENT_LOOP_MISUSE_MESSAGE = (
     "await url_sources.import_urls_async(...) instead"
 )
 
+# The stage is protocol metadata visible in heartbeat frames and diagnostics,
+# never display copy or request content. Reusing the stable-id grammar keeps a
+# plugin from accidentally putting a query, title, exception, or other free
+# text into that channel.
+_PLUGIN_TASK_STAGE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+_PLUGIN_TASK_ERROR_CODE = "extension_task_failed"
+_PLUGIN_ASYNC_TASK_MESSAGE = (
+    "task_stream.response work must be synchronous; pass a regular callable "
+    "and use the supplied cancellation event"
+)
+
 
 def _refuse_event_loop_thread() -> None:
     """Refuse to run blocking work on the thread the event loop is using.
@@ -278,6 +292,59 @@ class _UrlSourceImportAdapter:
         """
 
         return await run_in_threadpool(self.import_urls, notebook_id, list(urls))
+
+
+class _PluginTaskStreamAdapter:
+    """Bind the shared request-task transport to one deployment plugin.
+
+    This is a transport port, not a model or repository port. The plugin still
+    owns the synchronous upstream call; core owns only event-loop isolation,
+    heartbeat framing, disconnect signalling, and error redaction.
+    """
+
+    __slots__ = ("_plugin_id",)
+
+    def __init__(self, plugin_id: str) -> None:
+        self._plugin_id = plugin_id
+
+    def response(
+        self,
+        request: Any,
+        work: Callable[[threading.Event], Any],
+        *,
+        stage: str,
+    ) -> Response:
+        if not isinstance(request, Request):
+            raise TypeError("task_stream.response requires the current FastAPI Request")
+        if not callable(work):
+            raise TypeError("task_stream.response work must be callable")
+        call = getattr(work, "__call__", None)
+        if inspect.iscoroutinefunction(work) or inspect.iscoroutinefunction(call):
+            raise TypeError(_PLUGIN_ASYNC_TASK_MESSAGE)
+        if not isinstance(stage, str) or _PLUGIN_TASK_STAGE.fullmatch(stage) is None:
+            raise TypeError("task_stream.response stage must be a stable lowercase code")
+
+        cancellation = threading.Event()
+
+        def run_work() -> Any:
+            result = work(cancellation)
+            # A decorated callable can evade ``iscoroutinefunction``. Refuse
+            # its returned awaitable in the worker rather than handing a
+            # coroutine object to the JSON encoder or leaving it unclosed.
+            if inspect.isawaitable(result):
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError(_PLUGIN_ASYNC_TASK_MESSAGE)
+            return result
+
+        return task_stream_response(
+            request,
+            run_work,
+            stage=f"extension.{self._plugin_id}.{stage}",
+            error_code=_PLUGIN_TASK_ERROR_CODE,
+            cancel_event=cancellation,
+        )
 
 
 # One whitelisted observability payload: two stable codes and two counters.
@@ -871,6 +938,7 @@ def mount_extension_routers(
             current_actor=plugin_actor,
             user_error=user_error,
             url_sources=_UrlSourceImportAdapter(),
+            task_stream=_PluginTaskStreamAdapter(spec.plugin_id),
             emit_event=emit,
         )
         router = _call_plugin_router_factory(spec, context)

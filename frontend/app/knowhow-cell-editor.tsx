@@ -745,6 +745,9 @@ export function KnowhowCellEditor({
   // 在飞上传的中断句柄。上传**绝不允许比本组件实例活得久**：卸载/放弃时 abort 掉，
   // 免得 continuation 落到已卸载的树上（图片进不了正文、资产却已在服务端落盘）。
   const uploadAbortRef = useRef<AbortController | null>(null);
+  // 优化/规整共用一个请求句柄：新请求换代、确认离开或组件卸载都会断开
+  // request-local stream，让后端设置同一协作取消事件。
+  const modelTaskAbortRef = useRef<AbortController | null>(null);
   // 卸载清理要读到最新的落盘函数，但它自己挂在 [] 依赖的 effect 上（拿到的是首帧
   // 闭包），故经 ref 取。
   const flushDraftRef = useRef<() => boolean>(() => true);
@@ -763,6 +766,12 @@ export function KnowhowCellEditor({
       // 丢弃的那份草稿直接删掉（此刻正文还等于已保存内容 → 决策正是 remove）。
       if (hasUnsavedChanges(contentRef.current, savedContentRef.current)) flushDraftRef.current();
     };
+  }, []);
+  // 独立于上面的上传/草稿清理状态机：它的语义和结构都有专门 AST 守卫，模型
+  // request-local stream 只需在真实卸载时终止，不参与草稿决策。
+  useEffect(() => () => {
+    modelTaskAbortRef.current?.abort();
+    modelTaskAbortRef.current = null;
   }, []);
   // 「最新值」ref：异步收尾（保存返回）读到的 content 是发起那一刻被闭包冻住的
   // payload，看不见用户在请求在飞期间又敲进去的字（textarea 保存中并不禁用）。
@@ -996,6 +1005,8 @@ export function KnowhowCellEditor({
       setPendingLeave(null);
       setLeaveAfterUpload(null);
       leaveAfterUploadRef.current = null;
+      modelTaskAbortRef.current?.abort();
+      modelTaskAbortRef.current = null;
       if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
       else if (intent.kind === "history") onHistory();
       else onClose();
@@ -1287,13 +1298,22 @@ export function KnowhowCellEditor({
     // 与按钮 disabled 的条件保持一致（按钮同时受 busy 置灰），避免键盘/编程路径
     // 绕过其中一半——与 runSave / handleSwitchCell 的「入口再查一遍」写法对齐。
     if (optimizeDisabledReason || busy) return;
+    modelTaskAbortRef.current?.abort();
+    const controller = new AbortController();
+    modelTaskAbortRef.current = controller;
     setSaveError(null); // 清掉上一轮可能留下的「建议已失效」等提示，避免常驻红字
     setOptimizeState(beginCellOptimize);
     try {
-      const result = await optimizeKnowhowCell(notebookId, table.id, rowId, columnId);
+      const result = await optimizeKnowhowCell(
+        notebookId, table.id, rowId, columnId, controller.signal,
+      );
+      if (controller.signal.aborted || !mountedRef.current) return;
       setOptimizeState((state) => resolveCellOptimizeSuggestion(state, result.suggestionMd));
     } catch (err) {
+      if (controller.signal.aborted || !mountedRef.current) return;
       setOptimizeState((state) => failCellOptimize(state, extractErrorMessage(err, "优化失败，请重试")));
+    } finally {
+      if (modelTaskAbortRef.current === controller) modelTaskAbortRef.current = null;
     }
   }
 
@@ -1345,6 +1365,9 @@ export function KnowhowCellEditor({
   async function handleReformat() {
     // 与按钮 disabled 一致：busy 含兄弟「优化表达」的 loading，键盘/编程路径也互斥。
     if (reformatDisabledReason || busy) return;
+    modelTaskAbortRef.current?.abort();
+    const controller = new AbortController();
+    modelTaskAbortRef.current = controller;
     // P1-d：快照发起请求那一刻的编辑器内容。reformat_cell 读的是已保存内容，但
     // 请求在飞期间 textarea 未禁用——用户此刻敲的字会让内容偏离这份快照。到达时
     // 用 contentRef.current（实时值，非本闭包冻住的旧 content）比对，变了就丢弃这
@@ -1352,10 +1375,16 @@ export function KnowhowCellEditor({
     const contentAtRequest = content;
     setReformatState(beginCellReformat);
     try {
-      const result = await reformatKnowhowCell(notebookId, table.id, rowId, columnId);
+      const result = await reformatKnowhowCell(
+        notebookId, table.id, rowId, columnId, controller.signal,
+      );
+      if (controller.signal.aborted || !mountedRef.current) return;
       setReformatState((state) => resolveReformatArrival(state, contentAtRequest, contentRef.current, result));
     } catch (err) {
+      if (controller.signal.aborted || !mountedRef.current) return;
       setReformatState((state) => failCellReformat(state, extractErrorMessage(err, "规整格式失败，请重试")));
+    } finally {
+      if (modelTaskAbortRef.current === controller) modelTaskAbortRef.current = null;
     }
   }
 

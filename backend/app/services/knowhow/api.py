@@ -1048,7 +1048,14 @@ def _optimize_cell_prompt(content_md: str, column_name: str, kind: str) -> str:
     )
 
 
-def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> str:
+def optimize_cell(
+    repo: Any,
+    content_md: str,
+    column_name: str,
+    kind: str,
+    *,
+    cancel_event=None,
+) -> str:
     """LLM 表达优化（design doc §③）：格子浮窗「优化表达」/行详情抽屉「优化整行」
     的共享后端。**显式触发、suggestion-only、绝不写库**——回填走既有 PATCH cell
     端点（那才触发重投影）。是本特性唯一的新增 LLM 调用。
@@ -1067,6 +1074,7 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     bad response) AFTER logging it via ``note_model_error`` (502) — routes.py
     maps each to its own status code."""
     from app.core.llm import cap_kwargs
+    from app.services.cancellation import AskCancelled
     from app.services.model_work import ModelNotConfiguredError
 
     if not content_md.strip():
@@ -1076,10 +1084,12 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     if not client.configured:
         raise ModelNotConfiguredError("尚未配置模型，无法优化表达")
     try:
+        control = {"cancel_event": cancel_event} if cancel_event is not None else {}
         raw = client.chat_json(
             [{"role": "user", "content": _optimize_cell_prompt(content_md, column_name, kind)}],
             _OPTIMIZE_SCHEMA_HINT,
             **cap_kwargs(client, "openai_compat_max_tokens"),
+            **control,
         )
         data = json.loads(raw)
         suggestion = str(data.get("suggestion_md", "")).strip() if isinstance(data, dict) else ""
@@ -1087,6 +1097,8 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
             raise ValueError("模型未返回有效的重写结果")
         return suggestion
     except ModelNotConfiguredError:
+        raise
+    except AskCancelled:
         raise
     except Exception as exc:
         models.note_model_error(
@@ -1996,6 +2008,8 @@ def complete_row(
     table: dict,
     row_id: str,
     target_column_ids: "list[str] | None" = None,
+    *,
+    cancel_event=None,
 ) -> dict:
     """Suggest blank cells from same-table rows plus one reasoning retrieval.
 
@@ -2004,6 +2018,7 @@ def complete_row(
     It deliberately calls neither Ask synthesis nor conversations/Memory.
     """
     from app.core.llm import cap_kwargs
+    from app.services.cancellation import AskCancelled
     from app.services.model_work import ModelNotConfiguredError
     from app.services.reasoning_retrieval import reasoning_retriever_from_repository
 
@@ -2039,8 +2054,11 @@ def complete_row(
 
     try:
         settings = repo.settings
+        retrieval_control = (
+            {"cancel_event": cancel_event} if cancel_event is not None else {}
+        )
         reasoning_retriever = reasoning_retriever_from_repository(
-            repo, settings, fail_closed=True
+            repo, settings, fail_closed=True, **retrieval_control
         )
         reasoning_retriever.candidate_filter = _completion_reasoning_candidate_filter(
             runtime.evidence_context_component, table
@@ -2096,6 +2114,8 @@ def complete_row(
         )
     except ModelNotConfiguredError:
         raise
+    except AskCancelled:
+        raise
     except Exception as exc:
         models.note_model_error(
             "reasoning_agent", exc, workload_id="reasoning_agent"
@@ -2133,6 +2153,7 @@ def complete_row(
 
     client = clients["knowhow_complete"]
     try:
+        control = {"cancel_event": cancel_event} if cancel_event is not None else {}
         raw = client.chat_json(  # type: ignore[attr-defined]
             [
                 {"role": "system", "content": _COMPLETION_SYSTEM_INSTRUCTION},
@@ -2140,6 +2161,7 @@ def complete_row(
             ],
             _COMPLETION_SCHEMA_HINT,
             **cap_kwargs(client, "openai_compat_max_tokens"),
+            **control,
         )
         data = json.loads(raw)
         return _completion_result(
@@ -2154,6 +2176,8 @@ def complete_row(
             evidence=library_evidence,
         )
     except ModelNotConfiguredError:
+        raise
+    except AskCancelled:
         raise
     except Exception as exc:
         models.note_model_error(
@@ -2213,7 +2237,14 @@ def _reformat_cell_prompt(content_md: str, column_name: str, kind: str) -> str:
 # LLM 与 rule_normalize 都不拆（一致、可预期）；用户可手动分行或用编辑器的有序列表按钮。
 
 
-def llm_reformat(client: Any, content_md: str, column_name: str, kind: str) -> "str | None":
+def llm_reformat(
+    client: Any,
+    content_md: str,
+    column_name: str,
+    kind: str,
+    *,
+    cancel_event=None,
+) -> "str | None":
     """调 LLM 只做排版整理；调用失败（JSON 解析失败/字段缺失/网络异常）一律
     返回 None，调用方据此回退到 rule_normalize。``ModelNotConfiguredError``
     ——client 未配置（哨兵 client，见 model_provider.py::_UnconfiguredLLMClient）
@@ -2225,25 +2256,37 @@ def llm_reformat(client: Any, content_md: str, column_name: str, kind: str) -> "
     解析好后传入，避免同一次调用重复解析，也让本文件新增的 ``_runtime``
     私有面 reach 只多一个落点（在 reformat_cell 里）而不是两个。"""
     from app.core.llm import cap_kwargs
+    from app.services.cancellation import AskCancelled
     from app.services.model_work import ModelNotConfiguredError
 
     try:
         prompt = _reformat_cell_prompt(content_md, column_name, kind)
+        control = {"cancel_event": cancel_event} if cancel_event is not None else {}
         raw = client.chat_json(
             [{"role": "user", "content": prompt}],
             _REFORMAT_SCHEMA_HINT,
             **cap_kwargs(client, "openai_compat_max_tokens"),
+            **control,
         )
         data = json.loads(raw)
         out = data.get("reformatted_md") if isinstance(data, dict) else None
         return out if isinstance(out, str) and out.strip() else None
     except ModelNotConfiguredError:
         raise
+    except AskCancelled:
+        raise
     except Exception:
         return None
 
 
-def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> dict:
+def reformat_cell(
+    repo: Any,
+    content_md: str,
+    column_name: str,
+    kind: str,
+    *,
+    cancel_event=None,
+) -> dict:
     """LLM 重排 → 内容不变式校验 → 不过退规则。返回候选 dict
     ``{"candidate_md", "source", "changed"}``，``source`` ∈
     ``{"llm", "rule/llm-failed", "rule/no-llm"}``。**从不写库**（suggestion-
@@ -2270,7 +2313,9 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
         cand = md_normalize.rule_normalize(raw)
         return {"candidate_md": cand, "source": "rule/no-llm", "changed": cand != raw}
     try:
-        cand = llm_reformat(client, raw, column_name, kind)
+        cand = llm_reformat(
+            client, raw, column_name, kind, cancel_event=cancel_event
+        )
     except ModelNotConfiguredError:
         cand = md_normalize.rule_normalize(raw)
         return {"candidate_md": cand, "source": "rule/no-llm", "changed": cand != raw}

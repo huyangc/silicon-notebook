@@ -8,25 +8,27 @@ the mount would skip precisely the machinery under test: FastAPI's dependency
 tree, the router-level session guard, and core's notebook guards.
 
 See docs/superpowers/plans/2026-08-23-deployment-extensions-backend.md §3.3 and
-主 agent 裁决 2 (``PluginRouteContext`` is eight fields, and the gate set that
+主 agent 裁决 2 (``PluginRouteContext`` is nine fields, and the gate set that
 ``{notebook_id}`` routes are checked against includes core's *read* gate).
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import sys
 import textwrap
 import threading
 
 import pytest
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from app.api.extension_routes import (
     PluginRouteMountError,
+    _PluginTaskStreamAdapter,
     _event_emitter,
     _run_plugin_router_validation,
     mount_extension_routers,
@@ -231,6 +233,34 @@ def build_router(context):
     )
     def peek(notebook_id: str):
         return {"notebook_id": notebook_id}
+
+    return router
+"""
+
+_TASK_STREAM_SRC = """
+from fastapi import Request
+
+
+def build_router(context):
+    router = APIRouter()
+
+    @router.post("/search-task")
+    async def search_task(request: Request):
+        def work(cancel_event):
+            return {"ok": True, "cancelled": cancel_event.is_set()}
+
+        return context.task_stream.response(
+            request, work, stage="candidate_search"
+        )
+
+    @router.post("/failed-task")
+    async def failed_task(request: Request):
+        def work(cancel_event):
+            raise RuntimeError("secret-upstream-message")
+
+        return context.task_stream.response(
+            request, work, stage="candidate_search"
+        )
 
     return router
 """
@@ -1735,7 +1765,7 @@ def test_plugin_actor_is_narrow(tmp_path, monkeypatch, frozen_runtime_reset):
 def test_plugin_cannot_reach_repository_or_settings_through_the_context(
     tmp_path, monkeypatch, frozen_runtime_reset
 ):
-    """The context is exactly eight seams, and no core object hides behind one."""
+    """The context is exactly nine seams, and no core object hides behind one."""
 
     from app.api import deps
     from app.core.config import Settings
@@ -1753,6 +1783,7 @@ def test_plugin_cannot_reach_repository_or_settings_through_the_context(
         "current_actor",
         "user_error",
         "url_sources",
+        "task_stream",
         "emit_event",
     }
     # Frozen: a plugin cannot swap a seam out from under core after the fact.
@@ -1774,6 +1805,72 @@ def test_plugin_cannot_reach_repository_or_settings_through_the_context(
     # Settings object, and not core configuration of any kind.
     assert context.settings is None
     assert not hasattr(context, "repository")
+
+
+# --------------------------------------------------------------------------
+# The request-local task stream port
+# --------------------------------------------------------------------------
+
+
+def test_plugin_task_stream_uses_shared_ndjson_and_redacts_worker_failures(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    client = _client(tmp_path, monkeypatch, factory_src=_TASK_STREAM_SRC)
+    headers = _auth(client, "z00101515")
+
+    response = client.post(f"{_MOUNT}/search-task", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert events == [
+        {
+            "event": "started",
+            "stage": "extension.corp.sample.candidate_search",
+            "elapsed_ms": 0,
+        },
+        {
+            "event": "final",
+            "stage": "extension.corp.sample.candidate_search",
+            "result": {"ok": True, "cancelled": False},
+        },
+    ]
+
+    failed = client.post(f"{_MOUNT}/failed-task", headers=headers)
+    assert failed.status_code == 200
+    failed_events = [json.loads(line) for line in failed.text.splitlines()]
+    assert failed_events[-1] == {
+        "event": "error",
+        "stage": "extension.corp.sample.candidate_search",
+        "error": "extension_task_failed",
+    }
+    assert "secret-upstream-message" not in failed.text
+
+
+def test_plugin_task_stream_refuses_free_text_stage_and_async_work():
+    adapter = _PluginTaskStreamAdapter(_PLUGIN_ID)
+    request = Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [],
+        "client": None,
+        "server": None,
+    })
+
+    with pytest.raises(TypeError, match="stable lowercase code"):
+        adapter.response(request, lambda _cancel: {}, stage="用户问题 search")
+
+    async def async_work(_cancel):
+        return {}
+
+    with pytest.raises(TypeError, match="must be synchronous"):
+        adapter.response(request, async_work, stage="candidate_search")
 
 
 # --------------------------------------------------------------------------
