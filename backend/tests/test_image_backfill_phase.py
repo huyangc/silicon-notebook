@@ -479,6 +479,39 @@ def test_a_failed_write_transaction_rolls_back_this_source_s_assets(
     assert not assets_dir.exists() or list(assets_dir.iterdir()) == []
 
 
+def test_a_repo_root_relative_file_path_reads_from_any_working_directory(
+    repo, seeded, outputs, tmp_path, monkeypatch
+):
+    """历史来源的 `sources.file_path` 可以是**仓库根相对**路径，而这条离线命令从
+    任意 CWD 启动都合法。裸 `Path(file_path)` 会按进程 CWD 解析，于是整批历史来源
+    被误报成 `file_unreadable`——看起来像"文件都没了"。解析必须走产品统一的那条
+    （`SourceFileStore.resolve_path`：绝对原样、相对按仓库根）。"""
+    notebook_id, source_id = seeded
+    absolute = _rows(repo, "SELECT file_path FROM sources WHERE id=?", source_id)[0][
+        "file_path"
+    ]
+    # 用例里的存储目录在 tmp_path 下，所以把解析根指到那儿，好让 file_path 能写成
+    # 一个真正的相对路径（`resolve_path` 的规则本身不变：绝对原样、相对按根）。
+    monkeypatch.setattr(repo._runtime.database, "root_dir", tmp_path)
+    relative = str(Path(absolute).relative_to(tmp_path))
+    assert not Path(relative).is_absolute()
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE sources SET file_path=? WHERE id=?", (relative, source_id)
+        )
+        db.commit()
+
+    # 从一个**不是**解析根的 CWD 跑：裸 `Path(file_path)` 在这里必然读不到。
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert not (elsewhere / relative).exists(), "前置条件：裸 CWD 解析必须读不到"
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["skipped"].get("file_unreadable") is None
+    assert result["images_inserted"] == 2
+
+
 def test_an_asset_row_orphaned_mid_pass_is_swept_by_that_same_pass(
     repo, seeded, outputs, monkeypatch
 ):

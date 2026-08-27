@@ -1914,6 +1914,11 @@ class PostgresMaintenanceAdapter:
                 (normalize_timestamp(self._runtime.seams.now()), source_id),
             )
 
+    def image_backfill_resolve_source_path(self, file_path: str) -> str:
+        """SQLite 侧同名方法的对等半：复用 `SourceFileStore.resolve_path` 这条产品
+        统一的来源文件路径约定（零 I/O、零查询）。"""
+        return str(self._runtime.source_files.resolve_path(file_path))
+
     def image_backfill_source_asset_ids(
         self, notebook_id: str, source_id: str
     ) -> list[str]:

@@ -84,6 +84,8 @@ class ImageBackfillPort(Protocol):
 
     def image_backfill_source_state(self, source_id: str) -> dict: ...
 
+    def image_backfill_resolve_source_path(self, file_path: str) -> str: ...
+
     def apply_image_backfill(
         self,
         notebook_id: str,
@@ -242,7 +244,12 @@ def plan_for_source(
     if not path_text:
         plan.skip("no_file_path")
         return plan, {}
-    path = Path(path_text)
+    # 路径解析走产品统一的那一条（`SourceFileStore.resolve_path`，也就是数据库
+    # 边界的 `resolve_path`：绝对路径原样、相对路径按仓库根解析），**绝不**裸
+    # `Path(path_text)`。历史来源的 `sources.file_path` 可以是仓库根相对路径，
+    # 而这条离线命令从任意 CWD 启动都合法——裸 Path 会按进程 CWD 解析，于是
+    # 整批历史来源被误报成 `file_unreadable`，看起来像"文件都没了"。
+    path = Path(repo.maintenance.image_backfill_resolve_source_path(path_text))
     try:
         markdown = path.read_text(encoding="utf-8", errors="replace")
     except OSError:

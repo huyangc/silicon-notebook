@@ -407,6 +407,46 @@ def test_a_run_of_captioned_images_does_not_starve_the_lookahead_window():
     assert plan.skipped == {"image_not_found": 9}
 
 
+def test_an_inline_image_alt_survives_normalisation_so_its_line_still_matches():
+    """在线解析路径对**内嵌**图片执行「只留 alt 文本、不落资产」，所以 alt 留在
+    元素正文里（实测：``这一段里内嵌了 ![备注](x.jpg) 一张图。`` →
+    ``这一段里内嵌了 备注 一张图。``）。扫描侧若把整段图片语法连 alt 一起抹掉，
+    这一行就永远匹配不上它自己的元素——短文档里一行就能把覆盖率压到
+    `MIN_ALIGNMENT_COVERAGE` 之下、让整源被 `alignment_drifted` 误跳（修复前实测
+    cov=0.667），而独立成行的那张图会锚到错误的元素上（修复前锚到 0001）。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        "这一段里内嵌了 ![备注](images/x.jpg) 一张图。\n\n"
+        "![](images/z.jpg)\n\n"
+        "第三段正文收尾了这一节。\n"
+    )
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == ["paragraph"] * 3
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("z.jpg"),
+    )
+    assert plan.coverage == 1.0
+    assert plan.skipped.get("alignment_drifted") is None
+    # 独立成行的那张图锚在它物理上紧跟的那条元素（内嵌图片那一段）之后。
+    assert [image.src for image in plan.images] == ["images/z.jpg"]
+    assert [image.anchor_element_id for image in plan.images] == [f"el-{SID}-0002"]
+    # 内嵌那张仍按产品规则不落资产。
+    assert plan.skipped["inline_image_skipped"] == 1
+
+
+def test_an_image_only_line_stays_unmatched_even_when_it_carries_an_alt():
+    """行**分类**必须用抹掉 alt 的那份归一化。独占一行的带图注图片在解析路径上
+    产出的是一条 image 元素（不可匹配类型，指针无代价跨过），把这种行当成正文行
+    会让它进覆盖率分母却永远匹配不上——9 张连续带图注的图片会把 cov 从 1.00 打到
+    0.25，正好反向踩塌 `test_a_run_of_captioned_images_…` 守的那条闸。"""
+    lines, _ = scan_markdown("![图 1 一张带图注的图](images/p1.jpg)\n")
+    assert [line.kind for line in lines] == ["image"]
+    assert lines[0].norm == ""
+
+
 def test_crossed_elements_are_visible_to_the_chunk_walk_back():
     """跨过的不可匹配元素也进 `matched`：带图注的历史图片元素是**进过 chunk**
     的，它比更早那条段落离图更近，锚点回退理应先看见它。"""

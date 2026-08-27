@@ -174,7 +174,35 @@ def normalize_text(value: str) -> str:
     """把 markdown 行与元素文本折成同一种可比较形状。
 
     两侧必须逐字共用这一个函数：分别写两份归一化是这类对齐算法最典型的静默
-    失败——它不报错，只是永远匹配不上，于是每张图都"锚定失败"被跳过。"""
+    失败——它不报错，只是永远匹配不上，于是每张图都"锚定失败"被跳过。
+
+    图片语法折成它自己的 **alt 文本**（空 alt 折成空白）。在线解析路径对**内嵌**
+    图片（段落里、列表项里、表格格子里）执行的正是"只留 alt 文本、不落资产"这条
+    产品规则——`parse_markdown_text` 实测把 ``这一段里内嵌了 ![备注](x.jpg) 一张图。``
+    产出成元素正文 ``这一段里内嵌了 备注 一张图。``。把整段图片语法连 alt 一起抹掉
+    的话，这一行永远匹配不上它自己的元素：短文档里一行就足以把覆盖率压到
+    `MIN_ALIGNMENT_COVERAGE` 之下、让整源被 `alignment_drifted` 误跳，长文档里则是
+    白丢一个锚点。"""
+    text = _LINE_DECORATION_RE.sub("", value or "")
+    # 两侧留空格：alt 不能与相邻文字粘连（元素侧那一半也是靠空白分开的），随后
+    # 的 `split()` 会把多余空白收掉。
+    text = _IMAGE_RE.sub(lambda match: f" {match.group('alt') or ''} ", text)
+    text = _INLINE_MARKS_RE.sub("", text)
+    return " ".join(text.split())
+
+
+def _norm_without_image_alt(value: str) -> str:
+    """行**分类**专用：把图片语法连 alt 一起抹掉后还剩什么。
+
+    刻意与 `normalize_text` 分开，两者回答的是不同的问题：这里问"这一行除了图片
+    之外还有没有别的内容"（决定它是不是可匹配的正文行），`normalize_text` 问"这
+    一行折成元素正文长什么样"（决定它匹不匹配得上）。
+
+    合并成一个会当场回归：独占一行的 `![图 1 …](p1.jpg)` 在解析路径上产出的是一条
+    **image 元素**（`UNMATCHABLE_ELEMENT_TYPES`，指针无代价跨过、从不参与匹配）。
+    若按带 alt 的归一化去分类，这行就成了"正文行"，于是它进 `text_lines` 分母却
+    永远匹配不上——9 张连续带图注的图片会把覆盖率从 1.00 打到 0.25，正好把
+    `test_a_run_of_captioned_images_…` 要守的那条闸反向踩塌。"""
     text = _LINE_DECORATION_RE.sub("", value or "")
     text = _IMAGE_RE.sub(" ", text)
     text = _INLINE_MARKS_RE.sub("", text)
@@ -253,9 +281,10 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
         stripped = raw.strip()
         if not stripped:
             kind = "blank"
-        elif line_refs and not normalize_text(raw):
-            # 整行只有图片（剥掉图片语法后什么都不剩）：它是锚定的定位点，不是
-            # 可匹配的正文行。
+        elif line_refs and not _norm_without_image_alt(raw):
+            # 整行只有图片（把图片语法连 alt 一起抹掉后什么都不剩）：它是锚定的
+            # 定位点，不是可匹配的正文行。分类**必须**用抹掉 alt 的那份归一化，
+            # 理由见 `_norm_without_image_alt` 的 docstring。
             kind = "image"
         elif stripped.startswith("|"):
             kind = "table"
