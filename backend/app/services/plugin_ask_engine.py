@@ -133,11 +133,34 @@ class _TraceState:
     lifecycle: _AuthorityLifecycle = field(default_factory=_AuthorityLifecycle)
 
 
-# 「引用样」残留探测:括号组里出现 k\d 即嫌疑,合法组由 LOOSE_MARKER_RE.fullmatch
-# 放行(见 admit_plugin_engine_result 的注释;codex #602 R6 P1)。
+# 「引用样」残留探测:括号组里出现 k\d 即嫌疑,是否真的摘除由 `_marker_like`
+# 二次判定(见 admit_plugin_engine_result 的注释;codex #602 R6 P1)。
 _SUSPECT_MARKER_RE = re.compile(
     r"\[[^\[\]\n]*\bk\d+[^\[\]\n]*\]|【[^【】\n]*\bk\d+[^【】\n]*】"
 )
+
+# Private-use sentinels: verified markers are swapped for these while residual
+# marker-like groups are stripped, so a deletion can never CONCATENATE its
+# neighbours into a new marker-shaped group. The characters carry no meaning of
+# their own and are pre-stripped from plugin text so nothing authored outside
+# core can address the substitution table.
+_SENTINEL_OPEN = "\ue000"
+_SENTINEL_CLOSE = "\ue001"
+_SENTINEL_RE = re.compile("\ue000(\\d+)\ue001")
+_EXACT_KEY_RE = re.compile(r"k\d+")
+_MARKER_SEGMENT_SPLIT_RE = re.compile(r"[,，、]")
+
+
+def _marker_like(group: str) -> bool:
+    """True when a bracket group READS as a citation marker: some
+    separator-delimited segment is exactly ``k<digits>``. ``[k1, nope]`` and a
+    deletion-formed ``[k2]`` qualify; ``[k8s 官方文档]`` and ``[k1000 档]`` are
+    ordinary prose and must survive."""
+    return any(
+        _EXACT_KEY_RE.fullmatch(part.strip())
+        for part in _MARKER_SEGMENT_SPLIT_RE.split(group[1:-1])
+    )
+
 
 # Protocol boundary: the collection overview crosses to plugin prompts as one
 # opaque scaffolding string, so its ceiling is a contract value, not a budget.
@@ -994,8 +1017,11 @@ def admit_plugin_engine_result(
     citation-LEVEL problem instead degrades: a forged/replayed/unbound handle,
     a marker naming an index that never resolved, a residual citation-shaped
     token that never bound, and a record the model never referenced in the
-    text are each stripped rather than rejecting the whole answer. Surviving
-    indices are compacted and renumbered, and each class of degradation
+    text are each stripped rather than rejecting the whole answer. The one
+    exception is a body those strips reduce to whitespace: there is no prose
+    left to disclose anything about, so the whole answer is rejected rather
+    than persisted as a blank bubble. Surviving indices are compacted and
+    renumbered, and each class of degradation
     contributes one user-readable note into the returned tuple for the caller
     to fold into the persisted trace — disclosure is the precondition for
     stripping, not an afterthought. The safety invariant this module has
@@ -1045,54 +1071,87 @@ def admit_plugin_engine_result(
         if dropped_citations:
             notes.append(f"{dropped_citations} 条引用无法核验，已移除")
 
-        cited_marker_indexes: set[int] = set()
+        # Sentinel isolation (review P0): rewriting/deleting bracket groups IN
+        # PLACE lets the surrounding text CONCATENATE into brand-new
+        # marker-shaped groups that never passed index_map (`[k1[k9]2]` ->
+        # `[k12]`). Verified groups are therefore swapped for private-use
+        # sentinels that cannot combine with anything, every remaining
+        # marker-like group is stripped to a fixed point, and only then are the
+        # sentinels substituted back. The input is pre-cleaned of the two
+        # sentinel characters so plugin-authored text cannot address the
+        # substitution table.
+        text = answer_markdown.replace(_SENTINEL_OPEN, "").replace(
+            _SENTINEL_CLOSE, ""
+        )
+        kept_groups: list[str] = []
         dropped_markers = 0
 
         def normalize(match) -> str:
             nonlocal dropped_markers
             kept: list[str] = []
             for key in marker_keys(match.group(0)):
-                try:
-                    index = int(key[1:])
-                except (TypeError, ValueError):
-                    dropped_markers += 1
-                    continue
-                mapped = index_map.get(index)
+                # Keys are structurally ``k<digits>`` (LOOSE_MARKER_RE), so
+                # int() cannot fail here.
+                mapped = index_map.get(int(key[1:]))
                 if mapped is None:
                     dropped_markers += 1
                     continue
-                cited_marker_indexes.add(mapped)
                 kept.append(f"k{mapped}")
-            return "[" + ", ".join(kept) + "]" if kept else ""
+            if not kept:
+                return ""
+            kept_groups.append("[" + ", ".join(kept) + "]")
+            return f"{_SENTINEL_OPEN}{len(kept_groups) - 1}{_SENTINEL_CLOSE}"
 
-        normalized = LOOSE_MARKER_RE.sub(normalize, answer_markdown)
+        normalized = LOOSE_MARKER_RE.sub(normalize, text)
         if dropped_markers:
             notes.append(f"正文中 {dropped_markers} 个引用标记无法核验，已移除")
 
-        # 残留的「引用样」括号组摘除(codex #602 R6 P1 的纪律,执行方式从整份拒绝
-        # 改为摘除 + 披露):`[k1, nope]` 这类畸形组不被 LOOSE_MARKER_RE 匹配、会
-        # 原样留在正文里,渲染成一个从未被核验的引用外观——「未核验的引用外观绝不
-        # 上屏」这条纪律不变,只是不再连坐整份答案。归一化输出自己写回的合法组
-        # 恰好 fullmatch LOOSE_MARKER_RE,不会被这一步误伤。
+        # 残留「引用样」组摘除(codex #602 R6 P1 的纪律,执行方式从整份拒绝改为
+        # 摘除 + 披露):哨兵化之后正文里不存在任何合法标记,凡仍长得像引用标记的
+        # 括号组都是未核验的(含删除拼接新形成的),一律摘除。删除本身还可能再
+        # 拼接出新组,而删除只会缩短文本,所以迭代到不动点必然终止。判据经
+        # `_marker_like` 收窄——普通括号散文(markdown 链接文字、【…】夹注)不再
+        # 被误杀。
         suspect_markers = 0
 
         def strip_suspect(match) -> str:
             nonlocal suspect_markers
             group = match.group(0)
-            if LOOSE_MARKER_RE.fullmatch(group) is not None:
+            if not _marker_like(group):
                 return group
             suspect_markers += 1
             return ""
 
-        normalized = _SUSPECT_MARKER_RE.sub(strip_suspect, normalized)
+        while True:
+            stripped = _SUSPECT_MARKER_RE.sub(strip_suspect, normalized)
+            if stripped == normalized:
+                break
+            normalized = stripped
         if suspect_markers:
             notes.append(
                 f"正文中 {suspect_markers} 处疑似引用标记无法解析，已移除"
             )
 
-        uncited = len(records) - len(cited_marker_indexes)
+        normalized = _SENTINEL_RE.sub(
+            lambda match: kept_groups[int(match.group(1))], normalized
+        )
+
+        # Recomputed from the FINAL text (review P2-1): a suspect strip can
+        # take a verified sentinel down with it, so the normalize-time tally
+        # would overcount citedness.
+        cited: set[int] = set()
+        for match in LOOSE_MARKER_RE.finditer(normalized):
+            for key in marker_keys(match.group(0)):
+                cited.add(int(key[1:]))
+        uncited = len(records) - len(cited)
         if uncited > 0:
             notes.append(f"{uncited} 条引用未在正文中被引用，仅列入引用列表")
+
+        # Stripped down to nothing means nothing worth keeping (review P2-2):
+        # a whitespace-only answer would persist as a blank bubble, strictly
+        # worse than the stable rejection copy this code already maps.
+        if not normalized.strip() and answer_markdown.strip():
+            raise AskEnginePortError("plugin_engine_unverified_citation")
 
         return normalized, tuple(records), tuple(notes)
 

@@ -46,6 +46,7 @@ from app.services.plugin_ask_engine import (
     release_plugin_engine_ports,
 )
 from app.services.ask_modes import UnknownAskMode, resolve_mode
+from app.services.citation_markers import LOOSE_MARKER_RE, marker_keys
 from app.services.retrieval_run import current_retrieval_run, retrieval_run
 from app.services import plugin_ask_engine as plugin_ports
 from app.services.source_scope import source_scope_context
@@ -841,6 +842,56 @@ def test_plugin_ask_admits_partial_citations_and_discloses_degraded_verification
     assert "无法核验" in last_step.detail["detail"]
 
 
+def test_plugin_ask_renumbers_a_middle_drop_onto_the_right_record_end_to_end():
+    """服务级的重排对账(评审 P2-3):伪造句柄夹在两条合法之间,`[k3]` 必须一路
+    走到 anchors 里仍然指向 B——单条存活 record 的用例证明不了这件事。"""
+    def answer(_context, retrieval, _model, trace):
+        first = retrieval.search("first", 1)[0]
+        second = retrieval.search("second", 1)[0]
+        trace.step("检索", "命中两条")
+        return AskEngineResult(
+            "结论 [k1] 与 [k3]",
+            (first.evidence_key, "pe-forged", second.evidence_key),
+        )
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.search", answer=answer)),
+    ))
+    service = _minimal_ask_service(
+        ask_engine_host=runtime.ask_engines,
+        ask_engine_participant_notebooks=lambda _notebook_id: ("nb",),
+        ask_engine_visible_sources=lambda _notebook_id: ("source-1",),
+        ask_engine_hidden_sources=lambda _notebook_id, _actor_id: (),
+    )
+    hits = iter((
+        [_hit(element_id="element-A")],
+        [_hit(element_id="element-B")],
+    ))
+    service.retrieval.federated_retrieve_elements = (
+        lambda *_args, **_kwargs: next(hits)
+    )
+    service.evidence_context.evidence_elements = _all_live
+    service.evidence_context.citation_source_info = lambda _ids: {
+        "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
+    }
+
+    response = service.ask(
+        "nb", AskRequest(question="问题", mode="alpha.search"), user_id="user"
+    )
+
+    assert response.answer == "结论 [k1] 与 [k2]"
+    assert [citation.element_id for citation in response.citations] == [
+        "element-A", "element-B"
+    ]
+    assert [anchor.key for anchor in response.anchors] == ["k1", "k2"]
+    assert [anchor.element_id for anchor in response.anchors] == [
+        "element-A", "element-B"
+    ]
+    last_step = response.reasoning_trace[-1]
+    assert last_step.summary == "引用核验未全部通过"
+    assert "1 条引用无法核验，已移除" in last_step.detail["detail"]
+
+
 def test_plugin_cannot_mutate_the_core_request_identity_before_commit():
     def mutate(context, _retrieval, _model, _trace):
         object.__setattr__(context, "question", "changed")
@@ -970,6 +1021,246 @@ def test_citation_admission_strips_residual_citation_like_markers_and_discloses(
     )
     assert answer == "正文 [k1] 结尾"
     assert ok_notes == ()
+
+
+def _two_record_access():
+    """One access whose two searches issue handles for A then B, so a test can
+    forge a citation BETWEEN two live ones."""
+    hits = iter((
+        _hit(element_id="element-A"),
+        _hit(element_id="element-B"),
+    ))
+    access = PluginRetrievalAccess(
+        active_notebook_id="notebook-1",
+        actor_id="user-1",
+        cancellation=None,
+        participant_notebook_ids=lambda _notebook_id: ("notebook-1",),
+        all_visible_source_ids=lambda _notebook_id: ("source-1",),
+        hidden_source_ids=lambda _notebook_id, _actor_id: (),
+        search_elements=lambda *_args, **_kwargs: [next(hits)],
+        source_info=lambda _source_ids: {"source-1": {"title": "权威来源"}},
+        max_k=1,
+        max_calls=2,
+        evidence_chars=100,
+        query_chars=100,
+    )
+    return access, (
+        access.search("first", 1)[0].evidence_key,
+        access.search("second", 1)[0].evidence_key,
+    )
+
+
+def test_citation_admission_never_mints_a_marker_by_deleting_around_it():
+    """删除会拼接(评审 P0):`[k1[k9]2]` 的内层 `[k9]` 一旦就地删掉,两侧文本就
+    合成一个从未过 index_map 的 `[k12]`——旧实现会把它留在正文里,让
+    `records[index-1]` 越界或悄悄绑到模型从未引用的那条。哨兵隔离 + 摘除到
+    不动点让「正文里每个标记都指向存活引用」重新无条件成立。"""
+    # 整份正文就是那个畸形组:摘除后无散文可留,按摘空规则整份拒绝。
+    bare = _retrieval_access()
+    bare_key = bare.search("evidence", 1)[0].evidence_key
+    with pytest.raises(AskEnginePortError) as rejected:
+        admit_plugin_engine_result(bare, "[k1[k9]2]", (bare_key,))
+    assert rejected.value.code == "plugin_engine_unverified_citation"
+
+    # 同样的拼接危险,但周围有散文:逐项降级 + 披露,正文里不留任何标记。
+    access = _retrieval_access(hit=_hit(element_id="element-prose"))
+    key = access.search("evidence", 1)[0].evidence_key
+    answer, records, notes = admit_plugin_engine_result(
+        access, "结论：[k1[k9]2] 完毕", (key,)
+    )
+    assert answer == "结论： 完毕"
+    assert len(records) == 1
+    assert notes == (
+        "正文中 1 个引用标记无法核验，已移除",
+        "正文中 1 处疑似引用标记无法解析，已移除",
+        "1 条引用未在正文中被引用，仅列入引用列表",
+    )
+
+    # `[k[k9]2]` 拼出的是 `[k2]`——第二条 record 真实存在,所以旧实现不会越界,
+    # 只会静默把标记绑到模型从未绑定的 B 上。这条比越界更隐蔽,必须钉住。
+    two, keys = _two_record_access()
+    answer, records, notes = admit_plugin_engine_result(
+        two, "只引 [k1]，另见 [k[k9]2]", keys
+    )
+    assert answer == "只引 [k1]，另见 "
+    assert "[k2]" not in answer
+    assert [record.element_id for record in records] == [
+        "element-A", "element-B"
+    ]
+    assert "1 条引用未在正文中被引用，仅列入引用列表" in notes
+
+
+def test_citation_admission_keeps_ordinary_bracket_prose():
+    """疑似判据收窄(评审 P1):旧角色是「命中即整份拒绝」(响亮),新角色是就地
+    删正文(静默),所以判据必须精确到「某个分隔片段恰好是 k<数字>」,否则普通
+    括号散文会被无声吃掉。"""
+    cjk = _retrieval_access()
+    cjk_key = cjk.search("evidence", 1)[0].evidence_key
+    answer, _records, notes = admit_plugin_engine_result(
+        cjk, "见【定义 [k1]】结论", (cjk_key,)
+    )
+    assert answer == "见【定义 [k1]】结论"
+    assert notes == ()
+
+    link = _retrieval_access(hit=_hit(element_id="element-link"))
+    link_key = link.search("evidence", 1)[0].evidence_key
+    answer, _records, notes = admit_plugin_engine_result(
+        link, "参见 [k8s 官方文档](https://kubernetes.io) 与 [k1]。", (link_key,)
+    )
+    assert answer == "参见 [k8s 官方文档](https://kubernetes.io) 与 [k1]。"
+    assert notes == ()
+
+    numeric = _retrieval_access(hit=_hit(element_id="element-numeric"))
+    numeric_key = numeric.search("evidence", 1)[0].evidence_key
+    answer, _records, notes = admit_plugin_engine_result(
+        numeric, "退火 [k1]，参数上限 [k1000 档] 未定。", (numeric_key,)
+    )
+    assert answer == "退火 [k1]，参数上限 [k1000 档] 未定。"
+    assert notes == ()
+
+
+def test_citation_admission_recounts_citedness_from_the_final_text():
+    """「未被引用」记账必须按最终正文重算(评审 P2-1):疑似组摘除可以把一个
+    已核验标记一起带走,归一化阶段的记账会因此高估被引用条数,让这条 record
+    既不在正文里、也不出现在披露中。"""
+    access = _retrieval_access()
+    key = access.search("evidence", 1)[0].evidence_key
+
+    # `【…、k9】` 的顿号不是 LOOSE 分隔符,所以整组不是合法标记;它里面那个
+    # 已核验的 `[k1]` 随该组一起被摘除。
+    answer, records, notes = admit_plugin_engine_result(
+        access, "前置【[k1]、k9】后置", (key,)
+    )
+    assert answer == "前置后置"
+    assert len(records) == 1
+    assert notes == (
+        "正文中 1 处疑似引用标记无法解析，已移除",
+        "1 条引用未在正文中被引用，仅列入引用列表",
+    )
+
+    # 反向:没有任何摘除时不得凭空多报未被引用。
+    kept = _retrieval_access(hit=_hit(element_id="element-kept"))
+    kept_key = kept.search("evidence", 1)[0].evidence_key
+    answer, _records, kept_notes = admit_plugin_engine_result(
+        kept, "见【见 [k1]】结论", (kept_key,)
+    )
+    assert answer == "见【见 [k1]】结论"
+    assert kept_notes == ()
+
+
+def test_citation_admission_rejects_an_answer_stripped_to_nothing():
+    """摘空即整份拒绝(评审 P2-2):留下一个空白气泡比给出稳定的拒绝文案更糟,
+    而「整份答案就是一个无法核验的引用」正是既有拒绝码描述的情形。"""
+    access = _retrieval_access()
+
+    with pytest.raises(AskEnginePortError) as rejected:
+        admit_plugin_engine_result(access, "[k1]", ("pe-forged",))
+    assert rejected.value.code == "plugin_engine_unverified_citation"
+
+    # 只剩空白同样算摘空。
+    blank = _retrieval_access(hit=_hit(element_id="element-blank"))
+    with pytest.raises(AskEnginePortError):
+        admit_plugin_engine_result(blank, "  [k1]  ", ("pe-forged",))
+
+    # 反向:插件本来就交回空正文时不是「摘空」,保持原路径不新增拒绝。
+    empty = _retrieval_access(hit=_hit(element_id="element-empty"))
+    answer, records, _notes = admit_plugin_engine_result(empty, "", ())
+    assert answer == ""
+    assert records == ()
+
+
+def test_citation_admission_renumbers_onto_the_correct_surviving_record():
+    """压缩重排必须绑到正确那条(评审 P2-3):只有单条存活 record 时,「绑对了」
+    与「绑到唯一一条」不可区分。伪造句柄放在中间,`[k3]` 必须成为指向 B 的
+    `[k2]`,绝不能指向 A。"""
+    hits = iter((
+        _hit(element_id="element-A"),
+        _hit(element_id="element-B"),
+    ))
+    access = PluginRetrievalAccess(
+        active_notebook_id="notebook-1",
+        actor_id="user-1",
+        cancellation=None,
+        participant_notebook_ids=lambda _notebook_id: ("notebook-1",),
+        all_visible_source_ids=lambda _notebook_id: ("source-1",),
+        hidden_source_ids=lambda _notebook_id, _actor_id: (),
+        search_elements=lambda *_args, **_kwargs: [next(hits)],
+        source_info=lambda _source_ids: {"source-1": {"title": "权威来源"}},
+        # ``issuable`` must clear THREE citations or the forged middle handle
+        # is truncated away instead of dropped, and the renumbering this test
+        # exists to pin never happens.
+        max_k=2,
+        max_calls=2,
+        evidence_chars=100,
+        query_chars=100,
+    )
+    key_a = access.search("first", 1)[0].evidence_key
+    key_b = access.search("second", 1)[0].evidence_key
+
+    answer, records, notes = admit_plugin_engine_result(
+        access, "[k1] 与 [k3]", (key_a, "pe-forged", key_b)
+    )
+
+    assert answer == "[k1] 与 [k2]"
+    assert [record.element_id for record in records] == [
+        "element-A", "element-B"
+    ]
+    assert notes == ("1 条引用无法核验，已移除",)
+
+
+def test_citation_admission_ignores_plugin_authored_sentinel_characters():
+    """哨兵是核心私有的:插件正文里出现同样的私有区字符时,必须在建表之前被
+    清掉,否则它就能寻址替换表(KeyError/IndexError,或更糟——冒名一个合法组)。"""
+    access = _retrieval_access()
+    key = access.search("evidence", 1)[0].evidence_key
+
+    answer, records, notes = admit_plugin_engine_result(
+        access,
+        f"前{chr(0xE000)}0{chr(0xE001)}中 [k1] 后{chr(0xE000)}9{chr(0xE001)}",
+        (key,),
+    )
+
+    assert answer == "前0中 [k1] 后9"
+    assert len(records) == 1
+    assert notes == ()
+
+
+def test_admitted_markers_always_name_a_surviving_record():
+    """函数 docstring 的无条件不变量:凡在最终正文里长成引用的标记,序号一律
+    落在 1..len(records) 内。这条覆盖一批会触发删除拼接的敌意输入。"""
+    hostile = (
+        "[k1[k9]2]",
+        "[k[k9]2]",
+        # Needs TWO strip passes: the outer bracket group is not marker-like
+        # while the inner `[k9, nope]` is, and removing the inner one joins
+        # `[k1` to `2]` into `[k12]` at a position `re.sub` has already passed.
+        "结论：[k1[k9, nope]2] 完毕",
+        "[[k1]]",
+        "[k1【k9 x】2]",
+        "[k1【a k9 b】2]",
+        "[k[k9【k8 x】]2]",
+        "文字 [k1] 与 [k9[k8]9] 与【k7、k1】",
+        "[k9][k8][k7]",
+        "【k1，k9】与 [k2, k9]",
+    )
+    for source in hostile:
+        access, keys = _two_record_access()
+        try:
+            answer, records, _notes = admit_plugin_engine_result(
+                access, source, keys
+            )
+        except AskEnginePortError as rejected:
+            # 摘空拒绝也满足不变量:根本没有正文上屏。
+            assert rejected.code == "plugin_engine_unverified_citation", source
+            continue
+        indexes = [
+            int(key[1:])
+            for match in LOOSE_MARKER_RE.finditer(answer)
+            for key in marker_keys(match.group(0))
+        ]
+        assert all(1 <= index <= len(records) for index in indexes), (
+            source, answer, indexes
+        )
 
 
 def test_search_kg_issues_element_addressed_handles_admitted_as_citations():

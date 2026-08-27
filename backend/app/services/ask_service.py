@@ -1563,6 +1563,12 @@ class AskService:
                 )
                 trace_steps = plugin_engine_trace_steps(trace)
                 if admission_notes:
+                    # Accepted cosmetic wrinkle: when the plugin's own trace
+                    # was truncated, its last step carries `truncated` and this
+                    # disclosure step still renders after it. The truncation
+                    # marker describes the PLUGIN's step sequence; admission is
+                    # a separate core-owned stage that runs after it, so the
+                    # step genuinely belongs here.
                     trace_steps = (*trace_steps, TraceStep(
                         step_type="plugin",
                         summary="引用核验未全部通过",
@@ -1622,6 +1628,12 @@ class AskService:
             for marker in _MARKER_GROUP_RE.findall(answer):
                 for key in marker_keys(marker):
                     index = int(key[1:])
+                    if index < 1 or index > len(records):
+                        # Structurally unreachable post-admission (the final
+                        # body only carries compacted verified indexes); kept
+                        # so a future admission bug degrades to a missing
+                        # anchor rather than an uncaught 500.
+                        continue
                     if index in seen_indices:
                         continue
                     seen_indices.add(index)
