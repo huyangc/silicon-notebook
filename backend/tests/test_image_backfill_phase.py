@@ -479,6 +479,80 @@ def test_a_failed_write_transaction_rolls_back_this_source_s_assets(
     assert not assets_dir.exists() or list(assets_dir.iterdir()) == []
 
 
+def test_an_asset_row_orphaned_mid_pass_is_swept_by_that_same_pass(
+    repo, seeded, outputs, monkeypatch
+):
+    """`save_source_image` **先提交 `notebook_assets` 行、后写盘**，所以写盘失败
+    时它抛异常而调用方**拿不到 asset id**——那一行既不在本次的 `written` 里、又
+    永远没人引用，而 `sweep_orphan_assets` 刻意不扫带 `source_id` 的行。本趟范围
+    的清扫必须收掉它。"""
+    from app.services.knowhow.assets import AssetService
+
+    notebook_id, source_id = seeded
+    real_insert = repo.insert_notebook_asset
+    leaked: list[str] = []
+    original = AssetService.save_source_image
+
+    def _commit_row_then_fail(self, nb, src, filename, mime, data, created_by, **kw):
+        if not leaked:
+            # 第一张：逐字复刻"行已提交、写盘失败"这一半。
+            leaked.append(
+                real_insert(nb, filename, mime, len(data), created_by, source_id=src)
+            )
+            raise RuntimeError("simulated disk write failure after the row commit")
+        return original(self, nb, src, filename, mime, data, created_by, **kw)
+
+    monkeypatch.setattr(AssetService, "save_source_image", _commit_row_then_fail)
+    result = _run(repo, notebook_id, outputs)
+
+    assert leaked, "变异守护：模拟没有真的插进一行，这个用例什么都没验证"
+    assert result["skipped"].get("asset_write_failed") == 1
+    assert result["images_inserted"] == 1  # 第二张照常落地
+    assert result["orphan_assets_removed"] == 1
+    # 泄漏那一行没了，活着的那张图的资产还在。
+    remaining = {row["id"] for row in _rows(repo, "SELECT id FROM notebook_assets")}
+    assert leaked[0] not in remaining
+    assert len(remaining) == 1
+
+
+def test_the_sweep_never_touches_asset_rows_that_predate_the_pass(
+    repo, seeded, outputs
+):
+    """反向护栏：清扫**只**作用于本趟新出现的行。
+
+    判据里的 `assets_before` 差集是硬性的。若换成更宽的「该来源全部无人引用的
+    资产行」（也就是 docs 里写给人工清理用的那条），深拷贝留下的资产行会被连同
+    磁盘文件一起删掉——`notebook_sharing` 为 `notebook_assets` 铸新 id，却**不**
+    重映射 `source_elements.metadata.asset_id`（它的 json_maps 只含
+    element/source/object 三类），所以一本副本里每一条来源图片资产行都"无人引
+    用"。这里预置的正是那种形状的行。"""
+    notebook_id, source_id = seeded
+    stale = repo.insert_notebook_asset(
+        notebook_id, "copied.jpg", "image/jpeg", 3, "u", source_id=source_id
+    )
+    result = _run(repo, notebook_id, outputs)
+
+    assert result["images_inserted"] == 2
+    assert result["orphan_assets_removed"] == 0
+    assert stale in {row["id"] for row in _rows(repo, "SELECT id FROM notebook_assets")}
+
+
+def test_a_failed_write_transaction_sweeps_this_pass_s_assets(
+    repo, seeded, outputs, monkeypatch
+):
+    """元素事务失败这条路同样走本趟范围清扫（它取代了原先的 `_discard_assets`，
+    并且更强：连那些拿不到 id 的泄漏行也一并收掉）。"""
+    notebook_id, _ = seeded
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(repo.maintenance, "apply_image_backfill", _boom, raising=True)
+    result = _run(repo, notebook_id, outputs)
+    assert result["sources_failed"] == 1
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []
+
+
 def test_report_jsonl_carries_counts_only(repo, seeded, outputs, tmp_path):
     notebook_id, source_id = seeded
     report = tmp_path / "report.jsonl"
@@ -502,6 +576,7 @@ def test_report_jsonl_carries_counts_only(repo, seeded, outputs, tmp_path):
         "inserted",
         "enriched",
         "captions",
+        "orphan_assets_removed",
         "coverage",
         "skipped",
     }
@@ -731,6 +806,26 @@ def test_dry_run_prints_one_line_per_source_with_the_candidate_counts(
     assert source_id in out
     assert "候选=2(新增 2/补齐 0)" in out
     assert "缺图=1" in out
+
+
+def test_dry_run_captions_match_what_the_real_run_lands(
+    repo, seeded, outputs, tmp_path, capsys
+):
+    """真跑时 `captions` 按**实际落地**的图重算，而 dry-run 一张都不落——照那条
+    口径它会恒为 0，逐源行、JSONL 与汇总齐刷刷报「图注 0」，恰好废掉 dry-run 唯一
+    的估算用途。dry-run 下改取计划命中数，于是它与随后真跑的结果相符。"""
+    notebook_id, _ = seeded
+    report = tmp_path / "dry.jsonl"
+    planned = _run(repo, notebook_id, outputs, dry_run=True, report_path=report)
+
+    # 这份 MD 里只有第一张图带「图 1 …」图注。三个出口都要拿到这个数。
+    assert planned["captions"] == 1
+    assert json.loads(report.read_text().splitlines()[0])["captions"] == 1
+    assert "图注=1" in capsys.readouterr().out
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []  # 仍然零写入
+
+    applied = _run(repo, notebook_id, outputs)
+    assert applied["captions"] == planned["captions"]
 
 
 def test_source_id_that_matches_nothing_says_which_two_reasons(

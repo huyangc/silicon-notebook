@@ -83,7 +83,17 @@ MIN_PREFIX_MATCH_CHARS = 12
 #: （`MINERU_MAX_IMAGES_PER_SOURCE`，默认 200），一个锚点底下挂过 99 张之后，
 #: 两位的 `-g99` 与三位才写得下的第 100 张在 C collation 下就不再单调
 #: （`"-g100" < "-g99"`），元素顺序会当场乱掉。本特性未发布，没有兼容包袱。
+#:
+#: 位宽是**固定**的，而每源上限是**部署可配的且没有上界校验**——所以两者必须
+#: 在这一侧闭合：序号一旦要越过 `MAX_ANCHOR_SUFFIX`（999）就跳过那张图并记
+#: `anchor_suffix_exhausted`，而不是铸出一个 `-g1000` 把排序毁掉。刻意不去给
+#: `MINERU_MAX_IMAGES_PER_SOURCE` 加上界校验：那是**在线解析路径也在用**的共享
+#: 设置，为一个离线修复工具的 id 形状去收紧它会改变别人的行为面；有界跳过只影响
+#: 本工具自己，且在 report 里看得见。
 ANCHOR_SUFFIX_WIDTH = 3
+
+#: 同一锚点下能容纳的最大图片序号（由位宽派生，别写第二个字面量）。
+MAX_ANCHOR_SUFFIX = 10 ** ANCHOR_SUFFIX_WIDTH - 1
 
 
 # ------------------------------------------------------------------ markdown 扫描
@@ -630,15 +640,20 @@ def plan_source_images(
             continue
         anchor_id, chunk_id = anchor
 
-        used_suffix[anchor_id] = used_suffix.get(anchor_id, 0) + 1
+        next_suffix = used_suffix.get(anchor_id, 0) + 1
+        if next_suffix > MAX_ANCHOR_SUFFIX:
+            # 固定位宽与可配上限的闭合点（见 `ANCHOR_SUFFIX_WIDTH`）：越过它就得
+            # 铸 `-g1000`，而 C collation 下 `"-g1000" < "-g999"`，这一锚点底下
+            # 的元素顺序会当场乱掉。宁可少补一张，也不能把顺序写坏。
+            plan.skip("anchor_suffix_exhausted")
+            continue
+        used_suffix[anchor_id] = next_suffix
         caption = harvest_caption(lines, ref.line) or ref.alt
         if caption:
             plan.captions += 1
         plan.images.append(
             PlannedImage(
-                element_id=(
-                    f"{anchor_id}-g{used_suffix[anchor_id]:0{ANCHOR_SUFFIX_WIDTH}d}"
-                ),
+                element_id=f"{anchor_id}-g{next_suffix:0{ANCHOR_SUFFIX_WIDTH}d}",
                 anchor_element_id=anchor_id,
                 chunk_id=chunk_id,
                 src=ref.src,

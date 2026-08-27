@@ -1914,6 +1914,18 @@ class PostgresMaintenanceAdapter:
                 (normalize_timestamp(self._runtime.seams.now()), source_id),
             )
 
+    def image_backfill_source_asset_ids(
+        self, notebook_id: str, source_id: str
+    ) -> list[str]:
+        """SQLite 侧同名方法的对等半（只读；本趟范围孤儿清扫的前后快照）。"""
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM notebook_assets "
+                "WHERE notebook_id=%s AND source_id=%s ORDER BY id COLLATE \"C\"",
+                (notebook_id, source_id),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def image_backfill_discard_assets(self, asset_ids: Sequence[str]) -> list[dict]:
         """SQLite 侧同名方法的对等半：删这一批资产行并原样返回供 unlink。"""
         ids = [asset_id for asset_id in dict.fromkeys(asset_ids) if asset_id]

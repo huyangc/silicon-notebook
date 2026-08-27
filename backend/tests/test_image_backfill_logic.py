@@ -270,6 +270,40 @@ def test_minted_ids_stay_sorted_past_the_two_digit_boundary():
     ]
 
 
+def test_a_suffix_beyond_the_fixed_width_is_skipped_not_minted_out_of_order():
+    """位宽是固定的，而 `MINERU_MAX_IMAGES_PER_SOURCE` 是部署可配、没有上界校验
+    的——两者在这一侧闭合：第 1000 张跳过并记账，而不是铸出 `-g1000`（C collation
+    下 `"-g1000" < "-g999"`，这一锚点底下的元素顺序会当场乱掉）。"""
+    markdown = "第一段正文写了一些内容。\n\n" + "\n\n".join(
+        f"![](images/x{index}.jpg)" for index in range(1001)
+    )
+    plan = _plan(
+        markdown,
+        _els("第一段正文写了一些内容。"),
+        {f"el-{SID}-0001": "c1"},
+        _index(*[f"x{index}.jpg" for index in range(1001)]),
+        max_images=5000,  # 每源上限刻意不设障，闸只能来自位宽
+    )
+    ids = [image.element_id for image in plan.images]
+    assert len(ids) == 999
+    assert ids[-1] == f"el-{SID}-0001-g999"
+    assert sorted(ids) == ids  # 顺序仍单调
+    assert plan.skipped == {"anchor_suffix_exhausted": 2}
+
+
+def test_a_rerun_that_finds_the_suffix_already_exhausted_skips_immediately():
+    """续号是从既有 id 扫出来的，所以上一趟用尽之后重跑同样必须跳过。"""
+    plan = _plan(
+        "第一段正文写了一些内容。\n\n![](images/b.jpg)\n",
+        _els("第一段正文写了一些内容。"),
+        {f"el-{SID}-0001": "c1"},
+        _index("b.jpg"),
+        existing_element_ids=[f"el-{SID}-0001", f"el-{SID}-0001-g999"],
+    )
+    assert plan.images == []
+    assert plan.skipped == {"anchor_suffix_exhausted": 1}
+
+
 def test_rerun_continues_the_suffix_instead_of_colliding():
     plan = _plan(
         "第一段正文写了一些内容。\n\n![](images/b.jpg)\n",
