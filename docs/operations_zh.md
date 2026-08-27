@@ -541,7 +541,7 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 可移植 phase 还包括 `question-index`；它与下列 phase 一样按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。
 
-`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
@@ -582,6 +582,14 @@ PYTHONPATH=backend python scripts/batch_ingest.py backfill-chunk-elements --note
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-chunk-elements --all-notebooks
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-chunk-elements --notebook-id nb-xxxx --force
 
+# 外科式补回单文件 markdown 导入时丢掉的来源图片（幂等，不调用模型；--dry-run 只读）
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-images --notebook-id nb-xxxx \
+    --mineru-output /path/to/mineru/output --dry-run
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-images --notebook-id nb-xxxx \
+    --mineru-output /path/to/mineru/output --mineru-output /path/to/other/output
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-images --notebook-id nb-xxxx \
+    --mineru-output /path/to/mineru/output --source-id src-xxxx --report /tmp/backfill.jsonl
+
 # 补已解析论文源缺失的元数据（幂等；需绑定 `paper_metadata`，不调用 embedding）
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx --force
@@ -605,6 +613,12 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 `backfill-chunk-elements` 子命令填充 `chunk_elements` 元素→chunk 反查表。`chunks.element_ids` 存的是正向关系，所以「哪些 chunk 含这个证据元素」过去要按索引代次扫一遍该 notebook 的全部 chunk 行并逐行解 JSON；回填之后它变成一次有界点查，规模只跟本次查询真正命中的那几个证据元素有关。未回填的 notebook 逐字保持旧的整库扫描路径、结果不变，所以这个命令是可选但推荐给大库的。
 
 与 `backfill-source-index` 一样，它是**显式离线**操作（绝不从交互请求触发），不调用模型，幂等、可中断重跑。SQLite v46 / PostgreSQL v24 为每个 notebook 持久化一行 `chunk_element_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧行并按新代次重建。每个有界 keyset 页面把反查行与游标/计数原子提交，崩溃最多重做未提交页面。代次漂移只写稳定的 `kg_generation_changed`，保持 `chunk_elements_indexed` 快速路径标记为 false，并让下次运行按新代次重置；账本不含 chunk 正文或异常文本。新写入无需回填：活库够得着的每条 chunk 写路径都在同一个事务里维护反查行，删除来源、重新解析、改写 knowhow 格子都经 chunks 的外键级联带走它们。（整本深拷贝豁免：它不复制 `unified_kg_state`，副本恒走旧全量路径。）用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整库；只有要丢弃当前已完成账本并重建行时才加 `--force`。
+
+`backfill-images` 子命令外科式补回单文件 markdown 导入时丢掉的来源图片。历史部署把 PDF 用离线 MinerU 转成 markdown 后只上传了那个 `.md`，于是这批来源既没有图片元素也没有资产：单文件 markdown 解析路径不解析相对路径图片，而空 alt 的 `![](images/<sha>.jpg)` 会被整块丢弃。MinerU 的 output 树里还留着一部分原图，且文件名就是内容哈希，因此可以按名找回。命令会先给一个或多个 `--mineru-output` 树建索引（只认直接位于 `images/` 目录下的文件，所以 `auto`/`ocr`/`txt` 各种方法目录都适用），再按 keyset 分页遍历该 notebook 的 `.md`/`.markdown` 来源，用单调双指针把每篇文档的行与它既有的元素对齐，把命中的图片插在它物理上紧跟的那个元素之后。它不调用模型、不重算任何 embedding、不碰任何 KG 表，chunk id 与 chunk 正文逐字节不变——补回的图片只被 append 到锚点 chunk 的 `element_ids` **尾部**。图注是机会性收割的：图片前后最近的一行若形如 `Figure`/`Table`/`图`/`表` + 数字就取为图注（否则回退到图片自己的 alt 文本）；没有图注的图片照样显示，因为引用带图的准入只要求这条 `image` 元素的 `metadata.asset_id` 非空。
+
+它是**显式离线**操作（绝不从交互请求触发），且幂等：补回的元素记下原始 `src`，所以找回更多原图之后再跑一次只会补新增的那些，一条既有行都不改写。新元素写入的是该来源既有元素批次的 `created_at`，这样来源详情的 `(created_at, id)` 分页顺序与命令目录的来源代次都不会漂；`sources.updated_at` 与 `chunk_elements` 反查行在同一个写事务里推进。`chunked_at` 刻意不清，所以这批来源不会被重新判成需要重新解析。每源图片张数与单图字节上限一律复用部署既有的 `MINERU_MAX_IMAGES_PER_SOURCE` / `MINERU_MAX_IMAGE_BYTES` 设置，`MINERU_RETURN_IMAGES=false` 时直接拒绝运行。`--dry-run` 是一次**只读**的数据库演练，报告每源可回填数、锚定失败数、缺图数与图注命中数；`--source-id` 把本次运行限定到单个来源（试点用）；`--limit` 限制处理多少个候选来源；`--report <path.jsonl>` 写逐源明细，只含计数与稳定 reason code（绝不含图片字节或文档正文）。某个来源的写事务失败只隔离这一个来源并记为 failed，本次为它写下的资产（行与磁盘文件）会一并回滚——孤儿资产扫描刻意从不回收带 `source_id` 的行。
+
+**刻意登记的偏离**：标准分块管线对既无图注又无描述的图片元素一律跳过，而本命令仍会把它 append 进 chunk。这是一次针对历史数据修复的定向例外，判据是 markdown 里图片引用与该段文字的物理相邻关系（原始 PDF 的版面顺序），而不是分块所依赖的「这张图自带可检索文本」。
 
 **已登记的代价**：反查表按 (chunk, element) 一对一行，因此严格大于 chunks 表——每个 chunk 平均带 N 个元素 id 就产出约 N 行。这些行由 `chunks` 的外键级联带走，于是删除来源、重新解析比以前更重：交互式删除的那个事务现在还要级联这张侧表（有 `chunk_id` 索引，因此是逐 chunk 的有界索引删除，不是全表扫描）。大库应预期删除/重解析的事务规模与磁盘占用按比例上升。读侧收益是每次问答兑现的，这是相应的写侧价格。
 
@@ -667,7 +681,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--mineru-output` / `--source-id` / `--report`（仅 `backfill-images`：可重复的 MinerU output 树根、单源试点限制，以及只含计数与稳定 reason code 的逐源 JSONL 明细）、`--dry-run`（只扫描预估；`backfill-images` 的 dry-run 是只读数据库演练而不是输入目录预览）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract`、`paper_metadata` 和可选的 `chunk_question_generation`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
