@@ -556,6 +556,110 @@ def test_enrichment_does_not_consume_the_per_source_cap():
     assert "per_source_cap" not in plan.skipped
 
 
+def test_a_pure_image_document_is_still_enriched_despite_the_coverage_floor():
+    """纯图片 markdown（MinerU 版面还原的常见形态）一条文本行都没有，覆盖率因此
+    **恒为 0**、必然落在漂移闸之下。但就地补齐是按精确 src 相等找到目标元素的，
+    根本不依赖 markdown 对齐——按闸拒掉等于对这一整类来源永远补不了图。"""
+    markdown = "![图 1 系统总体架构](images/aaa.jpg)\n\n![图 2 数据通路](images/bbb.jpg)\n"
+    elements = _parsed_els(markdown)
+    assert [element.element_type for element in elements] == ["image", "image"]
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},  # 带图注的图会进分块
+        _index("aaa.jpg", "bbb.jpg"),
+        existing_unassigned_srcs={
+            "images/aaa.jpg": f"el-{SID}-0001",
+            "images/bbb.jpg": f"el-{SID}-0002",
+        },
+    )
+    assert plan.coverage == 0.0  # 闸值之下
+    assert plan.skipped.get("alignment_drifted") is None
+    assert [item.element_id for item in plan.enriched] == [
+        f"el-{SID}-0001",
+        f"el-{SID}-0002",
+    ]
+    assert [item.chunk_id for item in plan.enriched] == ["", ""]  # 已在 chunk 里
+    assert plan.captions == 2  # 两条都自带图注
+
+
+def test_the_drift_gate_still_blocks_inserts_while_enrichment_goes_through():
+    """两条路在同一个漂移来源里分头处置：补齐照做，新插入仍被闸住。"""
+    markdown = (
+        "\n\n".join(f"对不上的第 {n} 段文字甲乙丙丁。" for n in range(1, 11))
+        + "\n\n![图 1 系统总体架构](images/aaa.jpg)\n\n![](images/z.jpg)\n"
+    )
+    elements = _els("只有这一段能对上的正文内容。")
+    elements.append(
+        ElementView(
+            id=f"el-{SID}-0002",
+            element_type="image",
+            norm=normalize_text("图 1 系统总体架构"),
+        )
+    )
+    plan = _plan(
+        markdown,
+        elements,
+        {f"el-{SID}-0001": "c1", f"el-{SID}-0002": "c1"},
+        _index("aaa.jpg", "z.jpg"),
+        existing_unassigned_srcs={"images/aaa.jpg": f"el-{SID}-0002"},
+    )
+    assert plan.coverage < 0.8
+    assert [item.element_id for item in plan.enriched] == [f"el-{SID}-0002"]
+    assert plan.images == []                       # 新插入仍被闸住
+    assert plan.skipped == {"alignment_drifted": 1}
+
+
+def test_enrichment_finds_its_chunk_by_element_order_not_by_alignment():
+    """未入 chunk 的补齐目标沿**元素 id 序**向前回退找落点。对齐整篇漂掉（这里
+    coverage=0）也不影响它——元素位置是库里的既有事实。"""
+    markdown = "![图 1 系统总体架构](images/aaa.jpg)\n\n![图 2 数据通路](images/bbb.jpg)\n"
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {f"el-{SID}-0001": "c1"},  # 0002 不在任何 chunk 里
+        _index("aaa.jpg", "bbb.jpg"),
+        existing_unassigned_srcs={
+            "images/aaa.jpg": f"el-{SID}-0001",
+            "images/bbb.jpg": f"el-{SID}-0002",
+        },
+    )
+    assert plan.coverage == 0.0
+    assert [item.chunk_id for item in plan.enriched] == ["", "c1"]
+
+
+def test_an_enrichment_target_with_no_chunk_anywhere_before_it_is_skipped():
+    markdown = "![图 1 系统总体架构](images/aaa.jpg)\n"
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {},  # 一个 chunk 都没有
+        _index("aaa.jpg"),
+        existing_unassigned_srcs={"images/aaa.jpg": f"el-{SID}-0001"},
+    )
+    assert plan.enriched == []
+    assert plan.skipped == {"no_chunk": 1}
+
+
+def test_an_enrichment_target_without_its_own_text_is_not_counted_as_a_caption():
+    """图注统计的权威是**元素自己**（补齐不改写 text），不是 markdown 那一行。"""
+    markdown = "第一段正文写了一些内容。\n\n![备注](images/a.jpg)\n"
+    elements = _els("第一段正文写了一些内容。")
+    elements.append(ElementView(id=f"el-{SID}-0002", element_type="image", norm=""))
+    plan = _plan(
+        markdown,
+        elements,
+        {f"el-{SID}-0001": "c1", f"el-{SID}-0002": "c1"},
+        _index("a.jpg"),
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+    )
+    assert len(plan.enriched) == 1
+    assert plan.enriched[0].has_caption is False
+    assert plan.captions == 0
+
+
 def test_the_same_src_referenced_twice_is_enriched_once():
     """一个 src 在文档里被引用两次，但只有一条既有元素可补。补两遍会把同一个
     element id append 进 chunk 两次（`element_ids` 里出现重复），而"再插一条新

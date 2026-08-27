@@ -789,6 +789,62 @@ def test_enriching_an_unchunked_element_appends_it_and_its_reverse_row(
     assert [row["chunk_id"] for row in reverse] == owners
 
 
+def test_an_enrichment_only_source_reports_its_captions_in_every_outlet(
+    repo, seeded_with_alt, outputs, tmp_path, capsys
+):
+    """图注统计只数新插入的话，一个**纯补齐**的来源会报「图注 0」——而那条元素明明
+    带着图注。dry-run 与真跑必须给出同一个非零数字，且三个出口一致。"""
+    notebook_id, source_id = seeded_with_alt
+    report = tmp_path / "enrich.jsonl"
+    planned = _run(repo, notebook_id, outputs, dry_run=True, report_path=report)
+
+    assert planned["candidates_enrich"] == 1
+    assert planned["candidates_insert"] == 0
+    assert planned["captions"] == 1
+    entry = json.loads(report.read_text().splitlines()[0])
+    assert entry["captions"] == 1
+    assert "图注=1" in capsys.readouterr().out
+
+    applied = _run(repo, notebook_id, outputs, report_path=report)
+    assert applied["images_enriched"] == 1
+    assert applied["images_inserted"] == 0
+    assert applied["captions"] == planned["captions"] == 1
+    assert json.loads(report.read_text().splitlines()[1])["captions"] == 1
+
+
+def test_a_pure_image_source_is_enriched_even_though_alignment_cannot_run(
+    repo, outputs, tmp_path
+):
+    """端到端的纯图片 markdown：一条文本行都没有 → coverage 恒 0 → 落在漂移闸
+    之下。补齐按精确 src 相等工作，不该被那道闸拦住。"""
+    docs = tmp_path / "gallery"
+    docs.mkdir()
+    (docs / "gallery.md").write_text(
+        "![图 1 系统总体架构](images/aaa.jpg)\n\n![图 2 数据通路](images/bbb.jpg)\n",
+        encoding="utf-8",
+    )
+    notebook_id = bi.ensure_notebook(repo, None, "nb-gallery")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["id"]
+    before = _image_elements(repo, source_id)
+    assert len(before) == 2
+    assert not any(json.loads(row["metadata"]).get("asset_id") for row in before)
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_enriched"] == 2
+    assert result["images_inserted"] == 0
+    assert result["skipped"].get("alignment_drifted") is None
+    assert result["captions"] == 2
+
+    after = _image_elements(repo, source_id)
+    assert len(after) == 2  # 没有多出重复行
+    assert all(json.loads(row["metadata"])["asset_id"] for row in after)
+    assert [row["text"] for row in after] == [row["text"] for row in before]
+
+
 def test_enrichment_is_idempotent_across_reruns(repo, seeded_with_alt, outputs):
     notebook_id, source_id = seeded_with_alt
     _run(repo, notebook_id, outputs)

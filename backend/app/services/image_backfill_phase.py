@@ -491,11 +491,18 @@ def apply_plan(
             _referenced_asset_ids(state),
         )
         raise
+    # 图注命中按**实际落地**的图重算，插入与就地补齐两半都要数：只数插入的话，
+    # 一个纯补齐的来源会报「图注 0」，而那条元素明明带着图注。
     landed = {row["id"] for row in rows}
+    landed_updates = {update["id"] for update in updates}
     captions = sum(
         1
         for image in plan.images
         if image.element_id in landed and image.caption
+    ) + sum(
+        1
+        for item in plan.enriched
+        if item.element_id in landed_updates and item.has_caption
     )
     return ApplyOutcome(
         inserted=len(rows),
