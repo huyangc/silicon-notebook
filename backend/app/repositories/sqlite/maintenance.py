@@ -1947,6 +1947,17 @@ class SQLiteMaintenanceAdapter:
                 (self._runtime.seams.now(), source_id),
             )
 
+    def image_backfill_resolve_source_path(self, file_path: str) -> str:
+        """把 ``sources.file_path`` 解析成可直接打开的路径（零 I/O、零查询）。
+
+        刻意复用 `SourceFileStore.resolve_path`——它就是产品对来源文件路径的那**一
+        条**统一约定（绝对路径原样、相对路径按仓库根解析；`read_source_text` 的
+        docstring 写明"raw text reads accept both absolute stored paths and legacy
+        repo-root-relative ones"）。放在仓储适配器上而不是让离线阶段自己算，是因为
+        仓库根 (`root_dir`) 归数据库边界所有，服务层拿不到；自造第二份规则会让
+        离线命令与在线读取对同一批历史行给出不同答案。"""
+        return str(self._runtime.source_files.resolve_path(file_path))
+
     def image_backfill_source_asset_ids(
         self, notebook_id: str, source_id: str
     ) -> list[str]:

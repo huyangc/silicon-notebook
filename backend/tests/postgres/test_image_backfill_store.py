@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -382,6 +383,19 @@ def test_metadata_updates_enrich_in_place_without_touching_anything_else(
         "asset_id": "asset-9",
     }
     assert updated_at is not None  # 纯补齐同样推进变更信号
+
+
+@pytest.mark.postgres_integration
+def test_resolve_source_path_reuses_the_product_wide_convention(postgres_repository):
+    """来源文件路径解析走 `SourceFileStore.resolve_path` 那**一条**规则：绝对路径
+    原样、相对路径按仓库根（不是按进程 CWD）。两个后端必须给出同一个答案。"""
+    maintenance = postgres_repository.maintenance
+    root = postgres_repository._runtime.source_files.resolve_path(".")
+
+    assert maintenance.image_backfill_resolve_source_path("/tmp/a.md") == "/tmp/a.md"
+    assert maintenance.image_backfill_resolve_source_path(
+        "storage/notebooks/nb/x.md"
+    ) == str(Path(root) / "storage/notebooks/nb/x.md")
 
 
 @pytest.mark.postgres_integration
