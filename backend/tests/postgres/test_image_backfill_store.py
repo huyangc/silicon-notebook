@@ -114,6 +114,45 @@ def test_source_page_selects_markdown_candidates_by_keyset(postgres_repository):
 
 
 @pytest.mark.postgres_integration
+def test_keyset_paging_visits_every_markdown_source_exactly_once(postgres_repository):
+    """比较键与排序键必须同一个 collation。
+
+    库的默认 collation 不是 `C` 时，裸 `id > %s` 与 `ORDER BY id COLLATE "C"`
+    给出的是两种顺序，keyset 翻页会**漏源或重复**——而这两种结局都不报错：漏源
+    只是"这批图没补上"，重复只是多做一遍幂等的活。这里用带标点、在
+    `C` 与 `en_US.UTF-8` 下排序不同的 id 逐页（LIMIT 1）走一遍，断言每个来源恰好
+    出现一次、且顺序就是 C collation 序。"""
+    notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
+    runtime = postgres_repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    # `_`(0x5F) < `a`(0x61) 在 C 下成立，而 en_US.UTF-8 在主级别忽略标点。
+    ids = ["src-a_b", "src-ab", "src-a-c", "src-aB"]
+    with runtime.database.write() as db:
+        for index, source_id in enumerate(ids):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+                "file_path,file_size,file_hash,summary,created_at,updated_at,doc_type) "
+                "VALUES (%s,%s,'d','markdown','extracted','parsed','d.md','',0,%s,"
+                "'',%s,%s,'')",
+                (source_id, notebook_id, f"h-{index}", now, now),
+            )
+
+    seen: list[str] = []
+    after = ""
+    while True:
+        page = postgres_repository.maintenance.image_backfill_source_page(
+            notebook_id, after, 1
+        )
+        if not page:
+            break
+        seen.append(page[0]["id"])
+        after = page[-1]["id"]
+        assert len(seen) <= len(ids) + 1, f"keyset 不推进/重复: {seen}"
+    assert seen == sorted(ids)  # Python 的 str 序就是 C collation 序
+
+
+@pytest.mark.postgres_integration
 def test_source_state_decodes_jsonb_and_reports_the_element_generation(
     postgres_repository,
 ):
@@ -185,6 +224,7 @@ def test_apply_writes_elements_chunk_ids_reverse_rows_and_updated_at(
                 new_id,
             ]
         },
+        (),
         created_at=stamp,
     )
 
@@ -242,14 +282,15 @@ def test_reverse_row_insert_is_idempotent_across_reruns(postgres_repository):
             source_id,
             [
                 {
-                    "id": f"el-{source_id}-0002-g{index + 1:02d}",
+                    "id": f"el-{source_id}-0002-g{index + 1:03d}",
                     "element_type": "image",
                     "location_label": f"Markdown image {index + 1}",
                     "text": "",
                     "metadata": {"asset_id": f"asset-{index}"},
                 }
             ],
-            {"ck-1": element_ids + [f"el-{source_id}-0002-g{index + 1:02d}"]},
+            {"ck-1": element_ids + [f"el-{source_id}-0002-g{index + 1:03d}"]},
+            (),
             created_at=stamp,
         )
 
@@ -260,6 +301,84 @@ def test_reverse_row_insert_is_idempotent_across_reruns(postgres_repository):
         ).fetchone()["c"]
     # 两轮各送 3 条（两条老的重复），主键去重后只剩 4 条不同的。
     assert rows == 4
+
+
+@pytest.mark.postgres_integration
+def test_metadata_updates_enrich_in_place_without_touching_anything_else(
+    postgres_repository,
+):
+    """就地补齐（`image_backfill.EnrichedImage`）的 PG 半：只改 ``metadata``，
+    ``text``/``created_at``/``location_label`` 一律不动，jsonb 写入照常还成 dict。"""
+    notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
+    source_id = _seed(postgres_repository, notebook_id)
+    runtime = postgres_repository._runtime
+    maintenance = postgres_repository.maintenance
+    stamp = maintenance.image_backfill_source_state(source_id)["element_created_at"]
+    image_id = f"el-{source_id}-0004"
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (%s,%s,'image','Markdown image 1','图 1 系统总体架构',%s,%s)",
+            (
+                image_id,
+                source_id,
+                jsonb({"parser": "markdown", "src": "images/aaa.jpg"}),
+                stamp,
+            ),
+        )
+    with runtime.database.connect() as db:
+        before = db.execute(
+            "SELECT text, location_label, created_at FROM source_elements WHERE id=%s",
+            (image_id,),
+        ).fetchone()
+
+    maintenance.apply_image_backfill(
+        notebook_id,
+        source_id,
+        [],
+        {},
+        [
+            {
+                "id": image_id,
+                "metadata": {
+                    "parser": "markdown",
+                    "src": "images/aaa.jpg",
+                    "asset_id": "asset-9",
+                },
+            }
+        ],
+        created_at=stamp,
+    )
+
+    with runtime.database.connect() as db:
+        after = db.execute(
+            "SELECT text, location_label, created_at, metadata FROM source_elements "
+            "WHERE id=%s",
+            (image_id,),
+        ).fetchone()
+        others = db.execute(
+            "SELECT COUNT(*) AS c FROM source_elements WHERE source_id=%s "
+            "AND element_type='image'",
+            (source_id,),
+        ).fetchone()["c"]
+        updated_at = db.execute(
+            "SELECT updated_at FROM sources WHERE id=%s", (source_id,)
+        ).fetchone()["updated_at"]
+
+    assert others == 1  # 没有多出第二条 image 行
+    assert after["text"] == before["text"]
+    assert after["location_label"] == before["location_label"]
+    assert after["created_at"] == before["created_at"]
+    metadata = after["metadata"]
+    if isinstance(metadata, str):  # pragma: no cover - jsonb 正常还成 dict
+        metadata = json.loads(metadata)
+    assert metadata == {
+        "parser": "markdown",
+        "src": "images/aaa.jpg",
+        "asset_id": "asset-9",
+    }
+    assert updated_at is not None  # 纯补齐同样推进变更信号
 
 
 @pytest.mark.postgres_integration

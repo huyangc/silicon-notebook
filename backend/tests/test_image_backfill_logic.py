@@ -18,6 +18,7 @@ from app.services.image_backfill import (
     plan_source_images,
     scan_markdown,
 )
+from app.services.parsers import parse_markdown_text
 
 
 SID = "s1"
@@ -31,6 +32,23 @@ def _els(*texts: str) -> list[ElementView]:
             norm=normalize_text(text),
         )
         for index, text in enumerate(texts, start=1)
+    ]
+
+
+def _parsed_els(markdown: str) -> list[ElementView]:
+    """用**生产解析路径**产出元素，再按摄取路径的 `el-<sid>-NNNN` 形状铸 id。
+
+    对齐算法的失败模式全部来自"元素侧长什么样"，而手搓的 `_els` 只会造段落——
+    正是它让连续表格/连续带 alt 图片这两种真实漂移形态在原用例里一条都碰不到。
+    `parse_markdown_text` 是 markdown 来源的真实产出口，`source_ingestion` 落库
+    时按枚举序铸 `el-<source_id>-{index:04d}`。"""
+    return [
+        ElementView(
+            id=f"el-{SID}-{index:04d}",
+            element_type=element.element_type,
+            norm=normalize_text(element.text),
+        )
+        for index, element in enumerate(parse_markdown_text(SID, markdown), start=1)
     ]
 
 
@@ -49,6 +67,7 @@ def _plan(markdown, elements, chunk_by_element, index, **kwargs):
         markdown=markdown,
         elements=elements,
         existing_image_srcs=kwargs.pop("existing_image_srcs", []),
+        existing_unassigned_srcs=kwargs.pop("existing_unassigned_srcs", {}),
         existing_element_ids=kwargs.pop(
             "existing_element_ids", [element.id for element in elements]
         ),
@@ -149,8 +168,8 @@ def test_alignment_is_monotone_and_ignores_non_text_lines():
 
 
 def test_drifted_alignment_stops_matching_instead_of_guessing():
-    """元素与 markdown 完全对不上时，指针不前进、锚点保持 -1，图片被跳过而不是
-    瞎插到某个不相干的元素后面。"""
+    """元素与 markdown 完全对不上时，指针不前进、覆盖率归零，整源被闸住而不是
+    把图瞎插到某个不相干的元素后面。"""
     plan = _plan(
         "完全不相干的一段文字甲乙丙丁。\n\n![](images/a.jpg)\n",
         _els("另一份文档里的段落戊己庚辛。"),
@@ -158,11 +177,13 @@ def test_drifted_alignment_stops_matching_instead_of_guessing():
         _index("a.jpg"),
     )
     assert plan.images == []
-    assert plan.skipped == {"anchor_failed": 1}
+    assert plan.skipped == {"alignment_drifted": 1}
     assert plan.coverage == 0.0
 
 
-def test_document_leading_image_has_no_chunk_and_is_skipped():
+def test_document_leading_image_has_no_anchor_and_is_skipped():
+    """文档开头的图与"对齐失效"是两种处置完全不同的失败，reason code 分开：
+    这里对齐是好的（cov=1.0），只是图前面一条元素都没有。"""
     plan = _plan(
         "![](images/a.jpg)\n\n正文第一段在图片后面出现。\n",
         _els("正文第一段在图片后面出现。"),
@@ -170,7 +191,8 @@ def test_document_leading_image_has_no_chunk_and_is_skipped():
         _index("a.jpg"),
     )
     assert plan.images == []
-    assert plan.skipped == {"anchor_failed": 1}
+    assert plan.skipped == {"no_anchor": 1}
+    assert plan.coverage == 1.0
 
 
 def test_anchor_without_chunk_walks_back_to_the_nearest_chunked_element():
@@ -216,17 +238,36 @@ def test_consecutive_images_share_one_anchor_and_get_increasing_suffixes():
         _index("a.jpg", "b.jpg", "c.jpg"),
     )
     assert [image.element_id for image in plan.images] == [
-        f"el-{SID}-0001-g01",
-        f"el-{SID}-0001-g02",
-        f"el-{SID}-0001-g03",
+        f"el-{SID}-0001-g001",
+        f"el-{SID}-0001-g002",
+        f"el-{SID}-0001-g003",
     ]
 
 
-def test_new_ids_sort_between_their_anchor_and_the_next_element():
-    """C collation 下 `-`(0x2D) < 数字，所以补出来的 id 落在锚点与下一条之间——
-    元素顺序（分块与详情分页都按 id）因此保持文档序。"""
-    ids = sorted([f"el-{SID}-0012", f"el-{SID}-0012-g01", f"el-{SID}-0013"])
-    assert ids == [f"el-{SID}-0012", f"el-{SID}-0012-g01", f"el-{SID}-0013"]
+def test_minted_ids_stay_sorted_past_the_two_digit_boundary():
+    """真断言：拿 id **铸造函数自己的产出**排一遍，而不是把三个手写字面量交给
+    `sorted` 再断言它们有序（那只测了 Python 的 `sorted`）。
+
+    每源上限是部署设置（默认 200），所以同一个锚点底下过百是可达的；两位位宽
+    在第 100 张上会让 `"-g100" < "-g99"`，元素顺序当场乱掉。"""
+    markdown = "第一段正文写了一些内容。\n\n" + "\n\n".join(
+        f"![](images/x{index}.jpg)" for index in range(105)
+    )
+    plan = _plan(
+        markdown,
+        _els("第一段正文写了一些内容。"),
+        {f"el-{SID}-0001": "c1"},
+        _index(*[f"x{index}.jpg" for index in range(105)]),
+    )
+    ids = [image.element_id for image in plan.images]
+    assert len(ids) == 105
+    assert sorted(ids) == ids  # 铸出来的 id 本身就是单调的
+    # 而且整段落在锚点与下一条元素之间（C collation 下 `-`(0x2D) < 数字）。
+    assert sorted([f"el-{SID}-0001", *ids, f"el-{SID}-0002"]) == [
+        f"el-{SID}-0001",
+        *ids,
+        f"el-{SID}-0002",
+    ]
 
 
 def test_rerun_continues_the_suffix_instead_of_colliding():
@@ -235,24 +276,228 @@ def test_rerun_continues_the_suffix_instead_of_colliding():
         _els("第一段正文写了一些内容。"),
         {f"el-{SID}-0001": "c1"},
         _index("b.jpg"),
-        existing_element_ids=[f"el-{SID}-0001", f"el-{SID}-0001-g01"],
+        existing_element_ids=[f"el-{SID}-0001", f"el-{SID}-0001-g001"],
     )
-    assert [image.element_id for image in plan.images] == [f"el-{SID}-0001-g02"]
+    assert [image.element_id for image in plan.images] == [f"el-{SID}-0001-g002"]
 
 
-def test_inline_image_anchors_on_its_own_line_element():
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "第一段正文写了一些内容。\n\n第二段里内嵌了 ![](images/a.jpg) 这张图。\n",
+        "第一段正文写了一些内容。\n\n- 列表项里有 ![](images/a.jpg) 一张图\n",
+        "第一段正文写了一些内容。\n\n| 甲 | ![](images/a.jpg) |\n| - | - |\n",
+    ],
+)
+def test_images_that_do_not_own_their_line_are_skipped(markdown):
+    """产品规则平移：在线 markdown 路径只对**独占一行**的图片落资产，列表项/
+    表格单元格/段落中间的内嵌图片只留 alt 文本（`parse_markdown_text` 实测三种
+    形态都不产出带 `metadata.src` 的 image 元素）。回填不得比在线路径更宽。"""
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg"),
+    )
+    assert plan.images == []
+    assert plan.skipped == {"inline_image_skipped": 1}
+
+
+def test_alignment_anchors_an_inline_image_line_on_its_own_element():
+    """`position_by_line` 对**每一行**记账（不只整行图片），所以一条同时是正文
+    又带内嵌图片的行，锚点是它自己而不是上一条。该图虽然按上面那条产品规则不
+    回填，这条对齐性质仍然是后续行锚定正确的前提。"""
     markdown = (
         "第一段正文写了一些内容。\n\n"
         "第二段里内嵌了 ![](images/a.jpg) 这张图。\n"
     )
+    elements = _els("第一段正文写了一些内容。", "第二段里内嵌了 这张图。")
+    lines, refs = scan_markdown(markdown)
+    alignment = align(lines, elements)
+    assert alignment.position_by_line[refs[0].line] == 1
+    assert alignment.matched[1] == f"el-{SID}-0002"
+
+
+# -------------------------------------------------- 对齐漂移（真实解析产出）
+
+#: 两个漂移场景共用的收尾：目标图之前有一条正文段落，它才是正确锚点。
+_TAIL = "\n\n第二段正文继续往下说明细节。\n\n![](images/z.jpg)\n\n第三段正文收尾了这一节。\n"
+
+
+def _drift_plan(markdown: str):
+    elements = _parsed_els(markdown)
+    return elements, _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("z.jpg"),
+    )
+
+
+def test_a_run_of_tables_does_not_starve_the_lookahead_window():
+    """8 张连续表格：markdown 侧每张是若干 `table` 行（不参与匹配），元素侧每张
+    却是一条 `table` 元素。若前瞻预算对它们计数，8 张就把窗口（`ALIGN_LOOKAHEAD`
+    = 8）吃干，指针从此**永久**停滞——此后每张图都静默锚到漂移点之前的元素上，
+    `skipped` 里一个字都没有。修复前实测 cov=0.33、锚点落在 `el-s1-0001`。"""
+    tables = "\n\n".join(
+        f"| 甲{n} | 乙{n} |\n| --- | --- |\n| 丙{n} | 丁{n} |" for n in range(1, 9)
+    )
+    markdown = "第一段正文写了一些内容用于对齐锚定。\n\n" + tables + _TAIL
+    elements, plan = _drift_plan(markdown)
+    # paragraph, table ×8, paragraph, paragraph
+    assert [element.element_type for element in elements] == (
+        ["paragraph"] + ["table"] * 8 + ["paragraph", "paragraph"]
+    )
+    assert plan.coverage == 1.0
+    assert [image.anchor_element_id for image in plan.images] == [f"el-{SID}-0010"]
+    assert [image.src for image in plan.images] == ["images/z.jpg"]
+
+
+def test_a_run_of_captioned_images_does_not_starve_the_lookahead_window():
+    """9 张连续带 alt 的图片：解析路径给每张产出一条 `image` 元素（alt 当图注），
+    而 markdown 侧那些行是 `image` 行、同样不参与匹配。与连续表格是同一个机制，
+    修复前实测同样 cov=0.33、目标图锚到 `el-s1-0001`。"""
+    gallery = "\n\n".join(
+        f"![图 {n} 第 {n} 张示意图](images/p{n}.jpg)" for n in range(1, 10)
+    )
+    markdown = "第一段正文写了一些内容用于对齐锚定。\n\n" + gallery + _TAIL
+    elements, plan = _drift_plan(markdown)
+    assert [element.element_type for element in elements] == (
+        ["paragraph"] + ["image"] * 9 + ["paragraph", "paragraph"]
+    )
+    assert plan.coverage == 1.0
+    assert [image.anchor_element_id for image in plan.images] == [f"el-{SID}-0011"]
+    assert [image.src for image in plan.images] == ["images/z.jpg"]
+    # p1..p9 在索引里找不到（本用例只索引 z.jpg），照常逐张记账。
+    assert plan.skipped == {"image_not_found": 9}
+
+
+def test_crossed_elements_are_visible_to_the_chunk_walk_back():
+    """跨过的不可匹配元素也进 `matched`：带图注的历史图片元素是**进过 chunk**
+    的，它比更早那条段落离图更近，锚点回退理应先看见它。"""
+    markdown = (
+        "第一段正文写了一些内容用于对齐锚定。\n\n"
+        "![图 1 一张历史图片](images/p1.jpg)\n\n"
+        "第二段正文继续往下说明细节。\n\n"
+        "![](images/z.jpg)\n"
+    )
+    elements = _parsed_els(markdown)
+    # 只有那条历史图片元素属于 chunk，段落都不属于 → 回退必须走到它。
+    plan = _plan(markdown, elements, {f"el-{SID}-0002": "c-img"}, _index("z.jpg"))
+    assert [image.chunk_id for image in plan.images] == ["c-img"]
+
+
+def test_a_stale_anchor_is_refused_rather_than_used():
+    """对齐整体还过得去（覆盖率在闸上），但目标图之前连着一长串对不上的文本行
+    ——那个锚点只是"最后一次还认得路的地方"。宁可不补，也不能插到错的位置。"""
+    strays = "\n\n".join(f"另一份文档里的第 {n} 段落戊己庚辛。" for n in range(1, 11))
+    matched = "\n\n".join(f"能对上的第 {n} 段正文内容在这里。" for n in range(1, 41))
+    markdown = matched + "\n\n" + strays + "\n\n![](images/z.jpg)\n"
+    elements = _els(*[f"能对上的第 {n} 段正文内容在这里。" for n in range(1, 41)])
+    plan = _plan(
+        markdown, elements, {element.id: "c1" for element in elements}, _index("z.jpg")
+    )
+    assert plan.coverage >= 0.8  # 整源闸没有触发
+    assert plan.images == []
+    assert plan.skipped == {"anchor_stale": 1}
+
+
+def test_a_source_below_the_coverage_floor_is_skipped_whole():
+    """整源闸：对齐可信度低于 `MIN_ALIGNMENT_COVERAGE` 时一张图都不补，并以
+    `alignment_drifted` 逐张记账（dry-run / report 照常看得见）。"""
+    markdown = (
+        "\n\n".join(f"对不上的第 {n} 段文字甲乙丙丁。" for n in range(1, 11))
+        + "\n\n![](images/z.jpg)\n\n![](images/y.jpg)\n"
+    )
+    elements = _els("只有这一段能对上的正文内容。")
     plan = _plan(
         markdown,
-        _els("第一段正文写了一些内容。", "第二段里内嵌了 这张图。"),
-        {f"el-{SID}-0001": "c1", f"el-{SID}-0002": "c2"},
-        _index("a.jpg"),
+        elements,
+        {f"el-{SID}-0001": "c1"},
+        _index("z.jpg", "y.jpg"),
     )
-    assert [image.anchor_element_id for image in plan.images] == [f"el-{SID}-0002"]
-    assert [image.chunk_id for image in plan.images] == ["c2"]
+    assert plan.coverage < 0.8
+    assert plan.images == []
+    assert plan.skipped == {"alignment_drifted": 2}
+
+
+# -------------------------------------------------- 既有无资产图片的就地补齐
+
+def test_an_existing_captioned_image_is_enriched_not_duplicated():
+    """带 alt 的相对路径图片，解析路径已经产出过一条 image 元素（有 `src`、
+    没有 `asset_id`）。它不在"已补过"集合里（那条判据要求 asset_id 非空），
+    按"只插入"处理就会给同一张图造出第二条元素行。"""
+    markdown = "第一段正文写了一些内容。\n\n![图 1 系统架构](images/a.jpg)\n"
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {f"el-{SID}-0001": "c1", f"el-{SID}-0002": "c1"},
+        _index("a.jpg"),
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+    )
+    assert plan.images == []  # 一条新元素都不插
+    assert [item.element_id for item in plan.enriched] == [f"el-{SID}-0002"]
+    # 它已经在 chunk 里 → chunk 零改动。
+    assert [item.chunk_id for item in plan.enriched] == [""]
+    assert plan.skipped == {}
+
+
+def test_an_existing_image_outside_every_chunk_joins_its_anchor_chunk():
+    """另一种子形态：既有元素不属于任何 chunk（历史行不保证进过分块）。这时按
+    与新插入同款的锚点路径把它 append 进锚点 chunk。"""
+    markdown = "第一段正文写了一些内容。\n\n![图 1 系统架构](images/a.jpg)\n"
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {f"el-{SID}-0001": "c1"},  # 0002 不在任何 chunk 里
+        _index("a.jpg"),
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+    )
+    assert plan.images == []
+    assert [item.chunk_id for item in plan.enriched] == ["c1"]
+
+
+def test_enrichment_does_not_consume_the_per_source_cap():
+    """就地补齐不新增元素行，所以不该吃每源张数预算——它补的那条元素本来就已经
+    计在既有 image 元素数里了。"""
+    markdown = (
+        "第一段正文写了一些内容。\n\n"
+        "![图 1 系统架构](images/a.jpg)\n\n"
+        "![](images/b.jpg)\n"
+    )
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg", "b.jpg"),
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+        max_images=2,  # 既有 1 张 image 元素 → 还剩 1 个新增名额
+    )
+    assert [item.src for item in plan.enriched] == ["images/a.jpg"]
+    assert [image.src for image in plan.images] == ["images/b.jpg"]
+    assert "per_source_cap" not in plan.skipped
+
+
+def test_an_already_assigned_src_wins_over_enrichment():
+    """幂等：补齐过一轮之后 `asset_id` 非空，下一轮它落回"已补过"那一支，既不
+    重复插入也不重复补齐。"""
+    markdown = "第一段正文写了一些内容。\n\n![图 1 系统架构](images/a.jpg)\n"
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg"),
+        existing_image_srcs=["images/a.jpg"],
+        existing_unassigned_srcs={},
+    )
+    assert plan.images == []
+    assert plan.enriched == []
+    assert plan.skipped == {"already_backfilled": 1}
 
 
 # ------------------------------------------------------------------ 图注
@@ -376,5 +621,27 @@ def test_same_name_different_size_keeps_the_first_and_warns(tmp_path):
     assert index.duplicates == ["dup.jpg"]
 
 
-def test_missing_output_root_is_tolerated(tmp_path):
+def test_one_missing_root_among_several_is_tolerated(tmp_path):
+    """索引本身对缺失 root 保持容忍（多路径运行里一条挂载点没上来不该废掉整
+    跑）。"全部 root 都缺失 / 索引为空"是运行前置条件，由阶段层拒绝——见
+    `test_image_backfill_phase.py` 的两条 refuse 用例。"""
+    good = tmp_path / "sess" / "doc" / "auto" / "images"
+    good.mkdir(parents=True)
+    (good / "a.jpg").write_bytes(b"x")
+    index = build_image_index([tmp_path / "nope", tmp_path])
+    assert set(index.entries) == {"a.jpg"}
     assert build_image_index([tmp_path / "nope"]).entries == {}
+
+
+def test_index_walk_is_deterministic_regardless_of_directory_creation_order(tmp_path):
+    """逐目录 `os.walk` + 排序给出的顺序必须与"整树物化再排序"一致：目录字典序
+    在先、目录内文件字典序在后，"同名先见者取"因此逐字不变（这里 `a/` 先于
+    `b/`，所以 1 字节那份胜出，与文件系统返回的顺序无关）。"""
+    for method, payload in (("b", b"xxxx"), ("a", b"x")):
+        directory = tmp_path / method / "images"
+        directory.mkdir(parents=True)
+        (directory / "dup.jpg").write_bytes(payload)
+    index = build_image_index([tmp_path])
+    assert index.get("dup.jpg").size == 1
+    assert index.get("dup.jpg").path.parent.parent.name == "a"
+    assert index.duplicates == ["dup.jpg"]

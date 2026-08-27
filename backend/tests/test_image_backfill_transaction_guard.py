@@ -26,10 +26,14 @@ ADAPTERS = {
     / "app/repositories/postgres/maintenance.py",
 }
 
-#: 必须落在同一个写事务里的四条写。按 SQL 片段判而不是按行号——占位符方言不同，
+#: 必须落在同一个写事务里的五条写。按 SQL 片段判而不是按行号——占位符方言不同，
 #: 但语句形状两侧逐字对等。
 REQUIRED_WRITES = (
     "INTO source_elements",  # SQLite/PG 的 INSERT 前缀不同（OR IGNORE / ON CONFLICT）
+    # 就地补齐（`image_backfill.EnrichedImage`）：它描述的资产行已经写进
+    # `notebook_assets` 了，落在第二个事务里就会留下"资产在、元素还指不到它"的
+    # 中间态，而回滚只删得掉本次写的资产、删不掉一次已提交的半程。
+    "UPDATE source_elements SET metadata",
     "UPDATE chunks SET element_ids",
     "INTO chunk_elements",
     "UPDATE sources SET updated_at",
