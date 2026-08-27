@@ -553,6 +553,7 @@ def plan_source_images(
     drifted = alignment.coverage < MIN_ALIGNMENT_COVERAGE
 
     already = {src for src in existing_image_srcs if src}
+    enriched_ids: set[str] = set()
     # 同一锚点下的续号：先扫既有 id，重跑才不会撞主键。
     used_suffix: dict[str, int] = {}
     for element_id in existing_element_ids:
@@ -593,6 +594,12 @@ def plan_source_images(
 
         existing_id = existing_unassigned_srcs.get(ref.src)
         if existing_id is not None:
+            if existing_id in enriched_ids:
+                # 同一个 src 在文档里被引用了多次，但只有一条既有元素可补。补第
+                # 二次会让它被 append 进 chunk 两遍（`element_ids` 里出现重复
+                # id），而"再插一条新元素"等于凭空造出一条在线路径不会有的行。
+                plan.skip("duplicate_src_reference")
+                continue
             # 就地补齐：不新增元素，因此不吃 `remaining`（这条元素本来就已经计
             # 在既有 image 元素数里了）。已经在某个 chunk 里就零改动 chunk；
             # 不在（无图注的历史元素不进 chunk）才走与新插入同款的锚点路径。
@@ -603,6 +610,7 @@ def plan_source_images(
                 if anchor is None:
                     continue
                 chunk_id = anchor[1]
+            enriched_ids.add(existing_id)
             plan.enriched.append(
                 EnrichedImage(
                     element_id=existing_id,
