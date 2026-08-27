@@ -1,4 +1,10 @@
-"""`apply_image_backfill` 的**单写事务**语义守卫（双后端）。
+"""`backfill-images` 仓储半的**源码结构**守卫（双后端）。
+
+两条：`apply_image_backfill` 的单写事务语义，以及候选分页 SQL 的 keyset 形状。
+两者的共同点是**行为测试证明不了**——把某条写挪进第二个事务，行照样都在；
+把比较键上的 `COLLATE "C"` 去掉，今天的 schema 下行为逐字相同。
+
+## 一、单写事务
 
 v46 红线：每条活库够得着的 chunk 写路径都必须在**同一写事务**内维护
 `chunk_elements` 反查行；元素换代还必须同事务推进 `sources.updated_at`。
@@ -10,6 +16,15 @@ v46 红线：每条活库够得着的 chunk 写路径都必须在**同一写事�
 
 先例是 `test_knowhow_history_coverage_guard.py`（同样按"落在写事务 with 块**体
 内**"判，同样不钉它在块内的位置）。
+
+## 二、keyset 比较键的 collation
+
+`image_backfill_source_page` 的 `ORDER BY` 是 `id COLLATE "C"`，比较键必须写成
+同一个 collation。今天 `0001_initial.sql` 把每个 id 列都声明成 `text COLLATE
+"C"`，所以裸 `id > %s` 行为相同、**任何行为用例都钉不住它**（已在真 PG 上做过
+变异验证：去掉那半 collation，7 条 PG 用例全绿）。而一旦哪天某个 id 列的列级
+collation 变了，两种顺序会让 keyset 分页开始漏源——漏源不报错，只表现为"这批
+图没补上"。所以这一条只能按源码钉。
 """
 from __future__ import annotations
 
@@ -91,3 +106,14 @@ def test_every_write_lands_inside_that_transaction(backend, statement):
     assert statement in body_sql, (
         f"{backend}: {statement!r} 不在写事务体内——它必须与同一批 chunk 写入原子提交"
     )
+
+
+def test_postgres_keyset_compares_on_the_same_collation_it_orders_by():
+    """比较键与排序键的 collation 必须一致（PG 侧；SQLite 没有这个轴）。"""
+    sql = _sql_text(_function(ADAPTERS["postgres"], "image_backfill_source_page"))
+    assert 'ORDER BY id COLLATE "C"' in sql, "守卫已陈旧：排序键不再是 id COLLATE \"C\""
+    assert 'AND id COLLATE "C" > %s' in sql, (
+        "keyset 比较键漏了 COLLATE \"C\"——今天列级 collation 恰好也是 C，所以行为"
+        "用例全绿，但列级 collation 一变，比较序与排序序分叉，分页会静默漏源"
+    )
+    assert "AND id > %s" not in sql, "残留了不带 collation 的比较键"

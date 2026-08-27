@@ -1814,9 +1814,16 @@ class PostgresMaintenanceAdapter:
                 "SELECT id, file_name, file_path FROM sources "
                 "WHERE notebook_id=%s AND source_type NOT IN ('memory','knowhow') "
                 "AND (lower(file_name) LIKE '%%.md' OR lower(file_name) LIKE '%%.markdown') "
-                # 比较键与排序键必须同一个 collation：库的默认 collation 不是 `C`
-                # 时，裸 `id > %s` 与 `ORDER BY id COLLATE "C"` 会给出两种顺序，
-                # keyset 分页会漏源或死循环（与本文件全部兄弟分页器同口径）。
+                # 比较键与排序键写同一个 collation，与本文件全部兄弟分页器同
+                # 口径。**今天这是纵深防御而不是修 bug**：`0001_initial.sql` 把
+                # 每个 id 列都声明成 `text COLLATE "C"`（全库 117 处），所以裸
+                # `id > %s` 眼下已经在 C 序上比较、行为逐字相同——这也是为什么没
+                # 有任何行为用例能钉住它（真 PG 上做过变异验证：去掉那半
+                # collation，7 条 PG 用例全绿）。写全的理由是：一旦哪天某个 id 列
+                # 的列级 collation 变了，裸比较键与 `ORDER BY ... COLLATE "C"` 会
+                # 给出两种顺序，keyset 分页开始**漏源**——而漏源不报错，只表现为
+                # "这批图没补上"。形状由
+                # tests/test_image_backfill_transaction_guard.py 的源码守卫钉住。
                 "AND id COLLATE \"C\" > %s ORDER BY id COLLATE \"C\" LIMIT %s",
                 (notebook_id, after_id, int(limit)),
             ).fetchall()
