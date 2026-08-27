@@ -228,6 +228,8 @@ codex 的评审对象是 diff，它未必了解本 harness 的运行时事实。
 | 数值上限与截断的完整口径 | Numeric Limits and Truncation |
 | 产品形态、四个页签、上传到问答的完整流程 | Product Flow / MVP Scope |
 | 分层架构、repository facade、端口与适配器、schema 演进史 | Architecture Baseline |
+| 插件共享 UI 基座、部署 `ask.engine` / `indexing.pipeline` | Extension UI Kit And Deployment Ask Engines |
+| 后端当前基线（已实现到哪一步）、产品命名 | Current Backend Baseline / Product Name |
 | Python 环境、`PYTHON_BIN`、后端启动命令 | Python Environment / Backend Commands |
 | 前端约定、`object_type` 标签契约、错误层三段规则、前端状态 owner | Frontend/UI |
 | 界面词 ↔ 内部词对照表（词汇守卫的真源） | 界面词汇表 (User-Facing Vocabulary) |
@@ -236,8 +238,9 @@ codex 的评审对象是 diff，它未必了解本 harness 的运行时事实。
 | 事件日志、按用户隔离的日志目录 | Logging / Observability |
 | 深度报告可信度、检索 run 与报告运行时、来源证据多样性 | Deep Report Credibility Contract / Retrieval Run And Report Runtime / Source Evidence Diversity |
 | 所选来源图激活 | Selected-Source Graph Activation |
+| KG 探活响应、共享流式 JSON 传输、usage trailer、`model_response_invalid` | KG Probe Response Contract |
 | `scripts/check.sh` 三泳道、暖门时间目标、CI | Verification / GitHub Actions CI |
-| 测试怎么分层、测试根在哪、并发 worker | Test Architecture |
+| 测试怎么分层、测试根在哪、并发 worker | Test Architecture / Test Isolation |
 | worktree、子代理逐任务、文件安全 | Git And File Safety |
 | 收尾提 PR 的标准流程 | Feature Completion (Finish With a PR) |
 
