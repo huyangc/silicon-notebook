@@ -1111,7 +1111,9 @@ def finish_plugin_engine_trace(trace: PluginEngineTrace) -> None:
     Core performs request-identity and result/citation admission after the
     synchronous provider returns.  Separating the timestamp from the terminal
     event keeps that admission latency out of plugin execution time while also
-    preventing a premature user-visible "completed" step.
+    preventing a premature user-visible "completed" step.  The first caller
+    owns the timestamp; a later service-level fallback is intentionally
+    idempotent so it cannot move a boundary already frozen inside the host.
     """
 
     if type(trace) is not PluginEngineTrace:
@@ -1121,8 +1123,10 @@ def finish_plugin_engine_trace(trace: PluginEngineTrace) -> None:
     with _authority_use(state):
         with state.delivery_lock:
             with state.data_lock:
-                if state.finished_at is not None or state.completed:
+                if state.completed:
                     raise AskEnginePortError("plugin_engine_failed")
+                if state.finished_at is not None:
+                    return
                 state.finished_at = state.clock()
 
 
