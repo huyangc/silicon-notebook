@@ -744,6 +744,47 @@ def test_a_chunk_that_moved_without_any_element_change_is_also_refused(
     assert _rows(repo, "SELECT id FROM notebook_assets") == []
 
 
+def test_a_metadata_only_enrichment_racing_another_run_is_refused(
+    repo, seeded_with_alt, outputs
+):
+    """第三半 CAS 单独承重的那一格。
+
+    纯 metadata 补齐**不改**元素数、`MAX(created_at)` 与 chunk 的 `element_ids`，
+    所以另外两半 CAS 都穿得过去。两个并发的 backfill-images 补同一条已入 chunk 的
+    带图注图片时，第二个会把第一个刚写的 `asset_id` 直接覆盖掉——而被覆盖的那个资产
+    行从此没有任何元素引用，回收又只认本趟自己铸的 id，于是它**永久泄漏**。
+
+    这里让第二跑按一份过期的 plan 进 apply（plan 之后、apply 之前第一跑已经补完）。"""
+    notebook_id, source_id = seeded_with_alt
+    original = phase.plan_for_source
+    fired: list[int] = []
+
+    def _plan_then_let_the_first_run_finish(repo_arg, source, image_index):
+        result = original(repo_arg, source, image_index)
+        if not fired:
+            fired.append(1)
+            phase.plan_for_source = original       # 第一跑用真实实现，不再重入
+            assert _run(repo, notebook_id, outputs)["images_enriched"] == 1
+        return result
+
+    phase.plan_for_source = _plan_then_let_the_first_run_finish
+    try:
+        result = _run(repo, notebook_id, outputs)
+    finally:
+        phase.plan_for_source = original
+
+    assert fired, "变异守护：第一跑没有真的补齐，这个用例什么都没验证"
+    assert result["sources_concurrent_change"] == 1
+    assert result["images_enriched"] == 0
+    assert result["sources_failed"] == 0
+
+    # 第一跑写的 asset_id 没被覆盖，且它仍被那条元素引用（= 没有孤儿资产行）。
+    elements = _image_elements(repo, source_id)
+    assert len(elements) == 1
+    live = json.loads(elements[0]["metadata"])["asset_id"]
+    assert {row["id"] for row in _rows(repo, "SELECT id FROM notebook_assets")} == {live}
+
+
 def test_a_concurrent_reparse_does_not_stop_the_rest_of_the_run(
     repo, seeded, outputs, tmp_path
 ):

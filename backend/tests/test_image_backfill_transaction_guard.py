@@ -52,6 +52,10 @@ REQUIRED_WRITES = (
     "MAX(created_at) AS newest",
     # 每个目标 chunk 的现值，与计划快照里的旧 element_ids 比对。
     "SELECT element_ids FROM chunks WHERE id=",
+    # 每条就地补齐目标的现值：`asset_id` 必须仍为空（计划时的预期态）。纯 metadata
+    # 补齐不改元素代次也不改 chunk，上面两条读都穿得过去，只有这一条拦得住两个并发
+    # backfill-images 互相覆盖 asset_id（被覆盖的那条资产行会永久泄漏）。
+    "SELECT metadata FROM source_elements WHERE id=",
     "INTO source_elements",  # SQLite/PG 的 INSERT 前缀不同（OR IGNORE / ON CONFLICT）
     # 就地补齐（`image_backfill.EnrichedImage`）：它描述的资产行已经写进
     # `notebook_assets` 了，落在第二个事务里就会留下"资产在、元素还指不到它"的
