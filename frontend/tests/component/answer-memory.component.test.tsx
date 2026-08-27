@@ -98,8 +98,16 @@ test("Memory save previews, permits edits, and locks dismissal while saving", as
     provenance: {},
   };
   let resolveSave!: (response: Response) => void;
+  const encoder = new TextEncoder();
+  const previewStream = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`${JSON.stringify({ event: "started", stage: "memory_preview", elapsed_ms: 0 })}\n`));
+      controller.enqueue(encoder.encode(`${JSON.stringify({ event: "final", stage: "memory_preview", result: preview })}\n`));
+      controller.close();
+    },
+  }), { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
   const fetchMock = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify(preview), { status: 200 }))
+    .mockResolvedValueOnce(previewStream)
     .mockImplementationOnce(() => new Promise<Response>((resolve) => {
       resolveSave = resolve;
     }));

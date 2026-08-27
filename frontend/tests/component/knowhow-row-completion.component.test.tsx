@@ -1,5 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("../../app/knowhow-model.ts", async (importOriginal) => {
@@ -10,6 +11,7 @@ vi.mock("../../app/knowhow-model.ts", async (importOriginal) => {
     fetchKnowhowTable: vi.fn(),
     fetchKnowhowRowCodeByColumn: vi.fn(),
     completeKnowhowRow: vi.fn(),
+    optimizeKnowhowCell: vi.fn(),
     patchKnowhowCell: vi.fn(),
     batchPatchKnowhowCells: vi.fn(),
   };
@@ -17,6 +19,7 @@ vi.mock("../../app/knowhow-model.ts", async (importOriginal) => {
 
 import {
   completeKnowhowRow,
+  optimizeKnowhowCell,
   batchPatchKnowhowCells,
   fetchKnowhowRowCodeByColumn,
   fetchKnowhowTable,
@@ -109,7 +112,9 @@ test("可编辑成员逐项审阅补全：展示置信度/可读参考行，接�
 
   const trigger = await screen.findByRole("button", { name: "智能补全空列" });
   await user.click(trigger);
-  await waitFor(() => expect(completeKnowhowRow).toHaveBeenCalledWith("nb-1", "t1", "r1", ["c-fix", "c-tool"]));
+  await waitFor(() => expect(completeKnowhowRow).toHaveBeenCalledWith(
+    "nb-1", "t1", "r1", ["c-fix", "c-tool"], expect.any(AbortSignal),
+  ));
   const completionDialog = await screen.findByRole("dialog", { name: /智能补全空列/ });
   const closeButtons = within(completionDialog).getAllByRole("button", { name: "关闭" });
   expect(closeButtons[0]).toHaveFocus();
@@ -183,7 +188,9 @@ test("anchor 概念矩阵每个可补分支有入口；共享空格冻结完整�
   render(<KnowhowPanel notebookId="nb-1" apiBase="http://api.test" canEdit onClose={() => undefined} initialTableId="t-anchor" initialRowId="r1" />);
   const branchTrigger = await screen.findByRole("button", { name: "智能补全分支 1 的空列" });
   await user.click(branchTrigger);
-  await waitFor(() => expect(completeKnowhowRow).toHaveBeenCalledWith("nb-1", "t-anchor", "r1", ["c-shared", "c-own"]));
+  await waitFor(() => expect(completeKnowhowRow).toHaveBeenCalledWith(
+    "nb-1", "t-anchor", "r1", ["c-shared", "c-own"], expect.any(AbortSignal),
+  ));
   const dialog = await screen.findByRole("dialog", { name: /智能补全空列/ });
   expect(within(dialog).queryByText("不应展示")).not.toBeInTheDocument();
   expect(within(dialog).getByText("全库检索未找到可用证据")).toBeInTheDocument();
@@ -263,7 +270,10 @@ test("生成请求晚到时不污染已关闭弹窗；技术错误只展示安�
   await user.click(await screen.findByRole("button", { name: "智能补全空列" }));
   const completionDialog = await screen.findByRole("dialog", { name: /智能补全空列/ });
   expect(within(completionDialog).getByRole("status")).toHaveTextContent("表内参考 + 全库推理检索");
+  const requestSignal = vi.mocked(completeKnowhowRow).mock.calls[0][4];
+  expect(requestSignal?.aborted).toBe(false);
   await user.click(completionDialog.querySelector<HTMLButtonElement>('button[title="关闭"]')!);
+  expect(requestSignal?.aborted).toBe(true);
   resolveRequest(completionEnvelope([]));
   await Promise.resolve();
   expect(screen.queryByRole("dialog", { name: /智能补全空列/ })).not.toBeInTheDocument();
@@ -273,4 +283,32 @@ test("生成请求晚到时不污染已关闭弹窗；技术错误只展示安�
   await user.click(screen.getByRole("button", { name: "智能补全空列" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("生成建议失败，请稍后重试");
   expect(screen.queryByText(/upstream secret timeout/)).not.toBeInTheDocument();
+});
+
+test("StrictMode 探测不重复补全或整行优化的物理模型请求", async () => {
+  const user = userEvent.setup();
+  vi.mocked(completeKnowhowRow).mockReturnValue(new Promise(() => undefined));
+  vi.mocked(optimizeKnowhowCell).mockReturnValue(new Promise(() => undefined));
+
+  render(
+    <StrictMode>
+      <KnowhowPanel
+        notebookId="nb-1"
+        apiBase="http://api.test"
+        canEdit
+        onClose={() => undefined}
+        initialTableId="t1"
+        initialRowId="r1"
+      />
+    </StrictMode>,
+  );
+  const rowDrawer = await screen.findByRole("dialog", { name: /供电异常/ });
+
+  await user.click(within(rowDrawer).getByRole("button", { name: "智能补全空列" }));
+  await waitFor(() => expect(completeKnowhowRow).toHaveBeenCalledTimes(1));
+  const completionDialog = await screen.findByRole("dialog", { name: /智能补全空列/ });
+  await user.click(completionDialog.querySelector<HTMLButtonElement>('button[title="关闭"]')!);
+
+  await user.click(within(rowDrawer).getByRole("button", { name: "优化整行" }));
+  await waitFor(() => expect(optimizeKnowhowCell).toHaveBeenCalledTimes(1));
 });

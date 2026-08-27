@@ -923,6 +923,18 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         controller.signal,
         scopeSnapshot.sourceScope,
         scopeSnapshot.baseScope,
+        (elapsed) => {
+          if (
+            controller.signal.aborted
+            || askIntentFlowGenerationRef.current !== flowGeneration
+            || !sameViewOwner(ownerRef.current, previewOwner)
+          ) return;
+          askIntentTraceRef.current = replaceLastIntentStep(
+            askIntentTraceRef.current,
+            intentUnderstandingStep(elapsed),
+          );
+          setPendingTrace(askIntentTraceRef.current);
+        },
       );
       if (
         controller.signal.aborted

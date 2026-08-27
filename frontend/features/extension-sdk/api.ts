@@ -20,9 +20,11 @@
  */
 import { requestBlob, requestJson, requestVoid } from "../../app/api-client.ts";
 import { toUserMessage } from "../../app/errors.ts";
+import { requestTaskStream } from "../../app/request-task-stream.ts";
 import type {
   ExtensionApiQuery,
   ExtensionRequestInit,
+  ExtensionTaskStreamCallbacks,
   WorkspaceExtensionActions,
   WorkspaceExtensionApi,
   WorkspaceExtensionDialogCloseReason,
@@ -50,6 +52,7 @@ export type ExtensionApiTransport = Readonly<{
   requestJson: typeof requestJson;
   requestVoid: typeof requestVoid;
   requestBlob: typeof requestBlob;
+  requestTask: typeof requestTaskStream;
   toUserMessage: typeof toUserMessage;
 }>;
 
@@ -63,6 +66,7 @@ export const EXTENSION_API_TRANSPORT: ExtensionApiTransport = Object.freeze({
   requestJson,
   requestVoid,
   requestBlob,
+  requestTask: requestTaskStream,
   toUserMessage,
 });
 
@@ -145,7 +149,7 @@ function safeHeaders(headers: Readonly<Record<string, string>>): Record<string, 
 /**
  * 默认 transport 的端口按 `pluginId` 记忆，让 `actions.api` 跨渲染保持**引用相等**。
  *
- * 为什么这是安全的：端口的四个方法只闭包 `pluginId` 与 `transport` 两个值——不读
+ * 为什么这是安全的：端口的五个方法只闭包 `pluginId` 与 `transport` 两个值——不读
  * owner、notebook、actor 或任何请求期状态，所以同一个 `pluginId` 的端口在任何时刻
  * 行为逐字相同，缓存**不改变任何权限语义**（授权由后端加这里的路径限定承担，owner
  * 闸挂在 `actions` 的两个窄 command 上、那两个仍是每帧新造）。
@@ -178,7 +182,7 @@ function buildWorkspaceExtensionApi(
   pluginId: string,
   transport: ExtensionApiTransport,
 ): WorkspaceExtensionApi {
-  // 三个请求方法一律 `async`。**这不是排版偏好**：`extensionApiPath` 与 `safeHeaders`
+  // 四个请求方法一律 `async`。**这不是排版偏好**：`extensionApiPath` 与 `safeHeaders`
   // 都在碰 transport 之前**同步**抛 TypeError，非 async 的方法会把那次拒绝原样同步
   // 抛出调用点——而插件最自然的写法 `api.requestVoid(p).catch(show)` 或
   // `void api.requestJson(p).catch(...)` 接不住同步异常：`.catch` 还没被求值，异常就
@@ -209,6 +213,17 @@ function buildWorkspaceExtensionApi(
       return transport.requestBlob(
         extensionApiPath(pluginId, path, init?.query),
         coreOptions(init),
+      );
+    },
+    async requestTask<T>(
+      path: string,
+      init?: ExtensionRequestInit,
+      callbacks?: ExtensionTaskStreamCallbacks,
+    ): Promise<T> {
+      return transport.requestTask<T>(
+        extensionApiPath(pluginId, path, init?.query),
+        coreOptions(init),
+        callbacks,
       );
     },
     userMessage(error: unknown, fallback: string): string {

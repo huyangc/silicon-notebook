@@ -24,6 +24,7 @@ import type {
   ConversationShareResponse,
   ConversationSummary,
 } from "./workspace-model.ts";
+import { requestTaskStream } from "./request-task-stream.ts";
 
 // Compatibility exports: collection search is no longer owned by the Ask API,
 // but existing external imports keep the same public surface during F5.
@@ -114,17 +115,25 @@ export const previewAskIntent = (
   // 预检必须与执行用**同一份**参考库上限：预检读语料目录、执行读证据，两者用不同
   // 范围就会出现「预检说搜得到、执行搜不到」。省略即历史行为（全部挂载库参与）。
   baseScope?: BaseScopePayload,
-) => requestJson<QueryIntentContract>(`/notebooks/${notebookId}/ask/intent`, {
-  ...options,
-  method: "POST",
-  body: JSON.stringify({
-    question,
-    conversation_id: conversationId || undefined,
-    source_scope: sourceScope,
-    base_scope: baseScope,
-  }),
-  signal,
-});
+  onHeartbeat?: (elapsedMs: number) => void | Promise<void>,
+) => requestTaskStream<QueryIntentContract>(
+  `/notebooks/${notebookId}/ask/intent/stream`,
+  {
+    ...options,
+    method: "POST",
+    body: JSON.stringify({
+      question,
+      conversation_id: conversationId || undefined,
+      source_scope: sourceScope,
+      base_scope: baseScope,
+    }),
+    signal,
+  },
+  {
+    onHeartbeat: (elapsedMs) => onHeartbeat?.(elapsedMs),
+    fallbackMessage: "问题理解没能完成，请重试",
+  },
+);
 
 export async function runAskStream<TResponse = AskResponse>(
   notebookId: string,

@@ -12729,6 +12729,44 @@
           "summary": "Preview Answer Memory"
         }
       },
+      "/api/answers/{answer_id}/memory-preview/stream": {
+        "post": {
+          "description": "Stream the slow model half while retaining the deterministic fallback.",
+          "operationId": "preview_answer_memory_stream_api_answers__answer_id__memory_preview_stream_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "answer_id",
+              "required": true,
+              "schema": {
+                "title": "Answer Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Answer Memory Stream"
+        }
+      },
       "/api/ask-modes": {
         "get": {
           "description": "Sanitized built-in truth plus live deployment-engine projection.",
@@ -15570,6 +15608,54 @@
             }
           },
           "summary": "Preview Ask Intent"
+        }
+      },
+      "/api/notebooks/{notebook_id}/ask/intent/stream": {
+        "post": {
+          "description": "Heartbeat-capable browser transport for the request-local intent pass.\n\nThe original JSON endpoint remains available for compatibility clients.\nScope/history validation finishes before the first frame so those failures\nretain their authoritative HTTP status; only the potentially slow model\ncall runs inside the stream.",
+          "operationId": "preview_ask_intent_stream_api_notebooks__notebook_id__ask_intent_stream_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskIntentPreviewRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Ask Intent Stream"
         }
       },
       "/api/notebooks/{notebook_id}/ask/jobs/{job_id}": {
@@ -18747,6 +18833,70 @@
           "summary": "Optimize Knowhow Cell"
         }
       },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize/stream": {
+        "post": {
+          "operationId": "optimize_knowhow_cell_stream_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__optimize_stream_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Optimize Knowhow Cell Stream"
+        }
+      },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/reformat": {
         "post": {
           "operationId": "reformat_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__reformat_post",
@@ -18811,6 +18961,70 @@
             }
           },
           "summary": "Reformat Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/reformat/stream": {
+        "post": {
+          "operationId": "reformat_knowhow_cell_stream_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__reformat_stream_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reformat Knowhow Cell Stream"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete": {
@@ -18878,6 +19092,71 @@
             }
           },
           "summary": "Complete Knowhow Row"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete/stream": {
+        "post": {
+          "operationId": "complete_knowhow_row_stream_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__complete_stream_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowRowCompleteRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Complete Knowhow Row Stream"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/template": {

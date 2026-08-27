@@ -17,11 +17,14 @@ export function elapsedMs(startedAt: number, endedAt: number): number {
 }
 
 /** 预检在途:此刻真的还没有读取任何资料,措辞要顶住用户「怎么还没开始」的疑问。 */
-export function intentUnderstandingStep(): ReasoningTraceStep {
+export function intentUnderstandingStep(durationMs?: number): ReasoningTraceStep {
   return {
     step_type: INTENT_STEP_TYPE,
     summary: "正在理解问题，尚未读取资料或开始检索",
     detail: {},
+    ...(typeof durationMs === "number" && durationMs > 0
+      ? { duration_ms: Math.round(durationMs) }
+      : {}),
   };
 }
 

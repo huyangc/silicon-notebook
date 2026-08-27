@@ -14,11 +14,4 @@ export type AskStreamEvent<TResponse> =
   | { event: "cancelled" }
   | { event: "error"; error: string };
 
-export function takeNdjsonLines(buffer: string): { lines: string[]; remainder: string } {
-  const parts = buffer.split("\n");
-  const remainder = parts.pop() ?? "";
-  return {
-    lines: parts.map((line) => line.trim()).filter(Boolean),
-    remainder,
-  };
-}
+export { takeNdjsonLines } from "./ndjson.ts";

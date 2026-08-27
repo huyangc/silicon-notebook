@@ -23,6 +23,7 @@ from app.domain.extension_http import (
     PluginRejectedUrl,
     PluginRouteContext,
     PluginRouterFactory,
+    PluginTaskStreamPort,
     PluginUrlImportResult,
     PluginUrlSourceImportPort,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "PluginRejectedUrl",
     "PluginRouteContext",
     "PluginRouterFactory",
+    "PluginTaskStreamPort",
     "PluginUrlImportResult",
     "PluginUrlSourceImportPort",
 ]

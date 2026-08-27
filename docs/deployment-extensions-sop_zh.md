@@ -188,7 +188,7 @@ BUNDLE.capability_decisions = {"corp.search.available": _corp_search_available}
 
 ```python
 # silicon_notebook_corp_search/routes.py
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.extension_sdk.http import PluginRouteContext
 
@@ -206,6 +206,21 @@ def build_router(context: PluginRouteContext) -> APIRouter:
     )
     def candidates(notebook_id: str, q: str = ""):
         return {"items": _upstream_search(context.settings, q)}
+
+    # 网页直接等待慢同步上游时返回共享任务流，不让连接长时间静默。
+    @router.get(
+        "/notebooks/{notebook_id}/candidates-task",
+        dependencies=[Depends(context.require_notebook_read)],
+    )
+    async def candidates_task(request: Request, notebook_id: str, q: str = ""):
+        def work(cancel_event):
+            return {"items": _upstream_search(
+                context.settings, q, cancellation=cancel_event
+            )}
+
+        return context.task_stream.response(
+            request, work, stage="candidate_search"
+        )
 
     @router.post(
         "/notebooks/{notebook_id}/import",
@@ -241,17 +256,20 @@ def build_router(context: PluginRouteContext) -> APIRouter:
     return router
 ```
 
-八个接缝，仅此而已：`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`emit_event`。
+九个接缝，仅此而已：`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`task_stream`、`emit_event`。
 
 *core 替你做的：*
 
 - **按端口授权。** `url_sources.import_urls` 对**请求自己的那个用户**核对 `sources:write`——用户从 core 的请求上下文解析，绝不从你传进去的任何东西解析——不通过就用与 core 端点相同的 404 拒绝（不泄露存在性）。过了这一关，它就是 core 自己那个 URL 导入函数本人：同样的容量记账、管理员豁免、未配置解析器映射与后台解析调度。
 - **拒绝阻塞事件循环。** `url_sources.import_urls` 是阻塞的——数据库写入，外加每个 URL 一次串行远端探测。`def` handler 本来就跑在 FastAPI 的线程池里，直接调它即可；`async def` handler 跑在事件循环线程上，必须 `await url_sources.import_urls_async(...)`，它把同一份活挪进线程池。用反了会在运行期被**拒绝**而不只是被劝阻：`import_urls` 发现自己这条线程上有正在运行的事件循环就抛 `RuntimeError`，且发生在动任何东西之前，文案直接点名该 await 哪个方法。因此不会导入一半；失败是一个普通 `500` 加 traceback，而不是面向用户的文案——这是插件自己的代码缺陷，不是终端用户做错了什么。
+- **让请求级慢任务持续保活。** `task_stream.response(request, work, stage=...)` 只接普通同步 callable，把 `work(cancellation_event)` 放到事件循环之外执行，并立即返回共享 NDJSON 任务流。core 发送无正文 `started`/心跳、关闭代理缓冲、浏览器断连时设置传入的事件，终态只发一个 `final`、`cancelled` 或不含异常原文的固定 `extension_task_failed` 帧。`stage` 必须是固定小写码，不能放查询、标题或错误，core 会再加 plugin id 命名空间。worker 必须自己配合取消事件；已经卡进不支持取消的上游库调用时，core 不能强杀那条调用。
 - **对 `{notebook_id}` 路由的结构性守卫。** 路径里含这个字面子串的路由必须跑 core 自己的一道门（任一能力守卫，或读权门）。这是**纵深防御，不是边界**：把参数改名 `{nb}`、或从请求体里取 id，这道检查就看不见了——而端口照样拒绝。拿掉端口那道检查会开一个洞，拿掉这道不会。
 - **401 翻译。** 你的 handler **抛出**（`fastapi.HTTPException` 或 `starlette.exceptions.HTTPException` 皆可——前者是后者的子类，两者被接住的方式完全一样）**或返回**的 401 都会变成 `424`（把上游服务自己的 401 原样搬到你自己构造的 `Response`/`JSONResponse` 上再返回是很正常的写法，不是抛出，同样会被接住），带 core 自己的文案，并记一条 `plugin_upstream_unauthorized` 事件。在 core 里 401 对浏览器只有一个含义——清 token 并重载——所以某个插件路由里一张过期的上游凭据，否则会把用户从整个产品里登出。**覆盖面是 handler 与你自己的 `Depends(...)` 依赖，两者一视同仁**，嵌套多少层都算：把上游检查写进依赖至少和写进 handler 一样常见，而 FastAPI 在调 endpoint **之前**就把依赖解完了，所以依赖里抛的 401 否则会原样漏出去。依赖只覆盖「抛出」那一半——依赖的返回值是作为参数注入的，永远不会变成响应。**core 自己的依赖被排除在外**（按对象身份**加**定义所在模块双判），所以 core 会话门产生的真 401 仍然原样是 401、仍然把用户登出——那正是它存在的意义。生成器（`yield`）依赖与 security scheme 不动。
 - **事件脱敏。** `emit_event` 只收四个字段——`event`、`outcome`、`count`、`elapsed_ms`——出现别的键就**整条**丢弃。`kind` 与 `plugin_id` 由 core 补。它永远不会反向抛回你的 handler。
 
 *你不能：* 在 router 上挂 startup/shutdown 钩子；加非 `APIRoute` 的路由（挂载子应用、裸 websocket、裸 Starlette route）；声明第二个 router；返回不是 `APIRouter` 的东西。每一条都是启动失败，各有自己的码（见第 9 节）。
+
+输出形状按生命周期选。短校验/CRUD/列表/status 保持普通 JSON/Void；网页直接等待的慢交互用 `task_stream`；上传、ZIP 与其它二进制下载保持自己的原生 body。不得用 `task_stream` 包持久任务：`ask.engine` 与 `ask.gap_consult` 已在 detached Ask job 内并继承其心跳/重连面，parser 与 `indexing.pipeline` 在摄取/重建后台任务内，completion observer 在 durable 终态提交后才运行，`report.exporter` 必须返回纯 archive，不能混 NDJSON。
 
 ### 3.5 其它 contribution 类型
 
@@ -372,7 +390,7 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 }
 ```
 
-*core 替你做的：* 注入一份按**本条 contribution 的** `pluginId` 绑定的 `actions.api`，因此每次请求都限定在 `/api/extensions/<plugin id>/` 之下、你设的 `authorization`/`cookie` 头会被剥掉、`tag`/`auth`/`unauthorized` 由 core 写死。`ExtensionModal` 白送系统弹窗外壳、标题栏拖动，以及一格按插件分段的窗口位置记忆。
+*core 替你做的：* 注入一份按**本条 contribution 的** `pluginId` 绑定的 `actions.api`，因此每次请求都限定在 `/api/extensions/<plugin id>/` 之下、你设的 `authorization`/`cookie` 头会被剥掉、`tag`/`auth`/`unauthorized` 由 core 写死。后端路由若由 `context.task_stream` 返回，前端调用 `actions.api.requestTask<Result>(path, init, { fallbackMessage, onHeartbeat })`：它在同一套限定下消费共享 NDJSON，可更新就地已等待时间，并且绝不会把后端错误帧当用户文案。`ExtensionModal` 白送系统弹窗外壳、标题栏拖动，以及一格按插件分段的窗口位置记忆。
 
 弹窗内容也有一层推荐使用的 SDK 组件，同样从 `ui.tsx` 导出：`ExtensionFormRow`、`ExtensionTextInput`、`ExtensionResultList`、`ExtensionResultItem`、`ExtensionActions`、`ExtensionAlert` 与 `ExtensionEmptyState`。它们提供与基座一致、只使用 token 的表单、结果列表、动作行、提示条和空态，不要求插件自带 CSS 或内联颜色。这一层是推荐而非强制——语义正确的裸 HTML 仍然合规——但插件应优先复用这些组件，而不是另起一套无样式的视觉词汇。
 

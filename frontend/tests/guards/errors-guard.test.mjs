@@ -148,6 +148,10 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 1,
     reason: "stream diagnostics are logged before a branded scenario error",
   },
+  "request-task-stream.ts|<module>.requestTaskStream.consume|diagnostic|error": {
+    count: 1,
+    reason: "the stable request-task error code is bounded-log-only before fixed branded user copy",
+  },
   "use-ask-session.ts|<module>.useAskSession.tick|diagnostic|error": {
     count: 2,
     reason: "reconnected Ask job diagnostics pass through toUserMessage before fixed user copy",

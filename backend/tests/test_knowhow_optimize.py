@@ -338,6 +338,79 @@ def test_optimize_endpoint_success_returns_suggestion_and_writes_nothing(tmp_pat
     assert updated_row["cells"][column_id] == "先做A，再做B"
 
 
+def test_optimize_stream_uses_shared_task_envelope(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, column_id = _seed(client, "a00001097")
+    bind_chat_client(
+        _app_repo(),
+        "knowhow_optimize",
+        _FakeRewriteClient(suggestion="整理后的正文"),
+    )
+
+    response = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/rows/{row['id']}"
+        f"/cells/{column_id}/optimize/stream",
+        headers=owner_h,
+    )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line) for line in response.text.splitlines() if line.strip()
+    ]
+    assert events[0]["event"] == "started"
+    assert events[-1] == {
+        "event": "final",
+        "stage": "knowhow_optimize",
+        "result": {"suggestion_md": "整理后的正文"},
+    }
+
+
+def test_optimize_stream_preserves_preflight_http_errors(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, column_id = _seed(client, "a00001100")
+    bind_chat_client(
+        _app_repo(), "knowhow_optimize", SimpleNamespace(configured=False)
+    )
+    base = (
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/rows/{row['id']}"
+        "/cells"
+    )
+
+    unconfigured = client.post(
+        f"{base}/{column_id}/optimize/stream", headers=owner_h
+    )
+    bad_column = client.post(
+        f"{base}/no-such-column/optimize/stream", headers=owner_h
+    )
+    missing_table = client.post(
+        f"/api/notebooks/{nb}/knowhow/no-such-table/rows/{row['id']}"
+        f"/cells/{column_id}/optimize/stream",
+        headers=owner_h,
+    )
+
+    assert unconfigured.status_code == 400
+    assert unconfigured.json()["detail"] == "尚未配置模型，无法优化表达"
+    assert bad_column.status_code == 400
+    assert bad_column.json()["detail"] == "格子定位不合法"
+    assert missing_table.status_code == 404
+
+
+def test_complete_stream_validates_targets_before_starting_stream(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, _column_id = _seed(client, "a00001101")
+
+    response = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/rows/{row['id']}"
+        "/complete/stream",
+        headers=owner_h,
+        json={"target_column_ids": ["no-such-column"]},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == "无法补全当前行，请检查目标列和已知内容"
+
+
 def test_optimize_endpoint_unconfigured_returns_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, column_id = _seed(client, "a00001091")

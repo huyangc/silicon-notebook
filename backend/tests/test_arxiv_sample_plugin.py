@@ -1003,6 +1003,7 @@ def _route_context(
         current_actor=lambda: PluginActor(id="user-1", is_admin=False),
         user_error=_UserError,
         url_sources=sources,
+        task_stream=object(),
         # The real sanitizer, not a passthrough: a payload this plugin builds
         # has to survive core's whitelist, and a stub would prove nothing.
         emit_event=_event_emitter(PLUGIN_ID, log),

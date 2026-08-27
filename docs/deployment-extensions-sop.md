@@ -188,7 +188,7 @@ The factory receives one `PluginRouteContext` and returns an `APIRouter`. Core m
 
 ```python
 # silicon_notebook_corp_search/routes.py
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.extension_sdk.http import PluginRouteContext
 
@@ -206,6 +206,22 @@ def build_router(context: PluginRouteContext) -> APIRouter:
     )
     def candidates(notebook_id: str, q: str = ""):
         return {"items": _upstream_search(context.settings, q)}
+
+    # When the browser waits directly for a slow synchronous upstream call,
+    # return the shared task stream instead of leaving the connection silent.
+    @router.get(
+        "/notebooks/{notebook_id}/candidates-task",
+        dependencies=[Depends(context.require_notebook_read)],
+    )
+    async def candidates_task(request: Request, notebook_id: str, q: str = ""):
+        def work(cancel_event):
+            return {"items": _upstream_search(
+                context.settings, q, cancellation=cancel_event
+            )}
+
+        return context.task_stream.response(
+            request, work, stage="candidate_search"
+        )
 
     @router.post(
         "/notebooks/{notebook_id}/import",
@@ -241,17 +257,20 @@ def build_router(context: PluginRouteContext) -> APIRouter:
     return router
 ```
 
-The eight seams, and nothing else: `plugin_id`, `settings`, `require_notebook_capability`, `require_notebook_read`, `current_actor`, `user_error`, `url_sources`, `emit_event`.
+The nine seams, and nothing else: `plugin_id`, `settings`, `require_notebook_capability`, `require_notebook_read`, `current_actor`, `user_error`, `url_sources`, `task_stream`, `emit_event`.
 
 *Core does for you:*
 
 - **Authorization, per port.** `url_sources.import_urls` checks `sources:write` for the request's own user — resolved from core's request context, never from anything you pass — and refuses with the same 404 core's own endpoints use (existence is not disclosed). Past that check it is literally core's own URL-import function: the same capacity accounting, admin exemption, unconfigured-parser mapping and background parse scheduler.
 - **Refusing to block the event loop.** `url_sources.import_urls` blocks — database writes plus one serial remote probe per URL. A `def` handler is already in FastAPI's threadpool, so it calls it directly; an `async def` handler is on the event loop thread, so it must `await url_sources.import_urls_async(...)`, which does the same work in the threadpool. Getting it backwards is refused at runtime, not merely discouraged: `import_urls` raises `RuntimeError` when it finds a running event loop on its own thread, before doing any work, and the message names the method to await. Nothing is half-imported, and the failure is a plain `500` with a traceback rather than user-facing copy — it is a bug in the plugin, not something the end user did.
+- **Keeping request-local slow work alive.** `task_stream.response(request, work, stage=...)` takes a regular synchronous callable, runs `work(cancellation_event)` off the event-loop thread, and immediately returns the shared NDJSON task stream. Core sends content-free `started`/heartbeat frames, disables proxy buffering, sets the supplied event when the browser disconnects, and emits either one `final`, `cancelled`, or stable `extension_task_failed` frame without exception text. `stage` is fixed lowercase code, never a query/title/error, and core namespaces it by plugin id. The worker must cooperate with the cancellation event; core cannot forcibly interrupt an upstream library already inside a blocking call.
 - **A structural gate on `{notebook_id}` routes.** A route whose path contains that literal substring must run one of core's own gates (any capability guard, or the read gate). This is defence in depth, not the boundary: name the parameter `{nb}` or take the id from a body and the check does not see it — and the port still refuses. Removing the port's check would open a hole; removing this one would not.
 - **401 translation.** A 401 your handler either *raises* — as either `fastapi.HTTPException` or `starlette.exceptions.HTTPException`; the former is a subclass of the latter, and both are caught identically — or *returns* (proxying an upstream service's own 401 response onto your own `Response`/`JSONResponse` is a normal return, not a raise, and is caught the same way) becomes `424` with core's own copy and a logged `plugin_upstream_unauthorized` event. In core, 401 has exactly one meaning to the browser — clear the token and reload — so an expired upstream credential inside one plugin route would otherwise sign the user out of the whole product. **The cover is the handler and your own `Depends(...)` callables alike**, at any nesting depth: checking an upstream inside a dependency is at least as ordinary as checking it inside the handler, and FastAPI solves dependencies before it calls the endpoint, so a dependency-raised 401 would otherwise escape untranslated. Dependencies get the raised half only — a dependency's return value is injected as a parameter and never becomes the response. **Core's own dependencies are excluded** — by object identity *and* by defining module — so a genuine 401 from core's session gate still surfaces as 401 and still signs the user out, which is what it is for. Generator (`yield`) dependencies and security schemes are left alone.
 - **Event sanitization.** `emit_event` accepts exactly four fields — `event`, `outcome`, `count`, `elapsed_ms` — and drops the *whole* record on anything else. Core adds `kind` and `plugin_id`. It can never raise back into your handler.
 
 *You cannot:* mount startup/shutdown hooks on the router, add a non-`APIRoute` route (a sub-application, a raw websocket, a bare Starlette route), declare a second router, or return something that is not an `APIRouter`. Each is a startup failure with its own code (§9).
+
+Choose output shape by lifecycle. Short validation/CRUD/list/status routes stay ordinary JSON/Void; direct slow interactive calls use `task_stream`; uploads and ZIP/other binary downloads keep their native bodies. Do not use `task_stream` for durable work: `ask.engine` and `ask.gap_consult` already run inside the detached Ask job and inherit its heartbeat/reconnect surface, parser and `indexing.pipeline` calls live in ingestion/rebuild jobs, completion observers run after a durable terminal commit, and `report.exporter` must return the archive body without NDJSON mixed into it.
 
 ### 3.5 Other contribution kinds
 
@@ -372,7 +391,7 @@ export function CorpSearchEntry({ context, actions }: WorkspaceExtensionProps) {
 }
 ```
 
-*Core does for you:* injects `actions.api` bound to **this contribution's** `pluginId`, so every request is confined under `/api/extensions/<plugin id>/`, `authorization`/`cookie` headers you set are stripped, and `tag`/`auth`/`unauthorized` are fixed. `ExtensionModal` gives you the system dialog shell, the drag handle, and a per-plugin window-position key.
+*Core does for you:* injects `actions.api` bound to **this contribution's** `pluginId`, so every request is confined under `/api/extensions/<plugin id>/`, `authorization`/`cookie` headers you set are stripped, and `tag`/`auth`/`unauthorized` are fixed. For a backend route returned through `context.task_stream`, call `actions.api.requestTask<Result>(path, init, { fallbackMessage, onHeartbeat })`; it consumes the shared NDJSON stream through the same confinement, lets the plugin update an inline elapsed-time state, and never exposes the backend error frame as user copy. `ExtensionModal` gives you the system dialog shell, the drag handle, and a per-plugin window-position key.
 
 For the dialog body, the SDK also exports a recommended content layer from the same `ui.tsx` module: `ExtensionFormRow`, `ExtensionTextInput`, `ExtensionResultList`, `ExtensionResultItem`, `ExtensionActions`, `ExtensionAlert`, and `ExtensionEmptyState`. They provide the base application's token-backed form, result-list, action-row, alert, and empty-state language without requiring plugin CSS or inline colours. Their use is recommended rather than mandatory—plain semantic HTML remains valid—but a plugin should reach for these components before inventing an unstyled parallel vocabulary.
 

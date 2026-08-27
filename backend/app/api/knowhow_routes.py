@@ -4,11 +4,13 @@ Agent Knowhow stays in app.api.knowhow_agent_routes.
 """
 
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from typing import Any, List, Optional, Union
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
     content_overview_service,
@@ -59,6 +61,7 @@ from app.services.knowhow import history as knowhow_history
 from app.services.knowhow import transfer as _kh_transfer
 from app.services.knowhow.grid_parser import GridParseError
 from app.services.model_work import ModelNotConfiguredError
+from app.api.task_stream import task_stream_response
 
 
 router = APIRouter()
@@ -855,6 +858,46 @@ async def append_knowhow_rows(
 def optimize_knowhow_cell(
     notebook_id: str, table_id: str, row_id: str, column_id: str
 ) -> dict:
+    return _optimize_knowhow_cell(
+        notebook_id, table_id, row_id, column_id
+    )
+
+
+def _optimize_knowhow_cell(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    column_id: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    repo, content_md, column_name, column_kind = _prepare_knowhow_cell_task(
+        notebook_id,
+        table_id,
+        row_id,
+        column_id,
+    )
+    if not content_md.strip():
+        raise user_error(400, "格子为空，无需优化")
+    if not repo._runtime.models.chat("knowhow_optimize").configured:
+        raise user_error(400, "尚未配置模型，无法优化表达")
+    return _run_optimize_knowhow_cell(
+        repo,
+        content_md,
+        column_name,
+        column_kind,
+        cancel_event=cancel_event,
+    )
+
+
+def _prepare_knowhow_cell_task(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    column_id: str,
+) -> tuple[Any, str, str, str]:
+    """Resolve cheap authoritative cell state before a stream starts."""
+
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     if (
@@ -869,8 +912,25 @@ def optimize_knowhow_cell(
     row = next(r for r in table["rows"] if r["id"] == row_id)
     column = next(c for c in table["columns"] if c["id"] == column_id)
     content_md = row["cells"].get(column_id, "")
+    return repo, content_md, column["name"], column["kind"]
+
+
+def _run_optimize_knowhow_cell(
+    repo: Any,
+    content_md: str,
+    column_name: str,
+    column_kind: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict:
     try:
-        suggestion_md = knowhow_api.optimize_cell(repo, content_md, column["name"], column["kind"])
+        suggestion_md = knowhow_api.optimize_cell(
+            repo,
+            content_md,
+            column_name,
+            column_kind,
+            cancel_event=cancel_event,
+        )
     except ModelNotConfiguredError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except ValueError as exc:
@@ -878,6 +938,44 @@ def optimize_knowhow_cell(
     except knowhow_api.KnowhowOptimizeUnavailable as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"suggestion_md": suggestion_md}
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize/stream",
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
+)
+async def optimize_knowhow_cell_stream(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    column_id: str,
+    request: Request,
+) -> StreamingResponse:
+    repo, content_md, column_name, column_kind = await run_in_threadpool(
+        _prepare_knowhow_cell_task,
+        notebook_id,
+        table_id,
+        row_id,
+        column_id,
+    )
+    if not content_md.strip():
+        raise user_error(400, "格子为空，无需优化")
+    if not repo._runtime.models.chat("knowhow_optimize").configured:
+        raise user_error(400, "尚未配置模型，无法优化表达")
+    cancel_event = threading.Event()
+    return task_stream_response(
+        request,
+        lambda: _run_optimize_knowhow_cell(
+            repo,
+            content_md,
+            column_name,
+            column_kind,
+            cancel_event=cancel_event,
+        ),
+        stage="knowhow_optimize",
+        error_code="knowhow_optimize_failed",
+        cancel_event=cancel_event,
+    )
 
 
 # Suggestion-only row completion. This is write/owner gated because it is an
@@ -894,13 +992,85 @@ def complete_knowhow_row(
     row_id: str,
     body: KnowhowRowCompleteRequest,
 ) -> dict:
+    return _complete_knowhow_row(
+        notebook_id, table_id, row_id, body
+    )
+
+
+def _complete_knowhow_row(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    body: KnowhowRowCompleteRequest,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    repo, table = _prepare_complete_knowhow_row(
+        notebook_id, table_id, row_id, body
+    )
+    return _run_complete_knowhow_row(
+        repo,
+        notebook_id,
+        table,
+        row_id,
+        body,
+        cancel_event=cancel_event,
+    )
+
+
+def _prepare_complete_knowhow_row(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    body: KnowhowRowCompleteRequest,
+) -> tuple[Any, dict]:
+    """Validate row, targets and required workloads before streaming."""
+
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     if not any(row["id"] == row_id for row in table["rows"]):
         raise user_error(400, "行定位不合法")
+    models = repo._runtime.models
+    workload_id = "reasoning_agent"
+    try:
+        knowhow_api.resolve_completion_request(
+            table, row_id, body.target_column_ids
+        )
+        for workload_id in ("reasoning_agent", "knowhow_complete"):
+            if not models.chat(workload_id).configured:
+                raise ModelNotConfiguredError
+    except ModelNotConfiguredError:
+        raise user_error(400, "尚未配置模型，无法智能补全")
+    except ValueError:
+        raise user_error(400, "无法补全当前行，请检查目标列和已知内容")
+    except Exception as exc:
+        models.note_model_error(
+            workload_id, exc, workload_id=workload_id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="智能补全服务暂时不可用，请稍后再试",
+        )
+    return repo, table
+
+
+def _run_complete_knowhow_row(
+    repo: Any,
+    notebook_id: str,
+    table: dict,
+    row_id: str,
+    body: KnowhowRowCompleteRequest,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict:
     try:
         return knowhow_api.complete_row(
-            repo, notebook_id, table, row_id, body.target_column_ids
+            repo,
+            notebook_id,
+            table,
+            row_id,
+            body.target_column_ids,
+            cancel_event=cancel_event,
         )
     except ModelNotConfiguredError:
         raise user_error(400, "尚未配置模型，无法智能补全")
@@ -908,6 +1078,38 @@ def complete_knowhow_row(
         raise user_error(400, "无法补全当前行，请检查目标列和已知内容")
     except knowhow_api.KnowhowCompletionUnavailable as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete/stream",
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
+)
+async def complete_knowhow_row_stream(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    body: KnowhowRowCompleteRequest,
+    request: Request,
+) -> StreamingResponse:
+    repo, table = await run_in_threadpool(
+        _prepare_complete_knowhow_row,
+        notebook_id, table_id, row_id, body
+    )
+    cancel_event = threading.Event()
+    return task_stream_response(
+        request,
+        lambda: _run_complete_knowhow_row(
+            repo,
+            notebook_id,
+            table,
+            row_id,
+            body,
+            cancel_event=cancel_event,
+        ),
+        stage="knowhow_complete",
+        error_code="knowhow_complete_failed",
+        cancel_event=cancel_event,
+    )
 
 
 # --- knowhow-md-normalize Task 4: /reformat HTTP endpoint (design doc §③-
@@ -934,21 +1136,46 @@ def complete_knowhow_row(
 def reformat_knowhow_cell(
     notebook_id: str, table_id: str, row_id: str, column_id: str
 ) -> dict:
-    repo = repository()
-    table = _require_table(repo, notebook_id, table_id)
-    if (
-        not any(row["id"] == row_id for row in table["rows"])
-        or not any(column["id"] == column_id for column in table["columns"])
-    ):
-        raise user_error(400, "格子定位不合法")
-    try:
-        repo.validate_cell_target(row_id, column_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    row = next(r for r in table["rows"] if r["id"] == row_id)
-    column = next(c for c in table["columns"] if c["id"] == column_id)
-    content_md = row["cells"].get(column_id, "")
-    result = knowhow_api.reformat_cell(repo, content_md, column["name"], column["kind"])
+    return _reformat_knowhow_cell(
+        notebook_id, table_id, row_id, column_id
+    )
+
+
+def _reformat_knowhow_cell(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    column_id: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    repo, content_md, column_name, column_kind = _prepare_knowhow_cell_task(
+        notebook_id, table_id, row_id, column_id
+    )
+    return _run_reformat_knowhow_cell(
+        repo,
+        content_md,
+        column_name,
+        column_kind,
+        cancel_event=cancel_event,
+    )
+
+
+def _run_reformat_knowhow_cell(
+    repo: Any,
+    content_md: str,
+    column_name: str,
+    column_kind: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    result = knowhow_api.reformat_cell(
+        repo,
+        content_md,
+        column_name,
+        column_kind,
+        cancel_event=cancel_event,
+    )
     # Concurrency P1 (fix a): report the EXACT content_md we just read and fed to
     # reformat_cell so the batch client can tell "this candidate derives from the
     # cell I snapshotted" from "the live cell was edited under me". content_md is
@@ -957,6 +1184,37 @@ def reformat_knowhow_cell(
     # the snapshot iff nobody edited the cell between modal-open and now.
     result["source_md"] = content_md
     return result
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/reformat/stream",
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
+)
+async def reformat_knowhow_cell_stream(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    column_id: str,
+    request: Request,
+) -> StreamingResponse:
+    repo, content_md, column_name, column_kind = await run_in_threadpool(
+        _prepare_knowhow_cell_task,
+        notebook_id, table_id, row_id, column_id
+    )
+    cancel_event = threading.Event()
+    return task_stream_response(
+        request,
+        lambda: _run_reformat_knowhow_cell(
+            repo,
+            content_md,
+            column_name,
+            column_kind,
+            cancel_event=cancel_event,
+        ),
+        stage="knowhow_reformat",
+        error_code="knowhow_reformat_failed",
+        cancel_event=cancel_event,
+    )
 
 
 # --- knowhow 表版本管理 Task 12: 历史时间线 / 单条详情 / 两版对比 / 单格历史 /

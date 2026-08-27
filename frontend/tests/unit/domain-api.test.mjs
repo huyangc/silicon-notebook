@@ -183,14 +183,21 @@ test("Ask intent preview runs before the streaming endpoint and carries conversa
   let captured;
   globalThis.fetch = async (url, init) => {
     captured = { url, init };
-    return new Response(JSON.stringify({
-      objective: "分析一下这个问题",
-      resolved_question: "分析电荷泵 PLL",
-      mandatory_topics: [],
-      ambiguities: [],
-      needs_clarification: false,
-      confirmed: false,
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
+    return streamResponse(
+      JSON.stringify({ event: "started", stage: "ask_intent", elapsed_ms: 0 }),
+      JSON.stringify({
+        event: "final",
+        stage: "ask_intent",
+        result: {
+          objective: "分析一下这个问题",
+          resolved_question: "分析电荷泵 PLL",
+          mandatory_topics: [],
+          ambiguities: [],
+          needs_clarification: false,
+          confirmed: false,
+        },
+      }),
+    );
   };
 
   const result = await ask.previewAskIntent(
@@ -198,7 +205,7 @@ test("Ask intent preview runs before the streaming endpoint and carries conversa
   );
 
   assert.equal(result.resolved_question, "分析电荷泵 PLL");
-  assert.match(String(captured.url), /notebooks\/nb-1\/ask\/intent$/);
+  assert.match(String(captured.url), /notebooks\/nb-1\/ask\/intent\/stream$/);
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.body, JSON.stringify({
     question: "分析一下这个问题",

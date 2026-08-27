@@ -4890,16 +4890,27 @@ export function KnowhowRowCompletionModal({
   const mountedRef = useRef(false);
   const startedRef = useRef(false);
   const requestRef = useRef(0);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const pendingRequestAbortRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const floating = useFloatingWindow({ storageKey: "knowhow.rowCompletion.window" });
 
   function requestSuggestions() {
+    requestControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     const requestId = ++requestRef.current;
     setCompletion(null);
     setLoadError(null);
-    completeKnowhowRow(notebookId, tableId, row.id, targetColumns.map((column) => column.id))
+    completeKnowhowRow(
+      notebookId,
+      tableId,
+      row.id,
+      targetColumns.map((column) => column.id),
+      controller.signal,
+    )
       .then((result) => {
-        if (!mountedRef.current || requestRef.current !== requestId) return;
+        if (controller.signal.aborted || !mountedRef.current || requestRef.current !== requestId) return;
         const byColumnId = new Map(result.suggestions.map((suggestion) => [suggestion.columnId, suggestion]));
         setCompletion({
           ...result,
@@ -4910,15 +4921,24 @@ export function KnowhowRowCompletionModal({
         });
       })
       .catch((error) => {
-        if (!mountedRef.current || requestRef.current !== requestId) return;
+        if (controller.signal.aborted || !mountedRef.current || requestRef.current !== requestId) return;
         setLoadError(extractErrorMessage(error, "生成建议失败，请稍后重试"));
+      })
+      .finally(() => {
+        if (requestControllerRef.current === controller) {
+          requestControllerRef.current = null;
+        }
       });
   }
 
   useEffect(() => {
+    if (pendingRequestAbortRef.current !== null) {
+      clearTimeout(pendingRequestAbortRef.current);
+      pendingRequestAbortRef.current = null;
+    }
     mountedRef.current = true;
-    // React StrictMode 会做一次 effect setup→cleanup→setup 探测；startedRef 避免
-    // 因此把昂贵的建议请求发两遍。真实卸载后是新组件实例，ref 会自然重置。
+    // React StrictMode 会做一次 effect setup→cleanup→setup 探测。cleanup 把取消
+    // 延后一拍；紧随其后的 setup 撤销它并继续持有同一请求，真实卸载才会取消。
     if (!startedRef.current) {
       startedRef.current = true;
       requestSuggestions();
@@ -4926,6 +4946,14 @@ export function KnowhowRowCompletionModal({
     closeButtonRef.current?.focus();
     return () => {
       mountedRef.current = false;
+      const controller = requestControllerRef.current;
+      pendingRequestAbortRef.current = setTimeout(() => {
+        if (requestControllerRef.current === controller) {
+          controller?.abort();
+          requestControllerRef.current = null;
+        }
+        pendingRequestAbortRef.current = null;
+      }, 0);
       const focusTarget = returnFocusTo?.isConnected ? returnFocusTo : fallbackFocusTo?.isConnected ? fallbackFocusTo : null;
       focusTarget?.focus();
     };
@@ -4934,8 +4962,9 @@ export function KnowhowRowCompletionModal({
   }, []);
 
   function requestClose() {
-    // 保存中不允许卸载；请求建议时可以关闭，requestRef 会拦截晚到响应。
+    // 保存中不允许卸载；请求建议时可以关闭并协作取消后端工作。
     if (savingColumnId) return;
+    requestControllerRef.current?.abort();
     onClose();
   }
 
@@ -5199,34 +5228,59 @@ function KnowhowRowOptimizeModal({
   const [acceptBusy, setAcceptBusy] = useState(false);
   const startedRef = useRef(false);
   const mountedRef = useRef(true);
+  const optimizeControllerRef = useRef<AbortController | null>(null);
+  const pendingOptimizeAbortRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 本弹窗没有全屏概念（任务表未列出）——不传 disabled，拖动/resize 恒生效。
   const floating = useFloatingWindow({ storageKey: "knowhow.rowOptimize.window" });
 
   useEffect(() => {
+    if (pendingOptimizeAbortRef.current !== null) {
+      clearTimeout(pendingOptimizeAbortRef.current);
+      pendingOptimizeAbortRef.current = null;
+    }
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      const controller = optimizeControllerRef.current;
+      pendingOptimizeAbortRef.current = setTimeout(() => {
+        if (optimizeControllerRef.current === controller) {
+          controller?.abort();
+          optimizeControllerRef.current = null;
+        }
+        pendingOptimizeAbortRef.current = null;
+      }, 0);
     };
   }, []);
 
   const current = currentRowOptimizeItem(queue);
 
   async function fireOptimizeFor(item: RowOptimizeItem) {
+    optimizeControllerRef.current?.abort();
+    const controller = new AbortController();
+    optimizeControllerRef.current = controller;
     setQueue((state) => markCurrentInProgress(state));
     try {
-      const result = await optimizeKnowhowCell(notebookId, tableId, row.id, item.columnId);
-      if (!mountedRef.current) return;
+      const result = await optimizeKnowhowCell(
+        notebookId,
+        tableId,
+        row.id,
+        item.columnId,
+        controller.signal,
+      );
+      if (controller.signal.aborted || !mountedRef.current) return;
       setQueue((state) => applySuggestion(state, result.suggestionMd));
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (controller.signal.aborted || !mountedRef.current) return;
       setQueue((state) => applyError(state, extractErrorMessage(err, "优化失败，请重试")));
+    } finally {
+      if (optimizeControllerRef.current === controller) {
+        optimizeControllerRef.current = null;
+      }
     }
   }
 
-  // 挂载时启动队列首格（若队列非空）；ref 闩防 StrictMode 开发期双调用
-  // 重复发起同一格的请求（本组件不像 KnowhowImage 那样有天然的
-  // cancelled 闭包变量可用——这里的请求会经过好几次 setState 才落地，用一次
-  // 性 ref 闩更直接）。
+  // 挂载时启动队列首格（若队列非空）。StrictMode 探测的 setup 复用同一请求，
+  // 不形成第二次物理模型调用；真实卸载的延后 cleanup 才会取消它。
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
@@ -5236,6 +5290,7 @@ function KnowhowRowOptimizeModal({
 
   function requestClose() {
     if (acceptBusy) return;
+    optimizeControllerRef.current?.abort();
     onClose();
   }
 
@@ -5296,6 +5351,7 @@ function KnowhowRowOptimizeModal({
   }
 
   function handleAbort() {
+    optimizeControllerRef.current?.abort();
     setQueue((state) => abortQueue(state));
   }
 

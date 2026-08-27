@@ -15,6 +15,7 @@ import {
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { requestJson } from "./api-client.ts";
+import { requestTaskStream } from "./request-task-stream.ts";
 import { copyTextSafely } from "./copy-text";
 import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
 import { FloatingModalCard } from "./floating-modal-card";
@@ -1467,6 +1468,7 @@ export function MemorySaveDialog({
   const [previewEligible, setPreviewEligible] = useState(false);
   const [extractKg, setExtractKg] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [previewElapsedMs, setPreviewElapsedMs] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const requestEpochRef = useRef(0);
@@ -1495,10 +1497,22 @@ export function MemorySaveDialog({
     const controller = new AbortController();
     previewControllerRef.current = controller;
     setLoading(true);
-    memoryApi<MemoryPreview>(`/answers/${encodeURIComponent(answerId)}/memory-preview`, {
-      method: "POST",
-      signal: controller.signal,
-    })
+    setPreviewElapsedMs(0);
+    requestTaskStream<MemoryPreview>(
+      `/answers/${encodeURIComponent(answerId)}/memory-preview/stream`,
+      {
+        method: "POST",
+        signal: controller.signal,
+        tag: "memory",
+        unauthorized: "clear-and-reload",
+      },
+      {
+        onHeartbeat: (elapsedMs) => {
+          if (requestEpochRef.current === epoch) setPreviewElapsedMs(elapsedMs);
+        },
+        fallbackMessage: "记忆预览没能生成，请稍后重试",
+      },
+    )
       .then((preview) => {
         if (requestEpochRef.current !== epoch) return;
         setDraft(draftFor(preview));
@@ -1572,7 +1586,13 @@ export function MemorySaveDialog({
           </div>
           <button type="button" className="memory-close" onClick={onClose} aria-label="关闭" disabled={saving}><X size={18} /></button>
         </header>
-        {loading ? <div className="memory-empty compact">正在生成预览…</div> : (
+        {loading ? (
+          <div className="memory-empty compact">
+            {previewElapsedMs > 0
+              ? `正在生成预览（已等待 ${Math.max(1, Math.round(previewElapsedMs / 1000))} 秒）…`
+              : "正在生成预览…"}
+          </div>
+        ) : (
           <>
             <MemoryEditor draft={draft} setDraft={setDraft} />
             {previewEligible && (

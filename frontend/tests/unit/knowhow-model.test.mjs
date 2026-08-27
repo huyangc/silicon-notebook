@@ -141,6 +141,16 @@ function withFetchStub(responseBody, run) {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init });
+    if (String(url).endsWith("/stream")) {
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`${JSON.stringify({ event: "started", stage: "test", elapsed_ms: 0 })}\n`));
+          controller.enqueue(encoder.encode(`${JSON.stringify({ event: "final", stage: "test", result: responseBody })}\n`));
+          controller.close();
+        },
+      }), { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
+    }
     return new Response(JSON.stringify(responseBody), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -488,11 +498,11 @@ test("patchKnowhowCell: origin 与 expectedBefore 同时提供时请求体两个
 
 // --- reformatKnowhowCell（P1-a：回带 source_md）------------------------------
 
-test("reformatKnowhowCell: POST 到 .../reformat，响应 source_md 映射为 sourceMd（连同 candidate/source/changed）", () => {
+test("reformatKnowhowCell: POST 到 .../reformat/stream，响应 source_md 映射为 sourceMd（连同 candidate/source/changed）", () => {
   const wire = { candidate_md: "- a\n- b", source: "llm", changed: true, source_md: "原文快照" };
   return withFetchStub(wire, async (calls) => {
     const result = await reformatKnowhowCell("nb-1", "t1", "r1", "c1");
-    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/cells\/c1\/reformat$/);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/cells\/c1\/reformat\/stream$/);
     assert.strictEqual(calls[0].init.method, "POST");
     assert.deepStrictEqual(result, { candidateMd: "- a\n- b", source: "llm", changed: true, sourceMd: "原文快照" });
   });
@@ -717,12 +727,20 @@ test("appendKnowhowCommit: 同一端点 mode=commit，响应为 {added}", () => 
 
 // --- optimizeKnowhowCell -----------------------------------------------------------
 
-test("optimizeKnowhowCell: POST 到 .../optimize，响应 suggestion_md 映射为 suggestionMd", () => {
+test("optimizeKnowhowCell: POST 到 .../optimize/stream，响应 suggestion_md 映射为 suggestionMd", () => {
   return withFetchStub({ suggestion_md: "优化后的正文" }, async (calls) => {
     const result = await optimizeKnowhowCell("nb-1", "t1", "r1", "c1");
-    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/cells\/c1\/optimize$/);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/cells\/c1\/optimize\/stream$/);
     assert.strictEqual(calls[0].init.method, "POST");
     assert.deepStrictEqual(result, { suggestionMd: "优化后的正文" });
+  });
+});
+
+test("optimizeKnowhowCell: 可选 AbortSignal 透传到共享请求客户端", () => {
+  return withFetchStub({ suggestion_md: "优化后的正文" }, async (calls) => {
+    const controller = new AbortController();
+    await optimizeKnowhowCell("nb-1", "t1", "r1", "c1", controller.signal);
+    assert.strictEqual(calls[0].init.signal, controller.signal);
   });
 });
 
@@ -748,7 +766,7 @@ test("completeKnowhowRow: POST 目标空列并把建议 wire 映射为 camelCase
   };
   return withFetchStub(wire, async (calls) => {
     const result = await completeKnowhowRow("nb-1", "t1", "r1", ["c-fix", "c-tool"]);
-    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/complete$/);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/complete\/stream$/);
     assert.strictEqual(calls[0].init.method, "POST");
     assert.deepStrictEqual(bodyOf(calls[0]), { target_column_ids: ["c-fix", "c-tool"] });
     assert.deepStrictEqual(result, {
@@ -780,6 +798,16 @@ test("completeKnowhowRow: 未指定目标列时发送空对象，不伪造 null 
   }, async (calls) => {
     await completeKnowhowRow("nb-1", "t1", "r1");
     assert.deepStrictEqual(bodyOf(calls[0]), {});
+  }));
+
+test("completeKnowhowRow: 可选 AbortSignal 透传到共享请求客户端", () =>
+  withFetchStub({
+    retrieval_mode: "reasoning", retrieval_scope: "active_and_mounted",
+    retrieval_status: "no_evidence", reasoning_trace: [], evidence: [], suggestions: [],
+  }, async (calls) => {
+    const controller = new AbortController();
+    await completeKnowhowRow("nb-1", "t1", "r1", undefined, controller.signal);
+    assert.strictEqual(calls[0].init.signal, controller.signal);
   }));
 
 // --- getCellCode / putCellCode / deleteCellCode（三态覆盖）------------------------

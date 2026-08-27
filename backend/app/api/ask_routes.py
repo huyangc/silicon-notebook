@@ -1,5 +1,4 @@
 import asyncio
-import json
 import queue
 import threading
 from time import monotonic
@@ -69,6 +68,11 @@ from app.services.conversation_public_view import (
 )
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.source_scope import retrieval_scope_receipt_context
+from app.api.task_stream import (
+    NDJSON_STREAM_HEADERS,
+    ndjson_line,
+    task_stream_response,
+)
 
 
 # Protocol heartbeat: keep the NDJSON transport active across model calls whose
@@ -474,7 +478,7 @@ async def preview_ask_intent(
         raise user_error(422, "问题不能为空")
     cancel_event = threading.Event()
 
-    def run_preview() -> QueryIntentContract:
+    def prepare_preview():
         repo = repository()
         try:
             notebook = repo.get_notebook(notebook_id)
@@ -486,6 +490,13 @@ async def preview_ask_intent(
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
+        return repo, resolved_source_scope, resolved_base_scope, history
+
+    repo, resolved_source_scope, resolved_base_scope, history = (
+        await asyncio.to_thread(prepare_preview)
+    )
+
+    def run_preview() -> QueryIntentContract:
         from app.services.source_scope import source_scope_context
 
         # No ValueError handler here on purpose.  The one that used to live at
@@ -526,6 +537,65 @@ async def preview_ask_intent(
         raise
     except AskCancelled:
         raise HTTPException(status_code=499, detail="Client Closed Request")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/ask/intent/stream",
+    dependencies=[Depends(require_notebook_read)],
+)
+async def preview_ask_intent_stream(
+    notebook_id: str,
+    payload: AskIntentPreviewRequest,
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+) -> StreamingResponse:
+    """Heartbeat-capable browser transport for the request-local intent pass.
+
+    The original JSON endpoint remains available for compatibility clients.
+    Scope/history validation finishes before the first frame so those failures
+    retain their authoritative HTTP status; only the potentially slow model
+    call runs inside the stream.
+    """
+    question = payload.question.strip()
+    if not question:
+        raise user_error(422, "问题不能为空")
+
+    def prepare_preview():
+        repo = repository()
+        try:
+            notebook = repo.get_notebook(notebook_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+        resolved_source_scope, resolved_base_scope = _require_ask_available(
+            notebook, repo, payload.source_scope, payload.base_scope
+        )
+        history = _intent_history(
+            repo, notebook_id, payload.conversation_id, user.id
+        )
+        return repo, resolved_source_scope, resolved_base_scope, history
+
+    repo, resolved_source_scope, resolved_base_scope, history = (
+        await asyncio.to_thread(prepare_preview)
+    )
+    cancel_event = threading.Event()
+
+    def run_preview() -> QueryIntentContract:
+        from app.services.source_scope import source_scope_context
+
+        with source_scope_context(
+            notebook_id, resolved_source_scope, resolved_base_scope
+        ):
+            return repo.preview_reasoning_intent(
+                notebook_id, question, history, cancel_event=cancel_event
+            )
+
+    return task_stream_response(
+        request,
+        run_preview,
+        stage="ask_intent",
+        error_code="ask_intent_failed",
+        cancel_event=cancel_event,
+    )
 
 
 def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
@@ -647,10 +717,6 @@ def ask_modes() -> list[dict[str, Any]]:
     return [*builtins, *extensions]
 
 
-def _ndjson_line(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False) + "\n"
-
-
 async def _stream_ask_events(
     repo: AskStreamPort,
     notebook_id: str,
@@ -697,7 +763,7 @@ async def _stream_ask_events(
                 continue
         if event is None:
             break
-        yield _ndjson_line(event)
+        yield ndjson_line(event)
         last_delivery = monotonic()
 
 
@@ -729,10 +795,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             ),
         ),
         media_type="application/x-ndjson",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
+        headers=NDJSON_STREAM_HEADERS,
     )
 
 

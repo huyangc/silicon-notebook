@@ -154,6 +154,16 @@ export type ExtensionRequestInit = Readonly<{
 }>;
 
 /**
+ * 请求级长任务的安全进度面。`stage` 是后端登记的固定码，`elapsedMs` 是已经等待的
+ * 毫秒数；两者都不含问题、证据、模型正文或异常原文。回调在 `started` 与每次心跳时
+ * 触发，插件可用它刷新“仍在处理中”的就地状态。
+ */
+export type ExtensionTaskStreamCallbacks = Readonly<{
+  onHeartbeat?: (elapsedMs: number, stage: string) => void | Promise<void>;
+  fallbackMessage?: string;
+}>;
+
+/**
  * 插件唯一的 HTTP 出口，按 `pluginId` 绑定，路径恒在 `/extensions/<plugin id>/` 之下。
  *
  * `userMessage` 不是便利函数而是必需品：`errors-guard` 是精确计数普查，读
@@ -163,6 +173,11 @@ export type WorkspaceExtensionApi = Readonly<{
   requestJson<T>(path: string, init?: ExtensionRequestInit): Promise<T>;
   requestVoid(path: string, init?: ExtensionRequestInit): Promise<void>;
   requestBlob(path: string, init?: ExtensionRequestInit): Promise<Blob>;
+  requestTask<T>(
+    path: string,
+    init?: ExtensionRequestInit,
+    callbacks?: ExtensionTaskStreamCallbacks,
+  ): Promise<T>;
   userMessage(error: unknown, fallback: string): string;
 }>;
 

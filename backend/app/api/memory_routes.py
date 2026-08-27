@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
@@ -44,6 +46,8 @@ from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prom
 from app.services.knowledge_governance import PromotionTargetError
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.core.memory_inputs import MemoryInputError
+from app.api.task_stream import task_stream_response
+from app.services.cancellation import AskCancelled
 
 
 memory_router = APIRouter()
@@ -371,6 +375,22 @@ async def preview_answer_memory(
     kg_extract_eligible = await run_in_threadpool(
         service.memory_kg_eligible, source["notebook_id"]
     )
+    return await run_in_threadpool(
+        _answer_memory_preview_result,
+        answer_id,
+        source,
+        kg_extract_eligible,
+        llm_client,
+    )
+
+
+def _answer_memory_preview_result(
+    answer_id: str,
+    source: dict,
+    kg_extract_eligible: bool,
+    llm_client,
+    cancel_event: threading.Event | None = None,
+) -> MemoryPreview:
     fallback = MemoryPreview(
         title=source["question"][:80],
         content_md=_clean_answer(source["answer"]),
@@ -386,10 +406,11 @@ async def preview_answer_memory(
     if not getattr(llm_client, "configured", False):
         return fallback
     try:
-        raw = await run_in_threadpool(
-            llm_client.chat_json,
+        control = {"cancel_event": cancel_event} if cancel_event is not None else {}
+        raw = llm_client.chat_json(
             [{"role": "user", "content": memory_preview_prompt(source["question"], source["answer"])}],
             MEMORY_PREVIEW_SCHEMA_HINT,
+            **control,
         )
         data = json.loads(raw)
         title = str(data.get("title") or "").strip()[:80]
@@ -405,8 +426,48 @@ async def preview_answer_memory(
             provenance_summary=fallback.provenance_summary,
             kg_extract_eligible=kg_extract_eligible,
         )
+    except AskCancelled:
+        raise
     except Exception:
         return fallback
+
+
+@memory_router.post("/answers/{answer_id}/memory-preview/stream")
+async def preview_answer_memory_stream(
+    answer_id: str,
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+    ask_state: AskStateStorePort = Depends(ask_state_repository),
+    llm_client=Depends(memory_preview_client),
+    service: MemoryRepository = Depends(memory_service),
+) -> StreamingResponse:
+    """Stream the slow model half while retaining the deterministic fallback."""
+    can_read = await run_in_threadpool(
+        notebook_access_repository().user_can_read_answer, answer_id, user.id
+    )
+    if not can_read:
+        raise _not_found("Answer not found")
+    try:
+        source = await run_in_threadpool(ask_state.answer_memory_source, answer_id)
+    except KeyError:
+        raise _not_found("Answer not found")
+    kg_extract_eligible = await run_in_threadpool(
+        service.memory_kg_eligible, source["notebook_id"]
+    )
+    cancel_event = threading.Event()
+    return task_stream_response(
+        request,
+        lambda: _answer_memory_preview_result(
+            answer_id,
+            source,
+            kg_extract_eligible,
+            llm_client,
+            cancel_event,
+        ),
+        stage="memory_preview",
+        error_code="memory_preview_failed",
+        cancel_event=cancel_event,
+    )
 
 
 @memory_router.post(
