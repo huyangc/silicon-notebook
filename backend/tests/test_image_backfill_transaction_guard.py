@@ -77,10 +77,10 @@ def test_apply_image_backfill_uses_exactly_one_write_transaction(backend):
 def test_every_write_lands_inside_that_transaction(backend, statement):
     function = _function(ADAPTERS[backend], "apply_image_backfill")
     body_sql = "".join(
-        _sql_text(node)
-        for node in ast.walk(function)
-        if isinstance(node, ast.With)
-        for node in node.body
+        _sql_text(statement_node)
+        for with_node in ast.walk(function)
+        if isinstance(with_node, ast.With)
+        for statement_node in with_node.body
     )
     whole_sql = _sql_text(function)
     assert statement in whole_sql, f"{backend}: 找不到 {statement!r}（守卫已陈旧）"

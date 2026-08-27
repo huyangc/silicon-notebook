@@ -1798,7 +1798,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         f"(默认 min(32, CPU核数)={_BACKFILL_DEFAULT_WORKERS},1 走原串行路径,"
                         "不启动进程池;别到 64——单写 SQLite executemany + IPC 在 ~16-24 处封顶)")
     p.add_argument("--limit", type=int, default=None,
-                   help="kg 阶段只抽前 N 个未抽源 / reparse 阶段只处理前 N 个缺 elements 源"
+                   help="kg 阶段只抽前 N 个未抽源 / reparse 阶段只处理前 N 个缺 elements 源 / "
+                        "backfill-images 阶段只处理前 N 个候选来源"
                         "(仅限制本次数量;最终 rebuild 仍覆盖全本 notebook)")
     p.add_argument("--no-rebuild", action="store_true",
                    help="kg/reparse 阶段:只抽取/重解析,跳过收尾 rebuild_unified_kg 和 scale index。"
