@@ -482,6 +482,29 @@ def test_enrichment_does_not_consume_the_per_source_cap():
     assert "per_source_cap" not in plan.skipped
 
 
+def test_the_same_src_referenced_twice_is_enriched_once():
+    """一个 src 在文档里被引用两次，但只有一条既有元素可补。补两遍会把同一个
+    element id append 进 chunk 两次（`element_ids` 里出现重复），而"再插一条新
+    元素"等于凭空造出一条在线路径不会有的行。"""
+    markdown = (
+        "第一段正文写了一些内容。\n\n"
+        "![图 1 系统架构](images/a.jpg)\n\n"
+        "第二段又引了同一张图。\n\n"
+        "![图 1 系统架构](images/a.jpg)\n"
+    )
+    elements = _parsed_els(markdown)
+    plan = _plan(
+        markdown,
+        elements,
+        {element.id: "c1" for element in elements},
+        _index("a.jpg"),
+        existing_unassigned_srcs={"images/a.jpg": f"el-{SID}-0002"},
+    )
+    assert [item.element_id for item in plan.enriched] == [f"el-{SID}-0002"]
+    assert plan.images == []
+    assert plan.skipped == {"duplicate_src_reference": 1}
+
+
 def test_an_already_assigned_src_wins_over_enrichment():
     """幂等：补齐过一轮之后 `asset_id` 非空，下一轮它落回"已补过"那一支，既不
     重复插入也不重复补齐。"""
