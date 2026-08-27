@@ -209,17 +209,29 @@ def _norm_without_image_alt(value: str) -> str:
     return " ".join(text.split())
 
 
-def _strip_target(raw: str) -> str:
-    target = (raw or "").strip()
-    if target.startswith("<") and target.endswith(">"):
-        target = target[1:-1].strip()
-    # query/fragment 是 URL 语法，不属于存下来的文件名（与 `_bundle_image_path`
-    # 同款处理）。
+def canonical_src(value: str) -> str:
+    """一处图片引用的**规范形**：剥掉 query/fragment（它们是 URL 语法，不属于存下
+    来的文件名；与 `_bundle_image_path` 同款处理）。
+
+    这一个函数必须同时用在**两侧**：扫描 markdown 得到的引用，以及既有元素
+    ``metadata.src`` 拿来做集合键的时候。解析路径把 ``![Figure 1](images/a.jpg?raw=1#x)``
+    的 target **原样全量**存进 ``metadata.src``，而扫描侧剥掉了后缀——只在一侧规范化
+    的后果是"已补过/可补齐"两个集合永远匹配不上这类引用：既有元素补不上 asset，还会
+    被当成全新的图再插一条重复元素。新插入元素写进 ``metadata.src`` 的同样是这个规范
+    形（`_element_row`），所以本工具自己产出的行天然自洽。"""
+    target = (value or "").strip()
     for sep in ("#", "?"):
         cut = target.find(sep)
         if cut >= 0:
             target = target[:cut]
     return target.strip()
+
+
+def _strip_target(raw: str) -> str:
+    target = (raw or "").strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1].strip()
+    return canonical_src(target)
 
 
 def classify_target(target: str) -> str:

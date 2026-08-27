@@ -26,7 +26,9 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
+from app.domain.image_backfill import ImageBackfillConcurrentChange
 from app.repositories.chunk_elements import (
+    decode_element_ids,
     reverse_rows as chunk_element_reverse_rows,
     reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
 )
@@ -1877,15 +1879,17 @@ class SQLiteMaintenanceAdapter:
         notebook_id: str,
         source_id: str,
         elements: Sequence[dict],
-        chunk_element_ids: dict[str, list[str]],
+        chunk_updates: Sequence[dict],
         metadata_updates: Sequence[dict] = (),
         *,
         created_at: str,
+        expected_element_count: int,
     ) -> None:
         """一个来源的全部插入与就地补齐，**一个写事务**。
 
-        `chunk_element_ids` 是受影响 chunk 的**完整**新 element_ids 列表；
-        `chunks.text` 与 chunk id 逐字节不变，所以 `chunk_embeddings`
+        `chunk_updates` 是受影响 chunk 的 ``{id, expected, element_ids}``：
+        ``expected`` 是计划阶段看到的旧列表（CAS 判据），``element_ids`` 是**完整**
+        的新列表。`chunks.text` 与 chunk id 逐字节不变，所以 `chunk_embeddings`
         （`ON DELETE CASCADE` 挂在 chunk 行上）一行都不会动。反查行
         `chunk_elements` 与它们描述的那次 chunk 写入同事务（v46 红线），
         `sources.updated_at` 也在同一事务里推进（元素换代的变更信号）。
@@ -1896,11 +1900,44 @@ class SQLiteMaintenanceAdapter:
         插入必须同事务——它描述的资产行已经写进 `notebook_assets` 了，落在第二
         个事务里就会留下"资产在、元素还指不到它"的中间态。
 
+        **事务里的第一件事是 CAS**，不是写。本阶段是离线工具，但 SQLite 后端没有
+        PostgreSQL 那道"构造 repository 前强制 `--confirm-service-stopped`"的
+        preflight，所以它可能与一个仍在跑的服务并发。计划与写入之间若发生了对同一
+        来源的重新解析，快照就已作废——照它写下去会把旧 ``element_ids`` 整份盖回
+        换代后的 chunk、把新图挂到已删的锚点 id 上，而且不报任何错。所以先重读
+        元素代次信号 ``(COUNT, MAX(created_at))`` 与每个目标 chunk 的现值做比对，
+        不一致抛 `ImageBackfillConcurrentChange` 让整个事务回滚（语义是"稍后重跑"，
+        不是失败）。
+
         ``updated_at`` 刻意**不**由调用方传：时间戳格式是仓储自己的约定（带微秒
         与本地偏移的 ISO），而 `sources.updated_at` 是被当作字符串比较的变更信号
         令牌——让离线调用方自带一个"看起来像 ISO"的时钟，写进去的就是一个比旧值
         还小的字符串。"""
         with self._runtime.database.write() as db:
+            signature = db.execute(
+                "SELECT COUNT(*) AS n, MAX(created_at) AS newest "
+                "FROM source_elements WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            if (
+                int(signature["n"]) != int(expected_element_count)
+                or signature["newest"] != created_at
+            ):
+                raise ImageBackfillConcurrentChange(
+                    f"source {source_id} changed generation between plan and apply"
+                )
+            for update in chunk_updates:
+                current = db.execute(
+                    "SELECT element_ids FROM chunks WHERE id=? AND source_id=?",
+                    (update["id"], source_id),
+                ).fetchone()
+                if current is None or decode_element_ids(
+                    current["element_ids"]
+                ) != list(update["expected"]):
+                    raise ImageBackfillConcurrentChange(
+                        f"chunk {update['id']} of source {source_id} changed "
+                        "between plan and apply"
+                    )
             db.executemany(
                 "INSERT INTO source_elements "
                 "(id, source_id, element_type, location_label, text, metadata, created_at) "
@@ -1928,13 +1965,14 @@ class SQLiteMaintenanceAdapter:
                         source_id,
                     ),
                 )
-            for chunk_id, element_ids in chunk_element_ids.items():
+            for update in chunk_updates:
                 db.execute(
                     "UPDATE chunks SET element_ids=? WHERE id=? AND source_id=?",
-                    (json.dumps(list(element_ids)), chunk_id, source_id),
+                    (json.dumps(list(update["element_ids"])), update["id"], source_id),
                 )
             rows = chunk_element_reverse_rows_for_writes(
-                notebook_id, list(chunk_element_ids.items())
+                notebook_id,
+                [(update["id"], update["element_ids"]) for update in chunk_updates],
             )
             if rows:
                 db.executemany(

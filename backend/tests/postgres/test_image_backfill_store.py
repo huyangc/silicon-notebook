@@ -221,15 +221,20 @@ def test_apply_writes_elements_chunk_ids_reverse_rows_and_updated_at(
                 },
             }
         ],
-        {
-            "ck-1": [
-                f"el-{source_id}-0001",
-                f"el-{source_id}-0002",
-                new_id,
-            ]
-        },
+        [
+            {
+                "id": "ck-1",
+                "expected": [f"el-{source_id}-0001", f"el-{source_id}-0002"],
+                "element_ids": [
+                    f"el-{source_id}-0001",
+                    f"el-{source_id}-0002",
+                    new_id,
+                ],
+            }
+        ],
         (),
         created_at=stamp,
+        expected_element_count=3,
     )
 
     with postgres_repository._runtime.database.connect() as db:
@@ -278,25 +283,31 @@ def test_reverse_row_insert_is_idempotent_across_reruns(postgres_repository):
     # 两轮都送同样这两条老元素：第二轮的反查行整批与第一轮重叠，没有
     # `ON CONFLICT DO NOTHING` 就是一次主键冲突（整个事务回滚），而不是"多数了
     # 几行"——所以这条用例同时钉住幂等与"不炸"。
-    element_ids = [f"el-{source_id}-0001", f"el-{source_id}-0002"]
+    current = [f"el-{source_id}-0001", f"el-{source_id}-0002"]
 
     for index in range(2):
+        new_element_id = f"el-{source_id}-0002-g{index + 1:03d}"
+        updated = current + [new_element_id]
         maintenance.apply_image_backfill(
             notebook_id,
             source_id,
             [
                 {
-                    "id": f"el-{source_id}-0002-g{index + 1:03d}",
+                    "id": new_element_id,
                     "element_type": "image",
                     "location_label": f"Markdown image {index + 1}",
                     "text": "",
                     "metadata": {"asset_id": f"asset-{index}"},
                 }
             ],
-            {"ck-1": element_ids + [f"el-{source_id}-0002-g{index + 1:03d}"]},
+            # CAS 的 `expected` 必须是**此刻**库里的值：第二轮送的是第一轮写完之后
+            # 的那份，否则会被判成并发变更（这条 CAS 本身另有专门用例）。
+            [{"id": "ck-1", "expected": current, "element_ids": updated}],
             (),
             created_at=stamp,
+            expected_element_count=3 + index,
         )
+        current = updated
 
     with postgres_repository._runtime.database.connect() as db:
         rows = db.execute(
@@ -341,7 +352,7 @@ def test_metadata_updates_enrich_in_place_without_touching_anything_else(
         notebook_id,
         source_id,
         [],
-        {},
+        [],
         [
             {
                 "id": image_id,
@@ -353,6 +364,7 @@ def test_metadata_updates_enrich_in_place_without_touching_anything_else(
             }
         ],
         created_at=stamp,
+        expected_element_count=4,
     )
 
     with runtime.database.connect() as db:
@@ -383,6 +395,79 @@ def test_metadata_updates_enrich_in_place_without_touching_anything_else(
         "asset_id": "asset-9",
     }
     assert updated_at is not None  # 纯补齐同样推进变更信号
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("drift", ["elements", "chunk"])
+def test_apply_refuses_a_stale_snapshot_and_writes_nothing(postgres_repository, drift):
+    """写事务里的第一件事是 CAS。两个后端必须逐字对等——判据分叉会让「并发时安全
+    落空」这条保证只在一个后端成立。"""
+    from app.domain.image_backfill import ImageBackfillConcurrentChange
+
+    notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
+    source_id = _seed(postgres_repository, notebook_id)
+    runtime = postgres_repository._runtime
+    maintenance = postgres_repository.maintenance
+    stamp = maintenance.image_backfill_source_state(source_id)["element_created_at"]
+    now = normalize_timestamp(runtime.seams.now())
+    element_ids = [f"el-{source_id}-0001", f"el-{source_id}-0002"]
+
+    with runtime.database.write() as db:
+        if drift == "elements":
+            # 并发重新解析：多一条元素、代次戳前移。
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (%s,%s,'paragraph','p','新解析出来的段落',%s,%s)",
+                (f"el-{source_id}-9001", source_id, jsonb({}), now),
+            )
+        else:
+            # 只有 chunk 换了内容（元素代次信号看不见它）。
+            db.execute(
+                "UPDATE chunks SET element_ids=%s WHERE id='ck-1'",
+                (jsonb([f"el-{source_id}-0001"]),),
+            )
+
+    new_id = f"el-{source_id}-0002-g001"
+    with pytest.raises(ImageBackfillConcurrentChange):
+        maintenance.apply_image_backfill(
+            notebook_id,
+            source_id,
+            [
+                {
+                    "id": new_id,
+                    "element_type": "image",
+                    "location_label": "Markdown image 1",
+                    "text": "",
+                    "metadata": {"asset_id": "asset-x"},
+                }
+            ],
+            [
+                {
+                    "id": "ck-1",
+                    "expected": element_ids,
+                    "element_ids": element_ids + [new_id],
+                }
+            ],
+            (),
+            created_at=stamp,
+            expected_element_count=3,
+        )
+
+    with runtime.database.connect() as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) AS c FROM source_elements WHERE id=%s", (new_id,)
+            ).fetchone()["c"]
+            == 0
+        )
+        assert (
+            db.execute(
+                "SELECT COUNT(*) AS c FROM chunk_elements WHERE notebook_id=%s",
+                (notebook_id,),
+            ).fetchone()["c"]
+            == 0
+        )
 
 
 @pytest.mark.postgres_integration

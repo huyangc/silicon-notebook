@@ -1918,7 +1918,7 @@ def _dispatch_main(
         # 外科式补图:零模型、零 embedding 重算、零 KG 变动,chunk id 与 chunk.text
         # 逐字节不变(见 app/services/image_backfill_phase.py 的模块 docstring)。
         _t = time.perf_counter()
-        run_backfill_images(
+        result = run_backfill_images(
             repo,
             args.notebook_id,
             mineru_outputs=args.mineru_output or [],
@@ -1929,7 +1929,12 @@ def _dispatch_main(
             report_path=args.report,
         )
         print(f"backfill-images elapsed {time.perf_counter() - _t:.1f}s", flush=True)
-        return 0
+        # 有失败源必须非零退出(与 question-index / backfill-source-facts 同款
+        # 先例):丢掉汇总、恒返回 0 会让编排脚本把一次「一半源写事务炸了」的运行
+        # 当成完全成功,而失败只在 stdout 里一闪而过。
+        # `concurrent_change` **不算**失败:它是"这个源此刻正被重解析,稍后重跑即
+        # 可",不是"坏了"——把它算进退出码会让活服务上的正常运维跑恒定非零。
+        return 1 if int(result["sources_failed"]) else 0
 
     if args.phase == "backfill-source-facts":
         _t = time.perf_counter()

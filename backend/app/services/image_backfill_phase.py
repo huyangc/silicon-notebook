@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
 
+from app.domain.image_backfill import ImageBackfillConcurrentChange
 from app.services.image_backfill import (
     ElementView,
     EnrichedImage,
@@ -58,6 +59,7 @@ from app.services.image_backfill import (
     PlannedImage,
     SourcePlan,
     build_image_index,
+    canonical_src,
     normalize_text,
     plan_source_images,
 )
@@ -91,10 +93,11 @@ class ImageBackfillPort(Protocol):
         notebook_id: str,
         source_id: str,
         elements: Sequence[dict],
-        chunk_element_ids: dict[str, list[str]],
+        chunk_updates: Sequence[dict],
         metadata_updates: Sequence[dict],
         *,
         created_at: Any,
+        expected_element_count: int,
     ) -> None: ...
 
     def image_backfill_source_asset_ids(
@@ -149,6 +152,9 @@ def _totals() -> dict[str, int]:
         "sources_scanned": 0,
         "sources_changed": 0,
         "sources_failed": 0,
+        # 计划与写入之间被并发重新解析、因此整源安全落空的来源数。刻意与
+        # `sources_failed` 分列：它不是"坏了"，是"稍后重跑即可"，也不进退出码。
+        "sources_concurrent_change": 0,
         # 计划出来的候选（dry-run 唯一能报的"能补多少张"）。插入与就地补齐分列：
         # 两者的运维含义不同——前者新增元素行，后者只补既有行的 asset_id。
         "candidates_insert": 0,
@@ -194,8 +200,11 @@ def _existing_image_srcs(elements: Sequence[dict]) -> list[str]:
         metadata = element["metadata"]
         if not metadata.get("asset_id"):
             continue
-        src = metadata.get("src")
-        if isinstance(src, str) and src:
+        raw_src = metadata.get("src")
+        # 规范形是两侧集合键的唯一口径（见 `canonical_src`）；畸形载荷按无
+        # src 处理，一条历史坏行不该掀翻整个 notebook 的回填。
+        src = canonical_src(raw_src) if isinstance(raw_src, str) else ""
+        if src:
             out.append(src)
     return out
 
@@ -214,8 +223,11 @@ def _unassigned_image_srcs(elements: Sequence[dict]) -> dict[str, str]:
         metadata = element["metadata"]
         if metadata.get("asset_id"):
             continue
-        src = metadata.get("src")
-        if isinstance(src, str) and src:
+        raw_src = metadata.get("src")
+        # 规范形是两侧集合键的唯一口径（见 `canonical_src`）；畸形载荷按无
+        # src 处理，一条历史坏行不该掀翻整个 notebook 的回填。
+        src = canonical_src(raw_src) if isinstance(raw_src, str) else ""
+        if src:
             out.setdefault(src, element["id"])
     return out
 
@@ -452,9 +464,14 @@ def apply_plan(
 
         planned_by_id = {image.element_id: image for image in plan.images}
         enriched_by_id = {item.element_id: item for item in plan.enriched}
+        # 计划快照里的旧列表（CAS 判据）与追加后的新列表并排带上。
+        expected: dict[str, list[str]] = {}
         chunk_element_ids: dict[str, list[str]] = {}
         for chunk in state["chunks"]:
-            chunk_element_ids.setdefault(chunk["id"], list(chunk["element_ids"]))
+            if chunk["id"] in chunk_element_ids:
+                continue
+            expected[chunk["id"]] = list(chunk["element_ids"])
+            chunk_element_ids[chunk["id"]] = list(chunk["element_ids"])
         touched: set[str] = set()
         for row in rows:
             chunk_id = planned_by_id[row["id"]].chunk_id
@@ -472,13 +489,20 @@ def apply_plan(
             notebook_id,
             source_id,
             rows,
-            {
-                chunk_id: element_ids
+            [
+                {
+                    "id": chunk_id,
+                    "expected": expected[chunk_id],
+                    "element_ids": element_ids,
+                }
                 for chunk_id, element_ids in chunk_element_ids.items()
                 if chunk_id in touched
-            },
+            ],
             updates,
             created_at=created_at,
+            # 元素代次信号的另一半（`created_at` 就是快照的 MAX）：两个一起才判得出
+            # "计划之后这个来源被重新解析过"。
+            expected_element_count=len(state["elements"]),
         )
         # `try` 块必须**到此为止**：再往里放代码，一次提交成功之后才抛的异常会
         # 走下面那条回滚，而回滚用的引用集不含 rows/updates，刚提交的资产会被
@@ -624,6 +648,30 @@ def run_backfill_images(
                     outcome = apply_plan(
                         repo, notebook_id, source["id"], plan, state
                     )
+            except ImageBackfillConcurrentChange:
+                # 这**不是**失败：计划与写入之间这个来源被重新解析了，写事务已经
+                # 整个回滚、本趟的资产也已经清扫干净（`apply_plan` 的回滚路径），
+                # 库里零脏写。语义是"稍后重跑即可"，所以单列计数、不进
+                # `sources_failed`，也不影响进程退出码——否则活服务上的正常运维跑
+                # 会恒定非零。
+                totals["sources_concurrent_change"] += 1
+                candidates = len(plan.images) + len(plan.enriched)
+                skipped["concurrent_change"] = (
+                    skipped.get("concurrent_change", 0) + candidates
+                )
+                _write_report(
+                    report,
+                    {
+                        "source_id": source["id"],
+                        "status": "concurrent_change",
+                        "candidates": candidates,
+                    },
+                )
+                print(
+                    f"  SKIPPED {source['id']}: 该来源正被并发重新解析，稍后重跑即可",
+                    flush=True,
+                )
+                continue
             except Exception as exc:  # 单源失败隔离，不掀翻整跑
                 totals["sources_failed"] += 1
                 _write_report(
