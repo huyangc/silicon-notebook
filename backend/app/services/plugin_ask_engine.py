@@ -985,8 +985,24 @@ def admit_plugin_engine_result(
     access: PluginRetrievalAccess,
     answer_markdown: str,
     citations: tuple[str, ...],
-) -> tuple[str, tuple[PluginEvidenceRecord, ...]]:
-    """Core-only evidence-handle admission; it is not on the SDK facade."""
+) -> tuple[str, tuple[PluginEvidenceRecord, ...], tuple[str, ...]]:
+    """Core-only evidence-handle admission; it is not on the SDK facade.
+
+    A malformed RESULT SHAPE (not a ``PluginRetrievalAccess``, or an
+    answer/citations pair off the SDK's own types) is still a hard failure —
+    there is no answer worth keeping once the shape itself is wrong. Every
+    citation-LEVEL problem instead degrades: a forged/replayed/unbound handle,
+    a marker naming an index that never resolved, a residual citation-shaped
+    token that never bound, and a record the model never referenced in the
+    text are each stripped rather than rejecting the whole answer. Surviving
+    indices are compacted and renumbered, and each class of degradation
+    contributes one user-readable note into the returned tuple for the caller
+    to fold into the persisted trace — disclosure is the precondition for
+    stripping, not an afterthought. The safety invariant this module has
+    always enforced still holds unconditionally: an unverified citation NEVER
+    reaches the user wearing a citation's appearance, and every surviving
+    record came from this run's own ledger, never fabricated.
+    """
 
     if type(access) is not PluginRetrievalAccess:
         raise AskEnginePortError("invalid_plugin_engine_result")
@@ -997,53 +1013,88 @@ def admit_plugin_engine_result(
     with _authority_use(state):
         if type(answer_markdown) is not str or type(citations) is not tuple:
             raise AskEnginePortError("invalid_plugin_engine_result")
+        notes: list[str] = []
         # Every retrieval budget can issue up to ``max_k`` handles per call, so
         # the ceiling must follow both pools or a legitimate KG-heavy answer is
-        # rejected for citing handles this run really did issue.
+        # short-changed for citing handles this run really did issue.
         issuable = (state.max_calls + state.kg_max_calls) * state.max_k
         if len(citations) > issuable:
-            raise AskEnginePortError("plugin_engine_citation_limit")
+            notes.append(
+                f"引用条数（{len(citations)}）超过本次可签发上限"
+                f"（{issuable}），超出部分已忽略"
+            )
+        admitted_citations = citations[:issuable]
+
+        records: list[PluginEvidenceRecord] = []
+        # Maps each admitted citation's ORIGINAL 1-based position (the
+        # position a `[kN]` marker names) to its 1-based position in the
+        # compacted `records` list, so a marker naming a dropped citation
+        # resolves to nothing instead of a stale or foreign record.
+        index_map: dict[int, int] = {}
+        dropped_citations = 0
         with state.data_lock:
-            records: list[PluginEvidenceRecord] = []
-            for evidence_key in citations:
+            for position, evidence_key in enumerate(admitted_citations, start=1):
                 if (
                     type(evidence_key) is not str
                     or evidence_key not in state.ledger
                 ):
-                    raise AskEnginePortError(
-                        "plugin_engine_unverified_citation"
-                    )
+                    dropped_citations += 1
+                    continue
                 records.append(state.ledger[evidence_key])
+                index_map[position] = len(records)
+        if dropped_citations:
+            notes.append(f"{dropped_citations} 条引用无法核验，已移除")
 
         cited_marker_indexes: set[int] = set()
+        dropped_markers = 0
 
         def normalize(match) -> str:
-            keys = marker_keys(match.group(0))
-            for key in keys:
+            nonlocal dropped_markers
+            kept: list[str] = []
+            for key in marker_keys(match.group(0)):
                 try:
                     index = int(key[1:])
                 except (TypeError, ValueError):
-                    raise AskEnginePortError(
-                        "plugin_engine_unverified_citation"
-                    ) from None
-                if index < 1 or index > len(records):
-                    raise AskEnginePortError(
-                        "plugin_engine_unverified_citation"
-                    )
-                cited_marker_indexes.add(index)
-            return "[" + ", ".join(keys) + "]"
+                    dropped_markers += 1
+                    continue
+                mapped = index_map.get(index)
+                if mapped is None:
+                    dropped_markers += 1
+                    continue
+                cited_marker_indexes.add(mapped)
+                kept.append(f"k{mapped}")
+            return "[" + ", ".join(kept) + "]" if kept else ""
 
         normalized = LOOSE_MARKER_RE.sub(normalize, answer_markdown)
-        # 残留的「引用样」括号组整份拒绝(codex #602 R6 P1):`[k1, nope]` 这类畸形
-        # 组不被 LOOSE_MARKER_RE 匹配、会原样留在正文里,渲染成一个从未被核验的
-        # 引用外观——与核心「复合组遇到未知键整体失败关闭」同一条纪律。归一化输出
-        # 自己写回的合法组恰好 fullmatch LOOSE_MARKER_RE,不会误伤。
-        for suspect in _SUSPECT_MARKER_RE.finditer(normalized):
-            if LOOSE_MARKER_RE.fullmatch(suspect.group(0)) is None:
-                raise AskEnginePortError("plugin_engine_unverified_citation")
-        if cited_marker_indexes != set(range(1, len(records) + 1)):
-            raise AskEnginePortError("plugin_engine_unverified_citation")
-        return normalized, tuple(records)
+        if dropped_markers:
+            notes.append(f"正文中 {dropped_markers} 个引用标记无法核验，已移除")
+
+        # 残留的「引用样」括号组摘除(codex #602 R6 P1 的纪律,执行方式从整份拒绝
+        # 改为摘除 + 披露):`[k1, nope]` 这类畸形组不被 LOOSE_MARKER_RE 匹配、会
+        # 原样留在正文里,渲染成一个从未被核验的引用外观——「未核验的引用外观绝不
+        # 上屏」这条纪律不变,只是不再连坐整份答案。归一化输出自己写回的合法组
+        # 恰好 fullmatch LOOSE_MARKER_RE,不会被这一步误伤。
+        suspect_markers = 0
+
+        def strip_suspect(match) -> str:
+            nonlocal suspect_markers
+            group = match.group(0)
+            if LOOSE_MARKER_RE.fullmatch(group) is not None:
+                return group
+            suspect_markers += 1
+            return ""
+
+        normalized = _SUSPECT_MARKER_RE.sub(strip_suspect, normalized)
+        if suspect_markers:
+            notes.append(
+                f"正文中 {suspect_markers} 处疑似引用标记无法解析，已移除"
+            )
+
+        uncited = len(records) - len(cited_marker_indexes)
+        if uncited > 0:
+            notes.append(f"{uncited} 条引用未在正文中被引用，仅列入引用列表")
+
+        return normalized, tuple(records), tuple(notes)
 
 
 def plugin_engine_trace_steps(trace: PluginEngineTrace) -> tuple[TraceStep, ...]:

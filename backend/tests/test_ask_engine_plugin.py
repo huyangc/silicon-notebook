@@ -450,33 +450,49 @@ def test_later_port_construction_failure_revokes_earlier_retrieval(
     assert len(plugin_ports._RETRIEVAL_STATES) == before
 
 
-def test_citation_admission_rejects_forged_and_cross_run_handles():
+def test_citation_admission_strips_forged_and_cross_run_handles_and_discloses():
+    """用户拍板的降级语义:校验不过的引用/标记被摘除、答案保留,问题折进
+    notes 供调用方落进持久化轨迹披露——不再整份拒绝(fail-closed 的旧行为
+    见下面对 forged/replayed 分支的断言:两者都不再 raise)。"""
     first = _retrieval_access()
     first_key = first.search("evidence", 1)[0].evidence_key
     second = _retrieval_access(hit=_hit(element_id="element-2"))
     second_key = second.search("evidence", 1)[0].evidence_key
     assert first_key != second_key, "a run-local handle must not replay in a new run"
 
-    with pytest.raises(AskEnginePortError) as forged:
-        admit_plugin_engine_result(second, "伪造 [k1]", ("pe-forged",))
-    assert forged.value.code == "plugin_engine_unverified_citation"
+    forged_answer, forged_records, forged_notes = admit_plugin_engine_result(
+        second, "伪造 [k1]", ("pe-forged",)
+    )
+    assert forged_records == ()
+    assert "[k1]" not in forged_answer
+    assert any("无法核验，已移除" in note for note in forged_notes)
+    assert any("正文中" in note and "无法核验" in note for note in forged_notes)
 
-    with pytest.raises(AskEnginePortError) as replayed:
-        admit_plugin_engine_result(second, "重放 [k1]", (first_key,))
-    assert replayed.value.code == "plugin_engine_unverified_citation"
+    replayed_answer, replayed_records, replayed_notes = admit_plugin_engine_result(
+        second, "重放 [k1]", (first_key,)
+    )
+    assert replayed_records == ()
+    assert "[k1]" not in replayed_answer
+    assert any("无法核验，已移除" in note for note in replayed_notes)
+    assert any("正文中" in note and "无法核验" in note for note in replayed_notes)
 
-    with pytest.raises(AskEnginePortError) as unbound:
-        admit_plugin_engine_result(second, "没有引用标记", (second_key,))
-    assert unbound.value.code == "plugin_engine_unverified_citation"
+    unbound_answer, unbound_records, unbound_notes = admit_plugin_engine_result(
+        second, "没有引用标记", (second_key,)
+    )
+    assert unbound_answer == "没有引用标记"
+    assert len(unbound_records) == 1
+    assert unbound_records[0].element_id == "element-2"
+    assert unbound_notes == ("1 条引用未在正文中被引用，仅列入引用列表",)
 
-    answer, records = admit_plugin_engine_result(
+    answer, records, notes = admit_plugin_engine_result(
         second, "兼容标记【k1】", (second_key,)
     )
     assert answer == "兼容标记[k1]"
     assert records[0].element_id == "element-2"
+    assert notes == ()
 
 
-def test_citation_admission_requires_a_marker_for_every_admitted_record():
+def test_citation_admission_strips_unmarked_records_and_discloses():
     hits = iter((
         _hit(element_id="element-1"),
         _hit(element_id="element-2"),
@@ -500,9 +516,54 @@ def test_citation_admission_requires_a_marker_for_every_admitted_record():
         access.search("second", 1)[0].evidence_key,
     )
 
-    with pytest.raises(AskEnginePortError) as partial:
-        admit_plugin_engine_result(access, "只绑定第一条 [k1]", keys)
-    assert partial.value.code == "plugin_engine_unverified_citation"
+    answer, records, notes = admit_plugin_engine_result(
+        access, "只绑定第一条 [k1]", keys
+    )
+    assert answer == "只绑定第一条 [k1]"
+    assert len(records) == 2
+    assert notes == ("1 条引用未在正文中被引用，仅列入引用列表",)
+
+
+def test_citation_admission_truncates_citations_beyond_the_issuable_ceiling():
+    access = PluginRetrievalAccess(
+        active_notebook_id="notebook-1",
+        actor_id="user-1",
+        cancellation=None,
+        participant_notebook_ids=lambda _notebook_id: ("notebook-1",),
+        all_visible_source_ids=lambda _notebook_id: ("source-1",),
+        hidden_source_ids=lambda _notebook_id, _actor_id: (),
+        search_elements=lambda *_args, **_kwargs: [_hit()],
+        source_info=lambda _source_ids: {"source-1": {"title": "权威来源"}},
+        max_k=1,
+        max_calls=1,
+        evidence_chars=100,
+        query_chars=100,
+    )
+    key = access.search("evidence", 1)[0].evidence_key
+
+    answer, records, notes = admit_plugin_engine_result(
+        access, "[k1]", (key, key)
+    )
+
+    assert answer == "[k1]"
+    assert len(records) == 1
+    assert any("超过本次可签发上限" in note for note in notes)
+    assert not any("未在正文中被引用" in note for note in notes)
+
+
+def test_citation_admission_compacts_indexes_after_stripping_a_forged_key():
+    access = _retrieval_access()
+    legit_key = access.search("evidence", 1)[0].evidence_key
+
+    answer, records, notes = admit_plugin_engine_result(
+        access, "结论 [k1] 与 [k2]", ("pe-forged", legit_key)
+    )
+
+    assert answer == "结论  与 [k1]"
+    assert len(records) == 1
+    assert records[0].element_id == "element-1"
+    assert any("无法核验，已移除" in note for note in notes)
+    assert any("正文中" in note and "无法核验" in note for note in notes)
 
 
 @pytest.fixture
@@ -736,6 +797,48 @@ def test_full_plugin_ask_admits_core_citations_and_persists_mode():
     assert response.citations[0].element_id == "element-1"
     assert response.anchors[0].key == "k1"
     assert response.reasoning_trace[0].step_type == "plugin"
+    # Clean admission (every citation verified, every marker bound) must not
+    # add noise: no synthetic "引用核验未全部通过" step beyond the provider's
+    # own trace step.
+    assert len(response.reasoning_trace) == 1
+
+
+def test_plugin_ask_admits_partial_citations_and_discloses_degraded_verification():
+    def answer(_context, retrieval, _model, trace):
+        evidence = retrieval.search("evidence", 1)
+        trace.step("检索", "命中一条")
+        return AskEngineResult(
+            "结论 [k1] 与 [k2]", (evidence[0].evidence_key, "pe-forged")
+        )
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.search", answer=answer)),
+    ))
+    service = _minimal_ask_service(
+        ask_engine_host=runtime.ask_engines,
+        ask_engine_participant_notebooks=lambda _notebook_id: ("nb",),
+        ask_engine_visible_sources=lambda _notebook_id: ("source-1",),
+        ask_engine_hidden_sources=lambda _notebook_id, _actor_id: (),
+    )
+    service.retrieval.federated_retrieve_elements = (
+        lambda *_args, **_kwargs: [_hit()]
+    )
+    service.evidence_context.evidence_elements = _all_live
+    service.evidence_context.citation_source_info = lambda _ids: {
+        "source-1": {"title": "权威来源", "file_name": "paper.pdf"}
+    }
+
+    response = service.ask(
+        "nb", AskRequest(question="问题", mode="alpha.search"), user_id="user"
+    )
+    assert response.answer == "结论 [k1] 与 "
+    assert response.anchors[0].key == "k1"
+    assert len(response.citations) == 1
+    assert response.answer_id == "answer-1"
+    last_step = response.reasoning_trace[-1]
+    assert last_step.step_type == "plugin"
+    assert last_step.summary == "引用核验未全部通过"
+    assert "无法核验" in last_step.detail["detail"]
 
 
 def test_plugin_cannot_mutate_the_core_request_identity_before_commit():
@@ -834,27 +937,39 @@ def test_ask_modes_projection_is_sanitized_and_availability_filtered(monkeypatch
         )
 
 
-def test_citation_admission_rejects_residual_citation_like_markers():
-    """畸形「引用样」括号组整份拒绝(codex #602 R6 P1):`[k1, nope]` 不被
-    LOOSE_MARKER_RE 匹配、会原样留在正文里,渲染成从未被核验的引用外观。"""
+def test_citation_admission_strips_residual_citation_like_markers_and_discloses():
+    """畸形「引用样」括号组摘除 + 披露(codex #602 R6 P1 的纪律,执行方式从
+    整份拒绝改为摘除):`[k1, nope]` 不被 LOOSE_MARKER_RE 匹配、会原样留在
+    正文里,渲染成从未被核验的引用外观——现在这类残留组本身被摘除,合法组
+    保留,问题折进 notes。"""
     access = _retrieval_access()
     key = access.search("evidence", 1)[0].evidence_key
 
-    with pytest.raises(AskEnginePortError) as malformed:
-        admit_plugin_engine_result(access, "合法 [k1] 加畸形 [k1, nope]", (key,))
-    assert malformed.value.code == "plugin_engine_unverified_citation"
+    answer, records, notes = admit_plugin_engine_result(
+        access, "合法 [k1] 加畸形 [k1, nope]", (key,)
+    )
+    assert answer == "合法 [k1] 加畸形 "
+    assert len(records) == 1
+    assert notes == ("正文中 1 处疑似引用标记无法解析，已移除",)
 
     cjk = _retrieval_access(hit=_hit(element_id="element-cjk"))
     cjk_key = cjk.search("evidence", 1)[0].evidence_key
-    with pytest.raises(AskEnginePortError) as cjk_malformed:
-        admit_plugin_engine_result(cjk, "【k1】与【k2、nope】", (cjk_key,))
-    assert cjk_malformed.value.code == "plugin_engine_unverified_citation"
+    cjk_answer, cjk_records, cjk_notes = admit_plugin_engine_result(
+        cjk, "【k1】与【k2、nope】", (cjk_key,)
+    )
+    assert cjk_answer == "[k1]与"
+    assert len(cjk_records) == 1
+    assert cjk_notes == ("正文中 1 处疑似引用标记无法解析，已移除",)
 
-    # 合法组照常通过——归一化输出自己写回的组不被残留扫描误伤。
+    # 合法组照常通过——归一化输出自己写回的组不被残留扫描误伤,且干净路径
+    # 不产生任何披露噪音。
     ok = _retrieval_access(hit=_hit(element_id="element-ok"))
     ok_key = ok.search("evidence", 1)[0].evidence_key
-    answer, _records = admit_plugin_engine_result(ok, "正文 [k1] 结尾", (ok_key,))
+    answer, _records, ok_notes = admit_plugin_engine_result(
+        ok, "正文 [k1] 结尾", (ok_key,)
+    )
     assert answer == "正文 [k1] 结尾"
+    assert ok_notes == ()
 
 
 def test_search_kg_issues_element_addressed_handles_admitted_as_citations():
@@ -869,7 +984,7 @@ def test_search_kg_issues_element_addressed_handles_admitted_as_citations():
     assert hits[0].evidence_key
     assert "退火" in hits[0].text and "缓慢冷却" in hits[0].text
     assert hits[0].location_label == "第 3 页"
-    answer, records = admit_plugin_engine_result(
+    answer, records, notes = admit_plugin_engine_result(
         access, "结论 [k1]", (hits[0].evidence_key,)
     )
     assert answer == "结论 [k1]"
@@ -877,6 +992,7 @@ def test_search_kg_issues_element_addressed_handles_admitted_as_citations():
     assert records[0].element_id == "element-1"
     assert records[0].source_id == "source-1"
     assert records[0].source_file_name == "paper.pdf"
+    assert notes == ()
 
 
 def test_search_kg_two_lane_routing_mirrors_the_built_in_ask():
@@ -926,10 +1042,14 @@ def test_knowledge_hit_without_a_live_source_is_context_only():
     assert hits[0].evidence_key == ""
     assert hits[0].source_title == "" and hits[0].location_label == ""
     assert "退火" in hits[0].text
-    # Not citable ...
-    with pytest.raises(AskEnginePortError) as rejected:
-        admit_plugin_engine_result(access, "结论 [k1]", ("",))
-    assert rejected.value.code == "plugin_engine_unverified_citation"
+    # Not citable -- the empty context-only key is dropped and the marker
+    # naming it is stripped, degrading rather than rejecting the answer ...
+    answer, records, notes = admit_plugin_engine_result(
+        access, "结论 [k1]", ("",)
+    )
+    assert records == ()
+    assert "[k1]" not in answer
+    assert notes
     # ... and not an expansion anchor either.
     assert access.kg_neighbors("", 2) == ()
 
@@ -972,11 +1092,12 @@ def test_bound_evidence_requires_the_source_to_be_in_the_frozen_snapshot_not_jus
     )
     hits = mixed.search_kg("退火", 2)
     assert hits[0].evidence_key, "the in-snapshot binding must still be citable"
-    _, records = admit_plugin_engine_result(
+    _, records, notes = admit_plugin_engine_result(
         mixed, "结论 [k1]", (hits[0].evidence_key,)
     )
     assert records[0].source_id == "source-1"
     assert records[0].element_id == "element-in"
+    assert notes == ()
 
 
 def test_plugin_port_universe_excludes_the_callers_memory_projections():
@@ -1295,9 +1416,12 @@ def test_search_kg_all_empty_text_hit_is_context_only_not_a_ledger_entry():
     hits = access.search_kg("退火", 1)
 
     assert hits[0].evidence_key == "" and hits[0].text == ""
-    with pytest.raises(AskEnginePortError) as rejected:
-        admit_plugin_engine_result(access, "结论 [k1]", ("",))
-    assert rejected.value.code == "plugin_engine_unverified_citation"
+    answer, records, notes = admit_plugin_engine_result(
+        access, "结论 [k1]", ("",)
+    )
+    assert records == ()
+    assert "[k1]" not in answer
+    assert notes
     # Not registered as a `kg_neighbors` anchor either.
     assert access.kg_neighbors("", 2) == ()
 
@@ -1338,10 +1462,11 @@ def test_kg_neighbors_resolves_only_object_anchors_and_validates_its_request():
 
     assert forwarded == [("notebook-1", "ko-1", "depends_on", "out")]
     assert hits[0].object_type == "concept" and hits[0].evidence_key
-    _answer, records = admit_plugin_engine_result(
+    _answer, records, notes = admit_plugin_engine_result(
         access, "邻居 [k1]", (hits[0].evidence_key,)
     )
     assert records[0].element_id == "element-2"
+    assert notes == ()
 
 
 def test_kg_neighbors_resolves_origin_against_the_anchors_own_library_not_active():
@@ -1524,7 +1649,8 @@ def test_kg_evidence_requires_the_element_itself_to_survive_not_just_the_source(
     )
     key = access.search_kg("查询", 1)[0].evidence_key
     assert key, "a hit with one surviving binding must stay citable"
-    _, records = admit_plugin_engine_result(access, "回答 [k1]", (key,))
+    _, records, notes = admit_plugin_engine_result(access, "回答 [k1]", (key,))
+    assert notes == ()
     assert records[0].element_id == "element-live", (
         "the citation must bind the first SURVIVING evidence element, not the "
         "first listed one"
