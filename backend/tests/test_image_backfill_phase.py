@@ -1425,6 +1425,64 @@ def test_a_query_string_src_is_enriched_end_to_end_not_duplicated(
     assert _run(repo, notebook_id, outputs)["images_enriched"] == 0
 
 
+def test_image_syntax_inside_structural_blocks_never_becomes_an_asset(
+    repo, outputs, tmp_path
+):
+    """端到端：HTML 表块内、缩进代码块内的图片语法往往只是个**字面例子**，规范解析器
+    一条 image 元素都不产出。还原它们就是造出在线路径永远不会有的元素与资产。"""
+    docs = tmp_path / "literal"
+    docs.mkdir()
+    (docs / "literal.md").write_text(
+        "正文一段足够长的话在这里说明系统设计。\n\n"
+        "<table>\n<tr><td>写法示例</td></tr>\n![](images/aaa.jpg)\n</table>\n\n"
+        "    ![](images/bbb.jpg)\n\n"
+        "第二段正文继续往下说明细节。\n",
+        encoding="utf-8",
+    )
+    notebook_id = bi.ensure_notebook(repo, None, "nb-literal")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["id"]
+    assert _image_elements(repo, source_id) == []
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_inserted"] == 0
+    assert result["images_enriched"] == 0
+    assert result["skipped"].get("inline_image_skipped") == 2
+    assert _image_elements(repo, source_id) == []
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []
+
+
+def test_the_restored_label_is_not_inflated_by_inline_references(
+    repo, outputs, tmp_path
+):
+    """行内引用不该把还原出来的独立图的序号顶高。"""
+    docs = tmp_path / "label"
+    docs.mkdir()
+    (docs / "label.md").write_text(
+        "这一段里内嵌了 ![备注](images/inline.jpg) 一张图，后面才是真正独占一行的。\n\n"
+        "![](images/aaa.jpg)\n",
+        encoding="utf-8",
+    )
+    notebook_id = bi.ensure_notebook(repo, None, "nb-label")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["id"]
+
+    assert _run(repo, notebook_id, outputs)["images_inserted"] == 1
+    restored = _rows(
+        repo,
+        "SELECT location_label FROM source_elements "
+        "WHERE source_id=? AND element_type='image'",
+        source_id,
+    )
+    assert [row["location_label"] for row in restored] == ["Markdown image 1"]
+
+
 def test_cli_exits_non_zero_when_a_source_fails(repo, seeded, outputs, monkeypatch):
     """丢掉汇总、恒返回 0 会让编排脚本把一次「写事务炸了」的运行当成完全成功。"""
     notebook_id, _ = seeded

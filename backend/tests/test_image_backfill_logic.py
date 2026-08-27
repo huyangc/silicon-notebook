@@ -316,18 +316,34 @@ def test_rerun_continues_the_suffix_instead_of_colliding():
 
 
 @pytest.mark.parametrize(
-    "markdown",
+    "markdown,refs",
     [
-        "第一段正文写了一些内容。\n\n第二段里内嵌了 ![](images/a.jpg) 这张图。\n",
-        "第一段正文写了一些内容。\n\n- 列表项里有 ![](images/a.jpg) 一张图\n",
-        "第一段正文写了一些内容。\n\n| 甲 | ![](images/a.jpg) |\n| - | - |\n",
+        # 行内：段落中间 / 列表项 / 表格单元格。
+        ("第一段正文写了一些内容。\n\n第二段里内嵌了 ![](images/a.jpg) 这张图。\n", 1),
+        ("第一段正文写了一些内容。\n\n- 列表项里有 ![](images/a.jpg) 一张图\n", 1),
+        ("第一段正文写了一些内容。\n\n| 甲 | ![](images/a.jpg) |\n| - | - |\n", 1),
+        # HTML 表块内部：行看起来独占，但整块折成一条 table 元素。
+        (
+            "第一段正文写了一些内容。\n\n<table>\n![](images/a.jpg)\n</table>\n",
+            1,
+        ),
+        # 缩进 4 列以上：缩进代码块 / 列表续行 / 段落续行，都不产 image 块。
+        ("第一段正文写了一些内容。\n\n    ![](images/a.jpg)\n", 1),
+        ("第一段正文写了一些内容。\n\n\t![](images/a.jpg)\n", 1),
+        ("- 列表项\n\n    ![图 1 示意](images/a.jpg)\n", 1),
+        # 一行两张：markdown-it 当普通段落，同样不产 image 块。
+        ("第一段正文写了一些内容。\n\n![图 甲](images/a.jpg)![图 乙](images/a.jpg)\n", 2),
     ],
 )
-def test_images_that_do_not_own_their_line_are_skipped(markdown):
-    """产品规则平移：在线 markdown 路径只对**独占一行**的图片落资产，列表项/
-    表格单元格/段落中间的内嵌图片只留 alt 文本（`parse_markdown_text` 实测三种
-    形态都不产出带 `metadata.src` 的 image 元素）。回填不得比在线路径更宽。"""
+def test_images_that_are_not_real_image_blocks_are_skipped(markdown, refs):
+    """产品规则平移：只有真正的 image 块才落资产。「行独占」只是必要条件——
+    `parse_markdown_text` 实测这些形态**一条 image 元素都不产出**，把它们当真图
+    还原就会造出一批在线路径永远不会有的元素与资产（表格/代码里的图片语法往往
+    只是个字面例子）。"""
     elements = _parsed_els(markdown)
+    assert not [
+        element for element in elements if element.element_type == "image"
+    ], "前置条件：规范解析器对这种形态不产 image 元素"
     plan = _plan(
         markdown,
         elements,
@@ -335,7 +351,36 @@ def test_images_that_do_not_own_their_line_are_skipped(markdown):
         _index("a.jpg"),
     )
     assert plan.images == []
-    assert plan.skipped == {"inline_image_skipped": 1}
+    assert plan.enriched == []
+    assert plan.skipped == {"inline_image_skipped": refs}
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        # 行内引用不该占号：规范解析器只数 image **块**。
+        "这一段里内嵌了 ![备注](images/i.jpg) 一张图。\n\n![图 1 示意](images/z.jpg)\n",
+        # 结构块内与多图行同样不占号。
+        "<table>\n![](images/t.jpg)\n</table>\n\n    ![](images/c.jpg)\n\n"
+        "![图 甲](images/a.jpg)![图 乙](images/b.jpg)\n\n![图 x](images/z.jpg)\n",
+        "正文一段足够长的话在这里。\n\n![图 甲](images/a.jpg)\n\n![图 乙](images/b.jpg)\n",
+    ],
+)
+def test_the_ordinal_matches_the_canonical_parser_label(markdown):
+    """`location_label` 的序号必须与规范解析器同口径。它数的是 image **块**，而我们
+    原先把每一处正则命中都数进去——于是还原出的独立图会标成 `Markdown image 2`，
+    规范解析器却标 `1`。"""
+    canonical = [
+        (element.location_label, element.metadata.get("src"))
+        for element in parse_markdown_text(SID, markdown)
+        if element.element_type == "image"
+    ]
+    _, refs = scan_markdown(markdown)
+    ours = [
+        (f"Markdown image {ref.ordinal}", ref.src) for ref in refs if ref.image_block
+    ]
+    assert canonical, "前置条件：这份 markdown 必须真的产出 image 元素"
+    assert ours == canonical
 
 
 def test_alignment_anchors_an_inline_image_line_on_its_own_element():

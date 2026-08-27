@@ -106,6 +106,11 @@ MIN_PREFIX_MATCH_CHARS = 12
 #: 本工具自己，且在 report 里看得见。
 ANCHOR_SUFFIX_WIDTH = 3
 
+#: 缩进到这么多列（tab 按 4 列）就不再是普通正文行。markdown 的缩进代码块判据是
+#: 4 列；列表续行与段落续行同样缩进，而这三种形态实测都**不**产出 image 块，所以
+#: 对"这一行是不是真图"这个问题它们同答一个"不是"，一条判据就够。
+INDENTED_CODE_COLUMNS = 4
+
 #: 同一锚点下能容纳的最大图片序号（由位宽派生，别写第二个字面量）。
 MAX_ANCHOR_SUFFIX = 10 ** ANCHOR_SUFFIX_WIDTH - 1
 
@@ -162,15 +167,21 @@ class ImageRef:
     kind: str
     """``"relative"`` / ``"remote"`` / ``"data"``。"""
 
-    line_exclusive: bool
-    """这一行除了图片引用（与空白）之外别无他物。
+    image_block: bool
+    """这处引用所在的行确实是一个**真正的 image 块**。
 
-    在线 markdown 路径只把**独占一整行**的图片产出成 image 元素并落资产；列表
-    项、表格单元格与段落中间的内嵌图片一律只留 alt 文本
-    （`parse_markdown_text` 实测：``- 列表项 ![alt](b.jpg)`` → ``list_item``、
-    ``| 甲 | ![alt](c.jpg) |`` → ``table``、``见 ![](a.jpg) 所示`` →
-    ``paragraph``，三者都没有 ``metadata.src``）。回填必须服从同一条产品规则，
-    否则它会造出一批在线路径永远不会产出的资产。"""
+    在线 markdown 路径只为这种行产出 image 元素并落资产。「行独占」只是必要条件，
+    不是充分条件——`parse_markdown_text` 实测这几种"看起来独占一行"的形态一条
+    image 元素都不产出：
+
+    * **HTML 表块内部**的图片行（整块折成一条 table 元素）；
+    * **缩进 4 列以上**的图片行（缩进代码块 / 列表续行 / 段落续行，三种实测都没有
+      image 元素，tab 缩进同理）；
+    * 一行里**两张以上**图片（markdown-it 把它当普通段落）。
+
+    把它们当真图还原，就会造出一批在线路径永远不会产出的元素与资产，违背"表格/
+    代码内的图片只留 alt 文本、不落资产"的产品规则。围栏代码块内的行更早就被归成
+    ``code`` 并整行跳过，连引用都不会被收集。"""
 
 
 @dataclass(frozen=True)
@@ -227,6 +238,19 @@ def _norm_without_image_alt(value: str) -> str:
     text = _IMAGE_RE.sub(" ", text)
     text = _INLINE_MARKS_RE.sub("", text)
     return " ".join(text.split())
+
+
+def _leading_columns(raw: str) -> int:
+    """行首缩进了多少列（tab 按 4 列，与 markdown 的缩进代码块口径一致）。"""
+    width = 0
+    for char in raw:
+        if char == " ":
+            width += 1
+        elif char == "\t":
+            width += INDENTED_CODE_COLUMNS
+        else:
+            break
+    return width
 
 
 def canonical_src(value: str) -> str:
@@ -316,22 +340,39 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
             html_open = True
             in_html_block = True
 
-        # 「这一行只有图片」按**原始**行判：剥掉全部图片引用后还剩下什么。刻意
-        # 不复用 `normalize_text`——它会先剥掉行首的列表/引用/标题标记，于是
+        # 「这一行是不是一个真正的 image 块」——准入与序号共用的**唯一**判据
+        # （见 `ImageRef.image_block`）。「剥掉图片后还剩什么」按**原始**行判：刻意
+        # 不复用 `normalize_text`，它会先剥掉行首的列表/引用/标题标记，于是
         # `- ![](b.jpg)` 会被判成"只有图片"，而在线路径对它产出的是 list_item。
-        line_exclusive = not _IMAGE_RE.sub("", raw).strip()
+        matches = list(_IMAGE_RE.finditer(raw))
+        image_block = (
+            len(matches) == 1
+            and not (html_open or in_html_block)
+            and _leading_columns(raw) < INDENTED_CODE_COLUMNS
+            and not _IMAGE_RE.sub("", raw).strip()
+        )
         line_refs: list[ImageRef] = []
-        for match in _IMAGE_RE.finditer(raw):
-            ordinal += 1
+        for match in matches:
+            # 序号只数真正的 image 块，与 `parse_markdown_text` 的 per-type 计数器
+            # 同口径：行内引用、结构块内引用、多图行都不占号，否则还原出来的独立图
+            # 会标成 `Markdown image 2` 而规范解析器标 `1`。
+            #
+            # 已登记的残余：规范解析器把**空 alt** 的图片在 block 层就丢掉（实测
+            # `parse_blocks` 对 `![](a.jpg)` 根本不产 image 块），而那正是本工具要
+            # 还原的那一批——它们没有可对齐的规范号，所以这里按文档序照常给号。
+            # 全部独立图都带 alt 的文档里两侧逐字相同；混合文档只保证号在源内唯一
+            # 且跨重跑稳定。
+            if image_block:
+                ordinal += 1
             target = _strip_target(match.group("target"))
             line_refs.append(
                 ImageRef(
                     line=index,
-                    ordinal=ordinal,
+                    ordinal=ordinal if image_block else 0,
                     alt=(match.group("alt") or "").strip(),
                     src=target,
                     kind=classify_target(target),
-                    line_exclusive=line_exclusive,
+                    image_block=image_block,
                 )
             )
         refs.extend(line_refs)
@@ -364,7 +405,7 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
             # 说，`<table>` 之后紧跟的管道行属于那个 HTML 块（上面 kind 已归 table、
             # pipe 保持 False），不会重复起块。
             block_start = "table"
-        elif kind == "image" and any(ref.alt for ref in line_refs):
+        elif image_block and any(ref.alt for ref in line_refs):
             # 只对**带 alt** 的独立图片行跨越：空 alt、无描述、无资产的图片被
             # `parse_markdown_text` 整块丢弃（`if not caption and not description
             # and not asset_id: continue`），元素侧根本没有它，跨过去就会吃掉后面
@@ -742,10 +783,11 @@ def plan_source_images(
         if ref.kind != "relative":
             plan.skip(f"{ref.kind}_uri")
             continue
-        if not ref.line_exclusive:
-            # 产品规则：列表项/表格单元格/段落中间的内嵌图片只留 alt 文本、
-            # 不落资产（见 `ImageRef.line_exclusive`）。MinerU 的主流形态是图片
-            # 独占一行，不受影响。
+        if not ref.image_block:
+            # 产品规则：只有真正的 image 块才落资产。列表项/表格单元格/段落中间的
+            # 内嵌图片只留 alt 文本；HTML 表块内部、缩进 4 列以上、以及一行多图的
+            # 引用同样不产 image 元素（见 `ImageRef.image_block`）。MinerU 的主流
+            # 形态是图片独占一整行、无缩进，不受影响。
             plan.skip("inline_image_skipped")
             continue
         if ref.src in already:
