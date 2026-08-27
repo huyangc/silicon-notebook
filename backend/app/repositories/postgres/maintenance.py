@@ -12,10 +12,12 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 from app.repositories.postgres._store_utils import (
     execute_many,
     json_value,
+    jsonb,
     normalize_timestamp,
     sqlite_compatible_row,
 )
 from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
+from app.repositories.image_backfill_rows import image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite maintenance 共用
     asset_ref_tokens,
     collect_change_payload_tokens,
@@ -1794,6 +1796,121 @@ class PostgresMaintenanceAdapter:
     def chunk_elements_indexed(self, notebook_id: str) -> bool:
         with self._runtime.database.connect() as db:
             return self._runtime.knowledge.chunk_elements_indexed(db, notebook_id)
+
+    # ------------------------------------------------- backfill-images (离线)
+    # SQLite 侧 `SQLiteMaintenanceAdapter` 的逐字对等半（双后端同修红线）。
+    # 同样刻意不进 `ports.py`：那里的 Protocol 方法总数是只许降的零余量上限，
+    # 而这三个方法只有 `image_backfill_phase` 一个消费方，它按自己模块里的窄
+    # Protocol 结构化依赖它们。
+
+    def image_backfill_source_page(
+        self, notebook_id: str, after_id: str, limit: int
+    ) -> list[dict]:
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT id, file_name, file_path FROM sources "
+                "WHERE notebook_id=%s AND source_type NOT IN ('memory','knowhow') "
+                "AND (lower(file_name) LIKE '%%.md' OR lower(file_name) LIKE '%%.markdown') "
+                "AND id > %s ORDER BY id COLLATE \"C\" LIMIT %s",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "file_name": row["file_name"] or "",
+                "file_path": row["file_path"] or "",
+            }
+            for row in rows
+        ]
+
+    def image_backfill_source_state(self, source_id: str) -> dict:
+        """SQLite 侧同名方法的对等半；元素顺序用 ``id COLLATE "C"``——与
+        `source_elements_for_chunking` 同一口径，也就是对齐算法依赖的文档序。"""
+        with self._runtime.database.connect() as db:
+            element_rows = db.execute(
+                "SELECT id, element_type, text, metadata, created_at "
+                "FROM source_elements WHERE source_id=%s ORDER BY id COLLATE \"C\"",
+                (source_id,),
+            ).fetchall()
+            chunk_rows = db.execute(
+                "SELECT id, element_ids FROM chunks WHERE source_id=%s "
+                "ORDER BY id COLLATE \"C\"",
+                (source_id,),
+            ).fetchall()
+        return image_backfill_state(element_rows, chunk_rows)
+
+    def apply_image_backfill(
+        self,
+        notebook_id: str,
+        source_id: str,
+        elements: Sequence[dict],
+        chunk_element_ids: dict[str, list[str]],
+        *,
+        created_at: Any,
+        updated_at: Any,
+    ) -> None:
+        """一个来源的全部插入，一个写事务（SQLite 侧同名方法的对等半）。
+
+        `chunks.text` 与 chunk id 不变，所以 `chunk_embeddings` 一行不动；反查行
+        与 `sources.updated_at` 同事务。"""
+        stamp = normalize_timestamp(created_at)
+        with self._runtime.database.write() as db:
+            execute_many(
+                db,
+                "INSERT INTO source_elements "
+                "(id, source_id, element_type, location_label, text, metadata, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (
+                        element["id"],
+                        source_id,
+                        element["element_type"],
+                        element["location_label"],
+                        element["text"],
+                        jsonb(dict(element["metadata"])),
+                        stamp,
+                    )
+                    for element in elements
+                ],
+            )
+            for chunk_id, element_ids in chunk_element_ids.items():
+                db.execute(
+                    "UPDATE chunks SET element_ids=%s WHERE id=%s AND source_id=%s",
+                    (jsonb(list(element_ids)), chunk_id, source_id),
+                )
+            rows = chunk_element_reverse_rows(
+                notebook_id,
+                [
+                    {"id": chunk_id, "element_ids": list(element_ids)}
+                    for chunk_id, element_ids in chunk_element_ids.items()
+                ],
+            )
+            if rows:
+                execute_many(
+                    db,
+                    "INSERT INTO chunk_elements (notebook_id,element_id,chunk_id) "
+                    "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                    rows,
+                )
+            db.execute(
+                "UPDATE sources SET updated_at=%s WHERE id=%s",
+                (normalize_timestamp(updated_at), source_id),
+            )
+
+    def image_backfill_discard_assets(self, asset_ids: Sequence[str]) -> list[dict]:
+        """SQLite 侧同名方法的对等半：删这一批资产行并原样返回供 unlink。"""
+        ids = [asset_id for asset_id in dict.fromkeys(asset_ids) if asset_id]
+        if not ids:
+            return []
+        with self._runtime.database.write() as db:
+            rows = db.execute(
+                "DELETE FROM notebook_assets WHERE id = ANY(%s) RETURNING *",
+                (ids,),
+            ).fetchall()
+        return [
+            sqlite_compatible_row(row, timestamp_columns=("created_at",)) or {}
+            for row in rows
+        ]
 
     def clear_source_index(self, notebook_id: str) -> int:
         with self._runtime.database.write() as db:
