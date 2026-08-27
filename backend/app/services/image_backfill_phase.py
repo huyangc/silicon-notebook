@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
 
@@ -93,6 +94,10 @@ class ImageBackfillPort(Protocol):
         *,
         created_at: Any,
     ) -> None: ...
+
+    def image_backfill_source_asset_ids(
+        self, notebook_id: str, source_id: str
+    ) -> list[str]: ...
 
     def image_backfill_discard_assets(
         self, asset_ids: Sequence[str]
@@ -149,8 +154,12 @@ def _totals() -> dict[str, int]:
         "images_inserted": 0,
         "images_enriched": 0,
         # 实际落地的图里带图注的张数（不是计划里的——被 mime/读盘/资产校验拦下
-        # 的那些不该算进"收割到多少图注"）。
+        # 的那些不该算进"收割到多少图注"）。dry-run 一张都不落，那时改取计划命中
+        # 数，否则这个数恒为 0、把 dry-run 的估算用途废掉。
         "captions": 0,
+        # 本趟新出现、却没有任何元素引用的资产行被扫掉了几条（见
+        # `_sweep_pass_orphans`）。正常跑恒为 0，非零本身就是信号。
+        "orphan_assets_removed": 0,
     }
 
 
@@ -307,22 +316,62 @@ def _metadata_update_row(image: EnrichedImage, existing: dict, asset_id: str) ->
     return {"id": image.element_id, "metadata": metadata}
 
 
+@dataclass(frozen=True)
+class ApplyOutcome:
+    inserted: int = 0
+    enriched: int = 0
+    captions: int = 0
+    orphan_assets_removed: int = 0
+
+
+def _referenced_asset_ids(
+    state: dict, rows: Sequence[dict] = (), updates: Sequence[dict] = ()
+) -> set[str]:
+    """这个来源的元素当前引用着哪些资产 id。
+
+    ``rows``/``updates`` 只有在它们**已经提交**之后才该传进来——回滚路径传空，
+    正是那样才让本次刚写下的资产行落进"没人引用"那一边、被扫掉。"""
+    referenced: set[str] = set()
+    sources: list[Any] = [element.get("metadata") for element in state.get("elements", ())]
+    sources.extend(row.get("metadata") for row in rows)
+    sources.extend(update.get("metadata") for update in updates)
+    for metadata in sources:
+        if not isinstance(metadata, dict):
+            continue
+        asset_id = metadata.get("asset_id")
+        if isinstance(asset_id, str) and asset_id:
+            referenced.add(asset_id)
+    return referenced
+
+
 def apply_plan(
     repo: ImageBackfillRepository,
     notebook_id: str,
     source_id: str,
     plan: SourcePlan,
     state: dict,
-) -> tuple[int, int, int]:
+) -> ApplyOutcome:
     """落资产 → 一个写事务落元素/metadata/chunk/反查行/updated_at。
 
-    返回 ``(插入图片数, 就地补齐数, 实际落地图片里带图注的张数)``。
-
     两段式是被 `AssetService.save_source_image` 的形状逼出来的（它自带事务并写
-    盘）。中间的失败窗口由回滚补上：元素事务失败时，本次刚写的资产行连同磁盘
-    文件一起删掉（`sweep_orphan_assets` 明确不扫 ``source_id`` 非空的行，孤儿
-    留着没人回收），于是重跑从一个干净状态重新开始——重跑幂等因此是"重建"而
-    不是"复用孤儿"。"""
+    盘）。中间有两个失败窗口，都由**本趟范围内的孤儿清扫**收口：
+
+    1. 元素事务失败——本次写下的资产行连同磁盘文件一起删掉；
+    2. `save_source_image` **先提交 `notebook_assets` 行、后写盘**
+       （`assets.py`），写盘/落盘校验失败时它抛异常，调用方**拿不到 asset id**，
+       于是那一行既不在 ``written`` 里、又永远没人引用。
+
+    `sweep_orphan_assets` 明确不扫 ``source_id`` 非空的行，所以这两类孤儿没有任何
+    后台会回收——必须在这里扫。判据是「本趟**新出现**的、且不被该来源任何元素
+    引用的资产行」：先在动手之前快照一次该来源的资产 id，收尾时只考虑差集。
+
+    **刻意不用更宽的判据**（"该来源全部无人引用的资产行"，也就是 docs 里写给人工
+    清理用的那条）：深拷贝会为 `notebook_assets` 铸新 id，却**不**重映射
+    `source_elements.metadata.asset_id`（`notebook_sharing.py` 的 json_maps 只含
+    element/source/object 三类 id）——实测一本副本里每一条来源图片资产行都"无人
+    引用"。广义清扫会把副本的资产行连同磁盘文件全删掉，那是本工具不该碰的数据。
+    历史 kill-9 残留仍按 docs 的判据人工清理。
+    """
     assets = AssetService(repo)
     created_by = repo.current_user().id
     written: list[str] = []
@@ -330,6 +379,10 @@ def apply_plan(
     updates: list[dict] = []
     metadata_by_id = {element["id"]: element["metadata"] for element in state["elements"]}
     max_bytes = int(repo.settings.mineru_max_image_bytes)
+    # 动手之前的快照：清扫只作用于这之后新出现的行。
+    assets_before = set(
+        repo.maintenance.image_backfill_source_asset_ids(notebook_id, source_id)
+    )
 
     def _store(image) -> str:
         """读盘 + 落资产；失败时记账并返回空串。"""
@@ -373,7 +426,14 @@ def apply_plan(
                 )
 
         if not rows and not updates:
-            return 0, 0, 0
+            # 一张都没落成，但 `_store` 可能已经在 `asset_write_failed` 上留下了
+            # 提交过的资产行——这条路同样要扫。
+            return ApplyOutcome(
+                orphan_assets_removed=_sweep_pass_orphans(
+                    repo, assets, notebook_id, source_id, assets_before,
+                    _referenced_asset_ids(state),
+                )
+            )
         created_at = state["element_created_at"]
         if rows and not created_at:
             # 该来源一条元素都没有——对齐因此不可能匹配到任何锚点，走到这里说明
@@ -413,8 +473,16 @@ def apply_plan(
             updates,
             created_at=created_at,
         )
+        # `try` 块必须**到此为止**：再往里放代码，一次提交成功之后才抛的异常会
+        # 走下面那条回滚，而回滚用的引用集不含 rows/updates，刚提交的资产会被
+        # 当成孤儿删掉。
     except BaseException:
-        _discard_assets(repo, assets, written)
+        # 什么都没提交，所以 rows/updates 不算引用——本次写下的资产行（含
+        # `asset_write_failed` 那些拿不到 id 的）全落进差集，被扫干净。
+        _sweep_pass_orphans(
+            repo, assets, notebook_id, source_id, assets_before,
+            _referenced_asset_ids(state),
+        )
         raise
     landed = {row["id"] for row in rows}
     captions = sum(
@@ -422,19 +490,43 @@ def apply_plan(
         for image in plan.images
         if image.element_id in landed and image.caption
     )
-    return len(rows), len(updates), captions
+    return ApplyOutcome(
+        inserted=len(rows),
+        enriched=len(updates),
+        captions=captions,
+        orphan_assets_removed=_sweep_pass_orphans(
+            repo, assets, notebook_id, source_id, assets_before,
+            _referenced_asset_ids(state, rows, updates),
+        ),
+    )
 
 
-def _discard_assets(
-    repo: ImageBackfillRepository, assets: AssetService, asset_ids: Sequence[str]
-) -> None:
-    """Best-effort 回滚：先删行（拿回路径）再 unlink 文件，两步都不抛。"""
-    if not asset_ids:
-        return
+def _sweep_pass_orphans(
+    repo: ImageBackfillRepository,
+    assets: AssetService,
+    notebook_id: str,
+    source_id: str,
+    assets_before: set[str],
+    referenced: set[str],
+) -> int:
+    """删掉本趟新出现、却没有任何元素引用的资产行与文件；返回删除条数。
+
+    Best-effort：清扫自身的失败绝不掩盖调用路径上的原始异常，也绝不掀翻一次
+    本来成功的来源。差集 `assets_before` 是硬性的——没有它，判据就会误伤深拷贝
+    留下的资产行（见 `apply_plan` 的 docstring）。"""
     try:
-        removed = repo.maintenance.image_backfill_discard_assets(list(asset_ids))
-    except Exception:  # pragma: no cover - 回滚本身失败不得掩盖原始异常
-        return
+        current = set(
+            repo.maintenance.image_backfill_source_asset_ids(notebook_id, source_id)
+        )
+    except Exception:  # pragma: no cover - 读不到就不扫，绝不猜
+        return 0
+    orphans = sorted((current - assets_before) - referenced)
+    if not orphans:
+        return 0
+    try:
+        removed = repo.maintenance.image_backfill_discard_assets(orphans)
+    except Exception:  # pragma: no cover - 清扫失败不得掩盖原始异常
+        return 0
     for row in removed:
         try:
             path = assets.path_for(row)
@@ -442,6 +534,7 @@ def _discard_assets(
                 path.unlink()
         except OSError:  # pragma: no cover
             continue
+    return len(removed)
 
 
 def run_backfill_images(
@@ -505,11 +598,18 @@ def run_backfill_images(
             totals["sources_scanned"] += 1
             try:
                 plan, state = plan_for_source(repo, source, image_index)
-                inserted, enriched, captions = (
-                    (0, 0, 0)
-                    if dry_run or not (plan.images or plan.enriched)
-                    else apply_plan(repo, notebook_id, source["id"], plan, state)
-                )
+                if dry_run:
+                    # 图注命中数取**计划**里的（`plan.captions`）。真跑时它按实际
+                    # 落地的图重算（被 mime/读盘/资产校验拦下的不算），但 dry-run
+                    # 一张都不落——照那条口径就恒为 0，逐源行、JSONL 与汇总会齐刷刷
+                    # 报「图注 0」，恰好废掉 dry-run 唯一的估算用途。
+                    outcome = ApplyOutcome(captions=plan.captions)
+                elif not (plan.images or plan.enriched):
+                    outcome = ApplyOutcome()
+                else:
+                    outcome = apply_plan(
+                        repo, notebook_id, source["id"], plan, state
+                    )
             except Exception as exc:  # 单源失败隔离，不掀翻整跑
                 totals["sources_failed"] += 1
                 _write_report(
@@ -525,13 +625,14 @@ def run_backfill_images(
                     flush=True,
                 )
                 continue
-            if inserted or enriched:
+            if outcome.inserted or outcome.enriched:
                 totals["sources_changed"] += 1
             totals["candidates_insert"] += len(plan.images)
             totals["candidates_enrich"] += len(plan.enriched)
-            totals["images_inserted"] += inserted
-            totals["images_enriched"] += enriched
-            totals["captions"] += captions
+            totals["images_inserted"] += outcome.inserted
+            totals["images_enriched"] += outcome.enriched
+            totals["captions"] += outcome.captions
+            totals["orphan_assets_removed"] += outcome.orphan_assets_removed
             for reason, count in plan.skipped.items():
                 skipped[reason] = skipped.get(reason, 0) + count
             entry = {
@@ -541,9 +642,10 @@ def run_backfill_images(
                 "candidates": len(plan.images) + len(plan.enriched),
                 "candidates_insert": len(plan.images),
                 "candidates_enrich": len(plan.enriched),
-                "inserted": inserted,
-                "enriched": enriched,
-                "captions": captions,
+                "inserted": outcome.inserted,
+                "enriched": outcome.enriched,
+                "captions": outcome.captions,
+                "orphan_assets_removed": outcome.orphan_assets_removed,
                 "coverage": round(plan.coverage, 4),
                 "skipped": dict(plan.skipped),
             }
