@@ -164,6 +164,7 @@ class AskEngineHost:
         trace: EngineTraceSink,
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
+        on_provider_finished: Callable[[], None] | None = None,
     ) -> AskEngineResult:
         item = self._providers.get(mode_id)
         if item is None:
@@ -186,7 +187,24 @@ class AskEngineHost:
                 reason = "plugin_engine_unavailable"
                 raise AskPluginEngineError(reason)
             implementation = item.contribution.implementation
-            result = implementation.answer(context, retrieval, model, trace)
+            try:
+                result = implementation.answer(context, retrieval, model, trace)
+            except BaseException:
+                # Freeze plugin execution time at the provider's actual raise
+                # boundary.  Preserve the provider failure if the core timing
+                # callback itself is unexpectedly unavailable; the service
+                # owns a later fallback close for that exceptional case.
+                try:
+                    if on_provider_finished is not None:
+                        on_provider_finished()
+                except BaseException:
+                    pass
+                raise
+            else:
+                # Host result-shape validation and the observability emit in
+                # ``finally`` below are core work, not plugin execution time.
+                if on_provider_finished is not None:
+                    on_provider_finished()
             if not _valid_result(result):
                 reason = "invalid_plugin_engine_result"
                 raise AskPluginEngineError(reason)

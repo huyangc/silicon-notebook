@@ -11,6 +11,7 @@ import pytest
 from app.api import ask_routes
 from app.application.ask_reasoning import StageBoundaryError
 from app.core.config import Settings
+from app.domain.cancellation import AskCancelled
 from app.domain.ask_engine import AskPluginEngineError
 from app.domain.retrieval import (
     NeighborExpansion,
@@ -32,6 +33,7 @@ from app.extension_sdk import (
     ExtensionContribution,
     ExtensionManifest,
 )
+from app.extensions.ask_engine import AskEngineHost
 from app.extensions.bootstrap import build_extension_runtime
 from app.extensions.discovery import ExtensionDiscoveryError
 from app.extensions.registry import ExtensionRegistryError
@@ -811,6 +813,24 @@ def test_plugin_trace_core_timing_covers_steps_and_terminal_tail():
     assert closed.value.code == "plugin_engine_failed"
 
 
+def test_plugin_trace_first_finish_call_owns_terminal_timestamp():
+    now = [10.0]
+    trace = PluginEngineTrace(
+        max_steps=1,
+        label_chars=20,
+        detail_chars=20,
+        clock=lambda: now[0],
+    )
+
+    now[0] = 11.25
+    finish_plugin_engine_trace(trace)
+    now[0] = 99.0
+    finish_plugin_engine_trace(trace)
+    terminal = complete_plugin_engine_trace(trace, status="completed")
+
+    assert terminal.duration_ms == 1250
+
+
 def test_plugin_trace_terminal_step_times_provider_that_emits_no_steps():
     now = [20.0]
     streamed = []
@@ -1074,6 +1094,109 @@ def test_host_sanitizes_plugin_authored_port_codes_and_observability():
     }
     assert "private question" not in str(events[0])
     assert events[0]["reason_code"] == "plugin_engine_failed"
+
+
+def test_host_freezes_trace_before_result_validation_and_observability():
+    now = [10.0]
+    order: list[tuple[str, float]] = []
+
+    def answer(_context, _retrieval, _model, _trace):
+        now[0] = 11.25
+        return AskEngineResult("回答", ())
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.timed", answer=answer)),
+    ))
+
+    def emit(_event):
+        order.append(("event", now[0]))
+        now[0] = 99.0
+
+    host = AskEngineHost(
+        runtime.registry,
+        event_sink=emit,
+        clock=lambda: now[0],
+    )
+    host.answer(
+        "alpha.timed",
+        SimpleNamespace(question="question"),
+        object(),
+        object(),
+        object(),
+        on_provider_finished=lambda: order.append(("finished", now[0])),
+    )
+
+    assert order == [("finished", 11.25), ("event", 11.25)]
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_type", "expected_code"),
+    (
+        (
+            AskEnginePortError("plugin_engine_model_unconfigured"),
+            AskPluginEngineError,
+            "plugin_engine_model_unconfigured",
+        ),
+        (AskCancelled("provider cancelled"), AskCancelled, None),
+    ),
+)
+def test_host_preserves_provider_failure_when_finish_callback_fails(
+    provider_error,
+    expected_type,
+    expected_code,
+):
+    callback_calls = []
+
+    def answer(_context, _retrieval, _model, _trace):
+        raise provider_error
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.failure", answer=answer)),
+    ))
+
+    def finish():
+        callback_calls.append("finished")
+        raise RuntimeError("core timing callback failed")
+
+    with pytest.raises(expected_type) as rejected:
+        runtime.ask_engines.answer(
+            "alpha.failure",
+            SimpleNamespace(question="question"),
+            object(),
+            object(),
+            object(),
+            on_provider_finished=finish,
+        )
+
+    assert callback_calls == ["finished"]
+    if expected_type is AskCancelled:
+        assert rejected.value is provider_error
+    else:
+        assert rejected.value.code == expected_code
+
+
+def test_host_freezes_trace_before_rejecting_malformed_result():
+    callback_calls = []
+
+    def answer(_context, _retrieval, _model, _trace):
+        return object()
+
+    runtime = build_extension_runtime((
+        _bundle("alpha", _Provider("alpha.invalid", answer=answer)),
+    ))
+
+    with pytest.raises(AskPluginEngineError) as rejected:
+        runtime.ask_engines.answer(
+            "alpha.invalid",
+            SimpleNamespace(question="question"),
+            object(),
+            object(),
+            object(),
+            on_provider_finished=lambda: callback_calls.append("finished"),
+        )
+
+    assert callback_calls == ["finished"]
+    assert rejected.value.code == "invalid_plugin_engine_result"
 
 
 def test_ask_modes_projection_is_sanitized_and_availability_filtered(monkeypatch):

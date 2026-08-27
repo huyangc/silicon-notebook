@@ -1559,6 +1559,9 @@ class AskService:
                         model,
                         trace,
                         event_sink=getattr(self.event_log, "emit", None),
+                        on_provider_finished=lambda: finish_plugin_engine_trace(
+                            trace
+                        ),
                     )
                 except AskCancelled:
                     raise
