@@ -38,7 +38,7 @@ import json
 import mimetypes
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol, Sequence
+from typing import Any, Optional, Protocol, Sequence
 
 from app.services.image_backfill import (
     ElementView,
@@ -80,7 +80,6 @@ class ImageBackfillPort(Protocol):
         chunk_element_ids: dict[str, list[str]],
         *,
         created_at: Any,
-        updated_at: Any,
     ) -> None: ...
 
     def image_backfill_discard_assets(
@@ -239,8 +238,6 @@ def apply_plan(
     source_id: str,
     plan: SourcePlan,
     state: dict,
-    *,
-    now: Callable[[], str],
 ) -> int:
     """落资产 → 一个写事务落元素/chunk/反查行/updated_at。返回插入图片数。
 
@@ -283,6 +280,14 @@ def apply_plan(
 
         if not rows:
             return 0
+        created_at = state["element_created_at"]
+        if not created_at:
+            # 该来源一条元素都没有——对齐因此不可能匹配到任何锚点，走到这里说明
+            # 上游算错了。宁可整源失败也不要用"现在"当元素批次时间戳（那会把
+            # 图片在详情分页里全部沉底，并让命令目录的来源代次平白漂移）。
+            raise RuntimeError(
+                f"image backfill for {source_id} has no element generation stamp"
+            )
 
         planned_by_id = {image.element_id: image for image in plan.images}
         chunk_element_ids: dict[str, list[str]] = {}
@@ -292,7 +297,6 @@ def apply_plan(
             chunk_id = planned_by_id[row["id"]].chunk_id
             chunk_element_ids[chunk_id].append(row["id"])
         touched = {planned_by_id[row["id"]].chunk_id for row in rows}
-        stamp = now()
         repo.maintenance.apply_image_backfill(
             notebook_id,
             source_id,
@@ -302,8 +306,7 @@ def apply_plan(
                 for chunk_id, element_ids in chunk_element_ids.items()
                 if chunk_id in touched
             },
-            created_at=state["element_created_at"] or stamp,
-            updated_at=stamp,
+            created_at=created_at,
         )
     except BaseException:
         _discard_assets(repo, assets, written)
@@ -339,14 +342,12 @@ def run_backfill_images(
     limit: Optional[int] = None,
     dry_run: bool = False,
     report_path: Optional[Path] = None,
-    now: Optional[Callable[[], str]] = None,
 ) -> dict[str, Any]:
     if not repo.settings.mineru_return_images:
         raise ImageBackfillDisabled(
             "MINERU_RETURN_IMAGES=false：部署已关闭来源图片，backfill-images 拒绝运行"
         )
     repo.get_notebook(notebook_id)  # KeyError if missing
-    clock = now or (lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
 
     started = time.perf_counter()
     image_index = build_image_index([Path(root) for root in mineru_outputs])
@@ -373,9 +374,7 @@ def run_backfill_images(
                 inserted = (
                     0
                     if dry_run or not plan.images
-                    else apply_plan(
-                        repo, notebook_id, source["id"], plan, state, now=clock
-                    )
+                    else apply_plan(repo, notebook_id, source["id"], plan, state)
                 )
             except Exception as exc:  # 单源失败隔离，不掀翻整跑
                 totals["sources_failed"] += 1

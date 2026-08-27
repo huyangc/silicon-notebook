@@ -1877,7 +1877,6 @@ class SQLiteMaintenanceAdapter:
         chunk_element_ids: dict[str, list[str]],
         *,
         created_at: str,
-        updated_at: str,
     ) -> None:
         """一个来源的全部插入，**一个写事务**。
 
@@ -1885,7 +1884,12 @@ class SQLiteMaintenanceAdapter:
         `chunks.text` 与 chunk id 逐字节不变，所以 `chunk_embeddings`
         （`ON DELETE CASCADE` 挂在 chunk 行上）一行都不会动。反查行
         `chunk_elements` 与它们描述的那次 chunk 写入同事务（v46 红线），
-        `sources.updated_at` 也在同一事务里推进（元素换代的变更信号）。"""
+        `sources.updated_at` 也在同一事务里推进（元素换代的变更信号）。
+
+        ``updated_at`` 刻意**不**由调用方传：时间戳格式是仓储自己的约定（带微秒
+        与本地偏移的 ISO），而 `sources.updated_at` 是被当作字符串比较的变更信号
+        令牌——让离线调用方自带一个"看起来像 ISO"的时钟，写进去的就是一个比旧值
+        还小的字符串。"""
         with self._runtime.database.write() as db:
             db.executemany(
                 "INSERT INTO source_elements "
@@ -1924,7 +1928,7 @@ class SQLiteMaintenanceAdapter:
                 )
             db.execute(
                 "UPDATE sources SET updated_at=? WHERE id=?",
-                (updated_at, source_id),
+                (self._runtime.seams.now(), source_id),
             )
 
     def image_backfill_discard_assets(self, asset_ids: Sequence[str]) -> list[dict]:
