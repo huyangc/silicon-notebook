@@ -32,7 +32,7 @@ from app.repositories.chunk_elements import (
     reverse_rows as chunk_element_reverse_rows,
     reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
 )
-from app.repositories.image_backfill_rows import image_backfill_state
+from app.repositories.image_backfill_rows import decode_metadata, image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maintenance 共用
     asset_ref_tokens,
     collect_change_payload_tokens,
@@ -1956,6 +1956,23 @@ class SQLiteMaintenanceAdapter:
                 ],
             )
             for update in metadata_updates:
+                # 第三半 CAS。纯 metadata 补齐**不改**元素数、MAX(created_at) 与
+                # chunk element_ids，所以上面两半都穿得过去：两个并发的
+                # backfill-images 补同一条已入 chunk 的带图注图片时，第二个会把第一个
+                # 刚写的 `asset_id` 直接覆盖掉，而被覆盖的那个资产行从此没有任何元素
+                # 引用——回收只认本趟自己铸的 id，于是它永久泄漏。
+                # 预期态就是计划时看到的那个：`asset_id` 仍为空。
+                current = db.execute(
+                    "SELECT metadata FROM source_elements WHERE id=? AND source_id=?",
+                    (update["id"], source_id),
+                ).fetchone()
+                if current is None or decode_metadata(current["metadata"]).get(
+                    "asset_id"
+                ):
+                    raise ImageBackfillConcurrentChange(
+                        f"element {update['id']} of source {source_id} was assigned "
+                        "an asset between plan and apply"
+                    )
                 db.execute(
                     "UPDATE source_elements SET metadata=? "
                     "WHERE id=? AND source_id=?",

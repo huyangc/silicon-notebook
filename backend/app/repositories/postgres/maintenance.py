@@ -22,7 +22,7 @@ from app.repositories.chunk_elements import (
     reverse_rows as chunk_element_reverse_rows,
     reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
 )
-from app.repositories.image_backfill_rows import image_backfill_state
+from app.repositories.image_backfill_rows import decode_metadata, image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite maintenance 共用
     asset_ref_tokens,
     collect_change_payload_tokens,
@@ -1921,6 +1921,20 @@ class PostgresMaintenanceAdapter:
                 ],
             )
             for update in metadata_updates:
+                # 第三半 CAS（SQLite 侧同名方法有完整论证）：纯 metadata 补齐不改元素
+                # 代次也不改 chunk，上面两半都穿得过去，两个并发的 backfill-images
+                # 会互相覆盖 `asset_id` 并把被覆盖的那个资产行永久泄漏。
+                current = db.execute(
+                    "SELECT metadata FROM source_elements WHERE id=%s AND source_id=%s",
+                    (update["id"], source_id),
+                ).fetchone()
+                if current is None or decode_metadata(current["metadata"]).get(
+                    "asset_id"
+                ):
+                    raise ImageBackfillConcurrentChange(
+                        f"element {update['id']} of source {source_id} was assigned "
+                        "an asset between plan and apply"
+                    )
                 db.execute(
                     "UPDATE source_elements SET metadata=%s "
                     "WHERE id=%s AND source_id=%s",
