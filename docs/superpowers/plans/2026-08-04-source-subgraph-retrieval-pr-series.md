@@ -12,7 +12,7 @@
 3. 所有图能力都依赖冻结的 baseline manifest；没有通过 baseline preservation 的 PR 不得进入下一 rollout 阶段。
 4. 内部基础设施 PR 可以没有 UI；一旦新增状态或行为对用户可见，必须在同一 PR 完成 Ask、Deep Report 和前端呈现。
 5. SQLite/PostgreSQL 语义与测试同 PR 交付，不能先落一套后端。
-6. 配置、产品行为、架构或运维契约发生变化时，同 PR 同步 `README.md`、`README_zh.md`、`AGENTS.md`、`CLAUDE.md` 以及所属 `docs/` 中英文文档。
+6. 配置、产品行为、架构或运维契约发生变化时，同 PR 同步 `README.md`、`README_zh.md`、`AGENTS.md` 以及所属 `docs/` 中英文文档（`CLAUDE.md` 刻意不在这个集合里，判据与体量门见 `AGENTS.md`「Documentation Sync」）。
 7. 只有最终用户能力通过 `scripts/check.sh`、前端 build 和质量门后，才更新 `fangan_done.md`。
 
 ## 2. 依赖关系

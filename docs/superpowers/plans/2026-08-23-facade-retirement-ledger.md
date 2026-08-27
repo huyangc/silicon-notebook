@@ -77,12 +77,12 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 ## 退役时必须同步的守卫/baseline
 
 1. **`scripts/architecture_boundary_baseline.json::facade_public_surface.RepositoryFacade.allowed_names`**——被 `test_phase0_architecture_guard.py` 的 `facade_surface_additions` 消费，当前只拦"新增"（`assert ... == []`，即活跃表面相对 baseline 只能持平或减少）。**退役任何方法后必须显式从这份 `allowed_names` 数组里删除对应名字**，否则该名字会一直留在"历史允许"名单里，守卫不会报错但账本会失真（baseline 允许的名字集合不再等于活跃表面）。这是唯一会因退役而"变红"或需要主动更新的硬门——反过来说，这份 baseline 目前**没有**"退役压力"（删方法不会导致测试失败），必须靠人工同步。
-2. **`function_length_ceiling`**（同一 baseline 文件）里登记了 `RepositoryFacade.__init__`（468 行）与 `RepositoryRuntime.__init__`（443 行）的行数上限——只在**削减** `__init__` 本身逻辑时才相关（例如若退役导致某个 host 参数/组件不再需要在 `__init__` 里接线），退役单个委托方法本身不触碰 `__init__`，通常无需改动，但若退役连带清理了 runtime 组件的构造代码，须核实是否需要相应下调（只许降、降了必须同步 baseline，见 CLAUDE.md 硬门一节)。
+2. **`function_length_ceiling`**（同一 baseline 文件）里登记了 `RepositoryFacade.__init__`（468 行）与 `RepositoryRuntime.__init__`（443 行）的行数上限——只在**削减** `__init__` 本身逻辑时才相关（例如若退役导致某个 host 参数/组件不再需要在 `__init__` 里接线），退役单个委托方法本身不触碰 `__init__`，通常无需改动，但若退役连带清理了 runtime 组件的构造代码，须核实是否需要相应下调（只许降、降了必须同步 baseline，见 AGENTS.md「Architecture Baseline」)。
 3. **`backend/tests/test_repository_api_contract.py`**——对比 `facade_surface.json`/`api_contract.json` 等固化的响应快照（`FIXTURE` 常量指向 `backend/tests/fixtures/repository_contract/*.json`），退役面向 API 的方法（尤其是有路由直接调用的）需要重跑 `scripts/generate_repository_contract_fixtures.py`（默认模式，非 `--rebaseline*`）刷新快照；纯内部/无路由消费的方法退役通常不影响这份契约。
 4. **`backend/tests/test_repository_dependency_contract.py`**——消费 `repository_callers.py` 的 `private_repository_sites()`/`production_source_index()`，并维护一份手工的 `LIFECYCLE_STORE_CALLS` 允许清单（哪些内部服务允许绕过 facade 直调 store 方法）。退役 facade 方法本身**不会**触发这份契约变红（它检查的是私有属性访问边界，不是 facade 公开方法存在与否），但若退役后某个内部服务需要改为直调 runtime 组件（例如把测试从 `repo.foo()` 改成 `repo._runtime.<component>.foo()`），可能需要在 `LIFECYCLE_STORE_CALLS` 里登记新的允许项。
 5. **`backend/tests/test_repository_protocol_coverage.py`**——覆盖 `AskCandidatePort`/`AskGraphPort`/`AskStreamPort`/`RetrievalPort` 等 consumer-owned Protocol 的方法签名一致性，与 `BUNDLE_STORE_SEATS` 无关的 facade 方法退役通常不触碰它；仅当退役的方法恰好是这几个 Protocol 声明的一部分时才需要同步检查。
 6. **`backend/tests/architecture/facade_contract.py::RUNTIME_COMPONENT_OWNERS`/`OWNER_CONTRACT_EXCEPTIONS`/`MODULE_SURFACE_OWNER_EXCEPTIONS`**——若退役后某个 `_runtime.<component>` 分量因此不再被任何公开方法引用，不必清理这份映射表（它描述的是"组件名→owner 类名"的静态字典，不因某个方法消失而失效），但若整个组件本身也一并退役（超出本阶段范围），需要一并清理。
-7. **`docs/product-and-api*.md` / `AGENTS.md` / `CLAUDE.md` / `README*.md`**——若退役的方法在这些文档里被点名提及（当前未发现任何 `retire-now`/`ambiguous` 候选被点名，已用 `grep` 核实），无需同步；若后续退役 `test-only` 桶里的方法时发现文档提及，需按"文档同步"红线一并更新。
+7. **`docs/product-and-api*.md` / `AGENTS.md` / `README*.md`**（`CLAUDE.md` 已不在常规同步集合里，判据见 `AGENTS.md`「Documentation Sync」）——若退役的方法在这些文档里被点名提及（当前未发现任何 `retire-now`/`ambiguous` 候选被点名，已用 `grep` 核实），无需同步；若后续退役 `test-only` 桶里的方法时发现文档提及，需按"文档同步"红线一并更新。
 
 ## 退役 PR 建议顺序
 
