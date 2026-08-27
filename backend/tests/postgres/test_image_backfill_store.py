@@ -115,13 +115,16 @@ def test_source_page_selects_markdown_candidates_by_keyset(postgres_repository):
 
 @pytest.mark.postgres_integration
 def test_keyset_paging_visits_every_markdown_source_exactly_once(postgres_repository):
-    """比较键与排序键必须同一个 collation。
+    """逐页（LIMIT 1）走完全部候选：每个来源恰好一次，顺序是 C collation 序。
 
-    库的默认 collation 不是 `C` 时，裸 `id > %s` 与 `ORDER BY id COLLATE "C"`
-    给出的是两种顺序，keyset 翻页会**漏源或重复**——而这两种结局都不报错：漏源
-    只是"这批图没补上"，重复只是多做一遍幂等的活。这里用带标点、在
-    `C` 与 `en_US.UTF-8` 下排序不同的 id 逐页（LIMIT 1）走一遍，断言每个来源恰好
-    出现一次、且顺序就是 C collation 序。"""
+    用的是带标点、在 `C` 与库默认 `en_US.UTF-8` 下排序**不同**的 id
+    （`src-a_b`/`src-ab`/`src-a-c`/`src-aB`，两种 collation 实测给出不同顺序）。
+
+    **已登记：这条用例钉不住比较键上的 `COLLATE "C"`**。`0001_initial.sql` 把
+    每个 id 列都声明成 `text COLLATE "C"`，所以裸 `id > %s` 也在 C 序上比较，
+    把那半 collation 去掉本用例照样绿（已做变异验证）。留着它是因为它钉住的是
+    另一件真事：keyset 翻页确实推进、不漏不重。比较键与排序键的**书写**一致由
+    `test_image_backfill_transaction_guard.py` 的源码守卫钉。"""
     notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
     runtime = postgres_repository._runtime
     now = normalize_timestamp(runtime.seams.now())
