@@ -1847,12 +1847,11 @@ class PostgresMaintenanceAdapter:
         chunk_element_ids: dict[str, list[str]],
         *,
         created_at: Any,
-        updated_at: Any,
     ) -> None:
         """一个来源的全部插入，一个写事务（SQLite 侧同名方法的对等半）。
 
         `chunks.text` 与 chunk id 不变，所以 `chunk_embeddings` 一行不动；反查行
-        与 `sources.updated_at` 同事务。"""
+        与 `sources.updated_at` 同事务，后者的时间戳同样由仓储自己的时钟给。"""
         stamp = normalize_timestamp(created_at)
         with self._runtime.database.write() as db:
             execute_many(
@@ -1894,7 +1893,7 @@ class PostgresMaintenanceAdapter:
                 )
             db.execute(
                 "UPDATE sources SET updated_at=%s WHERE id=%s",
-                (normalize_timestamp(updated_at), source_id),
+                (normalize_timestamp(self._runtime.seams.now()), source_id),
             )
 
     def image_backfill_discard_assets(self, asset_ids: Sequence[str]) -> list[dict]:
