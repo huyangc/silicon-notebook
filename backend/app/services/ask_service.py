@@ -1558,10 +1558,16 @@ class AskService:
                     raise StageBoundaryError(
                         "plugin Ask request identity changed"
                     )
-                answer, records = admit_plugin_engine_result(
+                answer, records, admission_notes = admit_plugin_engine_result(
                     retrieval, result.answer_markdown, result.citations
                 )
                 trace_steps = plugin_engine_trace_steps(trace)
+                if admission_notes:
+                    trace_steps = (*trace_steps, TraceStep(
+                        step_type="plugin",
+                        summary="引用核验未全部通过",
+                        detail={"detail": "；".join(admission_notes)},
+                    ))
             except AskCancelled:
                 raise
             except StageBoundaryError:
