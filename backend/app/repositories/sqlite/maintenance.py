@@ -32,7 +32,7 @@ from app.repositories.chunk_elements import (
     reverse_rows as chunk_element_reverse_rows,
     reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
 )
-from app.repositories.image_backfill_rows import decode_metadata, image_backfill_state
+from app.repositories.image_backfill_rows import image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maintenance 共用
     asset_ref_tokens,
     collect_change_payload_tokens,
@@ -1962,26 +1962,32 @@ class SQLiteMaintenanceAdapter:
                 # 刚写的 `asset_id` 直接覆盖掉，而被覆盖的那个资产行从此没有任何元素
                 # 引用——回收只认本趟自己铸的 id，于是它永久泄漏。
                 # 预期态就是计划时看到的那个：`asset_id` 仍为空。
-                current = db.execute(
-                    "SELECT metadata FROM source_elements WHERE id=? AND source_id=?",
-                    (update["id"], source_id),
-                ).fetchone()
-                if current is None or decode_metadata(current["metadata"]).get(
-                    "asset_id"
-                ):
-                    raise ImageBackfillConcurrentChange(
-                        f"element {update['id']} of source {source_id} was assigned "
-                        "an asset between plan and apply"
-                    )
-                db.execute(
+                #
+                # 判据内联进 UPDATE 的 WHERE、按 rowcount 裁决，与 PostgreSQL 侧逐字
+                # 同形。这一侧有库级单写者锁、先读后写本来也安全，但 PG 默认
+                # READ COMMITTED 下裸 SELECT 不上行锁，两个进程会双双读到空
+                # `asset_id` 然后互相覆盖——两侧同一形状才不会让判据漂成两份。
+                # ``json_valid`` 必须排在最前并靠 OR 短路：`json_extract` 遇到畸形
+                # JSON 会抛 `malformed JSON`（实测），而畸形载荷在 Python 侧被
+                # `decode_metadata` 读成空 dict、也就是"没有 asset_id"，两边同解。
+                affected = db.execute(
                     "UPDATE source_elements SET metadata=? "
-                    "WHERE id=? AND source_id=?",
+                    "WHERE id=? AND source_id=? "
+                    "AND (json_valid(metadata)=0 "
+                    "OR json_extract(metadata,'$.asset_id') IS NULL "
+                    "OR json_extract(metadata,'$.asset_id')='')",
                     (
                         json.dumps(dict(update["metadata"]), ensure_ascii=False),
                         update["id"],
                         source_id,
                     ),
-                )
+                ).rowcount
+                if affected != 1:
+                    # 0 行 = 已被别人补齐，或这条元素已经不在了；两者都是"计划已过期"。
+                    raise ImageBackfillConcurrentChange(
+                        f"element {update['id']} of source {source_id} was assigned "
+                        "an asset between plan and apply"
+                    )
             for update in chunk_updates:
                 db.execute(
                     "UPDATE chunks SET element_ids=? WHERE id=? AND source_id=?",

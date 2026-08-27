@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -467,6 +468,93 @@ def test_apply_refuses_a_stale_snapshot_and_writes_nothing(postgres_repository, 
                 (notebook_id,),
             ).fetchone()["c"]
             == 0
+        )
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize(
+    "stored,expected_affected",
+    [
+        ({"parser": "markdown", "src": "a.jpg"}, 1),          # 键缺失
+        ({"parser": "markdown", "src": "a.jpg", "asset_id": ""}, 1),   # 空串
+        ({"parser": "markdown", "src": "a.jpg", "asset_id": "x"}, 0),  # 已被补齐
+    ],
+)
+def test_the_enrichment_cas_predicate_is_evaluated_by_postgres_on_jsonb(
+    postgres_repository, stored, expected_affected
+):
+    """补齐 CAS 的判据在 PG 上是 `metadata->>'asset_id'`（jsonb 取值），与 SQLite 的
+    `json_extract` 是两套方言——这一格只有真库验得到：键缺失与空串都必须算"仍为空"，
+    已补齐的必须命中 0 行。
+
+    **这条用例刻意不是"真交错"**，理由与取舍见文件末尾 `test_...` 旁的说明。"""
+    from app.domain.image_backfill import ImageBackfillConcurrentChange
+
+    notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
+    source_id = _seed(postgres_repository, notebook_id)
+    runtime = postgres_repository._runtime
+    maintenance = postgres_repository.maintenance
+    stamp = maintenance.image_backfill_source_state(source_id)["element_created_at"]
+    image_id = f"el-{source_id}-0004"
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (%s,%s,'image','Markdown image 1','图 1 架构',%s,%s)",
+            (image_id, source_id, jsonb(stored), stamp),
+        )
+
+    def _enrich() -> None:
+        maintenance.apply_image_backfill(
+            notebook_id,
+            source_id,
+            [],
+            [],
+            [
+                {
+                    "id": image_id,
+                    "metadata": {**stored, "asset_id": "new-asset"},
+                }
+            ],
+            created_at=stamp,
+            expected_element_count=4,
+        )
+
+    if expected_affected:
+        _enrich()
+    else:
+        with pytest.raises(ImageBackfillConcurrentChange):
+            _enrich()
+
+    with runtime.database.connect() as db:
+        metadata = db.execute(
+            "SELECT metadata FROM source_elements WHERE id=%s", (image_id,)
+        ).fetchone()["metadata"]
+    if isinstance(metadata, str):  # pragma: no cover - jsonb 正常还成 dict
+        metadata = json.loads(metadata)
+    assert metadata.get("asset_id") == ("new-asset" if expected_affected else "x")
+
+
+@pytest.mark.postgres_integration
+def test_a_row_that_vanished_between_plan_and_apply_is_also_refused(
+    postgres_repository,
+):
+    """行没了同样归 `concurrent_change`：条件 UPDATE 命中 0 行，判据不必区分两者。"""
+    from app.domain.image_backfill import ImageBackfillConcurrentChange
+
+    notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
+    source_id = _seed(postgres_repository, notebook_id)
+    maintenance = postgres_repository.maintenance
+    stamp = maintenance.image_backfill_source_state(source_id)["element_created_at"]
+    with pytest.raises(ImageBackfillConcurrentChange):
+        maintenance.apply_image_backfill(
+            notebook_id,
+            source_id,
+            [],
+            [],
+            [{"id": f"el-{source_id}-9999", "metadata": {"asset_id": "x"}}],
+            created_at=stamp,
+            expected_element_count=3,
         )
 
 
