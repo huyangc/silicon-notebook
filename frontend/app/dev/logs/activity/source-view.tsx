@@ -21,7 +21,7 @@ import type { ActivitySource } from "./types";
  * 命名来源」的路径共用的唯一真源：论文标题优先，其次 `title`，两者都空白才回落
  * `file_name`（`title` 为纯空白时刻意让它遮蔽 file_name、返回空串——那代表「这份
  * 来源就是没有显示名」）。前端拿原始 `title` 自己拼，已接地的论文就会在左栏叫
- * `1706.03762.pdf`、在中栏叫《Attention Is All You Need》，正是 CLAUDE.md 红线要防的
+ * `1706.03762.pdf`、在中栏叫《Attention Is All You Need》，正是 `docs/product-and-api.md` 契约要防的
  * 「同一篇论文在同一屏里有两个名字」。空标题的占位符由 format.ts::activityTitle 在
  * `display_title` **已经确定为空之后**统一给。
  *
@@ -58,7 +58,7 @@ export function toActivitySource(
 
 /**
  * 来源的异常小字。唯一渲染路径是 `AnomalyBadge` + `sourceAnomalies()`
- * （CLAUDE.md 红线：不得手搓内联样式或裸警示符号，回归门 anomaly-guard.test.mjs）。
+ * （见 `docs/development.md`：不得手搓内联样式或裸警示符号，回归门 anomaly-guard.test.mjs）。
  */
 export function SourceAnomalies({
   source,

@@ -939,7 +939,7 @@ class PluginEngineModelAccess:
             if getattr(state.client, "configured", True) is not True:
                 raise AskEnginePortError("plugin_engine_model_unconfigured")
             try:
-                # 刻意**不**传 cap_kwargs:合同(AGENTS.md ask.engine 条)写明输出
+                # 刻意**不**传 cap_kwargs:合同(docs/product-and-api*.md ask.engine 条)写明输出
                 # cap「继承绑定客户端的普通输出上限」——显式塞 answer_max_tokens 会
                 # 在部署给 plugin_engine 绑了小 cap 客户端时越过它(codex #602 R2 P2)。
                 raw = state.client.chat_json(

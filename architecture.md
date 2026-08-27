@@ -2,7 +2,7 @@
 
 更新日期：2026-08-22
 
-本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署、环境变量全集与产品操作说明以 `README.md`、`README_zh.md` 和 `.env.example` 为准；协作约束以 `AGENTS.md` 为准。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
+本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署与环境变量全集以 `docs/deployment-and-configuration.md` / `_zh.md` 和 `.env.example` 为准，产品操作说明以 `docs/product-and-api.md` / `_zh.md` 为准；协作约束由 `AGENTS.md` 路由到对应权威文档。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
 ## 1. 真实行为与验证
 
@@ -10,7 +10,7 @@
 
 1. 已通过的回归测试与 characterization test。
 2. 被这些测试覆盖的生产代码。
-3. `README.md`、`README_zh.md`、`AGENTS.md` 与本文。
+3. `docs/` 下负责该主题的现行权威文档与本文；根 README 只作入口，`AGENTS.md` 只作 Agent 工作流和文档路由。
 
 第一阶段用 `backend/tests/test_architecture_documentation.py` 固定以下容易漂移的架构契约：
 

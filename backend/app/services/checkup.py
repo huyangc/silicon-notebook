@@ -293,7 +293,7 @@ class CheckupService:
         信号,且本次不许加迁移,故退化为 TTL。于是:本库租约不变、又没到 TTL 时,端出的是
         上一次算的那两个数;别的进程(离线 CLI)或本进程的嵌入 worker 在这段窗口里补上的
         向量,最多晚 30 秒才在体检上体现。前端「补齐中…」的忙碌位因此可能比计数真正归零多
-        按住至多一个 TTL——已在 AGENTS.md / CLAUDE.md 的长任务按钮条登记。
+        按住至多一个 TTL——已在 docs/product-and-api*.md 的长任务按钮条登记。
 
         **单槽**(每个 notebook 只留最近一条,不是「按 active 分多槽」):多槽会保留「修复
         前 local_active=∅」那条,job 结束、租约回到 ∅ 时正好命中它,把修复前的数在 TTL 内

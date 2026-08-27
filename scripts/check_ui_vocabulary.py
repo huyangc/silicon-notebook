@@ -31,7 +31,7 @@ a semantic checker, so this does NOT claim full coverage):
     — only literal rendered text is. ASCII acronyms additionally require no adjacent
     ASCII letter, so `PKG`, `Scanner`, `currentNotebook` cannot false-positive.
 
-The blacklist below covers AGENTS.md「界面词汇表」row by row. Two rows are covered
+The blacklist below covers `docs/ui-vocabulary.md`「界面词汇表」row by row. Two rows are covered
 only in their unambiguous compound forms, on purpose (documented in that section):
 
   * 节点 / 边 — the graph view legitimately draws nodes and edges ("图谱技术上下文"
@@ -52,7 +52,7 @@ runs it as a hard gate. Split of duties: this file guards *rendered text*, that 
 guards *code shape*.
 
 `--extra-root <dir>` (repeatable) is a self-check hook for out-of-tree deployment
-plugins (`EXTENSIONS_CONFIG`, AGENTS.md「主 agent 裁决 3」): plugin source lives
+plugins (`EXTENSIONS_CONFIG`; see `docs/deployment-extensions-sop*.md`): plugin source lives
 outside this repository, so it cannot ship in `frontend/app`/`frontend/features` or
 `backend/app` and therefore is not reachable by the two default scan roots above no
 matter how the guard is invoked. Each `--extra-root` directory's `**/*.py` is scanned
@@ -107,7 +107,7 @@ ASCII_TERMS = {
     # (`const canonicalId`) 不在扫描面内——本守卫只在含中文的单元里匹配,且先剥注释/
     # 标识符/插值。
     #
-    # `canonical` 是**补一个既有缺口**,不只是本特性的需要:CLAUDE.md 与 AGENTS.md 一直
+    # `canonical` 是**补一个既有缺口**,不只是本特性的需要:界面词汇表一直
     # 把它与 projection/tier/chunk/KG/schema 并列为黑话,ASCII_TERMS 却从来没有它,
     # 直到本特性往词表加行、触发「词表 ⊇ 守卫覆盖」自检才暴露。
     "canonical": re.compile(r"(?<![A-Za-z])canonical(?![A-Za-z])", re.IGNORECASE),
@@ -142,7 +142,7 @@ CJK_TERMS = {
     # —— 索引一行(CSR/ANN 在 ASCII_TERMS)
     "向量检索索引": re.compile(r"向量检索索引"),
     "暴力检索": re.compile(r"暴力检索"),
-    # —— 节点 / 边 两行:只收无歧义复合形态,理由见上方 docstring 与 AGENTS.md
+    # —— 节点 / 边 两行:只收无歧义复合形态,理由见上方 docstring 与 docs/ui-vocabulary.md
     "孤立节点": re.compile(r"孤立节点"),
     "补连边": re.compile(r"补连边"),
     "关系边": re.compile(r"关系边"),
@@ -184,7 +184,7 @@ INTERP = re.compile(r"\$\{[^{}]*\}")  # template ${...}
 # 「图谱 Schema」——EDA/芯片场景下用户反而熟悉 "Schema" 一词。这是本守卫对 schema
 # 唯一放行的**复合短语**,像剥 ${…} 插值一样在匹配前从单元里剥掉;裸 schema / 裸
 # Schema(不带「图谱」前缀)仍然照抓(见 ASCII_TERMS["schema"] 与其正例)。真源为
-# AGENTS.md「界面词汇表」schema 行的放行注记。改动此处必须同步那条注记与
+# docs/ui-vocabulary.md「界面词汇表」schema 行的放行注记。改动此处必须同步那条注记与
 # backend/tests/test_ui_vocabulary_guard.py 的正反例。
 #
 # 前置断言 (?<![一-鿿]):放行短语的「图谱」前不能紧挨 CJK,否则会吃掉「知识图谱」的
@@ -466,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         print("UI vocabulary contract MISMATCH — internal jargon in user-visible copy:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)
         print(
-            "\nRewrite the copy per AGENTS.md「界面词汇表」(e.g. 基准库→公共知识库, "
+            "\nRewrite the copy per docs/ui-vocabulary.md「界面词汇表」(e.g. 基准库→公共知识库, "
             "chunk→段, KG/CSR/ANN→索引, 抽取→分析). Internal names stay in code, not UI.",
             file=sys.stderr,
         )

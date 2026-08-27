@@ -709,7 +709,7 @@ def _writable_notebook(
     granted admin on a notebook long after the token was issued, and the MCP
     write tools' blast radius (deleting documents out from under every member's
     retrieval) is the one this gate was created for. The divergence is a
-    recorded decision (CLAUDE.md/AGENTS.md「MCP 工具面与来源管理」), NOT drift;
+    recorded decision (docs/product-and-api*.md「MCP 工具面与来源管理」), NOT drift;
     ``deps._CAPABILITY_LEVELS``'s own comment records the same split from the
     HTTP side. ``notebook:delete`` stayed owner-only on BOTH surfaces.
 

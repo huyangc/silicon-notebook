@@ -67,8 +67,8 @@ O2（按节合成+集成）已实现（分支 `claude/outline-coevolution`）；
 - 行为测试：构造 >cap 的 elements（相关度乱序），断言进入 element_context 的子集按相关度
   取 top-cap；synthesis detail 计数正确。prompt 内容测试各加一条断言，并做删除+移动两种
   变异验证。
-- 文档：`docs/product-and-api*.md` 契约表加 `answer_element_items` 行（中英）；AGENTS.md 与
-  CLAUDE.md 档位契约句同步。README 不动。
+- 文档：`docs/product-and-api*.md` 契约表加 `answer_element_items` 行（中英），并在同一
+  权威文档中同步检索档位合同；入口 README / `AGENTS.md` / `CLAUDE.md` 不承载该细节。
 
 ## 2. PR-2 工具化枚举（stacked 于 PR-1 分支）
 
@@ -317,8 +317,7 @@ O2（按节合成+集成）已实现（分支 `claude/outline-coevolution`）；
 - 架构守卫默认模式重生成（AskResponse 变化）+ facade allowlist。
 - 文档：docs/product-and-api*.md 契约表新增 enum_* 与工具说明；`.env.example` 与
   docs/deployment-and-configuration*.md 登记 `REASONING_ENUM_TOOLS_ENABLED`（对照
-  KNOWHOW_KG_NODE_RETRIEVAL_ENABLED 先例三处齐改）；AGENTS.md「Architecture
-  Baseline」与 CLAUDE.md 红线补「集合枚举工具」条目——并修订两处现有红线句
+  KNOWHOW_KG_NODE_RETRIEVAL_ENABLED 先例三处齐改）；在产品/API 权威文档中修订
   「当前只有 Knowhow 支持完整枚举，其他对象集合仍是相关性结果」（PR-2 落地后不再成立，
   fangan 同款表述在 fangan_done.md 记账）；architecture.md 补 collection_catalog /
   collection_enumeration 运行时组件与全部新端口（T2 两个 + T3 三个）；README 中英一句

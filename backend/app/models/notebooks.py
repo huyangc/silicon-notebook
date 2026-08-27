@@ -146,7 +146,7 @@ class NotebookSummary(BaseModel):
     # 单个布尔,分不出「这次勾选的库里有没有带图的」。本库无图、用户又恰好取消勾选了
     # 唯一带图的那个参考库时,聚合布尔仍为真——前端门控(requiresKg)会放行一个这轮
     # 根本取不到图的模式,「将借用参考库《X》推理」还会点名一个本轮不参与的库。后端的
-    # KG 可用性闸早已按库维度收窄(见 AGENTS.md「参考库维度与 restricted 正交」),
+    # KG 可用性闸早已按库维度收窄(见 docs/product-and-api*.md 对应契约),
     # 界面必须能做同样的判断,故把那批 id 原样下发。
     #
     # 零新增查询:mounted_bases_row 的**每一行本来就带 has_kg**,base_kg_available 只是

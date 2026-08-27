@@ -2,7 +2,7 @@
 
 [返回 README](../README_zh.md) · [English](./development.md)
 
-本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。完整 Agent/开发约束仍以 [AGENTS.md](../AGENTS.md) 为准，详细运行时架构以 [architecture.md](../architecture.md) 为准。
+本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。[AGENTS.md](../AGENTS.md) 是精简的编码 Agent 入口与文档路由；详细运行时架构以 [architecture.md](../architecture.md) 为准。
 
 外部 Agent MCP 面由一个 API-owned registration host 和启动期冻结目录组成：`app.api.mcp_tools` 的固定 bundle 被捕获为精确 23-tool 面，`mcp_server.PUBLIC_TOOLS` 就是这份活目录，`CORE_TOOLS` 是同一份清单的结构化别名——不存在第二份手抄。core handler 保持既有 validation/auth/I/O 顺序，复用实时权威、owner-write、progress 与 output 边界。异常只映射稳定公开码；注册/listing 为零 repository/model 工作。原先「追加显式信任的进程内 `agent.tool_provider` contributor 标量 descriptor」那一半零消费者，已整体移除。
 
@@ -36,7 +36,11 @@
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 - 逐步推理的来源身份查找是纯身份 repository 操作，不读取来源正文、摘要、元素、KG payload 或 embedding。两个 adapter 都按稳定的 `(created_at,id)` 顺序分页读取可见且已授权的来源目录，并使用部分索引 `idx_sources_visible_identity`：`(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`。消费这份目录的服务层解析器已随「模型判断来源」一并移除，因此 `visible_source_identity_rows_bounded` 目前没有生产调用方；索引与两侧实现仍予保留，因为检索范围依旧以 `(notebook_id,source_id)` key 表达，且空来源 id 集合表示空、绝不表示不限制。
 
-当前 schema 版本为 57。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v57 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 增加 kg_canonical_scratch，v25 清除旧用户模型凭据并新增部署级模型服务状态，v26 增加 knowhow 变更流水/里程碑，v27 增加 sources.chunked_at，v28 增加文档数量上限 schema，v29 确定性清理重复 cluster membership 并安装唯一索引，v30 增加 sources(notebook_id, file_hash) 内容哈希去重索引（上传去重 / batch_ingest 续跑），v31 只增加 inert、无 payload 的 shadow_change_log 与 shadow_capture_control 内部表，v32 增加 reports.understanding_json，持久化深度报告的问题理解确认契约，v33 增加 `(notebook_id, source_object_id/target_object_id, id)` 覆盖索引，供关系词法补召回稳定地做有界 keyset 查询，v34 增加关系补全水位与对象 keyset 索引，v35 增加浏览器提交时间 `ask_jobs.asked_at` 供生成中会话重连，v36 增加 KG 质量分析的三张预计算产物表（kg_community_edges、kg_source_profiles 与产物账本 kg_analysis_artifacts）；rebuild_communities 整体重写它们，账本逐份记下产物建于哪个 kg_mutation_seq；发布是原子的——板块划分、community_seq 戳与三张产物表在同一个写事务里提交，而喂给它们的全表读全部待在那个事务之外（SQLite 写锁是进程级的）。三张表都不带 level 列——社区层的新鲜度闸本身不分 level，产物描述的 level 记在账本 payload 里；v37 增加 `source_elements` 上按 `(source_id, element_type, created_at, id)` 的索引，供有界、按类型的集合枚举（公式/表格/图片/代码块清单）；v38 增加部分可见来源身份索引 `idx_sources_visible_identity`：`sources(notebook_id, created_at, id)`，排除隐藏的 Memory/Knowhow 投影；v39 增加命令目录抽取的 `catalog_jobs`（每次运行一行，带按来源的 `queued`/`running` 条件唯一索引——那就是跨进程单飞守卫）与 `catalog_candidates`（每条抽取结果或被接地校验拦下的条目一行，按 job 内 `position` 做 keyset 排序）；`catalog_jobs.source_generation` 记下任务创建时刻的来源元素代次，来源被重新解析后这一轮候选整批作废，不会被确认成文档里已经不存在的内容。`catalog_candidates.job_id` **刻意不加外键**：候选直接挂在 notebooks/sources 上级联删除，而一条指向 catalog_jobs 的入向外键会让它不再是叶表，那个 source_id 单列守卫就没有可用的正向 shadow 停车方案了。v39 还在既有表上装了本迁移唯一的一个索引 `idx_knowhow_tables_nb_title`：`knowhow_tables(notebook_id, title, created_at, id)`，让按标题解析目标表变成一次索引定位——前两列等值 seek，后两列直接给出 `(created_at, id)` 的 tie-break 顺序，不再在 apply 的持锁窗口里把该 notebook 下每一张表都读一遍。SQLite v40 增加不可变的 `knowledge_source_facts` 与规范化 `knowledge_source_fact_elements` 绑定；写入方在全局 KG 同一事务内校验当前 running 抽取代次和每个证据元素的来源，替换时同事务清除旧代次；`global_object_id` 刻意不加外键，避免全局融合/治理抹掉来源事实。本迁移只启用存储与写生命周期，读取由后续 PR 激活。PostgreSQL v20 是配对业务 schema。临时 shadow 边界已有 preflight/control/guard、run-bound 原子 snapshot、有界可续跑 baseline COPY/H0，以及 fail-stop 单消费者正向 replicator 原语。replicator 连续校验全局 seq、在短只读 snapshot 仅为 upsert hydration 当前行，delete 保持 key-only 且 hydrated bytes 为零；同一 stable key 在 accepted prefix 内保留最后 event 并按全局最后 seq 排序，raw seq/checkpoint 仍连续，每个 identity 的最终 actual apply 覆盖 synthetic dependency contribution，只有 dependency-only identity 才引用计数一次 synthetic 行及其 bytes；短读窗口若在 allocated high-water 前结束，会在 hydration/apply 前立即判为 suffix gap；满窗口低于 high-water 时在同一 snapshot 探测相邻 seq，缺失即失败；PG apply 事务 claim worker 后、业务 DML 前复查既有 run/direction poison；poison 发布在 binding/checkpoint 校验后锁定检查该方向任意既有记录，完全相同视为 ACK-loss 成功，不同则 stale 且绝不新增第二条，再重新锁定 ledger+81 表并复核 snapshot source/target、live target identity 与精确 catalog后，把业务收敛、脱敏 progress 与 checkpoint CAS 同事务提交。批次硬上限为 4096 events/64 MiB；仅一个 final bundle 可独占超限，同 key replacement 若在已有其他 actual bundle 时使 bytes 超限则回滚并延后。FK 父闭包只读同一验证 source snapshot，每事件最多 64 行；固定 v32 图按 FK constraint branch 计数的上界为 12 个 row slots，依赖行计入 bytes且批内去重，不扫描 suffix log。PG 只延后 FK/UNIQUE ordering SQLSTATE，CHECK/NOT NULL 立即 poison；精确 PG32 catalog 的 110 个 unique surface 通过 NULL、按其他唯一列的非 NULL 等值/NULL `IS NULL` 与固定 predicate 定域的确定性 text/bigint 候选（`C` collation 文本 max 拼 `chr(1)`，或先走可索引 bigint MIN/MAX 快速路径选择 min−1/max+1，仅在两个 int64 边界都占用时扫描首个 gap），或仅限无入向 FK 且有 accepted current-final 恢复行的叶表同事务 delete/reinsert 来解 cycle。停车状态按 `(unique surface, row identity)` 跟踪；每个 stagnant pass 会停车所有可独立停车的冲突，final apply 成功会清除该 identity 的所有停车面。限制为 8 passes、32 actual statements/apply、16384 actual statements 总量；每次候选查询都计入预算，ordering、statement、pass、`ProgramLimitExceeded`/`DataError` 候选搜索与候选 UPDATE 容量耗尽保持 non-poison，`QueryCanceled` 保持瞬态并整事务重试，最终窗口不可停车的 UNIQUE 冲突则按最早实际 seq poison。worker 从 256 events/8 MiB 自适应倍增至硬上限，仍 ordering-blocked 时 non-poison；ack-loss 与 poison publication 使用相同 identity 绑定，snapshot 与业务 apply 前均要求 `progress.applied_seq == checkpoint.last_seq`。每个有效 batch 结局恰好记录一条脱敏 metric，batch events 使用实际 accepted/observed raw-event 数并尽可能保留 retries。瞬态错误整事务有界重试，SQLite path/file binding 失败使用专用 identity 异常而不依赖文本分类；已证明的确定性错误在实际阻断 seq 写一条脱敏 poison 后停止。显式运维 CLI 已提供 preflight/start-forward/status/verify；前台 worker 使用数据库时钟排他 lease、SIGTERM/INT 批次边界，并只在 FULL 校验、barrier/replay/poison、至少 7 天/100,000 events tail 等边界之后保守清理。`SHADOW_DATABASE_URL` 单独设置仍不启动同步，且只有该 CLI 可以读取；本阶段不含 cutover、反向复制或自动 active URL 交换。
+schema 变更继续由 `SqliteMigrator` 的版本门管理：追加新的 `_migration_N`、同步提升
+`SCHEMA_VERSION`，绝不能修改已经封版的旧 migration。启动恢复、稳定 seed 与管理员升级
+保持在版本门之外，每次启动都会执行。
+
+当前 schema 版本为 59。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v59 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 增加 kg_canonical_scratch，v25 清除旧用户模型凭据并新增部署级模型服务状态，v26 增加 knowhow 变更流水/里程碑，v27 增加 sources.chunked_at，v28 增加文档数量上限 schema，v29 确定性清理重复 cluster membership 并安装唯一索引，v30 增加 sources(notebook_id, file_hash) 内容哈希去重索引（上传去重 / batch_ingest 续跑），v31 只增加 inert、无 payload 的 shadow_change_log 与 shadow_capture_control 内部表，v32 增加 reports.understanding_json，持久化深度报告的问题理解确认契约，v33 增加 `(notebook_id, source_object_id/target_object_id, id)` 覆盖索引，供关系词法补召回稳定地做有界 keyset 查询，v34 增加关系补全水位与对象 keyset 索引，v35 增加浏览器提交时间 `ask_jobs.asked_at` 供生成中会话重连，v36 增加 KG 质量分析的三张预计算产物表（kg_community_edges、kg_source_profiles 与产物账本 kg_analysis_artifacts）；rebuild_communities 整体重写它们，账本逐份记下产物建于哪个 kg_mutation_seq；发布是原子的——板块划分、community_seq 戳与三张产物表在同一个写事务里提交，而喂给它们的全表读全部待在那个事务之外（SQLite 写锁是进程级的）。三张表都不带 level 列——社区层的新鲜度闸本身不分 level，产物描述的 level 记在账本 payload 里；v37 增加 `source_elements` 上按 `(source_id, element_type, created_at, id)` 的索引，供有界、按类型的集合枚举（公式/表格/图片/代码块清单）；v38 增加部分可见来源身份索引 `idx_sources_visible_identity`：`sources(notebook_id, created_at, id)`，排除隐藏的 Memory/Knowhow 投影；v39 增加命令目录抽取的 `catalog_jobs`（每次运行一行，带按来源的 `queued`/`running` 条件唯一索引——那就是跨进程单飞守卫）与 `catalog_candidates`（每条抽取结果或被接地校验拦下的条目一行，按 job 内 `position` 做 keyset 排序）；`catalog_jobs.source_generation` 记下任务创建时刻的来源元素代次，来源被重新解析后这一轮候选整批作废，不会被确认成文档里已经不存在的内容。`catalog_candidates.job_id` **刻意不加外键**：候选直接挂在 notebooks/sources 上级联删除，而一条指向 catalog_jobs 的入向外键会让它不再是叶表，那个 source_id 单列守卫就没有可用的正向 shadow 停车方案了。v39 还在既有表上装了本迁移唯一的一个索引 `idx_knowhow_tables_nb_title`：`knowhow_tables(notebook_id, title, created_at, id)`，让按标题解析目标表变成一次索引定位——前两列等值 seek，后两列直接给出 `(created_at, id)` 的 tie-break 顺序，不再在 apply 的持锁窗口里把该 notebook 下每一张表都读一遍。SQLite v40 增加不可变的 `knowledge_source_facts` 与规范化 `knowledge_source_fact_elements` 绑定；写入方在全局 KG 同一事务内校验当前 running 抽取代次和每个证据元素的来源，替换时同事务清除旧代次；`global_object_id` 刻意不加外键，避免全局融合/治理抹掉来源事实。本迁移只启用存储与写生命周期，读取由后续 PR 激活。PostgreSQL v20 是配对业务 schema。临时 shadow 边界已有 preflight/control/guard、run-bound 原子 snapshot、有界可续跑 baseline COPY/H0，以及 fail-stop 单消费者正向 replicator 原语。replicator 连续校验全局 seq、在短只读 snapshot 仅为 upsert hydration 当前行，delete 保持 key-only 且 hydrated bytes 为零；同一 stable key 在 accepted prefix 内保留最后 event 并按全局最后 seq 排序，raw seq/checkpoint 仍连续，每个 identity 的最终 actual apply 覆盖 synthetic dependency contribution，只有 dependency-only identity 才引用计数一次 synthetic 行及其 bytes；短读窗口若在 allocated high-water 前结束，会在 hydration/apply 前立即判为 suffix gap；满窗口低于 high-water 时在同一 snapshot 探测相邻 seq，缺失即失败；PG apply 事务 claim worker 后、业务 DML 前复查既有 run/direction poison；poison 发布在 binding/checkpoint 校验后锁定检查该方向任意既有记录，完全相同视为 ACK-loss 成功，不同则 stale 且绝不新增第二条，再重新锁定 ledger+81 表并复核 snapshot source/target、live target identity 与精确 catalog后，把业务收敛、脱敏 progress 与 checkpoint CAS 同事务提交。批次硬上限为 4096 events/64 MiB；仅一个 final bundle 可独占超限，同 key replacement 若在已有其他 actual bundle 时使 bytes 超限则回滚并延后。FK 父闭包只读同一验证 source snapshot，每事件最多 64 行；固定 v32 图按 FK constraint branch 计数的上界为 12 个 row slots，依赖行计入 bytes且批内去重，不扫描 suffix log。PG 只延后 FK/UNIQUE ordering SQLSTATE，CHECK/NOT NULL 立即 poison；精确 PG32 catalog 的 110 个 unique surface 通过 NULL、按其他唯一列的非 NULL 等值/NULL `IS NULL` 与固定 predicate 定域的确定性 text/bigint 候选（`C` collation 文本 max 拼 `chr(1)`，或先走可索引 bigint MIN/MAX 快速路径选择 min−1/max+1，仅在两个 int64 边界都占用时扫描首个 gap），或仅限无入向 FK 且有 accepted current-final 恢复行的叶表同事务 delete/reinsert 来解 cycle。停车状态按 `(unique surface, row identity)` 跟踪；每个 stagnant pass 会停车所有可独立停车的冲突，final apply 成功会清除该 identity 的所有停车面。限制为 8 passes、32 actual statements/apply、16384 actual statements 总量；每次候选查询都计入预算，ordering、statement、pass、`ProgramLimitExceeded`/`DataError` 候选搜索与候选 UPDATE 容量耗尽保持 non-poison，`QueryCanceled` 保持瞬态并整事务重试，最终窗口不可停车的 UNIQUE 冲突则按最早实际 seq poison。worker 从 256 events/8 MiB 自适应倍增至硬上限，仍 ordering-blocked 时 non-poison；ack-loss 与 poison publication 使用相同 identity 绑定，snapshot 与业务 apply 前均要求 `progress.applied_seq == checkpoint.last_seq`。每个有效 batch 结局恰好记录一条脱敏 metric，batch events 使用实际 accepted/observed raw-event 数并尽可能保留 retries。瞬态错误整事务有界重试，SQLite path/file binding 失败使用专用 identity 异常而不依赖文本分类；已证明的确定性错误在实际阻断 seq 写一条脱敏 poison 后停止。显式运维 CLI 已提供 preflight/start-forward/status/verify；前台 worker 使用数据库时钟排他 lease、SIGTERM/INT 批次边界，并只在 FULL 校验、barrier/replay/poison、至少 7 天/100,000 events tail 等边界之后保守清理。`SHADOW_DATABASE_URL` 单独设置仍不启动同步，且只有该 CLI 可以读取；本阶段不含 cutover、反向复制或自动 active URL 交换。
 SQLite v41 新增 `knowledge_source_fact_backfills`，以「可见来源 + 来源代次」记录显式离线历史投影的游标、计数、投影版本、稳定不完整原因、独立运维失败码和终态；`knowledge_source_facts.projection_origin` 显式区分在线抽取与历史投影，在线事实即使已失去融合全局对象仍会被保留并计数。命令每本 notebook 只先构建一次来源反查索引，后续运行复用其完成标记，再按来源做有界对象 keyset 分页，每页一个短写事务。只有 owner 与全部证据元素都能证明属于该来源的历史对象才会进入来源事实；混合或缺失来源的旧数据只记为 `incomplete`，绝不猜测。审计会独立对账有效 KG 代次、投影版本和持久事实数量，不信任账本上的 `complete`；它只输出聚合计数与有界 source id，不输出证据原文。深复制用同一来源代次映射重写事实、证据绑定与终态账本，并生成副本本地的 completed KG run，因此副本可独立审计或强制修复，不保留对原 notebook 运维抽取历史的依赖。这仍是只写准备阶段，不改变在线 Ask 读路径。
 
 SQLite v42 新增 notebook 级 `source_index_backfills` 执行账本。来源反查索引的每个有界 keyset 页面都在同一个短事务里写索引行并推进游标/计数，因此进程重启会从最后已提交页面继续，而不是先清空 notebook 再重来。账本固定 `kg_mutation_seq`；代次漂移只记录稳定的 `kg_generation_changed` 并保持快速路径标记为 false，下次运行再按新代次从头构建。当前完成标记会被规范化成完成账本，不重写索引行。账本不保存证据正文或原始异常。PostgreSQL v20 为配对 schema。
@@ -75,6 +79,19 @@ SQLite v57 / PostgreSQL v35 在群组根行增加可重复使用的邀请 capabi
 生效链接；换新或撤销会原子清除旧权限，删组则随根行一起删除。时间字段只能是 SQL NULL 或
 ISO 时刻，绝不能写空串。本迁移不加表、不加外键；正向 shadow 不变量为 82 张业务表、113 个
 unique surface、12 个 row slot，当前配对为 SQLite57/PG35/epoch1。
+
+SQLite v58 / PostgreSQL v36 增加可插拔索引管线列：`notebooks.indexing_pipeline` 是可空的
+期望选择（`NULL` 表示 builtin），`indexing_pipeline_version`、
+`indexing_pipeline_generation` 与 `indexing_pipeline_job_id` 是非空权威列；
+`unified_kg_state` 与 `extraction_runs` 同时增加已发布产物身份对
+`(indexing_pipeline_id, indexing_pipeline_version)`。本迁移不新增表、外键或 unique
+surface。
+
+SQLite v59 / PostgreSQL v37 增加持久化的 `indexing_pipeline_stages` 与
+`indexing_pipeline_stage_sources`。两表都归类为 `TableClass.LOCAL_EPHEMERAL`：它们存在于
+两套 schema 并计入 schema 完整性，但正向 shadow 的 copy/capture/apply 不传输某个后端本地
+worker 的 lease 状态。当前配对为 SQLite59/PG37/epoch1，共 84 张应用表（82 张复制表 +
+2 张本地 stage 表）、113 个复制面 unique surface，FK 分支计数上界仍为 12 个 row slot。
 
 只能在应用/API 与后台 writer 停止后执行：
 
@@ -198,13 +215,29 @@ Homebrew warm gate。
 依赖仓库外 PDF 解析产物的 gold 生成、构建与校验脚本仍属于 developer-only
 工具并保持在 `scripts/check.sh` 之外；该例外绝不适用于已提交测试。
 
+效率是一等工程约束。新增 LLM、embedding 或数据库调用前，必须评估能否合并、
+缓存、延后、异步执行，或按用户真正进入的界面再门控触发。强一致与提前计算必须
+显式选择；普通路径默认保持低开销。
+
+跨界面的前端交互护栏保持精简但必须明确：
+
+- 启动长任务的控件在动作发出后必须立即禁用，并显示忙碌文案或 spinner，直到该
+  动作结束；服务端单飞不能替代本地防重复提交。新入口若超出有界的长任务守卫，
+  必须扩展守卫或在评审中登记覆盖缺口。
+- 新增居中或可拖动弹窗必须复用 `FloatingModalCard`，并经 root modal coordinator
+  发布，不得另造遮罩、拖动、焦点、色板、边框或圆角行为。
+- 来源活动异常只能经 `sourceAnomalies()` 支撑的 `AnomalyBadge` 渲染，不得手搓
+  内联警告样式或符号。
+- 五档强度选择必须复用 `frontend/app/effort-picker.tsx::EffortPicker`，不得复制 range
+  控件或重造其 popover；`frontend/tests/unit/effort-picker.test.mjs` 钉住共享实现及调用方。
+
 ## 开发流程
 
 凡任务会写入仓库代码、测试、文档或配置，都必须在第一次写入前新建 linked git worktree 和分支，并在其中完成开发、验证及后续 PR；该任务期间本地主 checkout 保持只读，小修也不例外。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。纯调研、设计、状态汇报和只读审查不要求 worktree。
 
 对于已经批准的多步骤实施计划，默认采用 subagent-driven development：每个任务交给一个全新的实现子 Agent，并在进入下一任务前完成该任务范围内的规格符合性与代码质量审查。纯调研、设计、状态汇报和只读审查不要求创建 worktree 或使用子 Agent。
 
-`CLAUDE.md` 是 Claude Code 在本仓库的操作规范：Claude Code 只自动加载 `CLAUDE.md` 与 `.claude/rules/`，不会加载 `AGENTS.md`，因此该文件收录必须随时在线的通用约束与该语境独有的规程，并给出 `AGENTS.md` 章节与 `docs/` 文档对的路由；两者冲突时以 `AGENTS.md` 为准，刻意的例外由 `CLAUDE.md` 穷举列出。也正因为它的每个字符都是每次请求的固定成本，特性级契约一律不进它，体量由 `scripts/check_claude_md_budget.py` 在 G1 contracts 泳道钉住——归属判据见上面的「文档维护」。其中最硬的一条是**起子代理必须显式选模型，不得默认继承主 Agent**，按任务需要的判断力分层——需要判断力（写计划、评审、架构取舍、疑难归因）用 `opus`，规格已定死的转录型实现用 `sonnet`，纯检索定位用 `haiku`。这条由 PreToolUse 硬门 `.claude/hooks/require-subagent-model.py` 强制：没显式传 `model`、且 `subagent_type` 未在 `.claude/agents/` 中钉好模型的调用会被拒绝。`.claude/agents/` 已提供三个钉好模型的角色：`impl-task`（sonnet）、`spec-review`（opus）、`code-quality-review`（opus）。`backend/tests/test_claude_subagent_model_hook.py` 是这个 hook 的回归网：以子进程方式跑真实脚本，两个方向都覆盖——既盖「绕过」（让继承模型的调用溜过去），也盖「误拦」（把合法调用堵死，逼人绕开守卫）。
+`CLAUDE.md` 是 Claude Code 在本仓库的操作规范：Claude Code 只自动加载 `CLAUDE.md` 与 `.claude/rules/`，因此它只保留 Claude 专属的常驻规则，并把产品、架构、部署、运维与开发问题路由到 `AGENTS.md` 所列的同一组权威文档；两个入口都不是产品或架构的副本。其中最硬的一条是**起子代理必须显式选模型，不得默认继承主 Agent**，按任务需要的判断力分层——需要判断力（写计划、评审、架构取舍、疑难归因）用 `opus`，规格已定死的转录型实现用 `sonnet`，纯检索定位用 `haiku`。这条由 PreToolUse 硬门 `.claude/hooks/require-subagent-model.py` 强制：没显式传 `model`、且 `subagent_type` 未在 `.claude/agents/` 中钉好模型的调用会被拒绝。`.claude/agents/` 已提供三个钉好模型的角色：`impl-task`（sonnet）、`spec-review`（opus）、`code-quality-review`（opus）。`backend/tests/test_claude_subagent_model_hook.py` 是这个 hook 的回归网：以子进程方式跑真实脚本，两个方向都覆盖——既盖「绕过」（让继承模型的调用溜过去），也盖「误拦」（把合法调用堵死，逼人绕开守卫）。
 
 PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要逐字贴回 PR**——零意见的轮次要贴，手动补跑的轮次也要贴，并附上触发方式、完整命令、head SHA、退出码与输出字节数，便于核对评审确实跑过、结论没被转述失真。判一轮成功要**退出码为 0 且输出非空**两个条件：codex 被 SIGTERM 杀掉时退出码同样是 0，只看退出码会贴出一条空评论、看起来像通过。P0/P1 阻塞：核实后把站得住的意见修掉并重审，直到判定转为非阻塞——只有意见站不住（走下面的驳回规则）或修复方向需要人拍板时才停下来交人决定；P2/P3 不阻塞、可如实说明后不改；优先级标签解析不出来时保守拦人而不是默认放行。评审意见可以在核实后驳回（codex 评的是 diff，未必了解运行时事实），但驳回要同时给出 PR 上的理由与证据、代码里记录取舍的注释，以及钉住既有行为的回归用例。合入不再逐次征求同意：评审非阻塞**且** CI 全绿时直接 `--rebase` 合。评审仍阻塞或输出解析不出等级时一律不合——先修掉并重审；CI 未全绿、或用户说过等他自己合，同样不合。CI 判绿只认 `gh pr checks` 全部 `pass`——`mergeStateStatus: CLEAN` 只说没有东西拦着合并，不等于检查跑绿了。合入前还必须在 PR 上确认**针对 PR 远端 head（`headRefOid`）的评审已经贴出**（不能用本地 `git rev-parse HEAD`：本地落后时会命中一条旧评审而放行，而合入的是远端那个未经评审的 head）：评审自动化静默没触发，和它跑完判了通过，在外部看起来一模一样；agent 的汇报和 hook 的本地状态都不是证据，PR 上的那条评论才是。评审的自动化本身是开发者本机的 Claude Code hook、不是仓库产物，新 clone 上没有它——规则依然成立，那就手动跑；机制细节见 `CLAUDE.md`。
 
@@ -214,21 +247,16 @@ PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要�
 - 后端与前端静态契约使用模块路径、限定 scope、操作种类、目标和审核后的计数等语义身份。源码位置只能作为诊断元数据；行号、offset、CSS 顺序和源码切片都不得用来标识预期站点。
 - 前端测试不得再与生产代码混放：`frontend/tests/unit` 放 `node:test` 纯逻辑用例，`frontend/tests/guards` 放架构/安全/词汇/入口契约，`frontend/tests/component` 放 Vitest/jsdom/Testing Library 行为用例。共享 setup 和语义源码适配器位于 `frontend/test-support`；runner 递归收集这些目录，位置守卫会拒绝 `frontend/app` 或 `frontend/features` 中的测试。
 - 组件行为不得由 CSS 几何或源码布局钉死。普通特性重构只有在可观察契约改变时才应修改测试。
+- 每条新增的静态或语义守卫在合入前都必须做变异验证：删除受保护行为和把违规形态移动到另一个相关站点，两种变异都必须让守卫报红；并且要先确认变异确实命中了预期站点。记录结果后移除变异；对一条实际未生效的变异跑出绿色不构成证据。
 - 已提交测试不得使用 skip/xfail/todo/only 禁用；repository policy 会同时检查测试入口及其 helper 模块，并禁止绕过共享 semantic-source 适配器直接读取生产源码。
 - 前端源码策略必须保持有界：通过语法规则拒绝 AST 位置/集合顺序 API，以及源码语义命名值上的文本位置操作；共享 `semantic-source.mjs` 只能暴露 AST 语义，不能把文本切片、分行、下标或长度当作契约。不要为此实现整套 JavaScript 数据流解释器，普通数组操作仍然合法。
 - backend 测试会在 xdist worker 启动前，由主进程预热一份仓库本地 Matplotlib 字体缓存。必须保留这个 controller 边界，不能让每个图谱 worker 各自重复枚举 macOS 字体。
 
 ## 文档维护
 
-后续只要产品行为、启动方式、架构或开发约束发生变化，需要同步更新：
+改动应更新所有其负责表面确实发生变化的权威文档；同一改动可能同时影响产品、部署、运维与开发表面。`product-and-api`、`deployment-and-configuration`、`operations`、`development` 的中英文版本必须同批保持一致。只有快速开始、高层当前边界或导航变化时才更新根 README 对；只有全仓 Agent 工作流/路由变化时才更新 `AGENTS.md`，只有 Claude Code 常驻规则变化时才更新 `CLAUDE.md`。测试应逐一校验相应权威文档，不得反向要求把详细事实复制进入口文件。
 
-- `README.md`
-- `README_zh.md`
-- `AGENTS.md`
-
-根 README 保持精简；同时更新 `docs/` 下负责该主题的中英文权威文档：`product-and-api`、`deployment-and-configuration`、`operations` 或 `development`。
-
-`CLAUDE.md` 刻意不在这个集合里：它由 Claude Code 每次会话自动加载，每个字符都是每次请求的固定成本，因此只收「对下一个无关改动也成立」的通用约束与该语境独有的规程，特性级契约一律走 `AGENTS.md` / `docs/`，它只保留路由表。`scripts/check_claude_md_budget.py`（G1 contracts 泳道）把它的总字符数与最长行钉成**精确 baseline**（只许降的棘轮，两个方向都报红：涨了要先回答归属判据，变短了要在同一个 PR 里把 baseline 一起降，免得攒出没人记账的余量）。只有当改动触及它已有的通用约束时才动它；另有四条 G1 守卫要求扩展点/stage 边界的关键词出现在它正文里，改那一条时要连守卫一起跑。
+Claude Code 会自动加载 `CLAUDE.md`，因此 `scripts/check_claude_md_budget.py` 在 G1 contracts 泳道把它的总字符数与最长行钉成精确 baseline。文件体量发生任何变化，都必须在同一个 PR 里同步更新 baseline，避免积累无人记账的余量。特性级契约应留在其权威文档；只有 Claude Code 专属常驻规则或路由变化时才修改 `CLAUDE.md`。
 
 SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 source-binding identity；locked、busy、interrupted open 仍按瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。
 - `SelectedSourceGraphActivationService` 仍是唯一的所选来源图激活算法，但 Ask/深度报告只能经共享 host 的内建 contributor 与 core-private 请求 bridge 到达它。调用方必须先完成并冻结历史 `B` 再调用 host；服务只读取服务端冻结、真正收窄的 `include` scope，构建有界 snapshot，依次尝试在线 scoped PPR/邻居 membership，并在必要时读取按来源 partition 伴生产物，最后复验每个返回 source id，再把 `G` 交给 `BaselineProtectedEnrichmentService`。全范围/全选在 snapshot I/O 前直接返回；默认不可见 shadow 返回 `B`，质量批准的 active 模式返回 `B + G`，任何失败都返回 `B`。状态对象只属于内部观测，不得进入 Ask/报告 payload、轨迹、stream 或 UI；禁止新增第二套 rollout parser、workflow 级 service 直调、直接图 consumer 或客户端 narrowed 判据。

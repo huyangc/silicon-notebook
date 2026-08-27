@@ -1,6 +1,6 @@
 // 跨模块枚举 → 用户可见中文的单一真源。
 // 只装「跨模块」的枚举；功能自己的枚举留在各自模块里，但同样必须走 label()。
-// 散文词不进这里（抽成常量只会让代码更难读）——由 AGENTS.md 词汇表 +
+// 散文词不进这里（抽成常量只会让代码更难读）——由 docs/ui-vocabulary.md +
 // scripts/check_ui_vocabulary.py 管。
 //
 // object_type 刻意不在此处：后端 extraction_profiles.OBJECT_TYPE_LABELS 才是它的
@@ -161,7 +161,7 @@ export const MODEL_SERVICE_STATUS_ERROR: Record<string, string> = {
 };
 
 // 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H8、
-// fix=reparse 等枚举),面向用户的标签只在这里映射,绝不能含黑话(见 AGENTS.md
+// fix=reparse 等枚举),面向用户的标签只在这里映射,绝不能含黑话(见 docs/ui-vocabulary.md
 // 「界面词汇表」+ scripts/check_ui_vocabulary.py)。H4/H5 同为「检索向量缺失」是有意的
 // (对用户是同一件事、同一个修复动作),渲染时按 label 合并成一行。
 export const CHECKUP_ISSUE: Record<string, string> = {

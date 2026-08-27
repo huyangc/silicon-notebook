@@ -6,7 +6,7 @@ import type { NotebookRef } from "./notebook-bases";
  * 新建 notebook 的默认名 —— **持久化契约，不是界面文案，不受「界面词汇表」管辖。**
  *
  * 这个字符串会随 `POST /notebooks` 落库成 `notebooks.name` 的真实值，并被以下位置
- * 逐字钉死：`AGENTS.md`、`architecture.md`、`README.md` / `README_zh.md`、
+ * 逐字钉死：`docs/product-and-api*.md`、`architecture.md`、
  * `fangan_done.md`，后端侧还有 `app/models/schemas.py` 的字段默认值、
  * `notebook_store.py` 的空名兜底、`sqlite_repository.py` 的
  * `_DEFAULT_NOTEBOOK_NAMES`（决定「自动改名只覆盖占位名、不覆盖用户起的名字」）。
@@ -246,7 +246,7 @@ export type SourceSummary = {
    *  由 `app/services/source_display.py::source_display_title` 合成，与引用卡、
    *  检索证据卡、清单卡共用同一份实现）。 */
   title: string;
-  /** 面向用户的显示名（论文标题优先）。CLAUDE.md 红线：所有为用户命名来源的路径
+  /** 面向用户的显示名（论文标题优先）。`docs/product-and-api.md` 契约：所有为用户命名来源的路径
    *  共用这一个真源，否则同一篇论文会在同一屏里有两个名字。 */
   display_title: string;
   type: string;

@@ -3360,8 +3360,8 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
     scope-driven (``deps.user_or_agent_scope`` documents the same rule for
     the HTTP twins), and a cell code attachment is inert — never executed,
     indexed, embedded, or projected — so the blast-radius argument does not
-    carry over. Recorded as a decision in AGENTS.md / CLAUDE.md /
-    docs/product-and-api*.md; this test pins the knowhow side so the
+    carry over. Recorded as a decision in docs/product-and-api*.md; this test
+    pins the knowhow side so the
     divergence cannot drift silently.
 
     Bob is a read-only member of Alice's notebook: the very share where his

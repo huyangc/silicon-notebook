@@ -17,8 +17,8 @@
 //
 // 覆盖边界(如实说明):本守卫只钉住「已知的那条祖先规则」这一个量级。日后若有人在
 // composer 里加一条更具体的祖先规则(比如 `.chat-input-controls .effort-picker span`),
-// 它同样能压过控件而本守卫不会报红。那种情况的兜底是 AGENTS.md「Graded-effort控件」
-// 约定与人工评审。
+// 它同样能压过控件而本守卫不会报红。那种情况的兜底是 docs/product-and-api*.md
+// 的共享控件约定与人工评审。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

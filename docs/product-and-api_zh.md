@@ -2,7 +2,7 @@
 
 [返回 README](../README_zh.md) · [English](./product-and-api.md)
 
-本文保留详细的产品行为与 HTTP/MCP 契约。仓库根 README 作为精简入口；实现和架构细节仍以 [architecture.md](../architecture.md) 与 [AGENTS.md](../AGENTS.md) 为准。
+本文保留详细的产品行为与 HTTP/MCP 契约。仓库根 README 作为精简入口；运行时架构以 [architecture.md](../architecture.md) 为准，[AGENTS.md](../AGENTS.md) 只负责把编码 Agent 路由到对应权威文档。
 
 ## 当前范围
 
@@ -68,7 +68,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 
 知识对象类型的显示名只有一份真源：后端 `app/domain/extraction_profiles.py` 的 `OBJECT_TYPE_LABELS`（`app/services/extraction_profiles.py` 只是 re-export shim），由 `GET /notebooks/{id}/knowledge-types` 以 `KnowledgeTypeCount.label` 下发给前端。凡是拿得到这个 API label 的调用点——Knowledge 浏览器的类型 tab 与条目——一律直接使用它，因此用户自定义类型（例如 knowhow 表列名投影出来的类型）同样能显示正确的中文名。只拿得到 `object_type` 字符串的调用点——引用浮层与知识图谱画布/侧栏——回落到前端内置小表 `frontend/app/kg-type-model.ts` 的 `KG_TYPE_LABELS`；`kg-type-mark.tsx` 消费并 re-export 该模型供共用渲染。该表逐字等于后端常量；`scripts/check_object_type_labels_contract.py` 作为硬门挂在 `scripts/check.sh` 里，两份一旦漂移即构建失败。未知/自定义类型一律原样显示其 `object_type`，绝不 TitleCase 成臆造的英文。这两张表的键都由用户可控字符串索引，查表必须走 `Object.hasOwn(...)` 而非裸下标：`constructor`、`__proto__` 会命中原型链上继承的函数/对象，而不是「查不到」。
 
-面向用户的文案另有一份词汇契约，真源是 `AGENTS.md`「界面词汇表」：表中每一行把一个内部词（基准库、chunk、KG、抽取、投影、晋升、schema、deprecated……）映射到界面唯一允许使用的说法。内部名保留在代码、类型、注释与架构文档里——只有渲染给用户看的字符串才改写；而**被持久化**而非被渲染的值（`Untitled notebook` 这个默认库名、协议上的 enum id）属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们。`scripts/check_ui_vocabulary.py` 作为硬门挂在 `scripts/check.sh` 里执行该表，其**作用域跟着信任边界走、不跟着目录树走**：既扫描 `frontend/app` 每个源文件的渲染文本——字符串字面量加 JSX 文本节点，并先剥离注释、标识符、正则体与 `${…}` / `{…}` 插值——也扫描后端每处 `user_error(status, "…")` 的消息字面量，因为 `api/deps.py` 恰恰只给这批 4xx `detail` 打上 `X-User-Message: 1`，而 deny-by-default 的前端见到该标记就把它原样显示给用户。打标记等于声明「这是给人看的文案」，那就同样受这份词表约束；此前把守卫圈在 `frontend/app` 里，正是「仅管理员可设置基准库」「仅管理员可管理晋升队列」四条 403 一路上屏而守卫全绿的原因。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内——它永远不上屏，detail 是诊断 / MCP 契约，这条分界由 `backend/tests/test_user_error.py` 守。任一侧命中黑名单词即构建失败。另有一条独立守卫 `frontend/app/raw-enum-fallback.test.mjs`（由 `npm run test` 递归收集，因而同样是 `scripts/check.sh` 的硬门），拒绝「兜底即原值」（`MAP[x] ?? x`，以及通过正规 API 达成同一效果的 `label(map, x, x)`）：这种查表一旦后端新增枚举值，就会把英文 id 直接渲染给用户；应改用 `frontend/app/vocabulary.ts` 的 `label(MAP, value, fallback)`，它强制传中性兜底词，使该 bug 写不出来。该检查跑在真正的 TypeScript AST 上而非正则：渲染位置的 `M[x] ?? x` 与内部归一化的 `ALIASES[v] ?? v` **语法形状完全一致**，只有上下文能区分泄漏与正常代码——正则版误报了后者，又整个漏掉了 `M?.[x] ?? x`、`getLabels()[x] ?? x` 与 `label(m, x, x)`。它自己的文件头如实写明仍然看不到的部分（先算进变量再渲染、`alert(...)` 这类非 JSX 出口），诚实标注优于假装全覆盖。若确实要原样透出**用户自己写的**字符串（自定义 `object_type`、用户自建的 schema 字段名），则显式写成 `Object.hasOwn(...) ? ... : raw`，顺带规避上面那个原型链隐患。该守卫是词黑名单而非语义检查：有两行只覆盖其无歧义的复合形态——图谱视图里裸用「节点」「边」是正当的，且「边」与「旁边」「边框」同形。`backend/tests/test_ui_vocabulary_guard.py` 存放它的正例与反例，并额外在「词汇表新增一行却既没有对应规则、也没有登记豁免理由」时失败，使黑名单无法悄悄退化成只覆盖词表的一个子集。
+面向用户的文案另有一份词汇契约，真源是[界面词汇约定](./ui-vocabulary.md)：表中每一行把一个内部词（基准库、chunk、KG、抽取、投影、晋升、schema、deprecated……）映射到界面唯一允许使用的说法。内部名保留在代码、类型、注释与架构文档里——只有渲染给用户看的字符串才改写；而**被持久化**而非被渲染的值（`Untitled notebook` 这个默认库名、协议上的 enum id）属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们。`scripts/check_ui_vocabulary.py` 作为硬门挂在 `scripts/check.sh` 里执行该表，其**作用域跟着信任边界走、不跟着目录树走**：既扫描 `frontend/app` 与 `frontend/features` 每个源文件的渲染文本——字符串字面量加 JSX 文本节点，并先剥离注释、标识符、正则体与 `${…}` / `{…}` 插值——也扫描后端每处 `user_error(status, "…")` 的消息字面量，因为 `api/deps.py` 恰恰只给这批 4xx `detail` 打上 `X-User-Message: 1`，而 deny-by-default 的前端见到该标记就把它原样显示给用户。打标记等于声明「这是给人看的文案」，那就同样受这份词表约束；此前只扫描前端，正是「仅管理员可设置基准库」「仅管理员可管理晋升队列」四条 403 一路上屏而守卫全绿的原因。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内——它永远不上屏，detail 是诊断 / MCP 契约，这条分界由 `backend/tests/test_user_error.py` 守。任一侧命中黑名单词即构建失败。另有一条独立守卫 `frontend/tests/guards/raw-enum-fallback.test.mjs`（由 `npm run test` 递归收集，因而同样是 `scripts/check.sh` 的硬门），拒绝「兜底即原值」（`MAP[x] ?? x`，以及通过正规 API 达成同一效果的 `label(map, x, x)`）：这种查表一旦后端新增枚举值，就会把英文 id 直接渲染给用户；应改用 `frontend/app/vocabulary.ts` 的 `label(MAP, value, fallback)`，它强制传中性兜底词，使该 bug 写不出来。该检查跑在真正的 TypeScript AST 上而非正则：渲染位置的 `M[x] ?? x` 与内部归一化的 `ALIASES[v] ?? v` **语法形状完全一致**，只有上下文能区分泄漏与正常代码——正则版误报了后者，又整个漏掉了 `M?.[x] ?? x`、`getLabels()[x] ?? x` 与 `label(m, x, x)`。它自己的文件头如实写明仍然看不到的部分（先算进变量再渲染、`alert(...)` 这类非 JSX 出口），诚实标注优于假装全覆盖。若确实要原样透出**用户自己写的**字符串（自定义 `object_type`、用户自建的 schema 字段名），则显式写成 `Object.hasOwn(...) ? ... : raw`，顺带规避上面那个原型链隐患。该守卫是词黑名单而非语义检查：有两行只覆盖其无歧义的复合形态——图谱视图里裸用「节点」「边」是正当的，且「边」与「旁边」「边框」同形。`backend/tests/test_ui_vocabulary_guard.py` 存放它的正例与反例，并额外在「词汇表新增一行却既没有对应规则、也没有登记豁免理由」时失败，使黑名单无法悄悄退化成只覆盖词表的一个子集。
 
 重新解析保留 source 行与原始文件：替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。
 
@@ -80,7 +80,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 
 当笔记本的 `ScaleIndexStatus.state` 为 `"queued"` 时，状态响应会披露排队的具体原因，而不只是一个裸的排队标记：`queue_position`（从 1 开始）与 `queue_length` 描述在低峰队列中的位次与队列长度，`queued_at` 给出该项**首次**入队时刻（UTC ISO 字符串；重复排队只更新构建模式、保留原时间戳——与按插入序的位次同锚点，两者不会自相矛盾），`offpeak_in_window` 说明服务器当前是否已处于空闲时段内，不在窗口内时 `offpeak_next_start_at` 给出下一个空闲时段开始时刻（UTC ISO 字符串），`last_build_ms`（0 表示未知）携带上一次构建的实际耗时，供界面设定预期。以上六个字段均为可选，旧后端缺字段时前端优雅降级为此前的通用排队文案。已有已发布索引的排队笔记本同时仍带出 `last_built_at`，看板卡片排队时因此能继续显示「上次构建 X 前」。`queue_position` 是首次入队序（服务端按首次入队时刻排序推导，工作线程启动失败后的队列恢复不会改变位次），不代表等待顺序——低峰窗口一开，`_process_idle_queue` 会对队列里每一项并发启动构建，不承诺谁先谁后；前端 `queuedScheduleHint` 也因此只在队列长度 ≥ 2 时报告「共 N 项」而不报告位次。数值档位与内部术语不会原样上屏。铃铛（待确认中心）现在也会透传 `type:"index"` 条目底层的 `"queued"` 状态（此前会被改写成 `"building"`），并展示独立文案「索引已排队，将在空闲时段构建」，不再带百分比进度。
 
-notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。Ask、报告、Memory、Knowhow 展示的 Markdown 中，即使独占一行的单行 `$$...$$` 紧邻正文，也仍按块级公式渲染；宽块级公式只在自身内容块内横向滚动。来源详情、知识对象与知识图谱出处卡的公式视图在直调 KaTeX 前会剥除包裹整值的 Markdown 数学定界符，仍无法解析时显示原始文本，畸形公式输入不会再变成空白可视化。渲染模型产出文本的三个面（Ask 回答与 Memory 卡片、深度报告、报告公开分享页）里，**单个 `~` 是字面量而不是删除线**：GFM 删除线必须写成规范的 `~~文本~~`。这不是风格取舍——放任单波浪线成对，中文技术答案里 `7~5nm`、`80~90%`、`2~3 周` 这类区间与 `~3GHz` 这类约等于同段出现两个就会被配成一对，中间整段正文被划掉。Knowhow 格子预览刻意仍按单波浪线成对（它与格子 Markdown 规整的判定口径互相论证，见 `AGENTS.md`）。
+notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。Ask、报告、Memory、Knowhow 展示的 Markdown 中，即使独占一行的单行 `$$...$$` 紧邻正文，也仍按块级公式渲染；宽块级公式只在自身内容块内横向滚动。来源详情、知识对象与知识图谱出处卡的公式视图在直调 KaTeX 前会剥除包裹整值的 Markdown 数学定界符，仍无法解析时显示原始文本，畸形公式输入不会再变成空白可视化。渲染模型产出文本的三个面（Ask 回答与 Memory 卡片、深度报告、报告公开分享页）里，**单个 `~` 是字面量而不是删除线**：GFM 删除线必须写成规范的 `~~文本~~`。这不是风格取舍——放任单波浪线成对，中文技术答案里 `7~5nm`、`80~90%`、`2~3 周` 这类区间与 `~3GHz` 这类约等于同段出现两个就会被配成一对，中间整段正文被划掉。Knowhow 格子预览刻意仍按单波浪线成对（它与格子 Markdown 规整的判定口径互相论证）。
 
 ### 按来源选择检索范围
 
@@ -1784,6 +1784,10 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP——写后端 bundle 与构建期 UI 包、本地联调、打包、安装、启动校验、升级/回滚，以及完整拒绝码表：[部署插件 SOP](./deployment-extensions-sop_zh.md)。
 
 ### 部署问答引擎（`ask.engine`）
+
+结果准入产生的降级步骤必须经同一个 core-owned 轨迹回调追加并实时发送，且不带
+`duration_ms`，位置紧邻带计时的终止步骤之前。这样核心准入工作不会被计入插件耗时，
+同时 live 交付、durable 轨迹行与 final response 保持 append-only 且逐字一致。
 
 部署插件可以注册一个或多个完整问答引擎。每个 `PROVIDER` 暴露冻结描述符（`mode_id`、面向用户的名称/说明、`requires_kg`）和一个同步 `answer()` 方法。该方法仍在 detached durable Ask worker 内同步执行，但 host 会把每个 extension `AskMode` 构造成 `streaming=true`：`/ask-modes` 同步投影 `streaming=true` 与 `streams_trace=true`，正式浏览器通过 `POST /notebooks/{id}/ask/stream` 执行；普通 `POST .../ask` 兼容路由继续同步阻塞。`mode_id` 必须以该插件自己的 id 加 `.` 为前缀；重复、畸形、空值或超限描述符都会让启动 fail-closed。内建和已退役 mode id 都不含点号，而插件 id 本身全局唯一，因此插件前缀就是防碰撞边界，不另维护第二份保留字表。
 

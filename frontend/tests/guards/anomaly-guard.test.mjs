@@ -27,7 +27,7 @@
 // 把已有的一处 AnomalyBadge / <SourceAnomalies> 换成等价内联样式,那个文件的渲染
 // 次数会掉一档,被计数断言逮到。它抓不住**全新落点**这种子情形——在别处新增一段
 // 手搓样式渲染一个新异常,计数不降、也不撞前 4 条黑名单,理论上仍是假阴性。这类
-// 新落点的兜底不是这份测试,是 AGENTS.md「Anomaly severity tiers」约定 + 人工代码
+// 新落点的兜底不是这份测试,是 docs/product-and-api*.md 的异常分级约定 + 人工代码
 // 评审,如实说明而非声称全覆盖。
 import test from "node:test";
 import assert from "node:assert/strict";

@@ -163,7 +163,7 @@ class ActivitySource(BaseModel):
 
     ``display_title`` 由路由层经 ``source_display_title()`` 合成
     (论文标题优先),不是仓储层原始的 ``title``/``file_name`` 列——所有为用户
-    命名来源的路径共用同一份实现(CLAUDE.md 红线)。
+    命名来源的路径共用同一份实现（见 `docs/product-and-api.md`）。
     """
 
     type: Literal["source"] = "source"

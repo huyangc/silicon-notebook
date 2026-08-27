@@ -642,7 +642,7 @@ def test_project_trace_step_never_surfaces_the_new_keys():
 
 def test_public_trace_steps_passes_result_ids_through_unfiltered():
     """公开/覆盖层过滤只按 step_type 整步过滤,不剥内部键——真源见
-    ``AGENTS.md``「问答会话公开分享」条与 CLAUDE.md 对应段落:公开面结构上
+    ``docs/product-and-api.md``「问答会话公开分享」契约:公开面结构上
     不带 reasoning_trace,所以这里不是泄漏点;但过滤函数本身的行为必须钉住,
     免得日后有人往它里面加一条按 detail 键剥离的逻辑而不自知。
     """

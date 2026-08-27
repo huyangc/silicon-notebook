@@ -161,7 +161,7 @@ async def require_notebook_read(
 # 表,漏掉就是「API 收写而 UI 只读」或「Agent 面与浏览器面口径分叉」)。P2-T2 的
 # 逐项处置记录在此,后续任务照此清单继续核对:
 #   1. `user_or_agent_scope` 的 session 分支(本文件下方)——Agent/MCP 面,
-#      **刻意不翻**:CLAUDE.md「MCP 工具面与来源管理」红线登记了它独立的 owner-only
+#      **刻意不翻**:`architecture.md` 的 Sharing 边界登记了它独立的 owner-only
 #      取向(`mcp_server._writable_notebook`),浏览器面放宽不传导过去;
 #   2. `knowledge_routes.py` 的 `can_edit` 响应投影——驱动前端编辑控件显隐,
 #      **P2-T2 已改用 `notebook_capability_allowed("knowledge:write", ...)`**,
@@ -428,7 +428,7 @@ async def user_or_agent_scope(
     the MCP source-management/build tools DO layer an owner-only gate on
     top of their scopes (mcp_server._writable_notebook) because a document
     write reaches every member's retrieval. The divergence is a recorded
-    decision (AGENTS.md's Agent source-management bullet), pinned on both
+    decision (docs/product-and-api*.md's Agent source-management contract), pinned on both
     sides by backend/tests/test_memory_mcp.py.
 
     Otherwise -> session Bearer (or the auth_optional seeded-admin

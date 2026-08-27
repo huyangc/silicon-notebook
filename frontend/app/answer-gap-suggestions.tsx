@@ -23,7 +23,7 @@
  * class family (`.answer-gap-consult`), because the two blocks are unrelated
  * information categories and must be free to diverge in style later.
  *
- * Long-task button rule (CLAUDE.md "长任务按钮的忙碌态"): the import button
+ * Long-task button rule (`docs/development.md`): the import button
  * has no server-side single-flight guard behind it, so a click must disable
  * that one row immediately and swap in progress wording; success freezes it
  * into a terminal "已导入" state; failure surfaces the message persistently

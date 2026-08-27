@@ -14,7 +14,7 @@ Three groups of coverage:
    boundary (with an accompanying mutation-verification note in the module
    docstring below).
 
-⚠ Mutation verified by hand while authoring this file (per CLAUDE.md's "加了
+⚠ Mutation verified by hand while authoring this file (per `docs/development.md`'s
 守卫 ≠ 有效" rule): temporarily changed the SQLite adapter's
 ``recent_user_ask_languages`` to also return the raw ``question`` text
 alongside ``language``, re-ran
@@ -480,7 +480,7 @@ def test_fullwidth_latin_and_halfwidth_katakana_are_not_chinese():
 def test_sync_ask_paths_deliberately_do_not_notify_inference():
     """codex #535 R4 P2 的驳回护栏:同步 ask(ask_current——POST /ask 与 MCP
     ask_notebook 的路径)刻意不触发三条 note_ask_completed 链,P1 起的登记
-    口径(CLAUDE.md「同步 POST /ask 不计入覆盖层触发计数」)。若有人接入,
+    口径（见 `docs/product-and-api.md`「同步 POST /ask 不计入覆盖层触发计数」）。若有人接入,
     本用例红,提醒他那是在改三条链共同的计数语义、需单独过评审。"""
     import ast
     from pathlib import Path

@@ -506,7 +506,7 @@ def _plugin_extract_window(
 ) -> Tuple[List[Node], List[Edge]]:
     # 刻意不传 response_validator ⇒ 这条路**不进** LLM 内容寻址缓存(缓存是
     # opt-in):插件自定的响应形状 core 无法核验,没有可用的准入 validator。
-    # 代价是插件管线的每次重建按全价重跑模型——已登记取舍(CLAUDE.md LLM 缓存条)。
+    # 代价是插件管线的每次重建按全价重跑模型——已登记取舍（`docs/development.md` 效率约束）。
     prompt_result = kg_strategy.build_kg_prompt(
         pipeline_id,
         elements,

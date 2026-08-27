@@ -177,10 +177,9 @@ class _Conn(sqlite3.Connection):
 #
 # ⚠ 这份公平性是 CPython **≥3.13** 的实现细节,不是 ``threading`` 模块的文档
 # 承诺。3.13 之前 ``threading.Lock`` 由更老的信号量式实现支撑,没有交接语义,
-# 和 RLock 一样会 barge。项目根 ``AGENTS.md``(以及 README.md / README_zh.md 的
-# Prerequisites/前置条件)已把支持下限提到 Python 3.13+,原因正是这份依赖;这里
-# 没有做成运行时断言(解释器版本由部署环境固定,见 AGENTS.md 的 Python
-# Environment 一节),这段注释是这份依赖最详细的记录处。
+# 和 RLock 一样会 barge。``docs/deployment-and-configuration.md`` / ``_zh.md``
+# 的 Python Environment/环境一节已把支持下限提到 Python 3.13+，原因正是这份
+# 依赖；这里没有做成运行时断言，这段注释是这份依赖最详细的记录处。
 #
 # 二、可重入性不在锁里,在 ``write()`` 里
 #

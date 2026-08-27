@@ -61,7 +61,7 @@ dry-run 永远会写出 plan 文件，供 ``--apply --plan`` 指向。见 main()
 存量回填的默认路径必须可预测、零调用成本，绝不触发任何模型请求。加 --use-llm
 才改走 reformat_cell；若该次运行改写模型实际未配置（source == "rule/no-llm"）或
 LLM 结果未过校验已退回规则（source == "rule/llm-failed"），本脚本据此打印醒目
-WARNING，不悄悄假装 LLM 生效了（仓库「拒绝静默降级」的约定，见 AGENTS.md）。
+WARNING，不悄悄假装 LLM 生效了（见 docs/operations*.md 的运维失败边界）。
 """
 from __future__ import annotations
 

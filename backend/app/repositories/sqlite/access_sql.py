@@ -19,7 +19,7 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
   三处**不翻**,各有理由:
     1. `notebook:delete`(删库)恒 owner——爆炸半径是整本库,且 owner 无法撤销;
     2. Agent/MCP 面恒 owner(`mcp_server._writable_notebook`)——那是另一套鉴权模型
-       的刻意分歧,CLAUDE.md「MCP 工具面与来源管理」红线已登记;
+       的刻意分歧，`architecture.md` 的 Sharing 边界已登记;
     3. `reports:write` 已在 P1 转成行级 `created_by` 判定,不由这张表表达。
   主体判定与读权**同构**:同一份四值 `principal_type` 白名单,只多一个
   `ng.role='admin'` 条件(见 `_admin_principal_match_expr`)。

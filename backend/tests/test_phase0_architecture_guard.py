@@ -749,8 +749,11 @@ def test_registry_composition_does_not_change_route_topology(monkeypatch):
     assert route_signature(composed) == route_signature(baseline)
 
 
-def test_extension_boundary_is_present_in_all_agent_entry_documents():
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+def test_extension_boundary_is_present_in_canonical_development_documents():
+    for name in (
+        "docs/development.md",
+        "docs/development_zh.md",
+    ):
         normalized = (
             (ROOT / name)
             .read_text(encoding="utf-8")
@@ -766,8 +769,11 @@ def test_extension_boundary_is_present_in_all_agent_entry_documents():
         assert "ci" in normalized, name
 
 
-def test_ask_application_stage_boundary_is_in_all_agent_entry_documents():
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+def test_ask_application_stage_boundary_is_in_canonical_development_documents():
+    for name in (
+        "docs/development.md",
+        "docs/development_zh.md",
+    ):
         normalized = (
             (ROOT / name)
             .read_text(encoding="utf-8")
@@ -781,8 +787,11 @@ def test_ask_application_stage_boundary_is_in_all_agent_entry_documents():
         assert "connection" in normalized or "连接" in normalized, name
 
 
-def test_report_stage_and_post_terminal_boundary_is_in_all_agent_documents():
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+def test_report_stage_and_post_terminal_boundary_is_in_canonical_development_documents():
+    for name in (
+        "docs/development.md",
+        "docs/development_zh.md",
+    ):
         normalized = (
             (ROOT / name)
             .read_text(encoding="utf-8")

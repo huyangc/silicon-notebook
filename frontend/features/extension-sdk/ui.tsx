@@ -7,7 +7,7 @@
  * 红线做成**结构性**的：插件拿到的是一个只接内容的容器，骨架类名全在这里写死，
  * 插件那侧没有任何写 CSS 或内联颜色的入口（`extension-ui-layout-guard` 两侧都钉）。
  * 拖动同样是白拿的——`FloatingModalCard` 是全仓浮窗的唯一实现，插件不必也不得
- * 另造一套（CLAUDE.md「浮动弹窗」）。
+ * 另造一套（见 `docs/development.md` 的跨界面前端交互护栏）。
  *
  * **它接入核心的 root-dialog 裁决**（`app/use-root-modal-coordinator.ts` 的
  * `"extension"` slot），走的是"一个通用格子 + 一个 SDK 端口"而不是"每个插件一个

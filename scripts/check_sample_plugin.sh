@@ -6,7 +6,7 @@ set -euo pipefail
 # scripts/check.sh (G1) because it is the one place in the repository that
 # deliberately synchronizes a UI package into frontend/features/ext-*/ —
 # `npm run test` (G1) asserts that tree stays empty by default
-# (CLAUDE.md "Workspace UI registry": extension-ui-host.component.test.tsx's
+# (`docs/development.md` workspace UI registry: extension-ui-host.component.test.tsx's
 # "length 1 with zero plugins" must not be relaxed), so exercising the
 # sample package needs its own, separately-triggered pass.
 #
@@ -23,7 +23,7 @@ set -euo pipefail
 #      not just `extension-*.test.mjs`. Measured at zero practical cost (2441
 #      tests green) and it buys the rest of the suite a run against a
 #      *non-empty* `features/ext-*/`, which is the configuration no other
-#      lane ever sees (AGENTS.md §0.4 / R8). `test:node` is deliberately the
+#      lane ever sees (see docs/development*.md). `test:node` is deliberately the
 #      script name rather than `test`: npm fires `pre<script>` for the exact
 #      name, so this does not re-trigger `pretest`'s sync underneath us.
 #   4. `check_ui_vocabulary.py` — the synced copy lands inside

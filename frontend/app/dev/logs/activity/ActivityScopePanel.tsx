@@ -102,7 +102,7 @@ export function ActivityScopePanel({
                 >
                   <span className="activity-nb-name">{notebook.name}</span>
                   {/* 计数只用界面词。问答用量取 questions——conversations 是仅为兼容
-                      保留的会话容器数,拿它冒充提问次数是 CLAUDE.md 明禁的。 */}
+                      保留的会话容器数，`docs/product-and-api.md` 禁止拿它冒充提问次数。 */}
                   <span className="activity-nb-counts">
                     来源 {notebook.sources} · 提问 {notebook.questions} · 报告 {notebook.reports}
                   </span>

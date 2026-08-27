@@ -99,7 +99,7 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
 //
 // ⚠抽成常量不是为了省字:这串原本在 page.tsx 里各写一份,于是散文重写把统称
 // 修成「知识对象」时只改到一处,另一处继续挂着「概念」——把 claim / formula /
-// procedure 和 knowhow 自定义类型集体降格(见 AGENTS.md「概念」不是统称一节)。
+// procedure 和 knowhow 自定义类型集体降格(见 docs/ui-vocabulary.md「解释与例外」)。
 // 两份字面量正是它能漂移的原因,所以这里只留一份,并由
 // kg-object-vocabulary.test.mjs 钉住:统称串里不许出现任何一个具体类型名。
 export const UNINDEXED_SCOPE_HINT =

@@ -374,7 +374,7 @@ def test_every_answer_prompt_call_site_in_ask_service_passes_style_block():
 #:
 #: 显式豁免名单,键是相对 ``backend/app/`` 的模块路径。当前为空——
 #: ``report_engine.py`` 刻意不接风格块(报告面有自己独立的最终审校/终审
-#: prompt 契约,见 CLAUDE.md「深度报告与逐步推理准确性契约」,不复用 Ask 的
+#: prompt 契约，见 `docs/product-and-api.md` 的深度报告契约，不复用 Ask 的
 #: ``answer_prompt`` 调用形状),但它压根不 import/调用 ``answer_prompt``
 #: (``grep -rn "answer_prompt(" backend/app/services/reports/`` 零命中),
 #: 所以它也从不会出现在下面扫出的调用点集合里,不需要被列进这张名单。这张

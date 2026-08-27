@@ -241,6 +241,7 @@ Workspace UI 扩展只允许随构建静态进入。首个真实 contribution �
 | 需求 | 文档 |
 | --- | --- |
 | 产品行为、检索模式、Memory/MCP、knowhow、API、当前限制 | [产品与 API 参考](./docs/product-and-api_zh.md) |
+| 面向用户的中文界面用词 | [界面词汇约定](./docs/ui-vocabulary.md) |
 | 外部 Agent 界面配置、Codex/Claude CLI 与可运行 MCP/Memory 示例 | [Agent MCP 与 Memory 接入 SOP](./docs/agent-mcp-memory-sop_zh.md) |
 | 开发、接入与运维一个仓库外部署插件（后端 bundle、构建期 UI 包、安装、拒绝码表） | [部署插件 SOP](./docs/deployment-extensions-sop_zh.md) |
 | 安装、源码/生产部署、模型服务、配置项 | [部署与配置](./docs/deployment-and-configuration_zh.md) |
@@ -269,6 +270,4 @@ Workspace UI 扩展只允许随构建静态进入。首个真实 contribution �
 
 ## 文档维护
 
-根 README 只保留项目入口信息。详细行为写入上表对应的权威文档，中英文版本保持一致。安装、产品行为、架构或开发约束变化时，仍需同步更新 `README.md`、`README_zh.md`、`AGENTS.md` 三份，并更新对应的专题文档。
-
-`CLAUDE.md` 刻意不在这个集合里。它由 Claude Code 每次会话自动加载，因此只收「对下一个无关改动也成立」的通用约束，以及只有该语境才有的规程（worktree、子代理、codex 评审闭环）；特性级契约写进 `AGENTS.md` 与 `docs/`，`CLAUDE.md` 只给路由表。`scripts/check_claude_md_budget.py` 在 G1 contracts 泳道钉住它的体量。只有当改动触及它已有的通用约束时才动它，判据见 `AGENTS.md` → Documentation Sync。
+根 README 只保留项目入口信息。详细行为写入上表对应的权威文档，中英文版本保持一致。只有入口信息变化时才更新 README 对；只有全仓 Agent 工作流/文档路由变化时才更新 `AGENTS.md`，只有 Claude Code 常驻规则变化时才更新 `CLAUDE.md`。普通产品、架构、部署、运维与开发约束变化只更新其权威专题文档，不再复制到所有入口文件。

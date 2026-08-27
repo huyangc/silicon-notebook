@@ -546,7 +546,7 @@ def test_notebook_source_ids_among_batches_large_id_lists(repo):
 def test_h45_memo_expires_after_ttl(repo, monkeypatch):
     """租约完全不动时(如离线 CLI 在别的进程里写向量)靠 TTL 兜底:H4/H5 **至多陈旧
     ``_H45_CACHE_TTL`` 秒(30s)**。这是登记接受的口径(体检是诊断面),已写进
-    AGENTS.md / CLAUDE.md 的长任务按钮条与 docs/product-and-api*.md 的端点条目。
+    docs/product-and-api*.md 的长任务按钮条与端点条目。
 
     变异锚点:去掉 TTL 判定(只比租约快照)→ 时钟推过 TTL 后仍命中,``len(seen) == 4`` 红。"""
     import app.services.checkup as checkup_mod

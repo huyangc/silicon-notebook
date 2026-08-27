@@ -1074,7 +1074,7 @@ class RepositoryRuntime:
 
     # codex #535 R4 P2(驳回,登记决定):本通知只由流式 AskExecutionCoordinator
     # 触发,同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook`(经
-    # ask_current)刻意**不**接入——这是 P1 就登记的口径(CLAUDE.md「Agent 库
+    # ask_current)刻意**不**接入——这是 P1 就登记的口径（`docs/product-and-api.md`「Agent 库
     # 理解」条:「同步 POST /ask 不计入覆盖层触发计数」),P2 经验库与 P3 语言
     # 归纳共用同一个钩子、同一条边界。接同步路径要么在 ask_current 里再挂一次
     # (流式路径包着它,会双计),要么把钩子下沉进 ask_current 并让流式去重——
