@@ -269,4 +269,6 @@ Workspace UI 扩展只允许随构建静态进入。首个真实 contribution �
 
 ## 文档维护
 
-根 README 只保留项目入口信息。详细行为写入上表对应的权威文档，中英文版本保持一致。安装、产品行为、架构或开发约束变化时，仍需同步更新 `README.md`、`README_zh.md`、`AGENTS.md`、`CLAUDE.md`，并更新对应的专题文档。
+根 README 只保留项目入口信息。详细行为写入上表对应的权威文档，中英文版本保持一致。安装、产品行为、架构或开发约束变化时，仍需同步更新 `README.md`、`README_zh.md`、`AGENTS.md` 三份，并更新对应的专题文档。
+
+`CLAUDE.md` 刻意不在这个集合里。它由 Claude Code 每次会话自动加载，因此只收「对下一个无关改动也成立」的通用约束，以及只有该语境才有的规程（worktree、子代理、codex 评审闭环）；特性级契约写进 `AGENTS.md` 与 `docs/`，`CLAUDE.md` 只给路由表。`scripts/check_claude_md_budget.py` 在 G1 contracts 泳道钉住它的体量。只有当改动触及它已有的通用约束时才动它，判据见 `AGENTS.md` → Documentation Sync。

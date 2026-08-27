@@ -204,7 +204,7 @@ Homebrew warm gate。
 
 对于已经批准的多步骤实施计划，默认采用 subagent-driven development：每个任务交给一个全新的实现子 Agent，并在进入下一任务前完成该任务范围内的规格符合性与代码质量审查。纯调研、设计、状态汇报和只读审查不要求创建 worktree 或使用子 Agent。
 
-`CLAUDE.md` 是 Claude Code 在本仓库的操作规范：Claude Code 只自动加载 `CLAUDE.md` 与 `.claude/rules/`，不会加载 `AGENTS.md`，因此该文件内联了必须随时在线的红线，并给出 `AGENTS.md` 的章节索引；两者冲突时以 `AGENTS.md` 为准，刻意的例外由 `CLAUDE.md` 穷举列出。也正因为 Claude Code 读的是它而不是 `AGENTS.md`，`CLAUDE.md` 属于四份文档同步集合的一员。其中最硬的一条是**起子代理必须显式选模型，不得默认继承主 Agent**，按任务需要的判断力分层——需要判断力（写计划、评审、架构取舍、疑难归因）用 `opus`，规格已定死的转录型实现用 `sonnet`，纯检索定位用 `haiku`。这条由 PreToolUse 硬门 `.claude/hooks/require-subagent-model.py` 强制：没显式传 `model`、且 `subagent_type` 未在 `.claude/agents/` 中钉好模型的调用会被拒绝。`.claude/agents/` 已提供三个钉好模型的角色：`impl-task`（sonnet）、`spec-review`（opus）、`code-quality-review`（opus）。`backend/tests/test_claude_subagent_model_hook.py` 是这个 hook 的回归网：以子进程方式跑真实脚本，两个方向都覆盖——既盖「绕过」（让继承模型的调用溜过去），也盖「误拦」（把合法调用堵死，逼人绕开守卫）。
+`CLAUDE.md` 是 Claude Code 在本仓库的操作规范：Claude Code 只自动加载 `CLAUDE.md` 与 `.claude/rules/`，不会加载 `AGENTS.md`，因此该文件收录必须随时在线的通用约束与该语境独有的规程，并给出 `AGENTS.md` 章节与 `docs/` 文档对的路由；两者冲突时以 `AGENTS.md` 为准，刻意的例外由 `CLAUDE.md` 穷举列出。也正因为它的每个字符都是每次请求的固定成本，特性级契约一律不进它，体量由 `scripts/check_claude_md_budget.py` 在 G1 contracts 泳道钉住——归属判据见上面的「文档维护」。其中最硬的一条是**起子代理必须显式选模型，不得默认继承主 Agent**，按任务需要的判断力分层——需要判断力（写计划、评审、架构取舍、疑难归因）用 `opus`，规格已定死的转录型实现用 `sonnet`，纯检索定位用 `haiku`。这条由 PreToolUse 硬门 `.claude/hooks/require-subagent-model.py` 强制：没显式传 `model`、且 `subagent_type` 未在 `.claude/agents/` 中钉好模型的调用会被拒绝。`.claude/agents/` 已提供三个钉好模型的角色：`impl-task`（sonnet）、`spec-review`（opus）、`code-quality-review`（opus）。`backend/tests/test_claude_subagent_model_hook.py` 是这个 hook 的回归网：以子进程方式跑真实脚本，两个方向都覆盖——既盖「绕过」（让继承模型的调用溜过去），也盖「误拦」（把合法调用堵死，逼人绕开守卫）。
 
 PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要逐字贴回 PR**——零意见的轮次要贴，手动补跑的轮次也要贴，并附上触发方式、完整命令、head SHA、退出码与输出字节数，便于核对评审确实跑过、结论没被转述失真。判一轮成功要**退出码为 0 且输出非空**两个条件：codex 被 SIGTERM 杀掉时退出码同样是 0，只看退出码会贴出一条空评论、看起来像通过。P0/P1 阻塞：核实后把站得住的意见修掉并重审，直到判定转为非阻塞——只有意见站不住（走下面的驳回规则）或修复方向需要人拍板时才停下来交人决定；P2/P3 不阻塞、可如实说明后不改；优先级标签解析不出来时保守拦人而不是默认放行。评审意见可以在核实后驳回（codex 评的是 diff，未必了解运行时事实），但驳回要同时给出 PR 上的理由与证据、代码里记录取舍的注释，以及钉住既有行为的回归用例。合入不再逐次征求同意：评审非阻塞**且** CI 全绿时直接 `--rebase` 合。评审仍阻塞或输出解析不出等级时一律不合——先修掉并重审；CI 未全绿、或用户说过等他自己合，同样不合。CI 判绿只认 `gh pr checks` 全部 `pass`——`mergeStateStatus: CLEAN` 只说没有东西拦着合并，不等于检查跑绿了。合入前还必须在 PR 上确认**针对 PR 远端 head（`headRefOid`）的评审已经贴出**（不能用本地 `git rev-parse HEAD`：本地落后时会命中一条旧评审而放行，而合入的是远端那个未经评审的 head）：评审自动化静默没触发，和它跑完判了通过，在外部看起来一模一样；agent 的汇报和 hook 的本地状态都不是证据，PR 上的那条评论才是。评审的自动化本身是开发者本机的 Claude Code hook、不是仓库产物，新 clone 上没有它——规则依然成立，那就手动跑；机制细节见 `CLAUDE.md`。
 
@@ -225,9 +225,10 @@ PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要�
 - `README.md`
 - `README_zh.md`
 - `AGENTS.md`
-- `CLAUDE.md`
 
 根 README 保持精简；同时更新 `docs/` 下负责该主题的中英文权威文档：`product-and-api`、`deployment-and-configuration`、`operations` 或 `development`。
+
+`CLAUDE.md` 刻意不在这个集合里：它由 Claude Code 每次会话自动加载，每个字符都是每次请求的固定成本，因此只收「对下一个无关改动也成立」的通用约束与该语境独有的规程，特性级契约一律走 `AGENTS.md` / `docs/`，它只保留路由表。`scripts/check_claude_md_budget.py`（G1 contracts 泳道）钉住它的总字符数与单行字符数，两个上限只许降。只有当改动触及它已有的通用约束时才动它；另有四条 G1 守卫要求扩展点/stage 边界的关键词出现在它正文里，改那一条时要连守卫一起跑。
 
 SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 source-binding identity；locked、busy、interrupted open 仍按瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。
 - `SelectedSourceGraphActivationService` 仍是唯一的所选来源图激活算法，但 Ask/深度报告只能经共享 host 的内建 contributor 与 core-private 请求 bridge 到达它。调用方必须先完成并冻结历史 `B` 再调用 host；服务只读取服务端冻结、真正收窄的 `include` scope，构建有界 snapshot，依次尝试在线 scoped PPR/邻居 membership，并在必要时读取按来源 partition 伴生产物，最后复验每个返回 source id，再把 `G` 交给 `BaselineProtectedEnrichmentService`。全范围/全选在 snapshot I/O 前直接返回；默认不可见 shadow 返回 `B`，质量批准的 active 模式返回 `B + G`，任何失败都返回 `B`。状态对象只属于内部观测，不得进入 Ask/报告 payload、轨迹、stream 或 UI；禁止新增第二套 rollout parser、workflow 级 service 直调、直接图 consumer 或客户端 narrowed 判据。
