@@ -26,7 +26,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
-from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
+from app.repositories.chunk_elements import (
+    reverse_rows as chunk_element_reverse_rows,
+    reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
+)
 from app.repositories.image_backfill_rows import image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maintenance 共用
     asset_ref_tokens,
@@ -1875,16 +1878,23 @@ class SQLiteMaintenanceAdapter:
         source_id: str,
         elements: Sequence[dict],
         chunk_element_ids: dict[str, list[str]],
+        metadata_updates: Sequence[dict] = (),
         *,
         created_at: str,
     ) -> None:
-        """一个来源的全部插入，**一个写事务**。
+        """一个来源的全部插入与就地补齐，**一个写事务**。
 
         `chunk_element_ids` 是受影响 chunk 的**完整**新 element_ids 列表；
         `chunks.text` 与 chunk id 逐字节不变，所以 `chunk_embeddings`
         （`ON DELETE CASCADE` 挂在 chunk 行上）一行都不会动。反查行
         `chunk_elements` 与它们描述的那次 chunk 写入同事务（v46 红线），
         `sources.updated_at` 也在同一事务里推进（元素换代的变更信号）。
+
+        ``metadata_updates`` 是"就地补齐"那一半（见
+        `image_backfill.EnrichedImage`）：只改既有 image 元素的 ``metadata``
+        （补 ``asset_id``），``text``/``id``/``created_at`` 一律不动。它与元素
+        插入必须同事务——它描述的资产行已经写进 `notebook_assets` 了，落在第二
+        个事务里就会留下"资产在、元素还指不到它"的中间态。
 
         ``updated_at`` 刻意**不**由调用方传：时间戳格式是仓储自己的约定（带微秒
         与本地偏移的 ISO），而 `sources.updated_at` 是被当作字符串比较的变更信号
@@ -1908,17 +1918,23 @@ class SQLiteMaintenanceAdapter:
                     for element in elements
                 ],
             )
+            for update in metadata_updates:
+                db.execute(
+                    "UPDATE source_elements SET metadata=? "
+                    "WHERE id=? AND source_id=?",
+                    (
+                        json.dumps(dict(update["metadata"]), ensure_ascii=False),
+                        update["id"],
+                        source_id,
+                    ),
+                )
             for chunk_id, element_ids in chunk_element_ids.items():
                 db.execute(
                     "UPDATE chunks SET element_ids=? WHERE id=? AND source_id=?",
                     (json.dumps(list(element_ids)), chunk_id, source_id),
                 )
-            rows = chunk_element_reverse_rows(
-                notebook_id,
-                [
-                    {"id": chunk_id, "element_ids": list(element_ids)}
-                    for chunk_id, element_ids in chunk_element_ids.items()
-                ],
+            rows = chunk_element_reverse_rows_for_writes(
+                notebook_id, list(chunk_element_ids.items())
             )
             if rows:
                 db.executemany(

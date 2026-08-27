@@ -18,10 +18,20 @@
 * **零 KG 变动**：不碰 ``knowledge_objects`` / ``extraction_runs`` /
   ``unified_kg_state``；``kg_mutation_seq`` 不动，检索索引与社区划分因此都不会
   被判陈旧。
-* **不修改既有元素行**，只插入；不下载远程图片，不处理 data URI（后者归在线
-  解析路径的 `_persist_markdown_data_uri`）；不新增前端（离线运维 CLI，与
+* 不下载远程图片，不处理 data URI（后者归在线解析路径的
+  `_persist_markdown_data_uri`）；不新增前端（离线运维 CLI，与
   ``backfill-chunk-elements`` 等阶段同例）。
 * 已持久化的旧答案不回溯补图——payload 冻结是既有语义。
+
+## 对原规格「只插入、不修改既有元素行」的一次显式修订
+
+生产解析路径对**带 alt** 的相对路径图片会产出一条 image 元素并写下
+``metadata.src``，但拿不到 ``asset_id``（单文件 markdown 路径不传
+`resolve_image`）。这类行既不在"已补过"的集合里（那条判据是 asset_id 非空），
+又与本次引用指向同一个 src——按"只插入"处理就会给同一张图造出第二条元素行，
+两条都进 chunk、两条都能被引用带图取到。所以对**这一类**元素改为**就地补齐**：
+落资产之后只 UPDATE 它的 ``metadata``（补 ``asset_id``），``text``/``caption``/
+``id``/``created_at`` 一律不动。除此之外仍然只插入，不改任何既有元素行。
 
 ## 刻意登记的偏离
 
@@ -42,6 +52,7 @@ from typing import Any, Optional, Protocol, Sequence
 
 from app.services.image_backfill import (
     ElementView,
+    EnrichedImage,
     ImageIndex,
     PlannedImage,
     SourcePlan,
@@ -78,6 +89,7 @@ class ImageBackfillPort(Protocol):
         source_id: str,
         elements: Sequence[dict],
         chunk_element_ids: dict[str, list[str]],
+        metadata_updates: Sequence[dict],
         *,
         created_at: Any,
     ) -> None: ...
@@ -108,8 +120,21 @@ class ImageBackfillRepository(Protocol):
     def get_notebook_asset(self, asset_id: str) -> dict | None: ...
 
 
-class ImageBackfillDisabled(RuntimeError):
+class ImageBackfillRefused(RuntimeError):
+    """整跑的前置条件不成立，一个来源都不该扫。CLI 把它翻成退出码 2。"""
+
+
+class ImageBackfillDisabled(ImageBackfillRefused):
     """部署明确关掉了来源图片（``MINERU_RETURN_IMAGES=false``）。"""
+
+
+class ImageBackfillIndexEmpty(ImageBackfillRefused):
+    """一个 ``--mineru-output`` 都没索引到图片。
+
+    这几乎一定是路径给错了（拼错、挂载点没挂上、给成了 `auto/` 下一层）。带着
+    空索引跑下去的结果是一次**看起来正常**的全库扫描：每一张图都记
+    ``image_not_found``，汇总一片零，而运维会读成"原图确实找不回来了"。宁可
+    早退报错。"""
 
 
 def _totals() -> dict[str, int]:
@@ -117,7 +142,14 @@ def _totals() -> dict[str, int]:
         "sources_scanned": 0,
         "sources_changed": 0,
         "sources_failed": 0,
+        # 计划出来的候选（dry-run 唯一能报的"能补多少张"）。插入与就地补齐分列：
+        # 两者的运维含义不同——前者新增元素行，后者只补既有行的 asset_id。
+        "candidates_insert": 0,
+        "candidates_enrich": 0,
         "images_inserted": 0,
+        "images_enriched": 0,
+        # 实际落地的图里带图注的张数（不是计划里的——被 mime/读盘/资产校验拦下
+        # 的那些不该算进"收割到多少图注"）。
         "captions": 0,
     }
 
@@ -138,7 +170,12 @@ def _existing_image_srcs(elements: Sequence[dict]) -> list[str]:
 
     判据是"image 元素 + ``metadata.asset_id`` 非空"——与显示准入
     （`evidence_context._citation_image`）逐字同一条，所以"界面上看得见的图"
-    与"本阶段认为已补过的图"永远是同一批。"""
+    与"本阶段认为已补过的图"永远是同一批。
+
+    这一条判据**不可省**：删掉 ``asset_id`` 那半，带 alt 的既有 image 元素
+    （它有 src、没有 asset_id）就会被算成"已补过"而整批漏掉；反过来，只按 src
+    去重、不看 asset_id，重跑就不再幂等。另一半（有 src、无 asset_id）由
+    `_unassigned_image_srcs` 接手就地补齐。"""
     out: list[str] = []
     for element in elements:
         if element["element_type"] != "image":
@@ -149,6 +186,26 @@ def _existing_image_srcs(elements: Sequence[dict]) -> list[str]:
         src = metadata.get("src")
         if isinstance(src, str) and src:
             out.append(src)
+    return out
+
+
+def _unassigned_image_srcs(elements: Sequence[dict]) -> dict[str, str]:
+    """``src -> element_id``：有 ``metadata.src``、但 ``asset_id`` 为空的 image
+    元素（见 `image_backfill.EnrichedImage`）。
+
+    ``elements`` 已按 id 序读回，所以 ``setdefault`` 取的就是"同 src 多条时的
+    id 序第一条"——其余同 src 元素一律不动（多条同 src 是历史畸形数据，把每条
+    都指到同一个资产只会让引用带图重复显示同一张图）。"""
+    out: dict[str, str] = {}
+    for element in elements:
+        if element["element_type"] != "image":
+            continue
+        metadata = element["metadata"]
+        if metadata.get("asset_id"):
+            continue
+        src = metadata.get("src")
+        if isinstance(src, str) and src:
+            out.setdefault(src, element["id"])
     return out
 
 
@@ -192,6 +249,7 @@ def plan_for_source(
             markdown=markdown,
             elements=_element_views(elements),
             existing_image_srcs=_existing_image_srcs(elements),
+            existing_unassigned_srcs=_unassigned_image_srcs(elements),
             existing_element_ids=[element["id"] for element in elements],
             chunk_by_element=_chunk_by_element(state["chunks"]),
             image_index=image_index,
@@ -229,7 +287,24 @@ def _element_row(image: PlannedImage, asset_id: str) -> dict:
 
 
 def _guess_mime(name: str) -> str:
-    return mimetypes.guess_type(name)[0] or "image/jpeg"
+    """按扩展名猜 mime；猜不出返回空串，调用方按 ``mime_rejected`` 跳过。
+
+    刻意**不**兜底成 ``image/jpeg``：MinerU 只产 jpg/png，所以兜底一次都救不
+    了真图片，只会把一个扩展名不认识的文件（``.bin``/``.tmp``/被截断的名字）
+    当成 JPEG 写进资产表——落库的 mime 是错的，而错 mime 会让浏览器拿到一张
+    永远渲染不出来的图。"""
+    return mimetypes.guess_type(name)[0] or ""
+
+
+def _metadata_update_row(image: EnrichedImage, existing: dict, asset_id: str) -> dict:
+    """就地补齐用的 metadata：既有键原样保留，只补 ``asset_id``。
+
+    ``src`` 刻意留着（在线解析路径在成功落资产时会丢掉它，这里不能丢——它是
+    重跑的增量判据）；``parser`` 也保持既有值（``markdown``），这条行确实是解析
+    路径产出的，改写它等于伪造出处。"""
+    metadata = dict(existing)
+    metadata["asset_id"] = asset_id
+    return {"id": image.element_id, "metadata": metadata}
 
 
 def apply_plan(
@@ -238,8 +313,10 @@ def apply_plan(
     source_id: str,
     plan: SourcePlan,
     state: dict,
-) -> int:
-    """落资产 → 一个写事务落元素/chunk/反查行/updated_at。返回插入图片数。
+) -> tuple[int, int, int]:
+    """落资产 → 一个写事务落元素/metadata/chunk/反查行/updated_at。
+
+    返回 ``(插入图片数, 就地补齐数, 实际落地图片里带图注的张数)``。
 
     两段式是被 `AssetService.save_source_image` 的形状逼出来的（它自带事务并写
     盘）。中间的失败窗口由回滚补上：元素事务失败时，本次刚写的资产行连同磁盘
@@ -250,38 +327,55 @@ def apply_plan(
     created_by = repo.current_user().id
     written: list[str] = []
     rows: list[dict] = []
+    updates: list[dict] = []
+    metadata_by_id = {element["id"]: element["metadata"] for element in state["elements"]}
     max_bytes = int(repo.settings.mineru_max_image_bytes)
+
+    def _store(image) -> str:
+        """读盘 + 落资产；失败时记账并返回空串。"""
+        try:
+            data = image.source_path.read_bytes()
+        except OSError:
+            plan.skip("image_unreadable")
+            return ""
+        mime = _guess_mime(image.source_path.name)
+        if mime not in ALLOWED_MIME_EXTENSIONS:
+            plan.skip("mime_rejected")
+            return ""
+        try:
+            asset = assets.save_source_image(
+                notebook_id,
+                source_id,
+                image.source_path.name,
+                mime,
+                data,
+                created_by,
+                max_bytes=max_bytes,
+            )
+        except (AssetValidationError, RuntimeError, OSError):
+            plan.skip("asset_write_failed")
+            return ""
+        written.append(asset["id"])
+        return asset["id"]
+
     try:
         for image in plan.images:
-            try:
-                data = image.source_path.read_bytes()
-            except OSError:
-                plan.skip("image_unreadable")
-                continue
-            mime = _guess_mime(image.source_path.name)
-            if mime not in ALLOWED_MIME_EXTENSIONS:
-                plan.skip("mime_rejected")
-                continue
-            try:
-                asset = assets.save_source_image(
-                    notebook_id,
-                    source_id,
-                    image.source_path.name,
-                    mime,
-                    data,
-                    created_by,
-                    max_bytes=max_bytes,
+            asset_id = _store(image)
+            if asset_id:
+                rows.append(_element_row(image, asset_id))
+        for enriched in plan.enriched:
+            asset_id = _store(enriched)
+            if asset_id:
+                updates.append(
+                    _metadata_update_row(
+                        enriched, metadata_by_id.get(enriched.element_id, {}), asset_id
+                    )
                 )
-            except (AssetValidationError, RuntimeError, OSError):
-                plan.skip("asset_write_failed")
-                continue
-            written.append(asset["id"])
-            rows.append(_element_row(image, asset["id"]))
 
-        if not rows:
-            return 0
+        if not rows and not updates:
+            return 0, 0, 0
         created_at = state["element_created_at"]
-        if not created_at:
+        if rows and not created_at:
             # 该来源一条元素都没有——对齐因此不可能匹配到任何锚点，走到这里说明
             # 上游算错了。宁可整源失败也不要用"现在"当元素批次时间戳（那会把
             # 图片在详情分页里全部沉底，并让命令目录的来源代次平白漂移）。
@@ -290,13 +384,23 @@ def apply_plan(
             )
 
         planned_by_id = {image.element_id: image for image in plan.images}
+        enriched_by_id = {item.element_id: item for item in plan.enriched}
         chunk_element_ids: dict[str, list[str]] = {}
         for chunk in state["chunks"]:
             chunk_element_ids.setdefault(chunk["id"], list(chunk["element_ids"]))
+        touched: set[str] = set()
         for row in rows:
             chunk_id = planned_by_id[row["id"]].chunk_id
             chunk_element_ids[chunk_id].append(row["id"])
-        touched = {planned_by_id[row["id"]].chunk_id for row in rows}
+            touched.add(chunk_id)
+        for update in updates:
+            # 就地补齐的元素多半已经在某个 chunk 里（带图注的图会进分块），那时
+            # `chunk_id` 是空串、chunk 零改动。
+            chunk_id = enriched_by_id[update["id"]].chunk_id
+            if not chunk_id:
+                continue
+            chunk_element_ids[chunk_id].append(update["id"])
+            touched.add(chunk_id)
         repo.maintenance.apply_image_backfill(
             notebook_id,
             source_id,
@@ -306,12 +410,19 @@ def apply_plan(
                 for chunk_id, element_ids in chunk_element_ids.items()
                 if chunk_id in touched
             },
+            updates,
             created_at=created_at,
         )
     except BaseException:
         _discard_assets(repo, assets, written)
         raise
-    return len(rows)
+    landed = {row["id"] for row in rows}
+    captions = sum(
+        1
+        for image in plan.images
+        if image.element_id in landed and image.caption
+    )
+    return len(rows), len(updates), captions
 
 
 def _discard_assets(
@@ -339,6 +450,7 @@ def run_backfill_images(
     *,
     mineru_outputs: Sequence[Path],
     source_id: Optional[str] = None,
+    after_id: str = "",
     limit: Optional[int] = None,
     dry_run: bool = False,
     report_path: Optional[Path] = None,
@@ -350,12 +462,28 @@ def run_backfill_images(
     repo.get_notebook(notebook_id)  # KeyError if missing
 
     started = time.perf_counter()
-    image_index = build_image_index([Path(root) for root in mineru_outputs])
+    roots = [Path(root) for root in mineru_outputs]
+    missing = [root for root in roots if not root.is_dir()]
+    if missing and len(missing) == len(roots):
+        # 单个 root 缺失仍然容忍（多路径运行里一条挂载点没上来不该废掉整跑），
+        # 全部缺失才拒绝——那不是"图找不回来"，那是路径给错了。
+        raise ImageBackfillIndexEmpty(
+            f"backfill-images：全部 {len(roots)} 个 --mineru-output 都不是目录，"
+            "拒绝以空索引做一次全库空扫"
+        )
+    image_index = build_image_index(roots)
+    if not len(image_index):
+        raise ImageBackfillIndexEmpty(
+            "backfill-images：--mineru-output 树里一个 images/ 下的文件都没索引到，"
+            "拒绝以空索引做一次全库空扫（检查路径是否指向 output 根目录）"
+        )
     print(
         f"backfill-images: notebook={notebook_id} images_indexed={len(image_index)} "
         f"dry_run={dry_run}",
         flush=True,
     )
+    if missing:
+        print(f"  warning: {len(missing)} 个 --mineru-output 不是目录，已跳过", flush=True)
     if image_index.duplicates:
         print(
             "  warning: 同名不同大小的图片(按先见者取): "
@@ -365,15 +493,21 @@ def run_backfill_images(
 
     totals = _totals()
     skipped: dict[str, int] = {}
+    matched_source = False
+    if report_path is not None:
+        # append 语义（见 docs/operations）：目录可能还不存在，一次运维跑不该
+        # 在扫完整本库之后才因为少一个目录而丢掉全部明细。
+        report_path.parent.mkdir(parents=True, exist_ok=True)
     report = report_path.open("a", encoding="utf-8") if report_path else None
     try:
-        for source in _iter_sources(repo, notebook_id, source_id, limit):
+        for source in _iter_sources(repo, notebook_id, source_id, after_id, limit):
+            matched_source = True
             totals["sources_scanned"] += 1
             try:
                 plan, state = plan_for_source(repo, source, image_index)
-                inserted = (
-                    0
-                    if dry_run or not plan.images
+                inserted, enriched, captions = (
+                    (0, 0, 0)
+                    if dry_run or not (plan.images or plan.enriched)
                     else apply_plan(repo, notebook_id, source["id"], plan, state)
                 )
             except Exception as exc:  # 单源失败隔离，不掀翻整跑
@@ -391,28 +525,47 @@ def run_backfill_images(
                     flush=True,
                 )
                 continue
-            if inserted:
+            if inserted or enriched:
                 totals["sources_changed"] += 1
+            totals["candidates_insert"] += len(plan.images)
+            totals["candidates_enrich"] += len(plan.enriched)
             totals["images_inserted"] += inserted
-            totals["captions"] += plan.captions
+            totals["images_enriched"] += enriched
+            totals["captions"] += captions
             for reason, count in plan.skipped.items():
                 skipped[reason] = skipped.get(reason, 0) + count
-            _write_report(
-                report,
-                {
-                    "source_id": source["id"],
-                    "status": "planned" if dry_run else "applied",
-                    "file_name": source.get("file_name", ""),
-                    "candidates": len(plan.images),
-                    "inserted": inserted,
-                    "captions": plan.captions,
-                    "coverage": round(plan.coverage, 4),
-                    "skipped": dict(plan.skipped),
-                },
-            )
+            entry = {
+                "source_id": source["id"],
+                "status": "planned" if dry_run else "applied",
+                "file_name": source.get("file_name", ""),
+                "candidates": len(plan.images) + len(plan.enriched),
+                "candidates_insert": len(plan.images),
+                "candidates_enrich": len(plan.enriched),
+                "inserted": inserted,
+                "enriched": enriched,
+                "captions": captions,
+                "coverage": round(plan.coverage, 4),
+                "skipped": dict(plan.skipped),
+            }
+            _write_report(report, entry)
+            if dry_run:
+                # dry-run 的**唯一**产出就是这几行：不逐源打出来，运维就永远拿不
+                # 到"这一跑能补多少张"（汇总只有一个总数，看不出是哪些源、也看
+                # 不出锚定失败集中在哪）。
+                _print_dry_run_line(entry)
     finally:
         if report is not None:
             report.close()
+
+    if source_id and not matched_source:
+        # 区分性提示：`--source-id` 一个都没命中有两种完全不同的原因，而汇总
+        # 里的 `sources_scanned=0` 两种都长得一样。
+        print(
+            f"  note: --source-id {source_id} 未命中候选——它要么不属于 "
+            f"notebook {notebook_id}/不存在，要么不是 .md/.markdown 来源"
+            "（本阶段只处理 markdown 来源）",
+            flush=True,
+        )
 
     result: dict[str, Any] = dict(totals)
     result["skipped"] = skipped
@@ -423,16 +576,35 @@ def run_backfill_images(
     return result
 
 
+def _print_dry_run_line(entry: dict) -> None:
+    """逐源一行：候选 / 锚定失败 / 缺图 / 图注命中（docs 承诺的那四个数）。"""
+    skipped = entry["skipped"]
+    anchor_failed = sum(
+        count
+        for reason, count in skipped.items()
+        if reason in ("no_anchor", "no_chunk", "anchor_stale", "alignment_drifted")
+    )
+    print(
+        f"  {entry['source_id']} cov={entry['coverage']:.2f} "
+        f"候选={entry['candidates']}(新增 {entry['candidates_insert']}/"
+        f"补齐 {entry['candidates_enrich']}) "
+        f"锚定失败={anchor_failed} 缺图={skipped.get('image_not_found', 0)} "
+        f"图注={entry['captions']}",
+        flush=True,
+    )
+
+
 def _iter_sources(
     repo: ImageBackfillRepository,
     notebook_id: str,
     source_id: Optional[str],
+    after_id: str,
     limit: Optional[int],
 ):
     if source_id:
         # 页按 id 升序，所以一旦整页都排在目标之后就不必再翻（试点用的单源
         # 开关不值得为它新开一条查询，但也不该白扫完整本库）。
-        for page in _source_pages(repo, notebook_id):
+        for page in _source_pages(repo, notebook_id, after_id):
             for row in page:
                 if row["id"] == source_id:
                     yield row
@@ -441,7 +613,7 @@ def _iter_sources(
                 return
         return
     seen = 0
-    for page in _source_pages(repo, notebook_id):
+    for page in _source_pages(repo, notebook_id, after_id):
         for row in page:
             if limit is not None and seen >= limit:
                 return
@@ -449,8 +621,8 @@ def _iter_sources(
             yield row
 
 
-def _source_pages(repo: ImageBackfillRepository, notebook_id: str):
-    after = ""
+def _source_pages(repo: ImageBackfillRepository, notebook_id: str, after_id: str = ""):
+    after = after_id or ""
     while True:
         page = repo.maintenance.image_backfill_source_page(
             notebook_id, after, SOURCE_PAGE

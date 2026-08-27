@@ -38,7 +38,7 @@ from app.models.notebooks import NotebookCreate, NotebookSummary
 from app.models.sources import SourceSummary
 from app.models.identity import UserProfile
 from app.services.image_backfill_phase import (
-    ImageBackfillDisabled,
+    ImageBackfillRefused,
     run_backfill_images,
 )
 from app.services.knowledge_lifecycle import ModelSkipPolicy
@@ -1842,6 +1842,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "images/ 的文件,兼容 auto/ocr/txt 方法目录)。")
     p.add_argument("--source-id", default=None,
                    help="backfill-images 专用:只处理这一个来源(试点用)")
+    p.add_argument("--after-id", default="",
+                   help="backfill-images 专用:keyset 断点续跑起点(只处理 id 严格"
+                        "大于它的来源)。中断后原样重跑是安全的(幂等),但会把已经"
+                        "补过的来源重新扫一遍;传上一跑最后处理到的来源 id 可以"
+                        "直接跳过那一段。")
     p.add_argument("--report", type=Path, default=None,
                    help="backfill-images 专用:逐源 JSONL 明细路径"
                         "(只写计数与稳定 reason code,不写图片字节或正文)")
@@ -1918,6 +1923,7 @@ def _dispatch_main(
             args.notebook_id,
             mineru_outputs=args.mineru_output or [],
             source_id=args.source_id,
+            after_id=args.after_id or "",
             limit=args.limit,
             dry_run=args.dry_run,
             report_path=args.report,
@@ -2317,7 +2323,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 2
             finally:
                 reset_request_user(user_token)
-    except (MaintenanceCliError, ImageBackfillDisabled) as exc:
+    except (MaintenanceCliError, ImageBackfillRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

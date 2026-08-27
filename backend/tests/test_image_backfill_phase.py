@@ -96,7 +96,49 @@ def seeded(repo, tmp_path):
         source_id = db.execute(
             "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
         ).fetchone()["id"]
+    _seed_kg(repo, notebook_id, source_id)
     return notebook_id, source_id
+
+
+def _seed_kg(repo, notebook_id: str, source_id: str) -> None:
+    """给 KG 相关表各放一行真内容。
+
+    "零 KG 变动"是本阶段的红线之一，而 `after["kg"] == before["kg"]` 在两边都是
+    `{...: 0}` 时是**空转**的：把断言删掉、或者让阶段真的去写 KG，用例都照样绿。
+    有了这两行，那条断言才在比较实际内容。"""
+    stamp = "2020-01-01T00:00:00+00:00"
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, status, payload, evidence, source_id, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "ko-backfill-guard",
+                notebook_id,
+                "concept",
+                "approved",
+                json.dumps({"name": "回填守卫用的概念"}),
+                json.dumps([]),
+                source_id,
+                stamp,
+                stamp,
+            ),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs "
+            "(id, notebook_id, source_id, run_type, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "run-backfill-guard",
+                notebook_id,
+                source_id,
+                "kg",
+                "completed",
+                stamp,
+                stamp,
+            ),
+        )
+        db.commit()
 
 
 def _snapshot(repo, notebook_id: str) -> dict:
@@ -446,25 +488,43 @@ def test_report_jsonl_carries_counts_only(repo, seeded, outputs, tmp_path):
     entry = entries[0]
     assert entry["source_id"] == source_id
     assert entry["inserted"] == 2
+    assert entry["candidates"] == 2
+    assert entry["candidates_insert"] == 2
+    assert entry["candidates_enrich"] == 0
     assert entry["skipped"] == {"image_not_found": 1}
     assert set(entry) == {
         "source_id",
         "status",
         "file_name",
         "candidates",
+        "candidates_insert",
+        "candidates_enrich",
         "inserted",
+        "enriched",
         "captions",
         "coverage",
         "skipped",
     }
 
 
+def test_report_parent_directory_is_created(repo, seeded, outputs, tmp_path):
+    """`--report` 指向一个还不存在的目录时不该在扫完整本库之后才丢掉全部明细。"""
+    notebook_id, _ = seeded
+    report = tmp_path / "runs" / "2026-08" / "report.jsonl"
+    _run(repo, notebook_id, outputs, report_path=report)
+    assert report.is_file()
+    assert len(report.read_text().splitlines()) == 1
+
+
 def test_source_id_filter_processes_only_that_source(repo, seeded, outputs, tmp_path):
     notebook_id, source_id = seeded
     docs = tmp_path / "more"
     docs.mkdir()
-    (docs / "other.md").write_text(MD, encoding="utf-8")
+    # 与上传的内容哈希去重错开，否则第二个来源根本不会被建出来（见
+    # `test_after_id_resumes_past_already_processed_sources` 的同款注释）。
+    (docs / "other.md").write_text(MD + "\n第二篇文档独有的收尾段落。\n", encoding="utf-8")
     bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    assert len(_rows(repo, "SELECT id FROM sources")) == 2
 
     result = _run(repo, notebook_id, outputs, source_id=source_id)
     assert result["sources_scanned"] == 1
@@ -476,6 +536,261 @@ def test_source_id_filter_processes_only_that_source(repo, seeded, outputs, tmp_
         )
     }
     assert owners == {source_id}
+
+
+# -------------------------------------------------- 既有无资产图片的就地补齐
+
+#: 带 alt 的相对路径图片：解析路径会为它产出一条 image 元素（alt 当图注、写下
+#: `metadata.src`），但拿不到 `asset_id`（单文件 markdown 路径不传 resolve_image）。
+MD_WITH_ALT = """# 系统总体设计
+
+本章介绍系统的总体设计目标与边界，并给出关键取舍。
+
+![图 1 系统总体架构](images/aaa.jpg)
+
+数据通路由采集、解析、检索三段构成，各段之间以持久化产物解耦。
+"""
+
+
+@pytest.fixture
+def seeded_with_alt(repo, tmp_path):
+    docs = tmp_path / "alt-docs"
+    docs.mkdir()
+    (docs / "alt.md").write_text(MD_WITH_ALT, encoding="utf-8")
+    notebook_id = bi.ensure_notebook(repo, None, "nb-alt")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["id"]
+    return notebook_id, source_id
+
+
+def _image_elements(repo, source_id):
+    return _rows(
+        repo,
+        "SELECT id, element_type, text, created_at, metadata FROM source_elements "
+        "WHERE source_id=? AND element_type='image' ORDER BY id",
+        source_id,
+    )
+
+
+def test_an_existing_image_element_is_enriched_in_place_not_duplicated(
+    repo, seeded_with_alt, outputs
+):
+    """生产解析路径对带 alt 的图产出的元素有 `src`、没有 `asset_id`，所以它不在
+    "已补过"集合里；只插入就会给同一张图造出第二条元素行（两条都进 chunk、引用
+    带图会重复显示同一张图）。改为就地补齐：只 UPDATE metadata。"""
+    notebook_id, source_id = seeded_with_alt
+    before = _image_elements(repo, source_id)
+    assert len(before) == 1
+    assert not json.loads(before[0]["metadata"]).get("asset_id")
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_inserted"] == 0
+    assert result["images_enriched"] == 1
+    assert result["candidates_enrich"] == 1
+
+    after = _image_elements(repo, source_id)
+    assert len(after) == 1  # 没有多出第二条行
+    assert after[0]["id"] == before[0]["id"]
+    assert after[0]["text"] == before[0]["text"]  # 图注/正文不动
+    assert after[0]["created_at"] == before[0]["created_at"]
+    metadata = json.loads(after[0]["metadata"])
+    assert metadata["asset_id"]
+    assert metadata["src"] == "images/aaa.jpg"  # 增量判据留着
+    assert metadata["parser"] == "markdown"  # 出处不改写
+
+
+def test_enriched_image_is_reachable_by_the_citation_image_path(
+    repo, seeded_with_alt, outputs
+):
+    from app.services.evidence_context import _citation_image
+
+    notebook_id, source_id = seeded_with_alt
+    _run(repo, notebook_id, outputs)
+    element_ids: list[str] = []
+    for row in _rows(
+        repo, "SELECT element_ids FROM chunks WHERE source_id=?", source_id
+    ):
+        element_ids.extend(json.loads(row["element_ids"]))
+    rows = repo._runtime.source_store.image_asset_rows(element_ids)
+    assert len(rows) == 1
+    assert _citation_image(*rows[0]) is not None
+
+
+def test_enrichment_leaves_chunks_untouched_when_the_element_is_already_chunked(
+    repo, seeded_with_alt, outputs
+):
+    """带图注的图早就进过分块，所以补齐它时 chunk 一个字节都不该改。"""
+    notebook_id, source_id = seeded_with_alt
+    before = {
+        row["id"]: (row["text"], row["element_ids"])
+        for row in _rows(
+            repo,
+            "SELECT id, text, element_ids FROM chunks WHERE source_id=?",
+            source_id,
+        )
+    }
+    _run(repo, notebook_id, outputs)
+    after = {
+        row["id"]: (row["text"], row["element_ids"])
+        for row in _rows(
+            repo,
+            "SELECT id, text, element_ids FROM chunks WHERE source_id=?",
+            source_id,
+        )
+    }
+    assert after == before
+
+
+def test_enriching_an_unchunked_element_appends_it_and_its_reverse_row(
+    repo, seeded_with_alt, outputs
+):
+    """另一子形态：既有元素不属于任何 chunk。按新插入同款路径 append 进锚点
+    chunk，并在**同一写事务**里补反查行。"""
+    notebook_id, source_id = seeded_with_alt
+    image_id = _image_elements(repo, source_id)[0]["id"]
+    with repo._connect() as db:
+        for row in db.execute(
+            "SELECT id, element_ids FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchall():
+            ids = [item for item in json.loads(row["element_ids"]) if item != image_id]
+            db.execute(
+                "UPDATE chunks SET element_ids=? WHERE id=?",
+                (json.dumps(ids), row["id"]),
+            )
+        db.execute("DELETE FROM chunk_elements WHERE element_id=?", (image_id,))
+        db.commit()
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_enriched"] == 1
+    owners = [
+        row["id"]
+        for row in _rows(
+            repo, "SELECT id, element_ids FROM chunks WHERE source_id=?", source_id
+        )
+        if image_id in json.loads(row["element_ids"])
+    ]
+    assert len(owners) == 1
+    reverse = _rows(
+        repo,
+        "SELECT chunk_id FROM chunk_elements WHERE element_id=?",
+        image_id,
+    )
+    assert [row["chunk_id"] for row in reverse] == owners
+
+
+def test_enrichment_is_idempotent_across_reruns(repo, seeded_with_alt, outputs):
+    notebook_id, source_id = seeded_with_alt
+    _run(repo, notebook_id, outputs)
+    before = _snapshot(repo, notebook_id)
+    assets_before = _rows(repo, "SELECT id FROM notebook_assets")
+
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_enriched"] == 0
+    assert result["skipped"].get("already_backfilled") == 1
+    assert _snapshot(repo, notebook_id) == before
+    assert _rows(repo, "SELECT id FROM notebook_assets") == assets_before
+
+
+# ------------------------------------------------------------ 前置条件 / 报表
+
+def test_an_output_tree_with_no_images_refuses_to_run(repo, seeded, tmp_path):
+    """空索引跑下去会是一次"看起来正常"的全库空扫（每张图都 image_not_found，
+    汇总一片零），运维会读成"原图确实找不回来了"。早退报错。"""
+    empty = tmp_path / "empty-output"
+    (empty / "sess" / "doc" / "auto").mkdir(parents=True)
+    notebook_id, _ = seeded
+    with pytest.raises(phase.ImageBackfillIndexEmpty):
+        _run(repo, notebook_id, [empty])
+
+
+def test_every_output_root_missing_refuses_to_run(repo, seeded, tmp_path):
+    notebook_id, _ = seeded
+    with pytest.raises(phase.ImageBackfillIndexEmpty):
+        _run(repo, notebook_id, [tmp_path / "nope-a", tmp_path / "nope-b"])
+
+
+def test_one_missing_root_among_several_still_runs(repo, seeded, outputs, tmp_path):
+    notebook_id, _ = seeded
+    result = _run(repo, notebook_id, [tmp_path / "nope", outputs[0]])
+    assert result["images_inserted"] == 2
+
+
+def test_dry_run_prints_one_line_per_source_with_the_candidate_counts(
+    repo, seeded, outputs, capsys
+):
+    """dry-run 的**唯一**产出就是这几行：不逐源打出来，运维拿不到"这一跑能补多
+    少张"（汇总只有总数，看不出是哪些源、锚定失败集中在哪）。"""
+    notebook_id, source_id = seeded
+    result = _run(repo, notebook_id, outputs, dry_run=True)
+    assert result["candidates_insert"] == 2
+    assert result["images_inserted"] == 0
+    out = capsys.readouterr().out
+    assert source_id in out
+    assert "候选=2(新增 2/补齐 0)" in out
+    assert "缺图=1" in out
+
+
+def test_source_id_that_matches_nothing_says_which_two_reasons(
+    repo, seeded, outputs, capsys
+):
+    notebook_id, _ = seeded
+    result = _run(repo, notebook_id, outputs, source_id="src-does-not-exist")
+    assert result["sources_scanned"] == 0
+    out = capsys.readouterr().out
+    assert "--source-id src-does-not-exist 未命中候选" in out
+
+
+def test_after_id_resumes_past_already_processed_sources(
+    repo, seeded, outputs, tmp_path
+):
+    """`--after-id` 是 keyset 起点直传：中断后重跑安全但会全量重扫，传上一跑最后
+    处理到的来源 id 就能跳过那一段。"""
+    notebook_id, first_id = seeded
+    docs = tmp_path / "more"
+    docs.mkdir()
+    # 正文必须与第一个来源不同：上传按内容哈希在同 notebook 内去重，逐字复制
+    # 会复用既有来源行，这个用例就只剩一个来源、断言全部空转。
+    (docs / "other.md").write_text(MD + "\n第二篇文档独有的收尾段落。\n", encoding="utf-8")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    ids = sorted(row["id"] for row in _rows(repo, "SELECT id FROM sources"))
+    assert len(ids) == 2
+
+    result = _run(repo, notebook_id, outputs, after_id=ids[0])
+    assert result["sources_scanned"] == 1
+    owners = {
+        row["source_id"]
+        for row in _rows(
+            repo, "SELECT source_id FROM source_elements WHERE element_type='image'"
+        )
+    }
+    assert owners == {ids[1]}
+
+
+def test_an_unknown_extension_is_rejected_rather_than_stored_as_jpeg(
+    repo, seeded, tmp_path
+):
+    """`_guess_mime` 不再兜底成 image/jpeg：兜底救不了任何真图片（MinerU 只产
+    jpg/png），只会把一个认不出扩展名的文件当 JPEG 写进资产表，落一个浏览器永远
+    渲染不出来的错 mime。"""
+    images = tmp_path / "odd" / "sess" / "doc" / "auto" / "images"
+    images.mkdir(parents=True)
+    (images / "aaa.jpg.bin").write_bytes(b"\xff\xd8\xff\xe0" + b"a" * 64)
+    notebook_id, _ = seeded
+    # 让 markdown 里的引用指向这个怪扩展名。
+    with repo._connect() as db:
+        path = db.execute(
+            "SELECT file_path FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["file_path"]
+    Path(path).write_text(
+        MD.replace("images/aaa.jpg", "images/aaa.jpg.bin"), encoding="utf-8"
+    )
+    result = _run(repo, notebook_id, [tmp_path / "odd"])
+    assert result["images_inserted"] == 0
+    assert result["skipped"].get("mime_rejected") == 1
+    assert _rows(repo, "SELECT id FROM notebook_assets") == []
 
 
 # ------------------------------------------------------------------ CLI

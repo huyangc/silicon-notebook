@@ -16,7 +16,10 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     sqlite_compatible_row,
 )
-from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
+from app.repositories.chunk_elements import (
+    reverse_rows as chunk_element_reverse_rows,
+    reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
+)
 from app.repositories.image_backfill_rows import image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite maintenance 共用
     asset_ref_tokens,
@@ -1811,7 +1814,10 @@ class PostgresMaintenanceAdapter:
                 "SELECT id, file_name, file_path FROM sources "
                 "WHERE notebook_id=%s AND source_type NOT IN ('memory','knowhow') "
                 "AND (lower(file_name) LIKE '%%.md' OR lower(file_name) LIKE '%%.markdown') "
-                "AND id > %s ORDER BY id COLLATE \"C\" LIMIT %s",
+                # 比较键与排序键必须同一个 collation：库的默认 collation 不是 `C`
+                # 时，裸 `id > %s` 与 `ORDER BY id COLLATE "C"` 会给出两种顺序，
+                # keyset 分页会漏源或死循环（与本文件全部兄弟分页器同口径）。
+                "AND id COLLATE \"C\" > %s ORDER BY id COLLATE \"C\" LIMIT %s",
                 (notebook_id, after_id, int(limit)),
             ).fetchall()
         return [
@@ -1845,13 +1851,16 @@ class PostgresMaintenanceAdapter:
         source_id: str,
         elements: Sequence[dict],
         chunk_element_ids: dict[str, list[str]],
+        metadata_updates: Sequence[dict] = (),
         *,
         created_at: Any,
     ) -> None:
-        """一个来源的全部插入，一个写事务（SQLite 侧同名方法的对等半）。
+        """一个来源的全部插入与就地补齐，一个写事务（SQLite 侧的对等半）。
 
         `chunks.text` 与 chunk id 不变，所以 `chunk_embeddings` 一行不动；反查行
-        与 `sources.updated_at` 同事务，后者的时间戳同样由仓储自己的时钟给。"""
+        与 `sources.updated_at` 同事务，后者的时间戳同样由仓储自己的时钟给。
+        ``metadata_updates`` 只补既有 image 元素的 ``metadata.asset_id``
+        （见 SQLite 侧同名方法的 docstring 与 `image_backfill.EnrichedImage`）。"""
         stamp = normalize_timestamp(created_at)
         with self._runtime.database.write() as db:
             execute_many(
@@ -1872,17 +1881,19 @@ class PostgresMaintenanceAdapter:
                     for element in elements
                 ],
             )
+            for update in metadata_updates:
+                db.execute(
+                    "UPDATE source_elements SET metadata=%s "
+                    "WHERE id=%s AND source_id=%s",
+                    (jsonb(dict(update["metadata"])), update["id"], source_id),
+                )
             for chunk_id, element_ids in chunk_element_ids.items():
                 db.execute(
                     "UPDATE chunks SET element_ids=%s WHERE id=%s AND source_id=%s",
                     (jsonb(list(element_ids)), chunk_id, source_id),
                 )
-            rows = chunk_element_reverse_rows(
-                notebook_id,
-                [
-                    {"id": chunk_id, "element_ids": list(element_ids)}
-                    for chunk_id, element_ids in chunk_element_ids.items()
-                ],
+            rows = chunk_element_reverse_rows_for_writes(
+                notebook_id, list(chunk_element_ids.items())
             )
             if rows:
                 execute_many(
