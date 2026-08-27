@@ -52,10 +52,6 @@ REQUIRED_WRITES = (
     "MAX(created_at) AS newest",
     # 每个目标 chunk 的现值，与计划快照里的旧 element_ids 比对。
     "SELECT element_ids FROM chunks WHERE id=",
-    # 每条就地补齐目标的现值：`asset_id` 必须仍为空（计划时的预期态）。纯 metadata
-    # 补齐不改元素代次也不改 chunk，上面两条读都穿得过去，只有这一条拦得住两个并发
-    # backfill-images 互相覆盖 asset_id（被覆盖的那条资产行会永久泄漏）。
-    "SELECT metadata FROM source_elements WHERE id=",
     "INTO source_elements",  # SQLite/PG 的 INSERT 前缀不同（OR IGNORE / ON CONFLICT）
     # 就地补齐（`image_backfill.EnrichedImage`）：它描述的资产行已经写进
     # `notebook_assets` 了，落在第二个事务里就会留下"资产在、元素还指不到它"的
@@ -73,6 +69,20 @@ def _function(path: Path, name: str) -> ast.FunctionDef:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     raise AssertionError(f"{path.name}: {name} not found")
+
+
+def _executed_statements(function: ast.FunctionDef) -> list[str]:
+    """函数体里每一次 ``*.execute(...)`` 的 SQL 首参（相邻字符串已拼接）。"""
+    out: list[str] = []
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("execute", "executemany")
+            and node.args
+        ):
+            out.append(_sql_text(node.args[0]))
+    return out
 
 
 def _sql_text(node: ast.AST) -> str:
@@ -118,6 +128,61 @@ def test_every_write_lands_inside_that_transaction(backend, statement):
     assert statement in body_sql, (
         f"{backend}: {statement!r} 不在写事务体内——它必须与同一批 chunk 写入原子提交"
     )
+
+
+#: 就地补齐那半 CAS 的**语句形状**：判据必须内联在 UPDATE 的 WHERE 里。
+#: 两侧的 JSON 取值方言不同（PG 的 `->>`、SQLite 的 `json_extract`），所以按后端各
+#: 钉一份片段。
+_ENRICH_CAS_PREDICATE = {
+    "sqlite": "json_extract(metadata,'$.asset_id')",
+    "postgres": "metadata->>'asset_id'",
+}
+
+
+@pytest.mark.parametrize("backend", sorted(ADAPTERS))
+def test_enrichment_cas_is_an_atomic_conditional_update(backend):
+    """`asset_id` 仍为空这道判据必须**内联在 UPDATE 语句里**，并按 rowcount 裁决。
+
+    先 SELECT 再 UPDATE 在 PostgreSQL 上不设防：默认隔离级是 READ COMMITTED，裸
+    SELECT 不上行锁，两个并发进程都会读到空 `asset_id`、都通过检查，后提交的那个直接
+    覆盖先提交的——先写那份资产从此没有任何元素引用，而回收只认本趟自己铸的 id，于是
+    永久泄漏。条件 UPDATE 由行锁串行：后到者阻塞，等前者提交后重新求值谓词，命中 0 行。
+
+    SQLite 有库级单写者锁、两种写法都安全，但两侧保持同一形状，免得判据漂成两份。"""
+    function = _function(ADAPTERS[backend], "apply_image_backfill")
+    predicate = _ENRICH_CAS_PREDICATE[backend]
+    # 按**单条 execute 调用**取 SQL，不在整函数的拼接文本上切片：判据里就带括号，
+    # 任何按分隔符切的启发式都会在自己身上翻车。
+    updates = [
+        sql
+        for sql in _executed_statements(function)
+        if sql.startswith("UPDATE source_elements SET metadata")
+    ]
+    assert len(updates) == 1, f"{backend}: 期望恰好一条补齐 UPDATE，实得 {len(updates)}"
+    assert predicate in updates[0], (
+        f"{backend}: 补齐 CAS 的判据不在 UPDATE 语句里——先读后写在 PG 的 "
+        "READ COMMITTED 下拦不住并发覆盖"
+    )
+    assert not [
+        sql
+        for sql in _executed_statements(function)
+        if sql.startswith("SELECT metadata FROM source_elements")
+    ], f"{backend}: 残留了先读后写的 CAS"
+
+
+@pytest.mark.parametrize("backend", sorted(ADAPTERS))
+def test_enrichment_cas_checks_the_affected_row_count(backend):
+    """条件 UPDATE 本身不报错，只是**什么都不改**——不查 rowcount 就等于没有 CAS。"""
+    function = _function(ADAPTERS[backend], "apply_image_backfill")
+    names = {
+        node.attr for node in ast.walk(function) if isinstance(node, ast.Attribute)
+    }
+    assert "rowcount" in names, f"{backend}: 补齐 CAS 没有检查受影响行数"
+    assert any(
+        isinstance(node, ast.Raise)
+        and "ImageBackfillConcurrentChange" in ast.dump(node)
+        for node in ast.walk(function)
+    ), f"{backend}: rowcount 不匹配时没有抛 ImageBackfillConcurrentChange"
 
 
 def test_postgres_keyset_compares_on_the_same_collation_it_orders_by():

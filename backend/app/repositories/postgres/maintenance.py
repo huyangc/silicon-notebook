@@ -22,7 +22,7 @@ from app.repositories.chunk_elements import (
     reverse_rows as chunk_element_reverse_rows,
     reverse_rows_for_writes as chunk_element_reverse_rows_for_writes,
 )
-from app.repositories.image_backfill_rows import decode_metadata, image_backfill_state
+from app.repositories.image_backfill_rows import image_backfill_state
 from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite maintenance 共用
     asset_ref_tokens,
     collect_change_payload_tokens,
@@ -1924,22 +1924,30 @@ class PostgresMaintenanceAdapter:
                 # 第三半 CAS（SQLite 侧同名方法有完整论证）：纯 metadata 补齐不改元素
                 # 代次也不改 chunk，上面两半都穿得过去，两个并发的 backfill-images
                 # 会互相覆盖 `asset_id` 并把被覆盖的那个资产行永久泄漏。
-                current = db.execute(
-                    "SELECT metadata FROM source_elements WHERE id=%s AND source_id=%s",
-                    (update["id"], source_id),
-                ).fetchone()
-                if current is None or decode_metadata(current["metadata"]).get(
-                    "asset_id"
-                ):
+                #
+                # 判据**必须**内联进 UPDATE 的 WHERE 里、按 rowcount 裁决，不能先
+                # SELECT 再 UPDATE：PostgreSQL 默认 READ COMMITTED，裸 SELECT 不上
+                # 行锁，两个并发进程都会读到空 `asset_id`、都通过检查，后提交的那个
+                # 直接覆盖先提交的——正是这道 CAS 要防的竞态。条件 UPDATE 则由行锁
+                # 串行：后到者阻塞，等前者提交后重新求值谓词，`asset_id` 已非空于是
+                # 命中 0 行。（SQLite 有库级单写者锁、天然串行，两种写法都安全，但
+                # 两侧保持同一形状，免得判据在两个后端漂成两份。）
+                #
+                # 「键缺失」与「空串」都算仍为空——两者在 PG 上是不同的 jsonb 形态，
+                # 只判一个会漏掉另一个（真库用例逐格钉住）。
+                affected = db.execute(
+                    "UPDATE source_elements SET metadata=%s "
+                    "WHERE id=%s AND source_id=%s "
+                    "AND (metadata->>'asset_id' IS NULL "
+                    "OR metadata->>'asset_id'='')",
+                    (jsonb(dict(update["metadata"])), update["id"], source_id),
+                ).rowcount
+                if affected != 1:
+                    # 0 行 = 已被别人补齐，或这条元素已经不在了；两者都是"计划已过期"。
                     raise ImageBackfillConcurrentChange(
                         f"element {update['id']} of source {source_id} was assigned "
                         "an asset between plan and apply"
                     )
-                db.execute(
-                    "UPDATE source_elements SET metadata=%s "
-                    "WHERE id=%s AND source_id=%s",
-                    (jsonb(dict(update["metadata"])), update["id"], source_id),
-                )
             for update in chunk_updates:
                 db.execute(
                     "UPDATE chunks SET element_ids=%s WHERE id=%s AND source_id=%s",
