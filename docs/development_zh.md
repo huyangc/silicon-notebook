@@ -228,7 +228,7 @@ PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要�
 
 根 README 保持精简；同时更新 `docs/` 下负责该主题的中英文权威文档：`product-and-api`、`deployment-and-configuration`、`operations` 或 `development`。
 
-`CLAUDE.md` 刻意不在这个集合里：它由 Claude Code 每次会话自动加载，每个字符都是每次请求的固定成本，因此只收「对下一个无关改动也成立」的通用约束与该语境独有的规程，特性级契约一律走 `AGENTS.md` / `docs/`，它只保留路由表。`scripts/check_claude_md_budget.py`（G1 contracts 泳道）钉住它的总字符数与单行字符数，两个上限只许降。只有当改动触及它已有的通用约束时才动它；另有四条 G1 守卫要求扩展点/stage 边界的关键词出现在它正文里，改那一条时要连守卫一起跑。
+`CLAUDE.md` 刻意不在这个集合里：它由 Claude Code 每次会话自动加载，每个字符都是每次请求的固定成本，因此只收「对下一个无关改动也成立」的通用约束与该语境独有的规程，特性级契约一律走 `AGENTS.md` / `docs/`，它只保留路由表。`scripts/check_claude_md_budget.py`（G1 contracts 泳道）把它的总字符数与最长行钉成**精确 baseline**（只许降的棘轮，两个方向都报红：涨了要先回答归属判据，变短了要在同一个 PR 里把 baseline 一起降，免得攒出没人记账的余量）。只有当改动触及它已有的通用约束时才动它；另有四条 G1 守卫要求扩展点/stage 边界的关键词出现在它正文里，改那一条时要连守卫一起跑。
 
 SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 source-binding identity；locked、busy、interrupted open 仍按瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。
 - `SelectedSourceGraphActivationService` 仍是唯一的所选来源图激活算法，但 Ask/深度报告只能经共享 host 的内建 contributor 与 core-private 请求 bridge 到达它。调用方必须先完成并冻结历史 `B` 再调用 host；服务只读取服务端冻结、真正收窄的 `include` scope，构建有界 snapshot，依次尝试在线 scoped PPR/邻居 membership，并在必要时读取按来源 partition 伴生产物，最后复验每个返回 source id，再把 `G` 交给 `BaselineProtectedEnrichmentService`。全范围/全选在 snapshot I/O 前直接返回；默认不可见 shadow 返回 `B`，质量批准的 active 模式返回 `B + G`，任何失败都返回 `B`。状态对象只属于内部观测，不得进入 Ask/报告 payload、轨迹、stream 或 UI；禁止新增第二套 rollout parser、workflow 级 service 直调、直接图 consumer 或客户端 narrowed 判据。
