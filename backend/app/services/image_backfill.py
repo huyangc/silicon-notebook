@@ -542,6 +542,11 @@ class EnrichedImage:
     """需要把该元素 id append 进去的 chunk；空串表示它已经在某个 chunk 里，
     本次 chunk 零改动。"""
 
+    has_caption: bool = False
+    """这条既有元素自带可检索文本（图注/图片描述）。
+
+    补齐不改写 ``text``，所以图注统计的权威是元素自己，见 `_element_has_text`。"""
+
 
 @dataclass
 class SourcePlan:
@@ -600,6 +605,10 @@ def plan_source_images(
         if sep and tail.isdigit():
             used_suffix[head] = max(used_suffix.get(head, 0), int(tail))
 
+    # 元素 id -> 它在文档序里的下标。就地补齐用它沿元素自身顺序回退找 chunk 落点，
+    # 完全不碰 markdown 对齐（`elements` 已按 id 序读回，那就是文档序）。
+    element_positions = {element.id: index for index, element in enumerate(elements)}
+
     remaining = max_images - sum(
         1 for element in elements if element.element_type == "image"
     )
@@ -615,13 +624,6 @@ def plan_source_images(
             continue
         if ref.src in already:
             plan.skip("already_backfilled")
-            continue
-        if drifted:
-            # 整源闸：对齐已经不可信，每个锚点都是猜的（见
-            # `MIN_ALIGNMENT_COVERAGE`）。这里逐张记账而不是整源记一条，是为了
-            # 让 stdout 汇总里的 `alignment_drifted` 与其它 reason code 同口径
-            # （都是"多少张图没补上"）。
-            plan.skip("alignment_drifted")
             continue
         entry = image_index.get(Path(ref.src).name)
         if entry is None:
@@ -641,14 +643,22 @@ def plan_source_images(
                 continue
             # 就地补齐：不新增元素，因此不吃 `remaining`（这条元素本来就已经计
             # 在既有 image 元素数里了）。已经在某个 chunk 里就零改动 chunk；
-            # 不在（无图注的历史元素不进 chunk）才走与新插入同款的锚点路径。
+            # 不在（无图注的历史元素不进 chunk）才需要找一个落点。
+            #
+            # 这条路**整条与 markdown 对齐无关**：目标元素是按精确 src 相等找到
+            # 的，它的位置早已在库里，chunk 落点沿**元素 id 序**向前回退即可。所以
+            # 漂移闸（`MIN_ALIGNMENT_COVERAGE`）刻意不管它——纯图片文档的 coverage
+            # 恒为 0（一条文本行都没有），按闸拒掉就等于对这类来源永远补不了图，而
+            # 这恰恰是本工具最该修的那一批。
             if chunk_by_element.get(existing_id):
                 chunk_id = ""
             else:
-                anchor = _anchor_for(plan, alignment, ref, chunk_by_element)
-                if anchor is None:
+                chunk_id = _chunk_for_preceding_element(
+                    elements, element_positions, existing_id, chunk_by_element
+                )
+                if not chunk_id:
+                    plan.skip("no_chunk")
                     continue
-                chunk_id = anchor[1]
             enriched_ids.add(existing_id)
             plan.enriched.append(
                 EnrichedImage(
@@ -657,10 +667,23 @@ def plan_source_images(
                     source_path=entry.path,
                     size=entry.size,
                     chunk_id=chunk_id,
+                    has_caption=_element_has_text(
+                        elements, element_positions, existing_id
+                    ),
                 )
             )
+            if plan.enriched[-1].has_caption:
+                plan.captions += 1
             continue
 
+        if drifted:
+            # 整源闸**只作用于新插入**：插入要靠 markdown 对齐算锚点，而对齐一旦
+            # 不可信，每个锚点都是猜的（见 `MIN_ALIGNMENT_COVERAGE`）。上面的就地
+            # 补齐不经过这道闸。逐张记账而不是整源记一条，是为了让 stdout 汇总里
+            # 的 `alignment_drifted` 与其它 reason code 同口径（都是"多少张图没补
+            # 上"）。
+            plan.skip("alignment_drifted")
+            continue
         if remaining <= 0:
             plan.skip("per_source_cap")
             continue
@@ -726,6 +749,45 @@ def _anchor_for(
         plan.skip("no_chunk")
         return None
     return alignment.matched[position], chunk_id
+
+
+def _chunk_for_preceding_element(
+    elements: Sequence[ElementView],
+    element_positions: Mapping[str, int],
+    element_id: str,
+    chunk_by_element: Mapping[str, str],
+) -> str:
+    """就地补齐的 chunk 落点：从该元素自己出发，沿**元素 id 序**（= 文档序）有界
+    向前回退，取第一个属于某个 chunk 的元素所在的 chunk；找不到返回空串。
+
+    与新插入用的 `_chunk_for_anchor` 是同一条"向前回退"语义，区别只在走的是哪条
+    序列：插入的位置只能由 markdown 对齐推出来，而补齐的目标元素**已经在库里**、
+    位置是已知事实，不需要也不该依赖对齐。回退步数复用 `CHUNK_LOOKBACK`。"""
+    index = element_positions.get(element_id)
+    if index is None:
+        return ""
+    steps = 0
+    while index >= 0 and steps <= CHUNK_LOOKBACK:
+        chunk_id = chunk_by_element.get(elements[index].id)
+        if chunk_id:
+            return chunk_id
+        index -= 1
+        steps += 1
+    return ""
+
+
+def _element_has_text(
+    elements: Sequence[ElementView],
+    element_positions: Mapping[str, int],
+    element_id: str,
+) -> bool:
+    """这条既有元素自带可检索文本（图注或图片描述）吗。
+
+    补齐不改写 ``text``，所以"这张图有没有图注"的权威是**元素自己**，不是 markdown
+    里那一行——用 `harvest_caption` 重新收割会在两者不一致时报出一个库里并不存在的
+    数字。"""
+    index = element_positions.get(element_id)
+    return bool(index is not None and elements[index].norm)
 
 
 def _chunk_for_anchor(
