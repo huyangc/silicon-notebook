@@ -1190,6 +1190,47 @@ def test_a_pure_image_source_is_enriched_even_though_alignment_cannot_run(
     assert [row["text"] for row in after] == [row["text"] for row in before]
 
 
+def test_enrichment_respects_the_per_source_ceiling_end_to_end(
+    repo, outputs, tmp_path, monkeypatch
+):
+    """端到端：三条未挂资产的带图注元素、上限 1 → 恰好补齐 1 条，另 2 条记截断。
+    补齐不吃预算的话这一整批会被放行，直接越过 `MINERU_MAX_IMAGES_PER_SOURCE`。"""
+    docs = tmp_path / "cap"
+    docs.mkdir()
+    (docs / "cap.md").write_text(
+        "![图 1 系统总体架构](images/aaa.jpg)\n\n"
+        "![图 2 数据通路](images/bbb.jpg)\n\n"
+        "![图 3 模块划分](images/ccc.jpg)\n",
+        encoding="utf-8",
+    )
+    (outputs[0] / "sess" / "doc" / "auto" / "images" / "ccc.jpg").write_bytes(
+        b"\xff\xd8\xff\xe0" + b"c" * 64
+    )
+    notebook_id = bi.ensure_notebook(repo, None, "nb-cap")
+    bi.run_ingest(repo, notebook_id, bi.iter_files(docs), workers=1)
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["id"]
+    assert len(_image_elements(repo, source_id)) == 3
+
+    monkeypatch.setattr(repo.settings, "mineru_max_images_per_source", 1)
+    result = _run(repo, notebook_id, outputs)
+    assert result["images_enriched"] == 1
+    assert result["skipped"].get("per_source_cap") == 2
+    assigned = [
+        row
+        for row in _image_elements(repo, source_id)
+        if json.loads(row["metadata"]).get("asset_id")
+    ]
+    assert len(assigned) == 1
+    assert len(_rows(repo, "SELECT id FROM notebook_assets")) == 1
+
+    # 重跑不会突破上限：已补的那条现在**带资产**，把分母占满。
+    assert _run(repo, notebook_id, outputs)["images_enriched"] == 0
+    assert len(_rows(repo, "SELECT id FROM notebook_assets")) == 1
+
+
 def test_enrichment_is_idempotent_across_reruns(repo, seeded_with_alt, outputs):
     notebook_id, source_id = seeded_with_alt
     _run(repo, notebook_id, outputs)
