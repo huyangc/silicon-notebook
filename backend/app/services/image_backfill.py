@@ -49,6 +49,20 @@ ALIGN_LOOKAHEAD = 8
 #: `skipped` 里一个字都不会出现。实测两种形态各自把覆盖率打到 0.33。
 UNMATCHABLE_ELEMENT_TYPES = frozenset({"image", "figure", "table", "code_block"})
 
+#: 结构块（markdown 侧）-> 它在元素侧对应的类型。扫描时**即时**跨越：一个表格块
+#: 推进一条 table 元素、一个围栏代码块推进一条 code_block、一条带 alt 的独立图片行
+#: 推进一条 image/figure。
+#:
+#: 不即时跨越的后果是**静默的位置错误**：结构行不参与匹配，结构元素要等到后面某个
+#: 文本行命中才被顺带并进 `matched`，于是紧跟在表格/代码块之后的独立图片会锚到结构
+#: 块**之前**的那个段落、被 append 进错误的 chunk——而覆盖率仍是 100%，一个信号都
+#: 没有（实测：表格后的 `![](z.jpg)` 锚到 el-0001 而不是 el-0002）。
+STRUCTURAL_ELEMENT_TYPES: Mapping[str, tuple[str, ...]] = {
+    "table": ("table",),
+    "code_block": ("code_block",),
+    "image": ("image", "figure"),
+}
+
 #: 锚点新鲜度：自锚点被匹配以来，已经有这么多条 markdown 文本行**没能**匹配上
 #: 任何元素时，这个锚点就不再可信——对齐正在漂，插进去的图会落在错误的位置上
 #: 且没有任何信号。与 `ALIGN_LOOKAHEAD` 同量级（两者描述的是同一件事的两个
@@ -169,6 +183,12 @@ class MarkdownLine:
     norm: str
     """归一化后的可比较文本（仅 ``kind == "text"`` 有意义）。"""
 
+    block_start: str = ""
+    """这一行**开启**了一个结构块时，它对应的元素类型；否则空串。
+
+    取值 ``"table"`` / ``"code_block"`` / ``"image"``。只标在块的**第一行**上：
+    一整张表、一个围栏代码块各自在元素侧只是**一条**元素，所以只该推进一格。"""
+
 
 def normalize_text(value: str) -> str:
     """把 markdown 行与元素文本折成同一种可比较形状。
@@ -250,10 +270,17 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
 
     行分类只服务于对齐：围栏代码块内部一律 ``"code"``（那里的文字不是正文，
     元素侧是一整条 code_block 元素），表格行 ``"table"``（`parse_blocks` 把整张
-    表折成一条元素，逐行去匹配只会把指针推过头）。"""
+    表折成一条元素，逐行去匹配只会把指针推过头）——**HTML 表格块也算**：MinerU 与
+    PyMuPDF4LLM 会产出 ``<table>…</table>``，`parse_blocks` 同样把整块折成一条
+    table 元素（实测），而它不以 ``|`` 开头，不专门认就会被当成一串永远匹配不上的
+    正文行。
+
+    每个结构块的**第一行**还带 `MarkdownLine.block_start`，供对齐即时跨越。"""
     lines: list[MarkdownLine] = []
     refs: list[ImageRef] = []
     fence: str | None = None
+    html_table = False
+    prev_kind = ""
     ordinal = 0
     for index, raw in enumerate((text or "").splitlines()):
         fence_match = _FENCE_RE.match(raw)
@@ -264,11 +291,27 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
                 fence_match.group("fence")
             ) >= len(fence):
                 fence = None
+            prev_kind = "code"
             continue
         if fence_match:
             fence = fence_match.group("fence")
-            lines.append(MarkdownLine(index, raw, "code", ""))
+            lines.append(
+                MarkdownLine(
+                    index, raw, "code", "", "" if prev_kind == "code" else "code_block"
+                )
+            )
+            prev_kind = "code"
             continue
+
+        # HTML 表格块的状态机（围栏之后判，好让围栏里的 `<table>` 保持 code）。
+        lowered = raw.lower()
+        in_html_table = html_table
+        if html_table:
+            if "</table>" in lowered:
+                html_table = False
+        elif raw.strip().lower().startswith("<table"):
+            in_html_table = True
+            html_table = "</table>" not in lowered
 
         # 「这一行只有图片」按**原始**行判：剥掉全部图片引用后还剩下什么。刻意
         # 不复用 `normalize_text`——它会先剥掉行首的列表/引用/标题标记，于是
@@ -291,7 +334,10 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
         refs.extend(line_refs)
 
         stripped = raw.strip()
-        if not stripped:
+        if in_html_table:
+            # HTML 表格块整块归 table（含块内空行）：元素侧它只是一条 table。
+            kind = "table"
+        elif not stripped:
             kind = "blank"
         elif line_refs and not _norm_without_image_alt(raw):
             # 整行只有图片（把图片语法连 alt 一起抹掉后什么都不剩）：它是锚定的
@@ -302,9 +348,26 @@ def scan_markdown(text: str) -> tuple[list[MarkdownLine], list[ImageRef]]:
             kind = "table"
         else:
             kind = "text"
+
+        block_start = ""
+        if kind == "table" and prev_kind != "table":
+            block_start = "table"
+        elif kind == "image" and any(ref.alt for ref in line_refs):
+            # 只对**带 alt** 的独立图片行跨越：空 alt、无描述、无资产的图片被
+            # `parse_markdown_text` 整块丢弃（`if not caption and not description
+            # and not asset_id: continue`），元素侧根本没有它，跨过去就会吃掉后面
+            # 某张图的元素。
+            block_start = "image"
         lines.append(
-            MarkdownLine(index, raw, kind, normalize_text(raw) if kind == "text" else "")
+            MarkdownLine(
+                index,
+                raw,
+                kind,
+                normalize_text(raw) if kind == "text" else "",
+                block_start,
+            )
         )
+        prev_kind = kind
     return lines, refs
 
 
@@ -448,7 +511,33 @@ def align(lines: Sequence[MarkdownLine], elements: Sequence[ElementView]) -> Ali
     matched_lines = 0
     text_lines = 0
     stale = 0
+
+    def cross_structural(block: str) -> None:
+        """把指针**即时**推过这个结构块对应的元素。
+
+        只在游标处（跨过其间的不可匹配元素之后）**恰好**是期望类型时才推进：期望
+        类型不在眼前就什么都不做。宁可不推进（退回旧的滞后行为）也不猜——推错一格
+        比晚一格坏得多。"""
+        nonlocal cursor
+        wanted = STRUCTURAL_ELEMENT_TYPES.get(block, ())
+        index = cursor
+        while index < len(elements) and (
+            elements[index].element_type in UNMATCHABLE_ELEMENT_TYPES
+        ):
+            if elements[index].element_type in wanted:
+                matched.extend(
+                    elements[position].id for position in range(cursor, index + 1)
+                )
+                cursor = index + 1
+                return
+            index += 1
+
     for line in lines:
+        if line.block_start:
+            # 必须在记 `position_by_line` **之前**跨越：紧跟在结构块之后的那张独立
+            # 图片要锚到结构元素本身（表格/代码块都在 chunk 里，chunk 归属因此自然
+            # 正确），而不是结构块**之前**的那个段落。
+            cross_structural(line.block_start)
         if line.kind == "text":
             text_lines += 1
             budget = ALIGN_LOOKAHEAD

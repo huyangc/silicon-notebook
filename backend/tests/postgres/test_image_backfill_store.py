@@ -484,39 +484,6 @@ def test_resolve_source_path_reuses_the_product_wide_convention(postgres_reposit
 
 
 @pytest.mark.postgres_integration
-def test_source_asset_ids_is_scoped_to_that_notebook_and_source(postgres_repository):
-    """本趟范围孤儿清扫的前后快照口径（PG 半）：只回这个 (notebook, source) 名下
-    的资产行，别的来源与别的 notebook 一条都不带。"""
-    notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
-    other_notebook = postgres_repository.create_notebook(NotebookCreate(name="bf2")).id
-    source_id = _seed(postgres_repository, notebook_id)
-    maintenance = postgres_repository.maintenance
-    assert maintenance.image_backfill_source_asset_ids(notebook_id, source_id) == []
-
-    mine = [
-        postgres_repository.insert_notebook_asset(
-            notebook_id, f"a{index}.jpg", "image/jpeg", 3, "u", source_id=source_id
-        )
-        for index in range(2)
-    ]
-    # 同 notebook、别的来源；以及别的 notebook。两者都不该出现。
-    postgres_repository.insert_notebook_asset(
-        notebook_id, "other.jpg", "image/jpeg", 3, "u", source_id="src-other"
-    )
-    postgres_repository.insert_notebook_asset(
-        other_notebook, "far.jpg", "image/jpeg", 3, "u", source_id=source_id
-    )
-    # 没有 source_id 的普通粘贴图同样不在范围内。
-    postgres_repository.insert_notebook_asset(
-        notebook_id, "paste.jpg", "image/jpeg", 3, "u"
-    )
-
-    assert maintenance.image_backfill_source_asset_ids(notebook_id, source_id) == sorted(
-        mine
-    )
-
-
-@pytest.mark.postgres_integration
 def test_discard_assets_removes_only_the_named_rows(postgres_repository):
     notebook_id = postgres_repository.create_notebook(NotebookCreate(name="bf")).id
     source_id = _seed(postgres_repository, notebook_id)

@@ -1996,23 +1996,6 @@ class SQLiteMaintenanceAdapter:
         离线命令与在线读取对同一批历史行给出不同答案。"""
         return str(self._runtime.source_files.resolve_path(file_path))
 
-    def image_backfill_source_asset_ids(
-        self, notebook_id: str, source_id: str
-    ) -> list[str]:
-        """该来源名下全部 ``notebook_assets`` 行的 id（只读）。
-
-        供离线阶段做**本趟范围内**的孤儿清扫：动手前后各取一次，只有差集里
-        没人引用的那些才删。两个谓词都要——``source_id`` 是主键据，
-        ``notebook_id`` 是纵深防御（资产行的 notebook 归属由 `save_source_image`
-        与来源绑定，多带一个谓词让一条错挂的历史行不至于被跨库删掉）。"""
-        with self._runtime.database.connect() as db:
-            rows = db.execute(
-                "SELECT id FROM notebook_assets "
-                "WHERE notebook_id=? AND source_id=? ORDER BY id",
-                (notebook_id, source_id),
-            ).fetchall()
-        return [row["id"] for row in rows]
-
     def image_backfill_discard_assets(self, asset_ids: Sequence[str]) -> list[dict]:
         """删掉这一批 ``notebook_assets`` 行并原样返回，供调用方 unlink 文件。
 

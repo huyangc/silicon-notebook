@@ -75,10 +75,10 @@ SOURCE_PAGE = 500
 
 
 class ImageBackfillPort(Protocol):
-    """离线回填要的四个仓储口（SQLite / PostgreSQL 双后端逐字对等）。
+    """离线回填要的五个仓储口（SQLite / PostgreSQL 双后端逐字对等）。
 
     刻意声明在这里而不是 `app/repositories/ports.py`：那个文件的 Protocol 方法
-    总数钉在零余量上限上（只许降），而这四个方法只有本模块一个消费方。"""
+    总数钉在零余量上限上（只许降），而这几个方法只有本模块一个消费方。"""
 
     def image_backfill_source_page(
         self, notebook_id: str, after_id: str, limit: int
@@ -99,10 +99,6 @@ class ImageBackfillPort(Protocol):
         created_at: Any,
         expected_element_count: int,
     ) -> None: ...
-
-    def image_backfill_source_asset_ids(
-        self, notebook_id: str, source_id: str
-    ) -> list[str]: ...
 
     def image_backfill_discard_assets(
         self, asset_ids: Sequence[str]
@@ -165,8 +161,8 @@ def _totals() -> dict[str, int]:
         # 的那些不该算进"收割到多少图注"）。dry-run 一张都不落，那时改取计划命中
         # 数，否则这个数恒为 0、把 dry-run 的估算用途废掉。
         "captions": 0,
-        # 本趟新出现、却没有任何元素引用的资产行被扫掉了几条（见
-        # `_sweep_pass_orphans`）。正常跑恒为 0，非零本身就是信号。
+        # 本次调用亲手铸出来、却没有任何已提交元素引用的资产行被删掉了几条
+        # （见 `_discard_unreferenced`）。正常跑恒为 0，非零本身就是信号。
         "orphan_assets_removed": 0,
     }
 
@@ -373,23 +369,24 @@ def apply_plan(
     """落资产 → 一个写事务落元素/metadata/chunk/反查行/updated_at。
 
     两段式是被 `AssetService.save_source_image` 的形状逼出来的（它自带事务并写
-    盘）。中间有两个失败窗口，都由**本趟范围内的孤儿清扫**收口：
+    盘）。中间有两个失败窗口，都由 `_discard_unreferenced` 收口：
 
-    1. 元素事务失败——本次写下的资产行连同磁盘文件一起删掉；
+    1. 元素事务失败（含 CAS 拒绝）——本次铸出来的资产行连同磁盘文件一起删掉；
     2. `save_source_image` **先提交 `notebook_assets` 行、后写盘**
-       （`assets.py`），写盘/落盘校验失败时它抛异常，调用方**拿不到 asset id**，
-       于是那一行既不在 ``written`` 里、又永远没人引用。
+       （`assets.py`），写盘/落盘校验失败时它抛异常，调用方拿不到返回值——所以那
+       个 id 由 ``on_row_created`` 回调在**行提交那一刻**就记进 ``written``。
 
     `sweep_orphan_assets` 明确不扫 ``source_id`` 非空的行，所以这两类孤儿没有任何
-    后台会回收——必须在这里扫。判据是「本趟**新出现**的、且不被该来源任何元素
-    引用的资产行」：先在动手之前快照一次该来源的资产 id，收尾时只考虑差集。
+    后台会回收——必须在这里删。判据是「id 在 ``written`` 里且没有已提交元素引用
+    它」，也就是**只删本次调用亲手铸出来的**。
 
-    **刻意不用更宽的判据**（"该来源全部无人引用的资产行"，也就是 docs 里写给人工
-    清理用的那条）：深拷贝会为 `notebook_assets` 铸新 id，却**不**重映射
-    `source_elements.metadata.asset_id`（`notebook_sharing.py` 的 json_maps 只含
-    element/source/object 三类 id）——实测一本副本里每一条来源图片资产行都"无人
-    引用"。广义清扫会把副本的资产行连同磁盘文件全删掉，那是本工具不该碰的数据。
-    历史 kill-9 残留仍按 docs 的判据人工清理。
+    **刻意不用任何形式的差集判据**（"这一趟新出现的资产行"、"该来源全部无人引用的
+    资产行"）：SQLite 侧本命令可与活服务并存，而在线解析是先落资产、之后才换元素，
+    所以执行期间冒出来的行可能是并发重解析建的合法数据；文件名也区分不开（在线
+    MinerU 路径同样落 ``<sha>.jpg``）。另外深拷贝会为 `notebook_assets` 铸新 id 却
+    不重映射 `source_elements.metadata.asset_id`，一本副本里每条来源图片资产行都
+    "无人引用"。历史 kill-9 残留（本命令自己更早那些趟留下的）仍按 docs 的判据人工
+    清理。
     """
     assets = AssetService(repo)
     created_by = repo.current_user().id
@@ -398,10 +395,6 @@ def apply_plan(
     updates: list[dict] = []
     metadata_by_id = {element["id"]: element["metadata"] for element in state["elements"]}
     max_bytes = int(repo.settings.mineru_max_image_bytes)
-    # 动手之前的快照：清扫只作用于这之后新出现的行。
-    assets_before = set(
-        repo.maintenance.image_backfill_source_asset_ids(notebook_id, source_id)
-    )
 
     def _store(image) -> str:
         """读盘 + 落资产；失败时记账并返回空串。"""
@@ -423,11 +416,14 @@ def apply_plan(
                 data,
                 created_by,
                 max_bytes=max_bytes,
+                # 行一提交就记下 id——不能等这个调用**返回**才记：它在提交行之后、
+                # 写盘之前还会失败，那时 id 就永远拿不到了（见
+                # `AssetService.save_source_image` 的 docstring）。
+                on_row_created=written.append,
             )
         except (AssetValidationError, RuntimeError, OSError):
             plan.skip("asset_write_failed")
             return ""
-        written.append(asset["id"])
         return asset["id"]
 
     try:
@@ -448,9 +444,8 @@ def apply_plan(
             # 一张都没落成，但 `_store` 可能已经在 `asset_write_failed` 上留下了
             # 提交过的资产行——这条路同样要扫。
             return ApplyOutcome(
-                orphan_assets_removed=_sweep_pass_orphans(
-                    repo, assets, notebook_id, source_id, assets_before,
-                    _referenced_asset_ids(state),
+                orphan_assets_removed=_discard_unreferenced(
+                    repo, assets, written, _referenced_asset_ids(state)
                 )
             )
         created_at = state["element_created_at"]
@@ -510,10 +505,7 @@ def apply_plan(
     except BaseException:
         # 什么都没提交，所以 rows/updates 不算引用——本次写下的资产行（含
         # `asset_write_failed` 那些拿不到 id 的）全落进差集，被扫干净。
-        _sweep_pass_orphans(
-            repo, assets, notebook_id, source_id, assets_before,
-            _referenced_asset_ids(state),
-        )
+        _discard_unreferenced(repo, assets, written, _referenced_asset_ids(state))
         raise
     # 图注命中按**实际落地**的图重算，插入与就地补齐两半都要数：只数插入的话，
     # 一个纯补齐的来源会报「图注 0」，而那条元素明明带着图注。
@@ -532,33 +524,35 @@ def apply_plan(
         inserted=len(rows),
         enriched=len(updates),
         captions=captions,
-        orphan_assets_removed=_sweep_pass_orphans(
-            repo, assets, notebook_id, source_id, assets_before,
-            _referenced_asset_ids(state, rows, updates),
+        orphan_assets_removed=_discard_unreferenced(
+            repo, assets, written, _referenced_asset_ids(state, rows, updates)
         ),
     )
 
 
-def _sweep_pass_orphans(
+def _discard_unreferenced(
     repo: ImageBackfillRepository,
     assets: AssetService,
-    notebook_id: str,
-    source_id: str,
-    assets_before: set[str],
+    written: Sequence[str],
     referenced: set[str],
 ) -> int:
-    """删掉本趟新出现、却没有任何元素引用的资产行与文件；返回删除条数。
+    """删掉**本次调用亲手铸出来**、却没有任何已提交元素引用的资产行与文件。
 
-    Best-effort：清扫自身的失败绝不掩盖调用路径上的原始异常，也绝不掀翻一次
-    本来成功的来源。差集 `assets_before` 是硬性的——没有它，判据就会误伤深拷贝
-    留下的资产行（见 `apply_plan` 的 docstring）。"""
-    try:
-        current = set(
-            repo.maintenance.image_backfill_source_asset_ids(notebook_id, source_id)
-        )
-    except Exception:  # pragma: no cover - 读不到就不扫，绝不猜
-        return 0
-    orphans = sorted((current - assets_before) - referenced)
+    判据刻意是「id 在 ``written`` 里」而**不是**任何形式的"这一趟新出现的行"差集。
+    SQLite 侧本命令可以与活服务并存，而在线解析流程是**先落资产、之后才换元素**，
+    所以两次读之间冒出来的新资产行完全可能是并发重解析建的合法数据——CAS 通过也
+    不排除它（CAS 看的是元素与 chunk，不是资产）。按差集清扫会把它连同磁盘文件一起
+    删掉，而它的元素随后就会指向一个不存在的资产。文件名也区分不开：在线 MinerU
+    路径同样按 ``Path(img_path).name`` 落 ``<sha>.jpg``（`parsers.py` 的 image 分支），
+    与我们铸的名字形状逐字相同。
+
+    ``written`` 由 `AssetService.save_source_image` 的 ``on_row_created`` 回调在行
+    提交那一刻填入，所以它连"提交了行但写盘失败、调用方拿不到返回值"那一格也覆盖得
+    到——那正是本命令唯一会漏的窗口。
+
+    Best-effort：清扫自身的失败绝不掩盖调用路径上的原始异常，也绝不掀翻一次本来
+    成功的来源。"""
+    orphans = [asset_id for asset_id in dict.fromkeys(written) if asset_id not in referenced]
     if not orphans:
         return 0
     try:

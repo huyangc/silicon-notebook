@@ -20,6 +20,7 @@ smuggle a path traversal into the on-disk location.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from app.repositories.source_files import safe_filename
 
@@ -118,17 +119,29 @@ class AssetService:
         self, notebook_id: str, source_id: str, filename: str,
         mime: str, data: bytes, created_by: str,
         max_bytes: int | None = None,
+        *,
+        on_row_created: Callable[[str], None] | None = None,
     ) -> dict:
         """存 MinerU 从来源抽出的内嵌图片：与 save() 同款校验+落盘，但带 source_id
         关联，供来源视图渲染与按源级联清理。护栏(大小/张数)由调用方(persist_image
         工厂)先行把关，这里仍做 mime/尺寸兜底校验，绝不放行不合规写盘；
         ``max_bytes`` 由调用方传部署的来源图片上限(codex R6：否则配置超过
-        10MB 时被默认粘贴图上限静默压住)。"""
+        10MB 时被默认粘贴图上限静默压住)。
+
+        ``on_row_created`` 在 ``notebook_assets`` 行**已经提交、文件还没写**的那一刻
+        被调用一次，参数是新 asset id。行提交与写盘之间存在一个失败窗口：那之后抛出
+        的异常会让调用方**永远拿不到这个 id**，而 `sweep_orphan_assets` 明确不回收带
+        ``source_id`` 的行，于是它成为一条谁也够不着的孤儿。在线路径不传它（行为逐字
+        不变）；离线的 `backfill-images` 用它把 id 记进自己的回滚名单，从而只删自己
+        铸出来的资产——按"这一趟新出现的行"之类的差集去猜，会连并发的在线重解析刚建
+        的合法资产一起删掉（那条路径的文件名同样是 ``<sha>.jpg``，形状上区分不开）。"""
         validate_asset(mime, len(data), max_bytes=max_bytes)
         asset_id = self._repo.insert_notebook_asset(
             notebook_id, safe_filename(filename or "image"), mime, len(data),
             created_by, source_id=source_id,
         )
+        if on_row_created is not None:
+            on_row_created(asset_id)
         asset = self._repo.get_notebook_asset(asset_id)
         if asset is None:  # pragma: no cover
             raise RuntimeError(f"source image asset {asset_id} missing after insert")

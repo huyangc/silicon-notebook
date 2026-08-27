@@ -774,53 +774,95 @@ def test_a_concurrent_reparse_does_not_stop_the_rest_of_the_run(
     assert owners == {other}
 
 
-def test_an_asset_row_orphaned_mid_pass_is_swept_by_that_same_pass(
-    repo, seeded, outputs, monkeypatch
+def test_an_asset_row_orphaned_mid_pass_is_reclaimed_by_that_same_pass(
+    repo, seeded, outputs, monkeypatch, tmp_path
 ):
-    """`save_source_image` **先提交 `notebook_assets` 行、后写盘**，所以写盘失败
-    时它抛异常而调用方**拿不到 asset id**——那一行既不在本次的 `written` 里、又
-    永远没人引用，而 `sweep_orphan_assets` 刻意不扫带 `source_id` 的行。本趟范围
-    的清扫必须收掉它。"""
+    """`save_source_image` **先提交 `notebook_assets` 行、后写盘**，所以写盘失败时
+    它抛异常而调用方拿不到返回值——那一行既没人引用，`sweep_orphan_assets` 又刻意
+    不扫带 `source_id` 的行，于是成为一条谁也够不着的孤儿。
+
+    模拟走**真实的** `save_source_image`（只把落盘目标换成一个写不进去的路径），
+    这样 `on_row_created` 回调这条承重接线才真的被执行到——它就是本命令拿到那个
+    id 的唯一途径。"""
     from app.services.knowhow.assets import AssetService
 
     notebook_id, source_id = seeded
-    real_insert = repo.insert_notebook_asset
-    leaked: list[str] = []
-    original = AssetService.save_source_image
+    original_path_for = AssetService.path_for
+    hijacked: list[str] = []
 
-    def _commit_row_then_fail(self, nb, src, filename, mime, data, created_by, **kw):
-        if not leaked:
-            # 第一张：逐字复刻"行已提交、写盘失败"这一半。
-            leaked.append(
-                real_insert(nb, filename, mime, len(data), created_by, source_id=src)
-            )
-            raise RuntimeError("simulated disk write failure after the row commit")
-        return original(self, nb, src, filename, mime, data, created_by, **kw)
+    def _unwritable_path(self, asset):
+        if not hijacked:
+            hijacked.append(asset["id"])
+            return tmp_path  # 已存在的目录：write_bytes 抛 IsADirectoryError
+        return original_path_for(self, asset)
 
-    monkeypatch.setattr(AssetService, "save_source_image", _commit_row_then_fail)
+    monkeypatch.setattr(AssetService, "path_for", _unwritable_path)
     result = _run(repo, notebook_id, outputs)
 
-    assert leaked, "变异守护：模拟没有真的插进一行，这个用例什么都没验证"
+    assert hijacked, "变异守护：写盘失败没有真的发生，这个用例什么都没验证"
     assert result["skipped"].get("asset_write_failed") == 1
     assert result["images_inserted"] == 1  # 第二张照常落地
     assert result["orphan_assets_removed"] == 1
     # 泄漏那一行没了，活着的那张图的资产还在。
     remaining = {row["id"] for row in _rows(repo, "SELECT id FROM notebook_assets")}
-    assert leaked[0] not in remaining
+    assert hijacked[0] not in remaining
     assert len(remaining) == 1
 
 
-def test_the_sweep_never_touches_asset_rows_that_predate_the_pass(
+def test_an_asset_created_concurrently_by_a_live_service_is_never_deleted(
+    repo, seeded, outputs, monkeypatch, tmp_path
+):
+    """清扫只许碰**本次调用亲手铸出来**的 id。
+
+    SQLite 侧本命令可与活服务并存，而在线解析是**先落资产、之后才换元素**，所以
+    本趟执行期间冒出来的资产行完全可能是并发重解析建的合法数据（CAS 看的是元素与
+    chunk，不是资产，通过也不排除它）。文件名同样区分不开：在线 MinerU 路径按
+    ``Path(img_path).name`` 落的就是 ``<sha>.jpg``，与我们铸的名字形状逐字相同。
+    这里在同一趟里让一条这样的行出现，并把它做成"没有元素引用"的最坏形态。"""
+    from app.services.knowhow.assets import AssetService
+
+    notebook_id, source_id = seeded
+    original_path_for = AssetService.path_for
+    concurrent: list[str] = []
+    hijacked: list[str] = []
+
+    def _unwritable_path(self, asset):
+        if not hijacked:
+            hijacked.append(asset["id"])
+            # 活服务此刻正在重新解析同一个来源：先落资产，元素稍后才换。
+            concurrent.append(
+                repo.insert_notebook_asset(
+                    notebook_id,
+                    "aaa.jpg",  # 与我们铸的名字逐字相同，形状上无从区分
+                    "image/jpeg",
+                    16,
+                    "live-service",
+                    source_id=source_id,
+                )
+            )
+            return tmp_path
+        return original_path_for(self, asset)
+
+    monkeypatch.setattr(AssetService, "path_for", _unwritable_path)
+    result = _run(repo, notebook_id, outputs)
+
+    assert hijacked and concurrent, "变异守护：并发资产没有真的建出来"
+    assert result["orphan_assets_removed"] == 1  # 只删了自己那条
+    remaining = {row["id"] for row in _rows(repo, "SELECT id FROM notebook_assets")}
+    assert concurrent[0] in remaining, "并发的合法资产被误删了"
+    assert hijacked[0] not in remaining
+
+
+def test_the_sweep_never_touches_asset_rows_it_did_not_create(
     repo, seeded, outputs
 ):
-    """反向护栏：清扫**只**作用于本趟新出现的行。
+    """反向护栏：清扫**只**碰本次调用亲手铸出来的 id。
 
-    判据里的 `assets_before` 差集是硬性的。若换成更宽的「该来源全部无人引用的
-    资产行」（也就是 docs 里写给人工清理用的那条），深拷贝留下的资产行会被连同
-    磁盘文件一起删掉——`notebook_sharing` 为 `notebook_assets` 铸新 id，却**不**
-    重映射 `source_elements.metadata.asset_id`（它的 json_maps 只含
-    element/source/object 三类），所以一本副本里每一条来源图片资产行都"无人引
-    用"。这里预置的正是那种形状的行。"""
+    若换成任何形式的"无人引用"差集判据，深拷贝留下的资产行会被连同磁盘文件一起
+    删掉——`notebook_sharing` 为 `notebook_assets` 铸新 id，却**不**重映射
+    `source_elements.metadata.asset_id`（它的 json_maps 只含 element/source/object
+    三类），所以一本副本里每一条来源图片资产行都"无人引用"。这里预置的正是那种
+    形状的行。"""
     notebook_id, source_id = seeded
     stale = repo.insert_notebook_asset(
         notebook_id, "copied.jpg", "image/jpeg", 3, "u", source_id=source_id
@@ -835,8 +877,8 @@ def test_the_sweep_never_touches_asset_rows_that_predate_the_pass(
 def test_a_failed_write_transaction_sweeps_this_pass_s_assets(
     repo, seeded, outputs, monkeypatch
 ):
-    """元素事务失败这条路同样走本趟范围清扫（它取代了原先的 `_discard_assets`，
-    并且更强：连那些拿不到 id 的泄漏行也一并收掉）。"""
+    """元素事务失败这条路同样收掉本次铸出来的全部资产（连那些"行已提交、写盘失败"
+    因而没有返回值的也在内——它们的 id 由 `on_row_created` 回调记下了）。"""
     notebook_id, _ = seeded
 
     def _boom(*_args, **_kwargs):
