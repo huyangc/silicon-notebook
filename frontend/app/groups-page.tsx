@@ -515,14 +515,17 @@ export function GroupsPage({
                 {canManage && <section className="group-settings-card group-invite-card">
                   <div className="group-invite-title"><span className="group-page-empty-icon"><Link size={20} /></span><div><h4>邀请链接</h4><p>拿到链接的登录用户会自动以普通成员身份加入。链接可重复使用，撤销或重新生成后旧链接立即失效。</p></div></div>
                   {invite === null ? <p className="tool-hint">邀请链接加载中…</p> : invite.active ? <>
-                    <label>当前邀请链接<div className="group-invite-link"><input ref={inviteLinkRef} readOnly value={buildGroupInviteLink(invite.token, window.location.origin)} onFocus={(event) => event.currentTarget.select()} /><button className={inviteCopy.resultFor("invite") === "copied" ? "new-pill copy-result-copied" : inviteCopy.resultFor("invite") === "failed" ? "new-pill copy-result-failed" : "new-pill"} disabled={Boolean(busy)} onClick={() => { void run("copy-invite", async () => {
+                    <label>当前邀请链接<div className="group-invite-link"><input ref={inviteLinkRef} readOnly value={buildGroupInviteLink(invite.token, window.location.origin)} onFocus={(event) => event.currentTarget.select()} /><button className={inviteCopy.resultFor(invite.token) === "copied" ? "new-pill copy-result-copied" : inviteCopy.resultFor(invite.token) === "failed" ? "new-pill copy-result-failed" : "new-pill"} disabled={Boolean(busy)} onClick={() => { void run("copy-invite", async () => {
                       const copied = await copyTextSafely(buildGroupInviteLink(invite.token, window.location.origin));
-                      inviteCopy.report("invite", copied);
+                      // key 用 token 而不是固定串:结果要挂 1.6s,期间切群组或重新生成
+                      // 链接都会让这颗按钮指向另一条链接,固定串会让新链接顶着上一条的
+                      // 「已复制」出现(codex #612 R2 P2)。
+                      inviteCopy.report(invite.token, copied);
                       // 复制没成到剪贴板时，把链接选中——用户当场就能 ⌘C/Ctrl+C，
                       // 不用先看懂提示再自己去框选。
                       if (!copied) { inviteLinkRef.current?.focus(); inviteLinkRef.current?.select(); }
                       setNotice(copied ? "邀请链接已复制。" : "复制失败，链接已选中，请手动复制。");
-                    }, "复制邀请链接失败"); }}>{busy === "copy-invite" ? "复制中…" : inviteCopy.resultFor("invite") === "copied" ? "已复制" : inviteCopy.resultFor("invite") === "failed" ? "复制失败" : "复制"}</button></div></label>
+                    }, "复制邀请链接失败"); }}>{busy === "copy-invite" ? "复制中…" : inviteCopy.resultFor(invite.token) === "copied" ? "已复制" : inviteCopy.resultFor(invite.token) === "failed" ? "复制失败" : "复制"}</button></div></label>
                     {confirming === "rotate-invite" ? <div className="group-inline-confirm"><span>重新生成后，旧链接会立即失效。</span><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run("rotate-invite", async () => {
                       setInvite(await rotateGroupInvite(detail.id)); setConfirming(""); setNotice("已重新生成邀请链接，旧链接已失效。");
                     }, "重新生成邀请链接失败"); }}>确认重新生成</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div> : <div className="group-invite-actions"><button className="sort-button" disabled={Boolean(busy)} onClick={() => setConfirming("rotate-invite")}>重新生成</button><button className="sort-button danger-text" disabled={Boolean(busy)} onClick={() => { void run("revoke-invite", async () => {

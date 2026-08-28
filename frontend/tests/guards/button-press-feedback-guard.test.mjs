@@ -157,7 +157,7 @@ const COPY_BUTTONS = [
   },
   {
     module: "page.tsx",
-    match: "handleShareLinkCopy(item.id",
+    match: "handleShareLinkCopy(item.share_token",
     why: "「已分享」弹窗每行的链接:同一个 handler,结果还必须按行分格(否则整列一起变绿)",
   },
   {
