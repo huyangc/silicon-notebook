@@ -20,6 +20,15 @@ from app.services.model_registry import ModelServiceDefinition, SystemModelServi
 
 RuntimeModelProvider = provider_mod.RuntimeModelProvider
 
+# Every cross-thread rendezvous below is bounded only so a deadlock fails
+# instead of hanging the suite.  None of these bounds asserts latency: what the
+# tests prove is ordering -- an observation lands before its release event is
+# set, a completion resolves before the caller-side resolution is unblocked --
+# and those assertions hold no matter how long the scheduler takes.  Keeping
+# the bound far above any healthy timing is what stops a loaded runner from
+# reddening a green test.
+_RENDEZVOUS_TIMEOUT_SECONDS = 30.0
+
 
 class _EventLog:
     def __init__(self) -> None:
@@ -271,7 +280,7 @@ def test_raw_and_queued_chat_cancellation_preserve_ask_cancelled():
     class BlockingChat(_Chat):
         def chat_json(self, messages, response_schema_hint, **kwargs):
             entered.set()
-            assert release.wait(2)
+            assert release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
             return self.result
 
     events = _EventLog()
@@ -280,15 +289,15 @@ def test_raw_and_queued_chat_cancellation_preserve_ask_cancelled():
     try:
         client = provider.chat("ask_answer")
         active = executor.submit(client.chat_json, [], "{}")
-        assert entered.wait(1)
+        assert entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         cancelled = threading.Event()
         queued = executor.submit(client.chat_json, [], "{}", cancel_event=cancelled)
         cancelled.set()
         with pytest.raises(AskCancelled):
-            queued.result(timeout=2)
+            queued.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         assert events.events[-1]["status"] == "cancelled"
         release.set()
-        assert active.result(timeout=2) == '{"ok": true}'
+        assert active.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS) == '{"ok": true}'
     finally:
         release.set()
         provider.close()
@@ -578,16 +587,16 @@ def test_close_rejects_new_work_but_drains_the_active_call():
     class BlockingChat(_Chat):
         def chat_json(self, messages, response_schema_hint, **kwargs):
             entered.set()
-            assert release.wait(2)
+            assert release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
             return self.result
 
     provider = _provider(registry=_registry(maximum=1), chat=BlockingChat())
     client = provider.chat("ask_answer")
     executor = ThreadPoolExecutor(max_workers=2)
     active = executor.submit(client.chat_json, [], "{}")
-    assert entered.wait(1)
+    assert entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
     closing = executor.submit(provider.close)
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + _RENDEZVOUS_TIMEOUT_SECONDS
     while not closing.running():
         assert time.monotonic() < deadline
         time.sleep(0.005)
@@ -681,7 +690,7 @@ def test_provider_observation_persistence_cannot_delay_or_replace_failure():
 
     def blocking_observer(_observation):
         observer_entered.set()
-        assert observer_release.wait(2)
+        assert observer_release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         raise RuntimeError("sqlite observation write failed")
 
     provider = _provider(chat=FailingChat(), observation_sink=blocking_observer)
@@ -692,7 +701,7 @@ def test_provider_observation_persistence_cannot_delay_or_replace_failure():
         elapsed = time.perf_counter() - started
         assert caught.value.code == "provider_unavailable"
         assert elapsed < 0.5
-        assert observer_entered.wait(1)
+        assert observer_entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
     finally:
         observer_release.set()
         provider.close()
@@ -724,7 +733,7 @@ def test_provider_emits_failure_then_one_recovery_but_not_ordinary_success():
             provider.chat("ask_answer").chat_json([], "{}")
         assert provider.chat("ask_answer").chat_json([], "{}") == '{"ok": true}'
         assert provider.chat("ask_answer").chat_json([], "{}") == '{"ok": true}'
-        assert observed.wait(1)
+        assert observed.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         assert [(item.status, item.trigger) for item in observations] == [
             ("error", "observed_failure"),
             ("ok", "recovery_probe"),
@@ -794,7 +803,7 @@ def test_provider_failure_classes_emit_one_failure_and_one_recovery(failure):
         with pytest.raises(provider_mod.ModelInvocationError):
             client.chat_json([], "{}")
         assert client.chat_json([], "{}") == '{"ok": true}'
-        assert observed.wait(1)
+        assert observed.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         assert [(item.status, item.trigger) for item in observations] == [
             ("error", "observed_failure"),
             ("ok", "recovery_probe"),
@@ -838,10 +847,10 @@ def test_completion_order_not_delayed_caller_resolution_drives_recovery():
         def chat_json(self, messages, response_schema_hint, **kwargs):
             if messages == ["fail"]:
                 failure_entered.set()
-                assert failure_release.wait(2)
+                assert failure_release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
                 failure_finished.set()
                 raise TimeoutError("older provider failure")
-            assert failure_finished.wait(2)
+            assert failure_finished.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
             return self.result
 
     def observer(value):
@@ -860,8 +869,8 @@ def test_completion_order_not_delayed_caller_resolution_drives_recovery():
     def delayed_failure_resolve(call):
         if threading.current_thread().name.startswith("delayed-failure"):
             call.future.add_done_callback(lambda _future: failure_future_done.set())
-            assert failure_future_done.wait(2)
-            assert failure_resolution_release.wait(2)
+            assert failure_future_done.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
+            assert failure_resolution_release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         return original_resolve(call)
 
     client._resolve = delayed_failure_resolve
@@ -871,12 +880,12 @@ def test_completion_order_not_delayed_caller_resolution_drives_recovery():
     success_executor = ThreadPoolExecutor(max_workers=1)
     try:
         failed = failure_executor.submit(client.chat_json, ["fail"], "{}")
-        assert failure_entered.wait(1)
+        assert failure_entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         succeeded = success_executor.submit(client.chat_json, ["success"], "{}")
         failure_release.set()
-        assert failure_future_done.wait(1)
-        assert succeeded.result(timeout=2) == '{"ok": true}'
-        assert observed.wait(1)
+        assert failure_future_done.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
+        assert succeeded.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS) == '{"ok": true}'
+        assert observed.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         assert [(item.status, item.trigger) for item in observations] == [
             ("error", "observed_failure"),
             ("ok", "recovery_probe"),
@@ -884,7 +893,7 @@ def test_completion_order_not_delayed_caller_resolution_drives_recovery():
         assert observations[0].occurred_at <= observations[1].occurred_at
         failure_resolution_release.set()
         with pytest.raises(provider_mod.ModelInvocationError):
-            failed.result(timeout=2)
+            failed.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
     finally:
         failure_release.set()
         failure_resolution_release.set()
@@ -905,13 +914,13 @@ def test_close_drains_failure_observation_even_when_caller_resolves_late():
     class BlockingFailureChat(_Chat):
         def chat_json(self, messages, response_schema_hint, **kwargs):
             transport_entered.set()
-            assert transport_release.wait(2)
+            assert transport_release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
             raise TimeoutError("provider failed during close")
 
     def observer(value):
         observations.append(value)
         observer_entered.set()
-        assert observer_release.wait(2)
+        assert observer_release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
 
     provider = _provider(
         registry=_registry(maximum=1),
@@ -923,8 +932,8 @@ def test_close_drains_failure_observation_even_when_caller_resolves_late():
 
     def delayed_resolve(call):
         call.future.add_done_callback(lambda _future: future_done.set())
-        assert future_done.wait(2)
-        assert resolution_release.wait(2)
+        assert future_done.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
+        assert resolution_release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         return original_resolve(call)
 
     client._resolve = delayed_resolve
@@ -932,21 +941,21 @@ def test_close_drains_failure_observation_even_when_caller_resolves_late():
     closer = ThreadPoolExecutor(max_workers=1)
     try:
         result = caller.submit(client.chat_json, [], "{}")
-        assert transport_entered.wait(1)
+        assert transport_entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         closing = closer.submit(provider.close)
         transport_release.set()
-        assert future_done.wait(1)
-        assert observer_entered.wait(1)
+        assert future_done.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
+        assert observer_entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         time.sleep(0.03)
         assert not closing.done()
         observer_release.set()
-        closing.result(timeout=2)
+        closing.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         assert [(item.status, item.trigger) for item in observations] == [
             ("error", "observed_failure")
         ]
         resolution_release.set()
         with pytest.raises(provider_mod.ModelInvocationError):
-            result.result(timeout=2)
+            result.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
     finally:
         transport_release.set()
         observer_release.set()
@@ -963,7 +972,7 @@ def test_close_cancels_queued_rerank_call_without_deadlock():
     class BlockingReranker(_Reranker):
         def _rerank_batch(self, query, documents):
             entered.set()
-            assert release.wait(2)
+            assert release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
             return [{"index": 0, "relevance_score": 1.0}]
 
     provider = _provider(
@@ -973,17 +982,17 @@ def test_close_cancels_queued_rerank_call_without_deadlock():
     executor = ThreadPoolExecutor(max_workers=3)
     try:
         active = executor.submit(client.rerank, "q", ["a"])
-        assert entered.wait(1)
+        assert entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         queued = executor.submit(client.rerank, "q", ["b"])
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + _RENDEZVOUS_TIMEOUT_SECONDS
         while provider.scheduler_snapshot("rerank").queued != 1:
             assert time.monotonic() < deadline
             time.sleep(0.005)
         closing = executor.submit(provider.close)
         release.set()
-        assert active.result(timeout=2) == [0]
-        assert queued.result(timeout=2) == [0]
-        closing.result(timeout=2)
+        assert active.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS) == [0]
+        assert queued.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS) == [0]
+        closing.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
     finally:
         release.set()
         provider.close()
@@ -1030,7 +1039,7 @@ def test_close_stops_all_service_admission_before_waiting_for_active_work():
             self.transport_calls += 1
             if self.block:
                 entered.set()
-                assert release.wait(2)
+                assert release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
             return self.result
 
         def close(self):
@@ -1048,9 +1057,9 @@ def test_close_stops_all_service_admission_before_waiting_for_active_work():
     executor = ThreadPoolExecutor(max_workers=2)
     try:
         active = executor.submit(first.chat_json, [], "{}")
-        assert entered.wait(1)
+        assert entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         closing = executor.submit(provider.close)
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + _RENDEZVOUS_TIMEOUT_SECONDS
         while not provider._closing:
             assert time.monotonic() < deadline
             time.sleep(0.005)
@@ -1059,8 +1068,8 @@ def test_close_stops_all_service_admission_before_waiting_for_active_work():
         assert caught.value.code == "model_service_unavailable"
         assert raws["second"].transport_calls == 0
         release.set()
-        assert active.result(timeout=2) == '{"ok": true}'
-        closing.result(timeout=2)
+        assert active.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS) == '{"ok": true}'
+        closing.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         provider.close()
         assert [raw.close_calls for raw in raws.values()] == [1, 1]
     finally:
@@ -1107,14 +1116,14 @@ def test_close_and_submit_share_one_atomic_provider_admission_boundary():
 
     def blocked_stop_admission():
         stop_entered.set()
-        assert allow_stop.wait(2)
+        assert allow_stop.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         original_stop_admission()
 
     first._runtime.scheduler.stop_admission = blocked_stop_admission
     executor = ThreadPoolExecutor(max_workers=3)
     try:
         closing = executor.submit(provider.close)
-        assert stop_entered.wait(1)
+        assert stop_entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         assert provider._closing is True
         assert provider._closed is False
 
@@ -1123,16 +1132,16 @@ def test_close_and_submit_share_one_atomic_provider_admission_boundary():
             return second.chat_json([], "{}")
 
         late_call = executor.submit(submit_after_close_started)
-        assert submit_entered.wait(1)
+        assert submit_entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         with pytest.raises(provider_mod.ModelInvocationError) as caught:
-            late_call.result(timeout=2)
+            late_call.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         assert caught.value.code == "model_service_unavailable"
         assert raws["second"].transport_calls == 0
 
         concurrent_close = executor.submit(provider.close)
         allow_stop.set()
-        closing.result(timeout=2)
-        concurrent_close.result(timeout=2)
+        closing.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
+        concurrent_close.result(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         assert raws["second"].transport_calls == 0
         assert [raw.close_calls for raw in raws.values()] == [1, 1]
     finally:
