@@ -63,6 +63,15 @@ button {
    .new-pill 是近黑底(#050505)，往暗调根本看不见。位移与透明度对深浅两种底色、
    对 42px 药丸和整块卡片按钮(button.chat-session-card)同样成立。
 
+   为什么用 translate/scale 这两个**独立属性**而不是 transform 简写:全站基线会命中
+   那些拿 transform 定位自己的按钮,简写会把人家的定位整条替换掉。实例:
+   `.answer-image-preview-step`(多图预览的上一张/下一张)靠 `top: 50%` +
+   `transform: translateY(-50%)` 垂直居中,44px 的绝对定位控件在按下的那一刻会往下
+   跳约 22px —— 靠近上缘按下时它会从指针底下挪走,连这一次点击都取消掉
+   (codex #612 R1 P2)。独立属性按 translate → rotate → scale → transform 的次序
+   合成,各按钮自己的 transform 原样保留。写 transform 简写的那一版必须报红,守卫
+   button-press-feedback-guard 钉了这一条。
+
    刻意不加 transition:按下/松开都要即时，且 button 上已有各自的 transition
    声明，在这里再写一条会被它们整条覆盖，反而只在部分按钮上生效。
 
@@ -70,7 +79,8 @@ button {
    件事——结果必须落在按钮自身或紧邻处，不能只靠页面顶部的横幅。禁用态不参与:
    :disabled 已由各自的类表达，再叠一层按下态会暗示「点得动」。 */
 button:not(:disabled):not([aria-disabled="true"]):active {
-  transform: translateY(1px) scale(0.98);
+  translate: 0 1px;
+  scale: 0.98;
   opacity: 0.8;
 }
 
