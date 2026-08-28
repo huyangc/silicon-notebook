@@ -1953,7 +1953,20 @@ existing ledger, by contrast, follow **neither** switch — a switch flipped tod
 never turn data a member is entitled to delete into something they can neither see nor
 remove, so `GET` always returns the ledger and `DELETE ...?kind=call` is accepted even
 while the understanding feature is off (every other `DELETE` shape still 409s there,
-unchanged). `GET .../agent-observations` returns
+unchanged). The panel matches that: with the master gate off it still mounts the "Agent
+记录" section beside the "这项功能当前未开启。" line instead of returning early.
+Registered boundary: the panel's own ENTRY button follows `AGENT_PROFILE_ENABLED` too,
+so in a deployment that has the gate off the section is reachable only within an
+already-open panel — clearing there otherwise goes through the endpoint, which follows
+neither switch.
+
+A ledger row also carries the same member-removal compensation `add_observation` does:
+authorization and the write are two steps, so a member removed in between could leave an
+orphan row that resurfaces on rejoin. A post-write notebook-read recheck (not the full
+token check — a revoked token does not make the row illegitimate) clears the member's
+scope when access is genuinely gone, and fails open otherwise. Unlike `add_observation`
+it never raises: the tool call itself was legitimate. This is the one place the ledger
+costs a read as well as a write per recorded call. `GET .../agent-observations` returns
 the ledger as its own `calls` list with its own `call_limit` (default 20, capped at 200)
 rather than mixing kinds into `items` — under one shared limit a busy Agent's ledger could
 push every hand-written note out of the response. `calls_enabled` reports the

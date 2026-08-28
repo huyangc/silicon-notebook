@@ -704,6 +704,16 @@ def _record_agent_call(
     * **Off means zero writes.** Both gates are checked before anything else,
       so a deployment that turns either off pays nothing — not a
       transaction, not a row.
+    * **Compensates the member-removal race.** Authorization and this write
+      are two steps; a member removed in between can have their rows cleared
+      by the removal path first, leaving this row an orphan that resurfaces
+      if they rejoin — against the "cleared on member removal" lifecycle the
+      ledger documents. A post-write NOTEBOOK-read recheck (not the full
+      ``require_agent_access``, for the reason ``add_observation``'s twin
+      block spells out) clears the member's scope when access is genuinely
+      gone, and fails open otherwise (codex #616 R2 P2). Unlike
+      ``add_observation`` this never raises: the tool call itself was
+      legitimate, and book-keeping must not turn it into an error.
     * **Layered under the feature's own master gate.** Recording requires
       ``profile_wiring_active`` as well as ``agent_call_log_enabled``. The
       two are NOT independent, and the reason is the entry point: with
@@ -728,6 +738,25 @@ def _record_agent_call(
         )
     except Exception:  # noqa: BLE001 — see "Never fatal, and never chatty".
         logger.warning("agent call ledger write failed")
+        return
+    # 成员移除竞态的补偿,与 ``add_observation`` 逐条同款(codex #616 R2 P2):
+    # 鉴权与这次写入是两步,中间被移出共享笔记本的成员,其清理可能先跑——我们
+    # 这一行就成了孤儿,等他重新加入时又冒出来,与「移除即清空」的生命周期契约
+    # 相反。复查只看**笔记本读权**,不复查整个 ``require_agent_access``:令牌级
+    # 的失效(吊销/过期/scope 变更)不会让这一行变得不该存在(owner 仍是成员,
+    # 这仍是他自己的记录),为它补偿反而会误删该成员在这个库里的全部记录。
+    # 复查本身**出错则保留**(fail-open):它不是「访问已被撤销」的证据。
+    try:
+        still_member = repo.user_can_read_notebook(notebook_id, principal.owner_id)
+    except Exception:  # noqa: BLE001 — fail-open,同上
+        still_member = True
+    if not still_member:
+        try:
+            repo.agent_observations.clear_observations(
+                notebook_id, principal.owner_id
+            )
+        except Exception:  # noqa: BLE001 — 补偿同样不该炸掉这次工具调用
+            logger.warning("agent call ledger compensation failed")
 
 
 def _selected_notebook(

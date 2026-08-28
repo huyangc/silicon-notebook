@@ -879,7 +879,19 @@ export function AgentProfilePanel({
     return <p className="understanding-note">加载中…</p>;
   }
   if (!data.enabled) {
-    return <p className="understanding-note">这项功能当前未开启。</p>;
+    // 总闸关掉时两条「理解」链路整个不可用——但**已经记下的 Agent 记录仍然
+    // 要能看、能清**(codex #616 R2 P2:后端这一轮已经改成不论开关都回读、
+    // 并放行只清调用记录的那一支;前端若还在这里整页早返回,那份数据在浏览器
+    // 里就仍然是既看不到也删不掉的)。所以这里只收掉两条链路,记录那一节照常
+    // 挂上。⚠ 已登记的边界:这个面板的**入口按钮**同样跟随总闸,所以在总闸
+    // 关闭的部署里,这一节只在面板已经打开的窗口内可达;要在那种部署下清空,
+    // 走端点本身(它不跟随任何一把开关)。
+    return (
+      <div className="understanding-panel">
+        <p className="understanding-note">这项功能当前未开启。</p>
+        <AgentObservationSection notebookId={notebookId} />
+      </div>
+    );
   }
 
   return (
