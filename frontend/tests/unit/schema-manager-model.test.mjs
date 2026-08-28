@@ -6,11 +6,13 @@ import {
   draftFromSchema,
   draftIsDirty,
   groupSchemas,
+  managedRowKey,
   placementBadge,
   placementLabel,
   removable,
   resolveCreatePrimary,
   saveActionLabel,
+  schemaRowKey,
   statusLabel,
   statusTone,
   toggleActionLabel,
@@ -58,6 +60,24 @@ test("三组把候选、生效中、已停用分开，组内保持服务端顺�
 test("未知状态归入已停用，而不是凭空消失在三组之外", () => {
   const groups = groupSchemas([schema({ status: "retired" })]);
   assert.deepEqual(groups[2].rows.map((row) => row.object_type), ["claim"]);
+});
+
+// --- 行的身份：同名候选与继承行必须分得开 -------------------------------------
+
+test("同一个类型的继承行与还没批准的同名候选是两行，身份不同", () => {
+  // 后端刻意两行都返回：候选在批准前不遮蔽继承类型，且 active 排在 proposed 前面。
+  // 只按类型名认行，候选那一行永远选不中，审批那条路直接断掉。
+  const inherited = schema({ object_type: "failure_mode" });
+  const proposal = schema({ object_type: "failure_mode", status: "proposed", inherited: false });
+  assert.notEqual(schemaRowKey(inherited), schemaRowKey(proposal));
+  assert.equal(schemaRowKey(inherited), managedRowKey("failure_mode"));
+});
+
+test("启用与停用是同一行的两个状态，身份不随之变化", () => {
+  assert.equal(
+    schemaRowKey(schema({ status: "active" })),
+    schemaRowKey(schema({ status: "disabled" })),
+  );
 });
 
 // --- 草稿：脏判据同时喂给保存按钮与清单上那颗圆点 -----------------------------
