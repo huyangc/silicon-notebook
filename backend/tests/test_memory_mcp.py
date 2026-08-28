@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import pathlib
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
@@ -3344,6 +3345,14 @@ async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
     assert _source_row_exists(repo, seeded["source_id"])
     assert len(repo.list_sources(notebook_id)) == 1
     assert scheduled_jobs == []
+    # codex #616 R1 P2:被 owner-only 那道闸拒掉的写同样不留痕。这些调用过了
+    # require_agent_access(读权成立)、倒在第二道闸上——记账若发生在第一道闸
+    # 之后就会把「没发生的操作」写进账里。只读那一次(get_source_status)照常
+    # 记一行,证明这里挡掉的是被拒绝的写,不是整条记账。
+    calls = repo.agent_observations.list_calls(
+        notebook_id, mcp_env["bob"].id, limit=50
+    )
+    assert [row["capability"] for row in calls] == ["knowledge:read"]
 
 
 @pytest.mark.anyio
@@ -4329,8 +4338,33 @@ async def test_call_ledger_records_nothing_when_the_switch_is_off(
 
 
 @pytest.mark.anyio
-async def test_a_failing_ledger_write_never_fails_the_tool_call(
+async def test_call_ledger_records_nothing_while_the_master_gate_is_off(
     mcp_env, monkeypatch
+):
+    """记账叠在 AGENT_PROFILE_ENABLED 之上:总闸关掉时面板入口一个节点都不
+    渲染,此时还记就是在攒没人打开得了的行(codex #616 R1 P1)。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
+        get_settings.cache_clear()
+        try:
+            _payload(await client.call("list_knowhow_tables", {}))
+        finally:
+            monkeypatch.setenv("AGENT_PROFILE_ENABLED", "true")
+            get_settings.cache_clear()
+
+    assert repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=10
+    ) == []
+
+
+@pytest.mark.anyio
+async def test_a_failing_ledger_write_never_fails_the_tool_call(
+    mcp_env, monkeypatch, caplog
 ):
     """记账是「关于这次调用的账」,不是这次调用的一部分。写失败只该留在日志
     里,绝不能把一次已经通过鉴权的工具调用变成 Agent 看到的错误。"""
@@ -4346,9 +4380,19 @@ async def test_a_failing_ledger_write_never_fails_the_tool_call(
         monkeypatch.setattr(
             type(repo.agent_observations), "append_call", explode, raising=True
         )
-        result = await client.call("list_knowhow_tables", {})
+        with caplog.at_level(logging.WARNING, logger="app.api.mcp_tools._shared"):
+            result = await client.call("list_knowhow_tables", {})
 
     assert not result.isError, "记账失败把工具调用也弄失败了"
+    ledger_logs = [
+        record for record in caplog.records
+        if "ledger" in record.getMessage()
+    ]
+    assert ledger_logs, "记账失败连一条日志都没留下"
+    for record in ledger_logs:
+        # 只留一个稳定的、无内容的事件:异常文本会捎上库路径与 SQL 片段。
+        assert record.exc_info is None, "日志带上了异常与调用栈"
+        assert "on fire" not in record.getMessage()
 
 
 @pytest.mark.anyio

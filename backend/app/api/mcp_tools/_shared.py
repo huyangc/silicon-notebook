@@ -25,6 +25,7 @@ from starlette.responses import JSONResponse
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentPrincipal, UserProfile
+from app.services.reasoning_retrieval import profile_wiring_active
 
 
 logger = logging.getLogger(__name__)
@@ -680,22 +681,43 @@ def _record_agent_call(
     tools admitted under the same scope read back identically (see
     ``AgentObservationStorePort.append_call``).
 
-    Three properties, each deliberate:
+    Four properties, each deliberate:
 
-    * **After authorization, never before.** A call that
-      ``require_agent_access`` rejected did not reach this notebook, and
-      recording it would turn the ledger into a log of attempts by
-      principals who were denied — a different feature, with different
-      privacy consequences, that nobody asked for.
-    * **Never fatal.** Bookkeeping about a call is not part of the call. A
-      failing ledger write (disk full, a migration mid-flight) must not turn
-      a tool call that already passed authorization into an error the Agent
-      sees, so every exception is swallowed here and logged.
-    * **Off means zero writes.** ``agent_call_log_enabled`` is checked
-      first, so a deployment that turns this off pays nothing — not a
+    * **After EVERY authorization gate, never before.** A call that was
+      rejected did not reach this notebook, and recording it would turn the
+      ledger into a log of attempts by principals who were denied — a
+      different feature, with different privacy consequences, that nobody
+      asked for. ⚠ ``require_agent_access`` is not always the LAST gate:
+      ``_writable_notebook`` adds an owner-only check after it, so that
+      helper suppresses recording here (``record=False``) and calls this
+      itself once its own gate has cleared. Recording unconditionally inside
+      ``_selected_notebook`` would book every write a read-only member
+      attempted (codex #616 R1 P2).
+    * **Never fatal, and never chatty.** Bookkeeping about a call is not part
+      of the call: a failing ledger write (disk full, a migration mid-flight)
+      must not turn a tool call that already passed authorization into an
+      error the Agent sees. The failure is logged as a **content-free**
+      event — no ``exc_info``, no exception text — because a database
+      exception carries file paths and SQL fragments that the repository's
+      logging rule keeps out of logs (``AGENTS.md``: "keep … exception text
+      out of logs"; codex #616 R1 P2).
+    * **Off means zero writes.** Both gates are checked before anything else,
+      so a deployment that turns either off pays nothing — not a
       transaction, not a row.
+    * **Layered under the feature's own master gate.** Recording requires
+      ``profile_wiring_active`` as well as ``agent_call_log_enabled``. The
+      two are NOT independent, and the reason is the entry point: with
+      ``AGENT_PROFILE_ENABLED`` off the panel's entry button does not render
+      at all, so rows written then are rows no member can ever open — the
+      exact "accumulating records nobody can inspect" state codex #616 R1 P1
+      flagged. Reading and clearing an EXISTING ledger stay ungated (see
+      ``agent_profile_routes``): a switch flipped today must never make
+      yesterday's rows unreachable.
     """
-    if not getattr(get_settings(), "agent_call_log_enabled", True):
+    settings = get_settings()
+    if not getattr(settings, "agent_call_log_enabled", True):
+        return
+    if not profile_wiring_active(settings, getattr(repo, "agent_profile", None)):
         return
     try:
         repo.agent_observations.append_call(
@@ -704,11 +726,13 @@ def _record_agent_call(
             principal.profile_id,
             capability=scope,
         )
-    except Exception:  # noqa: BLE001 — see "Never fatal" above.
-        logger.warning("agent call ledger write failed", exc_info=True)
+    except Exception:  # noqa: BLE001 — see "Never fatal, and never chatty".
+        logger.warning("agent call ledger write failed")
 
 
-def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrincipal, str]:
+def _selected_notebook(
+    ctx: Context, repo: Any, scope: str, record: bool = True
+) -> tuple[AgentPrincipal, str]:
     principal = _live_principal(repo)
     notebook_id = getattr(ctx.session, _SELECTED_ATTR, "")
     if not notebook_id:
@@ -717,7 +741,11 @@ def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrinci
     repo.require_agent_access(
         principal, scope, notebook_id
     )
-    _record_agent_call(repo, principal, notebook_id, scope)
+    # ``record=False`` is passed by exactly one caller — ``_writable_notebook``,
+    # which still has a gate to apply. See ``_record_agent_call``'s first
+    # property for why the ledger must not run ahead of it.
+    if record:
+        _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id
 def _writable_notebook(
     ctx: Context, repo: Any, scope: str
@@ -801,10 +829,16 @@ def _writable_notebook(
           shared_notebook``, the write this gate DOES refuse under the same
           share).
     """
-    principal, notebook_id = _selected_notebook(ctx, repo, scope)
+    # ``record=False``: the call ledger only books calls that cleared EVERY
+    # gate, and this helper's owner-only check below is the second one. A
+    # read-only member reaching for a write tool passes ``require_agent_access``
+    # and is refused here — recording before that would fill the ledger with
+    # operations that never happened (codex #616 R1 P2).
+    principal, notebook_id = _selected_notebook(ctx, repo, scope, record=False)
     if not repo.user_can_access_notebook(notebook_id, principal.owner_id):
         raise PermissionError(
             "this write operation requires owning the notebook; the token "
             "owner only has read access here"
         )
+    _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id

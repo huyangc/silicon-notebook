@@ -362,22 +362,20 @@ def get_agent_observations(
     # owner 就是 ``user.id``。请求形状本身(路径/查询参数的存在与类型)由
     # `api_contract` 架构守卫冻结兜底,这里不重复断言(T3-T5 修复轮质量评审
     # 变异 ③ 的结论)。
-    if not _wiring_active():
-        return AgentObservationsResponse(enabled=False, items=[], calls=[])
     store = repository().agent_observations
-    rows = store.list_observations(notebook_id, user.id, limit=limit)
-    # 调用记录跟随它**自己**的开关。关掉时不发这次查询,也不把空清单说成
-    # 「没有 Agent 来过」——前端据 ``calls_enabled`` 分辨「关了」与「开着但还
-    # 没人调用过」,与总闸那一层 ``enabled`` 的分辨方式逐字相同。
+    wiring = _wiring_active()
+    # 短句那一侧仍然完全跟随总闸(与本端点接入时的契约逐字一致)。
+    rows = store.list_observations(notebook_id, user.id, limit=limit) if wiring else []
+    # ⚠ 调用记录的**读**不跟随任何一把开关(codex #616 R1 P1/P2)。开关管的是
+    # 「从现在起还记不记」,而不是「已经记下的还能不能看见」:今天关掉开关就让
+    # 昨天记下的行连同它们的清空入口一起消失,等于把一份用户有权删除的数据变成
+    # 他既看不到、也删不掉的东西。查询本身有界(``call_limit`` ≤ 环形上限),
+    # 关掉开关后它最多再读到一份不再增长的清单。
     calls_enabled = bool(get_settings().agent_call_log_enabled)
-    call_rows = (
-        store.list_calls(notebook_id, user.id, limit=call_limit)
-        if calls_enabled
-        else []
-    )
+    call_rows = store.list_calls(notebook_id, user.id, limit=call_limit)
     names = _observation_agent_names(user.id)
     return AgentObservationsResponse(
-        enabled=True,
+        enabled=wiring,
         items=[
             AgentObservationOut(
                 id=str(row.get("id") or ""),
@@ -423,7 +421,13 @@ def clear_agent_observations(
     clean_kind = str(kind or "")
     if clean_kind and clean_kind not in _CLEARABLE_KINDS:
         raise user_error(400, _UNKNOWN_KIND_MESSAGE)
-    if not _wiring_active():
+    # 总闸关掉时**只**挡住会碰到短句的那些清空(既有契约,不变):那一侧的写
+    # 路径整个不可达,清空作为写路径的一部分一并 409。
+    #
+    # 专清调用记录(``kind='call'``)是例外,与上面 GET 同一条理由:开关只说
+    # 「从现在起不记」,不该让已经记下的行变成删不掉的东西(codex #616 R1 P1)。
+    # 这一支不会碰到任何 ``kind='note'`` 的行,所以放行它不等于绕开总闸。
+    if clean_kind != AGENT_OBSERVATION_KIND_CALL and not _wiring_active():
         raise user_error(409, _DISABLED_MESSAGE)
     removed = repository().agent_observations.clear_observations(
         notebook_id,
