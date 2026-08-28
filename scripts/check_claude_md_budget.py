@@ -45,7 +45,13 @@ ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "CLAUDE.md"
 
 # 精确等于当前实际值。只许降——降了必须在同一个 PR 里把这两个数一起降。
-BASELINE_CHARS = 3_399
+#
+# 3,399 → 3,499:加了「按钮按下要有可见反馈、结果落在按钮自身」这条两行规则。它满足
+# 判据——不是某个特性的结论,而是对**以后每一个**加按钮的改动都成立的红线,而写不写
+# 反馈恰恰是 UI 改动最容易漏、又最难在评审里凭 diff 看出来的一项。细节(基线选择器、
+# 为什么是元素级、结果态与按下态的分工)留在 AGENTS.md 的 Interactive feedback,
+# 这里只留一句加去处。
+BASELINE_CHARS = 3_499
 BASELINE_LINE_CHARS = 79
 
 _GREW_ADVICE = """

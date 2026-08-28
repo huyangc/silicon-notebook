@@ -49,7 +49,9 @@ type ReportEffects = {
   notify: (message: string) => void;
   downloadMarkdown: (report: ReportDetailT) => void;
   downloadArchive: (blob: Blob) => void;
-  announceShareLink: (token: string) => Promise<void> | void;
+  // 返回值是「链接有没有真的进剪贴板」。报告工具栏那颗「复制链接」要把结果画在自己
+  // 身上,而复制发生在这一层之外(跨域 presentation effect),所以结果得原路带回来。
+  announceShareLink: (token: string) => Promise<boolean>;
 };
 
 export type UseReportWorkspaceOptions = {
@@ -564,20 +566,24 @@ export function useReportWorkspace({
     }
   };
 
-  const copyShareLink = async () => {
+  // 返回「链接有没有进剪贴板」;null = 这一次压根没走到复制(前置守卫不通过、切库/换
+  // 报告导致失效、或取回链接本身失败)。调用方据此决定要不要在按钮上画结果——把 null
+  // 也当失败会在用户什么都没等到的时候闪一下「复制失败」。
+  const copyShareLink = async (): Promise<boolean | null> => {
     const owner = currentOwner();
     const report = activeReportRef.current;
-    if (!owner || !policyRef.current.canManageReports || !report || shareBusy) return;
+    if (!owner || !policyRef.current.canManageReports || !report || shareBusy) return null;
     const operation = beginOperation("share");
     setShareBusy(true);
     try {
       const { share_token: token } = await getReportShare(owner.notebookId, report.id);
-      if (!owns(owner) || activeReportRef.current?.id !== report.id) return;
-      await effectsRef.current.announceShareLink(token);
+      if (!owns(owner) || activeReportRef.current?.id !== report.id) return null;
+      return await effectsRef.current.announceShareLink(token);
     } catch (error) {
       if (owns(owner) && activeReportRef.current?.id === report.id) {
         surfaceError(error, "取回分享链接失败");
       }
+      return null;
     } finally {
       if (owns(owner) && ownsOperation("share", operation)) setShareBusy(false);
     }

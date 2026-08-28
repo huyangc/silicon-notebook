@@ -20,6 +20,7 @@ import {
 } from "./answer-formatting";
 import { API_BASE } from "./api-config";
 import { AuthedImage } from "./authed-image";
+import { useCopyResult } from "./copy-result";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { quotedPhraseHint } from "./query-syntax";
 import { sourceImageAssetUrl } from "./source-image";
@@ -1222,7 +1223,9 @@ export function ReportsPanel({
     toggleSelected,
     downloadSelected: downloadSelectedZip,
   } = workspace;
-  const [copied, setCopied] = useState(false);
+  // 工具栏里两颗复制按钮共用一格结果态:同一排里同时亮起两个结果没有意义,而 key 保证
+  // 结果落在按下的那一颗上。复制正文此前只有成功态(失败被 .catch 吞掉,按钮纹丝不动)。
+  const copyResult = useCopyResult();
   // ---- 详情视图 ----
   if (active) {
     const displayQuestion = active.understanding?.confirmed
@@ -1247,15 +1250,17 @@ export function ReportsPanel({
             )}
             {active.content_md && (
               <button
-                className="report-action"
+                className={copyResult.resultFor("content") === "copied" ? "report-action copy-result-copied" : copyResult.resultFor("content") === "failed" ? "report-action copy-result-failed" : "report-action"}
                 type="button"
                 onClick={() => {
                   copyReportContent(active.content_md)
-                    .then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1600); })
-                    .catch(() => undefined);
+                    .then(() => copyResult.report("content", true))
+                    .catch(() => copyResult.report("content", false));
                 }}
               >
-                {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "已复制" : "复制"}
+                {copyResult.resultFor("content") === "copied" ? <Check size={14} /> : copyResult.resultFor("content") === "failed" ? <X size={14} /> : <Copy size={14} />}
+                {" "}
+                {copyResult.resultFor("content") === "copied" ? "已复制" : copyResult.resultFor("content") === "failed" ? "复制失败" : "复制"}
               </button>
             )}
             {active.content_md && (
@@ -1278,12 +1283,20 @@ export function ReportsPanel({
             )}
             {!readOnly && shared && (
               <button
-                className="report-action"
+                className={copyResult.resultFor("share-link") === "copied" ? "report-action copy-result-copied" : copyResult.resultFor("share-link") === "failed" ? "report-action copy-result-failed" : "report-action"}
                 type="button"
                 disabled={shareBusy}
-                onClick={() => void copyShareLink()}
+                onClick={() => {
+                  // null = 这一次没走到复制(切库/换报告/取回链接失败),那时按钮不该
+                  // 闪一下「复制失败」——错误本身已由 hook 经 notify 报出。
+                  void copyShareLink().then((copied) => {
+                    if (copied !== null) copyResult.report("share-link", copied);
+                  });
+                }}
               >
-                <Copy size={14} /> 复制链接
+                {copyResult.resultFor("share-link") === "copied" ? <Check size={14} /> : copyResult.resultFor("share-link") === "failed" ? <X size={14} /> : <Copy size={14} />}
+                {" "}
+                {copyResult.resultFor("share-link") === "copied" ? "已复制" : copyResult.resultFor("share-link") === "failed" ? "复制失败" : "复制链接"}
               </button>
             )}
             {!readOnly && (

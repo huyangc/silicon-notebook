@@ -48,6 +48,32 @@ button {
   cursor: pointer;
 }
 
+/* 按下反馈(全站基线) —— 任何按下去会产生效果的按钮，按下的那一刻必须在**按钮
+   自身**上出现可见变化，松手立刻还原。
+
+   缺陷来源:群组「成员」页的邀请链接「复制」按钮。点下去按钮纹丝不动，唯一的
+   反馈是页面**顶部**那条 notice 横幅——在长页面上它常常滚出视口，即使在视口内
+   也远离手指落点。用户看到的是「按钮没反应」，于是判定没生效。
+
+   为什么写成元素选择器而不是逐个类补:全站有 40 多个按钮类(.new-pill /
+   .sort-button / .icon-button / .index-cta / .kh-*-button …)，逐类补必漏，
+   而漏掉的那一颗就是下一个同样的缺陷。写在元素上，新加的按钮默认就有。
+
+   为什么是「位移 + 变淡」而不是改背景色:背景色要按每个类的配色分别调，且
+   .new-pill 是近黑底(#050505)，往暗调根本看不见。位移与透明度对深浅两种底色、
+   对 42px 药丸和整块卡片按钮(button.chat-session-card)同样成立。
+
+   刻意不加 transition:按下/松开都要即时，且 button 上已有各自的 transition
+   声明，在这里再写一条会被它们整条覆盖，反而只在部分按钮上生效。
+
+   边界:这条只回答「点上了没有」。动作**结果**(复制成功/失败、保存完成)是另一
+   件事——结果必须落在按钮自身或紧邻处，不能只靠页面顶部的横幅。禁用态不参与:
+   :disabled 已由各自的类表达，再叠一层按下态会暗示「点得动」。 */
+button:not(:disabled):not([aria-disabled="true"]):active {
+  transform: translateY(1px) scale(0.98);
+  opacity: 0.8;
+}
+
 .content-overview {
   display: grid;
   gap: 12px;
@@ -501,6 +527,38 @@ button {
 .new-pill:disabled {
   opacity: .5;
   cursor: not-allowed;
+}
+
+/* 复制类按钮的**结果**态。与上面的 :active 按下态分工:那条只说「点上了」,这两条
+   说「结果是什么」,并且和文案(复制 → 已复制/复制失败)一起出现在按钮自身,而不是
+   只落在页面顶部那条会滚出视口的横幅上。由 copy-result.ts 的 useCopyResult 在
+   1.6s 后摘掉。
+
+   写成 `button.` 而不是逐个壳层(`.new-pill.` / `.sort-button.` / `.report-action.`):
+   三种壳层的底色一深两浅,但结果态要说的是同一句话,填充色也就只有一份。(0,1,1)
+   的特指度足以压过三个壳层各自 (0,1,0) 的 `background`/`color`,与它们在文件里的
+   先后无关——新加的第四种壳层也自动成立。
+
+   第二条选择器不是冗余:`.report-action:hover:not(:disabled)` 是 (0,3,0),会在
+   (0,1,1) 之上把底色改回浅灰——而刚点完的那一秒指针必然正停在按钮上,结果态会
+   当场被悬停态吃掉。(0,3,1) 把它压回来。 */
+button.copy-result-copied,
+button.copy-result-copied:hover:not(:disabled),
+button.copy-result-failed,
+button.copy-result-failed:hover:not(:disabled) {
+  color: #fff;
+}
+
+button.copy-result-copied,
+button.copy-result-copied:hover:not(:disabled) {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+button.copy-result-failed,
+button.copy-result-failed:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger);
 }
 
 .collection-title {
@@ -11696,6 +11754,9 @@ select.group-input {
 .group-invite-title p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .group-invite-link { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .group-invite-link input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+/* 结果态把文案从「复制」换成「已复制」/「复制失败」/「复制中…」,不钉宽度整行就会在
+   那 1.6s 里抖一下(按钮变宽、输入框被挤窄)。宽度按最长的四字文案取。 */
+.group-invite-link button { min-width: 108px; }
 .group-invite-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .group-invite-actions .tool-hint { margin: 0 auto 0 0; font-size: 13px; }
 .group-inline-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--muted); font-size: 12px; }

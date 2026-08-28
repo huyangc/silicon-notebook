@@ -222,3 +222,64 @@ test("退出最后一个群组时立即失效旧 hash 请求且不把 404 写回
   await waitFor(() => expect(screen.getByText("还没有群组")).toBeInTheDocument());
   expect(screen.queryByText("群组详情加载失败")).not.toBeInTheDocument();
 });
+
+// 复制邀请链接:结果必须画在按钮自身上。
+//
+// 缺陷来源:唯一的反馈曾经是页面**顶部**那条 notice 横幅——在长页面上它常常滚出视口,
+// 用户看到的是「按钮纹丝不动」,于是判定没生效。按下态由 globals.css 的
+// `button:...:active` 负责(那条没有 AST,由 tests/guards/button-press-feedback-guard
+// 钉住),这里钉的是它管不到的另一半:**结果**态与它的自动还原。
+const ACTIVE_INVITE = {
+  active: true,
+  token: "gri_copy-token",
+  created_at: "2026-08-21T00:00:00+00:00",
+} as const;
+
+async function openInviteCard(user: ReturnType<typeof userEvent.setup>) {
+  vi.mocked(getGroupInvite).mockResolvedValue({ ...ACTIVE_INVITE });
+  renderPage();
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+  return await screen.findByRole("button", { name: "复制" });
+}
+
+test("复制成功时按钮自己变成「已复制」并换成成功配色，随后自动还原", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  try {
+    const copy = await openInviteCard(user);
+    await user.click(copy);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+      expect.stringContaining("group_invite=gri_copy-token"),
+    ));
+    const copied = await screen.findByRole("button", { name: "已复制" });
+    expect(copied).toHaveClass("copy-result-copied");
+
+    // 结果态是 JS 状态,不像 :active 那样松手自动还原——忘了摘掉就会一直挂着,
+    // 下一次点击反而看不出有没有点上。
+    const restored = await screen.findByRole("button", { name: "复制" }, { timeout: 4000 });
+    expect(restored).not.toHaveClass("copy-result-copied");
+    expect(restored).not.toHaveClass("copy-result-failed");
+  } finally {
+    Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+
+test("复制失败时按钮说「复制失败」，并把链接选中好让用户自己复制", async () => {
+  // 剪贴板 API 存在却被拒(权限/非安全上下文/文档失焦),DOM 兜底的 execCommand 在 jsdom
+  // 里又不存在——就是那台真的复制不了的浏览器。此时最要紧的不是那句提示,而是让用户当场
+  // 就能 ⌘C。⚠ 不能靠「jsdom 没有剪贴板」来造这个场景:userEvent.setup() 自己会装一份
+  // 可用的 navigator.clipboard,不打掉它这条用例会反过来测成功路径(实测过)。
+  const user = userEvent.setup();
+  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
+  const copy = await openInviteCard(user);
+  await user.click(copy);
+
+  const failed = await screen.findByRole("button", { name: "复制失败" });
+  expect(failed).toHaveClass("copy-result-failed");
+  const link = screen.getByDisplayValue(/group_invite=gri_copy-token/);
+  expect(document.activeElement).toBe(link);
+  expect((link as HTMLInputElement).selectionEnd).toBe((link as HTMLInputElement).value.length);
+});

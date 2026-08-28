@@ -63,6 +63,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 样式表没有可消费的 AST,`tsc` 不检查 className 字符串,testing-library 只看文本;
   // 文本是唯一诚实的输入。同文件对 groups-page.tsx 的 className 采集仍走 TS 语义解析。
   "tests/guards/group-page-style-guard.test.mjs",
+  // 同上,只读 globals.css:断言「按下有变化」这条基线写在 `button` **元素**上而不是
+  // 某个按钮类上(元素级才能让以后新写的按钮默认就有),且它排除了 :disabled、真的
+  // 声明了视觉变化。样式表没有可消费的 AST,jsdom 也不做特异性级联,文本是唯一诚实的
+  // 输入;同文件对 groups-page.tsx 的按钮与定时器断言仍走 semantic-source 的语义解析。
+  "tests/guards/button-press-feedback-guard.test.mjs",
   // 同上,只读 globals.css:断言只读/群组共享库的顶栏身份行 `.reader-badge-row` 恒不换行、
   // 标题可压缩并省略。它此前用会换行的 `.tag-row`,而 `.workspace-header` 是固定 72px 单行,
   // 于是标题被推到可视区之上——群组共享库点进去整份库名一个像素都看不见。样式表没有可消费的

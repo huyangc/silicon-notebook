@@ -134,6 +134,7 @@ import { KG_RANGE_DEFAULT, KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
+import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
@@ -304,6 +305,11 @@ const SUPPORTED_SOURCE_EXT_GROUP = DEFAULT_SUPPORTED_SOURCE_EXTENSIONS.join("|")
 // xlrd 纯 Python 可读，注册表 builtin 引擎已直接放行，这里只剩 doc/ppt 两个仍需
 // 引导另存为的旧格式。
 const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt"];
+
+// 分享弹窗那一颗复制按钮在 useCopyResult 里的格位。「已分享」弹窗每行用 item.id 作
+// key,弹窗只有一颗、没有天然的 id,所以给它一个固定名字——按钮与只读输入框都用它,
+// 免得两处各写一遍字面量后失配(失配的表现是结果不显示,不报错)。
+const SHARE_MODAL_LINK_KEY = "share-modal";
 
 // 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
 // depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
@@ -1064,6 +1070,11 @@ export default function Home() {
   const [shareModal, setShareModal] = useState<ShareState | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   const shareOperationRef = useRef<object | null>(null);
+  // 分享链接复制的结果态。它此前只落在页面顶部的 toast 上——横幅离按钮很远、还会滚出
+  // 视口，用户看到的是「按钮纹丝不动」。toast 仍然保留(失败时它带着链接原文)，但结果
+  // 首先要画在按下的那一颗上。按 key 分格:「已分享」弹窗里每行一颗复制按钮。
+  const shareLinkCopy = useCopyResult();
+  const shareLinkInputs = useRef(new Map<string, HTMLInputElement | null>());
   // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
   const [copyBusy, setCopyBusy] = useState(false);
@@ -2039,6 +2050,8 @@ export default function Home() {
         setToast(copied
           ? `分享链接已复制：${link}`
           : `分享链接：${link}（自动复制失败，请手动复制）`);
+        // 报告工具栏没有紧邻的只读链接框可供选中，失败时链接由上面这条 toast 带出。
+        return copied;
       },
     },
   });
@@ -4145,15 +4158,24 @@ export default function Home() {
     }
   }
 
-  // 复制分享链接到剪贴板；失败时引导用户选择紧邻按钮的只读链接。
-  async function handleShareLinkCopy(link: string) {
-    setToast(shareLinkCopyToast(await copyTextSafely(link)));
+  // 复制分享链接到剪贴板。结果先落在按下的那一颗按钮上(`key` 标识是哪一颗),失败时
+  // 顺手选中紧邻的只读链接——用户当场就能 ⌘C/Ctrl+C,不用先读懂提示再自己框选。toast
+  // 保留:失败那条带着链接原文,是横幅仍然有用的地方。
+  async function handleShareLinkCopy(key: string, link: string) {
+    const copied = await copyTextSafely(link);
+    shareLinkCopy.report(key, copied);
+    if (!copied) {
+      const input = shareLinkInputs.current.get(key);
+      input?.focus();
+      input?.select();
+    }
+    setToast(shareLinkCopyToast(copied));
   }
 
   async function copyShareLink() {
     if (!shareModal) return;
     const link = buildShareLink(shareModal.share_token, window.location.origin);
-    await handleShareLinkCopy(link);
+    await handleShareLinkCopy(SHARE_MODAL_LINK_KEY, link);
   }
 
   // 取消分享:撤销 token 并踢掉只读成员。**弹窗不关**——它同时是「共享给群组」的
@@ -6146,12 +6168,18 @@ export default function Home() {
                 <label>分享链接
                   <div className="tag-row" style={{ marginTop: 6 }}>
                     <input
+                      ref={(node) => { shareLinkInputs.current.set(SHARE_MODAL_LINK_KEY, node); }}
                       readOnly
                       value={buildShareLink(shareModal.share_token, window.location.origin)}
                       onFocus={(event) => event.currentTarget.select()}
                       style={{ flex: 1 }}
                     />
-                    <button className="sort-button" onClick={() => copyShareLink().catch(reportError)}>复制</button>
+                    <button
+                      className={shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
+                      onClick={() => copyShareLink().catch(reportError)}
+                    >
+                      {shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "copied" ? "已复制" : shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "failed" ? "复制失败" : "复制"}
+                    </button>
                   </div>
                 </label>
                 <p className="tool-hint" style={{ margin: "2px 0 0" }}>
@@ -6290,18 +6318,19 @@ export default function Home() {
                       {item.share_token && (
                         <div className="tag-row" style={{ marginTop: 2 }}>
                           <input
+                            ref={(node) => { shareLinkInputs.current.set(item.id, node); }}
                             readOnly
                             value={buildShareLink(item.share_token, window.location.origin)}
                             onFocus={(event) => event.currentTarget.select()}
                             style={{ flex: 1 }}
                           />
                           <button
-                            className="sort-button"
+                            className={shareLinkCopy.resultFor(item.id) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(item.id) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
                             onClick={() => {
                               const link = buildShareLink(item.share_token, window.location.origin);
-                              handleShareLinkCopy(link).catch(reportError);
+                              handleShareLinkCopy(item.id, link).catch(reportError);
                             }}
-                          >复制</button>
+                          >{shareLinkCopy.resultFor(item.id) === "copied" ? "已复制" : shareLinkCopy.resultFor(item.id) === "failed" ? "复制失败" : "复制"}</button>
                         </div>
                       )}
                       {/* 规模统计只在有链接时算(纯群组共享的行后端刻意不跑那次统计,

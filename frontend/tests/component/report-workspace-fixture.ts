@@ -38,7 +38,9 @@ export function reportWorkspaceFixture(
     confirmIntent: vi.fn(),
     confirmOutline: vi.fn(),
     toggleShare: vi.fn(),
-    copyShareLink: vi.fn(),
+    // 默认 resolve(null)=「这一次没走到复制」。不能用裸 vi.fn():它返回 undefined,而
+    // 调用方要 `.then(...)` 读复制结果,undefined 上取 then 当场抛。
+    copyShareLink: vi.fn(async () => null),
     requestDelete: vi.fn(),
     deleteById: vi.fn(),
     chooseDeleteConfirmation: vi.fn(),

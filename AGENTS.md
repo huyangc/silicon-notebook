@@ -82,6 +82,20 @@ or architecture source of truth.
 - User-visible errors are Chinese and actionable. Diagnostic details that are not explicitly
   marked displayable remain internal.
 
+### Interactive feedback
+
+- Every control that performs an action must change visibly the moment it is pressed and return
+  to its resting state on release. The baseline is one element-level `button:…:active` rule in
+  `frontend/app/globals.css`; keep it on the element rather than on individual button classes so
+  newly written buttons inherit it, and exclude disabled controls.
+- Press feedback only answers "did the click register". Report the action's *outcome* on the
+  control itself or immediately beside it, and clear that state on its own timer. A banner at the
+  top of the page is not sufficient on its own: it scrolls out of view, sits far from the pointer,
+  and repeats identical text on a second click, so a real effect reads as "nothing happened".
+- Actions that keep running after the click must additionally disable or replace the control
+  while in flight, so a returned POST cannot be resubmitted by repeated clicking.
+- The selector, the property choices, and the gates that pin them live in `docs/development*.md`.
+
 ## Documentation Ownership
 
 - Update every canonical document whose owned surface actually changed; one change may affect
