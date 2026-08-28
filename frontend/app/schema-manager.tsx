@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { KgTypeMark } from "./kg-type-mark";
 import {
@@ -76,6 +76,9 @@ type WorkbenchProps = {
   onDelete: (type: string) => MutationOutcome;
   onInduce: () => void;
 };
+
+/** 「正在新增」这一格的身份。与行身份同处一个命名空间,故不能与任何 `schemaRowKey` 撞名。 */
+const CREATE_PANE = "create";
 
 /**
  * 右栏此刻在显示什么。选中一行和「正在新增」是互斥的两种状态。
@@ -189,9 +192,32 @@ function SchemaWorkbench({
   const [drafts, setDrafts] = useState<Record<string, SchemaDraft>>({});
   const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE_DRAFT);
   const [error, setError] = useState("");
-  // 与 `busy` 分工:`busy` 是整个面板的忙碌位(别人触发的动作也会置起),`submitting`
-  // 只说「这一次提交是我发出的」,于是按钮上的「保存中…」不会被无关动作点亮。
-  const [submitting, setSubmitting] = useState(false);
+  // 与 `busy` 分工:`busy` 是整个面板的忙碌位(别人触发的动作也会置起),这一格记的是
+  // **哪一行**正由本面板提交(行身份,新增时是 `CREATE_PANE`)。存行身份而不是布尔:
+  // 请求在飞期间清单仍然可点,存布尔的话「保存中…」会跟着跑到用户刚点开的另一行上。
+  const [submittingKey, setSubmittingKey] = useState("");
+
+  // 提交那一刻用户停在哪一格。写动作完成时要拿它核对「人还在不在原地」——见 settle。
+  const paneRef = useRef(pane);
+  paneRef.current = pane;
+
+  /**
+   * 只有用户仍停在发起这次动作的那一格时,才把结果落到界面上。
+   *
+   * 请求在飞期间清单行**刻意**仍然可点:只读浏览不该被一次写入冻住。代价是完成回调
+   * 会晚于用户的下一次导航到达,不核对就会做两件都错的事——把人从他刚点开的类型拽回
+   * 原来那一行,以及把失败提示挂在**另一个**类型旁边。后者正是 `AGENTS.md` 那条
+   * 「动作结果落在按钮自身或紧邻处」要消灭的形态:提示还在,只是长在了错的地方,比
+   * 不提示更糟(codex #614 R2 P2)。人已经走开时,真失败仍由上层的错误提示兜底。
+   *
+   * 与 `use-kg-schema.ts` 里 `owns(owner) && ownsOperation(...)` 是同一条纪律,只是
+   * 这一层的身份是「面板此刻停在哪一格」。
+   */
+  const settle = (paneKey: string, apply: () => void) => {
+    const current = paneRef.current;
+    const currentKey = current.kind === "detail" ? current.key : current.kind === "create" ? CREATE_PANE : "";
+    if (currentKey === paneKey) apply();
+  };
 
   const groups = groupSchemas(schemas);
   const selectedKey = pane.kind === "detail" ? pane.key : "";
@@ -238,8 +264,10 @@ function SchemaWorkbench({
       setError(message);
       return;
     }
+    const rowKey = schemaRowKey(schema);
+    const failure = "保存失败，请检查类型定义后重试；当前输入已保留。";
     setError("");
-    setSubmitting(true);
+    setSubmittingKey(rowKey);
     try {
       const ok = await onPatch(schema.object_type, {
         fields: splitFields(draft.fieldsText),
@@ -250,17 +278,18 @@ function SchemaWorkbench({
         description: draft.description,
       });
       if (!ok) {
-        setError("保存失败，请检查类型定义后重试；当前输入已保留。");
+        settle(rowKey, () => setError(failure));
         return;
       }
-      // 只有拿到回执才丢草稿并退回只读态——只读态显示的就是刚写成功的那一版,
-      // 这本身就是落在按钮紧邻处的结果反馈。
-      dropDraft(schemaRowKey(schema));
-      setPane({ kind: "detail", key: schemaRowKey(schema), editing: false });
+      // 草稿无条件丢掉:它已经落库,不再是「用户还没提交的输入」。退回只读态则要核对
+      // 人还在不在原地——只读态显示的就是刚写成功的那一版,那是落在按钮紧邻处的结果
+      // 反馈,而人走开之后再把他拽回来就成了打断。
+      dropDraft(rowKey);
+      settle(rowKey, () => setPane({ kind: "detail", key: rowKey, editing: false }));
     } catch {
-      setError("保存失败，请检查类型定义后重试；当前输入已保留。");
+      settle(rowKey, () => setError(failure));
     } finally {
-      setSubmitting(false);
+      setSubmittingKey("");
     }
   };
 
@@ -270,8 +299,9 @@ function SchemaWorkbench({
       setError(message);
       return;
     }
+    const failure = "新增失败，请检查类型标识是否重复及字段定义是否有效；当前输入已保留。";
     setError("");
-    setSubmitting(true);
+    setSubmittingKey(CREATE_PANE);
     const objectType = createDraft.objectType.trim();
     try {
       const ok = await onCreate({
@@ -284,17 +314,17 @@ function SchemaWorkbench({
         description: createDraft.description.trim(),
       });
       if (!ok) {
-        setError("新增失败，请检查类型标识是否重复及字段定义是否有效；当前输入已保留。");
+        settle(CREATE_PANE, () => setError(failure));
         return;
       }
       setCreateDraft(EMPTY_CREATE_DRAFT);
       // 新增完直接选中它:用户下一步多半就是看看它长什么样,而右栏空着会让人以为没成。
       // 新建出来的是生效类型而不是候选,所以认的是它的 managed 那一行。
-      setPane({ kind: "detail", key: managedRowKey(objectType), editing: false });
+      settle(CREATE_PANE, () => setPane({ kind: "detail", key: managedRowKey(objectType), editing: false }));
     } catch {
-      setError("新增失败，请检查类型标识是否重复及字段定义是否有效；当前输入已保留。");
+      settle(CREATE_PANE, () => setError(failure));
     } finally {
-      setSubmitting(false);
+      setSubmittingKey("");
     }
   };
 
@@ -303,22 +333,24 @@ function SchemaWorkbench({
     // 则是真的把这一行拿走。判据在发起前就已知(不能事后去翻 schemas——那还是发起
     // 前的那一份),所以直接按动作语义决定选中项去留。
     const restoresInherited = view === "notebook" && Boolean(schema.overrides_global);
+    const rowKey = schemaRowKey(schema);
+    const failure = "删除失败，请稍后重试；这个类型下若已经有知识对象则不能删除。";
     setError("");
-    setSubmitting(true);
+    setSubmittingKey(rowKey);
     try {
       const ok = await onDelete(schema.object_type);
       if (!ok) {
-        setError("删除失败，请稍后重试；这个类型下若已经有知识对象则不能删除。");
+        settle(rowKey, () => setError(failure));
         return;
       }
-      dropDraft(schemaRowKey(schema));
-      setPane(restoresInherited
+      dropDraft(rowKey);
+      settle(rowKey, () => setPane(restoresInherited
         ? { kind: "detail", key: managedRowKey(schema.object_type), editing: false }
-        : { kind: "empty" });
+        : { kind: "empty" }));
     } catch {
-      setError("删除失败，请稍后重试；这个类型下若已经有知识对象则不能删除。");
+      settle(rowKey, () => setError(failure));
     } finally {
-      setSubmitting(false);
+      setSubmittingKey("");
     }
   };
 
@@ -330,19 +362,20 @@ function SchemaWorkbench({
    * 候选)随之改变;沿用旧身份的话,批准成功的那一刻右栏反而会空掉。
    */
   const patchStatus = async (schema: ObjectSchema, status: string, nextKey: string, failure: string) => {
+    const rowKey = schemaRowKey(schema);
     setError("");
-    setSubmitting(true);
+    setSubmittingKey(rowKey);
     try {
       const ok = await onPatch(schema.object_type, { status });
       if (!ok) {
-        setError(failure);
+        settle(rowKey, () => setError(failure));
         return;
       }
-      setPane({ kind: "detail", key: nextKey, editing: false });
+      settle(rowKey, () => setPane({ kind: "detail", key: nextKey, editing: false }));
     } catch {
-      setError(failure);
+      settle(rowKey, () => setError(failure));
     } finally {
-      setSubmitting(false);
+      setSubmittingKey("");
     }
   };
 
@@ -436,7 +469,7 @@ function SchemaWorkbench({
               {error && <p className="tool-hint" role="alert">{error}</p>}
               <div className="schema-actions">
                 <button type="button" className="index-cta primary" disabled={busy} onClick={() => { void create(); }}>
-                  {submitting ? "新增中…" : "创建类型"}
+                  {submittingKey === CREATE_PANE ? "新增中…" : "创建类型"}
                 </button>
                 <button
                   type="button"
@@ -513,7 +546,7 @@ function SchemaWorkbench({
                       disabled={busy || !dirtyOf(selected)}
                       onClick={() => { void save(selected, draftOf(selected)); }}
                     >
-                      {submitting ? "保存中…" : saveActionLabel(selected, view)}
+                      {submittingKey === schemaRowKey(selected) ? "保存中…" : saveActionLabel(selected, view)}
                     </button>
                     <button type="button" className="index-cta" disabled={busy} onClick={() => discardDraft(schemaRowKey(selected))}>
                       放弃修改
