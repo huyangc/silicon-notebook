@@ -6007,6 +6007,9 @@ export default function Home() {
                   ) : askQuotedPhraseHint ? (
                     <span className="chat-hint">{askQuotedPhraseHint}</span>
                   ) : null}
+                  {/* 自动模式只保留问答框：模式、引擎、档位以及相应提示整组不挂载。
+                      高级模式继续完整消费用户在前端做出的选择。 */}
+                  {isAdvanced(uiMode) && (
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.filter((group) => (
                       group.id !== "extension"
@@ -6022,8 +6025,7 @@ export default function Home() {
                         {g.label}
                       </button>
                     ))}
-                    {/* 自动模式下深入分析固定走「逐步推理」，引擎子切换与检索档位这两个
-                        配置面整个不渲染（不是禁用——禁用还是把控件摆在那儿）。 */}
+                    {/* 引擎子切换与检索档位只属于高级模式。 */}
                     {isAdvanced(uiMode) && (
                       groupOf(askMode, askModes) === "strict"
                       || groupOf(askMode, askModes) === "extension"
@@ -6103,6 +6105,7 @@ export default function Home() {
                       <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{borrowedBaseNames.join("、")}」推理</span>
                     )}
                   </div>
+                  )}
                 </AskComposer>
                 </>
               )}

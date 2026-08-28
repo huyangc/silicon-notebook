@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from tests.ask_testkit import seed_ask_evidence
 
@@ -82,6 +83,108 @@ def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
     assert kinds[-1] == "final"
     assert "reasoning_trace" not in events[-1]["response"] or \
         not events[-1]["response"]["reasoning_trace"]
+
+
+@pytest.mark.parametrize("selected", ["chunk", "reasoning"])
+def test_auto_mode_is_resolved_by_backend_before_durable_job(
+    tmp_path, monkeypatch, selected
+):
+    import json
+    from app.api.ask_routes import repository
+    from app.models.ask import QueryIntentContract
+    from app.models.schemas import AskResponse
+
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    repo = repository()
+    seed_ask_evidence(repo, nb)
+    routed = []
+    def preview_auto_intent(
+        notebook_id, question, history="", cancel_event=None
+    ):
+        routed.append((notebook_id, question, history))
+        return QueryIntentContract(
+            objective=question,
+            resolved_question=question,
+            intent_type="compare" if selected == "reasoning" else "explain",
+        )
+
+    monkeypatch.setattr(repo, "preview_reasoning_intent", preview_auto_intent)
+    service = repo._runtime.ask_service()
+    seen = {}
+
+    def fake_ask(notebook_id, payload, **kwargs):
+        seen["mode"] = payload.mode
+        seen["retrieval_effort"] = payload.retrieval_effort
+        return AskResponse(
+            conclusion="routed",
+            conversation_id=payload.conversation_id or "",
+            mode=payload.mode,
+        )
+
+    monkeypatch.setattr(service, "ask", fake_ask, raising=False)
+    response = client.post(
+        f"/api/notebooks/{nb}/ask/stream",
+        json={
+            "question": "比较两个方案的取舍",
+            "mode": "auto",
+            "retrieval_effort": "exhaustive",
+        },
+    )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert routed == [(nb, "比较两个方案的取舍", "")]
+    assert seen["mode"] == selected
+    assert seen["retrieval_effort"] == "standard"
+    assert events[1]["step"]["detail"]["mode"] == selected
+    assert events[-1]["response"]["mode"] == selected
+
+
+def test_auto_mode_stream_close_cancels_inflight_classifier(monkeypatch):
+    import asyncio
+    import threading
+
+    from app.api import ask_routes
+    from app.models.ask import AskRequest
+    from app.services.cancellation import AskCancelled
+
+    started = threading.Event()
+    stopped = threading.Event()
+    seen = {}
+
+    class _Repo:
+        def preview_reasoning_intent(
+            self, notebook_id, question, history="", cancel_event=None
+        ):
+            seen["cancel_event"] = cancel_event
+            started.set()
+            cancel_event.wait(timeout=1)
+            stopped.set()
+            raise AskCancelled()
+
+    class _Request:
+        async def is_disconnected(self):
+            return False
+
+    monkeypatch.setattr(ask_routes, "ASK_STREAM_HEARTBEAT_SECONDS", 0.0)
+
+    async def run():
+        stream = ask_routes._stream_auto_ask_events(
+            _Repo(),
+            "notebook-a",
+            AskRequest(question="q", mode="auto"),
+            "",
+            _Request(),
+            scope_receipt=None,
+        )
+        await anext(stream)
+        assert started.is_set()
+        await stream.aclose()
+
+    asyncio.run(run())
+    assert seen["cancel_event"].is_set()
+    assert stopped.wait(timeout=1)
 
 
 def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):

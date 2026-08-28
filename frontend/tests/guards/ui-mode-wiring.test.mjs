@@ -259,16 +259,15 @@ test("Report owner 在请求汇聚点按 policy.advanced 固定 auto_generate", 
   assert.match(depth.getText(reportWorkspace), /REPORT_DEFAULT_DEPTH_INDEX/);
 });
 
-test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 收敛 graph", () => {
-  // codex R1 P2：把 graph 收回 reasoning 的 useEffect 在 render 之后才跑；用户从
-  // 高级模式拨回自动后抢先提交，state 残留的 graph 仍会被发出去。与 scope/档位同一
-  // 原则：被隐藏的控件由请求侧强制默认值。钉住 submitMode 初始化式的三个语义要素。
+test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 改用后台自动路由", () => {
+  // 自动模式没有任何 Ask 模式控件，请求汇聚点必须发送 request-only auto selector；
+  // 高级模式则继续发送前端 state 中的具名引擎。
   assert.equal(askPolicyProperty("advanced"), "isAdvanced(uiMode)");
   const initializer = initializerOf("submitMode", askSession);
   const text = initializer.getText(askSession);
   assert.ok(text.includes("currentPolicy.advanced"), `submitMode 初始化式必须按 policy.advanced 分叉：${text}`);
-  assert.ok(text.includes('"graph"'), `submitMode 初始化式必须识别 graph 残留：${text}`);
-  assert.ok(text.includes('"reasoning"'), `submitMode 初始化式必须收敛到 reasoning：${text}`);
+  assert.ok(text.includes("AUTO_ASK_MODE"), `自动模式必须发送后台路由 selector：${text}`);
+  assert.match(text, /\?\s*mode\s*:\s*AUTO_ASK_MODE/);
 
   // 移动变异防线：光有 submitMode 定义不够，executeAsk 的模式实参不许再直接用
   // mode（否则定义成了摆设）。全 hook 扫 executeAsk(...) 调用，第二实参不得是
@@ -289,4 +288,37 @@ test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 收�
   }
   visitCalls(askSession);
   assert.deepEqual(offenders, [], "executeAsk 的模式实参不得绕过 submitMode 直接用 mode");
+});
+
+test("自动模式不挂载整组 Ask 模式选择控件", () => {
+  const controls = [];
+  function visit(node) {
+    if (ts.isJsxElement(node)) {
+      const classAttribute = node.openingElement.attributes.properties.find((property) => (
+        ts.isJsxAttribute(property)
+        && property.name.text === "className"
+        && property.initializer
+        && ts.isStringLiteral(property.initializer)
+        && property.initializer.text === "ask-mode-control"
+      ));
+      if (classAttribute) controls.push(node);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(page);
+  assert.equal(controls.length, 1, "问答模式控件应只有一个生产挂载点");
+
+  let conditional = null;
+  for (let node = controls[0].parent; node; node = node.parent) {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      conditional = node;
+      break;
+    }
+  }
+  assert.ok(conditional, "ask-mode-control 必须位于条件渲染表达式中");
+  assert.equal(
+    conditional.left.getText(page),
+    "isAdvanced(uiMode)",
+    "只有高级模式可以挂载模式选择控件",
+  );
 });

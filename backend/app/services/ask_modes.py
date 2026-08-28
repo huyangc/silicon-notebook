@@ -28,6 +28,10 @@ ASK_MODES: dict[str, AskMode] = {
 }
 
 DEFAULT_MODE = "chunk"
+# Request-only selector used by the simplified UI.  It is intentionally not a
+# registry entry or user-facing engine: the backend resolves it to one of the
+# two stable built-ins before a durable Ask job is created.
+AUTO_MODE = "auto"
 
 # 退役但曾合法的 mode id → 映射 chunk(保旧会话/书签持久化的 mode 不 422)。
 # 窄例外:仅这两个具名 id;其余未知 mode 仍 UnknownAskMode。

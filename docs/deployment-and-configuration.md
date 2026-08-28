@@ -410,6 +410,11 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
+Backend Ask routing for the simplified interface reuses `reasoning_agent` for
+one corpus-blind question-understanding pass. If that workload is unbound or
+fails, automatic routing conservatively selects ordinary Q&A; it introduces no
+additional model-service binding.
+
 The optional `[thinking]` table controls thinking per **chat workload**, using
 `enabled`, `disabled`, or `provider_default`. The policy is workload-scoped
 rather than service-scoped because one physical chat service may carry both

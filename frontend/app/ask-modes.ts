@@ -41,6 +41,9 @@ export const ASK_MODES: readonly AskModeDef[] = Object.freeze([
 ]);
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";
+// Request-only backend selector for the simplified interface. It is not a
+// visible engine and therefore stays outside ASK_MODES / AskModeId.
+export const AUTO_ASK_MODE = "auto";
 
 export const ASK_MODE_GROUPS: { id: AskModeGroup; label: string }[] = [
   { id: "general", label: "通用问答" },

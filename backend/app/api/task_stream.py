@@ -36,7 +36,7 @@ NDJSON_STREAM_HEADERS = {
 }
 
 
-class _TaskStreamingResponse(StreamingResponse):
+class ClosingStreamingResponse(StreamingResponse):
     """Close the task generator even when the ASGI body send itself fails."""
 
     async def stream_response(self, send) -> None:
@@ -148,7 +148,7 @@ def task_stream_response(
     error_code: str,
     cancel_event: threading.Event | None = None,
 ) -> StreamingResponse:
-    return _TaskStreamingResponse(
+    return ClosingStreamingResponse(
         task_event_stream(
             request,
             work,

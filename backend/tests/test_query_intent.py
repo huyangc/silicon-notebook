@@ -15,11 +15,81 @@ from app.models.ask import (
     QueryIntentContract,
 )
 from app.services.query_intent import (
+    auto_ask_mode_from_intent,
     confirmed_intent_queries,
     confirmed_research_question,
     finalize_query_intent,
     plan_query_intent,
 )
+
+
+@pytest.mark.parametrize(
+    ("updates", "mode"),
+    [
+        ({"intent_type": "explain"}, "chunk"),
+        ({"intent_type": "other", "needs_clarification": True}, "chunk"),
+        ({"intent_type": "compare"}, "reasoning"),
+        ({"intent_type": "diagnose"}, "reasoning"),
+        ({"intent_type": "design"}, "reasoning"),
+        ({"intent_type": "review"}, "reasoning"),
+        ({"completeness_required": True}, "reasoning"),
+        ({
+            "mandatory_topics": [
+                {"id": "a", "title": "A", "question": "A?"},
+                {"id": "b", "title": "B", "question": "B?"},
+            ],
+        }, "reasoning"),
+    ],
+)
+def test_model_intent_routes_simplified_ask_to_closed_engine(updates, mode):
+    contract = QueryIntentContract(
+        objective="q", resolved_question="q", **updates
+    )
+
+    assert auto_ask_mode_from_intent(contract) == mode
+
+
+@pytest.mark.parametrize("client", [None, "raises", "malformed"])
+def test_auto_ask_falls_back_to_chunk_when_understanding_did_not_succeed(client):
+    class _FailingClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            raise RuntimeError("provider unavailable")
+
+    class _MalformedClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({"error": "upstream overloaded"})
+
+    resolved_client = (
+        _FailingClient() if client == "raises"
+        else _MalformedClient() if client == "malformed"
+        else None
+    )
+    status = {}
+    contract = QueryIntentContract(**plan_query_intent(
+        resolved_client, "列出所有命令并比较差异", status=status
+    ))
+    contract._understanding_succeeded = status["understanding_succeeded"]
+
+    # Deterministic scope parsing remains available to reviewed reasoning/report
+    # flows, but it must not turn a failed automatic classifier into a costly
+    # engine selection.
+    assert contract.completeness_required is True
+    assert contract._understanding_succeeded is False
+    assert auto_ask_mode_from_intent(contract) == "chunk"
+
+
+def test_understanding_status_is_absent_from_wire_and_openapi_schema():
+    contract = QueryIntentContract(objective="q", resolved_question="q")
+    contract._understanding_succeeded = False
+
+    assert "understanding_succeeded" not in contract.model_dump()
+    assert "understanding_succeeded" not in str(
+        QueryIntentContract.model_json_schema()
+    )
 
 
 class _IntentClient:

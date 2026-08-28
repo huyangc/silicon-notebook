@@ -80,6 +80,46 @@ _ANALYSIS_REQUEST = re.compile(
 )
 
 
+def _understanding_response_is_valid(data: object) -> bool:
+    """Require the classifier fields that make automatic dispatch trustworthy."""
+    if not isinstance(data, dict):
+        return False
+    return (
+        isinstance(data.get("normalized_question"), str)
+        and bool(data["normalized_question"].strip())
+        and str(data.get("intent_type") or "").strip().lower() in _INTENT_TYPES
+        and str(data.get("result_scope") or "").strip().lower()
+        in RESULT_SCOPES
+        and isinstance(data.get("completeness_required"), bool)
+        and isinstance(data.get("mandatory_topics"), list)
+        and isinstance(data.get("ambiguities"), list)
+        and isinstance(data.get("needs_clarification"), bool)
+    )
+
+
+def auto_ask_mode_from_intent(contract: Any) -> str:
+    """Map the model-produced corpus-blind intent onto a stable Ask engine.
+
+    Ambiguous or ordinary one-direction requests stay on ``chunk``.  Deep
+    routing requires an explicit structured signal from the understanding
+    model: collection completeness, multiple mandatory directions, or a
+    compare/diagnose/design/review operation.  The closed mapping prevents a
+    model-generated string from becoming a dispatch target.
+    """
+    if not bool(getattr(contract, "_understanding_succeeded", True)):
+        return "chunk"
+    if bool(getattr(contract, "needs_clarification", False)):
+        return "chunk"
+    if bool(getattr(contract, "completeness_required", False)):
+        return "reasoning"
+    if len(getattr(contract, "mandatory_topics", ()) or ()) > 1:
+        return "reasoning"
+    intent_type = str(getattr(contract, "intent_type", "") or "").strip().lower()
+    if intent_type in {"compare", "diagnose", "design", "review"}:
+        return "reasoning"
+    return "chunk"
+
+
 def _complete_match_is_negated(question: str, match: re.Match) -> bool:
     prefix = question[max(0, match.start() - 24):match.start()]
     prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]
@@ -185,6 +225,7 @@ def plan_query_intent(
     max_topics: int = 6,
     purpose: str = "evidence-grounded answer",
     cancel_event: CancelEvent = None,
+    status: dict[str, bool] | None = None,
 ) -> dict:
     """Build one bounded intent contract without reading corpus content."""
     from app.services.prompts import (
@@ -196,6 +237,7 @@ def plan_query_intent(
     history = str(history or "")[:8000]
     max_topics = max(1, min(int(max_topics), 16))
     data: dict = {}
+    understanding_succeeded = False
     try:
         if getattr(client, "configured", False):
             raw = client.chat_json(
@@ -210,10 +252,13 @@ def plan_query_intent(
             )
             parsed = json.loads(raw)
             data = parsed if isinstance(parsed, dict) else {}
+            understanding_succeeded = _understanding_response_is_valid(data)
     except AskCancelled:
         raise
     except Exception:
         data = {}
+    if status is not None:
+        status["understanding_succeeded"] = understanding_succeeded
 
     topics: list[dict] = []
     raw_topics = data.get("mandatory_topics")

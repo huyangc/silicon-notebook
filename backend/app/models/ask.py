@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from app.models.source_scope import (
     BaseNotebookScope,
@@ -200,6 +200,10 @@ class QueryIntentAnswer(BaseModel):
 
 class QueryIntentContract(BaseModel):
     """Corpus-blind understanding shared by report and reasoning retrieval."""
+    # Internal provenance for automatic Ask routing. A PrivateAttr is required:
+    # Field(exclude=True) would hide the value from response bodies while still
+    # leaking it into the public OpenAPI schema for /ask/intent.
+    _understanding_succeeded: bool = PrivateAttr(default=True)
     objective: str = Field(min_length=1, max_length=4000)
     resolved_question: str = Field(min_length=1, max_length=4000)
     intent_type: str = "other"
@@ -301,7 +305,9 @@ class AskRequest(BaseModel):
     asked_at: str = Field(default="", max_length=64)
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
-    mode: str = "chunk"       # "chunk"(默认,通用问答) | "fast"(旧KG) | "reasoning" | "graph" | "global"
+    # ``auto`` is a request-only backend selector resolved to chunk/reasoning
+    # before durable state; it is never a persisted engine id.
+    mode: str = "chunk"       # "chunk"(默认) | "reasoning" | "graph" | "auto" | retired aliases
     # User-controlled resource level.  It selects immutable hard ceilings from
     # ask_retrieval_policy; the model may stop early but cannot increase them.
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
