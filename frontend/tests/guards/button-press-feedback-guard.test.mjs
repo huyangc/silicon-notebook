@@ -230,6 +230,37 @@ test("复制结果的两种配色在样式表里真的有规则", () => {
   }
 });
 
+test("叫不出新身份的调用点，必须在身份换掉时清结果", () => {
+  // 真实缺陷(codex #612 R5 P2)。key 规则要求 key 就是被复制对象的身份,但报告分享链接
+  // 那一颗叫不出来:token 由 use-report-workspace 在点击时现取,渲染时视图手里只有报告 id。
+  // 于是 1.6s 停留期内「取消分享 → 再分享」发出的**新** token 会顶着旧链接的「已复制」
+  // 出现——而它根本没被复制过;若 toggleShare 顺带做的那次自动复制还失败了,按钮就在说反话。
+  //
+  // `shared` 翻面是「链接身份换了」唯一的信号(换 token 必经 shared:false),所以判据是:
+  // report-view 里存在一个依赖 `shared` 的 effect,它调 reset()。
+  const view = MODULES.get("report-view.tsx");
+  const resets = [];
+  const walk = (node) => {
+    if (
+      ts.isCallExpression(node)
+      && node.expression.getText(view) === "useEffect"
+      && node.arguments.length === 2
+      && /\breset\(\)/.test(node.arguments[0].getText(view))
+      && /\bshared\b/.test(node.arguments[1].getText(view))
+    ) {
+      resets.push(node);
+    }
+    node.forEachChild(walk);
+  };
+  walk(view);
+  assert.equal(
+    resets.length,
+    1,
+    "report-view.tsx 里应当恰好有一个依赖 shared 的 useEffect 调用 reset() —— 少了它,"
+    + "「取消分享→再分享」发出的新链接会在 1.6s 内顶着旧链接的「已复制」出现",
+  );
+});
+
 test("回到 idle 的计时只有一份，调用点都用它", () => {
   // :active 松手自动还原;JS 状态不会,忘了摘掉就一直挂着「已复制」,下一次点击反而
   // 看不出变化。判据是「共享模块里有一个 setTimeout 把它设回 idle」,不钉具体毫秒数

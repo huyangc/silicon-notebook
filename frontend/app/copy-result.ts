@@ -45,6 +45,15 @@ export function useCopyResult(): {
   report: (key: string, copied: boolean) => void;
   /** 该目标当前该显示的结果;别的目标报的结果对它恒为 idle。 */
   resultFor: (key: string) => CopyResult;
+  /**
+   * 立刻清掉当前结果,给「按钮背后的东西被换掉了、但调用方叫不出新身份」那种情形用。
+   *
+   * 上面那条 key 规则要求 key 就是被复制对象的身份,但有一处叫不出来:报告的分享链接
+   * token 由 use-report-workspace 在点击时现取,视图层渲染时手里只有报告 id。于是
+   * 「取消分享→再分享」会发一个**新** token,而 key 没变,新链接就顶着旧链接的
+   * 「已复制」出现(codex #612 R5 P2)。调用方在「身份换了」的那个信号上调 reset()。
+   */
+  reset: () => void;
 } {
   const [state, setState] = useState<{ key: string; result: CopyResult }>({
     key: "",
@@ -69,5 +78,7 @@ export function useCopyResult(): {
     [state],
   );
 
-  return { report, resultFor };
+  const reset = useCallback(() => setState({ key: "", result: "idle" }), []);
+
+  return { report, resultFor, reset };
 }
