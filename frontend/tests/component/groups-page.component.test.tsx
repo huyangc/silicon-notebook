@@ -283,3 +283,54 @@ test("复制失败时按钮说「复制失败」，并把链接选中好让用�
   expect(document.activeElement).toBe(link);
   expect((link as HTMLInputElement).selectionEnd).toBe((link as HTMLInputElement).value.length);
 });
+
+test("剪贴板挂着时切了群组，失败不去选中另一个群组的邀请链接", async () => {
+  // codex #612 R3 P2。剪贴板那一步可以挂很久(权限提示、非安全上下文),期间侧栏没有禁用。
+  // 用户切走后 inviteLinkRef 指向**新群组**的输入框,旧的那次失败如果照样 focus+select,
+  // 用户 ⌘C 拿到的是另一个群组的邀请链接——比「复制失败」严重得多。
+  const user = userEvent.setup();
+  const other: GroupDetail = { ...OWNER_DETAIL, id: "g2", name: "另一个群组" };
+  vi.mocked(listGroups).mockResolvedValue([OWNER_DETAIL, other]);
+  vi.mocked(getGroup).mockImplementation(async (id: string) => (id === "g2" ? other : OWNER_DETAIL));
+  vi.mocked(getGroupInvite).mockImplementation(async (id: string) => ({
+    active: true,
+    token: id === "g2" ? "gri_second-group" : "gri_first-group",
+    created_at: "2026-08-21T00:00:00+00:00",
+  }));
+
+  // 剪贴板写入挂起，由测试决定什么时候失败。
+  let rejectWrite: (reason: Error) => void = () => undefined;
+  vi.spyOn(navigator.clipboard, "writeText").mockReturnValue(
+    new Promise<void>((_resolve, reject) => { rejectWrite = reject; }),
+  );
+
+  // ⚠ 不传 initialGroupId:传了之后「hash 回跳」那个 effect 会在 detail 变化时把页面
+  // 拽回 initialGroupId 那个群组,切组根本切不过去(实测过)。
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+  await user.click(await screen.findByRole("button", { name: "复制" }));
+
+  // 复制还挂着就切到另一个群组，等新群组的链接渲染出来。
+  await user.click(screen.getByRole("button", { name: /另一个群组/ }));
+  await screen.findByRole("heading", { name: "另一个群组" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+  const secondLink = await screen.findByDisplayValue(/group_invite=gri_second-group/) as HTMLInputElement;
+
+  // 现在让第一次复制失败：它不能碰这个属于另一个群组的输入框。
+  rejectWrite(new Error("denied"));
+  await screen.findByText("复制失败，请手动复制链接。");
+  expect(document.activeElement).not.toBe(secondLink);
+  expect(secondLink.selectionStart).toBe(secondLink.selectionEnd);
+});
