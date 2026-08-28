@@ -7529,16 +7529,16 @@ export default function Home() {
 
       {rootModals.view("kg-schema").open && kgSchema.open && (
         <section className="utility-modal" role="dialog" aria-modal={rootModals.view("kg-schema").topmost} aria-hidden={!rootModals.view("kg-schema").topmost} inert={rootModals.view("kg-schema").topmost ? undefined : true} style={{ zIndex: rootModals.view("kg-schema").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) closeKgSchemas("backdrop"); }}>
-          <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
+          <FloatingModalCard storageKey="schema.window" className="utility-modal-card schema-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>图谱 Schema</h2>
-                <p>查看当前笔记本实际采用的类型。所有者可改写继承类型或新增本库类型；管理员可切换到全局基线。</p>
+                <p>左边是这个范围里现有的类型，右边是选中类型的定义；改动要按下保存才生效。</p>
               </div>
               <button className="icon-button" onClick={() => closeKgSchemas("button")} title="Close">×</button>
             </div>
-            <div className="source-detail-body">
+            <div className="schema-modal-body">
               <SchemaManager
                 schemas={kgSchema.schemas}
                 busy={kgSchema.busy}

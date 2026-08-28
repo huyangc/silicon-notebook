@@ -287,12 +287,14 @@ test("schema mutation rechecks live authority before its derived reload", async 
   act(() => value!.openSchemas());
   await waitFor(() => expect(knowledgeApi.listNotebookObjectSchemas).toHaveBeenCalledOnce());
 
-  let mutating!: Promise<void>;
+  let mutating!: Promise<boolean>;
   act(() => { mutating = value!.patchSchema("concept", { status: "active" }); });
   await waitFor(() => expect(knowledgeApi.updateNotebookObjectSchema).toHaveBeenCalledOnce());
   rerender(<Harness policy={{ ...writablePolicy, canManageNotebookSchemas: false }} />);
   await act(async () => pending.resolve());
-  await mutating;
+  // 权限在写入在飞期间被撤走：既不重新拉清单、也不报成功——回执必须是 false，
+  // 面板才不会把「已保存」画在一次其实没落地的写入上。
+  expect(await mutating).toBe(false);
   expect(knowledgeApi.listNotebookObjectSchemas).toHaveBeenCalledTimes(1);
   expect(effects.notify).not.toHaveBeenCalledWith("类型已更新");
 });
