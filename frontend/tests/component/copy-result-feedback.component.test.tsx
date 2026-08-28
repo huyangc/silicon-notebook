@@ -108,3 +108,57 @@ test("结果只落在按下的那一颗上，同排的另一颗不跟着变", as
   expect(shareButton).not.toHaveClass("copy-result-copied");
   expect(shareButton).not.toHaveClass("copy-result-failed");
 });
+
+// —— codex #612 R2 的两条 P2，一条修了一条驳了，两边都要有回归覆盖 ——
+
+test("换到另一份报告时，新报告的按钮不顶着上一份的「已复制」", async () => {
+  // 采纳的那条:结果态要挂 1.6s,期间在报告之间切换会让同一颗按钮指向另一份报告。
+  // key 里带报告 id,内容一换就自动失配回 idle。
+  const user = userEvent.setup();
+  const other: ReportDetailT = { ...DONE_REPORT, id: "rep-other", question: "另一份报告" };
+  const { rerender } = render(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ active: DONE_REPORT, shared: true, copyShareLink: async () => true })}
+      setToast={vi.fn()}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "复制链接" }));
+  expect(await screen.findByRole("button", { name: "已复制" })).toHaveClass("copy-result-copied");
+
+  // 1.6s 还没到就切走：新报告的链接从来没被复制过，不能说「已复制」。
+  rerender(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ active: other, shared: true, copyShareLink: async () => true })}
+      setToast={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "复制链接" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "已复制" })).toBeNull();
+});
+
+test("同一个目标被重复复制：结果不闪回 idle，保持为真", async () => {
+  // 驳回的那条(codex #612 R2 P2 第 1 条)建议「每次尝试开始时先清空结果」，好让重复点
+  // 有一次可见的状态跳变。这里刻意不那么做，登记理由：
+  //  · 「这一次点击有没有被接住」由 `:active` 回答——它每一次 mousedown 都如实位移+变淡
+  //    (浏览器实测 translate 0px 1px / scale 0.98 / opacity 0.8)。结果态回答的是另一个
+  //    问题:「现在剪贴板里有没有这条链接」，重复点时它照样是真话。
+  //  · 想让清空真的落屏，需要一次「空档帧」；React 会把 await 前后的两次 setState 合成
+  //    一次渲染，空档多半根本不落屏，要稳定看见就得再引入动画，而这条基线刻意不带动画。
+  //
+  // 因此这里钉住**刻意的**行为:重复点不把结果打回 idle。停留计时确实会从最后一次点击
+  // 重新起算(state 每次都是新对象，effect 依赖它、清掉旧 timer)，但那条不写成断言——
+  // 它只能靠墙钟时刻来判定，在满载的 CI 上就是一条 flake。
+  const user = userEvent.setup();
+  renderToolbar(async () => true);
+
+  await user.click(screen.getByRole("button", { name: "复制链接" }));
+  expect(await screen.findByRole("button", { name: "已复制" })).toHaveClass("copy-result-copied");
+
+  await user.click(screen.getByRole("button", { name: "已复制" }));
+  const again = await screen.findByRole("button", { name: "已复制" });
+  expect(again).toHaveClass("copy-result-copied");
+  expect(screen.queryByRole("button", { name: "复制链接" })).toBeNull();
+});

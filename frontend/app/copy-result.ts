@@ -16,8 +16,21 @@
  *  - 三处的壳层本来就不一样:黑色药丸 `.new-pill`、描边 `.sort-button`、带图标的
  *    `.report-action`,连忙碌态文案都各说各的。共用的只有这个状态机。
  *
- * `key` 是给列表用的:「已分享」弹窗里每行一颗复制按钮,共用一个无 key 的状态会让整列
- * 一起变绿。单按钮的调用点传一个固定串即可。
+ * `key` 必须是**被复制的那个东西**的身份(邀请 token、分享 token、报告 id),不是按钮的
+ * 槽位名。两个理由,后一个是踩出来的:
+ *  - 列表:「已分享」弹窗每行一颗复制按钮,共用一个无 key 的状态会让整列一起变绿。
+ *  - 结果不能跟着槽位走:结果态要挂 1.6s,而这期间内容可能被换掉——切群组、重新生成
+ *    邀请链接、在报告间切换,都会让同一颗按钮指向**另一条**链接。key 写成固定串
+ *    (`"invite"` / `"share-link"`)时,新链接会顶着上一条链接的「已复制」出现,而它
+ *    根本没被复制过(codex #612 R2 P2)。key 用 token/id,内容一换就自动失配回 idle。
+ *
+ * 刻意**不**做的事:同一个目标在 1.6s 内被重复点时,不把结果闪回 idle 再置位。
+ * 那样做需要一次真的「空档帧」——而 React 会把 await 前后的两次 setState 合成一次
+ * 渲染,空档多半根本不落屏,想稳定看见就得再引入一套动画,而这条基线刻意不带动画。
+ * 更要紧的是:这一层不是「这次点击有没有被接住」的答案,`:active` 才是,它每一次
+ * mousedown 都如实位移+变淡(实测 translate 0px 1px / scale 0.98 / opacity 0.8)。
+ * 结果态回答的是「现在剪贴板里有没有这条链接」,重复点时它照样是真话,只是把停留
+ * 时间从这一次点击重新计时。回归覆盖见 copy-result-feedback.component.test.tsx。
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -28,9 +41,9 @@ export type CopyResult = "idle" | "copied" | "failed";
 export const COPY_RESULT_HOLD_MS = 1600;
 
 export function useCopyResult(): {
-  /** 记下某颗按钮这一次复制成没成。 */
+  /** 记下某个复制目标这一次成没成。`key` 用目标自己的身份(token / id)。 */
   report: (key: string, copied: boolean) => void;
-  /** 该按钮当前该显示的结果;别的按钮报的结果对它恒为 idle。 */
+  /** 该目标当前该显示的结果;别的目标报的结果对它恒为 idle。 */
   resultFor: (key: string) => CopyResult;
 } {
   const [state, setState] = useState<{ key: string; result: CopyResult }>({

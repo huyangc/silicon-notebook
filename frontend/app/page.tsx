@@ -306,11 +306,6 @@ const SUPPORTED_SOURCE_EXT_GROUP = DEFAULT_SUPPORTED_SOURCE_EXTENSIONS.join("|")
 // 引导另存为的旧格式。
 const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt"];
 
-// 分享弹窗那一颗复制按钮在 useCopyResult 里的格位。「已分享」弹窗每行用 item.id 作
-// key,弹窗只有一颗、没有天然的 id,所以给它一个固定名字——按钮与只读输入框都用它,
-// 免得两处各写一遍字面量后失配(失配的表现是结果不显示,不报错)。
-const SHARE_MODAL_LINK_KEY = "share-modal";
-
 // 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
 // depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
 // 外加可传递的 derived_from / kind_of / prerequisite_of / precedes / part_of)。
@@ -1072,7 +1067,9 @@ export default function Home() {
   const shareOperationRef = useRef<object | null>(null);
   // 分享链接复制的结果态。它此前只落在页面顶部的 toast 上——横幅离按钮很远、还会滚出
   // 视口，用户看到的是「按钮纹丝不动」。toast 仍然保留(失败时它带着链接原文)，但结果
-  // 首先要画在按下的那一颗上。按 key 分格:「已分享」弹窗里每行一颗复制按钮。
+  // 首先要画在按下的那一颗上。key 一律是**被复制的那条链接的 token**:「已分享」弹窗
+  // 每行一颗按钮要分格，而且 token 换掉(重开分享、重新生成)时结果必须自动失配回
+  // idle，不能让新链接顶着上一条的「已复制」出现。
   const shareLinkCopy = useCopyResult();
   const shareLinkInputs = useRef(new Map<string, HTMLInputElement | null>());
   // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
@@ -4175,7 +4172,7 @@ export default function Home() {
   async function copyShareLink() {
     if (!shareModal) return;
     const link = buildShareLink(shareModal.share_token, window.location.origin);
-    await handleShareLinkCopy(SHARE_MODAL_LINK_KEY, link);
+    await handleShareLinkCopy(shareModal.share_token, link);
   }
 
   // 取消分享:撤销 token 并踢掉只读成员。**弹窗不关**——它同时是「共享给群组」的
@@ -6168,17 +6165,17 @@ export default function Home() {
                 <label>分享链接
                   <div className="tag-row" style={{ marginTop: 6 }}>
                     <input
-                      ref={(node) => { shareLinkInputs.current.set(SHARE_MODAL_LINK_KEY, node); }}
+                      ref={(node) => { shareLinkInputs.current.set(shareModal.share_token, node); }}
                       readOnly
                       value={buildShareLink(shareModal.share_token, window.location.origin)}
                       onFocus={(event) => event.currentTarget.select()}
                       style={{ flex: 1 }}
                     />
                     <button
-                      className={shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
+                      className={shareLinkCopy.resultFor(shareModal.share_token) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(shareModal.share_token) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
                       onClick={() => copyShareLink().catch(reportError)}
                     >
-                      {shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "copied" ? "已复制" : shareLinkCopy.resultFor(SHARE_MODAL_LINK_KEY) === "failed" ? "复制失败" : "复制"}
+                      {shareLinkCopy.resultFor(shareModal.share_token) === "copied" ? "已复制" : shareLinkCopy.resultFor(shareModal.share_token) === "failed" ? "复制失败" : "复制"}
                     </button>
                   </div>
                 </label>
@@ -6318,19 +6315,19 @@ export default function Home() {
                       {item.share_token && (
                         <div className="tag-row" style={{ marginTop: 2 }}>
                           <input
-                            ref={(node) => { shareLinkInputs.current.set(item.id, node); }}
+                            ref={(node) => { shareLinkInputs.current.set(item.share_token, node); }}
                             readOnly
                             value={buildShareLink(item.share_token, window.location.origin)}
                             onFocus={(event) => event.currentTarget.select()}
                             style={{ flex: 1 }}
                           />
                           <button
-                            className={shareLinkCopy.resultFor(item.id) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(item.id) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
+                            className={shareLinkCopy.resultFor(item.share_token) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(item.share_token) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
                             onClick={() => {
                               const link = buildShareLink(item.share_token, window.location.origin);
-                              handleShareLinkCopy(item.id, link).catch(reportError);
+                              handleShareLinkCopy(item.share_token, link).catch(reportError);
                             }}
-                          >{shareLinkCopy.resultFor(item.id) === "copied" ? "已复制" : shareLinkCopy.resultFor(item.id) === "failed" ? "复制失败" : "复制"}</button>
+                          >{shareLinkCopy.resultFor(item.share_token) === "copied" ? "已复制" : shareLinkCopy.resultFor(item.share_token) === "failed" ? "复制失败" : "复制"}</button>
                         </div>
                       )}
                       {/* 规模统计只在有链接时算(纯群组共享的行后端刻意不跑那次统计,
