@@ -5372,20 +5372,433 @@ button.chat-session-card {
   line-height: 1.45;
 }
 
-/* Schema 管理卡片:整齐的竖排表单(小标签 + 全宽控件),消除内联 label 的错位换行。 */
-.schema-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
+/* ─────────────────────────────────────────────────────────────────────────────
+   「图谱 Schema」面板。版式契约见 frontend/app/schema-manager.tsx 顶部的说明：
+   ① 作用范围一行 → ② 类型清单(左栏) → ③ 选中类型的定义(右栏)。
+
+   为什么这一片是自己的一套类而不是复用 `.item` 卡片：原来每个类型都是一张摊开的
+   `.item` 表单卡，一屏放不下两个类型，"这个库现在有哪些类型" 这个最常见的问题反而
+   最难回答。清单行必须**矮**(单行 + 一行元信息)才扫得动，而表单必须**宽**才不至于
+   把逗号分隔的字段串挤成多行——两种需求在一条竖列里无解，分栏之后各自都成立。
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* 这个弹窗比默认的 680px 宽：两栏版式要求左栏能完整显示 snake_case 类型名 + 徽章
+   (实测 288px 是不省略号的下限)，右栏还要放得下六个全宽输入框。窄视口由下面的
+   断点收成单栏，不靠横向滚动。 */
+/* 复合选择器不是装饰:`.source-modal-card, .utility-modal-card { width: min(680px, 100%) }`
+   在本文件里排在后面,同为 (0,1,0) 时后来者胜——单写 `.schema-modal-card` 会被它整条
+   吃掉,弹窗仍然是 680px(实测右栏只剩 334px,六个输入框挤成一团)。 */
+.utility-modal-card.schema-modal-card {
+  width: min(1020px, 100%);
 }
 
-.schema-card-head {
+/* 不复用 `.source-detail-body`：那一条是"整块一起滚"，两栏版式下会让左侧清单跟着
+   右侧长表单一起滚走。这里由两栏**各自**滚，栏头与栏底动作区始终在原位。 */
+.schema-modal-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  /* 定高而不是 max-height：两栏各自滚动要求父容器有确定高度，否则 `1fr` 行会退回
+     内容高、把清单和右栏一起顶出 `overflow: hidden` 的裁切线（栏底那排「新增类型」
+     首当其冲——它正是这个面板唯一的写入口）。定高的附带好处是切换只读/编辑/新增时
+     弹窗不再忽高忽低，拖动窗口的位置也就不会跟着跳。 */
+  height: min(660px, 70vh);
+  min-height: 0;
+  overflow: hidden;
+  padding: 20px 22px 22px;
+}
+
+.schema-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+
+.schema-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.schema-scope-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.schema-panel > .tool-hint {
+  margin: 0;
+  font-size: 13px;
+}
+
+.schema-workbench {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+/* ── 左栏：类型清单 ───────────────────────────────────────────────────────── */
+
+.schema-list {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+  background: #fbfcfe;
+}
+
+.schema-list-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 10px;
+}
+
+.schema-list-scroll > .tool-hint {
+  margin: 6px 4px;
+  font-size: 13px;
+}
+
+.schema-group + .schema-group {
+  margin-top: 16px;
+}
+
+.schema-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 4px 2px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.schema-group-count {
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: #e7ebf3;
+  color: #4f5663;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.schema-group-hint {
+  margin: 0 4px 7px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.schema-type-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.schema-type-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 7px 8px;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+}
+
+.schema-type-row:hover {
+  background: #eef2f8;
+}
+
+.schema-type-row.is-selected {
+  border-color: #c3ccdd;
+  background: #e8eefb;
+}
+
+/* 停用的类型仍然要读得清（它的定义还在，随时可能被重新启用），所以压的是**饱和度**
+   而不是把整行调淡到读不出字。 */
+.schema-type-row.is-off .schema-type-name code,
+.schema-type-row.is-off .schema-type-label {
+  color: #79818f;
+}
+
+.schema-type-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.schema-type-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 收缩顺位：先压显示名，最后才动类型标识。标识是这一行的身份（也是 API 上的键），
+   把 `process_window` 截成 `process_wind…` 而旁边的「工艺窗口」四个字完好无损，
+   正好把该留的和该让的弄反了。100 倍的 flex-shrink 让显示名先被吃到 0；标识仍留
+   `flex-shrink: 1` 兜底——真的长到一行放不下时它自己带省略号，而不是撑破整行。 */
+.schema-type-name code {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #1d2530;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schema-type-label {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schema-type-meta {
+  overflow: hidden;
+  color: #8a919c;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schema-type-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schema-badge {
+  border: 1px solid #d9dfeb;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: #fff;
+  color: #5b6473;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 「有还没保存的修改」。草稿按类型分格留存（见 schema-manager.tsx），所以切到别的
+   类型之后必须有个东西说明它还在——否则草稿等于悄悄消失。 */
+.schema-dirty-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning-solid);
+  flex: 0 0 auto;
+}
+
+/* 竖排而不是并排：300px 的栏宽放不下「新增类型」+「从当前笔记本归纳候选类型」两颗
+   药丸，并排必然换行，而换行后的第二行会被上面那条定高裁掉。 */
+.schema-list-actions {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--line);
+  padding: 10px;
+  background: #fff;
+}
+
+.schema-list-actions .tag {
+  justify-self: start;
+}
+
+/* ── 右栏：选中类型的定义 ─────────────────────────────────────────────────── */
+
+/* flex 而不是两行 grid：空态那一版没有栏头，grid 的 auto 首行会把提示语挤在顶部，
+   而 flex 里 `flex: 1` 的空态块自然吃满整栏、正中居中。 */
+.schema-detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.schema-detail-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 13px 18px;
+}
+
+.schema-detail-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
+.schema-detail-name {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+code.schema-detail-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.schema-detail-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.schema-detail-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schema-status.is-on {
+  border-color: #bfe2d3;
+  background: #eef8f3;
+  color: var(--green);
+}
+
+.schema-status.is-pending {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.schema-status.is-off {
+  background: var(--soft);
+  color: var(--muted);
+}
+
+.schema-detail-body {
+  flex: 1 1 auto;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 18px;
+}
+
+.schema-detail-empty {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+/* 只读定义：标签一列、值一列。左列定宽让四行的值对齐成一条竖线——这正是"看一眼
+   就知道这个类型长什么样"和"六个输入框"的差别。 */
+.schema-def {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.schema-def > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+}
+
+.schema-def dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.schema-def dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.schema-def-empty {
+  color: #9aa1ad;
+  font-size: 13px;
+}
+
+.schema-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schema-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #dde3ee;
+  border-radius: 7px;
+  padding: 2px 7px;
+  background: #f7f9fd;
+}
+
+.schema-chip code {
+  color: #1d2530;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.schema-chip.is-primary {
+  border-color: #b9cdf5;
+  background: #eef3fe;
+}
+
+.schema-chip-mark {
+  border-radius: 4px;
+  padding: 0 4px;
+  background: #dde5f6;
+  color: #3c4a63;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* 一句话的旁注：继承说明、草稿提醒、新增表单的默认值说明。它不是错误也不是标题，
+   所以既不用 .tool-hint 的正文字号，也不做成横幅。 */
+.schema-note {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  border-left: 2px solid #dbe1ec;
+  padding-left: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.schema-note strong {
+  color: #4f5663;
+  font-size: 12px;
+}
+
+.schema-note.is-warning {
+  border-left-color: var(--warning-solid);
+  color: var(--warning);
+}
+
+/* 编辑/新增表单：小标签 + 全宽控件的竖排，消除内联 label 的错位换行。 */
 .schema-field {
   display: flex;
   flex-direction: column;
@@ -5411,10 +5824,33 @@ button.chat-session-card {
   outline: 0;
 }
 
+.schema-field input:focus,
+.schema-field textarea:focus {
+  border-color: #9db4e8;
+}
+
 .schema-field textarea {
   resize: vertical;
   min-height: 56px;
   line-height: 1.5;
+}
+
+/* 三个输入框（字段 / 主字段 / 列表字段）合起来才是一份字段表，谁是主字段、哪些是
+   列表字段光看逗号串看不出来。这一行把三者合成的**结果**当场画出来，与只读态用的
+   是同一种 chip，所以"保存后会变成什么样"不需要先保存再看。 */
+.schema-field-preview {
+  display: grid;
+  gap: 6px;
+  border: 1px dashed #dde3ee;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #fafbfe;
+}
+
+.schema-field-preview-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .schema-actions {
@@ -5422,6 +5858,46 @@ button.chat-session-card {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
+}
+
+/* 窄视口：两栏收成上下两段，并且**换一种滚动模型**——由整块面板一起滚，而不是让
+   两个内层滚动区去分一份本来就不够的高度。竖排之后，定高里能分给下半段的只剩两百
+   来像素，只读定义连"编辑/停用/删除"那一排都露不出来；而两级滚动条套在一起，手指
+   往下划到底是"列表滚完了"还是"面板滚完了"也说不清。清单自己仍限高，否则类型一多，
+   下半段的定义要翻很久才够得着。 */
+@media (max-width: 900px) {
+  .schema-modal-body {
+    grid-template-rows: auto;
+    height: auto;
+    max-height: min(660px, 76vh);
+    overflow-y: auto;
+  }
+
+  .schema-panel {
+    grid-template-rows: auto auto auto;
+  }
+
+  .schema-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+
+  .schema-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .schema-list-scroll {
+    max-height: 260px;
+  }
+
+  .schema-detail-body {
+    overflow-y: visible;
+  }
+
+  .schema-detail-empty {
+    padding: 34px 24px;
+  }
 }
 
 /* item 数与 track 数必须同步（自动模式少一个勾选格）：默认 3 track 对应勾选框 +

@@ -111,31 +111,40 @@ export function useKgSchema({ authority, policy, effects }: UseKgSchemaOptions) 
     ? policyRef.current.canManageGlobalSchemas
     : policyRef.current.canManageNotebookSchemas;
 
+  // 回执语义：`true` 只在「写成功 + 重新拉回的清单已经进 state + 这一格仍归本次操作」
+  // 三件事同时成立时返回，也就是与那句 `notify(...)` 逐字同一个条件。面板拿它决定
+  // 保存后要不要退回只读态、新增后要不要清空表单——吞掉失败再让面板去猜，正是
+  // 「新增撞重名却把输入清光」这类问题的来源。所有权/视图已经换人的分支返回 `false`
+  // 而不是 `true`：那时面板要么已经卸载，要么看的是另一份注册表，没有任何一次写入
+  // 结果该落到它身上。
   const mutateSchema = async (
     mutation: (owner: KgWorkspaceOwner, view: SchemaView) => Promise<void>,
     success: (view: SchemaView) => string,
-  ) => {
+  ): Promise<boolean> => {
     const owner = currentOwner();
     const view = schemaViewRef.current;
-    if (!owner || !schemaModalOpen || !canWriteSchema(view) || schemaBusy) return;
+    if (!owner || !schemaModalOpen || !canWriteSchema(view) || schemaBusy) return false;
     const operation = beginOperation("schema");
     setSchemaBusy(true);
     try {
       await mutation(owner, view);
       if (!owns(owner) || !ownsOperation("schema", operation)
-        || schemaViewRef.current !== view || !canWriteSchema(view)) return;
+        || schemaViewRef.current !== view || !canWriteSchema(view)) return false;
       schemaRequestRef.current += 1;
       const reloaded = await loadSchemasFor(owner, view);
       if (owns(owner) && ownsOperation("schema", operation)
         && reloaded
         && schemaViewRef.current === view && canWriteSchema(view)) {
         effectsRef.current.notify(success(view));
+        return true;
       }
+      return false;
     } catch (error) {
       if (owns(owner) && ownsOperation("schema", operation)
         && schemaViewRef.current === view && canWriteSchema(view)) {
         effectsRef.current.reportError(error);
       }
+      return false;
     } finally {
       if (owns(owner) && ownsOperation("schema", operation)) setSchemaBusy(false);
     }

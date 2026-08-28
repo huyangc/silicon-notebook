@@ -63,6 +63,14 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 样式表没有可消费的 AST,`tsc` 不检查 className 字符串,testing-library 只看文本;
   // 文本是唯一诚实的输入。同文件对 groups-page.tsx 的 className 采集仍走 TS 语义解析。
   "tests/guards/group-page-style-guard.test.mjs",
+  // 同上,只读 globals.css:「图谱 Schema」面板上出现的每一个 class 名都必须在样式表里
+  // 真的有规则,另外三条钉住弹窗宽度的复合选择器(同特指度下排在后面的
+  // `.utility-modal-card` 会吃掉单类声明)、弹窗体的定高(写成 max-height 会让 1fr 行
+  // 退回内容高、把清单栏底部唯一的写入口裁掉),以及清单行「先压显示名再压类型标识」的
+  // 收缩顺位。这条守卫存在的理由同样是一个真实缺陷——状态徽章长期挂着 globals.css 里
+  // 根本不存在的 `.severity-low`。样式表没有可消费的 AST,jsdom 不做级联也不做布局;
+  // 同文件对 schema-manager.tsx 的 className 采集仍走 TS 语义解析。
+  "tests/guards/schema-panel-style-guard.test.mjs",
   // 同上,只读 globals.css:断言「按下有变化」这条基线写在 `button` **元素**上而不是
   // 某个按钮类上(元素级才能让以后新写的按钮默认就有),且它排除了 :disabled、真的
   // 声明了视觉变化。样式表没有可消费的 AST,jsdom 也不做特异性级联,文本是唯一诚实的
