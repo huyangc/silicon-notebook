@@ -265,6 +265,69 @@ test("候选类型在右栏给出归纳理由与批准、拒绝", () => {
   expect(callbacks.onPatch).toHaveBeenCalledWith("failure_mode", { status: "active" });
 });
 
+test("同名候选与继承行是两条可分别选中的行，候选的审批控件够得着", async () => {
+  // 后端刻意两行都返回（候选在批准前不遮蔽继承类型），并把 active 排在 proposed 前面。
+  // 只按 object_type 认行时，find 必然命中继承那一行：两行同时高亮，而候选的归纳理由
+  // 与批准/拒绝按钮永远点不到——审批这条路整条断掉。
+  const callbacks = mount({
+    schemas: [
+      item({ object_type: "failure_mode" }),
+      item({ object_type: "failure_mode", status: "proposed", inherited: false, scope: "notebook", rationale: "反复出现的失效归因" }),
+    ],
+  });
+  const list = screen.getByLabelText("类型清单");
+  const rows = within(list).getAllByRole("button", { name: /failure_mode/ });
+  expect(rows).toHaveLength(2);
+  // 按徽章认行，不按下标：分组顺序是版式取舍，不该被断言钉死。
+  const proposalRow = rows.find((one) => within(one).queryByText("候选"))!;
+  const inheritedRow = rows.find((one) => within(one).queryByText("继承"))!;
+
+  fireEvent.click(proposalRow);
+  const detail = screen.getByLabelText("类型定义");
+  expect(within(detail).getByText("反复出现的失效归因")).toBeInTheDocument();
+  expect(rows.filter((one) => one.getAttribute("aria-current") === "true")).toEqual([proposalRow]);
+
+  fireEvent.click(inheritedRow);
+  expect(within(detail).getByText("全局继承")).toBeInTheDocument();
+  expect(rows.filter((one) => one.getAttribute("aria-current") === "true")).toEqual([inheritedRow]);
+
+  fireEvent.click(proposalRow);
+  fireEvent.click(screen.getByRole("button", { name: "批准并启用" }));
+  await waitFor(() => expect(callbacks.onPatch).toHaveBeenCalledWith("failure_mode", { status: "active" }));
+});
+
+test("批准成功后选中项跟着换到生效那一行，右栏不会空掉", async () => {
+  const callbacks = mount({
+    schemas: [item({ object_type: "failure_mode", status: "proposed", inherited: false, scope: "notebook", rationale: "反复出现的失效归因" })],
+  });
+  fireEvent.click(row("failure_mode"));
+  fireEvent.click(screen.getByRole("button", { name: "批准并启用" }));
+  await waitFor(() => expect(callbacks.onPatch).toHaveBeenCalled());
+  callbacks.rerender(
+    <SchemaManager
+      schemas={[item({ object_type: "failure_mode", inherited: false, overrides_global: false, scope: "notebook" })]}
+      busy={false}
+      view="notebook"
+      canEdit
+      canManageGlobal={false}
+      onView={callbacks.onView}
+      onPatch={callbacks.onPatch}
+      onCreate={callbacks.onCreate}
+      onDelete={callbacks.onDelete}
+      onInduce={callbacks.onInduce}
+    />,
+  );
+  await waitFor(() => expect(screen.getByRole("button", { name: "编辑" })).toBeInTheDocument());
+  expect(screen.queryByText("从左边选一个类型，这里显示它的完整定义。")).not.toBeInTheDocument();
+});
+
+test("状态类写动作拿不到回执时在按钮紧邻处说明原因", async () => {
+  mount({ onPatch: vi.fn().mockResolvedValue(false), schemas: [item({ inherited: false, scope: "notebook" })] });
+  fireEvent.click(row("claim"));
+  fireEvent.click(screen.getByRole("button", { name: "停用" }));
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("切换启用状态失败"));
+});
+
 // --- 权限：只读成员看得到同一份定义，但没有任何写控件 -------------------------
 
 test("只读成员可以查看，但不会渲染任何写入控件", () => {

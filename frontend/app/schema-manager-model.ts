@@ -142,6 +142,26 @@ export function placementBadge(schema: ObjectSchema, view: SchemaView): string {
   return "自建";
 }
 
+/**
+ * 清单行的身份。**不是** `object_type`——同一个类型在当前笔记本视图下最多有两行。
+ *
+ * 后端刻意如此:一条还没批准的候选在批准前**不遮蔽**继承来的同名类型(见
+ * `docs/product-and-api_zh.md` 里 `POST /schema-proposals` 那段),于是
+ * `list_notebook_object_schemas` 对这种情况同时返回继承行(active)与候选行(proposed),
+ * 并把 active 排在前面。只按类型名认行,`find` 必然命中那条继承行:两行同时显示为
+ * 选中,而候选的归纳理由与批准/拒绝按钮永远够不着——审批那条路直接断掉。
+ *
+ * 两行的区别只有一个:是不是候选。所以身份就是「类型 + 是不是候选」。
+ */
+export function schemaRowKey(schema: ObjectSchema): string {
+  return `${schema.status === "proposed" ? "proposed" : "managed"}:${schema.object_type}`;
+}
+
+/** 某个类型**非候选**那一行的身份。批准会把一行从候选变成生效类型，身份随之改变。 */
+export function managedRowKey(objectType: string): string {
+  return `managed:${objectType}`;
+}
+
 export function statusLabel(status: string): string {
   if (status === "active") return "已启用";
   if (status === "proposed") return "待批准";

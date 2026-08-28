@@ -10,11 +10,13 @@ import {
   draftFromSchema,
   draftIsDirty,
   groupSchemas,
+  managedRowKey,
   placementBadge,
   placementLabel,
   removable,
   resolveCreatePrimary,
   saveActionLabel,
+  schemaRowKey,
   splitFields,
   statusLabel,
   statusTone,
@@ -75,10 +77,15 @@ type WorkbenchProps = {
   onInduce: () => void;
 };
 
-/** 右栏此刻在显示什么。选中一个类型和「正在新增」是互斥的两种状态。 */
+/**
+ * 右栏此刻在显示什么。选中一行和「正在新增」是互斥的两种状态。
+ *
+ * `key` 是**行的身份**(`schemaRowKey`),不是类型名:同一个类型可以同时有一条继承行和
+ * 一条还没批准的同名候选,只按类型名认行会让候选那一行永远选不中。
+ */
 type Pane =
   | { kind: "empty" }
-  | { kind: "detail"; type: string; editing: boolean }
+  | { kind: "detail"; key: string; editing: boolean }
   | { kind: "create" };
 
 function scopeHint(view: SchemaView, canEdit: boolean): string {
@@ -187,14 +194,14 @@ function SchemaWorkbench({
   const [submitting, setSubmitting] = useState(false);
 
   const groups = groupSchemas(schemas);
-  const selectedType = pane.kind === "detail" ? pane.type : "";
+  const selectedKey = pane.kind === "detail" ? pane.key : "";
   const selected = pane.kind === "detail"
-    ? schemas.find((schema) => schema.object_type === pane.type) ?? null
+    ? schemas.find((schema) => schemaRowKey(schema) === pane.key) ?? null
     : null;
 
-  const draftOf = (schema: ObjectSchema): SchemaDraft => drafts[schema.object_type] ?? draftFromSchema(schema);
+  const draftOf = (schema: ObjectSchema): SchemaDraft => drafts[schemaRowKey(schema)] ?? draftFromSchema(schema);
   const dirtyOf = (schema: ObjectSchema): boolean => {
-    const draft = drafts[schema.object_type];
+    const draft = drafts[schemaRowKey(schema)];
     return draft ? draftIsDirty(schema, draft) : false;
   };
 
@@ -203,22 +210,26 @@ function SchemaWorkbench({
   // 没有因此被藏起来:行上的圆点、只读态那句提醒和「继续编辑」三处都在说它还在。
   const select = (schema: ObjectSchema) => {
     setError("");
-    setPane({ kind: "detail", type: schema.object_type, editing: false });
+    setPane({ kind: "detail", key: schemaRowKey(schema), editing: false });
   };
 
-  const patchDraft = (objectType: string, base: SchemaDraft, patch: Partial<SchemaDraft>) => {
-    setDrafts((previous) => ({ ...previous, [objectType]: { ...base, ...patch } }));
+  const patchDraft = (rowKey: string, base: SchemaDraft, patch: Partial<SchemaDraft>) => {
+    setDrafts((previous) => ({ ...previous, [rowKey]: { ...base, ...patch } }));
   };
 
-  const discardDraft = (objectType: string) => {
+  const dropDraft = (rowKey: string) => {
     setDrafts((previous) => {
-      if (!(objectType in previous)) return previous;
+      if (!(rowKey in previous)) return previous;
       const next = { ...previous };
-      delete next[objectType];
+      delete next[rowKey];
       return next;
     });
+  };
+
+  const discardDraft = (rowKey: string) => {
+    dropDraft(rowKey);
     setError("");
-    setPane({ kind: "detail", type: objectType, editing: false });
+    setPane({ kind: "detail", key: rowKey, editing: false });
   };
 
   const save = async (schema: ObjectSchema, draft: SchemaDraft) => {
@@ -244,12 +255,8 @@ function SchemaWorkbench({
       }
       // 只有拿到回执才丢草稿并退回只读态——只读态显示的就是刚写成功的那一版,
       // 这本身就是落在按钮紧邻处的结果反馈。
-      setDrafts((previous) => {
-        const next = { ...previous };
-        delete next[schema.object_type];
-        return next;
-      });
-      setPane({ kind: "detail", type: schema.object_type, editing: false });
+      dropDraft(schemaRowKey(schema));
+      setPane({ kind: "detail", key: schemaRowKey(schema), editing: false });
     } catch {
       setError("保存失败，请检查类型定义后重试；当前输入已保留。");
     } finally {
@@ -282,7 +289,8 @@ function SchemaWorkbench({
       }
       setCreateDraft(EMPTY_CREATE_DRAFT);
       // 新增完直接选中它:用户下一步多半就是看看它长什么样,而右栏空着会让人以为没成。
-      setPane({ kind: "detail", type: objectType, editing: false });
+      // 新建出来的是生效类型而不是候选,所以认的是它的 managed 那一行。
+      setPane({ kind: "detail", key: managedRowKey(objectType), editing: false });
     } catch {
       setError("新增失败，请检查类型标识是否重复及字段定义是否有效；当前输入已保留。");
     } finally {
@@ -303,17 +311,36 @@ function SchemaWorkbench({
         setError("删除失败，请稍后重试；这个类型下若已经有知识对象则不能删除。");
         return;
       }
-      setDrafts((previous) => {
-        if (!(schema.object_type in previous)) return previous;
-        const next = { ...previous };
-        delete next[schema.object_type];
-        return next;
-      });
+      dropDraft(schemaRowKey(schema));
       setPane(restoresInherited
-        ? { kind: "detail", type: schema.object_type, editing: false }
+        ? { kind: "detail", key: managedRowKey(schema.object_type), editing: false }
         : { kind: "empty" });
     } catch {
       setError("删除失败，请稍后重试；这个类型下若已经有知识对象则不能删除。");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /**
+   * 只改状态的那两个动作(停用/启用、批准并启用)。与保存/新增/删除同样认回执:
+   * 结果必须落在按钮紧邻处,不能只发页面顶部的横幅。
+   *
+   * `nextKey` 不是多余的参数:批准会把一行从候选变成生效类型,它的身份(类型 + 是不是
+   * 候选)随之改变;沿用旧身份的话,批准成功的那一刻右栏反而会空掉。
+   */
+  const patchStatus = async (schema: ObjectSchema, status: string, nextKey: string, failure: string) => {
+    setError("");
+    setSubmitting(true);
+    try {
+      const ok = await onPatch(schema.object_type, { status });
+      if (!ok) {
+        setError(failure);
+        return;
+      }
+      setPane({ kind: "detail", key: nextKey, editing: false });
+    } catch {
+      setError(failure);
     } finally {
       setSubmitting(false);
     }
@@ -335,11 +362,11 @@ function SchemaWorkbench({
               <p className="schema-group-hint">{group.hint}</p>
               <ul className="schema-type-list">
                 {group.rows.map((row) => (
-                  <li key={row.object_type}>
+                  <li key={schemaRowKey(row)}>
                     <button
                       type="button"
-                      className={`schema-type-row${selectedType === row.object_type ? " is-selected" : ""}${statusTone(row.status) === "is-off" ? " is-off" : ""}`}
-                      aria-current={selectedType === row.object_type ? "true" : undefined}
+                      className={`schema-type-row${selectedKey === schemaRowKey(row) ? " is-selected" : ""}${statusTone(row.status) === "is-off" ? " is-off" : ""}`}
+                      aria-current={selectedKey === schemaRowKey(row) ? "true" : undefined}
                       onClick={() => select(row)}
                     >
                       <KgTypeMark type={row.object_type} />
@@ -461,7 +488,9 @@ function SchemaWorkbench({
                         type="button"
                         className="index-cta primary"
                         disabled={busy}
-                        onClick={() => { void onPatch(selected.object_type, { status: "active" }); }}
+                        onClick={() => {
+                          void patchStatus(selected, "active", managedRowKey(selected.object_type), "批准失败，请稍后重试。");
+                        }}
                       >
                         批准并启用
                       </button>
@@ -474,7 +503,7 @@ function SchemaWorkbench({
                   <DraftFields
                     draft={draftOf(selected)}
                     busy={busy}
-                    onChange={(patch) => patchDraft(selected.object_type, draftOf(selected), patch)}
+                    onChange={(patch) => patchDraft(schemaRowKey(selected), draftOf(selected), patch)}
                   />
                   {error && <p className="tool-hint" role="alert">{error}</p>}
                   <div className="schema-actions">
@@ -486,7 +515,7 @@ function SchemaWorkbench({
                     >
                       {submitting ? "保存中…" : saveActionLabel(selected, view)}
                     </button>
-                    <button type="button" className="index-cta" disabled={busy} onClick={() => discardDraft(selected.object_type)}>
+                    <button type="button" className="index-cta" disabled={busy} onClick={() => discardDraft(schemaRowKey(selected))}>
                       放弃修改
                     </button>
                   </div>
@@ -522,7 +551,7 @@ function SchemaWorkbench({
                         type="button"
                         className="index-cta primary"
                         disabled={busy}
-                        onClick={() => { setError(""); setPane({ kind: "detail", type: selected.object_type, editing: true }); }}
+                        onClick={() => { setError(""); setPane({ kind: "detail", key: schemaRowKey(selected), editing: true }); }}
                       >
                         {dirtyOf(selected) ? "继续编辑" : "编辑"}
                       </button>
@@ -530,7 +559,14 @@ function SchemaWorkbench({
                         type="button"
                         className="index-cta"
                         disabled={busy}
-                        onClick={() => { void onPatch(selected.object_type, { status: selected.status === "active" ? "disabled" : "active" }); }}
+                        onClick={() => {
+                          void patchStatus(
+                            selected,
+                            selected.status === "active" ? "disabled" : "active",
+                            managedRowKey(selected.object_type),
+                            "切换启用状态失败，请稍后重试。",
+                          );
+                        }}
                       >
                         {toggleActionLabel(selected, view)}
                       </button>
