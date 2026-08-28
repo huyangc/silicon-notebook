@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 
-import { SchemaManager } from "../../app/schema-manager.tsx";
+import { SchemaManager, type SchemaWriteOutcome } from "../../app/schema-manager.tsx";
 import type { ObjectSchema } from "../../app/workspace-model.ts";
 
 function item(overrides: Partial<ObjectSchema> = {}): ObjectSchema {
@@ -35,9 +35,9 @@ function mount(overrides: Partial<Parameters<typeof SchemaManager>[0]> = {}) {
     canEdit: true,
     canManageGlobal: false,
     onView: vi.fn(),
-    onPatch: vi.fn().mockResolvedValue(true),
-    onCreate: vi.fn().mockResolvedValue(true),
-    onDelete: vi.fn().mockResolvedValue(true),
+    onPatch: vi.fn().mockResolvedValue("confirmed"),
+    onCreate: vi.fn().mockResolvedValue("confirmed"),
+    onDelete: vi.fn().mockResolvedValue("confirmed"),
     onInduce: vi.fn(),
     ...overrides,
   };
@@ -150,7 +150,7 @@ test("保存成功后退回只读态并显示写回来的那一版", async () =>
 });
 
 test("保存没拿到回执时留在编辑态、保留输入并说明原因", async () => {
-  const callbacks = mount({ onPatch: vi.fn().mockResolvedValue(false) });
+  const callbacks = mount({ onPatch: vi.fn().mockResolvedValue("failed") });
   openEditor("claim");
   fireEvent.change(screen.getByLabelText("显示名"), { target: { value: "项目结论" } });
   fireEvent.click(screen.getByRole("button", { name: "保存并建立覆盖" }));
@@ -185,7 +185,7 @@ test("编辑中切到另一个类型，草稿留在原处并在清单上标记�
 // --- 新增：入口、护栏与失败保留 ----------------------------------------------
 
 test("新增校验失败或请求失败时显示原因并保留输入", async () => {
-  const onCreate = vi.fn().mockResolvedValue(false);
+  const onCreate = vi.fn().mockResolvedValue("failed");
   mount({ schemas: [], onCreate });
   fireEvent.click(screen.getByRole("button", { name: "新增类型" }));
   const typeInput = screen.getByLabelText("类型标识（snake_case）");
@@ -210,7 +210,7 @@ test("新增校验失败或请求失败时显示原因并保留输入", async ()
 });
 
 test("新增表单在请求前执行名称与文本长度护栏", () => {
-  const onCreate = vi.fn().mockResolvedValue(true);
+  const onCreate = vi.fn().mockResolvedValue("confirmed");
   mount({ schemas: [], onCreate });
   fireEvent.click(screen.getByRole("button", { name: "新增类型" }));
   fireEvent.change(screen.getByLabelText("类型标识（snake_case）"), { target: { value: `a${"b".repeat(80)}` } });
@@ -221,7 +221,7 @@ test("新增表单在请求前执行名称与文本长度护栏", () => {
 });
 
 test("新增拿到回执后清空表单，下一次打开是干净的", async () => {
-  const onCreate = vi.fn().mockResolvedValue(true);
+  const onCreate = vi.fn().mockResolvedValue("confirmed");
   mount({ schemas: [], onCreate });
   fireEvent.click(screen.getByRole("button", { name: "新增类型" }));
   fireEvent.change(screen.getByLabelText("类型标识（snake_case）"), { target: { value: "lab_recipe" } });
@@ -322,7 +322,7 @@ test("批准成功后选中项跟着换到生效那一行，右栏不会空掉",
 });
 
 test("状态类写动作拿不到回执时在按钮紧邻处说明原因", async () => {
-  mount({ onPatch: vi.fn().mockResolvedValue(false), schemas: [item({ inherited: false, scope: "notebook" })] });
+  mount({ onPatch: vi.fn().mockResolvedValue("failed"), schemas: [item({ inherited: false, scope: "notebook" })] });
   fireEvent.click(row("claim"));
   fireEvent.click(screen.getByRole("button", { name: "停用" }));
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("切换启用状态失败"));
@@ -334,8 +334,8 @@ test("保存在飞时切到别的类型，完成回调既不把人拽回去，�
   // 清单行**刻意**在写入在飞期间仍然可点（只读浏览不该被一次写入冻住），代价就是
   // 完成回调会晚于用户的下一次导航到达。不核对身份就会做两件都错的事：把人从他刚
   // 点开的类型拽回原来那一行，以及把失败提示挂在另一个类型旁边。
-  let settle: (ok: boolean) => void = () => {};
-  const onPatch = vi.fn().mockImplementation(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+  let settle: (outcome: SchemaWriteOutcome) => void = () => {};
+  const onPatch = vi.fn().mockImplementation(() => new Promise<SchemaWriteOutcome>((resolve) => { settle = resolve; }));
   mount({
     onPatch,
     schemas: [item(), item({ object_type: "process_window", label: "工艺窗口", inherited: false, scope: "notebook" })],
@@ -346,7 +346,7 @@ test("保存在飞时切到别的类型，完成回调既不把人拽回去，�
   await waitFor(() => expect(onPatch).toHaveBeenCalled());
 
   fireEvent.click(row("process_window"));
-  await act(async () => { settle(false); });
+  await act(async () => { settle("failed"); });
 
   // 人留在自己刚点开的那一行，失败提示没有跟过来。
   expect(within(screen.getByLabelText("类型定义")).getByText("process_window")).toBeInTheDocument();
@@ -356,8 +356,8 @@ test("保存在飞时切到别的类型，完成回调既不把人拽回去，�
 });
 
 test("保存在飞时切走再切回来，成功那一版仍然是只读态且草稿已清", async () => {
-  let settle: (ok: boolean) => void = () => {};
-  const onPatch = vi.fn().mockImplementation(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+  let settle: (outcome: SchemaWriteOutcome) => void = () => {};
+  const onPatch = vi.fn().mockImplementation(() => new Promise<SchemaWriteOutcome>((resolve) => { settle = resolve; }));
   mount({
     onPatch,
     schemas: [item(), item({ object_type: "process_window", label: "工艺窗口", inherited: false, scope: "notebook" })],
@@ -367,12 +367,30 @@ test("保存在飞时切走再切回来，成功那一版仍然是只读态且�
   fireEvent.click(screen.getByRole("button", { name: "保存并建立覆盖" }));
   await waitFor(() => expect(onPatch).toHaveBeenCalled());
   fireEvent.click(row("process_window"));
-  await act(async () => { settle(true); });
+  await act(async () => { settle("confirmed"); });
 
   // 落库的草稿无条件丢掉——它已经不是「用户还没提交的输入」了。
   expect(within(row("claim")).queryByTitle("有还没保存的修改")).not.toBeInTheDocument();
   fireEvent.click(row("claim"));
   expect(screen.queryByLabelText("显示名")).not.toBeInTheDocument();
+});
+
+test("写已提交但没能确认时，不说失败、也不劝重试", async () => {
+  // 写落库了、只是清单没读回来。照着说「失败，请重试」会把用户引去撞重名 409——
+  // 而第一次其实成功了；删除同理会留下一行删不掉的陈旧条目（codex #614 R4 P2）。
+  const onCreate = vi.fn().mockResolvedValue("unconfirmed" satisfies SchemaWriteOutcome);
+  mount({ schemas: [], onCreate });
+  fireEvent.click(screen.getByRole("button", { name: "新增类型" }));
+  fireEvent.change(screen.getByLabelText("类型标识（snake_case）"), { target: { value: "lab_recipe" } });
+  fireEvent.change(screen.getByLabelText("字段（逗号分隔，按顺序）"), { target: { value: "title" } });
+  fireEvent.click(screen.getByRole("button", { name: "创建类型" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("改动可能已经生效");
+  expect(alert).toHaveTextContent("不要直接重试");
+  expect(alert).not.toHaveTextContent("新增失败");
+  // 表单原样留着，用户确认之后自己决定怎么办。
+  expect(screen.getByLabelText("类型标识（snake_case）")).toHaveValue("lab_recipe");
 });
 
 // --- 权限：只读成员看得到同一份定义，但没有任何写控件 -------------------------

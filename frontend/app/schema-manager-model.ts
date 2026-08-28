@@ -8,6 +8,20 @@ import type { ObjectSchema } from "./workspace-model.ts";
 
 export type SchemaView = "notebook" | "global";
 
+/**
+ * 一次写动作的回执。**三值**,不是布尔。
+ *
+ * 「写失败」和「写成功了但没能把最新清单读回来」是两件事,合成一个 `false` 会让界面
+ * 说错话:后者照着说「新增失败,请重试」,用户一重试就撞重名 409——而第一次其实成功了;
+ * 删除同理,会留下一行删不掉的陈旧条目。没验证到的结果不能当结论报,所以中间那一档
+ * 单独有个名字,界面据此说「可能已经生效,请重新打开确认,不要直接重试」。
+ *
+ * · `confirmed`   —— 服务端写成功,并且重新拉回的清单已经进 state。
+ * · `unconfirmed` —— 写已提交,但这一格的结果无从确认(重载没发布,或这一格已不归本次操作)。
+ * · `failed`      —— 请求本身失败,或者根本没发出去。
+ */
+export type SchemaWriteOutcome = "confirmed" | "unconfirmed" | "failed";
+
 /** 一份类型定义的可编辑投影。字段用逗号分隔的文本编辑，提交前才切成数组。 */
 export type SchemaDraft = {
   label: string;
