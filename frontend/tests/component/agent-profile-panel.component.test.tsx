@@ -439,6 +439,34 @@ test("总闸关掉：Agent 记录展开后照常拉取，已经记下的调用�
   ).toBeEnabled();
 });
 
+test("总闸关掉：全清按钮带上 kind=call，不发一次注定 409 的请求", async () => {
+  // codex #616 R3 P2:禁用态里能显示的只有调用记录,而不带 kind 的清空在那里
+  // 必然被后端 409 挡下——一颗注定失败的按钮比没有按钮更糟。名字也跟着改,
+  // 免得「全部」承诺了它清不到的东西。
+  const user = userEvent.setup();
+  mockFetch.mockResolvedValue(
+    response({ enabled: false, base: [], mine: [], can_edit_base: false }),
+  );
+  mockFetchObservations.mockResolvedValue({
+    enabled: false,
+    items: [],
+    calls_enabled: true,
+    calls: [agentCall({ capability: "ask:execute" })],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByText("这项功能当前未开启。");
+  await user.click(screen.getByText("Agent 记录"));
+  await screen.findByText("提问");
+
+  expect(screen.queryByRole("button", { name: "清空全部记录" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "清空调用记录" }));
+  await user.click(screen.getByRole("button", { name: "确认清空调用记录" }));
+
+  await waitFor(() =>
+    expect(mockClearObservations).toHaveBeenCalledWith("nb1", undefined, "call"),
+  );
+});
+
 // ---------------------------------------------------------------- 依据渲染
 // codex #520 R2 P2-2:服务端一直在写 `evidence`,前端却把它当 opaque 透传、一个字
 // 都不渲染,而设计契约要的正是「结论可点开来源」。
@@ -653,7 +681,11 @@ test("Agent 记录：清空全部是两步确认，第一下只出确认按钮�
   mockFetchObservations.mockResolvedValueOnce({ calls_enabled: true, calls: [], enabled: true, items: [] });
   await user.click(screen.getByRole("button", { name: "确认清空全部记录" }));
 
-  await waitFor(() => expect(mockClearObservations).toHaveBeenCalledWith("nb1"));
+  // 两个收窄位都显式传出去(都为 undefined = 不收窄):开着的时候「全部」就是
+  // 字面意义的两种都清。
+  await waitFor(() =>
+    expect(mockClearObservations).toHaveBeenCalledWith("nb1", undefined, undefined),
+  );
   expect(await screen.findByText("暂无 Agent 记录")).toBeInTheDocument();
 });
 
