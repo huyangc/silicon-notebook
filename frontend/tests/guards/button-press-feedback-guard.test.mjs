@@ -109,13 +109,33 @@ test("按下态是真的视觉变化，而不是空规则", () => {
   const [pressed] = RULES.filter((rule) => ELEMENT_PRESSED.test(rule.selector));
   assert.ok(pressed, "没有元素级 button:active 规则(上一条断言已解释后果)");
   const properties = declaredProperties(pressed.body);
-  const visual = ["transform", "opacity", "filter", "background", "box-shadow"]
+  const visual = ["translate", "scale", "rotate", "opacity", "filter", "background", "box-shadow"]
     .filter((name) => properties.has(name));
   assert.ok(
     visual.length >= 2,
     `按下态只声明了 ${[...properties].join("、") || "空"}`
     + " —— 需要至少两项视觉变化:单看位移在整块卡片按钮上几乎不可见,单看变淡在浅色"
     + "描边按钮上同样弱,两者叠加才对深浅两种底色都成立",
+  );
+});
+
+test("按下态不用 transform 简写，免得替换掉按钮自己的定位", () => {
+  // 真实缺陷(codex #612 R1 P2):`.answer-image-preview-step`(多图预览的上一张/下一张)
+  // 靠 `top: 50%` + `transform: translateY(-50%)` 垂直居中。全站基线一旦写 transform
+  // 简写,就把那条居中整条替换掉——44px 的绝对定位控件在按下的瞬间往下跳约 22px,
+  // 靠近上缘按下时它会从指针底下挪走,连这一次点击都取消。
+  //
+  // 判据钉的是**形态**而不是那一颗按钮:任何拿 transform 定位自己的按钮都会中招,
+  // 而 translate/scale/rotate 这三个独立属性按 translate → rotate → scale → transform
+  // 的次序合成,各按钮自己的 transform 原样保留。
+  const [pressed] = RULES.filter((rule) => ELEMENT_PRESSED.test(rule.selector));
+  assert.ok(pressed, "没有元素级 button:active 规则(上一条断言已解释后果)");
+  assert.equal(
+    declaredProperties(pressed.body).has("transform"),
+    false,
+    "全站按下态用了 transform 简写 —— 它会替换掉按钮自己的定位 transform"
+    + "(如 .answer-image-preview-step 的 translateY(-50%)),按下时控件会跳位甚至"
+    + "从指针底下挪走。改用 translate / scale 独立属性,它们与既有 transform 合成",
   );
 });
 
