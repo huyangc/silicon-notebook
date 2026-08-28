@@ -777,7 +777,7 @@ def _selected_notebook(
         _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id
 def _writable_notebook(
-    ctx: Context, repo: Any, scope: str
+    ctx: Context, repo: Any, scope: str, record: bool = True
 ) -> tuple[AgentPrincipal, str]:
     """``_selected_notebook`` plus the OWNER-ONLY write gate.
 
@@ -869,5 +869,8 @@ def _writable_notebook(
             "this write operation requires owning the notebook; the token "
             "owner only has read access here"
         )
-    _record_agent_call(repo, principal, notebook_id, scope)
+    # ``record=False`` 再往下传一层:``delete_source`` 在这道闸之后**还有**一道
+    # 鉴权(只许删 Agent 自己添加的资料),由它自己在那道闸之后记(codex #616 R6 P2)。
+    if record:
+        _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id

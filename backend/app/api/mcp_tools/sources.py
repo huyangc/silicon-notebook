@@ -29,6 +29,7 @@ from app.services.source_format_admission import (
 )
 
 from ._shared import (
+    _record_agent_call,
     _budget_response,
     _owner_request_context,
     _run_with_progress,
@@ -504,8 +505,11 @@ def register_source_tools(
     )
     async def delete_source(source_id: str, ctx: Context) -> dict[str, Any]:
         repo = repository_provider()
+        # ``record=False``:下面那条「只许删 Agent 自己添加的资料」是一道**鉴权**
+        # (它抛 PermissionError),而调用记账只记过了每一道鉴权的调用。记在这里
+        # 会让一次被拒的删除在记录里长得和删成功一模一样(codex #616 R6 P2)。
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _writable_notebook, ctx, repo, "sources:delete"
+            _writable_notebook, ctx, repo, "sources:delete", False
         )
 
         def run() -> dict[str, Any]:
@@ -537,6 +541,11 @@ def register_source_tools(
                         "this source was added by a user; an Agent token may "
                         "only delete sources that an Agent added"
                     )
+                # 每一道鉴权都过了才记账。⚠ 上面 ``_own_source`` 的「查不到」
+                # **不**在此列(见产品文档里那条划线):那不是「不许你做」,是
+                # 「这里没有这份资料」,而记账记的是「这个 Agent 对这个库发起过
+                # 这种调用」——那件事确实发生了。
+                _record_agent_call(repo, principal, notebook_id, "sources:delete")
                 # Synchronous. Safe against a CONCURRENT duplicate call:
                 # delete_source re-checks the row inside its write transaction
                 # (`source_exists_for_update_tx`), so the loser's destructive
