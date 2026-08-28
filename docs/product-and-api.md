@@ -1955,10 +1955,12 @@ remove, so `GET` always returns the ledger and `DELETE ...?kind=call` is accepte
 while the understanding feature is off (every other `DELETE` shape still 409s there,
 unchanged). The panel matches that: with the master gate off it still mounts the "Agent
 记录" section beside the "这项功能当前未开启。" line instead of returning early.
-Registered boundary: the panel's own ENTRY button follows `AGENT_PROFILE_ENABLED` too,
-so in a deployment that has the gate off the section is reachable only within an
-already-open panel — clearing there otherwise goes through the endpoint, which follows
-neither switch.
+In that state the section's clear-all button narrows itself to
+`kind=call` and renames accordingly, because a button that sends the un-narrowed
+`DELETE` there would be one the server is certain to refuse. Registered boundary: the
+panel's own ENTRY button follows `AGENT_PROFILE_ENABLED` too, so in a deployment that has
+the gate off the section is reachable only within an already-open panel — clearing there
+otherwise goes through the endpoint, which follows neither switch.
 
 A ledger row also carries the same member-removal compensation `add_observation` does:
 authorization and the write are two steps, so a member removed in between could leave an

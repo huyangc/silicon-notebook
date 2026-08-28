@@ -81,6 +81,7 @@ import {
   zeroHitCount,
   type AgentCall,
   type AgentObservation,
+  type AgentRecordKind,
   type UnderstandingBlock,
   type UnderstandingDraft,
   type UnderstandingJobStatus,
@@ -443,12 +444,18 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
     }
   }
 
+  // 总闸关掉时,这一节里能显示的**只有**调用记录(后端在那种状态下不回短句),
+  // 而不带 kind 的清空在那里必然 409。所以禁用态下这颗按钮只清调用记录,名字
+  // 也跟着改——一颗注定失败的按钮比没有按钮更糟(codex #616 R3 P2)。
+  const clearAllKind: AgentRecordKind | undefined = remoteDisabled ? "call" : undefined;
+  const clearAllLabel = remoteDisabled ? "清空调用记录" : "清空全部记录";
+
   async function clearAll() {
     setConfirmingAll(false);
     setClearingAll(true);
     setError("");
     try {
-      await clearAgentObservations(notebookId);
+      await clearAgentObservations(notebookId, undefined, clearAllKind);
       await load();
     } catch (err) {
       setError(toUserMessage(err, "没能清空，请稍后重试"));
@@ -612,7 +619,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
                   disabled={anyClearing}
                   onClick={() => { void clearAll(); }}
                 >
-                  {clearingAll ? "清空中…" : "确认清空全部记录"}
+                  {clearingAll ? "清空中…" : `确认${clearAllLabel}`}
                 </button>
                 <button
                   type="button"
@@ -630,7 +637,7 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
                 disabled={anyClearing}
                 onClick={() => setConfirmingAll(true)}
               >
-                清空全部记录
+                {clearAllLabel}
               </button>
             )}
           </div>
