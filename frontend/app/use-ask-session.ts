@@ -18,6 +18,7 @@ import {
 } from "./ask-api.ts";
 import {
   ASK_MODES,
+  AUTO_ASK_MODE,
   DEFAULT_ASK_MODE,
   groupOf,
   groupLabel,
@@ -228,6 +229,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
 
   const policyRef = useRef(policy);
   policyRef.current = policy;
+  const advancedRef = useRef(policy.advanced);
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
   const actorIdRef = useRef(actorId);
@@ -696,21 +698,17 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   useEffect(() => {
-    const replacement = !policy.advanced && mode === "graph"
-      ? "reasoning"
-      : !policy.advanced && mode.includes(".")
-        ? DEFAULT_ASK_MODE
-        : null;
-    if (replacement) {
-      modeChoiceVersionRef.current += 1;
-      modeRef.current = replacement;
-      setMode(replacement);
-    }
-  }, [policy.advanced, mode]);
-
-  useEffect(() => {
     abortIntentPreview();
   }, [conversationId, mode]);
+
+  useEffect(() => {
+    const wasAdvanced = advancedRef.current;
+    advancedRef.current = policy.advanced;
+    if (!wasAdvanced || policy.advanced) return;
+    const draft = askIntentDraftRef.current;
+    abortIntentPreview();
+    if (draft) setQuestion(draft);
+  }, [policy.advanced]);
 
   async function executeAsk(
     nextQuestion: string,
@@ -881,9 +879,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
-    const submitMode = !currentPolicy.advanced
-      ? (mode === "graph" ? "reasoning" : mode.includes(".") ? DEFAULT_ASK_MODE : mode)
-      : mode;
+    const submitMode = currentPolicy.advanced ? mode : AUTO_ASK_MODE;
     if (requiresKg(submitMode, askModesRef.current) && !currentPolicy.kgAvailable) {
       effectsRef.current.notify(`${groupLabel(groupOf(submitMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;

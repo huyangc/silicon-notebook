@@ -341,6 +341,32 @@ test("a deployment Ask engine uses the durable Ask stream and receives live plug
   expect(value!.turns[0]?.response.reasoning_trace?.[0]?.duration_ms).toBe(125);
 });
 
+test("simplified mode submits the backend auto selector without intent preview", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  api.runAskStream.mockResolvedValue({
+    ...answer("conversation-auto"),
+    mode: "reasoning",
+  });
+  render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+
+  // A stale advanced-mode choice must neither leak into the request nor be
+  // destroyed; the hidden surface delegates this turn to the backend.
+  act(() => value!.selectMode("graph"));
+  await act(async () => {
+    await value!.submit("请判断这个问题需要怎样分析");
+  });
+
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "请判断这个问题需要怎样分析",
+    mode: "auto",
+  });
+  expect(value!.mode).toBe("graph");
+  expect(value!.turns[0]?.response.mode).toBe("reasoning");
+});
+
 test("a failed Ask-mode projection retries on the next committed workspace", async () => {
   api.fetchAskModes
     .mockRejectedValueOnce(new Error("projection unavailable"))
@@ -1294,6 +1320,59 @@ test("intent confirmation reuses the exact preview scope snapshot", async () => 
   expect(payload.source_scope).toEqual(originalPolicy.sourceScope);
   expect(payload.base_scope).toEqual(originalPolicy.baseScope);
 });
+
+test.each(["preview", "review"] as const)(
+  "switching from advanced to automatic mode clears an intent %s and restores the draft",
+  async (phase) => {
+    const contract: QueryIntentContract = {
+      objective: "ambiguous",
+      resolved_question: "ambiguous",
+      intent_type: "other",
+      result_scope: "ranked",
+      completeness_required: false,
+      entities: [],
+      mandatory_topics: [],
+      comparison_axes: [],
+      constraints: [],
+      excluded_topics: [],
+      expected_output: "answer",
+      assumptions: [],
+      ambiguities: [{ id: "which", question: "Which one?", required: true }],
+      confidence: 0.5,
+      needs_clarification: true,
+      confirmed: false,
+    };
+    const preview = deferred<QueryIntentContract>();
+    api.previewAskIntent.mockReturnValue(preview.promise);
+    const view = render(<Harness />);
+    beginOwnedNotebook();
+    act(() => value!.selectMode("reasoning"));
+
+    let submission!: Promise<void>;
+    act(() => {
+      submission = value!.submit("draft question");
+    });
+    if (phase === "review") {
+      preview.resolve(contract);
+      await act(async () => submission);
+      expect(value!.intentReview).not.toBeNull();
+    } else {
+      expect(value!.intentChecking).toBe(true);
+    }
+
+    view.rerender(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+    expect(value!.intentChecking).toBe(false);
+    expect(value!.intentReview).toBeNull();
+    expect(value!.pendingQuestion).toBe("");
+    expect(value!.question).toBe("draft question");
+
+    if (phase === "preview") {
+      preview.resolve(contract);
+      await act(async () => submission);
+    }
+    expect(api.runAskStream).not.toHaveBeenCalled();
+  },
+);
 
 test("an old confirmed stream cannot idle a newer same-notebook clarification flow", async () => {
   const ambiguous = (label: string): QueryIntentContract => ({

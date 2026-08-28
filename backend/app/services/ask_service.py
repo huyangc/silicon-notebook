@@ -1082,6 +1082,7 @@ class AskService:
         """Understand a reasoning request before any corpus retrieval starts."""
         from app.services.query_intent import plan_query_intent
 
+        status: dict[str, bool] = {}
         contract = plan_query_intent(
             self.model_clients.chat("reasoning_agent"),
             question,
@@ -1089,8 +1090,13 @@ class AskService:
             max_topics=self.settings.reasoning_max_subqueries,
             purpose="step-by-step evidence-grounded answer",
             cancel_event=cancel_event,
+            status=status,
         )
-        return QueryIntentContract(**contract)
+        result = QueryIntentContract(**contract)
+        result._understanding_succeeded = status.get(
+            "understanding_succeeded", False
+        )
+        return result
 
     def validate_reasoning_submission(
         self, notebook_id: str, payload: AskRequest,

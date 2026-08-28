@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import get_settings
+from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
 from app.bootstrap import application_extension_runtime
 from app.domain.ask_engine import AskPluginEngineError
 
@@ -29,6 +30,7 @@ from app.models.source_scope import (
     SourceScope,
 )
 from app.models.ask import (
+    AskIntentConfirmation,
     AskIntentPreviewRequest,
     AskRequest,
     AskResponse,
@@ -53,12 +55,14 @@ from app.repositories.ports import (
 )
 from app.services.ask_modes import (
     ASK_MODES,
+    AUTO_MODE,
     UnknownAskMode,
     resolve_mode,
     user_facing_modes,
 )
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
+    auto_ask_mode_from_intent,
     finalize_query_intent,
     plan_query_intent,
 )
@@ -69,6 +73,7 @@ from app.services.conversation_public_view import (
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.source_scope import retrieval_scope_receipt_context
 from app.api.task_stream import (
+    ClosingStreamingResponse,
     NDJSON_STREAM_HEADERS,
     ndjson_line,
     task_stream_response,
@@ -96,7 +101,9 @@ def _extension_ask_modes():
 
 
 def _valid_ask_mode_ids() -> list[str]:
-    return [mode.id for mode in user_facing_modes(_extension_ask_modes())]
+    return [AUTO_MODE, *(
+        mode.id for mode in user_facing_modes(_extension_ask_modes())
+    )]
 
 
 def _plugin_engine_http_error(exc: AskPluginEngineError) -> HTTPException:
@@ -461,6 +468,46 @@ def _intent_history(repo, notebook_id: str, conversation_id: str | None,
     return "\n".join(lines)
 
 
+def _resolve_auto_ask_request(
+    repo,
+    notebook_id: str,
+    payload: AskRequest,
+    history: str = "",
+    cancel_event: threading.Event | None = None,
+):
+    """Resolve request-only ``mode=auto`` before durable state is created."""
+    question = payload.question.strip()
+    if not question:
+        spec = resolve_mode("chunk", _extension_ask_modes())
+        return payload.model_copy(update={"mode": spec.id}), spec
+    contract = repo.preview_reasoning_intent(
+        notebook_id,
+        question,
+        history,
+        cancel_event=cancel_event,
+    )
+    selected = auto_ask_mode_from_intent(contract)
+    # The classifier has a closed return contract, but the route still resolves
+    # through the canonical registry rather than trusting a model-adjacent value.
+    spec = resolve_mode(selected, _extension_ask_modes())
+    updates = {
+        "mode": spec.id,
+        # The simplified interface intentionally has no quality/cost control.
+        # Ignore values supplied by stale or direct clients and freeze the
+        # documented automatic-mode default before durable state is created.
+        "retrieval_effort": DEFAULT_RETRIEVAL_EFFORT,
+    }
+    if spec.id == "reasoning":
+        # Clear automatic-mode questions use the same model-produced contract
+        # as the advanced UI's clear-intent auto-confirm path.  This avoids a
+        # second understanding call and preserves its retrieval directions.
+        updates["intent"] = AskIntentConfirmation(
+            contract=contract,
+            resolved_question=contract.resolved_question,
+        )
+    return payload.model_copy(update=updates), spec
+
+
 @router.post(
     "/notebooks/{notebook_id}/ask/intent",
     response_model=QueryIntentContract,
@@ -654,20 +701,35 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         notebook = repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    # 先校验模式(422 malformed 请求),再查可用性(409 前置条件不满足),口径与 stream 一致。
-    try:
-        spec = resolve_mode(payload.mode, _extension_ask_modes())
-    except UnknownAskMode as exc:
-        raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode,
-            "valid": _valid_ask_mode_ids()})
-    _validate_confirmed_reasoning_intent(payload, spec)
+    # 先校验具名模式(422 malformed 请求),再查可用性(409 前置条件不满足),口径与
+    # stream 一致。auto 是请求级选择器,不是 registry engine；空库先 409，避免为
+    # 一次注定不能执行的请求花路由模型调用。
+    spec = None
+    if payload.mode != AUTO_MODE:
+        try:
+            spec = resolve_mode(payload.mode, _extension_ask_modes())
+        except UnknownAskMode as exc:
+            raise HTTPException(status_code=422, detail={
+                "error": "unknown ask mode", "mode": exc.mode,
+                "valid": _valid_ask_mode_ids()})
+        _validate_confirmed_reasoning_intent(payload, spec)
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
     )
     payload = _apply_resolved_scopes(
         payload, resolved_source_scope, resolved_base_scope
     )
+    if spec is None:
+        history = _intent_history(
+            repo,
+            notebook_id,
+            payload.conversation_id,
+            repo.current_user().id,
+        )
+        payload, spec = _resolve_auto_ask_request(
+            repo, notebook_id, payload, history
+        )
+        _validate_confirmed_reasoning_intent(payload, spec)
     try:
         # The whole synchronous ask runs inside this thread's context, so the
         # receipt reaches AskService's single answer-persistence seam.
@@ -770,6 +832,64 @@ async def _stream_ask_events(
         last_delivery = monotonic()
 
 
+async def _stream_auto_ask_events(
+    repo,
+    notebook_id: str,
+    payload: AskRequest,
+    history: str,
+    request: Request,
+    *,
+    scope_receipt: RetrievalScopeReceipt,
+):
+    """Keep the transport alive while the backend selects the Ask engine."""
+    cancel_event = threading.Event()
+    task = asyncio.create_task(asyncio.to_thread(
+        _resolve_auto_ask_request,
+        repo,
+        notebook_id,
+        payload,
+        history,
+        cancel_event,
+    ))
+    last_delivery = monotonic()
+    task_observed = False
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=0.05)
+            if task.done():
+                break
+            if await request.is_disconnected():
+                return
+            now = monotonic()
+            if now - last_delivery >= ASK_STREAM_HEARTBEAT_SECONDS:
+                yield "\n"
+                last_delivery = now
+        task_observed = True
+        routed_payload, spec = task.result()
+    except asyncio.CancelledError:
+        raise
+    except AskCancelled:
+        return
+    finally:
+        if not task.done():
+            cancel_event.set()
+        if not task_observed:
+            task.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception()
+            )
+
+    _validate_confirmed_reasoning_intent(routed_payload, spec)
+    async for line in _stream_ask_events(
+        repo,
+        notebook_id,
+        routed_payload,
+        spec,
+        request,
+        scope_receipt=scope_receipt,
+    ):
+        yield line
+
+
 @router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
 async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
     repo = repository()
@@ -777,19 +897,42 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         notebook = repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    try:
-        spec = resolve_mode(payload.mode, _extension_ask_modes())
-    except UnknownAskMode as exc:
-        raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode,
-            "valid": _valid_ask_mode_ids()})
-    _validate_confirmed_reasoning_intent(payload, spec)
+    spec = None
+    if payload.mode != AUTO_MODE:
+        try:
+            spec = resolve_mode(payload.mode, _extension_ask_modes())
+        except UnknownAskMode as exc:
+            raise HTTPException(status_code=422, detail={
+                "error": "unknown ask mode", "mode": exc.mode,
+                "valid": _valid_ask_mode_ids()})
+        _validate_confirmed_reasoning_intent(payload, spec)
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
     )  # 空库/空检索范围权威拒绝
     payload = _apply_resolved_scopes(
         payload, resolved_source_scope, resolved_base_scope
     )
+    if spec is None:
+        history = _intent_history(
+            repo,
+            notebook_id,
+            payload.conversation_id,
+            repo.current_user().id,
+        )
+        return ClosingStreamingResponse(
+            _stream_auto_ask_events(
+                repo,
+                notebook_id,
+                payload,
+                history,
+                request,
+                scope_receipt=_scope_receipt(
+                    notebook, resolved_source_scope, resolved_base_scope
+                ),
+            ),
+            media_type="application/x-ndjson",
+            headers=NDJSON_STREAM_HEADERS,
+        )
     return StreamingResponse(
         _stream_ask_events(
             repo, notebook_id, payload, spec, request,
