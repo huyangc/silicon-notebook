@@ -1,5 +1,6 @@
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import type { SchemaWriteOutcome } from "../../app/schema-manager.tsx";
 
 import type { NotebookSummary, PendingMerge, UnifiedGraphResp } from "../../app/workspace-model";
 
@@ -287,14 +288,14 @@ test("schema mutation rechecks live authority before its derived reload", async 
   act(() => value!.openSchemas());
   await waitFor(() => expect(knowledgeApi.listNotebookObjectSchemas).toHaveBeenCalledOnce());
 
-  let mutating!: Promise<boolean>;
+  let mutating!: Promise<SchemaWriteOutcome>;
   act(() => { mutating = value!.patchSchema("concept", { status: "active" }); });
   await waitFor(() => expect(knowledgeApi.updateNotebookObjectSchema).toHaveBeenCalledOnce());
   rerender(<Harness policy={{ ...writablePolicy, canManageNotebookSchemas: false }} />);
   await act(async () => pending.resolve());
-  // 权限在写入在飞期间被撤走：既不重新拉清单、也不报成功——回执必须是 false，
-  // 面板才不会把「已保存」画在一次其实没落地的写入上。
-  expect(await mutating).toBe(false);
+  // 权限在写入在飞期间被撤走：既不重新拉清单、也不报成功。回执是 `unconfirmed` 而不是
+  // `failed`——请求已经发出去了，这一格只是无从确认；说成失败会引着面板劝用户重试。
+  expect(await mutating).toBe("unconfirmed");
   expect(knowledgeApi.listNotebookObjectSchemas).toHaveBeenCalledTimes(1);
   expect(effects.notify).not.toHaveBeenCalledWith("类型已更新");
 });

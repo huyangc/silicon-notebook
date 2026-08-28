@@ -17,6 +17,7 @@ import {
   resolveCreatePrimary,
   saveActionLabel,
   schemaRowKey,
+  type SchemaWriteOutcome,
   splitFields,
   statusLabel,
   statusTone,
@@ -26,7 +27,7 @@ import {
 } from "./schema-manager-model.ts";
 import type { ObjectSchema } from "./workspace-model.ts";
 
-export type { SchemaView } from "./schema-manager-model.ts";
+export type { SchemaView, SchemaWriteOutcome } from "./schema-manager-model.ts";
 
 /**
  * 「图谱 Schema」面板。外层(page.tsx)负责浮动窗与标题栏,这里只管内容——同
@@ -59,12 +60,17 @@ type CreatePayload = {
 };
 
 /**
- * 写动作的回执:`true` 表示后端确实写成功、清单也已经重新拉回来。
+ * 写动作的回执(三值,定义见 `schema-manager-model.ts`)。
  *
  * 面板拿它决定两件不能靠猜的事:保存后要不要退回只读态、新增后要不要清空表单。
  * 拿不到回执就只能「反正大概成了」,那正是「新增失败却把输入清光」这类问题的来源。
+ * 而 `unconfirmed` 之所以不能并进 `failed`:那一档的写**已经落库**,只是没能确认;
+ * 说成失败会引着用户去重试,重试就撞重名。
  */
-type MutationOutcome = Promise<boolean>;
+type MutationOutcome = Promise<SchemaWriteOutcome>;
+
+/** 写已提交但没能确认时的说法。刻意不说「失败」,也刻意劝住重试。 */
+const UNCONFIRMED = "改动可能已经生效，但没能读回最新的类型清单。请关掉这个面板重新打开确认，不要直接重试。";
 
 type WorkbenchProps = {
   schemas: ObjectSchema[];
@@ -269,7 +275,7 @@ function SchemaWorkbench({
     setError("");
     setSubmittingKey(rowKey);
     try {
-      const ok = await onPatch(schema.object_type, {
+      const outcome = await onPatch(schema.object_type, {
         fields: splitFields(draft.fieldsText),
         label: draft.label,
         plural: draft.plural,
@@ -277,8 +283,8 @@ function SchemaWorkbench({
         list_fields: splitFields(draft.listFieldsText),
         description: draft.description,
       });
-      if (!ok) {
-        settle(rowKey, () => setError(failure));
+      if (outcome !== "confirmed") {
+        settle(rowKey, () => setError(outcome === "failed" ? failure : UNCONFIRMED));
         return;
       }
       // 草稿无条件丢掉:它已经落库,不再是「用户还没提交的输入」。退回只读态则要核对
@@ -304,7 +310,7 @@ function SchemaWorkbench({
     setSubmittingKey(CREATE_PANE);
     const objectType = createDraft.objectType.trim();
     try {
-      const ok = await onCreate({
+      const outcome = await onCreate({
         object_type: objectType,
         plural: createDraft.plural.trim() || `${objectType}s`,
         label: createDraft.label.trim(),
@@ -313,8 +319,8 @@ function SchemaWorkbench({
         list_fields: splitFields(createDraft.listFieldsText),
         description: createDraft.description.trim(),
       });
-      if (!ok) {
-        settle(CREATE_PANE, () => setError(failure));
+      if (outcome !== "confirmed") {
+        settle(CREATE_PANE, () => setError(outcome === "failed" ? failure : UNCONFIRMED));
         return;
       }
       setCreateDraft(EMPTY_CREATE_DRAFT);
@@ -338,9 +344,9 @@ function SchemaWorkbench({
     setError("");
     setSubmittingKey(rowKey);
     try {
-      const ok = await onDelete(schema.object_type);
-      if (!ok) {
-        settle(rowKey, () => setError(failure));
+      const outcome = await onDelete(schema.object_type);
+      if (outcome !== "confirmed") {
+        settle(rowKey, () => setError(outcome === "failed" ? failure : UNCONFIRMED));
         return;
       }
       dropDraft(rowKey);
@@ -366,9 +372,9 @@ function SchemaWorkbench({
     setError("");
     setSubmittingKey(rowKey);
     try {
-      const ok = await onPatch(schema.object_type, { status });
-      if (!ok) {
-        settle(rowKey, () => setError(failure));
+      const outcome = await onPatch(schema.object_type, { status });
+      if (outcome !== "confirmed") {
+        settle(rowKey, () => setError(outcome === "failed" ? failure : UNCONFIRMED));
         return;
       }
       settle(rowKey, () => setPane({ kind: "detail", key: nextKey, editing: false }));
