@@ -1937,16 +1937,27 @@ model prompt even if a future caller forgets it exists. Recording is keyed on th
 not the tool's name: the single choke point every notebook-scoped tool already passes
 through receives that scope as an argument it must supply to be admitted at all, so a
 newly added tool is recorded without its author doing anything — at the registered cost
-that two tools admitted under the same scope read back identically. Denied calls leave no
-trace (a ledger of *attempts by principals who were refused* is a different feature with
-different privacy consequences) — including calls refused by a LATER gate than the choke
-point's own. Two tools apply one: write tools add the owner-only check after
-`require_agent_access`, and `get_memory` requires `memory:read_candidates` before it will
-return a candidate. Both suppress the automatic record and book it themselves once their
-own gate has cleared, so the invariant is "recorded after EVERY gate", not "recorded at
-the choke point". (Registered edge: a `get_memory` for an id that resolves to nothing
-records nothing either — it returns before the gate is even reached, and the ledger books
-calls that reached this notebook's data, not ids someone tried.) A failing ledger write is swallowed and
+that two tools admitted under the same scope read back identically. Calls an AUTHORIZATION decision refused leave no
+trace — a ledger of *attempts by principals who were refused* is a different feature with
+different privacy consequences — and that holds for authorization decisions made AFTER
+the choke point too. Three exist, and each suppresses the automatic record and books it
+itself once its own gate clears: the owner-only check write tools add after
+`require_agent_access`, `get_memory`'s `memory:read_candidates` requirement for a
+candidate, and `delete_source`'s rule that an Agent token may only delete sources an
+Agent added. The invariant is therefore "recorded after every AUTHORIZATION gate", not
+"recorded at the choke point".
+
+**Registered line: a lookup outcome is not an authorization decision.** A call naming an
+id that does not exist, or one that belongs to a different notebook (`get_cited_element`,
+the knowhow reads, `get_source_status`, `delete_source`'s own not-found branch), still
+leaves a row. Two reasons, both deliberate. It is TRUE — the Agent did make that call
+against this notebook, and the ledger's question is "who is using this library and how",
+which a fumbled id answers as much as a successful one. And the alternative does not
+survive contact with the codebase: filtering on lookup outcomes would require every one
+of a dozen tools to remember to suppress and re-book its record, which is exactly the
+"a new tool silently logs nothing" failure the single choke point exists to prevent —
+whereas the three authorization gates above are a closed, enumerable set that lives in
+shared helpers or is named here. A failing ledger write is swallowed and
 logged as a content-free event (no exception text — the book-keeping about a call is not
 part of the call, and a database exception carries paths and SQL the logging rule keeps
 out).

@@ -4485,3 +4485,47 @@ async def test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row(
     assert [row["capability"] for row in calls] == ["memory:read"], (
         "被候选那道闸拒掉的读留了痕,或者成功的那次没记上"
     )
+
+
+@pytest.mark.anyio
+async def test_refused_delete_of_a_user_added_source_leaves_no_ledger_row(mcp_env):
+    """codex #616 R6 P2:「只许删 Agent 自己添加的资料」是一道**鉴权**(抛
+    PermissionError),被它拒掉的删除不能在记录里长得和删成功一模一样。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "user-added")  # 没有 agent 戳
+    token = _agent_token(mcp_env, _SOURCE_DELETE)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert (await client.call(
+            "delete_source", {"source_id": seeded["source_id"]}
+        )).isError
+
+    assert _source_row_exists(repo, seeded["source_id"])
+    calls = repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=50
+    )
+    assert "sources:delete" not in {row["capability"] for row in calls}
+
+
+@pytest.mark.anyio
+async def test_a_lookup_that_finds_nothing_still_leaves_a_ledger_row(mcp_env):
+    """已登记的划线(见产品文档):查不到**不是**鉴权。一次点名了不存在的 id 的
+    调用仍然留一行——这个 Agent 确实对这个库发起过这种调用,而记账回答的是
+    「谁在怎么用这个库」。反向钉住:别把这条线悄悄改成「按查不到也过滤」,那会
+    要求十来个工具每一个都记得先关掉再补记。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert (await client.call(
+            "get_source_status", {"source_id": "src-does-not-exist"}
+        )).isError
+
+    calls = repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=50
+    )
+    assert [row["capability"] for row in calls] == ["knowledge:read"]

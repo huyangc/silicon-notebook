@@ -174,3 +174,60 @@ def test_frontend_scope_options_equal_the_core_scope_vocabulary() -> None:
     frontend_scopes = re.findall(r'value:\s*"([a-z_]+:[a-z_]+)"', block)
     assert len(frontend_scopes) == len(set(frontend_scopes))
     assert set(frontend_scopes) == set(AGENT_SCOPES)
+
+
+def test_every_suppressed_ledger_record_is_re_booked_in_the_same_module() -> None:
+    """调用记账的抑制与补记必须成对出现。
+
+    「所有鉴权都过了才记」这条不变式的实现方式是:带后置鉴权的工具把收口的
+    自动记账关掉(``record=False``),自己在那道闸之后补记。危险的方向是**关掉
+    却忘了补**——那不会报任何错,只会让这条路径从此静默不记,而这正是单一收口
+    最初要消灭的失败形态(codex #616 R2/R5/R6 连着三轮都在这条线上)。
+
+    判据是构造性的:任何一个模块只要出现 ``record=False``(或以位置参数形式
+    传的 ``False``),同一模块里就必须出现 ``_record_agent_call`` 调用。反过来
+    不作要求——``_shared`` 自己就是那个收口。
+
+    覆盖边界(如实说明):本守卫不判断补记的**位置**是否真的在那道闸之后,那需要
+    控制流分析;位置由用例(``test_memory_mcp.py`` 里那几条「被拒不留痕」)与人工
+    评审保证。它只钉住「关掉了就必须补」。
+    """
+    tools_dir = Path(mcp_server.__file__).parent / "mcp_tools"
+    offenders = []
+    for path in sorted(tools_dir.glob("*.py")):
+        if path.name == "_shared.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        suppresses = False
+        rebooks = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+            # 判据是**调用**而不是名字出现过:只留一行 import 也算补记的话,
+            # 摘掉真正那次调用不会让这条守卫报红(自证时实测过)。
+            if target == "_record_agent_call":
+                rebooks = True
+            # 关键字形态:record=False
+            if any(
+                keyword.arg == "record"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is False
+                for keyword in node.keywords
+            ):
+                suppresses = True
+            # 位置形态:run_sync(_selected_notebook, ctx, repo, scope, False)
+            if target == "run_sync" and node.args:
+                first = getattr(node.args[0], "id", "")
+                if first in {"_selected_notebook", "_writable_notebook"} and any(
+                    isinstance(arg, ast.Constant) and arg.value is False
+                    for arg in node.args
+                ):
+                    suppresses = True
+        if suppresses and not rebooks:
+            offenders.append(path.name)
+    assert offenders == [], (
+        f"这些模块关掉了收口的自动记账却没有补记:{offenders}——"
+        "那条路径会从此静默不记,而且不会有任何东西报错"
+    )
