@@ -769,6 +769,28 @@ test("Agent 记录：调用记录那把开关关掉时说清「没开」，不�
   expect(screen.queryByText("还没有 Agent 调用过这个库")).not.toBeInTheDocument();
 });
 
+test("Agent 记录：开关关掉但已经记过的行照常显示，并且还能清", async () => {
+  // codex #616 R1 P2:关开关是「从现在起不记」。后端因此照常回读既有的行,
+  // 面板必须跟着它——否则一份用户有权删除的数据会变成他既看不到也删不掉的。
+  const user = userEvent.setup();
+  mockFetchObservations.mockResolvedValueOnce({
+    enabled: true,
+    items: [],
+    calls_enabled: false,
+    calls: [agentCall({ capability: "ask:execute" })],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("Agent 记录"));
+
+  expect(await screen.findByText("提问")).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "清空这个 Agent 的调用记录" }),
+  ).toBeEnabled();
+  // 「没开」那句话只在真的没有行可显示时才顶上来。
+  expect(screen.queryByText("这个部署没有开启调用记录")).not.toBeInTheDocument();
+});
+
 test("Agent 记录：清空某个 Agent 的调用记录只带 call，不动它写下的线索", async () => {
   const user = userEvent.setup();
   mockFetchObservations.mockResolvedValueOnce({

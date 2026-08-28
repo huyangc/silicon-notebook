@@ -1939,8 +1939,21 @@ through receives that scope as an argument it must supply to be admitted at all,
 newly added tool is recorded without its author doing anything — at the registered cost
 that two tools admitted under the same scope read back identically. Denied calls leave no
 trace (a ledger of *attempts by principals who were refused* is a different feature with
-different privacy consequences), and a failing ledger write is swallowed and logged: the
-book-keeping about a call is not part of the call. `GET .../agent-observations` returns
+different privacy consequences) — including calls refused by the SECOND gate: the
+owner-only check that write tools apply after `require_agent_access`, so recording for
+those runs only once that gate has cleared too. A failing ledger write is swallowed and
+logged as a content-free event (no exception text — the book-keeping about a call is not
+part of the call, and a database exception carries paths and SQL the logging rule keeps
+out).
+
+Recording is layered **under** `AGENT_PROFILE_ENABLED`, not independent of it: this
+ledger's only reader is a panel whose entry button does not render while that gate is
+off, so recording then would accumulate rows nobody can open. Reading and clearing an
+existing ledger, by contrast, follow **neither** switch — a switch flipped today must
+never turn data a member is entitled to delete into something they can neither see nor
+remove, so `GET` always returns the ledger and `DELETE ...?kind=call` is accepted even
+while the understanding feature is off (every other `DELETE` shape still 409s there,
+unchanged). `GET .../agent-observations` returns
 the ledger as its own `calls` list with its own `call_limit` (default 20, capped at 200)
 rather than mixing kinds into `items` — under one shared limit a busy Agent's ledger could
 push every hand-written note out of the response. `calls_enabled` reports the

@@ -686,7 +686,7 @@ REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每�
 AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）
 AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpus_gaps）重新巡固前累计的来源变更次数（默认 5）
 AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）
-AGENT_CALL_LOG_ENABLED       # Agent 每次经 MCP 落到某个笔记本上的工具调用记一行（哪个 Agent、什么时候、按哪一档能力），只有该成员自己能在「Agent 记录」里查看与清空（默认 true；false 时零写入——判据在开事务之前——且不删已经记下的行，因为关开关是「从现在起不记」而不是「把记过的抹掉」）。与 AGENT_PROFILE_ENABLED 刻意分开：那把闸管的是一条会花模型调用、会影响回答的链路，这条只是把已经发生的调用记一笔账，既不进 prompt（巡固读取在 SQL 里钉死 kind='note'），也不触发任何巡固
+AGENT_CALL_LOG_ENABLED       # Agent 每次经 MCP 落到某个笔记本上的工具调用记一行（哪个 Agent、什么时候、按哪一档能力），只有该成员自己能在「Agent 记录」里查看与清空（默认 true；false 时零写入，判据在开事务之前）。**叠在 AGENT_PROFILE_ENABLED 之上**而不是与它并列：这份记账唯一的读处就是那个面板，而总闸关掉时它的入口按钮一个节点都不渲染，所以总闸关着还记就是在攒没人打开得了的行。读与清空**两把闸都不跟随**——关掉它是「从现在起不记」，绝不是「把已经记下的藏起来或冻住」。记账仍然既不进 prompt（巡固读取在 SQL 里钉死 kind='note'），也不触发任何巡固
 RETRIEVAL_EXPERIENCE_ENABLED # 部署级全局检索策略经验库（Agentic Memory P2）的蒸馏总闸：是否读取已完成提问并蒸馏进 retrieval_experiences（默认 true——部署可以只蒸馏、只观测而从不注入，见下面的 RETRIEVAL_EXPERIENCE_INJECT_ENABLED）
 RETRIEVAL_EXPERIENCE_INJECT_ENABLED # 同一份经验库的独立注入闸：蒸出的块是否会被加进 plan/reflect prompt（默认 **false**——先攒够观测数据再决定是否开启；关闭时在注入侧逐字等于该特性不存在：不读表、不拼块、不记 trace 步）
 REASONING_CONSULT_MEMORY_ENABLED # consult_memory reflect 动作（Agentic Memory P4）的按场景 kill switch（纵深防御）；这个动作真正的可用性闸是「retrieval_effort 为 deep/thorough/exhaustive 之一 且 RETRIEVAL_EXPERIENCE_INJECT_ENABLED 也开着」——单独把这个开关打开、注入闸仍关着时，动作不会出现（默认 true）

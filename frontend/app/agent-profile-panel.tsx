@@ -481,10 +481,6 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
           <p className="understanding-note is-error" role="alert">{error}</p>
         ) : null}
         {loading && items === null ? <p className="understanding-note">加载中…</p> : null}
-        {remoteDisabled ? (
-          <p className="understanding-empty">该功能已在此部署关闭</p>
-        ) : (
-          <>
         {/* ——— 小节一:Agent 调用这个库的记账 ———
             放在写下的线索**之前**,因为它才是「这个库被谁在用」的直接答案;
             线索是 Agent 自己额外留下的话,数量少得多,也更偏注解。 */}
@@ -498,9 +494,15 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
           <p className="understanding-module-hint">
             Agent 每次通过接口用到这个库，都会在这里记一笔：哪个 Agent、什么时候、做了什么。只有你能看到。
           </p>
-          {!callsEnabled ? (
+          {/* 关掉开关 ≠ 抹掉记过的。三种态各说各的话:没开且没有行(空态)、
+              没开但此前记过(照常列出,并说清不再新增)、开着但还没人来过。 */}
+          {!callsEnabled && (calls?.length ?? 0) === 0 ? (
             <p className="understanding-empty">这个部署没有开启调用记录</p>
-          ) : calls !== null && calls.length === 0 ? (
+          ) : null}
+          {!callsEnabled && (calls?.length ?? 0) > 0 ? (
+            <p className="understanding-note">这个部署已经不再记录，下面是此前记下的</p>
+          ) : null}
+          {callsEnabled && calls !== null && calls.length === 0 ? (
             <p className="understanding-empty">还没有 Agent 调用过这个库</p>
           ) : null}
           {/* 与下面那份线索清单同一条口径:取满上限时必须说清「还有更早的没显示」,
@@ -558,7 +560,9 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
             外部 Agent 通过接口写下的使用线索。它们只会用来更新你自己的「我的检索心得」，不会进入回答，也不会被引用。
           </p>
         {items !== null && items.length === 0 ? (
-          <p className="understanding-empty">暂无 Agent 记录</p>
+          <p className="understanding-empty">
+            {remoteDisabled ? "该功能已在此部署关闭" : "暂无 Agent 记录"}
+          </p>
         ) : null}
         {/* 服务端按最近 `AGENT_OBSERVATION_SAMPLE_MAX` 条取数(见该常量注释里的
             镜像关系)、不分页、也不回传取了多少——`items.length` 恰好等于这个
@@ -631,8 +635,6 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
             )}
           </div>
         ) : null}
-          </>
-        )}
       </div>
     </details>
   );

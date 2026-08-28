@@ -373,11 +373,12 @@ def test_calls_are_owner_scoped_like_observations(tmp_path, monkeypatch):
     assert [row["capability"] for row in reader_calls] == ["knowledge:read"]
 
 
-def test_call_log_switch_off_reports_itself_instead_of_an_empty_list(
+def test_call_log_switch_off_still_shows_and_clears_what_was_recorded(
     tmp_path, monkeypatch
 ):
-    """关掉开关时,空清单必须带着「这个部署不记调用」的说明上屏——否则用户会
-    把它读成「没有 Agent 来过这个库」。"""
+    """关掉开关只是「从现在起不记」。已经记下的行必须照常看得见、删得掉——
+    否则一份用户有权删除的数据会因为管理员翻了个开关变成他既看不到也删不掉的
+    东西(codex #616 R1 P2)。``calls_enabled`` 负责说清「这里不再记了」。"""
     monkeypatch.setenv("AGENT_CALL_LOG_ENABLED", "false")
     client = _client(tmp_path, monkeypatch)
     owner, owner_id = _new_user(client)
@@ -389,9 +390,60 @@ def test_call_log_switch_off_reports_itself_instead_of_an_empty_list(
         f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
     ).json()
     assert body["calls_enabled"] is False
-    assert body["calls"] == []
-    # 已经记下的行不会被删——关开关是「从现在起不记」。
+    assert [row["capability"] for row in body["calls"]] == ["ask:execute"]
     assert body["enabled"] is True
+
+    cleared = client.delete(
+        f"/api/notebooks/{notebook_id}/agent-observations",
+        params={"kind": "call"},
+        headers=owner,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {"removed": 1}
+
+
+def test_call_ledger_stays_readable_and_clearable_while_the_master_gate_is_off(
+    tmp_path, monkeypatch
+):
+    """总闸关掉之后不再记新行(写侧叠在它之上),但既有的行仍然要能看、能清。
+    只清调用记录那一支放行;其它形态的 DELETE 在这里照旧 409(既有契约)。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    agent_a, _ = _seed_observation(notebook_id, owner_id, agent_name="巡检助手")
+    _seed_call(notebook_id, owner_id, agent_a, "ask:execute")
+
+    # 造好数据之后再关总闸——模拟「先记了一批,后来才关」。设置缓存要显式失效,
+    # 否则读到的还是建客户端那一刻的快照;``finally`` 里再清一次,免得这份
+    # 「关掉」的快照漏给同一个 worker 后面的用例。
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
+    get_settings.cache_clear()
+    try:
+        body = client.get(
+            f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+        ).json()
+        assert body["enabled"] is False
+        assert body["items"] == []
+        assert [row["capability"] for row in body["calls"]] == ["ask:execute"]
+
+        # 会碰到短句的清空仍然 409。
+        blocked = client.delete(
+            f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+        )
+        assert blocked.status_code == 409, blocked.text
+
+        cleared = client.delete(
+            f"/api/notebooks/{notebook_id}/agent-observations",
+            params={"kind": "call"},
+            headers=owner,
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json() == {"removed": 1}
+    finally:
+        monkeypatch.setenv("AGENT_PROFILE_ENABLED", "true")
+        get_settings.cache_clear()
 
 
 def test_clear_kind_narrows_and_unknown_kind_is_rejected(tmp_path, monkeypatch):
