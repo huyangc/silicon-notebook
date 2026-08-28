@@ -162,3 +162,31 @@ test("同一个目标被重复复制：结果不闪回 idle，保持为真", asy
   expect(again).toHaveClass("copy-result-copied");
   expect(screen.queryByRole("button", { name: "复制链接" })).toBeNull();
 });
+
+test("取消分享再分享后，新链接不顶着旧链接的「已复制」", async () => {
+  // codex #612 R5 P2。这颗按钮的 key 只认得报告 id——token 由 use-report-workspace 在点击时
+  // 现取，渲染时视图手里没有。于是 1.6s 停留期内「取消分享 → 再分享」发出的**新** token
+  // 会顶着旧链接的「已复制」出现，而它根本没被复制过；若 toggleShare 顺带做的那次自动复制
+  // 还失败了，按钮就在说反话。`shared` 翻面是「链接身份换了」唯一的信号。
+  const user = userEvent.setup();
+  const view = (shared: boolean) => (
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ active: DONE_REPORT, shared, copyShareLink: async () => true })}
+      setToast={vi.fn()}
+    />
+  );
+  const { rerender } = render(view(true));
+
+  await user.click(screen.getByRole("button", { name: "复制链接" }));
+  expect(await screen.findByRole("button", { name: "已复制" })).toHaveClass("copy-result-copied");
+
+  // 取消分享：按钮整颗卸载。
+  rerender(view(false));
+  expect(screen.queryByRole("button", { name: "已复制" })).toBeNull();
+
+  // 1.6s 还没到就再分享——后端发的是另一条链接，它没被复制过。
+  rerender(view(true));
+  expect(screen.getByRole("button", { name: "复制链接" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "已复制" })).toBeNull();
+});

@@ -1228,6 +1228,12 @@ export function ReportsPanel({
   // key 带上报告 id:结果要挂 1.6s,期间在报告之间切换会让同一颗按钮指向**另一份**报告,
   // 固定串会让新报告顶着上一份的「已复制」出现(codex #612 R2 P2)。
   const copyResult = useCopyResult();
+  // 「取消分享 → 再分享」会发一个**新** token,而这颗按钮的 key 只认得报告 id(token 由
+  // use-report-workspace 在点击时现取,渲染时视图手里没有),于是 1.6s 停留期内新链接会
+  // 顶着旧链接的「已复制」出现——而那条链接根本没被复制过;若 toggleShare 顺带做的那次
+  // 自动复制还失败了,按钮就在说反话(codex #612 R5 P2)。`shared` 翻面是「链接身份换了」
+  // 唯一的信号(换 token 必经 shared:false),在它上面清掉结果。
+  useEffect(() => { copyResult.reset(); }, [shared, copyResult.reset]);
   // ---- 详情视图 ----
   if (active) {
     const displayQuestion = active.understanding?.confirmed
