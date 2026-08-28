@@ -154,14 +154,42 @@ test("弹窗体定高,两栏才分得到确定高度各自滚动", () => {
   assert.match(
     body,
     /(^|[\s;])height:\s*min\(/,
-    "只写 max-height 时那条 1fr 行会退回内容高,清单栏底部的写入口会被裁掉",
+    "只写 max-height 时可伸缩的那一格会退回内容高,清单栏底部的写入口会被裁掉",
   );
-  assert.match(body, /grid-template-rows:\s*minmax\(0,\s*1fr\)/);
   assert.match(body, /overflow:\s*hidden/);
   assert.match(
     ruleBody(".schema-list"),
     /grid-template-rows:\s*minmax\(0,\s*1fr\)\s+auto/,
     "清单自己滚、底部动作区不参与压缩",
+  );
+});
+
+test("竖排容器不按子项个数排版——作用范围那一行只有管理员看得到", () => {
+  // 真实缺陷:`.schema-panel` 曾写 `grid-template-rows: auto auto minmax(0, 1fr)`,
+  // 默认「作用范围 + 说明 + 工作区」三个子项。普通库主看不到作用范围那一行,于是整体
+  // 错一格:工作区落到第二条 auto 上按内容定高,`1fr` 那行空着没人用,类型一多就把栏底
+  // 唯一的写入口顶出 `overflow: hidden`(codex #614 R3 P1)。右栏 `.schema-detail` 早先
+  // 因为空态没有栏头踩过同一个坑。判据因此钉在**机制**上而不是某一组行数:这两个容器
+  // 必须是 flex 竖排,并且由「谁吃剩余高度」自己声明,而不是由它排在第几行决定。
+  for (const selector of [".schema-modal-body", ".schema-panel", ".schema-detail"]) {
+    const declarations = ruleBody(selector);
+    assert.match(declarations, /display:\s*flex/, `${selector} 必须是 flex 竖排`);
+    assert.match(declarations, /flex-direction:\s*column/, selector);
+    assert.doesNotMatch(
+      declarations,
+      /grid-template-rows/,
+      `${selector} 不得按行数排版 —— 子项个数随权限变化`,
+    );
+  }
+  assert.match(
+    ruleBody(".schema-panel"),
+    /flex:\s*1\s+1\s+auto/,
+    ".schema-panel 要吃满弹窗体的剩余高度",
+  );
+  assert.match(
+    ruleBody(".schema-workbench"),
+    /flex:\s*1\s+1\s+auto/,
+    "工作区是面板里那个吃剩余高度的格子;少了它,两栏拿不到确定高度",
   );
 });
 

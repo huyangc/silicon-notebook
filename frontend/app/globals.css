@@ -5395,9 +5395,9 @@ button.chat-session-card {
 /* 不复用 `.source-detail-body`：那一条是"整块一起滚"，两栏版式下会让左侧清单跟着
    右侧长表单一起滚走。这里由两栏**各自**滚，栏头与栏底动作区始终在原位。 */
 .schema-modal-body {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr);
-  /* 定高而不是 max-height：两栏各自滚动要求父容器有确定高度，否则 `1fr` 行会退回
+  display: flex;
+  flex-direction: column;
+  /* 定高而不是 max-height：两栏各自滚动要求父容器有确定高度，否则可伸缩的那一格会退回
      内容高、把清单和右栏一起顶出 `overflow: hidden` 的裁切线（栏底那排「新增类型」
      首当其冲——它正是这个面板唯一的写入口）。定高的附带好处是切换只读/编辑/新增时
      弹窗不再忽高忽低，拖动窗口的位置也就不会跟着跳。 */
@@ -5407,14 +5407,24 @@ button.chat-session-card {
   padding: 20px 22px 22px;
 }
 
+/* flex 而不是写死行数的 grid —— 这一片竖排容器一律用 flex，理由是同一条：子项个数是
+   有条件的。作用范围那一行只有管理员看得到，`grid-template-rows: auto auto minmax(0, 1fr)`
+   于是在普通库主那里整体错一格：说明文字占掉第一条 auto、工作区占掉第二条 auto，而那条
+   本该吃满剩余高度的 `1fr` 空着没人用。工作区随即按内容定高，类型一多就把栏底的「新增
+   类型」/「从当前笔记本归纳候选类型」顶出上面那条 `overflow: hidden` 的裁切线——普通库主
+   够不着这个面板唯一的写入口（codex #614 R3 P1）。flex 里没有「第几行」这回事：谁写
+   `flex: 1` 谁吃剩余高度，少一个兄弟也不会错位。右栏 `.schema-detail` 早先因为空态没有
+   栏头踩过同一个坑，那次也是换成 flex 收的——同一条教训两次，所以写在这里。 */
 .schema-panel {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   min-height: 0;
 }
 
 .schema-scope {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -5428,11 +5438,13 @@ button.chat-session-card {
 }
 
 .schema-panel > .tool-hint {
+  flex: 0 0 auto;
   margin: 0;
   font-size: 13px;
 }
 
 .schema-workbench {
+  flex: 1 1 auto;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   min-height: 0;
@@ -5867,17 +5879,14 @@ code.schema-detail-name {
    下半段的定义要翻很久才够得着。 */
 @media (max-width: 900px) {
   .schema-modal-body {
-    grid-template-rows: auto;
     height: auto;
     max-height: min(660px, 76vh);
     overflow-y: auto;
   }
 
-  .schema-panel {
-    grid-template-rows: auto auto auto;
-  }
-
+  /* 整块面板一起滚，所以工作区按内容定高，不再抢剩余高度。 */
   .schema-workbench {
+    flex: 0 0 auto;
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto;
   }
