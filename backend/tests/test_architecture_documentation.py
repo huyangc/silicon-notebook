@@ -288,18 +288,18 @@ def test_development_docs_own_current_schema_migration_rules():
         f"The current schema version is {SCHEMA_VERSION}",
         "_migration_N",
         "SCHEMA_VERSION",
-        "SQLite v58 / PostgreSQL v36",
+        "SQLite v59 / PostgreSQL v37",
         "indexing_pipeline_stages",
-        "PostgreSQL 37",
+        "PostgreSQL 38",
     ):
         assert phrase in english
     for phrase in (
         f"当前 schema 版本为 {SCHEMA_VERSION}",
         "_migration_N",
         "SCHEMA_VERSION",
-        "SQLite v58 / PostgreSQL v36",
+        "SQLite v59 / PostgreSQL v37",
         "indexing_pipeline_stages",
-        "PostgreSQL v37",
+        "PostgreSQL v38",
     ):
         assert phrase in chinese
 

@@ -23,7 +23,14 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.ports import AGENT_OBSERVATION_RING_MAX, project_observation_row
+from app.repositories.ports import (
+    AGENT_CALL_RING_MAX,
+    AGENT_OBSERVATION_KIND_CALL,
+    AGENT_OBSERVATION_KIND_NOTE,
+    AGENT_OBSERVATION_RING_MAX,
+    project_call_row,
+    project_observation_row,
+)
 
 
 class AgentObservationStore:
@@ -98,7 +105,8 @@ class AgentObservationStore:
         insert_sql = (
             "INSERT INTO agent_observations "
             "(id,notebook_id,owner_id,agent_profile_id,text,"
-            "client_request_id,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "client_request_id,created_at,kind) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (notebook_id,owner_id,agent_profile_id,"
             "client_request_id) WHERE client_request_id IS NOT NULL "
             "DO NOTHING"
@@ -111,6 +119,7 @@ class AgentObservationStore:
             text,
             request_id,
             now,
+            AGENT_OBSERVATION_KIND_NOTE,
         )
         select_sql = (
             "SELECT id FROM agent_observations WHERE notebook_id=%s "
@@ -147,21 +156,100 @@ class AgentObservationStore:
                     )
             if not won:
                 return str(row["id"]), True
-            connection.execute(
-                "DELETE FROM agent_observations WHERE notebook_id=%s "
-                "AND owner_id = %s AND id NOT IN ("
-                "SELECT id FROM agent_observations WHERE notebook_id=%s "
-                'AND owner_id = %s ORDER BY created_at DESC, '
-                'id COLLATE "C" DESC LIMIT %s)',
-                (
-                    notebook_id,
-                    owner_id,
-                    notebook_id,
-                    owner_id,
-                    AGENT_OBSERVATION_RING_MAX,
-                ),
+            self._evict(
+                connection,
+                notebook_id,
+                owner_id,
+                kind=AGENT_OBSERVATION_KIND_NOTE,
+                ring_max=AGENT_OBSERVATION_RING_MAX,
             )
         return observation_id, False
+
+    def _evict(
+        self,
+        connection,
+        notebook_id: str,
+        owner_id: str,
+        *,
+        kind: str,
+        ring_max: int,
+    ) -> None:
+        """Trim ONE ``(notebook_id, owner_id, kind)`` group to its own ring
+        bound, inside the caller's already-open write transaction and under
+        the caller's already-held advisory lock.
+
+        ``kind`` must appear in BOTH the outer DELETE and the inner survivor
+        SELECT — see the SQLite mirror's ``_evict`` for the two distinct
+        data-loss shapes that dropping it from either one produces.
+        """
+        connection.execute(
+            "DELETE FROM agent_observations WHERE notebook_id=%s "
+            "AND owner_id = %s AND kind = %s AND id NOT IN ("
+            "SELECT id FROM agent_observations WHERE notebook_id=%s "
+            'AND owner_id = %s AND kind = %s ORDER BY created_at DESC, '
+            'id COLLATE "C" DESC LIMIT %s)',
+            (
+                notebook_id,
+                owner_id,
+                kind,
+                notebook_id,
+                owner_id,
+                kind,
+                ring_max,
+            ),
+        )
+
+    def append_call(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        agent_profile_id: str,
+        *,
+        capability: str,
+    ) -> str:
+        """See the port docstring for the full contract. This backend's
+        specifics:
+
+        ``client_request_id`` is written as SQL NULL, so this INSERT touches
+        no unique surface and needs neither ``ON CONFLICT`` nor the losing-
+        writer re-read dance ``append_observation`` carries. The advisory
+        lock is still taken, on the SAME key: it serialises INSERT+eviction
+        for this ``(notebook, owner)`` pair, and two concurrent writers each
+        computing a survivor list from their own pre-commit snapshot is
+        exactly the over-retention race that lock exists for — the kinds
+        differ but the group's rows are trimmed by the same shape of
+        statement.
+        """
+        now = self.now()
+        call_id = self.new_id("acl")
+        with self.database.write() as connection:
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"agent-observations:{notebook_id}:{owner_id}",),
+            )
+            connection.execute(
+                "INSERT INTO agent_observations "
+                "(id,notebook_id,owner_id,agent_profile_id,text,"
+                "client_request_id,created_at,kind) "
+                "VALUES (%s,%s,%s,%s,%s,NULL,%s,%s)",
+                (
+                    call_id,
+                    notebook_id,
+                    owner_id,
+                    agent_profile_id,
+                    capability,
+                    now,
+                    AGENT_OBSERVATION_KIND_CALL,
+                ),
+            )
+            self._evict(
+                connection,
+                notebook_id,
+                owner_id,
+                kind=AGENT_OBSERVATION_KIND_CALL,
+                ring_max=AGENT_CALL_RING_MAX,
+            )
+        return call_id
 
     def recent_observations(
         self, notebook_id: str, owner_id: str, *, limit: int
@@ -170,9 +258,14 @@ class AgentObservationStore:
             rows = connection.execute(
                 "SELECT id, agent_profile_id, text, created_at "
                 "FROM agent_observations WHERE notebook_id=%s "
-                'AND owner_id = %s ORDER BY created_at DESC, '
+                'AND owner_id = %s AND kind = %s ORDER BY created_at DESC, '
                 'id COLLATE "C" DESC LIMIT %s',
-                (notebook_id, owner_id, max(0, int(limit))),
+                (
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_KIND_NOTE,
+                    max(0, int(limit)),
+                ),
             ).fetchall()
         return [
             project_observation_row(
@@ -194,9 +287,14 @@ class AgentObservationStore:
             rows = connection.execute(
                 "SELECT id, agent_profile_id, text, created_at "
                 "FROM agent_observations WHERE notebook_id=%s "
-                'AND owner_id = %s ORDER BY created_at DESC, '
+                'AND owner_id = %s AND kind = %s ORDER BY created_at DESC, '
                 'id COLLATE "C" DESC LIMIT %s',
-                (notebook_id, owner_id, max(0, int(limit))),
+                (
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_KIND_NOTE,
+                    max(0, int(limit)),
+                ),
             ).fetchall()
         return [
             project_observation_row(
@@ -208,21 +306,57 @@ class AgentObservationStore:
             for row in rows
         ]
 
+    def list_calls(
+        self, notebook_id: str, owner_id: str, *, limit: int
+    ) -> list[dict]:
+        # Same query as the two reads above with ``kind`` flipped, projected
+        # through ``project_call_row`` — a call row's ``text`` column holds a
+        # capability scope and must never reach a reader as ``text``.
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, agent_profile_id, text, created_at "
+                "FROM agent_observations WHERE notebook_id=%s "
+                'AND owner_id = %s AND kind = %s ORDER BY created_at DESC, '
+                'id COLLATE "C" DESC LIMIT %s',
+                (
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_KIND_CALL,
+                    max(0, int(limit)),
+                ),
+            ).fetchall()
+        return [
+            project_call_row(
+                row["id"],
+                row["agent_profile_id"],
+                row["text"],
+                iso_timestamp(row["created_at"]),
+            )
+            for row in rows
+        ]
+
     def clear_observations(
-        self, notebook_id: str, owner_id: str, *, agent_profile_id: str = ""
+        self,
+        notebook_id: str,
+        owner_id: str,
+        *,
+        agent_profile_id: str = "",
+        kind: str = "",
     ) -> int:
         profile = str(agent_profile_id or "")
+        # Assembled from the narrowings actually supplied, mirroring the
+        # SQLite implementation, so no combination needs its own statement.
+        clauses = ["notebook_id=%s", "owner_id=%s"]
+        params: list[object] = [notebook_id, owner_id]
+        if profile:
+            clauses.append("agent_profile_id=%s")
+            params.append(profile)
+        if kind:
+            clauses.append("kind=%s")
+            params.append(str(kind))
         with self.database.write() as connection:
-            if profile:
-                cursor = connection.execute(
-                    "DELETE FROM agent_observations WHERE notebook_id=%s "
-                    "AND owner_id=%s AND agent_profile_id=%s",
-                    (notebook_id, owner_id, profile),
-                )
-            else:
-                cursor = connection.execute(
-                    "DELETE FROM agent_observations WHERE notebook_id=%s "
-                    "AND owner_id=%s",
-                    (notebook_id, owner_id),
-                )
+            cursor = connection.execute(
+                "DELETE FROM agent_observations WHERE " + " AND ".join(clauses),
+                tuple(params),
+            )
         return cursor.rowcount

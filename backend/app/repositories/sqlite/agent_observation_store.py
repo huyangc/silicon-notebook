@@ -15,7 +15,14 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
-from app.repositories.ports import AGENT_OBSERVATION_RING_MAX, project_observation_row
+from app.repositories.ports import (
+    AGENT_CALL_RING_MAX,
+    AGENT_OBSERVATION_KIND_CALL,
+    AGENT_OBSERVATION_KIND_NOTE,
+    AGENT_OBSERVATION_RING_MAX,
+    project_call_row,
+    project_observation_row,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 # Absolute-instant ordering, matching the ``conversations`` table's own
@@ -115,7 +122,7 @@ class AgentObservationStore:
                 db.execute(
                     "INSERT INTO agent_observations "
                     "(id,notebook_id,owner_id,agent_profile_id,text,"
-                    "client_request_id,created_at) VALUES (?,?,?,?,?,?,?)",
+                    "client_request_id,created_at,kind) VALUES (?,?,?,?,?,?,?,?)",
                     (
                         observation_id,
                         notebook_id,
@@ -124,6 +131,7 @@ class AgentObservationStore:
                         text,
                         request_id,
                         now,
+                        AGENT_OBSERVATION_KIND_NOTE,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -136,20 +144,95 @@ class AgentObservationStore:
                 if existing is not None:
                     return str(existing["id"]), True
                 raise
-            db.execute(
-                "DELETE FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? AND id NOT IN ("
-                "SELECT id FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? " + AGENT_OBSERVATIONS_ORDER_DESC + " LIMIT ?)",
-                (
-                    notebook_id,
-                    owner_id,
-                    notebook_id,
-                    owner_id,
-                    AGENT_OBSERVATION_RING_MAX,
-                ),
+            self._evict(
+                db,
+                notebook_id,
+                owner_id,
+                kind=AGENT_OBSERVATION_KIND_NOTE,
+                ring_max=AGENT_OBSERVATION_RING_MAX,
             )
         return observation_id, False
+
+    def _evict(
+        self,
+        db: sqlite3.Connection,
+        notebook_id: str,
+        owner_id: str,
+        *,
+        kind: str,
+        ring_max: int,
+    ) -> None:
+        """Trim ONE ``(notebook_id, owner_id, kind)`` group down to its own
+        ring bound, inside the caller's already-open write transaction.
+
+        ⚠ ``kind`` appears in BOTH the outer DELETE and the inner survivor
+        SELECT, and dropping it from either one is a silent data-loss bug in
+        a different direction: missing from the DELETE, a note gets evicted
+        because too many CALLS arrived; missing from the SELECT, the survivor
+        set is computed across both kinds, so the newest N rows may be all
+        calls and the DELETE then removes every note in the group.
+        """
+        db.execute(
+            "DELETE FROM agent_observations WHERE notebook_id=? "
+            "AND owner_id = ? AND kind=? AND id NOT IN ("
+            "SELECT id FROM agent_observations WHERE notebook_id=? "
+            "AND owner_id = ? AND kind=? "
+            + AGENT_OBSERVATIONS_ORDER_DESC
+            + " LIMIT ?)",
+            (
+                notebook_id,
+                owner_id,
+                kind,
+                notebook_id,
+                owner_id,
+                kind,
+                ring_max,
+            ),
+        )
+
+    def append_call(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        agent_profile_id: str,
+        *,
+        capability: str,
+    ) -> str:
+        """See the port docstring for the full contract. This backend's
+        specifics:
+
+        ``client_request_id`` is written as SQL NULL — not ``''`` — so the
+        row stays outside ``idx_agent_observations_request``'s partial unique
+        surface entirely. There is therefore no read-then-insert to
+        serialise, and so no ``begin_immediate`` here: unlike
+        ``append_observation``, this write has no idempotency decision that a
+        second process could interleave with.
+        """
+        now = self.now()
+        call_id = self.new_id("acl")
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO agent_observations "
+                "(id,notebook_id,owner_id,agent_profile_id,text,"
+                "client_request_id,created_at,kind) VALUES (?,?,?,?,?,NULL,?,?)",
+                (
+                    call_id,
+                    notebook_id,
+                    owner_id,
+                    agent_profile_id,
+                    capability,
+                    now,
+                    AGENT_OBSERVATION_KIND_CALL,
+                ),
+            )
+            self._evict(
+                db,
+                notebook_id,
+                owner_id,
+                kind=AGENT_OBSERVATION_KIND_CALL,
+                ring_max=AGENT_CALL_RING_MAX,
+            )
+        return call_id
 
     def recent_observations(
         self, notebook_id: str, owner_id: str, *, limit: int
@@ -158,8 +241,15 @@ class AgentObservationStore:
             rows = connection.execute(
                 "SELECT id, agent_profile_id, text, created_at "
                 "FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? " + AGENT_OBSERVATIONS_ORDER_DESC + " LIMIT ?",
-                (notebook_id, owner_id, max(0, int(limit))),
+                "AND owner_id = ? AND kind = ? "
+                + AGENT_OBSERVATIONS_ORDER_DESC
+                + " LIMIT ?",
+                (
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_KIND_NOTE,
+                    max(0, int(limit)),
+                ),
             ).fetchall()
         return [
             project_observation_row(
@@ -178,8 +268,15 @@ class AgentObservationStore:
             rows = connection.execute(
                 "SELECT id, agent_profile_id, text, created_at "
                 "FROM agent_observations WHERE notebook_id=? "
-                "AND owner_id = ? " + AGENT_OBSERVATIONS_ORDER_DESC + " LIMIT ?",
-                (notebook_id, owner_id, max(0, int(limit))),
+                "AND owner_id = ? AND kind = ? "
+                + AGENT_OBSERVATIONS_ORDER_DESC
+                + " LIMIT ?",
+                (
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_KIND_NOTE,
+                    max(0, int(limit)),
+                ),
             ).fetchall()
         return [
             project_observation_row(
@@ -188,21 +285,58 @@ class AgentObservationStore:
             for row in rows
         ]
 
+    def list_calls(
+        self, notebook_id: str, owner_id: str, *, limit: int
+    ) -> list[dict]:
+        # Same shape as the two reads above with ``kind`` flipped, and the
+        # projection swapped: a call row's ``text`` column holds a capability
+        # scope, so it reaches readers as ``capability`` and never as
+        # ``text`` (see ``project_call_row``).
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, agent_profile_id, text, created_at "
+                "FROM agent_observations WHERE notebook_id=? "
+                "AND owner_id = ? AND kind = ? "
+                + AGENT_OBSERVATIONS_ORDER_DESC
+                + " LIMIT ?",
+                (
+                    notebook_id,
+                    owner_id,
+                    AGENT_OBSERVATION_KIND_CALL,
+                    max(0, int(limit)),
+                ),
+            ).fetchall()
+        return [
+            project_call_row(
+                row["id"], row["agent_profile_id"], row["text"], row["created_at"]
+            )
+            for row in rows
+        ]
+
     def clear_observations(
-        self, notebook_id: str, owner_id: str, *, agent_profile_id: str = ""
+        self,
+        notebook_id: str,
+        owner_id: str,
+        *,
+        agent_profile_id: str = "",
+        kind: str = "",
     ) -> int:
         profile = str(agent_profile_id or "")
+        # Both narrowings are OPTIONAL and independent: the SQL is assembled
+        # from the two that were actually supplied rather than branching on
+        # every combination, so "clear this Agent's call rows only" needs no
+        # fourth hand-written statement.
+        clauses = ["notebook_id=?", "owner_id=?"]
+        params: list[object] = [notebook_id, owner_id]
+        if profile:
+            clauses.append("agent_profile_id=?")
+            params.append(profile)
+        if kind:
+            clauses.append("kind=?")
+            params.append(str(kind))
         with self.database.write() as db:
-            if profile:
-                cursor = db.execute(
-                    "DELETE FROM agent_observations WHERE notebook_id=? "
-                    "AND owner_id=? AND agent_profile_id=?",
-                    (notebook_id, owner_id, profile),
-                )
-            else:
-                cursor = db.execute(
-                    "DELETE FROM agent_observations WHERE notebook_id=? "
-                    "AND owner_id=?",
-                    (notebook_id, owner_id),
-                )
+            cursor = db.execute(
+                "DELETE FROM agent_observations WHERE " + " AND ".join(clauses),
+                tuple(params),
+            )
         return cursor.rowcount

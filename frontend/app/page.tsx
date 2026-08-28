@@ -7565,7 +7565,10 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>AI 对这个库的理解</h2>
-                <p>AI 读过这个库之后形成的印象，以及你自己的检索心得。提问时会一并带上，可以随时改。</p>
+                {/* 窗口标题栏只说「这扇窗里是什么」。原来这句话把下面两档的说明
+                    又复述了一遍(「AI 读过这个库之后形成的印象，以及你自己的检索
+                    心得」逐字重复第一档的说明),同一屏里同一件事说了两遍。 */}
+                <p>下面几档内容会在提问时一并带上，都可以随时改。</p>
               </div>
               <button className="icon-button" onClick={() => rootModals.requestClose("understanding", "button")} title="Close">×</button>
             </div>

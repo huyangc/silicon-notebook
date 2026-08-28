@@ -1,0 +1,44 @@
+-- Mirror SQLite v60 (_migration_60): agent_observations.kind.
+--
+-- One column, two kinds of "Agent 记录" in one table:
+--
+--   'note' = a short line the Agent itself wrote through the add_observation
+--            MCP tool (the only kind that could exist before this hop, which
+--            is why the default IS the historical truth and no backfill is
+--            needed).
+--   'call' = one recorded tool call this Agent made against this notebook,
+--            written by the single choke point every notebook-scoped MCP tool
+--            already passes through.
+--
+-- Why a column and not a second table: both kinds carry the identical
+-- ownership key (notebook_id, owner_id, agent_profile_id) and the identical
+-- lifecycle -- cleared together when a member is removed from a shared
+-- notebook, cascaded together when the notebook is deleted, excluded together
+-- from notebook deep copy. A second table would pay this repository's fixed
+-- per-table cost (business-table manifest, replicator park strategy, both
+-- backends' NOTEBOOK_SCOPED_TABLES, snapshot verifier, merge_dbs
+-- classification, fixtures) for nothing but a second table name.
+--
+-- The two kinds must never crowd each other out, and that is enforced on both
+-- sides rather than left to convention:
+--
+--   * ring eviction runs PER KIND (agent_observation_store.append_observation
+--     / append_call): call accounting writes one row per tool call and is far
+--     more frequent than hand-written notes, so a shared ring would let one
+--     burst of retrieval evict everything the member accumulated.
+--   * the consolidation read (recent_observations) pins kind='note' in SQL:
+--     call accounting is the system's own ledger, not something an external
+--     Agent said to this member, and it must never reach the model. That it
+--     cannot is a property of the query shape, not of caller discipline.
+--
+-- Deliberately NO new index: idx_agent_observations_scope (notebook_id,
+-- owner_id, created_at, id) already narrows both reads and the eviction
+-- DELETE to ONE (notebook, member) group, and each group is capped by the two
+-- ring bounds. kind is a residual predicate over a few hundred rows; a second
+-- index would buy nothing and cost every write another B-tree.
+--
+-- text COLLATE "C" + NOT NULL DEFAULT matches every other enumerated string
+-- column on this backend (see 0029_agent_profile.sql's updated_origin).
+
+ALTER TABLE agent_observations
+  ADD COLUMN kind text COLLATE "C" NOT NULL DEFAULT 'note';

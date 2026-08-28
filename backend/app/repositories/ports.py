@@ -4742,6 +4742,64 @@ AGENT_OBSERVATION_RING_MAX = 200
 #: nothing here requires the two constants to move together.
 AGENT_OBSERVATION_SAMPLE_MAX = 20
 
+#: ``agent_observations.kind`` — the two kinds of row this ONE table carries.
+#: ``NOTE`` is what an Agent wrote about this notebook through
+#: ``add_observation``; ``CALL`` is the system's own ledger of one tool call
+#: that reached this notebook. They are separated at BOTH ends and neither
+#: separation is optional:
+#:
+#: * every write evicts within its OWN kind (see ``append_observation`` /
+#:   ``append_call``) — call accounting is written once per tool call and
+#:   would otherwise evict notes a member accumulated over weeks;
+#: * ``recent_observations`` — the consolidation job's read — pins
+#:   ``kind='note'`` in SQL, so call accounting cannot reach the model even
+#:   if a future caller forgets it exists.
+AGENT_OBSERVATION_KIND_NOTE = "note"
+AGENT_OBSERVATION_KIND_CALL = "call"
+
+#: Ring bound for ``kind='call'`` rows, held SEPARATELY from
+#: ``AGENT_OBSERVATION_RING_MAX`` above. Same shape, different number's right
+#: to move: a member's own notes and the call ledger answer different
+#: questions and are written at wildly different rates, so tying them to one
+#: constant would mean tuning either one against the other's cost.
+AGENT_CALL_RING_MAX = 200
+
+#: Default read width for ``list_calls``. Mirrors
+#: ``AGENT_OBSERVATION_SAMPLE_MAX``'s role for notes, and is likewise
+#: independent of the ring above.
+AGENT_CALL_SAMPLE_MAX = 20
+
+
+def project_call_row(
+    call_id: object,
+    agent_profile_id: object,
+    capability: object,
+    created_at: object,
+) -> dict:
+    """The ONLY shape a caller of ``list_calls`` ever sees:
+    ``{"id", "agent_profile_id", "capability", "created_at"}``.
+
+    ``capability`` is the stored ``text`` column read back under the name it
+    actually carries for a ``kind='call'`` row: the CAPABILITY SCOPE the tool
+    was admitted under (``"ask:execute"``, ``"knowledge:read"``, …), not the
+    tool's own name. That is a deliberate, registered coarsening — see
+    ``append_call``'s docstring for why the scope (which the single choke
+    point already receives) is recorded instead of a tool name (which it
+    would have to be told, at every one of ~17 call sites, and which a
+    newly added tool could silently forget to pass).
+
+    ``owner_id`` is absent for the same reason it is absent from
+    ``project_observation_row``: the caller supplied it as the query
+    parameter, so projecting it back is a redundant copy of a value no
+    reader needs.
+    """
+    return {
+        "id": str(call_id or ""),
+        "agent_profile_id": str(agent_profile_id or ""),
+        "capability": str(capability or ""),
+        "created_at": str(created_at or ""),
+    }
+
 
 def project_observation_row(
     observation_id: object,
@@ -4876,6 +4934,13 @@ class AgentObservationStorePort(Protocol):
 
         This is T4's read: the untrusted-overlay-consolidation sample calls
         it with ``limit=AGENT_OBSERVATION_SAMPLE_MAX``.
+
+        6. ``kind='note'`` is baked into the SQL text exactly like
+        ``owner_id`` is, and for the same class of reason: this read feeds a
+        model prompt, and the call ledger (``kind='call'``) is the system's
+        own bookkeeping, not something an Agent said. Making it a predicate
+        the query cannot omit means no future caller can accidentally widen
+        the prompt's input by passing an argument.
         """
         ...
 
@@ -4894,11 +4959,94 @@ class AgentObservationStorePort(Protocol):
         would make a future divergence between them (the panel growing
         pagination, say) look like it required auditing T4's call sites too,
         when it would not.
+
+        That foreseen divergence has since happened on the OTHER axis and is
+        worth naming: both reads still pin ``kind='note'``, but the panel
+        additionally has ``list_calls`` beside it, while the consolidation
+        job has — and must have — no such second read.
+        """
+        ...
+
+    def append_call(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        agent_profile_id: str,
+        *,
+        capability: str,
+    ) -> str:
+        """Record ONE tool call that reached this notebook; return its id.
+
+        The ``kind='call'`` twin of ``append_observation``, and deliberately
+        NOT the same method with a flag — four properties differ, and each
+        of them is load-bearing:
+
+        1. **No idempotency key.** ``client_request_id`` is written NULL, so
+           a call row never participates in
+           ``idx_agent_observations_request``'s partial unique surface. Two
+           identical calls a second apart ARE two calls; folding them onto
+           one row would be a lie about what happened. (This is also why the
+           partial index has to stay partial: the call ledger is the one
+           writer that legitimately carries no request id — see
+           ``append_observation``'s guard, which fails loud on an EMPTY
+           string precisely because an empty string is not NULL and WOULD
+           collide.)
+
+        2. **Eviction is per kind.** The same write transaction evicts this
+           ``(notebook_id, owner_id, kind='call')`` group down to
+           ``AGENT_CALL_RING_MAX`` — never touching ``kind='note'`` rows. A
+           shared ring would let one burst of retrieval evict every note a
+           member accumulated, which is the whole reason the kinds are
+           separated rather than merged into one log.
+
+        3. **``capability`` is a CAPABILITY SCOPE, not a tool name.** The
+           value stored is the scope string the call was admitted under
+           (``"ask:execute"``, ``"knowledge:read"``, ``"sources:write"``,
+           …). The single choke point every notebook-scoped MCP tool already
+           passes through receives that scope as an argument it must supply
+           to be admitted at all, so recording it CANNOT be forgotten by a
+           newly added tool — whereas a tool name would have to be threaded
+           through ~17 call sites, each of which is one edit away from
+           silently logging nothing. The registered cost of that choice:
+           two tools admitted under the same scope are indistinguishable in
+           the ledger (``search_notebook_context`` and
+           ``list_knowhow_tables`` both read back as ``knowledge:read``).
+
+        4. **Failure is never the caller's problem.** This ledger is
+           bookkeeping about a call, not part of it. The caller records
+           on a best-effort basis: a write that fails must never turn a tool
+           call that already passed authorization into an error the Agent
+           sees.
+
+        ``created_at`` comes from the store's own clock seam and is an ISO
+        timestamp, never the empty string — same contract, and same reason,
+        as ``append_observation``'s point 2.
+        """
+        ...
+
+    def list_calls(
+        self, notebook_id: str, owner_id: str, *, limit: int
+    ) -> list[dict]:
+        """The newest ``limit`` ``kind='call'`` rows for one ``(notebook_id,
+        owner_id)`` scope, newest-instant-first then ``id`` descending — the
+        same ordering, the same ``owner_id`` equality predicate as a privacy
+        boundary, and the same "nothing returned here is a row eviction
+        would already have dropped" property as ``recent_observations``.
+
+        Rows project through ``project_call_row``, NOT
+        ``project_observation_row``: a call row's ``text`` column is a
+        capability scope, and handing it to a reader under the key ``text``
+        would invite it to be rendered as if an Agent had written it.
         """
         ...
 
     def clear_observations(
-        self, notebook_id: str, owner_id: str, *, agent_profile_id: str = ""
+        self,
+        notebook_id: str,
+        owner_id: str,
+        *,
+        agent_profile_id: str = "",
+        kind: str = "",
     ) -> int:
         """Delete observations for one ``(notebook_id, owner_id)`` scope.
         Returns the row count deleted.
@@ -4910,5 +5058,13 @@ class AgentObservationStorePort(Protocol):
         confirmed scope by construction: ``notebook_id``/``owner_id`` come
         from the caller's own authenticated server-side identity, never from
         request input a caller could spoof.
+
+        5. ``kind=""`` (the default) clears BOTH kinds. That default is what
+        every pre-existing caller means and must keep meaning: the member
+        removal cleanup (``notebook_sharing``) is removing this member's
+        entire footprint in this notebook, and a default that silently
+        spared the call ledger would leave rows behind at exactly the moment
+        the member lost access. A non-empty value narrows to that one kind —
+        the panel's "clear the call log but keep what my Agents wrote".
         """
         ...

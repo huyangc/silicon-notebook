@@ -3564,5 +3564,58 @@ MIGRATION_MANIFEST[(58, 59)] = {
 }
 
 
+# v60: agent_observations.kind separates the Agent's own written notes
+# ('note', every row that could exist before this hop) from recorded tool
+# calls ('call'). One column only: no new table/index/trigger/view — the
+# existing (notebook_id, owner_id, created_at, id) index still points both
+# reads and the per-kind eviction at one bounded group.
+AGENT_OBSERVATION_KIND_COLUMNS = {
+    "agent_observations": {
+        "kind": ("kind", "TEXT", 1, "'note'", 0),
+    },
+}
+# A baseline older than v55 CREATEs agent_observations at v55 and then ALTERs
+# it here, so by the end of that replay the table is an ADDED table whose
+# stored SQL no longer matches the v55 literal — the added-table check compares
+# final text verbatim and has no per-column fallback (that fallback exists only
+# for tables which already existed in the baseline, e.g. user_profiles gaining
+# search_profile_json at the same hop). The expected text for every hop that
+# ENDS at v60 therefore has to be the post-ALTER rendering: SQLite appends the
+# new column immediately before the closing paren, on the line the previous
+# column ended, exactly as reproduced below.
+AGENT_OBSERVATION_KIND_TABLES = {
+    "agent_observations": AGENT_OBSERVATION_TABLES["agent_observations"][:-1]
+    + ", kind TEXT NOT NULL DEFAULT 'note')",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 60, *key[2:]): {
+        **manifest,
+        # Only rewrite the entry when this hop actually carries the table (a
+        # replay whose baseline already has agent_observations never adds it,
+        # and must not start claiming it does).
+        "tables": (
+            {**manifest["tables"], **AGENT_OBSERVATION_KIND_TABLES}
+            if "agent_observations" in manifest["tables"]
+            else manifest["tables"]
+        ),
+        "columns": {
+            **manifest["columns"],
+            "agent_observations": {
+                **manifest["columns"].get("agent_observations", {}),
+                **AGENT_OBSERVATION_KIND_COLUMNS["agent_observations"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(59, 60)] = {
+    "tables": {},
+    "columns": AGENT_OBSERVATION_KIND_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

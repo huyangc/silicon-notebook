@@ -1749,7 +1749,7 @@
       },
       {
         "name": "agent_observations",
-        "sql_sha256": "723ffb362042299381369511354b746f0f8c038229acae2c5af7cdf75bc77b36",
+        "sql_sha256": "510f4dfbeb98a9dbe18a4225e142e0fdcd76c17161774e0c90dd97a7fa19a466",
         "type": "table"
       },
       {
@@ -2268,6 +2268,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 59
+    "user_version": 60
   }
 }

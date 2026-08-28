@@ -844,6 +844,21 @@ class Settings(BaseSettings):
         5, ge=1, validation_alias="AGENT_PROFILE_BASE_TRIGGER")
     agent_profile_overlay_trigger: int = Field(
         10, ge=1, validation_alias="AGENT_PROFILE_OVERLAY_TRIGGER")
+    # 「Agent 调用记录」总开关:外部 Agent 经 MCP 落到某个笔记本上的每一次工具
+    # 调用,在通过鉴权之后记一行(谁、什么时候、按哪一档能力),供该成员自己在
+    # 「Agent 记录」里查看与清空。
+    #
+    # **独立于 ``agent_profile_enabled`` 是刻意的**:那把闸管的是「AI 要不要
+    # 形成并注入对这个库的理解」,是一条会花模型调用、会影响回答的链路;这条
+    # 只是把已经发生的调用记一笔账,既不进 prompt(读侧在 SQL 里钉死
+    # ``kind='note'``),也不参与任何整理触发。把两者绑在一起,就等于「不想让
+    # AI 自动整理」的部署连「谁在用我的库」都看不到。
+    #
+    # 关掉即零写入:判据在唯一收口 ``_record_agent_call`` 的第一行,关掉之后
+    # 连事务都不开。既有的记录不会被删——关开关是「从现在起不记」,不是「把
+    # 记过的抹掉」(抹掉是面板上那个清空按钮的语义,归成员自己决定)。
+    agent_call_log_enabled: bool = Field(
+        True, validation_alias="AGENT_CALL_LOG_ENABLED")
     # Agentic Memory P3(B-Profile,T6):每用户「检索/回答风格偏好」文档
     # (``user_profiles.search_profile_json``)总开关。判据只有一处——
     # ``reasoning_retrieval.search_profile_wiring_active``,T7 归纳 job 的
