@@ -4414,3 +4414,37 @@ async def test_denied_calls_leave_no_trace_in_the_ledger(mcp_env):
         notebook_id, mcp_env["alice"].id, limit=10
     )
     assert [row["capability"] for row in calls] == []
+
+
+@pytest.mark.anyio
+async def test_call_ledger_row_landing_after_member_removal_is_compensated(
+    mcp_env, monkeypatch,
+):
+    """codex #616 R2 P2:与 ``add_observation`` 同一条竞态——鉴权与记账是两步,
+    中间被移出的成员,其清理可能先跑,这一行就成了重新加入即复活的孤儿。修法
+    同款:记账之后复核笔记本读权,撤销即补偿清理。**但不报错**——记账是关于这次
+    调用的账,不是这次调用的一部分。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bob = mcp_env["bob"]
+    bob_token = _agent_token(mcp_env, _SOURCE_READ, user="bob")
+
+    store = repo.agent_observations
+    real_append = store.append_call
+
+    def append_then_remove(*args, **kwargs):
+        result = real_append(*args, **kwargs)
+        # 模拟移除恰好落在记账与复核之间
+        repo.remove_member(notebook_id, bob.id)
+        return result
+
+    monkeypatch.setattr(store, "append_call", append_then_remove)
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = await client.call("list_knowhow_tables", {})
+
+    assert not result.isError, "补偿清理把工具调用也弄失败了"
+    assert repo.agent_observations.list_calls(
+        notebook_id, bob.id, limit=10
+    ) == [], "移除后落地的记账必须被补偿清理,不得留下复活孤儿行"

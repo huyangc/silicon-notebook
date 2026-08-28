@@ -409,9 +409,34 @@ test("总闸关掉：GET 回 enabled=false 时面板不给任何编辑入口", a
   expect(await screen.findByText("这项功能当前未开启。")).toBeInTheDocument();
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "重新整理" })).not.toBeInTheDocument();
-  // 「Agent 记录」判据取同一个 enabled——关闸时整个小节都不渲染,不新开一个布尔。
-  expect(screen.queryByText("Agent 记录")).not.toBeInTheDocument();
+  // 「Agent 记录」**仍然挂着**(codex #616 R2 P2):总闸关掉的是两条理解链路,
+  // 而已经记下的调用记录仍然要能看、能清——后端这一轮已经改成不论开关都回读、
+  // 并放行只清调用记录的那一支,前端在这里整页早返回就等于把那份数据在浏览器
+  // 里变成既看不到也删不掉的。
+  expect(screen.getByText("Agent 记录")).toBeInTheDocument();
+  // 仍然是折叠的:不展开就一次请求都不发,这条与开着时逐字相同。
   expect(mockFetchObservations).not.toHaveBeenCalled();
+});
+
+test("总闸关掉：Agent 记录展开后照常拉取，已经记下的调用记录看得见也清得掉", async () => {
+  const user = userEvent.setup();
+  mockFetch.mockResolvedValue(
+    response({ enabled: false, base: [], mine: [], can_edit_base: false }),
+  );
+  mockFetchObservations.mockResolvedValueOnce({
+    enabled: false,
+    items: [],
+    calls_enabled: true,
+    calls: [agentCall({ capability: "ask:execute" })],
+  });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByText("这项功能当前未开启。");
+  await user.click(screen.getByText("Agent 记录"));
+
+  expect(await screen.findByText("提问")).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "清空这个 Agent 的调用记录" }),
+  ).toBeEnabled();
 });
 
 // ---------------------------------------------------------------- 依据渲染
