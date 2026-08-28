@@ -516,15 +516,26 @@ export function GroupsPage({
                   <div className="group-invite-title"><span className="group-page-empty-icon"><Link size={20} /></span><div><h4>邀请链接</h4><p>拿到链接的登录用户会自动以普通成员身份加入。链接可重复使用，撤销或重新生成后旧链接立即失效。</p></div></div>
                   {invite === null ? <p className="tool-hint">邀请链接加载中…</p> : invite.active ? <>
                     <label>当前邀请链接<div className="group-invite-link"><input ref={inviteLinkRef} readOnly value={buildGroupInviteLink(invite.token, window.location.origin)} onFocus={(event) => event.currentTarget.select()} /><button className={inviteCopy.resultFor(invite.token) === "copied" ? "new-pill copy-result-copied" : inviteCopy.resultFor(invite.token) === "failed" ? "new-pill copy-result-failed" : "new-pill"} disabled={Boolean(busy)} onClick={() => { void run("copy-invite", async () => {
-                      const copied = await copyTextSafely(buildGroupInviteLink(invite.token, window.location.origin));
+                      const link = buildGroupInviteLink(invite.token, window.location.origin);
+                      const copied = await copyTextSafely(link);
                       // key 用 token 而不是固定串:结果要挂 1.6s,期间切群组或重新生成
                       // 链接都会让这颗按钮指向另一条链接,固定串会让新链接顶着上一条的
                       // 「已复制」出现(codex #612 R2 P2)。
                       inviteCopy.report(invite.token, copied);
                       // 复制没成到剪贴板时，把链接选中——用户当场就能 ⌘C/Ctrl+C，
                       // 不用先看懂提示再自己去框选。
-                      if (!copied) { inviteLinkRef.current?.focus(); inviteLinkRef.current?.select(); }
-                      setNotice(copied ? "邀请链接已复制。" : "复制失败，链接已选中，请手动复制。");
+                      //
+                      // ⚠ 先核对框里还是不是**这条**链接。剪贴板那一步可以挂很久(权限
+                      // 提示、非安全上下文),期间侧栏没有禁用,用户切了群组 ref 就指向新
+                      // 群组的输入框——旧的失败去选中它,用户 ⌘C 拿到的是**另一个群组**的
+                      // 邀请链接(codex #612 R3 P2)。比对 value 而不是比对节点:React 会
+                      // 把同位置同类型的 <input> 复用给新群组,节点相等骗不过去。
+                      const linkInput = inviteLinkRef.current;
+                      const stillThisLink = linkInput?.value === link;
+                      if (!copied && stillThisLink) { linkInput.focus(); linkInput.select(); }
+                      setNotice(copied
+                        ? "邀请链接已复制。"
+                        : stillThisLink ? "复制失败，链接已选中，请手动复制。" : "复制失败，请手动复制链接。");
                     }, "复制邀请链接失败"); }}>{busy === "copy-invite" ? "复制中…" : inviteCopy.resultFor(invite.token) === "copied" ? "已复制" : inviteCopy.resultFor(invite.token) === "failed" ? "复制失败" : "复制"}</button></div></label>
                     {confirming === "rotate-invite" ? <div className="group-inline-confirm"><span>重新生成后，旧链接会立即失效。</span><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run("rotate-invite", async () => {
                       setInvite(await rotateGroupInvite(detail.id)); setConfirming(""); setNotice("已重新生成邀请链接，旧链接已失效。");
