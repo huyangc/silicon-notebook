@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.repositories.ports import AGENT_OBSERVATION_RING_MAX
+from app.repositories.ports import AGENT_CALL_RING_MAX, AGENT_OBSERVATION_RING_MAX
 from app.repositories.postgres.agent_observation_store import AgentObservationStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from tests.agent_observation_parity_cases import (
@@ -116,7 +116,7 @@ def agent_observation_harness(request) -> AgentObservationHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 37
+    assert PostgresMigrator(database).migrate() == 38
     _seed(database, notebook_ids=(NOTEBOOK_ID, OTHER_NOTEBOOK_ID))
     yield AgentObservationHarness(
         database=database,
@@ -346,3 +346,89 @@ def test_concurrent_appends_at_the_ring_limit_never_exceed_the_cap(
             (NOTEBOOK_ID, "user-a"),
         ).fetchone()
     assert int(row["n"]) == AGENT_OBSERVATION_RING_MAX
+
+
+# ---------------------------------------------- 调用记账(kind='call')的对等
+#
+# 与 SQLite 侧同名用例逐条对应。跨后端必须**同样**成立的是那两条互不侵占的
+# 性质:环形淘汰按 kind 分组,巡固读取钉死 kind='note'。
+
+
+def test_append_call_is_invisible_to_both_observation_reads(
+    agent_observation_harness,
+):
+    harness = agent_observation_harness
+    call_id = harness.store.append_call(
+        NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute"
+    )
+
+    calls = harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10)
+    assert [row["id"] for row in calls] == [call_id]
+    assert set(calls[0]) == {"id", "agent_profile_id", "capability", "created_at"}
+    assert calls[0]["capability"] == "ask:execute"
+    assert calls[0]["created_at"] == NOW
+
+    assert harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10) == []
+    assert harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=10) == []
+
+
+def test_call_rows_park_on_null_client_request_id(agent_observation_harness):
+    """调用行不参与那条部分唯一索引:两次同样的调用就是两次调用。写空串而不是
+    NULL 会让它们真的撞上(空串不是 NULL)。"""
+    harness = agent_observation_harness
+    harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
+    harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
+
+    with harness.database.connect() as connection:
+        rows = connection.execute(
+            "SELECT client_request_id FROM agent_observations "
+            "WHERE notebook_id=%s AND owner_id=%s AND kind='call'",
+            (NOTEBOOK_ID, "user-a"),
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(row["client_request_id"] is None for row in rows)
+
+
+def test_ring_eviction_is_per_kind(agent_observation_harness):
+    harness = agent_observation_harness
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1",
+        text="攒了很久的一句", client_request_id="keep-me",
+    )
+    for index in range(AGENT_CALL_RING_MAX + 5):
+        harness.store.append_call(
+            NOTEBOOK_ID, "user-a", "agent-1", capability=f"scope:{index}"
+        )
+
+    notes = harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=50)
+    assert [row["text"] for row in notes] == ["攒了很久的一句"]
+
+    calls = harness.store.list_calls(
+        NOTEBOOK_ID, "user-a", limit=AGENT_CALL_RING_MAX + 100
+    )
+    assert len(calls) == AGENT_CALL_RING_MAX
+
+
+def test_clear_narrows_by_kind(agent_observation_harness):
+    harness = agent_observation_harness
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1",
+        text="written", client_request_id="req-1",
+    )
+    harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
+
+    assert harness.store.clear_observations(NOTEBOOK_ID, "user-a", kind="call") == 1
+    assert harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10) == []
+    assert len(harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=10)) == 1
+
+    # 缺省仍然清两种(成员移除路径走的就是这一条)。
+    harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
+    assert harness.store.clear_observations(NOTEBOOK_ID, "user-a") == 2
+
+
+def test_notebook_delete_cascades_call_rows(agent_observation_harness):
+    harness = agent_observation_harness
+    harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
+    with harness.database.write() as connection:
+        connection.execute("DELETE FROM notebooks WHERE id=%s", (NOTEBOOK_ID,))
+    assert harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10) == []

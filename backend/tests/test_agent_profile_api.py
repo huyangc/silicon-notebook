@@ -217,7 +217,15 @@ def test_disabled_get_returns_empty_not_404_delete_returns_409(tmp_path, monkeyp
 
     got = client.get(f"/api/notebooks/{notebook_id}/agent-observations", headers=owner)
     assert got.status_code == 200, got.text
-    assert got.json() == {"enabled": False, "items": []}
+    # 总闸关掉时两份清单都空。`calls_enabled` 仍如实报调用记录**自己**那把开关的
+    # 状态(这里没关),因为它回答的是另一个问题——前端据此分辨「这个部署不记调用」
+    # 与「记，但还没有人调用过」,而总闸关掉时两份清单一律为空是更外层的结论。
+    assert got.json() == {
+        "enabled": False,
+        "items": [],
+        "calls_enabled": True,
+        "calls": [],
+    }
 
     deleted = client.delete(
         f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
@@ -306,3 +314,118 @@ def test_agent_names_resolve_past_the_first_roster_page():
     assert len(names) == len(roster)
     assert names["agent-0249"] == "Agent 249"
     assert calls == [(0, 100), (100, 100), (200, 100)]
+
+
+# ------------------------------------------------------- 调用记录(kind=call)
+
+
+def _seed_call(notebook_id: str, owner_id: str, agent_profile_id: str, capability: str):
+    from app.api.deps import repository
+
+    return repository().agent_observations.append_call(
+        notebook_id, owner_id, agent_profile_id, capability=capability
+    )
+
+
+def test_calls_are_a_separate_list_with_resolved_agent_names(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    agent_a, _ = _seed_observation(
+        notebook_id, owner_id, agent_name="巡检助手", text="写下的一句"
+    )
+    _seed_call(notebook_id, owner_id, agent_a, "ask:execute")
+
+    body = client.get(
+        f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+    ).json()
+
+    # 两份清单各自独立:调用记账绝不混进 Agent 写下的短句里。
+    assert [item["text"] for item in body["items"]] == ["写下的一句"]
+    assert [item["capability"] for item in body["calls"]] == ["ask:execute"]
+    assert body["calls"][0]["agent_name"] == "巡检助手"
+    assert body["calls_enabled"] is True
+
+
+def test_calls_are_owner_scoped_like_observations(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    reader, reader_id = _readonly_member(client, owner, notebook_id)
+
+    owner_agent, _ = _seed_observation(
+        notebook_id, owner_id, agent_name="Owner 的助手", text="owner"
+    )
+    reader_agent, _ = _seed_observation(
+        notebook_id, reader_id, agent_name="Reader 的助手", text="reader"
+    )
+    _seed_call(notebook_id, owner_id, owner_agent, "ask:execute")
+    _seed_call(notebook_id, reader_id, reader_agent, "knowledge:read")
+
+    owner_calls = client.get(
+        f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+    ).json()["calls"]
+    reader_calls = client.get(
+        f"/api/notebooks/{notebook_id}/agent-observations", headers=reader
+    ).json()["calls"]
+
+    assert [row["capability"] for row in owner_calls] == ["ask:execute"]
+    assert [row["capability"] for row in reader_calls] == ["knowledge:read"]
+
+
+def test_call_log_switch_off_reports_itself_instead_of_an_empty_list(
+    tmp_path, monkeypatch
+):
+    """关掉开关时,空清单必须带着「这个部署不记调用」的说明上屏——否则用户会
+    把它读成「没有 Agent 来过这个库」。"""
+    monkeypatch.setenv("AGENT_CALL_LOG_ENABLED", "false")
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    agent_a, _ = _seed_observation(notebook_id, owner_id, agent_name="巡检助手")
+    _seed_call(notebook_id, owner_id, agent_a, "ask:execute")
+
+    body = client.get(
+        f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+    ).json()
+    assert body["calls_enabled"] is False
+    assert body["calls"] == []
+    # 已经记下的行不会被删——关开关是「从现在起不记」。
+    assert body["enabled"] is True
+
+
+def test_clear_kind_narrows_and_unknown_kind_is_rejected(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    agent_a, _ = _seed_observation(
+        notebook_id, owner_id, agent_name="巡检助手", text="留下的一句"
+    )
+    _seed_call(notebook_id, owner_id, agent_a, "ask:execute")
+
+    only_calls = client.delete(
+        f"/api/notebooks/{notebook_id}/agent-observations",
+        params={"kind": "call"},
+        headers=owner,
+    )
+    assert only_calls.status_code == 200, only_calls.text
+    assert only_calls.json() == {"removed": 1}
+
+    after = client.get(
+        f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+    ).json()
+    assert after["calls"] == []
+    assert [item["text"] for item in after["items"]] == ["留下的一句"]
+
+    # 不认识的 kind 必须响亮失败:静默匹配零行会与「本来就没有」长得一模一样,
+    # 用户会以为清过了。
+    bad = client.delete(
+        f"/api/notebooks/{notebook_id}/agent-observations",
+        params={"kind": "calls"},
+        headers=owner,
+    )
+    assert bad.status_code == 400, bad.text
+    still_there = client.get(
+        f"/api/notebooks/{notebook_id}/agent-observations", headers=owner
+    ).json()
+    assert [item["text"] for item in still_there["items"]] == ["留下的一句"]

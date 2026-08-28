@@ -1220,6 +1220,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>.clear_agent_observations', kind='attribute', target='agent_observations'),
             ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>.get_agent_observations', kind='attribute', target='agent_observations'),
+            ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._record_agent_call', kind='attribute', target='agent_observations'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='agent_observations'),
         ),
         patches=(

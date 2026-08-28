@@ -247,6 +247,13 @@ export function isUnderstandingChainBusy(
 // 与上面五块「理解」完全独立的第二套小节,共用同一个面板、同一个总闸判据。
 // ---------------------------------------------------------------------------
 
+/**
+ * 「Agent 记录」的两种行,逐字对齐后端 `agent_observations.kind` 的取值。
+ * `note` 是 Agent 自己写下的短句,`call` 是它调用这个库的记账。这是一份**封闭**
+ * 词表:清空端点按白名单校验,认不出的值一律 400。
+ */
+export type AgentRecordKind = "note" | "call";
+
 /** 一条 GET `.../agent-observations` 返回的记录,逐字对齐后端 `AgentObservationOut`。 */
 export type AgentObservation = {
   id: string;
@@ -256,9 +263,32 @@ export type AgentObservation = {
   created_at: string;
 };
 
+/**
+ * 一条 Agent 调用这个库的记账,逐字对齐后端 `AgentCallOut`。
+ *
+ * 与上面的 `AgentObservation` 是**两种**东西,不是一种的两个变体:那一条带的是
+ * Agent 自己写下的话(`text`),这一条带的是系统准许这次调用时用的能力档
+ * (`capability`)。合成一个 `text` 字段就等于邀请渲染方把系统记的账当成 Agent
+ * 说过的话上屏。
+ */
+export type AgentCall = {
+  id: string;
+  agent_profile_id: string;
+  agent_name: string;
+  capability: string;
+  created_at: string;
+};
+
 export type AgentObservationsResponse = {
   enabled: boolean;
   items: AgentObservation[];
+  /**
+   * 调用记录**自己**那把部署开关。与 `enabled`(整个特性的总闸)是两回事:
+   * 一个部署可以开着「AI 对这个库的理解」却不记调用,这时面板必须说「这里没
+   * 开记录」,而不是把空清单渲染成「从来没有 Agent 调用过这个库」。
+   */
+  calls_enabled: boolean;
+  calls: AgentCall[];
 };
 
 /**
@@ -325,4 +355,111 @@ export function observationRelativeTime(iso: string): string {
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
   if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
   return new Date(then).toLocaleDateString();
+}
+
+/**
+ * 真源镜像:后端 `GET .../agent-observations` 的 `call_limit` 默认值
+ * `AGENT_CALL_SAMPLE_MAX`(`backend/app/repositories/ports.py`)。与上面
+ * `AGENT_OBSERVATION_SAMPLE_MAX` 分开一份,理由与后端把两个常量分开的理由
+ * 逐字相同:两份清单的写入速率差一个数量级,共用一个数字就等于让其中一侧的
+ * 取数宽度替另一侧做决定。
+ */
+export const AGENT_CALL_SAMPLE_MAX = 20;
+
+/** 一个 Agent 名下的调用记账,保持服务端给的新到旧顺序不变。 */
+export type AgentCallGroup = {
+  agentProfileId: string;
+  agentName: string;
+  items: AgentCall[];
+};
+
+/**
+ * 能力档 → 用户看得懂的一句话。
+ *
+ * 后端记的是**能力档**而不是工具名(见 `append_call` 的契约:能力档是那个唯一
+ * 收口本来就收到的参数,新加的工具因此天然被记上,不会因为作者忘了传而漏记)。
+ * 代价是同一档下的不同工具在这里读起来一样——这句译名因此按「这次调用**做了
+ * 什么**」写,而不是假装能区分它调的是哪个工具。
+ */
+const CALL_CAPABILITY_LABELS: Readonly<Record<string, string>> = {
+  "ask:execute": "提问",
+  "knowledge:read": "查资料",
+  "memory:read": "读我的记忆",
+  "memory:propose": "提交记忆",
+  "knowhow:code": "写表格公式",
+  "sources:write": "添加资料",
+  "sources:delete": "删除资料",
+  "maintenance:execute": "整理这个库",
+  "agent_profile:read": "读这个库的理解",
+  "agent_observation:write": "写下使用线索",
+};
+
+/**
+ * 认不出的能力档退回一句中性的话,**绝不**把 `ask:execute` 这种协议串直接上屏。
+ * 部署侧插件可以带来这份表里没有的能力档,那不是异常,只是这份表不认识它——
+ * 与全站 `vocabulary.ts` 的 `label()` 同一条口径(未命中永不泄漏原值)。
+ */
+export function callCapabilityLabel(capability: string): string {
+  return CALL_CAPABILITY_LABELS[capability] ?? "用了这个库";
+}
+
+/**
+ * 按 `agent_profile_id` 分组,顺序规则与 `groupObservationsByAgent` 逐字相同。
+ * 刻意不与它合成一个泛型函数:两个清单的元素类型不同(`text` vs `capability`),
+ * 合成之后调用处要么退化成 `any`,要么多出一个类型参数来省这十行。
+ */
+export function groupCallsByAgent(items: readonly AgentCall[]): AgentCallGroup[] {
+  const order: string[] = [];
+  const groups = new Map<string, AgentCallGroup>();
+  for (const item of items) {
+    const key = item.agent_profile_id;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        agentProfileId: key,
+        agentName: item.agent_name || UNKNOWN_AGENT_DISPLAY_NAME,
+        items: [],
+      };
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.items.push(item);
+  }
+  return order.map((key) => groups.get(key) as AgentCallGroup);
+}
+
+/**
+ * 连着的同一能力档折成一行并计数。
+ *
+ * 一次 reasoning 提问里 Agent 可能连打十几次检索,逐条铺开之后「这个 Agent 在
+ * 做什么」反而被淹掉了。折叠**只发生在渲染层**:服务端仍然逐条存,清空、计数与
+ * 环形上限都按真实条数走——这里折的是看的方式,不是记的方式。
+ *
+ * 只折**相邻**的同档调用,不做全局聚合:相邻意味着「这一串是连着发生的」,而把
+ * 全天所有 `knowledge:read` 加成一个数字会让时间线不再是时间线。
+ */
+export type AgentCallRun = {
+  id: string;
+  capability: string;
+  count: number;
+  /** 这一串里**最新**那一次的时间——列表是新到旧,所以就是第一条。 */
+  created_at: string;
+};
+
+export function collapseCallRuns(items: readonly AgentCall[]): AgentCallRun[] {
+  const runs: AgentCallRun[] = [];
+  for (const item of items) {
+    const last = runs[runs.length - 1];
+    if (last && last.capability === item.capability) {
+      last.count += 1;
+      continue;
+    }
+    runs.push({
+      id: item.id,
+      capability: item.capability,
+      count: 1,
+      created_at: item.created_at,
+    });
+  }
+  return runs;
 }

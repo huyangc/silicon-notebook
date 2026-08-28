@@ -1872,6 +1872,8 @@ The report sample's ownership predicate is `reports.created_by`, which is the re
 | Characters per observation | 500 (`add_observation`'s `text`) |
 | Observation sample read per consolidation | ≤20 most recent, on its own separate query from the ask/report sample above |
 | Rendered observation section budget | ≤600 characters — its OWN budget, never a slice of the 3,000-character usage-section budget above |
+| Call-ledger ring per `(notebook, owner)` | 200 rows, held **separately** from the observation ring above — each kind evicts only within itself, so neither can crowd the other out |
+| Call-ledger read width | ≤20 most recent by default (`call_limit`, capped at the 200-row ring), on its own query and its own response list |
 
 **Injection surface.** A run that has `AGENT_PROFILE_ENABLED` on (and a bound profile store) injects the base layer plus the current user's own overlay into both the planning prompt and the reflect loop's context, ahead of the collection map section in each. A notebook the agent has not yet consolidated anything for injects nothing and records no trace step — this is a deliberately different rule from Memory's zero-hit `skip` step, because a Memory miss carries the cost of an embedding round trip and a vector scan worth disclosing, while a profile read is a sub-millisecond bounded primary-key lookup whose absence is pure noise on every single run of a fresh notebook. The block is injected even when the request has genuinely narrowed its source scope — unlike the collection map, which is cleared in that case because it promises collections the narrowed run cannot enumerate, the profile block opens no channel, is not evidence, and cannot be `[k]`-cited, so a narrowed run still benefits from knowing what the agent has learned about phrasing and known gaps. On Deep Report's side, the block reaches only each section's per-section deep-dive retrieval (`_deep_dive`), which always seeds its run with `intent_queries` rather than calling the planning model — so in practice the profile only ever reaches the reflect loop on the report path, never a report's own planning call.
 
@@ -1916,6 +1918,38 @@ ring size below); `DELETE /notebooks/{id}/agent-observations` clears them, optio
 to one `agent_profile_id`. Both 409 while the feature is off. The web panel surfaces this as
 "Agent 记录" under "我的检索心得", explicitly stating observations only ever feed the
 member's own understanding and are never evidence or citable.
+
+**The same section also shows what Agents actually did with this notebook (call
+ledger).** Every notebook-scoped MCP tool call that clears authorization books one row —
+which Agent, when, and under which capability scope — in the SAME `agent_observations`
+table under `kind='call'` (`'note'` being what an Agent wrote through `add_observation`,
+and the value every row predating the column carries). A column, not a second table:
+both kinds share the identical ownership key `(notebook_id, owner_id, agent_profile_id)`
+and the identical lifecycle — cleared together on member removal, cascaded together on
+notebook delete, excluded together from deep copy.
+
+The two kinds never crowd each other out, and that is enforced at both ends rather than
+by convention: ring eviction runs **per kind** (a burst of retrieval can therefore never
+evict notes a member accumulated over weeks — each kind has its own 200-row ring), and
+the consolidation read pins `kind='note'` **in SQL**, so call accounting cannot reach a
+model prompt even if a future caller forgets it exists. Recording is keyed on the
+**capability scope** the call was admitted under (`ask:execute`, `knowledge:read`, …),
+not the tool's name: the single choke point every notebook-scoped tool already passes
+through receives that scope as an argument it must supply to be admitted at all, so a
+newly added tool is recorded without its author doing anything — at the registered cost
+that two tools admitted under the same scope read back identically. Denied calls leave no
+trace (a ledger of *attempts by principals who were refused* is a different feature with
+different privacy consequences), and a failing ledger write is swallowed and logged: the
+book-keeping about a call is not part of the call. `GET .../agent-observations` returns
+the ledger as its own `calls` list with its own `call_limit` (default 20, capped at 200)
+rather than mixing kinds into `items` — under one shared limit a busy Agent's ledger could
+push every hand-written note out of the response. `calls_enabled` reports the
+`AGENT_CALL_LOG_ENABLED` switch specifically, so the panel can say "recording is off here"
+instead of rendering an empty list as "no Agent has ever called this notebook".
+`DELETE .../agent-observations` takes an optional `kind` (`note`/`call`, validated against
+that closed set — an unrecognized value is a 400, never a silent zero-row delete that
+looks exactly like "there was nothing there"); omitting it clears both, which is what the
+member-removal path means and must keep meaning.
 
 **Registered trade-offs.** Notebook deep copy carries neither table forward — a copy starts with no consolidated understanding of its own, by design, since the profile describes how the agent has come to understand *this* library's usage, not a fact about the source material that a copy should inherit. A synchronous `POST /ask` call (which creates no durable `ask_jobs` row) does not advance the overlay-chain counter, matching the existing rule that usage accounting counts durable submitted `ask_jobs`. The base and overlay chains for a single-person notebook are deliberately **not** merged into one execution — each still queues and runs on its own, registered as a P1 simplification rather than a correctness requirement. A consolidation job's failure — of either chain — still consumes the `pending_signal` count captured at claim time, so a failed run requires the trigger threshold to refill again before it retries, capping cost at one model call per threshold batch rather than retrying every subsequent change. Removing a member from a shared notebook clears their overlay through the membership-removal path (`kick_all_members` deliberately does not — a documented exception, since read-side participant-set gating already keeps a removed member's overlay unreachable through every consumer).
 

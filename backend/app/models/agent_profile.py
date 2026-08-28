@@ -175,16 +175,58 @@ class AgentObservationOut(BaseModel):
     created_at: str
 
 
+class AgentCallOut(BaseModel):
+    """One recorded tool call an Agent made against this notebook.
+
+    A sibling of ``AgentObservationOut``, NOT a variant of it, because the
+    two say different things and one of them is not a quotation: an
+    observation carries text an Agent WROTE, while this carries the
+    capability the system admitted a call under. Merging them behind one
+    ``text`` field would invite a renderer to show a scope string as if the
+    Agent had said it.
+
+    ``capability`` is the raw scope (``"ask:execute"``, ``"knowledge:read"``,
+    …) — a closed protocol vocabulary, mapped to user-facing wording by the
+    browser exactly like every other enum this API returns raw. Two tools
+    admitted under the same scope are deliberately indistinguishable here;
+    see ``AgentObservationStorePort.append_call`` for why the scope, not the
+    tool name, is what gets recorded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    agent_profile_id: str
+    agent_name: str
+    capability: str
+    created_at: str
+
+
 class AgentObservationsResponse(BaseModel):
     """``GET /notebooks/{id}/agent-observations``. ``enabled=false`` (总闸关闭,
     or the deployment never wired a profile store) always carries an empty
     list rather than 404 — same "off" vs "on but nothing written yet"
-    distinction ``UnderstandingResponse`` makes."""
+    distinction ``UnderstandingResponse`` makes.
+
+    ``items`` and ``calls`` are two SEPARATE lists rather than one mixed,
+    kind-tagged list, and that is a contract decision, not a layout one: each
+    is independently bounded by its OWN ``limit``. Folded into one list under
+    a shared limit, a busy Agent's call ledger could fill the whole window
+    and push every hand-written note off the end of the response — the
+    request-level twin of the eviction race the per-kind rings already close
+    at the storage level.
+
+    ``calls_enabled`` reports the ``AGENT_CALL_LOG_ENABLED`` deployment
+    switch specifically. It is NOT the same bit as ``enabled`` above: a
+    deployment may keep the understanding feature on while turning call
+    recording off, and the panel has to say "recording is off here" rather
+    than render an empty list as "no Agent has ever called this notebook"."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
     items: list[AgentObservationOut] = Field(default_factory=list)
+    calls_enabled: bool = True
+    calls: list[AgentCallOut] = Field(default_factory=list)
 
 
 class AgentObservationsCleared(BaseModel):

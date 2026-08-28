@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 59. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v59 and remains readable. Those migrations
+The current schema version is 60. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v60 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -397,9 +397,19 @@ SQLite v59 / PostgreSQL v37 adds durable `indexing_pipeline_stages` and
 `indexing_pipeline_stage_sources`. Both are `TableClass.LOCAL_EPHEMERAL`: they
 exist in both schemas and count toward schema totality, but forward-shadow
 copy/capture/apply never transfers a backend-local worker's lease state. The
-current pairing is SQLite 59 / PostgreSQL 37 / epoch 1, with 84 application
+This pairing has 84 application
 tables (82 replicated plus 2 local staging tables), 113 replicated unique
 surfaces, and a 12-row-slot branch-counted foreign-key bound.
+
+SQLite v60 / PostgreSQL v38 adds `agent_observations.kind`: `'note'` for a
+line an Agent wrote through `add_observation` (every row that could exist
+before this hop, hence the default is the historical truth and no backfill
+runs), `'call'` for one recorded tool call against that notebook. One column
+only — no table, index, foreign key, or unique surface — so the current
+pairing stays SQLite 60 / PostgreSQL 38 / epoch 1 with the same 84 application
+tables, 113 replicated unique surfaces, and 12-row-slot bound. Ring eviction
+and the consolidation read are both scoped by `kind`, so call accounting can
+neither evict written notes nor reach a model prompt.
 
 Run it only while application/background writers are stopped:
 

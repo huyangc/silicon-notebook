@@ -22,6 +22,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.fastmcp import Context
 from starlette.responses import JSONResponse
 
+from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentPrincipal, UserProfile
 
@@ -666,6 +667,47 @@ class AgentBearerMiddleware:
             _MCP_PRINCIPAL.reset(marker)
 
 
+def _record_agent_call(
+    repo: Any, principal: AgentPrincipal, notebook_id: str, scope: str
+) -> None:
+    """Book one admitted tool call into this member's own call ledger.
+
+    Placed at the ONE choke point every notebook-scoped tool already passes
+    through, and keyed on the capability ``scope`` that choke point already
+    receives — so a tool added tomorrow is recorded without its author doing
+    anything, and cannot silently opt out by forgetting an argument. The
+    registered cost of keying on the scope rather than the tool name: two
+    tools admitted under the same scope read back identically (see
+    ``AgentObservationStorePort.append_call``).
+
+    Three properties, each deliberate:
+
+    * **After authorization, never before.** A call that
+      ``require_agent_access`` rejected did not reach this notebook, and
+      recording it would turn the ledger into a log of attempts by
+      principals who were denied — a different feature, with different
+      privacy consequences, that nobody asked for.
+    * **Never fatal.** Bookkeeping about a call is not part of the call. A
+      failing ledger write (disk full, a migration mid-flight) must not turn
+      a tool call that already passed authorization into an error the Agent
+      sees, so every exception is swallowed here and logged.
+    * **Off means zero writes.** ``agent_call_log_enabled`` is checked
+      first, so a deployment that turns this off pays nothing — not a
+      transaction, not a row.
+    """
+    if not getattr(get_settings(), "agent_call_log_enabled", True):
+        return
+    try:
+        repo.agent_observations.append_call(
+            notebook_id,
+            principal.owner_id,
+            principal.profile_id,
+            capability=scope,
+        )
+    except Exception:  # noqa: BLE001 — see "Never fatal" above.
+        logger.warning("agent call ledger write failed", exc_info=True)
+
+
 def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrincipal, str]:
     principal = _live_principal(repo)
     notebook_id = getattr(ctx.session, _SELECTED_ATTR, "")
@@ -675,6 +717,7 @@ def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrinci
     repo.require_agent_access(
         principal, scope, notebook_id
     )
+    _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id
 def _writable_notebook(
     ctx: Context, repo: Any, scope: str

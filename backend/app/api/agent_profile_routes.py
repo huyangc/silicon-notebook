@@ -50,6 +50,7 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.models.agent_profile import (
+    AgentCallOut,
     AgentObservationOut,
     AgentObservationsCleared,
     AgentObservationsResponse,
@@ -65,6 +66,10 @@ from app.models.agent_profile import (
 )
 from app.models.identity import UserProfile
 from app.repositories.ports import (
+    AGENT_CALL_RING_MAX,
+    AGENT_CALL_SAMPLE_MAX,
+    AGENT_OBSERVATION_KIND_CALL,
+    AGENT_OBSERVATION_KIND_NOTE,
     AGENT_OBSERVATION_RING_MAX,
     AGENT_OBSERVATION_SAMPLE_MAX,
     AgentProfileRevisionConflict,
@@ -87,6 +92,13 @@ _REBUILD_BUSY_MESSAGE = "正在整理，请稍候"
 _REVISION_CONFLICT_MESSAGE = "这段理解刚被更新过，请刷新后再改"
 _SCOPE_LABEL_MISMATCH_MESSAGE = "所选范围与这项内容不匹配，无法编辑"
 _VALUE_TOO_LONG_MESSAGE = f"内容过长，最多 {AGENT_PROFILE_VALUE_MAX_CHARS} 字"
+_UNKNOWN_KIND_MESSAGE = "要清空的记录种类不对，请刷新页面后重试"
+
+#: 允许出现在 ``DELETE .../agent-observations?kind=`` 上的两个值。空串(清全部)
+#: 不在其中——它是**缺省**,不是一个要被认出来的值,见该端点的说明。
+_CLEARABLE_KINDS = frozenset(
+    {AGENT_OBSERVATION_KIND_NOTE, AGENT_OBSERVATION_KIND_CALL}
+)
 
 
 def _profile_store():
@@ -338,6 +350,10 @@ def get_agent_observations(
     limit: int = Query(
         AGENT_OBSERVATION_SAMPLE_MAX, ge=1, le=AGENT_OBSERVATION_RING_MAX
     ),
+    # 调用记录有**自己**的取数宽度,不共用上面那个 ``limit``:两份清单的行来自
+    # 两个独立的环,写入速率差一个数量级,共用一个参数就等于让调用侧的取数上限
+    # 替 Agent 手写的短句做决定。
+    call_limit: int = Query(AGENT_CALL_SAMPLE_MAX, ge=1, le=AGENT_CALL_RING_MAX),
     user: UserProfile = Depends(get_current_user),
 ) -> AgentObservationsResponse:
     # ``owner_id`` 是本端点的隔离层三:永远是已认证调用者自己的 id,从不取自
@@ -347,9 +363,17 @@ def get_agent_observations(
     # `api_contract` 架构守卫冻结兜底,这里不重复断言(T3-T5 修复轮质量评审
     # 变异 ③ 的结论)。
     if not _wiring_active():
-        return AgentObservationsResponse(enabled=False, items=[])
-    rows = repository().agent_observations.list_observations(
-        notebook_id, user.id, limit=limit
+        return AgentObservationsResponse(enabled=False, items=[], calls=[])
+    store = repository().agent_observations
+    rows = store.list_observations(notebook_id, user.id, limit=limit)
+    # 调用记录跟随它**自己**的开关。关掉时不发这次查询,也不把空清单说成
+    # 「没有 Agent 来过」——前端据 ``calls_enabled`` 分辨「关了」与「开着但还
+    # 没人调用过」,与总闸那一层 ``enabled`` 的分辨方式逐字相同。
+    calls_enabled = bool(get_settings().agent_call_log_enabled)
+    call_rows = (
+        store.list_calls(notebook_id, user.id, limit=call_limit)
+        if calls_enabled
+        else []
     )
     names = _observation_agent_names(user.id)
     return AgentObservationsResponse(
@@ -364,6 +388,17 @@ def get_agent_observations(
             )
             for row in rows
         ],
+        calls_enabled=calls_enabled,
+        calls=[
+            AgentCallOut(
+                id=str(row.get("id") or ""),
+                agent_profile_id=str(row.get("agent_profile_id") or ""),
+                agent_name=names.get(str(row.get("agent_profile_id") or ""), ""),
+                capability=str(row.get("capability") or ""),
+                created_at=str(row.get("created_at") or ""),
+            )
+            for row in call_rows
+        ],
     )
 
 
@@ -375,15 +410,25 @@ def get_agent_observations(
 def clear_agent_observations(
     notebook_id: str,
     agent_profile_id: str = Query(""),
+    kind: str = Query(""),
     user: UserProfile = Depends(get_current_user),
 ) -> AgentObservationsCleared:
-    # 同一条不变式:``owner_id`` 只能是 ``user.id``。``agent_profile_id`` 是
-    # 唯一的请求参数,它只收窄「清哪个 Agent」,从不改「清谁的」。请求形状本身
-    # 同样由 `api_contract` 架构守卫冻结兜底(T3-T5 修复轮质量评审变异 ③ 的
-    # 结论)。
+    # 同一条不变式:``owner_id`` 只能是 ``user.id``。``agent_profile_id`` 与
+    # ``kind`` 都只收窄「清哪些行」,从不改「清谁的」。请求形状本身同样由
+    # `api_contract` 架构守卫冻结兜底(T3-T5 修复轮质量评审变异 ③ 的结论)。
+    #
+    # ``kind`` 走**白名单**而不是原样下传:它最终会进 SQL 的等值谓词,而一个
+    # 拼错的值(或者一个存心试探的值)静默匹配零行、回 ``removed=0``,看起来
+    # 与「本来就没有」一模一样——用户会以为清过了。不认识的值直接回 400。
+    clean_kind = str(kind or "")
+    if clean_kind and clean_kind not in _CLEARABLE_KINDS:
+        raise user_error(400, _UNKNOWN_KIND_MESSAGE)
     if not _wiring_active():
         raise user_error(409, _DISABLED_MESSAGE)
     removed = repository().agent_observations.clear_observations(
-        notebook_id, user.id, agent_profile_id=agent_profile_id
+        notebook_id,
+        user.id,
+        agent_profile_id=agent_profile_id,
+        kind=clean_kind,
     )
     return AgentObservationsCleared(removed=removed)

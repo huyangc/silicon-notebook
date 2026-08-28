@@ -4272,3 +4272,101 @@ async def test_add_observation_requires_its_own_scope(mcp_env):
         assert (await client.call("add_observation", {
             "text": "No scope for this.", "client_request_id": "no-scope-1",
         })).isError
+
+
+# --------------------------------------------------- 「Agent 调用记录」记账
+#
+# 记账挂在 ``_selected_notebook`` 这个唯一收口上,所以这一组用**普通工具**
+# (不是某个专门的记账工具)来验证:任何一个 notebook 级工具走一遍,账就记上了。
+
+
+@pytest.mark.anyio
+async def test_admitted_tool_call_is_recorded_in_the_callers_own_ledger(mcp_env):
+    """记的是「谁、什么时候、按哪一档能力」。能力档取自收口本来就收到的那个
+    参数,所以新加的工具天然被记上——不需要作者记得去登记。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        _payload(await client.call("list_knowhow_tables", {}))
+
+    calls = repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=10
+    )
+    assert [row["capability"] for row in calls] == ["knowledge:read"]
+    assert calls[0]["created_at"]
+
+    # 记账绝不混进 Agent 自己写下的短句那一侧。
+    assert repo.agent_observations.list_observations(
+        notebook_id, mcp_env["alice"].id, limit=10
+    ) == []
+
+
+@pytest.mark.anyio
+async def test_call_ledger_records_nothing_when_the_switch_is_off(
+    mcp_env, monkeypatch
+):
+    """关掉即零写入——判据在收口第一行,连事务都不开。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        monkeypatch.setenv("AGENT_CALL_LOG_ENABLED", "false")
+        get_settings.cache_clear()
+        try:
+            _payload(await client.call("list_knowhow_tables", {}))
+        finally:
+            monkeypatch.delenv("AGENT_CALL_LOG_ENABLED", raising=False)
+            get_settings.cache_clear()
+
+    assert repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=10
+    ) == []
+
+
+@pytest.mark.anyio
+async def test_a_failing_ledger_write_never_fails_the_tool_call(
+    mcp_env, monkeypatch
+):
+    """记账是「关于这次调用的账」,不是这次调用的一部分。写失败只该留在日志
+    里,绝不能把一次已经通过鉴权的工具调用变成 Agent 看到的错误。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_READ)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("ledger is on fire")
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        monkeypatch.setattr(
+            type(repo.agent_observations), "append_call", explode, raising=True
+        )
+        result = await client.call("list_knowhow_tables", {})
+
+    assert not result.isError, "记账失败把工具调用也弄失败了"
+
+
+@pytest.mark.anyio
+async def test_denied_calls_leave_no_trace_in_the_ledger(mcp_env):
+    """记的是「到达了这个库」的调用。被 ``require_agent_access`` 拒掉的那次
+    没有到达,记下来就变成了另一种东西——一份「谁被拒了」的日志。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        # 这个 token 没有 sources:write,删除一律拒绝。
+        assert (await client.call(
+            "delete_source", {"source_id": "src-nope"}
+        )).isError
+
+    calls = repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=10
+    )
+    assert [row["capability"] for row in calls] == []

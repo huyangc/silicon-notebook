@@ -70,7 +70,11 @@ from app.domain.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_T
 # v57 adds one revocable group invitation capability to each group. The token
 # is nullable (no active link), unique while present, and deleted with the
 # group because it lives on the aggregate root.
-SCHEMA_VERSION = 59
+# v60 adds agent_observations.kind — 'note' (a line the Agent itself wrote via
+# add_observation) vs 'call' (one recorded tool call against this notebook).
+# Existing rows are 'note' by construction: every row that can exist before
+# this hop was written by add_observation.
+SCHEMA_VERSION = 60
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3222,6 +3226,44 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_indexing_pipeline_stage_sources_source
                   ON indexing_pipeline_stage_sources(source_id);
                 """
+            )
+
+    def _migration_60(self) -> None:
+        """``agent_observations.kind`` —— 同一张表承载两种「Agent 记录」。
+
+        ``'note'``  = Agent 自己经 ``add_observation`` 写下的短句(v55 起就有的
+                      那一种,也是本迁移之前**唯一**可能存在的行,所以默认值就是
+                      历史真相,不需要回填)。
+        ``'call'``  = 一次经 MCP 落到这个笔记本上的工具调用记账(谁、什么时候、
+                      按哪一档能力),由 ``_selected_notebook`` 这个唯一收口写。
+
+        **为什么加列而不是新建一张表。** 两种行的归属键逐字相同——
+        ``(notebook_id, owner_id, agent_profile_id)``——生命周期也相同(成员被移出
+        共享笔记本时一起清、笔记本删除时一起级联、深拷贝一起不带)。新建一张表要
+        为这份完全一样的归属再走一遍固定开销(shadow 业务表清单、replicator 停车
+        策略、双后端 sharing_store 的 NOTEBOOK_SCOPED_TABLES、快照校验器、
+        merge_dbs 分类、fixtures),换来的只是一个额外的表名。
+
+        **两种行必须互不侵占,这一条由读写两侧同时保证,不靠约定:**
+
+        · 环形淘汰**按 kind 分组**(见 ``agent_observation_store`` 的
+          ``append_observation``/``append_call``):调用记账每次调用写一行、频率
+          远高于 Agent 手写的短句,共用一个环意味着一次密集检索就能把用户攒了
+          很久的短句全部挤掉。
+        · 巡固读取(``recent_observations``)在 SQL 里钉死 ``kind='note'``:调用
+          记账是系统自己记的账,不是外部 Agent 写给这位成员的话,**绝不**进模型
+          输入。它进不了 prompt 这件事因此是查询形态的性质,不是调用方的自觉。
+
+        **刻意不加索引。** 既有的 ``idx_agent_observations_scope``
+        ``(notebook_id, owner_id, created_at, id)`` 已经把读写收窄到一个
+        ``(笔记本, 成员)`` 分组;而每个分组的行数由两条环形上限封死(见
+        ``AGENT_OBSERVATION_RING_MAX`` / ``AGENT_CALL_RING_MAX``),``kind`` 只是
+        分组内几百行上的剩余谓词。给一个恒定几百行的分组再加一条以 kind 打头的
+        索引,买到的是零,付出的是每次写多维护一棵 B 树——而写正是这次要省的那一侧。
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "agent_observations", "kind", "TEXT NOT NULL DEFAULT 'note'",
             )
 
     def _recover_interrupted_jobs(self) -> None:

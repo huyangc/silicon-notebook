@@ -13,6 +13,7 @@
 import { requestJson } from "../../app/api-client.ts";
 import type {
   AgentObservationsResponse,
+  AgentRecordKind,
   UnderstandingBlock,
   UnderstandingResponse,
   UnderstandingScope,
@@ -97,12 +98,17 @@ export function fetchAgentObservations(notebookId: string): Promise<AgentObserva
 export function clearAgentObservations(
   notebookId: string,
   agentProfileId?: string,
+  kind?: AgentRecordKind,
 ): Promise<{ removed: number }> {
-  const query = agentProfileId
-    ? `?agent_profile_id=${encodeURIComponent(agentProfileId)}`
-    : "";
+  // 两个收窄条件互相独立,各自缺省即「不收窄」:省略 `kind` 清两种记录(「清空
+  // 全部记录」走的就是这一条),传了只清那一种。服务端对认不出的 kind 回 400 而
+  // 不是静默清零行——那种静默与「本来就没有」长得一模一样。
+  const params = new URLSearchParams();
+  if (agentProfileId) params.set("agent_profile_id", agentProfileId);
+  if (kind) params.set("kind", kind);
+  const query = params.toString();
   return requestJson<{ removed: number }>(
-    `/notebooks/${notebookId}/agent-observations${query}`,
+    `/notebooks/${notebookId}/agent-observations${query ? `?${query}` : ""}`,
     { ...options, method: "DELETE" },
   );
 }

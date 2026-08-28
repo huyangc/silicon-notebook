@@ -13,14 +13,36 @@
 // · **清空是两步确认,不是 `window.confirm`。** 与群组面板同一条口径:一次误点不该
 //   决定一段已经攒了很久的内容;而原生确认框在浮动窗里还会把焦点整个抢走。
 //
+// 版式(与独立群组页同一次整改的同一条口径,见 group-page-style-guard):三档内容
+// (共享理解 / 我的检索心得 / Agent 记录)各自是一张**带头部的卡**,不再是三段
+// `.stack` 平铺。平铺的代价是具体的、不是审美问题:
+//
+//   · 三档的**边界看不出来**。五个块 + 五个块 + 一段折叠记录全是同一种白底方框,
+//     滚到中间时无从判断手里这一块属于哪一档、会被谁看到。
+//   · 「这一档给谁看」原先只写在说明文字里。共享 vs 只有自己是这个面板最要命的
+//     一条区分(改错地方 = 把只给自己的话写给全笔记本看),它必须是一眼可见的
+//     固定标记,而不是一段要读完才知道的话。
+//   · 「重新整理」原先是标题下面孤零零的一颗按钮,与它作用的那一档没有视觉从属
+//     关系;放进模块头部之后,它作用在哪一档不需要解释。
+//
+// 卡片骨架抄 `.group-detail`/`.group-detail-head`(浅蓝头部带 + 白色主体),不新造
+// 第二套视觉语言;新样式全部 namespaced 到 `.understanding-*`,不改任何共享规则。
+//
 // 长任务契约（见 `docs/development.md`）在这里的落点:「重新整理」点完立刻
 // 不可点并换成「整理中…」;忙碌位存的是**哪个库在忙**(共享的 `notebook-busy-set`,
 // 不是裸布尔);解除**按证据**——只有轮询读到服务端说这条链不在跑了才解除,另设
 // 轮询尝试上限,超限走中性文案而不猜结局。
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
-import { ChevronDown } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type SyntheticEvent,
+} from "react";
+import { Bot, ChevronDown, RefreshCw, Search, Sparkles } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
 import {
@@ -32,6 +54,7 @@ import {
   saveUnderstandingBlock,
 } from "../features/agent-profile/profile-api.ts";
 import {
+  AGENT_CALL_SAMPLE_MAX,
   AGENT_OBSERVATION_SAMPLE_MAX,
   AGENT_PROFILE_VALUE_MAX_CHARS,
   BASE_LABELS,
@@ -42,9 +65,12 @@ import {
   UNDERSTANDING_POLL_MAX_ATTEMPTS,
   UNDERSTANDING_POLL_MS,
   busyForNotebook,
+  callCapabilityLabel,
   claimNotebookSlot,
+  collapseCallRuns,
   draftIsStale,
   evidenceSourceIds,
+  groupCallsByAgent,
   groupObservationsByAgent,
   isUnderstandingChainBusy,
   observationRelativeTime,
@@ -53,6 +79,7 @@ import {
   understandingValueLength,
   understandingValueTooLong,
   zeroHitCount,
+  type AgentCall,
   type AgentObservation,
   type UnderstandingBlock,
   type UnderstandingDraft,
@@ -85,7 +112,7 @@ function BlockEvidence({
   const zeroHits = zeroHitCount(block);
   if (zeroHits !== null) {
     return (
-      <p className="tool-hint" style={{ margin: "6px 0 0" }}>
+      <p className="understanding-evidence-note">
         依据：{zeroHits} 次没找到结果的检索
       </p>
     );
@@ -93,8 +120,8 @@ function BlockEvidence({
   const sourceIds = evidenceSourceIds(block);
   if (sourceIds.length === 0) return null;
   return (
-    <div style={{ marginTop: 6 }}>
-      <p className="tool-hint" style={{ margin: "0 0 4px" }}>依据来源</p>
+    <div className="understanding-evidence">
+      <p className="understanding-evidence-note">依据来源</p>
       <div className="tag-row">
         {sourceIds.map((sourceId) => {
           // 标题查不到时退回 id:那不是内部黑话,是这份资料在这个库里的名字,
@@ -123,6 +150,13 @@ function BlockEvidence({
 type ChainProps = {
   title: string;
   description: string;
+  /** 模块头的图标。只是识别标记,不承担任何语义——它旁边的标题才是可访问名。 */
+  icon: ReactNode;
+  /**
+   * 「这一档给谁看」。两档的差别里最要命的就是这一条(共享 vs 只有自己),原先只能
+   * 从两段说明文字里读出来;做成头部的固定徽标之后,一眼就能分清,不必读完两段话。
+   */
+  scopeLabel: string;
   blocks: UnderstandingBlock[];
   scope: UnderstandingScope;
   /** 共享那一档对只读成员是 `false`:内容照常显示,写入控件不渲染。 */
@@ -148,6 +182,8 @@ type ChainProps = {
 function UnderstandingChain({
   title,
   description,
+  icon,
+  scopeLabel,
   blocks,
   scope,
   canEdit,
@@ -167,28 +203,40 @@ function UnderstandingChain({
   resolveSourceTitle,
 }: ChainProps) {
   return (
-    <section className="stack">
-      <div>
-        <h3 style={{ margin: 0 }}>{title}</h3>
-        <p className="tool-hint" style={{ margin: "4px 0 0" }}>{description}</p>
-      </div>
-      {canEdit && (
-        <div>
-          <button
-            type="button"
-            className="sort-button"
-            disabled={busy}
-            title={busy ? "整理进行中" : "让 AI 重新读一遍，整理出最新的一份"}
-            onClick={() => onRebuild(scope)}
+    <section className="understanding-module">
+      <div className="understanding-module-head">
+        <div className="understanding-module-title">
+          <span className="understanding-module-icon" aria-hidden="true">{icon}</span>
+          <h3>{title}</h3>
+          <span
+            className={
+              scope === "shared"
+                ? "understanding-scope-chip"
+                : "understanding-scope-chip private"
+            }
           >
-            {busy ? "整理中…" : "重新整理"}
-          </button>
+            {scopeLabel}
+          </span>
+          {canEdit ? (
+            <button
+              type="button"
+              className="sort-button understanding-rebuild"
+              disabled={busy}
+              title={busy ? "整理进行中" : "让 AI 重新读一遍，整理出最新的一份"}
+              onClick={() => onRebuild(scope)}
+            >
+              <RefreshCw size={14} className={busy ? "busy-spin" : undefined} />
+              {busy ? "整理中…" : "重新整理"}
+            </button>
+          ) : null}
         </div>
-      )}
+        <p className="understanding-module-hint">{description}</p>
+      </div>
+      <div className="understanding-module-body">
       {/* 失败原因是后端刻意写给用户看的那一份(内部诊断从不下发),不显示等于让
           用户对着一份永远不更新的内容猜。 */}
       {job?.failure_reason ? (
-        <p className="tool-hint" role="status">上次整理没成功：{job.failure_reason}</p>
+        <p className="understanding-note" role="status">上次整理没成功：{job.failure_reason}</p>
       ) : null}
       {blocks.map((block) => {
         const blockTitle = PROFILE_BLOCK_TITLES[block.label];
@@ -204,28 +252,24 @@ function UnderstandingChain({
         const saving = savingLabels.has(block.label);
         const confirming = confirmingLabel === block.label;
         return (
-          <div className="item" key={block.label}>
-            <strong>{blockTitle}</strong>
-            <p className="tool-hint" style={{ margin: "4px 0 8px" }}>
+          <div className="item understanding-block" key={block.label}>
+            <div className="understanding-block-head">
+              <strong>{blockTitle}</strong>
+            </div>
+            <p className="understanding-block-hint">
               {PROFILE_BLOCK_HINTS[block.label] ?? ""}
             </p>
             {canEdit ? (
               <>
                 <textarea
-                  className="textarea"
+                  className="textarea understanding-textarea"
                   aria-label={blockTitle}
                   value={value}
                   onChange={(event) => onDraft(block.label, event.target.value, block.revision)}
                 />
                 {stale ? (
-                  <div
-                    className="tool-hint"
-                    role="alert"
-                    style={{ margin: "4px 0 0", color: "var(--warning)" }}
-                  >
-                    <p style={{ margin: "0 0 4px" }}>
-                      内容刚被重新整理过，下面是你未保存的修改
-                    </p>
+                  <div className="understanding-stale" role="alert">
+                    <p>内容刚被重新整理过，下面是你未保存的修改</p>
                     <button
                       type="button"
                       className="sort-button"
@@ -235,47 +279,61 @@ function UnderstandingChain({
                     </button>
                   </div>
                 ) : null}
-                <p className="tool-hint" style={{ margin: "4px 0 0" }}>
-                  {understandingValueLength(value)} / {AGENT_PROFILE_VALUE_MAX_CHARS} 字
-                  {tooLong ? "　内容过长，请先删减后再保存" : ""}
-                </p>
-                <div className="tag-row" style={{ marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={!dirty || tooLong || saving}
-                    onClick={() => onSave(scope, block)}
-                  >
-                    {saving ? "保存中…" : "保存"}
-                  </button>
-                  {confirming ? (
-                    <>
-                      <button
-                        type="button"
-                        className="sort-button"
-                        disabled={saving}
-                        onClick={() => onClear(scope, block)}
-                      >
-                        确认清空
-                      </button>
-                      <button type="button" className="sort-button" onClick={onCancelClear}>
-                        取消
-                      </button>
-                    </>
-                  ) : (
+                {/* 字数与超限提示留在**同一个**元素里:两段拆开之后,「401 / 400 字」
+                    与那句「内容过长」会分属两行,而它们说的是同一件事。 */}
+                <div className="understanding-block-foot">
+                  <p className="understanding-count">
+                    <span className={tooLong ? "understanding-count-over" : undefined}>
+                      {understandingValueLength(value)} / {AGENT_PROFILE_VALUE_MAX_CHARS} 字
+                    </span>
+                    {tooLong ? (
+                      <span className="understanding-count-over">
+                        内容过长，请先删减后再保存
+                      </span>
+                    ) : null}
+                  </p>
+                  <div className="understanding-block-actions">
                     <button
                       type="button"
                       className="sort-button"
-                      disabled={saving || (block.value === "" && value === "")}
-                      onClick={() => onAskClear(block.label)}
+                      disabled={!dirty || tooLong || saving}
+                      onClick={() => onSave(scope, block)}
                     >
-                      清空
+                      {saving ? "保存中…" : "保存"}
                     </button>
-                  )}
+                    {confirming ? (
+                      <>
+                        <button
+                          type="button"
+                          className="sort-button danger-text"
+                          disabled={saving}
+                          onClick={() => onClear(scope, block)}
+                        >
+                          确认清空
+                        </button>
+                        <button type="button" className="sort-button" onClick={onCancelClear}>
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="sort-button"
+                        disabled={saving || (block.value === "" && value === "")}
+                        onClick={() => onAskClear(block.label)}
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
                 </div>
               </>
             ) : (
-              <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+              <p
+                className={
+                  block.value ? "understanding-readonly" : "understanding-readonly is-empty"
+                }
+              >
                 {block.value || "还没有整理出内容。"}
               </p>
             )}
@@ -289,6 +347,7 @@ function UnderstandingChain({
           </div>
         );
       })}
+      </div>
     </section>
   );
 }
@@ -305,6 +364,11 @@ function UnderstandingChain({
  */
 function AgentObservationSection({ notebookId }: { notebookId: string }) {
   const [items, setItems] = useState<AgentObservation[] | null>(null);
+  // 调用记账与上面那份短句清单分开存,不合成一个数组:两者的清空按钮、上限提示
+  // 与空态文案各不相同,合起来之后每一处都要先按 kind 分回去。
+  const [calls, setCalls] = useState<AgentCall[] | null>(null);
+  const [callsEnabled, setCallsEnabled] = useState(true);
+  const [clearingCallsAgentId, setClearingCallsAgentId] = useState("");
   const [remoteDisabled, setRemoteDisabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -327,6 +391,10 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
         // 的 enabled=false 必须保真,不能把「关闭」渲染成「暂无记录」。
         setRemoteDisabled(next.enabled === false);
         setItems(next.items);
+        // 调用记账有**自己**那把开关:关掉时如实记下来,空清单才不会被读成
+        // 「从来没有 Agent 调用过这个库」。
+        setCallsEnabled(next.calls_enabled !== false);
+        setCalls(next.calls ?? []);
       }
     } catch (err) {
       if (epoch === loadEpochRef.current) {
@@ -337,7 +405,8 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
     }
   }, [notebookId]);
 
-  const anyClearing = clearingAgentId !== "" || clearingAll;
+  const anyClearing =
+    clearingAgentId !== "" || clearingCallsAgentId !== "" || clearingAll;
 
   function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
     if (event.currentTarget.open && items === null && !loading) {
@@ -345,16 +414,32 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
     }
   }
 
+  // 两个按 Agent 的清空各自**只清自己那一种**。不带 kind 会让「清掉这个 Agent
+  // 写下的短句」顺手把它的调用记录也删掉——按钮就挨着那份清单,用户没理由预期
+  // 它会动到另一份。
   async function clearAgent(agentProfileId: string) {
     setClearingAgentId(agentProfileId);
     setError("");
     try {
-      await clearAgentObservations(notebookId, agentProfileId);
+      await clearAgentObservations(notebookId, agentProfileId, "note");
       await load();
     } catch (err) {
       setError(toUserMessage(err, "没能清空，请稍后重试"));
     } finally {
       setClearingAgentId("");
+    }
+  }
+
+  async function clearAgentCalls(agentProfileId: string) {
+    setClearingCallsAgentId(agentProfileId);
+    setError("");
+    try {
+      await clearAgentObservations(notebookId, agentProfileId, "call");
+      await load();
+    } catch (err) {
+      setError(toUserMessage(err, "没能清空，请稍后重试"));
+    } finally {
+      setClearingCallsAgentId("");
     }
   }
 
@@ -373,79 +458,138 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
   }
 
   const groups = items ? groupObservationsByAgent(items) : [];
+  const callGroups = calls ? groupCallsByAgent(calls) : [];
+  // 折叠头上的计数是**两份清单之和**:折起来的时候用户想知道的是「这里有没有
+  // 东西」,而不是其中某一份有多少。
+  const recordCount = (items?.length ?? 0) + (calls?.length ?? 0);
 
   return (
-    <details className="agent-observation-panel" onToggle={onToggle}>
-      <summary><ChevronDown size={14} /> Agent 记录</summary>
-      <div className="stack">
-        <p className="tool-hint" style={{ margin: 0 }}>
-          外部 Agent 通过接口写下的使用线索。它们只会用来更新你自己的「我的检索心得」，不会进入回答，也不会被引用。
-        </p>
+    <details className="understanding-module understanding-observations" onToggle={onToggle}>
+      <summary className="understanding-module-head">
+        <span className="understanding-module-title">
+          <span className="understanding-module-icon" aria-hidden="true"><Bot size={15} /></span>
+          <span className="understanding-module-name">Agent 记录</span>
+          <span className="understanding-scope-chip private">仅自己可见</span>
+          {recordCount > 0 ? (
+            <span className="understanding-count-chip">{recordCount}</span>
+          ) : null}
+        </span>
+        <ChevronDown size={16} className="understanding-summary-chevron" aria-hidden="true" />
+      </summary>
+      <div className="understanding-module-body">
         {error ? (
-          <p className="tool-hint" role="alert" style={{ color: "var(--danger)" }}>{error}</p>
+          <p className="understanding-note is-error" role="alert">{error}</p>
         ) : null}
-        {loading && items === null ? <p className="tool-hint">加载中…</p> : null}
+        {loading && items === null ? <p className="understanding-note">加载中…</p> : null}
+        {remoteDisabled ? (
+          <p className="understanding-empty">该功能已在此部署关闭</p>
+        ) : (
+          <>
+        {/* ——— 小节一:Agent 调用这个库的记账 ———
+            放在写下的线索**之前**,因为它才是「这个库被谁在用」的直接答案;
+            线索是 Agent 自己额外留下的话,数量少得多,也更偏注解。 */}
+        <div className="understanding-subsection">
+          <div className="understanding-subsection-head">
+            <h4>调用记录</h4>
+            {callGroups.length > 0 ? (
+              <span className="understanding-count-chip">{(calls ?? []).length}</span>
+            ) : null}
+          </div>
+          <p className="understanding-module-hint">
+            Agent 每次通过接口用到这个库，都会在这里记一笔：哪个 Agent、什么时候、做了什么。只有你能看到。
+          </p>
+          {!callsEnabled ? (
+            <p className="understanding-empty">这个部署没有开启调用记录</p>
+          ) : calls !== null && calls.length === 0 ? (
+            <p className="understanding-empty">还没有 Agent 调用过这个库</p>
+          ) : null}
+          {/* 与下面那份线索清单同一条口径:取满上限时必须说清「还有更早的没显示」,
+              否则「取满了」会被读成「一共就这么多」。 */}
+          {calls !== null && calls.length === AGENT_CALL_SAMPLE_MAX ? (
+            <p className="understanding-note">仅显示最近 {AGENT_CALL_SAMPLE_MAX} 次</p>
+          ) : null}
+          {callGroups.map((group) => (
+            <div className="item understanding-agent-card" key={group.agentProfileId}>
+              <div className="understanding-agent-head">
+                <strong>{group.agentName}</strong>
+                <span className="understanding-count-chip">{group.items.length}</span>
+                <button
+                  type="button"
+                  className="sort-button danger-text"
+                  disabled={anyClearing}
+                  onClick={() => { void clearAgentCalls(group.agentProfileId); }}
+                >
+                  {clearingCallsAgentId === group.agentProfileId
+                    ? "清空中…"
+                    : "清空这个 Agent 的调用记录"}
+                </button>
+              </div>
+              <ul className="understanding-observation-list">
+                {/* 连着的同一档调用折成一行并计数:一次提问里 Agent 可能连打十几次
+                    检索,逐条铺开反而把「它在做什么」淹掉。折叠只在这里发生,服务端
+                    仍逐条存、逐条清。 */}
+                {collapseCallRuns(group.items).map((run) => (
+                  <li key={run.id}>
+                    <span className="understanding-observation-time">
+                      {observationRelativeTime(run.created_at)}
+                    </span>
+                    <span className="understanding-observation-text">
+                      {callCapabilityLabel(run.capability)}
+                      {run.count > 1 ? (
+                        <span className="understanding-run-count">×{run.count}</span>
+                      ) : null}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+
+        {/* ——— 小节二:Agent 自己写下的线索 ——— */}
+        <div className="understanding-subsection">
+          <div className="understanding-subsection-head">
+            <h4>Agent 写下的线索</h4>
+            {items !== null && items.length > 0 ? (
+              <span className="understanding-count-chip">{items.length}</span>
+            ) : null}
+          </div>
+          <p className="understanding-module-hint">
+            外部 Agent 通过接口写下的使用线索。它们只会用来更新你自己的「我的检索心得」，不会进入回答，也不会被引用。
+          </p>
         {items !== null && items.length === 0 ? (
-          <p className="tool-hint">{remoteDisabled ? "该功能已在此部署关闭" : "暂无 Agent 记录"}</p>
+          <p className="understanding-empty">暂无 Agent 记录</p>
         ) : null}
         {/* 服务端按最近 `AGENT_OBSERVATION_SAMPLE_MAX` 条取数(见该常量注释里的
             镜像关系)、不分页、也不回传取了多少——`items.length` 恰好等于这个
             上限时,唯一能说清「还有更早的记录没显示」的办法就是这一行提示,
             否则用户会把「取满了」误读成「一共就这么多」。 */}
         {items !== null && items.length === AGENT_OBSERVATION_SAMPLE_MAX ? (
-          <p className="tool-hint">仅显示最近 {AGENT_OBSERVATION_SAMPLE_MAX} 条</p>
+          <p className="understanding-note">仅显示最近 {AGENT_OBSERVATION_SAMPLE_MAX} 条</p>
         ) : null}
         {items !== null && items.length > 0 ? (
           <>
-            <div>
-              {confirmingAll ? (
-                <div className="tag-row">
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={anyClearing}
-                    onClick={() => { void clearAll(); }}
-                  >
-                    {clearingAll ? "清空中…" : "确认清空全部记录"}
-                  </button>
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={anyClearing}
-                    onClick={() => setConfirmingAll(false)}
-                  >
-                    取消
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  className="sort-button"
-                  disabled={anyClearing}
-                  onClick={() => setConfirmingAll(true)}
-                >
-                  清空全部记录
-                </button>
-              )}
-            </div>
             {groups.map((group) => (
-              <div className="item" key={group.agentProfileId}>
-                <div className="tag-row" style={{ justifyContent: "space-between" }}>
+              <div className="item understanding-agent-card" key={group.agentProfileId}>
+                <div className="understanding-agent-head">
                   <strong>{group.agentName}</strong>
+                  <span className="understanding-count-chip">{group.items.length}</span>
                   <button
                     type="button"
-                    className="sort-button"
+                    className="sort-button danger-text"
                     disabled={anyClearing}
                     onClick={() => { void clearAgent(group.agentProfileId); }}
                   >
                     {clearingAgentId === group.agentProfileId ? "清空中…" : "清空这个 Agent 的记录"}
                   </button>
                 </div>
-                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                <ul className="understanding-observation-list">
                   {group.items.map((item) => (
                     <li key={item.id}>
-                      <span className="tool-hint">{observationRelativeTime(item.created_at)}　</span>
-                      {item.text}
+                      <span className="understanding-observation-time">
+                        {observationRelativeTime(item.created_at)}
+                      </span>
+                      <span className="understanding-observation-text">{item.text}</span>
                     </li>
                   ))}
                 </ul>
@@ -453,6 +597,42 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
             ))}
           </>
         ) : null}
+        </div>
+        {recordCount > 0 ? (
+          <div className="understanding-observations-toolbar">
+            {confirmingAll ? (
+              <div className="understanding-block-actions">
+                <button
+                  type="button"
+                  className="sort-button danger-text"
+                  disabled={anyClearing}
+                  onClick={() => { void clearAll(); }}
+                >
+                  {clearingAll ? "清空中…" : "确认清空全部记录"}
+                </button>
+                <button
+                  type="button"
+                  className="sort-button"
+                  disabled={anyClearing}
+                  onClick={() => setConfirmingAll(false)}
+                >
+                  取消
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="sort-button"
+                disabled={anyClearing}
+                onClick={() => setConfirmingAll(true)}
+              >
+                清空全部记录
+              </button>
+            )}
+          </div>
+        ) : null}
+          </>
+        )}
       </div>
     </details>
   );
@@ -686,29 +866,31 @@ export function AgentProfilePanel({
   if (data === null) {
     if (error) {
       return (
-        <div className="stack">
-          <p className="tool-hint" role="alert" style={{ color: "var(--danger)" }}>{error}</p>
+        <div className="understanding-panel">
+          <p className="understanding-note is-error" role="alert">{error}</p>
           <div>
             <button type="button" className="sort-button" onClick={retryLoad}>重试</button>
           </div>
         </div>
       );
     }
-    return <p className="tool-hint">加载中…</p>;
+    return <p className="understanding-note">加载中…</p>;
   }
   if (!data.enabled) {
-    return <p className="tool-hint">这项功能当前未开启。</p>;
+    return <p className="understanding-note">这项功能当前未开启。</p>;
   }
 
   return (
-    <div className="stack">
+    <div className="understanding-panel">
       {error ? (
-        <p className="tool-hint" role="alert" style={{ color: "var(--danger)" }}>{error}</p>
+        <p className="understanding-note is-error" role="alert">{error}</p>
       ) : null}
-      {notice ? <p className="tool-hint" role="status">{notice}</p> : null}
+      {notice ? <p className="understanding-note" role="status">{notice}</p> : null}
       <UnderstandingChain
         title="AI 对这个库的理解"
         description="AI 读过这个库里的资料之后形成的印象，笔记本里的每个人看到的都是同一份，提问时会带上它。"
+        icon={<Sparkles size={15} />}
+        scopeLabel="笔记本里的每个人"
         blocks={orderedUnderstandingBlocks(data.base, BASE_LABELS)}
         scope="shared"
         canEdit={data.can_edit_base}
@@ -730,6 +912,8 @@ export function AgentProfilePanel({
       <UnderstandingChain
         title="我的检索心得"
         description="只有你能看到，也只在你自己提问时生效；别的成员既看不到，也不会被它影响。"
+        icon={<Search size={15} />}
+        scopeLabel="仅自己可见"
         blocks={orderedUnderstandingBlocks(data.mine, OVERLAY_LABELS)}
         scope="mine"
         canEdit

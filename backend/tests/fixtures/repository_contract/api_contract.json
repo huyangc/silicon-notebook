@@ -702,6 +702,41 @@
           "title": "AdminUserUsage",
           "type": "object"
         },
+        "AgentCallOut": {
+          "additionalProperties": false,
+          "description": "One recorded tool call an Agent made against this notebook.\n\nA sibling of ``AgentObservationOut``, NOT a variant of it, because the\ntwo say different things and one of them is not a quotation: an\nobservation carries text an Agent WROTE, while this carries the\ncapability the system admitted a call under. Merging them behind one\n``text`` field would invite a renderer to show a scope string as if the\nAgent had said it.\n\n``capability`` is the raw scope (``\"ask:execute\"``, ``\"knowledge:read\"``,\n…) — a closed protocol vocabulary, mapped to user-facing wording by the\nbrowser exactly like every other enum this API returns raw. Two tools\nadmitted under the same scope are deliberately indistinguishable here;\nsee ``AgentObservationStorePort.append_call`` for why the scope, not the\ntool name, is what gets recorded.",
+          "properties": {
+            "agent_name": {
+              "title": "Agent Name",
+              "type": "string"
+            },
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "capability": {
+              "title": "Capability",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "agent_profile_id",
+            "agent_name",
+            "capability",
+            "created_at"
+          ],
+          "title": "AgentCallOut",
+          "type": "object"
+        },
         "AgentObservationOut": {
           "additionalProperties": false,
           "description": "One line an external Agent wrote via ``add_observation``, projected\nfor the caller's own \"Agent 记录\" list. Wraps the store's four-field\n``project_observation_row`` shape (``id``/``agent_profile_id``/``text``/\n``created_at``) plus a resolved display name — never the raw\n``owner_id``, which this endpoint never returns because it is always\nexactly the caller who asked for it (mirrors ``project_observation_row``'s\nown reasoning for omitting it).",
@@ -754,8 +789,20 @@
         },
         "AgentObservationsResponse": {
           "additionalProperties": false,
-          "description": "``GET /notebooks/{id}/agent-observations``. ``enabled=false`` (总闸关闭,\nor the deployment never wired a profile store) always carries an empty\nlist rather than 404 — same \"off\" vs \"on but nothing written yet\"\ndistinction ``UnderstandingResponse`` makes.",
+          "description": "``GET /notebooks/{id}/agent-observations``. ``enabled=false`` (总闸关闭,\nor the deployment never wired a profile store) always carries an empty\nlist rather than 404 — same \"off\" vs \"on but nothing written yet\"\ndistinction ``UnderstandingResponse`` makes.\n\n``items`` and ``calls`` are two SEPARATE lists rather than one mixed,\nkind-tagged list, and that is a contract decision, not a layout one: each\nis independently bounded by its OWN ``limit``. Folded into one list under\na shared limit, a busy Agent's call ledger could fill the whole window\nand push every hand-written note off the end of the response — the\nrequest-level twin of the eviction race the per-kind rings already close\nat the storage level.\n\n``calls_enabled`` reports the ``AGENT_CALL_LOG_ENABLED`` deployment\nswitch specifically. It is NOT the same bit as ``enabled`` above: a\ndeployment may keep the understanding feature on while turning call\nrecording off, and the panel has to say \"recording is off here\" rather\nthan render an empty list as \"no Agent has ever called this notebook\".",
           "properties": {
+            "calls": {
+              "items": {
+                "$ref": "#/components/schemas/AgentCallOut"
+              },
+              "title": "Calls",
+              "type": "array"
+            },
+            "calls_enabled": {
+              "default": true,
+              "title": "Calls Enabled",
+              "type": "boolean"
+            },
             "enabled": {
               "title": "Enabled",
               "type": "boolean"
@@ -15308,6 +15355,16 @@
                 "title": "Agent Profile Id",
                 "type": "string"
               }
+            },
+            {
+              "in": "query",
+              "name": "kind",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Kind",
+                "type": "string"
+              }
             }
           ],
           "responses": {
@@ -15355,6 +15412,18 @@
                 "maximum": 200,
                 "minimum": 1,
                 "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "call_limit",
+              "required": false,
+              "schema": {
+                "default": 20,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Call Limit",
                 "type": "integer"
               }
             }

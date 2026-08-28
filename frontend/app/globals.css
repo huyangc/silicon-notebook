@@ -8877,28 +8877,407 @@ button.tag:hover {
   white-space: nowrap;
 }
 
-/* 「Agent 记录」折叠小节(Agentic Memory P3-T5)——默认收起,主体只在展开时才
-   请求过数据,样式只负责让 <summary> 看着像个可点的小节标题。 */
-.agent-observation-panel {
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
-  margin-top: 4px;
+/* 「AI 对这个库的理解」面板(Agentic Memory P1-T7 / P3-T5)。
+   ——————————————————————————————————————————————————————————————————————
+   三档内容(共享理解 / 我的检索心得 / Agent 记录)各自是一张带头部的卡。骨架抄
+   `.group-detail` / `.group-detail-head`(浅蓝头部带 + 白色主体 + overflow hidden
+   收圆角),不另起一套视觉语言;全部 namespaced 到 `.understanding-*`,一条共享规则
+   都不改。理由写在 agent-profile-panel.tsx 顶部的模块注释里(为什么平铺不行)。 */
+.understanding-panel {
+  display: grid;
+  gap: 14px;
 }
 
-.agent-observation-panel > summary {
-  cursor: pointer;
-  font-weight: 700;
+.understanding-module {
+  border: 1px solid #cfd9ee;
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.understanding-module-head {
+  display: grid;
+  gap: 7px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #f4f7ff;
+}
+
+.understanding-module-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.understanding-module-title h3,
+.understanding-module-name {
+  margin: 0;
+  min-width: 0;
+  color: #1b2430;
+  font-size: 16px;
+  font-weight: 650;
+  word-break: break-word;
+}
+
+.understanding-module-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: #3f5b9b;
+  background: #e3ebff;
+}
+
+/* 「这一档给谁看」。共享那一档用中性描边,只给自己的两档用琥珀——与全站
+   `--warning-*`(提醒,不是错误)同一支色,不新造第三种强调色。 */
+.understanding-scope-chip {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  color: #344255;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.understanding-scope-chip.private {
+  border-color: var(--warning-border);
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+/* 计数徽标(某个 Agent 有几条记录 / 一共几条)。与群组页的 .group-count-chip 同形,
+   但不复用那个类:那是群组页的词汇,跨面板借用会让两处的改动互相牵连。 */
+.understanding-count-chip {
+  flex: none;
+  min-width: 24px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--muted);
+  background: var(--soft);
+  font-size: 12px;
+  font-weight: 750;
+  text-align: center;
+}
+
+/* 「重新整理」贴在它作用的那一档的头部右侧,不再是标题下面孤零零的一颗按钮。 */
+.understanding-rebuild {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+  min-height: 32px;
+  padding: 0 13px;
   font-size: 13px;
-  color: var(--ink);
-  list-style: none;
+  font-weight: 600;
 }
 
-.agent-observation-panel > summary::-webkit-details-marker {
+.understanding-module-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.understanding-module-body {
+  display: grid;
+  gap: 10px;
+  padding: 13px 14px;
+}
+
+/* 折叠头:整条 <summary> 就是点击目标,右侧的箭头随展开翻转。 */
+.understanding-observations > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.understanding-observations > summary::-webkit-details-marker {
   display: none;
 }
 
-.agent-observation-panel > .stack {
-  margin-top: 10px;
+.understanding-observations > summary > .understanding-module-title {
+  flex: 1 1 auto;
+}
+
+.understanding-summary-chevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform .15s ease;
+}
+
+.understanding-observations[open] .understanding-summary-chevron {
+  transform: rotate(180deg);
+}
+
+/* 块卡。在共享的 .item 之上只改三件事:圆角与卡内节奏,以及浅一档的底色——
+   模块主体已经是白的,块再纯白就会与卡底糊成一片。 */
+.understanding-block {
+  display: grid;
+  gap: 7px;
+  border-radius: 10px;
+  padding: 12px 13px;
+  background: #fbfcfe;
+}
+
+.understanding-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.understanding-block-head strong {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.understanding-block-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.understanding-textarea {
+  min-height: 86px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.understanding-textarea:focus {
+  border-color: #9fb8ff;
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, .11);
+  outline: 0;
+}
+
+/* 字数与动作同一行:字数靠左、动作靠右,不再各占一行把块拉长。窄宽度下换行,
+   动作整组一起走,不会拆成半行。 */
+.understanding-block-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.understanding-count {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.understanding-count-over {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.understanding-block-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.understanding-block-actions .sort-button,
+.understanding-observations-toolbar .sort-button,
+.understanding-agent-head .sort-button,
+.understanding-stale .sort-button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 陈旧草稿警示:提醒档(琥珀),不是错误档。 */
+.understanding-stale {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: var(--warning);
+  background: var(--warning-bg);
+  font-size: 12px;
+}
+
+.understanding-stale p {
+  flex: 1 1 200px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* 只读渲染(共享那一档对只读成员)。空态与有内容态用同一个元素,只换字色—— */
+.understanding-readonly {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.understanding-readonly.is-empty {
+  color: var(--muted);
+}
+
+.understanding-evidence {
+  display: grid;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.understanding-evidence-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 面板级的一句话:加载中 / 出错 / 上次整理没成功 / 只显示最近若干条。 */
+.understanding-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.understanding-note.is-error {
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+/* 空态:一条虚线框比一句灰字更像「这里本该有内容」(与 .group-empty 同一条口径)。 */
+.understanding-empty {
+  margin: 0;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.understanding-observations-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+/* 「Agent 记录」里的两个小节(调用记录 / Agent 写下的线索)。卡内的小节标题比
+   模块头再轻一档,免得卡里卡外两级标题看起来一样重(与 .group-block > h4 同一
+   条口径)。 */
+.understanding-subsection {
+  display: grid;
+  gap: 8px;
+}
+
+.understanding-subsection + .understanding-subsection {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.understanding-subsection-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.understanding-subsection-head h4 {
+  margin: 0;
+  color: #4f5663;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: .02em;
+}
+
+/* 「×12」——连着的同一档调用折叠之后的次数。 */
+.understanding-run-count {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.understanding-agent-card {
+  display: grid;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 11px 12px;
+  background: #fbfcfe;
+}
+
+.understanding-agent-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.understanding-agent-head strong {
+  min-width: 0;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.understanding-agent-head .sort-button {
+  margin-left: auto;
+}
+
+.understanding-observation-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.understanding-observation-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border-top: 1px solid #eef1f7;
+  padding-top: 6px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.understanding-observation-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.understanding-observation-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.understanding-observation-text {
+  min-width: 0;
+  word-break: break-word;
 }
 
 .kg-action-stack {

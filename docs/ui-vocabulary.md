@@ -37,6 +37,8 @@
 | 画像 / 底座画像（agent_notebook_profile 共享层） / 巡固（consolidation job） | AI 对这个库的理解 |
 | 画像 / 覆盖层画像（agent_notebook_profile 个人层） | 我的检索心得 |
 | 观察队列（observation, agent_observations） | Agent 记录 |
+| 调用记账（call ledger，`agent_observations.kind='call'`） | 调用记录 |
+| 能力档（capability scope，`ask:execute` 这类协议串同样不上屏） | 按动作说人话（提问 / 查资料 / 添加资料…） |
 | 回答风格偏好（search profile, user_profiles.search_profile_json） | 我的回答偏好 |
 | consult_memory（模型主动拉取检索经验的 reflect 动作／trace 步） | 回想 |
 
