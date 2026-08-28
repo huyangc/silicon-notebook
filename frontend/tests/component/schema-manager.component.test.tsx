@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 
 import { SchemaManager } from "../../app/schema-manager.tsx";
@@ -326,6 +326,53 @@ test("状态类写动作拿不到回执时在按钮紧邻处说明原因", async
   fireEvent.click(row("claim"));
   fireEvent.click(screen.getByRole("button", { name: "停用" }));
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("切换启用状态失败"));
+});
+
+// --- 在飞期间导航：结果不能落到用户此刻看的那一行上 ---------------------------
+
+test("保存在飞时切到别的类型，完成回调既不把人拽回去，也不把失败挂到别人身上", async () => {
+  // 清单行**刻意**在写入在飞期间仍然可点（只读浏览不该被一次写入冻住），代价就是
+  // 完成回调会晚于用户的下一次导航到达。不核对身份就会做两件都错的事：把人从他刚
+  // 点开的类型拽回原来那一行，以及把失败提示挂在另一个类型旁边。
+  let settle: (ok: boolean) => void = () => {};
+  const onPatch = vi.fn().mockImplementation(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+  mount({
+    onPatch,
+    schemas: [item(), item({ object_type: "process_window", label: "工艺窗口", inherited: false, scope: "notebook" })],
+  });
+  openEditor("claim");
+  fireEvent.change(screen.getByLabelText("显示名"), { target: { value: "项目结论" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存并建立覆盖" }));
+  await waitFor(() => expect(onPatch).toHaveBeenCalled());
+
+  fireEvent.click(row("process_window"));
+  await act(async () => { settle(false); });
+
+  // 人留在自己刚点开的那一行，失败提示没有跟过来。
+  expect(within(screen.getByLabelText("类型定义")).getByText("process_window")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  // 而那份没保存成功的草稿仍在原处等着，圆点还亮着。
+  expect(within(row("claim")).getByTitle("有还没保存的修改")).toBeInTheDocument();
+});
+
+test("保存在飞时切走再切回来，成功那一版仍然是只读态且草稿已清", async () => {
+  let settle: (ok: boolean) => void = () => {};
+  const onPatch = vi.fn().mockImplementation(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+  mount({
+    onPatch,
+    schemas: [item(), item({ object_type: "process_window", label: "工艺窗口", inherited: false, scope: "notebook" })],
+  });
+  openEditor("claim");
+  fireEvent.change(screen.getByLabelText("显示名"), { target: { value: "项目结论" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存并建立覆盖" }));
+  await waitFor(() => expect(onPatch).toHaveBeenCalled());
+  fireEvent.click(row("process_window"));
+  await act(async () => { settle(true); });
+
+  // 落库的草稿无条件丢掉——它已经不是「用户还没提交的输入」了。
+  expect(within(row("claim")).queryByTitle("有还没保存的修改")).not.toBeInTheDocument();
+  fireEvent.click(row("claim"));
+  expect(screen.queryByLabelText("显示名")).not.toBeInTheDocument();
 });
 
 // --- 权限：只读成员看得到同一份定义，但没有任何写控件 -------------------------
