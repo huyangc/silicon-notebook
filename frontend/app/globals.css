@@ -59,18 +59,22 @@ button {
    .sort-button / .icon-button / .index-cta / .kh-*-button …)，逐类补必漏，
    而漏掉的那一颗就是下一个同样的缺陷。写在元素上，新加的按钮默认就有。
 
-   为什么是「位移 + 变淡」而不是改背景色:背景色要按每个类的配色分别调，且
-   .new-pill 是近黑底(#050505)，往暗调根本看不见。位移与透明度对深浅两种底色、
-   对 42px 药丸和整块卡片按钮(button.chat-session-card)同样成立。
+   ⚠ 为什么**一个改几何的属性都不能用**——transform / translate / scale / rotate
+   全部出局:按下期间的几何就是**命中测试**用的几何。缩小后，落在原边缘附近的那次
+   按压会滑出按钮，mouseup 命中的是父元素,而 click 派发到 mousedown 与 mouseup 的
+   最近公共祖先——按钮的 onClick 干脆不触发。实测(400px 宽按钮 + scale(0.98),在
+   左边缘内 1px 处按下):mousedown → 按钮，mouseup → 父元素，click 计数 0；同一颗
+   按钮正中间按下则正常触发(codex #612 R4 P2)。缩 2% 在 400px 的
+   .notebook-card-main / button.chat-session-card 上就是每边 4px 的「吞点击」条带，
+   而它吞掉的正是这条基线要消灭的那件事——「我点了，什么都没发生」。translate 同理，
+   1px 也会在上边缘吃掉 1px。
+   (更早还有一条独立理由,一并记着:写 transform 简写会替换掉按钮自己的定位
+   transform,`.answer-image-preview-step` 的 translateY(-50%) 因此在按下时跳位约
+   22px——codex #612 R1 P2。改用几何无关的属性后两条一起消失。)
 
-   为什么用 translate/scale 这两个**独立属性**而不是 transform 简写:全站基线会命中
-   那些拿 transform 定位自己的按钮,简写会把人家的定位整条替换掉。实例:
-   `.answer-image-preview-step`(多图预览的上一张/下一张)靠 `top: 50%` +
-   `transform: translateY(-50%)` 垂直居中,44px 的绝对定位控件在按下的那一刻会往下
-   跳约 22px —— 靠近上缘按下时它会从指针底下挪走,连这一次点击都取消掉
-   (codex #612 R1 P2)。独立属性按 translate → rotate → scale → transform 的次序
-   合成,各按钮自己的 transform 原样保留。写 transform 简写的那一版必须报红,守卫
-   button-press-feedback-guard 钉了这一条。
+   于是只用不碰几何的两项:透明度 + 亮度。为什么不是改背景色:背景要按每个类的配色
+   分别调，且 .new-pill 是近黑底(#050505)，往暗调根本看不见；而变淡对近黑底同样成立
+   (透到白底上就是灰)，亮度则负责浅色描边按钮那一侧。两项叠加对深浅两种底色都成立。
 
    刻意不加 transition:按下/松开都要即时，且 button 上已有各自的 transition
    声明，在这里再写一条会被它们整条覆盖，反而只在部分按钮上生效。
@@ -79,9 +83,8 @@ button {
    件事——结果必须落在按钮自身或紧邻处，不能只靠页面顶部的横幅。禁用态不参与:
    :disabled 已由各自的类表达，再叠一层按下态会暗示「点得动」。 */
 button:not(:disabled):not([aria-disabled="true"]):active {
-  translate: 0 1px;
-  scale: 0.98;
-  opacity: 0.8;
+  opacity: 0.7;
+  filter: brightness(0.88);
 }
 
 .content-overview {

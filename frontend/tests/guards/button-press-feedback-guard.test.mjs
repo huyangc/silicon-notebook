@@ -109,33 +109,44 @@ test("按下态是真的视觉变化，而不是空规则", () => {
   const [pressed] = RULES.filter((rule) => ELEMENT_PRESSED.test(rule.selector));
   assert.ok(pressed, "没有元素级 button:active 规则(上一条断言已解释后果)");
   const properties = declaredProperties(pressed.body);
-  const visual = ["translate", "scale", "rotate", "opacity", "filter", "background", "box-shadow"]
+  // 候选里刻意**不含** transform/translate/scale/rotate —— 见下一条,它们改的是
+  // 命中测试用的几何,不许出现在这条规则里。
+  const visual = ["opacity", "filter", "background", "box-shadow", "color", "border-color"]
     .filter((name) => properties.has(name));
   assert.ok(
     visual.length >= 2,
     `按下态只声明了 ${[...properties].join("、") || "空"}`
-    + " —— 需要至少两项视觉变化:单看位移在整块卡片按钮上几乎不可见,单看变淡在浅色"
-    + "描边按钮上同样弱,两者叠加才对深浅两种底色都成立",
+    + " —— 需要至少两项不碰几何的视觉变化:单看变淡在浅色描边按钮上偏弱,单看压暗在"
+    + "近黑底的 .new-pill 上几乎不可见,两者叠加才对深浅两种底色都成立",
   );
 });
 
-test("按下态不用 transform 简写，免得替换掉按钮自己的定位", () => {
-  // 真实缺陷(codex #612 R1 P2):`.answer-image-preview-step`(多图预览的上一张/下一张)
-  // 靠 `top: 50%` + `transform: translateY(-50%)` 垂直居中。全站基线一旦写 transform
-  // 简写,就把那条居中整条替换掉——44px 的绝对定位控件在按下的瞬间往下跳约 22px,
-  // 靠近上缘按下时它会从指针底下挪走,连这一次点击都取消。
+test("按下态不碰几何——改几何就会吞掉边缘上的点击", () => {
+  // 真实缺陷(codex #612 R4 P2)。按下期间的几何**就是命中测试用的几何**:按钮一缩,
+  // 落在原边缘附近的那次按压就滑出了按钮,mouseup 命中父元素,而 click 派发到
+  // mousedown 与 mouseup 的最近公共祖先——按钮的 onClick 干脆不触发。
   //
-  // 判据钉的是**形态**而不是那一颗按钮:任何拿 transform 定位自己的按钮都会中招,
-  // 而 translate/scale/rotate 这三个独立属性按 translate → rotate → scale → transform
-  // 的次序合成,各按钮自己的 transform 原样保留。
+  // 浏览器实测(400px 宽按钮 + `scale: 0.98`,在左边缘内 1px 处按下):
+  //   mousedown → 按钮, mouseup → 父元素, 按钮 click 计数 0
+  // 同一颗按钮正中间按下则正常触发;换成 opacity + filter 之后,同一个边缘坐标
+  // click 计数 1。缩 2% 在 400px 的 .notebook-card-main / button.chat-session-card
+  // 上就是每边 4px 的「吞点击」条带——而它吞掉的正是这条基线要消灭的那件事:
+  // 「我点了，什么都没发生」。translate 同理,1px 也会在上边缘吃掉 1px。
+  //
+  // 还有一条独立理由(codex #612 R1 P2):`transform` 简写会替换掉按钮自己的定位
+  // transform,`.answer-image-preview-step` 的 translateY(-50%) 因此在按下时跳位
+  // 约 22px。禁掉整类属性后两条一起消失。
+  const GEOMETRY = ["transform", "translate", "scale", "rotate"];
   const [pressed] = RULES.filter((rule) => ELEMENT_PRESSED.test(rule.selector));
   assert.ok(pressed, "没有元素级 button:active 规则(上一条断言已解释后果)");
-  assert.equal(
-    declaredProperties(pressed.body).has("transform"),
-    false,
-    "全站按下态用了 transform 简写 —— 它会替换掉按钮自己的定位 transform"
-    + "(如 .answer-image-preview-step 的 translateY(-50%)),按下时控件会跳位甚至"
-    + "从指针底下挪走。改用 translate / scale 独立属性,它们与既有 transform 合成",
+  const properties = declaredProperties(pressed.body);
+  const offenders = GEOMETRY.filter((name) => properties.has(name));
+  assert.deepEqual(
+    offenders,
+    [],
+    `全站按下态声明了会改几何的属性:${offenders.join("、")} —— 按下期间的几何就是`
+    + "命中测试用的几何,边缘附近的按压会被静默吞掉(实测 400px 按钮 + scale(0.98),"
+    + "边缘内 1px 处按下,按钮 click 计数 0)。改用 opacity / filter 这类不碰几何的属性",
   );
 });
 
