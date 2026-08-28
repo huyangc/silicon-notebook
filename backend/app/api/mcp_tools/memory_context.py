@@ -25,6 +25,7 @@ from ._shared import (
     RESULT_LIMIT,
     TEXT_LIMIT,
     _budget_response,
+    _record_agent_call,
     _owner_request_context,
     _run_with_progress,
     _selected_notebook,
@@ -307,8 +308,12 @@ def register_memory_context_tools(
     @server.tool(description="Get one owner-private Memory from the selected notebook.")
     async def get_memory(memory_id: str, ctx: Context) -> dict[str, Any]:
         repo = repository_provider()
+        # ``record=False``:这个工具在收口之后**还有一道**鉴权——候选条目要求
+        # ``memory:read_candidates``。让收口自动记账会把被那道闸拒掉的读也写进
+        # 调用记录,与「被拒绝的调用不留痕」相反(codex #616 R5 P2)。与
+        # ``_writable_notebook`` 同一条处理:自己在所有闸都过了之后再记。
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _selected_notebook, ctx, repo, "memory:read"
+            _selected_notebook, ctx, repo, "memory:read", False
         )
 
         def load() -> dict[str, Any]:
@@ -322,6 +327,10 @@ def register_memory_context_tools(
                 repo.require_agent_access(
                     principal, "memory:read_candidates", notebook_id
                 )
+            # 每一道闸都过了才记。已登记的边界:查不到(或落在别的笔记本/已废弃)
+            # 的那次同样不记——它在闸判完之前就抬手了,而记账记的是「到达了这个
+            # 库的数据」,不是「有人试过这个 id」。
+            _record_agent_call(repo, principal, notebook_id, "memory:read")
             profiles = _profile_names(
                 repo, principal.owner_id
             )

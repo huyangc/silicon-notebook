@@ -1939,9 +1939,14 @@ through receives that scope as an argument it must supply to be admitted at all,
 newly added tool is recorded without its author doing anything — at the registered cost
 that two tools admitted under the same scope read back identically. Denied calls leave no
 trace (a ledger of *attempts by principals who were refused* is a different feature with
-different privacy consequences) — including calls refused by the SECOND gate: the
-owner-only check that write tools apply after `require_agent_access`, so recording for
-those runs only once that gate has cleared too. A failing ledger write is swallowed and
+different privacy consequences) — including calls refused by a LATER gate than the choke
+point's own. Two tools apply one: write tools add the owner-only check after
+`require_agent_access`, and `get_memory` requires `memory:read_candidates` before it will
+return a candidate. Both suppress the automatic record and book it themselves once their
+own gate has cleared, so the invariant is "recorded after EVERY gate", not "recorded at
+the choke point". (Registered edge: a `get_memory` for an id that resolves to nothing
+records nothing either — it returns before the gate is even reached, and the ledger books
+calls that reached this notebook's data, not ids someone tried.) A failing ledger write is swallowed and
 logged as a content-free event (no exception text — the book-keeping about a call is not
 part of the call, and a database exception carries paths and SQL the logging rule keeps
 out).

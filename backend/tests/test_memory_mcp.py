@@ -4448,3 +4448,40 @@ async def test_call_ledger_row_landing_after_member_removal_is_compensated(
     assert repo.agent_observations.list_calls(
         notebook_id, bob.id, limit=10
     ) == [], "移除后落地的记账必须被补偿清理,不得留下复活孤儿行"
+
+
+@pytest.mark.anyio
+async def test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row(
+    mcp_env,
+):
+    """codex #616 R5 P2:``get_memory`` 在收口之后还有一道闸——候选条目要求
+    ``memory:read_candidates``。收口自动记账会把被那道闸拒掉的读也记进去,与
+    「被拒绝的调用不留痕」相反。成功的那次照常记一行,证明这里推迟的是记账时机,
+    不是把这条路径整个排除在外。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    candidate = mcp_env["service"].create_memory_candidate(
+        notebook_id, mcp_env["alice"].id, mcp_env["profile_a"].id,
+        "ledger-request", "候选条目", "只有带 read_candidates 的令牌能读", [], "test",
+    )
+    confirmed = mcp_env["service"].create_memory_candidate(
+        notebook_id, mcp_env["alice"].id, mcp_env["profile_a"].id,
+        "ledger-request-confirmed", "已确认条目", "谁都能读", [], "test",
+    )
+    mcp_env["service"].confirm_memory(confirmed.id, mcp_env["alice"].id)
+
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["restricted"].token
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert (await client.call(
+            "get_memory", {"memory_id": candidate.id}
+        )).isError
+        _payload(await client.call("get_memory", {"memory_id": confirmed.id}))
+
+    calls = repo.agent_observations.list_calls(
+        notebook_id, mcp_env["alice"].id, limit=50
+    )
+    assert [row["capability"] for row in calls] == ["memory:read"], (
+        "被候选那道闸拒掉的读留了痕,或者成功的那次没记上"
+    )
