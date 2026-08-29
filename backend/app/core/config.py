@@ -625,6 +625,16 @@ class Settings(BaseSettings):
     scale_build_failure_backoff_max_seconds: int = Field(
         1800, ge=1, validation_alias="SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS"
     )
+    # 笔记本全文搜索(HTTP /notebooks/{id}/search 与 MCP search_notebook_context 两入口
+    # 共用一个闸)的进程级并发上限。默认 4 与前端集合页搜索自身的并行扇出档位
+    # (frontend/app/collection-search.ts 的 SEARCH_FANOUT_LIMIT)一致:单个用户的整库
+    # 搜索不被自己的扇出卡住,第二个并发打字者则等待而非把又一轮全表扫描压进连接池。
+    # 等待发生在事件循环上(挂起协程,不占线程不占连接,见 services/search_concurrency.py
+    # 的成本模型);这是部署可调的成本预算(codex #627 R2 P2):池更小的部署应调低,
+    # 池充裕的部署可调高——调整前先核对 POSTGRES_POOL_MAX_SIZE 余量。
+    search_concurrency_limit: int = Field(
+        4, ge=1, le=64, validation_alias="SEARCH_CONCURRENCY_LIMIT"
+    )
     # 已索引大库检索策略:默认只搜已索引部分(ANN 核 ∪ FTS 词法);delta(水位后新增 source)
     # 的 chunk 不做暴力语义补召回。True 时对 delta 额外暴力(强一致,但大库慢),供 opt-in。
     # 配合 scale_auto_fold_on_add:新增内容排增量 fold,使 delta 尽快进索引取代暴力。

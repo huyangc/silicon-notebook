@@ -610,6 +610,7 @@ SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 t
 SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
 STARTUP_PRELOAD_SCALE_INDEXES # readiness 前加载全部已发布 scale 索引、启用 ANN 与安全的单索引 PPR core（默认 true）
 SCALE_IDX_CACHE_MAX        # scale 索引常驻上限；开预加载时必须不少于存量有效索引数（默认 8）
+SEARCH_CONCURRENCY_LIMIT   # 笔记本全文搜索的进程级并发上限，HTTP /search 路由与 MCP search_notebook_context 工具共用一个闸（默认 4，对齐前端集合页自身的搜索扇出档位）。等待发生在事件循环上（不占线程、不占数据库连接）且无超时——结果只会延后、绝不收窄。这是部署成本预算：POSTGRES_POOL_MAX_SIZE 较小的主机应调低；只有池有余量时才调高。
 SCALE_BUILD_CONCURRENCY    # 进程内同时执行的 scale 索引 build/fold 操作上限（默认 2）。此前每个构建都是裸的无界 daemon 线程，低峰调度器可能把整条 idle 队列一次性全部起线程、在同机上打出一次内存/CPU 峰值；超出上限的构建会先阻塞在这道闸前，构建本身一旦真正开始执行，耗时不受影响。
 SCALE_BUILD_FAILURE_BACKOFF_SECONDS     # 同一 notebook 的 scale build/fold 失败后，**自动**重跑（调度器/发布后 follow-up——不含用户显式点击「立即重建」）前的最短等待（默认 60）。指数退避：每次连续失败翻倍。
 SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS # 该指数退避的封顶值（默认 1800），让持续失败的 notebook 重试间隔越拉越开而不是无界增长，同时仍能避免背靠背重跑——一次又一次立刻撞上同样会失败的构建、白白占掉并发 slot。

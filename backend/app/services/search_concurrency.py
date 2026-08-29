@@ -76,14 +76,23 @@ from __future__ import annotations
 
 import asyncio
 
-# 4 == frontend/app/collection-search.ts's own SEARCH_FANOUT_LIMIT: the
-# server-side ceiling matches the client's own parallelism so a single
-# user's collection-wide search is never throttled by their own fan-out,
-# only by a genuinely concurrent second caller.
-SEARCH_CONCURRENCY_LIMIT = 4
+from app.core.config import get_settings
 
 _gate: asyncio.Semaphore | None = None
 _gate_loop: asyncio.AbstractEventLoop | None = None
+
+
+def search_concurrency_limit() -> int:
+    """The configured ceiling (``SEARCH_CONCURRENCY_LIMIT``, default 4).
+
+    A deployment-tunable cost budget (codex #627 R2 P2), validated ``ge=1`` in
+    ``Settings``. The default mirrors the frontend's own ``SEARCH_FANOUT_LIMIT``
+    (``frontend/app/collection-search.ts``): a lone user's collection-wide
+    fan-out is never throttled by their own parallelism, only a genuinely
+    concurrent second caller waits. Read at gate construction time — i.e. once
+    per event loop, not per call.
+    """
+    return int(get_settings().search_concurrency_limit)
 
 
 def search_concurrency_gate() -> asyncio.Semaphore:
@@ -115,8 +124,10 @@ def search_concurrency_gate() -> asyncio.Semaphore:
 
     if _gate is None or _gate_loop is None or _gate_loop.is_closed():
         # First use in this process, or the loop the gate was bound to has
-        # finished. Either way nothing can still be holding a permit.
-        _gate = asyncio.Semaphore(SEARCH_CONCURRENCY_LIMIT)
+        # finished. Either way nothing can still be holding a permit. The
+        # ceiling is read from Settings here — once per loop binding — so a
+        # deployment tunes it via SEARCH_CONCURRENCY_LIMIT without code edits.
+        _gate = asyncio.Semaphore(search_concurrency_limit())
         _gate_loop = loop
     elif _gate_loop is not loop:
         raise RuntimeError(

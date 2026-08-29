@@ -44,8 +44,8 @@ from app.api.mcp_tools import memory_context
 from app.models.ask import NotebookSearchResponse
 from app.services import search_concurrency
 from app.services.search_concurrency import (
-    SEARCH_CONCURRENCY_LIMIT,
     search_concurrency_gate,
+    search_concurrency_limit,
 )
 
 
@@ -65,8 +65,14 @@ async def _settle(turns: int = 50) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_search_concurrency_limit_is_four() -> None:
-    assert SEARCH_CONCURRENCY_LIMIT == 4
+def test_search_concurrency_limit_defaults_to_four_and_is_settings_tunable() -> None:
+    """默认 4 对齐前端 SEARCH_FANOUT_LIMIT;上限是部署可调的 Settings 字段
+    (SEARCH_CONCURRENCY_LIMIT, ge=1, codex #627 R2 P2),不再是模块硬编码常量。"""
+    assert search_concurrency_limit() == 4
+    from app.core.config import Settings
+    field = Settings.model_fields["search_concurrency_limit"]
+    assert field.default == 4
+    assert str(field.validation_alias) == "SEARCH_CONCURRENCY_LIMIT"
 
 
 def test_gate_is_an_asyncio_semaphore_admitting_four_with_the_fifth_pending() -> None:
@@ -88,10 +94,10 @@ def test_gate_is_an_asyncio_semaphore_admitting_four_with_the_fifth_pending() ->
                 await release.wait()
 
         holders = [
-            asyncio.create_task(holder(i)) for i in range(SEARCH_CONCURRENCY_LIMIT)
+            asyncio.create_task(holder(i)) for i in range(search_concurrency_limit())
         ]
         await _settle()
-        assert len(entered) == SEARCH_CONCURRENCY_LIMIT
+        assert len(entered) == search_concurrency_limit()
 
         fifth = asyncio.create_task(holder("fifth"))
         await _settle()  # every chance to (wrongly) proceed
@@ -102,7 +108,7 @@ def test_gate_is_an_asyncio_semaphore_admitting_four_with_the_fifth_pending() ->
         release.set()
         await asyncio.gather(*holders, fifth)
         assert "fifth" in entered
-        assert len(entered) == SEARCH_CONCURRENCY_LIMIT + 1
+        assert len(entered) == search_concurrency_limit() + 1
 
     asyncio.run(scenario())
 
@@ -235,7 +241,7 @@ def test_waiting_searches_leave_the_shared_thread_pool_free(monkeypatch) -> None
       thread and block in them, the pool is exhausted, and the unrelated call
       never runs -- ``wait_for`` times out and this test goes red.
     """
-    pool_size, holder_count, waiter_count = 6, SEARCH_CONCURRENCY_LIMIT, 6
+    pool_size, holder_count, waiter_count = 6, search_concurrency_limit(), 6
     probe = _ConcurrencyProbe()
     release = threading.Event()
     monkeypatch.setattr(
@@ -279,7 +285,7 @@ def test_waiting_searches_leave_the_shared_thread_pool_free(monkeypatch) -> None
         release.set()
         results = await asyncio.gather(*holders, *waiters)
         assert len(results) == holder_count + waiter_count
-        assert probe.max_seen == SEARCH_CONCURRENCY_LIMIT
+        assert probe.max_seen == search_concurrency_limit()
 
     asyncio.run(scenario())
 
@@ -403,9 +409,9 @@ def test_mcp_entry_point_shares_the_gate_with_the_http_entry_point(monkeypatch) 
     async def scenario() -> None:
         holders = [
             asyncio.create_task(_call_search_route())
-            for _ in range(SEARCH_CONCURRENCY_LIMIT)
+            for _ in range(search_concurrency_limit())
         ]
-        await _await_holders(probe, SEARCH_CONCURRENCY_LIMIT, "the 4 HTTP holders")
+        await _await_holders(probe, search_concurrency_limit(), "the 4 HTTP holders")
 
         mcp_call = asyncio.create_task(
             search_notebook_context(query="q", ctx=_FakeCtx(), limit=12)
@@ -421,7 +427,7 @@ def test_mcp_entry_point_shares_the_gate_with_the_http_entry_point(monkeypatch) 
         payload = await mcp_call
 
         assert "mcp-caller" in probe.entered
-        assert probe.max_seen == SEARCH_CONCURRENCY_LIMIT
+        assert probe.max_seen == search_concurrency_limit()
         assert payload["notebook_id"] == "nb-mcp"
 
     asyncio.run(scenario())
