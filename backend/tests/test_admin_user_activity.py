@@ -183,7 +183,7 @@ def test_question_overview_enforces_live_read_access_unless_admin_audit(repo):
     self_view = repo.list_user_activity("u1", activity_type="ask")
     assert [item["id"] for item in self_view["items"]] == ["ask-mine"]
 
-    admin_view = repo._runtime.queries.list_user_activity(
+    admin_view = repo.list_user_activity(
         "u1", activity_type="ask", include_inaccessible_questions=True
     )
     assert [item["id"] for item in admin_view["items"]] == [
