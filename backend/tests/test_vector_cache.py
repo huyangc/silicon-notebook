@@ -729,3 +729,18 @@ def test_oversized_entry_is_rejected_before_the_bucket_quota_evicts_anyone():
     assert not c.peek("nb-huge:kwtok", version=1)
     assert c.stats()["evictions_by_family"] == {"kwtok": 1}, (
         "只该记它自己那一次不驻留")
+
+
+def test_negative_cache_budgets_are_rejected_at_settings_construction() -> None:
+    """负值会让 VectorCache 的 ``> 0`` 判断静默关闭对应保护(codex #634 R3 P2)——
+    ge 校验把这类配置错误挡在启动期。0 对字节预算是文档化的「关闭」,仍然合法。"""
+    import pydantic
+    import pytest
+
+    from app.core.config import Settings
+
+    with pytest.raises(pydantic.ValidationError):
+        Settings(database_url="sqlite:///gate-test.db", vector_cache_per_family_entries=0)
+    with pytest.raises(pydantic.ValidationError):
+        Settings(database_url="sqlite:///gate-test.db", vector_cache_max_bytes=-1)
+    assert Settings(database_url="sqlite:///gate-test.db", vector_cache_max_bytes=0).vector_cache_max_bytes == 0
