@@ -12972,6 +12972,11 @@ select.group-input {
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
+  /* 纵向 auto 是极矮视口的兜底(codex #631 R3 P2,与 `.source-modal-card` 同一条):清单区
+     收到 0 之后,头部 + 底栏这两块**不收缩**的东西自己就可能超过卡高(窄屏上头部说明折成
+     三四行时尤其容易),此时公共类的 `overflow: hidden` 会把「×」和「完成」一起裁成不可点。
+     整卡滚动兜底,任何控件都保持可达。 */
+  overflow-y: auto;
 }
 
 .share-overview-card > .source-modal-header,
