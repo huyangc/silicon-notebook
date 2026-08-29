@@ -387,6 +387,7 @@ def get_admin_user_activity(
         raw = admin_query_repository().list_user_activity(
             user_id,
             activity_type=activity_type,
+            include_inaccessible_questions=user.role == "admin",
             notebook_id=notebook_id,
             since=since,
             until=until,
@@ -471,6 +472,10 @@ def get_admin_user_ask_detail(
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
     if job["created_by"] != user_id:
+        raise HTTPException(status_code=404, detail="ask job not found")
+    if user.role != "admin" and not repo.user_can_read_notebook(
+        job["notebook_id"], user.id
+    ):
         raise HTTPException(status_code=404, detail="ask job not found")
 
     asked_at = job.get("asked_at") or ""

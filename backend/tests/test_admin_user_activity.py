@@ -46,6 +46,14 @@ def _insert_notebook(db, nid: str, owner: str, status: str = "ready") -> None:
     )
 
 
+def _insert_member(db, notebook_id: str, user_id: str) -> None:
+    db.execute(
+        "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+        "VALUES (?,?,?,?)",
+        (notebook_id, user_id, "viewer", "2026-08-01T00:00:00"),
+    )
+
+
 def _insert_ask(db, job_id, notebook_id, created_by, created_at, *,
                  question="q?", mode="chunk", status="completed", asked_at="",
                  answer_id="", error="") -> None:
@@ -135,6 +143,7 @@ def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(r
         _insert_user(db, "u2", "b00000002")
         _insert_notebook(db, "n1", "u1")
         _insert_notebook(db, "n2", "u2")
+        _insert_member(db, "n2", "u1")
         _insert_source(db, "src-new", "n1", "2026-08-01T13:00:00")
         _insert_report(db, "rep-new", "n1", "u1", "2026-08-01T12:00:00")
         _insert_ask(
@@ -160,6 +169,41 @@ def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(r
     )
     assert [item["id"] for item in second["items"]] == ["ask-1"]
     assert second["has_more"] is False
+
+
+def test_question_overview_enforces_live_read_access_unless_admin_audit(repo):
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_user(db, "u2", "b00000002")
+        _insert_notebook(db, "n1", "u1")
+        _insert_notebook(db, "n2", "u2")
+        _insert_ask(db, "ask-mine", "n1", "u1", "2026-08-01T11:00:00")
+        _insert_ask(db, "ask-revoked", "n2", "u1", "2026-08-01T10:00:00")
+
+    self_view = repo.list_user_activity("u1", activity_type="ask")
+    assert [item["id"] for item in self_view["items"]] == ["ask-mine"]
+
+    admin_view = repo._runtime.queries.list_user_activity(
+        "u1", activity_type="ask", include_inaccessible_questions=True
+    )
+    assert [item["id"] for item in admin_view["items"]] == [
+        "ask-mine", "ask-revoked",
+    ]
+
+    with repo._write() as db:
+        _insert_member(db, "n2", "u1")
+    shared_view = repo.list_user_activity("u1", activity_type="ask")
+    assert [item["id"] for item in shared_view["items"]] == [
+        "ask-mine", "ask-revoked",
+    ]
+
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            ("n2", "u1"),
+        )
+    revoked_view = repo.list_user_activity("u1", activity_type="ask")
+    assert [item["id"] for item in revoked_view["items"]] == ["ask-mine"]
 
 
 def test_creator_wide_question_overview_uses_activity_keyset_index(repo):

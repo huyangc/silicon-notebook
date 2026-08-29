@@ -51,6 +51,14 @@ def _insert_notebook(connection, notebook_id: str, owner: str, status: str = "re
     )
 
 
+def _insert_member(connection, notebook_id: str, user_id: str) -> None:
+    connection.execute(
+        "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+        "VALUES (%s,%s,%s,%s)",
+        (notebook_id, user_id, "viewer", NOW),
+    )
+
+
 def _insert_ask(connection, job_id, notebook_id, created_by, created_at, **kw) -> None:
     connection.execute(
         "INSERT INTO ask_jobs "
@@ -150,6 +158,7 @@ def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(
         _insert_user(connection, "u2")
         _insert_notebook(connection, "n1", "u1")
         _insert_notebook(connection, "n2", "u2")
+        _insert_member(connection, "n2", "u1")
         _insert_source(
             connection, "src-new", "n1",
             datetime(2026, 8, 1, 13, tzinfo=timezone.utc),
@@ -182,6 +191,46 @@ def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(
     )
     assert [item["id"] for item in second["items"]] == ["ask-1"]
     assert second["has_more"] is False
+
+
+def test_question_overview_enforces_live_read_access_unless_admin_audit(
+    postgres_database, store
+):
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_user(connection, "u2")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_notebook(connection, "n2", "u2")
+        _insert_ask(connection, "ask-mine", "n1", "u1", NOW)
+        _insert_ask(
+            connection, "ask-revoked", "n2", "u1",
+            datetime(2026, 7, 31, 10, tzinfo=timezone.utc),
+        )
+
+    self_view = store.list_user_activity("u1", activity_type="ask")
+    assert [item["id"] for item in self_view["items"]] == ["ask-mine"]
+
+    admin_view = store.list_user_activity(
+        "u1", activity_type="ask", include_inaccessible_questions=True
+    )
+    assert [item["id"] for item in admin_view["items"]] == [
+        "ask-mine", "ask-revoked",
+    ]
+
+    with postgres_database.write() as connection:
+        _insert_member(connection, "n2", "u1")
+    shared_view = store.list_user_activity("u1", activity_type="ask")
+    assert [item["id"] for item in shared_view["items"]] == [
+        "ask-mine", "ask-revoked",
+    ]
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n2", "u1"),
+        )
+    revoked_view = store.list_user_activity("u1", activity_type="ask")
+    assert [item["id"] for item in revoked_view["items"]] == ["ask-mine"]
 
 
 def test_source_hides_memory_and_knowhow_and_carries_paper_meta(postgres_database, store):

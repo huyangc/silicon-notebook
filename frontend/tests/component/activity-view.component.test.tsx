@@ -354,7 +354,7 @@ test("活动流重载期间禁用类型筛选，避免重复发起并发查询",
 });
 
 
-test("类型筛选失败后重复点击当前筛选会重新取数", async () => {
+test("类型筛选失败后在筛选旁显示结果并可就地重试", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
   mocks.fetchUserActivity
@@ -364,8 +364,10 @@ test("类型筛选失败后重复点击当前筛选会重新取数", async () =>
 
   view();
 
-  expect(await screen.findByText("活动记录加载失败，请重试")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "全部" }));
+  const feedback = await screen.findByRole("alert");
+  expect(feedback).toHaveTextContent("活动记录加载失败，请重试");
+  expect(feedback.closest(".activity-stream-head")).not.toBeNull();
+  await user.click(screen.getByRole("button", { name: "重试" }));
 
   expect(await screen.findByText("重试后看到的问题")).toBeInTheDocument();
   expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(2);

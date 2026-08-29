@@ -716,6 +716,7 @@ class QueryStore:
         user_id: str,
         *,
         activity_type: str | None = None,
+        include_inaccessible_questions: bool = False,
         notebook_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -754,7 +755,9 @@ class QueryStore:
         Mixed activity and source/report filters are owner-only, matching the
         SQLite twin. The unscoped ask-only question overview is the deliberate
         exception: it follows the usage total's ``created_by`` attribution and
-        includes the viewed user's submissions in shared notebooks.
+        includes the viewed user's submissions in shared notebooks. Self-service
+        reads retain the canonical live notebook-read predicate; administrators
+        may explicitly include historical submissions after access revocation.
         """
         limit = max(1, min(200, int(limit)))
         fetch_limit = limit + 1
@@ -821,7 +824,13 @@ class QueryStore:
             if activity_type in (None, "ask"):
                 ask_notebook_clause = ""
                 ask_params: list[Any] = [user_id]
-                if not all_question_submissions:
+                if all_question_submissions and not include_inaccessible_questions:
+                    ask_notebook_clause = (
+                        " AND "
+                        + access_sql.read_access_exists_clause("ask_jobs")
+                    )
+                    ask_params.extend(access_sql.read_access_params(user_id))
+                elif not all_question_submissions:
                     ask_notebook_clause = (
                         f" AND notebook_id IN ({owned_placeholders})"
                     )
