@@ -857,6 +857,27 @@ test("recovery keeps the notebook held until the projection is actually reloaded
   expect(value!.editor?.busy).toBe(false);
 });
 
+test("a promotion mid-open cannot render an owner mount section over skipped mount data", async () => {
+  // 参考库 I/O 是 owner-only：非 owner 那一路根本没发请求，mountable/mountEdges 是空的。
+  // 若发布时按刷新后的行重算权限，一次 await 期间的提权就会画出一个「没有任何挂载」的
+  // owner 参考库区，保存时 setBases(id, []) 会把已有挂载全部抹掉（codex #629 R8 P2）。
+  const pipeline = deferred<ReturnType<typeof indexingProjection>>();
+  notebookApi.fetchNotebookIndexingPipeline.mockReturnValueOnce(pipeline.promise);
+  render(<Harness />);
+  publish([notebook("shared", "reader", true)]);
+
+  let opening!: Promise<boolean>;
+  act(() => { opening = value!.openEditor("shared"); });
+  publish([notebook("shared")]);          // 提权成 owner
+  await act(async () => pipeline.resolve(indexingProjection()));
+  await opening;
+
+  expect(basesApi.listBases).not.toHaveBeenCalled();
+  expect(basesApi.listMountable).not.toHaveBeenCalled();
+  expect(value!.editor?.canConfigureNotebook).toBe(false);
+  expect(value!.editor?.mountEdges).toEqual([]);
+});
+
 test("an open in flight during recovery publishes the refreshed row, not its snapshot", async () => {
   // openEditor 的表单快照原本取在它自己那几个请求**之前**。恢复的刷新恰好在这段窗口里
   // 落地时，发布出来的就是刷新前的旧行——一次未经编辑的「保存」又能把已经落库的值写回

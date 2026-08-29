@@ -731,10 +731,16 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     editorOperationRef.current = operation;
     editorRevokedOperationRef.current = null;
     try {
-      // Pre-flight only: the row has to exist before spending requests on it, and
-      // owner-only reference I/O is skipped for a non-owner.  What actually gets
-      // published is re-read after the awaits.
+      // Pre-flight: the row has to exist before spending requests on it.  The two
+      // capability flags are frozen here on purpose — they *select* which
+      // requests run below (reference-library I/O is owner-only), so the form has
+      // to be published with the same snapshot the fetched data corresponds to.
+      // Re-reading them after the awaits would let a promotion mid-flight render
+      // an owner mount section over the empty result of the skipped requests, and
+      // saving that form would call setBases(id, []) — silently unmounting every
+      // reference library.  The row's *content* is re-read; its authority is not.
       if (!currentRow(notebookId)) return false;
+      const canManageContent = rowCanManageContent(notebookId);
       const canConfigureNotebook = rowCanConfigure(notebookId);
       const indexingPipelinePromise = fetchNotebookIndexingPipeline(notebookId);
       const [indexingPipeline, mountable, mountEdges] = canConfigureNotebook
@@ -763,8 +769,8 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       setEditor({
         owner,
         target: published,
-        canManageContent: rowCanManageContent(notebookId),
-        canConfigureNotebook: rowCanConfigure(notebookId),
+        canManageContent,
+        canConfigureNotebook,
         mountable,
         mountEdges,
         mountedIds: mountEdges.map((edge) => edge.id),
