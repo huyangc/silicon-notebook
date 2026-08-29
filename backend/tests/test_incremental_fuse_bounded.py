@@ -958,11 +958,31 @@ def test_insert_clusters_batches_member_probe(repo, monkeypatch):
 #   ③ 整库重建 → `delete_notebook_graph_rows` 整表清空。
 # 于是这里剩下的唯一职责是清历史残渣:每进程每 notebook 一次。
 
-_SWEEP_SQL_FRAGMENT = "member_object_id NOT IN (SELECT id FROM knowledge_objects"
+# 清扫的第一条语句(每批必发的 keyset 页读)。数「跑了几批清扫」要数它而不是数
+# DELETE:P1 修复后 DELETE 只在页非空**且**页内真有孤儿要删时才发,而清扫是否
+# 开跑与库里有没有孤儿无关(零孤儿的库照样要扫一遍才知道它是零)。
+_SWEEP_PAGE_SQL_FRAGMENT = (
+    "SELECT object_type, member_object_id, id FROM concept_clusters WHERE notebook_id = ?"
+)
+_SWEEP_DELETE_SQL_FRAGMENT = (
+    "WHERE k.id = c.member_object_id AND k.notebook_id = c.notebook_id"
+)
 
 
 def _sweeps(log):
-    return len([sql for sql in log if _SWEEP_SQL_FRAGMENT in sql])
+    """清扫扫过的**页数**(= 发出的 keyset 页读条数)。"""
+    return len([sql for sql in log if _SWEEP_PAGE_SQL_FRAGMENT in sql])
+
+
+def _sweep_deletes(log):
+    """清扫发出的 DELETE 条数 —— **每个非空页一条**(页内有没有孤儿要等这条语句
+    自己去判)。终止用的那次空页读不带 DELETE,所以它恒等于「非空页数」。"""
+    return len([sql for sql in log if _SWEEP_DELETE_SQL_FRAGMENT in sql])
+
+
+def _cluster_seq_bumps(log):
+    """`cluster_mutation_seq` 被推进的次数 —— 只有真删到行的那些批才该推。"""
+    return len([sql for sql in log if "cluster_mutation_seq=" in sql])
 
 
 def _cluster_members(repo, notebook_id):
@@ -1073,32 +1093,38 @@ def test_orphan_sweep_is_not_suppressed_across_workers(
     assert lifecycle_module._ORPHAN_SWEEP_DONE == worker_b_state
 
 
-def test_orphan_sweep_mark_is_recorded_only_after_the_commit(
+def test_orphan_sweep_mark_is_recorded_even_when_the_sweep_raises(
         repo, monkeypatch, fresh_process):
-    """P2:记账必须在**提交之后**。sweep 事务失败 → 不记 → 下次重扫。"""
+    """Z6(P0,行为恢复):记账现在挪进了 try/finally —— 语义从「成功过一次」变成
+    「尝试过一次」。清扫本身已经是有界的 keyset 分批 DELETE,不该再稳定撞
+    statement_timeout;但如果一次异常(连接抖动、某一批恰好超时)不记账,下一次
+    上传会在同一个大概率还会失败的清扫上重开一遍、每次都白烧时间,还连带打断
+    整个 `incremental_fuse_source`(Tier2 桥接与 claim/formula/procedure 聚类因此
+    对这本库永久不生效)——这个代价远大于「漏扫一次历史残渣」,而残渣本身可以被
+    下一次进程重启或 rebuild 兜住。
+
+    变异复现:把记账挪回 `try/finally` 之外(旧形态,只在成功时记账)会让第一个
+    assert 变红 —— 失败之后 notebook.id 不会进 `_ORPHAN_SWEEP_DONE`。"""
     from app.services import knowledge_lifecycle as lifecycle_module
 
-    notebook = repo.create_notebook(NotebookCreate(name="sweep-rollback"))
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-raises"))
     _seed_busy_notebook(repo, notebook.id)
     service = repo._runtime.knowledge_lifecycle
     store = repo._runtime.governance
-    original = store.sweep_orphan_clusters
-    boom = {"armed": True}
+    original = store.sweep_orphan_clusters_page
 
-    def exploding_sweep(db, notebook_id):
-        if boom["armed"]:
-            boom["armed"] = False
-            raise RuntimeError("sweep transaction failed")
-        return original(db, notebook_id)
+    def exploding_sweep(db, notebook_id, after_object_type, after_member_object_id, limit):
+        raise RuntimeError("sweep transaction failed")
 
-    monkeypatch.setattr(store, "sweep_orphan_clusters", exploding_sweep)
+    monkeypatch.setattr(store, "sweep_orphan_clusters_page", exploding_sweep)
     with pytest.raises(RuntimeError, match="sweep transaction failed"):
         service.incremental_fuse_source(notebook.id, "src-B")
-    assert notebook.id not in lifecycle_module._ORPHAN_SWEEP_DONE
+    assert notebook.id in lifecycle_module._ORPHAN_SWEEP_DONE  # 失败也记账了
 
+    monkeypatch.setattr(store, "sweep_orphan_clusters_page", original)
     log = _sql_log(repo, monkeypatch)
     repo.incremental_fuse_source(notebook.id, "src-B")
-    assert _sweeps(log) == 1                 # 回滚过 → 这次必须补扫
+    assert _sweeps(log) == 0                 # 已记过账 → 这次不再重扫
 
 
 def test_orphan_sweep_gate_takes_no_write_lock_when_it_skips(
@@ -1154,6 +1180,265 @@ def test_legacy_orphan_residue_is_swept_by_a_fresh_process(repo, fresh_process):
 
     repo.incremental_fuse_source(notebook.id, "src-B")
     assert orphan not in _cluster_members(repo, notebook.id)
+
+
+def _apply_legacy_not_in_sweep(repo, notebook_id):
+    """Z6 ②的等价 oracle:冻结拷贝的**旧**单条 ``NOT IN`` 反连接语义,只用来跟
+    NOT EXISTS 分批版对账 —— 不是任何生产路径。"""
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM concept_clusters WHERE notebook_id=? AND member_object_id NOT IN "
+            "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
+            (notebook_id, notebook_id),
+        )
+
+
+def _seed_sweep_oracle_fixture(repo, notebook_id, other_notebook_id):
+    """两个 notebook 都要跑同一套镜像数据(相同的 object_type/member_object_id
+    组合,字面 id 完全相同)——两边各自跑在**独立的 sqlite 文件**里,不共享
+    ``knowledge_objects`` 的全局主键空间,所以字面复用不会冲突,也让两边的最终
+    存活集合可以直接按字符串比较。
+
+    覆盖:同 object_type 内既有存活又有孤儿、跨 object_type、以及**跨 notebook
+    的 id 撞名**(member_object_id 是另一个 notebook 的真实对象 id —— 旧查询按
+    notebook 过滤后仍必须判它是孤儿,这正是新 NOT EXISTS 里
+    ``k.notebook_id = c.notebook_id`` 那个额外条件要保住的语义)。"""
+    with repo._write() as db:
+        # 另一个 notebook 下的真实对象:对 notebook_id 而言,它的 id 存在于
+        # knowledge_objects(全局 PK 命中),但属于别的库。
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+            "payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ko-cross-owner", other_notebook_id, "concept",
+             "approved", "", "{}", "[]", "src-A", NOW, NOW),
+        )
+        for index in range(3):
+            alive_id = f"ko-alive-{index}"
+            db.execute(
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+                "payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (alive_id, notebook_id, "concept", "approved", "", "{}", "[]",
+                 "src-A", NOW, NOW),
+            )
+        rows = [
+            ("concept", "ko-alive-0"),
+            ("concept", "ko-alive-1"),
+            ("concept", "ko-orphan-a"),
+            ("claim", "ko-orphan-b"),
+            ("claim", "ko-alive-2"),
+            ("procedure", "ko-cross-owner"),  # 全局存在,但不属于本库
+        ]
+        for index, (object_type, member_object_id) in enumerate(rows):
+            db.execute(
+                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+                "member_object_id,canonical_name,object_type,canonical_description,"
+                "created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (f"cc-{notebook_id}-{index}", notebook_id, f"K-{index}",
+                 member_object_id, "Name", object_type, "", NOW),
+            )
+
+
+def test_new_batched_sweep_matches_legacy_not_in_semantics_bit_for_bit(
+        make_repo, fresh_process):
+    """Z6 ②:等价 oracle —— NOT EXISTS 分批版在同一套夹具上,存活/被删的
+    ``(object_type, member_object_id)`` 集合必须与旧的单条 NOT IN 反连接逐字
+    相同,包括「member_object_id 是另一个 notebook 的真实对象 id」这个边界
+    (旧查询按 notebook 过滤后仍判它是孤儿,新查询靠 NOT EXISTS 里的
+    ``k.notebook_id = c.notebook_id`` 保住同一判定)。
+
+    两套完全隔离的 sqlite 文件各自灌入同构数据,一套跑冻结的旧算法,另一套跑
+    `_sweep_orphan_clusters_page_loop`,比较两边最终存活的成员集合。"""
+    repo_old = make_repo("legacy")
+    repo_new = make_repo("batched")
+
+    notebook_old = repo_old.create_notebook(NotebookCreate(name="oracle"))
+    other_old = repo_old.create_notebook(NotebookCreate(name="oracle-other"))
+    notebook_new = repo_new.create_notebook(NotebookCreate(name="oracle"))
+    other_new = repo_new.create_notebook(NotebookCreate(name="oracle-other"))
+
+    _seed_sweep_oracle_fixture(repo_old, notebook_old.id, other_old.id)
+    _seed_sweep_oracle_fixture(repo_new, notebook_new.id, other_new.id)
+
+    before_old = _cluster_members(repo_old, notebook_old.id)
+    before_new = _cluster_members(repo_new, notebook_new.id)
+    assert before_old == before_new                     # 夹具本身镜像一致
+
+    _apply_legacy_not_in_sweep(repo_old, notebook_old.id)
+    deleted = repo_new._runtime.knowledge_lifecycle._sweep_orphan_clusters_page_loop(
+        notebook_new.id
+    )
+
+    after_old = _cluster_members(repo_old, notebook_old.id)
+    after_new = _cluster_members(repo_new, notebook_new.id)
+    assert after_old == after_new                        # 存活集合逐字一致
+    assert before_old - after_old == before_new - after_new  # 被删集合也逐字一致
+    assert deleted == len(before_new - after_new)
+    # 反向:两态里都真的既有存活又有被删,不是退化成全删或全不删。
+    assert after_old
+    assert before_old - after_old
+
+
+def _insert_live_cluster_row(repo, notebook_id, member):
+    """一条**非孤儿**簇行:对象真实存在于同一个 notebook。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+            "payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (member, notebook_id, "concept", "approved", "", "{}", "[]",
+             "src-A", NOW, NOW))
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"cc-live-{member}", notebook_id, "K-live", member,
+             "Live", "concept", "", NOW))
+    return member
+
+
+def _record_sweep_cursors(repo, monkeypatch, *, max_calls):
+    """把 store 的清扫批包一层,记下每批**收到的游标**和**扫到的页长**。
+
+    这是变异自检的着力点:P1 修复的判据是「游标按扫描页推进」,而它只能从
+    连续两批的游标关系上看出来 —— 光看最终存活集合,退化实现(按被删行推进)在
+    有孤儿的夹具上也能碰巧通过。``max_calls`` 是死循环护栏:退化实现在零孤儿的库
+    上游标永不推进,没有它这条用例会挂死而不是变红。"""
+    store = repo._runtime.governance
+    original = store.sweep_orphan_clusters_page
+    seen: list[tuple[tuple[str, str], int]] = []
+
+    def recording(db, notebook_id, after_object_type, after_member_object_id, limit):
+        cursor = (after_object_type, after_member_object_id)
+        assert len(seen) < max_calls, (
+            f"清扫批数超过 {max_calls} —— 游标没有按扫描页推进(退化成按被删行推进"
+            f"就会在零孤儿页上原地打转);已见游标={seen}")
+        page, deleted = original(
+            db, notebook_id, after_object_type, after_member_object_id, limit)
+        # 单批扫描行数 ≤ 页大小 —— 批大小界住的是**扫描**,不是被删。
+        assert len(page) <= limit, (len(page), limit)
+        seen.append((cursor, len(page)))
+        return page, deleted
+
+    monkeypatch.setattr(store, "sweep_orphan_clusters_page", recording)
+    return seen
+
+
+def test_orphan_sweep_batches_progress_by_scanned_pages(
+        repo, monkeypatch, fresh_process):
+    """Z6 ③(P1 修复后重写):批数由**扫描页数**决定,不由孤儿数决定。
+
+    夹具:10 行、页大小 3 → 页边界 [0,1,2][3,4,5][6,7,8][9];4 个孤儿分散在
+    第 1、2、4 页(第 3 页**一个孤儿都没有**)。断言按页推进 4 批、孤儿全删、
+    非孤儿一行不少 —— 中间那个「零孤儿页」正是旧实现会跳过、从而把游标推过头
+    (或反复重扫)的地方。"""
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    monkeypatch.setattr(lifecycle_module, "_ORPHAN_SWEEP_BATCH_SIZE", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-batches"))
+    orphan_indexes = {0, 4, 5, 9}
+    orphans, alive = [], []
+    for index in range(10):
+        member = f"ko-row-{index}"
+        if index in orphan_indexes:
+            orphans.append(_insert_orphan_cluster_row(repo, notebook.id, member=member))
+        else:
+            alive.append(_insert_live_cluster_row(repo, notebook.id, member))
+
+    cursors = _record_sweep_cursors(repo, monkeypatch, max_calls=12)
+    log = _sql_log(repo, monkeypatch)
+    service = repo._runtime.knowledge_lifecycle
+    deleted = service._sweep_orphan_clusters_page_loop(notebook.id)
+
+    members = _cluster_members(repo, notebook.id)
+    assert deleted == len(orphans)
+    assert members.isdisjoint(orphans)       # 孤儿全删
+    assert set(alive) <= members             # 非孤儿全存
+    # 4 批 = ceil(10/3);短的最后一页(1 行)是终止条件。
+    assert _sweeps(log) == 4
+    assert [page_length for _cursor, page_length in cursors] == [3, 3, 3, 1]
+    # 游标严格按**扫到的页尾**推进,与那一页删没删无关(第 3 页零孤儿)。
+    assert [cursor for cursor, _length in cursors] == [
+        ("", ""),
+        ("concept", "ko-row-2"),
+        ("concept", "ko-row-5"),
+        ("concept", "ko-row-8"),
+    ]
+    # 每个非空页一条 DELETE(4 页全非空);但只有真删到行的 3 页推进 cseq ——
+    # 第 3 页零孤儿:DELETE 发了、删到 0 行、不 bump,游标照样推进(上一条断言)。
+    assert _sweep_deletes(log) == 4
+    assert _cluster_seq_bumps(log) == 3
+
+
+def test_orphan_sweep_terminates_on_a_zero_orphan_notebook(
+        repo, monkeypatch, fresh_process):
+    """P1 的正面判据:一本**一个孤儿都没有**的库(生产常态 —— 生产者已清零)
+    照样按页扫完并正常终止,且每批扫描行数 ≤ 页大小、零删除。
+
+    旧形态在这里最痛:`LIMIT` 挂在已被 `NOT EXISTS` 过滤过的子查询上,攒不满
+    n 条孤儿就一路扫到切片尽头 —— 单批 = 全 notebook 扫描,900 万行照撞 30s
+    statement_timeout,而 docstring 里「没有语句的成本随全量簇行数增长」的说法
+    根本不成立。
+
+    变异自检:把 `_sweep_orphan_clusters_page_loop` 的游标改回按**被删行**推进
+    (旧形态),这条会因为游标原地不动而撞上 `_record_sweep_cursors` 的护栏、或
+    因为一批就 break 而在批数断言上变红。"""
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    monkeypatch.setattr(lifecycle_module, "_ORPHAN_SWEEP_BATCH_SIZE", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-zero-orphan"))
+    alive = [
+        _insert_live_cluster_row(repo, notebook.id, f"ko-live-{index}")
+        for index in range(9)
+    ]
+
+    cursors = _record_sweep_cursors(repo, monkeypatch, max_calls=12)
+    log = _sql_log(repo, monkeypatch)
+    service = repo._runtime.knowledge_lifecycle
+    deleted = service._sweep_orphan_clusters_page_loop(notebook.id)
+
+    assert deleted == 0
+    assert _cluster_members(repo, notebook.id) == set(alive)   # 一行都没被误删
+    # 3 个满页 + 1 次空探测:9 行整除页大小,所以终止靠的是最后那次空页读,
+    # 而不是任何「这批没删到东西」的判断。
+    assert [page_length for _cursor, page_length in cursors] == [3, 3, 3, 0]
+    assert _sweeps(log) == 4
+    # 3 个非空页各发一条 DELETE(它们各自删到 0 行),空页读不发 —— 而一次
+    # cseq 推进都没有:清扫没动过任何一行,不得制造变更信号。
+    assert _sweep_deletes(log) == 3
+    assert _cluster_seq_bumps(log) == 0
+
+
+def test_sweep_delete_never_binds_more_ids_than_the_chunk(
+        repo, monkeypatch, fresh_process):
+    """SQLite 侧独有的一件事:页可以比一条 DELETE 允许绑定的 id 数宽。
+
+    PG 把整页当成一个 `= ANY(%s)` 数组传;SQLite 没有数组,只能把 id 展开成
+    `IN (?,?,…)`,所以一页要按 `_SWEEP_DELETE_ID_CHUNK` 切片,免得一条语句绑上
+    几千个参数(SQLite 有 host-parameter 上限,而且仓库其余展开式 IN 一律钉在
+    500/900 这个量级)。总成本不变:⌈页/切片⌉ 条语句,每条 ≤ 切片次主键探针。"""
+    from app.repositories.sqlite import governance_store as gov_module
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    monkeypatch.setattr(lifecycle_module, "_ORPHAN_SWEEP_BATCH_SIZE", 5)
+    monkeypatch.setattr(gov_module, "_SWEEP_DELETE_ID_CHUNK", 2)
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-chunk"))
+    orphans = [
+        _insert_orphan_cluster_row(repo, notebook.id, member=f"ko-vanished-{i}")
+        for i in range(5)
+    ]
+
+    log = _sql_log(repo, monkeypatch)
+    deleted = repo._runtime.knowledge_lifecycle._sweep_orphan_clusters_page_loop(
+        notebook.id)
+
+    assert deleted == 5
+    assert _cluster_members(repo, notebook.id).isdisjoint(orphans)
+    deletes = [sql for sql in log if _SWEEP_DELETE_SQL_FRAGMENT in sql]
+    assert len(deletes) == 3                 # 一页 5 个 id → 切成 2+2+1
+    # 每条 DELETE 的占位符 = 1 个 notebook_id + ≤ chunk 个 id。
+    assert [sql.count("?") for sql in deletes] == [3, 3, 2]
 
 
 # ── 生产者侧:三条删除路径各自的事务内清理 ──────────────────────────────────

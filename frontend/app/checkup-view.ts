@@ -74,8 +74,10 @@ export function sourceHealthGroups(checkup: CheckupResponse | null): SourceHealt
 
 /**
  * 已触发、后台仍在跑的修复该**何时**恢复可点。修复都是后台 job,POST 返回 ≠ 修好,
- * 中间这段真空期按钮必须禁用(后端 backfill-vectors / reparse 都没有单飞守卫,
- * 重复提交会真的重复干活),但解除条件不能一刀切——两类修复的形状不同。
+ * 中间这段真空期按钮必须禁用——reparse 端点仍没有单飞守卫,重复提交会真的重复干活;
+ * backfill-vectors 端点已加 per-notebook 单飞(进程内,同一 notebook 在飞时的二次
+ * 请求幂等受理、不重复排 job),但客户端仍要在这段真空期禁用按钮:避免用户对着同一个
+ * 已在跑的修复反复点击发请求。解除条件不能一刀切——两类修复的形状不同。
  */
 export type RepairRelease =
   // 一轮只修一批:reparse 的样本有上界(≤20 篇),命中更多时本来就是逐轮修复、每轮

@@ -609,6 +609,22 @@ class Settings(BaseSettings):
     scale_index_offpeak_start_hour: int = Field(2, validation_alias="SCALE_INDEX_OFFPEAK_START_HOUR")    # 低峰窗口起(含)
     scale_index_offpeak_end_hour: int = Field(6, validation_alias="SCALE_INDEX_OFFPEAK_END_HOUR")        # 低峰窗口止(不含);start>end 视为跨零点
     scale_index_scheduler_poll_seconds: int = Field(300, validation_alias="SCALE_INDEX_SCHEDULER_POLL_SECONDS")  # 调度器轮询间隔
+    # 进程内同时执行的 scale build/fold(fold/full)操作上限。此前每个笔记本的构建都是
+    # 裸 daemon 线程,数量无界:低峰调度器一次性把整条 idle 队列全部起线程,一次内存/CPU
+    # 峰值就能拖垮同机的其它请求。默认 2 是"允许一定并行但不至于让重活扇出到几十路"
+    # 的折衷——单个构建自身的耗时不受影响,只是排队等 slot 的构建线程在真正执行前先
+    # 阻塞在这个信号量上。
+    scale_build_concurrency: int = Field(2, ge=1, validation_alias="SCALE_BUILD_CONCURRENCY")
+    # 同一笔记本的 scale build/fold 失败后,自动重跑(调度器/发布后 follow-up 等——不含
+    # 用户显式点击"立即重建")前的最短等待。指数退避:60s 起步,每次失败翻倍,封顶
+    # scale_build_failure_backoff_max_seconds,避免持续失败的笔记本背靠背重跑,一次又
+    # 一次撞上同样会失败的构建、白白占并发 slot。
+    scale_build_failure_backoff_seconds: int = Field(
+        60, ge=1, validation_alias="SCALE_BUILD_FAILURE_BACKOFF_SECONDS"
+    )
+    scale_build_failure_backoff_max_seconds: int = Field(
+        1800, ge=1, validation_alias="SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS"
+    )
     # 已索引大库检索策略:默认只搜已索引部分(ANN 核 ∪ FTS 词法);delta(水位后新增 source)
     # 的 chunk 不做暴力语义补召回。True 时对 delta 额外暴力(强一致,但大库慢),供 opt-in。
     # 配合 scale_auto_fold_on_add:新增内容排增量 fold,使 delta 尽快进索引取代暴力。

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+from typing import Callable
 
 from app.core.config import Settings
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 
 from app.domain.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_TYPE_LABELS
+
+logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 
 # Both sides originally allocated migration 24 independently.  Version 29 is
 # the merge migration that makes either already-deployed lineage converge.
@@ -3280,76 +3284,110 @@ class SqliteMigrator:
         落到 'failed' 还让「重新上传同一个文件」能按失败源走重试
         （见 upload_sources 的 reuse_uploaded_source）。
         只由服务端 lifespan 启动路径调用一次（见 initialize 的说明）。
-        幂等——safe every boot。"""
-        with self._connect() as db:
-            db.execute(
-                "UPDATE merge_review_jobs SET status='failed', "
-                "error='中断:服务重启' WHERE status='running'")
-            db.execute(
-                "UPDATE ask_jobs SET status='interrupted', "
-                "error='中断:服务重启' WHERE status='running'")
-            db.execute(
-                "UPDATE knowhow_rows SET projection_status='failed' "
-                "WHERE projection_status IN ('syncing','pending')")
-            now = _now()
-            db.execute(
-                "UPDATE sources SET status='parsed', parse_status='parsed', "
-                "error_message='', updated_at=? "
-                "WHERE parse_status='extracting'",
-                (now,),
+        幂等——safe every boot。
+
+        逐语句独立事务，双写后端同一条依据（见 PostgreSQL 孪生
+        ``PostgresMaintenanceAdapter.recover_interrupted_jobs`` 的完整说明）：
+        任一条结算失败只记日志并跳过，不再让它的异常回滚其余语句已经做完的
+        结算。方言差异：PostgreSQL 侧把两张 KG 聚类 scratch 表从无谓词 `DELETE`
+        换成了 `TRUNCATE`（PostgreSQL 的 `DELETE` 是逐元组 MVCC 标记，9M 级
+        残留行足以让单条语句超过启动时间预算）。SQLite 没有 `TRUNCATE` 语句，
+        也不需要等价物：无 `WHERE` 子句的 `DELETE FROM` 本就会走 SQLite 自带的
+        "truncate optimization"（按页释放，不逐行访问/不触发行级判定），因此
+        这里的 `DELETE FROM` 保持不变。"""
+        now = _now()
+        failed_steps: list[str] = []
+
+        def _settle(label: str, action: Callable[[], None]) -> None:
+            try:
+                action()
+            except Exception:  # noqa: BLE001 — 逐语句尽力,任一条失败绝不阻断其余语句
+                logger.exception(
+                    "_recover_interrupted_jobs: 结算 %s 失败,已跳过继续其余语句", label
+                )
+                failed_steps.append(label)
+
+        def _write(sql: str, params: tuple = ()) -> None:
+            with self._connect() as db:
+                db.execute(sql, params)
+
+        _settle("merge_review_jobs", lambda: _write(
+            "UPDATE merge_review_jobs SET status='failed', "
+            "error='中断:服务重启' WHERE status='running'"))
+        _settle("ask_jobs", lambda: _write(
+            "UPDATE ask_jobs SET status='interrupted', "
+            "error='中断:服务重启' WHERE status='running'"))
+        _settle("knowhow_rows", lambda: _write(
+            "UPDATE knowhow_rows SET projection_status='failed' "
+            "WHERE projection_status IN ('syncing','pending')"))
+        _settle("sources(extracting)", lambda: _write(
+            "UPDATE sources SET status='parsed', parse_status='parsed', "
+            "error_message='', updated_at=? "
+            "WHERE parse_status='extracting'",
+            (now,),
+        ))
+        _settle("sources(queued/parsing)", lambda: _write(
+            "UPDATE sources SET status='failed', parse_status='failed', "
+            "error_message='服务重启导致文档解析中断；文件已保留，可重新解析或重新上传。', "
+            "updated_at=? WHERE parse_status IN ('queued','parsing')",
+            (now,),
+        ))
+        _settle("extraction_runs", lambda: _write(
+            "UPDATE extraction_runs SET status='failed', "
+            "error_message='worker_interrupted: 服务重启导致知识图谱分析中断', "
+            "updated_at=? WHERE run_type='kg' AND status='running'",
+            (now,),
+        ))
+        _settle("kg_build_jobs", lambda: _write(
+            "UPDATE kg_build_jobs SET status='failed', stage='finished', "
+            "error_code='worker_interrupted', "
+            "error_message='服务重启导致本次分析中断；"
+            "已完成内容已保留，可继续分析未完成内容。', "
+            "updated_at=?, finished_at=? WHERE status='running'",
+            (now, now),
+        ))
+        # Staged products are unpublished scratch owned by those running
+        # jobs.  No worker survives process restart, so retaining them can
+        # only waste space or tempt a later generation to consume stale
+        # payload.  The live chunk/KG tables were never touched.
+        _settle("indexing_pipeline_stages", lambda: _write(
+            "DELETE FROM indexing_pipeline_stages"
+        ))
+        # 命令目录抽取同理,且**必须连 'queued' 一起收**:单飞守卫的谓词是
+        # `status IN ('queued','running')`,只扫 running 会让一行崩在「已建行、
+        # 线程未起」窗口里的 queued 永久占住该来源的守卫,用户既看不到进度也
+        # 无法重新发起,而离线 CLI 无权自清。
+        # 措辞与 app/services/catalog_job.py 的 INTERRUPTED_MESSAGE 同步维护:
+        # 用户可见的动作叫「识别」,不是内部叫法「抽取」——这条 SQL 字面量绕开了
+        # user_error()/前端词汇门,原样上屏,必须自己保证界面词正确。R6 P1:
+        # 去掉「可重新发起识别」的无条件承诺——保留不等于够得着,`.../job` 只
+        # 返回最近一次任务,新任务一发起旧候选就永久孤儿化(见 catalog_job.py
+        # 的 `_reject_if_pending_candidates`,它现在也拦截这个终态)。
+        _settle("catalog_jobs", lambda: _write(
+            "UPDATE catalog_jobs SET status='failed', "
+            "failure_reason='服务重启导致命令目录识别中断；已生成的候选已保留，"
+            "请先在审阅面板确认或跳过，再重新发起识别。', "
+            "diagnostic='worker_interrupted', "
+            "updated_at=?, finished_at=? WHERE status IN ('queued','running')",
+            (now, now),
+        ))
+        # 重聚类的两张 scratch 表是**纯瞬态**的:只有一次进行中的 rebuild 会读
+        # 自己那个 run_id 的行,进程重启后没有任何代码路径会再回访它们。
+        # rebuild 的 finally 只能兜住异常/取消,兜不住 SIGKILL / 掉电——那种情况
+        # 下 run_id 随进程一起消失,行就永久不可达(每张表都没有时间戳列,事后
+        # 也无从按年龄清理),几次被打断的大库 rebuild 就能把库撑起来。
+        # 与本函数其余各行同一条依据:后端单进程,启动这一刻不可能有 rebuild 在飞,
+        # 所以此时表里的任何行按定义都是上次崩溃的遗留。
+        _settle("kg_cluster_scratch", lambda: _write("DELETE FROM kg_cluster_scratch"))
+        _settle(
+            "kg_canonical_scratch", lambda: _write("DELETE FROM kg_canonical_scratch")
+        )
+
+        if failed_steps:
+            logger.error(
+                "_recover_interrupted_jobs: %d 条结算语句失败并被跳过: %s",
+                len(failed_steps), ", ".join(failed_steps),
             )
-            db.execute(
-                "UPDATE sources SET status='failed', parse_status='failed', "
-                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析或重新上传。', "
-                "updated_at=? WHERE parse_status IN ('queued','parsing')",
-                (now,),
-            )
-            db.execute(
-                "UPDATE extraction_runs SET status='failed', "
-                "error_message='worker_interrupted: 服务重启导致知识图谱分析中断', "
-                "updated_at=? WHERE run_type='kg' AND status='running'",
-                (now,),
-            )
-            db.execute(
-                "UPDATE kg_build_jobs SET status='failed', stage='finished', "
-                "error_code='worker_interrupted', "
-                "error_message='服务重启导致本次分析中断；"
-                "已完成内容已保留，可继续分析未完成内容。', "
-                "updated_at=?, finished_at=? WHERE status='running'",
-                (now, now),
-            )
-            # Staged products are unpublished scratch owned by those running
-            # jobs.  No worker survives process restart, so retaining them can
-            # only waste space or tempt a later generation to consume stale
-            # payload.  The live chunk/KG tables were never touched.
-            db.execute("DELETE FROM indexing_pipeline_stages")
-            # 命令目录抽取同理,且**必须连 'queued' 一起收**:单飞守卫的谓词是
-            # `status IN ('queued','running')`,只扫 running 会让一行崩在「已建行、
-            # 线程未起」窗口里的 queued 永久占住该来源的守卫,用户既看不到进度也
-            # 无法重新发起,而离线 CLI 无权自清。
-            # 措辞与 app/services/catalog_job.py 的 INTERRUPTED_MESSAGE 同步维护:
-            # 用户可见的动作叫「识别」,不是内部叫法「抽取」——这条 SQL 字面量绕开了
-            # user_error()/前端词汇门,原样上屏,必须自己保证界面词正确。R6 P1:
-            # 去掉「可重新发起识别」的无条件承诺——保留不等于够得着,`.../job` 只
-            # 返回最近一次任务,新任务一发起旧候选就永久孤儿化(见 catalog_job.py
-            # 的 `_reject_if_pending_candidates`,它现在也拦截这个终态)。
-            db.execute(
-                "UPDATE catalog_jobs SET status='failed', "
-                "failure_reason='服务重启导致命令目录识别中断；已生成的候选已保留，"
-                "请先在审阅面板确认或跳过，再重新发起识别。', "
-                "diagnostic='worker_interrupted', "
-                "updated_at=?, finished_at=? WHERE status IN ('queued','running')",
-                (now, now),
-            )
-            # 重聚类的两张 scratch 表是**纯瞬态**的:只有一次进行中的 rebuild 会读
-            # 自己那个 run_id 的行,进程重启后没有任何代码路径会再回访它们。
-            # rebuild 的 finally 只能兜住异常/取消,兜不住 SIGKILL / 掉电——那种情况
-            # 下 run_id 随进程一起消失,行就永久不可达(每张表都没有时间戳列,事后
-            # 也无从按年龄清理),几次被打断的大库 rebuild 就能把库撑起来。
-            # 与本函数其余各行同一条依据:后端单进程,启动这一刻不可能有 rebuild 在飞,
-            # 所以此时表里的任何行按定义都是上次崩溃的遗留。
-            db.execute("DELETE FROM kg_cluster_scratch")
-            db.execute("DELETE FROM kg_canonical_scratch")
 
     def _seed(self) -> None:
         now = _now()

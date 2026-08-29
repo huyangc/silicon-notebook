@@ -312,3 +312,59 @@ def test_viz_stale_detected_by_cluster_seq(repo):
     with repo._write() as db:                          # bump cseq only (no cluster COUNT/time change)
         repo._runtime.knowledge_lifecycle._bump_cluster_mutation_seq(db, nb.id)
     assert sa.viz_probe(nb.id)["viz_stale"] is True     # cseq advanced → stale, via cluster_seq
+
+
+def test_large_nb_guard_uses_cached_active_object_count(repo, monkeypatch):
+    """Z3 (codex #621 同族遗漏的一行换缓存): unified_graph 与 kg_neighbors 的大库闸
+    (knowledge_lifecycle.py 里 unified_graph 顶部、_kg_neighbors_unchecked 的 DB
+    fallback 分支)现在都通过 ``store.count_active_objects`` 读数——那是既有的
+    seq-gated ``knowledge_counts_cache.active_object_count`` memo(与
+    postgres/knowledge_store.py:count_active_objects 同一条缓存路径),不再各自跑一次
+    裸 ``SELECT COUNT(*) ... status!='deprecated'``。
+
+    Spy 挂在游标方法上,按 SQL 文本区分两种形态:①缓存的冷路径(GROUP BY object_type,
+    status,只在 memo miss 时才发生);②未缓存的裸计数(``AND status!='deprecated'``,
+    没有 GROUP BY——即被替换前的旧查询)。断言总次数,而不只是①的次数,这样即使某个
+    调用点偷偷换回②也会被抓到(只看①会漏检:②根本不含 GROUP BY,不会被①的计数器
+    看见,但确实是一次不该有的冷查询)。两次大库闸检查之间 kg_mutation_seq 没变,若都
+    走缓存,合计应恰好 1 次(第一次 miss 建 memo,第二次命中零查询)。
+
+    变异自检:把 kg_neighbors 那处调用改回 ``self.knowledge.active_object_count``
+    (未缓存版本)会让第二个 assert 变红——total_calls 会变成 2 而不是 1(见任务报告;
+    只看①形态的计数器测不出这个变异,因为②走的是完全不同的 SQL 文本)。"""
+    nb = _star(repo)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    # kg_neighbors 的大库闸只在「没有 viz 索引」的 DB-fallback 分支里出现;
+    # _star() 对这个小图会顺带同步建好 viz,所以显式挡掉它,强制走 fallback。
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+
+    from app.repositories.sqlite import knowledge_counts_cache as kcc
+    from app.repositories.sqlite.database import _DiagnosticCursor
+
+    kcc.invalidate(nb.id)  # 清掉 rebuild 过程中可能留下的 memo,保证下面第一次是冷查询
+    cached_cold_calls = []
+    uncached_raw_calls = []
+    original_execute = _DiagnosticCursor.execute
+
+    def spy_execute(self, sql, parameters=(), /):
+        if "GROUP BY object_type, status" in sql:
+            cached_cold_calls.append(sql)
+        elif "knowledge_objects" in sql and "status!='deprecated'" in sql:
+            uncached_raw_calls.append(sql)
+        return original_execute(self, sql, parameters)
+
+    monkeypatch.setattr(_DiagnosticCursor, "execute", spy_execute)
+
+    result1 = repo.unified_graph(nb.id, level="object", limit=10)
+    assert result1["viz_building"] is True   # 确认真的走了大库闸分支
+    total_calls = len(cached_cold_calls) + len(uncached_raw_calls)
+    assert total_calls == 1                  # 第一次:冷查询(且必须是缓存形态①)
+    assert len(cached_cold_calls) == 1
+    assert len(uncached_raw_calls) == 0
+
+    result2 = repo.kg_neighbors(nb.id, "a")
+    assert result2.get("locating_unavailable") is True  # 确认走了 DB-fallback 大库闸分支
+    total_calls = len(cached_cold_calls) + len(uncached_raw_calls)
+    assert total_calls == 1                  # 第二次:同 seq,命中 memo,合计仍是 1
+    assert len(uncached_raw_calls) == 0      # 且不能是靠走②形态凑出来的「零查询」假象

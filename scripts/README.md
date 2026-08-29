@@ -230,6 +230,30 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 `bench_sqlite_writes.py`（合成写吞吐基准）与 `replay_retrieval.py`（检索回归对照）不属于
 生产 DFX 命令，见下表。
 
+### `diag_pg_hotpaths.py` —— PostgreSQL 生产热路径自查（不进上面七命令矩阵）
+
+```bash
+python3 scripts/diag_pg_hotpaths.py                    # 默认档
+python3 scripts/diag_pg_hotpaths.py --notebook-id nb-xxxxxxxx
+python3 scripts/diag_pg_hotpaths.py --deep              # + 四条重探针
+```
+
+只对 PostgreSQL 生效（`database_identity(...)` 必须解析为 `postgresql`，否则拒绝运行）；
+与上面 `diag.py` 七命令矩阵不同，本脚本会 `import app`、需要真实 `DATABASE_URL` 连接，且
+只服务 PostgreSQL 后端，故单独登记，不进那张纯 stdlib / app-free 的矩阵。
+
+只读声明：`SET default_transaction_read_only = on` 是连接后的第一条语句（先于任何其它查询，
+包括未指定 `--notebook-id` 时的自动选库）；autocommit、每条语句各自一个隐式事务；只跑
+`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`、`SELECT COUNT(*)`、`pg_indexes`/`pg_constraint`
+目录查询，不写库、不建索引、不跑 DDL；单条语句失败只记账跳过，不阻断其余语句，但**任一
+语句失败会让整体退出码为 1**（0 表示全部语句成功返回一行结果）。
+
+预期时长：默认档也不是纯秒级——热语句族的 EXPLAIN 探针是 notebook 级、走索引，通常秒级，
+但随后的全表行数一览对每张热表跑无 notebook 过滤的 `SELECT COUNT(*)`，9M 行级的表这一节
+可能是分钟级；未指定 `--notebook-id` 时的自动选库同样是一次 `knowledge_objects` 全表
+`GROUP BY`。`--deep` 额外加两条 ILIKE 全文探针 + 两条缺向量反连接 COUNT（这两条正是 Z7
+从 backfill-vectors 受理路径拿掉的查询——冷库单条可超 30s），请勿在生产高峰期运行。
+
 ---
 
 ## 四、其它(评测 / 迁移 / 一次性,按需)

@@ -2219,7 +2219,7 @@ class KnowledgeStore:
         ``incremental_fuse_source``).
 
         The ``notebook_id`` predicate rides along so this statement is the
-        byte-for-byte same SEMANTICS as the ``sweep_orphan_clusters`` it
+        byte-for-byte same SEMANTICS as the ``sweep_orphan_clusters_page`` it
         replaces, rather than resting on three remote facts (ids are a global
         primary key, deep copy remints them, the batch came from a
         notebook-scoped query). ``idx_clusters_member`` still drives the seek —

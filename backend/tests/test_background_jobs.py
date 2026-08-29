@@ -218,6 +218,7 @@ def test_submit_keeps_job_active_until_pending_notification_finishes(
         ("report-plan-report-private123", "report-plan"),
         ("knowhow-project-table-private123", "knowhow-project"),
         ("knowhow-asset-sweep:nb-private123", "knowhow-asset-sweep"),
+        ("index-pipeline-nb-private123", "index-pipeline"),
         ("ask-reasoning", "ask-reasoning"),
     ],
 )
@@ -338,6 +339,7 @@ HEAVY_JOB_NAMES = (
     "unifiedkg-nb-a",
     "conflictresolve-nb-a",
     "mergereview-nb-a",
+    "index-pipeline-nb-a",
 )
 LIGHT_JOB_NAMES = (
     "papermeta-nb-a",

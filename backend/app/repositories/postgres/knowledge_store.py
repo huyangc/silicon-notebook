@@ -2358,7 +2358,7 @@ class KnowledgeStore:
         membership rows deleted in this same transaction by
         ``(notebook_id, member_object_id)`` (``idx_clusters_member`` drives the
         seek; the notebook column keeps this statement semantically identical to
-        the ``sweep_orphan_clusters`` it replaces) — see that adapter's
+        the ``sweep_orphan_clusters_page`` it replaces) — see that adapter's
         docstring for why they belong here rather than in
         ``incremental_fuse_source``'s notebook-wide orphan anti-join, why the
         knowhow projector deliberately does NOT do the same, and why no

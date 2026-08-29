@@ -41,6 +41,11 @@ LIFECYCLE_STORE_CALLS = {
         "completion_pending_states",
         "completion_validate_scope",
         "clear_source_graph_state",
+        # Z3(codex #621 同族遗漏):大库闸从裸 COUNT(*) 换成既有的 seq-gated
+        # `knowledge_counts_cache.active_object_count` memo(经 store 的
+        # `count_active_objects` 转发)——`active_object_count` 上面仍在(另两处
+        # 未纳入本次改动的调用点),两个名字都合法存在。
+        "count_active_objects",
         # `embedding_rows`(整个 notebook 的全类型向量)是**刻意缺席**的:增量融合
         # 的无 ANN 桥接分支只消费 concept 向量,读取已收窄成下面这条,这个精确集合
         # 断言就是让「退回全类型读」失败关闭 —— 与 `relink_rows` / `cluster_map_rows`
@@ -92,7 +97,10 @@ LIFECYCLE_STORE_CALLS = {
         # what makes a regression to the unbounded read fail closed — mirroring
         # the `relink_rows` note above.
         "merge_candidate_pairs_for_canonicals",
-        "sweep_orphan_clusters",
+        # Z6: renamed from `sweep_orphan_clusters` — now a keyset PAGE primitive
+        # (NOT EXISTS, bounded per batch) rather than one unbounded NOT IN
+        # anti-join; the loop lives in `_sweep_orphan_clusters_page_loop`.
+        "sweep_orphan_clusters_page",
         "valid_object_ids",
     },
     "unified_kg": {

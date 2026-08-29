@@ -293,6 +293,30 @@ class CheckupService:
             checks=checks,
         )
 
+    # ------------------------------------------------------------- narrow reads
+    def missing_vector_counts(self, notebook_id: str) -> "tuple[int, int]":
+        """(缺 chunk 向量数, 缺 element 向量数)的**窄读口**——只算 H4/H5 这两个数,
+        不顺路跑 H2/H3(各一次全库 sources anti-join)、H6、H7(索引状态签名/探针)、
+        H8(磁盘 manifest 交叉校验)。承 Z7:``backfill_vectors`` 的受理判定只需要
+        「有没有缺向量」,调整套 ``run()`` 会为一个布尔判断白付其余五项体检的代价
+        (H2/H3 尤其是大库上的整表反连接)。
+
+        底层复用 ``_h45_missing_vector_counts`` 的既有 memo/事件失效/背底 TTL 机制
+        (与 ``run()`` 里 H4/H5 的那份是**同一套缓存、同一个键取法**,不是另起一套):
+        active/local_active/kg_mutation_seq 三个键分量的取法与 ``run()`` 逐字一致,
+        故两条路径算出的键永远相等,不会因为「走了不同入口」而各自命中/未命中出两份
+        结果——数值同源、语义一致。为了不牵动 ``run()`` 里三条查询共用一个连接的既有
+        结构(H2/H3/H6 也搭那个连接),这里为这三个分量单独开一次连接,是刻意的小重复,
+        换来的是不必为窄读口专门拆一个「三选一开关」的 run()。"""
+        active = set(self._active_source_ids() or ())
+        with self._database.connect() as db:
+            local_active = (
+                self._queries.notebook_source_ids_among(db, notebook_id, active)
+                if active else set()
+            )
+            h45_seq = int(self._kg_mutation_seq(db, notebook_id))
+        return self._h45_missing_vector_counts(notebook_id, active, local_active, h45_seq)
+
     # ---------------------------------------------------------------- H4/H5
     def invalidate_missing_vector_counts(self, notebook_id: str) -> None:
         """H4/H5 memo 的**边界**事件失效:element/chunk 向量写路径在自己的边界(整源

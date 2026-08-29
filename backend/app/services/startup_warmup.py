@@ -277,6 +277,58 @@ def _sweep_agent_profile_chains(repo: object) -> None:
         logger.info("startup: settled %d stranded understanding chain(s)", swept)
 
 
+def _pool_budget_warning(settings: object) -> str | None:
+    """Return a one-time startup warning when the PostgreSQL connection pool
+    is sized smaller than the worst-case background job concurrency this
+    process can run at once, or ``None`` when the budget looks safe.
+
+    Three independent knobs each open their own PostgreSQL connections and
+    have never been checked against each other: the heavy maintenance pool
+    (``background_maintenance_concurrency`` — full KG rebuilds, the
+    ``index-pipeline-*`` full-library reindex, merge review, conflict
+    resolution), the light maintenance pool (``background_light_job_concurrency``),
+    and KG extraction's own per-notebook fan-out (``kg_job_concurrency``). Each
+    pool independently caps its OWN job count; nothing today caps how many of
+    them run at once, so their worst-case connection demand is additive. The
+    production defaults (4 + 4 + 8 = 16) already exceed the default
+    ``postgres_pool_max_size`` of 10 — this is deliberately only a warning,
+    not a refusal to start: most deployments never saturate every pool at
+    once, and turning a rare peak-load slowdown into a hard boot failure would
+    trade a recoverable problem for an unrecoverable one.
+
+    The whole body is one best-effort block: this diagnostic must never be
+    able to fail — let alone change the *shape* of — a startup that would
+    otherwise succeed or fail for an unrelated reason. Several existing
+    tests intentionally construct a minimal settings double (e.g.
+    ``SimpleNamespace(database_url=...)``) that carries none of the pool
+    knobs; an unguarded attribute read here would raise ``AttributeError``
+    from inside ``run_startup``'s try block and get misreported as a
+    (redacted) startup failure cause instead of the test's own injected one.
+    """
+    try:
+        from app.core.database_url import database_identity
+
+        identity = database_identity(str(settings.database_url))
+        if identity.scheme != "postgresql":
+            return None  # pool sizing is meaningless for the SQLite backend
+
+        heavy = int(settings.background_maintenance_concurrency)
+        light = int(settings.background_light_job_concurrency)
+        kg = int(settings.kg_job_concurrency)
+        budget = heavy + light + kg
+        pool_max = int(settings.postgres_pool_max_size)
+        if pool_max > budget:
+            return None
+        return (
+            f"pool-budget: POSTGRES_POOL_MAX_SIZE={pool_max} <= "
+            f"重活维护池({heavy})+轻活维护池({light})+KG 分析并发({kg})={budget}；"
+            "高峰期后台维护 job 与 KG 分析可能耗尽连接池并让前台请求排队甚至超时。"
+            f"建议把 POSTGRES_POOL_MAX_SIZE 调到至少 {budget + 1}。"
+        )
+    except Exception:  # noqa: BLE001 — diagnostic-only; never affects startup
+        return None
+
+
 def run_startup(lease: object | None) -> object | None:
     """Construct the repository, recover interrupted work, warm caches, and
     then mark the service ready. Any exception is captured into readiness and
@@ -294,6 +346,13 @@ def run_startup(lease: object | None) -> object | None:
         )
 
         validate_process_local_scheduler_deployment()
+        # One-time loud pool-budget disclosure: warn, never refuse to start
+        # (see _pool_budget_warning for why this stays a warning).
+        from app.core.config import get_settings
+
+        pool_warning = _pool_budget_warning(get_settings())
+        if pool_warning:
+            logger.warning(pool_warning)
         logger.info("startup: constructing repository (runs schema migrations)…")
         # Imported lazily so module import stays cheap and side-effect free.
         from app.api.deps import repository as repository_factory

@@ -46,6 +46,12 @@ _EMBEDDING_PAGE_SIZE = 500
 # Rows consumed per fetch while streaming the orphan-asset keeper scan. Twin of
 # the SQLite adapter's constant; see ``_surviving_asset_refs``.
 _ASSET_SCAN_FETCH_ROWS = 200
+# Rows removed per transaction while sweeping ``indexing_pipeline_stages``
+# during crash recovery. That table cannot use the ``TRUNCATE`` fast path used
+# for the KG clustering scratch tables below (see ``recover_interrupted_jobs``
+# for why), so a bounded batch keeps each individual DELETE well under the
+# startup-readiness time budget even if many jobs were interrupted at once.
+_RECOVERY_DELETE_BATCH_ROWS = 5000
 
 
 class PostgresMaintenanceAdapter:
@@ -482,71 +488,172 @@ class PostgresMaintenanceAdapter:
             notebook_id, assume_locked=_assume_locked
         )
 
+    def _delete_indexing_pipeline_stages_in_batches(self) -> int:
+        """Delete every ``indexing_pipeline_stages`` row a batch at a time.
+
+        Cannot use ``TRUNCATE`` here (unlike the two scratch tables below):
+        ``indexing_pipeline_stage_sources`` holds
+        ``FOREIGN KEY (job_id) REFERENCES indexing_pipeline_stages(job_id)``
+        (see ``0037_indexing_pipeline_staging.sql``), and PostgreSQL refuses to
+        ``TRUNCATE`` a table with an incoming foreign key unless the referencing
+        table is truncated in the very same statement or ``CASCADE`` is added.
+        ``CASCADE`` would silently widen this crash-recovery sweep to whatever
+        else ever gains a foreign key into this table — a bigger footgun than
+        paying for a batched delete.
+
+        What the batch limit (``_RECOVERY_DELETE_BATCH_ROWS``) actually bounds
+        — corrected, this used to overstate how cheap the cascade is:
+        ``indexing_pipeline_stages`` itself has ``job_id`` as its sole primary
+        key (one row per job, not per stage), so this table's own row count
+        genuinely is capped at ``_RECOVERY_DELETE_BATCH_ROWS`` per iteration —
+        "job count" and "row count" are the same number *for this table*.
+        But ``ON DELETE CASCADE`` on the child table
+        (``indexing_pipeline_stage_sources``, primary key ``(job_id,
+        source_id)`` — one row per queued source in that job's snapshot) fires
+        as part of the very same statement, and a single job's
+        ``source_snapshot`` can itself span a large library-wide reindex
+        (tens of thousands of sources); PostgreSQL cascades cannot be
+        batched independently of the parent-row batching done here. So one
+        iteration's total deleted-row count, once the cascaded child rows are
+        counted, is **not** capped at ``_RECOVERY_DELETE_BATCH_ROWS`` — only
+        the number of *jobs* settled per iteration is. Bounding the cascade
+        too would mean dropping the FK's ``ON DELETE CASCADE`` (a schema
+        migration) and batch-deleting ``indexing_pipeline_stage_sources`` by
+        its own primary key before each parent batch — deliberately left
+        alone here as a larger, riskier change than this crash-recovery
+        sweep's cost actually justifies; batching the parent table at least
+        keeps each individual statement's own work bounded, which is what
+        made the two KG-clustering scratch tables' *unconditional* ``DELETE``
+        dangerous in the first place (see ``recover_interrupted_jobs``).
+        """
+        total = 0
+        while True:
+            with self._runtime.database.write() as db:
+                cursor = db.execute(
+                    "DELETE FROM indexing_pipeline_stages WHERE job_id IN "
+                    "(SELECT job_id FROM indexing_pipeline_stages LIMIT %s)",
+                    (_RECOVERY_DELETE_BATCH_ROWS,),
+                )
+                deleted = cursor.rowcount
+            total += deleted
+            if deleted < _RECOVERY_DELETE_BATCH_ROWS:
+                return total
+
     def recover_interrupted_jobs(self) -> None:
-        """Settle process-owned work abandoned by a previous backend process."""
+        """Settle process-owned work abandoned by a previous backend process.
+
+        Each statement below runs in its **own** transaction and any failure
+        is logged and skipped rather than propagated: this function only runs
+        once, after a crash, before the service becomes ready, and its
+        statements settle entirely independent resources (merge-review jobs,
+        ask jobs, source parsing, KG build jobs, ...) with no invariant that
+        spans more than one of them. The previous shape ran all statements in
+        one shared transaction, so any single failure rolled back every other
+        settlement too. That was actively dangerous for the two KG-clustering
+        scratch tables: ``kg_cluster_scratch``/``kg_canonical_scratch`` hold
+        one row per clustered object per run (9M-row scale on a large
+        notebook), so an unconditional ``DELETE`` after an OOM/SIGKILL could
+        by itself exceed the startup time budget — and if it did, the shared
+        transaction meant the rollback left EVERY row in place, so the next
+        restart failed in the exact same place, forever. Splitting into
+        independent transactions plus switching those two tables (and,
+        separately, ``indexing_pipeline_stages`` — see
+        ``_delete_indexing_pipeline_stages_in_batches``) off unconditional
+        row-by-row ``DELETE`` removes both halves of that trap.
+        """
         now = normalize_timestamp(self._runtime.seams.now())
-        with self._runtime.database.write() as db:
-            db.execute(
-                "UPDATE merge_review_jobs SET status='failed', "
-                "error='中断:服务重启' WHERE status='running'"
+        failed_steps: list[str] = []
+
+        def _settle(label: str, action: Callable[[], None]) -> None:
+            try:
+                action()
+            except Exception:  # noqa: BLE001 — 逐语句尽力,任一条失败绝不阻断其余语句
+                logger.exception(
+                    "recover_interrupted_jobs: 结算 %s 失败,已跳过继续其余语句", label
+                )
+                failed_steps.append(label)
+
+        def _write(sql: str, params: tuple = ()) -> None:
+            with self._runtime.database.write() as db:
+                db.execute(sql, params)
+
+        _settle("merge_review_jobs", lambda: _write(
+            "UPDATE merge_review_jobs SET status='failed', "
+            "error='中断:服务重启' WHERE status='running'"
+        ))
+        _settle("ask_jobs", lambda: _write(
+            "UPDATE ask_jobs SET status='interrupted', "
+            "error='中断:服务重启' WHERE status='running'"
+        ))
+        _settle("knowhow_rows", lambda: _write(
+            "UPDATE knowhow_rows SET projection_status='failed' "
+            "WHERE projection_status IN ('syncing','pending')"
+        ))
+        _settle("sources(extracting)", lambda: _write(
+            "UPDATE sources SET status='parsed',parse_status='parsed',"
+            "error_message='',updated_at=%s WHERE parse_status='extracting'",
+            (now,),
+        ))
+        _settle("sources(queued/parsing)", lambda: _write(
+            "UPDATE sources SET status='failed',parse_status='failed',"
+            "error_message='服务重启导致文档解析中断；文件已保留，可重新解析。',"
+            "updated_at=%s WHERE parse_status IN ('queued','parsing')",
+            (now,),
+        ))
+        _settle("extraction_runs", lambda: _write(
+            "UPDATE extraction_runs SET status='failed',"
+            "error_message='worker_interrupted: 服务重启导致知识图谱分析中断',"
+            "updated_at=%s WHERE run_type='kg' AND status='running'",
+            (now,),
+        ))
+        _settle("kg_build_jobs", lambda: _write(
+            "UPDATE kg_build_jobs SET status='failed',stage='finished',"
+            "error_code='worker_interrupted',"
+            "error_message='服务重启导致本次分析中断；已完成内容已保留，可继续分析未完成内容。',"
+            "updated_at=%s,finished_at=%s WHERE status='running'",
+            (now, now),
+        ))
+        _settle(
+            "indexing_pipeline_stages",
+            self._delete_indexing_pipeline_stages_in_batches,
+        )
+        # Mirrors the SQLite sweep: the command-catalog single-flight
+        # predicate covers queued AND running, so a row stranded before its
+        # worker thread started would otherwise hold that source's guard
+        # forever.
+        # Wording kept in sync with app/services/catalog_job.py's
+        # INTERRUPTED_MESSAGE: the user-facing verb is "识别" ("recognize"),
+        # not the internal "抽取" ("extract") — this SQL literal bypasses
+        # user_error()/the frontend vocabulary gate and lands on screen
+        # verbatim, so it is on its own to keep the interface vocabulary right.
+        # R6 P1: dropped the unconditional "可重新发起识别" promise — retained
+        # is not the same as reachable, `.../job` only ever returns the
+        # latest run, and a restart from here now orphans those candidates
+        # exactly like a restart from `succeeded` (see catalog_job.py's
+        # `_reject_if_pending_candidates`, which now blocks this status too).
+        _settle("catalog_jobs", lambda: _write(
+            "UPDATE catalog_jobs SET status='failed',"
+            "failure_reason='服务重启导致命令目录识别中断；已生成的候选已保留，"
+            "请先在审阅面板确认或跳过，再重新发起识别。',"
+            "diagnostic='worker_interrupted',"
+            "updated_at=%s,finished_at=%s WHERE status IN ('queued','running')",
+            (now, now),
+        ))
+        # No incoming foreign keys reference either scratch table (verified
+        # against every migration under app/repositories/postgres/migrations/),
+        # so TRUNCATE is safe here and is O(1) regardless of row count — unlike
+        # the unconditional DELETE it replaces, which walks and MVCC-deletes
+        # every tuple.
+        _settle("kg_cluster_scratch", lambda: _write("TRUNCATE kg_cluster_scratch"))
+        _settle(
+            "kg_canonical_scratch", lambda: _write("TRUNCATE kg_canonical_scratch")
+        )
+
+        if failed_steps:
+            logger.error(
+                "recover_interrupted_jobs: %d 条结算语句失败并被跳过: %s",
+                len(failed_steps), ", ".join(failed_steps),
             )
-            db.execute(
-                "UPDATE ask_jobs SET status='interrupted', "
-                "error='中断:服务重启' WHERE status='running'"
-            )
-            db.execute(
-                "UPDATE knowhow_rows SET projection_status='failed' "
-                "WHERE projection_status IN ('syncing','pending')"
-            )
-            db.execute(
-                "UPDATE sources SET status='parsed',parse_status='parsed',"
-                "error_message='',updated_at=%s WHERE parse_status='extracting'",
-                (now,),
-            )
-            db.execute(
-                "UPDATE sources SET status='failed',parse_status='failed',"
-                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析。',"
-                "updated_at=%s WHERE parse_status IN ('queued','parsing')",
-                (now,),
-            )
-            db.execute(
-                "UPDATE extraction_runs SET status='failed',"
-                "error_message='worker_interrupted: 服务重启导致知识图谱分析中断',"
-                "updated_at=%s WHERE run_type='kg' AND status='running'",
-                (now,),
-            )
-            db.execute(
-                "UPDATE kg_build_jobs SET status='failed',stage='finished',"
-                "error_code='worker_interrupted',"
-                "error_message='服务重启导致本次分析中断；已完成内容已保留，可继续分析未完成内容。',"
-                "updated_at=%s,finished_at=%s WHERE status='running'",
-                (now, now),
-            )
-            db.execute("DELETE FROM indexing_pipeline_stages")
-            # Mirrors the SQLite sweep: the command-catalog single-flight
-            # predicate covers queued AND running, so a row stranded before its
-            # worker thread started would otherwise hold that source's guard
-            # forever.
-            # Wording kept in sync with app/services/catalog_job.py's
-            # INTERRUPTED_MESSAGE: the user-facing verb is "识别" ("recognize"),
-            # not the internal "抽取" ("extract") — this SQL literal bypasses
-            # user_error()/the frontend vocabulary gate and lands on screen
-            # verbatim, so it is on its own to keep the interface vocabulary right.
-            # R6 P1: dropped the unconditional "可重新发起识别" promise — retained
-            # is not the same as reachable, `.../job` only ever returns the
-            # latest run, and a restart from here now orphans those candidates
-            # exactly like a restart from `succeeded` (see catalog_job.py's
-            # `_reject_if_pending_candidates`, which now blocks this status too).
-            db.execute(
-                "UPDATE catalog_jobs SET status='failed',"
-                "failure_reason='服务重启导致命令目录识别中断；已生成的候选已保留，"
-                "请先在审阅面板确认或跳过，再重新发起识别。',"
-                "diagnostic='worker_interrupted',"
-                "updated_at=%s,finished_at=%s WHERE status IN ('queued','running')",
-                (now, now),
-            )
-            db.execute("DELETE FROM kg_cluster_scratch")
-            db.execute("DELETE FROM kg_canonical_scratch")
 
     @staticmethod
     def _lock_candidate_assets(

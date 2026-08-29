@@ -192,6 +192,9 @@ _ORPHAN_SWEEP_DONE_LOCK = threading.Lock()
 # 有界:多租户进程里 notebook 数无上限,记满就整体丢弃重来(下一轮各扫一次,
 # 与冷启动同代价),不引入 LRU 复杂度。
 _ORPHAN_SWEEP_DONE_MAX = 512
+# Z6:每批 DELETE 的行数上限 —— 与 keyset 游标一起把清扫拆成多条独立提交的写事务,
+# 使单条语句在 9M 行级别的库上仍能稳稳落在 statement_timeout(30s)以内。
+_ORPHAN_SWEEP_BATCH_SIZE = 5000
 
 
 class ModelSkipPolicy:
@@ -1731,6 +1734,63 @@ class KnowledgeLifecycleService:
             self._invalidate_unified_cache(notebook_id)
         return added
 
+    def _sweep_orphan_clusters_page_loop(self, notebook_id: str) -> int:
+        """Z6: keyset-batched anti-join delete of legacy orphan
+        ``concept_clusters`` rows (``member_object_id`` pointing at a
+        since-deleted knowledge object) for ``notebook_id``.
+
+        The batch bound is on **scanned** rows, not deleted ones. Each
+        iteration asks the store for one keyset page of ``≤
+        _ORPHAN_SWEEP_BATCH_SIZE`` cluster rows ordered by ``(object_type,
+        member_object_id)`` — exactly the column order of the existing
+        ``uq_clusters_notebook_type_member`` unique index, so both backends
+        drive the scan off it without an extra sort and ties are impossible
+        (that triple is UNIQUE with ``notebook_id`` fixed by the WHERE
+        clause) — and the store deletes whichever rows of THAT page are
+        orphans. Cost per batch is O(page) for both statements; a full sweep of
+        a notebook holding N cluster rows is ``ceil(N / page)`` batches, O(N)
+        overall, and its FREQUENCY is what the once-per-process-per-notebook
+        accounting in ``incremental_fuse_source`` bounds — not the size of any
+        single statement.
+
+        ⚠ The cursor therefore advances to the **last scanned** key, and the
+        loop stops on a SHORT PAGE — never on "this batch deleted nothing".
+        Advancing by deleted rows instead is exactly the P1 this shape fixes:
+        with the `LIMIT` sitting behind the orphan filter, a notebook with zero
+        orphans (the normal state — the producers are zeroed out, see
+        ``incremental_fuse_source``) made every batch scan the entire cluster
+        slice before coming back empty, i.e. the same ``statement_timeout``
+        hazard the batching was introduced to remove; and with many orphans
+        every batch re-scanned the whole remaining range.
+
+        Each batch is its own committed write transaction. Returns the total
+        number of rows deleted (0 in the common case)."""
+        total = 0
+        after_object_type = ""
+        after_member_object_id = ""
+        while True:
+            with self._write() as db:
+                page, deleted = self.governance_store.sweep_orphan_clusters_page(
+                    db, notebook_id, after_object_type, after_member_object_id,
+                    _ORPHAN_SWEEP_BATCH_SIZE,
+                )
+                # P0-A: only bump when this batch actually deleted rows — the
+                # later append_clusters calls in incremental_fuse_source
+                # self-bump on their own additions, so this guards just the
+                # DELETE branch (no double-count, no fake signal on a scanned
+                # -but-deleted-nothing batch, which is now the common one).
+                if deleted:
+                    self._bump_cluster_mutation_seq(db, notebook_id)
+            if not page:
+                break
+            total += deleted
+            last = page[-1]
+            after_object_type = str(last["object_type"])
+            after_member_object_id = str(last["member_object_id"])
+            if len(page) < _ORPHAN_SWEEP_BATCH_SIZE:
+                break
+        return total
+
     def incremental_fuse_source(self, notebook_id: str, source_id: str) -> None:
         """上传后增量融合该源 concept 进 concept_clusters。Tier1 名种子 append(无 LLM)。"""
         if not self.settings.kg_incremental_fusion_enabled:
@@ -1766,23 +1826,29 @@ class KnowledgeLifecycleService:
         # 每个 worker 各扫一次历史残渣,之后没有任何新残渣需要谁去发现。
         #
         # 判据是**纯内存**的,所以跳过时既不读库也不开写事务(fold 循环 D 次白拿
-        # 进程写锁是 PR#320 写锁饿死的同一形状);只有真要扫时才 `_write()`。记账
-        # 放在事务**提交之后** —— 回滚了就不记,下次重扫(安全方向)。
+        # 进程写锁是 PR#320 写锁饿死的同一形状);只有真要扫时才 `_write()`。
+        #
+        # ⚠ Z6(P0,行为恢复):记账在**try/finally**里,语义是「每进程每库尝试过一次」
+        # ——不再是「成功过一次」。原因是清扫本身已经是 keyset 分批(见
+        # `_sweep_orphan_clusters_page_loop` 与 store 侧「先取页、再删页内孤儿」的两步
+        # 重写:批大小界住的是**扫描行数**),单批有界、正常
+        # 不该再撞 30s statement_timeout;但历史残渣的分布无法在事前证明,一次异常
+        # (连接抖动、极端倾斜分布撑爆某一批)如果不记账,会让**下一次上传**在同一个
+        # 注定失败(或注定慢)的清扫上重开一遍、每次都白烧时间,还连带打断整个
+        # `incremental_fuse_source`(Tier2 桥接与 claim/formula/procedure 聚类因此对
+        # 这本库永久不生效)——这个代价远大于「漏扫一次历史残渣」。生产者早已清零
+        # (见上),所以漏掉的只是**静态残渣**,不是持续增长的活伤口:下一次进程重启
+        # (`_ORPHAN_SWEEP_DONE` 清空)或一次 `rebuild_unified_kg` 都能把它兜住。
         with _ORPHAN_SWEEP_DONE_LOCK:
             already_swept = notebook_id in _ORPHAN_SWEEP_DONE
         if not already_swept:
-            with self._write() as db:
-                swept = self.governance_store.sweep_orphan_clusters(db, notebook_id)
-                # P0-A: only bump if this orphan-sweep actually deleted rows — the
-                # later append_clusters calls in this method self-bump on their own
-                # additions, so this guards just the DELETE branch (no double-count,
-                # no fake signal on a no-op sweep).
-                if swept > 0:
-                    self._bump_cluster_mutation_seq(db, notebook_id)
-            with _ORPHAN_SWEEP_DONE_LOCK:
-                if len(_ORPHAN_SWEEP_DONE) >= _ORPHAN_SWEEP_DONE_MAX:
-                    _ORPHAN_SWEEP_DONE.clear()
-                _ORPHAN_SWEEP_DONE.add(notebook_id)
+            try:
+                self._sweep_orphan_clusters_page_loop(notebook_id)
+            finally:
+                with _ORPHAN_SWEEP_DONE_LOCK:
+                    if len(_ORPHAN_SWEEP_DONE) >= _ORPHAN_SWEEP_DONE_MAX:
+                        _ORPHAN_SWEEP_DONE.clear()
+                    _ORPHAN_SWEEP_DONE.add(notebook_id)
         from app.services.kg_merge import place_new_concepts, _norm
         # PR-C 有界化:这里曾经 `cmap = self.cluster_map(notebook_id)` —— 整表物化
         # {member_object_id: canonical_id}(生产 9.1M 行 ≈2GB dict),而且每次融合的
@@ -3473,7 +3539,7 @@ class KnowledgeLifecycleService:
         frontend always sends level=object, but we still defend the API for
         level=concept / no-level callers that would otherwise slip through)."""
         with self._connect() as db:
-            nb_count = self.knowledge.active_object_count(db, notebook_id)
+            nb_count = self.knowledge.count_active_objects(db, notebook_id)
         if int(nb_count) > self.settings.viz_sync_build_max_objects:
             effective_limit = limit if limit is not None else self.settings.viz_default_limit
             idx = self.scale_artifacts.viz_index(notebook_id)
@@ -3784,7 +3850,7 @@ class KnowledgeLifecycleService:
         # It remains acceptable for a small notebook, but must never run while a
         # large notebook's compact viz artifact is being built or repaired.
         with self._connect() as db:
-            object_count = self.knowledge.active_object_count(db, notebook_id)
+            object_count = self.knowledge.count_active_objects(db, notebook_id)
         if int(object_count) > self.settings.viz_sync_build_max_objects:
             return {
                 "nodes": [],

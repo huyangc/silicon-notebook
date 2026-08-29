@@ -415,13 +415,19 @@ def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch)
     assert result["status"] == "building"
     assert notebook.id in scale.building
     assert notebook.id not in scale.idle_queue
-    assert scale.status(notebook.id)["state"] == "building"
+    # `_start_daemon` is stubbed, so the claimed worker never wins a build
+    # slot: the notebook is a WAITER (queued shape, no off-peak fields) and,
+    # decisively for this test, holds no idle-queue entry.
+    claimed = scale.status(notebook.id)
+    assert claimed["state"] == "queued"
+    assert "offpeak_next_start_at" not in claimed
+    assert notebook.id in scale._scale_waiting
     assert [name for name, _target in launched].count(f"scaleidx-{notebook.id}") == 1
 
     # A genuinely newer follow-up remains queued behind the claimed build.
     assert scale.trigger(notebook.id, when="idle", mode="fold")["status"] == "queued"
     assert scale.idle_queue[notebook.id][0] == "fold"
-    assert scale.status(notebook.id)["state"] == "building"
+    assert scale.status(notebook.id)["state"] == "queued"
 
 
 def test_post_publication_rebuild_coalesces_busy_full_followup(repo, monkeypatch):
@@ -594,6 +600,402 @@ def test_idle_tick_restores_failed_item_and_continues_with_remaining_queue(
     assert second.id not in scale.idle_queue
     assert second.id in scale.building
     assert [name for name, _target in launched] == [f"scaleidx-{second.id}"]
+
+
+# ---------------------------------------------------------------------------
+# Z5: process-wide build/fold concurrency ceiling + per-notebook failure backoff.
+# ---------------------------------------------------------------------------
+
+
+def test_scale_build_concurrency_is_capped_at_configured_limit(repo, monkeypatch):
+    """并发 2 上限:第 3 个 notebook 的 daemon 线程已经启动(admission 立即成功),
+    但真正执行 build 的临界区必须等前两个释放 slot——从不同时超过 2 个。"""
+    notebooks = [_seed(repo) for _ in range(3)]
+    scale = repo._runtime.scale_artifacts
+    scale._scale_build_semaphore = threading.BoundedSemaphore(2)
+    for notebook in notebooks:
+        with repo._write() as db:
+            db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
+
+    entered_lock = threading.Lock()
+    entered: list[str] = []
+    concurrent = 0
+    peak_concurrent = 0
+    release = threading.Event()
+
+    def fake_build(notebook_id, **_kwargs):
+        nonlocal concurrent, peak_concurrent
+        with entered_lock:
+            entered.append(notebook_id)
+            concurrent += 1
+            peak_concurrent = max(peak_concurrent, concurrent)
+        assert release.wait(timeout=5)
+        with entered_lock:
+            concurrent -= 1
+        return {}
+
+    monkeypatch.setattr(scale.builder, "build", fake_build)
+
+    # Real daemon threads (default `_start_daemon`, not monkeypatched): admission
+    # must return immediately for all three even though only 2 can execute.
+    for notebook in notebooks:
+        assert scale._run_scale_op(notebook.id, "full") is True
+
+    deadline = time.monotonic() + 5
+    while len(entered) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(entered) == 2  # the 3rd is blocked on the semaphore, not yet inside
+    time.sleep(0.2)
+    assert len(entered) == 2  # still blocked — no drift under a short observation window
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while len(entered) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(entered) == 3
+    assert peak_concurrent <= 2
+
+    deadline = time.monotonic() + 5
+    while any(nb.id in scale.building for nb in notebooks) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert all(nb.id not in scale.building for nb in notebooks)
+
+
+def test_automatic_retry_refused_during_backoff_manual_bypasses_it(repo, monkeypatch):
+    """Z5②:同一 notebook 构建失败后,自动重跑在退避窗口内被拒绝(admission 直接
+    返回 False,不占并发 slot);手动(manual=True,如用户点『立即重建』)不受限,
+    始终立即受理。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(
+        scale.builder,
+        "build",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    # First (automatic) attempt is admitted, runs, and fails — recording backoff.
+    assert scale._run_scale_op(notebook.id, "full") is True
+    assert notebook.id not in scale.building
+
+    # A second automatic attempt inside the backoff window is refused outright:
+    # it never reaches `building`/`_start_daemon` — no wasted concurrency slot.
+    assert scale._run_scale_op(notebook.id, "full") is False
+    assert notebook.id not in scale.building
+
+    # An explicit manual trigger is exempt from backoff and admitted immediately.
+    assert scale._run_scale_op(notebook.id, "full", manual=True) is True
+
+
+def test_failure_backoff_is_cleared_by_a_subsequent_success(repo, monkeypatch):
+    """一次成功清空该 notebook 的失败退避状态,后续自动重跑不再被拒绝。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
+
+    monkeypatch.setattr(
+        scale.builder,
+        "build",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert scale._run_scale_op(notebook.id, "full") is True
+    assert scale._scale_backoff_active(notebook.id) is True
+
+    monkeypatch.setattr(scale.builder, "build", lambda *_a, **_k: {})
+    assert scale._run_scale_op(notebook.id, "full", manual=True) is True
+    assert scale._scale_backoff_active(notebook.id) is False
+
+    # With the failure state cleared, a plain automatic retry is admitted again.
+    assert scale._run_scale_op(notebook.id, "full") is True
+
+
+def test_failure_backoff_delay_doubles_and_is_capped(repo, monkeypatch):
+    """指数退避:60s 起步,每次失败翻倍,封顶 scale_build_failure_backoff_max_seconds。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale.settings, "scale_build_failure_backoff_seconds", 60, raising=False)
+    monkeypatch.setattr(
+        scale.settings, "scale_build_failure_backoff_max_seconds", 180, raising=False
+    )
+    before = time.monotonic()
+
+    scale._scale_record_failure(notebook.id)
+    _streak, retry_at = scale._scale_failure_state[notebook.id]
+    assert 55 <= retry_at - before <= 65  # ~60s
+
+    scale._scale_record_failure(notebook.id)
+    before = time.monotonic()
+    _streak, retry_at = scale._scale_failure_state[notebook.id]
+    assert 115 <= retry_at - before <= 125  # ~120s (doubled)
+
+    scale._scale_record_failure(notebook.id)
+    before = time.monotonic()
+    _streak, retry_at = scale._scale_failure_state[notebook.id]
+    assert 175 <= retry_at - before <= 185  # capped at 180s, not 240s
+
+
+def _base_tier(repo, notebook):
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+
+
+def _fake_clock(scale, monkeypatch, start=1_000.0):
+    """Drive the backoff clock without patching the process-wide time module
+    (other threads in this file legitimately read the real monotonic clock)."""
+    state = {"now": start}
+    monkeypatch.setattr(scale, "_monotonic", lambda: state["now"])
+    return state
+
+
+def test_publication_during_backoff_still_queues_and_rebuilds_after_expiry(
+    repo, monkeypatch
+):
+    """P1-1:退避挡的是**执行**,不挡**排队**。
+
+    某库构建失败进入退避窗口(最长 30 分钟),期间用户改分块/管线并发布 ——
+    发布尾段的 rebuild_after_publication 是这次新代次**唯一**的持久登记。若在
+    退避处直接拒绝,idle 队列里什么都没有,调度器永远不会重建新代次,而 HTTP
+    却回了 queued_followup(谎报)。退避过期后调度器必须自然把它接走。
+    """
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    _base_tier(repo, notebook)
+    clock = _fake_clock(scale, monkeypatch)
+    monkeypatch.setattr(scale.settings, "scale_build_failure_backoff_seconds", 60, raising=False)
+    monkeypatch.setattr(
+        scale.settings, "scale_build_failure_backoff_max_seconds", 1800, raising=False
+    )
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+
+    builds: list[str] = []
+
+    def failing_build(notebook_id, **_kwargs):
+        builds.append(notebook_id)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scale.builder, "build", failing_build)
+
+    # An automatic build fails → the notebook enters its backoff window.
+    assert scale._run_scale_op(notebook.id, "full") is True
+    assert scale._scale_backoff_active(notebook.id) is True
+    assert len(builds) == 1
+
+    # A publication lands inside that window: nothing may start, but the
+    # follow-up MUST be registered — and the reported status must match.
+    result = scale.rebuild_after_publication(notebook.id)
+    assert result["status"] == "queued_followup"
+    assert scale.idle_queue[notebook.id][0] == "full"
+    assert notebook.id not in scale.building
+
+    # A scheduler tick inside the window must not consume the entry either.
+    scale._process_idle_queue(force=True)
+    assert scale.idle_queue[notebook.id][0] == "full"
+    assert len(builds) == 1
+
+    # Once the window expires the very same queued entry is claimed and built.
+    clock["now"] += 61
+    monkeypatch.setattr(scale.builder, "build", lambda nbid, **_k: builds.append(nbid) or {})
+    scale._process_idle_queue(force=True)
+    assert notebook.id not in scale.idle_queue
+    assert len(builds) == 2
+    assert notebook.id not in scale.building
+
+
+def test_rebuild_after_publication_status_matches_what_was_registered(
+    repo, monkeypatch
+):
+    """P1-1:三条返回分支逐一与真实登记状态对齐 —— building ⇔ 认领了构建;
+    queued_followup ⇔ idle 队列里真有这一条。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    _base_tier(repo, notebook)
+    _fake_clock(scale, monkeypatch)  # 步骤 3 的退避窗口必须确定性地「仍然活着」
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, _target: None)
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+
+    # 1) Nothing in flight → started, and the claim is real.
+    assert scale.rebuild_after_publication(notebook.id) == {
+        "status": "building",
+        "notebook_id": notebook.id,
+    }
+    assert notebook.id in scale.building
+    assert notebook.id not in scale.idle_queue
+
+    # 2) Busy → queued_followup, and the entry is really there.
+    assert scale.rebuild_after_publication(notebook.id)["status"] == "queued_followup"
+    assert scale.idle_queue[notebook.id][0] == "full"
+
+    # 3) Backed off → still queued_followup, still a real entry.
+    scale.building.discard(notebook.id)
+    scale._scale_waiting.pop(notebook.id, None)
+    scale.idle_queue.pop(notebook.id, None)
+    scale._scale_record_failure(notebook.id)
+    assert scale._scale_backoff_active(notebook.id) is True
+    assert scale.rebuild_after_publication(notebook.id)["status"] == "queued_followup"
+    assert scale.idle_queue[notebook.id][0] == "full"
+
+    # 4) Not applicable is unchanged and registers nothing.
+    other = repo.create_notebook(NotebookCreate(name="tiny"))
+    assert scale.rebuild_after_publication(other.id)["status"] == "not_applicable"
+    assert other.id not in scale.idle_queue
+
+
+def test_expired_failure_state_is_reclaimed_and_bounded(repo, monkeypatch):
+    """P2-2:_scale_failure_state 既不能无限长,也不能永不回收。
+
+    过期的一刻**不**丢条目 —— streak 是指数退避的全部依据,一到点就忘会把
+    60→120→240 退化成恒定 60s;只有再空过一个封顶窗口(远长于调度器轮询)
+    才判定这条记录已经没有意义并回收。"""
+    import app.services.scale_artifact_runtime as runtime_module
+
+    first = _seed(repo)
+    second = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    clock = _fake_clock(scale, monkeypatch)
+    monkeypatch.setattr(scale.settings, "scale_build_failure_backoff_seconds", 60, raising=False)
+    monkeypatch.setattr(
+        scale.settings, "scale_build_failure_backoff_max_seconds", 600, raising=False
+    )
+
+    scale._scale_record_failure(first.id)
+    assert scale._scale_backoff_active(first.id) is True
+
+    # 刚过期:窗口开了,但记录仍在 —— 下一次失败要在 streak 上继续翻倍。
+    clock["now"] += 61
+    assert scale._scale_backoff_active(first.id) is False
+    assert first.id in scale._scale_failure_state
+    scale._scale_record_failure(first.id)
+    _streak, retry_at = scale._scale_failure_state[first.id]
+    assert retry_at - clock["now"] == 120  # 翻倍,而不是从 60 重来
+
+    # 过期 + 再空过一个封顶窗口 → 回收,内存不随笔记本数单调增长。
+    clock["now"] += 120 + 600 + 1
+    assert scale._scale_backoff_active(first.id) is False
+    assert first.id not in scale._scale_failure_state
+
+    # 有界:超过上限时按「最久未失败」淘汰,被挤掉的条目等价于退避提前结束。
+    monkeypatch.setattr(runtime_module, "_SCALE_FAILURE_STATE_MAX", 2)
+    scale._scale_failure_state.clear()
+    for index in range(4):
+        scale._scale_record_failure(f"nb-{index}")
+    assert len(scale._scale_failure_state) == 2
+    assert set(scale._scale_failure_state) == {"nb-2", "nb-3"}
+    assert second.id not in scale._scale_failure_state
+
+
+def test_waiting_for_a_build_slot_reports_queued_and_can_be_cancelled(
+    repo, monkeypatch
+):
+    """P2-3:信号量在 spawn 后的线程里 acquire,所以低峰一次放 20 个库时多数
+    线程只是在等 slot。它们此前一律显示「构建中」且 cancel 一概返回
+    building_not_interruptible —— 明明一行活都还没干。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    _base_tier(repo, notebook)
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
+    builds: list[str] = []
+    monkeypatch.setattr(
+        scale.builder, "build", lambda nbid, **_k: builds.append(nbid) or {}
+    )
+
+    # Occupy the only slot so the spawned worker is stuck waiting for one.
+    scale._scale_build_semaphore = threading.BoundedSemaphore(1)
+    scale._scale_build_semaphore.acquire()
+    assert scale._run_scale_op(notebook.id, "full") is True
+
+    deadline = time.monotonic() + 5
+    while notebook.id not in scale._scale_waiting and time.monotonic() < deadline:
+        time.sleep(0.01)
+    status = scale.status(notebook.id)
+    assert status["state"] == "queued"
+    assert status["building"] is False        # 没开跑就不能说「构建中」
+    assert notebook.id in scale.building      # 认领仍在:别的请求进不来
+    assert status["queue_position"] == 1 and status["queue_length"] == 1
+    assert status["queued_at"]
+    # 等的是执行 slot,不是低峰窗口 —— 不许下发「预计今天 02:00 后开始」。
+    assert "offpeak_next_start_at" not in status
+
+    cancelled = scale.cancel(notebook.id)
+    assert cancelled["cancelled"] is True
+    assert cancelled["reason"] == ""
+    assert notebook.id not in scale.building
+    assert notebook.id not in scale._scale_waiting
+
+    # 放行 slot:被取消的线程醒来后必须直接退出 —— 不建索引、不记退避、
+    # 并且把 slot 还回去(否则一次取消就永久漏掉一个并发名额)。
+    scale._scale_build_semaphore.release()
+    deadline = time.monotonic() + 5
+    while (
+        threading.active_count() > 1
+        and any(t.name == f"scaleidx-{notebook.id}" for t in threading.enumerate())
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert not any(
+        t.name == f"scaleidx-{notebook.id}" for t in threading.enumerate()
+    )
+    assert builds == []
+    assert scale._scale_failure_state == {}
+    assert scale._scale_build_semaphore.acquire(timeout=1) is True
+    scale._scale_build_semaphore.release()
+
+
+def test_waiting_notebook_flips_to_building_once_it_wins_a_slot(repo, monkeypatch):
+    """等 slot 的库拿到名额后才转入「构建中」,状态与通知都在这一刻翻面。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    _base_tier(repo, notebook)
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
+    inside = threading.Event()
+    finish = threading.Event()
+
+    def blocking_build(_notebook_id, **_kwargs):
+        inside.set()
+        assert finish.wait(timeout=5)
+        return {}
+
+    monkeypatch.setattr(scale.builder, "build", blocking_build)
+    scale._scale_build_semaphore = threading.BoundedSemaphore(1)
+    scale._scale_build_semaphore.acquire()
+
+    assert scale._run_scale_op(notebook.id, "full") is True
+    deadline = time.monotonic() + 5
+    while notebook.id not in scale._scale_waiting and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert scale.status(notebook.id)["state"] == "queued"
+
+    scale._scale_build_semaphore.release()
+    assert inside.wait(timeout=5)
+    promoted = scale.status(notebook.id)
+    assert promoted["state"] == "building"
+    assert promoted["building"] is True
+    assert notebook.id not in scale._scale_waiting
+    # 真正开跑之后 cancel 才该说「不可中断」。
+    assert scale.cancel(notebook.id) == {
+        "cancelled": False,
+        "state": "building",
+        "reason": "building_not_interruptible",
+    }
+
+    finish.set()
+    deadline = time.monotonic() + 5
+    while notebook.id in scale.building and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert notebook.id not in scale.building
 
 
 # ---------------------------------------------------------------------------

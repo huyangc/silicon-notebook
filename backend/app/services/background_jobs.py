@@ -54,6 +54,7 @@ _SAFE_JOB_PREFIXES = (
     ("unifiedkg-", "unifiedkg"),
     ("papermeta-", "papermeta"),
     ("buildkg-", "buildkg"),
+    ("index-pipeline-", "index-pipeline"),
 )
 _SAFE_ASK_JOB_NAMES = frozenset({"ask-chunk", "ask-reasoning", "ask-graph"})
 _CALLABLE_OPERATION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
@@ -77,6 +78,11 @@ _HEAVY_MAINTENANCE_OPERATIONS = frozenset({
     "unifiedkg",
     "conflictresolve",
     "mergereview",
+    # `set_indexing_pipeline` 切换分块/索引管线时提交的整库重建
+    # (`RepositoryFacade.execute_indexing_pipeline_rebuild`):chunks → 可选 KG →
+    # 原子发布尾段,量级与 rebuildkg/unifiedkg 同档——都是整库重建,不是
+    # 单来源/单表的轻量投影,故同样进重活池,而不是轻活池。
+    "index-pipeline",
 })
 _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     "papermeta",
