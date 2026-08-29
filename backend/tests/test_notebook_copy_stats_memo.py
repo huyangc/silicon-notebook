@@ -66,6 +66,13 @@ def _add_chunk(repo, nb_id, cid, text):
     repo._mark_unified_kg_dirty(nb_id)
 
 
+def _memo(repo):
+    """这个 repo 自己的 copy-stats memo —— codex PR#634 R2 P2-2 之后它是
+    runtime-owned 对象(``RetrievalSnapshotCache.copy_stats_memo``),不再是模块级
+    全局,所以测试也必须经实例拿。"""
+    return repo._runtime.retrieval_snapshots.copy_stats_memo
+
+
 def _count_cold_loads(repo, monkeypatch) -> dict:
     """数「五条整表聚合」真正跑了几次。
 
@@ -140,9 +147,9 @@ def test_copy_stats_invalidated_by_invalidate_unified_cache(repo):
     nb = repo.create_notebook(NotebookCreate(name="b"))
     _add_concept(repo, nb.id, "a", "MOSFET")
     repo.notebook_copy_stats(nb.id)  # warm
-    assert notebook_scale.copy_stats_cached_version(nb.id) is not None
+    assert _memo(repo).cached_version(nb.id) is not None
     repo._invalidate_unified_cache(nb.id)
-    assert notebook_scale.copy_stats_cached_version(nb.id) is None
+    assert _memo(repo).cached_version(nb.id) is None
 
 
 # ────────────────────── R2-2:等价 oracle 与「不被挤兑」的方向钉 ──────────────
@@ -262,32 +269,67 @@ def test_copy_stats_recomputes_after_a_source_upload_bumps_the_version(repo):
     assert after["size"]["sources"] == 1 and after["size"]["chunks"] == 1
 
 
-def test_ingestion_invalidation_clears_the_copy_stats_memo(repo):
+def test_ingestion_invalidation_clears_the_copy_stats_memo(repo, monkeypatch):
     """P2-1:摄取改了语料规模时,copy-stats memo 必须跟着失效。
 
     版本键里没有 ``sources`` 表的信号(见 ``notebook_scale`` 模块 docstring),
     而 R2-2 把这份 memo 搬进专池之后驻留时长变长了 —— 原先有一部分新鲜度是被
     32 条共享 LRU 的挤兑白捡的。所以摄取路径上补了显式失效。
 
-    **变异锚点**:把 ``_invalidate_corpus_scale_memos`` 里的
-    ``invalidate_copy_stats(notebook_id)`` 删掉 → 这条报红。
-    """
-    from app.services import notebook_scale
-    from app.services.source_ingestion import SourceIngestionService
+    用**真实接线的** ``source_ingestion`` 实例(不是 ``__new__`` 的裸壳):
+    codex PR#634 R2 P2-2 之后失效走的是 runtime 注入的 ``invalidate_copy_stats``
+    回调,所以这条同时钉住「runtime 真的把这个 runtime 自己的 memo 接进去了」。
 
+    **变异锚点**:把 ``_invalidate_corpus_scale_memos`` 里的
+    ``self.invalidate_copy_stats(notebook_id)`` 删掉,或把 repository_runtime 里
+    那行注入摘掉 → 这条报红。
+    """
     nb = repo.create_notebook(NotebookCreate(name="b"))
     _add_concept(repo, nb.id, "a", "MOSFET")
     repo.notebook_copy_stats(nb.id)
-    assert notebook_scale.copy_stats_cached_version(nb.id) is not None
+    assert _memo(repo).cached_version(nb.id) is not None
 
+    ingestion = repo._runtime.source_ingestion
     counts_calls: list = []
-    service = SourceIngestionService.__new__(SourceIngestionService)
-    service.invalidate_knowledge_counts = counts_calls.append
-    service._invalidate_corpus_scale_memos(nb.id)
+    monkeypatch.setattr(ingestion, "invalidate_knowledge_counts", counts_calls.append)
+    ingestion._invalidate_corpus_scale_memos(nb.id)
 
     # 既有的开路计数失效没有被替换掉,copy-stats 是**新增**的一半。
     assert counts_calls == [nb.id]
-    assert notebook_scale.copy_stats_cached_version(nb.id) is None
+    assert _memo(repo).cached_version(nb.id) is None
+
+
+def test_two_runtimes_do_not_share_the_copy_stats_memo():
+    """P2-2(codex PR#634 R2):memo 是 runtime-owned 的,不是模块级全局。
+
+    判据是 ``docs/development.md`` 的组合契约:``REPORT_CANCELLATIONS`` 是唯一
+    被特许的进程级可变工件,其余可变运行状态(含工件缓存)必须 runtime-owned。
+    模块级 dict 会让同进程里的两个 runtime(shadow 迁移、并存的维护流程、测试)
+    在同一个 ``(notebook_id, version, 阈值)`` 键上互读缓存、互等 ``_pending``。
+
+    **变异锚点**:把 memo 退回模块级共享状态(或让两个 ``CopyStatsMemo`` 共用
+    同一个 ``_store``)→ 第二个实例会命中第一个的值、``compute`` 只跑一次,
+    这条报红。
+    """
+    from app.services.notebook_scale import CopyStatsMemo
+
+    memo_a, memo_b = CopyStatsMemo(), CopyStatsMemo()
+    calls = {"a": 0, "b": 0}
+
+    a = memo_a.get("nb", ("v", 1), lambda: (calls.__setitem__("a", calls["a"] + 1),
+                                            {"copyable": True, "size": {"bytes": 1}})[1])
+    b = memo_b.get("nb", ("v", 1), lambda: (calls.__setitem__("b", calls["b"] + 1),
+                                            {"copyable": False, "size": {"bytes": 2}})[1])
+
+    assert calls == {"a": 1, "b": 1}, "两个 runtime 的 memo 不得互相复用结果"
+    assert a["copyable"] is True and b["copyable"] is False
+    assert memo_a.cached_version("nb") == ("v", 1)
+    assert memo_b.cached_version("nb") == ("v", 1)
+
+    # 失效也必须只打自己那一份。
+    memo_a.invalidate("nb")
+    assert memo_a.cached_version("nb") is None
+    assert memo_b.cached_version("nb") == ("v", 1), "失效不得越界打到另一个 runtime"
 
 
 # ─────────── P2(codex PR#634 R1):冷载的 single-flight —— R2-2 搬家时丢掉的 ──
@@ -306,9 +348,9 @@ def test_concurrent_cold_loads_run_the_five_aggregates_once():
     import threading
     import time
 
-    from app.services import notebook_scale
+    from app.services.notebook_scale import CopyStatsMemo
 
-    notebook_scale.invalidate_copy_stats()
+    memo = CopyStatsMemo()
     version = ("v", 1)
     calls = {"n": 0}
     follower_entered = threading.Event()
@@ -329,12 +371,12 @@ def test_concurrent_cold_loads_run_the_five_aggregates_once():
         return {"copyable": False, "size": {"bytes": 2}}
 
     def leader():
-        results["leader"] = notebook_scale._memoized_copy_stats(
+        results["leader"] = memo.get(
             "nb-sf", version, leader_compute)
 
     def follower():
         follower_entered.set()
-        results["follower"] = notebook_scale._memoized_copy_stats(
+        results["follower"] = memo.get(
             "nb-sf", version, follower_compute)
 
     t_leader = threading.Thread(target=leader)
@@ -353,7 +395,7 @@ def test_concurrent_cold_loads_run_the_five_aggregates_once():
     assert not follower_computed.is_set(), "等待者不得自己跑聚合"
     assert results["follower"] is results["leader"], "等待者必须复用同一个结果"
     # 有界性:完成即清理,不留在途条目。
-    assert notebook_scale._PENDING == {}
+    assert memo._pending == {}
 
 
 def test_a_failed_cold_load_wakes_waiters_and_caches_no_poison():
@@ -365,9 +407,9 @@ def test_a_failed_cold_load_wakes_waiters_and_caches_no_poison():
     """
     import threading
 
-    from app.services import notebook_scale
+    from app.services.notebook_scale import CopyStatsMemo
 
-    notebook_scale.invalidate_copy_stats()
+    memo = CopyStatsMemo()
     version = ("v", 1)
     follower_entered = threading.Event()
     attempts = {"n": 0}
@@ -385,13 +427,13 @@ def test_a_failed_cold_load_wakes_waiters_and_caches_no_poison():
 
     def leader():
         try:
-            notebook_scale._memoized_copy_stats("nb-err", version, failing_compute)
+            memo.get("nb-err", version, failing_compute)
         except RuntimeError as exc:
             errors.append(exc)
 
     def follower():
         follower_entered.set()
-        results["follower"] = notebook_scale._memoized_copy_stats(
+        results["follower"] = memo.get(
             "nb-err", version, retry_compute)
 
     t_leader = threading.Thread(target=leader)
@@ -406,5 +448,5 @@ def test_a_failed_cold_load_wakes_waiters_and_caches_no_poison():
     assert len(errors) == 1, "leader 自己仍要把异常抛给它的调用方"
     assert results["follower"] == {"copyable": True, "size": {"bytes": 7}}
     assert attempts["n"] == 2, "失败不缓存毒值:等待者必须自己重试一次"
-    assert notebook_scale.copy_stats_cached_version("nb-err") == version
-    assert notebook_scale._PENDING == {}
+    assert memo.cached_version("nb-err") == version
+    assert memo._pending == {}

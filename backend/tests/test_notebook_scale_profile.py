@@ -1,25 +1,17 @@
-import pytest
 from unittest.mock import Mock
 from app.core.config import Settings
 from app.services.notebook_scale import (
+    CopyStatsMemo,
     NotebookScaleFacts,
     NotebookScaleProfile,
-    invalidate_copy_stats,
 )
 
 
-@pytest.fixture(autouse=True)
-def _isolated_copy_stats_memo():
-    """R2-2:copy-stats memo 是**进程级**的(照 knowledge_counts_cache 的形态),
-    而这个文件里的用例共用字面 notebook id 'n'。逐用例清空,免得串味。"""
-    invalidate_copy_stats()
-    yield
-    invalidate_copy_stats()
-
-
 def profile(facts=None, version=None):
+    """每个 profile 一份自己的 memo —— codex PR#634 R2 P2-2 之后 memo 是
+    runtime-owned 对象,用例之间天然隔离,不再需要 autouse 的全局清理。"""
     facts = facts or Mock()
-    return NotebookScaleProfile(Settings(index_suggest_chunk_threshold=10), facts, version or (lambda _: ('v',)))
+    return NotebookScaleProfile(Settings(index_suggest_chunk_threshold=10), facts, version or (lambda _: ('v',)), CopyStatsMemo())
 
 def test_facts_size_dict():
     assert NotebookScaleFacts(1,2,3,4,5).as_size_dict() == {'bytes':1,'sources':2,'chunks':3,'nodes':4,'edges':5}
@@ -57,7 +49,7 @@ def test_index_eligible_false_when_not_mounted_and_small():
 
 def test_requires_index_and_predicate_order():
     repo=Mock(); repo.load_notebook_scale_facts.return_value=NotebookScaleFacts(10**9,0,0,0,0)
-    p=NotebookScaleProfile(Settings(notebook_copy_max_bytes=1), repo, lambda _: 'v')
+    p=NotebookScaleProfile(Settings(notebook_copy_max_bytes=1), repo, lambda _: 'v', CopyStatsMemo())
     assert p.requires_index('n', has_disk_index=False)
     assert not p.requires_index('n', has_disk_index=True)
     assert repo.load_notebook_scale_facts.call_count == 1

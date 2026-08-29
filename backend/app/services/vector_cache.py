@@ -9,16 +9,15 @@ LRU: OrderedDict 保序，命中 move_to_end 刷新新鲜度，超过 max_entrie
 
 分池（热路径修复批 2 · R2-4，审计 ASK-3）: 三道上限，从紧到松：
 
-1. **每键族**上限 ``per_family_entries``(默认 8,**单位是笔记本**)。族名从
-   key 的第一段冒号之后取(``{nb}:matrix:{table}`` → ``matrix``,所以四张
-   embedding 表归同一族)。这是本项真正要买的东西:改造前只有一道全进程 32 条
-   的总上限,而单个大库自己就要占十几条(四个矩阵 + kwtok + ppr_graph +
-   entchunk + elemchunk + clustermap + edge_centrality + …),**两个活跃库即
-   互相挤兑**,而被挤掉的恰好是冷载最贵的那些(GB 级矩阵、整表 dict)。按族
-   分池之后,矩阵族里可以同时住 8 个库的矩阵,谁也挤不掉谁。
-   ⚠ 单位是笔记本而不是条目:``matrix`` 族每库占 4 条,所以它的条目额度是
-   ``8 × 4 = 32``,见 ``_FAMILY_ENTRIES_PER_NOTEBOOK`` 处的完整说明(错配会
-   直接打到问答质量,不只是命中率)。
+1. **每配额桶**上限 ``per_family_entries``(默认 8,单位是**笔记本**)。桶名
+   取 key 第一个冒号之后的全部后缀(``{nb}:matrix:relation_embeddings`` →
+   ``matrix:relation_embeddings``;``{nb}:kwtok`` → ``kwtok``),所以每个桶每库
+   恰好一条,「上限 = 同时保温几个笔记本」by construction 成立。这是本项真正
+   要买的东西:改造前只有一道全进程 32 条的总上限,而单个大库自己就要占十几条
+   (四个矩阵 + kwtok + ppr_graph + entchunk + elemchunk + clustermap +
+   edge_centrality + …),**两个活跃库即互相挤兑**,被挤掉的恰好是冷载最贵的
+   那些(GB 级矩阵、整表 dict)。分桶之后每张 embedding 表各自保住最近用过的
+   8 个库,谁也挤不掉谁 —— 详见 ``quota_bucket`` 处「为什么不是按族 ×4」。
 2. **全局条目**上限 ``max_entries``:族数乘以族上限的兜底,防止「族名意外
    爆炸」这类退化。它不再是常态下的约束条件(默认值随本项从 32 提到 128
    = 16 族 × 8),所以也不再是挤兑的来源。
@@ -125,16 +124,29 @@ def estimate_entry_bytes(value: Any, _depth: int = 0) -> int:
     return _NOMINAL_ENTRY_BYTES
 
 
-# 族上限的**单位是笔记本,不是条目**。绝大多数键族每库只存一条
-# (``{nb}:kwtok``、``{nb}:clustermap``、……),两者恰好相等;但 ``matrix`` 族
-# 每库存**四条**(knowledge / element / relation / chunk 四张 embedding 表),
-# 单位错配会让 per_family_entries=8 实际只装得下 2 个库 —— 3 个参与库的联邦
-# 提问必然挤兑(而全局上限还空着一百多个槽),被逐出的矩阵又会让
-# ``_vector_matrix_warm`` 的 peek 判冷,``_retrieve_relations_scored`` 整段跳过
-# 关系语义打分。那是问答质量红线,不是缓存命中率问题(评审 P1-1,实测复现)。
-# 所以按族登记「每库几条」,额度 = per_family_entries × 变体数;matrix 族因此是
-# 8 库 × 4 表 = 32 条,与 ``SCALE_IDX_CACHE_MAX``=8 的「8 个活跃库」同一口径。
-_FAMILY_ENTRIES_PER_NOTEBOOK = {"matrix": 4}
+# 配额桶:LRU 上限**按桶**执法,而每个桶每库恰好一条,所以「上限 = 同时保温几个
+# 笔记本」这个不变量对每个桶都是 by construction 成立的。
+#
+# 桶名取 key 的第一个冒号之后的**全部**后缀,所以 ``{nb}:matrix:relation_embeddings``
+# 自成一桶,与 ``matrix:chunk_embeddings`` 互不挤占;而 ``{nb}:kwtok`` 这类每库
+# 一条的键族,桶 == 族。
+#
+# 为什么不是「matrix 归一族、额度 ×4」(codex PR#634 R2 P1 打掉的第一版):族淘汰
+# 是**逐条**的,而 LRU 序里多库的四张矩阵是交错的,第 9 个库进场会从 4 个既有库
+# 各剥一张矩阵 —— 8 库额度实际只剩 5 个全暖库,被剥的若是 relation 矩阵就直接触发
+# ``_retrieve_relations_scored`` 的打分跳过。按变体分桶之后,每个桶各自保住它那张
+# 表最近用过的 N 个库,``relation_embeddings`` 的 N 库常驻是独立成立的,不会被
+# knowledge/element/chunk 三张表的活动稀释。
+#
+# 也没有选「以 notebook 为单位整组淘汰」那条:它要从 key 反解 nb 前缀、要在淘汰时
+# 扫全族凑出「同一库的全部变体」,而按变体分桶用一行 partition 就得到同样的不变量,
+# 且对「某条路径只加载了其中一张表」这种不齐的现实更稳。
+def quota_bucket(key: str) -> str:
+    """LRU 上限的执法桶名(见上)。``{nb}:matrix:relation_embeddings`` →
+    ``matrix:relation_embeddings``;``{nb}:kwtok`` → ``kwtok``;没有冒号的裸键
+    → ``""``。"""
+    _head, separator, tail = key.partition(":")
+    return tail if separator else ""
 
 
 def key_family(key: str) -> str:
@@ -194,41 +206,24 @@ class VectorCache:
                 key, family, reason, len(self._store), self._total_bytes,
             )
 
-    def _family_quota(self, family: str) -> int:
-        """该族的**条目**额度 = ``per_family_entries``(单位:笔记本)× 该族每库
-        占用的条目数(见 ``_FAMILY_ENTRIES_PER_NOTEBOOK``)。"""
-        return self._per_family_entries * _FAMILY_ENTRIES_PER_NOTEBOOK.get(family, 1)
-
     def _enforce_limits_locked(self, keep: str) -> None:
         """三道上限,从紧到松(见模块 docstring)。``keep`` 是刚写入的 key,
         任何一道都不得把它淘汰掉——否则调用方立刻又得冷载一次同一个值。"""
         family = key_family(keep)
-        if self._per_family_entries > 0:
-            quota = self._family_quota(family)
-            in_family = [k for k in self._store if key_family(k) == family]
-            while len(in_family) > quota:
-                victim = in_family.pop(0)      # 全局 LRU 序 → 族内最旧的在前
-                if victim == keep:
-                    continue
-                self._drop_locked(victim, "family")
-        if self._max_entries > 0:
-            while len(self._store) > self._max_entries:
-                victim = next(iter(self._store))
-                if victim == keep:
-                    break
-                self._drop_locked(victim, "entries")
+
         if self._max_bytes > 0:
             oversized = self._bytes.get(keep, 0)
             if oversized > self._max_bytes:
-                # 单条**自己**就超过整条预算 → 直接不驻留(codex PR#634 R1 P1-2)。
+                # 单条**自己**就超过整条预算 → 直接不驻留,而且必须排在**一切**
+                # 淘汰之前(codex PR#634 R1 P1-2 提出、R2 P2-1 纠正位置)。
                 #
-                # 这个判断必须排在淘汰循环**之前**。此前那个循环止于
-                # ``len == 1``,于是这种条目会永久驻留 —— 违反预算「常驻不超过
-                # N」的字面意思;而它一旦被留下,下一次插入的字节回收又永远到
-                # 不了预算之下,会把每一条比它旧的条目一路逐光(实测:3 条常驻
-                # 小条目全毁,最后连它自己也没保住)。
-                # 但反过来,先跑循环再拒绝它同样是错的:那是**为一个注定留不下
-                # 的条目**把常驻集合清空,白毁一遍。所以先判、直接拒,一条都不逐。
+                # 它一旦被留下,下一次插入的字节回收永远到不了预算之下,会把每一条
+                # 比它旧的条目一路逐光(实测:3 条常驻小条目全毁,最后连它自己也
+                # 没保住)。但反过来,先跑淘汰再拒绝它同样是错的:那是**为一个注定
+                # 留不下的条目**清空常驻集合,白毁一遍 —— R1 的修法只把它排在字节
+                # 循环之前,桶配额与全局条目两个循环仍排在它前面,于是「桶已满时
+                # 插入一条超额条目」照样会先逐掉一条合法条目再拒绝新值。所以判断
+                # 排在最前,一条都不逐。
                 #
                 # 值照常返回给调用方(本次调用不受影响),只是不进缓存:下次同
                 # key 再 get 会重新 load。想让它常驻就该把
@@ -242,12 +237,28 @@ class VectorCache:
                     "still returned to the caller but will be reloaded next time",
                     keep, family, oversized, self._max_bytes,
                 )
-            else:
-                while self._total_bytes > self._max_bytes and len(self._store) > 1:
-                    victim = next(iter(self._store))
-                    if victim == keep:
-                        break
-                    self._drop_locked(victim, "bytes")
+                return
+
+        if self._per_family_entries > 0:
+            bucket = quota_bucket(keep)
+            in_bucket = [k for k in self._store if quota_bucket(k) == bucket]
+            while len(in_bucket) > self._per_family_entries:
+                victim = in_bucket.pop(0)      # 全局 LRU 序 → 桶内最旧的在前
+                if victim == keep:
+                    continue
+                self._drop_locked(victim, "family")
+        if self._max_entries > 0:
+            while len(self._store) > self._max_entries:
+                victim = next(iter(self._store))
+                if victim == keep:
+                    break
+                self._drop_locked(victim, "entries")
+        if self._max_bytes > 0:
+            while self._total_bytes > self._max_bytes and len(self._store) > 1:
+                victim = next(iter(self._store))
+                if victim == keep:
+                    break
+                self._drop_locked(victim, "bytes")
 
     def stats(self) -> dict:
         """命中/未命中/淘汰与每族驻留量的只读快照(运维观察 + 测试用)。"""

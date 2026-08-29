@@ -222,6 +222,10 @@ class SourceIngestionService:
         apply_notebook_meta: Callable[..., None],
         maybe_enqueue_scale_fold: Callable[[str], None],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
+        # copy-stats memo 的失效通路。与上面那条同一注入形态、同一 no-op 默认:
+        # memo 是 runtime-owned 的(codex PR#634 R2 P2-2),服务层不许去摸模块级
+        # 全局,也不该自己去 runtime 里翻。
+        invalidate_copy_stats: Callable[[str], None] = lambda _notebook_id: None,
         # Agentic Memory P1 (T4). Defaulted to a no-op for the same reason
         # ``invalidate_knowledge_counts`` above is: narrow test doubles and any
         # runtime that never wires the understanding feature must keep
@@ -268,6 +272,7 @@ class SourceIngestionService:
         self.apply_notebook_meta = apply_notebook_meta
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         self.invalidate_knowledge_counts = invalidate_knowledge_counts
+        self.invalidate_copy_stats = invalidate_copy_stats
         self.note_corpus_change = note_corpus_change
 
         self.require_indexing_write = require_indexing_write
@@ -1244,11 +1249,12 @@ class SourceIngestionService:
         原先有一部分"新鲜度"其实是挤兑白捡的,现在没有了。所以在摄取这条既有的
         失效调用点上把 copy-stats 一并失效:服务层调用、与后端无关、零新增查询,
         也不新增调用点(替换的是同一处 ``invalidate_knowledge_counts``)。
-        """
-        from app.services.notebook_scale import invalidate_copy_stats
 
+        两条失效都走 runtime 注入的回调(codex PR#634 R2 P2-2):memo 是
+        runtime-owned 的,服务层不许调模块级全局函数,也不该自己去 runtime 里翻。
+        """
         self.invalidate_knowledge_counts(notebook_id)
-        invalidate_copy_stats(notebook_id)
+        self.invalidate_copy_stats(notebook_id)
 
     def _admit_and_freeze_pipeline(self, notebook_id: str) -> tuple[str, str]:
         """注册 → 准入 → 冻结,三步配对不可拆(codex #602 R5/R14 P1)。

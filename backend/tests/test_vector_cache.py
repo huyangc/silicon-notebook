@@ -309,6 +309,7 @@ def test_store_iteration_compat():
 
 # ───────────────────── R2-4(热路径修复批 2 / 审计 ASK-3):分池与字节预算 ──
 def test_key_family_derivation_folds_the_matrix_variants():
+    """报告口径(stats/日志)按族折叠;**执法**口径按变体分桶,见下一条。"""
     from app.services.vector_cache import key_family
 
     assert key_family("nb-1:matrix:knowledge_embeddings") == "matrix"
@@ -316,6 +317,17 @@ def test_key_family_derivation_folds_the_matrix_variants():
     assert key_family("nb-1:kwtok") == "kwtok"
     assert key_family("nb-2:fed_rxgraph") == "fed_rxgraph"
     assert key_family("bare-key-without-colon") == ""
+
+
+def test_quota_bucket_splits_each_matrix_variant():
+    """配额桶按变体分:``matrix`` 的四张表各是一个桶,所以每个桶每库恰好一条,
+    「上限 = 同时保温几个笔记本」by construction 成立。"""
+    from app.services.vector_cache import quota_bucket
+
+    assert quota_bucket("nb-1:matrix:knowledge_embeddings") == "matrix:knowledge_embeddings"
+    assert quota_bucket("nb-1:matrix:relation_embeddings") == "matrix:relation_embeddings"
+    assert quota_bucket("nb-1:kwtok") == "kwtok"
+    assert quota_bucket("bare-key-without-colon") == ""
 
 
 _EMBEDDING_TABLES = (
@@ -641,3 +653,79 @@ def test_an_oversized_entry_evicts_nobody_on_its_way_out():
     assert c.stats()["estimated_bytes"] <= budget
     assert c.stats()["evictions_by_family"] == {"kwtok": 1}, (
         "只该记它自己那一次不驻留,不该有 clustermap 的淘汰")
+
+
+def test_interleaved_lru_ninth_notebook_does_not_strip_one_matrix_from_four_libraries():
+    """P1(codex PR#634 R2,带实测表格):族配额必须按**库**执法,不能逐条剥。
+
+    现场:LRU 序里多库的四张矩阵是**交错**的(每个库依次写四张表,再换下一个库,
+    于是全局 LRU 是 nb0:k, nb0:e, nb0:r, nb0:c, nb1:k, …)。第一版把 matrix 归一
+    族、额度 ×4 之后,族淘汰仍是逐条的:第 9 个库进场写第一张表就超额一条,逐掉
+    族内最旧的一条(nb0:knowledge);写第二张表再逐 nb0:element…… 四张写完正好把
+    最旧那一库剥光,看起来没事。但只要 LRU 序被打乱(某些路径只用到 relation
+    矩阵、或某库被复用刷新过),被剥的就会散落到 4 个不同的库上 —— 8 库额度实际
+    只剩 5 个全暖库,而被剥的若是 relation 矩阵就直接触发
+    ``_retrieve_relations_scored`` 的打分跳过(问答质量红线)。
+
+    这里复现那个乱序:先按库写满 8 个库,再把其中若干库的**部分**表复用一次
+    (打乱交错序),然后第 9 个库进场。按变体分桶的实现下,每个桶各自逐掉自己那张
+    表最旧的库,所以「每张表的最近 8 个库」都成立 —— 尤其 relation 桶。
+
+    **变异锚点**:把 ``quota_bucket`` 换回 ``key_family``(即 matrix 归一族、
+    逐条淘汰)→ 断言报红。
+    """
+    tables = _EMBEDDING_TABLES
+    c = VectorCache(max_entries=1024, per_family_entries=8, max_bytes=0)
+    notebooks = [f"nb-{i}" for i in range(8)]
+    _warm_matrices(c, notebooks)
+
+    # 打乱交错序:让几个库只刷新其中一两张表(生产上很常见 —— 关系检索只碰
+    # relation 矩阵,chunk overlay 只碰 chunk 矩阵)。
+    for notebook, table in (("nb-0", "relation_embeddings"),
+                            ("nb-2", "chunk_embeddings"),
+                            ("nb-5", "relation_embeddings"),
+                            ("nb-1", "knowledge_embeddings")):
+        c.get(f"{notebook}:matrix:{table}", version=1, loader=lambda: {"m": 1})
+
+    c.get("nb-8:matrix:knowledge_embeddings", version=1, loader=lambda: {"m": 1})
+    c.get("nb-8:matrix:relation_embeddings", version=1, loader=lambda: {"m": 1})
+
+    # 每张表都仍然保住最近用过的 8 个库 —— 桶与桶之间互不牵连。
+    for table in tables:
+        resident = [n for n in notebooks + ["nb-8"]
+                    if c.peek(f"{n}:matrix:{table}", version=1)]
+        assert len(resident) == 8, (
+            f"{table} 桶应恰好常驻 8 个库,实际 {len(resident)}: {resident}")
+
+    # relation 是最要命的那一张(冷则整段跳过打分):刚进场的 nb-8 与刚复用过的
+    # nb-0/nb-5 必须都在。
+    for notebook in ("nb-8", "nb-0", "nb-5"):
+        assert c.peek(f"{notebook}:matrix:relation_embeddings", version=1), notebook
+
+
+def test_oversized_entry_is_rejected_before_the_bucket_quota_evicts_anyone():
+    """P2-1(codex PR#634 R2):超额判断必须排在**一切**淘汰之前。
+
+    R1 的修法只把它排在**字节**淘汰循环之前,桶配额与全局条目两个循环仍排在它
+    前面 —— 于是「桶已满 + 超额条目进场」会先逐掉一条合法的常驻条目,再拒绝新值:
+    净损失一条,换来零收益。上一轮那条 ``evicts_nobody`` 用例的夹具桶未满,所以
+    对这个错序是假绿。
+
+    **变异锚点**:把 oversized 判断挪回桶/条目两个循环之后 → 这条报红。
+    """
+    from app.services.vector_cache import _CONTAINER_ITEM_BYTES
+
+    budget = 100 * _CONTAINER_ITEM_BYTES
+    c = VectorCache(max_entries=128, per_family_entries=2, max_bytes=budget)
+    # 桶(kwtok)先塞满到额度。
+    for i in range(2):
+        c.get(f"nb-{i}:kwtok", version=1, loader=lambda: {str(n): n for n in range(20)})
+
+    # 第 3 条 kwtok,而且它自己就超预算 —— 必须直接拒,不许先逐掉 nb-0。
+    c.get("nb-huge:kwtok", version=1, loader=lambda: {str(n): n for n in range(1000)})
+
+    assert [i for i in range(2) if c.peek(f"nb-{i}:kwtok", version=1)] == [0, 1], (
+        "桶已满时拒绝一个超额条目,不得先逐掉桶内合法条目")
+    assert not c.peek("nb-huge:kwtok", version=1)
+    assert c.stats()["evictions_by_family"] == {"kwtok": 1}, (
+        "只该记它自己那一次不驻留")
