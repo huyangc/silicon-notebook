@@ -325,60 +325,105 @@ def test_publish_tokens_are_monotonic_and_reset_with_the_holder():
     assert extension_admission.begin_publish() == 1
 
 
-def test_a_tick_that_read_before_an_admin_write_cannot_undo_it(caplog):
-    """The race the publish token exists for.
+def test_an_older_read_cannot_overwrite_a_newer_one_at_the_holder():
+    """The token contract, exercised where it is actually load-bearing.
 
-    The tick's SELECT starts before the admin's row is committed, so it can
-    only ever return the pre-write world; it finishes after the admin has
-    published. Last-writer-wins would re-enable the plugin an admin just
-    switched off, for up to a whole interval, with nothing to correct it until
-    the next tick.
+    ``_publish_sequence_lock`` makes this interleaving unreachable *through
+    this module* — which is why this test drives the holder primitives
+    directly instead of two ``refresh_extension_admission`` calls (those would
+    now simply queue, and the test would be asserting nothing). The token
+    still has to hold the line here: the holder is public, its token-free
+    convenience form is used elsewhere, and a future publisher that forgets
+    the lock must not be able to install data it read before a newer publish.
     """
 
-    read_started = threading.Event()
-    release_read = threading.Event()
+    # Two publishers begin, in order. The first is descheduled; the second
+    # reads fresher data and lands.
+    first_token = extension_admission.begin_publish()
+    second_token = extension_admission.begin_publish()
 
-    def answer(reads):
-        if reads == 1:
-            read_started.set()
-            assert release_read.wait(10.0), "test never released the read"
-            return frozenset()  # the pre-write world: nothing disabled
-        return frozenset({"corp.disabled"})  # later reads see the commit
+    assert extension_admission.publish_disabled_plugin_ids(
+        frozenset({"corp.second"}), second_token
+    ) is True
+    # The first now finishes and tries to publish what it read earlier.
+    assert extension_admission.publish_disabled_plugin_ids(
+        frozenset({"corp.first"}), first_token
+    ) is False
+    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.second"})
 
-    caplog.set_level(logging.DEBUG, logger=LOGGER_NAME)
-    tick_store = _Store(answer)
-    stop = extension_toggles.start_extension_admission_refresher(tick_store, 0.01)
+
+def test_a_publisher_holding_the_read_window_blocks_a_concurrent_refresh():
+    """take-token → read → publish is indivisible per process.
+
+    codex #635 R8: taking the token and starting the read are two statements,
+    so a thread descheduled between them can end up holding a token older than
+    the data it goes on to read — and then be refused for it, leaving this
+    process an interval behind a value it had already seen. The lock closes
+    that window by making the second publisher wait for the first to finish
+    entirely, rather than overtaking it mid-read.
+
+    Asserted by event ordering, not by timing: while the first publisher is
+    parked inside its store read, the second must not have reached its own
+    read at all. That claim cannot flake in the failing direction — with the
+    lock held, no amount of scheduling luck lets the second read start.
+    """
+
+    first_read_started = threading.Event()
+    release_first = threading.Event()
+    second_read_started = threading.Event()
+
+    def blocking_answer(_reads):
+        first_read_started.set()
+        assert release_first.wait(10.0), "test never released the read"
+        return frozenset({"corp.first"})
+
+    def recording_answer(_reads):
+        second_read_started.set()
+        return frozenset({"corp.second"})
+
+    first_store = _Store(blocking_answer)
+    second_store = _Store(recording_answer)
+    order: list[str] = []
+
+    def run_first() -> None:
+        extension_toggles.refresh_extension_admission(first_store)
+        order.append("first")
+
+    def run_second() -> None:
+        extension_toggles.refresh_extension_admission(second_store)
+        order.append("second")
+
+    first = threading.Thread(target=run_first, name="publisher-first")
+    second = threading.Thread(target=run_second, name="publisher-second")
+    first.start()
     try:
-        assert read_started.wait(10.0)
-
-        # The whole admin write path runs inside the tick's read window.
-        admin_store = _Store(_always(frozenset({"corp.disabled"})))
-        assert extension_toggles.refresh_extension_admission(
-            admin_store
-        ) == frozenset({"corp.disabled"})
-
-        release_read.set()
-        # Read 2 starting proves the blocked tick's publish already ran.
-        tick_store.wait_for_reads(2)
-        assert extension_admission.disabled_plugin_ids() == frozenset(
-            {"corp.disabled"}
+        assert first_read_started.wait(10.0)
+        second.start()
+        # The whole point: the second publisher is not merely refused later,
+        # it has not even begun reading.
+        assert not second_read_started.wait(0.3), (
+            "the second publisher read inside the first one's window"
         )
+        assert second_store.reads == 0
     finally:
-        release_read.set()
-        stop()
+        release_first.set()
+        first.join(10.0)
+        second.join(10.0)
 
-    assert any(
-        "superseded" in record.getMessage()
-        for record in caplog.records
-        if record.name == LOGGER_NAME
-    ), "the stale tick's publish should have been refused, not applied"
+    assert not first.is_alive() and not second.is_alive()
+    assert order == ["first", "second"]
+    # Serialised, so both publishes land in order and the later one wins —
+    # neither is dropped for holding a token older than its own data.
+    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.second"})
 
 
-def test_an_older_read_cannot_overwrite_a_concurrent_newer_write():
-    """Two admin writes interleaving: the one that read first publishes last.
+def test_apply_admission_override_waits_for_an_in_flight_refresh():
+    """The local-fallback path takes the same lock, and needs it twice over.
 
-    Same shape as the tick race above, without a refresher — this is what two
-    concurrent PATCHes do to each other.
+    It is a read-modify-write on the snapshot, so overlapping a tick would let
+    it compute from a set the tick then replaced and write the result back,
+    silently discarding the tick. Serialised, it flips its bit on whatever the
+    tick actually published.
     """
 
     read_started = threading.Event()
@@ -387,34 +432,40 @@ def test_an_older_read_cannot_overwrite_a_concurrent_newer_write():
     def answer(_reads):
         read_started.set()
         assert release_read.wait(10.0), "test never released the read"
-        return frozenset({"corp.first"})
+        return frozenset({"corp.from-store"})
 
-    first_store = _Store(answer)
-    result: dict[str, frozenset[str]] = {}
+    store = _Store(answer)
+    override_done = threading.Event()
 
-    def run_first() -> None:
-        result["live"] = extension_toggles.refresh_extension_admission(
-            first_store
-        )
+    def run_refresh() -> None:
+        extension_toggles.refresh_extension_admission(store)
 
-    worker = threading.Thread(target=run_first, name="admin-write-a")
-    worker.start()
+    def run_override() -> None:
+        extension_toggles.apply_admission_override("corp.override", False)
+        override_done.set()
+
+    refresher = threading.Thread(target=run_refresh, name="publisher-refresh")
+    override = threading.Thread(target=run_override, name="publisher-override")
+    refresher.start()
     try:
         assert read_started.wait(10.0)
-        # The second write takes its token and publishes entirely inside the
-        # first one's read window.
-        extension_toggles.refresh_extension_admission(
-            _Store(_always(frozenset({"corp.second"})))
+        override.start()
+        assert not override_done.wait(0.3), (
+            "the override published inside the refresh's read window"
         )
+        # Nothing of the override is visible yet.
+        assert "corp.override" not in extension_admission.disabled_plugin_ids()
     finally:
         release_read.set()
-        worker.join(10.0)
+        refresher.join(10.0)
+        override.join(10.0)
 
-    assert not worker.is_alive()
-    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.second"})
-    # The loser is told what is actually in effect, not what it read: a set it
-    # lost the race with was never in effect for anybody.
-    assert result["live"] == frozenset({"corp.second"})
+    assert not refresher.is_alive() and not override.is_alive()
+    # The override flipped its bit on top of the refresh's value rather than
+    # on top of the snapshot that preceded it.
+    assert extension_admission.disabled_plugin_ids() == frozenset(
+        {"corp.from-store", "corp.override"}
+    )
 
 
 def test_an_invalid_snapshot_is_reported_every_tick_and_never_debounced(caplog):

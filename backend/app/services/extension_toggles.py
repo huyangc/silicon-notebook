@@ -32,10 +32,11 @@ would be worse than a snapshot that is a few minutes old.
 
 Inside the writing process those two publishers race, and a tick that started
 its query first can finish last — which is why every publish here carries a
-token taken *before* its read. The ordering argument lives in
+token taken *before* its read, and why the whole take-token → read → publish
+sequence runs inside one process-local lock. The ordering argument lives in
 ``app.core.extension_admission``; the rule to remember at this level is that
-a read and its publish are one unit, and the token is what marks where that
-unit began.
+a read and its publish are one unit — the lock is what makes them indivisible
+and the token is what marks where the unit began.
 """
 from __future__ import annotations
 
@@ -59,6 +60,43 @@ logger = logging.getLogger("silicon_notebook.extension_admission")
 # spurious "query on a closing pool" error in the log, waiting forever would
 # hang shutdown behind a wedged database.
 _STOP_JOIN_TIMEOUT_SECONDS = 5.0
+
+# Serialises the whole take-token → read → publish sequence of every publisher
+# in this module, which is what makes "token order is read order" a fact
+# rather than an approximation.
+#
+# Without it the two statements come apart under scheduling alone: A takes
+# token 1 and is descheduled before its read; B takes token 2, reads X, and
+# publishes; another process then commits Y; A finally reads — seeing the
+# *newer* Y — and is refused for holding the older token. Nothing is corrupted
+# (Y arrives on the next tick), but this process lags a whole interval behind
+# a value it had already read. Inside one critical section that interleaving
+# cannot occur: the token is issued and the read begins with no other
+# publisher in between.
+#
+# Process-local is the right scope. The holder this orders is a module global,
+# so ordering only has to hold among the publishers sharing it; other
+# processes have their own holders and were never ordered against this one —
+# they converge by polling, which is the documented contract.
+#
+# Lock discipline (deadlock audit):
+#   * Held while calling the store, and while calling the holder's publisher
+#     lock — which is a leaf. Nothing else is acquired underneath.
+#   * The route-level ``_RUNTIME_TOGGLE_WRITE_LOCK`` in ``admin_routes`` is
+#     always acquired ABOVE this one (that handler enters here from inside its
+#     own critical section) and never below, so the two cannot cycle. They
+#     order different things: the route lock makes DB commit order match
+#     publish order for admin writes; this one makes token order match read
+#     order for every publisher.
+#   * Acquired only by threads holding no database connection, and released
+#     before any join: ``stop``/``start`` never touch it, so a shutdown can
+#     always reap a refresher blocked on a wedged read.
+#
+# Cost: a tick that blocks in its store read holds this for the length of that
+# read, so a concurrent admin publish waits behind it. Acceptable — the read
+# is a one-row-per-plugin SELECT, and a database slow enough to make that wait
+# matter is one the admin's own write is already stuck in.
+_publish_sequence_lock = threading.Lock()
 
 
 def _publish(disabled, token: int) -> bool:
@@ -98,26 +136,34 @@ def refresh_extension_admission(
     effect): a set this call read but lost the race with was never in effect
     for anyone.
 
-    The token is taken BEFORE the read, and that ordering is the whole point.
-    An admin write and a polling tick both do read-then-publish; the tick's
-    read can start before the admin's row is committed and finish after the
-    admin has published, so last-writer-wins would let the tick undo the
-    switch for a whole interval. Two concurrent admin writes interleave the
-    same way. Token order is read-start order, so the holder can drop exactly
-    the publishes whose data is stale. See ``app.core.extension_admission``.
+    The token is taken BEFORE the read, and the whole sequence runs inside
+    ``_publish_sequence_lock``. That combination is the point. An admin write
+    and a polling tick both do read-then-publish; the tick's read can start
+    before the admin's row is committed and finish after the admin has
+    published, so last-writer-wins would let the tick undo the switch for a
+    whole interval. Two concurrent admin writes interleave the same way. The
+    lock is what makes token order *strictly* read order — taking the token
+    and starting the read are two statements, and a thread descheduled between
+    them would otherwise carry a token older than the data it went on to read
+    — and the holder then drops exactly the publishes whose data is stale. See
+    ``app.core.extension_admission`` for the ordering argument, and the lock's
+    own comment above for how it divides work with the route-level write lock
+    in ``admin_routes`` (that one orders DB commits; this one orders publishes).
 
     Store failures propagate on purpose — see the module docstring. Callers
     that must survive a failed read (only the refresher below) catch it there,
     where "keep the previous snapshot" is a decision rather than an accident.
+    A failure releases the lock on the way out like any other exception.
 
     The refresher does NOT reuse this function: it needs to re-check its stop
     flag between the read and the publish (see ``_Refresher._tick``), which is
     a step this one-shot form has no reason to carry.
     """
 
-    token = begin_publish()
-    _publish(store.extension_runtime_disabled_ids(), token)
-    return disabled_plugin_ids()
+    with _publish_sequence_lock:
+        token = begin_publish()
+        _publish(store.extension_runtime_disabled_ids(), token)
+        return disabled_plugin_ids()
 
 
 def apply_admission_override(plugin_id: str, enabled: bool) -> frozenset[str]:
@@ -135,13 +181,21 @@ def apply_admission_override(plugin_id: str, enabled: bool) -> frozenset[str]:
     from the live snapshot plus a durable fact, not from a fallible read that
     could have started before someone else's write — so "newest token wins"
     is exactly right, and a stale in-flight tick cannot undo it.
+
+    Inside ``_publish_sequence_lock`` for a second reason on top of ordering:
+    this is a read-modify-write on the snapshot. Outside the lock it could
+    read ``current``, have a tick publish a different set underneath it, and
+    then write back arithmetic based on the set it replaced — silently
+    discarding that tick. Holding the lock across read *and* publish is what
+    makes "flip one bit of whatever is live" true.
     """
 
-    token = begin_publish()
-    current = disabled_plugin_ids()
-    updated = current - {plugin_id} if enabled else current | {plugin_id}
-    _publish(updated, token)
-    return disabled_plugin_ids()
+    with _publish_sequence_lock:
+        token = begin_publish()
+        current = disabled_plugin_ids()
+        updated = current - {plugin_id} if enabled else current | {plugin_id}
+        _publish(updated, token)
+        return disabled_plugin_ids()
 
 
 class _Refresher:
@@ -227,10 +281,11 @@ class _Refresher:
         Two guards, for two different stale-read problems, and neither
         subsumes the other:
 
-        - The **token**, taken before the read, is the general one: it drops
-          this read if anyone whose read started later has already published.
-          That is what stops a tick from undoing an admin's switch when the
-          tick's query began before the row was committed.
+        - The **token**, taken before the read and under
+          ``_publish_sequence_lock``, is the general one: it drops this read if
+          anyone whose read started later has already published. That is what
+          stops a tick from undoing an admin's switch when the tick's query
+          began before the row was committed.
         - The **stop re-check** is the specific one: a refresher that has been
           told to stop must not act, even when its data would win. ``stop``
           waits only a bounded time, so a read stuck on a slow query can
@@ -241,17 +296,22 @@ class _Refresher:
 
         Checking the flag is also why the loop does not just call
         ``refresh_extension_admission``.
+
+        The lock is released by the early return as well as by the publish;
+        ``stop`` deliberately does not want it, so a shutdown never waits on a
+        tick wedged inside its store read — it just times its join out.
         """
 
-        token = begin_publish()
-        disabled = self._store.extension_runtime_disabled_ids()
-        if self._stop_requested.is_set():
-            logger.debug(
-                "extension admission refresh discarded: refresher retired "
-                "while its read was in flight"
-            )
-            return
-        _publish(disabled, token)
+        with _publish_sequence_lock:
+            token = begin_publish()
+            disabled = self._store.extension_runtime_disabled_ids()
+            if self._stop_requested.is_set():
+                logger.debug(
+                    "extension admission refresh discarded: refresher retired "
+                    "while its read was in flight"
+                )
+                return
+            _publish(disabled, token)
 
     def _note_programming_error(self, exc: BaseException) -> None:
         # Deliberately does not touch ``_consecutive_failures``: this is not
