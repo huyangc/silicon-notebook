@@ -352,26 +352,9 @@ class RetrievalService:
             if base_id != notebook_id
         )
 
-    def graph_is_large(self, notebook_id):
-        return self.candidates._federated_graph_is_large(notebook_id)
-
     def unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
         """True for a narrowed scope or an all-selected universe drift."""
         return self.candidates._unsafe_source_scope_restricted(notebook_id)
-
-    def fuse_graph_seeds(self, notebook_id, question, seeds, cancel_event=None):
-        return self.candidates._graph_seed_fusion(
-            notebook_id, question, seeds, cancel_event
-        )
-
-    def federated_graph(self, notebook_id):
-        return self.graph._federated_rx_graph(notebook_id)
-
-    def source_chunks(self, notebook_id, object_ids):
-        return filter_retrieval_items(
-            notebook_id, "chunk",
-            self.graph._kg_source_chunks(notebook_id, object_ids),
-        )
 
     def embed_query(self, query):
         return self.candidates._embed_query(query)

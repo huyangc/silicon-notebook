@@ -4084,8 +4084,8 @@ class ReasoningRetriever:
                 else:
                     visited.add(oid)
                     # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
-                    # neighbors live in the base notebook, so deep cross-tier graph walks are
-                    # graph mode's job (_federated_rx_graph), not reasoning mode (P4 spec §F).
+                    # neighbors live in the base notebook, so this action deliberately skips
+                    # deep cross-tier graph walks (P4 spec §F); only `follow_chain` does that.
                     expansion = self.neighbors(
                         notebook_id, oid,
                         decision.expand_edge_type, decision.expand_direction)

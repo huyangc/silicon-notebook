@@ -264,68 +264,6 @@ def test_reasoning_consumes_confirmed_memory_when_no_kg_exists(memory_data, monk
     assert response.citations[0].memory_id == data.confirmed.id
 
 
-def test_graph_memory_only_answer_does_not_build_or_walk_the_graph(memory_data, monkeypatch):
-    data = memory_data
-    llm = _MemoryAnswerLLM()
-    data.provider.chat_clients = {"ask_answer": llm}
-    service = data.repo._runtime.ask_service()
-    monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
-    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda _nb: False)
-    monkeypatch.setattr(service.retrieval, "federated_retrieve", lambda *_a, **_k: [])
-    monkeypatch.setattr(
-        service.graph,
-        "federated_graph",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not walk graph")),
-    )
-    token = set_request_user(data.alice)
-    try:
-        response = service.ask_graph(
-            data.notebook.id,
-            AskRequest(question="timing closure", mode="graph"),
-            user_id=data.alice.id,
-        )
-    finally:
-        reset_request_user(token)
-
-    assert [(item.object_type, item.object_id) for item in response.anchors] == [
-        ("memory", data.confirmed.id)
-    ]
-    assert response.citations[0].memory_id == data.confirmed.id
-
-
-def test_graph_classifier_never_synthesizes_relevance_for_memory_anchor():
-    from app.models.schemas import AnswerAnchor
-    from app.services.ask_service import _graph_classification_hits
-
-    memory = MemoryHit(
-        memory_id="memory-low",
-        title="Memory",
-        text="Relevant but weak",
-        status="confirmed",
-        authority=3,
-        score=0.2,
-        provenance={"origin": "answer"},
-    )
-    anchor = AnswerAnchor(
-        key="k3001",
-        object_id=memory.memory_id,
-        object_type="memory",
-        label="Memory",
-        name="Memory",
-    )
-
-    hits = _graph_classification_hits(
-        top_hits=[],
-        memory_hits=[memory],
-        anchors=[anchor],
-        neighbour_relevance=0.95,
-        notebook_id="nb-a",
-    )
-
-    assert len(hits) == 1
-    assert hits[0] is memory
-
-
 def test_knowledge_search_projects_confirmed_memory_only(memory_data):
     data = memory_data
     token = set_request_user(data.alice)

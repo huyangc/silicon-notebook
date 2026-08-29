@@ -2088,15 +2088,25 @@ def collect_ask_goldens() -> dict[str, object]:
             # 就是可枚举集合之一;``no_collections`` 是**零源**库,三类计数全为零,
             # 那才是「本笔记本尚未构建知识图谱」早退真正管的场景。两个案例都留着,
             # 因为这一组 golden 声称覆盖「每一条早退」。
+            # ask_graph 模式退役时一并删除了三个案例:``graph``(该引擎本身)、
+            # ``no_hits``(经 mode="graph" 制造零命中的早退)、
+            # ``large_graph_refusal``(大库拒绝全图漫游的早退——该行为已随
+            # ask_graph 一起从代码里消失,不是「换个引擎复现」能保留的覆盖)。
+            # chunk/reasoning 模式各自的零命中早退目前不在这组 golden 里——这里
+            # 需要同时把 top_hits/elements/chunks/chains/memory_hits/
+            # structured_batch/enumerations 等好几条独立通道逐一在真实 HTTP/DB
+            # 栈里压空,比 mode="graph" 当年单点 stub federated_retrieve 脆弱得
+            # 多。reasoning 的零证据分支(`_NO_RETRIEVAL_EVIDENCE_MESSAGE`,见
+            # ask_service.py)改由 test_reasoning_ask.py::
+            # test_reasoning_zero_evidence_uses_the_shared_no_evidence_message
+            # 覆盖:直接 monkeypatch `ReasoningRetriever.run_stage`(检索阶段唯一
+            # 的类型化产出口)返回全空快照,其余装配仍走生产代码路径。
             for case_name, mode, question, include_kg, include_source in (
                 ("chunk", "chunk", "fixture gain", True, True),
                 ("reasoning", "reasoning", "fixture gain", True, True),
-                ("graph", "graph", "fixture gain", True, True),
                 ("unconfigured_model", "reasoning", "fixture gain", True, True),
                 ("no_kg", "reasoning", "fixture gain", False, True),
                 ("no_collections", "reasoning", "fixture gain", False, False),
-                ("no_hits", "graph", "unrelated-zqxj", True, True),
-                ("large_graph_refusal", "graph", "fixture gain", True, True),
             ):
                 case_root = root / case_name
                 # Every case builds a FRESH database but reuses the same
@@ -2116,16 +2126,6 @@ def collect_ask_goldens() -> dict[str, object]:
                 notebook_id = _seed_ask_repository(
                     repo, include_kg=include_kg, include_source=include_source
                 )
-                # Task 24: the graph engine lives in AskService and consumes the
-                # retrieval port directly — seat the replay stubs on the canonical
-                # candidate-retrieval owner (facade instance patches no longer sit
-                # on the engine's call path). Frozen goldens stay byte-identical.
-                if case_name == "no_hits":
-                    repo.retrieval.candidates.federated_retrieve = (
-                        lambda *_args, **_kwargs: [])
-                if case_name == "large_graph_refusal":
-                    repo.retrieval.candidates._federated_graph_is_large = (
-                        lambda *_args, **_kwargs: True)
                 cases[case_name] = _capture_ask_case(
                     repo, notebook_id, mode, question
                 )

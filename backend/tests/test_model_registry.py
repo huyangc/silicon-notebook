@@ -18,7 +18,6 @@ _EXPECTED_WORKLOADS = {
     "reasoning_agent": ("chat", "interactive", "逐步推理"),
     "query_rewrite": ("chat", "interactive", "查询改写"),
     "evidence_refine": ("chat", "interactive", "证据筛选"),
-    "graph_chain_verify": ("chat", "interactive", "推理链验证"),
     "report_outline": ("chat", "report", "报告提纲"),
     "report_sufficiency": ("chat", "report", "报告充分性判断"),
     "report_section": ("chat", "report", "报告章节生成"),
@@ -94,7 +93,6 @@ def test_chat_workloads_make_an_exhaustive_thinking_default_choice():
     enabled = {
         "ask_answer",
         "reasoning_agent",
-        "graph_chain_verify",
         "report_outline",
         "report_sufficiency",
         "schema_induction",

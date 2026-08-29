@@ -264,6 +264,7 @@ class RunObservation:
     ``str`` reason field to get there.
     """
 
+    # "graph" ask 模式已退役,但这是持久化闭集词表——历史行仍需要能解析出它。
     mode: Literal["chunk", "reasoning", "graph", "unknown"]
     result_scope: Literal["ranked", "complete", "aggregate", "hybrid", "unknown"]
     retrieval_effort: Literal[

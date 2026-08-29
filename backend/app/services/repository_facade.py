@@ -241,8 +241,8 @@ _DEFAULT_NOTEBOOK_NAMES = {"", "未命名笔记本", "Untitled notebook"}
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
 
-# The `[k…]` answer-marker regexes and _strip_unbound_markers moved to
-# app.services.ask_service with the mode engines (Task 24).
+# The `[k…]` answer-marker regexes moved to app.services.ask_service with the
+# mode engines (Task 24).
 
 
 # copy_notebook's per-table chunk size (perf-audit P1-4): mirrors store_kg's
@@ -3602,9 +3602,14 @@ class RepositoryFacade:
             notebook_id, payload
         )
 
-    # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
-    # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
+    # ask_fast (legacy KG-native, P4-5退役)、_ask_global (GraphRAG map-reduce, P4-5退役)
+    # 与全图 BFS + PPR 的 graph 问答引擎(本轮退役)已删除。旧会话/书签中的
+    # mode="fast"/"global"/"graph" 通过 ask_modes._RETIRED_MODES 映射到
     # "chunk"，不会触发 422。
+    # 随该 graph 引擎一并删除的还有：它专属的检索端口协议、大库判定与图种子融合
+    # 两个端口方法、AskService 构造参数里只服务于它的图端口与社区报告座位；
+    # kg/graph_reason.py 的答案期链路验证函数与 _federated_rx_graph/
+    # _kg_source_chunks 等底层基础设施保留(follow_chain/chunk mix 分支仍消费)。
     # 随之删除的还有：is_process_query import（原 ask_fast 独占调用）。
     # 保留的 helper（_rrf_scored 等）仍被其他 ask_* 路径或测试直接调用，尚未可删。
     # 旧 LLM 打分重排 helper 已删——被 qwen3-rerank(RerankClient)取代。
@@ -3746,18 +3751,6 @@ class RepositoryFacade:
         AskService.ask_reasoning (Task 24),身份适配 current_user().id。"""
         return self._runtime.ask_component.ask_reasoning_current(
             notebook_id, payload, on_trace, cancel_event)
-
-    def ask_graph(
-        self,
-        notebook_id: str,
-        payload: "AskRequest",
-        seed_ids: Optional[List[str]] = None,
-        cancel_event: CancelEvent = None,
-    ) -> AskResponse:
-        """Multi-hop graph reasoning mode — 冻结签名 delegate:engine body 在
-        AskService.ask_graph (Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_component.ask_graph_current(
-            notebook_id, payload, seed_ids, cancel_event)
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor

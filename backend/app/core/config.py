@@ -581,20 +581,10 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="REASONING_PER_QUERY_LIMIT",
     )
-    # Response projection and graph-walk budgets. These used to be unrelated
-    # literal slices/defaults in ask_service.py, which made retrieval tuning
-    # incomplete and hid the effective graph ceiling from deployments.
+    # Response projection budget. This used to be an unrelated literal slice
+    # in ask_service.py, which made retrieval tuning incomplete.
     ask_related_knowledge_limit: int = Field(
         12, ge=1, validation_alias="ASK_RELATED_KNOWLEDGE_LIMIT"
-    )
-    graph_seed_top_n: int = Field(
-        5, ge=1, validation_alias="GRAPH_SEED_TOP_N"
-    )
-    graph_max_depth: int = Field(
-        3, ge=1, validation_alias="GRAPH_MAX_DEPTH"
-    )
-    graph_max_fan_out: int = Field(
-        8, ge=1, validation_alias="GRAPH_MAX_FAN_OUT"
     )
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, validation_alias="RETRIEVAL_RRF_ENABLED")
@@ -740,10 +730,9 @@ class Settings(BaseSettings):
     ppr_emb_synonym_threshold: float = Field(0.83, validation_alias="PPR_EMB_SYNONYM_THRESHOLD")
     ppr_emb_synonym_topk: int = Field(20, validation_alias="PPR_EMB_SYNONYM_TOPK")
     ppr_emb_synonym_max_entities: int = Field(50000, validation_alias="PPR_EMB_SYNONYM_MAX_ENTITIES")  # cost guard
-    ppr_community_context_top_n: int = Field(3, validation_alias="PPR_COMMUNITY_CONTEXT_TOP_N")
     kg_canonical_fold_enabled: bool = Field(False, validation_alias="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, validation_alias="KG_ABOUT_DOWNWEIGHT_ENABLED")
-    # knowhow 格子级 KO 进入 reasoning/graph 的 KG-node 检索路径(object_type=列名)。
+    # knowhow 格子级 KO 进入 reasoning 的 KG-node 检索路径(object_type=列名)。
     # 默认开启，让结构化格子既参与 chunk 召回，也可作为 KG 节点参与图检索；仍保留
     # env 回滚开关。仅当 notebook 真有 knowhow 投影类型时才放开类型并查询隐藏
     # knowhow 源的缓存向量旁挂，普通 notebook 不增加检索工作。

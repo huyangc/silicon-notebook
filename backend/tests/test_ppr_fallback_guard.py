@@ -353,7 +353,11 @@ def test_scale_ppr_success_path_emits_no_bailout_event(repo, monkeypatch):
     assert [e for e in events if e.get("kind") == "scale_ppr_bailout"] == []
 
 
-# ── Fix wave: graph 模式大库建图守卫(ask_graph / _chunk_kg_overlay) ─────────
+# ── Fix wave: 大库建图守卫(_chunk_kg_overlay) ────────────────────────────
+# 已退役的 graph 引擎曾在这里有一对端到端的镜像测试(大库拒绝全量建图 + 小库
+# 照常建图),随该 ask 模式退役一并删除;_federated_rx_graph 本身仍是共享
+# 基础设施(reasoning 的 follow_chain 消费),下面的 _chunk_kg_overlay 大库
+# 守卫测试覆盖同一条 _federated_rx_graph 大库早退路径。
 
 def _spy_fed_rx_graph(repo, monkeypatch):
     """Spy on _federated_rx_graph — counts calls, delegates to the original."""
@@ -366,55 +370,6 @@ def _spy_fed_rx_graph(repo, monkeypatch):
 
     monkeypatch.setattr(repo.retrieval.graph, "_federated_rx_graph", spy)
     return called
-
-
-def test_ask_graph_large_notebook_refuses_graph_walk(repo, monkeypatch):
-    """大库(copyable=False)graph 模式端到端:PPR 分支空手(scale_ppr 无索引
-    bail + Fix1 拒绝 rustworkx 回退)后,ask_graph 不得再触发 _federated_rx_graph
-    全量建图 —— 早退带解释的降级回答(deterministic)+ graph_walk_refused 事件。
-
-    大库分支下 federated_retrieve/_retrieve_scored 也已改走 FTS 词法有界兜底
-    (kg_bruteforce_refused 守卫);_seed_two_doc_moe 用裸 SQL 插入 knowledge_objects,
-    绕过了真实入库管线维护 kg_objects_fts 的那一步,故这里手工补一行 FTS 记录
-    (镜像真实入库行为),让 federated_retrieve 仍能词法命中种子对象、
-    ask_graph 得以推进到本测试真正要验证的 graph_walk_refused 守卫,
-    而不是提前落到"无匹配知识"的更早退出分支。"""
-    nb = _seed_two_doc_moe(repo)
-    with repo._write() as db:
-        db.execute("INSERT INTO kg_objects_fts (object_id, notebook_id, name) VALUES (?,?,?)",
-                   ("e1", nb.id, "DeepSeek MoE 架构?"))
-    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
-                        lambda notebook_id: {"copyable": False, "size": {}})
-    called = _spy_fed_rx_graph(repo, monkeypatch)
-    events = _capture_events(repo, monkeypatch)
-
-    from app.models.schemas import AskRequest
-    resp = repo.ask_graph(nb.id, AskRequest(question="DeepSeek MoE 架构?", mode="graph"))
-
-    assert called["n"] == 0, "large notebook must NOT build the federated rustworkx graph"
-    assert resp.mode == "graph"
-    assert resp.llm_mode == "deterministic"
-    assert resp.conclusion  # 有解释文案,不是空答案
-    refused = [e for e in events if e.get("kind") == "graph_walk_refused"]
-    assert len(refused) == 1
-    assert refused[0]["notebook_id"] == nb.id
-    assert refused[0]["reason"] == "large_notebook"
-
-
-def test_ask_graph_small_notebook_builds_graph_unchanged(repo, monkeypatch):
-    """小库 graph 模式行为不变:关掉 PPR 分支走 BFS 图路径,_federated_rx_graph
-    照常被调用,无 graph_walk_refused 事件。"""
-    nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    called = _spy_fed_rx_graph(repo, monkeypatch)
-    events = _capture_events(repo, monkeypatch)
-
-    from app.models.schemas import AskRequest
-    resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
-
-    assert called["n"] >= 1, "small notebook keeps the legacy graph walk"
-    assert resp.mode == "graph"
-    assert [e for e in events if e.get("kind") == "graph_walk_refused"] == []
 
 
 def test_chunk_kg_overlay_large_notebook_skips_graph(repo, monkeypatch):

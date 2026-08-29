@@ -242,7 +242,7 @@ test("runtime Ask modes load once per actor generation and restore the exact plu
   });
   expect(api.fetchAskModes).toHaveBeenCalledTimes(1);
   expect(value!.askModes.map((candidate) => candidate.id)).toEqual([
-    "chunk", "reasoning", "graph", "corp.search",
+    "chunk", "reasoning", "corp.search",
   ]);
   expect(value!.mode).toBe("corp.search");
 
@@ -345,14 +345,18 @@ test("simplified mode submits the backend auto selector without intent preview",
   const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
   api.runAskStream.mockResolvedValue({
     ...answer("conversation-auto"),
-    mode: "reasoning",
+    mode: "chunk",
   });
   render(<Harness policy={simplifiedPolicy} />);
   beginOwnedNotebook();
 
   // A stale advanced-mode choice must neither leak into the request nor be
-  // destroyed; the hidden surface delegates this turn to the backend.
-  act(() => value!.selectMode("graph"));
+  // destroyed; the hidden surface delegates this turn to the backend. The
+  // mocked response resolves to a DIFFERENT mode ("chunk") than the one
+  // selected ("reasoning") specifically so this proves value.mode still
+  // reflects the user's own selection instead of being silently overwritten
+  // by response.mode.
+  act(() => value!.selectMode("reasoning"));
   await act(async () => {
     await value!.submit("请判断这个问题需要怎样分析");
   });
@@ -363,8 +367,8 @@ test("simplified mode submits the backend auto selector without intent preview",
     question: "请判断这个问题需要怎样分析",
     mode: "auto",
   });
-  expect(value!.mode).toBe("graph");
-  expect(value!.turns[0]?.response.mode).toBe("reasoning");
+  expect(value!.mode).toBe("reasoning");
+  expect(value!.turns[0]?.response.mode).toBe("chunk");
 });
 
 test("a failed Ask-mode projection retries on the next committed workspace", async () => {
@@ -395,7 +399,7 @@ test("a failed Ask-mode projection retries on the next committed workspace", asy
   });
   expect(api.fetchAskModes).toHaveBeenCalledTimes(1);
   expect(value!.askModes.map((candidate) => candidate.id)).toEqual([
-    "chunk", "reasoning", "graph",
+    "chunk", "reasoning",
   ]);
 
   act(() => {
@@ -411,7 +415,7 @@ test("a failed Ask-mode projection retries on the next committed workspace", asy
   });
   expect(api.fetchAskModes).toHaveBeenCalledTimes(2);
   expect(value!.askModes.map((candidate) => candidate.id)).toEqual([
-    "chunk", "reasoning", "graph", "corp.search",
+    "chunk", "reasoning", "corp.search",
   ]);
 });
 

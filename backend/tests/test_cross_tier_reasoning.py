@@ -485,7 +485,12 @@ class TestTask5ConflictPrecedence:
         assert conflict and conflict[0].get("base_override") is True
 
 
-class TestTask6AskGraphFederated:
+class TestTask6FederatedGraphCache:
+    """_federated_rx_graph cache invalidation — shared infra behind reasoning's
+    follow_chain (retrieval_candidates.py), not an ask-mode-specific test.
+    The retired full-graph ask engine's own mode-specific tests were removed
+    along with that engine."""
+
     @pytest.fixture
     def repo_with_two_notebooks(self, tmp_path, monkeypatch):
         """base_nb has B1→B2 (derived_from); personal_nb has P1→P2 (supports).
@@ -499,14 +504,6 @@ class TestTask6AskGraphFederated:
         from app.models.schemas import NotebookCreate
         r = SQLiteRepository(Settings())
         bind_all_embedding_clients(r, FakeEmbedder(dim=16))
-
-        class _AnswerLLM:
-            configured = True
-
-            def chat_json(self, messages, schema, **kwargs):
-                return json.dumps({"answer": "Oxide evidence [k1].", "grounded": True})
-
-        bind_chat_client(r, "ask_answer", _AnswerLLM())
 
         base_nb = r.create_notebook(NotebookCreate(name="base"))
         r.mark_notebook_base(base_nb.id)
@@ -545,27 +542,7 @@ class TestTask6AskGraphFederated:
         r.replace_notebook_bases(pers_nb.id, [base_nb.id], "user-local")
         return r, base_nb, pers_nb
 
-    def test_ask_graph_traverses_both_notebooks(self, repo_with_two_notebooks):
-        """ask(mode='graph') on personal_nb must traverse nodes from both notebooks."""
-        from app.models.schemas import AskRequest
-        repo, base_nb, pers_nb = repo_with_two_notebooks
-        resp = repo.ask(pers_nb.id, AskRequest(question="oxide breakdown", mode="graph"))
-        # AskResponse must have a reasoning_trace with the graph_verify step.
-        assert resp.reasoning_trace, "expected reasoning_trace in graph mode"
-        trace = resp.reasoning_trace[0]
-        # Traversal count: must include nodes from at least the base notebook.
-        assert "node(s) traversed" in trace.summary
-
-    def test_ask_graph_reasoning_trace_includes_authority_notes(self, repo_with_two_notebooks):
-        """reasoning_trace detail must include 'authority_notes' from verify_chain_edges."""
-        from app.models.schemas import AskRequest
-        repo, base_nb, pers_nb = repo_with_two_notebooks
-        resp = repo.ask(pers_nb.id, AskRequest(question="oxide breakdown", mode="graph"))
-        trace = resp.reasoning_trace[0]
-        assert "authority_notes" in trace.detail, (
-            "reasoning_trace detail missing 'authority_notes' from verify_chain_edges")
-
-    def test_ask_graph_cache_invalidation_on_reingest(self, repo_with_two_notebooks):
+    def test_federated_rx_graph_cache_invalidation_on_reingest(self, repo_with_two_notebooks):
         """Re-ingesting into base_nb must invalidate personal_nb's fed_rxgraph cache.
 
         The federated cache key is "{pers}:fed_rxgraph" (the ACTIVE notebook's

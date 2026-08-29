@@ -188,10 +188,11 @@ def multihop_subgraph(
     stored inside `G`.  rustworkx's get_edge_data / G[idx] hand back the same
     object held in the graph, and `G` is typically the version-cached PyDiGraph
     (see SqliteRepository._federated_rx_graph) reused across many asks.  A consumer that
-    mutates a payload in place — e.g. ask_graph demoting a flagged edge's
-    confidence to 0.05 before re-rendering — would otherwise corrupt the cached
-    graph and leak that change into every subsequent ask until the next version
-    rebuild.  Copying here keeps the cache pristine for all downstream callers.
+    mutates a payload in place — e.g. the now-retired graph ask engine used to
+    demote a flagged edge's confidence to 0.05 before re-rendering — would
+    otherwise corrupt the cached graph and leak that change into every
+    subsequent ask until the next version rebuild.  Copying here keeps the
+    cache pristine for all downstream callers.
 
     edge_types: frozenset of edge_type strings to follow; None = all edges.
     """

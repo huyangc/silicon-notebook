@@ -87,16 +87,19 @@ def test_parse_answer_anchors_keeps_only_cited(repo):
 
 def test_ask_grounded_answer_has_anchors(repo):
     # P4-5: ask_fast retired; test now uses _retrieve_scored to verify KG retrieval
-    # still surfaces the concept, and ask_graph to verify the grounded-answer path.
+    # still surfaces the concept, and reasoning to verify the grounded-answer path
+    # (mode="graph" used to exercise this same evidence_refine step; that engine
+    # has since been retired in turn, so this now drives the mode that still does).
     nb = _seed(repo)   # one concept "Engram"
     # Directly verify that KG retrieval surfaces the concept
     hits = repo._retrieve_scored(nb.id, "what is engram")
     assert any("engram" in (h.payload.get("name") or "").lower() for h in hits), \
         "_retrieve_scored must find the Engram concept"
-    # ask_graph synthesises an answer from KG hits; verify it does not crash
-    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="graph"))
+    # reasoning synthesises an answer from KG hits; verify it does not crash
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="reasoning"))
     assert resp is not None
-    assert resp.mode == "graph"
+    assert resp.mode == "reasoning"
+    assert resp.anchors, "expected the cited concept to produce an anchor"
     assert ("chat", "evidence_refine") in repo.recording_model_provider.calls
 
 def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
@@ -108,25 +111,13 @@ def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
     assert resp.grounded is False  # chunk path with no hits must not claim grounding
 
 
-def test_graph_edge_verification_binds_graph_chain_verify(repo):
-    nb = repo.create_notebook(NotebookCreate(name="graph"))
-    repo.store_kg(
-        nb.id,
-        None,
-        [
-            {"local_id": "A", "object_type": "claim",
-             "payload": {"name": "Alpha fact"}, "evidence": []},
-            {"local_id": "B", "object_type": "claim",
-             "payload": {"name": "Beta fact"}, "evidence": []},
-        ],
-        [{"source_local_id": "A", "target_local_id": "B",
-          "edge_type": "supports", "confidence": 0.9,
-          "evidence": [{"quote": "Alpha supports Beta"}]}],
-    )
+# test_graph_edge_verification_binds_graph_chain_verify was removed with the
+# retired full-graph ask engine: it was the only production caller of the
+# graph_chain_verify workload / verify_chain_edges (kg/graph_reason.py), which
+# is now unreachable from any live ask mode. graph_reason.py keeps the function
+# and its own direct unit tests (test_graph_reason.py); nothing currently
+# exercises it end-to-end.
 
-    repo.ask(nb.id, AskRequest(question="Alpha fact", mode="graph"))
-
-    assert ("chat", "graph_chain_verify") in repo.recording_model_provider.calls
 
 def test_concept_dedup_degrades_gracefully_without_clusters(repo):
     # No concept_clusters rows populated -> _concept_cluster_id returns object_id
@@ -146,6 +137,8 @@ def test_concept_dedup_degrades_gracefully_without_clusters(repo):
     oids = [r["id"] for r in rows]
     for oid in oids:
         assert repo._concept_cluster_id(nb.id, oid) == oid   # falls back to object_id
-    # P4-5: ask_fast retired; use ask_graph (same KG path) to verify no crash
+    # P4-5: ask_fast retired; mode="graph" is itself retired now too and aliases
+    # to chunk (_RETIRED_MODES) — kept here as an incidental regression check
+    # that the alias still resolves cleanly through this KG-only fixture.
     resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="graph"))
     assert resp is not None  # did not crash

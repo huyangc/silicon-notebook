@@ -994,8 +994,8 @@ class GraphRetrievalService(_RetrievalState):
         曾在 1.13M 节点库上导致 reasoning 模式冻结)。大库(与分享/拷贝阈值同一「大」
         定义,not notebook_copy_stats()["copyable"])下拒绝构建该图,发
         ppr_fallback_refused 事件后返回 []——调用方(reasoning 种子/agent 动作、
-        chunk 模式三路 mix、ask_graph PPR 分支)均已对 [] 容错降级。小库保留旧
-        回退路径,字节不变。"""
+        chunk 模式三路 mix;曾经的 graph 引擎 PPR 分支同样如此,该 ask 模式已
+        退役)均已对 [] 容错降级。小库保留旧回退路径,字节不变。"""
         from app.services.kg.ppr import run_ppr
         top_chunks = self.settings.ppr_top_chunks
         ranked = self.scale_ppr(
@@ -1393,10 +1393,12 @@ class GraphRetrievalService(_RetrievalState):
         不再对 chunks 表做全量扫描 + 逐行 json.loads + 集合交。
 
         输出序 = 确定性 first-seen 序:按 object_ids 顺序 → 各对象 evidence 内
-        element 顺序 → 该 element 的 chunk 列表序。
-        消费方 ask_graph 的 BFS 兜底路径无 rerank,顺序直接决定
-        truncate_by_tokens 的截断存活集和引用编号,所以序必须确定(旧实现的
-        「chunks 全表扫描序」依赖表物理序,本就不是契约)。
+        element 顺序 → 该 element 的 chunk 列表序。消费方 `_mix_retrieve`(chunk
+        模式的 KG-overlay 分支)把这个序喂给 retrieval_rerank 作为输入序;
+        rerank 未配置或调用失败时 RerankClient.rerank 原样退回这个序(identity
+        fallback)——两种情形下这个序都直接决定 truncate_by_tokens 的截断存活集
+        和引用编号,所以序必须确定(旧实现的「chunks 全表扫描序」依赖表物理序,
+        本就不是契约)。
 
         批 5:element→chunk 反查改由 ``_elem_chunks_scoped`` 按标记分叉——已回填
         的 notebook 走 ``chunk_elements`` 有界点查(SQLite ``ORDER BY rowid`` /

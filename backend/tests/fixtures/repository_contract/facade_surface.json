@@ -2749,12 +2749,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.ask_graph",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.ask_job_detail",
         "target": "_runtime"
       },
@@ -4855,21 +4849,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
-  },
-  "ask_graph": {
-    "consumers": [
-      {
-        "kind": "registry",
-        "path": "backend/app/services/ask_modes.py",
-        "scope": "<module>.ASK_MODES",
-        "target": "ask_graph"
-      }
-    ],
-    "kind": "method",
-    "owner": "AskService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: \"'AskRequest'\", seed_ids: 'Optional[List[str]]' = None, cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
   },
   "ask_job_detail": {
     "consumers": [

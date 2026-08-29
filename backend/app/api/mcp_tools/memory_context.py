@@ -80,7 +80,7 @@ def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
 logger = logging.getLogger(__name__)
 
 # The gate and the advertised legal-mode list must never drift apart, so both
-# read this one constant. ``graph`` and the retired ``fast``/``global`` aliases
+# read this one constant. The retired ``fast``/``global``/``graph`` aliases
 # are deliberately absent: this Agent face offers only the two supported
 # built-ins plus live plugin engines, unlike the browser registry.
 _BUILTIN_ASK_MODES = ("chunk", "reasoning")

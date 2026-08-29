@@ -271,3 +271,46 @@ def test_reasoning_service_streams_trace_with_explicit_user_id(arepo):
     assert "plan" in streamed and streamed.index("plan") > streamed.index("intent")
     assert resp.mode == "reasoning" and resp.answer_id  # 引擎收口照存答案
     assert arepo.get_conversation(resp.conversation_id).turn_count == 1
+
+
+def test_reasoning_zero_evidence_uses_the_shared_no_evidence_message(arepo, monkeypatch):
+    """检索阶段真的一无所获(不是「这一条通道零命中」,而是 top_hits/elements/
+    chunks/chains/memory_hits/structured_batch/enumerations/collection_map 全部
+    为空)时,`_draft_reasoning_response` 的合成 `elif answer_client.configured
+    and (top_hits or elements or chunks or chains or memory_hits or
+    structured_batch is not None or enumerations or collection_map_prompt_block):`
+    整段短路跳过,落到与 chunk 共用的 `_NO_RETRIEVAL_EVIDENCE_MESSAGE` 确定性
+    文案——已退役的 graph 问答引擎删除前,它自己的镜像分支(「not top_hits and
+    not seed_ids」早退)是仓库里唯一间接练习到这条消息的用例,该引擎删除后这条
+    reasoning 分支全仓零测试覆盖。
+
+    直接 monkeypatch `ReasoningRetriever.run_stage`(检索阶段唯一的类型化产出口,
+    见 `execute_reasoning_retrieval_stage`)返回全空快照,比手工拼出
+    `PreparedReasoningAsk`/`ResponseDraftInput` 这两层内部冻结 dataclass 更可靠:
+    `_run_reasoning_stage` 其余的装配(intent 理解、Memory 召回、结构化批等)仍
+    走生产代码路径,只有检索这一段被替换成确定性的「什么都没找到」。
+    """
+    from app.application.ask_reasoning import ReasoningEvidenceSnapshot
+    from app.services.ask_service import _NO_RETRIEVAL_EVIDENCE_MESSAGE
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed(arepo)
+    _bind_reasoning(arepo, _SeqLLM(
+        plan={"sub_queries": [{"query": "无关问题"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不应该被使用", "grounded": False}))
+
+    def _empty_run_stage(self, stage, runtime):
+        return ReasoningEvidenceSnapshot(
+            top_hits=(), elements=(), trace=(), chunks=(), chains=(),
+            attempted=(), enumerations=(), collection_map_text="",
+            outline=(), outline_evidence=(), baseline_manifest=None,
+        )
+
+    monkeypatch.setattr(ReasoningRetriever, "run_stage", _empty_run_stage)
+    resp = arepo.ask(nb.id, AskRequest(question="完全无关的问题", mode="reasoning"))
+
+    assert resp.conclusion == _NO_RETRIEVAL_EVIDENCE_MESSAGE
+    assert resp.llm_mode == "deterministic"
+    assert not resp.answer
+    assert not resp.anchors

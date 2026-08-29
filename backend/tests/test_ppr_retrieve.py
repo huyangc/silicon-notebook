@@ -256,42 +256,6 @@ def test_ppr_retrieve_empty_when_no_kg(repo):
     assert repo._ppr_retrieve(nb.id, "anything") == []
 
 
-class _StubAnswerLLM:
-    configured = True
-    def chat_json(self, *a, **k):
-        return '{"answer": "DeepSeek 与 GLM 都用 MoE [k1][k2].", "grounded": true}'
-
-
-def test_ask_graph_ppr_cites_multiple_documents(repo, monkeypatch):
-    nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    bind_chat_client(repo, "ask_answer", _StubAnswerLLM())
-    from app.models.schemas import AskRequest
-    resp = repo.ask_graph(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="graph"))
-    assert resp.mode == "graph"
-    src_ids = {c.source_id for c in resp.citations}
-    assert "src-A" in src_ids and "src-B" in src_ids
-    # codex r4 fix: 单笔记本、无挂载 base——_ppr_retrieve 返回的每个 chunk 的
-    # notebook_id 必然就是 nb.id 自己(scale_ppr/_ppr_graph 都只在 nb 范围内
-    # 找,r["chunk_notebook_id"] 原样带出、并非只在跨库命中时才打标)。ask_graph
-    # 的 PPR 分支内联 Citation(...) 构造点必须把它归一成空串,否则前端会对
-    # 「本库自己」的两条证据都渲染出一个多余的「来自「当前笔记本」」徽章。
-    nb_by_source = {c.source_id: c.notebook_id for c in resp.citations}
-    assert nb_by_source.get("src-A") == "", (
-        f"单库 PPR chunk citation.notebook_id 应留空,实为 {nb_by_source.get('src-A')!r}")
-    assert nb_by_source.get("src-B") == "", (
-        f"单库 PPR chunk citation.notebook_id 应留空,实为 {nb_by_source.get('src-B')!r}")
-
-
-def test_ask_graph_ppr_off_keeps_kg_path(repo, monkeypatch):
-    nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    from app.models.schemas import AskRequest
-    resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
-    assert resp.mode == "graph"
-    assert not any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))
-
-
 def test_ppr_reset_vector_seeds_entities_and_chunks(repo):
     nb = _seed_two_doc_moe(repo)
     G, key_to_idx, chunk_idx_to_id = repo._ppr_graph(nb.id)
@@ -469,30 +433,6 @@ def test_ppr_graph_emb_synonym_edges(repo, monkeypatch):
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     assert key_to_idx["e1"] in set(G.successor_indices(key_to_idx["e0"]))   # e0≈e1 → emb edge
     assert key_to_idx["e2"] not in set(G.successor_indices(key_to_idx["e0"]))  # orthogonal → none
-
-
-def test_ask_graph_ppr_community_context(repo, monkeypatch):
-    nb = _seed_two_doc_moe(repo)
-    with repo._write() as db:
-        db.execute("INSERT INTO communities (id,notebook_id,level,member_ids,size,title,summary,findings,created_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?)",
-                   ("cm1", nb.id, 0, json.dumps(["e1", "e2"]), 2, "MoE models",
-                    "DeepSeek and GLM both use Mixture-of-Experts.", "[]", "2026-06-24T00:00:00"))
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    bind_chat_client(repo, "ask_answer", _StubAnswerLLM())
-    from app.models.schemas import AskRequest
-    resp = repo.ask_graph(nb.id, AskRequest(question="MoE comparison across models", mode="graph"))
-    assert resp.mode == "graph"
-    assert any("Knowledge base theme" in c.label for c in resp.citations)  # community report cited
-
-
-def test_ask_graph_ppr_no_community_when_none(repo, monkeypatch):
-    nb = _seed_two_doc_moe(repo)   # no communities seeded
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    bind_chat_client(repo, "ask_answer", _StubAnswerLLM())
-    from app.models.schemas import AskRequest
-    resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
-    assert not any("Knowledge base theme" in c.label for c in resp.citations)
 
 
 def test_scale_ppr_caches_combined_graph(repo, monkeypatch):

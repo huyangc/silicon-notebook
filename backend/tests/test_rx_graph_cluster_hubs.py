@@ -1,25 +1,30 @@
-"""TD2 — activate cross-document cluster hubs in the reasoning/graph path.
+"""TD2 — activate cross-document cluster hubs in the reasoning graph path.
 
 These tests cover the *integration* seam (TD1 already unit-tests build_rx_graph's
 hub construction in test_graph_reason.py):
 
   1. _federated_rx_graph aggregates concept_clusters across ALL participants
      (active + base tier) so a base-side member bridges an active-side member.
-  2. ask_graph's multihop_subgraph call uses edge_types == DEFAULT_REASONING_EDGES
-     | {"synonym"} (the bridge would be dormant without "synonym").
 
 C3 (hotpath cleanup): this file used to also cover the *repo-level* single-
 notebook path via `SqliteRepository._rx_graph` (loads concept_clusters into
 cluster_groups, version-cache invalidation on cluster-row changes, cross-doc
 bridge reachability) — six tests in total. `_rx_graph` had zero production
-callers (grep-confirmed across two review passes; `ask_graph`/reasoning only
-ever go through `_federated_rx_graph`, which merges base+active and subsumes
-the single-notebook case), so it was deleted as dead code and those six
-tests were deleted with it. No unique coverage is lost: the underlying pure
-function (`build_rx_graph`, including cluster-hub construction, transit-only
-guarantees, and version-key soundness reasoning) remains exhaustively unit-
-tested in test_graph_reason.py, and the repo-level integration seam for the
-live code path is covered here via `_federated_rx_graph` (tests 1-2 below).
+callers (grep-confirmed across two review passes; both the reasoning follow_chain
+path and the (since retired) full-graph ask engine only ever went through
+`_federated_rx_graph`, which merges base+active and subsumes the single-notebook
+case), so it was deleted as dead code and those six tests were deleted with it.
+No unique coverage is lost: the underlying pure function (`build_rx_graph`,
+including cluster-hub construction, transit-only guarantees, and version-key
+soundness reasoning) remains exhaustively unit-tested in test_graph_reason.py,
+and the repo-level integration seam for the live code path is covered here via
+`_federated_rx_graph` (test 1 below).
+
+The retired full-graph ask engine used to demonstrate a second integration seam
+here — its own local `multihop_subgraph` call widened edge_types with
+`| {"synonym"}` so the cluster hub above wasn't dormant on that path — but
+that mode and its call site are gone; only the scope-guard on the shared
+`DEFAULT_REASONING_EDGES` constant remains below.
 """
 import json
 
@@ -167,52 +172,14 @@ def test_federated_rx_graph_version_invalidates_on_cluster_row(repo):
     assert G2 is not G1, "cluster row on a participant did not invalidate fed graph"
 
 
-# ── 2: ask_graph uses DEFAULT_REASONING_EDGES | {"synonym"} ──────────────────
-
-def test_ask_graph_multihop_call_includes_synonym_edge_type(repo, monkeypatch):
-    """ask_graph's multihop_subgraph call must pass edge_types that include
-    "synonym" (and every DEFAULT_REASONING_EDGE) — without it the hub is dormant.
-
-    We monkeypatch multihop_subgraph at its source module so the patched symbol
-    is the one ask_graph imports, capture the edge_types kwarg, and drive
-    ask_graph directly with explicit seed_ids (bypasses the empty-retrieval
-    early-return and the PPR branch, which returns [] with no chunks seeded)."""
-    from app.models.schemas import NotebookCreate, AskRequest
-    from app.services.kg.graph_reason import DEFAULT_REASONING_EDGES
-    import app.services.kg.graph_reason as gr
-
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
-
-    captured = {}
-    real = gr.multihop_subgraph
-
-    def _spy(*args, **kwargs):
-        # ask_graph passes edge_types explicitly (with synonym);
-        # _chunk_kg_overlay passes edge_types=None — capture only the former.
-        et = kwargs.get("edge_types")
-        if et is not None:
-            captured["edge_types"] = et
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(gr, "multihop_subgraph", _spy)
-
-    repo.ask_graph(nb.id, AskRequest(question="alpha", mode="graph"),
-                   seed_ids=["a1"])
-
-    assert "edge_types" in captured, "ask_graph never called multihop with edge_types"
-    et = captured["edge_types"]
-    assert "synonym" in et, f"synonym not in ask_graph edge_types: {et}"
-    # every default reasoning edge is still present (no narrowing)
-    assert set(DEFAULT_REASONING_EDGES).issubset(set(et))
-    # exactly the defaults plus synonym (no accidental broadening)
-    assert set(et) == set(DEFAULT_REASONING_EDGES) | {"synonym"}
-
-
 def test_default_reasoning_edges_unchanged_globally():
-    """Scope guard: the synonym addition must NOT mutate the module-level
-    DEFAULT_REASONING_EDGES constant."""
+    """Scope guard: DEFAULT_REASONING_EDGES is a shared constant consumed by
+    reasoning's follow_chain (retrieval_candidates.py) and must never grow
+    "synonym" — a local edge-type widening a caller needs for its own
+    multihop call must stay scoped to that call's own kwargs, never leak into
+    the shared frozenset. (The full-graph ask engine that used to demonstrate
+    this scoping with its own local `| {"synonym"}` widening has been retired;
+    the invariant on the shared constant itself still stands.)"""
     from app.services.kg.graph_reason import DEFAULT_REASONING_EDGES
     assert "synonym" not in DEFAULT_REASONING_EDGES
     assert DEFAULT_REASONING_EDGES == frozenset({"derived_from", "supports", "depends_on"})

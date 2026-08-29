@@ -129,7 +129,8 @@ def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
 def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, monkeypatch):
     # P4-5: ask_fast retired. This test was specific to ask_fast's element-gather
     # optimization. Replaced: verify _retrieve_scored surfaces the bandwidth claim
-    # without loading all elements (the optimization now lives in ask_chunk/ask_graph).
+    # without loading all elements (the optimization now lives in ask_chunk; the
+    # graph ask engine, which also inherited it, has since been retired in turn).
     bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})

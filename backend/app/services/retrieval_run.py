@@ -23,7 +23,6 @@ T = TypeVar("T")
 _CANCEL_POLL_SECONDS = 0.05
 _RUN_KINDS = frozenset({
     "ask_chunk",
-    "ask_graph",
     "ask_reasoning",
     "ask_plugin_engine",
     "report_generation",
