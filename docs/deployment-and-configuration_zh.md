@@ -277,8 +277,10 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py
 PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 ```
 
-每条都是普通 btree（其中一条 partial、一条表达式）索引而非 GIN，即使在大表上单条建索引
-也快——但 `CREATE INDEX CONCURRENTLY` 仍要对表做一次全表扫描，繁忙数据库上应避开高峰期。
+批 1 的八条都是普通 btree（其中一条 partial、一条表达式）索引，大表上单条构建也快；
+批 2 的 payload 一条是对整个 jsonb-as-text 的全文 GIN，在大 `knowledge_objects` 表上
+单条构建是分钟级，安排窗口时按此预估。无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
+做一次全表扫描，繁忙数据库上应避开高峰期。
 迁移文件 `0039_hotpath_batch1_indexes.sql` 与 `0042_hotpath_batch2_search_indexes.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
 （迁移在事务里跑，`CONCURRENTLY` 进不了事务），一旦这个脚本已经把全部索引建好，迁移
 落地时就是 no-op 的账本记录；全新部署、还没有生产流量的库，迁移本身已经够用，先跑脚本
