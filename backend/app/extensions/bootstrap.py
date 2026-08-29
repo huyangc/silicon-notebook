@@ -1,7 +1,7 @@
 """Composition entry point for the startup-frozen extension topology."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 from dataclasses import dataclass, field
 from functools import lru_cache
 from types import MappingProxyType
