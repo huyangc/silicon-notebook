@@ -6,7 +6,7 @@
  */
 "use client";
 
-import { useRef, type MouseEvent, type ReactNode } from "react";
+import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -55,6 +55,83 @@ export interface AnswerMarkdownProps {
   citationImageOrder?: CitationImageOrder;
 }
 
+type AnswerMarkdownRenderState = Readonly<{
+  refsByCitationKey: Record<string, AnswerReference>;
+  selectedReferenceId: string | null;
+  onReferenceClick: AnswerMarkdownProps["onReferenceClick"];
+  renderCitationImages?: AnswerMarkdownProps["renderCitationImages"];
+}>;
+
+// The renderer functions are React component *types*, so they must not be recreated on each
+// AnswerMarkdown render: replacing them remounts authenticated images and makes them flash.
+// Their changing data travels through Context instead of a render-mutated ref. Context publishes
+// the new value only with the committed tree, so an interrupted concurrent render cannot make the
+// still-visible citation buttons observe callbacks or references that never committed.
+const AnswerMarkdownRenderContext = createContext<AnswerMarkdownRenderState | null>(null);
+
+function AnswerMarkdownLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const state = useContext(AnswerMarkdownRenderContext);
+  if (href?.startsWith("cite:")) {
+    const reference = state?.refsByCitationKey[href.slice(5)];
+    if (reference && state) {
+      const isSelected = state.selectedReferenceId === reference.id;
+      return (
+        <span className="cite-chip-wrap">
+          <button
+            type="button"
+            aria-expanded={isSelected}
+            className={`cite-chip${isSelected ? " active" : ""}`}
+            onClick={(event) => state.onReferenceClick(reference, event)}
+          >
+            {children}
+          </button>
+        </span>
+      );
+    }
+    // key 不在映射里，fallback 为文本
+    return <span>{children}</span>;
+  }
+  // 普通外链
+  return (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  );
+}
+
+function AnswerMarkdownPre({ children }: { children?: React.ReactNode }) {
+  return <pre className="answer-code">{children}</pre>;
+}
+
+function AnswerMarkdownTable({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="answer-table-wrap">
+      <table className="answer-table">{children}</table>
+    </div>
+  );
+}
+
+function AnswerMarkdownAside({
+  node,
+  children,
+}: {
+  node?: { properties?: Record<string, unknown> };
+  children?: React.ReactNode;
+}) {
+  const state = useContext(AnswerMarkdownRenderContext);
+  const raw = node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE];
+  const items = citationImageSlotItems(raw);
+  if (items.length > 0) return state?.renderCitationImages?.(items) ?? null;
+  return <aside>{children}</aside>;
+}
+
+const ANSWER_MARKDOWN_COMPONENTS = {
+  a: AnswerMarkdownLink,
+  pre: AnswerMarkdownPre,
+  table: AnswerMarkdownTable,
+  aside: AnswerMarkdownAside,
+} satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;
+
 export function AnswerMarkdown({
   answer,
   anchors = [],
@@ -74,109 +151,34 @@ export function AnswerMarkdown({
     ]),
   );
 
-  // React treats the functions in `components` as component *types*. Rebuilding those
-  // functions on every AnswerMarkdown render therefore unmounts and remounts every
-  // customized subtree, even when the answer itself did not change. In particular, an
-  // unrelated parent update (such as typing in the next Ask input) used to replace the
-  // citation-image <aside>, which made AuthedImage revoke its object URL, show loading,
-  // and fetch the same asset again: the visible image flashed on every keystroke.
-  //
-  // Keep the component types stable for this AnswerMarkdown instance, while reading the
-  // latest render data through a ref. Citation selection/callbacks can still change
-  // immediately without turning those ordinary updates into subtree replacement.
-  const renderStateRef = useRef({
-    refsByCitationKey,
-    selectedReferenceId,
-    onReferenceClick,
-    renderCitationImages,
-  });
-  renderStateRef.current = {
-    refsByCitationKey,
-    selectedReferenceId,
-    onReferenceClick,
-    renderCitationImages,
-  };
-
-  // -----------------------------------------------------------------------
-  // 自定义 <a> 渲染：cite: 开头 → 引用徽章；其余 → 普通新标签链接
-  // -----------------------------------------------------------------------
-  const componentsRef = useRef<Parameters<typeof ReactMarkdown>[0]["components"] | null>(null);
-  if (componentsRef.current === null) {
-    componentsRef.current = {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      a({ href, children }: { href?: string; children?: React.ReactNode }) {
-        if (href?.startsWith("cite:")) {
-          const key = href.slice(5);
-          const state = renderStateRef.current;
-          const reference = state.refsByCitationKey[key];
-          if (reference) {
-            const isSelected = state.selectedReferenceId === reference.id;
-            return (
-              <span className="cite-chip-wrap">
-                <button
-                  type="button"
-                  aria-expanded={isSelected}
-                  className={`cite-chip${isSelected ? " active" : ""}`}
-                  onClick={(event) => state.onReferenceClick(reference, event)}
-                >
-                  {children}
-                </button>
-              </span>
-            );
-          }
-          // key 不在映射里，fallback 为文本
-          return <span>{children}</span>;
-        }
-        // 普通外链
-        return (
-          <a href={href} target="_blank" rel="noreferrer">
-            {children}
-          </a>
-        );
-      },
-      // 给代码块加现有样式 class，保持外观一致
-      pre({ children }: { children?: React.ReactNode }) {
-        return <pre className="answer-code">{children}</pre>;
-      },
-      // 表格外层包装
-      table({ children }: { children?: React.ReactNode }) {
-        return (
-          <div className="answer-table-wrap">
-            <table className="answer-table">{children}</table>
-          </div>
-        );
-      },
-      aside({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
-        const raw = node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE];
-        const items = citationImageSlotItems(raw);
-        if (items.length > 0) return renderStateRef.current.renderCitationImages?.(items) ?? null;
-        return <aside>{children}</aside>;
-      },
-    };
-  }
-  const components = componentsRef.current;
-
   return (
     <div className="answer-markdown">
-      <ReactMarkdown
-        remarkPlugins={[
-          remarkGfmPlugin,
-          remarkMath,
-          [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
-        ]}
-        rehypePlugins={[
-          rehypeKatex,
-          [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
-            typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder | undefined,
-          ],
-        ]}
-        // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
-        // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
-        urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-        components={components}
-      >
-        {normalizeMathMarkdown(answer)}
-      </ReactMarkdown>
+      <AnswerMarkdownRenderContext.Provider value={{
+        refsByCitationKey,
+        selectedReferenceId,
+        onReferenceClick,
+        renderCitationImages,
+      }}>
+        <ReactMarkdown
+          remarkPlugins={[
+            remarkGfmPlugin,
+            remarkMath,
+            [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+          ]}
+          rehypePlugins={[
+            rehypeKatex,
+            [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
+              typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder | undefined,
+            ],
+          ]}
+          // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
+          // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
+          urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
+          components={ANSWER_MARKDOWN_COMPONENTS}
+        >
+          {normalizeMathMarkdown(answer)}
+        </ReactMarkdown>
+      </AnswerMarkdownRenderContext.Provider>
     </div>
   );
 }
