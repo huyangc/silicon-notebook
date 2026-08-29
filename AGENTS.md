@@ -18,6 +18,10 @@ history belong in the owning documents below, not here.
    are not the current contract unless a live document explicitly points to them.
 4. Use `rg` / `rg --files` for discovery. Prefer focused edits and focused tests before the
    full verification gate.
+5. Before running `npm install` in a worktree, inspect `frontend/node_modules` with
+   `ls -l frontend/node_modules`. If it is a symlink into the main checkout, do not write
+   through the shared dependency tree; copy it or install in the correct checkout when an
+   independent dependency tree is required.
 
 ## Current Sources of Truth
 
@@ -36,7 +40,11 @@ history belong in the owning documents below, not here.
 
 The root `README.md` / `README_zh.md` are concise entry points, not detailed contracts.
 `CLAUDE.md` contains Claude Code-specific resident instructions; it is not a second product
-or architecture source of truth.
+or architecture source of truth. For agent-workflow constraints stated in both files,
+`AGENTS.md` follows `CLAUDE.md`: if their wording or required behavior differs, `CLAUDE.md`
+controls and `AGENTS.md` must be corrected. Carrier-specific commands apply only to the
+carrier they name; shared product, architecture, and development contracts remain owned by
+the canonical documents below.
 
 ## Repository-Wide Working Rules
 
@@ -49,6 +57,8 @@ or architecture source of truth.
   and file edits inside the sandbox.
 - Do not infer authority for deployment, external messages, PR creation, merging, or other
   remote mutations from a local code-edit request.
+- Use the agent's structured edit/write capability for file changes; do not replace whole
+  files through shell redirection.
 - Keep secrets, raw tokens, credentials, private paths, source content, prompts, evidence, and
   exception text out of logs and content-free telemetry.
 
