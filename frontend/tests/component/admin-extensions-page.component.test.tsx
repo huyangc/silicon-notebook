@@ -1,6 +1,6 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetchMe: vi.fn(),
@@ -75,6 +75,12 @@ beforeEach(() => {
   mocks.fetchMe.mockReset();
   mocks.fetchLoadedExtensions.mockReset();
   mocks.setExtensionRuntimeEnabled.mockReset();
+});
+
+// 安全网:某个假计时器测试的 try/finally 之前就抛出(比如 render 本身炸了),
+// 也不会把 vi.useFakeTimers() 的效力漏到下一个测试文件里。
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 // ⚠ 参数**必须**显式标注 `readonly LoadedExtension[]`。不标注时 TypeScript 从默认值
@@ -475,4 +481,146 @@ test("服务端回声的 plugin_id 与请求不一致时,仍按用户实际点�
   // beta 完全没被这次回声异常牵连:还是启用态,还是它自己的按钮名。
   expect(within(betaRow).getByText("已启用")).toBeInTheDocument();
   expect(within(betaRow).getByRole("button", { name: "停用 corp.beta" })).toBeInTheDocument();
+});
+
+
+// --------------------------------------------------------------------------
+// 错误态到点自清(codex 评审 P2,依据 AGENTS.md「Interactive feedback」:动作结果
+// 反馈必须 "clear that state on its own timer",行内错误态不能永驻到下次重试)。
+//
+// 三条用例都用 `vi.useFakeTimers()` + `fireEvent.click`(不是 `userEvent.click`):
+// 本仓库既有先例(chat-question.component.test.tsx、command-catalog-panel.
+// component.test.tsx 等)从不在同一个测试里混用 `userEvent` 与假计时器——
+// `userEvent` 内部的指针事件模拟自己也走 `setTimeout`,一旦被假计时器接管就会
+// 挂起等不到真正推进。初次装载与点击后的状态落地改用 `vi.waitFor`(与
+// agent-profile-panel.component.test.tsx 同款),而不是 `screen.findByText`——
+// 后者的轮询走 `@testing-library/dom` 自己的 `setTimeout`,同样会被假计时器接管
+// 而失去意义;`vi.waitFor` 是 vitest 自己感知假计时器的版本。
+// --------------------------------------------------------------------------
+
+test("错误态到点后自动清空,回到可再次点击的空闲态(不需要用户手动重试)", async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
+    mocks.fetchLoadedExtensions.mockResolvedValue(topology([deploymentExtension()]));
+    mocks.setExtensionRuntimeEnabled.mockRejectedValue(humanizedError("扩展停用失败,请稍后重试", 500));
+
+    render(<AdminExtensionsPage />);
+    await vi.waitFor(() => expect(screen.getByRole("row", { name: /corp\.sample/ })).toBeInTheDocument());
+    const row = screen.getByRole("row", { name: /corp\.sample/ });
+
+    fireEvent.click(within(row).getByRole("button", { name: "停用 corp.sample" }));
+    await vi.waitFor(() =>
+      expect(within(row).getByText(/操作没成功：扩展停用失败/)).toBeInTheDocument(),
+    );
+
+    // 还没到点:错误文案照常挂着,不是刚出现就自己没了。这一步不需要 `vi.waitFor`
+    // ——没有任何状态变化,上一次渲染的结果原样成立,同步断言即可。
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(within(row).getByText(/操作没成功：扩展停用失败/)).toBeInTheDocument();
+
+    // 到点(累计过 6000ms,多留 1ms 余量避开假计时器的边界取整):`setTimeout`
+    // 回调触发的 `setState` 是从假计时器的宏任务里发起的,React 要再走一轮微任务
+    // 才会把它提交成新的 DOM——`advanceTimersByTimeAsync` 本身不保证在它 resolve
+    // 的那一刻就已经提交完,所以这一步的断言必须用 `vi.waitFor` 等,不能紧跟着
+    // 同步 `expect`(同款教训见 agent-profile-panel.component.test.tsx:「先
+    // `advanceTimersByTimeAsync`,再 `vi.waitFor` 断言」从不合并成一步)。
+    await vi.advanceTimersByTimeAsync(1001);
+    await vi.waitFor(() => expect(within(row).queryByText(/操作没成功/)).not.toBeInTheDocument());
+    const button = within(row).getByRole("button", { name: "停用 corp.sample" });
+    expect(button).not.toBeDisabled();
+    expect(within(row).getByText("已启用")).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+
+test("到时前重试:旧的自清定时器立即被取消,不会留到过期后误清新状态", async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
+    mocks.fetchLoadedExtensions.mockResolvedValue(topology([deploymentExtension()]));
+
+    let resolveRetry: (value: unknown) => void = () => {};
+    mocks.setExtensionRuntimeEnabled
+      .mockRejectedValueOnce(humanizedError("扩展停用失败,请稍后重试", 500))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRetry = resolve; }));
+
+    render(<AdminExtensionsPage />);
+    await vi.waitFor(() => expect(screen.getByRole("row", { name: /corp\.sample/ })).toBeInTheDocument());
+    const row = screen.getByRole("row", { name: /corp\.sample/ });
+
+    fireEvent.click(within(row).getByRole("button", { name: "停用 corp.sample" }));
+    await vi.waitFor(() =>
+      expect(within(row).getByText(/操作没成功：扩展停用失败/)).toBeInTheDocument(),
+    );
+    // 错误态确实挂了一个自清定时器,不是这条用例本身就没测到东西。
+    expect(vi.getTimerCount()).toBe(1);
+
+    // 到点前(6000ms 之内)重试:行状态从 error 变成 pending。
+    await vi.advanceTimersByTimeAsync(3000);
+    fireEvent.click(within(row).getByRole("button", { name: "停用 corp.sample" }));
+    await vi.waitFor(() =>
+      expect(within(row).getByRole("button", { name: "停用中… corp.sample" })).toBeDisabled(),
+    );
+
+    // 核心断言:重试把 rowState 换成 pending 的同一个 effect 周期里,cleanup 必须
+    // 已经把上一个错误态挂的定时器取消掉了——不是留着,等它自己在 6000ms 到期
+    // 后才被动作废。用 `vi.getTimerCount()` 直接查计时器数量(而不是等它到期后
+    // 观察 DOM 有没有被误清),是因为定时器触发后的 `setState` 提交到 DOM 需要
+    // 经过一次 React 调度,在假计时器环境下这次调度何时真正落地并不确定
+    // (`vi.waitFor` 对「本来就没变化」的断言会在第一次检查就通过,拿不到额外的
+    // 微任务窗口去暴露一个尚未提交的误清)——`vi.getTimerCount()` 则是当场就能
+    // 查到的事实,不受这个不确定性影响,也正是
+    // use-root-modal-coordinator.component.test.tsx 里同款「零残留定时器」断言
+    // 的用法。
+    expect(vi.getTimerCount()).toBe(0);
+
+    // 就算真的没取消(定时器还在),把它的原定到期时刻也推过去,确认状态没有被
+    // 追认变坏——多一层保险,不是这条用例唯一的证据。
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(within(row).getByRole("button", { name: "停用中… corp.sample" })).toBeDisabled();
+    expect(within(row).queryByText(/操作没成功/)).not.toBeInTheDocument();
+
+    // 收尾:真正 resolve 这次重试,确认状态机没有被上面那次干扰卡死。
+    resolveRetry({
+      pluginId: "corp.sample",
+      runtimeEnabled: false,
+      runtimeUpdatedBy: "user-admin-1",
+      runtimeUpdatedAt: "2026-08-29T10:00:00",
+    });
+    await vi.waitFor(() => expect(within(row).getByText("已停用")).toBeInTheDocument());
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+
+test("组件卸载时取消尚未到点的错误自清定时器,不留下悬挂的计时器", async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
+    mocks.fetchLoadedExtensions.mockResolvedValue(topology([deploymentExtension()]));
+    mocks.setExtensionRuntimeEnabled.mockRejectedValue(humanizedError("扩展停用失败,请稍后重试", 500));
+
+    const { unmount } = render(<AdminExtensionsPage />);
+    await vi.waitFor(() => expect(screen.getByRole("row", { name: /corp\.sample/ })).toBeInTheDocument());
+    const row = screen.getByRole("row", { name: /corp\.sample/ });
+
+    fireEvent.click(within(row).getByRole("button", { name: "停用 corp.sample" }));
+    await vi.waitFor(() =>
+      expect(within(row).getByText(/操作没成功：扩展停用失败/)).toBeInTheDocument(),
+    );
+    // 错误态确实挂了一个自清定时器,不是这条用例本身就没测到东西。
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    unmount();
+
+    // 卸载已经把它取消了,不是留到 6s 后才悄悄清空——`ExtensionRuntimeCell` 的
+    // effect cleanup 必须在这个组件实例卸载时同步跑一次。
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });
