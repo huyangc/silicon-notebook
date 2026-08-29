@@ -26,18 +26,14 @@ export const listBases = (notebookId: string): Promise<MountedBase[]> =>
 export const listMountable = (notebookId: string): Promise<MountableNotebook[]> =>
   requestJson(`/notebooks/${notebookId}/mountable`, { tag: "bases" });
 
-// `signal`:笔记本设置的保存是多步写序列,用户中途关掉弹窗后必须能掐掉在飞的这一条
-// (见 notebook-api.ts 同名参数的说明)。
 export const setBases = (
   notebookId: string,
-  baseNotebookIds: string[],
-  signal?: AbortSignal
+  baseNotebookIds: string[]
 ): Promise<MountedBase[]> =>
   requestJson(`/notebooks/${notebookId}/bases`, {
     method: "PUT",
     body: JSON.stringify({ base_notebook_ids: baseNotebookIds }),
     tag: "bases",
-    signal,
   });
 
 // 必办 4(spec §6):删除确认弹窗要显示"N 个笔记本正在把它作为参考库"—— CASCADE

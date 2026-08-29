@@ -425,8 +425,7 @@ test("one-click revert to builtin uses only indexing pipeline APIs", async () =>
   await act(async () => value!.openEditor("shared"));
   await act(async () => value!.revertIndexingPipelineToBuiltin());
 
-  expect(notebookApi.setNotebookIndexingPipeline)
-    .toHaveBeenCalledWith("shared", null, expect.any(AbortSignal));
+  expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith("shared", null);
   expect(basesApi.listMountable).not.toHaveBeenCalled();
   expect(basesApi.listBases).not.toHaveBeenCalled();
 });
@@ -459,7 +458,6 @@ test("failed indexing rebuild can retry the same selected pipeline", async () =>
   expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith(
     "shared",
     "plugin.arxiv",
-    expect.any(AbortSignal),
   );
 });
 
@@ -711,7 +709,7 @@ test("a committed editor save is not reclassified as failed when collection refr
   expectRefreshFailureLogged(logged);
 });
 
-test("dismissing settings during a save stops waiting and frees the seat for a retry", async () => {
+test("dismissing settings during a save stops waiting and says so", async () => {
   const stuck = deferred<NotebookSummary>();
   notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
   render(<Harness />);
@@ -729,49 +727,45 @@ test("dismissing settings during a save stops waiting and frees the seat for a r
     "已停止等待保存结果；此前已提交的修改不会撤销，未提交的部分不会继续。",
   );
 
-  // 座位已释放：重开设置后立刻可以再存一次，不必等挂死的那次收尾。
-  await act(async () => value!.openEditor("a"));
-  await act(async () => value!.saveEditor(editorPatch));
-  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
-  expect(basesApi.setBases).toHaveBeenCalledTimes(1);
-
-  // 被放弃的那次收尾时不许再碰任何界面状态。
+  // 剩下的步骤停在下一个检查点：不再打 PUT bases / GET，也不再改界面。
   await act(async () => stuck.resolve(notebook("a")));
   await saving;
-  expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
+  expect(basesApi.setBases).not.toHaveBeenCalled();
+  expect(effects.onNotebookUpdated).not.toHaveBeenCalled();
 });
 
-test("dismissing settings aborts the request the abandoned save has on the wire", async () => {
-  // 「停在下一个检查点」不够：用户重开再存之后，那条还在飞的 PATCH/PUT 一旦落到
-  // 服务端，就会拿走人时的旧值盖掉刚存进去的新值（codex #629 R1 P1）。
+test("a dismissed save keeps its notebook single-flight until the server answers", async () => {
+  // 掐掉浏览器 fetch 只是让客户端不再等响应，FastAPI 那侧的 handler 照跑。所以放弃的
+  // 那次写入必须一直占着这本笔记本，直到客户端真看到它落定——否则重试可能先提交，
+  // 再被那个较老的 handler 覆盖回去（codex #629 R2 P1）。
   const stuck = deferred<NotebookSummary>();
-  let signal: AbortSignal | undefined;
-  notebookApi.updateNotebook.mockImplementationOnce((...args: unknown[]) => {
-    signal = args[2] as AbortSignal;
-    return stuck.promise;
-  });
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
   render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openEditor("a"));
 
   let saving!: Promise<void>;
   act(() => { saving = value!.saveEditor(editorPatch); });
-  expect(signal?.aborted).toBe(false);
-
   act(() => { value!.closeEditor(); });
-  expect(signal?.aborted).toBe(true);
+
+  // 重开时如实显示这本库还有一笔写在飞：不给一个 saveEditor 会静默拒绝的「保存」。
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.busy).toBe(true);
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
 
   await act(async () => stuck.resolve(notebook("a")));
   await saving;
+  expect(value!.editor?.busy).toBe(false);
+
+  // 落定之后才允许第二次写入。
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
 });
 
-test("reopening settings for another notebook aborts the orphaned request too", async () => {
+test("an outstanding write on one notebook does not block another notebook's settings", async () => {
   const stuck = deferred<NotebookSummary>();
-  let signal: AbortSignal | undefined;
-  notebookApi.updateNotebook.mockImplementationOnce((...args: unknown[]) => {
-    signal = args[2] as AbortSignal;
-    return stuck.promise;
-  });
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
   render(<Harness />);
   publish([notebook("a"), notebook("b")]);
   await act(async () => value!.openEditor("a"));
@@ -779,10 +773,37 @@ test("reopening settings for another notebook aborts the orphaned request too", 
   let saving!: Promise<void>;
   act(() => { saving = value!.saveEditor(editorPatch); });
   await act(async () => value!.openEditor("b"));
+  expect(value!.editor?.busy).toBe(false);
 
-  expect(signal?.aborted).toBe(true);
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenNthCalledWith(2, "b", expect.anything());
+
   await act(async () => stuck.resolve(notebook("a")));
   await saving;
+});
+
+test("a settings dialog reopened after re-login still recovers from its old write", async () => {
+  // deletingRef / editorSavingIdsRef 都按 actor id 记账，登出再登录回同一个账号时
+  // 键还在；释放若绑在发起时的 generation 上，重开的框会永远卡在忙碌（codex #629 R2 P2）。
+  const stuck = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  const view = render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  act(() => { value!.closeEditor(); });
+
+  view.rerender(<Harness actorId={null} />);
+  view.rerender(<Harness actorId="user-a" />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.busy).toBe(true);
+
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+  expect(value!.editor?.busy).toBe(false);
 });
 
 test("closing settings without a save in flight says nothing", async () => {
@@ -794,26 +815,6 @@ test("closing settings without a save in flight says nothing", async () => {
 
   expect(value!.editor).toBeNull();
   expect(effects.notify).not.toHaveBeenCalled();
-});
-
-test("reopening settings for another notebook releases the orphaned save seat", async () => {
-  const stuck = deferred<NotebookSummary>();
-  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
-  render(<Harness />);
-  publish([notebook("a"), notebook("b")]);
-  await act(async () => value!.openEditor("a"));
-
-  let saving!: Promise<void>;
-  act(() => { saving = value!.saveEditor(editorPatch); });
-  await act(async () => value!.openEditor("b"));
-  expect(value!.editor?.target.id).toBe("b");
-
-  await act(async () => value!.saveEditor(editorPatch));
-
-  expect(notebookApi.updateNotebook)
-    .toHaveBeenNthCalledWith(2, "b", expect.anything(), expect.any(AbortSignal));
-  await act(async () => stuck.resolve(notebook("a")));
-  await saving;
 });
 
 test("a save refuses to run while the open editor and the pending operation name different notebooks", async () => {
@@ -863,8 +864,7 @@ test("an immediate reopen after a committed save can unmount a base before refre
   let firstSave!: Promise<void>;
   act(() => { firstSave = value!.saveEditor(editorPatch); });
   await waitFor(() => expect(value!.editor).toBeNull());
-  expect(basesApi.setBases)
-    .toHaveBeenNthCalledWith(1, "a", ["base-a"], expect.any(AbortSignal));
+  expect(basesApi.setBases).toHaveBeenNthCalledWith(1, "a", ["base-a"]);
 
   await act(async () => value!.openEditor("a"));
   expect(value!.editor?.mountedIds).toEqual(["base-a"]);
@@ -872,7 +872,7 @@ test("an immediate reopen after a committed save can unmount a base before refre
   await act(async () => value!.saveEditor(editorPatch));
 
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
-  expect(basesApi.setBases).toHaveBeenNthCalledWith(2, "a", [], expect.any(AbortSignal));
+  expect(basesApi.setBases).toHaveBeenNthCalledWith(2, "a", []);
   await act(async () => firstRefresh.resolve(undefined));
   await firstSave;
 });
