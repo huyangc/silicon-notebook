@@ -410,13 +410,22 @@ test("failed indexing rebuild can retry the same selected pipeline", async () =>
 });
 
 test("rename reports a committed write even when the refreshed list loses manage access", async () => {
-  const renamed = notebook("shared", "reader", true);
+  const renamed = notebook("shared");
   renamed.name = "renamed";
+  renamed.shared_from = "旧授权";
+  renamed.is_shared = false;
+  renamed.granted_via = [{ group_id: "old", group_name: "旧群组", kind: "team" }];
+  renamed.document_limit = 321;
   notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
   render(<Harness />);
   publish([notebook("shared", "reader", true)]);
   vi.mocked(effects.refreshComposite).mockImplementationOnce(async () => {
-    publish([notebook("shared", "reader", false)]);
+    const refreshed = notebook("shared", "reader", false);
+    refreshed.shared_from = "新授权";
+    refreshed.is_shared = true;
+    refreshed.granted_via = [{ group_id: "new", group_name: "新群组", kind: "team" }];
+    refreshed.document_limit = 0;
+    publish([refreshed]);
   });
 
   let result: NotebookSummary | null = renamed;
@@ -425,7 +434,32 @@ test("rename reports a committed write even when the refreshed list loses manage
   });
 
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
-  expect((result as NotebookSummary | null)?.name).toBe("renamed");
+  expect(result).toMatchObject({
+    name: "renamed",
+    access: "reader",
+    shared_from: "新授权",
+    is_shared: true,
+    granted_via: [{ group_id: "new", group_name: "新群组", kind: "team" }],
+    can_manage_content: false,
+    document_limit: 321,
+  });
+  expect(effects.notify).toHaveBeenCalledWith("笔记本名称已更新");
+});
+
+test("rename does not return stale detail after a successful refresh removes the notebook", async () => {
+  const renamed = notebook("shared", "reader", true);
+  renamed.name = "renamed";
+  notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
+  render(<Harness />);
+  publish([notebook("shared", "reader", true)]);
+  vi.mocked(effects.refreshComposite).mockImplementationOnce(async () => { publish([]); });
+
+  let result: NotebookSummary | null = renamed;
+  await act(async () => {
+    result = await value!.renameNotebook("shared", "renamed");
+  });
+
+  expect(result).toBeNull();
   expect(effects.notify).toHaveBeenCalledWith("笔记本名称已更新");
 });
 

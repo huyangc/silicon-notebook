@@ -579,7 +579,22 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
           ? "笔记本名称已更新"
           : "笔记本名称已更新，但列表暂未刷新；请稍后刷新页面。",
       );
-      return updated;
+      if (!refreshed) return updated;
+      const authoritativeRow = currentRow(notebookId);
+      if (!authoritativeRow) return null;
+      // PATCH returns the access projection from request time.  A concurrent
+      // refresh may already have revoked or changed that access, so carry only
+      // the refreshed authority fields onto the committed detail before the
+      // shell replaces currentNotebook with it.  Do not spread the whole list
+      // row: several detail-only fields use sentinels in collection responses.
+      return {
+        ...updated,
+        access: authoritativeRow.access,
+        shared_from: authoritativeRow.shared_from,
+        is_shared: authoritativeRow.is_shared,
+        granted_via: authoritativeRow.granted_via,
+        can_manage_content: authoritativeRow.can_manage_content,
+      };
     } catch (error) {
       if (owns(owner) && renamingRef.current.get(key) === token) throw error;
       return null;
