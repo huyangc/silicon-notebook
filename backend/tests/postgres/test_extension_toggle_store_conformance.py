@@ -80,6 +80,11 @@ def test_set_disabled_then_enabled_flips_membership_without_deleting_the_row(sto
         "updated_at": disabled["updated_at"],
     }
     assert isinstance(disabled["updated_at"], str) and disabled["updated_at"]
+    # Aware UTC, not naive local: mirrors the SQLite store's `_now()` shape
+    # byte-for-byte (see that module's docstring for why — a naive server-
+    # local write would let an admin's browser `new Date()` silently
+    # misread the instant whenever the browser and server timezones differ).
+    assert disabled["updated_at"].endswith("+00:00")
     assert store.extension_runtime_disabled_ids() == frozenset({"plugin-a"})
 
     enabled = store.set_extension_runtime_enabled("plugin-a", True, "user-admin")
