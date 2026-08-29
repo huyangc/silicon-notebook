@@ -150,28 +150,29 @@ class ScaleArtifactRuntime:
         # Each notebook's build was previously a bare daemon thread with no
         # cross-notebook cap — an off-peak scheduler tick draining a long idle
         # queue, or several notebooks publishing at once, could start dozens
-        # of concurrent builds and exhaust memory/CPU on the same box. The
-        # semaphore is acquired inside the spawned thread body (see
-        # ``_run_scale_op``'s ``run()``), not by the caller of
-        # ``_run_scale_op`` itself: admission (queued vs building) must stay
-        # instantaneous for callers (HTTP handlers, the scheduler loop), only
-        # the actual fold/build work serializes to this many concurrent ops.
+        # of concurrent builds and exhaust memory/CPU on the same box.
+        #
+        # The ticket is taken by the ADMITTING thread, non-blockingly, and is
+        # released by the worker it hands the ticket to. A blocking acquire
+        # inside the spawned worker would have capped only how many builds
+        # EXECUTE while letting every queued notebook hold a parked daemon
+        # thread — a 20-entry off-peak drain, or repeated cancel+retrigger,
+        # would still exhaust threads/memory (codex PR#627 R1 P1). So work
+        # that cannot get a ticket is parked as DATA (``_scale_pending`` /
+        # ``idle_queue``), never as a thread: the live thread count is bounded
+        # by this semaphore's capacity.
         self._scale_build_semaphore = threading.BoundedSemaphore(
             max(1, int(getattr(settings, "scale_build_concurrency", 2)))
         )
-        # Notebooks whose worker thread is spawned but still blocked on the
-        # semaphore above, i.e. queued for a slot rather than executing.
-        # Guarded by ``building_lock`` and a strict SUBSET of ``building``:
-        # the claim semantics of ``building`` (one artifact writer per
-        # notebook, shared by identity with ScaleIndexBuilder) are deliberately
-        # unchanged — this map only records WHICH of the claimed notebooks have
-        # not started yet, so ``status()`` can report them as "queued" instead
-        # of lying with "building", and ``cancel()`` can still stop them.
-        # Values are per-spawn records ``{"cancelled": bool, "queued_at": str}``
-        # held by identity in the worker's closure: a cancelled waiter's record
-        # is removed here, so a later spawn for the same notebook installs a
-        # fresh record and can never be aborted by the older cancellation.
-        self._scale_waiting: dict[str, dict] = {}
+        # Notebooks admitted for IMMEDIATE execution that lost the race for a
+        # concurrency slot: no thread, no ``building`` claim, just a record of
+        # "run this as soon as a slot frees". Same entry shape as
+        # ``idle_queue`` (mode, queued_at_iso) and guarded by the same
+        # ``building_lock``, but a different promise: the idle queue waits for
+        # the off-peak window, this one only for a slot, so it is drained by
+        # the completion handoff (``_handoff_free_slot``) and by every
+        # scheduler tick regardless of the window.
+        self._scale_pending: dict[str, tuple[str, str]] = {}
         # Test seam for the backoff clock (monotonic, immune to wall-clock
         # jumps). Patching the module-global ``time.monotonic`` would be
         # process-wide and would also skew unrelated worker threads.
@@ -701,9 +702,9 @@ class ScaleArtifactRuntime:
             tuple(self.projections.version_signal(notebook_id)),
             manifest_ident,
             notebook_id in self.building,
-            # 等 slot → 真正开跑是纯内存态转换,且两者都在 `building` 里,少了这一位
-            # 该转换就不会失效 memo,体检会继续报「已排队」(codex batch-0 Z5 P2-3)。
-            notebook_id in self._scale_waiting,
+            # 等 slot 的库既不在 building 也不在 idle_queue,少了这一位,「未建索引」
+            # 与「已排队等 slot」在体检 memo 上无从分辨(codex batch-0 Z5 P2-3)。
+            notebook_id in self._scale_pending,
             notebook_id in self.idle_queue,
         )
 
@@ -721,37 +722,30 @@ class ScaleArtifactRuntime:
         is chronological order."""
         with self.building_lock:
             entries = list(self.idle_queue.items())
-        length = len(entries)
-        ordered = sorted(entries, key=lambda item: (item[1][1], item[0]))
-        position = 0
-        queued_at = ""
-        for index, (entry_id, entry) in enumerate(ordered):
-            if entry_id == notebook_id:
-                position = index + 1
-                queued_at = entry[1]
-                break
-        return position, length, queued_at
+        return self._entry_snapshot(entries, notebook_id)
 
-    def _waiting_snapshot(self, notebook_id: str) -> tuple[int, int, str]:
-        """The queued-shape triple for a notebook waiting on a build slot.
+    def _pending_snapshot(self, notebook_id: str) -> tuple[int, int, str]:
+        """The same triple over ``_scale_pending``.
 
-        Same contract as ``_queue_snapshot`` (1-based position, total, this
-        entry's queued_at) but over ``_scale_waiting``: these are two distinct
-        queues that happen to share the display shape — the idle queue waits
-        for the off-peak window, this one for a concurrency slot. Position is
-        derived from the spawn stamp, and (like the idle queue's) describes
-        arrival order, not a guaranteed wake order — the semaphore makes no
-        FIFO promise.
+        Two distinct queues that share the entry shape and the display shape:
+        the idle queue waits for the off-peak window, this one for a
+        concurrency slot. Position describes arrival order — the slot handoff
+        walks the pending map in that order, but a concurrent admission can
+        still take a freed slot first, so it is an estimate, exactly like the
+        idle queue's.
         """
         with self.building_lock:
-            entries = [
-                (entry_id, str(record.get("queued_at", "")))
-                for entry_id, record in self._scale_waiting.items()
-            ]
-        ordered = sorted(entries, key=lambda item: (item[1], item[0]))
-        for index, (entry_id, queued_at) in enumerate(ordered):
+            entries = list(self._scale_pending.items())
+        return self._entry_snapshot(entries, notebook_id)
+
+    @staticmethod
+    def _entry_snapshot(
+        entries: list[tuple[str, tuple[str, str]]], notebook_id: str
+    ) -> tuple[int, int, str]:
+        ordered = sorted(entries, key=lambda item: (item[1][1], item[0]))
+        for index, (entry_id, entry) in enumerate(ordered):
             if entry_id == notebook_id:
-                return index + 1, len(entries), queued_at
+                return index + 1, len(entries), entry[1]
         return 0, len(entries), ""
 
     def status(self, notebook_id: str) -> dict:
@@ -764,15 +758,16 @@ class ScaleArtifactRuntime:
         if tier is None:
             raise KeyError(notebook_id)
         out_dir = self.artifacts.scale_dir(notebook_id)
-        # One coherent snapshot of the three membership tests: a waiter is a
-        # claimed-but-not-started build (see ``_scale_waiting``) and must be
-        # reported as queued, not as building — 18 notebooks blocked behind a
-        # 2-slot semaphore all claiming「构建中…」is a lie the user cannot even
-        # cancel (codex batch-0 Z5 P2-3).
+        # One coherent snapshot of the three membership tests: a notebook
+        # parked for a concurrency slot has no worker and no claim, and must be
+        # reported as queued — 18 notebooks behind a 2-slot ceiling all
+        # claiming「构建中…」is a lie the user cannot even cancel (codex
+        # batch-0 Z5 P2-3). Reading them under one lock also stops the
+        # pending→building transition from momentarily looking like neither.
         with self.building_lock:
-            waiting = notebook_id in self._scale_waiting
-            building = notebook_id in self.building and not waiting
-            queued = waiting or notebook_id in self.idle_queue
+            building = notebook_id in self.building
+            pending = notebook_id in self._scale_pending
+            queued = pending or notebook_id in self.idle_queue
         exists = (out_dir / "manifest.json").exists()
         delta = self.builder._index_delta(notebook_id)
         total_chunks = self.projections.total_chunk_count(notebook_id)
@@ -799,13 +794,13 @@ class ScaleArtifactRuntime:
             result["state"] = "building"
         elif queued:
             result["state"] = "queued"
-            if waiting:
+            if pending:
                 # A slot waiter shares the queued SHAPE but not the off-peak
                 # fields: it is waiting for a concurrency slot, not for the
                 # window, and will start as soon as one frees. Omitting them
                 # makes the client fall back to its neutral "将在服务器空闲时
                 # 构建" wording, which is exactly what happens here.
-                position, length, queued_at = self._waiting_snapshot(notebook_id)
+                position, length, queued_at = self._pending_snapshot(notebook_id)
                 result.update(
                     {
                         "queue_position": position,
@@ -1042,6 +1037,32 @@ class ScaleArtifactRuntime:
             prior[1] if prior is not None else _utc_now_iso(),
         )
 
+    def _park_pending(self, notebook_id: str, mode: str) -> None:
+        """Park an immediate request that could not get a concurrency slot.
+
+        Caller must hold ``building_lock``. Re-parking updates the mode (the
+        newer request wins, as in ``trigger(when="idle")``) and keeps the
+        original stamp so the handoff order stays anchored to first arrival.
+        """
+        prior = self._scale_pending.get(notebook_id)
+        self._scale_pending[notebook_id] = (
+            mode,
+            prior[1] if prior is not None else _utc_now_iso(),
+        )
+
+    def _slot_available(self) -> bool:
+        """Peek at the concurrency ceiling without committing to a build.
+
+        Used to keep a drain from paying a full admission check (a DB read)
+        per parked notebook when nothing can start anyway. Losing the peeked
+        slot to a concurrent admission is harmless: that thread is starting
+        the work this drain would have started.
+        """
+        if not self._scale_build_semaphore.acquire(blocking=False):
+            return False
+        self._scale_build_semaphore.release()
+        return True
+
     def _run_scale_op(
         self,
         notebook_id: str,
@@ -1049,6 +1070,7 @@ class ScaleArtifactRuntime:
         *,
         supersede_idle: bool = False,
         claim_idle: bool = False,
+        claim_pending: bool = False,
         queue_full_if_busy: bool = False,
         manual: bool = False,
     ) -> bool:
@@ -1059,6 +1081,7 @@ class ScaleArtifactRuntime:
                 mode,
                 supersede_idle=supersede_idle,
                 claim_idle=claim_idle,
+                claim_pending=claim_pending,
                 queue_full_if_busy=queue_full_if_busy,
                 manual=manual,
             )
@@ -1072,6 +1095,7 @@ class ScaleArtifactRuntime:
         *,
         supersede_idle: bool = False,
         claim_idle: bool = False,
+        claim_pending: bool = False,
         queue_full_if_busy: bool = False,
         manual: bool = False,
     ) -> str:
@@ -1089,9 +1113,17 @@ class ScaleArtifactRuntime:
         to a stale ``queued`` state after the immediate build finishes.
 
         The scheduler uses ``claim_idle`` to consume only an operation it can
-        start.  A notebook that is already building keeps its queued follow-up,
+        start (``claim_pending`` is the same contract over the slot-parked
+        map).  A notebook that is already building keeps its queued follow-up,
         and the queued mode is read while holding the claim lock so an updated
         request cannot be replaced by an older scheduler snapshot.
+
+        Execution admission is a NON-BLOCKING ticket taken here, under the
+        claim lock, and released by the worker this call spawns. No ticket
+        means no thread: the request is parked in ``_scale_pending`` (or left
+        in whichever queue it came from) and returns ``queued``. That is what
+        keeps live worker threads bounded by ``scale_build_concurrency``
+        instead of by the queue length (codex PR#627 R1 P1).
 
         An idle request created *after* a claim is deliberately preserved:
         it may represent content committed while the current generation is
@@ -1136,61 +1168,76 @@ class ScaleArtifactRuntime:
             publish_snapshot(self._resolve_index_owner(notebook_id))
             return _SCALE_OP_QUEUED
         removed_idle_entry = None
+        removed_pending_entry = None
+        parked = False
         with self.building_lock:
-            # Waiters are a subset of ``building``, so this one membership test
-            # keeps covering both "executing" and "spawned, waiting for a slot".
             if notebook_id in self.building:
                 if queue_full_if_busy:
                     self._queue_full_followup(notebook_id)
                     return _SCALE_OP_QUEUED
                 return _SCALE_OP_REFUSED
-            if claim_idle:
-                removed_idle_entry = self.idle_queue.pop(notebook_id, None)
-                if removed_idle_entry is None:
-                    return _SCALE_OP_REFUSED
-                mode = removed_idle_entry[0]
-            elif supersede_idle:
-                removed_idle_entry = self.idle_queue.pop(notebook_id, None)
-            self.building.add(notebook_id)
-            # Claimed but not started: until the worker wins a concurrency slot
-            # this notebook is queued, not building (see ``_scale_waiting``).
-            waiter = {"cancelled": False, "queued_at": _utc_now_iso()}
-            self._scale_waiting[notebook_id] = waiter
-        # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
-        # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
+            # Does the work this call claims to consume still exist? Checked
+            # before taking a ticket so a stale drain cannot borrow one.
+            if claim_idle and notebook_id not in self.idle_queue:
+                return _SCALE_OP_REFUSED
+            if claim_pending and notebook_id not in self._scale_pending:
+                return _SCALE_OP_REFUSED
+            if not self._scale_build_semaphore.acquire(blocking=False):
+                # Every slot is busy. Park the request as data — parking it as
+                # a blocked thread is what made the ceiling meaningless
+                # (codex PR#627 R1 P1). Work already parked in a queue stays
+                # exactly where it is; only a fresh immediate request needs a
+                # record of its own. A freed slot comes back to it through
+                # ``_handoff_free_slot`` / the scheduler tick.
+                if claim_idle or claim_pending:
+                    # Already parked in a queue a drain is walking; leave it.
+                    return _SCALE_OP_QUEUED
+                if supersede_idle:
+                    # An immediate request outranks this notebook's own
+                    # off-peak entry even when it has to wait for a slot: it
+                    # will run strictly sooner, so no work is lost.
+                    self.idle_queue.pop(notebook_id, None)
+                self._park_pending(notebook_id, mode)
+                parked = True
+            else:
+                # A ticket is held from here on: every exit must either hand it
+                # to the worker (which releases it in its finally) or release
+                # it.
+                if claim_idle:
+                    removed_idle_entry = self.idle_queue.pop(notebook_id)
+                    mode = removed_idle_entry[0]
+                elif claim_pending:
+                    removed_pending_entry = self._scale_pending.pop(notebook_id)
+                    mode = removed_pending_entry[0]
+                elif supersede_idle:
+                    removed_idle_entry = self.idle_queue.pop(notebook_id, None)
+                if removed_pending_entry is None:
+                    # This request is about to run, so its own parked copy (if
+                    # any) must not start a second time for the same notebook.
+                    removed_pending_entry = self._scale_pending.pop(
+                        notebook_id, None
+                    )
+                self.building.add(notebook_id)
         # owner 复用完成通知那套解析,fail-open 在 publish_snapshot 内。
         from app.services.pending_bus import publish_snapshot
 
+        if parked:
+            # The completion handoff normally wakes parked work; the scheduler
+            # is the floor under it if no worker tail ever runs (hard-killed
+            # process, or a slot held by a build that outlives this request).
+            self._ensure_scheduler()
+            # 与 trigger(when="idle") 对称:新出现的「已排队」项要立刻推给铃铛,
+            # 否则要等重连才看得到(codex R5 P2)。
+            publish_snapshot(self._resolve_index_owner(notebook_id))
+            return _SCALE_OP_QUEUED
+        # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
+        # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
         publish_snapshot(self._resolve_index_owner(notebook_id))
 
         def run() -> None:
+            # This worker owns the concurrency ticket its admitting thread
+            # took; the finally below is the single release site.
             succeeded = False
-            # Z5: bound how many notebooks execute a build/fold at once,
-            # process-wide. This thread is already spawned and counted in
-            # ``self.building`` — it just blocks here, off the calling
-            # thread, until a slot is free. A single build's own duration is
-            # unaffected; only cross-notebook fan-out is capped.
-            self._scale_build_semaphore.acquire()
-            with self.building_lock:
-                # Only this spawn's own record may promote it: a cancellation
-                # dropped the record (and the ``building`` claim) already, and
-                # a later spawn owns a different record.
-                aborted = (
-                    waiter["cancelled"]
-                    or self._scale_waiting.get(notebook_id) is not waiter
-                )
-                if not aborted:
-                    self._scale_waiting.pop(notebook_id, None)
-            if aborted:
-                # Nothing was attempted, so the failure/backoff state is left
-                # alone, and ``cancel()`` already released the claim — this
-                # thread must not discard a ``building`` entry that a newer
-                # request may since have made its own.
-                self._scale_build_semaphore.release()
-                return
-            # Now genuinely executing: refresh the bell so the item flips from
-            # 「已排队」to「构建中」without waiting for a reconnect.
-            publish_snapshot(self._resolve_index_owner(notebook_id))
             try:
                 operation = self._resolve_mode(notebook_id, mode)
                 if operation == "fold":
@@ -1230,18 +1277,36 @@ class ScaleArtifactRuntime:
                         )
                     except Exception:
                         pass
+                # The slot this worker just released is the only thing the
+                # parked queues are waiting for, and nothing else is watching
+                # for it — without this handoff a pending entry would sit
+                # until the next scheduler tick (or, outside the off-peak
+                # window, until some unrelated request happened to arrive).
+                try:
+                    self._handoff_free_slot()
+                except Exception:  # noqa: BLE001 - daemon tail stays fail-open
+                    try:
+                        self.event_log.logger.exception(
+                            "scale slot handoff failed after %s", notebook_id
+                        )
+                    except Exception:
+                        pass
 
         try:
             self._start_daemon(f"scaleidx-{notebook_id}", run)
         except Exception:
+            self._scale_build_semaphore.release()  # the worker never got it
             with self.building_lock:
                 self.building.discard(notebook_id)
-                self._scale_waiting.pop(notebook_id, None)
                 # Starting the immediate worker failed before it could do any
-                # work.  Restore the displaced off-peak request unless a newer
-                # request was queued in the meantime.
+                # work.  Restore the displaced requests unless a newer one was
+                # queued in the meantime.
                 if removed_idle_entry is not None:
                     self.idle_queue.setdefault(notebook_id, removed_idle_entry)
+                if removed_pending_entry is not None:
+                    self._scale_pending.setdefault(
+                        notebook_id, removed_pending_entry
+                    )
             raise
         return _SCALE_OP_STARTED
 
@@ -1278,7 +1343,69 @@ class ScaleArtifactRuntime:
         )
         return {"status": "refused", "notebook_id": notebook_id}
 
-    def _process_idle_queue(self, force: bool = False) -> None:
+    def _handoff_free_slot(self) -> None:
+        """Hand the concurrency slot this worker just released to parked work.
+
+        Admission never blocks a thread on the ceiling, so a freed slot has no
+        thread waiting to grab it — this is the wake-up. Deliberately capped at
+        ONE start: this tail freed exactly one slot, and the other slots have
+        (or will have) tails of their own. Draining greedily here would let a
+        single finishing worker spawn the entire queue back-to-back — bounded
+        in *executing* builds, but not in live threads, which is the property
+        this whole design exists to keep (codex PR#627 R1 P1).
+        """
+        if not self._slot_available():
+            return
+        self._process_idle_queue(force=False, limit=1)
+
+    def _drain_pending_slots(self, limit: Optional[int] = None) -> int:
+        """Start parked immediate work while slots remain; returns starts.
+
+        Unlike the idle queue this ignores the off-peak window: these requests
+        were admitted for immediate execution and only lost a race for a slot,
+        so making them wait for 02:00 would be a different (and much slower)
+        promise than the one their caller was given.
+        """
+        with self.building_lock:
+            candidates = sorted(
+                self._scale_pending.items(),
+                key=lambda item: (item[1][1], item[0]),
+            )
+        started = 0
+        for notebook_id, entry in candidates:
+            if limit is not None and started >= limit:
+                break
+            # Re-checked every iteration: one start consumes the slot, and
+            # stopping here keeps a full queue from paying an admission check
+            # (a DB read) per parked notebook on every tick.
+            if not self._slot_available():
+                break
+            try:
+                if self._run_scale_op(notebook_id, entry[0], claim_pending=True):
+                    started += 1
+            except Exception:  # noqa: BLE001 - one item must not drain the tick
+                try:
+                    self.event_log.logger.exception(
+                        "scale pending item failed for %s", notebook_id
+                    )
+                except Exception:
+                    pass
+        return started
+
+    def _process_idle_queue(
+        self, force: bool = False, limit: Optional[int] = None
+    ) -> None:
+        """Start as much queued work as the ceiling allows.
+
+        ``limit`` caps how many operations this pass may start (the completion
+        handoff passes 1 — see ``_handoff_free_slot``); the scheduler tick
+        leaves it unset and fills every free slot.
+        """
+        # Slot-parked work drains on every tick: it is waiting for a slot, not
+        # for the window (see ``_drain_pending_slots``).
+        started = self._drain_pending_slots(limit=limit)
+        if limit is not None and started >= limit:
+            return
         if not force:
             in_window, _next_start = offpeak_window_state(
                 datetime.datetime.now().astimezone(),
@@ -1290,11 +1417,16 @@ class ScaleArtifactRuntime:
         with self.building_lock:
             queued_notebook_ids = list(self.idle_queue)
         for notebook_id in queued_notebook_ids:
+            if not self._slot_available():
+                return
             try:
                 # Claim each entry independently.  Busy notebooks stay queued,
                 # and one daemon-start failure restores that entry without
                 # preventing the remaining notebooks from being considered.
-                self._run_scale_op(notebook_id, "auto", claim_idle=True)
+                if self._run_scale_op(notebook_id, "auto", claim_idle=True):
+                    started += 1
+                    if limit is not None and started >= limit:
+                        return
             except Exception:  # noqa: BLE001 - one item must not drain the tick
                 try:
                     self.event_log.logger.exception(
@@ -1369,14 +1501,21 @@ class ScaleArtifactRuntime:
 
             publish_snapshot(self._resolve_index_owner(notebook_id))
             return {"status": "queued", "notebook_id": notebook_id}
-        started = self._run_scale_op(
+        outcome = self._admit_scale_op(
             notebook_id,
             mode,
             supersede_idle=True,
             manual=manual,
         )
+        # "queued" here means the ceiling was full and the request is parked
+        # for the next free slot — the same word ``when="idle"`` already
+        # returns, and the truth: reporting "already_building" would name a
+        # build that is not running (nothing was claimed).
         return {
-            "status": "building" if started else "already_building",
+            "status": {
+                _SCALE_OP_STARTED: "building",
+                _SCALE_OP_QUEUED: "queued",
+            }.get(outcome, "already_building"),
             "notebook_id": notebook_id,
         }
 
@@ -1384,35 +1523,25 @@ class ScaleArtifactRuntime:
         """Stop this notebook's pending index work, if it has not started.
 
         Three cases: executing (not interruptible — the worker is inside the
-        builder), waiting for a concurrency slot (interruptible: nothing has
-        been attempted yet), or queued for the off-peak window.
+        builder), parked for a concurrency slot, or queued for the off-peak
+        window. The last two are plain records with no thread behind them, so
+        cancelling is just dropping the record — nothing has been attempted,
+        nothing needs to be woken, and no failure/backoff state is touched.
         """
         self.get_notebook(notebook_id)
         with self.building_lock:
-            waiter = self._scale_waiting.get(notebook_id)
-            if waiter is not None:
-                # Claimed but not started. Release the claim here so the user
-                # can immediately re-trigger, and leave a flag the spawned
-                # thread reads when the semaphore finally wakes it: it then
-                # exits without touching ``building`` (which a newer request
-                # may own by then) or the failure/backoff state (nothing was
-                # attempted, so nothing failed).
-                waiter["cancelled"] = True
-                self._scale_waiting.pop(notebook_id, None)
-                self.building.discard(notebook_id)
-                # A follow-up queued behind this build (queue_full_if_busy) is
-                # dropped with it: "cancel" means this notebook's pending index
-                # work stops, and leaving the entry would have the scheduler
-                # silently start the very build the user just cancelled.
-                self.idle_queue.pop(notebook_id, None)
-                building = False
-                removed = True
-            elif notebook_id in self.building:
+            if notebook_id in self.building:
                 building = True
                 removed = False
             else:
                 building = False
-                removed = self.idle_queue.pop(notebook_id, None) is not None
+                # Drop both records: "cancel" means this notebook's pending
+                # index work stops, and leaving either one would have the
+                # scheduler silently start the very build the user cancelled.
+                removed = self._scale_pending.pop(notebook_id, None) is not None
+                removed = (
+                    self.idle_queue.pop(notebook_id, None) is not None or removed
+                )
         if building:
             return {
                 "cancelled": False,
@@ -1448,7 +1577,11 @@ class ScaleArtifactRuntime:
             return
         if notebook_id in self.auto_index_checked:
             return
-        if notebook_id in self.building or notebook_id in self.idle_queue:
+        if (
+            notebook_id in self.building
+            or notebook_id in self.idle_queue
+            or notebook_id in self._scale_pending
+        ):
             self.auto_index_checked.add(notebook_id)
             return
         try:
