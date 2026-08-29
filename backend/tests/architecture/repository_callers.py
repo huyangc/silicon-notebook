@@ -78,6 +78,7 @@ SQL_REASON_BY_PATH = {
     "scripts/backfill_knowhow_md.py": "read-only planning for an operator-supplied maintenance database",
     "scripts/diag_open_latency.py": "read-only host database diagnostic",
     "scripts/diag_db.py": "read-only host database diagnostic",
+    "scripts/diag_pg_hotpaths.py": "read-only host database diagnostic",
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/kg_quality_audit.py": "read-only host database diagnostic",
@@ -93,23 +94,18 @@ FACADE_IMPORT_REASON_BY_PATH = {
     "backend/app/eval/run_all.py": "evaluation composition root",
     "backend/app/eval/sa_calibration.py": "evaluation composition root",
     "backend/app/eval/speed.py": "evaluation composition root",
-    "backend/app/scripts/backfill_relation_embeddings.py": "offline CLI composition root",
-    "backend/app/scripts/build_kg.py": "offline CLI composition root",
     "backend/app/scripts/gen_recall_gold.py": "offline CLI composition root",
-    "backend/app/scripts/recluster_kg.py": "offline CLI composition root",
-    "backend/app/scripts/reembed_kg.py": "offline CLI composition root",
-    "backend/app/services/batch_ingest.py": "batch-ingest CLI composition root",
+    # Kept although FACADE_IMPORT_TARGETS currently misses it: the shim still
+    # late-binds facade privates via `from app.services.sqlite_repository
+    # import _new_id / _COPY_CHUNK`, member imports the target set does not
+    # match. The boundary is real; only the scan is blind to this spelling.
     "backend/app/services/sqlite_notebook_sharing.py": (
         "compatibility shim late-binds legacy facade monkeypatch seams"
     ),
-    "scripts/backfill_kg_embeddings.py": "offline CLI composition root",
     "scripts/backfill_knowhow_md.py": "offline maintenance CLI composition root",
     "scripts/bench_sqlite_writes.py": "synthetic benchmark composition root",
-    "scripts/build_chunks.py": "offline CLI composition root",
-    "scripts/denoise_reextract_nb.py": "offline CLI composition root",
     "scripts/generate_repository_contract_fixtures.py": "contract fixture composition root",
     "scripts/kg_product_smoke.py": "offline smoke composition root",
-    "scripts/reextract_notebook.py": "offline CLI composition root",
     "scripts/replay_retrieval.py": "offline CLI composition root",
     "scripts/smoke_backend.py": "offline smoke composition root",
     "scripts/verify_repository_snapshot.py": "backup-only verifier composition root",
@@ -124,7 +120,8 @@ FACADE_IMPORT_TARGETS = {
 PRIVATE_REASON_BY_PATH = {
     "backend/app/api/deps.py": "composition root extracts narrow runtime ports",
     "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
-    "backend/app/api/mcp_server.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/knowhow_routes.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/mcp_tools/maintenance.py": "API readiness checks the process-owned model provider",
     "backend/app/api/report_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/source_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",
