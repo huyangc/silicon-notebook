@@ -12,6 +12,7 @@ from app.repositories.ports import (
     CatalogStorePort,
     ChunkStorePort,
     EmbeddingStorePort,
+    ExtensionToggleStorePort,
     GovernanceStorePort,
     GroupStorePort,
     IdentityStorePort,
@@ -62,6 +63,7 @@ class PersistenceBundle(Protocol):
     agent_profile: AgentProfileStorePort
     retrieval_experiences: RetrievalExperienceStorePort
     agent_observations: AgentObservationStorePort
+    extension_toggles: ExtensionToggleStorePort
 
 
 class PersistenceBundleFactory(Protocol):

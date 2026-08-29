@@ -270,6 +270,11 @@ class _PersistenceSeats:
     # and T5 (the member-facing "my observations" API) wire on top of
     # this. See AgentObservationStorePort in repositories/ports.py.
     agent_observations: Any
+    # Deployment-plugin runtime enable/disable switch + audit (who, when):
+    # bare store seat, no consumer yet — T3 (the admission-gate refresh
+    # service) and T4 (the admin route + PATCH endpoint) wire on top of
+    # this. See ExtensionToggleStorePort in repositories/ports.py.
+    extension_toggles: Any
     source_store: Any
     chunk_store: Any
     # Task 25: reports-table row persistence is seam-free (the shared
@@ -368,6 +373,7 @@ def _build_persistence_seats(
         agent_profile=bundle.agent_profile,
         retrieval_experiences=bundle.retrieval_experiences,
         agent_observations=bundle.agent_observations,
+        extension_toggles=bundle.extension_toggles,
         source_store=bundle.sources,
         chunk_store=bundle.chunks,
         report_store=bundle.reports,
@@ -990,6 +996,7 @@ class RepositoryRuntime:
         self.agent_profile = seats.agent_profile
         self.retrieval_experiences = seats.retrieval_experiences
         self.agent_observations = seats.agent_observations
+        self.extension_toggles = seats.extension_toggles
         self.source_store = seats.source_store
         self.chunk_store = seats.chunk_store
         self.report_store = seats.report_store

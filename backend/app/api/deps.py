@@ -11,7 +11,7 @@ from app.core.request_context import set_request_user, reset_request_user
 from app.models.identity import UserProfile
 from app.bootstrap import application_extension_runtime, create_application_repository
 from app.domain.report_export import ReportExporterHostPort
-from app.repositories.ports import AdminQueryRepository, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
+from app.repositories.ports import AdminQueryRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
 
 
 @lru_cache
@@ -25,6 +25,9 @@ def report_exporter_host() -> ReportExporterHostPort:
 
 def identity_repository() -> IdentityRepository:
     return repository()._runtime.identity  # type: ignore[attr-defined]
+
+def extension_toggle_repository() -> ExtensionToggleStorePort:
+    return repository()._runtime.extension_toggles  # type: ignore[attr-defined]
 
 def admin_query_repository() -> AdminQueryRepository:
     return repository()._runtime.queries  # type: ignore[attr-defined]

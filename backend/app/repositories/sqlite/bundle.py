@@ -15,6 +15,7 @@ from app.repositories.sqlite.catalog_store import CatalogStore
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.embedding_store import EmbeddingStore
+from app.repositories.sqlite.extension_toggle_store import ExtensionToggleStore
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.group_store import GroupStore
 from app.repositories.sqlite.identity_store import IdentityStore
@@ -75,6 +76,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     agent_profile: AgentProfileStore
     retrieval_experiences: RetrievalExperienceStore
     agent_observations: AgentObservationStore
+    extension_toggles: ExtensionToggleStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -137,6 +139,7 @@ class SqlitePersistenceBundleFactory:
         agent_observations = AgentObservationStore(
             database, new_id=seams.new_id, now=seams.now
         )
+        extension_toggles = ExtensionToggleStore(database)
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -163,4 +166,5 @@ class SqlitePersistenceBundleFactory:
             agent_profile=agent_profile,
             retrieval_experiences=retrieval_experiences,
             agent_observations=agent_observations,
+            extension_toggles=extension_toggles,
         )

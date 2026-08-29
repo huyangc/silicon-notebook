@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=62, postgres_version=40, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=63, postgres_version=41, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -38,8 +38,11 @@ COPY_READY_SCHEMA_PAIRS: frozenset[SchemaPair] = frozenset()
 
 # Declarative transform vocabulary.  A pipeline joins these names with "+";
 # later row transformers provide the direction-specific implementation.  The
-# current schema intentionally keeps SQLite integer flags as PostgreSQL bigint,
-# so boolean is registered but not selected by an epoch-1 table.
+# schema kept SQLite integer flags as PostgreSQL bigint through epoch 1 for
+# every table but one: SQLite v63 / PostgreSQL v41's
+# extension_runtime_toggles.enabled is the first column selecting "boolean" —
+# a reviewed, table-specific choice (see 0041_extension_runtime_toggles.sql),
+# not a change to the bigint convention for every other integer flag.
 COLUMN_TRANSFORMS = {
     "identity": "no storage conversion",
     "timestamptz": "SQLite ISO text <-> PostgreSQL timestamptz",
@@ -742,6 +745,23 @@ _TABLES = (
         (),
         ReplicationKeyKind.DECLARED_PK,
         89,
+    ),
+    # SQLite v63 / PostgreSQL v41: the deployment-plugin runtime
+    # enable/disable switch + audit. No FK of any kind (plugin_id is an
+    # EXTENSIONS_CONFIG identifier, not a row in any other table), so the
+    # appended rank is FK-consistent by construction and it stays a leaf
+    # table. The declared replication key is the table's single-column
+    # `plugin_id` primary key, matching the SQLite `TEXT PRIMARY KEY`
+    # declaration verbatim — the park precondition (see the agent-profile
+    # and retrieval-experience notes above): _build_unique_surfaces resolves
+    # the one surface to REPLICATION_KEY, so no sentinel column, no nullable
+    # column and no leaf delete/reinsert is involved.
+    _table(
+        "extension_runtime_toggles",
+        ("plugin_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        90,
+        "timestamptz+boolean",
     ),
 )
 

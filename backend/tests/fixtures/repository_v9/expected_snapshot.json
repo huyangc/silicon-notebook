@@ -1943,6 +1943,11 @@
         "type": "table"
       },
       {
+        "name": "extension_runtime_toggles",
+        "sql_sha256": "256d7a9030fcd6673ed7ee5b5d3ac5a74ae917ad20330a32b34d1fb86a69afea",
+        "type": "table"
+      },
+      {
         "name": "extraction_runs",
         "sql_sha256": "e4a76c5b05e5cf3e6e54557ec64f6d04aa955a39f1f61085a460edf6776e938b",
         "type": "table"
@@ -2308,6 +2313,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 62
+    "user_version": 63
   }
 }

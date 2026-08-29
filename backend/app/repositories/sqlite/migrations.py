@@ -97,7 +97,10 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # question overview. Its expression is byte-for-byte aligned with the activity
 # query's normalized absolute-time ordering, so keyset LIMIT avoids a global
 # ask_jobs scan plus temp sort.
-SCHEMA_VERSION = 62
+# v63 adds extension_runtime_toggles — the deployment-plugin runtime
+# enable/disable switch + audit (who, when). No row means enabled, so a
+# fresh/unmodified deployment behaves exactly as before this table existed.
+SCHEMA_VERSION = 63
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3401,6 +3404,47 @@ class SqliteMigrator:
                 "id DESC)"
             )
 
+    def _migration_63(self) -> None:
+        """``extension_runtime_toggles`` —— 部署插件运行时开关 + 审计。
+
+        「关」是一道全局闸,不是「卸载」:registry 冻结时仍照 TOML 装载这个
+        插件,只是它在贡献点求值(``contribution_availability`` /
+        ``capability_availability``)处提前返回 ``DISABLED, "admin_disabled"``。
+        **这条闸的每次求值只读进程内快照,绝不现查这张表**——本表是写路径与
+        刷新路径唯一的持久层:写路径改完本表立即让快照失效并重建,其余进程
+        靠低频轮询把本表读进各自的快照。求值路径因此仍是零 I/O,不会退化成
+        每次贡献点判定都打一次数据库(那既是 N+1,也破坏 probe 零 I/O 的既有
+        教义)。秒级生效、不需要重启。TOML 的 ``enabled=false`` / 未点名的
+        插件仍然是「装不装载」这条更早的闸,本表管不到——两层语义故意分开。
+
+        **无行 = 启用**,这是这张表唯一的存在理由能不动老部署的关键:全新库、
+        或从未有管理员碰过这张表的老库,查询结果恒为空集,行为与这张表出现
+        之前逐字节相同。``updated_by``/``updated_at`` 是审计字段——谁在什么
+        时候关/开过这个插件;写路径在同一写事务内按 actor 现时角色复检 admin,
+        逐条镜像 ``identity_store.set_user_role`` 的复检与拒绝方式(非 admin
+        → ``PermissionError``,且不写入)。
+
+        ``enabled`` 刻意不加 ``CHECK(enabled IN (0,1))``——仓库里其它 INTEGER
+        标志位列同样不加,这里维持现状而非另立新规。代价是 0/1 之外的值能写
+        进这一列,后果在 ``sqlite_to_postgres.py`` 的 ``_transform_sqlite_value``
+        ``bool`` 分支里现身:那种值会 ``raise SqliteToPostgresMigrationError``
+        硬失败,而不是被悄悄折成 ``true``/``false``——这是接受的取舍,不是遗漏。
+
+        行**不**随插件从 TOML 移除而删除:管理员的决定要在配置调整、甚至该
+        插件被临时摘掉又装回来之间幸存——同一个 ``plugin_id`` 再次出现时,
+        沿用它上一次被设置的开关,而不是悄悄回到默认启用。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS extension_runtime_toggles (
+                  plugin_id TEXT NOT NULL PRIMARY KEY,
+                  enabled INTEGER NOT NULL,
+                  updated_by TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                """
+            )
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'

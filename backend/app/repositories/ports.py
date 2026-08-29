@@ -393,6 +393,19 @@ class ModelStatusStorePort(Protocol):
 
 
 @runtime_checkable
+class ExtensionToggleStorePort(Protocol):
+    """部署插件运行时开关 + 审计。无行 = 启用——见两个后端 store 实现。"""
+
+    def extension_runtime_disabled_ids(self) -> frozenset[str]: ...
+
+    def list_extension_runtime_toggles(self) -> list[dict]: ...
+
+    def set_extension_runtime_enabled(
+        self, plugin_id: str, enabled: bool, actor_id: str
+    ) -> dict: ...
+
+
+@runtime_checkable
 class KnowhowHistoryStorePort(Protocol):
     def head_seq(self, table_id: str) -> int: ...
     def list_changes(
