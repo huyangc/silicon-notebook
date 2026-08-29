@@ -742,5 +742,7 @@ def test_negative_cache_budgets_are_rejected_at_settings_construction() -> None:
     with pytest.raises(pydantic.ValidationError):
         Settings(database_url="sqlite:///gate-test.db", vector_cache_per_family_entries=0)
     with pytest.raises(pydantic.ValidationError):
+        Settings(database_url="sqlite:///gate-test.db", vector_cache_max_entries=0)
+    with pytest.raises(pydantic.ValidationError):
         Settings(database_url="sqlite:///gate-test.db", vector_cache_max_bytes=-1)
     assert Settings(database_url="sqlite:///gate-test.db", vector_cache_max_bytes=0).vector_cache_max_bytes == 0

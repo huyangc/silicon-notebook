@@ -762,7 +762,7 @@ class Settings(BaseSettings):
     # 分池:每族各有自己的 LRU 上限,族与族之间不再竞争;总条目上限退居兜底,默认
     # 随之从 32 提到 128(≈16 族 × 每族 8),否则它会继续充当挤兑的来源。真正的
     # 内存兜底改由字节预算负责。
-    vector_cache_max_entries: int = Field(128, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
+    vector_cache_max_entries: int = Field(128, ge=1, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
     # 每个键族的 LRU 上限,**单位是笔记本而不是条目**:8 = 同时活跃的库数量级
     # (与 SCALE_IDX_CACHE_MAX 同一口径)。绝大多数键族每库只存一条,两者相等;
     # `matrix` 族每库存四条(knowledge/element/relation/chunk 四张 embedding
