@@ -593,6 +593,17 @@ class ExtensionRegistry:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="unknown_contribution",
             )
+        # Third gate point, and the earliest one this method could have: ahead
+        # of the ``requires`` loop, not delegated to ``contribution_availability``
+        # at the end. A disabled plugin's contribution that requires a core or
+        # built-in capability would otherwise run that decision first — work on
+        # behalf of a plugin nobody may use — and, whenever the decision came
+        # back non-AVAILABLE, would return *its* reason instead of
+        # ``admin_disabled``, hiding the administrator's switch behind an
+        # unrelated one. All three entry points therefore answer identically
+        # for a disabled plugin, and none of them evaluates anything first.
+        if self._plugin_admission_blocked(registered.plugin_id):
+            return _ADMIN_DISABLED
         manifest = self._manifests[registered.plugin_id]
         for capability in manifest.requires:
             # Through ``capability_availability``, not the catalog directly:
@@ -613,13 +624,15 @@ class ExtensionRegistry:
     ) -> Availability:
         """Evaluate one frozen capability decision without a contribution probe.
 
-        Second of the two admission gate points. This entry is not reachable
-        only through ``availability`` — ``parser_chain`` and ``retrieval`` call
-        it directly to ask "can this capability be used at all", with no
-        contribution in hand — so gating it separately is what keeps a disabled
-        plugin's capability from being consulted through that door. A capability
-        with no gateable owner (core's own, or one a built-in provides) never
-        matches and falls straight through to the catalog, unchanged.
+        One of the three admission gate points, and the only one keyed on a
+        capability's *owner* rather than on a contribution's plugin. This entry
+        is not reachable only through ``availability`` — ``parser_chain`` and
+        ``retrieval`` call it directly to ask "can this capability be used at
+        all", with no contribution in hand — so gating it separately is what
+        keeps a disabled plugin's capability from being consulted through that
+        door. A capability with no gateable owner (core's own, or one a
+        built-in provides) never matches and falls straight through to the
+        catalog, unchanged.
         """
 
         self._require_frozen()
@@ -635,15 +648,14 @@ class ExtensionRegistry:
     ) -> Availability:
         """Evaluate only the contribution's I/O-free live probe.
 
-        First of the two admission gate points, and the reason the gate is not
+        One of the three admission gate points, and the reason the gate is not
         installed in ``availability`` alone: ``retrieval`` and ``parser_chain``
         reach this method directly for every contributor and chain link they
-        dispatch, so a gate one level up would leave exactly those two hosts
-        running a disabled plugin's code. ``availability`` inherits the gate
-        from here instead — its ``requires`` loop reads the catalog directly,
-        but it finishes by delegating to this method, so every host that goes
-        through it (ask, ask_engine, indexing, report, report_export,
-        gap_consult) is gated too, without a third copy of the check.
+        dispatch, so a gate only one level up would leave exactly those two
+        hosts running a disabled plugin's code. Every host that arrives through
+        ``availability`` instead (ask, ask_engine, indexing, report,
+        report_export, gap_consult) is stopped by that method's own check
+        before it ever gets here.
 
         The gate sits above the probe, not beside it: a disabled plugin's own
         code must not run, and it is not asked whether it is available.

@@ -611,9 +611,8 @@ def test_disabled_deployment_contribution_is_gated_before_its_probe_runs(
 
     for gated in (
         registry.contribution_availability("corp.probe"),
-        # ``availability`` holds no gate of its own: it inherits this one by
-        # delegating here (and the capability one through its ``requires``
-        # loop, which the cross-plugin case below covers).
+        # ``availability`` gates on its own, ahead of its ``requires`` loop —
+        # the two cases below pin what that ordering is for.
         registry.availability("corp.probe"),
     ):
         assert gated.status is AvailabilityStatus.DISABLED
@@ -697,6 +696,52 @@ def test_capability_gate_covers_deployment_owners_and_spares_core_names(
             AvailabilityStatus.AVAILABLE
         )
     assert len(calls) == 2
+
+
+def test_a_disabled_plugin_is_gated_before_its_own_requires_are_evaluated(
+    admission,
+):
+    """The gate outranks the contribution's ``requires``, and answers for it.
+
+    A disabled plugin's contribution that requires a core capability must not
+    get that capability's decision run on its behalf, and must not have the
+    administrator's switch reported as some unrelated reason — which is what
+    returning the requirement's own verdict would do the moment that verdict
+    is not AVAILABLE.
+    """
+
+    calls = []
+
+    def core_decision(context):
+        calls.append(context)
+        return Availability(
+            AvailabilityStatus.UNAVAILABLE, "core_precondition_missing"
+        )
+
+    declaration = ContributionDeclaration(
+        "corp.probe", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    registry = build_extension_registry(
+        (_Bundle(
+            _deployment("corp.plugin", declaration, requires=("core.cap",)),
+            (object(),),
+        ),),
+        capability_decisions={"core.cap": core_decision},
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+
+    # Enabled: the requirement is evaluated and it is what decides.
+    enabled = registry.availability("corp.probe")
+    assert enabled.status is AvailabilityStatus.UNAVAILABLE
+    assert enabled.reason_code == "core_precondition_missing"
+    assert len(calls) == 1
+
+    admission.publish_disabled_plugin_ids(frozenset({"corp.plugin"}))
+
+    gated = registry.availability("corp.probe")
+    assert gated.status is AvailabilityStatus.DISABLED
+    assert gated.reason_code == "admin_disabled"
+    assert len(calls) == 1
 
 
 def test_a_required_capability_is_gated_by_its_owner_not_by_its_consumer(
