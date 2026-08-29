@@ -857,6 +857,40 @@ test("recovery keeps the notebook held until the projection is actually reloaded
   expect(value!.editor?.busy).toBe(false);
 });
 
+test("an open in flight during recovery publishes the refreshed row, not its snapshot", async () => {
+  // openEditor 的表单快照原本取在它自己那几个请求**之前**。恢复的刷新恰好在这段窗口里
+  // 落地时，发布出来的就是刷新前的旧行——一次未经编辑的「保存」又能把已经落库的值写回
+  // 旧值（codex #629 R7 P1）。
+  const stuck = deferred<NotebookSummary>();
+  const pipeline = deferred<ReturnType<typeof indexingProjection>>();
+  const refreshedRow = notebook("a");
+  refreshedRow.name = "服务端最新";
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  vi.mocked(effects.refreshComposite).mockImplementationOnce(async () => {
+    publish([refreshedRow]);
+  });
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  act(() => { value!.closeEditor(); });
+
+  // 重开的请求先发出去，快照此刻还是旧行。
+  notebookApi.fetchNotebookIndexingPipeline.mockReturnValueOnce(pipeline.promise);
+  let opening!: Promise<boolean>;
+  act(() => { opening = value!.openEditor("a"); });
+
+  // 恢复在这段窗口里跑完并换掉了行。
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+
+  await act(async () => pipeline.resolve(indexingProjection()));
+  await opening;
+  expect(value!.editor?.target.name).toBe("服务端最新");
+});
+
 test("recovery does not claim a refresh that failed", async () => {
   captureRefreshFailureLog();
   const stuck = deferred<NotebookSummary>();

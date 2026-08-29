@@ -731,9 +731,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     editorOperationRef.current = operation;
     editorRevokedOperationRef.current = null;
     try {
-      const target = currentRow(notebookId);
-      if (!target) return false;
-      const canManageContent = rowCanManageContent(notebookId);
+      // Pre-flight only: the row has to exist before spending requests on it, and
+      // owner-only reference I/O is skipped for a non-owner.  What actually gets
+      // published is re-read after the awaits.
+      if (!currentRow(notebookId)) return false;
       const canConfigureNotebook = rowCanConfigure(notebookId);
       const indexingPipelinePromise = fetchNotebookIndexingPipeline(notebookId);
       const [indexingPipeline, mountable, mountEdges] = canConfigureNotebook
@@ -752,11 +753,18 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         || editorOperationRef.current !== operation
         || !rowCanManageContent(notebookId)
       ) return false;
+      // Publish the row as it stands *now*, not the snapshot taken before these
+      // requests.  A collection refresh can land while this open is in flight —
+      // the abandoned-commit recovery is exactly that — and publishing the
+      // pre-await snapshot would hand back a form older than the server, which a
+      // plain 保存 would then write back over what just committed.
+      const published = currentRow(notebookId);
+      if (!published) return false;
       setEditor({
         owner,
-        target,
-        canManageContent,
-        canConfigureNotebook,
+        target: published,
+        canManageContent: rowCanManageContent(notebookId),
+        canConfigureNotebook: rowCanConfigure(notebookId),
         mountable,
         mountEdges,
         mountedIds: mountEdges.map((edge) => edge.id),
