@@ -79,6 +79,8 @@ type EditorView = {
   busy: boolean;
 };
 
+type EditorOperation = Readonly<{ notebookId: string }>;
+
 type DeleteView = {
   owner: CollectionOwner;
   target: NotebookSummary;
@@ -143,14 +145,15 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   const listIssuedRef = useRef(0);
   const listPublishedRef = useRef(0);
   const searchGenerationRef = useRef(0);
-  const editorOperationRef = useRef<object | null>(null);
+  const editorOperationRef = useRef<EditorOperation | null>(null);
   const deleteOperationRef = useRef<object | null>(null);
   const createOperationRef = useRef<{ owner: CollectionOwner; token: object } | null>(null);
   // Tie the single-flight seat to the editor operation that acquired it.  A
   // successful save closes the editor before the post-write collection refresh
   // finishes, so a bare boolean can leak forever when the user reopens settings
   // and replaces editorOperationRef before the old finally block runs.
-  const editorSavingRef = useRef<object | null>(null);
+  const editorSavingRef = useRef<EditorOperation | null>(null);
+  const editorRevokedOperationRef = useRef<EditorOperation | null>(null);
   const deletingRef = useRef(new Set<string>());
   const renamingRef = useRef(new Map<string, object>());
   const tombstonesRef = useRef(new Map<string, Set<string>>());
@@ -191,6 +194,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     deleteOperationRef.current = null;
     createOperationRef.current = null;
     editorSavingRef.current = null;
+    editorRevokedOperationRef.current = null;
   };
 
   // Authentication changes are synchronous authority boundaries.  The pending
@@ -268,6 +272,32 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     ));
   };
 
+  const rowExplicitlyDeniesManageContent = (id: string): boolean => {
+    const row = currentRow(id);
+    return Boolean(
+      row
+      && (row.access ?? "owner") === "reader"
+      && row.can_manage_content !== true
+    );
+  };
+
+  const editorOperationMayContinue = (
+    owner: CollectionOwner,
+    operation: EditorOperation,
+    notebookId: string,
+  ): boolean => {
+    if (!owns(owner) || editorOperationRef.current !== operation) return false;
+    if (
+      editorRevokedOperationRef.current !== operation
+      && !rowExplicitlyDeniesManageContent(notebookId)
+    ) return true;
+    editorRevokedOperationRef.current = operation;
+    effectsRef.current.notify(
+      "权限已变更，已停止继续操作；此前已提交的修改不会撤销。",
+    );
+    return false;
+  };
+
   const rowCanRename = (id: string): boolean => {
     return rowCanManageContent(id);
   };
@@ -330,6 +360,16 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     rowsOwnerRef.current = read.owner;
     rowsRef.current = next;
     setRows(next);
+    const activeEditorOperation = editorOperationRef.current;
+    if (
+      activeEditorOperation
+      && editorSavingRef.current === activeEditorOperation
+      && rowExplicitlyDeniesManageContent(activeEditorOperation.notebookId)
+    ) {
+      // Once this operation observes an explicit revocation it cannot be made
+      // writable again by a later incomplete/omitted collection projection.
+      editorRevokedOperationRef.current = activeEditorOperation;
+    }
     const ownerIds = new Set(next
       .filter((row) => (row.access ?? "owner") !== "reader")
       .map((row) => row.id));
@@ -348,6 +388,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       ) return current;
       editorOperationRef.current = null;
       editorSavingRef.current = null;
+      editorRevokedOperationRef.current = null;
       return null;
     });
     setDeletion((current) => {
@@ -606,8 +647,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   async function openEditor(notebookId: string): Promise<boolean> {
     const owner = captureOwner();
     if (!owner || !rowCanManageContent(notebookId)) return false;
-    const operation = {};
+    const operation: EditorOperation = { notebookId };
     editorOperationRef.current = operation;
+    editorRevokedOperationRef.current = null;
     try {
       const target = currentRow(notebookId);
       if (!target) return false;
@@ -653,6 +695,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   function closeEditor() {
     editorOperationRef.current = null;
     editorSavingRef.current = null;
+    editorRevokedOperationRef.current = null;
     setEditor(null);
   }
 
@@ -695,30 +738,18 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     try {
       const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
       await updateNotebook(current.target.id, notebookPatch);
-      if (
-        !owns(owner)
-        || editorOperationRef.current !== operation
-      ) return;
+      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const pipelineResult = await applyIndexingPipelineSelection(
         current,
         normalizeIndexingPipelineId(indexingPipelineId),
       );
-      if (
-        !owns(owner)
-        || editorOperationRef.current !== operation
-      ) return;
+      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const bases = current.canConfigureNotebook
         ? await setBases(current.target.id, current.mountedIds)
         : current.mountEdges;
-      if (
-        !owns(owner)
-        || editorOperationRef.current !== operation
-      ) return;
+      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const updated = await getNotebook(current.target.id);
-      if (
-        !owns(owner)
-        || editorOperationRef.current !== operation
-      ) return;
+      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       // The server-side write sequence is complete.  Release the save seat
       // before hiding the dialog and awaiting the slower collection refresh so
       // an immediate reopen starts with a fresh, usable operation.
@@ -749,6 +780,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
     } finally {
       if (editorSavingRef.current === operation) editorSavingRef.current = null;
+      if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
       if (owns(owner) && editorOperationRef.current === operation) {
         setEditor((value) => {
           if (!value) return value;
@@ -776,15 +808,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
       await setNotebookIndexingPipeline(current.target.id, pipelineId);
-      if (
-        !owns(owner)
-        || editorOperationRef.current !== operation
-      ) return;
+      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const updated = await getNotebook(current.target.id);
-      if (
-        !owns(owner)
-        || editorOperationRef.current !== operation
-      ) return;
+      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       // 成功即关弹窗(镜像 saveEditor):弹窗没有活状态轮询,留着只会把一次性的
       // pending 响应冻在屏上——后台重建早已结束,界面还写着「重建中」并禁用整组
       // 单选,直到用户自己关掉重开(codex #602 R1 P2)。toast 已说明重建在进行;
@@ -806,6 +832,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       }
     } finally {
       if (editorSavingRef.current === operation) editorSavingRef.current = null;
+      if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
       if (owns(owner) && editorOperationRef.current === operation) {
         setEditor((value) => {
           if (!value) return value;
