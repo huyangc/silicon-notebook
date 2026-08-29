@@ -333,6 +333,27 @@ test("提问概览深链在首个请求就下推 ask 筛选", async () => {
 });
 
 
+test("活动流重载期间禁用类型筛选，避免重复发起并发查询", async () => {
+  const user = userEvent.setup();
+  const first = deferred<ReturnType<typeof page>>();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockReturnValue(first.promise);
+  window.history.replaceState(null, "", "/dev/logs");
+
+  view();
+
+  const sourceFilter = screen.getByRole("button", { name: "来源" });
+  await waitFor(() => expect(sourceFilter).toBeDisabled());
+  expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(1);
+
+  await user.click(sourceFilter);
+  expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(1);
+
+  first.resolve(page([]));
+  await waitFor(() => expect(sourceFilter).toBeEnabled());
+});
+
+
 test("选中一条提问时取回它的详情，并复用既有推理轨迹面板", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
