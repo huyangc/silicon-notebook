@@ -315,6 +315,7 @@ def _index_row(connection, schema: str, name: str):
     return connection.execute(
         "SELECT idx.relname AS index_name, tbl.relname AS table_name, "
         "tbl_ns.nspname AS table_schema, i.indisvalid, i.indisready, "
+        "i.indisunique, i.indnkeyatts, i.indnatts, "
         "am.amname AS access_method, "
         "ARRAY(SELECT opc_ns.nspname||':'||opc.opcname "
         "FROM unnest(i.indclass::oid[]) WITH ORDINALITY op(oid,ord) "
@@ -352,6 +353,15 @@ def _matches_shape(row, spec: HotpathIndexSpec) -> bool:
     be silently accepted as "ready" -- see this module's docstring for why
     ``predicate_shape`` (not ``predicate``) is the comparison target.
     """
+    # 唯一性与总列数也是形态(codex #636 R2 P2):同名但声明 UNIQUE、或带
+    # INCLUDE 附加列的索引,keys(只含 1..indnkeyatts)与谓词都可能全同,但
+    # inspect 报就绪而迁移 0042 的 DO 块按这两维拒绝——两个校验器必须同结论。
+    if bool(row["indisunique"]):
+        return False
+    if int(row["indnkeyatts"]) != len(spec.columns) or int(row["indnatts"]) != len(
+        spec.columns
+    ):
+        return False
     keys = tuple(_normalized_expr(str(value)) for value in row["keys"] or ())
     expected_keys = tuple(_normalized_expr(value) for value in spec.columns)
     if keys != expected_keys:

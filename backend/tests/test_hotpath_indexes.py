@@ -225,6 +225,7 @@ class _FakeConnection:
             spec = _spec_by_name(row["table"], name)
             default_keys = list(spec.columns) if spec else []
             default_predicate = spec.predicate_shape if spec else ""
+            keys = row.get("keys", default_keys)
             return _FakeResult(
                 {
                     "index_name": name,
@@ -232,7 +233,10 @@ class _FakeConnection:
                     "table_schema": row.get("schema", "public"),
                     "indisvalid": row.get("indisvalid", True),
                     "indisready": row.get("indisready", True),
-                    "keys": row.get("keys", default_keys),
+                    "indisunique": row.get("indisunique", False),
+                    "indnkeyatts": row.get("indnkeyatts", len(keys)),
+                    "indnatts": row.get("indnatts", len(keys)),
+                    "keys": keys,
                     "predicate": row.get("predicate", default_predicate),
                     "access_method": row.get(
                         "access_method", (spec.using or "btree") if spec else "btree"
@@ -254,6 +258,9 @@ class _FakeConnection:
                 "table": table,
                 "indisvalid": True,
                 "indisready": True,
+                "indisunique": False,
+                "indnkeyatts": len(spec.columns) if spec else 0,
+                "indnatts": len(spec.columns) if spec else 0,
                 "keys": list(spec.columns) if spec else [],
                 "predicate": spec.predicate_shape if spec else "",
                 "access_method": (spec.using or "btree") if spec else "btree",
