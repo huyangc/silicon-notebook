@@ -70,6 +70,7 @@ RUNTIME_ATTRIBUTES = [
     "embedding_store",
     "event_log",
     "evidence_context",
+    "extension_toggles",
     "gap_consult",
     "governance",
     "graph_retrieval",

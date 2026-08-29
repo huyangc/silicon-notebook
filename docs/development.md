@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 62. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v62 and remains readable. Those migrations
+The current schema version is 63. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v63 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -448,6 +448,36 @@ overview query, including its unresolved-timestamp sentinel, so every page can
 stop at `LIMIT` without a global `ask_jobs` scan or a temporary full-history
 sort. This adds no table, foreign key, or unique surface; the schema pair is
 SQLite 62 / PostgreSQL 40 / epoch 1.
+
+SQLite v63 / PostgreSQL v41 adds `extension_runtime_toggles`: the deployment-
+plugin runtime enable/disable switch plus audit (who, when). No row means
+enabled, so a deployment where no administrator has touched this table
+behaves exactly as before the table existed. It has no foreign key in either
+direction (`plugin_id` is an `EXTENSIONS_CONFIG` identifier, not a row in any
+other table) and no secondary index — the table only ever holds a few dozen
+rows (one per plugin an administrator has ever toggled), so both the admin
+page's full listing and the admission-refresh read (`enabled = false`) are a
+cheap sequential scan; `enabled` is not part of the primary key, so the
+primary key index could not have served that filter anyway. The admission
+gate itself reads none of this at evaluation time — every contribution/
+capability check reads an in-process snapshot, this table is only the
+durable layer behind it, refreshed immediately on write and polled by other
+processes at low frequency; that keeps the check zero-I/O instead of one
+query per evaluation. `enabled` is declared PostgreSQL `boolean`, not this
+repository's usual SQLite-integer-flag-to-`bigint` convention, because its
+only external contract is the JSON `runtime_enabled: bool` field the admin
+API layer reads straight off it — there is no shared internal reader to keep
+aligned with the bigint convention instead. SQLite's twin `enabled INTEGER`
+column carries no `CHECK (enabled IN (0,1))`, matching every other INTEGER
+flag column in this schema; a 0/1-violating value there hard-fails
+`sqlite_to_postgres.py`'s `bool` transform branch instead of being silently
+coerced, an accepted tradeoff rather than an oversight. Because v63/v41 adds
+one more (leaf, parentless)
+table, the forward-shadow invariants move to 85 application tables and 114
+replicated unique surfaces (the new table's declared PK is its only unique
+surface); the branch-counted bound remains exactly 12 row slots. PostgreSQL
+migration v41 is the paired schema, and the current pairing is SQLite 63 /
+PostgreSQL 41 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

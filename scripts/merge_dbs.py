@@ -196,6 +196,10 @@ SKIP_SECONDARY_TABLES = [
     # A merge cannot resume that authority, so keep only the primary DB's
     # in-flight state just like the other process/job tables above.
     "indexing_pipeline_stages", "indexing_pipeline_stage_sources",
+    # v61 部署插件运行时开关 + 审计,与 app_settings 同一理由:这是 primary 部署的
+    # 管理员决定(哪个插件被临时关停),导入副库的开关会静默改变 primary 的运行态
+    # 行为——副库可能把某个 primary 依赖的插件关掉了。保留 primary、丢副库那份。
+    "extension_runtime_toggles",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

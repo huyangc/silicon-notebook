@@ -132,8 +132,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # migrations/0039_hotpath_batch1_indexes.sql，第 6 组
     # chunks(source_id, ordinal) 在 SQLite 侧不适用，理由见
     # _migration_61 的 docstring），以及 v62 用户提问总览的创建者/时间排序
-    # 索引，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 62
+    # 索引，v63 部署插件运行时开关 + 审计的 extension_runtime_toggles 表，
+    # 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 63
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

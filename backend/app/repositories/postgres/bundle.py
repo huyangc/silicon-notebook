@@ -16,6 +16,7 @@ from app.repositories.postgres.catalog_store import CatalogStore
 from app.repositories.postgres.chunk_store import ChunkStore
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.embedding_store import EmbeddingStore
+from app.repositories.postgres.extension_toggle_store import ExtensionToggleStore
 from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.group_store import GroupStore
 from app.repositories.postgres.identity_store import IdentityStore
@@ -156,6 +157,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     agent_profile: AgentProfileStore
     retrieval_experiences: RetrievalExperienceStore
     agent_observations: AgentObservationStore
+    extension_toggles: ExtensionToggleStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -230,6 +232,7 @@ class PostgresPersistenceBundleFactory:
             agent_observations = AgentObservationStore(
                 database, new_id=seams.new_id, now=seams.now
             )
+            extension_toggles = ExtensionToggleStore(database)
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -256,6 +259,7 @@ class PostgresPersistenceBundleFactory:
                 agent_profile=agent_profile,
                 retrieval_experiences=retrieval_experiences,
                 agent_observations=agent_observations,
+                extension_toggles=extension_toggles,
             )
         except BaseException:
             database.close()

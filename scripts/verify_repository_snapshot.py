@@ -3659,6 +3659,21 @@ ASK_CREATOR_ACTIVITY_INDEXES = {
         "COALESCE(julianday(created_at), "
         "julianday('0001-01-01T00:00:00+00:00')) DESC, id DESC)",
 }
+
+
+# v63: extension_runtime_toggles, the deployment-plugin runtime
+# enable/disable switch + audit (who, when). No row means enabled, so a
+# fresh/untouched deployment behaves exactly as before this table existed.
+# No index, trigger, or view — the primary key alone serves both the admin
+# page's full listing and the admission-refresh scan.
+EXTENSION_RUNTIME_TOGGLES_TABLES = {
+    "extension_runtime_toggles": """CREATE TABLE extension_runtime_toggles (
+                  plugin_id TEXT NOT NULL PRIMARY KEY,
+                  enabled INTEGER NOT NULL,
+                  updated_by TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+}
 MIGRATION_MANIFEST = {
     (key[0], 61, *key[2:]): {
         **manifest,
@@ -3684,6 +3699,20 @@ MIGRATION_MANIFEST[(61, 62)] = {
     "tables": {},
     "columns": {},
     "indexes": ASK_CREATOR_ACTIVITY_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+MIGRATION_MANIFEST = {
+    (key[0], 63, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **EXTENSION_RUNTIME_TOGGLES_TABLES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(62, 63)] = {
+    "tables": EXTENSION_RUNTIME_TOGGLES_TABLES,
+    "columns": {},
+    "indexes": {},
     "triggers": {},
     "views": {},
 }

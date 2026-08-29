@@ -46,6 +46,7 @@ BUNDLE_STORE_PORTS = {
     "agent_profile": "AgentProfileStorePort",
     "retrieval_experiences": "RetrievalExperienceStorePort",
     "agent_observations": "AgentObservationStorePort",
+    "extension_toggles": "ExtensionToggleStorePort",
 }
 
 
