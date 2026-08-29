@@ -484,8 +484,8 @@ one more (leaf, parentless)
 table, the forward-shadow invariants move to 85 application tables and 114
 replicated unique surfaces (the new table's declared PK is its only unique
 surface); the branch-counted bound remains exactly 12 row slots. PostgreSQL
-migration v41 is the paired schema, and the current pairing is SQLite 63 /
-PostgreSQL 41 / epoch 1.
+migration v41 is the paired schema; the schema pair was SQLite 63 /
+PostgreSQL 41 / epoch 1 at that point.
 
 Run it only while application/background writers are stopped:
 
