@@ -41,24 +41,33 @@ export const createNotebook = (payload: unknown) =>
     body: JSON.stringify(payload),
   });
 
-export const getNotebook = (id: string) =>
-  requestJson<NotebookSummary>(`/notebooks/${id}`, options);
+// `signal` 只加在**多步写序列**用到的那几条上:一次保存要连打 PATCH → 管线 → PUT
+// bases → GET,用户中途关掉弹窗后必须能把在飞那一条掐掉——否则它可能在用户重开、
+// 重存之后才落到服务端,拿旧值盖掉新值。其余读接口没有这个形态,不加参数。
+export const getNotebook = (id: string, signal?: AbortSignal) =>
+  requestJson<NotebookSummary>(`/notebooks/${id}`, { ...options, signal });
 
-export const updateNotebook = (id: string, patch: unknown) =>
+export const updateNotebook = (id: string, patch: unknown, signal?: AbortSignal) =>
   requestJson<NotebookSummary>(`/notebooks/${id}`, {
     ...options,
     method: "PATCH",
     body: JSON.stringify(patch),
+    signal,
   });
 
 export const fetchNotebookIndexingPipeline = (id: string) =>
   requestJson<IndexingPipelineResponse>(`/notebooks/${id}/indexing-pipeline`, options);
 
-export const setNotebookIndexingPipeline = (id: string, pipelineId: string | null) =>
+export const setNotebookIndexingPipeline = (
+  id: string,
+  pipelineId: string | null,
+  signal?: AbortSignal,
+) =>
   requestJson<IndexingPipelineResponse>(`/notebooks/${id}/indexing-pipeline`, {
     ...options,
     method: "PATCH",
     body: JSON.stringify({ pipeline_id: pipelineId }),
+    signal,
   });
 
 export const deleteNotebook = (id: string) =>

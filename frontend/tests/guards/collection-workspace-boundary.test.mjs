@@ -38,6 +38,10 @@ test("collection hook has a positive dependency allowlist and no cross-domain ow
   const allowed = new Set([
     "react",
     "./collection-search.ts",
+    // 诊断词汇表。零依赖的叶子模块（errors.ts 自己一条 import 都没有），不是任何域的
+    // owner——放行的是 logDiagnostic 这条「未翻译诊断」的唯一截断/压平出口，AGENTS.md
+    // 要求异常原文不许裸进日志，各域只能经它落 console。
+    "./errors.ts",
     "./indexing-pipeline-settings.ts",
     "./notebook-api.ts",
     "./notebook-bases.ts",

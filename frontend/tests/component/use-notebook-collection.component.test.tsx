@@ -134,10 +134,13 @@ function captureRefreshFailureLog() {
   return spy;
 }
 
+// 记录必须过 logDiagnostic —— 它是「未翻译诊断」的唯一截断/压平出口（AGENTS.md：
+// 异常原文与私有路径不许进日志）。断言钉的是那条出口的形态：带 tag 的前缀 + 被压平
+// 成一行字符串的诊断，而不是原始 Error 对象。
 function expectRefreshFailureLogged(spy: ReturnType<typeof captureRefreshFailureLog>) {
   expect(spy).toHaveBeenCalledWith(
-    "[collection] composite refresh after a committed write failed",
-    expect.any(Error),
+    expect.stringContaining("[collection-refresh]"),
+    "Error: refresh failed",
   );
 }
 
@@ -422,7 +425,8 @@ test("one-click revert to builtin uses only indexing pipeline APIs", async () =>
   await act(async () => value!.openEditor("shared"));
   await act(async () => value!.revertIndexingPipelineToBuiltin());
 
-  expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith("shared", null);
+  expect(notebookApi.setNotebookIndexingPipeline)
+    .toHaveBeenCalledWith("shared", null, expect.any(AbortSignal));
   expect(basesApi.listMountable).not.toHaveBeenCalled();
   expect(basesApi.listBases).not.toHaveBeenCalled();
 });
@@ -455,6 +459,7 @@ test("failed indexing rebuild can retry the same selected pipeline", async () =>
   expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith(
     "shared",
     "plugin.arxiv",
+    expect.any(AbortSignal),
   );
 });
 
@@ -736,6 +741,50 @@ test("dismissing settings during a save stops waiting and frees the seat for a r
   expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
 });
 
+test("dismissing settings aborts the request the abandoned save has on the wire", async () => {
+  // 「停在下一个检查点」不够：用户重开再存之后，那条还在飞的 PATCH/PUT 一旦落到
+  // 服务端，就会拿走人时的旧值盖掉刚存进去的新值（codex #629 R1 P1）。
+  const stuck = deferred<NotebookSummary>();
+  let signal: AbortSignal | undefined;
+  notebookApi.updateNotebook.mockImplementationOnce((...args: unknown[]) => {
+    signal = args[2] as AbortSignal;
+    return stuck.promise;
+  });
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  expect(signal?.aborted).toBe(false);
+
+  act(() => { value!.closeEditor(); });
+  expect(signal?.aborted).toBe(true);
+
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+});
+
+test("reopening settings for another notebook aborts the orphaned request too", async () => {
+  const stuck = deferred<NotebookSummary>();
+  let signal: AbortSignal | undefined;
+  notebookApi.updateNotebook.mockImplementationOnce((...args: unknown[]) => {
+    signal = args[2] as AbortSignal;
+    return stuck.promise;
+  });
+  render(<Harness />);
+  publish([notebook("a"), notebook("b")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  await act(async () => value!.openEditor("b"));
+
+  expect(signal?.aborted).toBe(true);
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+});
+
 test("closing settings without a save in flight says nothing", async () => {
   render(<Harness />);
   publish([notebook("a")]);
@@ -761,7 +810,8 @@ test("reopening settings for another notebook releases the orphaned save seat", 
 
   await act(async () => value!.saveEditor(editorPatch));
 
-  expect(notebookApi.updateNotebook).toHaveBeenNthCalledWith(2, "b", expect.anything());
+  expect(notebookApi.updateNotebook)
+    .toHaveBeenNthCalledWith(2, "b", expect.anything(), expect.any(AbortSignal));
   await act(async () => stuck.resolve(notebook("a")));
   await saving;
 });
@@ -813,7 +863,8 @@ test("an immediate reopen after a committed save can unmount a base before refre
   let firstSave!: Promise<void>;
   act(() => { firstSave = value!.saveEditor(editorPatch); });
   await waitFor(() => expect(value!.editor).toBeNull());
-  expect(basesApi.setBases).toHaveBeenNthCalledWith(1, "a", ["base-a"]);
+  expect(basesApi.setBases)
+    .toHaveBeenNthCalledWith(1, "a", ["base-a"], expect.any(AbortSignal));
 
   await act(async () => value!.openEditor("a"));
   expect(value!.editor?.mountedIds).toEqual(["base-a"]);
@@ -821,7 +872,7 @@ test("an immediate reopen after a committed save can unmount a base before refre
   await act(async () => value!.saveEditor(editorPatch));
 
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
-  expect(basesApi.setBases).toHaveBeenNthCalledWith(2, "a", []);
+  expect(basesApi.setBases).toHaveBeenNthCalledWith(2, "a", [], expect.any(AbortSignal));
   await act(async () => firstRefresh.resolve(undefined));
   await firstSave;
 });
@@ -922,6 +973,36 @@ test("a delete that fails after its confirmation was dismissed still reports", a
 
   expect(effects.reportError).toHaveBeenCalledWith(rejection);
   expect(value!.rows.map((row) => row.id)).toEqual(["a"]);
+});
+
+test("a confirmation reopened over a pending DELETE shows it pending and recovers", async () => {
+  // 关掉再打开时行还在（DELETE 没落定），一个崭新的 busy:false 确认框会给出一个
+  // confirmDelete 永远静默拒绝的「确认」——挂死的请求下它永远按不动（codex #629 R1 P2）。
+  const first = deferred<undefined>();
+  const rejection = new Error("delete rejected");
+  notebookApi.deleteNotebook
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValueOnce(undefined);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  act(() => { value!.closeDelete(); });
+
+  await act(async () => value!.openDelete("a"));
+  expect(value!.deletion?.busy).toBe(true);
+
+  await act(async () => first.reject(rejection));
+  await deleting;
+  expect(effects.reportError).toHaveBeenCalledWith(rejection);
+  // 原请求落定后，重开的这个框回到可按状态——而不是永远卡在「删除中…」。
+  expect(value!.deletion?.busy).toBe(false);
+
+  await act(async () => value!.confirmDelete());
+  expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(2);
+  expect(value!.rows).toEqual([]);
 });
 
 test("closing the confirmation without a delete in flight says nothing", async () => {
