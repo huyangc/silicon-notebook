@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from typing import Callable, Hashable, MutableMapping
 
+from app.services.notebook_scale import CopyStatsMemo
 from app.services.vector_cache import VectorCache
 
 
@@ -45,9 +46,15 @@ class RetrievalSnapshotCache:
         self,
         vector_cache: VectorCache,
         unified_cache: MutableMapping[tuple, object],
+        copy_stats_memo: CopyStatsMemo,
     ) -> None:
         self.vector_cache = vector_cache
         self.unified_cache = unified_cache
+        # copy-stats memo:R2-2 把它从 vector_cache 的 ``{nb}:copystats`` 键族搬
+        # 进自己的存储,codex PR#634 R2 P2-2 又把那份存储从模块级全局收成
+        # runtime-owned 对象。所有者仍是这里 —— 这个类本来就是「冻结键族及其
+        # 失效」的所有者,而 copy-stats 曾经就是它的一个键族。
+        self.copy_stats_memo = copy_stats_memo
 
     def get(
         self,
@@ -133,6 +140,4 @@ class RetrievalSnapshotCache:
         # unrelated key families, forcing a five-aggregate cold reload on every
         # ask); the eviction contract here is unchanged — same family, same
         # trigger, one call away.
-        from app.services.notebook_scale import invalidate_copy_stats
-
-        invalidate_copy_stats(notebook_id)
+        self.copy_stats_memo.invalidate(notebook_id)

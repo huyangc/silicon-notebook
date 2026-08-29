@@ -92,7 +92,7 @@ from app.services import background_jobs
 from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 # Task 24: Ask mode engines + synthesis (appended — same convention).
 from app.services.ask_service import AskService
-from app.services.notebook_scale import NotebookScaleProfile
+from app.services.notebook_scale import CopyStatsMemo, NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
 from app.services.parser_chain_execution import BuiltinParserChainHost
 
@@ -630,6 +630,9 @@ def _build_retrieval_domain(foundation: _ProcessFoundation) -> _RetrievalDomain:
                 max_bytes=foundation.settings.vector_cache_max_bytes,
             ),
             unified_cache={},
+            # 每个 runtime 一份 copy-stats memo(codex PR#634 R2 P2-2:模块级
+            # 全局违反 development.md 的 runtime-owned 契约)。
+            copy_stats_memo=CopyStatsMemo(),
         ),
         memory_service=None,
         memory_retriever=None,
@@ -1492,6 +1495,9 @@ class RepositoryRuntime:
             make_persist_image=make_persist_image,
             delete_source_images=delete_source_images,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
+            # copy-stats memo 是 runtime-owned 的(codex PR#634 R2 P2-2),所以
+            # 摄取路径的失效走注入回调,与上面那条同一形态。
+            invalidate_copy_stats=self.retrieval_snapshots.copy_stats_memo.invalidate,
         )
         # Memory-KG bridge (memory-kg-extract Task 3): MemoryService is wired
         # earlier (wire_memory, before wire_knowledge_lifecycle), but
@@ -1726,6 +1732,7 @@ class RepositoryRuntime:
             viz_building_lock=viz_building_lock,
             notebooks=self.catalog,
             facts_repo=self.queries,
+            copy_stats_memo=self.retrieval_snapshots.copy_stats_memo,
             require_indexing_write=self.indexing_pipeline.require_write_admission,
         )
         return self.scale_artifacts
@@ -2093,6 +2100,7 @@ class RepositoryRuntime:
                     self.settings,
                     self.queries,
                     lambda nb: tuple(self.scale_artifacts.version(nb)),
+                    self.retrieval_snapshots.copy_stats_memo,
                 ),
                 scale_index_probe=lambda nb: (
                     self.scale_artifacts.load(nb, allow_stale=True) is not None

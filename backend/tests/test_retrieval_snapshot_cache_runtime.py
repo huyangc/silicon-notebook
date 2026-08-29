@@ -7,8 +7,9 @@ objects (never facade-only copies), and every wired consumer — the
 KgMutationCoordinator and the KnowledgeLifecycleService's unified-graph memo —
 keeps holding/reading them by identity. (The NotebookScaleProfile copy-stats
 memo was one of those consumers until R2-2 moved it into `notebook_scale`'s own
-bounded store; `invalidate_kg` still evicts that family, just through a call
-instead of a cache key.) `invalidate_kg` is the KG key-family eviction every online mutation
+bounded store, which codex PR#634 R2 P2-2 then made runtime-owned — this cache
+holds that store as `copy_stats_memo`; `invalidate_kg` still evicts that family,
+just through a call instead of a cache key.) `invalidate_kg` is the KG key-family eviction every online mutation
 funnels through (moved from the coordinator, itself moved from the facade in
 Task 14): the frozen phase matrix in mutation_phases.json replays unchanged.
 """
@@ -137,10 +138,9 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     snapshots.unified_cache[(other, "concept")] = {"g": 2}
     # copystats: same frozen family, new home (R2-2). Warm both notebooks so the
     # sweep's per-notebook scoping is still under test.
-    from app.services import notebook_scale
-
+    memo = snapshots.copy_stats_memo
     for notebook_id in (nb, other):
-        notebook_scale._memoized_copy_stats(notebook_id, ("v", 1), lambda: {"c": 1})
+        memo.get(notebook_id, ("v", 1), lambda: {"c": 1})
 
     snapshots.invalidate_kg(nb)
 
@@ -152,8 +152,8 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     assert snapshots.peek(f"{other}:kwtok", ("v", 1))
     assert (nb, "concept") not in snapshots.unified_cache
     assert (other, "concept") in snapshots.unified_cache
-    assert notebook_scale.copy_stats_cached_version(nb) is None
-    assert notebook_scale.copy_stats_cached_version(other) == ("v", 1)
+    assert memo.cached_version(nb) is None
+    assert memo.cached_version(other) == ("v", 1)
 
 
 def test_invalidate_unified_drops_only_this_notebooks_graph_dict(repo):

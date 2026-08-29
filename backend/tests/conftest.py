@@ -391,19 +391,6 @@ def _reset_pending_bus():
 
 
 @pytest.fixture(autouse=True)
-def _reset_copy_stats_memo():
-    """copy-stats memo 是进程级单例(R2-2 把它从共享 VectorCache 搬出来,形态
-    照 knowledge_counts_cache),而 VectorCache 是**每个仓库实例自己的**——搬家
-    之后「换一个 repo 就自动换一份缓存」这条隐式隔离没有了。用例里手写的
-    notebook id(不是 uuid)因此可能跨用例串味,统一在这里前后各清一次。"""
-    from app.services.notebook_scale import invalidate_copy_stats
-
-    invalidate_copy_stats()
-    yield
-    invalidate_copy_stats()
-
-
-@pytest.fixture(autouse=True)
 def _reset_background_job_gates():
     """后台并发闸是进程级单例,容量在首次用到时按当时的 Settings 定死。
 
