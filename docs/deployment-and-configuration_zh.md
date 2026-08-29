@@ -905,6 +905,15 @@ enabled = true
 [extensions."corp.ieee_search".settings]
 ```
 
-每条配置遵守三条铁律：只加载**点名列表里、且未 `enabled = false`** 的插件——不扫描目录、不读 entry points、不看第二个环境变量；插件自带的 pydantic `settings_model` 会把未知键或类型错误判为启动失败（可接受键集合由 core 自己从模型算出，不指望插件写 `extra="forbid"`；带 `alias` 的字段**只按 alias** 接受，与 pydantic 自身的默认行为一致，除非模型设了 `populate_by_name`/`validate_by_name`），所以密钥应该经一个环境变量名字段引用（同 `model-services.toml` 的 `api_key_env` 约定），而不是把明文值直接写进配置,任何 settings 值都不会进日志、事件或 `GET /api/admin/extensions`;插件包装进与后端**同一个** `PYTHON_BIN` 环境,不是独立解释器。插件的 `configure()` 必须廉价且无副作用——不起线程、不开网络/数据库连接、不做阻塞 I/O,这类工作留到首次真正用到时再惰性执行。插件 capability 名只能用点/下划线/短横线分隔(`:` 留给 core 自己的 `point:name` capability)。启用、停用或升级插件一律靠重启进程,没有热加载。
+每条配置遵守三条铁律：只加载**点名列表里、且未 `enabled = false`** 的插件——不扫描目录、不读 entry points、不看第二个环境变量；插件自带的 pydantic `settings_model` 会把未知键或类型错误判为启动失败（可接受键集合由 core 自己从模型算出，不指望插件写 `extra="forbid"`；带 `alias` 的字段**只按 alias** 接受，与 pydantic 自身的默认行为一致，除非模型设了 `populate_by_name`/`validate_by_name`），所以密钥应该经一个环境变量名字段引用（同 `model-services.toml` 的 `api_key_env` 约定），而不是把明文值直接写进配置,任何 settings 值都不会进日志、事件或 `GET /api/admin/extensions`;插件包装进与后端**同一个** `PYTHON_BIN` 环境,不是独立解释器。插件的 `configure()` 必须廉价且无副作用——不起线程、不开网络/数据库连接、不做阻塞 I/O,这类工作留到首次真正用到时再惰性执行。插件 capability 名只能用点/下划线/短横线分隔(`:` 留给 core 自己的 `point:name` capability)。改这份 TOML——新增/删除条目、改 `bundle`/`settings`、把文件里的 `enabled` 改成 `false`——一律靠重启进程生效，没有热加载；这管的是「装不装载」这一层拓扑。已经装载的 deployment 插件另有一层不需要重启的运行时开关，见下文「运行时启停」。
 
 运维方用下面这条命令自查某次部署的实时插件拓扑是否与配套前端构建一致:`EXTENSIONS_CONFIG=/etc/silicon/extensions.toml PYTHONPATH=backend python3 scripts/check_deployment_extension_parity.py --frontend-contract frontend/.local/ui-extension-contract.json`(退出码 `0` 对等 / `1` 漂移 / `2` 用法或环境错误)。插件包应对自己的源码跑一次 `python3 scripts/check_ui_vocabulary.py --extra-root <插件源码目录>`,拿到与 core 自己同等的中文界面文案保证。重新生成 `scripts/generate_ui_extension_contract.py` 时必须清空 `EXTENSIONS_CONFIG`——它提交的 fixture 只反映内建拓扑,绝不能带上某次部署的插件。 逐步的开发、联调与运维流程见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。
+
+**运行时启停：**
+
+```text
+EXTENSION_ADMISSION_REFRESH_SECONDS  # 服务进程重读管理员运行时开关表、收敛内存 admission 快照的间隔
+                                     # （默认 3.0；范围 1..300）
+```
+
+这是叠在上面 TOML 拓扑之上的第二层、以数据库为真值的开关，不是替代它：`EXTENSIONS_CONFIG` 的 `enabled` 键依旧只表示「装不装载」，依旧只能靠重启生效，一个从未点名或标了 `enabled = false` 的插件不会因为这层开关而注册。一旦某个 `trust="deployment"` 插件已经装载，管理员就可以在 `/admin/extensions`（`PATCH /api/admin/extensions/{plugin_id}`）不重启地把它开或关；当前值存在 `extension_runtime_toggles` 表里，按 plugin id 建键，无行即启用。这一行会在插件从 `EXTENSIONS_CONFIG` 移除、之后又重新加回时保留下来——一个被卸载又重新装载的插件恢复的是管理员上一次给它这个 id 设的开关，不会被重置为启用。发起这次管理员写入的进程立即重新发布自己的内存快照；同一部署里的其它服务进程（例如多副本）各自按 `EXTENSION_ADMISSION_REFRESH_SECONDS` 的节奏收敛。零个已装载 `trust="deployment"` 插件的进程完全不起刷新线程——一个没有部署插件的常规部署仍要付一次启动时的 prime（与其它所有进程一样，组合期本就要做的那一次读表加迁移），只是不会在它之上再起一条周期轮询。离线 CLI 与批处理进程（`batch_ingest.py` 等）只在启动组合那一刻 prime 一次这份快照，运行期间不会再刷新——管理员运行中途翻的开关，一个已经在跑的批处理任务要等下一次调用才能看到。运维操作手册见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。

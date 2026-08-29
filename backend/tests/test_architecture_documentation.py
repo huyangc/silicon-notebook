@@ -1265,6 +1265,37 @@ def test_plugin_admission_degradation_timing_lives_in_product_docs():
         assert phrase in chinese
 
 
+def test_extension_runtime_toggle_contract_is_documented_bilingually():
+    """The runtime-toggle contract's four load-bearing points must survive in both languages.
+
+    This pins docs/deployment-and-configuration.md's registration of the
+    admin runtime-toggle feature (architecture.md and
+    docs/deployment-extensions-sop*.md carry the rest of the contract): the
+    env var that governs cross-process convergence, the table that is its
+    database source of truth, the "no row means enabled" default, and the
+    offline-CLI/batch exception to convergence. It deliberately does not
+    assert the numeric default/bounds — those may change freely; only their
+    single canonical registration point is pinned here.
+    """
+
+    english = _read_file("docs/deployment-and-configuration.md")
+    chinese = _read_file("docs/deployment-and-configuration_zh.md")
+    for phrase in (
+        "EXTENSION_ADMISSION_REFRESH_SECONDS",
+        "extension_runtime_toggles",
+        "no row meaning enabled",
+        "prime this snapshot once, at startup composition, and never refresh it again",
+    ):
+        assert phrase in english, phrase
+    for phrase in (
+        "EXTENSION_ADMISSION_REFRESH_SECONDS",
+        "extension_runtime_toggles",
+        "无行即启用",
+        "只在启动组合那一刻 prime 一次这份快照，运行期间不会再刷新",
+    ):
+        assert phrase in chinese, phrase
+
+
 def test_user_facing_vocabulary_guard_is_documented_in_both_product_bundles():
     """The README bundles link the dedicated vocabulary source and explain its guard."""
     _assert_phrases(

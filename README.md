@@ -15,7 +15,7 @@ The project is a local-team beta built with FastAPI and Next.js. SQLite works ou
 - External Agent access through authenticated MCP tools, including scoped Ask, source, Memory, and knowhow workflows.
 - A startup-frozen Extension SDK for deployment-owned backend, UI, Ask-engine, parser, indexing, exporter, and observer contributions.
 
-Backend deployment plugins are trusted same-process code loaded only from the TOML named by `EXTENSIONS_CONFIG`; changes require a restart, and their API extensions mount only below `/api/extensions/{plugin_id}`. Private UI packages are injected separately at frontend build time through `SILICON_NOTEBOOK_UI_PLUGINS` and require a rebuild.
+Backend deployment plugins are trusted same-process code loaded only from the TOML named by `EXTENSIONS_CONFIG`; config changes require a restart, and their API extensions mount only below `/api/extensions/{plugin_id}`. Private UI packages are injected separately at frontend build time through `SILICON_NOTEBOOK_UI_PLUGINS` and require a rebuild.
 
 The interface starts in auto mode for upload-and-ask use. Advanced mode exposes retrieval effort, report depth, and source/reference-library scope controls.
 
