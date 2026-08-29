@@ -586,10 +586,10 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | core 升级，`EXTENSION_API_VERSION` 没变 | `git pull`，带着 `SILICON_NOTEBOOK_UI_PLUGINS` 重新构建前端，重启。插件侧什么都不用动。 |
 | core 升级，`EXTENSION_API_VERSION` 变了 | 启动直接拒绝、报 `plugin_api_version_unsupported` 并点名插件。**先**装上支持新版本的插件构建，再升 core。没有兼容窗口。 |
 | 插件升级 | 装新 wheel、替换 UI 包目录、重新构建前端、重启。manifest 与 `ui-plugin.json` 的 `version` 必须**一起**bump——不一致会让浏览器那道三元组检查把 contribution 藏掉，而后端仍然列着它。 |
-| 回滚 | 装回上一版 wheel 与 UI 包，重启。或者把该条目设 `enabled = false` 后重启——标了 `enabled = false` 的条目连 import 都不会发生。 |
-| 临时停用 | TOML 里 `enabled = false`，重启。**不要**为了停用一个插件而清空 `EXTENSIONS_CONFIG`：那是把所有插件的发现/registry 组合一次性换成另一份。 |
+| 回滚 | 装回上一版 wheel 与 UI 包再重启，是唯一真正把代码换回去的路径——下面那个运行时开关关不掉一个已经出问题的版本本身，只能让它暂停对外服务。想先止血、再从容准备回滚包，可以先在运行时把它关掉（见下一行），不必立刻重启。或者把该条目设 `enabled = false` 后重启——标了 `enabled = false` 的条目连 import 都不会发生。 |
+| 临时停用 | 优先用运行时开关：在 `/admin/extensions` 把该插件关掉（`PATCH /api/admin/extensions/{plugin_id}`）。发起这次改动的进程立即生效，同一部署里的其它服务进程会在 `EXTENSION_ADMISSION_REFRESH_SECONDS` 一个刷新周期内跟上（默认间隔与上下限登记在 [`docs/deployment-and-configuration_zh.md`](deployment-and-configuration_zh.md)）——不需要重启，重新打开同样即时。它只挡「访问」：工作区入口消失、插件自己的 HTTP 路由返回 403、它贡献的每一项能力都不再提供——插件代码本身仍然装载在进程里。只有需要更彻底的档位——连 import 都不发生，比如准备卸载它、或者已经不再信任这段代码本身——才退回 TOML 里 `enabled = false` 加重启。**不要**为了停用一个插件而清空 `EXTENSIONS_CONFIG`：那是把所有插件的发现/registry 组合一次性换成另一份。 |
 
-**以上每一种都是重启进程。** 刻意不做热更新：registry 在启动时冻结，装载出来的拓扑才是一个在进程生命周期内成立的事实，而不是每次请求都要重新推导的移动目标。
+**上表里除运行时开关之外的每一行都是重启进程。** 装载层依旧没有热更新，这一半没有变：registry 只在启动时冻结一次，**哪些插件存在**在进程生命周期内是个事实，不是每次请求都要重新推导的移动目标。运行时开关是叠在这层拓扑之上的另一层，薄得多：它从不改变谁被装载，只决定一个已经装载的 deployment 插件此刻是否服务请求。发起改动的那个进程立即生效；同一部署里的其它服务进程在一个刷新周期内收敛；离线 CLI/批处理进程只在自己启动那一刻读一次，运行期间不会再变。
 
 离线 CLI（`scripts/batch_ingest.py` 等）构建同一个 runtime，因而装载同一份插件拓扑。批处理任务卡在某个插件上时，修的是配置文件——绝不是「这一次跑就把变量清掉」，那会悄悄给这个任务一份与服务不同的组合。
 
@@ -683,13 +683,13 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | `url_sources.import_urls` / `import_urls_async` 返回 404 | 调用用户对该笔记本没有 `sources:write`——或者该笔记本不存在。两者刻意不可区分。 |
 | `RuntimeError: url_sources.import_urls must not be called from an async handler…`，客户端看到 `500` | 某个 `async def` handler 调了阻塞版本，那会让进程里其余所有在飞请求跟着卡住。改成 `await url_sources.import_urls_async(...)`；同步 `def` handler 仍然调 `import_urls`。这一次什么都没有导入。 |
 | 你的事件在日志里静默消失 | 载荷带了 `event`/`outcome`/`count`/`elapsed_ms` 之外的字段、稳定码超过 64 字符或不匹配 `^[a-z][a-z0-9_]{0,63}$`、或 `count`/`elapsed_ms` 不是 `0..1e9` 区间的整数（`True` 不算 `1`）。整条记录被丢弃，而不是写一半。 |
-| 入口不渲染，但 `/admin/extensions` 列着这个插件 | 第 7 节那四道可见性闸有一道为假。先看 `GET /api/system/extensions`：该行的 `available` 与 `unavailable_reason`（`disabled` = 你的 probe 返回了 `DISABLED`，`unavailable` = 返回了 `UNAVAILABLE`）。如果该行整个不存在，说明浏览器侧的本地三元组没命中——两边 manifest 的 `version` 漂了。 |
+| 入口不渲染，但 `/admin/extensions` 列着这个插件 | 第 7 节那四道可见性闸有一道为假。先看 `GET /api/system/extensions`：该行的 `available` 与 `unavailable_reason`（`disabled` = 要么你的 probe 返回了 `DISABLED`，要么某个管理员在 `/admin/extensions` 把这个插件的运行时开关关掉了——两种情形在这个 wire 值上不可区分；`unavailable` = 返回了 `UNAVAILABLE`）。如果该行整个不存在，说明浏览器侧的本地三元组没命中——两边 manifest 的 `version` 漂了。要区分是不是管理员停用，去 `/admin/extensions`（或 `GET /api/admin/extensions`）查这一行的 `runtime_enabled`——`false` 就是管理员关的，与你自己的 probe 会返回什么无关。 |
 
 ## 10. 刻意不支持
 
 | 不支持 | 为什么，以及改用什么 |
 | --- | --- |
-| 热更新 | registry 在启动时冻结，拓扑因此是一个事实而不是每次请求都要问一遍的问题。启停与升级一律重启。 |
+| 装载拓扑的热更新 | registry 在启动时冻结，**哪些插件存在**因此是一个事实而不是每次请求都要问一遍的问题。新增/移除/升级一个插件、以及在 TOML 里改 `enabled`，一律重启。已装载 deployment 插件的运行时开关（第 8 节）是叠在这层固定拓扑之上、不需要重启的另一层，不是这条规则的例外。 |
 | 进程隔离插件 | `trust="isolated"` 是 registry 当前一律拒绝的保留值。部署插件就是可信的同进程代码。 |
 | 插件自建数据库表 | schema 是一套带版本、带校验和、参与正向复制的封闭集合。用给你的接缝做持久化，或把状态留在自己的上游。见模块化插件架构设计稿 §10。 |
 | 匿名插件路由 | 挂载点恒带 router 级会话依赖。免登录公开页是核心的产品决定，不是插件能开的。 |
@@ -728,7 +728,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 - [ ] `check_deployment_extension_parity.py` 退出码为 `0`。
 - [ ] `/admin/extensions` 列出预期的插件、版本与接入项。
 - [ ] 一次真实用户动作端到端跑通。
-- [ ] 回滚路径已经写下来：上一版 wheel + 上一版 UI 包，或 `enabled = false`，再加一次重启。
+- [ ] 回滚路径已经写下来：上一版 wheel + 上一版 UI 包，或 `enabled = false`，再加一次重启——以及运行时开关（第 8 节）作为准备回滚期间第一道止血手段。
 
 ## 12. 样板插件（`examples/extensions/arxiv-search`）
 

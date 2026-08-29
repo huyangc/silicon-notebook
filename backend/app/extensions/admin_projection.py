@@ -9,13 +9,29 @@ Whitelist only, six fields per extension — ``id`` / ``version`` / ``trust`` /
 path, a file path, a plugin's ``settings`` value, an internal availability
 ``reason_code``, or exception text: none of those cross this boundary.
 
-There is deliberately no ``enabled`` field. The registry topology is
-startup-frozen (see ``ExtensionRegistry.freeze``); a plugin entry the
-deployment marked ``enabled = false`` in ``EXTENSIONS_CONFIG`` is never
-imported and never registered, so it simply does not appear in
-``registry.manifests()``. A boolean that could only ever read ``true`` for
-every row this function can see would not describe anything — it would just
-be a decoration an operator could misread as live health.
+There is deliberately no ``enabled`` field on this projection. The registry
+topology is startup-frozen (see ``ExtensionRegistry.freeze``); a plugin entry
+the deployment marked ``enabled = false`` in ``EXTENSIONS_CONFIG`` — or never
+named there at all — is never imported and never registered, so it simply
+does not appear in ``registry.manifests()``. A boolean that could only ever
+read ``true`` for every row this function can see would not describe
+anything — it would just be a decoration an operator could misread as live
+health.
+
+Runtime enable/disable is a separate, later-added layer and does not live
+here either. An admin can switch an already-loaded ``trust="deployment"``
+plugin on or off without a restart (``PATCH /api/admin/extensions/{plugin_id}``);
+that state — ``runtime_enabled`` / ``runtime_updated_by`` / ``runtime_updated_at``
+— lives in the ``extension_runtime_toggles`` table, not in anything this
+module can see. ``app.api.admin_routes.list_admin_extensions`` merges those
+fields onto this projection's rows by ``plugin_id`` before building the
+response, and it reads them from that store — never from the in-process
+admission snapshot ``app.core.extension_admission`` holds; how often (and
+whether) that snapshot itself gets refreshed is described in that module and
+in ``app.services.extension_toggles``, not here. This module stays exactly
+what its name says: a sanitized, static view of what the registry froze at
+startup — never the current runtime switch, which is a live database read
+this pure function has no business performing.
 """
 from __future__ import annotations
 

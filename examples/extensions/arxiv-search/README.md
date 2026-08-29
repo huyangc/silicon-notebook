@@ -47,6 +47,11 @@ frozen at startup composition time. There is no hot reload: after changing
 either the TOML or `SILICON_NOTEBOOK_UI_PLUGINS`, restart the backend and
 rebuild/restart the frontend.
 
+That is a separate layer from runtime enable/disable: once this plugin is
+loaded, an admin can switch it off at `/admin/extensions` without a restart —
+its own HTTP routes then return 403 and its contributions stop being offered.
+See [Deployment extensions SOP §8](../../../docs/deployment-extensions-sop.md#8-upgrade-rollback-disable).
+
 ## 2. Settings table
 
 All keys are optional; core computes the accepted key set from the settings
