@@ -16,6 +16,8 @@ def _settings(**overrides) -> SimpleNamespace:
         background_maintenance_concurrency=4,
         background_light_job_concurrency=4,
         kg_job_concurrency=8,
+        search_concurrency_limit=4,
+        scale_build_concurrency=2,
         postgres_pool_max_size=10,
     )
     base.update(overrides)
@@ -23,22 +25,23 @@ def _settings(**overrides) -> SimpleNamespace:
 
 
 def test_production_defaults_trigger_the_warning():
-    """生产默认 4+4+8=16 > postgres_pool_max_size 默认 10——必须触发。"""
+    """生产默认 4+4+8+4+2=22 > postgres_pool_max_size 默认 10——必须触发。
+    搜索闸与 scale 构建并发也计入(codex #627 R4 P2):它们各占连接且与维护池独立。"""
     warning = _pool_budget_warning(_settings())
     assert warning is not None
     assert "POSTGRES_POOL_MAX_SIZE=10" in warning
-    assert "16" in warning
-    assert "17" in warning  # 建议值 = budget + 1
+    assert "22" in warning
+    assert "23" in warning  # 建议值 = budget + 1
 
 
 def test_pool_max_strictly_above_budget_is_silent():
-    warning = _pool_budget_warning(_settings(postgres_pool_max_size=17))
+    warning = _pool_budget_warning(_settings(postgres_pool_max_size=23))
     assert warning is None
 
 
 def test_pool_max_exactly_equal_to_budget_still_warns():
     """边界:`<=` 触发,不是 `<`——池子被打满时前台请求已经排不上号了。"""
-    warning = _pool_budget_warning(_settings(postgres_pool_max_size=16))
+    warning = _pool_budget_warning(_settings(postgres_pool_max_size=22))
     assert warning is not None
 
 
@@ -67,3 +70,19 @@ def test_postgres_url_with_missing_pool_fields_does_not_raise():
         SimpleNamespace(database_url="postgresql://u:p@localhost:5432/db")
     )
     assert warning is None
+
+
+def test_search_and_scale_consumers_alone_can_trigger_the_warning():
+    """codex #627 R4 P2 的精确场景:三个维护池各 1、池 5——旧口径(1+1+1=3 < 5)
+    误判安全,而 4 路搜索 + 2 路 scale 构建就能把需求推到 9。新口径必须告警。"""
+    warning = _pool_budget_warning(
+        _settings(
+            background_maintenance_concurrency=1,
+            background_light_job_concurrency=1,
+            kg_job_concurrency=1,
+            postgres_pool_max_size=5,
+        )
+    )
+    assert warning is not None
+    assert "搜索并发(4)" in warning
+    assert "scale 构建并发(2)" in warning

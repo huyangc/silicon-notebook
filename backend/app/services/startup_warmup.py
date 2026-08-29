@@ -315,14 +315,21 @@ def _pool_budget_warning(settings: object) -> str | None:
         heavy = int(settings.background_maintenance_concurrency)
         light = int(settings.background_light_job_concurrency)
         kg = int(settings.kg_job_concurrency)
-        budget = heavy + light + kg
+        # 本批新增的两路有界 DB 消费者也计入保守预算(codex #627 R4 P2):搜索闸的
+        # 每个执行位与 scale build 的每个并发位都各占一条连接,且与三个维护池相互
+        # 独立——漏算它们会把 1+1+1 vs pool=5 这类实际会被 4 路搜索打穿的配置误判
+        # 为安全。部署文档把这两个旋钮明确绑到池容量上,预算口径必须一致。
+        search = int(settings.search_concurrency_limit)
+        scale = int(settings.scale_build_concurrency)
+        budget = heavy + light + kg + search + scale
         pool_max = int(settings.postgres_pool_max_size)
         if pool_max > budget:
             return None
         return (
             f"pool-budget: POSTGRES_POOL_MAX_SIZE={pool_max} <= "
-            f"重活维护池({heavy})+轻活维护池({light})+KG 分析并发({kg})={budget}；"
-            "高峰期后台维护 job 与 KG 分析可能耗尽连接池并让前台请求排队甚至超时。"
+            f"重活维护池({heavy})+轻活维护池({light})+KG 分析并发({kg})"
+            f"+搜索并发({search})+scale 构建并发({scale})={budget}；"
+            "高峰期后台 job、搜索与索引构建可能耗尽连接池并让前台请求排队甚至超时。"
             f"建议把 POSTGRES_POOL_MAX_SIZE 调到至少 {budget + 1}。"
         )
     except Exception:  # noqa: BLE001 — diagnostic-only; never affects startup
