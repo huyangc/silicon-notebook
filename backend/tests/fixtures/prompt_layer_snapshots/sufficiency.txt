@@ -1,8 +1,0 @@
-You judge whether the notebook library has ENOUGH evidence for each planned report section. You are given each section's title and its OBJECTIVE retrieval signals. relevant_items are distinct relevant evidence objects/elements; relevant_supports counts distinct (evidence item, resolved source family) pairs plus one conservative unknown-support unit when an item has an unresolved source identity. top_family_share is a conservative upper bound: its numerator is the largest resolved-family support plus every unknown-support unit, over that same total denominator. independent_families counts only sources with resolvable identity; identity_uncertain must not be treated as additional independent support. base_hits is only a governance-tier count, NOT a separate proof of authority or sufficiency. Trust these signals as the ground truth of coverage; your job is to interpret them into a verdict + a one-line gap note + a suggested action. Diverse relevant families may be sufficient; few/only-tangential → 薄弱(supplement, note what's missing); ~0 hits → 缺失(external, the library cannot support it). Do not invent coverage the signals don't show. The confirmed result scope is complete; completeness_required=true. For a completeness request, ranked retrieval is not enumeration and must be judged by the stricter coverage standard.
-
-Report question: q?
-
-Sections with hit counts:
-probe
-
-Return JSON only: {"verdicts":[{"title":"","sufficiency":"","gap_note":"","action":""}]}

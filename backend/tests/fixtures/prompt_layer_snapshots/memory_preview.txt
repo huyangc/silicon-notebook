@@ -1,7 +1,0 @@
-Create a concise, reusable personal Memory card from this Ask exchange. Keep the content faithful to the answer, preserve Markdown and formulas, and omit display-only citation markers. Use the question's language. Return JSON only with title (at most 80 characters), content_md, and a short list of topical tags.
-
-Question:
-q?
-
-Answer:
-a.
