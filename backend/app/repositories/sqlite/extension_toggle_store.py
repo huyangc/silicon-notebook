@@ -1,12 +1,23 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.repositories.sqlite.database import SqliteDatabase
 
 
 def _now() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    """Aware UTC ISO string — deliberately the same construction as the
+    PostgreSQL store's ``utc_now()`` + ``iso_timestamp()`` pair (see
+    ``app.repositories.postgres._store_utils``), not this repository's more
+    common naive-local ``_now()`` (e.g. ``identity_store.py``). This table is
+    brand new with zero production rows, so there is no compatibility
+    payload to preserve; picking the naive-local shape here would mean an
+    admin's browser (``new Date()`` parses a naive string in ITS OWN local
+    timezone) shows a wall-clock time that silently drifts from what the
+    server actually wrote whenever the two differ. Both backends therefore
+    return byte-for-byte the same shape: an offset-aware ``+00:00`` UTC ISO
+    string with zero microseconds."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _row(row) -> dict:

@@ -89,6 +89,12 @@ def test_set_disabled_then_enabled_flips_membership_without_deleting_the_row(
         "updated_at": disabled["updated_at"],
     }
     assert isinstance(disabled["updated_at"], str) and disabled["updated_at"]
+    # Aware UTC, not naive local: a browser's `new Date()` parses a naive
+    # string in ITS OWN local timezone, so a naive server-local write would
+    # silently drift from the actual instant whenever the two timezones
+    # differ. Mirrors the PostgreSQL store's `utc_now()` + `iso_timestamp()`
+    # shape byte-for-byte (see extension_toggle_store.py's `_now()` docstring).
+    assert disabled["updated_at"].endswith("+00:00")
     assert store.extension_runtime_disabled_ids() == frozenset({"plugin-a"})
 
     enabled = store.set_extension_runtime_enabled("plugin-a", True, "user-admin")
