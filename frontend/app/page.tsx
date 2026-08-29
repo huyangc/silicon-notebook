@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
@@ -4459,6 +4459,30 @@ export default function Home() {
     }
   }
 
+  // 总览里「取消链接分享」的确认。撤销不可逆:旧 token 永久失效,已通过链接加入的只读
+  // 成员当场被移除,重新开启只会铸出一条新链接。所以它与「删除来源」「删除会话」走同一套
+  // 确认弹窗(info 层,z:80,与本总览共存),而不是点一下就执行。
+  // 后果句按这一行的真实处境写:有人加入过就报人数,还共享给群组就说明那条通道不受影响 ——
+  // 「撤销会波及什么」正是用户在这一刻唯一想知道的事。
+  function confirmUnshareFromOverview(item: SharedByMeItem) {
+    const joined = item.mode === "readonly" ? item.members.length : 0;
+    const consequences = [
+      joined > 0
+        ? `链接立即失效，已通过它加入的 ${joined} 位只读成员会被移除。`
+        : "链接立即失效，拿到旧链接的人不能再打开。",
+      "重新开启会生成另一条链接，旧链接不会恢复。",
+      item.group_count > 0 ? "共享给群组的部分不受影响。" : "",
+    ].filter(Boolean);
+    openInfoModal({
+      title: `取消「${item.name}」的链接分享`,
+      message: consequences.join(""),
+      actions: [
+        { label: "保留链接", action: () => {} },
+        { label: "取消链接分享", danger: true, action: () => { handleUnshareFromOverview(item.id).catch(reportError); } },
+      ],
+    }, rootModals.captureActorOwner());
+  }
+
   // 总览里「取消分享」:撤销 token(踢全员)→ 重拉总览刷新
   async function handleUnshareFromOverview(notebookId: string) {
     const modalLease = rootModals.activeLease("shared-by-me");
@@ -6305,13 +6329,15 @@ export default function Home() {
               <span className="section-title">链接分享</span>
               {shareModal.share_token ? (<>
                 <label>分享链接
-                  <div className="tag-row" style={{ marginTop: 6 }}>
+                  {/* 链接框与「已分享」总览用同一个 `.share-link-field`:同一件东西
+                      (一条分享链接 + 复制)在两个弹窗里必须长同一个样,而原生方角
+                      input 紧挨 999px 圆角按钮是这套界面里最扎眼的一处形状冲突。 */}
+                  <div className="share-link-field" style={{ marginTop: 6 }}>
                     <input
                       ref={(node) => { shareLinkInputs.current.set(shareModal.share_token, node); }}
                       readOnly
                       value={buildShareLink(shareModal.share_token, window.location.origin)}
                       onFocus={(event) => event.currentTarget.select()}
-                      style={{ flex: 1 }}
                     />
                     <button
                       className={shareLinkCopy.resultFor(shareModal.share_token) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(shareModal.share_token) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
@@ -6424,90 +6450,109 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>已分享</h2>
-                <p>你分享出去的笔记本：经链接分享的（较小的可被拷贝为独立副本，较大的以只读方式加入，下方列出已加入的只读成员），以及共享给群组的。</p>
+                <p>你分享出去的笔记本，以及每一本此刻正通过哪种方式对外可见。链接分享可以在这里复制与撤销；共享给群组的部分在别处管理。</p>
               </div>
               <button className="icon-button" onClick={() => rootModals.requestClose("shared-by-me", "button")} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {sharedByMeList === null ? (
-                <p className="tool-hint">加载中…</p>
+                <p className="share-overview-loading"><Loader2 size={15} className="busy-spin" /> 正在读取分享状态…</p>
               ) : sharedByMeList.length === 0 ? (
                 <article className="source-empty">
-                  <div>▧</div>
-                  <strong>尚未分享任何笔记本</strong>
-                  <p>在某个笔记本里点「分享」即可生成链接。</p>
+                  <div><Share2 size={38} strokeWidth={1.4} /></div>
+                  <strong>还没有分享出去的笔记本</strong>
+                  <p>在笔记本里点「分享」，可以发一条链接给具体的人，或共享给一个群组。</p>
                 </article>
               ) : (
-                <div className="stack">
+                <div className="share-overview">
                   {sharedByMeList.map((item) => (
-                    <div className="checklist-row" key={item.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-                      <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
-                        <span style={{ flex: 1, wordBreak: "break-word", fontWeight: 600 }}>{item.name}</span>
-                        {/* 只因群组共享而出现的行没有分享链接(share_token 为空)——
+                    <article className="share-overview-item" key={item.id}>
+                      <header className="share-overview-head">
+                        <h3 className="share-overview-name">{item.name}</h3>
+                        {/* 顶部这排 chip 是**事实**不是动作:一眼看清这本库现在开着哪几条
+                            对外通道。只因群组共享而出现的行没有分享链接(share_token 为空),
                             它的分享模式(可拷贝/只读)对读者没有意义,不显示。 */}
                         {item.share_token && (
-                          <span className="new-pill" title={item.mode === "readonly" ? "笔记本较大,只读共享" : "笔记本较小,可被拷贝"}>
-                            {shareModeLabel(item.mode)}
+                          <span className="share-channel-chip is-link" title={item.mode === "readonly" ? "笔记本较大,只读共享" : "笔记本较小,可被拷贝"}>
+                            <Link2 size={12} /> 链接 · {shareModeLabel(item.mode)}
                           </span>
                         )}
                         {item.group_count > 0 && (
-                          <span className="new-pill" title="已共享给群组">共享给 {item.group_count} 个群组</span>
+                          <span className="share-channel-chip is-group">
+                            <Users size={12} /> 共享给 {item.group_count} 个群组
+                          </span>
                         )}
-                      </div>
+                      </header>
                       {item.share_token && (
-                        <div className="tag-row" style={{ marginTop: 2 }}>
-                          <input
-                            ref={(node) => { shareLinkInputs.current.set(item.share_token, node); }}
-                            readOnly
-                            value={buildShareLink(item.share_token, window.location.origin)}
-                            onFocus={(event) => event.currentTarget.select()}
-                            style={{ flex: 1 }}
-                          />
-                          <button
-                            className={shareLinkCopy.resultFor(item.share_token) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(item.share_token) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
-                            onClick={() => {
-                              const link = buildShareLink(item.share_token, window.location.origin);
-                              handleShareLinkCopy(item.share_token, link).catch(reportError);
-                            }}
-                          >{shareLinkCopy.resultFor(item.share_token) === "copied" ? "已复制" : shareLinkCopy.resultFor(item.share_token) === "failed" ? "复制失败" : "复制"}</button>
+                        <div className="share-overview-channel is-link">
+                          <div className="share-link-field">
+                            <input
+                              ref={(node) => { shareLinkInputs.current.set(item.share_token, node); }}
+                              readOnly
+                              value={buildShareLink(item.share_token, window.location.origin)}
+                              onFocus={(event) => event.currentTarget.select()}
+                            />
+                            <button
+                              className={shareLinkCopy.resultFor(item.share_token) === "copied" ? "sort-button copy-result-copied" : shareLinkCopy.resultFor(item.share_token) === "failed" ? "sort-button copy-result-failed" : "sort-button"}
+                              onClick={() => {
+                                const link = buildShareLink(item.share_token, window.location.origin);
+                                handleShareLinkCopy(item.share_token, link).catch(reportError);
+                              }}
+                            >{shareLinkCopy.resultFor(item.share_token) === "copied" ? "已复制" : shareLinkCopy.resultFor(item.share_token) === "failed" ? "复制失败" : "复制"}</button>
+                          </div>
+                          {/* 复制按钮**旁边**必须写清这条链接此刻交出去的是什么:两种模式给出的
+                              东西根本不同(一份快照 vs 一直看得到的实时内容),而这正是决定
+                              「能不能发给这个人」的那句话。 */}
+                          <p className="share-overview-note">
+                            {item.mode === "readonly"
+                              ? "拿到链接的人可以只读加入：他们看得到这本笔记本此刻及以后的内容，但不能修改。"
+                              : "拿到链接的人可以把此刻的内容拷贝成自己的独立副本；之后你这边的改动不会同步过去。"}
+                          </p>
+                          {/* 规模统计只在有链接时算(纯群组共享的行后端刻意不跑那次统计,
+                              省掉 N 次新鲜复核),所以也只在有链接时显示。 */}
+                          <p className="share-overview-stats">
+                            <span>{item.size.sources ?? 0} 来源</span>
+                            <span>{item.size.nodes ?? 0} 节点</span>
+                            <span>{item.size.edges ?? 0} 边</span>
+                            <span>{formatFileSize(item.size.bytes ?? 0)}</span>
+                          </p>
+                          {item.mode === "readonly" && (item.members.length > 0 ? (
+                            <div className="share-overview-members">
+                              <span className="share-overview-members-label">已加入 {item.members.length} 人</span>
+                              {item.members.map((member) => (
+                                <span className="share-member-chip" key={member.username}>{member.username}</span>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="share-overview-note">还没有人通过这条链接加入。</p>
+                          ))}
+                          {/* 「取消分享」只撤销链接与只读成员,对群组授权是空操作——所以
+                              只因群组共享而出现的行不给这个按钮(点了会成功却什么都没变)。
+                              撤销不可逆(重开会铸出新 token、旧链接永久失效,已加入的人被踢),
+                              因此与「删除来源」等破坏性动作一样先过确认弹窗。 */}
+                          <div className="share-overview-actions">
+                            <button
+                              className="sort-button danger-text"
+                              disabled={shareBusy}
+                              onClick={() => confirmUnshareFromOverview(item)}
+                            >{shareBusy ? "取消中…" : "取消链接分享"}</button>
+                          </div>
                         </div>
-                      )}
-                      {/* 规模统计只在有链接时算(纯群组共享的行后端刻意不跑那次统计,
-                          省掉 N 次新鲜复核),所以也只在有链接时显示。 */}
-                      {item.share_token && (
-                        <p className="tool-hint" style={{ margin: "0" }}>
-                          {`${item.size.sources ?? 0} 来源 · ${item.size.nodes ?? 0} 节点 · ${item.size.edges ?? 0} 边 · ${formatFileSize(item.size.bytes ?? 0)}`}
-                        </p>
-                      )}
-                      {item.share_token && item.mode === "readonly" && (
-                        <p className="tool-hint" style={{ margin: "0" }}>
-                          只读成员:{item.members.length > 0 ? item.members.map((m) => m.username).join("，") : "暂无成员"}
-                        </p>
                       )}
                       {item.group_count > 0 && (
-                        <p className="tool-hint" style={{ margin: "0" }}>
-                          共享给群组的部分在这本笔记本的「分享」里查看与撤销，或由组管理员在「群组」里撤销。
-                        </p>
-                      )}
-                      {/* 「取消分享」只撤销链接与只读成员,对群组授权是空操作——所以
-                          只因群组共享而出现的行不给这个按钮(点了会成功却什么都没变)。 */}
-                      {item.share_token && (
-                        <div className="tag-row" style={{ marginTop: 2 }}>
-                          <button
-                            className="sort-button"
-                            disabled={shareBusy}
-                            title="撤销分享链接并移除所有只读成员"
-                            onClick={() => handleUnshareFromOverview(item.id).catch(reportError)}
-                          >取消链接分享</button>
+                        <div className="share-overview-channel is-group">
+                          <p className="share-overview-note">
+                            组内成员随进出自动获得与失去只读权限。要看是哪些群组或撤销，去这本笔记本的「分享」，或由组管理员在「群组」里撤销。
+                          </p>
                         </div>
                       )}
-                    </div>
+                    </article>
                   ))}
                 </div>
               )}
-              <div className="tag-row">
-                <button className="new-pill" onClick={() => rootModals.requestClose("shared-by-me", "button")}>完成</button>
-              </div>
+            </div>
+            <div className="share-overview-footer">
+              <button className="new-pill" onClick={() => rootModals.requestClose("shared-by-me", "button")}>完成</button>
             </div>
             </>)}
           </FloatingModalCard>
