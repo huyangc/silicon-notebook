@@ -6445,7 +6445,7 @@ export default function Home() {
 
       {rootModals.view("shared-by-me").open && (
         <section className="utility-modal" role="dialog" aria-modal={rootModals.view("shared-by-me").topmost} aria-hidden={!rootModals.view("shared-by-me").topmost} inert={rootModals.view("shared-by-me").topmost ? undefined : true} style={{ zIndex: rootModals.view("shared-by-me").zIndex }} onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("shared-by-me", "backdrop"); }}>
-          <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card">
+          <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card share-overview-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
