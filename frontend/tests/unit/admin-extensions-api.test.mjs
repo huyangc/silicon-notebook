@@ -7,7 +7,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseLoadedExtensions } from "../../app/admin/extensions/api.ts";
+import { parseLoadedExtensions, setExtensionRuntimeEnabled } from "../../app/admin/extensions/api.ts";
+import { httpErrorStatus } from "../../app/errors.ts";
 
 
 const wire = {
@@ -50,8 +51,70 @@ test("解析器把后端形状原样翻成页面形状", () => {
         slot: "workspace.side_panel",
         capability: "ui.agent_profile.available",
       }],
+      // builtin 行:三个运行时字段恒为 null(见 api.ts 的字段注释——builtin 只读,
+      // 后端也确实一律回 None)。
+      runtimeEnabled: null,
+      runtimeUpdatedBy: null,
+      runtimeUpdatedAt: null,
     }],
   });
+});
+
+
+test("deployment 行的运行时三字段原样解析:合法值透传,builtin 恒 null", () => {
+  const parsed = parseLoadedExtensions({
+    api_version: "1",
+    extensions: [{
+      id: "corp.sample",
+      trust: "deployment",
+      runtime_enabled: false,
+      runtime_updated_by: "user-admin-1",
+      runtime_updated_at: "2026-08-29T10:00:00",
+    }],
+  });
+  assert.deepEqual(parsed.extensions, [{
+    id: "corp.sample",
+    displayName: "",
+    version: "",
+    trust: "deployment",
+    contributions: [],
+    uiContributions: [],
+    runtimeEnabled: false,
+    runtimeUpdatedBy: "user-admin-1",
+    runtimeUpdatedAt: "2026-08-29T10:00:00",
+  }]);
+});
+
+
+test("PG 带偏移的 updated_at 一样原样透传,不做任何字符串改写", () => {
+  const [row] = parseLoadedExtensions({
+    api_version: "1",
+    extensions: [{
+      id: "corp.sample",
+      trust: "deployment",
+      runtime_enabled: true,
+      runtime_updated_by: "user-admin-1",
+      runtime_updated_at: "2026-08-29T10:00:00+00:00",
+    }],
+  }).extensions;
+  assert.equal(row.runtimeUpdatedAt, "2026-08-29T10:00:00+00:00");
+});
+
+
+test("运行时三字段缺失/类型不对一律退回 null,不把无效值透出去", () => {
+  const [row] = parseLoadedExtensions({
+    api_version: "1",
+    extensions: [{
+      id: "corp.sample",
+      trust: "deployment",
+      runtime_enabled: "yes",       // 非布尔
+      runtime_updated_by: 42,       // 非字符串
+      // runtime_updated_at 缺失
+    }],
+  }).extensions;
+  assert.equal(row.runtimeEnabled, null);
+  assert.equal(row.runtimeUpdatedBy, null);
+  assert.equal(row.runtimeUpdatedAt, null);
 });
 
 
@@ -73,6 +136,9 @@ test("未知字段忽略,缺字段给安全默认", () => {
     trust: "unknown",
     contributions: [],
     uiContributions: [],
+    runtimeEnabled: null,
+    runtimeUpdatedBy: null,
+    runtimeUpdatedAt: null,
   }]);
 });
 
@@ -139,5 +205,80 @@ test("整份响应畸形时返回空拓扑而不抛", () => {
     const parsed = parseLoadedExtensions(malformed);
     assert.deepEqual(parsed.extensions, []);
     assert.equal(parsed.versionRecognized, false);
+  }
+});
+
+
+// --------------------------------------------------------------------------
+// setExtensionRuntimeEnabled —— PATCH /admin/extensions/{plugin_id}
+// --------------------------------------------------------------------------
+
+test("setExtensionRuntimeEnabled 发 PATCH,body 带 enabled,响应体解析成驼峰形状", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({
+      plugin_id: "corp.sample",
+      runtime_enabled: false,
+      runtime_updated_by: "user-admin-1",
+      runtime_updated_at: "2026-08-29T10:00:00",
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const result = await setExtensionRuntimeEnabled("corp.sample", false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].init.method, "PATCH");
+    assert.deepEqual(JSON.parse(calls[0].init.body), { enabled: false });
+    assert.ok(calls[0].url.endsWith("/admin/extensions/corp.sample"), calls[0].url);
+    assert.deepEqual(result, {
+      pluginId: "corp.sample",
+      runtimeEnabled: false,
+      runtimeUpdatedBy: "user-admin-1",
+      runtimeUpdatedAt: "2026-08-29T10:00:00",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("setExtensionRuntimeEnabled 对 plugin_id 做 URL 编码", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({
+      plugin_id: "corp/weird id",
+      runtime_enabled: true,
+      runtime_updated_by: "user-admin-1",
+      runtime_updated_at: "2026-08-29T10:00:00",
+    }), { status: 200 });
+  };
+  try {
+    await setExtensionRuntimeEnabled("corp/weird id", true);
+    assert.ok(calls[0].endsWith(encodeURIComponent("corp/weird id")), calls[0]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("setExtensionRuntimeEnabled 失败时把 HTTP 错误原样抛出,不吞、不自造成功", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("该扩展不存在或不支持运行时开关", {
+    status: 404,
+    headers: { "X-User-Message": "1" },
+  });
+  try {
+    await assert.rejects(
+      () => setExtensionRuntimeEnabled("missing.plugin", true),
+      (error) => {
+        assert.equal(httpErrorStatus(error), 404);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
