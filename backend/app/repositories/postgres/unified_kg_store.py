@@ -689,7 +689,10 @@ class UnifiedKgStore:
         ``(a,b,c) IN ((...),(...))`` 就地展开成对 `pk_canonical_relations`
         的多路索引探查(EXPLAIN 已确认,见批 1 热点整改的 T1)。语义与
         SQLite 侧、与旧逐条 ``edge_support_rows`` 全表扫的等价性见那侧
-        docstring 与 ``graph_retrieval.relation_support_counts``。"""
+        docstring 与 ``graph_retrieval.relation_support_counts``。投影里的
+        ``support_count``(热路径修复批 2 · R2-1)同样是 parity:两个消费者
+        (``relation_support_counts`` 只要 source,``annotate_edge_support``
+        要 (support, source) 二元组)共用这一条定点原语,理由见 SQLite 侧。"""
         rows = [triple for triple in triples if triple]
         if not rows:
             return []
@@ -698,7 +701,8 @@ class UnifiedKgStore:
         for triple in rows:
             params.extend(triple)
         return db.execute(
-            f"SELECT canonical_src, edge_type, canonical_tgt, source_count "
+            f"SELECT canonical_src, edge_type, canonical_tgt, "
+            f"       support_count, source_count "
             f"FROM canonical_relations WHERE notebook_id=%s "
             f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders})",
             params,

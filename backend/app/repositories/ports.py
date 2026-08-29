@@ -1974,7 +1974,14 @@ class UnifiedKgStorePort(Protocol):
         ``(canonical_src, edge_type, canonical_tgt)`` tuples, at most the
         handful of distinct relation identities one answer assembly admits.
         Returns rows with ``canonical_src, edge_type, canonical_tgt,
-        source_count``; empty ``triples`` returns ``[]`` without querying.
+        support_count, source_count``; empty ``triples`` returns ``[]``
+        without querying.
+
+        两个消费者(热路径修复批 2 · R2-1 起):``relation_support_counts``
+        只读 ``source_count``;``KnowledgeQueryService.annotate_edge_support``
+        读 ``(support_count, source_count)`` 二元组——那是它替换掉的整表
+        ``edge_support_map`` 的值形状。两列同在 PK 行内,多投影一列不改访问
+        路径,所以这条仍是 canonical_relations 支撑数的唯一有界定点原语。
         """
         ...
     @staticmethod

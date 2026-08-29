@@ -59,6 +59,8 @@ class RetrievalRunState:
         self._lock = threading.RLock()
         self._embedding_cache: dict[Hashable, Any] = {}
         self._embedding_pending: dict[Hashable, _PendingEmbedding] = {}
+        # identity-keyed per-run probe memo (see memoized_probe)
+        self._probe_cache: dict[Hashable, tuple[Any, Any]] = {}
         self.embedding_requests = 0
         self.embedding_hits = 0
         self.embedding_errors = 0
@@ -104,6 +106,46 @@ class RetrievalRunState:
             current = self._embedding_pending.pop(key, None)
             if current is not None:
                 current.ready.set()
+        return value
+
+    def memoized_probe(
+        self, key: Hashable, identity: Any, compute: Callable[[], T]
+    ) -> T:
+        """Per-run memo for a repeated read-only probe whose answer is fixed by
+        ``identity`` (热路径修复批 2 · R2-3).
+
+        Deliberately NOT ``memoized_embedding``: that one drops falsy/``None``
+        results so a transient embedding failure retries. A probe's answer IS
+        very often ``False``, and re-running it because it was falsy would
+        defeat the whole point. Every value is retained, ``False`` included.
+
+        ``identity`` is compared by ``is``, not ``==``: the callers hand in a
+        frozen context object (e.g. the active ``ActiveSourceScope``) whose
+        ``__eq__`` would hash 48k-element frozensets on every call — the exact
+        cost this memo exists to remove. Storing it alongside the value also
+        pins the reference for as long as the entry lives, so identity can
+        never be recycled onto a different object underneath the memo. A
+        different-but-equal object simply re-probes: conservative, never wrong.
+
+        No single-flight. Unlike an embedding call (an outbound model request
+        worth ~seconds), a probe is a couple of bounded local reads: two
+        threads racing the same key each run it once, then the first writer's
+        value wins for the rest of the run — which is what keeps every reader
+        in the run consistent. Serialising them behind a pending-event would
+        cost more than the duplicate it prevents.
+        """
+        with self._lock:
+            hit = self._probe_cache.get(key)
+            if hit is not None and hit[0] is identity:
+                return hit[1]
+
+        value = compute()
+
+        with self._lock:
+            hit = self._probe_cache.get(key)
+            if hit is not None and hit[0] is identity:
+                return hit[1]
+            self._probe_cache[key] = (identity, value)
         return value
 
     @contextmanager
@@ -209,6 +251,20 @@ def memoized_query_embedding(key: Hashable, compute: Callable[[], T]) -> T:
     return state.memoized_embedding(key, compute) if state is not None else compute()
 
 
+def memoized_run_probe(key: Hashable, identity: Any, compute: Callable[[], T]) -> T:
+    """``RetrievalRunState.memoized_probe`` outside a run = plain ``compute()``.
+
+    Mirrors ``memoized_query_embedding``'s shape: no run installed (direct
+    service/test callers, background jobs) means no memo and byte-identical
+    behaviour to not having this function at all.
+    """
+    state = current_retrieval_run()
+    return (
+        state.memoized_probe(key, identity, compute)
+        if state is not None else compute()
+    )
+
+
 @contextmanager
 def retrieval_fanout_slot() -> Iterator[None]:
     state = current_retrieval_run()
@@ -223,6 +279,7 @@ __all__ = [
     "RetrievalRunState",
     "current_retrieval_run",
     "memoized_query_embedding",
+    "memoized_run_probe",
     "retrieval_fanout_slot",
     "retrieval_run",
 ]

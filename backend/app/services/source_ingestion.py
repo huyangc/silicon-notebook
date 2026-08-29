@@ -269,6 +269,7 @@ class SourceIngestionService:
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         self.invalidate_knowledge_counts = invalidate_knowledge_counts
         self.note_corpus_change = note_corpus_change
+
         self.require_indexing_write = require_indexing_write
         self.indexing_pipelines = indexing_pipelines
         self.effective_object_types = effective_object_types
@@ -1224,11 +1225,30 @@ class SourceIngestionService:
             self.event_log.logger.exception(
                 "chunk build failed for %s", source_id
             )
-            self.invalidate_knowledge_counts(notebook_id)
+            self._invalidate_corpus_scale_memos(notebook_id)
             return ""
         if warning:
             return f"{INDEXING_CHUNK_FALLBACK_WARNING_PREFIX} {warning}"
         return ""
+
+    def _invalidate_corpus_scale_memos(self, notebook_id: str) -> None:
+        """摄取改了语料规模 → 同时失效**开路计数** memo 与 **copy-stats** memo。
+
+        R2 评审 P2-1:copy-stats 的版本键(``ScaleArtifactRuntime.version()``)
+        里没有 ``sources`` 表的信号 —— 一次上传/删除只在它顺带 bump 了
+        ``kg_mutation_seq`` 时才让键变化,``size.bytes``/``size.sources`` 因此
+        本来就有一个已登记的陈旧窗口(见 ``notebook_scale`` 模块 docstring 与
+        ``NotebookScaleProfile.copy_stats`` 的注释:深拷贝那道总量闸由
+        ``NotebookSharingService`` 上一层现查兜住)。R2-2 把这份 memo 从会被别的
+        键族挤兑的共享 VectorCache 搬进专池之后,条目的**驻留时长变长了**——
+        原先有一部分"新鲜度"其实是挤兑白捡的,现在没有了。所以在摄取这条既有的
+        失效调用点上把 copy-stats 一并失效:服务层调用、与后端无关、零新增查询,
+        也不新增调用点(替换的是同一处 ``invalidate_knowledge_counts``)。
+        """
+        from app.services.notebook_scale import invalidate_copy_stats
+
+        self.invalidate_knowledge_counts(notebook_id)
+        invalidate_copy_stats(notebook_id)
 
     def _admit_and_freeze_pipeline(self, notebook_id: str) -> tuple[str, str]:
         """注册 → 准入 → 冻结,三步配对不可拆(codex #602 R5/R14 P1)。
@@ -2149,7 +2169,7 @@ class SourceIngestionService:
                 indexing_pipeline_id=pipeline_id,
                 indexing_pipeline_version=pipeline_version,
             )
-            self.invalidate_knowledge_counts(source.notebook_id)
+            self._invalidate_corpus_scale_memos(source.notebook_id)
         try:
             kg_llm_client = kg_client if kg_client is not None else self.model_clients
             if not (

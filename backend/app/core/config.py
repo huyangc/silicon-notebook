@@ -754,7 +754,32 @@ class Settings(BaseSettings):
     kg_merge_review_batch_size: int = Field(30, validation_alias="KG_MERGE_REVIEW_BATCH_SIZE")
     # 进程级 VectorCache（embedding 矩阵/分词语料/rustworkx 图等 GB 级条目）的
     # LRU 容量上限，防止 fed_rxgraph 等按用户/notebook 线性增长的条目无界占用内存。
-    vector_cache_max_entries: int = Field(32, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
+    #
+    # 热路径修复批 2 · R2-4(审计 ASK-3):这里原来只有一道 32 条的**全进程总**上限,
+    # 而单个大库自己就要占十几条(四个 embedding 矩阵 + kwtok + ppr_graph +
+    # entchunk/elemchunk + clustermap + edge_centrality + …),两个活跃库即互相
+    # 挤兑,被挤掉的恰好是冷载最贵的那些(GB 级矩阵、整表 dict)。现在按**键族**
+    # 分池:每族各有自己的 LRU 上限,族与族之间不再竞争;总条目上限退居兜底,默认
+    # 随之从 32 提到 128(≈16 族 × 每族 8),否则它会继续充当挤兑的来源。真正的
+    # 内存兜底改由字节预算负责。
+    vector_cache_max_entries: int = Field(128, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
+    # 每个键族的 LRU 上限,**单位是笔记本而不是条目**:8 = 同时活跃的库数量级
+    # (与 SCALE_IDX_CACHE_MAX 同一口径)。绝大多数键族每库只存一条,两者相等;
+    # `matrix` 族每库存四条(knowledge/element/relation/chunk 四张 embedding
+    # 表),所以它的**条目**额度是 8×4=32 —— 换算表在
+    # `vector_cache._FAMILY_ENTRIES_PER_NOTEBOOK`,那里也写了单位错配为什么会
+    # 直接打到问答质量(矩阵被逐出 → peek 判冷 → 关系语义打分整段跳过)。
+    vector_cache_per_family_entries: int = Field(
+        8, validation_alias="VECTOR_CACHE_PER_FAMILY_ENTRIES"
+    )
+    # VectorCache 常驻条目的**估算**字节预算(数量级估算,见 vector_cache
+    # .estimate_entry_bytes:numpy 用 nbytes,dict/set 按条目数 × 名义单价,估不出
+    # 的类型按名义条目大小 → 那类条目上预算自然退化成条目数上限)。超预算按全局
+    # LRU 回收。默认 16GiB:高于「两三个活跃大库」的实际常驻集合,所以常态下不该
+    # 生效——它的职责是兜住膨胀,不是替代分池。设 0 关闭。
+    vector_cache_max_bytes: int = Field(
+        16 * 1024 ** 3, validation_alias="VECTOR_CACHE_MAX_BYTES"
+    )
     # 进程级 scale/viz 索引缓存(_scale_idx_cache/_viz_idx_cache;每条目 = numpy
     # 数组 + memoized hnsw handle,单条目可达数十 MB~GB)的 LRU 容量上限——此前是
     # 无界 plain dict,每个访问过的 notebook 常驻一条目直到进程重启。8 = 典型部署

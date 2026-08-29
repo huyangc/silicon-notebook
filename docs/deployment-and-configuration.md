@@ -817,6 +817,30 @@ covers the artifact set published at startup. Runtime build/fold and a newly add
 `SCALE_IDX_CACHE_MAX+1` index still use the existing online publication path; size the
 cache before that change and restart to re-establish the readiness guarantee.
 
+**Retrieval hot cache (VectorCache):** the in-process, version-keyed cache holding
+embedding matrices, keyword token sets, rustworkx graphs and cluster maps — single
+entries reach GB scale. It used to have only one process-wide cap of 32 entries, while a
+single large notebook occupies a dozen or more, so two or three active notebooks crowded
+each other out — and what got evicted was exactly the most expensive to reload. Entries
+are now pooled per key family; the total cap is a backstop and memory is bounded by a
+byte budget.
+
+```text
+VECTOR_CACHE_PER_FAMILY_ENTRIES # resident **notebooks** per key family (default 8, the same "how many notebooks are active at once" unit as SCALE_IDX_CACHE_MAX). The unit is notebooks, not entries: the `matrix` family stores 4 entries per notebook (four embedding tables), so its entry quota is 8x4=32. Lowering this lowers "how many notebooks stay warm at once".
+VECTOR_CACHE_MAX_ENTRIES        # process-wide total entry backstop (default 128 ~ 16 families x 8 notebooks; it was 32 before this version, a value that would cancel out the pooling). It should not be the binding constraint — it only guards against an unexpected family explosion.
+VECTOR_CACHE_MAX_BYTES          # **estimated** byte budget for resident entries (default 16GiB, 0=disabled). Over budget, entries are reclaimed by global LRU. Estimates are per type (real nbytes for numpy/scipy, nodes+edges for rustworkx, item count x a nominal unit price for containers) — an order-of-magnitude estimate, not exact accounting.
+```
+
+RAM sizing: these three knobs together with `SCALE_IDX_CACHE_MAX` bound the process's
+resident memory. On small-memory deployments (<32GB), first lower
+`VECTOR_CACHE_PER_FAMILY_ENTRIES` to 2-4 (i.e. "keep only 2-4 notebooks warm"), then set
+`VECTOR_CACHE_MAX_BYTES` to roughly a third of physical RAM; with both lowered you do not
+need to touch `VECTOR_CACHE_MAX_ENTRIES`. WARNING: do not set
+`VECTOR_CACHE_PER_FAMILY_ENTRIES` below the **number of participant notebooks in one
+question** (the active notebook plus its mounted reference libraries): evicting a matrix
+makes relation semantic scoring skip entirely (logged as the `relation semantic scoring
+skipped` warning), which degrades answer quality, not just latency.
+
 **Notebook copy vs read-only share — size gate:** sharing a notebook offers a deep
 *copy* when it is small enough, otherwise a read-only *join*. "Small enough" (and the
 non-copyable threshold above) is the same set of bounds — a notebook must be under ALL

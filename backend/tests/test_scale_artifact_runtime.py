@@ -232,7 +232,10 @@ def test_startup_preload_loads_ann_and_safe_ppr_core_before_progress(repo):
     repo.build_scale_index(notebook.id)
     scale = repo._runtime.scale_artifacts
     scale.scale_cache.pop(notebook.id, None)
-    scale.snapshots.vector_cache.invalidate(f"{notebook.id}:scale_combined")
+    # R2-2 之后 ScaleArtifactRuntime 不再持有 snapshots(唯一读者是搬走的
+    # copy-stats memo);共享 VectorCache 仍由 facade 的写穿句柄暴露,是同一
+    # 个对象。
+    repo._vector_cache.invalidate(f"{notebook.id}:scale_combined")
     progress = []
 
     result = repo._preload_scale_retrieval_artifacts(
@@ -249,7 +252,7 @@ def test_startup_preload_loads_ann_and_safe_ppr_core_before_progress(repo):
     # Combined graphs share the general VectorCache and are intentionally not
     # claimed as startup-resident: mounted multi-index composition can require
     # multi-GB copies.  The reusable self-only core lives on ScaleIndex instead.
-    assert f"{notebook.id}:scale_combined" not in scale.snapshots.vector_cache.keys()
+    assert f"{notebook.id}:scale_combined" not in repo._vector_cache.keys()
     assert result == {"indexes": 1, "ann_handles": 1, "ppr_cores": 1}
     assert progress == [(0, 1), (1, 1)]
 

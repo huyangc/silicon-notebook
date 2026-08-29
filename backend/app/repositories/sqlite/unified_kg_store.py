@@ -689,7 +689,17 @@ class UnifiedKgStore:
         deterministic (ascending on the same three PK columns) regardless of
         physical storage order or the caller's tuple order — the caller
         builds an unordered ``dict`` from these rows so this is not required
-        for correctness, only for reproducible reads (tests, logs)."""
+        for correctness, only for reproducible reads (tests, logs).
+
+        投影里带 ``support_count``(热路径修复批 2 · R2-1):这条定点查询现在有
+        两个消费者,它们要的列不同——``relation_support_counts`` 只读
+        ``source_count``,而 ``KnowledgeQueryService.annotate_edge_support``
+        (从整表 ``edge_support_rows`` 迁过来)要 ``(support_count, source_count)``
+        二元组,与它替换掉的那份整表 map 的值形状逐字一致。两列都在
+        ``pk_canonical_relations`` 的行里,多投影一列不改变访问路径(仍是每个
+        tuple 一次 PK seek),也不改变任何既有调用方的取值——它们按列名读。
+        与其复制一份只差一列的孪生方法(连同上面这整段 row-value IN 的论证),
+        不如让这一条继续做 canonical_relations 支撑数的**唯一有界定点原语**。"""
         rows = [triple for triple in triples if triple]
         if not rows:
             return []
@@ -698,7 +708,8 @@ class UnifiedKgStore:
         for triple in rows:
             params.extend(triple)
         return db.execute(
-            f"SELECT canonical_src, edge_type, canonical_tgt, source_count "
+            f"SELECT canonical_src, edge_type, canonical_tgt, "
+            f"       support_count, source_count "
             f"FROM canonical_relations WHERE notebook_id=? "
             f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders}) "
             f"ORDER BY canonical_src, edge_type, canonical_tgt",

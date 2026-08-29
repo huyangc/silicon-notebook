@@ -20,7 +20,11 @@ plus the fail-open None → caller-fallback semantics.
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from typing import Callable
+
+# ``_stale_manifest_admissible`` 的解析 memo 上限(每条只有两个字段,几十字节)。
+_MANIFEST_IDENTITY_MEMO_MAX = 512
 
 
 class _AnnLoadState:
@@ -54,6 +58,56 @@ class ScaleArtifactCatalog:
         self.note_model_error = note_model_error
         self.pipeline_identity = pipeline_identity
         self._ann_lock_guard = threading.Lock()
+        # R2-5:磁盘 manifest 的**身份投影** memo,键是文件的 stat 签名。
+        self._manifest_identity_lock = threading.Lock()
+        self._manifest_identity_memo: "OrderedDict[str, tuple]" = OrderedDict()
+
+    def _manifest_identity(self, notebook_id: str) -> "dict | None":
+        """``{"version": ..., "pipeline_identity": ...}`` —— 身份比对真正需要的
+        那两个字段,按磁盘 stat 签名 memo(热路径修复批 2 · R2-5,审计 P1-15)。
+
+        为什么是投影 + memo,而不是「轻读 manifest 头部」:JSON 没有部分解析,
+        读出 ``version`` 就必然把整份(含 48k 元素、≈2MB 的 ``watermark_sources``)
+        解析一遍。既有的 ``read_manifest_version`` 也不例外——它省的是**返回**
+        整份 dict,不是解析。把 ``watermark_sources`` 拆到 manifest 旁的独立文件
+        才能真正做到轻读,那是工件格式 + 迁移 + 读写两侧的改动,本批不做(登记为
+        残余)。所以这里退而求其次:同一份磁盘工件只解析一次,之后按签名命中。
+
+        签名与 fail-soft 语义见 ``ScaleArtifactStore.manifest_stat_signature``。
+        解析失败(corrupt manifest)刻意**不进** memo:与仓库既有约定一致
+        (``scale_manifest_identity`` 的 docstring:损坏结论不缓存),用户修好
+        工件之后不必等任何东西过期。
+        """
+        directory = self.artifacts.scale_dir(notebook_id)
+        signature = None
+        probe = getattr(self.artifacts, "manifest_stat_signature", None)
+        if callable(probe):
+            signature = probe(directory)
+            if signature is None:
+                # 文件不在 = 无工件,与 read_manifest 的缺失分支同款早退。
+                return None
+            with self._manifest_identity_lock:
+                cached = self._manifest_identity_memo.get(notebook_id)
+                if cached is not None and cached[0] == signature:
+                    self._manifest_identity_memo.move_to_end(notebook_id)
+                    return cached[1]
+        try:
+            manifest = self.artifacts.read_manifest(directory)
+        except (OSError, ValueError):
+            return None
+        if manifest is None or manifest.get("version") is None:
+            return None
+        identity = {
+            "version": manifest.get("version"),
+            "pipeline_identity": manifest.get("pipeline_identity"),
+        }
+        if signature is not None:
+            with self._manifest_identity_lock:
+                self._manifest_identity_memo[notebook_id] = (signature, identity)
+                self._manifest_identity_memo.move_to_end(notebook_id)
+                while len(self._manifest_identity_memo) > _MANIFEST_IDENTITY_MEMO_MAX:
+                    self._manifest_identity_memo.popitem(last=False)
+        return identity
 
     def _stale_manifest_admissible(self, notebook_id: str) -> "dict | None":
         """allow_stale 的磁盘 manifest 读取 + 管线身份闸(codex #602 R8 P1)。
@@ -64,25 +118,27 @@ class ScaleArtifactCatalog:
         它失败后永远)。工件 manifest 的 `pipeline_identity` ≠ 当前已发布身份时按
         「无工件」处理,调用方回落 live 检索路径。legacy 工件缺该键——它们必然
         建于插件管线存在之前——按内建身份放行;corrupt manifest 保持 fail-soft。
+
+        R2-5:返回的是 manifest 的**身份投影**(``version`` + ``pipeline_identity``)
+        而不是整份 manifest —— 这两个字段就是本方法与它唯一的调用方 ``load()``
+        (只读 ``.get("version")``)消费的全部。解析按磁盘签名 memo,见
+        ``_manifest_identity``。管线身份的**数据库**一侧仍然每次现读(它是一次
+        主键行读,而且发布切换必须立刻可见),只有磁盘那一侧被 memo。
         """
-        try:
-            manifest = self.artifacts.read_manifest(
-                self.artifacts.scale_dir(notebook_id))
-        except (OSError, ValueError):
-            return None
-        if manifest is None or manifest.get("version") is None:
+        identity = self._manifest_identity(notebook_id)
+        if identity is None:
             return None
         if self.pipeline_identity is not None:
             from app.domain.indexing_pipeline import (
                 BUILTIN_INDEXING_PIPELINE_VERSION,
             )
             artifact_identity = list(
-                manifest.get("pipeline_identity")
+                identity.get("pipeline_identity")
                 or ["", BUILTIN_INDEXING_PIPELINE_VERSION]
             )
             if artifact_identity != list(self.pipeline_identity(notebook_id)):
                 return None
-        return manifest
+        return identity
 
     def load(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex or None.

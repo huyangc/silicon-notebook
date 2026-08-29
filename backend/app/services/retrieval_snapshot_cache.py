@@ -10,7 +10,7 @@ inline and hand around by identity:
   reverse maps, ``{nb}:knowhow_types`` source-scoped type tuple,
   ``{nb}:knowhow_bridge`` cell-vector sidecar,
   ``{nb}:edge_centrality`` betweenness map, ``{nb}:clustermap``
-  membership map, ``{nb}:copystats`` size memo and ``{nb}:edge_support``
+  membership map and ``{nb}:edge_support``
   annotation map. Version keys (table row counts / MAX created_at /
   kg_mutation_seq) stay computed at the call sites; LRU + single-flight stay
   VectorCache-owned.
@@ -25,8 +25,11 @@ funnels through (``KgMutationCoordinator.invalidate_unified_cache`` delegates
 here; the frozen per-operation phase matrix in mutation_phases.json is
 untouched). It evicts exactly the frozen families — the embedding matrices
 (all four embedding tables), kwtok, EVERY fed_rxgraph entry, ppr_graph, entchunk,
-elemchunk, knowhow_types, knowhow_bridge, edge_centrality, clustermap and
-copystats — plus this notebook's unified-cache entries.
+elemchunk, knowhow_types, knowhow_bridge, edge_centrality and clustermap —
+plus this notebook's unified-cache entries, plus the copy-stats memo that now
+lives in ``notebook_scale`` (R2-2 moved it out of this cache; the eviction is
+the SAME frozen family, only its storage changed — see that module's
+docstring).
 ``{nb}:edge_support`` deliberately stays out: it is versioned by
 canonical_rel_seq and self-invalidates on table rewrites.
 """
@@ -125,5 +128,11 @@ class RetrievalSnapshotCache:
         self.vector_cache.invalidate(f"{notebook_id}:clustermap")
         # notebook_copy_stats memo (perf-audit A3) — evict so a same-second
         # in-place edit with an unchanged version tuple cannot serve a stale
-        # size/copyable verdict to the ask-path guards / share paths.
-        self.vector_cache.invalidate(f"{notebook_id}:copystats")
+        # size/copyable verdict to the ask-path guards / share paths. R2-2 moved
+        # this memo out of the shared VectorCache (it was being evicted by
+        # unrelated key families, forcing a five-aggregate cold reload on every
+        # ask); the eviction contract here is unchanged — same family, same
+        # trigger, one call away.
+        from app.services.notebook_scale import invalidate_copy_stats
+
+        invalidate_copy_stats(notebook_id)

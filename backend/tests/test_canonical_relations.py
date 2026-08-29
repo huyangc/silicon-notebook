@@ -414,6 +414,212 @@ def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
     assert set(fold_ids) == {"o-src", "o-tgt"}
 
 
+# ─────────────────────── R2-1(热路径修复批 2 / 审计 KG-1)等价 oracle ──
+def _legacy_annotate_edge_support(kq, notebook_id, edges):
+    """``annotate_edge_support`` 改造**前**的正文,原样抄成 oracle。
+
+    唯一差别在支撑数的取法:这里仍走 ``retrieval.edge_support_map()`` 的整表
+    dict(生产 8.35M 行),新实现改成按本次边集的两个朝向做 ``relation_support_rows``
+    定点查询。折叠、键构造、正/反向偏好、未命中原样返回,三处逐字保持相同,
+    所以两者在同一数据上必须逐字段相等。
+    """
+    support = kq.retrieval().edge_support_map(notebook_id)
+    if not support:
+        return edges
+    ids = sorted({
+        oid
+        for edge in edges
+        for oid in (edge["source_object_id"], edge["target_object_id"])
+    })
+    clusters: dict = {}
+    if ids:
+        with kq.database.connect() as db:
+            for start in range(0, len(ids), 900):
+                for row in kq.unified_kg.cluster_fold_rows(
+                    db, notebook_id, ids[start:start + 900]
+                ):
+                    clusters[row["member_object_id"]] = row["canonical_id"]
+    result = []
+    for edge in edges:
+        key = (
+            clusters.get(edge["source_object_id"], edge["source_object_id"]),
+            edge["edge_type"],
+            clusters.get(edge["target_object_id"], edge["target_object_id"]),
+        )
+        hit = support.get(key) or support.get((key[2], key[1], key[0]))
+        result.append(
+            {**edge, "support_count": hit[0], "source_count": hit[1]}
+            if hit else edge
+        )
+    return result
+
+
+def _annotate_oracle_fixture(repo):
+    """一个把 annotate 的每条分支都盖到的库 + 边集。
+
+    - K-cascode --kind_of--> K-gain:两源折叠,support=2/source=2(经簇折叠命中);
+    - K-solo --cites--> K-other:直接写进 canonical_relations 的**未聚簇**行,
+      support=5/source=3(两个计数**故意不相等**,取错列会立刻可见),用来盖
+      「折叠 miss → 回退原 id → 定点命中」这条;
+    - K-alpha --refines--> K-beta(support=7/source=4):边集里**只**放它的反向
+      朝向。这一条是对称回退的真正钉子 —— 前两条边互为正反,反向那条即便实现
+      忘了查反向朝向,也会靠正向那条边贡献的同一个 key 蒙混过关(第一轮变异
+      自检真的这样漏过);只有一条「反向存在、正向不在边集里」的边能钉住它。
+    - 反向朝向的边(kg_neighbors 把入边画成「查询节点→邻居」时的形状);
+    - 完全没有 support 的边、自环边:必须原样返回、不带任何新字段。
+    """
+    nb = _mk_nb_with_relations(repo)
+    with repo._write() as db:
+        for canonical_src, edge_type, canonical_tgt, support, source in (
+            ("K-solo", "cites", "K-other", 5, 3),
+            ("K-alpha", "refines", "K-beta", 7, 4),
+            # 互为反向、取值不同的一对(评审 P2-2):边集里只放 X→Y,断言必须
+            # 拿到正向那一行 (9,9)。少了这一对,「正反向偏好反转」的变异会
+            # 全绿——两边都命中、值又相等,断言看不出区别。
+            ("K-x", "leads_to", "K-y", 9, 9),
+            ("K-y", "leads_to", "K-x", 1, 1),
+        ):
+            db.execute(
+                "INSERT INTO canonical_relations "
+                "(notebook_id, canonical_src, edge_type, canonical_tgt, "
+                " support_count, source_count, sample_relation_ids, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (nb.id, canonical_src, edge_type, canonical_tgt, support, source,
+                 "[]", "2024-01-01T00:00:00"),
+            )
+        db.execute(
+            "UPDATE unified_kg_state SET canonical_rel_seq=canonical_rel_seq+1 "
+            "WHERE notebook_id=?", (nb.id,),
+        )
+    cascode_id = _ids_by_name(repo, nb.id, "cascode")[0]
+    gain_id = _ids_by_name(repo, nb.id, "gain")[0]
+    edges = [
+        # 正向:两个端点都要经簇折叠才命中。
+        {"source_object_id": cascode_id, "edge_type": "kind_of",
+         "target_object_id": gain_id},
+        # 反向:正向 key 查不到,必须经对称回退命中同一行。
+        {"source_object_id": gain_id, "edge_type": "kind_of",
+         "target_object_id": cascode_id},
+        # 未聚簇 id:折叠 miss → 回退原 id → 定点命中(support≠source)。
+        {"source_object_id": "K-solo", "edge_type": "cites",
+         "target_object_id": "K-other"},
+        # 只有反向朝向进边集:正向 key 不由任何别的边贡献,必须自己查反向。
+        {"source_object_id": "K-beta", "edge_type": "refines",
+         "target_object_id": "K-alpha"},
+        # 正反向**都存在、取值不同**:必须优先正向 (9,9),不是反向 (1,1)。
+        {"source_object_id": "K-x", "edge_type": "leads_to",
+         "target_object_id": "K-y"},
+        # 边类型不同:同一对端点但 canonical_relations 里没有这条 → 不注解。
+        {"source_object_id": cascode_id, "edge_type": "supports",
+         "target_object_id": gain_id},
+        # 两端都陌生 → 不注解。
+        {"source_object_id": "K-nobody", "edge_type": "relates",
+         "target_object_id": "K-nowhere"},
+        # 自环 → 正反向是同一个 key,不得因此重复注解或崩。
+        {"source_object_id": cascode_id, "edge_type": "kind_of",
+         "target_object_id": cascode_id},
+    ]
+    return nb, edges
+
+
+def test_annotate_edge_support_matches_full_map_oracle(repo):
+    """R2-1 等价 oracle:定点查询版与整表 map 版在同一数据上逐字段相等。
+
+    整表版跑在前面(它会把 ``:edge_support`` 整表结果暖进 VectorCache),新版
+    随后跑;两者对同一条边必须给出同一个 dict —— 键集合、``support_count``、
+    ``source_count`` 全部逐字相同,未命中的边则两侧都不带这两个字段。
+    """
+    nb, edges = _annotate_oracle_fixture(repo)
+    kq = repo._runtime.knowledge_query
+
+    expected = _legacy_annotate_edge_support(kq, nb.id, [dict(e) for e in edges])
+    actual = kq.annotate_edge_support(nb.id, [dict(e) for e in edges])
+
+    assert actual == expected, f"\nnew: {actual}\nold: {expected}"
+    # 夹具真的覆盖到了「命中」与「未命中」两侧(否则这条 oracle 会在两边都
+    # 什么都不注解的空断言上通过)。
+    annotated = [e for e in actual if "support_count" in e]
+    assert [(e["support_count"], e["source_count"]) for e in annotated] == [
+        (2, 2), (2, 2), (5, 3), (7, 4), (9, 9),
+    ]
+    assert len(actual) - len(annotated) == 3
+
+
+def test_annotate_edge_support_matches_oracle_on_notebook_without_canonical_rows(repo):
+    """同一 oracle,但库里一条 canonical 关系都没有 —— 旧实现在这里靠
+    ``if not support: return edges`` 早退,新实现靠「定点查询零行」。两者必须
+    仍然逐字相等(所有边原样、不带注解字段)。"""
+    nb, edges = _annotate_oracle_fixture(repo)
+    with repo._write() as db:
+        db.execute("DELETE FROM canonical_relations WHERE notebook_id=?", (nb.id,))
+        db.execute(
+            "UPDATE unified_kg_state SET canonical_rel_seq=canonical_rel_seq+1 "
+            "WHERE notebook_id=?", (nb.id,),
+        )
+    kq = repo._runtime.knowledge_query
+
+    expected = _legacy_annotate_edge_support(kq, nb.id, [dict(e) for e in edges])
+    actual = kq.annotate_edge_support(nb.id, [dict(e) for e in edges])
+
+    assert actual == expected
+    assert all("support_count" not in edge for edge in actual)
+
+
+def test_annotate_edge_support_never_scans_the_full_support_table(repo, monkeypatch):
+    """R2-1 的方向钉:标注绝不允许再触碰整表 ``edge_support_rows``
+    (canonical_relations 的 per-notebook 全表扫,生产 8.35M 行 ≈3.6GB)。
+
+    **变异锚点**:把实现改回 ``retrieval.edge_support_map(notebook_id)``
+    → 这条立刻报红。上面的等价 oracle 按定义对这条变异是绿的(它就是 oracle
+    自己),所以「少扫」这一半必须由本条守卫钉住。"""
+    nb, edges = _annotate_oracle_fixture(repo)
+    kq = repo._runtime.knowledge_query
+    # 上面的夹具没走过 annotate,但同一进程里别的用例可能已把整表结果暖进
+    # VectorCache;显式失效,免得变异版靠缓存命中绕开这条守卫(与
+    # test_relation_support_lookup_... 同款的假阴性)。
+    repo._vector_cache.invalidate(f"{nb.id}:edge_support")
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "annotate_edge_support must not load the full edge_support_rows table")
+
+    monkeypatch.setattr(kq.unified_kg, "edge_support_rows", _forbidden)
+
+    annotated = kq.annotate_edge_support(nb.id, [dict(e) for e in edges])
+    assert [(e["support_count"], e["source_count"])
+            for e in annotated if "support_count" in e] == [
+        (2, 2), (2, 2), (5, 3), (7, 4), (9, 9)]
+
+
+def test_annotate_edge_support_on_empty_edges_issues_no_query(repo, monkeypatch):
+    """空响应必须零查询。旧实现把整表取值排在判空**之前**,所以一次空边的
+    KG 视图也要付一次全表扫描(审计 KG-1 的第二半)。
+
+    **变异锚点**:把 ``if not edges: return edges`` 早退挪到查询之后(或删掉)
+    → 这条报红。"""
+    nb, _edges = _annotate_oracle_fixture(repo)
+    kq = repo._runtime.knowledge_query
+    repo._vector_cache.invalidate(f"{nb.id}:edge_support")
+
+    calls: list = []
+    real_connect = kq.database.connect
+    monkeypatch.setattr(
+        kq.database, "connect",
+        lambda *a, **k: (calls.append("connect"), real_connect(*a, **k))[1],
+    )
+    for name in ("edge_support_rows", "relation_support_rows", "cluster_fold_rows"):
+        real = getattr(kq.unified_kg, name)
+        monkeypatch.setattr(
+            kq.unified_kg, name,
+            (lambda _name, _real: (
+                lambda *a, **k: (calls.append(_name), _real(*a, **k))[1]
+            ))(name, real),
+        )
+
+    assert kq.annotate_edge_support(nb.id, []) == []
+    assert calls == [], f"empty edge list must issue zero queries, got {calls}"
+
+
 def test_relation_support_rows_returns_rows_in_ascending_canonical_order(repo):
     """P3(评审 E2):relation_support_rows 的行序不应该靠 SQLite 恰好保留了
     请求 triples 的字面顺序,或恰好保留了物理插入顺序——那两者都不是 SQL 标准

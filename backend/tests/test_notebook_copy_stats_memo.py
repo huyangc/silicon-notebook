@@ -14,6 +14,12 @@ Three guarantees under test:
    the aggregates and reflects the new count.
 3. Output equality: the memoized dict is identical in shape/values to the
    unmemoized computation (no behavior change, only caching).
+
+R2-2(热路径修复批 2 / 审计 ASK-4)把这份 memo 从共享 VectorCache 搬进
+``notebook_scale`` 自己的有界 per-notebook 存储:版本键与判据**逐字不变**,变的
+只有存放位置,所以上面三条保证原样成立。新增的两条:等价 oracle(旧的
+VectorCache 路径与新 memo 在同一数据上逐字段相同)与「不被别的键族挤兑」——后者
+是这次改动真正要买的东西,也是唯一能钉住它的断言(值等价对回退变异天然是绿的)。
 """
 import json
 import pytest
@@ -60,44 +66,23 @@ def _add_chunk(repo, nb_id, cid, text):
     repo._mark_unified_kg_dirty(nb_id)
 
 
-class _SpyCursor:
-    def __init__(self, cur):
-        self._cur = cur
+def _count_cold_loads(repo, monkeypatch) -> dict:
+    """数「五条整表聚合」真正跑了几次。
 
-    def fetchone(self):
-        return self._cur.fetchone()
-
-    def fetchall(self):
-        return self._cur.fetchall()
-
-    def __getattr__(self, name):
-        return getattr(self._cur, name)
-
-
-def _make_spy_connect(orig_connect, counter, tables):
-    class _SpyConn:
-        def __init__(self):
-            self._ctx = None
-            self._conn = None
-
-        def execute(self, sql, *a, **k):
-            s = " ".join(str(sql).split())
-            if any(t in s for t in tables) and ("SUM(" in s or "COUNT(*)" in s):
-                counter["n"] += 1
-            return _SpyCursor(self._conn.execute(sql, *a, **k))
-
-        def __enter__(self):
-            self._ctx = orig_connect()
-            self._conn = self._ctx.__enter__()
-            return self
-
-        def __exit__(self, *a):
-            return self._ctx.__exit__(*a)
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    return lambda: _SpyConn()
+    ⚠ 这里刻意 spy ``facts_repo.load_notebook_scale_facts``,而不是像本文件
+    早先那样包一层 ``repo._connect`` 数 SQL:facts 读走的是 QueryStore 自己的
+    连接,根本不经过 ``repo._connect``——那个连接级 spy 因此**永远**数到 0,
+    对「缓存整个失效」这类变异也是绿的(R2-2 的变异自检里实测确认)。
+    """
+    loads = {"n": 0}
+    facts_repo = repo._runtime.scale_artifacts.facts_repo
+    real_load = facts_repo.load_notebook_scale_facts
+    monkeypatch.setattr(
+        facts_repo, "load_notebook_scale_facts",
+        lambda notebook_id: (loads.__setitem__("n", loads["n"] + 1),
+                             real_load(notebook_id))[1],
+    )
+    return loads
 
 
 def test_copy_stats_memo_hit_runs_loader_once(repo, monkeypatch):
@@ -106,18 +91,13 @@ def test_copy_stats_memo_hit_runs_loader_once(repo, monkeypatch):
 
     first = repo.notebook_copy_stats(nb.id)
 
-    counter = {"n": 0}
-    orig_connect = repo._connect
-    monkeypatch.setattr(
-        repo, "_connect",
-        _make_spy_connect(orig_connect, counter,
-                           ("sources", "chunks", "knowledge_objects", "knowledge_relations")))
+    loads = _count_cold_loads(repo, monkeypatch)
 
     second = repo.notebook_copy_stats(nb.id)
     assert second == first
-    assert counter["n"] == 0, (
+    assert loads["n"] == 0, (
         "second call with no intervening mutation must be a memo hit "
-        f"(0 aggregate queries); ran {counter['n']}"
+        f"(0 cold five-aggregate loads); ran {loads['n']}"
     )
 
 
@@ -148,12 +128,163 @@ def test_copy_stats_output_matches_unmemoized_shape(repo):
 
 def test_copy_stats_invalidated_by_invalidate_unified_cache(repo):
     """Sibling invalidation convention: _invalidate_unified_cache must also
-    evict the copystats memo key (defense against same-second in-place edits
-    with an unchanged version tuple)."""
+    evict the copystats memo (defense against same-second in-place edits
+    with an unchanged version tuple).
+
+    R2-2 moved the memo out of the shared VectorCache into
+    ``notebook_scale``'s own bounded per-notebook store; the invalidation
+    contract — same family, same trigger — is what this pins, so it now reads
+    that module instead of a vector-cache key."""
+    from app.services import notebook_scale
+
     nb = repo.create_notebook(NotebookCreate(name="b"))
     _add_concept(repo, nb.id, "a", "MOSFET")
     repo.notebook_copy_stats(nb.id)  # warm
-    key = f"{nb.id}:copystats"
-    assert key in repo._vector_cache._store
+    assert notebook_scale.copy_stats_cached_version(nb.id) is not None
     repo._invalidate_unified_cache(nb.id)
-    assert key not in repo._vector_cache._store
+    assert notebook_scale.copy_stats_cached_version(nb.id) is None
+
+
+# ────────────────────── R2-2:等价 oracle 与「不被挤兑」的方向钉 ──────────────
+
+
+def _legacy_copy_stats(repo, notebook_id, cache):
+    """``copy_stats`` 改造**前**的正文(VectorCache 版),原样抄成 oracle。
+
+    版本键、阈值、copyable 判据、``size`` 字典全部与现实现相同——差别只有存储:
+    这里 ``cache.get(f"{nb}:copystats", version, load)``,新实现走
+    ``notebook_scale`` 的 per-notebook memo。
+    """
+    settings = repo._runtime.settings
+    runtime = repo._runtime.scale_artifacts
+    version = (
+        tuple(runtime.version(notebook_id)),
+        settings.notebook_copy_max_bytes,
+        settings.notebook_copy_max_rows,
+    )
+
+    def load():
+        f = runtime.facts_repo.load_notebook_scale_facts(notebook_id)
+        return {
+            "copyable": (
+                f.bytes <= settings.notebook_copy_max_bytes
+                and f.chunks + f.nodes <= settings.notebook_copy_max_rows
+            ),
+            "size": f.as_size_dict(),
+        }
+
+    return cache.get(f"{notebook_id}:copystats", version, load)
+
+
+def test_copy_stats_matches_the_vector_cache_oracle(repo):
+    """R2-2 等价 oracle:新 memo 与旧 VectorCache 路径在同一数据上逐字段相等。
+
+    三个数据状态各比一次(空库 / 有 KO / 又加了 chunk+source),免得只在一种
+    形状上碰巧相同。
+    """
+    from app.services.vector_cache import VectorCache
+
+    oracle_cache = VectorCache()
+    nb = repo.create_notebook(NotebookCreate(name="b"))
+
+    assert repo.notebook_copy_stats(nb.id) == _legacy_copy_stats(
+        repo, nb.id, oracle_cache)
+
+    _add_concept(repo, nb.id, "a", "MOSFET")
+    assert repo.notebook_copy_stats(nb.id) == _legacy_copy_stats(
+        repo, nb.id, oracle_cache)
+
+    _add_chunk(repo, nb.id, "c1", "chunk text")
+    new = repo.notebook_copy_stats(nb.id)
+    assert new == _legacy_copy_stats(repo, nb.id, oracle_cache)
+    # 夹具真的走过一次重算(否则两侧都在返回同一份冷值,等式没有信息量)。
+    assert new["size"] == {"bytes": 0, "sources": 1, "chunks": 1, "nodes": 1, "edges": 0}
+
+
+def test_copy_stats_memo_holds_every_active_notebook(repo, monkeypatch):
+    """R2-2 的方向钉:专池能同时装下**所有活跃 notebook** 的 copy-stats,而共享
+    VectorCache 的 ``:copystats`` 键族只装得下 ``per_family_entries`` 个。
+
+    现场(审计 ASK-4):copy-stats 的冷载是五条整表聚合,而一次提问要问它 5–10
+    次(``_federated_graph_is_large`` 每参与库一次、``_lexical_knn_allowed``、
+    chunk 暴力守卫、``requires_index`` …)。它此前存在全进程共用的 VectorCache
+    里,被别的键族(和后来的族上限)挤兑;专池的容量是 512 个 notebook,每条只有
+    一个 ``{"copyable", "size"}`` 小 dict。
+
+    ⚠ 这条钉子的**第一版是空的**(评审 P1-3 实测):它当时用 40 个
+    ``other-nb-i:matrix:knowledge_embeddings`` 灌 VectorCache,而 R2-4 的分池
+    把这 40 条全归进 ``matrix`` 族、按族上限砍掉,全局上限根本不触发 —— 于是
+    「改回 VectorCache」的变异照样绿。现在改成按 notebook 数量做对照,那才是
+    专池真正买到的东西。
+
+    **变异锚点**:把 ``NotebookScaleProfile.copy_stats`` 改回
+    ``self.cache.get(f"{nb}:copystats", version, load)`` → 只有最近 8 个
+    notebook 还暖,其余 12 个各付一次五条整表聚合,这条报红(已实测)。
+    """
+    from app.services.vector_cache import VectorCache
+
+    notebooks = [repo.create_notebook(NotebookCreate(name=f"b{i}")) for i in range(20)]
+    for nb in notebooks:
+        _add_concept(repo, nb.id, "a", "MOSFET")
+        repo.notebook_copy_stats(nb.id)          # warm
+
+    loads = _count_cold_loads(repo, monkeypatch)
+    for nb in notebooks:
+        repo.notebook_copy_stats(nb.id)
+    assert loads["n"] == 0, (
+        "20 个活跃 notebook 的 copy-stats 必须全部仍在专池里;冷载了 "
+        f"{loads['n']} 次")
+
+    # 对照:同一批 key 走共享 VectorCache 的 ``:copystats`` 键族(族上限 8 个
+    # notebook,每库一条)—— 只有最近 8 个留得住,前 12 个必须重付五条聚合。
+    shared = VectorCache(max_entries=128, per_family_entries=8, max_bytes=0)
+    for nb in notebooks:
+        shared.get(f"{nb.id}:copystats", version=1, loader=lambda: {})
+    resident = [nb.id for nb in notebooks if shared.peek(f"{nb.id}:copystats", version=1)]
+    assert resident == [nb.id for nb in notebooks[-8:]], (
+        "对照组必须真的复现「共享缓存装不下」,否则上面那条断言没有对照意义")
+
+
+def test_copy_stats_recomputes_after_a_source_upload_bumps_the_version(repo):
+    """上传(bump 之后)必须重算 —— memo 不是永久钉住的。
+
+    ``_add_chunk`` 走的是生产写入 + ``_mark_unified_kg_dirty`` 的同一形状(插
+    sources 行 + chunks 行),``sources`` 与 ``chunks`` 两个计数都必须跟着变。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="b"))
+    _add_concept(repo, nb.id, "a", "MOSFET")
+    before = repo.notebook_copy_stats(nb.id)
+    assert before["size"]["sources"] == 0 and before["size"]["chunks"] == 0
+
+    _add_chunk(repo, nb.id, "c1", "chunk text")
+
+    after = repo.notebook_copy_stats(nb.id)
+    assert after["size"]["sources"] == 1 and after["size"]["chunks"] == 1
+
+
+def test_ingestion_invalidation_clears_the_copy_stats_memo(repo):
+    """P2-1:摄取改了语料规模时,copy-stats memo 必须跟着失效。
+
+    版本键里没有 ``sources`` 表的信号(见 ``notebook_scale`` 模块 docstring),
+    而 R2-2 把这份 memo 搬进专池之后驻留时长变长了 —— 原先有一部分新鲜度是被
+    32 条共享 LRU 的挤兑白捡的。所以摄取路径上补了显式失效。
+
+    **变异锚点**:把 ``_invalidate_corpus_scale_memos`` 里的
+    ``invalidate_copy_stats(notebook_id)`` 删掉 → 这条报红。
+    """
+    from app.services import notebook_scale
+    from app.services.source_ingestion import SourceIngestionService
+
+    nb = repo.create_notebook(NotebookCreate(name="b"))
+    _add_concept(repo, nb.id, "a", "MOSFET")
+    repo.notebook_copy_stats(nb.id)
+    assert notebook_scale.copy_stats_cached_version(nb.id) is not None
+
+    counts_calls: list = []
+    service = SourceIngestionService.__new__(SourceIngestionService)
+    service.invalidate_knowledge_counts = counts_calls.append
+    service._invalidate_corpus_scale_memos(nb.id)
+
+    # 既有的开路计数失效没有被替换掉,copy-stats 是**新增**的一半。
+    assert counts_calls == [nb.id]
+    assert notebook_scale.copy_stats_cached_version(nb.id) is None
