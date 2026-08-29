@@ -67,7 +67,6 @@ class ExtensionToggleStore:
         """
         if not plugin_id.strip():
             raise ValueError("empty plugin_id")
-        now = _now()
         with self.database.write() as db:
             self.database.begin_immediate(db)
             actor = db.execute(
@@ -75,6 +74,9 @@ class ExtensionToggleStore:
             ).fetchone()
             if actor is None or actor["role"] != "admin":
                 raise PermissionError("admin role required")
+            # 取时必须在 begin_immediate 之后:在锁外取时,一个先取时、后拿锁
+            # 的请求会用更旧的时间戳盖掉更新的写,让 updated_at 倒退。
+            now = _now()
             row = db.execute(
                 "INSERT INTO extension_runtime_toggles"
                 "(plugin_id, enabled, updated_by, updated_at) VALUES (?, ?, ?, ?) "
