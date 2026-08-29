@@ -1,0 +1,21 @@
+You decide the NEXT retrieval step for answering a question from a knowledge graph. Below are the candidates gathered so far.
+Choose next_action:
+- answer: candidates suffice — stop and answer.
+- expand_graph: a candidate looks central; follow its relations one more hop (set expand.object_id, optional edge_type/direction). You may expand repeatedly across turns — go as deep as the question needs.
+- add_subquery: an aspect of the question is uncovered; add one sub-query (set new_sub_query). Never re-submit a sub-query already listed as tried in the context; rephrase it substantially or choose a different action.
+- search_elements: the KG is too thin; fall back to raw document passages (set elements_query).
+- ppr_retrieve: the question compares across models/sources or needs breadth across documents; pull cross-document source passages via PPR (set ppr_query). Prefer this for comparison / cross-paper questions where single-document evidence isn't enough, or when a multi-layer derivation needs supporting passages scattered across documents.
+- expand_community: the question compares an entity with its peers / other of-its-kind, and those peers are missing from candidates; pull the entity's SEMANTIC COMMUNITY members across documents (set community_focal to the entity name, e.g. 'DeepSeek-V4'). Use for 'X vs other Y' questions.
+- follow_chain: the question requires an explicit A→B→C derivation. Set follow_chain.start_object_id to a candidate id, optional target_object_id, optional edge_type, and direction=out|in|both. This action performs a fail-closed, evidence-backed TWO-hop composition and returns a query-time inference. It only supports same-type derived_from, kind_of, prerequisite_of, precedes, or part_of chains. NEVER request it for supports, depends_on, contrasts_with, about, defines, used_in, composed_of, or mixed edge types because those are not safely transitive.
+- exact_lookup: the question names a specific command / API / option / parameter (e.g. 'set_db') and the candidates do not yet cover its full definition (arguments, defaults, examples). Set exact_term to that name EXACTLY as written in the documentation; this matches the name literally and returns the whole manual section it heads, so a name you invent or paraphrase returns nothing.
+Scope words are not search terms. Phrases like 当前notebook / 这个库 / 本库 / 整个库 / 库里 / the current notebook / this library name the notebook the user has open plus the reference libraries mounted on it — the SCOPE every retrieval already runs in, not content inside it. Resolve such a phrase into the scope and DROP it: no document contains the name of the library holding it. 知识图谱 / KG counts as a scope word ONLY in that possessive form (本库的知识图谱 / 这个库的图谱 / the knowledge graph of this library), meaning this library's own knowledge structure. Standing on its own it is an ordinary TOPIC and stays a search term: if the documents are about knowledge graphs, '这些论文里知识图谱是怎么构建的' must keep 知识图谱. Either way keep the rest of the question intact — dropping scope words must never turn it into a different question.
+This applies to every retrieval field you fill: new_sub_query.query, elements_query, ppr_query and exact_term. exact_term especially — it is matched literally against document text, so a scope word there returns nothing.
+Before choosing answer, check aspect by aspect that every part the question explicitly asks for (each layer / entity / requirement it names) is covered by the candidates; if an asked-for aspect has no evidence yet, prefer a retrieval action targeting it. Set sufficient=true only when that per-aspect check passes (or further retrieval keeps failing). reason: one line.
+In reason, NEVER claim that 'all/every X have been retrieved' — relevance-based retrieval cannot prove completeness of a collection. Instead state what has actually been found so far and what, if anything, is still missing.
+
+Question: q?
+
+Candidates so far:
+(none)
+
+Return JSON only matching the schema (omit unused branch fields).

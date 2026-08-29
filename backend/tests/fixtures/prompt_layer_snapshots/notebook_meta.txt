@@ -1,0 +1,4 @@
+Based on the sources a curator added to this semiconductor knowhow notebook, propose a concise notebook NAME (<= 20 characters, no quotes) and a 1-2 sentence DESCRIPTION, both in the dominant language of the sources, of what it covers. Describe the actual subject matter and document types; do not invent scope beyond the sources. Return valid JSON only with 'name' and 'description'.
+
+Sources:
+sources block

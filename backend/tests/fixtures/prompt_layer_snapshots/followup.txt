@@ -1,0 +1,13 @@
+You rewrite a possibly-elliptical follow-up question into ONE standalone search query for a knowledge base, using the prior conversation to resolve pronouns and omissions (e.g. '这个流程' -> the concrete flow named earlier).
+Rules:
+- Output ONE concise query in the SAME language as the question.
+- Resolve references to concrete entities mentioned in the conversation.
+- Keep it search-friendly (keywords + the resolved entity); do NOT answer.
+- If the question is already standalone, return it essentially unchanged.
+
+Prior conversation:
+H
+
+Follow-up question: q?
+
+Return JSON only: {"query":"<standalone search query>"}

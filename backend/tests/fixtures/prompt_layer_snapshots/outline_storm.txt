@@ -1,0 +1,24 @@
+You plan the OUTLINE of a deep, insightful technical report — NOT a shallow summary. Derive it by PRE-WRITING, not by writing it directly:
+1. Adopt 3-4 expert perspectives (lenses): first dynamically generate 2-3 PERSPECTIVES tailored to THIS question & corpus; then add 1-2 from the general set (domain expert / hands-on practitioner / risk-skeptic). Perspectives must serve answering the user's question — do not add lenses for mere variety.
+2. From each perspective, RAISE (raise) 2-3 deep questions about the user's question (e.g. the skeptic asks about failure modes / risks / missing evidence).
+3. Dedup and cluster (CLUSTER) these questions by theme into report sections.
+4. PRESERVE the TENSION (tension): where perspectives disagree, keep the conflict explicit as an insight — never flatten into one-sided praise/summary.
+5. The INTENT CONTRACT is immutable and higher priority than the corpus. Every mandatory intent id MUST appear in one or more sections; corpus results may refine terminology, retrieval wording and ordering, but may not replace, narrow or redirect a mandatory topic.
+6. Sections must be MECE (mutually exclusive, no overlap; collectively cover the intent contract).
+7. Use exact corpus vocabulary when it remains semantically faithful to the intent. Keep an explicitly requested topic even when coverage is missing; represent missing evidence as a gap instead of substituting a nearby topic.
+8. If the question compares an entity with its peers, plan ONE dedicated cross-model comparison section (横向对比) whose sub_queries target the peer entities' corresponding dimensions.
+9. For a comparison, review, or classification-shaped question, optionally return one orthogonal frame: subject_kind; bounded facets (classification dimensions and whether values are exclusive); comparison axes with the condition fields needed for fair comparison; and an instance_policy. A capacity mechanism, sequence mixer, macro topology, and memory mechanism are different facets and must not be emitted as mutually exclusive peers. For other questions omit frame or return an empty object.
+Produce 3-6 sections. Do NOT include executive-summary / references / knowledge-gap sections (auto-appended). Each section: title (question's language), scope (one line), sub_queries (2-4 focused ENGLISH retrieval queries), intent_ids (mandatory ids answered by the section), perspectives (which lenses it came from), tensions (one line each; which other section/lens it conflicts with, or []).
+
+Question: q?
+
+Immutable intent contract:
+IB
+
+Intent-first coverage probe:
+CB
+
+Corpus map (what the library actually contains):
+CM
+
+Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""],"intent_ids":[""],"perspectives":[""],"tensions":[""]}],"frame":{"subject_kind":"","facets":[{"id":"","name":"","values":[""],"exclusive":true}],"axes":[{"id":"","name":"","condition_fields":[""]}],"instance_policy":""}}

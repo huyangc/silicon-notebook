@@ -1,0 +1,4 @@
+Write a concise 1-2 sentence description, in the dominant language of the sources, of what this knowhow notebook covers, based on the sources its curator has added. Describe the subject matter and document types; do not invent scope beyond the sources. Return valid JSON only with a 'description' field.
+
+Sources:
+sources block

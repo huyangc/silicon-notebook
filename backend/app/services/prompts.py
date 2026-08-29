@@ -2,6 +2,14 @@
 
 Kept separate from business logic so prompts can be versioned and tuned
 without touching the repository/extraction code.
+
+This module's text is layered L0/L1/L2 (system skeleton / optimizable
+fragments / data injection blocks); see ``app.services.prompt_layers`` for
+the full contract, the registry of extracted L1 fragments
+(``L1_FRAGMENTS`` / ``fragment_text()``), the L2 block metadata
+(``L2_BLOCKS``), and the list of prompts that are L0-only by design. Nine
+spots below call ``fragment_text("<id>")`` in place of a literal — those are
+today's only L1 extraction points; every other piece of text here is L0.
 """
 
 from __future__ import annotations
@@ -9,6 +17,7 @@ from __future__ import annotations
 from typing import List, Optional, Sequence
 
 from app.core.query_syntax import quoted_phrases
+from app.services.prompt_layers import fragment_text
 
 
 # Deictic phrases that name the SCOPE of a request rather than anything inside
@@ -327,7 +336,7 @@ def answer_prompt(
         "MUST NOT contain any [k] marker.\n"
         "3. If the items don't cover the question, still answer from general "
         "knowledge and set grounded=false; otherwise grounded=true.\n"
-        "4. Answer in the question's language. Be concrete.\n"
+        f"{fragment_text('answer.style_language')}"
         "5. Items tagged [base] come from the authoritative reference knowledge "
         "base; items tagged [personal] are the user's own notes. If a personal "
         "item contradicts a base item, defer to the base item's position and "
@@ -347,20 +356,9 @@ def answer_prompt(
         "do NOT emit plain forms like A_dm or V_OS1. Inline $...$ must stay on one "
         "line with no '$' inside it. Keep [k] markers OUTSIDE the math (after the "
         "sentence), never inside $...$.\n"
-        "8. For a question that asks for a multi-layer mechanism or derivation, "
-        "organize the answer layer by layer (e.g. circuit principle -> device "
-        "physics -> statistical/solid-state physics -> quantum/lattice origin -> "
-        "engineering practice) and keep the derivation chain complete within each "
-        "layer; where the knowledge items lack a link of the chain, bridge it "
-        "explicitly as （推断）.\n"
-        "9. Keep formulas dimensionally consistent and prefer the circuit-"
-        "realizable form the sources use (e.g. $\\Delta V_{BE}=V_T\\ln N$ rather "
-        "than an abstract $K\\cdot V_T$); when converting between energy and "
-        "voltage, state the conversion (e.g. $E_g=qV_{G0}$) — as a （推断） note "
-        "if the items use a different notation.\n"
-        "10. When a specific numeric value comes from a single source, attribute "
-        "it as that source's stated value; you may add the typical engineering "
-        "range or the factors that shift it, marked as （推断）.\n"
+        f"{fragment_text('answer.mechanism_organization')}"
+        f"{fragment_text('answer.domain_conventions')}"
+        f"{fragment_text('answer.numeric_attribution')}"
         "11. When the question asks you to enumerate or list every item of some "
         "kind (e.g. 'which formulas', 'what figures', 'list the methods'), list "
         "EVERY distinct matching item found in the knowledge items below, each "
@@ -778,37 +776,6 @@ def community_report_prompt(members_block: str, relations_block: str) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Global map-reduce 问答 (R4, GraphRAG-style)
-# ---------------------------------------------------------------------------
-
-GLOBAL_MAP_SCHEMA_HINT = '{"points":[{"description":"","score":0}]}'
-
-
-def global_map_prompt(question: str, report_block: str) -> str:
-    return (
-        "You extract, from ONE community report, the points relevant to the user "
-        "question, each with an importance score 0-100 (0 = irrelevant). If the "
-        "report is irrelevant, return an empty points list. Be faithful to the "
-        "report. Return JSON only with 'points':[{'description','score'}].\n\n"
-        f"Question: {question}\n\nCommunity report:\n{report_block}"
-    )
-
-
-GLOBAL_REDUCE_SCHEMA_HINT = '{"answer":"","grounded":true}'
-
-
-def global_reduce_prompt(question: str, points_block: str) -> str:
-    return (
-        "You answer the user question by synthesizing the key points below "
-        "(gathered from community reports, sorted by importance). Be concrete and "
-        "structured. Answer in the SAME language as the question. If the points do "
-        "not cover the question, say so and set grounded=false. Return JSON only "
-        "with 'answer' and 'grounded'.\n\n"
-        f"Question: {question}\n\nKey points:\n{points_block}"
-    )
-
-
 EVIDENCE_REFINE_SCHEMA_HINT = '{"relevant":[""]}'
 
 
@@ -888,15 +855,8 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "3. low_level_keywords: concrete entities / names / specifics (used to "
         f"retrieve ENTITIES) — {kw_langs_rule}\n"
         f"4. sub_queries: 1-{max_subqueries} focused, standalone retrieval queries IN "
-        "THE QUESTION'S LANGUAGE that together cover the question. For a COMPARISON, "
-        "emit ONE sub-query per entity (e.g. 'DeepSeek-V2 architecture and features', "
-        "'DeepSeek-V3 improvements'). For a BROAD/overview question, emit one per "
-        "distinct dimension. For a simple single-topic question, ONE sub-query is "
-        "fine. For a DEEP MECHANISM/DERIVATION question that spans abstraction "
-        "levels, emit one sub-query per level it crosses (e.g. circuit principle / "
-        "device physics / statistical or solid-state physics / quantum-lattice "
-        "origin / engineering constraints such as packaging & materials). Use "
-        "canonical entity names.\n"
+        "THE QUESTION'S LANGUAGE that together cover the question. "
+        f"{fragment_text('expand_query.decomposition_guidance')}"
         f"{types_line}"
         "Keep sub-queries non-redundant.\n"
         "If the question compares an entity with others of its kind (e.g. 'X vs "
@@ -969,20 +929,7 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "1-4 retrieval queries. Preserve requested comparisons, constraints, scope, "
         "time range and output form. excluded_topics lists plausible but out-of-scope "
         "directions. Do not answer the question and do not mention corpus coverage.\n"
-        "When the question names TWO OR MORE tools/systems/products and asks how a "
-        "capability of one maps to, compares with, or is achieved in another:\n"
-        "- Each named tool/system MUST own its own mandatory topic. Never fold the "
-        "target tool's side into the source tool's topic.\n"
-        "- The target-side topic's retrieval_queries MUST pair the target tool's NAME "
-        "with functional description words (what the capability does), NEVER the "
-        "source tool's command/API names alone — the target's documents do not "
-        "mention the source's identifiers.\n"
-        "- If the topic budget cannot cover every split, per-tool topics take "
-        "precedence over other decompositions, and the target tool's topic is "
-        "never the one dropped.\n"
-        "  Example: for \"how do I do Innovus's place_opt_design in ICC2?\", a good "
-        "target-side query is \"ICC2 placement optimization command\", not "
-        "\"place_opt_design usage\".\n"
+        f"{fragment_text('intent.cross_tool_mapping')}"
         "normalized_question is a standalone, precise formulation in the user's "
         "language. intent_type classifies the requested operation. entities lists "
         "the concrete research objects. confidence is 0..1 confidence that the "
@@ -1107,10 +1054,7 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "to a sentence whose content comes DIRECTLY from that item.\n"
         "2. When a sentence is your own inference bridging the items, prefix "
         "it with （推断） and attach NO [k].\n"
-        "3. Keep the derivation chain complete within this section's scope; "
-        "keep formulas dimensionally consistent and prefer circuit-realizable "
-        "forms; single-source numeric values: attribute as that source's "
-        "stated value, ranges may be added as （推断）.\n"
+        f"{fragment_text('report_section.domain_conventions')}"
         f"{parametric_rule}"
         "5. Answer in the question's language. Typeset ALL math as LaTeX "
         "($...$ inline, $$...$$ display); keep [k] markers outside math.\n"
@@ -1241,11 +1185,7 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
     return (
         "You plan the OUTLINE of a deep, insightful technical report — NOT a shallow "
         "summary. Derive it by PRE-WRITING, not by writing it directly:\n"
-        "1. Adopt 3-4 expert perspectives (lenses): first dynamically generate 2-3 "
-        "PERSPECTIVES tailored to THIS question & corpus; then add 1-2 from the "
-        "general set (domain expert / hands-on practitioner / risk-skeptic). "
-        "Perspectives must serve answering the user's question — do not add lenses "
-        "for mere variety.\n"
+        f"{fragment_text('report.storm_lenses')}"
         "2. From each perspective, RAISE (raise) 2-3 deep questions about the user's "
         "question (e.g. the skeptic asks about failure modes / risks / missing "
         "evidence).\n"
@@ -1269,9 +1209,9 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         "9. For a comparison, review, or classification-shaped question, optionally "
         "return one orthogonal frame: subject_kind; bounded facets (classification "
         "dimensions and whether values are exclusive); comparison axes with the "
-        "condition fields needed for fair comparison; and an instance_policy. A "
-        "capacity mechanism, sequence mixer, macro topology, and memory mechanism are "
-        "different facets and must not be emitted as mutually exclusive peers. For "
+        "condition fields needed for fair comparison; and an instance_policy. "
+        f"{fragment_text('report.frame_example')}"
+        "For "
         "other questions omit frame or return an empty object.\n"
         f"Produce 3-{max_sections} sections. Do NOT include executive-summary / "
         "references / knowledge-gap sections (auto-appended). Each section: title "
