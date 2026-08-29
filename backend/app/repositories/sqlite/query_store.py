@@ -900,6 +900,7 @@ class QueryStore:
         self,
         user_id: str,
         *,
+        activity_type: str | None = None,
         notebook_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -921,9 +922,13 @@ class QueryStore:
         可能与 SQL 口径分叉。复合游标谓词按 (绝对时刻, id) 的严格字典序比较,避免并列
         时间戳下只比 ts 跳行。
 
-        三类都按**该用户自有的笔记本**收窄(owner-only),与 sources 侧同口径:共享库
-        里别人库中的行不进这份清单。设计稿 §5 的「合计包含共享库提交」只针对用量合计,
-        展开清单刻意是 owner-only。
+        混合流与按来源/报告过滤时都按**该用户自有的笔记本**收窄(owner-only),与
+        sources 侧同口径。只有无 notebook_id 的 ask-only「提问概览」跟用户总览的
+        questions 合计对齐，按 created_by 纳入该用户在共享库里的提交；显式选某库仍
+        只接受左栏列出的自有笔记本。
+
+        ``activity_type`` 可把读取收窄到 ask/source/report 中的一类；筛选发生在各表
+        的 LIMIT 之前，因此「只看提问」仍能完整翻页，不会被较新的来源或报告挤出窗口。
 
         ``since``/``until`` 是半开区间 [since, until);它与 ``before_ts`` 一起在方法
         入口经 ``parse_activity_instant`` 归一成绝对时刻(**双后端共用同一份解析**),
@@ -989,7 +994,8 @@ class QueryStore:
                         (user_id,),
                     ).fetchall()
                 ]
-            if not owned_notebook_ids:
+            all_question_submissions = activity_type == "ask" and notebook_id is None
+            if not owned_notebook_ids and not all_question_submissions:
                 # 三类都按自有笔记本收窄,一个都没有就没有任何活动可列。
                 return empty
             owned_placeholders = ",".join("?" for _ in owned_notebook_ids)
@@ -997,18 +1003,29 @@ class QueryStore:
             # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,同 sources)。
             # notebook_id 已在上面解析成 owned_notebook_ids == [notebook_id],所以这
             # 条 IN 同时兑现了「按库过滤」和「归属校验」两件事,不需要第二条谓词。
-            ask_params: list[Any] = [user_id, *owned_notebook_ids]
-            ask_range_clause, ask_range_params = _range_and_cursor_clause("")
-            ask_params.extend(ask_range_params)
-            ask_rows = db.execute(
-                "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
-                "question, mode, status, answer_id, error, "
-                f"{_absolute_instant('created_at')} AS sort_instant FROM ask_jobs "
-                f"WHERE created_by = ? AND notebook_id IN ({owned_placeholders})"
-                f"{ask_range_clause} "
-                f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
-                [*ask_params, fetch_limit],
-            ).fetchall()
+            ask_rows = []
+            if activity_type in (None, "ask"):
+                # 提问概览与用户总览的 questions 合计同口径：无 notebook_id 时按
+                # created_by 覆盖该用户在自有库和共享库里的全部提交。混合流以及显式
+                # 选中左栏某库时仍保持既有 owner-only 展开语义。
+                ask_notebook_clause = ""
+                ask_params: list[Any] = [user_id]
+                if not all_question_submissions:
+                    ask_notebook_clause = (
+                        f" AND notebook_id IN ({owned_placeholders})"
+                    )
+                    ask_params.extend(owned_notebook_ids)
+                ask_range_clause, ask_range_params = _range_and_cursor_clause("")
+                ask_params.extend(ask_range_params)
+                ask_rows = db.execute(
+                    "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
+                    "question, mode, status, answer_id, error, "
+                    f"{_absolute_instant('created_at')} AS sort_instant FROM ask_jobs "
+                    f"WHERE created_by = ?{ask_notebook_clause}"
+                    f"{ask_range_clause} "
+                    f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
+                    [*ask_params, fetch_limit],
+                ).fetchall()
 
             # 2. 来源:sources 没有 created_by 列,靠"该用户自己的笔记本 id"限定范围
             # (与 list_user_notebooks 完全同口径)。必须带
@@ -1019,20 +1036,22 @@ class QueryStore:
             # 是否显示论文标题。s.doc_type / s.error_message 一并带出仅用于 Python 侧
             # 派生 paper_meta_status / parse_quality_warning,本身都不作为返回字段
             # (error_message 是 str(exc) 原样落库、可能带服务端绝对路径,见下)。
-            source_params: list[Any] = list(owned_notebook_ids)
-            source_range_clause, source_range_params = _range_and_cursor_clause("s.")
-            source_params.extend(source_range_params)
-            source_rows = db.execute(
-                "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
-                "s.source_type, s.parse_status, s.status, s.error_message, "
-                "s.doc_type, m.is_paper, m.paper_title, "
-                f"{_absolute_instant('s.created_at')} AS sort_instant "
-                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
-                f"WHERE s.notebook_id IN ({owned_placeholders}) "
-                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
-                f"ORDER BY {_absolute_instant('s.created_at')} DESC, s.id DESC LIMIT ?",
-                [*source_params, fetch_limit],
-            ).fetchall()
+            source_rows = []
+            if activity_type in (None, "source"):
+                source_params: list[Any] = list(owned_notebook_ids)
+                source_range_clause, source_range_params = _range_and_cursor_clause("s.")
+                source_params.extend(source_range_params)
+                source_rows = db.execute(
+                    "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
+                    "s.source_type, s.parse_status, s.status, s.error_message, "
+                    "s.doc_type, m.is_paper, m.paper_title, "
+                    f"{_absolute_instant('s.created_at')} AS sort_instant "
+                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                    f"WHERE s.notebook_id IN ({owned_placeholders}) "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
+                    f"ORDER BY {_absolute_instant('s.created_at')} DESC, s.id DESC LIMIT ?",
+                    [*source_params, fetch_limit],
+                ).fetchall()
 
             # 2b. extraction_warning 是「最近一次 extraction_runs.error_message 里的
             # windows_failed=N/T 标记」派生态,不是 sources 上的列——必须单独一条批量
@@ -1054,18 +1073,20 @@ class QueryStore:
             # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
             # row_to_dict 同一个 "$._generation_started_at" 表达式,不发明第二套提取
             # 写法),understanding_json 本身不作为返回字段。
-            report_params: list[Any] = [user_id, *owned_notebook_ids]
-            report_range_clause, report_range_params = _range_and_cursor_clause("")
-            report_params.extend(report_range_params)
-            report_rows = db.execute(
-                "SELECT id, notebook_id, created_at, updated_at, question, depth, "
-                "status, understanding_json, "
-                f"{_absolute_instant('created_at')} AS sort_instant FROM reports "
-                f"WHERE created_by = ? AND notebook_id IN ({owned_placeholders})"
-                f"{report_range_clause} "
-                f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
-                [*report_params, fetch_limit],
-            ).fetchall()
+            report_rows = []
+            if activity_type in (None, "report"):
+                report_params: list[Any] = [user_id, *owned_notebook_ids]
+                report_range_clause, report_range_params = _range_and_cursor_clause("")
+                report_params.extend(report_range_params)
+                report_rows = db.execute(
+                    "SELECT id, notebook_id, created_at, updated_at, question, depth, "
+                    "status, understanding_json, "
+                    f"{_absolute_instant('created_at')} AS sort_instant FROM reports "
+                    f"WHERE created_by = ? AND notebook_id IN ({owned_placeholders})"
+                    f"{report_range_clause} "
+                    f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
+                    [*report_params, fetch_limit],
+                ).fetchall()
 
         # 归并键与 SQL 逐位同源:(sort_instant, id) 就是 SQL 自己算出来的那两个值。
         pool: list[tuple[float, str, dict[str, Any]]] = []

@@ -142,6 +142,48 @@ def test_merges_three_types_in_time_descending_order(postgres_database, store):
     assert isinstance(result["items"][0]["created_at"], str)
 
 
+def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(
+    postgres_database, store
+):
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_user(connection, "u2")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_notebook(connection, "n2", "u2")
+        _insert_source(
+            connection, "src-new", "n1",
+            datetime(2026, 8, 1, 13, tzinfo=timezone.utc),
+        )
+        _insert_report(
+            connection, "rep-new", "n1", "u1",
+            datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+        )
+        _insert_ask(
+            connection, "ask-2", "n1", "u1",
+            datetime(2026, 8, 1, 11, tzinfo=timezone.utc),
+            question="第二个关注点",
+        )
+        _insert_ask(
+            connection, "ask-1", "n2", "u1",
+            datetime(2026, 8, 1, 10, tzinfo=timezone.utc),
+            question="第一个关注点",
+        )
+
+    first = store.list_user_activity("u1", activity_type="ask", limit=1)
+    assert [item["id"] for item in first["items"]] == ["ask-2"]
+    assert first["has_more"] is True
+
+    second = store.list_user_activity(
+        "u1",
+        activity_type="ask",
+        before_ts=first["next_cursor"]["ts"],
+        before_id=first["next_cursor"]["id"],
+        limit=1,
+    )
+    assert [item["id"] for item in second["items"]] == ["ask-1"]
+    assert second["has_more"] is False
+
+
 def test_source_hides_memory_and_knowhow_and_carries_paper_meta(postgres_database, store):
     with postgres_database.write() as connection:
         _insert_user(connection, "u1")

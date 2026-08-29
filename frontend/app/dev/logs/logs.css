@@ -92,6 +92,13 @@
 .activity-col-head { flex: 0 0 auto; padding: 7px 14px; border-bottom: 1px solid var(--line); background: var(--soft); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; }
 .activity-scope-list, .activity-stream-list { flex: 1; min-height: 0; overflow-y: auto; }
 
+.activity-stream-head { flex: 0 0 auto; border-bottom: 1px solid var(--line); background: var(--soft); }
+.activity-stream-head .activity-col-head { border-bottom: 0; }
+.activity-type-filter { display: flex; gap: 6px; padding: 0 12px 8px; flex-wrap: wrap; }
+.activity-type-button { border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); padding: 3px 10px; font-size: 11px; }
+.activity-type-button.active { border-color: var(--blue); background: #eaf1ff; color: var(--blue); font-weight: 600; }
+.activity-focus-hint { margin: 0; padding: 0 12px 9px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+
 /* 左栏 · 范围 */
 .activity-nb { border-bottom: 1px solid var(--line); }
 .activity-nb-head { display: flex; align-items: stretch; }
@@ -118,6 +125,7 @@
 
 /* 中栏 · 活动流 */
 .activity-row .logrow-head { flex-wrap: wrap; row-gap: 4px; }
+.activity-stream-question-overview .logrow-preview { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; line-height: 1.5; }
 .activity-chip { border-radius: 6px; padding: 1px 7px; font-size: 11px; background: var(--soft); color: var(--muted); border: 1px solid var(--line); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 异常小字容器。徽标本身的样式在 globals.css 的 .anomaly-badge 系列里，这里只排版。 */

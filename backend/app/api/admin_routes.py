@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -369,6 +369,9 @@ def _activity_item_from_row(row: dict):
 @router.get("/admin/users/{user_id}/activity", response_model=ActivityResponse)
 def get_admin_user_activity(
     user_id: str,
+    activity_type: Optional[Literal["ask", "source", "report"]] = Query(
+        None, alias="activity_type"
+    ),
     notebook_id: Optional[str] = Query(None),
     since: Optional[str] = Query(None),
     until: Optional[str] = Query(None),
@@ -383,6 +386,7 @@ def get_admin_user_activity(
     try:
         raw = admin_query_repository().list_user_activity(
             user_id,
+            activity_type=activity_type,
             notebook_id=notebook_id,
             since=since,
             until=until,

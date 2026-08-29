@@ -153,6 +153,39 @@ def test_activity_allowed_for_admin_any_user(client):
     assert resp.status_code == 200
 
 
+def test_activity_type_query_returns_only_questions(client):
+    a = _auth(client, 33)
+    uid_a = _me(client, a)
+    nb_id = _create_notebook(client, a, "NB-question-overview")
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db, "ask-focus", nb_id, uid_a, "2026-08-01T10:00:00",
+            question="用户现在关注什么？",
+        )
+        _insert_source(db, "src-newer", nb_id, "2026-08-01T11:00:00")
+
+    resp = client.get(
+        f"/api/admin/users/{uid_a}/activity",
+        params={"activity_type": "ask", "limit": 1},
+        headers=a,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [item["id"] for item in body["items"]] == ["ask-focus"]
+    assert body["items"][0]["question"] == "用户现在关注什么？"
+
+
+def test_activity_type_query_rejects_unknown_value(client):
+    a = _auth(client, 34)
+    uid_a = _me(client, a)
+    resp = client.get(
+        f"/api/admin/users/{uid_a}/activity",
+        params={"activity_type": "unknown"},
+        headers=a,
+    )
+    assert resp.status_code == 422
+
+
 def test_activity_source_display_title_prefers_paper_title(client):
     """The one test the task letter calls out by name: a paper source must
     show its parsed paper title in the activity feed, not the uploaded file

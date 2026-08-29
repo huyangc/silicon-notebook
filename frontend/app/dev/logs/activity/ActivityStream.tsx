@@ -13,7 +13,14 @@ import {
   activityTone,
 } from "./format.ts";
 import { SourceAnomalies } from "./source-view.tsx";
-import type { ActivityItem } from "./types";
+import type { ActivityItem, ActivityTypeFilter } from "./types";
+
+const ACTIVITY_TYPE_OPTIONS: Array<{ value: ActivityTypeFilter; label: string }> = [
+  { value: "", label: "全部" },
+  { value: "ask", label: "提问" },
+  { value: "source", label: "来源" },
+  { value: "report", label: "报告" },
+];
 
 export function activityKey(item: ActivityItem): string {
   return `${item.type}:${item.id}`;
@@ -93,6 +100,8 @@ function ActivityRow({
 
 export function ActivityStream({
   items,
+  activityType = "",
+  onActivityTypeChange = () => undefined,
   selectedKey,
   onSelect,
   hasMore,
@@ -102,6 +111,8 @@ export function ActivityStream({
   now,
 }: {
   items: ActivityItem[];
+  activityType?: ActivityTypeFilter;
+  onActivityTypeChange?: (value: ActivityTypeFilter) => void;
   selectedKey: string;
   onSelect: (item: ActivityItem) => void;
   hasMore: boolean;
@@ -113,11 +124,33 @@ export function ActivityStream({
   now?: Date;
 }) {
   return (
-    <div className="activity-stream">
-      <div className="activity-col-head">活动</div>
+    <div className={`activity-stream${activityType === "ask" ? " activity-stream-question-overview" : ""}`}>
+      <div className="activity-stream-head">
+        <div className="activity-col-head">
+          {activityType === "ask" ? "提问概览" : "活动"}
+        </div>
+        <div className="activity-type-filter" aria-label="按活动类型筛选" role="group">
+          {ACTIVITY_TYPE_OPTIONS.map((option) => (
+            <button
+              aria-pressed={activityType === option.value}
+              className={`activity-type-button${activityType === option.value ? " active" : ""}`}
+              key={option.value || "all"}
+              onClick={() => onActivityTypeChange(option.value)}
+              type="button"
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        {activityType === "ask" ? (
+          <p className="activity-focus-hint">集中查看用户提出的问题，了解当前关注点。</p>
+        ) : null}
+      </div>
       <div className="activity-stream-list">
         {items.length === 0 && !loading && !identityErrored ? (
-          <div className="empty">这个范围里没有活动记录</div>
+          <div className="empty">
+            {activityType === "ask" ? "这个范围里没有提问" : "这个范围里没有活动记录"}
+          </div>
         ) : null}
         {items.map((item) => (
           <ActivityRow

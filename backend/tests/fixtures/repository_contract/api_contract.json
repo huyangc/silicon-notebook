@@ -11695,6 +11695,27 @@
             },
             {
               "in": "query",
+              "name": "activity_type",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "ask",
+                      "source",
+                      "report"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Activity Type"
+              }
+            },
+            {
+              "in": "query",
               "name": "notebook_id",
               "required": false,
               "schema": {

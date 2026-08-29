@@ -12,6 +12,9 @@ export type { SourceSummary, PaginatedSources } from "../../../workspace-model.t
 
 export type ActivityCursor = { ts: string; id: string };
 
+/** 空串表示混合活动；其余值与后端 activity_type 查询参数逐字对应。 */
+export type ActivityTypeFilter = "" | "ask" | "source" | "report";
+
 export type ActivityAsk = {
   type: "ask";
   id: string;

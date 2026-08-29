@@ -128,6 +128,40 @@ def test_merges_three_types_in_time_descending_order(repo):
     assert result["next_cursor"] is None
 
 
+def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(repo):
+    """提问概览不能先取混合页再过滤：较新的来源/报告不应挤掉问题。"""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_user(db, "u2", "b00000002")
+        _insert_notebook(db, "n1", "u1")
+        _insert_notebook(db, "n2", "u2")
+        _insert_source(db, "src-new", "n1", "2026-08-01T13:00:00")
+        _insert_report(db, "rep-new", "n1", "u1", "2026-08-01T12:00:00")
+        _insert_ask(
+            db, "ask-2", "n1", "u1", "2026-08-01T11:00:00",
+            question="第二个关注点",
+        )
+        _insert_ask(
+            db, "ask-1", "n2", "u1", "2026-08-01T10:00:00",
+            question="第一个关注点",
+        )
+
+    first = repo.list_user_activity("u1", activity_type="ask", limit=1)
+    assert [item["id"] for item in first["items"]] == ["ask-2"]
+    assert first["has_more"] is True
+    assert first["next_cursor"] is not None
+
+    second = repo.list_user_activity(
+        "u1",
+        activity_type="ask",
+        before_ts=first["next_cursor"]["ts"],
+        before_id=first["next_cursor"]["id"],
+        limit=1,
+    )
+    assert [item["id"] for item in second["items"]] == ["ask-1"]
+    assert second["has_more"] is False
+
+
 def test_ask_field_shape_and_ordering_uses_created_at_not_asked_at(repo):
     with repo._write() as db:
         _insert_user(db, "u1", "a00000001")

@@ -281,6 +281,58 @@ test("日期区间原样下推，不在前端过滤", async () => {
 });
 
 
+test("提问概览把筛选下推给服务端，并保留完整问题文本", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockImplementation((_userId, params) => (
+    params.activityType === "ask"
+      ? Promise.resolve(page([ask("focus-1", "封装噪声为什么比仿真高？")]))
+      : Promise.resolve(page([]))
+  ));
+  window.history.replaceState(null, "", "/dev/logs");
+  view();
+
+  await user.click(screen.getByRole("button", { name: "提问" }));
+
+  expect(await screen.findByText("封装噪声为什么比仿真高？")).toBeInTheDocument();
+  expect(screen.getByText("集中查看用户提出的问题，了解当前关注点。")).toBeInTheDocument();
+  expect(screen.getByText("全部提问（含共享笔记本）")).toBeInTheDocument();
+  await waitFor(() => {
+    expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith("user-1", {
+      activityType: "ask",
+      notebookId: undefined,
+      since: undefined,
+      until: undefined,
+      limit: 50,
+    });
+  });
+  expect(window.location.search).toContain("activity_type=ask");
+  expect(screen.getByRole("group", { name: "按活动类型筛选" })).toBeInTheDocument();
+  window.history.replaceState(null, "", "/dev/logs");
+});
+
+
+test("提问概览深链在首个请求就下推 ask 筛选", async () => {
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  window.history.replaceState(null, "", "/dev/logs?view=activity&activity_type=ask");
+
+  view();
+
+  await waitFor(() => {
+    expect(mocks.fetchUserActivity).toHaveBeenCalledWith("user-1", {
+      activityType: "ask",
+      notebookId: undefined,
+      since: undefined,
+      until: undefined,
+      limit: 50,
+    });
+  });
+  expect(screen.getByText("提问概览")).toBeInTheDocument();
+  window.history.replaceState(null, "", "/dev/logs");
+});
+
+
 test("选中一条提问时取回它的详情，并复用既有推理轨迹面板", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);

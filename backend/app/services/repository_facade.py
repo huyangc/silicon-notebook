@@ -814,6 +814,7 @@ class RepositoryFacade:
         self,
         user_id: str,
         *,
+        activity_type: Optional[str] = None,
         notebook_id: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
@@ -823,6 +824,7 @@ class RepositoryFacade:
     ) -> Dict[str, Any]:
         return self._runtime.queries.list_user_activity(
             user_id,
+            activity_type=activity_type,
             notebook_id=notebook_id,
             since=since,
             until=until,
