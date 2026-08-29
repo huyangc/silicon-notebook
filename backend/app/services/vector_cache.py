@@ -309,11 +309,16 @@ class VectorCache:
         try:
             with entry.lock:
                 # double-check：等待锁期间可能已被别的线程构建好了。
+                # ⚠ 这条路径**不再**计 hit(codex #634 R5 P2):本次 get() 已经在
+                # 上面记过一次 miss,再计 hit 会让并发 follower 把一次调用记成
+                # 「一 miss + 一 hit」,stats() 的总数与命中率双双失真。每次公开
+                # get() 恰好记一个结果——首检命中记 hit,其余一律记 miss(即便
+                # follower 复用了 leader 的构建成果,对调用方它仍是一次未预热的
+                # 访问,按 miss 口径如实反映冷载压力)。
                 with self._global_lock:
                     cached = self._store.get(key)
                     if cached is not None and cached[0] == version:
                         self._store.move_to_end(key)
-                        self._hits += 1
                         return cached[1]
 
                 # loader 绝不在全局锁内运行。
