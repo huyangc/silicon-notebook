@@ -6,7 +6,7 @@
  */
 "use client";
 
-import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -132,24 +132,63 @@ const ANSWER_MARKDOWN_COMPONENTS = {
   aside: AnswerMarkdownAside,
 } satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;
 
+// 默认参数必须是模块级常量：写成 `anchors = []` 会让省略这两个 prop 的调用方
+// （Memory 等纯 Markdown 消费面）每次渲染拿到一个新数组，下面按引用比较的
+// useMemo 永远失效，等于整层白做。
+const NO_ANCHORS: AnswerAnchorLike[] = [];
+const NO_CITATIONS: CitationLike[] = [];
+
 export function AnswerMarkdown({
   answer,
-  anchors = [],
-  citations = [],
+  anchors = NO_ANCHORS,
+  citations = NO_CITATIONS,
   selectedReferenceId = null,
   onReferenceClick,
   renderCitationImages,
   citationImageOrder,
 }: AnswerMarkdownProps) {
   // 构建 key→reference 映射，供 remarkCitations 插件和 <a> 组件使用
-  const references = buildAnswerReferences(answer, anchors, citations);
-  const refsByCitationKey = referenceByCitationKey(references);
-  const imageIdsByCitationKey: CitationImageIdsByKey = Object.fromEntries(
+  const references = useMemo(
+    () => buildAnswerReferences(answer, anchors, citations),
+    [answer, anchors, citations],
+  );
+  const refsByCitationKey = useMemo(() => referenceByCitationKey(references), [references]);
+  const imageIdsByCitationKey: CitationImageIdsByKey = useMemo(() => Object.fromEntries(
     Object.entries(refsByCitationKey).map(([key, reference]) => [
       key,
       (reference.anchor?.images ?? reference.citation?.images ?? []).map((image) => image.asset_id),
     ]),
-  );
+  ), [refsByCitationKey]);
+
+  // Ask 输入框每敲一个键都会让 page.tsx 整页重渲染一次，波及每一轮历史回答。
+  // 模块级 components（上文）已保证重渲染不换型、不重挂载；这里更进一步：answer/
+  // anchors/citations 没变时直接复用上一次的 ReactMarkdown 元素，让 React 整棵
+  // 子树 bail out——remark+KaTeX+rehype 解析是 O(全会话内容) 的开销，没理由跟着
+  // 每个按键重跑。选中态、点击回调、图片渲染端口刻意不进依赖：它们经由上面的
+  // Context 送达，Provider value 的变化会穿透被跳过的子树到达徽章/图片槽消费者，
+  // 所以引用高亮与点击仍然即时。citationImageOrder 的记账随解析走：解析被跳过时
+  // 账本保持原样（内容没变，账也不该变），依赖变化重跑时由插件清空重记。
+  const markdownTree = useMemo(() => (
+    <ReactMarkdown
+      remarkPlugins={[
+        remarkGfmPlugin,
+        remarkMath,
+        [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+      ]}
+      rehypePlugins={[
+        rehypeKatex,
+        [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
+          typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder | undefined,
+        ],
+      ]}
+      // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
+      // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
+      urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
+      components={ANSWER_MARKDOWN_COMPONENTS}
+    >
+      {normalizeMathMarkdown(answer)}
+    </ReactMarkdown>
+  ), [answer, refsByCitationKey, imageIdsByCitationKey, citationImageOrder]);
 
   return (
     <div className="answer-markdown">
@@ -159,25 +198,7 @@ export function AnswerMarkdown({
         onReferenceClick,
         renderCitationImages,
       }}>
-        <ReactMarkdown
-          remarkPlugins={[
-            remarkGfmPlugin,
-            remarkMath,
-            [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
-          ]}
-          rehypePlugins={[
-            rehypeKatex,
-            [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
-              typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder | undefined,
-            ],
-          ]}
-          // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
-          // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
-          urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-          components={ANSWER_MARKDOWN_COMPONENTS}
-        >
-          {normalizeMathMarkdown(answer)}
-        </ReactMarkdown>
+        {markdownTree}
       </AnswerMarkdownRenderContext.Provider>
     </div>
   );

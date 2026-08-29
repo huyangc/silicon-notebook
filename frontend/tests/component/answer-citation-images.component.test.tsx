@@ -11,9 +11,11 @@ vi.mock("../../app/source-api", async (importOriginal) => {
   };
 });
 
+import { AnswerMarkdown } from "../../app/answer-markdown";
 import { AnswerView } from "../../app/answer-panel";
 import { ImagePreviewModal } from "../../app/image-preview-modal";
 import type { AnswerImagePreviewRequest } from "../../app/image-preview";
+import type { CitationImageOrder } from "../../app/rehype-citation-images";
 import { fetchInternalAssetBlob } from "../../app/source-api";
 import type { AskResponse } from "../../app/workspace-model";
 
@@ -77,6 +79,7 @@ test("回答外的输入状态更新时已加载附图保持挂载且不重复�
   const answer = anchorAnswerWithImages();
   const view = renderAnswer(answer);
   const image = await screen.findByRole("img", { name: "图 1：示意图" });
+  const textBelowCard = screen.getByText("第二段继续说明。");
   expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1);
 
   // Ask 输入框每敲一个字都会让页面壳重新渲染 AnswerView。这里用与回答内容无关的
@@ -100,6 +103,40 @@ test("回答外的输入状态更新时已加载附图保持挂载且不重复�
 
   await waitFor(() => expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1));
   expect(screen.getByRole("img", { name: "图 1：示意图" })).toBe(image);
+  // 真机症状是「图片卡片下方的文字打字时频闪」：卡片后的正文节点同样必须原地保留，
+  // 不允许被重建（重建=一帧删除+一帧插入，看起来就是文字在闪）。
+  expect(screen.getByText("第二段继续说明。")).toBe(textBelowCard);
+});
+
+// 打字时的父级重渲染不止不能换型重挂载，连 remark+KaTeX+rehype 解析都不该重跑
+// （O(全会话内容)/键的开销）。观测点用 citationImageOrder 账本：解析每重跑一次都
+// 会清空重记（items 换成新数组），所以「数组身份未变」就是「管线没重跑」的直接
+// 证据；反过来，回答内容真变了必须重跑并重新记账。
+test("与回答无关的更新复用已解析的 markdown 子树，回答变化时才重新解析", () => {
+  const order: CitationImageOrder = { items: [] };
+  const { anchors } = anchorAnswerWithImages();
+  const markdownProps = {
+    anchors,
+    onReferenceClick: () => undefined,
+    renderCitationImages: () => null,
+    citationImageOrder: order,
+  };
+  const view = render(
+    <AnswerMarkdown answer="第一段结论 [k1]。" selectedReferenceId={null} {...markdownProps} />,
+  );
+  const ledger = order.items;
+  expect(ledger).toEqual([{ citationKey: "k1", imageId: "asset-1" }]);
+
+  view.rerender(
+    <AnswerMarkdown answer="第一段结论 [k1]。" selectedReferenceId="ref-1" {...markdownProps} />,
+  );
+  expect(order.items).toBe(ledger);
+
+  view.rerender(
+    <AnswerMarkdown answer="改写后的结论 [k1]。" selectedReferenceId="ref-1" {...markdownProps} />,
+  );
+  expect(order.items).not.toBe(ledger);
+  expect(order.items).toEqual([{ citationKey: "k1", imageId: "asset-1" }]);
 });
 
 test("caption 只作为图片 alt，不在正文或引用浮层重复显示", async () => {
