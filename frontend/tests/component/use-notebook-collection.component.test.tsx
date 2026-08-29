@@ -763,6 +763,44 @@ test("a dismissed save keeps its notebook single-flight until the server answers
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
 });
 
+test("a second save keeps the notebook while the first one unwinds its refresh", async () => {
+  // 完成写序列的那次保存会在等 collection 刷新**之前**就释放这本库（#628 的刻意设计），
+  // 所以第二次保存可能在第一次还没收尾时合法地占住同一个键。收尾必须认 token，否则它会
+  // 把第二次的占位删掉、把第二次的弹窗标成不忙（codex #629 R3 P1）。
+  const firstRefresh = deferred<void>();
+  const secondUpdate = deferred<NotebookSummary>();
+  vi.mocked(effects.refreshComposite)
+    .mockReturnValueOnce(firstRefresh.promise)
+    .mockResolvedValueOnce(undefined);
+  notebookApi.updateNotebook
+    .mockResolvedValueOnce(notebook("a"))
+    .mockReturnValueOnce(secondUpdate.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let firstSave!: Promise<void>;
+  act(() => { firstSave = value!.saveEditor(editorPatch); });
+  await waitFor(() => expect(value!.editor).toBeNull());
+
+  // 写序列已结束、刷新还在飞：这时重开并再存一次是允许的。
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.busy).toBe(false);
+  let secondSave!: Promise<void>;
+  act(() => { secondSave = value!.saveEditor(editorPatch); });
+  expect(value!.editor?.busy).toBe(true);
+
+  // 第一次的收尾跑完，不许动第二次的占位与忙碌位。
+  await act(async () => firstRefresh.resolve(undefined));
+  await firstSave;
+  expect(value!.editor?.busy).toBe(true);
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
+
+  await act(async () => secondUpdate.resolve(notebook("a")));
+  await secondSave;
+});
+
 test("an outstanding write on one notebook does not block another notebook's settings", async () => {
   const stuck = deferred<NotebookSummary>();
   notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
@@ -1003,6 +1041,51 @@ test("a confirmation reopened over a pending DELETE shows it pending and recover
   await act(async () => value!.confirmDelete());
   expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(2);
   expect(value!.rows).toEqual([]);
+});
+
+test("a confirmation reopened after re-login still recovers from its old DELETE", async () => {
+  // 与设置弹窗同一条：deletingRef 按 actor id 记账，登出再登录回同一账号时键还在，
+  // 释放若绑在发起时的 generation 上，重开的框会永远卡在「删除中」（codex #629 R2 P2）。
+  const stuck = deferred<undefined>();
+  notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
+  const view = render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  act(() => { value!.closeDelete(); });
+
+  view.rerender(<Harness actorId={null} />);
+  view.rerender(<Harness actorId="user-a" />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+  expect(value!.deletion?.busy).toBe(true);
+
+  await act(async () => stuck.reject(new Error("delete rejected")));
+  await deleting;
+  expect(value!.deletion?.busy).toBe(false);
+});
+
+test("a completed delete does not close a confirmation opened for another notebook", async () => {
+  const stuck = deferred<undefined>();
+  notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
+  render(<Harness />);
+  publish([notebook("a"), notebook("b")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  act(() => { value!.closeDelete(); });
+  await act(async () => value!.openDelete("b"));
+  expect(value!.deletion?.target.id).toBe("b");
+
+  await act(async () => stuck.resolve(undefined));
+  await deleting;
+
+  // A 删成功不该顺手把 B 的确认框关掉（codex #629 R3 P2）。
+  expect(value!.deletion?.target.id).toBe("b");
+  expect(value!.rows.map((row) => row.id)).toEqual(["b"]);
 });
 
 test("closing the confirmation without a delete in flight says nothing", async () => {

@@ -161,9 +161,14 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   // per notebook (rather than one hook-wide latch) keeps a different notebook's
   // settings usable while one notebook's write is outstanding.
   //
-  // Entries are removed unconditionally at settlement — never on an authority
-  // change — so a logout/login cycle cannot strand a key that nothing will clear.
-  const editorSavingIdsRef = useRef(new Set<string>());
+  // The value is the token of the save that holds the notebook.  A completed
+  // save releases its key *before* awaiting the slower collection refresh, so a
+  // second save can legitimately own the same key while the first is still
+  // unwinding; only the token owner may release it or un-busy the dialog.
+  //
+  // Entries are removed at settlement and never on an authority change, so a
+  // logout/login cycle cannot strand a key that nothing will clear.
+  const editorSavingTokensRef = useRef(new Map<string, object>());
   const editorRevokedOperationRef = useRef<EditorOperation | null>(null);
   const deletingRef = useRef(new Set<string>());
   const renamingRef = useRef(new Map<string, object>());
@@ -175,7 +180,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   );
 
   const editorSaveOutstanding = (actor: string | null, notebookId: string): boolean => (
-    actor !== null && editorSavingIdsRef.current.has(operationKey(actor, notebookId))
+    actor !== null && editorSavingTokensRef.current.has(operationKey(actor, notebookId))
   );
 
   // The dialog currently on screen belongs to the operation in editorOperationRef;
@@ -221,7 +226,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     editorOperationRef.current = null;
     deleteOperationRef.current = null;
     createOperationRef.current = null;
-    // editorSavingIdsRef is deliberately untouched: its entries are owned by the
+    // editorSavingTokensRef is deliberately untouched: its entries are owned by the
     // requests that created them and are removed when those settle.  Dropping
     // them here would let a re-login start a second write over one that is still
     // running, and (mirroring deletingRef) would strand a dialog reopened by the
@@ -807,7 +812,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     // access.  Refuse instead of running on a split identity.
     if (!operation || operation.notebookId !== current.target.id) return;
     const savingKey = operationKey(owner.actorId, current.target.id);
-    editorSavingIdsRef.current.add(savingKey);
+    const savingToken = {};
+    const releaseNotebook = () => {
+      if (editorSavingTokensRef.current.get(savingKey) === savingToken) {
+        editorSavingTokensRef.current.delete(savingKey);
+      }
+    };
+    editorSavingTokensRef.current.set(savingKey, savingToken);
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
       const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
@@ -827,7 +838,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // Every server write in the sequence has settled — release the notebook
       // before hiding the dialog and awaiting the slower collection refresh so
       // an immediate reopen starts with a usable form.
-      editorSavingIdsRef.current.delete(savingKey);
+      releaseNotebook();
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, bases);
       const refreshed = await refreshCompositeAfterCommit(owner);
@@ -853,14 +864,18 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
     } finally {
-      editorSavingIdsRef.current.delete(savingKey);
+      releaseNotebook();
       if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
       // Settled on the notebook and on actor identity, not on this dialog
       // instance or the generation that started the write.  Dismissing and
       // reopening the dialog replaces editorOperationRef, and a logout/login
       // cycle replaces the generation — keying the release on either would
       // strand the reopened dialog at busy with nothing left to clear it.
-      if (ownsIdentity(owner)) {
+      //
+      // `!editorSaveOutstanding` is what keeps a *newer* save's dialog busy: a
+      // save released its key before the refresh it is still awaiting, so by the
+      // time this runs the notebook may already belong to a second write.
+      if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
         setEditor((value) => {
           if (!value || value.target.id !== current.target.id) return value;
           if (!rowCanManageContent(value.target.id)) {
@@ -886,7 +901,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     // Same split-identity refusal as saveEditor — see the comment there.
     if (!operation || operation.notebookId !== current.target.id) return;
     const savingKey = operationKey(owner.actorId, current.target.id);
-    editorSavingIdsRef.current.add(savingKey);
+    const savingToken = {};
+    const releaseNotebook = () => {
+      if (editorSavingTokensRef.current.get(savingKey) === savingToken) {
+        editorSavingTokensRef.current.delete(savingKey);
+      }
+    };
+    editorSavingTokensRef.current.set(savingKey, savingToken);
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
       await setNotebookIndexingPipeline(current.target.id, pipelineId);
@@ -897,7 +918,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // pending 响应冻在屏上——后台重建早已结束,界面还写着「重建中」并禁用整组
       // 单选,直到用户自己关掉重开(codex #602 R1 P2)。toast 已说明重建在进行;
       // 重开设置时会重新取一次实时投影。
-      editorSavingIdsRef.current.delete(savingKey);
+      releaseNotebook();
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, current.mountEdges);
       const refreshed = await refreshCompositeAfterCommit(owner);
@@ -913,14 +934,18 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         effectsRef.current.reportError(error);
       }
     } finally {
-      editorSavingIdsRef.current.delete(savingKey);
+      releaseNotebook();
       if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
       // Settled on the notebook and on actor identity, not on this dialog
       // instance or the generation that started the write.  Dismissing and
       // reopening the dialog replaces editorOperationRef, and a logout/login
       // cycle replaces the generation — keying the release on either would
       // strand the reopened dialog at busy with nothing left to clear it.
-      if (ownsIdentity(owner)) {
+      //
+      // `!editorSaveOutstanding` is what keeps a *newer* save's dialog busy: a
+      // save released its key before the refresh it is still awaiting, so by the
+      // time this runs the notebook may already belong to a second write.
+      if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
         setEditor((value) => {
           if (!value || value.target.id !== current.target.id) return value;
           if (!rowCanManageContent(value.target.id)) {
@@ -1027,7 +1052,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
           return copy;
         });
         effectsRef.current.onNotebookDeleted(current.target.id);
-        setDeletion(null);
+        // Only this notebook's confirmation.  The box can be dismissed while the
+        // DELETE is in flight, so by now the user may have opened a different
+        // notebook's confirmation — an unconditional close would take that one
+        // down with it.
+        setDeletion((value) => (
+          value && value.target.id === current.target.id ? null : value
+        ));
         await effectsRef.current.refreshComposite(() => ownsIdentity(owner)).catch(() => undefined);
       }
       if (owns(owner)) effectsRef.current.notify("笔记本已删除");
