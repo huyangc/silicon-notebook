@@ -323,7 +323,12 @@ def import_sources(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult:
+def import_url_sources(
+    notebook_id: str,
+    urls: List[str],
+    *,
+    trusted_proxy_origins: "frozenset[str] | None" = None,
+) -> AddUrlSourcesResult:
     """按 URL 建源的**唯一**实现,浏览器端点与部署插件路由宿主共用。
 
     抽成模块级函数只为让第二个调用方(``app.api.extension_routes`` 的
@@ -347,6 +352,13 @@ def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult
     ``notebook_capability_allowed("sources:write", …)`` 对**本请求已认证的用户**判一次
     ——不是靠插件自己挂了哪道门(它可以只挂读门、把 id 藏在 body 里,或者给路径参数换
     个名字)。
+
+    ``trusted_proxy_origins`` 是部署配置的受信代理 origin 白名单(SSRF 公网地址
+    检查的豁免面,详见 ``source_ingestion.add_url_sources``),**只由插件端口适配器
+    注入**——浏览器端点(下面的 ``add_url_sources`` 路由)刻意不传,恒 ``None``,
+    故导入探测半程的豁免只对插件端口可达;请求级输入在任何路径上都改不了名单
+    本身(解析下载半程按部署 settings 判定,见
+    ``source_ingestion._parser_trusted_proxy_origins``)。
     """
     repo = source_repository()
     cap = _document_capacity(notebook_id)
@@ -357,6 +369,7 @@ def import_url_sources(notebook_id: str, urls: List[str]) -> AddUrlSourcesResult
             urls,
             scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
             capacity_limit=capacity_limit,
+            trusted_proxy_origins=trusted_proxy_origins,
         )
     except MinerUCloudNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc))

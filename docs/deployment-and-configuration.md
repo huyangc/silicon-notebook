@@ -599,6 +599,29 @@ adds no second user-visible size setting. Offline standalone bundles build the
 transport envelope against the allowed protocol maximum so a target-machine runtime
 `.env` remains free to select any valid `SOURCE_UPLOAD_MAX_MB`.
 
+**URL source import:**
+
+```text
+URL_IMPORT_TRUSTED_PROXY_HOSTS  # comma-separated trusted plugin-proxy origins exempt from the URL-import SSRF public-address check (default empty = no exemption)
+```
+
+The URL-import chain refuses outbound URLs that resolve to private, loopback or
+reserved addresses. A deployment plugin proxy co-deployed with this service (for
+example a signed PDF-download proxy on `http://127.0.0.1:8100`) naturally lives on
+such an address; list its origin here to let URL imports reach it. Every entry
+must carry its `http://` or `https://` scheme — a bare `host:port` entry is
+silently ignored. Matching is by exact origin (`scheme://host:port`, lowercased,
+default ports normalized — a different port is a different origin), and a match
+skips only the public-address check in the import probe and the parse-time
+download; scheme/credential/port shape checks still apply. The list comes from
+this deployment configuration only — request input can never alter it. The
+probe-side exemption is injected by the plugin route adapter only (browser and
+MCP URL imports never receive it); the parse-time download applies the list to
+every URL source whose origin matches, reparse included — so a whitelisted
+origin that is publicly resolvable also exempts browser-created sources of that
+origin during the parse download, redirect chain included. Only list origins you
+trust to that extent.
+
 **Retrieval:**
 
 ```text

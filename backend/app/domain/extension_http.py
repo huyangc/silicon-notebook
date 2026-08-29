@@ -88,6 +88,21 @@ class PluginUrlSourceImportPort(Protocol):
     ``app.api.source_routes.import_url_sources``) instead of handing the plugin
     a repository or a model client.
 
+    **Trusted-proxy SSRF exemption (deployment-configured).** Core's URL
+    import refuses URLs that resolve to private/loopback addresses. A
+    deployment whose plugin proxies live on private origins (a co-deployed
+    signed-download proxy, say) lists those origins in the
+    ``URL_IMPORT_TRUSTED_PROXY_HOSTS`` environment variable; a URL whose
+    origin matches exactly then skips only that public-address check — in the
+    import probe and in the parse-time download alike. The whitelist comes
+    from deployment configuration and is NEVER taken from anything the plugin
+    passes through this port, so request input can never alter it. The
+    probe-side exemption is injected only by core's adapter behind this port
+    (browser and MCP imports never receive it); the parse-time download reads
+    the same deployment whitelist itself and applies it to every URL source
+    whose origin matches, reparse included. An empty whitelist (the default)
+    keeps the historical behaviour bit-for-bit.
+
     **Two call shapes, one implementation — which one you use is not a style
     choice.** The work behind this port blocks: database writes plus one
     serial remote probe per URL, so a single slow host holds the calling

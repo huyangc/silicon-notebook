@@ -97,3 +97,35 @@ def test_download_pdf_cleans_up_on_network_error(tmp_path):
     with pytest.raises(ConnectionError):
         download_pdf("https://a/x.pdf", dest, opener=boom)
     assert not dest.exists()
+
+
+def test_probe_pdf_default_fetch_carries_allow_private(monkeypatch):
+    """不注入 fetch 时，allow_private 必须穿进默认 fetch（受信代理豁免的探测半程）。"""
+    from app.services import remote_sources
+
+    seen = []
+
+    def fake_default_fetch(url, timeout, *, allow_private=False):
+        seen.append(allow_private)
+        return FetchResult(200, "application/pdf", 10, b"%PDF-")
+
+    monkeypatch.setattr(remote_sources, "_default_fetch", fake_default_fetch)
+    assert probe_pdf("http://127.0.0.1:8100/a.pdf", allow_private=True).ok
+    assert probe_pdf("http://127.0.0.1:8100/a.pdf").ok
+    assert seen == [True, False]
+
+
+def test_download_pdf_default_opener_carries_allow_private(tmp_path, monkeypatch):
+    """不注入 opener 时，allow_private 必须穿进默认 opener（受信代理豁免的下载半程）。"""
+    from app.services import remote_sources
+
+    seen = []
+
+    def fake_default_opener(url, timeout, *, allow_private=False):
+        seen.append(allow_private)
+        return io.BytesIO(b"%PDF-")
+
+    monkeypatch.setattr(remote_sources, "_default_opener", fake_default_opener)
+    download_pdf("http://127.0.0.1:8100/a.pdf", tmp_path / "a.pdf", allow_private=True)
+    download_pdf("http://127.0.0.1:8100/b.pdf", tmp_path / "b.pdf")
+    assert seen == [True, False]

@@ -110,6 +110,18 @@ class Settings(BaseSettings):
         le=1024,
         validation_alias="SOURCE_UPLOAD_MAX_MB",
     )
+    # URL 导入 SSRF 保护的豁免名单：逗号分隔的受信插件代理 origin（如与本服务
+    # 同机部署的签名下载代理 http://127.0.0.1:8100；每项必须带 http/https scheme，
+    # 裸 host:port 会被整项忽略）。origin 精确匹配（scheme/host 小写、端口显式
+    # 归一，不同端口=不同 origin）才在 URL 导入的探测与解析下载中跳过「公网地址」
+    # 这一条检查；协议/凭证/端口形态检查照常，豁免路径不触发 DNS 解析。空串
+    # （默认）= 不豁免任何 URL，行为与接入前逐位一致。名单只来自本部署配置、
+    # 绝不来自请求输入；探测半程的豁免只由插件端口适配器注入，解析下载半程按
+    # 本配置对所有 URL 来源按 origin 命中生效（含 reparse）。
+    url_import_trusted_proxy_hosts: str = Field(
+        "",
+        validation_alias="URL_IMPORT_TRUSTED_PROXY_HOSTS",
+    )
     # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
     # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
     # Deployment-owned system model-service registry. An empty path explicitly
