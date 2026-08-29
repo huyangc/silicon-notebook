@@ -11,8 +11,15 @@ vi.mock("../../app/public-conversation.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/public-conversation.ts")>()),
   fetchPublicConversation: mocks.fetchPublicConversation,
 }));
+// 行为不变的透传 spy：normalizeMathMarkdown 只在 markdown 解析真正重跑时被调用，
+// 调用次数就是「remark+KaTeX+rehype 管线跑了几次」的账本。
+vi.mock("../../app/math-markdown.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../app/math-markdown.ts")>();
+  return { ...actual, normalizeMathMarkdown: vi.fn(actual.normalizeMathMarkdown) };
+});
 
 import PublicConversationPage from "../../app/c/[token]/page";
+import { normalizeMathMarkdown } from "../../app/math-markdown";
 
 const CONVERSATION = {
   title: "关于 LLM 架构的一次问答",
@@ -146,6 +153,39 @@ test("附图在正文引用段落后渲染、只显示图片，并可页内放�
   await user.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
   expect(screen.queryByRole("dialog", { name: "引用 [1] 图片预览" })).toBeNull();
   expect(screen.getByRole("button", { name: "放大查看本段附图" })).toHaveFocus();
+});
+
+// 渲染器组件表若在每次渲染时重建，React 会把整棵 markdown 子树（含附图区）卸载重挂：
+// 一帧删除 + 一帧插入，用户看到的就是附图闪烁与文字重排（主问答页 c5649a88/02ceda29
+// 修掉的同型缺陷）。该页无输入框，触发面是点选引用与开关图片预览这两类状态变化。
+// DOM 节点身份钉「不重挂」；normalizeMathMarkdown 调用数钉「解析管线没重跑」——与
+// answer-citation-images 用 citationImageOrder 账本身份断言是同一套证据思路，此处
+// 账本在组件内部拿不到，改用行为等价的解析入口计数。
+test("点选引用与开关图片预览复用已解析的 markdown 子树，附图与正文不重挂", async () => {
+  const user = userEvent.setup();
+  render(<PublicConversationPage />);
+
+  const img = await screen.findByRole("img", { name: "架构示意" });
+  const paragraph = screen.getByText(/Transformer 是主流/).closest("p");
+  const parseRuns = vi.mocked(normalizeMathMarkdown).mock.calls.length;
+
+  // 点选正文引用：高亮态必须经 Context 穿透被复用的子树到达徽章（同一个 DOM 按钮
+  // 原地变 active），而不是靠重建子树刷出来。
+  const chip = screen.getByRole("button", { name: "[7]" });
+  await user.click(chip);
+  expect(screen.getByRole("button", { name: "[7]" })).toBe(chip);
+  expect(chip).toHaveClass("active");
+  expect(screen.getByRole("img", { name: "架构示意" })).toBe(img);
+  expect(screen.getByText(/Transformer 是主流/).closest("p")).toBe(paragraph);
+
+  // 开关图片预览同理：预览是 markdown 子树之外的弹层，正文与附图必须原地保留。
+  await user.click(screen.getByRole("button", { name: "放大查看本段附图" }));
+  await user.click(screen.getByRole("button", { name: "关闭图片预览" }));
+  expect(screen.getByRole("img", { name: "架构示意" })).toBe(img);
+  expect(screen.getByText(/Transformer 是主流/).closest("p")).toBe(paragraph);
+
+  // 上面四次状态变化没有一次触发重新解析。
+  expect(vi.mocked(normalizeMathMarkdown).mock.calls.length).toBe(parseRuns);
 });
 
 test("清单卡未公开时留一句可见说明，绝不静默丢弃", async () => {

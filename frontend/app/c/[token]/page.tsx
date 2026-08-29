@@ -14,7 +14,7 @@
 //   * 表格/代码块沿用 `.answer-table-wrap` / `.answer-code`，宽内容才在自己的内容块
 //     里横向滚动，而不是把整页顶宽。
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
@@ -37,6 +37,7 @@ import {
   publicConversationCitationRefs,
   publicConversationImageUrl,
   publicConversationRefNumber,
+  type PublicCitationRefT,
   type PublicConversationT,
   type PublicImageT,
   type PublicTurnT,
@@ -64,6 +65,123 @@ const EVIDENCE_LABELS: Record<string, string> = {
   overview: "概述",
   inferred: "推断",
 };
+
+type PublicTurnRenderState = Readonly<{
+  token: string;
+  turnIndex: number;
+  selectedKey: string | null;
+  citationRefs: Record<string, PublicCitationRefT>;
+  markdownCitationRefs: Record<string, PublicCitationRefT>;
+  imagesByAlias: ReadonlyMap<string, PublicImageT>;
+  openReference: (key: string) => void;
+  openImagePreview: (image: PublicImageT, referenceLabel: string, returnFocusKey: string | null) => void;
+}>;
+
+// 渲染器函数是 React 组件*类型*，绝不能在 PublicTurnView 每次渲染时重建：换型即整棵
+// markdown 子树卸载重挂，附图重载、文字重排（与 answer-markdown.tsx 修掉的频闪同型）。
+// 会变的运行时状态一律走 Context。每轮问答是独立组件实例，Provider 也按轮包在各自的
+// markdown 子树外，消费者读到的是最近一层——本轮——的状态，跨轮互不串扰。
+const PublicTurnRenderContext = createContext<PublicTurnRenderState | null>(null);
+
+function PublicMarkdownLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const state = useContext(PublicTurnRenderContext);
+  if (href?.startsWith("cite:")) {
+    const key = href.slice(5);
+    if (state?.citationRefs[key]) {
+      return (
+        <button
+          type="button"
+          className={`cite-chip${state.selectedKey === key ? " active" : ""}`}
+          onClick={() => state.openReference(key)}
+        >
+          {children}
+        </button>
+      );
+    }
+    return <span>{children}</span>;
+  }
+  return (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  );
+}
+
+function PublicMarkdownPre({ children }: { children?: React.ReactNode }) {
+  return <pre className="answer-code">{children}</pre>;
+}
+
+function PublicMarkdownTable({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="answer-table-wrap">
+      <table className="answer-table">{children}</table>
+    </div>
+  );
+}
+
+function PublicMarkdownAside({
+  node,
+  children,
+}: {
+  node?: { properties?: Record<string, unknown> };
+  children?: React.ReactNode;
+}) {
+  const state = useContext(PublicTurnRenderContext);
+  const items = citationImageSlotItems(node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE]);
+  if (items.length === 0) return <aside>{children}</aside>;
+  if (!state) return null;
+  const rows = items.flatMap(({ citationKey, imageId }) => {
+    const image = state.imagesByAlias.get(imageId);
+    return image ? [{ citationKey, image }] : [];
+  });
+  if (rows.length === 0) return null;
+  const labels = [...new Set(rows
+    .map(({ citationKey }) => state.markdownCitationRefs[citationKey]?.displayLabel)
+    .filter((value): value is string => Boolean(value)))];
+  return (
+    <aside
+      className="answer-inline-images"
+      aria-label={`引用图片${labels.length > 0 ? ` ${labels.join("、")}` : ""}`}
+    >
+      <div className="answer-inline-images-heading">
+        <span>引用{labels.length > 0 ? ` ${labels.join("、")}` : ""}</span>
+        <small>模型未直接读取图片</small>
+      </div>
+      <ul className="answer-inline-image-list">
+        {rows.map(({ citationKey, image }) => (
+          <li key={image.alias} className="answer-inline-image-item">
+            <img
+              className="element-image"
+              src={publicConversationImageUrl(state.token, image.alias)}
+              alt={image.caption || `${state.markdownCitationRefs[citationKey]?.displayLabel || "引用"}的附图`}
+              loading="lazy"
+            />
+            <button
+              type="button"
+              className="answer-inline-image-open"
+              aria-label="放大查看本段附图"
+              data-answer-image-preview-return={`${state.turnIndex}:${image.alias}`}
+              onClick={(event) => {
+                state.openImagePreview(
+                  image,
+                  state.markdownCitationRefs[citationKey]?.displayLabel || "",
+                  event.currentTarget.dataset.answerImagePreviewReturn || null,
+                );
+              }}
+            />
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
+}
+
+const PUBLIC_MARKDOWN_COMPONENTS = {
+  a: PublicMarkdownLink,
+  pre: PublicMarkdownPre,
+  table: PublicMarkdownTable,
+  aside: PublicMarkdownAside,
+} satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;
 
 export default function PublicConversationPage() {
   const params = useParams<{ token: string }>();
@@ -211,6 +329,10 @@ function PublicTurnView({
     const at = items.findIndex((row) => row.image.alias === image.alias);
     setPreviewImage(at >= 0 ? { items, index: at } : { items: [{ image, referenceLabel }], index: 0 });
   };
+  const openImagePreview = (image: PublicImageT, referenceLabel: string, returnFocusKey: string | null) => {
+    previewReturnFocusRef.current = returnFocusKey;
+    openPreview(image, referenceLabel);
+  };
 
   useLayoutEffect(() => {
     if (previewImage) return;
@@ -232,85 +354,31 @@ function PublicTurnView({
     target.focus({ preventScroll: true });
   };
 
-  const components = {
-    a({ href, children }: { href?: string; children?: React.ReactNode }) {
-      if (href?.startsWith("cite:")) {
-        const key = href.slice(5);
-        if (citationRefs[key]) {
-          return (
-            <button
-              type="button"
-              className={`cite-chip${selectedKey === key ? " active" : ""}`}
-              onClick={() => openReference(key)}
-            >
-              {children}
-            </button>
-          );
-        }
-        return <span>{children}</span>;
-      }
-      return (
-        <a href={href} target="_blank" rel="noreferrer">
-          {children}
-        </a>
-      );
-    },
-    pre({ children }: { children?: React.ReactNode }) {
-      return <pre className="answer-code">{children}</pre>;
-    },
-    table({ children }: { children?: React.ReactNode }) {
-      return (
-        <div className="answer-table-wrap">
-          <table className="answer-table">{children}</table>
-        </div>
-      );
-    },
-    aside({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
-      const items = citationImageSlotItems(node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE]);
-      if (items.length === 0) return <aside>{children}</aside>;
-      const rows = items.flatMap(({ citationKey, imageId }) => {
-        const image = imagesByAlias.get(imageId);
-        return image ? [{ citationKey, image }] : [];
-      });
-      if (rows.length === 0) return null;
-      const labels = [...new Set(rows
-        .map(({ citationKey }) => markdownCitationRefs[citationKey]?.displayLabel)
-        .filter((value): value is string => Boolean(value)))];
-      return (
-        <aside
-          className="answer-inline-images"
-          aria-label={`引用图片${labels.length > 0 ? ` ${labels.join("、")}` : ""}`}
-        >
-          <div className="answer-inline-images-heading">
-            <span>引用{labels.length > 0 ? ` ${labels.join("、")}` : ""}</span>
-            <small>模型未直接读取图片</small>
-          </div>
-          <ul className="answer-inline-image-list">
-            {rows.map(({ citationKey, image }) => (
-              <li key={image.alias} className="answer-inline-image-item">
-                <img
-                  className="element-image"
-                  src={publicConversationImageUrl(token, image.alias)}
-                  alt={image.caption || `${markdownCitationRefs[citationKey]?.displayLabel || "引用"}的附图`}
-                  loading="lazy"
-                />
-                <button
-                  type="button"
-                  className="answer-inline-image-open"
-                  aria-label="放大查看本段附图"
-                  data-answer-image-preview-return={`${index}:${image.alias}`}
-                  onClick={(event) => {
-                    previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
-                    openPreview(image, markdownCitationRefs[citationKey]?.displayLabel || "");
-                  }}
-                />
-              </li>
-            ))}
-          </ul>
-        </aside>
-      );
-    },
-  } as Parameters<typeof ReactMarkdown>[0]["components"];
+  // 选中引用、开关图片预览都会让本轮重渲染；正文没变时直接复用上一次的 ReactMarkdown
+  // 元素，remark+KaTeX+rehype 解析不跟着重跑（O(正文) 的开销）。选中态与点击回调刻意
+  // 不进依赖：它们经由 Context 送达，Provider value 的变化会穿透被跳过的子树到达
+  // 徽章/图片槽消费者。citationImageOrder 的记账随解析走：解析被跳过时账本保持原样。
+  const markdownTree = useMemo(() => (
+    <ReactMarkdown
+      remarkPlugins={[
+        remarkGfmPlugin,
+        remarkMath,
+        [remarkCitations, markdownCitationRefs] as [typeof remarkCitations, typeof markdownCitationRefs],
+      ]}
+      rehypePlugins={[
+        rehypeKatex,
+        [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
+          typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder,
+        ],
+      ]}
+      // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,其余仍走
+      // 默认清洗(防 javascript: 等不安全协议)。
+      urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
+      components={PUBLIC_MARKDOWN_COMPONENTS}
+    >
+      {normalizeMathMarkdown(turn.answer_md)}
+    </ReactMarkdown>
+  ), [turn.answer_md, markdownCitationRefs, imageIdsByCitationKey, citationImageOrder]);
 
   const evidenceLabel = EVIDENCE_LABELS[turn.evidence_level];
 
@@ -332,25 +400,18 @@ function PublicTurnView({
         {evidenceLabel && (
           <span className={`public-turn-evidence evidence-${turn.evidence_level}`}>{evidenceLabel}</span>
         )}
-        <ReactMarkdown
-          remarkPlugins={[
-            remarkGfmPlugin,
-            remarkMath,
-            [remarkCitations, markdownCitationRefs] as [typeof remarkCitations, typeof markdownCitationRefs],
-          ]}
-          rehypePlugins={[
-            rehypeKatex,
-            [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
-              typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder,
-            ],
-          ]}
-          // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,其余仍走
-          // 默认清洗(防 javascript: 等不安全协议)。
-          urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-          components={components}
-        >
-          {normalizeMathMarkdown(turn.answer_md)}
-        </ReactMarkdown>
+        <PublicTurnRenderContext.Provider value={{
+          token,
+          turnIndex: index,
+          selectedKey,
+          citationRefs,
+          markdownCitationRefs,
+          imagesByAlias,
+          openReference,
+          openImagePreview,
+        }}>
+          {markdownTree}
+        </PublicTurnRenderContext.Provider>
       </article>
 
       {/* Compatibility for snapshots produced before reference_keys existed:
@@ -378,8 +439,7 @@ function PublicTurnView({
                   aria-label="放大查看旧分享附图"
                   data-answer-image-preview-return={`${index}:legacy:${image.alias}`}
                   onClick={(event) => {
-                    previewReturnFocusRef.current = event.currentTarget.dataset.answerImagePreviewReturn || null;
-                    openPreview(image, "");
+                    openImagePreview(image, "", event.currentTarget.dataset.answerImagePreviewReturn || null);
                   }}
                 />
               </li>
