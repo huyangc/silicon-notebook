@@ -293,6 +293,20 @@ test("default creation releases its single-flight authority after failure", asyn
   expect(effects.onNotebookCreated).toHaveBeenCalledTimes(1);
 });
 
+test("a committed creation still opens and reports success when collection refresh fails", async () => {
+  vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
+  render(<Harness />);
+
+  await act(async () => value!.createDefaultNotebook());
+
+  expect(notebookApi.createNotebook).toHaveBeenCalledTimes(1);
+  expect(effects.onNotebookCreated).toHaveBeenCalledWith(expect.objectContaining({ id: "created" }));
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(effects.notify).toHaveBeenCalledWith(
+    "笔记本已创建，但列表暂未刷新；请稍后刷新页面。",
+  );
+});
+
 test("group administrators retain PATCH-only rename and can open settings without owner-only reference I/O", async () => {
   const renamed = notebook("shared", "reader", true);
   renamed.name = "renamed";
@@ -395,7 +409,7 @@ test("failed indexing rebuild can retry the same selected pipeline", async () =>
   );
 });
 
-test("rename cannot return a stale writable detail after the composite refresh revokes manage access", async () => {
+test("rename reports a committed write even when the refreshed list loses manage access", async () => {
   const renamed = notebook("shared", "reader", true);
   renamed.name = "renamed";
   notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
@@ -411,8 +425,25 @@ test("rename cannot return a stale writable detail after the composite refresh r
   });
 
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
-  expect(result).toBeNull();
-  expect(effects.notify).not.toHaveBeenCalled();
+  expect((result as NotebookSummary | null)?.name).toBe("renamed");
+  expect(effects.notify).toHaveBeenCalledWith("笔记本名称已更新");
+});
+
+test("rename returns its committed detail when collection refresh fails", async () => {
+  const renamed = notebook("a");
+  renamed.name = "renamed";
+  notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
+  vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
+  render(<Harness />);
+  publish([notebook("a")]);
+
+  let result: NotebookSummary | null = null;
+  await act(async () => { result = await value!.renameNotebook("a", "renamed"); });
+
+  expect((result as NotebookSummary | null)?.name).toBe("renamed");
+  expect(effects.notify).toHaveBeenCalledWith(
+    "笔记本名称已更新，但列表暂未刷新；请稍后刷新页面。",
+  );
 });
 
 test("rename is single-flight and releases its key after both success and failure", async () => {
@@ -438,7 +469,7 @@ test("rename is single-flight and releases its key after both success and failur
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(3);
 });
 
-test("editor open is latest-wins and a permission downgrade blocks the second write", async () => {
+test("editor open is latest-wins and an in-flight list projection cannot truncate save", async () => {
   const mountableA = deferred<never[]>();
   const basesA = deferred<never[]>();
   const pipelineA = deferred<ReturnType<typeof indexingProjection>>();
@@ -471,12 +502,15 @@ test("editor open is latest-wins and a permission downgrade blocks the second wr
   let saving!: Promise<void>;
   act(() => { saving = value!.saveEditor({ ...editorPatch, name: "b" }); });
   publish([notebook("b", "reader")]);
+  expect(value!.editor?.busy).toBe(true);
   await act(async () => update.resolve(notebook("b")));
   await saving;
-  expect(basesApi.setBases).not.toHaveBeenCalled();
+  expect(basesApi.setBases).toHaveBeenCalledWith("b", []);
+  expect(notebookApi.getNotebook).toHaveBeenCalledWith("b");
+  expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
 });
 
-test("a downgrade while final editor detail is pending closes owner UI and blocks stale detail commit", async () => {
+test("a transient list omission while final detail is pending does not cancel save", async () => {
   const detail = deferred<NotebookSummary>();
   notebookApi.getNotebook.mockReturnValueOnce(detail.promise);
   render(<Harness />);
@@ -489,15 +523,92 @@ test("a downgrade while final editor detail is pending closes owner UI and block
     saving = value!.saveEditor(editorPatch);
   });
   await waitFor(() => expect(notebookApi.getNotebook).toHaveBeenCalledTimes(1));
-  publish([notebook("a", "reader")]);
-  expect(value!.editor).toBeNull();
+  publish([]);
+  expect(value!.editor?.busy).toBe(true);
   publish([notebook("a")]);
-  expect(value!.editor).toBeNull();
+  expect(value!.editor?.busy).toBe(true);
 
   await act(async () => detail.resolve(notebook("a")));
   await saving;
-  expect(effects.onNotebookUpdated).not.toHaveBeenCalled();
+  expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
+  expect(effects.notify).toHaveBeenCalledWith("笔记本信息已更新");
+});
+
+test("a backend rejection after a transient list omission is reported instead of swallowed", async () => {
+  const update = deferred<NotebookSummary>();
+  const rejection = new Error("permission changed");
+  notebookApi.updateNotebook.mockReturnValueOnce(update.promise);
+  basesApi.setBases.mockRejectedValueOnce(rejection);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  publish([]);
+  expect(value!.editor?.busy).toBe(true);
+  await act(async () => update.resolve(notebook("a")));
+  await saving;
+
+  expect(effects.reportError).toHaveBeenCalledWith(rejection);
+  expect(notebookApi.getNotebook).not.toHaveBeenCalled();
   expect(effects.notify).not.toHaveBeenCalled();
+});
+
+test("a committed editor save is not reclassified as failed when collection refresh fails", async () => {
+  vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  await act(async () => value!.saveEditor(editorPatch));
+
+  expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(effects.notify).toHaveBeenCalledWith(
+    "笔记本信息已更新，但列表暂未刷新；请稍后刷新页面。",
+  );
+});
+
+test("an immediate reopen after a committed save can unmount a base before refresh finishes", async () => {
+  const firstRefresh = deferred<void>();
+  const mountedBase = {
+    id: "base-a",
+    name: "公共知识库 A",
+    tier: "base",
+    active: true,
+    inactive_reason: "",
+  };
+  vi.mocked(effects.refreshComposite)
+    .mockReturnValueOnce(firstRefresh.promise)
+    .mockResolvedValueOnce(undefined);
+  basesApi.listMountable.mockResolvedValue([{ id: "base-a", name: "公共知识库 A", tier: "base" }]);
+  basesApi.listBases
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([mountedBase]);
+  basesApi.setBases
+    .mockResolvedValueOnce([mountedBase])
+    .mockResolvedValueOnce([]);
+
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+  act(() => value!.toggleMountedBase("base-a", true));
+
+  let firstSave!: Promise<void>;
+  act(() => { firstSave = value!.saveEditor(editorPatch); });
+  await waitFor(() => expect(value!.editor).toBeNull());
+  expect(basesApi.setBases).toHaveBeenNthCalledWith(1, "a", ["base-a"]);
+
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.mountedIds).toEqual(["base-a"]);
+  act(() => value!.toggleMountedBase("base-a", false));
+  await act(async () => value!.saveEditor(editorPatch));
+
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
+  expect(basesApi.setBases).toHaveBeenNthCalledWith(2, "a", []);
+  await act(async () => firstRefresh.resolve(undefined));
+  await firstSave;
 });
 
 test("editor save is single-flight and releases its authority after success and failure", async () => {
@@ -539,6 +650,25 @@ test("a published permission downgrade closes an owner-only delete confirmation"
   expect(value!.deletion).toBeNull();
   await act(async () => value!.confirmDelete());
   expect(notebookApi.deleteNotebook).not.toHaveBeenCalled();
+});
+
+test("an in-flight delete reports backend rejection after a transient list omission", async () => {
+  const deletion = deferred<undefined>();
+  const rejection = new Error("delete rejected");
+  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  publish([]);
+  expect(value!.deletion?.busy).toBe(true);
+  await act(async () => deletion.reject(rejection));
+  await deleting;
+
+  expect(effects.reportError).toHaveBeenCalledWith(rejection);
+  expect(value!.deletion).toBeNull();
 });
 
 test("delete is single-flight and a pre-delete list cannot resurrect its tombstone", async () => {

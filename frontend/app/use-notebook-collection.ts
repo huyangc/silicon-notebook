@@ -146,7 +146,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   const editorOperationRef = useRef<object | null>(null);
   const deleteOperationRef = useRef<object | null>(null);
   const createOperationRef = useRef<{ owner: CollectionOwner; token: object } | null>(null);
-  const editorSavingRef = useRef(false);
+  // Tie the single-flight seat to the editor operation that acquired it.  A
+  // successful save closes the editor before the post-write collection refresh
+  // finishes, so a bare boolean can leak forever when the user reopens settings
+  // and replaces editorOperationRef before the old finally block runs.
+  const editorSavingRef = useRef<object | null>(null);
   const deletingRef = useRef(new Set<string>());
   const renamingRef = useRef(new Map<string, object>());
   const tombstonesRef = useRef(new Map<string, Set<string>>());
@@ -186,7 +190,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     editorOperationRef.current = null;
     deleteOperationRef.current = null;
     createOperationRef.current = null;
-    editorSavingRef.current = false;
+    editorSavingRef.current = null;
   };
 
   // Authentication changes are synchronous authority boundaries.  The pending
@@ -272,6 +276,17 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     return rowIsOwner(id);
   };
 
+  const refreshCompositeAfterCommit = async (owner: CollectionOwner): Promise<boolean> => {
+    try {
+      await effectsRef.current.refreshComposite(() => owns(owner));
+      return owns(owner);
+    } catch {
+      // The write has already committed.  Callers disclose an unrefreshed
+      // projection without reclassifying the durable action as failed.
+      return false;
+    }
+  };
+
   function activateActor(nextActorId: string) {
     if (!nextActorId || actorIdRef.current === nextActorId || actorIdRef.current !== null) return;
     actorDetachedRef.current = false;
@@ -323,12 +338,25 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       .map((row) => row.id));
     setEditor((current) => {
       if (!current || editorVisibleIds.has(current.target.id)) return current;
+      // The list is only a projection and may be replaced while a multi-step
+      // save is in flight.  Keep the disabled editor visible and let the API
+      // authorization on each remaining write decide; otherwise this snapshot
+      // silently cancels the operation between PATCH and PUT.
+      if (
+        editorOperationRef.current
+        && editorSavingRef.current === editorOperationRef.current
+      ) return current;
       editorOperationRef.current = null;
-      editorSavingRef.current = false;
+      editorSavingRef.current = null;
       return null;
     });
     setDeletion((current) => {
       if (!current || ownerIds.has(current.target.id)) return current;
+      const key = `${current.owner.actorId}\0${current.target.id}`;
+      // As with editor saves, a list projection is not cancellation authority
+      // for a request that has already reached the server.  Keep the disabled
+      // confirmation visible so either success or failure has somewhere to land.
+      if (deletingRef.current.has(key)) return current;
       deleteOperationRef.current = null;
       return null;
     });
@@ -500,13 +528,28 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     createOperationRef.current = { owner, token };
     setCreating(true);
     try {
-      const notebook = await createNotebook(defaultNotebookPayload());
+      let notebook: NotebookSummary;
+      try {
+        notebook = await createNotebook(defaultNotebookPayload());
+      } catch (error) {
+        if (owns(owner)) effectsRef.current.reportError(error);
+        return;
+      }
       if (!owns(owner)) return;
-      await effectsRef.current.refreshComposite(() => owns(owner));
+      const refreshed = await refreshCompositeAfterCommit(owner);
       if (!owns(owner)) return;
-      await effectsRef.current.onNotebookCreated(notebook);
-    } catch (error) {
-      if (owns(owner)) effectsRef.current.reportError(error);
+      try {
+        await effectsRef.current.onNotebookCreated(notebook);
+      } catch (error) {
+        if (owns(owner)) {
+          effectsRef.current.reportError(error);
+          effectsRef.current.notify("笔记本已创建，但暂时没能打开；请从列表重新打开。");
+        }
+        return;
+      }
+      if (!refreshed && owns(owner)) {
+        effectsRef.current.notify("笔记本已创建，但列表暂未刷新；请稍后刷新页面。");
+      }
     } finally {
       if (createOperationRef.current?.token === token) {
         createOperationRef.current = null;
@@ -524,14 +567,18 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     renamingRef.current.set(key, token);
     try {
       const updated = await updateNotebook(notebookId, { name });
-      if (!owns(owner) || renamingRef.current.get(key) !== token || !rowCanRename(notebookId)) {
+      if (!owns(owner) || renamingRef.current.get(key) !== token) {
         return null;
       }
-      await effectsRef.current.refreshComposite(() => owns(owner));
-      if (!owns(owner) || renamingRef.current.get(key) !== token || !rowCanRename(notebookId)) {
+      const refreshed = await refreshCompositeAfterCommit(owner);
+      if (!owns(owner) || renamingRef.current.get(key) !== token) {
         return null;
       }
-      effectsRef.current.notify("笔记本名称已更新");
+      effectsRef.current.notify(
+        refreshed
+          ? "笔记本名称已更新"
+          : "笔记本名称已更新，但列表暂未刷新；请稍后刷新页面。",
+      );
       return updated;
     } catch (error) {
       if (owns(owner) && renamingRef.current.get(key) === token) throw error;
@@ -590,6 +637,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
 
   function closeEditor() {
     editorOperationRef.current = null;
+    editorSavingRef.current = null;
     setEditor(null);
   }
 
@@ -627,7 +675,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
     if (!operation) return;
-    editorSavingRef.current = true;
+    editorSavingRef.current = operation;
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
       const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
@@ -635,7 +683,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(current.target.id)
       ) return;
       const pipelineResult = await applyIndexingPipelineSelection(
         current,
@@ -644,7 +691,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(current.target.id)
       ) return;
       const bases = current.canConfigureNotebook
         ? await setBases(current.target.id, current.mountedIds)
@@ -652,35 +698,51 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(current.target.id)
       ) return;
       const updated = await getNotebook(current.target.id);
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(current.target.id)
       ) return;
+      // The server-side write sequence is complete.  Release the save seat
+      // before hiding the dialog and awaiting the slower collection refresh so
+      // an immediate reopen starts with a fresh, usable operation.
+      if (editorSavingRef.current === operation) editorSavingRef.current = null;
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, bases);
-      await effectsRef.current.refreshComposite(() => owns(owner));
+      const refreshed = await refreshCompositeAfterCommit(owner);
       if (owns(owner)) {
         if (pipelineResult?.changed) {
           const warningCount = pipelineResult.warning_count ?? 0;
-          effectsRef.current.notify(
+          const message = (
             warningCount > 0
               ? `索引管线已切换，正在重建全库索引；${warningCount} 项插件分块已回退到内建。`
-              : "索引管线已切换，正在重建全库索引。",
+              : "索引管线已切换，正在重建全库索引。"
+          );
+          effectsRef.current.notify(
+            refreshed ? message : `${message} 列表暂未刷新，请稍后刷新页面。`,
           );
         } else {
-          effectsRef.current.notify("笔记本信息已更新");
+          effectsRef.current.notify(
+            refreshed
+              ? "笔记本信息已更新"
+              : "笔记本信息已更新，但列表暂未刷新；请稍后刷新页面。",
+          );
         }
       }
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
     } finally {
-      if (editorOperationRef.current === operation) editorSavingRef.current = false;
+      if (editorSavingRef.current === operation) editorSavingRef.current = null;
       if (owns(owner) && editorOperationRef.current === operation) {
-        setEditor((value) => value ? { ...value, busy: false } : value);
+        setEditor((value) => {
+          if (!value) return value;
+          if (!rowCanManageContent(value.target.id)) {
+            editorOperationRef.current = null;
+            return null;
+          }
+          return { ...value, busy: false };
+        });
       }
     }
   }
@@ -695,37 +757,49 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
     if (!operation) return;
-    editorSavingRef.current = true;
+    editorSavingRef.current = operation;
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
       await setNotebookIndexingPipeline(current.target.id, pipelineId);
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(current.target.id)
       ) return;
       const updated = await getNotebook(current.target.id);
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(current.target.id)
       ) return;
       // 成功即关弹窗(镜像 saveEditor):弹窗没有活状态轮询,留着只会把一次性的
       // pending 响应冻在屏上——后台重建早已结束,界面还写着「重建中」并禁用整组
       // 单选,直到用户自己关掉重开(codex #602 R1 P2)。toast 已说明重建在进行;
       // 重开设置时会重新取一次实时投影。
+      if (editorSavingRef.current === operation) editorSavingRef.current = null;
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, current.mountEdges);
-      await effectsRef.current.refreshComposite(() => owns(owner));
-      if (owns(owner)) effectsRef.current.notify(successMessage);
+      const refreshed = await refreshCompositeAfterCommit(owner);
+      if (owns(owner)) {
+        effectsRef.current.notify(
+          refreshed
+            ? successMessage
+            : `${successMessage} 列表暂未刷新，请稍后刷新页面。`,
+        );
+      }
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) {
         effectsRef.current.reportError(error);
       }
     } finally {
-      if (editorOperationRef.current === operation) editorSavingRef.current = false;
+      if (editorSavingRef.current === operation) editorSavingRef.current = null;
       if (owns(owner) && editorOperationRef.current === operation) {
-        setEditor((value) => value ? { ...value, busy: false } : value);
+        setEditor((value) => {
+          if (!value) return value;
+          if (!rowCanManageContent(value.target.id)) {
+            editorOperationRef.current = null;
+            return null;
+          }
+          return { ...value, busy: false };
+        });
       }
     }
   }
@@ -812,7 +886,14 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     } finally {
       deletingRef.current.delete(key);
       if (owns(owner) && deleteOperationRef.current === operation) {
-        setDeletion((value) => value ? { ...value, busy: false } : value);
+        setDeletion((value) => {
+          if (!value) return value;
+          if (!rowIsOwner(value.target.id)) {
+            deleteOperationRef.current = null;
+            return null;
+          }
+          return { ...value, busy: false };
+        });
       }
     }
   }
@@ -824,6 +905,14 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   const menuNotebook = visible && menuNotebookId
     ? rows.find((row) => row.id === menuNotebookId) ?? null
     : null;
+  const editorSaveInFlight = Boolean(
+    editorOperationRef.current
+    && editorSavingRef.current === editorOperationRef.current
+  );
+  const deletionInFlight = Boolean(
+    deletion
+    && deletingRef.current.has(`${deletion.owner.actorId}\0${deletion.target.id}`)
+  );
 
   return {
     rows: rowsVisible ? rows : NO_ROWS,
@@ -839,10 +928,12 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       position: menuNotebook ? menuPosition : null,
       ref: menuRef,
     },
-    editor: visible && editor && owns(editor.owner) && rowCanManageContent(editor.target.id)
+    editor: visible && editor && owns(editor.owner)
+      && (editorSaveInFlight || rowCanManageContent(editor.target.id))
       ? editor
       : null,
-    deletion: visible && deletion && owns(deletion.owner) && rowIsOwner(deletion.target.id)
+    deletion: visible && deletion && owns(deletion.owner)
+      && (deletionInFlight || rowIsOwner(deletion.target.id))
       ? deletion
       : null,
     creating: visible && creating && Boolean(
