@@ -483,9 +483,9 @@ def _count_kg_queries(repo, monkeypatch):
 
 
 def test_kg_counts_are_memoized_on_the_mutation_seq(repo, monkeypatch):
-    """PG 侧 ``knowledge_type_count_rows`` 是实时 GROUP BY(SQLite 才有 store
-    级 memo),百万对象库每次建图都付一遍扫描——所以计数缓存必须在本模块里,
-    按 kg_mutation_seq 门控。第二次构建应零 KG 查询。"""
+    """``knowledge_type_count_rows`` 曾在 PG 侧是实时 GROUP BY(如今两后端都有
+    store 级 seq memo),但本模块的计数缓存仍独立成立:它缓存的是 collection_map
+    的**组装结果**,不依赖底层 store 是否命中自己的 memo。第二次构建应零 KG 查询。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_kg_object(repo, notebook.id, "o1", "concept")
     catalog = _catalog(repo)

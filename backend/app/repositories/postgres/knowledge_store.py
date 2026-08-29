@@ -1412,27 +1412,18 @@ class KnowledgeStore:
 
     @staticmethod
     def count_active_objects(db: Any, notebook_id: str) -> int:
-        return int(
-            db.execute(
-                "SELECT COUNT(*) AS c FROM knowledge_objects "
-                "WHERE notebook_id=%s AND status!='deprecated'",
-                (notebook_id,),
-            ).fetchone()["c"]
-        )
+        from app.repositories.postgres import knowledge_counts_cache
+        return knowledge_counts_cache.active_object_count(db, notebook_id)
 
     @staticmethod
     def type_counts(
         db: Any, notebook_id: str
     ) -> "tuple[Dict[str, int], Dict[str, str]]":
-        counts = {
-            row["object_type"]: int(row["c"])
-            for row in db.execute(
-                "SELECT object_type,COUNT(*) AS c FROM knowledge_objects "
-                "WHERE notebook_id=%s AND status!='deprecated' GROUP BY object_type",
-                (notebook_id,),
-            ).fetchall()
-        }
-        # SchemaRegistryService owns effective global + notebook label merging.
+        from app.repositories.postgres import knowledge_counts_cache
+        counts = knowledge_counts_cache.type_counts(db, notebook_id)  # non-deprecated
+        # Labels are resolved by SchemaRegistryService so global + notebook
+        # overlay semantics have one implementation rather than dialect SQL
+        # duplicated in both knowledge stores.
         return counts, {}
 
     # --------------------------------------------------------------- list
@@ -1486,11 +1477,11 @@ class KnowledgeStore:
             base_query += " AND status = %s"
             params.append(status)
 
-        total = int(
-            db.execute(
-                "SELECT COUNT(*) AS c " + base_query,
-                params,
-            ).fetchone()["c"]
+        # Pagination total = a slice of the seq-gated type/status count memo
+        # (from_row already warmed it this request), not a fresh per-page COUNT.
+        from app.repositories.postgres import knowledge_counts_cache
+        total = knowledge_counts_cache.object_type_total(
+            db, notebook_id, object_type, status
         )
         rows = db.execute(
             f"SELECT * {base_query} ORDER BY created_at ASC, id ASC LIMIT %s OFFSET %s",

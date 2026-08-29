@@ -1,26 +1,60 @@
 """PostgreSQL 的开路计数进程缓存,gated on ``kg_mutation_seq``——镜像 sqlite 的
-``knowledge_counts_cache`` 的 pending-source 两个变体(checkup H6 与开路 readiness 用)。
+``knowledge_counts_cache``(见该模块头注释的完整背景与代价分析)。
 
-为什么要缓存(codex 第4轮 P2):``_pending_source_count`` 冷查询即使按 source 做
-有界索引探测,仍然与来源数成正比;前端进入 notebook 会自动拉 checkup,大库
-不应每次都付冷查询成本。sqlite 侧早已 seq-gated memo,postgres 之前直读——
-本模块补齐,兑现「体检廉价」契约。
+移植范围(大库打开卡死修复,见 docs/large-notebook-latency-analysis.md):这里原来
+只有 pending-source 两个变体(checkup H6 与开路 readiness 用,codex 第4轮 P2)。
+现在补齐 sqlite 侧的 ``type_status_counts`` / ``type_counts`` / ``active_object_count`` /
+``object_type_total`` / ``chunk_count`` / ``warm_all``——笔记本打开、列表分页、看板、
+scale-index 状态在 9M 对象的生产库上都是这几条裸 GROUP BY/COUNT 的受害者。
 
 seq gate 自失效即正确(seq 变→缓存 miss);``invalidate()`` 不是正确性必需,只是安全阀,
 由 ``queries.invalidate_knowledge_counts`` 在「写已落、但其 seq bump 尚未提交」的边缘调用
-(与 sqlite 版同款语义)。epoch 防止一个在途查询把 pre-invalidation 快照重新写回。
+(与 sqlite 版同款语义)。epoch 防止一个在途查询把 pre-invalidation 快照重新写回——
+**按 notebook 分开**:每个 notebook 有自己的失效代次,跨库互不误伤。这一点是本次
+移植踩过的真实缺陷修复:早期版本用单个全局 epoch,大库(9M 对象)的冷 GROUP BY 要跑
+几秒,期间任何**别的** notebook 走一次 ingestion 都会让全局 epoch +1、连带拒绝本库
+本该成功的写回——在持续上传的生产环境里,大库因此可能永远暖不起来,恰好废掉这次
+移植要解决的场景。现在 per-notebook epoch(``_EPOCHS``)只在该 notebook 自己被
+invalidate 时推进,外部无关 notebook 的 ingestion 不再牵连它;仍保留一个全局 epoch
+(``_GLOBAL_EPOCH``,只被 ``invalidate(None)`` 推进)用于「清空全部缓存」这一路径。
+
+刻意差异(比 sqlite 版严格一点):sqlite 的 ``type_status_counts`` 写回不做 epoch 检查
+(它只有一个 ``_MEMO`` 消费者形态历史更早,当时判断该窗口足够窄可以不设防;且 sqlite
+侧 pending memo 用的是全局单值 epoch,没有 per-notebook 隔离)。PG 这里从
+``type_status_counts`` 到 ``chunk_count`` 到两个 pending 视图,四个 memo 统一套上
+per-notebook epoch 守卫——原因是 PG 面对的大库冷查询窗口(几秒级)比 sqlite 场景长得多,
+全局 epoch 在这个窗口内被无关库的高频 ingestion 持续作废的概率显著更高,窄窗口下可以
+不设防的假设在这里不成立,所以选择更精细的隔离而不是复用 sqlite 的从简版本。
 """
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
+
+from psycopg import Error
+
+# non-deprecated 是大多数调用点想要的「活跃」集合;更窄的 USABLE_STATUSES 由
+# knowledge_contracts 定义,调用方按需自己过滤——与 sqlite 版同一分工。
+_DEPRECATED = "deprecated"
 
 _LOCK = threading.Lock()
-_MAX_NOTEBOOKS = 512  # bounded LRU;每 notebook 只存一个 int,极小
+_MAX_NOTEBOOKS = 512  # bounded LRU;每 notebook 的值都很小(int,或 types×statuses 的小字典)
+_MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict()
 _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_INVALIDATION_EPOCH = 0
+_CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+
+# invalidation epoch:写回前重新核对「读之后到写之前,这个 notebook(或全局)没被
+# invalidate 过」。_GLOBAL_EPOCH 只被 invalidate(None) 推进(清空全部缓存那条路径);
+# _EPOCHS 是 per-notebook 代次,只被该 notebook 自己的 invalidate(nb) 推进——这样
+# nb-A 的一次几秒级冷查询不会被 nb-B 的 ingestion 误伤。_EPOCHS 本身是有界 LRU
+# (上限沿用 _MAX_NOTEBOOKS):它是 best-effort 安全阀,不是正确性权威(权威始终是
+# seq gate)——被淘汰的 notebook 代次退回默认值 0,最坏情况下只是让该 notebook
+# 「恰好在这次淘汰之后、下次 invalidate 之前」的一次在途写回多存活一轮,方向与
+# 现状(epoch 整体就是尽力而为的安全阀)一致,不引入新的正确性风险。
+_GLOBAL_EPOCH = 0
+_EPOCHS: "OrderedDict[str, int]" = OrderedDict()
 
 
 def _mutation_seq(db: Any, notebook_id: str) -> int:
@@ -31,6 +65,152 @@ def _mutation_seq(db: Any, notebook_id: str) -> int:
     if row is None or row["kg_mutation_seq"] is None:
         return 0
     return int(row["kg_mutation_seq"])
+
+
+def _epoch_of(notebook_id: str) -> Tuple[int, int]:
+    """采样 ``(全局 epoch, 该 notebook 的 epoch)`` 二元组。调用方必须已持有 ``_LOCK``。"""
+    return (_GLOBAL_EPOCH, _EPOCHS.get(notebook_id, 0))
+
+
+def _seq_gated(
+    memo: "OrderedDict[str, Tuple[int, Any]]",
+    db: Any,
+    notebook_id: str,
+    compute: "Callable[[], Any]",
+) -> Any:
+    """四个 memo(``_MEMO`` / ``_CHUNKS`` / ``_PENDING`` / ``_VISIBLE_PENDING``)共享的
+    seq-gated 读写骨架:命中同 ``kg_mutation_seq`` 直接返回;miss 时锁外跑
+    ``compute()``,写回前重新核对 ``(全局 epoch, 该 notebook 的 epoch)`` 二元组没有
+    在计算期间变化——只有这个 notebook 自己被 invalidate,或全局被清空,才会拒绝写回;
+    别的 notebook 的 invalidate 不影响。"""
+    seq = _mutation_seq(db, notebook_id)
+    with _LOCK:
+        hit = memo.get(notebook_id)
+        if hit is not None and hit[0] == seq:
+            memo.move_to_end(notebook_id)
+            return hit[1]
+        epoch = _epoch_of(notebook_id)
+
+    value = compute()
+
+    with _LOCK:
+        if epoch == _epoch_of(notebook_id):  # 期间没被 invalidate 才写回
+            memo[notebook_id] = (seq, value)
+            memo.move_to_end(notebook_id)
+            while len(memo) > _MAX_NOTEBOOKS:
+                memo.popitem(last=False)
+    return value
+
+
+def type_status_counts(db: Any, notebook_id: str) -> "Dict[Tuple[str, str], int]":
+    """``{(object_type, status): count}`` for the notebook, memoized on
+    ``kg_mutation_seq``. Returns a shared read-only dict — callers must not
+    mutate it。"""
+
+    def compute() -> Dict[Tuple[str, str], int]:
+        rows = db.execute(
+            "SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects "
+            "WHERE notebook_id=%s GROUP BY object_type, status",
+            (notebook_id,),
+        ).fetchall()
+        return {(r["object_type"], r["status"]): int(r["c"]) for r in rows}
+
+    return _seq_gated(_MEMO, db, notebook_id, compute)
+
+
+def type_counts(
+    db: Any,
+    notebook_id: str,
+    statuses: "Optional[Tuple[str, ...]]" = None,
+) -> "Dict[str, int]":
+    """``{object_type: count}`` filtered to ``statuses`` (a whitelist), or to
+    all-but-``deprecated`` when ``statuses is None``。"""
+    raw = type_status_counts(db, notebook_id)
+    allow = set(statuses) if statuses is not None else None
+    out: Dict[str, int] = {}
+    for (object_type, status), c in raw.items():
+        if allow is None:
+            if status == _DEPRECATED:
+                continue
+        elif status not in allow:
+            continue
+        out[object_type] = out.get(object_type, 0) + c
+    return out
+
+
+def active_object_count(db: Any, notebook_id: str) -> int:
+    """Total non-deprecated object count。"""
+    raw = type_status_counts(db, notebook_id)
+    return sum(c for (_ot, status), c in raw.items() if status != _DEPRECATED)
+
+
+def object_type_total(
+    db: Any,
+    notebook_id: str,
+    object_type: str,
+    status: "Optional[str]" = None,
+) -> int:
+    """The ``/knowledge`` list-pagination total for one ``object_type`` — served
+    as a slice of the seq-gated ``type_status_counts`` memo instead of a fresh
+    per-request ``COUNT(*)``. A falsy ``status`` counts ALL statuses (including
+    deprecated), identical to the bare ``WHERE notebook_id=%s AND object_type=%s``
+    count it replaces; a truthy status is one dict lookup。"""
+    raw = type_status_counts(db, notebook_id)
+    if status:
+        return raw.get((object_type, status), 0)
+    return sum(c for (ot, _st), c in raw.items() if ot == object_type)
+
+
+def chunk_count(db: Any, notebook_id: str) -> int:
+    """``COUNT(*)`` of the notebook's chunks (``/scale-index/status`` open path),
+    memoized on ``(notebook_id, kg_mutation_seq)``. Cold it is a full covering
+    scan over millions of chunk leaf entries; warm it is one PK seq read。"""
+
+    def compute() -> int:
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["c"])
+
+    return _seq_gated(_CHUNKS, db, notebook_id, compute)
+
+
+def warm_all(db: Any, progress=None) -> int:
+    """Prime all per-notebook open-path memos (``type_status_counts`` / both
+    pending-source views / ``chunk_count``) for every live notebook, so the
+    first open / board / status-poll after a fresh process start is served
+    warm instead of paying the cold GROUP BY + correlated scans (see module
+    docstring; sqlite 镜像见 ``sqlite/knowledge_counts_cache.warm_all``)。
+
+    Best-effort: 每个 notebook 一个独立事务尝试,``psycopg.Error`` 被吞掉——但 PG
+    的事务语义要求出错后必须 ``rollback()`` 才能让连接在下一次 ``execute`` 继续可用
+    (不像 sqlite,一次失败不会污染后续查询)。``progress`` — when given — is invoked
+    as ``progress(done, total)`` after EACH notebook (1-based ``done``)。
+
+    'copying' notebooks are skipped: a half-materialized deep-copy has no
+    stable counts to warm and is not yet openable。
+    """
+    ids = [
+        row["id"]
+        for row in db.execute(
+            "SELECT id FROM notebooks WHERE status != 'copying' ORDER BY id"
+        ).fetchall()
+    ]
+    total = len(ids)
+    for i, notebook_id in enumerate(ids, start=1):
+        try:
+            type_status_counts(db, notebook_id)
+            pending_source_count(db, notebook_id)
+            visible_pending_source_count(db, notebook_id)
+            chunk_count(db, notebook_id)
+        except Error:
+            db.rollback()
+            continue
+        finally:
+            if progress is not None:
+                progress(i, total)
+    return total
 
 
 def _pending_sql(*, visible_only: bool) -> str:
@@ -98,21 +278,10 @@ def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
 
 
 def _cached(memo, db: Any, notebook_id: str, *, visible_only: bool) -> int:
-    seq = _mutation_seq(db, notebook_id)
-    with _LOCK:
-        hit = memo.get(notebook_id)
-        if hit is not None and hit[0] == seq:
-            memo.move_to_end(notebook_id)
-            return hit[1]
-        epoch = _INVALIDATION_EPOCH
-    count = _pending_query(db, notebook_id, visible_only=visible_only)
-    with _LOCK:
-        if epoch == _INVALIDATION_EPOCH:  # 期间没被 invalidate 才写回
-            memo[notebook_id] = (seq, count)
-            memo.move_to_end(notebook_id)
-            while len(memo) > _MAX_NOTEBOOKS:
-                memo.popitem(last=False)
-    return count
+    return _seq_gated(
+        memo, db, notebook_id,
+        lambda: _pending_query(db, notebook_id, visible_only=visible_only),
+    )
 
 
 def pending_source_count(db: Any, notebook_id: str) -> int:
@@ -127,19 +296,40 @@ def visible_pending_source_count(db: Any, notebook_id: str) -> int:
 
 
 def invalidate(notebook_id: Optional[str] = None) -> None:
-    """清缓存(单 notebook 或全部)。非正确性必需(seq gate 已自失效),安全阀而已。"""
-    global _INVALIDATION_EPOCH
+    """清缓存(单 notebook 或全部)。非正确性必需(seq gate 已自失效),安全阀而已。
+
+    ``notebook_id`` 给定时只推进该 notebook 自己的 epoch(``_EPOCHS[notebook_id]``)——
+    不影响任何别的 notebook 在途的冷查询写回。``notebook_id is None`` 时推进
+    ``_GLOBAL_EPOCH`` 并清空全部 memo;``_EPOCHS`` 也一并清空——全局代次已经变了,
+    残留的 per-notebook 代次不再有意义(下次读取时 ``_epoch_of`` 会用默认值 0
+    重新起算,不影响正确性)。"""
+    global _GLOBAL_EPOCH
     with _LOCK:
-        _INVALIDATION_EPOCH += 1
         if notebook_id is None:
+            _GLOBAL_EPOCH += 1
+            _MEMO.clear()
             _PENDING.clear()
             _VISIBLE_PENDING.clear()
+            _CHUNKS.clear()
+            _EPOCHS.clear()
         else:
+            _EPOCHS[notebook_id] = _EPOCHS.get(notebook_id, 0) + 1
+            _EPOCHS.move_to_end(notebook_id)
+            while len(_EPOCHS) > _MAX_NOTEBOOKS:
+                _EPOCHS.popitem(last=False)
+            _MEMO.pop(notebook_id, None)
             _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
+            _CHUNKS.pop(notebook_id, None)
 
 
 __all__ = [
+    "type_status_counts",
+    "type_counts",
+    "active_object_count",
+    "object_type_total",
+    "chunk_count",
+    "warm_all",
     "pending_source_count",
     "visible_pending_source_count",
     "invalidate",

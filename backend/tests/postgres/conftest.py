@@ -195,6 +195,20 @@ def _require_postgres_url_for_integration(request) -> None:
         pytest.skip("TEST_POSTGRES_URL is not configured")
 
 
+@pytest.fixture(autouse=True)
+def _reset_postgres_knowledge_counts_cache():
+    """``knowledge_counts_cache`` 是进程级模块全局(``_MEMO``/``_PENDING``/
+    ``_VISIBLE_PENDING``/``_CHUNKS``),不随每个测试的隔离 schema 一起清空——两个测试
+    即使各自建了互不相干的 schema,只要都用了同一个 ``notebook_id``(本目录下的测试
+    偏爱 ``nb-pending`` 这类好记的字面量),后一个测试就可能读到前一个测试留下的
+    memo 快照,而它对应的 seq 在新 schema 里从未出现过,不会自然失效。这里在每个
+    测试前清空一次,让直插 SQL(不经过会 bump ``kg_mutation_seq`` 的服务层)的测试
+    总是从冷状态开始。"""
+    from app.repositories.postgres import knowledge_counts_cache
+
+    knowledge_counts_cache.invalidate()
+
+
 @pytest.fixture
 def postgres_scope() -> ScopedPostgres:
     base_url = os.environ.get("TEST_POSTGRES_URL")
