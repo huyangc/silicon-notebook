@@ -901,6 +901,7 @@ class QueryStore:
         user_id: str,
         *,
         activity_type: str | None = None,
+        include_inaccessible_questions: bool = False,
         notebook_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -924,7 +925,8 @@ class QueryStore:
 
         混合流与按来源/报告过滤时都按**该用户自有的笔记本**收窄(owner-only),与
         sources 侧同口径。只有无 notebook_id 的 ask-only「提问概览」跟用户总览的
-        questions 合计对齐，按 created_by 纳入该用户在共享库里的提交；显式选某库仍
+        questions 合计对齐，按 created_by 纳入该用户在共享库里的提交；本人查看时
+        仍叠加当前实时读权，管理员审计可显式纳入已经失权的历史提交。显式选某库仍
         只接受左栏列出的自有笔记本。
 
         ``activity_type`` 可把读取收窄到 ask/source/report 中的一类；筛选发生在各表
@@ -1010,7 +1012,13 @@ class QueryStore:
                 # 选中左栏某库时仍保持既有 owner-only 展开语义。
                 ask_notebook_clause = ""
                 ask_params: list[Any] = [user_id]
-                if not all_question_submissions:
+                if all_question_submissions and not include_inaccessible_questions:
+                    ask_notebook_clause = (
+                        " AND "
+                        + access_sql.read_access_exists_clause("ask_jobs")
+                    )
+                    ask_params.extend(access_sql.read_access_params(user_id))
+                elif not all_question_submissions:
                     ask_notebook_clause = (
                         f" AND notebook_id IN ({owned_placeholders})"
                     )

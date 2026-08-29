@@ -97,6 +97,8 @@
 .activity-type-filter { display: flex; gap: 6px; padding: 0 12px 8px; flex-wrap: wrap; }
 .activity-type-button { border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); padding: 3px 10px; font-size: 11px; }
 .activity-type-button.active { border-color: var(--blue); background: #eaf1ff; color: var(--blue); font-weight: 600; }
+.activity-type-feedback { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 12px 8px; color: var(--danger); font-size: 11px; line-height: 1.45; }
+.activity-type-feedback button { flex: 0 0 auto; border: 1px solid currentColor; border-radius: 6px; background: var(--panel); color: inherit; padding: 2px 8px; font-size: 11px; }
 .activity-focus-hint { margin: 0; padding: 0 12px 9px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 
 /* 左栏 · 范围 */

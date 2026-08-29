@@ -186,6 +186,54 @@ def test_activity_type_query_rejects_unknown_value(client):
     assert resp.status_code == 422
 
 
+def test_revoked_shared_question_is_admin_only_in_overview_and_detail(client):
+    member = _auth(client, 35)
+    owner = _auth(client, 36)
+    member_id = _me(client, member)
+    notebook_id = _create_notebook(client, owner, "NB-revoked-question")
+    with _repo()._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,?,?)",
+            (notebook_id, member_id, "viewer", "2026-08-01T09:00:00"),
+        )
+        _insert_ask_job(
+            db, "ask-revoked", notebook_id, member_id,
+            "2026-08-01T10:00:00", question="已经失权的共享库问题",
+        )
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (notebook_id, member_id),
+        )
+
+    self_overview = client.get(
+        f"/api/admin/users/{member_id}/activity",
+        params={"activity_type": "ask"},
+        headers=member,
+    )
+    assert self_overview.status_code == 200
+    assert self_overview.json()["items"] == []
+    self_detail = client.get(
+        f"/api/admin/users/{member_id}/asks/ask-revoked", headers=member
+    )
+    assert self_detail.status_code == 404
+
+    admin = _auth_admin(client)
+    admin_overview = client.get(
+        f"/api/admin/users/{member_id}/activity",
+        params={"activity_type": "ask"},
+        headers=admin,
+    )
+    assert [item["id"] for item in admin_overview.json()["items"]] == [
+        "ask-revoked"
+    ]
+    admin_detail = client.get(
+        f"/api/admin/users/{member_id}/asks/ask-revoked", headers=admin
+    )
+    assert admin_detail.status_code == 200
+    assert admin_detail.json()["question"] == "已经失权的共享库问题"
+
+
 def test_activity_source_display_title_prefers_paper_title(client):
     """The one test the task letter calls out by name: a paper source must
     show its parsed paper title in the activity feed, not the uploaded file

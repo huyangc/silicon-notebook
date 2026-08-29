@@ -387,7 +387,6 @@ export function ActivityView({
   return (
     <>
       {userError ? <div className="errorbar">{userError}</div> : null}
-      {error ? <div className="errorbar">{error}</div> : null}
       <div className="logview-body logview-activity-body">
         <ActivityScopePanel
           allNotebooksLabel={activityType === "ask" ? "全部提问（含共享笔记本）" : undefined}
@@ -405,6 +404,7 @@ export function ActivityView({
           sources={sources}
         />
         <ActivityStream
+          activityFailure={error}
           activityType={activityType}
           hasMore={hasMore}
           identityErrored={identityErrored}
@@ -412,6 +412,7 @@ export function ActivityView({
           loading={pending || loading}
           now={now}
           onLoadMore={() => void loadMore()}
+          onRetryActivity={() => void reload()}
           onActivityTypeChange={selectActivityType}
           onSelect={selectItem}
           selectedKey={selectedKey}

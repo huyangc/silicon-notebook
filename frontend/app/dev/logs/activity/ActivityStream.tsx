@@ -102,6 +102,8 @@ export function ActivityStream({
   items,
   activityType = "",
   onActivityTypeChange = () => undefined,
+  activityFailure = "",
+  onRetryActivity = () => undefined,
   selectedKey,
   onSelect,
   hasMore,
@@ -113,6 +115,8 @@ export function ActivityStream({
   items: ActivityItem[];
   activityType?: ActivityTypeFilter;
   onActivityTypeChange?: (value: ActivityTypeFilter) => void;
+  activityFailure?: string;
+  onRetryActivity?: () => void;
   selectedKey: string;
   onSelect: (item: ActivityItem) => void;
   hasMore: boolean;
@@ -143,6 +147,12 @@ export function ActivityStream({
             </button>
           ))}
         </div>
+        {activityFailure ? (
+          <div className="activity-type-feedback" role="alert">
+            <span>{activityFailure}</span>
+            <button disabled={loading} onClick={onRetryActivity} type="button">重试</button>
+          </div>
+        ) : null}
         {activityType === "ask" ? (
           <p className="activity-focus-hint">集中查看用户提出的问题，了解当前关注点。</p>
         ) : null}
