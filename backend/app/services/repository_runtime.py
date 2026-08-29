@@ -2098,7 +2098,6 @@ class RepositoryRuntime:
                 ask_state=self.ask_state,
                 retrieval=retrieval,
                 candidates=retrieval,
-                graph=retrieval,
                 evidence_context=self.evidence_context,
                 model_clients=self.models,
                 model_errors=self.models,
@@ -2116,9 +2115,6 @@ class RepositoryRuntime:
                 event_log=self.event_log,
                 notebooks=self.catalog,
                 schemas=self.schema_registry,
-                community_reports=(
-                    lambda nb: self.knowledge_lifecycle.get_community_reports(nb)
-                ),
                 source_titles=self.source_store.source_titles,
                 knowhow_store=self.knowhow_store,
                 memory_retriever=self.memory_retriever,

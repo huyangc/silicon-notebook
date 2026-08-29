@@ -8,7 +8,7 @@ Frozen here (the RED items of the move):
 1. non-streaming ``repo.ask()`` uses the same durable-job and atomic-final-save
    lifecycle as streaming, while keeping the job id out of its response;
 2. the runtime owns ONE AskService (identity-stable across resolutions) and
-   the facade's frozen ``ask_chunk``/``ask_reasoning``/``ask_graph``
+   the facade's frozen ``ask_chunk``/``ask_reasoning``
    signatures adapt ``current_user().id`` into the service's keyword-only
    ``user_id``;
 3. system workload clients resolve through the service's model-client port and
@@ -188,24 +188,6 @@ class _MinimalCandidates:
     def any_base_has_kg(self, notebook_id):
         return False
 
-    def graph_is_large(self, notebook_id):
-        return False
-
-    def fuse_graph_seeds(self, notebook_id, question, seeds, cancel_event):
-        return seeds
-
-
-class _MinimalGraph:
-    def federated_graph(self, notebook_id):
-        from app.services.kg.graph_reason import build_rx_graph
-
-        return build_rx_graph(
-            {"ko-1": {"type": "concept", "name": "one"}}, []
-        )
-
-    def source_chunks(self, notebook_id, object_ids):
-        return []
-
 
 class _MinimalRetrieval:
     def federated_retrieve(self, notebook_id, query, **kwargs):
@@ -261,7 +243,7 @@ def _minimal_ask_service(**overrides):
     ``response_draft_stage``, a connection probe) without a second factory."""
     return AskService(
         ask_state=_MinimalAskState(), retrieval=_MinimalRetrieval(),
-        candidates=_MinimalCandidates(), graph=_MinimalGraph(),
+        candidates=_MinimalCandidates(),
         evidence_context=_MinimalEvidence(), model_clients=_MinimalModels(),
         model_errors=SimpleNamespace(note_model_error=lambda *args, **kwargs: None),
         communities=lambda: SimpleNamespace(),
@@ -271,23 +253,18 @@ def _minimal_ask_service(**overrides):
         event_log=SimpleNamespace(emit=lambda event: None),
         notebooks=SimpleNamespace(get_notebook=lambda notebook_id: object()),
         schemas=SimpleNamespace(effective_schemas=lambda: {}),
-        community_reports=lambda notebook_id: [], source_titles=lambda ids: {},
+        source_titles=lambda ids: {},
         **overrides,
     )
 
 
-def test_chunk_and_graph_ask_execute_on_declared_ports_only():
+def test_chunk_ask_executes_on_declared_ports_only():
     service = _minimal_ask_service()
 
     chunk = service.ask_chunk("nb", AskRequest(question="q"), user_id="user")
-    graph = service.ask_graph(
-        "nb", AskRequest(question="q", mode="graph"), user_id="user"
-    )
 
     assert chunk.answer_id == "answer-1"
-    assert graph.answer_id == "answer-1"
     assert chunk.conclusion == "Retrieved 1 relevant passage(s) for this question."
-    assert "Graph traversal found 1 node(s)" in graph.conclusion
     assert not hasattr(service.retrieval, "candidates")
     assert not hasattr(service.retrieval, "graph")
     assert not hasattr(service.model_clients, "identity")

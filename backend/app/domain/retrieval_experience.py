@@ -197,6 +197,8 @@ def project_trace_step(step: object) -> dict | None:
 #: that writes an unexpected ``result_scope`` into its intent contract cannot
 #: get that string past this point.
 SITUATION_UNKNOWN = "unknown"
+# "graph" 对应的 ask 模式已退役(见 app.services.ask_modes._RETIRED_MODES),但
+# 这是持久化闭集词表——历史行仍可能带着 "graph" 落在存量数据里,必须继续能解析。
 SITUATION_ASK_MODES = ("chunk", "reasoning", "graph")
 SITUATION_RESULT_SCOPES = ("ranked", "complete", "aggregate", "hybrid")
 SITUATION_RETRIEVAL_EFFORTS = (

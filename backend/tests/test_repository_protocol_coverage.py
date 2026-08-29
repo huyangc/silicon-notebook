@@ -11,7 +11,6 @@ from typing import get_type_hints
 
 from app.repositories.ports import (
     AskCandidatePort,
-    AskGraphPort,
     AskStreamPort,
     RetrievalPort,
 )
@@ -99,7 +98,6 @@ def _protocol_receivers(tree: ast.AST, protocol_name: str) -> set[str]:
     receivers = {
         "RetrievalPort": {"retrieval", "_retrieval"},
         "AskCandidatePort": set(),
-        "AskGraphPort": set(),
         "AskStreamPort": set(),
     }[protocol_name].copy()
     for node in ast.walk(tree):
@@ -139,7 +137,7 @@ def protocol_call_sites(protocol_name: str) -> frozenset[ProtocolCallSite]:
     constructor argument to ``self.<seat>``.
     """
     if protocol_name not in {
-        "RetrievalPort", "AskCandidatePort", "AskGraphPort", "AskStreamPort",
+        "RetrievalPort", "AskCandidatePort", "AskStreamPort",
     }:
         raise ValueError(f"unsupported protocol audit: {protocol_name}")
 
@@ -215,7 +213,6 @@ def test_retrieval_port_declares_every_production_retrieval_call():
 def test_ask_ports_declare_the_executable_service_and_route_surface():
     for name, protocol in (
         ("AskCandidatePort", AskCandidatePort),
-        ("AskGraphPort", AskGraphPort),
         ("AskStreamPort", AskStreamPort),
     ):
         declared = {

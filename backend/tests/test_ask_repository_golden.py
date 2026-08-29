@@ -23,7 +23,6 @@ GENERATOR = ROOT / "scripts" / "generate_repository_contract_fixtures.py"
 REQUIRED_CASES = {
     "chunk",
     "reasoning",
-    "graph",
     "unconfigured_model",
     # 「没有图」有两种,行为不同,两个都必须在这一组 oracle 里:
     #   no_kg          = 纯散文库(有文档、零可枚举元素、零知识对象)。文档本身是
@@ -32,8 +31,10 @@ REQUIRED_CASES = {
     #   no_collections = 零源库,三类计数全为零 ⇒ 早退那句「请先构建知识图谱」。
     "no_kg",
     "no_collections",
-    "no_hits",
-    "large_graph_refusal",
+    # graph 这个 ask 模式退役时一并删除了三个案例:"graph"(引擎本身)、
+    # "no_hits"(经 mode="graph" 制造的零命中早退)、"large_graph_refusal"
+    # (大库拒绝全图漫游——该行为已随该模式从代码里消失)。见
+    # generate_repository_contract_fixtures.py collect_ask_goldens() 的同条注释。
 }
 
 
@@ -62,7 +63,7 @@ def test_every_ask_golden_is_a_complete_response_and_payload_pair():
         response = AskResponse.model_validate(case["response"]).model_dump(mode="json")
         assert response == case["response"], name
         assert case["answers_payload"] == response, name
-        assert response["mode"] in {"chunk", "reasoning", "graph"}, name
+        assert response["mode"] in {"chunk", "reasoning"}, name
         assert isinstance(response["model_errors"], list), name
 
 
@@ -81,11 +82,6 @@ def test_ask_early_exit_flags_are_frozen():
     assert prose_only["kg_required"] is True
     assert prose_only["llm_mode"] != "deterministic"
     assert "本笔记本尚未构建知识图谱" not in prose_only["conclusion"]
-    assert cases["no_hits"]["response"]["grounded"] is False
-    refusal = cases["large_graph_refusal"]["response"]
-    assert refusal["mode"] == "graph"
-    assert refusal["llm_mode"] == "deterministic"
-    assert "规模过大" in refusal["conclusion"]
 
 
 def test_current_repository_runtime_matches_the_frozen_ask_oracle():

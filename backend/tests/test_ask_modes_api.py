@@ -23,9 +23,9 @@ def _client(tmp_path, monkeypatch):
 def test_ask_modes_endpoint_lists_user_facing(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     body = client.get("/api/ask-modes").json()
-    assert [m["id"] for m in body] == ["chunk", "reasoning", "graph"]
+    assert [m["id"] for m in body] == ["chunk", "reasoning"]
     assert {m["id"]: m["requires_kg"] for m in body} == {
-        "chunk": False, "reasoning": True, "graph": True}
+        "chunk": False, "reasoning": True}
 
 
 def test_unknown_mode_returns_422_not_silent_fast(tmp_path, monkeypatch):

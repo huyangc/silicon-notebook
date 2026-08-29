@@ -7,9 +7,9 @@ knowhow 格子的引用时，批量按 element_id 查 `source_elements.metadata.
 
 Task 12b（引用跳转扩面，本文件的第二个阶段）：T12 的评审裁定「引用跳转」按钮
 在默认 chunk 模式下结构性地从不出现——`citations_from` 只被 reasoning 模式
-调用，chunk/graph 模式的四处内联 `Citation(...)` 构造点（ask_service.py
-的 mix/plain chunk 分支 + PPR/mix graph 分支）此前从未查过 knowhow。本文件
-扩面覆盖两条腿：
+调用，chunk 模式的两处内联 `Citation(...)` 构造点（ask_service.py 的
+mix/plain chunk 分支；graph 模式当时另有 PPR/mix 两处，已随该 ask 模式退役
+一并删除）此前从未查过 knowhow。本文件扩面覆盖两条腿：
   1. Citation 侧：新抽出的 `EvidenceContextService.knowhow_refs_for()`——
      `citations_from` 与四个内联构造点共用的批量查询，仍是「不管命中多少条
      引用只查一次」。
@@ -23,12 +23,12 @@ Task 12b（引用跳转扩面，本文件的第二个阶段）：T12 的评审�
 镜像 `test_evidence_context_service.py` 的既有测试风格，但补充了一个
 「记录每次批量调用参数」的 spy fake（`_SpySources`），专门用来断言「只查一次」
 这一条 TDD 要求——这是既有 `test_evidence_context_service.py` 里那个静默返回
-`{}` 的 `_Sources` fake做不到的。后半段（T12b 新增）补两个真实 SQLite 集成
-测试，证明 ask_chunk/ask_graph 这两条此前完全没测过 knowhow 富化的路径真的
-接上了——镜像 `test_knowhow_projection.py`（chunk 侧：repo/embedder/projector
-直接建表投影，不经 HTTP/轮询）与 `test_graph_src_chunks.py`（graph 侧：
-raw SQL 造一个节点+chunk+source_elements，stub LLM，不经完整 KG 抽取）两个
-既有约定,而不是发明第三种。
+`{}` 的 `_Sources` fake做不到的。后半段（T12b 新增）补真实 SQLite 集成
+测试，证明 ask_chunk 这条此前完全没测过 knowhow 富化的路径真的接上了——
+镜像 `test_knowhow_projection.py`（chunk 侧：repo/embedder/projector直接建表
+投影，不经 HTTP/轮询）的既有约定。graph 侧的镜像集成测试（曾用
+`test_graph_src_chunks.py` 同款 raw-SQL 造数手法）已随该 ask 模式退役
+一并删除。
 """
 from __future__ import annotations
 
@@ -340,14 +340,14 @@ def test_anchor_has_no_knowhow_when_rows_key_is_missing_or_not_a_list():
 
 
 # ---------------------------------------------------------------------------
-# Task 12b — end-to-end: real SQLite, driving ask_chunk/ask_graph directly,
-# proving the four production Citation(...) sites actually wire the new
-# batching helper in (the unit tests above only prove the helper itself is
-# correct in isolation). Mirrors test_knowhow_projection.py's repo/embedder/
-# projector fixture convention for the chunk-mode table (no HTTP, no
-# background-job polling — `project_table` runs synchronously when called
-# directly) and test_graph_src_chunks.py's raw-SQL seeding for the graph-mode
-# case (no full KG extraction pipeline needed).
+# Task 12b — end-to-end: real SQLite, driving ask_chunk directly, proving the
+# two production Citation(...) sites actually wire the new batching helper in
+# (the unit tests above only prove the helper itself is correct in
+# isolation). Mirrors test_knowhow_projection.py's repo/embedder/projector
+# fixture convention for the chunk-mode table (no HTTP, no background-job
+# polling — `project_table` runs synchronously when called directly).
+# The graph-mode mirror (two more sites, raw-SQL seeded like
+# test_graph_src_chunks.py) was retired along with that ask mode.
 # ---------------------------------------------------------------------------
 
 TABLE_TITLE = "时序修复表"
@@ -399,7 +399,7 @@ def projector(repo) -> KnowhowProjector:
 
 def _spy_on_evidence_elements(repo, monkeypatch) -> list:
     """Wraps the REAL SourceStore.evidence_elements with a call-count spy,
-    installed on the app's own repo instance so ask_chunk/ask_graph's actual
+    installed on the app's own repo instance so ask_chunk's actual
     production wiring is what gets observed (not a fake substituted in)."""
     calls: list[list[str]] = []
     original = repo._runtime.source_store.evidence_elements
@@ -530,91 +530,4 @@ def test_grounded_chunk_answer_puts_knowhow_on_the_chunk_anchor(
     # 批量口径：anchor 侧（chunk_context）一次 + citation 侧一次 = 恰好 2 次
     # store 读取，与锚点/引用数量无关。（T1 附图走窄读 `image_asset_rows`，
     # 不经这个 spy。）
-    assert len(calls) == 2, calls
-
-
-class _GraphAnswerLLM:
-    """Covers both verify_chain_edges' schema probe and the mix-mode answer
-    schema — mirrors test_graph_src_chunks.py's `_GraphLLM`."""
-    configured = True
-
-    def chat_json(self, messages, schema_hint, **kw):
-        if "valid" in (schema_hint or ""):
-            return '{"valid": true, "reason": "ok"}'
-        return '{"answer": "增大去耦电容 [k1]。", "grounded": true}'
-
-
-def test_ask_graph_src_chunk_citation_carries_knowhow(repo, monkeypatch):
-    """T12b：graph 模式的源原文(mix)分支同样此前从未富化过 citation.knowhow。
-    用 test_graph_src_chunks.py 同款轻量 raw-SQL 造数（一个 KO + 它 evidence
-    指向的 chunk + 一条真实的 source_elements 行，metadata 带 knowhow 标签），
-    不经完整 KG 抽取管线，证明这条 Citation 构造点也接上了。
-
-    显式传 `seed_ids=["ko-KH"]`（`ask_graph` 冻结签名里既有的公开参数,
-    ports.py:368,当前生产 HTTP 路由从不传它,但 sqlite_repository.py facade
-    委托保留了这个入参）绕开 BFS 的种子发现(`federated_retrieve`)——写这个
-    测试时发现的一个真实、独立于本任务的既有缺口:`_retrieve_scored`
-    (retrieval_candidates.py:42/700)把候选类型硬编码死在 PR-1 时代的
-    `_KG_TYPES = (claim, formula, procedure, concept)` 四态,knowhow 格子的
-    动态 object_type(列名,如本例的"修复方法")从不在这四态里,导致任何
-    knowhow KO 关键词/语义检索都查不到,BFS 种子发现天然找不到它——这与本
-    Citation 构造点的批量 knowhow 查询是否接对无关,本测试用 seed_ids 绕开
-    这个不相关的检索可见性缺口,只验证 Citation 构造这一段。已用 spawn_task
-    另开一条建议跟进(不在本任务范围内解决)。"""
-    nb = repo.create_notebook(NotebookCreate(name="g")).id
-    now = "2026-07-16T00:00:00"
-    with repo._write() as db:
-        db.execute(
-            "INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            ("src-KH", nb, "Knowhow 表：时序修复表", "md", "ready", now, now),
-        )
-        db.execute(
-            "INSERT INTO source_elements "
-            "(id,source_id,element_type,location_label,text,metadata,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            ("el-cell-KH", "src-KH", "knowhow_cell", "过冲问题 › 修复方法",
-             "增大去耦电容", json.dumps({
-                 "knowhow": {"table_id": "tbl-1", "row_id": "row-1", "column_id": "c-fix"},
-             }), now),
-        )
-        db.execute(
-            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            ("c-KH", nb, "src-KH", "增大去耦电容", "过冲问题 › 修复方法",
-             json.dumps(["el-cell-KH"]), now),
-        )
-        ev = json.dumps([{
-            "source_id": "src-KH", "source_title": "", "element_id": "el-cell-KH",
-            "element_type": "knowhow_cell", "location_label": "过冲问题 › 修复方法",
-            "quoted_span": "增大去耦电容", "confidence": 1.0,
-        }])
-        db.execute(
-            "INSERT INTO knowledge_objects "
-            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            ("ko-KH", nb, "修复方法", "approved", "",
-             json.dumps({"name": "增大去耦电容"}), ev, "src-KH", now, now),
-        )
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)  # 强制走 BFS
-    llm = _GraphAnswerLLM()
-    bind_chat_client(repo, "ask_answer", llm)
-    bind_chat_client(repo, "graph_chain_verify", llm)
-    calls = _spy_on_evidence_elements(repo, monkeypatch)
-
-    resp = repo.ask_graph(
-        nb, AskRequest(question="增大去耦电容", mode="graph"), seed_ids=["ko-KH"],
-    )
-
-    assert resp.mode == "graph"
-    kh_citations = [c for c in resp.citations if c.source_id == "src-KH"]
-    assert kh_citations, [c.source_id for c in resp.citations]
-    assert kh_citations[0].knowhow is not None
-    assert kh_citations[0].knowhow.table_id == "tbl-1"
-    assert kh_citations[0].knowhow.row_id == "row-1"
-    # 评审修复后 graph mix 路径固定两次批量：anchor 侧（_answer_mix →
-    # chunk_context，让 [k] 命中的 chunk 锚点也带 knowhow）+ citation 侧
-    # 一次，与锚点/引用数量无关。（T1 附图走窄读 `image_asset_rows`。）
-    anchor = next(a for a in resp.anchors if a.object_type == "chunk")
-    assert anchor.knowhow is not None and anchor.knowhow.row_id == "row-1"
     assert len(calls) == 2, calls

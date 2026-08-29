@@ -5,6 +5,7 @@ import ts from "typescript";
 
 import {
   assignmentsIn,
+  callSitesIn,
   callsIn,
   comparisonsIn,
   findFunction,
@@ -123,15 +124,20 @@ test("问题理解阶段进入同一条轨迹,而不是另起一条提示", () =
 });
 
 
-test("在途占位按引擎是否流轨迹渲染(关联追溯不再空等后端事件)", () => {
+test("在途占位按引擎是否流轨迹渲染(分组判断不得替代逐引擎判断)", () => {
   assert.ok(
     importsFrom(page, "./ask-modes").map((item) => item.imported).includes("streamsTrace"),
   );
-  // 深入分析组里只有逐步推理是流式的;按 pendingMode 的分组判断必然把关联追溯
-  // 也挂上实时轨迹面板,那面板从头到尾只会显示「等待后端事件…」。
-  assert.deepEqual(
-    comparisonsIn(page).filter((item) => item.left.includes("groupOf(pendingMode)")),
-    [],
+  // 正向判据:在途面板的渲染条件里必须真的调用了 streamsTrace(pendingMode, ...)
+  // ——按 pendingMode 的分组判断(groupOf(pendingMode))会把同组里不流轨迹的引擎
+  // 也挂上实时轨迹面板,那面板从头到尾只会显示「等待后端事件…」。只断言
+  // "groupOf(pendingMode)" 不存在管不住换成第三种错误判据的变异;这里改断言
+  // 正确判据确实在用。
+  assert.ok(
+    callSitesIn(page).some((call) => (
+      call.target === "streamsTrace" && call.arguments[0] === "pendingMode"
+    )),
+    "在途占位的渲染条件里找不到 streamsTrace(pendingMode, ...) 调用",
   );
 });
 

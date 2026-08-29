@@ -110,7 +110,7 @@ def _enable_active(service, monkeypatch):
     )
 
 
-def _wire_ask_graph_host(ask):
+def _wire_ask_source_graph_host(ask):
     ask.retrieval_contributors = default_extension_runtime().retrieval_contributors
     ask.retrieval_connection_probe = SimpleNamespace(
         is_connection_held=lambda: False
@@ -526,7 +526,7 @@ def test_builtin_plugin_preserves_shadow_status_and_single_graph_event(monkeypat
     ask.retrieval = SimpleNamespace(
         unsafe_source_scope_restricted=lambda _nb: True
     )
-    _wire_ask_graph_host(ask)
+    _wire_ask_source_graph_host(ask)
 
     with source_scope_context(
         "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
@@ -593,7 +593,7 @@ def test_builtin_plugin_preserves_active_chunks_status_and_graph_event(monkeypat
     ask.retrieval = SimpleNamespace(
         unsafe_source_scope_restricted=lambda _nb: True
     )
-    _wire_ask_graph_host(ask)
+    _wire_ask_source_graph_host(ask)
 
     with source_scope_context(
         "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
@@ -844,7 +844,7 @@ def test_ask_shared_seam_preserves_historical_shape_and_laziness(monkeypatch):
         AssertionError("all-selected must not open scale metadata")
     )
     ask.retrieval = SimpleNamespace(unsafe_source_scope_restricted=lambda _nb: False)
-    _wire_ask_graph_host(ask)
+    _wire_ask_source_graph_host(ask)
 
     with source_scope_context(
         "nb", {"mode": "include", "source_ids": ["a"], "narrowed": False}
@@ -855,36 +855,13 @@ def test_ask_shared_seam_preserves_historical_shape_and_laziness(monkeypatch):
     assert status is None
 
 
-def test_graph_mode_freezes_real_source_chunk_baseline_before_appending_g():
-    baseline = [_chunk("b", "a")]
-    baseline[0].score = 0.42
-    baseline[0].relevance = 0.73
-    graph_chunk = _chunk("g", "a")
-    seen = {}
-    ask = object.__new__(AskService)
-    ask.graph = SimpleNamespace(source_chunks=lambda _nb, object_ids: (
-        seen.setdefault("object_ids", object_ids), baseline
-    )[1])
-    ask.settings = SimpleNamespace(ppr_top_chunks=20)
-
-    def activate(_notebook_id, chunks, **_kwargs):
-        seen["baseline"] = list(chunks)
-        return [*chunks, graph_chunk], SimpleNamespace(state="active")
-
-    ask._activate_selected_source_graph = activate
-    subgraph = [({"object_id": "o", "name": "O"}, None, None)]
-
-    chunks, status = AskService._graph_source_chunks_with_activation(
-        ask, "nb", subgraph, (), unsafe_scope=True
-    )
-
-    assert seen["object_ids"] == ["o"]
-    assert seen["baseline"] == baseline
-    assert [chunk.chunk_id for chunk in chunks] == ["b", "g"]
-    assert chunks[0] is baseline[0]
-    assert chunks[0].score == 0.42
-    assert chunks[0].relevance == 0.73
-    assert status.state == "active"
+# test_graph_mode_freezes_real_source_chunk_baseline_before_appending_g was
+# removed with the retired full-graph ask engine: it froze
+# AskService._graph_source_chunks_with_activation's baseline-before-G
+# semantics, and that method (along with AskService.graph, its only reader)
+# was deleted along with that engine. _activate_selected_source_graph itself
+# — the shared primitive both ask_chunk and ask_reasoning still call —
+# remains covered by the other test cases in this file.
 
 
 def test_ask_and_report_consumers_keep_baseline_on_graph_io_failure(monkeypatch):
@@ -909,7 +886,7 @@ def test_ask_and_report_consumers_keep_baseline_on_graph_io_failure(monkeypatch)
     ask.selected_graph_hydrate = lambda _ids: ()
     ask.scale_version = lambda _nb: (_ for _ in ()).throw(RuntimeError("scale"))
     ask.retrieval = SimpleNamespace(unsafe_source_scope_restricted=lambda _nb: True)
-    _wire_ask_graph_host(ask)
+    _wire_ask_source_graph_host(ask)
 
     with source_scope_context(
         "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}

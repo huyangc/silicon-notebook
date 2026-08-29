@@ -136,9 +136,10 @@ def anchor_image_targets(
 ) -> list[tuple[AnswerAnchor, Sequence[str]]]:
     """把一批锚点配上各自的候选 element id，供 `attach_citation_images` 消费。
 
-    这是「chunk 锚点按 ``object_id`` 反查」这条规则的**唯一**拼写：四个装配点
-    (ask_chunk / ask_reasoning / ask_graph 两处) 都调它，而不是各写一遍
-    `by_id.get(anchor.object_id)`——四份手抄能互相认同一个陈旧值。
+    这是「chunk 锚点按 ``object_id`` 反查」这条规则的**唯一**拼写：两个装配点
+    (ask_chunk、ask_reasoning；曾经的 graph 引擎另有两处，已随该 ask 模式退役
+    一并删除) 都调它，而不是各写一遍 `by_id.get(anchor.object_id)`——多份手抄
+    能互相认同一个陈旧值。
 
     chunk 锚点非查不可：`chunk_context` 只在 chunk 恰好只有一个元素时才填
     ``anchor.element_id``（多元素 chunk 留空），而「一段正文 + 一张配图」恰恰是
@@ -980,8 +981,9 @@ class EvidenceContextService:
 
         fail-open（评审 F1）：本方法是已生成回答上的最后一步装饰性富化，`store`
         读取（`citation_images_for` → `image_asset_rows`）瞬态异常必须只丢图不
-        丢答案——四个调用点（ask_chunk/ask_reasoning/两处 ask_graph）此前都没
-        有兜底，一次 DB 抖动会把已经算完的回答整个打失败。兜底放在共享层而不
+        丢答案——调用点（ask_chunk/ask_reasoning；曾经的 graph 引擎另有两处，
+        已随该 ask 模式退役一并删除）此前都没有兜底，一次 DB 抖动会把已经算完
+        的回答整个打失败。兜底放在共享层而不
         是每个调用点各包一次，理由与 `attach_reference_images` 的"共享一份
         `CITATION_IMAGES_PER_ANSWER` 预算"同源：装配是这里的单一定义点。
         `report_engine.py` 里 `attach_reference_images` 外层那个 try/except 因

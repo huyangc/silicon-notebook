@@ -24,7 +24,6 @@ class UnknownAskMode(ValueError):
 ASK_MODES: dict[str, AskMode] = {
     "chunk":     AskMode("chunk",     "ask_chunk",     "general", False, False, True),
     "reasoning": AskMode("reasoning", "ask_reasoning", "strict",  True,  True,  True),
-    "graph":     AskMode("graph",     "ask_graph",     "strict",  False, True,  True),
 }
 
 DEFAULT_MODE = "chunk"
@@ -34,8 +33,8 @@ DEFAULT_MODE = "chunk"
 AUTO_MODE = "auto"
 
 # 退役但曾合法的 mode id → 映射 chunk(保旧会话/书签持久化的 mode 不 422)。
-# 窄例外:仅这两个具名 id;其余未知 mode 仍 UnknownAskMode。
-_RETIRED_MODES = {"fast": "chunk", "global": "chunk"}
+# 窄例外:仅这三个具名 id;其余未知 mode 仍 UnknownAskMode。
+_RETIRED_MODES = {"fast": "chunk", "global": "chunk", "graph": "chunk"}
 
 
 def resolve_mode(

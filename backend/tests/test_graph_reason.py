@@ -308,11 +308,13 @@ def test_verify_chain_edges_no_edges_no_calls():
 
 # ── Cache-isolation regression (cross-ask leak) ──────────────────────────────
 # Bug: multihop_subgraph used to return LIVE references into the cached
-# PyDiGraph (rustworkx get_edge_data / G[idx] hand back the same object).
-# ask_graph demotes a flagged edge in-place (edge["confidence"] = 0.05) before
-# re-rendering, which mutated the CACHED graph and leaked into the NEXT ask on
-# the same cached graph. multihop_subgraph must now hand back COPIES so the
-# cache stays pristine.
+# PyDiGraph (rustworkx get_edge_data / G[idx] hand back the same object). The
+# now-retired full-graph ask engine demoted a flagged edge in-place
+# (edge["confidence"] = 0.05) before re-rendering, which mutated the CACHED
+# graph and leaked into the NEXT ask on the same cached graph. Any caller that
+# demotes edges the same way (verify_chain_edges is still exercised standalone
+# below) would hit the same leak, so multihop_subgraph must hand back COPIES
+# so the cache stays pristine.
 
 def test_multihop_subgraph_returns_edge_payload_copies():
     """Edge payloads returned by multihop_subgraph must be copies, not the live
@@ -346,7 +348,7 @@ def test_flag_demotion_does_not_leak_into_next_ask():
     assert G.get_edge_data(src_idx, tgt_idx)["confidence"] == 1.0
 
     # ── First ask: traverse, then demote the flagged edge in-place exactly as
-    # ask_graph does (sqlite_repository.py: edge["confidence"] = 0.05).
+    # the (now-retired) full-graph ask engine used to: edge["confidence"] = 0.05.
     sub1 = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
                              {"derived_from"}, max_depth=1, max_fan_out=10)
     flagged = [e for _n, e, _s in sub1 if e and e.get("edge_type") == "derived_from"]

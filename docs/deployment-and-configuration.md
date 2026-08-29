@@ -478,9 +478,8 @@ override. Neither the provider nor transport layer inspects the configured
 model name.
 
 The checked-in example spells out every current default. `ask_answer`,
-`reasoning_agent`, `graph_chain_verify`, `report_outline`,
-`report_sufficiency`, `schema_induction`, `agent_profile_consolidate`, and
-`retrieval_experience_distill` are enabled. They are one-shot or bounded
+`reasoning_agent`, `report_outline`, `report_sufficiency`, `schema_induction`,
+`agent_profile_consolidate`, and `retrieval_experience_distill` are enabled. They are one-shot or bounded
 planning/judgement/synthesis calls whose result directly affects the user or a
 durable retrieval policy. Every other current chat workload is disabled. In
 particular, all KG extraction/governance/description passes, chunk-question
@@ -684,7 +683,6 @@ REASONING_TOP_N_PER_QUERY  # adaptive budget: seats reserved per aspect/sub-quer
 REASONING_TOP_N_CAP        # adaptive budget cap; comparison Qs scale by #aspects (default 36)
 ASK_RELATED_KNOWLEDGE_LIMIT # related-KG records projected into an Ask response
 QUERY_REFINE_MAX_ITEMS / ASK_CONTEXT_RELATION_LIMIT # refined evidence bullets and ranked relationship lines admitted to Ask context
-GRAPH_SEED_TOP_N / GRAPH_MAX_DEPTH / GRAPH_MAX_FAN_OUT # graph-walk candidate rails
 CHUNK_KG_NODE_SEED_TOP_N / CHUNK_KG_RELATION_SEED_TOP_N / CHUNK_KG_MAX_DEPTH / CHUNK_KG_FAN_OUT # chunk×KG overlay rails
 CHUNK_GRAPH_RESERVE        # seats for graph-only chunks already above the relevance floor (default 0; set 1 after evaluation)
 EXACT_LOOKUP_ENABLED       # exact-identifier fast path: whole-section fetch for `set_db`-style names (default true)
@@ -713,8 +711,8 @@ row down; the numeric contract lives in `docs/product-and-api.md`
   (6 at the default).
 
 Raising these four therefore no longer widens a report; raise the research depth
-instead. Ask's `mix`/`graph` modes and any reasoning run made without an effort
-level still read them unchanged.
+instead. Ask's `mix` mode and any reasoning run made without an effort level
+still read them unchanged.
 
 The same applies to the two **context assembly** budgets a report section used to
 size from settings — the level's own numbers replace them:
@@ -991,7 +989,7 @@ smaller output or total-context limit.
 
 **Behavior change (PR-5, no new flag):** each report section's deep-dive retrieval budget now follows the report's own `depth` value (1/2/4/8/16, clamped API-side to `[1, 16]`) mapped onto the same named effort tiers reasoning Ask uses (`overview`/`standard`/`deep`/`thorough`/`exhaustive`) rather than always running at the `standard` budget. Low depths therefore retrieve with a smaller budget than before this change and high depths with a larger one — this is an intentional alignment fix (same tier name, same budget in both Ask and Deep Report), not a regression. Reaching depth 16 (`exhaustive`) additionally activates the outline scratchpad and KG weak-support gap feedback described above inside that section's deep-dive only; see `docs/product-and-api.md`'s "Deep Report outline co-evolution" section for the full contract.
 
-**Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
+**Two-tier KB (Wave 1+2):** these have no `.env` toggles today.
 A notebook's `tier` (`base` | `personal`, default `personal`) is data on the notebook
 row, set via the repository's `mark_notebook_base()`; publishing a notebook to `base`
 does not make it globally shared — every other notebook must explicitly mount it as a
@@ -1001,10 +999,7 @@ before it joins that notebook's retrieval participant set. Tier-aware federation
 leaves retrieval scores unchanged: relevance is the primary ordering key, with `base`
 used only as the secondary key for an exact score tie among mounted participants. The
 base-wins contradiction rule is a separate answer-synthesis policy that remains active
-for evidence from a mounted base notebook. The opt-in
-graph-reasoning Ask mode (`mode="graph"`) bounds its multi-hop traversal with fixed
-defaults `max_depth=3` and `max_fan_out=8` (read via `getattr` on settings, so a future
-`GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env override would slot in without code changes).
+for evidence from a mounted base notebook.
 Edge-trust scoring, the curator review queue, and personal→base promotion are likewise
 behavior, not env-gated.
 

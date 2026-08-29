@@ -297,60 +297,15 @@ def test_knowledge_context_gates_the_library_at_the_assembly_point(
     )
 
 
-def test_ask_graph_walk_never_renders_a_node_from_an_unchecked_library(
-    federated_corpus, monkeypatch,
-):
-    """graph 模式跑的是整张联邦图的 BFS —— 库维度暴露面最大的漫游出口。
-
-    断言落在 ``render_subgraph_context`` 的**入参**上,因为 render 就是子图变成
-    「答案 prompt 的一段 + 一批活的 `k{n}` 锚点」的那一步:任何在它之后才做的过滤
-    都已经晚了。
-
-    PPR 先关掉:它命中就会带着 chunk 答案提前 return,整个全图漫游分支根本不执行,
-    留着它这条用例会在不触发目标代码的情况下变绿。
-    """
-    from app.models.schemas import AskRequest
-    from app.services.kg import graph_reason
-
-    repo, active, base, _local_source, _base_sources = federated_corpus
-    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False, raising=False)
-
-    rendered: list[list[dict]] = []
-    id_maps: list[dict] = []
-    original = graph_reason.render_subgraph_context
-
-    def _spy(subgraph, **kwargs):
-        rendered.append([dict(node) for node, _edge, _src in subgraph])
-        block, id_map = original(subgraph, **kwargs)
-        id_maps.append(id_map)
-        return block, id_map
-
-    monkeypatch.setattr(graph_reason, "render_subgraph_context", _spy)
-
-    repo.ask(active, AskRequest(question=_QUERY, mode="graph"))
-    assert rendered, "the whole-graph walk never ran -- the spy is blind"
-    assert any(
-        node.get("notebook_id") == base for call in rendered for node in call
-    ), "baseline: the walk must actually reach the mounted library's nodes"
-
-    rendered.clear()
-    id_maps.clear()
-    with _base_excluded(active):
-        repo.ask(active, AskRequest(question=_QUERY, mode="graph"))
-
-    assert rendered, "the whole-graph walk never ran under the library scope"
-    assert any(call for call in rendered), (
-        "the walk came back empty -- unchecking a library must not empty the graph"
-    )
-    for call in rendered:
-        assert {node.get("notebook_id") for node in call} <= {active}, (
-            f"an unchecked library's node reached the prompt: "
-            f"{[n for n in call if n.get('notebook_id') != active]}"
-        )
-    for id_map in id_maps:
-        assert all(row.get("notebook_id") != base for row in id_map.values()), (
-            f"an unchecked library's node became citable: {id_map}"
-        )
+# test_ask_graph_walk_never_renders_a_node_from_an_unchecked_library was removed
+# with the retired full-graph ask engine: it spied on graph_reason.render_subgraph_context
+# during a full-graph BFS that a PLAIN question triggered end-to-end — that
+# whole-graph-walk-on-every-question behavior no longer exists anywhere.
+# scoped_subgraph_nodes (source_scope.py) — the node-level notebook_id filter
+# this test asserted on — is still live infra consumed by reasoning's
+# follow_chain (retrieval_candidates.py), but follow_chain only activates for
+# an explicit two-hop derivation question, not this fixture's generic _QUERY,
+# so no equivalent end-to-end regression test currently covers that path.
 
 
 def test_ask_payload_base_scope_alone_narrows_without_manual_context(

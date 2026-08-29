@@ -419,7 +419,7 @@ async def test_same_profile_lower_scope_token_cannot_reuse_an_initialized_sessio
 
 
 @pytest.mark.anyio
-async def test_ask_tool_reuses_formal_ask_and_rejects_experimental_graph(mcp_env):
+async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_env):
     from app.services.sqlite_repository import _now
 
     repo = repository()

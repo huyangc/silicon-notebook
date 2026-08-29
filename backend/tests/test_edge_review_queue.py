@@ -132,8 +132,8 @@ def test_set_edge_review_invalid_status_raises(repo):
 # ── Feedback loop: rejected edges demoted in graph ───────────────────────────
 # C3 (hotpath cleanup): this section used to test the feedback loop through
 # `SqliteRepository._rx_graph`, the single-notebook reasoning-graph loader.
-# `_rx_graph` had zero production callers — `ask_graph`/reasoning always go
-# through `_federated_rx_graph` (base+active merge; a solo personal notebook
+# `_rx_graph` had zero production callers — reasoning's follow_chain always
+# goes through `_federated_rx_graph` (base+active merge; a solo personal notebook
 # with no base participants federates to just itself, so it subsumes the
 # single-notebook case) — so `_rx_graph` was deleted as dead code. The cache-
 # invalidation-on-warm-graph and rejected/verified-edge-visibility assertions
@@ -157,9 +157,9 @@ def _rx_edge_rel_ids(G) -> set:
 
 
 def test_verify_chain_edges_skips_rejected_federated(repo):
-    """verify_chain_edges in ask_graph: a subgraph traversal on the federated
-    reasoning graph (the live path — see module comment above) where a
-    rejected edge has been excluded should not include that edge at all."""
+    """A subgraph traversal (as used by verify_chain_edges/follow_chain) on the
+    federated reasoning graph (the live path — see module comment above) where
+    a rejected edge has been excluded should not include that edge at all."""
     nb_id = _seed_graph(repo)
     q = repo.review_queue(nb_id)
     # Reject the first edge

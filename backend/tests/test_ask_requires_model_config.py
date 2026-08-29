@@ -130,7 +130,7 @@ def test_empty_system_registry_reasoning_keeps_offline_kg_evidence(tmp_path):
         repo.close()
 
 
-@pytest.mark.parametrize("mode", ["chunk", "reasoning", "graph"])
+@pytest.mark.parametrize("mode", ["chunk", "reasoning"])
 def test_nonempty_registry_missing_ask_answer_surfaces_system_error(
     tmp_path, monkeypatch, mode
 ):

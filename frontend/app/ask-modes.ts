@@ -2,7 +2,7 @@
 // sanitized from GET /ask-modes and merged at runtime; no plugin id is compiled
 // into the browser bundle.
 
-export type AskModeId = "chunk" | "reasoning" | "graph";
+export type AskModeId = "chunk" | "reasoning";
 export type AskModeGroup = "general" | "strict" | "extension";
 
 export interface AskModeDef {
@@ -35,9 +35,6 @@ export const ASK_MODES: readonly AskModeDef[] = Object.freeze([
   Object.freeze({ id: "reasoning", group: "strict", label: "逐步推理",
     desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。",
     requiresKg: true, streamsTrace: true, groupDefault: true } as AskModeDef),
-  Object.freeze({ id: "graph", group: "strict", label: "关联追溯",
-    desc: "顺着资料之间的关联往外找，列出牵连到的内容；适合理清一件事的来龙去脉。",
-    requiresKg: true, streamsTrace: false } as AskModeDef),
 ]);
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";

@@ -398,7 +398,7 @@ OpenAI SDK 的 `extra_body` 把 `enabled` 或 `disabled` 发送为 `thinking.typ
 `provider_default` 则不发送覆盖。provider 与 transport 两层都不检查配置的模型名。
 
 仓库示例明确列出当前全部默认值：`ask_answer`、`reasoning_agent`、
-`graph_chain_verify`、`report_outline`、`report_sufficiency`、`schema_induction`、
+`report_outline`、`report_sufficiency`、`schema_induction`、
 `agent_profile_consolidate` 与 `retrieval_experience_distill` 开启。它们是单次或有界的
 规划、判断、合成调用，结果会直接影响用户或持久检索策略。其余现有 chat workload 全部
 关闭；尤其是全部 KG 抽取/治理/描述阶段、chunk 问题生成、元数据/摘要抽取、查询/证据
@@ -555,7 +555,6 @@ REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社
 REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
 ASK_RELATED_KNOWLEDGE_LIMIT # Ask 响应中展示的相关 KG 条目上限
 QUERY_REFINE_MAX_ITEMS / ASK_CONTEXT_RELATION_LIMIT # Ask 上下文中的精炼要点和排序关系条目上限
-GRAPH_SEED_TOP_N / GRAPH_MAX_DEPTH / GRAPH_MAX_FAN_OUT # graph 遍历候选护栏
 CHUNK_KG_NODE_SEED_TOP_N / CHUNK_KG_RELATION_SEED_TOP_N / CHUNK_KG_MAX_DEPTH / CHUNK_KG_FAN_OUT # chunk×KG overlay 护栏
 CHUNK_GRAPH_RESERVE        # 为已过相关度门槛的纯图路径 chunk 预留席位（默认 0；评测后可设 1）
 EXACT_LOOKUP_ENABLED       # 精确标识符通道：按 `set_db` 这类完整命令名整节取齐（默认 true）
@@ -578,7 +577,7 @@ EXACT_SECTION_RESERVE      # mix 最终选择为这些块预留的席位，仍�
   档每节首轮子查询为 5，而按配置推导的旧路径是 `REASONING_MAX_SUBQUERIES + 1`
   （默认值下为 6）。
 
-所以调大这四项已经不会让报告更宽，要更宽请调高研究深度。逐步推理的 `mix`/`graph`
+所以调大这四项已经不会让报告更宽，要更宽请调高研究深度。逐步推理的 `mix`
 模式，以及任何不带档位的推理调用，仍照旧读取它们。
 
 报告节此前从配置取的两项**上下文装配**预算同理，改由档位自己的数值决定：
@@ -808,7 +807,7 @@ workload 的最大 prompt 下接受这些上限。若 provider 的输出或总�
 
 **行为变化（PR-5，不新增开关）：** 每节深挖的检索预算现在按报告自己的 `depth` 值（1/2/4/8/16，接口侧夹在 `[1, 16]`）映射到与逐步推理相同的档名（`overview`/`standard`/`deep`/`thorough`/`exhaustive`），不再永远按 `standard` 预算跑。低档位因此比这次改动前检索预算更小、高档位更大——这是把同名档位对齐（同一档名在 Ask 与深度报告两处买到同一份预算）的有意修复，不是回归。到达 depth 16（`exhaustive`）时，该节深挖内部还会额外激活上文的大纲便签与 KG 弱支撑边回喂；完整合同见 `docs/product-and-api_zh.md`「深度报告接入大纲共演化」一节。
 
-**两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
+**两层知识库（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
 （`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法
 `mark_notebook_base()` 设置；把一个 notebook 发布为 `base` 并不会让它自动全局共享——
 其它每个 notebook 都必须显式把它挂为参考库（持久化在 `notebook_bases`，经
@@ -816,8 +815,6 @@ workload 的最大 prompt 下接受这些上限。若 provider 的输出或总�
 之后，它才会加入该 notebook 的检索参与集。tier 感知联合检索不改相关度分数：相关度是
 第一排序键，`base` 仅在参与集内命中相关度分数完全相同时作为第二排序键。答案里的 base
 优先冲突规则是独立的合成策略，对来自已挂载 base notebook 的证据始终生效。
-可选的图推理 Ask 模式（`mode="graph"`）多跳遍历用固定默认 `max_depth=3`、`max_fan_out=8`
-（经 `getattr` 读取 settings，因此将来加 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env 覆盖无需改代码）。
 边可信打分、策展审核队列、个人→基准晋升同样是行为，不由 env 控制。
 
 **用户系统：**

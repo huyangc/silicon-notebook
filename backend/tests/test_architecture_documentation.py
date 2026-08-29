@@ -947,13 +947,13 @@ def test_repository_composition_history_keeps_v10_baseline():
 
 
 def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
-    """`chunk` (default) / `reasoning` / `graph` are the modes; persisted
-    `fast`/`global` ids survive only as aliases to `chunk`.  The older
-    fast/global product description must not resurface."""
+    """`chunk` (default) / `reasoning` are the modes; persisted
+    `fast`/`global`/`graph` ids survive only as aliases to `chunk`.  The older
+    fast/global/graph product description must not resurface."""
     _assert_phrases(
         {
-            "README.md": "Retired ids `fast` and `global` are transparently remapped to `chunk`",
-            "README_zh.md": "退役 id `fast`、`global` 透明映射到 `chunk`",
+            "README.md": "Retired ids `fast`, `global`, and `graph` are transparently remapped to `chunk`",
+            "README_zh.md": "退役 id `fast`、`global`、`graph` 透明映射到 `chunk`",
             "architecture.md": "退役 mode id 只保留兼容映射",
             "fangan_done.md": "KG-native Ask（chunk / graph / reasoning",
         }

@@ -1,8 +1,11 @@
-"""T3 — gate ii: graph-mode KG-node anchors carry a knowhow row-drawer ref.
+"""T3 — gate ii: KG-node anchors reached via graph traversal carry a knowhow
+row-drawer ref.
 
 Chunk mode already surfaces `AnswerAnchor.knowhow` (#272). This closes the
-`mode=graph` / reasoning KG-node path: a BFS-reached single-row knowhow cell KO
-node must thread its `{table_id, rows}` from `_federated_rx_graph._load` through
+reasoning KG-node path (consumed via `follow_chain`; the full-graph ask engine
+this was originally written against has since been retired — see its own e2e
+test history): a BFS-reached single-row knowhow cell KO node must thread its
+`{table_id, rows}` from `_federated_rx_graph._load` through
 `build_rx_graph` into `render_subgraph_context`'s id_map so
 `evidence_context.parse_anchors` (which already reads `context.get("knowhow")`)
 can put a `CitationKnowhowRef` on the anchor — letting an ask citation jump to
@@ -28,12 +31,12 @@ import json
 import pytest
 
 from app.core.config import Settings
-from app.models.schemas import AskRequest, NotebookCreate
+from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.kg.graph_reason import (
     build_rx_graph, render_subgraph_context)
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
+from tests.model_testkit import bind_all_embedding_clients
 
 _FLAG = "knowhow_kg_node_retrieval_enabled"
 
@@ -212,112 +215,3 @@ def test_federated_load_omits_knowhow_when_flag_off(kh_store, monkeypatch):
     _ctx, id_map = render_subgraph_context([(dict(payload), None, None)])
     assert id_map["k1"]["knowhow"] is None
 
-
-# ── e2e: mode=graph answer citing a knowhow node yields AnswerAnchor.knowhow ──
-# Mirrors test_graph_k_binding.py: a plain seed K1 reaches the knowhow KO KH via
-# a derived_from edge; KH is in the rendered subgraph id_map (a multi-hop
-# neighbour) and the mocked answer LLM cites its key.
-
-@pytest.fixture
-def graph_kh_store(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    store = _new_repo()
-    bind_all_embedding_clients(store, FakeEmbedder(dim=16))
-    nb = store.create_notebook(NotebookCreate(name="nb"))
-    store.store_kg(nb.id, None, [
-        {"local_id": "K1", "object_type": "formula",
-         "payload": {"name": "Gate oxide breakdown voltage", "section_path": "1"},
-         "evidence": []},
-        {"local_id": "KH", "object_type": "电压",
-         "payload": {"name": "High field oxide failure mechanism", "text": "3.3V",
-                     "table_id": "tbl-1", "rows": ["row-1"],
-                     "column_id": "col-1", "column_name": "电压"},
-         "evidence": []},
-    ], [
-        {"local_id": "rel1", "source_local_id": "K1", "target_local_id": "KH",
-         "edge_type": "derived_from", "evidence": [
-             {"source_id": "s1", "source_title": "textbook", "element_id": "e1",
-              "element_type": "paragraph", "location_label": "p1",
-              "quoted_span": "oxide breakdown derives the failure mechanism",
-              "confidence": 1.0}]},
-    ])
-    return store, nb
-
-
-def _resolve_subgraph_keys(store, nb_id, seed_oids):
-    from app.services.kg.graph_reason import (
-        DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context)
-    G, idx_to_oid, oid_to_idx = store.retrieval.graph._federated_rx_graph(nb_id)
-    sub = multihop_subgraph(
-        G, oid_to_idx, idx_to_oid, seed_ids=seed_oids,
-        edge_types=DEFAULT_REASONING_EDGES,
-        max_depth=getattr(store.settings, "graph_max_depth", 3),
-        max_fan_out=getattr(store.settings, "graph_max_fan_out", 8))
-    _ctx, id_map = render_subgraph_context(sub, id_offset=0)
-    return id_map, {v["object_id"]: k for k, v in id_map.items()}
-
-
-class _CiteLLM:
-    """Answer LLM that cites the knowhow node's key (grounded)."""
-    configured = True
-
-    def __init__(self, valid_key):
-        self._valid_key = valid_key
-
-    def chat_json(self, messages, schema_hint, **kwargs):
-        answer = f"The cell value drives the failure mechanism [{self._valid_key}]."
-        return json.dumps({"answer": answer, "grounded": True})
-
-
-def _drive_graph_ask(store, nb, monkeypatch):
-    k1_oid = _oid_by_name(store, "Gate oxide breakdown")
-    kh_oid = _oid_by_name(store, "High field oxide failure")
-    _id_map, key_by_oid = _resolve_subgraph_keys(store, nb.id, [k1_oid])
-    assert kh_oid in key_by_oid, "expected the knowhow KO reachable as a neighbour"
-    valid_key = key_by_oid[kh_oid]
-
-    from app.services.retrieval import RetrievedKnowledge
-
-    def _fake_retrieve_scored(notebook_id, query, *a, **kw):
-        return [RetrievedKnowledge(
-            object_type="formula", object_id=k1_oid,
-            payload={"name": "Gate oxide breakdown voltage"},
-            score=1.0, relevance=0.95, status="approved", owner="",
-            last_reviewed="", evidence=[], notebook_id=notebook_id, tier="personal")]
-
-    monkeypatch.setattr(store.retrieval.candidates, "_retrieve_scored",
-                        _fake_retrieve_scored)
-    bind_chat_client(store, "ask_answer", _CiteLLM(valid_key))
-    # Skip the adversarial chain verifier's LLM calls (non-configured stub).
-    bind_chat_client(
-        store,
-        "graph_chain_verify",
-        type("_NoLLM", (), {"configured": False})(),
-    )
-    resp = store.ask(nb.id, AskRequest(question="oxide breakdown failure", mode="graph"))
-    return resp, kh_oid
-
-
-def test_graph_mode_anchor_carries_knowhow_when_flag_on(graph_kh_store, monkeypatch):
-    store, nb = graph_kh_store
-    _set_flag(store.settings, True)
-    resp, kh_oid = _drive_graph_ask(store, nb, monkeypatch)
-    assert resp.anchors, "expected the cited knowhow node to produce an anchor"
-    kh_anchors = [a for a in resp.anchors if a.object_id == kh_oid]
-    assert kh_anchors, "the knowhow node must be a bound anchor"
-    ref = kh_anchors[0].knowhow
-    assert ref is not None, "graph-mode knowhow anchor must carry a row-drawer ref"
-    assert ref.table_id == "tbl-1"
-    assert ref.row_id == "row-1"
-
-
-def test_graph_mode_anchor_no_knowhow_when_flag_off(graph_kh_store, monkeypatch):
-    store, nb = graph_kh_store
-    _set_flag(store.settings, False)
-    resp, kh_oid = _drive_graph_ask(store, nb, monkeypatch)
-    assert resp.anchors, "the node is still cited; only the knowhow jump differs"
-    kh_anchors = [a for a in resp.anchors if a.object_id == kh_oid]
-    assert kh_anchors
-    assert kh_anchors[0].knowhow is None, "flag OFF ⇒ no knowhow ref on the anchor"

@@ -1,4 +1,4 @@
-"""Ask 模式引擎与答案合成 (Task 24) — chunk/reasoning/graph 三引擎、follow-up
+"""Ask 模式引擎与答案合成 (Task 24) — chunk/reasoning 双引擎、follow-up
 改写、refine/retry/mix 合成 helper、未配模型短路、index-required 装饰与答案落存
 的唯一所有者。SQLiteRepository 只保留冻结签名 delegate。
 
@@ -11,14 +11,14 @@
   sibling_min_bridge 在调用时读取——镜像 ReportEngine 的 per-launch 构造)、
   scale_profiles 工厂 + scale_index_probe(_needs_index 逐调用现读
   _vector_cache,保 facade 换缓存测试语义)、notebooks(存在性守卫)、
-  schemas(effective_schemas)、community_reports、source_titles。
+  schemas(effective_schemas)、source_titles。
 * 持久化身份显式:``user_id`` 关键字由调用方传入(facade delegate 适配
   current_user().id;流式路径由 AskExecutionCoordinator 每次 start 传入),
   本模块绝不读请求 ContextVar、绝不 import facade/runtime、绝不开私有 DB 缝。
 * 模型身份走注入的 process-owned provider；每个调用点使用稳定 workload ID
   解析只读 adapter，不读取请求用户的模型配置。
-* 三模式派发仍以 ask_modes.ASK_MODES 冻结注册表为唯一真源(getattr 派发 +
-  fast/global 退役别名);控制流与 facade 基线逐字一致 —— ask goldens
+* 两模式派发仍以 ask_modes.ASK_MODES 冻结注册表为唯一真源(getattr 派发 +
+  fast/global/graph 退役别名);控制流与 facade 基线逐字一致 —— ask goldens
   (test_ask_repository_golden)按字节冻结着每条路径。
 """
 from __future__ import annotations
@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     from app.application.ask_reasoning import ResponseDraftStage
     from app.repositories.ports import (
         AskCandidatePort,
-        AskGraphPort,
         AskModelClientProvider,
         PreparedAskTurn,
         RetrievalPort,
@@ -211,53 +210,6 @@ class _SectionedSynthesis:
     baseline_assemblies: list
 
 
-def _graph_classification_hits(
-    *, top_hits, memory_hits, anchors, neighbour_relevance: float, notebook_id: str
-):
-    """Build graph-mode classifier evidence without inflating Memory scores.
-
-    Graph nodes reached through a verified chain may inherit discounted seed
-    relevance. Memory anchors already have their own retrieval score and must
-    never be mistaken for graph neighbours.
-    """
-    hits = list(top_hits) + list(memory_hits)
-    scored_oids = {hit.object_id for hit in hits}
-    for anchor in anchors:
-        if anchor.object_id in scored_oids or anchor.object_type == "memory":
-            continue
-        scored_oids.add(anchor.object_id)
-        hits.append(RetrievedKnowledge(
-            object_id=anchor.object_id,
-            object_type=anchor.object_type,
-            payload={"name": anchor.name},
-            relevance=neighbour_relevance,
-            tier=getattr(anchor, "tier", "personal"),
-            notebook_id=notebook_id,
-        ))
-    return hits
-
-
-def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
-    """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
-    keys that actually resolved to an anchor):
-      - key in bound_keys  → rewrite to the canonical `[key]` form (repairs a
-        malformed spaced `[ k1]` so it reads as a clean citation, not a fabricated
-        one, while still pointing at its real anchor);
-      - key not in bound_keys → drop the token (out-of-map ids like `[k99]`, or a
-        spaced id with no anchor).
-    Collapses the double space a removed mid-sentence marker would leave behind."""
-    def _sub(m: re.Match) -> str:
-        keys = marker_keys(m.group(0))
-        # Mixed known/unknown groups fail closed. Keeping only the known subset
-        # would silently alter which premises the sentence claims to cite.
-        return ("[" + ", ".join(keys) + "]"
-                if keys and all(key in bound_keys for key in keys) else "")
-    cleaned = _LOOSE_MARKER_GROUP_RE.sub(_sub, answer or "")
-    # A stripped marker between words leaves "word  word"; normalise to one space
-    # without disturbing newlines / other whitespace runs the model intended.
-    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
-
-
 def _keep_only_section_markers(answer: str, section_keys: set) -> str:
     """按节合成:把一节的正文里**不属于本节号段**的 `[k…]` 标记清掉。
 
@@ -268,20 +220,18 @@ def _keep_only_section_markers(answer: str, section_keys: set) -> str:
     渲染这道后门原样回来了。号段偏移买到的隔离,必须在**送到读者眼前的那份文本**上
     也成立。
 
-    与 `_strip_unbound_markers`(graph 模式)的两处刻意分歧:
+本函数的两处设计取舍:
 
-    * **混合组保留合法子集**而不是整组丢弃。那边未知键是**凭空造的** id,没法判断
-      它想引什么,所以整组失效最诚实;这边不同 —— 号段互不相交是**服务端**造的
-      事实,本节模型手里从来就没有过 `k1` 这个号,它只可能是幻觉,而同组里的
+    * **混合组保留合法子集**而不是整组丢弃。号段互不相交是**服务端**造的事实,
+      本节模型手里从来就没有过 `k1` 这个号,它只可能是幻觉,而同组里的
       `k10001` 是服务端确确实实发给这一节、它也确确实实看见了的证据。连着好的一半
       一起丢,是拿一次幻觉惩罚一条真引用。
     * **空白收敛带 `(?<=\\S)` 前置断言**:标记按 prompt 规则 1 挂在句末,删掉只会留下
       「词__词」这种**跟在非空白字符后面**的空格串。不加断言的话,分节答案里的嵌套
       列表(`  - 项`)与四空格代码块会被一起压平 —— 那对长文比漏一个标记严重得多。
 
-    合法标记逐字保留(顺带把 `[ k10001]` 这类畸形写法规范化成可绑定的形态,同
-    `_strip_unbound_markers` 的既有行为)。整组全非法时连同方括号一起移除,所以不会
-    留下空括号或多余逗号。
+    合法标记逐字保留(顺带把 `[ k10001]` 这类畸形写法规范化成可绑定的形态)。整组
+    全非法时连同方括号一起移除,所以不会留下空括号或多余逗号。
     """
     def _sub(match: re.Match) -> str:
         keys = marker_keys(match.group(0))
@@ -535,7 +485,6 @@ class AskService:
         ask_state,
         retrieval: "RetrievalPort",
         candidates: "AskCandidatePort",
-        graph: "AskGraphPort",
         evidence_context,
         model_clients: "AskModelClientProvider",
         model_errors,
@@ -546,7 +495,6 @@ class AskService:
         event_log,
         notebooks,
         schemas,
-        community_reports: Callable[[str], list],
         source_titles: Callable[[List[str]], Dict[str, str]],
         knowhow_store=None,
         memory_retriever=None,
@@ -581,7 +529,6 @@ class AskService:
         self.ask_state = ask_state
         self.retrieval = retrieval
         self.candidates = candidates
-        self.graph = graph
         self.evidence_context = evidence_context
         self.model_clients = model_clients
         self.model_errors = model_errors
@@ -592,7 +539,6 @@ class AskService:
         self.event_log = event_log
         self.notebooks = notebooks
         self.schemas = schemas
-        self.community_reports = community_reports
         self.source_titles = source_titles
         self.knowhow_store = knowhow_store
         self.memory_retriever = memory_retriever
@@ -751,27 +697,6 @@ class AskService:
         except Exception:
             return call.fail_closed_result("activation_seam_failed")
 
-    def _graph_source_chunks_with_activation(
-        self,
-        notebook_id: str,
-        subgraph,
-        top_hits,
-        *,
-        unsafe_scope: bool,
-    ):
-        """Freeze graph mode's historical source-chunk B before optional G."""
-        baseline = list(self.graph.source_chunks(
-            notebook_id, [node["object_id"] for node, _edge, _source in subgraph]
-        ))
-        if not unsafe_scope:
-            return baseline, None
-        return self._activate_selected_source_graph(
-            notebook_id,
-            baseline,
-            top_hits=top_hits,
-            max_results=self.settings.ppr_top_chunks,
-        )
-
     # ------------------------------------------------------------------
     # dispatch
     # ------------------------------------------------------------------
@@ -883,15 +808,6 @@ class AskService:
         return self.ask_reasoning(
             notebook_id, payload, user_id=self.current_user_id(),
             on_trace=on_trace, cancel_event=cancel_event,
-        )
-
-    def ask_graph_current(
-        self, notebook_id: str, payload: AskRequest,
-        seed_ids: Optional[List[str]] = None, cancel_event: CancelEvent = None,
-    ) -> AskResponse:
-        return self.ask_graph(
-            notebook_id, payload, user_id=self.current_user_id(),
-            seed_ids=seed_ids, cancel_event=cancel_event,
         )
 
     def unconfigured_model_response_current(
@@ -3719,8 +3635,8 @@ class AskService:
 
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
-        # P1-A(本轮 scope):只挂 reasoning 模式。ask_graph/ask_chunk 同样受益,
-        # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
+        # P1-A(本轮 scope):只挂 reasoning 模式。ask_chunk 同样受益(已退役的
+        # graph 引擎曾也受益),但等价性回放验证只覆盖了 reasoning——留作 fast-follow。
         _emb_token = _ASK_EMBED_CACHE.set({})
         source_graph_status = None
         historical_reasoning_chunks = []
@@ -4665,599 +4581,3 @@ class AskService:
             baseline_manifest=final_baseline_manifest,
         )
 
-    # ------------------------------------------------------------------
-    # graph engine
-    # ------------------------------------------------------------------
-
-    def ask_graph(
-        self,
-        notebook_id: str,
-        payload: "AskRequest",
-        *,
-        user_id: str,
-        job_id: str = "",
-        seed_ids: Optional[List[str]] = None,
-        cancel_event: CancelEvent = None,
-    ) -> AskResponse:
-        """Multi-hop graph reasoning mode.
-
-        1. Retrieve top seeds via federated_retrieve (active + base-tier notebooks).
-        2. Build the federated rx graph via _federated_rx_graph.
-        3. BFS from seed object_ids along DEFAULT_REASONING_EDGES.
-        4. Render subgraph → (context_block, id_map) via render_subgraph_context.
-        5. Feed context_block to the existing answer LLM + grounding path.
-
-        The [k] anchor markers, _parse_answer_anchors, and classify_evidence are
-        shared helpers reused across ask modes. There is no longer a "fast path" —
-        ask_fast was retired in P4-5; _answer_kg also deleted (dead code). Context
-        is now evidence-refined via the ``evidence_refine`` workload before being
-        fed to the ``ask_answer`` workload.
-        """
-        from app.services.kg.graph_reason import (
-            DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,
-        )
-        self.notebooks.get_notebook(notebook_id)
-        question = payload.question.strip()
-        raise_if_cancelled(cancel_event)
-        turn = self._prepare_turn(
-            notebook_id,
-            payload.conversation_id,
-            question,
-            user_id=user_id,
-            job_id=job_id,
-        )
-        conversation_id, history = turn.conversation_id, turn.history
-        from app.services.source_scope import scoped_conversation_history
-
-        history = scoped_conversation_history(history)
-        unsafe_scope_probe = getattr(
-            self.retrieval, "unsafe_source_scope_restricted", None
-        )
-        unsafe_scope = (
-            bool(unsafe_scope_probe(notebook_id))
-            if callable(unsafe_scope_probe)
-            else source_scope_restricted()
-        )
-        source_graph_status = None
-        raise_if_cancelled(cancel_event)
-        # Agentic Memory P3(T8):合成侧的风格提示,一次点读、贯穿本次 ask_graph
-        # 用到的每个 answer_prompt 调用(见 _search_profile_style_block)。
-        style_block = self._search_profile_style_block(user_id)
-        memory_hits = self._memory_hits(user_id, notebook_id, question)
-
-        if self._primary_llm_unconfigured():
-            return self._unconfigured_model_response(
-                notebook_id, question, conversation_id, "graph",
-                user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-
-        if not memory_hits and not (
-                self.candidates.has_kg(notebook_id)
-                or self.candidates.any_base_has_kg(notebook_id)):
-            response = AskResponse(
-                answer_id="",
-                conclusion="本笔记本尚未构建知识图谱,也没有已建图的参考库;"
-                           "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
-                           "公共知识库。",
-                conversation_id=conversation_id, retrieval_query=question,
-                llm_mode="deterministic", kg_required=True)
-            response.mode = "graph"
-            raise_if_cancelled(cancel_event)
-            response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id,
-                user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-            return response
-
-        _err_sink: list = []
-        _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
-        try:
-            # Seed: top-N by relevance (federated across base notebooks).
-            raise_if_cancelled(cancel_event)
-            top_hits = self.retrieval.federated_retrieve(
-                notebook_id, question)[:self.settings.retrieval_top_n]
-            raise_if_cancelled(cancel_event)
-            if not top_hits and not seed_ids:
-                if not memory_hits:
-                    response = AskResponse(
-                        answer_id="",
-                        conclusion=_NO_RETRIEVAL_EVIDENCE_MESSAGE,
-                        conversation_id=conversation_id, retrieval_query=question,
-                        llm_mode="deterministic",
-                    )
-                else:
-                    answer_client = self.model_clients.chat("ask_answer")
-                    answer, llm_grounded, anchors, ok = self._answer_with_retry(
-                        lambda: self._answer_chunks(
-                            question, [], history, cancel_event=cancel_event,
-                            notebook_id=notebook_id, memory_hits=memory_hits,
-                            llm_client=answer_client, style_block=style_block,
-                        ),
-                        getattr(answer_client, "model", ""),
-                    )
-                    evidence_level, top_relevance = classify_evidence(
-                        memory_hits, anchors, llm_grounded,
-                        self.settings.evidence_tau_low,
-                        self.settings.evidence_tau_high,
-                    )
-                    response = AskResponse(
-                        answer_id="",
-                        conclusion=(
-                            _MARKER_GROUP_RE.sub("", answer).strip()
-                            if answer else
-                            "Confirmed Memory matched, but answer synthesis failed."
-                        ),
-                        answer=answer,
-                        grounded=evidence_level == "grounded",
-                        evidence_level=evidence_level,
-                        anchors=anchors,
-                        citations=self._memory_citations(anchors, memory_hits),
-                        conversation_id=conversation_id,
-                        retrieval_query=question,
-                        top_relevance=top_relevance,
-                        llm_mode=(
-                            "grounded" if evidence_level == "grounded"
-                            else "ungrounded" if ok else "synthesis_failed"
-                        ),
-                    )
-                response.mode = "graph"
-                response.model_errors = [ModelError(**e) for e in _err_sink]
-                raise_if_cancelled(cancel_event)
-                response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id,
-                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-                return response
-
-            # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
-            # 别的文档相关 chunk 也召回,_answer_chunks 出 chunk 引用(跨多篇)。
-            if self.settings.graph_ppr_enabled and not unsafe_scope:
-                raise_if_cancelled(cancel_event)
-                ppr_chunks = self.retrieval.ppr_retrieve(notebook_id, question)
-                raise_if_cancelled(cancel_event)
-                if ppr_chunks:
-                    from app.services.retrieval import RetrievedChunk, RetrievalSupport
-                    reports = (
-                        [] if unsafe_scope else self.community_reports(
-                            notebook_id
-                        )[: self.settings.ppr_community_context_top_n]
-                    )
-                    community_chunks = [RetrievedChunk(
-                        chunk_id=f"community:{i}", source_id="",
-                        source_title="Knowledge base theme", section_path=r["title"],
-                        text=f"{r['title']}. {r['summary']}", element_ids=[], relevance=1.0,
-                        retrieval_supports=(RetrievalSupport(
-                            "kg_source", "object", str(r.get("community_id") or ""), 1.0
-                        ),))
-                        for i, r in enumerate(reports)]
-                    ppr_chunks = community_chunks + ppr_chunks
-                    answer, llm_grounded, anchors = "", False, []
-                    synth_failed = False
-                    answer_client = self.model_clients.chat("ask_answer")
-                    if getattr(answer_client, "configured", False):
-                        answer, llm_grounded, anchors, _ok = self._answer_with_retry(
-                            lambda: self._answer_chunks(
-                                question, ppr_chunks, history, cancel_event=cancel_event,
-                                notebook_id=notebook_id, memory_hits=memory_hits,
-                                llm_client=answer_client, style_block=style_block),
-                            getattr(answer_client, "model", ""),
-                        )
-                        synth_failed = not _ok
-                    citations: List[Citation] = []
-                    by_id = {c.chunk_id: c for c in ppr_chunks}
-                    # ppr_chunks = 合成 community_chunks(无 notebook_id,回退本 nb)
-                    # + PPR 检索结果(可掺 base 库 chunk,notebook_id 已标)。
-                    ppr_tier_map = self._tier_map_for(
-                        {c.notebook_id or notebook_id for c in ppr_chunks})
-                    # Task 14 codex r4 fix: _ppr_retrieve 对 active 库自己的命中
-                    # 同样会打上 active 自己的 id(scale_ppr 的 combined_chunk_ids
-                    # 跨 base ⊕ active,逐 chunk 原样带出 chunk_notebook_id,并非
-                    # 只在跨库命中时才打标)——citations_from 同一根因的镜像修复
-                    # (见 evidence_context.py citations_from 的 codex r4 fix 注
-                    # 释)。这里直接构造 Citation,必须同样与调用方 notebook_id
-                    # 比较,相等则归零,否则前端会显示一个多余的「来自「当前笔记
-                    # 本」」徽章。
-                    def _cite_notebook_id(c) -> str:
-                        return c.notebook_id if c.notebook_id != notebook_id else ""
-                    # Task 12b(引用跳转扩面):graph 模式的 PPR 引用同样此前从未
-                    # 富化过 citation.knowhow——批量查一次,覆盖 ppr_chunks 里每
-                    # 个 chunk 的首个 element_id,一次 store 读取(同 ask_chunk
-                    # 侧口径,运行效率是一等约束)。
-                    knowhow_refs = self.evidence_context.knowhow_refs_for(
-                        c.element_ids[0] for c in ppr_chunks if c.element_ids)
-                    citation_source_info = self.evidence_context.citation_source_info(
-                        c.source_id for c in ppr_chunks
-                    )
-                    # 本段附图: 引用与它的 chunk 在这里配对(Citation 不带
-                    # chunk_id),候选是整个 element_ids 而非首个 eid。
-                    citation_image_targets: List[tuple[Citation, Sequence[str]]] = []
-                    for a in anchors:
-                        if a.object_type == "chunk" and a.object_id in by_id:
-                            c = by_id[a.object_id]
-                            eid = c.element_ids[0] if c.element_ids else ""
-                            source_info = citation_source_info.get(c.source_id) or {}
-                            source_title = source_info.get("title", c.source_title)
-                            citation = Citation(
-                                label=f"{source_title} · {c.section_path}".strip(" ·"),
-                                source_id=c.source_id, element_id=eid,
-                                location_label=c.section_path, quoted_span=c.text[:200],
-                                source_file_name=source_info.get("file_name", ""),
-                                tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal"),
-                                notebook_id=_cite_notebook_id(c),
-                                knowhow=knowhow_refs.get(eid))
-                            citations.append(citation)
-                            citation_image_targets.append((citation, c.element_ids))
-                    citations.extend(self._memory_citations(anchors, memory_hits))
-                    self.evidence_context.attach_citation_images(
-                        anchor_image_targets(
-                            anchors,
-                            {c.chunk_id: c.element_ids for c in ppr_chunks},
-                        ) + citation_image_targets
-                    )
-                    evidence_level, top_relevance = classify_evidence(
-                        list(ppr_chunks) + list(memory_hits), anchors, llm_grounded,
-                        self.settings.evidence_tau_low, self.settings.evidence_tau_high)
-                    grounded = evidence_level == "grounded"
-                    if answer:
-                        conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
-                        llm_mode = "grounded" if grounded else "ungrounded"
-                    elif synth_failed:
-                        conclusion = (
-                            f"已检索到 {len(ppr_chunks)} 条跨文档相关内容,但本次答案合成未产出内容"
-                            "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。")
-                        llm_mode = "synthesis_failed"
-                    else:
-                        conclusion = f"PPR retrieved {len(ppr_chunks)} cross-document passage(s)."
-                        llm_mode = "deterministic"
-                    resp = AskResponse(
-                        answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-                        evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
-                        citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
-                        retrieval_query=question, top_relevance=top_relevance,
-                        reasoning_trace=[TraceStep(step_type="ppr",
-                            summary=f"概念漫游:跨文档召回 {len(ppr_chunks)} 个 chunk",
-                            detail={"chunks": len(ppr_chunks),
-                                    "sources": len({c.source_id for c in ppr_chunks})})])
-                    resp.mode = "graph"
-                    resp.model_errors = [ModelError(**e) for e in _err_sink]
-                    raise_if_cancelled(cancel_event)
-                    resp.answer_id = self._save_answer(
-                        notebook_id, question, resp, conversation_id,
-                        user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-                    return resp
-
-            # 大库守卫(与 PPR 检索的 Fix 1 同一「大」定义):下方
-            # _federated_rx_graph 是全库 rustworkx 建图(Python 边循环),在百万级
-            # 节点库上=数十分钟 + 数 GB 内存(与 1.13M 节点 reasoning 冻结同机制)。
-            # 空图喂给 multihop_subgraph 的下游是 subgraph=[] → src_chunks=[] →
-            # id_map={} → 不调答案 LLM → 只剩 "Graph traversal found 0 node(s)"
-            # 的空壳 deterministic 文案 —— 对用户等于空答案。故大库直接早退一条
-            # 带解释的降级回答(镜像上方无 KG 时的 deterministic 回答形态),
-            # 并发 graph_walk_refused 事件;顺带省掉 _graph_seed_fusion 的
-            # expand_query LLM 调用。放在 PPR 分支之后:大库若有 scale 索引,
-            # PPR 分支仍可正常出跨文档答案,不受此守卫影响。
-            if (not unsafe_scope
-                    and self.candidates.graph_is_large(notebook_id)):
-                self.event_log.emit({
-                    "kind": "graph_walk_refused",
-                    "notebook_id": notebook_id,
-                    "reason": "large_notebook",
-                    "site": "ask_graph",
-                })
-                response = AskResponse(
-                    answer_id="",
-                    conclusion="该知识库规模过大,graph 模式的全图漫游在此库上不可用"
-                               "(已跳过以避免长时间无响应)。请改用 chunk 或 reasoning "
-                               "模式提问;若已构建规模化检索索引(scale index),"
-                               "graph 模式的跨文档 PPR 检索仍可正常工作。",
-                    conversation_id=conversation_id, retrieval_query=question,
-                    llm_mode="deterministic",
-                )
-                response.mode = "graph"
-                response.model_errors = [ModelError(**e) for e in _err_sink]
-                raise_if_cancelled(cancel_event)
-                response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id,
-                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-                return response
-
-            if unsafe_scope:
-                # The persisted full graph has no source partition.  Even if
-                # out-of-scope neighbours are removed after traversal, they can
-                # still steer seed fusion/BFS.  A checkbox-scoped graph request
-                # therefore renders the already source-bounded KG seeds as
-                # isolated evidence nodes and performs no whole-graph walk.
-                subgraph = [
-                    ({
-                        "object_id": hit.object_id,
-                        "object_type": hit.object_type,
-                        "name": str((hit.payload or {}).get("name") or hit.object_id),
-                        "tier": getattr(hit, "tier", "personal"),
-                        "notebook_id": getattr(hit, "notebook_id", ""),
-                    }, None, None)
-                    for hit in top_hits[: self.settings.graph_seed_top_n]
-                ]
-            else:
-                base_seeds = seed_ids if seed_ids else [
-                    h.object_id
-                    for h in top_hits[: self.settings.graph_seed_top_n]
-                ]
-                raise_if_cancelled(cancel_event)
-                use_seeds = self.candidates.fuse_graph_seeds(
-                    notebook_id, question, base_seeds, cancel_event)
-
-                G, idx_to_oid, oid_to_idx = self.graph.federated_graph(notebook_id)
-                raise_if_cancelled(cancel_event)
-                subgraph = multihop_subgraph(
-                    G, oid_to_idx, idx_to_oid,
-                    seed_ids=use_seeds,
-                    # TD2: include "synonym" so multihop walks THROUGH the transit-
-                    # only cross-doc cluster hubs (their member edges are "synonym").
-                    # Scoped to this call only — DEFAULT_REASONING_EDGES (a frozenset)
-                    # is NOT broadened globally. The hub node itself is still filtered
-                    # from the result/render/verify by build_rx_graph + multihop_subgraph
-                    # (kind="cluster" pass-through), so the LLM never cites a hub.
-                    edge_types=DEFAULT_REASONING_EDGES | {"synonym"},
-                    max_depth=self.settings.graph_max_depth,
-                    max_fan_out=self.settings.graph_max_fan_out,
-                )
-                from app.services.source_scope import scoped_subgraph_nodes
-
-                # The federated graph is process-cached under a scope-blind
-                # key, so the library ceiling is applied to the walk's RESULT
-                # rather than to its per-participant build (see the helper).
-                subgraph = scoped_subgraph_nodes(subgraph)
-            # Render subgraph into (context_block, id_map) — same k{i} format as
-            # _answer_context so grouped marker resolution works unchanged.
-            context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
-            raise_if_cancelled(cancel_event)
-
-            # Answer-time chain verification: an adversarial LLM check per chain edge.
-            # Flagged edges get their confidence demoted to 0.05; the context is then
-            # re-rendered so the demotion is visible to the answer LLM. chain_trust is
-            # the weakest-link confidence over all edges (1.0 when there are no edges).
-            verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
-                             "authority_notes": []}
-            verify_client = self.model_clients.chat("graph_chain_verify")
-            if getattr(verify_client, "configured", False):
-                from app.services.kg.graph_reason import verify_chain_edges
-                verify_result = verify_chain_edges(
-                    subgraph, verify_client,
-                    votes=1, timeout=self.settings.reasoning_timeout_seconds,
-                    cancel_event=cancel_event,
-                )
-                raise_if_cancelled(cancel_event)
-                if verify_result["flagged"]:
-                    flagged_types = {f["edge_type"] for f in verify_result["flagged"]}
-                    for _node, edge, _src in subgraph:
-                        if edge and edge.get("edge_type") in flagged_types:
-                            edge["confidence"] = 0.05
-                    context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
-
-            # 原文增强:子图 KG 节点的源 chunk 整段也喂模型(复用 chunk overlay 的 mix)。
-            # 有源 chunk → 走 _answer_mix(KG 段 k1001+ / chunk 段 k1..N)、出 chunk 引用、直接 return;
-            # 无源 chunk → 落到下方现状 KG-only 答案,行为不变。
-            from app.services.retrieval import est_tokens, truncate_by_tokens
-            src_chunks, graph_activation_status = (
-                self._graph_source_chunks_with_activation(
-                    notebook_id,
-                    subgraph,
-                    top_hits,
-                    unsafe_scope=unsafe_scope,
-                )
-            )
-            if graph_activation_status is not None:
-                source_graph_status = graph_activation_status
-            if src_chunks:
-                mix_kg_block, mix_id_map = render_subgraph_context(
-                    subgraph, id_offset=self._MIX_KG_KEY_BASE)
-                mix_kg_block = self.evidence_context.truncate_kg_block(
-                    mix_kg_block,
-                    self.settings.max_entity_tokens + self.settings.max_relation_tokens)
-                chunk_budget = max(0, self.settings.max_total_tokens
-                                   - est_tokens(mix_kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
-                src_chunks = truncate_by_tokens(src_chunks, lambda c: c.text, chunk_budget)
-                # 源 chunk 的 source_title 补全(供引用标签;_kg_source_chunks 留空)
-                _sids = list({c.source_id for c in src_chunks})
-                _source_info = (
-                    self.evidence_context.citation_source_info(_sids) if _sids else {}
-                )
-                for c in src_chunks:
-                    c.source_title = (_source_info.get(c.source_id) or {}).get("title", "")
-                answer, llm_grounded, anchors = "", False, []
-                synth_failed = False
-                answer_client = self.model_clients.chat("ask_answer")
-                if getattr(answer_client, "configured", False):
-                    answer, llm_grounded, anchors, _ok = self._answer_with_retry(
-                        lambda: self._answer_mix(
-                            question, src_chunks, mix_kg_block, mix_id_map, history,
-                            cancel_event=cancel_event, notebook_id=notebook_id,
-                            memory_hits=memory_hits, llm_client=answer_client,
-                            style_block=style_block),
-                        getattr(answer_client, "model", ""),
-                    )
-                    synth_failed = not _ok
-                citations: List[Citation] = []
-                by_id = {c.chunk_id: c for c in src_chunks}
-                # src_chunks 来自 _kg_source_chunks(notebook_id, ...):subgraph 节点虽可能
-                # 跨 base(_federated_rx_graph),但 element→chunk 反查经 _elem_chunk_map(
-                # notebook_id) 单库范围,base 节点的 element 天生查不到 chunk——凡是这里
-                # 真返回的 chunk 必属 notebook_id 自己,故只需查这一个 notebook 的 tier。
-                src_chunk_tier = self._tier_map_for({notebook_id}).get(notebook_id, "personal")
-                # Task 14 codex r4 fix: c.notebook_id 在这条分支里目前恒为 ""
-                # (_kg_source_chunks 从不设置 RetrievedChunk.notebook_id,见其上方
-                # 注释),但仍与调用方 notebook_id 比较后再传入,而非原样透传——
-                # 与 citations_from/ask_chunk 两处 mix 分支/ask_graph 的 PPR 分支
-                # 保持同一写法,防止 _kg_source_chunks 未来改动(或换一条同名字段
-                # 的产出源)时悄悄退化成第四处同类泄漏。
-                def _cite_notebook_id(c) -> str:
-                    return c.notebook_id if c.notebook_id != notebook_id else ""
-                # Task 12b(引用跳转扩面):graph 模式的源原文引用(mix)同样此前
-                # 从未富化过 citation.knowhow——批量查一次,覆盖 src_chunks 里
-                # 每个 chunk 的首个 element_id,一次 store 读取(同 ask_chunk
-                # 侧口径,运行效率是一等约束)。
-                knowhow_refs = self.evidence_context.knowhow_refs_for(
-                    c.element_ids[0] for c in src_chunks if c.element_ids)
-                # 本段附图: 同 PPR 分支——引用在这里与它的 chunk 配对,候选是整个
-                # element_ids。
-                citation_image_targets: List[tuple[Citation, Sequence[str]]] = []
-                for a in anchors:
-                    if a.object_type == "chunk" and a.object_id in by_id:
-                        c = by_id[a.object_id]
-                        eid = c.element_ids[0] if c.element_ids else ""
-                        citation = Citation(
-                            label=f"{c.source_title} · {c.section_path}".strip(" ·"),
-                            source_id=c.source_id, element_id=eid,
-                            location_label=c.section_path, quoted_span=c.text[:200],
-                            source_file_name=(
-                                _source_info.get(c.source_id) or {}
-                            ).get("file_name", ""),
-                            tier=src_chunk_tier, notebook_id=_cite_notebook_id(c),
-                            knowhow=knowhow_refs.get(eid))
-                        citations.append(citation)
-                        citation_image_targets.append((citation, c.element_ids))
-                citations.extend(self._memory_citations(anchors, memory_hits))
-                self.evidence_context.attach_citation_images(
-                    anchor_image_targets(
-                        anchors, {c.chunk_id: c.element_ids for c in src_chunks}
-                    ) + citation_image_targets
-                )
-                evidence_level, top_relevance = classify_evidence(
-                    list(src_chunks) + list(memory_hits), anchors, llm_grounded,
-                    self.settings.evidence_tau_low, self.settings.evidence_tau_high)
-                grounded = evidence_level == "grounded"
-                if answer:
-                    conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
-                    llm_mode = "grounded" if grounded else "ungrounded"
-                elif synth_failed:
-                    conclusion = (
-                        f"已检索到 {len(src_chunks)} 段源原文,但本次答案合成未产出内容"
-                        "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。")
-                    llm_mode = "synthesis_failed"
-                else:
-                    conclusion = f"Graph retrieved {len(src_chunks)} source passage(s) for this question."
-                    llm_mode = "deterministic"
-                resp = AskResponse(
-                    answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-                    evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
-                    citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
-                    retrieval_query=question, top_relevance=top_relevance,
-                    reasoning_trace=[TraceStep(step_type="graph_src_chunks",
-                        summary=f"BFS 子图 + {len(src_chunks)} 段源原文",
-                        detail={"chunks": len(src_chunks),
-                                "sources": len({c.source_id for c in src_chunks})})])
-                resp.mode = "graph"
-                resp.model_errors = [ModelError(**e) for e in _err_sink]
-                resp.answer_id = self._save_answer(
-                    notebook_id, question, resp, conversation_id,
-                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-                return resp
-
-            # Synthesise the answer through the existing LLM + grounding path.
-            context_block, id_map = self._append_memory_context(
-                context_block, id_map, memory_hits
-            )
-            context_block = self._refine_context(
-                question, context_block, self.model_clients.chat("evidence_refine"), cancel_event)
-            answer, llm_grounded, anchors = "", False, []
-            synth_failed = False
-            raise_if_cancelled(cancel_event)
-            answer_client = self.model_clients.chat("ask_answer")
-            if getattr(answer_client, "configured", False) and id_map:
-                def _synth_kg():
-                    llm_client = answer_client
-                    raw = llm_client.chat_json(
-                        [{"role": "user",
-                          "content": answer_prompt(
-                              question, context_block, history,
-                              style_block=style_block)}],
-                        ANSWER_SCHEMA_HINT,
-                        cancel_event=cancel_event,
-                        **cap_kwargs(llm_client, "answer_max_tokens"),
-                    )
-                    raise_if_cancelled(cancel_event)
-                    data = json.loads(raw)
-                    if not isinstance(data, dict):
-                        return "", False, []
-                    _ans = str(data.get("answer", "")).strip()
-                    _g = data.get("grounded", False) is True
-                    _anc = self._parse_answer_anchors(_ans, id_map)
-                    # Scrub citation-shaped tokens that did NOT bind to a real
-                    # id_map entry (out-of-map ids like [k99], malformed [ k1]).
-                    # Unlike the fast path — whose id_map IS top_hits, so the LLM
-                    # rarely invents ids — graph mode shows a wider subgraph and
-                    # the answer LLM occasionally emits markers the strict anchor
-                    # parser can't bind; left in place they read as fabricated
-                    # citations. Strip them so only resolved [k] markers ship.
-                    return _strip_unbound_markers(_ans, {a.key for a in _anc}), _g, _anc
-                answer, llm_grounded, anchors, _ok = self._answer_with_retry(
-                    _synth_kg,
-                    getattr(answer_client, "model", ""),
-                )
-                synth_failed = not _ok
-
-            # classify_evidence keys "grounded" off the relevance of the CITED hit.
-            # In the fast path id_map IS built from top_hits, so every anchor is a
-            # scored hit. In graph mode the cited node can be a multi-hop NEIGHBOUR
-            # that is in id_map but NOT in top_hits → its relevance would read 0 and
-            # the answer would be demoted to "overview" even though it cites a real,
-            # chain-connected node (the q17/q18 "overview while citing specifics"
-            # contradiction). Mirror the fast-path invariant: give each cited
-            # neighbour a relevance inherited from the strongest seed, discounted by
-            # chain_trust (the verifier's weakest-link confidence), so a trusted
-            # chain can reach "grounded" while a flagged/weak one still falls back.
-            raise_if_cancelled(cancel_event)
-            seed_rel = max((h.relevance for h in top_hits), default=0.0)
-            neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
-            hits_for_classify = _graph_classification_hits(
-                top_hits=top_hits,
-                memory_hits=memory_hits,
-                anchors=anchors,
-                neighbour_relevance=neighbour_rel,
-                notebook_id=notebook_id,
-            )
-
-            evidence_level, top_relevance = classify_evidence(
-                hits_for_classify, anchors, llm_grounded,
-                self.settings.evidence_tau_low, self.settings.evidence_tau_high)
-            # Report the genuine seed relevance, not the synthetic neighbour value.
-            top_relevance = max(
-                (h.relevance for h in [*top_hits, *memory_hits]),
-                default=top_relevance,
-            )
-            grounded = evidence_level == "grounded"
-            if answer:
-                conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
-                llm_mode = "grounded" if grounded else "ungrounded"
-            elif synth_failed:
-                conclusion = (
-                    f"已检索到 {len(subgraph)} 个相关节点,但本次答案合成未产出内容"
-                    "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。")
-                llm_mode = "synthesis_failed"
-            else:
-                conclusion = (
-                    f"Graph traversal found {len(subgraph)} node(s) across "
-                    f"{len(use_seeds)} seed(s).")
-                llm_mode = "deterministic"
-
-            graph_trace = [TraceStep(
-                step_type="graph_verify",
-                summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
-                         f"{len(verify_result['flagged'])} edge(s) flagged; "
-                         f"{len(subgraph)} node(s) traversed"),
-                detail={**verify_result,
-                        "authority_notes": verify_result.get("authority_notes", [])},
-            )]
-            response = AskResponse(
-                answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-                evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
-                citations=self._memory_citations(anchors, memory_hits), llm_mode=llm_mode,
-                conversation_id=conversation_id, retrieval_query=question,
-                top_relevance=top_relevance, reasoning_trace=graph_trace,
-            )
-        finally:
-            _ASK_MODEL_ERRORS.reset(_err_token)
-        response.mode = "graph"
-        response.model_errors = [ModelError(**e) for e in _err_sink]
-        raise_if_cancelled(cancel_event)
-        response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
-        return response

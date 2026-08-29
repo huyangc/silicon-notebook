@@ -9,7 +9,7 @@ The project is a local-team beta built with FastAPI and Next.js. SQLite works ou
 ## Highlights
 
 - Structured ingestion with element-level citations for text, tables, formulas, code, and retained document images.
-- Multi-turn Ask with source selection, clickable evidence, conversation history, and `chunk`, `reasoning`, or experimental `graph` retrieval.
+- Multi-turn Ask with source selection, clickable evidence, conversation history, and `chunk` or `reasoning` retrieval.
 - Knowledge extraction and governance for concepts, claims, formulas, procedures, relations, and a unified graph.
 - Private Memory, structured knowhow, deep reports, reference libraries, and controlled notebook/report sharing.
 - External Agent access through authenticated MCP tools, including scoped Ask, source, Memory, and knowhow workflows.

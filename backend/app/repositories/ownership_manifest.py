@@ -836,7 +836,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_answer_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_chunk', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_graph', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_job_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_job_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_reasoning', kind='attribute', target='_runtime'),
@@ -1321,16 +1320,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/ask_modes.py', scope='<module>.ASK_MODES', kind='registry', target='ask_chunk'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='ask_graph',
-        owner='AskService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/services/ask_modes.py', scope='<module>.ASK_MODES', kind='registry', target='ask_graph'),
         ),
         patches=(
         ),
@@ -4015,7 +4004,6 @@ DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
     'approve_promotion': 'KnowledgeGovernanceService',
     'ask': 'RepositoryRuntime.ask_component',
     'ask_chunk': 'RepositoryRuntime.ask_component',
-    'ask_graph': 'RepositoryRuntime.ask_component',
     'ask_job_detail': 'AskStateStore',
     'ask_job_status': 'AskStateStore',
     'ask_reasoning': 'RepositoryRuntime.ask_component',

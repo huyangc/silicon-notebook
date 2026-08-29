@@ -6077,9 +6077,9 @@ export default function Home() {
                       <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
                         {pendingQuestion && <ChatQuestion question={pendingQuestion} askedAt={pendingAskedAt} />}
                         <div className="chat-assistant chat-thinking">
-                          {/* 按引擎是否流式推轨迹判断,不按分组:深入分析组里只有
-                              逐步推理会流轨迹,关联追溯挂上去只会让用户从头到尾
-                              盯着一句「等待后端事件…」。 */}
+                          {/* 按引擎是否流式推轨迹判断,不按分组:同一分组里未来若混入
+                              不流轨迹的模式,挂轨迹面板只会让用户从头到尾盯着一句
+                              「等待后端事件…」。 */}
                           {streamsTrace(pendingMode, askModes) ? (
                             <ReasoningTracePanel steps={pendingTrace} live />
                           ) : "思考中…"}

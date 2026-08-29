@@ -57,7 +57,6 @@ ROLE_SECRET_ENVS = {
 }
 REASONING_WORKLOADS = frozenset({
     "reasoning_agent",
-    "graph_chain_verify",
     "report_outline",
     "report_section",
     "report_summary",

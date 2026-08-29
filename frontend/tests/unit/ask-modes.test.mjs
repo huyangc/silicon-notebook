@@ -23,7 +23,7 @@ async function appSourceCopy({ exclude = [] } = {}) {
 }
 
 test("user-facing ids and default", () => {
-  assert.deepEqual(askModeIds(), ["chunk", "reasoning", "graph"]);
+  assert.deepEqual(askModeIds(), ["chunk", "reasoning"]);
   assert.equal(DEFAULT_ASK_MODE, "chunk");
   assert.deepEqual(ASK_MODE_GROUPS.map((g) => g.id), ["general", "strict", "extension"]);
 });
@@ -61,7 +61,7 @@ test("deployment mode projection is data-driven, strict, and restorable", () => 
       desc: "无点号", requires_kg: false, streaming: true, streams_trace: true,
     },
   ]);
-  assert.deepEqual(askModeIds(modes), ["chunk", "reasoning", "graph", "corp.search"]);
+  assert.deepEqual(askModeIds(modes), ["chunk", "reasoning", "corp.search"]);
   assert.equal(groupOf("corp.search", modes), "extension");
   assert.equal(requiresKg("corp.search", modes), true);
   assert.equal(canUseMode("corp.search", false, modes), false);
@@ -72,7 +72,7 @@ test("deployment mode projection is data-driven, strict, and restorable", () => 
 
 test("grouping + default engine per group", () => {
   assert.equal(groupOf("chunk"), "general");
-  assert.equal(groupOf("graph"), "strict");
+  assert.equal(groupOf("reasoning"), "strict");
   assert.equal(defaultModeForGroup("general"), "chunk");
   assert.equal(defaultModeForGroup("strict"), "reasoning");   // groupDefault
 });
@@ -82,25 +82,22 @@ test("kg gating", () => {
   assert.equal(requiresKg("reasoning"), true);
   assert.equal(canUseMode("chunk", false), true);     // 通用问答无需 KG
   assert.equal(canUseMode("reasoning", false), false);
-  assert.equal(canUseMode("graph", true), true);
+  assert.equal(canUseMode("reasoning", true), true);
 });
 
-// 后端 ask_modes.py 的 streaming 决定跑的过程中有没有轨迹步骤流下来。按分组判断
-// 会把关联追溯也挂上实时轨迹面板,用户从提交到最终答案只看得到「等待后端事件…」。
+// 后端 ask_modes.py 的 streaming 决定跑的过程中有没有轨迹步骤流下来,按引擎判断
+// 而不是按分组——graph 模式(与 reasoning 同组、不流轨迹)已退役,当前分组内只剩
+// reasoning 一个成员,但判断口径本身仍是 streamsTrace(mode),不是 groupOf(mode)。
 // 跨栈的一致性由 scripts/check_ask_modes_contract.py 锁死,这里锁的是前端语义。
-test("实时轨迹面板按引擎是否流轨迹判断,分组替代不了它", () => {
+test("实时轨迹面板按引擎是否流轨迹判断", () => {
   assert.equal(streamsTrace("reasoning"), true);
-  assert.equal(streamsTrace("graph"), false);
   assert.equal(streamsTrace("chunk"), false);
-  // 同一分组里两种都有 → 用分组判断必然误判其中一个。
-  assert.equal(groupOf("reasoning"), groupOf("graph"));
-  assert.notEqual(streamsTrace("reasoning"), streamsTrace("graph"));
 });
 
 test("restore mode from a prior turn (exact engine, safe fallback)", () => {
-  assert.equal(modeFromTurn({ response: { mode: "graph" } }), "graph");
   assert.equal(modeFromTurn({ response: { mode: "reasoning" } }), "reasoning");
   assert.equal(modeFromTurn({ response: { mode: "fast" } }), "chunk");   // 非 user-facing → 兜底
+  assert.equal(modeFromTurn({ response: { mode: "graph" } }), "chunk");  // 退役模式 → 兜底
   assert.equal(modeFromTurn({ response: {} }), "chunk");
   assert.equal(modeFromTurn(undefined), "chunk");
 });
@@ -109,7 +106,6 @@ test("user-facing labels/descs are the current names (locks against silent drift
   const byId = Object.fromEntries(ASK_MODES.map((m) => [m.id, m]));
   assert.equal(byId.chunk.label, "通用问答");
   assert.equal(byId.reasoning.label, "逐步推理");
-  assert.equal(byId.graph.label, "关联追溯");
   assert.equal(ASK_MODE_GROUPS.find((g) => g.id === "strict").label, "深入分析");
   // desc 不逐字锁(允许润色),但不得含机制黑话
   for (const m of ASK_MODES) {
@@ -133,7 +129,7 @@ test("显示名查询函数由注册表派生(单一真源的读取口)", () => 
 });
 
 test("退休模式名不得在前端源码里复活(含子目录)", async () => {
-  const retired = ["严格推理", "深挖推理", "图谱多跳"];
+  const retired = ["严格推理", "深挖推理", "图谱多跳", "关联追溯"];
   const offenders = [];
   for (const { path, values } of await appSourceCopy()) {
     for (const term of retired) {

@@ -20,7 +20,7 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
     calls = {}; ask_service = repo.__dict__["_runtime"].ask_component
-    for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
+    for mid in ("ask_chunk", "ask_reasoning"):
         def make(mid):
             return lambda notebook_id, payload, **kwargs: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
         monkeypatch.setattr(ask_service, mid, make(mid))
@@ -28,10 +28,10 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
     service = repo.__dict__["_runtime"].ask_component
     user_id = repo.current_user().id
     assert service.ask(nb.id, AskRequest(question="q"), user_id=user_id).conclusion == "ask_chunk"
-    assert service.ask(nb.id, AskRequest(question="q", mode="graph"), user_id=user_id).conclusion == "ask_graph"
-    # P4-5: retired ids "fast"/"global" alias to chunk (保旧会话/书签不 422)
+    # P4-5: retired ids "fast"/"global"/"graph" alias to chunk (保旧会话/书签不 422)
     assert service.ask(nb.id, AskRequest(question="q", mode="fast"), user_id=user_id).conclusion == "ask_chunk"
     assert service.ask(nb.id, AskRequest(question="q", mode="global"), user_id=user_id).conclusion == "ask_chunk"
+    assert service.ask(nb.id, AskRequest(question="q", mode="graph"), user_id=user_id).conclusion == "ask_chunk"
 
     from app.services.ask_modes import UnknownAskMode
     with pytest.raises(UnknownAskMode):
@@ -39,25 +39,25 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
 
 
 def test_registry_has_expected_modes_and_flags():
-    # P4-5: fast/global 已从注册表移除
-    assert set(ASK_MODES) == {"chunk", "reasoning", "graph"}
+    # P4-5: fast/global/graph 已从注册表移除
+    assert set(ASK_MODES) == {"chunk", "reasoning"}
     assert ASK_MODES["chunk"].handler == "ask_chunk"
     assert ASK_MODES["chunk"].requires_kg is False
     assert ASK_MODES["reasoning"].handler == "ask_reasoning"
     assert ASK_MODES["reasoning"].streaming is True
     assert ASK_MODES["reasoning"].requires_kg is True
-    assert ASK_MODES["graph"].handler == "ask_graph"
-    assert ASK_MODES["graph"].streaming is False        # ask_graph 暂无 on_trace
 
 
 def test_user_facing_subset_is_chunk_and_strict_engines():
-    assert user_facing_mode_ids() == ["chunk", "reasoning", "graph"]
+    assert user_facing_mode_ids() == ["chunk", "reasoning"]
 
 
 def test_resolve_known_default_and_unknown():
-    assert resolve_mode("graph") is ASK_MODES["graph"]
+    assert resolve_mode("reasoning") is ASK_MODES["reasoning"]
     assert resolve_mode(None) is ASK_MODES[DEFAULT_MODE]   # 缺省 → chunk
     assert resolve_mode("") is ASK_MODES[DEFAULT_MODE]
+    # 退役别名(与 fast/global 同款):graph 不再是注册表条目,resolve 到 chunk。
+    assert resolve_mode("graph") is ASK_MODES["chunk"]
     with pytest.raises(UnknownAskMode) as exc:
         resolve_mode("bogus")
     assert exc.value.mode == "bogus"
@@ -87,7 +87,7 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
             return AskResponse(conclusion=mid)
         return handler
 
-    for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
+    for mid in ("ask_chunk", "ask_reasoning"):
         monkeypatch.setattr(service, mid, make(mid), raising=False)
 
     cancel_event = threading.Event()
@@ -99,10 +99,10 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
     assert calls["run_cancel"] is cancel_event
     assert events[0]["kind"] == "retrieval_run_stats"
     assert events[0]["correlation_id"] == "job-safe-id"
-    assert service.ask("nb", AskRequest(question="q", mode="graph"), user_id="u1").conclusion == "ask_graph"
     assert service.ask("nb", AskRequest(question="q", mode="reasoning"), user_id="u1").conclusion == "ask_reasoning"
     # 退役 id 映射与 facade 完全一致(保旧会话/书签不 422)
     assert service.ask("nb", AskRequest(question="q", mode="fast"), user_id="u1").conclusion == "ask_chunk"
     assert service.ask("nb", AskRequest(question="q", mode="global"), user_id="u1").conclusion == "ask_chunk"
+    assert service.ask("nb", AskRequest(question="q", mode="graph"), user_id="u1").conclusion == "ask_chunk"
     with pytest.raises(UnknownAskMode):
         service.ask("nb", AskRequest(question="q", mode="bogus"), user_id="u1")

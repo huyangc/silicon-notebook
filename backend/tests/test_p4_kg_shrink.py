@@ -237,25 +237,26 @@ def test_base_kg_available_on_notebook_summary(repo):
 
 
 # ---------------------------------------------------------------------------
-# P4-5: 退役 fast/global 模式
+# P4-5: 退役 fast/global 模式(graph 模式随后同样退役,并入同一批断言)
 # ---------------------------------------------------------------------------
 
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 
 
-def test_fast_global_removed_from_registry():
+def test_fast_global_graph_removed_from_registry():
     assert "fast" not in ASK_MODES
     assert "global" not in ASK_MODES
+    assert "graph" not in ASK_MODES
 
 
 def test_retired_modes_alias_to_chunk():
     assert resolve_mode("fast").id == "chunk"
     assert resolve_mode("global").id == "chunk"
+    assert resolve_mode("graph").id == "chunk"
 
 
 def test_strict_modes_and_default_intact():
     assert resolve_mode("reasoning").id == "reasoning"
-    assert resolve_mode("graph").id == "graph"
     assert resolve_mode(None).id == "chunk"
 
 

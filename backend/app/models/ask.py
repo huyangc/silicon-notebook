@@ -307,7 +307,7 @@ class AskRequest(BaseModel):
     conversation_id: Optional[str] = None
     # ``auto`` is a request-only backend selector resolved to chunk/reasoning
     # before durable state; it is never a persisted engine id.
-    mode: str = "chunk"       # "chunk"(默认) | "reasoning" | "graph" | "auto" | retired aliases
+    mode: str = "chunk"       # "chunk"(默认) | "reasoning" | "auto" | retired aliases(fast/global/graph)
     # User-controlled resource level.  It selects immutable hard ceilings from
     # ask_retrieval_policy; the model may stop early but cannot increase them.
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT

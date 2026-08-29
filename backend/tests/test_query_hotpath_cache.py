@@ -369,7 +369,7 @@ def test_ppr_reset_vector_uses_ent_chunk_map_for_specificity_weight(repo, monkey
 
 
 def test_kg_source_chunks_return_shape_is_list_for_ordered_consumers(repo):
-    """_mix_retrieve/ask_graph index kg_chunks by position (src[i]) and pass
+    """_mix_retrieve indexes kg_chunks by position (src[i]) and passes
     the result through truncate_by_tokens, both of which require a concrete
     list, not a set — guard the return type."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -380,12 +380,15 @@ def test_kg_source_chunks_return_shape_is_list_for_ordered_consumers(repo):
 
 
 # ── ordering contract (Fix 1) ────────────────────────────────────────────────
-# ask_graph's BFS-fallback path feeds _kg_source_chunks output straight into
-# truncate_by_tokens with NO rerank, so list order decides which chunks survive
-# truncation and how citations are numbered — the order must be deterministic:
-# object_ids order → each object's evidence array order → _elem_chunk_map's
-# per-element chunk list order (chunks scan order). NOT the old implementation's
-# full-table physical scan order (which was never a contract).
+# _mix_retrieve's KG-overlay branch feeds _kg_source_chunks output into
+# retrieval_rerank as its input order, then truncate_by_tokens; when rerank is
+# unconfigured or its call fails, RerankClient.rerank falls back to the
+# identity order it was given, so list order decides which chunks survive
+# truncation and how citations are numbered in both the rerank-input and the
+# rerank-fallback case — the order must be deterministic: object_ids order →
+# each object's evidence array order → _elem_chunk_map's per-element chunk
+# list order (chunks scan order). NOT the old implementation's full-table
+# physical scan order (which was never a contract).
 
 def _seed_order_fixture(repo):
     """3 chunks inserted in table order c1,c2,c3 (element el1,el2,el3 resp.);
