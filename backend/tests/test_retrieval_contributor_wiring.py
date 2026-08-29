@@ -226,7 +226,17 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
 
     def fake_repository(settings, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(settings=settings)
+        # The composition root also primes the extension admission snapshot
+        # from the toggle-store seat before returning, so a stand-in for a
+        # composed repository has to carry that seat.
+        return SimpleNamespace(
+            settings=settings,
+            _runtime=SimpleNamespace(
+                extension_toggles=SimpleNamespace(
+                    extension_runtime_disabled_ids=frozenset
+                )
+            ),
+        )
 
     monkeypatch.setattr(bootstrap, "application_extension_runtime", lambda: runtime)
     monkeypatch.setattr(bootstrap, "create_repository", fake_repository)

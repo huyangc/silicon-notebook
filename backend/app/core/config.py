@@ -136,6 +136,20 @@ class Settings(BaseSettings):
     # anchored to the repo root below.
     extensions_config: str = Field("", validation_alias="EXTENSIONS_CONFIG")
 
+    # How often a serving process re-reads the admin runtime-toggle rows above
+    # to converge its in-memory admission snapshot. Unlike EXTENSIONS_CONFIG
+    # this changes nothing about which plugins are loaded — only how quickly a
+    # process that did not perform the write notices one. The process that did
+    # write republishes immediately, so this budget is purely the cross-process
+    # lag an operator accepts; the floor keeps the poll off the database's hot
+    # path and the ceiling keeps "eventually" inside a support call's patience.
+    extension_admission_refresh_seconds: float = Field(
+        3.0,
+        ge=1,
+        le=300,
+        validation_alias="EXTENSION_ADMISSION_REFRESH_SECONDS",
+    )
+
     openai_compat_timeout_seconds: int = Field(
         60,
         validation_alias="OPENAI_COMPAT_TIMEOUT_SECONDS",

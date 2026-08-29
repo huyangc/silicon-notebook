@@ -392,6 +392,26 @@ def _reset_pending_bus():
 
 
 @pytest.fixture(autouse=True)
+def _reset_extension_admission():
+    """插件运行时停用快照是进程级单例,和上面 pending_bus / 后台并发闸同一类问题。
+
+    这份 frozenset 有两类写入者:测试自己 publish 的停用集,以及**任何**构造仓库
+    的测试——组合根 `create_application_repository` 会按库里的开关行 prime 一次。
+    两者都不自带回收,于是同一个 xdist worker 里先跑的测试可以把「某插件被停用」
+    留给后跑的测试,而后者只会表现为 registry 闸莫名其妙地把贡献点判成
+    `admin_disabled`——和 pending_bus 那条一样,谁先跑由 xdist 分配决定,所以是
+    间歇失败而不是稳定红。统一在这里前后各清一次。
+
+    注意这只复位快照,不停刷新线程:线程由 `startup_warmup` 的 lifecycle 成对
+    管理(且默认零 deployment 插件时根本不起),不属于本 fixture 的职责。
+    """
+    from app.core import extension_admission
+    extension_admission.reset_for_tests()
+    yield
+    extension_admission.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _reset_background_job_gates():
     """后台并发闸是进程级单例,容量在首次用到时按当时的 Settings 定死。
 
