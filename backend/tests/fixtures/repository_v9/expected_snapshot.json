@@ -1168,6 +1168,11 @@
         "type": "index"
       },
       {
+        "name": "idx_ask_jobs_creator_activity",
+        "sql_sha256": "8bffbf7a2f2854ed7d595f155968ef3bc5c85aa267cd234b825134810c69a968",
+        "type": "index"
+      },
+      {
         "name": "idx_ask_jobs_nb_status",
         "sql_sha256": "3c1ecb77ea88e3f8e52cc44458d1e2610f7a82d35239b33014f324406817bfd1",
         "type": "index"
@@ -2303,6 +2308,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 61
+    "user_version": 62
   }
 }

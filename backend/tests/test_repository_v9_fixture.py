@@ -131,8 +131,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # kind 列，以及 v61 热路径修复批 1 的五组索引（六组 PostgreSQL 侧对应
     # migrations/0039_hotpath_batch1_indexes.sql，第 6 组
     # chunks(source_id, ordinal) 在 SQLite 侧不适用，理由见
-    # _migration_61 的 docstring），合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 61
+    # _migration_61 的 docstring），以及 v62 用户提问总览的创建者/时间排序
+    # 索引，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 62
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

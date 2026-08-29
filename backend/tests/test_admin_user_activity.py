@@ -162,6 +162,22 @@ def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(r
     assert second["has_more"] is False
 
 
+def test_creator_wide_question_overview_uses_activity_keyset_index(repo):
+    """The unscoped ask-only path must not regress to a global scan + temp sort."""
+    with repo._connect() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id FROM ask_jobs WHERE created_by = ? "
+            "ORDER BY COALESCE(julianday(created_at), "
+            "julianday('0001-01-01T00:00:00+00:00')) DESC, id DESC LIMIT ?",
+            ("u1", 51),
+        ).fetchall()
+
+    details = "\n".join(str(row["detail"]) for row in plan)
+    assert "idx_ask_jobs_creator_activity" in details
+    assert "USE TEMP B-TREE" not in details
+
+
 def test_ask_field_shape_and_ordering_uses_created_at_not_asked_at(repo):
     with repo._write() as db:
         _insert_user(db, "u1", "a00000001")
