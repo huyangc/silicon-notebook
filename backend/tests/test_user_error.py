@@ -58,7 +58,7 @@ def test_marked_4xx_reaches_the_wire_with_the_header(client):
     assert r.status_code == 400
     assert r.headers.get(USER_MESSAGE_HEADER) == "1"
     # detail 仍是原来那个字符串字段，形状没变。
-    assert r.json()["detail"].startswith("用户名须为")
+    assert r.json()["detail"] == "用户名须为「单个小写字母+八位数字」，如 a12345678"
 
 
 def test_marked_401_login_failure_carries_the_header(client):

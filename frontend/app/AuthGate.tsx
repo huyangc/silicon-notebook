@@ -11,13 +11,13 @@ export function AuthGate({ onAuthenticated }: { onAuthenticated: (user: AuthUser
   const [busy, setBusy] = useState(false);
 
   const usernameHint = username && !isValidUsername(username)
-    ? "用户名须为「单个小写字母 + 00 + 六位数字」，如 a00123456" : "";
+    ? "用户名须为「单个小写字母 + 八位数字」，如 a12345678" : "";
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError("");
     if (mode === "register" && !isValidUsername(username)) {
-      setError("用户名须为「单个小写字母 + 00 + 六位数字」，如 a00123456");
+      setError("用户名须为「单个小写字母 + 八位数字」，如 a12345678");
       return;
     }
     if (!password) { setError("请输入密码"); return; }
@@ -48,7 +48,7 @@ export function AuthGate({ onAuthenticated }: { onAuthenticated: (user: AuthUser
         </div>
         <label className="auth-label">用户名
           <input className="auth-input" value={username} autoFocus
-            onChange={(e) => setUsername(e.target.value.toLowerCase())} placeholder="a00123456" />
+            onChange={(e) => setUsername(e.target.value.toLowerCase())} placeholder="a12345678" />
         </label>
         {mode === "register" && usernameHint && <div className="auth-hint">{usernameHint}</div>}
         <label className="auth-label">密码

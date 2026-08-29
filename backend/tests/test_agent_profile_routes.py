@@ -18,8 +18,7 @@ from fastapi.testclient import TestClient
 
 
 _PASSWORD = "pw12345678"
-# 用户名须为「单个小写字母 + 00 + 六位数字」——``{index:08d}`` 在 index < 1_000_000
-# 时前两位天然是 "00",与 test_group_routes.py / test_report_ownership.py 同一个套路。
+# 用户名须为「单个小写字母 + 八位数字」；``{index:08d}`` 直接生成八位数字部分。
 _USERNAMES = iter(f"y{index:08d}" for index in range(1, 999))
 
 

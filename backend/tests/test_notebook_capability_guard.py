@@ -360,8 +360,8 @@ def test_notebook_configure_capability_matches_owner_member_stranger_matrix(
 def _group_admin_world(client: TestClient, letter: str) -> dict:
     """一本 owner 的库 + 一个组:`deputy` 是组管理员且持 admin 边,`plain` 只是组员。
 
-    ``letter`` 是这批用户名的首字母——注册校验的用户名形态是「单个小写字母 + 00 +
-    六位数字」,所以每个用例挑一个自己的字母,免得跨用例撞名。
+    ``letter`` 是这批用户名的首字母——注册校验的用户名形态是「单个小写字母 +
+    八位数字」,所以每个用例挑一个自己的字母,免得跨用例撞名。
 
     边发成 `principal_type='group_admins'` + `role='admin'`,即产品里「共享给群组并
     勾选组管理员可管理」那条路径。`plain` 存在的意义是证明翻的是**管理边**而不是

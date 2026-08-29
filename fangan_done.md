@@ -442,7 +442,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 已完成（2026-07-10）：reasoning `follow_chain`——该能力不新增 migration 或改写历史数据，查询期复用既有端点索引，对有证据、审核可用、条件兼容的同类型两跳关系做有界类型化组合；关系前提可引用、推论不入库，Ask/深度报告与流式 `推导` 轨迹均已接通。已通过 `scripts/check.sh` 与前端 build。
 - 已完成（2026-06-25）：用户账号系统——
   - **后端**：`auth_sessions` 表存储不透明 Bearer session token；`app/services/auth_utils.py` 封装 PBKDF2-SHA256 密码哈希与 token 生成；`app/api/auth_routes.py` 实现 `POST /auth/register`、`POST /auth/login`、`POST /auth/logout`、`GET /auth/me`；`app/api/deps.py` 提供 `get_current_user` 依赖用于路由级鉴权；`notebooks.created_by` 列实现按 owner 隔离（用户只能看/操作自己的 notebook）；内置 `user-local` 账号原地升级为 `admin`（id 不变，登录用户名 `admin`，密码由 `SILICON_NOTEBOOK_ADMIN_PASSWORD` 控制，本地默认 `admin`，每次后端启动重置；production/对外监听必须改为强密码）；管理员可经 `PATCH /api/admin/users/{user_id}/role` 授予/撤销管理员角色并共同标记公共知识库，角色变更事务内会重验操作者权限，内置管理员与当前操作管理员不可降级，已有 session 下一次请求即读取新角色；公共知识库从普通用户列表隐藏但仍参与问答上下文检索。新增环境变量：`SILICON_NOTEBOOK_ADMIN_PASSWORD`（admin 密码）和 `SILICON_NOTEBOOK_AUTH_OPTIONAL`（默认 false=强制登录；true=无 token 请求回退 admin，仅本地/测试）。
-  - **前端**：首次加载展示登录/注册界面；注册用户名规则为单个字母 + `00` + 6 位数字（如 `a00123456`，存为小写）；Bearer token 写入 localStorage 并由 api() 自动注入请求头；顶栏展示当前登录用户名与退出按钮；用户使用总览提供二次确认的“设为管理员/撤销管理员”操作，并标明当前账户和受保护账户；管理员专属操作仅对当前角色为 admin 的用户可见。
+  - **前端**：首次加载展示登录/注册界面；注册用户名规则为单个字母 + 8 位数字（如 `a12345678`，存为小写）；Bearer token 写入 localStorage 并由 api() 自动注入请求头；顶栏展示当前登录用户名与退出按钮；用户使用总览提供二次确认的“设为管理员/撤销管理员”操作，并标明当前账户和受保护账户；管理员专属操作仅对当前角色为 admin 的用户可见。
   - **测试**：新增 `tests/test_auth.py`（注册/登录/会话/退出）、`tests/test_user_isolation.py`（notebook owner 隔离）以及集成场景覆盖；全部 ~990 测试通过，`scripts/check.sh` 与 `npm run build` 绿。
   - 本轮有意不包含：修改密码、共享、协作。
 

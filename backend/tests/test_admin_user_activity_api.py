@@ -49,9 +49,8 @@ def _repo():
 
 
 def _username(n: int) -> str:
-    # Must match the seeded username shape ^[a-z]00\\d{6}$ (see
-    # test_admin_user_notebooks.py's "z00123456" precedent).
-    return f"z00{n:06d}"
+    # Must match the seeded username shape ^[a-z][0-9]{8}$.
+    return f"z{n:08d}"
 
 
 def _auth(client, n: int):

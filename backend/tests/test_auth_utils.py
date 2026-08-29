@@ -3,9 +3,9 @@ from app.services.auth_utils import (
 )
 
 
-def test_username_regex_accepts_single_lowercase_letter_00_six_digits():
-    assert is_valid_username("a00123456")
-    assert is_valid_username("b00999999")
+def test_username_regex_accepts_single_lowercase_letter_and_eight_digits():
+    assert is_valid_username("a12345678")
+    assert is_valid_username("b01999999")
     assert is_valid_username("m00000042")
 
 
@@ -14,10 +14,10 @@ def test_username_regex_rejects_bad_shapes():
     assert not is_valid_username("A00123456")       # 大写（须小写）
     assert not is_valid_username("Z00000042")       # 大写
     assert not is_valid_username("ab00123456")      # 多个字母
-    assert not is_valid_username("a0123456")        # 只有一个 0
-    assert not is_valid_username("a0012345")        # 5 位数字
-    assert not is_valid_username("a001234567")      # 7 位数字
+    assert not is_valid_username("a1234567")        # 7 位数字
+    assert not is_valid_username("a123456789")      # 9 位数字
     assert not is_valid_username("a_00123456")      # 非法字符
+    assert not is_valid_username("a１２３４５６７８")  # 只接受 ASCII 数字
 
 
 def test_normalize_username_lowercases_and_strips():
