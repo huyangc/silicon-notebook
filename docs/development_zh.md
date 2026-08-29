@@ -128,10 +128,15 @@ SQLite v62 / PostgreSQL v40 增加 `idx_ask_jobs_creator_activity`，按创建�
 SQLite62/PG40/epoch1。
 
 PostgreSQL v42（`0042_hotpath_batch2_search_indexes.sql`，热路径修复批 2）新增
-`idx_knowledge_objects_payload_trgm`（`((payload::text) COLLATE "C")` 上的 GIN
-trigram 索引，服务集合页搜索的 knowledge 腿）与 `idx_source_elements_nonblank`
-（非空元素资格谓词上的部分 btree，服务体检 H5）。本批刻意不动 SQLite。不增加表、
-外键或 unique surface；当前配对为 SQLite63/PG42/epoch1。
+`idx_knowledge_objects_nb_payload_trgm`（notebook 域复合 partial GIN trigram 索引：
+btree_gin 的 `public.text_ops` 令 `notebook_id` 前置于 `((payload::text) COLLATE "C")`，
+`WHERE status != 'deprecated'`，与 `idx_knowledge_objects_nb_name_trgm` 同形——强制的
+notebook 等值在索引访问内相交，而非先建全局位图；服务集合页搜索的 knowledge 腿）与
+`idx_source_elements_nonblank`（非空元素资格谓词上的部分 btree，服务体检 H5）。迁移
+同时安装 btree_gin（与 0002 装 pg_trgm 同一 trusted-extension 形式），并校验任何同名
+先存索引——INVALID 残留或异形名字冲突让迁移响亮失败，而不是被 `IF NOT EXISTS` 静默
+跳过。本批刻意不动 SQLite。不增加表、外键或 unique surface；当前配对为
+SQLite63/PG42/epoch1。
 
 SQLite v63 / PostgreSQL v41 增加 `extension_runtime_toggles`：部署插件的运行时启停开关加
 审计（谁、何时）。无行 = 启用，因此从未有管理员碰过这张表的部署行为与这张表出现之前

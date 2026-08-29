@@ -215,7 +215,7 @@ def test_packaged_index_migration_phases_are_exact():
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
-        # ``IF NOT EXISTS`` is optional here (only migrations 39 and 41 use
+        # ``IF NOT EXISTS`` is optional here (only migrations 39 and 42 use
         # it, both for the same no-op-once-the-offline-builder-already-ran
         # semantics) — without skipping it the capture group would grab the
         # literal word "IF" as the index name instead of the real one.
@@ -456,24 +456,36 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(41) == []
     assert "CREATE TABLE extension_runtime_toggles" in migrations[41].sql
     assert "enabled boolean NOT NULL" in migrations[41].sql
-    # Migration 42 (hot-path fix batch 2 / R6) — one GIN trigram expression
-    # index and one partial btree index; see
-    # migrations/0042_hotpath_batch2_search_indexes.sql's header comment for
-    # the full production-diag evidence. Pure additions: no table, column, or
-    # FK changes.
+    # Migration 42 (hot-path fix batch 2 / R6) — one notebook-scoped composite
+    # partial GIN trigram index (codex #636 R1 P1: notebook_id leads via
+    # btree_gin, WHERE status != 'deprecated', mirroring
+    # idx_knowledge_objects_nb_name_trgm's shape) and one partial btree index;
+    # see migrations/0042_hotpath_batch2_search_indexes.sql's header comment
+    # for the full production-diag evidence. Pure additions: no table, column,
+    # or FK changes. The migration also installs btree_gin (same form as
+    # 0002's pg_trgm) and validates any pre-existing same-named index before
+    # creating (codex #636 R1 P2).
     v42_hotpath_indexes = index_declarations(42)
     assert v42_hotpath_indexes == [
-        (False, "idx_knowledge_objects_payload_trgm"),
+        (False, "idx_knowledge_objects_nb_payload_trgm"),
         (False, "idx_source_elements_nonblank"),
     ]
     v42_ddl_only = "\n".join(
         line for line in migrations[42].sql.splitlines()
         if not line.strip().startswith("--")
     )
-    assert (
-        'USING gin (((payload::text) COLLATE "C") public.gin_trgm_ops)'
-        in v42_ddl_only
-    )
+    # btree_gin is installed via a guarded DO block (a raw permission or
+    # packaging error is rewrapped into a preinstall-then-retry instruction,
+    # and an install in the wrong schema is rejected).
+    assert "CREATE EXTENSION btree_gin WITH SCHEMA public" in v42_ddl_only
+    assert "installing btree_gin failed" in v42_ddl_only
+    assert "notebook_id public.text_ops," in v42_ddl_only
+    assert '((payload::text) COLLATE "C") public.gin_trgm_ops' in v42_ddl_only
+    assert "WHERE status != 'deprecated'" in v42_ddl_only
+    # P2 validation block: fail-loud on INVALID residue / shape mismatch, and
+    # never auto-drop inside the migration transaction.
+    assert "RAISE EXCEPTION" in v42_ddl_only
+    assert "DROP INDEX CONCURRENTLY" in v42_ddl_only  # operator guidance text
     assert "ON source_elements(source_id, id)" in v42_ddl_only
     # The partial predicate's charset must stay byte-identical to
     # PY_WHITESPACE — see backend/tests/test_hotpath_indexes_batch2.py for the

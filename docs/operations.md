@@ -479,6 +479,11 @@ only after heap recheck. The two operational indexes prepend `notebook_id` with 
 - `idx_knowledge_objects_nb_name_trgm` on the active knowledge-object name predicate;
 - `idx_chunks_nb_text_trgm` on chunk text.
 
+The hot-path fix batch 2 payload index (`idx_knowledge_objects_nb_payload_trgm`,
+migration 0042 / `scripts/build_hotpath_indexes.py`) follows this same composite shape
+for the same reason; it ships through the hot-path channel documented in
+`docs/deployment-and-configuration.md`, not through the script below.
+
 From the repository root, first inspect without changing the database, then apply during a
 controlled low-traffic window:
 

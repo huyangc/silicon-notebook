@@ -343,7 +343,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_ask_jobs_creator_activity" in final_indexes
     # v42 (hot-path fix batch 2 / R6) — see
     # migrations/0042_hotpath_batch2_search_indexes.sql.
-    assert "idx_knowledge_objects_payload_trgm" in final_indexes
+    assert "idx_knowledge_objects_nb_payload_trgm" in final_indexes
     assert "idx_source_elements_nonblank" in final_indexes
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
