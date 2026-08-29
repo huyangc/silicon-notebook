@@ -570,3 +570,74 @@ def test_invalidate_releases_the_byte_accounting():
     assert c.stats()["estimated_bytes"] > 0
     c.invalidate("nb-1:kwtok")
     assert c.stats()["estimated_bytes"] == 0
+
+
+def test_an_entry_larger_than_the_whole_budget_is_returned_but_not_retained():
+    """P1-2(codex PR#634 R1):单条就超预算的条目不得驻留。
+
+    此前字节回收循环止于 ``len(self._store) > 1``,于是这种条目被永久钉住 ——
+    既违反「常驻不超过 N」这条预算的字面意思,又会把缓存饿死(它自己占满预算,
+    之后任何新条目一进来就把别人全逐光)。
+
+    行为如实:值照常返回给本次调用方,只是不进缓存;下次同 key 再 ``get`` 会
+    重新 load。
+
+    **变异锚点**:删掉 ``_enforce_limits_locked`` 末尾那段「新条目自身仍超预算
+    → 不驻留」→ 驻留断言与「后续重载」两条都报红。
+    """
+    from app.services.vector_cache import _CONTAINER_ITEM_BYTES
+
+    budget = 100 * _CONTAINER_ITEM_BYTES
+    c = VectorCache(max_entries=128, per_family_entries=8, max_bytes=budget)
+    c.get("nb-small:kwtok", version=1, loader=lambda: {str(n): n for n in range(10)})
+
+    loads = {"n": 0}
+
+    def huge_loader():
+        loads["n"] += 1
+        return {str(n): n for n in range(1000)}       # 单条 ≈10× 预算
+
+    value = c.get("nb-huge:kwtok", version=1, loader=huge_loader)
+
+    # 1) 调用方拿到的是完整的值 —— 不驻留不等于不返回。
+    assert value == {str(n): n for n in range(1000)}
+    # 2) 它没有驻留,字节账里也没有它的份。
+    stats = c.stats()
+    assert not c.peek("nb-huge:kwtok", version=1)
+    assert stats["estimated_bytes"] <= budget
+    assert "nb-huge:kwtok" not in c._store and "nb-huge:kwtok" not in c._bytes
+    # 3) 后续同 key 再取会重新 load(行为如实,不是静默命中)。
+    assert c.get("nb-huge:kwtok", version=1, loader=huge_loader) == value
+    assert loads["n"] == 2
+
+
+def test_an_oversized_entry_evicts_nobody_on_its_way_out():
+    """超额条目被拒时**一条常驻都不许陪葬**。
+
+    实测过的两种错法(都留过痕):
+    · 完全不拒(codex 指出的原状):它被永久留下,而下一次插入的字节回收永远
+      到不了预算之下,会把每一条比它旧的条目一路逐光 —— 3 条常驻小条目全毁,
+      最后连它自己也没保住。
+    · 先跑淘汰循环、再拒绝它(本轮第一版修法):那是为一个**注定留不下**的
+      条目把常驻集合清空,白毁一遍 —— 同样 3 条全毁。
+    所以「单条超预算」必须在淘汰循环**之前**判掉,直接拒、一条不逐。
+
+    **变异锚点**:把超额判断挪到淘汰循环之后(或整段删掉)→ 三条小条目被清空,
+    这条报红。
+    """
+    from app.services.vector_cache import _CONTAINER_ITEM_BYTES
+
+    budget = 100 * _CONTAINER_ITEM_BYTES
+    c = VectorCache(max_entries=128, per_family_entries=8, max_bytes=budget)
+    for i in range(3):
+        c.get(f"nb-{i}:clustermap", version=1,
+              loader=lambda: {str(n): n for n in range(20)})
+
+    c.get("nb-huge:kwtok", version=1, loader=lambda: {str(n): n for n in range(1000)})
+
+    assert [i for i in range(3) if c.peek(f"nb-{i}:clustermap", version=1)] == [0, 1, 2], (
+        "拒绝一个超额条目不该淘汰任何既有常驻条目")
+    assert not c.peek("nb-huge:kwtok", version=1)
+    assert c.stats()["estimated_bytes"] <= budget
+    assert c.stats()["evictions_by_family"] == {"kwtok": 1}, (
+        "只该记它自己那一次不驻留,不该有 clustermap 的淘汰")

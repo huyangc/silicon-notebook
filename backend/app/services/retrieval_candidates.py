@@ -270,37 +270,31 @@ class _RetrievalState:
     def _unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
         """Whether non-partitioned channels must be disabled before I/O.
 
-        热路径修复批 2 · R2-3(审计 ASK-5):下面那次漂移比对是这条路径的全部
-        代价 —— ``all_visible_source_ids``(生产 48k 行)+ ``hidden_source_ids``
-        (同规模、还要回表)+ 两个 48k 的 set 构造。一次提问要踩 4–8 次
-        (:1334 / :1690 / :2822 / :3200 附近各一处,federated 分支还会重复),
-        每一次都把这三件事从头做一遍。
+        ⛔ 这条探针**必须逐调用现探**,不许 memo 到 run / 请求 / 进程上。判据不是
+        性能权衡,是权威契约 ``docs/product-and-api.md``(检索范围那一节):
+        「A visible-source or hidden-participant addition/deletion after
+        validation disables unsafe graph channels **before I/O**」,并且同一段
+        明确写了为什么后过滤不算数——「post-filtering alone is not authority
+        because excluded candidates can consume Top-K or supply hidden graph
+        premises」。把结果 memo 到 run 上,就等于让 run 内首探之后新增/删除的
+        来源在后续 whole-graph / PPR / relation expansion / exact-lookup 调用点
+        上带着**陈旧的 False** 放行:越界候选会吃掉 Top-K,或者作为隐藏前提进入
+        推理,而这两种损害都不是后过滤能修回来的。
 
-        改法:把**比对结果**memo 到当前 ``current_retrieval_run()``,身份键是
-        ``(notebook_id, 当前 scope 对象)`` —— 用对象身份(``is``)而不是相等,
-        因为 ``ActiveSourceScope.__eq__`` 会去哈希那两个 48k 的 frozenset,
-        正是这里要省掉的东西。一次 run 里 scope 可以被重新安装(插件引擎在
-        run 内 ``source_scope_context`` 换过一次,见 ask_service),换了对象就
-        重新探,不会串味。run 之外(直接服务调用、后台作业、单测)没有 memo,
-        逐字保持原行为。
+        热路径修复批 2 曾按 ASK-5 把它 memo 到 ``current_retrieval_run()``
+        (R2-3),codex 对 PR #634 第 1 轮判为 P1 并整体回退——留档在这里,免得
+        「一次提问踩 4–8 次、每次两个 48k 读」这个诱惑再把同一个改动带回来。
 
-        ⚠ 刻意接受并登记的语义收窄:memo 之后,一次 run 内的漂移只在**该 run
-        第一次探测**时被看见 —— 探过之后才发生的漂移(比如 run 执行到一半有人
-        上传了新来源)不会让后面的调用点改判。这不是遗漏而是选择:
-        (1) 冻结的 ceiling 完全没动 —— 按来源分区的候选与最终证据仍然逐条按
-            冻结 id 列表过滤(``filter_evidence`` / ``scoped_allowed_source_ids``),
-            这条探针只决定「非分区通道(PPR/图/私有 Memory/社区报告/精确定位)
-            这一轮开不开」;
-        (2) 一次 run 因此对这个问题给出**一个**答案,而不是前半程开、后半程关的
-            半开半闭状态 —— 后者产出的证据集本来也难以解释。
-        ⚠ 不要用「反正本来就有竞态窗口」给它开脱(评审 P2-4 打掉的一条理由):
-        改造前的窗口是同一次调用里两读之间的**微秒级**缝隙,改造后是「本 run
-        首探 → run 结束」,量级是**秒到分钟**(detached worker 更长),差 3–6 个
-        数量级。这是一次真实的窗口放大,理由只有 (1)(2) 两条,不是三条。
-        真正需要「run 中途也立刻收紧」的场景应当由 run 级的取消/重放解决,不该
-        靠在热路径上每次重扫 48k 行来近似。
+        性能背景也已经变了:审计给出那个量级时,``hidden_source_ids`` 的
+        ``source_type IN ('memory','knowhow')`` 谓词上没有索引,是一次按 notebook
+        分片的回表。热路径修复**批 1** 已经补上 partial 索引
+        ``sources(notebook_id, source_type) WHERE source_type IN
+        ('memory','knowhow')``(``idx_sources_nb_hidden_type``,见该批的迁移与
+        ``source_store.hidden_source_ids``),这一半已经收窄成窄索引读。也就是说
+        当初驱动 memo 化的那个成本量级不再成立,而它要付的代价(越过一条产品
+        契约)从来就不可接受。真需要「run 中途也立刻收紧」之外的省法,应当去
+        收窄 ``all_visible_source_ids`` 那一半的读,而不是缓存判定结果。
         """
-        from app.services.retrieval_run import memoized_run_probe
         from app.services.source_scope import (
             current_source_scope,
             source_scope_restricted,
@@ -327,19 +321,11 @@ class _RetrievalState:
         # would report drift forever in any shared notebook holding another
         # member's Memory, silently disabling these channels for good.
         hidden_ids = getattr(self.sources, "hidden_source_ids", None)
-
-        def _probe() -> bool:
-            return not source_scope_visible_universe_matches(
-                notebook_id,
-                visible_ids(notebook_id),
-                (hidden_ids(notebook_id, scope.owner_id)
-                 if callable(hidden_ids) else None),
-            )
-
-        # 只 memo 这条**昂贵**的尾巴。上面四个早退分支是纯内存判断,留在 memo
-        # 之外照常每次现算 —— 它们不花钱,而且 scope 一变就该立刻改判。
-        return memoized_run_probe(
-            ("scope_universe_drift", notebook_id), scope, _probe
+        return not source_scope_visible_universe_matches(
+            notebook_id,
+            visible_ids(notebook_id),
+            (hidden_ids(notebook_id, scope.owner_id)
+             if callable(hidden_ids) else None),
         )
 
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
