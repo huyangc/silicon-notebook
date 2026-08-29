@@ -44,6 +44,7 @@ _MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict(
 _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+_REVIEW_QUEUE_TOTAL: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 
 # invalidation epoch:写回前重新核对「读之后到写之前,这个 notebook(或全局)没被
 # invalidate 过」。_GLOBAL_EPOCH 只被 invalidate(None) 推进(清空全部缓存那条路径);
@@ -181,6 +182,47 @@ def chunk_count(db: Any, notebook_id: str) -> int:
     return _seq_gated(_CHUNKS, db, notebook_id, compute)
 
 
+def review_queue_total(db: Any, notebook_id: str) -> int:
+    """Total size of the edge trust review queue (``review_status != 'rejected'``
+    edges in ``knowledge_relations``), memoized on ``(notebook_id,
+    kg_mutation_seq)`` via the shared ``_seq_gated`` skeleton — same epoch/LRU
+    guarantees as the four siblings above. Backs the ``GET
+    /notebooks/{id}/edge-review-queue`` response's ``total`` field (R3 T-A3):
+    the queue itself stays ``limit``-bounded (``review_queue``'s top-M
+    ranking), so callers need this independent COUNT to know how many edges
+    remain unreviewed beyond the page they were handed.
+
+    Deliberately NOT part of ``warm_all``: cold it is a sequential COUNT(*)
+    scan gated only by ``idx_knowledge_relations_nb_review`` (no GROUP BY, no
+    correlated LATERAL joins) but still ~1.1s on the largest production
+    library — a startup warm of every notebook would pay that for a value
+    most notebooks' users never open the review queue for. Lazy: the first
+    request against a given notebook's queue pays the cold COUNT once, and
+    every request after (until the next KG mutation) is a memo hit.
+
+    Known gap (registered, not fixed here): ``RepositoryFacade.add_relations``
+    — a test-only path used by fixtures that inserts relations straight
+    through ``KnowledgeStorePort.add_relations_current`` — does NOT bump
+    ``kg_mutation_seq``. A test/fixture that warms this memo, then calls
+    ``add_relations``, then reads it again can see a stale total until an
+    unrelated seq-bumping write lands. Production's only mutator of
+    ``review_status``/relation membership is the full lifecycle path
+    (``store_kg`` / ``set_edge_review``), which does bump the seq, so this is
+    a test-fixture-only hole. R3 T-A2 is expected to give ``add_relations`` an
+    explicit ``invalidate()`` call alongside its `ReviewQueueMemo` wiring.
+    """
+
+    def compute() -> int:
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_relations "
+            "WHERE notebook_id=%s AND review_status != 'rejected'",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["c"])
+
+    return _seq_gated(_REVIEW_QUEUE_TOTAL, db, notebook_id, compute)
+
+
 def warm_all(db: Any, progress=None) -> int:
     """Prime all per-notebook open-path memos (``type_status_counts`` / both
     pending-source views / ``chunk_count``) for every live notebook, so the
@@ -310,7 +352,13 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
     ``_GLOBAL_EPOCH``,fail closed——代价是被牵连的 notebook 多付一次冷查,方向保守。
     ``notebook_id is None`` 时推进 ``_GLOBAL_EPOCH`` 并清空全部 memo;``_EPOCHS`` 也
     一并清空——全局代次已经变了,残留的 per-notebook 代次不再有意义(下次读取时
-    ``_epoch_of`` 会用默认值 0 重新起算,不影响正确性)。"""
+    ``_epoch_of`` 会用默认值 0 重新起算,不影响正确性)。
+
+    ``_REVIEW_QUEUE_TOTAL``(T-A3)加入了下面两个分支的显式 clear/pop——核实过
+    这一步**不是**自动的:本函数按名字枚举每个 memo 字典,新增一个 memo 字典必须
+    在这里显式登记才会被安全阀覆盖,否则「写已落但 seq bump 未提交」那个边缘窗口
+    对新 memo 依旧成立(seq gate 本身仍是正确性权威,只是这一处 best-effort 安全阀
+    会漏了它)。"""
     global _GLOBAL_EPOCH
     with _LOCK:
         if notebook_id is None:
@@ -319,6 +367,7 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
             _PENDING.clear()
             _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
+            _REVIEW_QUEUE_TOTAL.clear()
             _EPOCHS.clear()
         else:
             _EPOCHS[notebook_id] = _EPOCHS.get(notebook_id, 0) + 1
@@ -333,6 +382,7 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
             _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)
+            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)
 
 
 __all__ = [
@@ -344,5 +394,6 @@ __all__ = [
     "warm_all",
     "pending_source_count",
     "visible_pending_source_count",
+    "review_queue_total",
     "invalidate",
 ]

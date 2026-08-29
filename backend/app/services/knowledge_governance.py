@@ -164,6 +164,7 @@ class KnowledgeGovernanceService:
         rule_card: Callable[[Any], RuleCard],
         set_conflict_status: Callable[[str, str, str], None],
         memory_store: MemoryStorePort,
+        review_queue_total: Callable[[str], int],
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -187,6 +188,7 @@ class KnowledgeGovernanceService:
         self._rule_card = rule_card
         self._set_conflict_status = set_conflict_status
         self.memory_store = memory_store
+        self._review_queue_total_fn = review_queue_total
 
     @staticmethod
     def promotion_dict(row, *, payload=None, evidence=None) -> dict:
@@ -311,6 +313,14 @@ class KnowledgeGovernanceService:
             items.sort(key=lambda x: x["review_priority"], reverse=True)
             return items[:limit]
         return heapq.nlargest(limit, items, key=lambda x: x["review_priority"])
+
+    def review_queue_total(self, notebook_id: str) -> int:
+        """Total edge-review-queue size (``review_status != 'rejected'``),
+        independent of any ``limit`` passed to ``review_queue`` — a seq-gated
+        ``COUNT(*)`` served by the injected query port (R3 T-A3), not a
+        Python len() over the (already limited) ranked items ``review_queue``
+        returns."""
+        return self._review_queue_total_fn(notebook_id)
 
     def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
         """Persist review_status on a knowledge_relation.

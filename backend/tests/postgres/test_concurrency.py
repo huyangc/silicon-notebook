@@ -1404,6 +1404,7 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
         rule_card=lambda row: row,
         set_conflict_status=lambda *_args: None,
         memory_store=store,
+        review_queue_total=lambda _notebook_id: 0,
     )
     revoked_uncommitted = threading.Event()
     approval_started = threading.Event()

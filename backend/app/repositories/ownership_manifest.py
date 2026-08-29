@@ -264,7 +264,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_connect'),
             ConsumerSite(path='backend/tests/test_language_policy.py', scope='<module>.test_notebook_langs_is_cached', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_node_context.py', scope='<module>.test_element_texts_does_not_scan_entire_notebook', kind='patch', target='_connect'),
-            ConsumerSite(path='backend/tests/test_notebook_copy_stats_memo.py', scope='<module>.test_copy_stats_memo_hit_runs_loader_once', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_query_hotpath_cache.py', scope='<module>.test_edge_centrality_bounded_load_no_full_objects_query', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_relation_retrieval.py', scope='<module>._connect_spy', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_relation_retrieval.py', scope='<module>._execute_spy', kind='patch', target='_connect'),
@@ -278,7 +277,6 @@ SURFACE_MEMBERS = (
         patches=(
             ConsumerSite(path='backend/tests/test_language_policy.py', scope='<module>.test_notebook_langs_is_cached', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_node_context.py', scope='<module>.test_element_texts_does_not_scan_entire_notebook', kind='patch', target='_connect'),
-            ConsumerSite(path='backend/tests/test_notebook_copy_stats_memo.py', scope='<module>.test_copy_stats_memo_hit_runs_loader_once', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_query_hotpath_cache.py', scope='<module>.test_edge_centrality_bounded_load_no_full_objects_query', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_relation_retrieval.py', scope='<module>._connect_spy', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_relation_retrieval.py', scope='<module>._execute_spy', kind='patch', target='_connect'),
@@ -626,6 +624,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.extension_toggle_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.group_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='_runtime'),
@@ -1045,6 +1044,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revert_knowhow_table', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_pending_merges', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue_total', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revoke_agent_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_conflict_resolution_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_merge_review_job', kind='attribute', target='_runtime'),
@@ -1455,6 +1455,7 @@ SURFACE_MEMBERS = (
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.checkup_service', kind='attribute', target='checkup'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='checkup'),
         ),
         patches=(
         ),
@@ -1581,7 +1582,11 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_once_then_hydrates_by_page', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_notifies_h45_exactly_once', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_job_discovery_failure_is_logged_and_finally_still_runs', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_refuses_pending_pipeline_before_submit', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_vectors_admission_reuses_checkup_h45_cache', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_vectors_inflight_second_request_is_idempotent', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_vectors_not_inflight_is_admitted_and_registers_guard', kind='patch', target='configured'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='configured'),
         ),
@@ -1591,7 +1596,11 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_once_then_hydrates_by_page', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_notifies_h45_exactly_once', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_job_discovery_failure_is_logged_and_finally_still_runs', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_refuses_pending_pipeline_before_submit', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_vectors_admission_reuses_checkup_h45_cache', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_vectors_inflight_second_request_is_idempotent', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_source_repair_api.py', scope='<module>.test_backfill_vectors_not_inflight_is_admitted_and_registers_guard', kind='patch', target='configured'),
         ),
     ),
     SurfaceMember(
@@ -1738,10 +1747,10 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._own_conversation_or_404', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events._start_ask_stream', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream.prepare_ask_stream', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>._resolve_session_user', kind='attribute', target='current_user'),
@@ -2136,7 +2145,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream.prepare_ask_stream', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.prepare_preview', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent_stream.prepare_preview', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
@@ -2473,8 +2482,10 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/notebook_scale.py', scope='<module>.NotebookScaleProfile.facts', kind='attribute', target='load_notebook_scale_facts'),
+            ConsumerSite(path='backend/tests/test_notebook_copy_stats_memo.py', scope='<module>._count_cold_loads', kind='patch', target='load_notebook_scale_facts'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_notebook_copy_stats_memo.py', scope='<module>._count_cold_loads', kind='patch', target='load_notebook_scale_facts'),
         ),
     ),
     SurfaceMember(
@@ -2483,7 +2494,6 @@ SURFACE_MEMBERS = (
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='maintenance'),
-            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/backfill_relation_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/gen_recall_gold.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='maintenance'),
@@ -3158,6 +3168,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='review_queue_total',
+        owner='KnowledgeGovernanceService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.edge_review_queue', kind='attribute', target='review_queue_total'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='root_dir',
         owner='QueryStore',
         kind='instance_attribute',
@@ -3402,7 +3422,7 @@ SURFACE_MEMBERS = (
         owner='AskExecutionCoordinator',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events', kind='attribute', target='start_ask_stream'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events._start_ask_stream', kind='attribute', target='start_ask_stream'),
         ),
         patches=(
         ),
@@ -3688,6 +3708,7 @@ SURFACE_MEMBERS = (
         owner='NotebookSharingService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._public_conversation_or_404', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._record_agent_call', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='user_can_read_notebook'),

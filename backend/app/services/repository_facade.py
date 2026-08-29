@@ -2424,6 +2424,12 @@ class RepositoryFacade:
         facade's _edge_centrality_map port). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.review_queue(notebook_id, limit)
 
+    def review_queue_total(self, notebook_id: str) -> int:
+        """Total edge-review-queue size, independent of any ``limit`` passed to
+        ``review_queue`` — a seq-gated COUNT(*) (R3 T-A3), not a Python len()
+        over the (already limited) ranked items ``review_queue`` returns."""
+        return self._runtime.knowledge_governance.review_queue_total(notebook_id)
+
     def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
         """Persist review_status on a knowledge_relation —
         KnowledgeGovernanceService owns the orchestration (Task 16; the frozen

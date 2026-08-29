@@ -127,6 +127,15 @@ class EdgeReviewItem(BaseModel):
     review_status: str = "pending"
 
 
+class EdgeReviewQueueResponse(BaseModel):
+    """Response for GET /notebooks/{id}/edge-review-queue: the limit-bounded,
+    priority-ranked page plus the queue's true total (a seq-gated COUNT,
+    independent of `limit`) so the UI can show "共 N 条" instead of just the
+    page it was handed (R3 T-A3)."""
+    items: List[EdgeReviewItem]
+    total: int
+
+
 class EdgeReviewRequest(BaseModel):
     """Payload for POST /relations/{rel_id}/review."""
     status: str   # "verified" | "rejected" | "pending"

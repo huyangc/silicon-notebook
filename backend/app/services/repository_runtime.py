@@ -1837,6 +1837,16 @@ class RepositoryRuntime:
         facade-late until their domain moves) and ONE surviving compound port
         — ``set_conflict_status`` resolves the FACADE wrapper per call because
         the frozen confirm_conflict phase contract patches that method."""
+
+        def review_queue_total(notebook_id: str) -> int:
+            # R3 T-A3: seq-gated COUNT via the QueryStorePort seat (``self.queries``
+            # already exists on the runtime — set in __init__ from ``seats.queries``),
+            # not a new compound facade port. Uses the SAME ``connect`` seat the rest
+            # of this method's read paths ride, so transaction-counting/failure-
+            # injection monkeypatches keep observing it.
+            with connect() as db:
+                return self.queries.review_queue_total(db, notebook_id)
+
         self.knowledge_governance = KnowledgeGovernanceService(
             settings=self.settings,
             event_log=self.event_log,
@@ -1857,6 +1867,7 @@ class RepositoryRuntime:
             rule_card=rule_card,
             set_conflict_status=set_conflict_status,
             memory_store=self.memory_store,
+            review_queue_total=review_queue_total,
         )
         if self.memory_service is not None:
             self.memory_service.set_promotion_service(self.knowledge_governance)
