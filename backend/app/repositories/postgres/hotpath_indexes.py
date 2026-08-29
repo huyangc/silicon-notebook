@@ -88,6 +88,13 @@ class HotpathIndexSpec:
     # catalog echoes back. "" (default) means "DDL text == columns joined by
     # ', '" (batch 1's plain btree case, unchanged).
     ddl_columns: str = ""
+    # 目录形态的另外两维(codex #636 R1 P2 + 质量评审 P1):按 key 列序的
+    # 期望 opclass("namespace:name")与期望 collation("namespace:name",
+    # 非可排序类型/默认为 "")。空元组 = 本条不校验该维——批 1 的普通 btree
+    # 条目维持既有校验面(keys+predicate+am),批 2 两条(评审实证过
+    # 「少写 COLLATE \"C\" 的手建 GIN 三层全报就绪而 planner 拒用」)必须声明。
+    opclasses: tuple[str, ...] = ()
+    collations: tuple[str, ...] = ()
 
     def column_list_sql(self) -> str:
         return self.ddl_columns or ", ".join(self.columns)
@@ -211,12 +218,21 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         ddl_columns='((payload::text) COLLATE "C") public.gin_trgm_ops',
         predicate="",
         predicate_shape="",
+        # 目录侧的第三/第四维期望(质量评审 P1 的实证场景:少写 COLLATE "C" 的
+        # 手建 GIN,keys/predicate/am/opclass 全对但 planner 因 exprCollation 不匹配
+        # 拒用——collation 必须进比对面)。conftest 保证 pg_trgm 装在 public。
+        opclasses=("public:gin_trgm_ops",),
+        collations=("pg_catalog:C",),
         serves="search.py:notebook_knowledge_rows (payload ILIKE probe)",
     ),
     HotpathIndexSpec(
         name="idx_source_elements_nonblank",
         table="source_elements",
         columns=("source_id", "id"),
+        # 两列建表即 COLLATE "C"(0001_initial.sql:609-620),索引继承——声明出来
+        # 让同名错 collation 的手建索引同样被拒。opclass 为 pg_catalog 默认 text_ops。
+        opclasses=("pg_catalog:text_ops", "pg_catalog:text_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C"),
         # ``PY_WHITESPACE``-keyed non-blank predicate, rendered as a flat
         # ``chr(N) || chr(N) || ...`` concatenation (same style as
         # ``knowhow_store.py``'s ``_PG_TRIM_CHARS`` and
@@ -280,11 +296,23 @@ def _index_row(connection, schema: str, name: str):
     return connection.execute(
         "SELECT idx.relname AS index_name, tbl.relname AS table_name, "
         "tbl_ns.nspname AS table_schema, i.indisvalid, i.indisready, "
+        "am.amname AS access_method, "
+        "ARRAY(SELECT opc_ns.nspname||':'||opc.opcname "
+        "FROM unnest(i.indclass::oid[]) WITH ORDINALITY op(oid,ord) "
+        "JOIN pg_opclass opc ON opc.oid=op.oid "
+        "JOIN pg_namespace opc_ns ON opc_ns.oid=opc.opcnamespace "
+        "ORDER BY op.ord) AS opclasses, "
+        "ARRAY(SELECT COALESCE(coll_ns.nspname||':'||coll.collname, '') "
+        "FROM unnest(i.indcollation::oid[]) WITH ORDINALITY co(oid,ord) "
+        "LEFT JOIN pg_collation coll ON coll.oid=co.oid "
+        "LEFT JOIN pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace "
+        "ORDER BY co.ord) AS collations, "
         "ARRAY(SELECT pg_get_indexdef(i.indexrelid,n,true) "
         "FROM generate_series(1,i.indnkeyatts) AS n ORDER BY n) AS keys, "
         "pg_get_expr(i.indpred,i.indrelid,true) AS predicate "
         "FROM pg_index i "
         "JOIN pg_class idx ON idx.oid=i.indexrelid "
+        "JOIN pg_am am ON am.oid=idx.relam "
         "JOIN pg_namespace ns ON ns.oid=idx.relnamespace "
         "JOIN pg_class tbl ON tbl.oid=i.indrelid "
         "JOIN pg_namespace tbl_ns ON tbl_ns.oid=tbl.relnamespace "
@@ -311,7 +339,27 @@ def _matches_shape(row, spec: HotpathIndexSpec) -> bool:
         return False
     predicate = _normalized_expr(str(row["predicate"] or ""))
     expected_predicate = _normalized_expr(spec.predicate_shape)
-    return predicate == expected_predicate
+    if predicate != expected_predicate:
+        return False
+    # 访问方法/opclass 也是形态的一部分(codex #636 R1 P2):同名 btree 冒充 GIN、
+    # 或建了非 trgm opclass 的 GIN,keys/predicate 都可能一致,但对 ILIKE 毫无
+    # 加速作用——照姊妹 retrieval_indexes.py 的目录检查,一并比对。spec.using
+    # 为空 = 普通 btree(批 1 全部条目)。
+    expected_am = spec.using or "btree"
+    if str(row["access_method"]) != expected_am:
+        return False
+    # 期望声明在 spec 上而非硬编码在比较逻辑里(质量评审 P2):第三批若加一条
+    # jsonb_path_ops 的 GIN,只需在它的 spec 里声明,不会让 install 的建后复检
+    # 在一条刚建成功的索引上误报 index_verification_failed。
+    if spec.opclasses:
+        opclasses = tuple(str(v) for v in (row["opclasses"] or ()))
+        if opclasses != spec.opclasses:
+            return False
+    if spec.collations:
+        collations = tuple(str(v) for v in (row["collations"] or ()))
+        if collations != spec.collations:
+            return False
+    return True
 
 
 def _state(connection, schema: str, spec: HotpathIndexSpec) -> dict[str, object]:

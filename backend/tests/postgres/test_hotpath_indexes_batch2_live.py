@@ -162,7 +162,10 @@ def test_payload_trgm_index_is_usable_for_a_rare_term_ilike(postgres_repository)
                 now,
             ),
         )
-    with runtime.database.connect() as db:
+    with runtime.database.write() as db:
+        # ANALYZE 在 100k 行上本机 0.15s,但 CI runner 慢 3-5 倍且本仓库有
+        # 计时器用例被 CPU 抢占挤成假回归的前科——与种子同样局部放宽。
+        db.execute("SET LOCAL statement_timeout = '0'")
         db.execute("ANALYZE knowledge_objects")
 
     # Verbatim copy of search.py:notebook_knowledge_rows's WHERE clause (see
@@ -223,6 +226,19 @@ def test_nonblank_partial_index_chosen_with_literal_and_not_with_bound_param(
         )
     assert "idx_source_elements_nonblank" in new_plan, new_plan
     assert "Seq Scan" not in new_plan, new_plan
+
+    # docstring 里「绑定参数在 custom plan 下同样命中索引」那半的实证就在这里:
+    # psycopg 默认逐次 custom plan,planner 能看到实参值并证明谓词蕴含。
+    with runtime.database.connect() as db:
+        custom_old = "\n".join(
+            row["QUERY PLAN"]
+            for row in db.execute(
+                "EXPLAIN (COSTS OFF) SELECT id FROM source_elements e "
+                "WHERE e.source_id=%s AND btrim(e.text, %s) <> ''",
+                ("src-a", PY_WHITESPACE),
+            ).fetchall()
+        )
+    assert "idx_source_elements_nonblank" in custom_old, custom_old
 
     # 负断言必须在 **generic plan** 下做(maintenance._NONBLANK_TEXT_SQL 的注释
     # 论证的正是这一点):psycopg 默认走 custom plan,planner 能看到绑定参数的实际

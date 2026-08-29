@@ -251,4 +251,56 @@ def test_no_eligibility_site_regresses_to_a_bound_param_btrim():
     )
     assert "btrim(e.text, %s)" not in ddl_and_comments_stripped
     assert "btrim(text, %s)" not in ddl_and_comments_stripped
-    assert ddl_and_comments_stripped.count("_NONBLANK_TEXT_SQL") >= 6  # 定义 + ≥5 站点
+    # 精确等值 + 逐站点:>=6 会在任何人多提一次这个名字时凭空多出余量,
+    # 单站点回退(逐字恢复旧形态,含无空格变体)就静默通过(质量评审变异实证)。
+    assert ddl_and_comments_stripped.count("_NONBLANK_TEXT_SQL") == 6  # 1 定义 + 5 站点
+    import inspect as _inspect
+    for method_name in (
+        "count_missing_element_vectors",
+        "missing_element_embedding_ids",
+        "missing_element_embedding_rows",
+        "missing_element_embedding_page",
+        "missing_element_vector_source_ids",
+    ):
+        body = _inspect.getsource(
+            getattr(postgres_maintenance.PostgresMaintenanceAdapter, method_name)
+        )
+        assert "_NONBLANK_TEXT_SQL" in body, method_name
+
+
+def test_same_named_btree_posing_as_the_gin_is_reported_unexpected():
+    """codex #636 R1 P2 的钉:形态比对必须含访问方法/opclass——同名 btree(或非
+    trgm opclass 的 GIN)即使 keys/predicate 碰巧一致,对 ILIKE 也零加速,三层
+    (inspect/apply/迁移 IF NOT EXISTS)都不许把它当「存在」。"""
+    from app.repositories.postgres.hotpath_indexes import (
+        HOTPATH_INDEX_SPECS,
+        _matches_shape,
+    )
+
+    spec = next(
+        s for s in HOTPATH_INDEX_SPECS if s.name == "idx_knowledge_objects_payload_trgm"
+    )
+    good_row = {
+        "keys": list(spec.columns),
+        "predicate": spec.predicate_shape,
+        "access_method": "gin",
+        "opclasses": ["public:gin_trgm_ops"],
+        "collations": ["pg_catalog:C"],
+    }
+    assert _matches_shape(good_row, spec)
+    assert not _matches_shape({**good_row, "access_method": "btree"}, spec)
+    assert not _matches_shape({**good_row, "opclasses": ["public:jsonb_ops"]}, spec)
+    # 质量评审 P1 的实证场景:手建时少写 COLLATE "C"——keys/predicate/am/opclass
+    # 全对,唯 collation 是列默认(空),planner 因 exprCollation 不匹配拒用。
+    assert not _matches_shape({**good_row, "collations": [""]}, spec)
+    # 批 1 的普通 btree 条目:期望 access_method 恒为 btree。
+    plain = next(s for s in HOTPATH_INDEX_SPECS if s.using == "")
+    plain_row = {
+        "keys": list(plain.columns),
+        "predicate": plain.predicate_shape,
+        "access_method": "btree",
+        "opclasses": list(plain.opclasses),
+        "collations": list(plain.collations),
+    }
+    assert _matches_shape(plain_row, plain)
+    assert not _matches_shape({**plain_row, "access_method": "gin"}, plain)

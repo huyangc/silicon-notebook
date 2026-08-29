@@ -314,7 +314,7 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index — ten in total; the GIN runs about 1.5x the knowledge_objects table segment and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index — ten in total; the GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
@@ -327,18 +327,24 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py
 PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 ```
 
-Each is a plain btree (or one partial, one expression) index rather than a GIN index, so
-individual builds are fast even on large tables — but `CREATE INDEX CONCURRENTLY` still
-takes a full table scan per index and should run outside peak hours on a busy database.
+Batch 1's eight are plain btree (one partial, one expression) indexes, so those builds are
+fast even on large tables; batch 2's payload index IS a GIN over the full jsonb-as-text and
+is minutes-scale on a large `knowledge_objects` table — schedule the window accordingly. In
+every case `CREATE INDEX CONCURRENTLY` still takes a full table scan per index and should
+run outside peak hours on a busy database.
 Migrations `0039_hotpath_batch1_indexes.sql` and `0042_hotpath_batch2_search_indexes.sql` use plain `CREATE INDEX IF NOT EXISTS` (a
 migration runs inside a transaction, where `CONCURRENTLY` cannot run) and becomes a no-op
 ledger entry once this script has built every index; on a fresh database with no existing
 traffic, the migration alone is sufficient and running the script first is optional. If
 `--apply` reports an `INVALID` index (a prior `CONCURRENTLY` build that failed partway
 through), the tool prints the exact `DROP INDEX CONCURRENTLY <name>;` to run before
-retrying — it never drops that index on its own. Each index is a pure read-path addition
-with no query or service-code change; if write latency on its table regresses more than 20%
-after building one, `DROP INDEX CONCURRENTLY <name>` removes it with no other effect.
+retrying — it never drops that index on its own. Batch 1's indexes and the batch-2 GIN are pure read-path additions with no query or
+service-code change. The batch-2 partial index ships together with one query-text change
+(`maintenance.py`'s eligibility predicate moved from a bound parameter to the identical
+inlined literal — same semantics, hardened against generic-plan cache states); dropping the
+index alone is still safe, since the literal form works with or without it. If write latency
+on a table regresses more than 20% after building an index, `DROP INDEX CONCURRENTLY <name>`
+removes it with no other effect.
 
 Known, registered write-amplification debt from this batch (not addressed here — dropping a
 live index is a deliberate, separate operator call): the pre-existing `idx_chunks_source`

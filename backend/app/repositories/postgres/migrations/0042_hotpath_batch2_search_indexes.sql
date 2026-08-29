@@ -118,8 +118,9 @@
 -- gets a SQLite-side index change in this batch -- SQLite has no partial-index
 -- planner benefit worth chasing here and no equivalent to a GIN trigram index
 -- for this shape of query, so backend/app/repositories/sqlite/maintenance.py's
--- twin keeps its bound-parameter `TRIM(e.text, ?)` form unchanged (see that
--- file's own comment on this deliberate divergence). SQLITE_SCHEMA_VERSION is
+-- twin keeps its bound-parameter `TRIM(e.text, ?)` form unchanged (the
+-- divergence is registered in postgres/maintenance.py's _NONBLANK_TEXT_SQL
+-- block comment; the sqlite file itself is untouched). SQLITE_SCHEMA_VERSION is
 -- therefore untouched by this migration; only postgres_version advances.
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_payload_trgm
