@@ -48,6 +48,33 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v61(db: sqlite3.Connection) -> None:
+    """Undo _migration_61 (hot-path fix batch 1's five index groups, seven
+    SQLite indexes).
+
+    Unlike v60 (agent_observations.kind — never needed its own rollback
+    because every deployed-vNN target below 55 already drops the whole
+    agent_observations table via _rollback_v55, taking the column with it),
+    these seven indexes sit on foundational tables (concept_clusters,
+    extraction_runs, knowledge_source_fact_elements, memory_items,
+    knowledge_relations, sources) that exist since v1 and are never dropped
+    by any rollback helper below. Without an explicit undo here, every
+    forged "before" snapshot (built by upgrading the v9 fixture all the way
+    to current, then rolling back everything after the target version) would
+    still carry these indexes, so the verifier would see them as already
+    present in "before" and flag the (target, 61) manifest's expected
+    addition as ``manifest-addition-missing`` — the migration's OWN indexes
+    would look undone, at every target version, not just this one.
+    """
+    db.execute("DROP INDEX idx_sources_nb_hidden_type")
+    db.execute("DROP INDEX idx_knowledge_relations_nb_source_target_edge")
+    db.execute("DROP INDEX idx_memory_items_notebook")
+    db.execute("DROP INDEX idx_knowledge_source_fact_elements_notebook")
+    db.execute("DROP INDEX idx_extraction_runs_notebook")
+    db.execute("DROP INDEX idx_clusters_nb_canonical_name_lower")
+    db.execute("DROP INDEX idx_clusters_nb_canonical")
+
+
 def _rollback_v59(db: sqlite3.Connection) -> None:
     """Undo _migration_59 (backend-local unpublished indexing stages)."""
     db.execute("DROP TABLE indexing_pipeline_stage_sources")
@@ -636,6 +663,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
@@ -716,6 +744,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
@@ -791,6 +820,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
@@ -849,6 +879,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
@@ -920,6 +951,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
@@ -986,6 +1018,7 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")
@@ -1022,6 +1055,7 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v34(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
@@ -1062,6 +1096,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         rollback.execute("DROP TABLE source_index_backfills")          # _migration_42
         rollback.execute("DROP TABLE knowledge_source_fact_backfills") # _migration_41
         rollback.execute("DROP INDEX idx_kos_source_object")            # _migration_41
@@ -1133,6 +1168,7 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         ).fetchone() is not None
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         rollback.execute("DROP TABLE source_index_backfills")
         rollback.execute("DROP TABLE knowledge_source_fact_backfills")
         rollback.execute("DROP INDEX idx_kos_source_object")
@@ -1175,6 +1211,7 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         rollback.execute("DROP TABLE source_index_backfills")
         rollback.execute("DROP TABLE knowledge_source_fact_backfills")
         rollback.execute("DROP INDEX idx_kos_source_object")
@@ -1223,6 +1260,7 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
         rollback.execute(
             "ALTER TABLE knowledge_source_facts DROP COLUMN projection_origin"
         )
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1256,6 +1294,7 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1290,6 +1329,7 @@ def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1321,6 +1361,7 @@ def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1381,6 +1422,7 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1424,6 +1466,7 @@ def test_deployed_v49_database_verifies_share_request_table(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1464,6 +1507,7 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1503,6 +1547,7 @@ def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v61(rollback)
         _rollback_v59(rollback)
         _rollback_v58(rollback)
         _rollback_v57(rollback)
@@ -1574,6 +1619,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
     upgraded.close_local()
     db = sqlite3.connect(database)
     try:
+        _rollback_v61(db)
         _rollback_v34(db)
         db.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         db.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33

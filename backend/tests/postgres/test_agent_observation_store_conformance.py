@@ -116,7 +116,7 @@ def agent_observation_harness(request) -> AgentObservationHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 38
+    assert PostgresMigrator(database).migrate() == 39
     _seed(database, notebook_ids=(NOTEBOOK_ID, OTHER_NOTEBOOK_ID))
     yield AgentObservationHarness(
         database=database,

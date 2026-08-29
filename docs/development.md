@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 60. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v60 and remains readable. Those migrations
+The current schema version is 61. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v61 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -410,6 +410,36 @@ pairing stays SQLite 60 / PostgreSQL 38 / epoch 1 with the same 84 application
 tables, 113 replicated unique surfaces, and 12-row-slot bound. Ring eviction
 and the consolidation read are both scoped by `kind`, so call accounting can
 neither evict written notes nor reach a model prompt.
+
+SQLite v61 / PostgreSQL v39 (hot-path fix batch 1) adds indexes for query
+families a production audit found scanning without one:
+`concept_clusters(notebook_id, canonical_id)`,
+`concept_clusters(notebook_id, lower(canonical_name))`, three reverse-FK
+covers (`extraction_runs.notebook_id`,
+`knowledge_source_fact_elements.notebook_id`, `memory_items.notebook_id`),
+`knowledge_relations(notebook_id, source_object_id, target_object_id,
+edge_type)`, and a partial `sources(notebook_id, source_type) WHERE
+source_type IN ('memory','knowhow')` index backing `hidden_source_ids` — six
+query-family groups, eight indexes total on PostgreSQL; five of the six
+groups (seven of the eight indexes) on SQLite. PostgreSQL alone also adds
+`chunks(source_id, ordinal)`: SQLite's planner does not eliminate an
+`ORDER BY rowid` sort through a rowid-suffixed secondary index (verified
+empirically — a plain `idx_chunks_source` already gives this ordering for
+free, so the SQLite twin would cost a write-side B-tree for no read benefit
+and, when actually selected by the planner, for negative benefit versus not
+building it at all), so it is deliberately not added — see `_migration_61`'s
+docstring. No table, column, foreign key, or unique surface changes, so the
+pairing stays SQLite 61 / PostgreSQL 39 / epoch 1 with the same 84
+application tables, 113 replicated unique surfaces, and 12-row-slot bound.
+On PostgreSQL, an already-populated production database should have these
+eight indexes built online first with `scripts/build_hotpath_indexes.py
+--apply` (`CREATE INDEX CONCURRENTLY`); the migration's plain `CREATE INDEX
+IF NOT EXISTS` then applies as a no-op ledger entry. See
+`docs/deployment-and-configuration.md`'s hot-path index section for the
+operator SOP. `idx_chunks_source` (added in migration 0003) is now fully
+covered by the new `idx_chunks_source_ordinal` and is registered
+write-amplification debt, not dropped in this batch — see migration
+0039's header comment.
 
 Run it only while application/background writers are stopped:
 

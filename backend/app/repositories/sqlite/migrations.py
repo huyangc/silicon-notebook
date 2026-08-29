@@ -78,7 +78,22 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # add_observation) vs 'call' (one recorded tool call against this notebook).
 # Existing rows are 'note' by construction: every row that can exist before
 # this hop was written by add_observation.
-SCHEMA_VERSION = 60
+# v61 adds five of hot-path fix batch 1's six groups (seven of the eight
+# indexes; parity with PostgreSQL 0039_hotpath_batch1_indexes.sql):
+# concept_clusters(notebook_id,
+# canonical_id), concept_clusters(notebook_id, lower(canonical_name)),
+# three reverse-FK covers (extraction_runs.notebook_id,
+# knowledge_source_fact_elements.notebook_id, memory_items.notebook_id),
+# knowledge_relations(notebook_id, source_object_id, target_object_id,
+# edge_type), and a partial sources(notebook_id, source_type) WHERE
+# source_type IN ('memory','knowhow'). The sixth group
+# (chunks(source_id, ordinal) on PostgreSQL) has no SQLite twin: SQLite's
+# planner does not eliminate the ORDER BY sort through a rowid-suffixed
+# secondary index (verified empirically; see _migration_61's docstring), so
+# a chunks(source_id, "rowid") index would cost a write-side B-tree for zero
+# read benefit. Pure index additions: no table, column, foreign key, or
+# unique surface changes.
+SCHEMA_VERSION = 61
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3268,6 +3283,99 @@ class SqliteMigrator:
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "agent_observations", "kind", "TEXT NOT NULL DEFAULT 'note'",
+            )
+
+    def _migration_61(self) -> None:
+        """热路径修复批 1:此前缺失的索引,parity 于 PostgreSQL
+        ``0039_hotpath_batch1_indexes.sql``(该文件的头注释有每组的完整
+        「服务哪条查询」证据与形态取舍,这里不重复)。纯增量索引——不改任何查询
+        语句、不改任何服务代码。PostgreSQL 侧六组共八条;SQLite 侧落地五组共七条,
+        第 5 组(``chunks(source_id, ordinal)``)在 SQLite 上不适用,理由见下方。
+
+        1. ``idx_clusters_nb_canonical`` ON
+           ``concept_clusters(notebook_id, canonical_id)`` —— 概念详情/共提对端
+           名/关系端点名三族调用当前按 notebook_id 之后再筛 canonical_id,无法
+           用索引收窄 canonical_id 这一段。
+        2. ``idx_clusters_nb_canonical_name_lower`` ON
+           ``concept_clusters(notebook_id, lower(canonical_name))`` ——
+           ``resolve_focal`` 的 ``lower(canonical_name)=?``,SQLite 表达式索引
+           原生支持,写法与 Postgres 侧逐字同义。
+        3. 三条反向 FK 覆盖:``idx_extraction_runs_notebook``
+           ``(extraction_runs.notebook_id)``、
+           ``idx_knowledge_source_fact_elements_notebook``
+           ``(knowledge_source_fact_elements.notebook_id)``、
+           ``idx_memory_items_notebook`` ``(memory_items.notebook_id)`` ——
+           三张表都对 ``notebooks(id) ON DELETE CASCADE``,但都没有一条以
+           notebook_id 打头的索引(memory_items 现有两条复合索引都以
+           created_by 打头),笔记本删除级联对这三张表退化为整表扫描。
+        4. ``idx_knowledge_relations_nb_source_target_edge`` ON
+           ``knowledge_relations(notebook_id, source_object_id,
+           target_object_id, edge_type)`` —— ``in_network_relation_rows``
+           (答案装配 ``in_network_relations`` 的落地查询)按两端 id 集合筛选,
+           既有的 ``idx_knowledge_relations_nb_source``/``_nb_target`` 只覆盖
+           单一端点,hub 端点命中时会被迫逐行过滤另一端。
+        5. **不适用**。PostgreSQL 侧 ``chunks(source_id, ordinal)`` 服务
+           ``chunk_section_rows``(``chunks_by_section`` 的落地 SQL)的
+           ``WHERE source_id=? ... ORDER BY ordinal LIMIT ?``——``ordinal`` 是
+           一个真实存储列,普通复合索引能让 planner 用索引序满足这条 ORDER BY
+           而不必排序。SQLite 侧同一查询排的是隐式 ``rowid``(SQLite 侧
+           ``chunks_by_section`` 的 docstring 已经说明理由:id 是随机 128-bit
+           surrogate,排它会打乱一个 section 内的顺序)。SQLite **允许**用带
+           双引号的 ``"rowid"`` 把它编进一条二级索引(``PRAGMA index_info``
+           会把这一列报成保留位 ``-2``),但经过实测验证(四配置矩阵:
+           有/无这条新索引 × 是否强制 planner 选中它),SQLite 的查询规划器
+           **不会**用这样的索引消去 ``ORDER BY rowid`` 的排序步骤——建一条
+           ``chunks(source_id, "rowid")`` 索引后,若用 ``INDEXED BY`` 强制
+           planner 真的选中它,``EXPLAIN QUERY PLAN`` 对
+           ``WHERE source_id=? ORDER BY rowid LIMIT ?`` 报
+           ``USE TEMP B-TREE FOR ORDER BY``——这一步只在这条 rowid 尾列索引
+           被选中时才出现,rowid 伪列尾巴不像真实存储列那样能让优化器确认
+           索引序已经满足这条 ORDER BY。而不加 ``INDEXED BY`` 时,规划器压根
+           不会挑这条新索引,自然落回既有的 ``idx_chunks_source``——后者本来
+           就**免费**给出这份 rowid 序(同一键值下,二级索引条目本就按 rowid
+           排列,``EXPLAIN QUERY PLAN`` 对它不报任何排序步骤)。也就是说这条
+           新索引不仅换不来任何读侧收益,一旦真被 planner 选中反而比什么都
+           不建更差(多一步排序)。对照组(把 ``rowid`` 换成一个同构的真实
+           整数列)同一 planner 版本下,建了同构复合索引后确实消去了排序步骤,
+           证明差异来自 rowid 伪列本身,不是这条索引的写法问题。这样一条索引
+           除了拿现有 ``idx_chunks_source`` 已经提供的 ``source_id`` 等值
+           收窄之外不会再带来别的收益,只会让每次写 chunk 多付一棵 B 树的
+           维护成本,因此本迁移不建它——这是两个后端在这一点上真实的规划器
+           能力差异,不是遗漏。
+        6. ``idx_sources_nb_hidden_type`` ON
+           ``sources(notebook_id, source_type) WHERE source_type IN
+           ('memory','knowhow')``(partial)—— 服务 ``hidden_source_ids`` 自己
+           的谓词。互补的多数谓词(``NOT IN``)已经在既有扫描的投影里求值
+           (``source_change_signal_rows`` 的注释:「求值放在投影里而不是另开
+           一条 id 查询」),给多数谓词建一条全量索引买不到什么,只会让每次
+           来源写入多付一棵 B 树的维护成本——partial 谓词精确覆盖收益、不
+           覆盖成本。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_clusters_nb_canonical
+                  ON concept_clusters(notebook_id, canonical_id);
+
+                CREATE INDEX IF NOT EXISTS idx_clusters_nb_canonical_name_lower
+                  ON concept_clusters(notebook_id, lower(canonical_name));
+
+                CREATE INDEX IF NOT EXISTS idx_extraction_runs_notebook
+                  ON extraction_runs(notebook_id);
+
+                CREATE INDEX IF NOT EXISTS idx_knowledge_source_fact_elements_notebook
+                  ON knowledge_source_fact_elements(notebook_id);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_items_notebook
+                  ON memory_items(notebook_id);
+
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_source_target_edge
+                  ON knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type);
+
+                CREATE INDEX IF NOT EXISTS idx_sources_nb_hidden_type
+                  ON sources(notebook_id, source_type)
+                  WHERE source_type IN ('memory', 'knowhow');
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

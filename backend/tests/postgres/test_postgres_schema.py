@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 38
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 39
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 38
-    assert migrator.migrate() == 38
-    assert migrator.current_version() == 38
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 38
+    assert migrator.migrate() == 39
+    assert migrator.migrate() == 39
+    assert migrator.current_version() == 39
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 39
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 38
+    assert migrator.migrate() == 39
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 38
+        assert PostgresMigrator(databases[1]).migrate() == 39
     finally:
         for database in databases:
             database.close()
@@ -206,13 +206,18 @@ def test_packaged_index_migration_phases_are_exact():
         (36, "pluggable_indexing_pipeline"),
         (37, "indexing_pipeline_staging"),
         (38, "agent_observation_kind"),
+        (39, "hotpath_batch1_indexes"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
+        # ``IF NOT EXISTS`` is optional here (only migration 39 uses it, for
+        # its no-op-once-the-offline-builder-already-ran semantics) — without
+        # skipping it the capture group would grab the literal word "IF" as
+        # the index name instead of the real one.
         return [
             (bool(unique), name)
             for unique, name in re.findall(
-                r"(?mi)^CREATE\s+(UNIQUE\s+)?INDEX\s+([a-z0-9_]+)",
+                r"(?mi)^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)",
                 migrations[version].sql,
             )
         ]
@@ -395,6 +400,48 @@ def test_packaged_index_migration_phases_are_exact():
     assert "ADD COLUMN indexing_pipeline_id text COLLATE \"C\"" in (
         migrations[36].sql
     )
+
+    # Migration 39 (hot-path fix batch 1) — six query-family groups (eight
+    # indexes) a production audit found scanning without one; see
+    # migrations/0039_hotpath_batch1_indexes.sql's header comment for the full
+    # per-group evidence. Pure additions: no table, column, or FK changes.
+    v39_hotpath_indexes = index_declarations(39)
+    assert v39_hotpath_indexes == [
+        (False, "idx_clusters_nb_canonical"),
+        (False, "idx_clusters_nb_canonical_name_lower"),
+        (False, "idx_extraction_runs_notebook"),
+        (False, "idx_knowledge_source_fact_elements_notebook"),
+        (False, "idx_memory_items_notebook"),
+        (False, "idx_knowledge_relations_nb_source_target_edge"),
+        (False, "idx_chunks_source_ordinal"),
+        (False, "idx_sources_nb_hidden_type"),
+    ]
+    # The migration's own header comment walks through each index's column
+    # list in prose (e.g. "ON concept_clusters(notebook_id, canonical_id)")
+    # as part of explaining which query family it serves, so a bare
+    # substring assertion against the raw file text could pass on the
+    # comment alone even if the real DDL below it were mangled. Strip
+    # ``--``-prefixed lines first so these assertions can only be satisfied
+    # by the actual CREATE INDEX statements.
+    v39_ddl_only = "\n".join(
+        line for line in migrations[39].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert (
+        "ON concept_clusters(notebook_id, canonical_id)" in v39_ddl_only
+    )
+    assert (
+        "ON concept_clusters(notebook_id, lower(canonical_name))"
+        in v39_ddl_only
+    )
+    assert (
+        "ON knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)"
+        in v39_ddl_only
+    )
+    assert "ON chunks(source_id, ordinal)" in v39_ddl_only
+    # Partial, not full: the complementary NOT IN majority-case predicate is
+    # deliberately left unindexed (see the migration's own header comment).
+    assert "WHERE source_type IN ('memory', 'knowhow')" in v39_ddl_only
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():
