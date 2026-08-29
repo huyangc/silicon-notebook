@@ -398,6 +398,10 @@ PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索�
 - `idx_knowledge_objects_nb_name_trgm`：对应有效 knowledge object 的 name 谓词；
 - `idx_chunks_nb_text_trgm`：对应 chunk text。
 
+热路径修复批 2 的 payload 索引（`idx_knowledge_objects_nb_payload_trgm`，迁移 0042 /
+`scripts/build_hotpath_indexes.py`）出于同一理由采用同一复合形；它走
+`docs/deployment-and-configuration_zh.md` 记录的热路径通道，不经下面这个脚本。
+
 从仓库根先只读检查，再在受控的低流量时段执行：
 
 ```bash

@@ -6,13 +6,14 @@ indexes) -- see
 for the full "which query family does this serve" evidence per group. Batch 2
 (R6) added a second migration,
 ``backend/app/repositories/postgres/migrations/0042_hotpath_batch2_search_indexes.sql``,
-contributing one GIN expression index (this module's first non-btree entry,
-hence the ``using``/``ddl_columns`` fields below) and one partial btree index.
+contributing one notebook-scoped composite partial GIN index (this module's
+first non-btree entry, hence the ``using``/``ddl_columns`` fields below) and
+one partial btree index.
 Both migrations and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
 cross-checks migration 0039 against its eight batch-1 specs, and
-``backend/tests/test_hotpath_indexes_batch2.py`` cross-checks migration 0041
+``backend/tests/test_hotpath_indexes_batch2.py`` cross-checks migration 0042
 against its two batch-2 specs, so neither pairing can silently drift. One
 shared builder/inspector serves every batch: there is a single advisory lock
 name and a single ``HOTPATH_INDEX_SPECS`` tuple that grows with each batch,
@@ -20,9 +21,10 @@ not a lock/tuple per batch.
 
 This is the sibling of ``retrieval_indexes.py`` (GIN trigram indexes for
 large, notebook-scoped tables) but far simpler: every spec here is either a
-plain btree/partial index, or (since batch 2) a single-expression GIN index
-that needs no per-notebook composite key and no legacy-index retirement
-dance, so ``HotpathIndexSpec`` stays a flat dataclass instead of
+plain btree/partial index, or (since batch 2) a notebook-scoped composite
+GIN in the same ``(notebook_id public.text_ops, expr gin_trgm_ops)`` shape
+as ``idx_knowledge_objects_nb_name_trgm`` -- but with no legacy-index
+retirement dance, so ``HotpathIndexSpec`` stays a flat dataclass instead of
 ``retrieval_indexes.py``'s richer ``IndexShape``/collation-oid machinery.
 
 Inspecting is always safe (read-only ``pg_index``/``pg_class`` catalog
@@ -199,30 +201,47 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
     # backend/tests/test_hotpath_indexes_batch2.py for this module's own
     # migration<->spec and PY_WHITESPACE<->literal reconciliation tests.
     HotpathIndexSpec(
-        name="idx_knowledge_objects_payload_trgm",
+        name="idx_knowledge_objects_nb_payload_trgm",
         table="knowledge_objects",
         using="gin",
-        # Bare per-key shape a live catalog read reports back for this
-        # expression key -- COLLATE and the opclass are never echoed in the
-        # per-column ``pg_get_indexdef(indexrelid, n, true)`` form even
-        # though the DDL below declares them (empirically verified against a
-        # live PostgreSQL 16 instance; see idx_source_elements_nonblank's own
+        # Bare per-key shape a live catalog read reports back -- COLLATE and
+        # the opclass are never echoed in the per-column
+        # ``pg_get_indexdef(indexrelid, n, true)`` form even though the DDL
+        # below declares them (empirically verified against a live
+        # PostgreSQL 16 instance; see idx_source_elements_nonblank's own
         # note on the same asymmetry for a partial predicate).
-        columns=("(payload::text)",),
-        # The real DDL text: must stay byte-identical to
+        # ``notebook_id`` leads (codex #636 R1 P1): a bare single-expression
+        # trigram GIN repeats the cross-notebook global-bitmap failure
+        # docs/operations.md already documents for the legacy lexical
+        # indexes; this is the same composite shape retrieval_indexes.py
+        # ships for idx_knowledge_objects_nb_name_trgm, so the mandatory
+        # ``notebook_id=%s`` equality intersects inside index access.
+        columns=("notebook_id", "(payload::text)"),
+        # The real DDL text: the expression key must stay byte-identical to
         # search.py's own ``(payload::text) COLLATE "C"`` ILIKE-arm
         # expression (search.py:846) so the GIN index actually covers that
         # query's operator, and to migrations/0006_search_gin.sql's
         # idx_knowledge_objects_name_trgm sibling's double-parenthesized
-        # ``((expr) COLLATE "C") opclass`` form.
-        ddl_columns='((payload::text) COLLATE "C") public.gin_trgm_ops',
-        predicate="",
-        predicate_shape="",
+        # ``((expr) COLLATE "C") opclass`` form. ``public.text_ops`` is
+        # btree_gin's gin-AM text opclass (install_hotpath_indexes ensures
+        # the extension; migration 0042 installs it on the fresh path).
+        ddl_columns=(
+            'notebook_id public.text_ops, '
+            '((payload::text) COLLATE "C") public.gin_trgm_ops'
+        ),
+        # ``status!='deprecated'`` appears as a LITERAL in
+        # notebook_knowledge_rows's SQL text, so the partial predicate is
+        # implied even under a generic (parameter-value-blind) plan -- the
+        # same literal-vs-bound-parameter mechanics documented at length on
+        # idx_source_elements_nonblank below.
+        predicate="status != 'deprecated'",
+        predicate_shape="status <> 'deprecated'::text",
         # 目录侧的第三/第四维期望(质量评审 P1 的实证场景:少写 COLLATE "C" 的
         # 手建 GIN,keys/predicate/am/opclass 全对但 planner 因 exprCollation 不匹配
-        # 拒用——collation 必须进比对面)。conftest 保证 pg_trgm 装在 public。
-        opclasses=("public:gin_trgm_ops",),
-        collations=("pg_catalog:C",),
+        # 拒用——collation 必须进比对面)。conftest 保证 pg_trgm/btree_gin 装在
+        # public;notebook_id 建表即 COLLATE "C"(0001_initial.sql)。
+        opclasses=("public:text_ops", "public:gin_trgm_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C"),
         serves="search.py:notebook_knowledge_rows (payload ILIKE probe)",
     ),
     HotpathIndexSpec(
@@ -362,6 +381,30 @@ def _matches_shape(row, spec: HotpathIndexSpec) -> bool:
     return True
 
 
+def _require_extensions(connection) -> None:
+    """Mirror ``retrieval_indexes.py``'s ``_require_extensions``: pg_trgm must
+    already sit in ``public`` (migration 0002 puts it there; a mislocated
+    install is an operator decision this tool must not second-guess), and
+    btree_gin -- which supplies the gin-AM ``public.text_ops`` opclass the
+    batch-2 composite key needs -- is created on demand, exactly as migration
+    0042 does on the fresh-deploy path. This runs in the install path only;
+    inspect stays read-only.
+    """
+    row = connection.execute(
+        "SELECT n.nspname AS schema_name FROM pg_extension e "
+        "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'"
+    ).fetchone()
+    if row is None or row["schema_name"] != "public":
+        raise HotpathIndexError("public_pg_trgm_required")
+    connection.execute("CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public")
+    row = connection.execute(
+        "SELECT n.nspname AS schema_name FROM pg_extension e "
+        "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='btree_gin'"
+    ).fetchone()
+    if row is None or row["schema_name"] != "public":
+        raise HotpathIndexError("public_btree_gin_required")
+
+
 def _state(connection, schema: str, spec: HotpathIndexSpec) -> dict[str, object]:
     row = _index_row(connection, schema, spec.name)
     if row is None:
@@ -423,8 +466,14 @@ def install_hotpath_indexes(
                 "set_config('lock_timeout',%s,false)",
                 (f"{lock_timeout_seconds}s",),
             )
+            # current_spec_name 必须先于 _require_extensions 绑定:下面的兜底
+            # except 读它拼诊断,扩展安装抛非 HotpathIndexError 异常时(缺 contrib
+            # 包 58P01、库上无 CREATE 权限 42501、与 retrieval 构建器并发的
+            # DuplicateObject)否则是 UnboundLocalError 裸栈,可操作消息全丢
+            # (质量评审 P1 实证)。
             invalid_names: list[str] = []
             current_spec_name: str | None = None
+            _require_extensions(connection)
             for spec in HOTPATH_INDEX_SPECS:
                 current_spec_name = spec.name
                 state = _state(connection, schema, spec)

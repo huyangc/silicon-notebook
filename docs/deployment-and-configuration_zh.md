@@ -248,10 +248,13 @@ DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
 ```
 
 PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 owner 可让 migration
-0001 创建，也可由 DBA 预装；同名扩展位于其他 schema 时会被拒绝。向量存为 float32
+0001 创建，也可由 DBA 预装；同名扩展位于其他 schema 时会被拒绝。自 schema v42 起，
+`public` 下的 `btree_gin` 按同样条款成为先决条件：迁移 0042 在迁移角色有权限时自动创建
+（trusted 扩展仍需要库上的 CREATE），否则带着「先预装再重试」的明确指引失败——DBA 预装的
+`public.btree_gin` 与 pg_trgm 一样直接满足。向量存为 float32
 `bytea`，不需要 pgvector。生产仍保持单 backend worker（`--workers 1`）。
 
-大型 PostgreSQL 数据库还应把 `btree_gin` 安装在 `public`，并建立两条 notebook-aware
+大型 PostgreSQL 数据库还应建立两条 notebook-aware
 词法索引。以 database owner 运行时，运维工具可创建该扩展；默认只检查，只有 `--apply`
 才改数据库：
 
@@ -278,13 +281,18 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 ```
 
 批 1 的八条都是普通 btree（其中一条 partial、一条表达式）索引，大表上单条构建也快；
-批 2 的 payload 一条是对整个 jsonb-as-text 的全文 GIN，在大 `knowledge_objects` 表上
-单条构建是分钟级，安排窗口时按此预估。无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
+批 2 的 payload 一条是 notebook 域复合 partial 全文 GIN（btree_gin 令 `notebook_id`
+前置、`WHERE status != 'deprecated'`，与运维侧 `idx_knowledge_objects_nb_name_trgm`
+同形——词集中在别的 notebook 时不会建全局位图；`--apply` 会按需安装 btree_gin 扩展），
+对整个 jsonb-as-text 建索引，在大 `knowledge_objects` 表上单条构建是分钟级，安排窗口
+时按此预估。无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
 做一次全表扫描，繁忙数据库上应避开高峰期。
 迁移文件 `0039_hotpath_batch1_indexes.sql` 与 `0042_hotpath_batch2_search_indexes.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
 （迁移在事务里跑，`CONCURRENTLY` 进不了事务），一旦这个脚本已经把全部索引建好，迁移
 落地时就是 no-op 的账本记录；全新部署、还没有生产流量的库，迁移本身已经够用，先跑脚本
-是可选项。`--apply` 若报告某条索引状态是 `INVALID`（此前一次 `CONCURRENTLY` 建索引中途
+是可选项。迁移 0042 落地前还会校验同名先存索引：INVALID 残留或异形名字冲突会让迁移带着
+确切的在线处置指引响亮失败，而不是被 `IF NOT EXISTS` 静默跳过、账本却记成功。
+`--apply` 若报告某条索引状态是 `INVALID`（此前一次 `CONCURRENTLY` 建索引中途
 失败留下的残留），工具会打印确切的 `DROP INDEX CONCURRENTLY <name>;` 指引，重跑前先手动
 执行——工具自己绝不会代劳删除。每条索引都是纯读路径新增，批 1 与批 2 的 GIN 不改任何查询或服务代码；批 2 的 partial 随行带一处查询文本等价改写（maintenance 资格谓词绑定参数→同值字面量，语义相同、为 generic plan 加固），单独 DROP 该索引仍然安全；建完
 之后若该表写延迟劣化超过 20%，`DROP INDEX CONCURRENTLY <name>` 即可无副作用地移除它。

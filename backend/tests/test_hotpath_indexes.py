@@ -176,11 +176,14 @@ class _FakeResult:
 
 
 class _FakeConnection:
-    """Serves the three query shapes hotpath_indexes.py issues:
+    """Serves the query shapes hotpath_indexes.py issues:
     ``pg_try_advisory_lock`` / ``set_config`` / ``pg_advisory_unlock`` (no-ops
-    here), the ``pg_index``/``pg_class`` existence+validity probe, and
-    ``CREATE INDEX [CONCURRENTLY] IF NOT EXISTS`` (recorded and reflected
-    back into the fake catalog so a subsequent probe sees it as ready).
+    here), the ``pg_extension`` probe + ``CREATE EXTENSION`` pair
+    ``_require_extensions`` issues on the install path (both extensions
+    reported as already living in ``public``), the ``pg_index``/``pg_class``
+    existence+validity probe, and ``CREATE INDEX [CONCURRENTLY] IF NOT
+    EXISTS`` (recorded and reflected back into the fake catalog so a
+    subsequent probe sees it as ready).
     """
 
     def __init__(self, catalog: dict[str, dict]):
@@ -206,6 +209,10 @@ class _FakeConnection:
         if "PG_ADVISORY_UNLOCK" in upper:
             return _FakeResult(None)
         if "SET_CONFIG" in upper:
+            return _FakeResult(None)
+        if "FROM PG_EXTENSION" in upper:
+            return _FakeResult({"schema_name": "public"})
+        if upper.startswith("CREATE EXTENSION"):
             return _FakeResult(None)
         if "FROM PG_INDEX" in upper:
             schema, name = params
@@ -458,12 +465,36 @@ def test_connect_calls_psycopg_connect_with_autocommit_true(monkeypatch):
     assert captured.get("autocommit") is True
 
 
+def test_a_failing_extension_install_is_wrapped_not_a_bare_traceback(
+    fake_connect, monkeypatch
+):
+    """质量评审 P2 的回归钉:扩展安装抛非 HotpathIndexError 异常(缺 contrib 包
+    58P01 / 库上无 CREATE 权限 42501 / 与 retrieval 构建器并发的 DuplicateObject)
+    时,必须落进兜底 except、拿到带 SQLSTATE 的可操作消息——修复前
+    current_spec_name 在 _require_extensions 之后才初始化,except 里读它直接
+    UnboundLocalError 裸栈,还会经异常链把原始 psycopg 消息打出去。"""
+    fake_connect({})
+
+    def _permission_denied(_connection):
+        exc = RuntimeError("permission denied to create extension")
+        exc.sqlstate = "42501"
+        raise exc
+
+    monkeypatch.setattr(
+        hotpath_indexes_module, "_require_extensions", _permission_denied
+    )
+    with pytest.raises(
+        HotpathIndexError, match=r"^hotpath_index_build_failed:42501$"
+    ):
+        install_hotpath_indexes("postgresql://fake/db")
+
+
 def test_inspect_reports_unexpected_for_a_btree_posing_as_the_gin(fake_connect):
     """端到端(经 inspect_hotpath_indexes 而非私有函数)钉住 am/opclass/collation
     进入形态比对:同名 btree 冒充批 2 的 GIN → UNEXPECTED,不是「存在」。"""
     gin = next(
         s for s in HOTPATH_INDEX_SPECS
-        if s.name == "idx_knowledge_objects_payload_trgm"
+        if s.name == "idx_knowledge_objects_nb_payload_trgm"
     )
     catalog = {
         gin.name: {
@@ -471,10 +502,10 @@ def test_inspect_reports_unexpected_for_a_btree_posing_as_the_gin(fake_connect):
             "indisvalid": True,
             "indisready": True,
             "keys": list(gin.columns),
-            "predicate": "",
+            "predicate": gin.predicate_shape,
             "access_method": "btree",
-            "opclasses": ["pg_catalog:text_ops"],
-            "collations": ["pg_catalog:C"],
+            "opclasses": ["pg_catalog:text_ops", "pg_catalog:text_ops"],
+            "collations": ["pg_catalog:C", "pg_catalog:C"],
         }
     }
     fake_connect(catalog)

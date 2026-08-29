@@ -3,13 +3,30 @@ connection cannot exercise (see ``backend/tests/test_hotpath_indexes_batch2.py``
 for the fake-connection half: migration<->spec anti-drift and the
 PY_WHITESPACE<->literal reconciliation pins).
 
-Three things only a real server can prove:
+Things only a real server can prove:
 
   1. Both new indexes actually build via ``install_hotpath_indexes`` (real
-     ``CREATE INDEX CONCURRENTLY``, including the GIN case this module's
-     ``HotpathIndexSpec`` has never carried before batch 2) and migration 42
-     is a true no-op ledger entry once they exist online — mirrors
-     ``test_hotpath_indexes_live.py``'s batch-1 equivalent.
+     ``CREATE INDEX CONCURRENTLY``, including the composite partial GIN case
+     this module's ``HotpathIndexSpec`` has never carried before batch 2) and
+     migration 42 is a true no-op ledger entry once they exist online —
+     mirrors ``test_hotpath_indexes_live.py``'s batch-1 equivalent, and (new
+     with codex #636 R1 P2) also exercises the migration's pre-existing-index
+     validation DO block on its accept path — including the per-key
+     pg_get_indexdef echo the DO block compares, so a PostgreSQL deparser
+     rendering change fails here loudly. The reject paths — a same-named
+     wrong-shape index, and a REAL INVALID residue row (a failed
+     CREATE UNIQUE INDEX CONCURRENTLY over duplicate data, no superuser
+     needed) — get their own tests below, as does the accept path for an
+     index carrying reloptions (``SET (fastupdate = off)``), which the DO
+     block must tolerate because it compares semantic catalog dimensions,
+     not the full indexdef text. The DO block's expected values are
+     reconciled against ``HOTPATH_INDEX_SPECS`` in the unit half
+     (``test_hotpath_indexes_batch2.py``).
+  1b. The composite payload GIN keeps ``notebook_id`` INSIDE index access
+     (codex #636 R1 P1): a term concentrated in OTHER notebooks must not
+     build a global bitmap that survives to heap recheck — the failure mode
+     docs/operations.md documents for the legacy single-expression trigram
+     indexes.
   2. ``idx_source_elements_nonblank`` is actually chosen by the planner when
      the query uses ``postgres/maintenance.py``'s ``_NONBLANK_TEXT_SQL``
      inlined-literal form under PostgreSQL's normal per-call custom planning
@@ -34,6 +51,7 @@ from __future__ import annotations
 
 import re
 
+import psycopg
 import pytest
 
 from app.models.notebooks import NotebookCreate
@@ -51,7 +69,7 @@ from app.repositories.text_whitespace import PY_WHITESPACE
 pytestmark = pytest.mark.postgres_integration
 
 _BATCH2_NAMES = frozenset(
-    {"idx_knowledge_objects_payload_trgm", "idx_source_elements_nonblank"}
+    {"idx_knowledge_objects_nb_payload_trgm", "idx_source_elements_nonblank"}
 )
 
 
@@ -105,7 +123,7 @@ def test_install_builds_both_new_indexes_and_is_idempotent(postgres_database):
     assert after_migration == state
 
 
-def _seed_notebook_with_source(repository, name: str) -> str:
+def _seed_notebook_with_source(repository, name: str, source_id: str = "src-a") -> str:
     notebook_id = repository.create_notebook(NotebookCreate(name=name)).id
     runtime = repository._runtime
     now = normalize_timestamp(runtime.seams.now())
@@ -114,9 +132,9 @@ def _seed_notebook_with_source(repository, name: str) -> str:
             "INSERT INTO sources "
             "(id,notebook_id,title,source_type,status,parse_status,file_name,"
             "file_path,file_size,file_hash,summary,created_at,updated_at,doc_type) "
-            "VALUES ('src-a',%s,'source','markdown','extracted','parsed',"
-            "'a.md','',0,'hash-a','',%s,%s,'textbook')",
-            (notebook_id, now, now),
+            "VALUES (%s,%s,'source','markdown','extracted','parsed',"
+            "'a.md','',0,%s,'',%s,%s,'textbook')",
+            (source_id, notebook_id, f"hash-{source_id}", now, now),
         )
     return notebook_id
 
@@ -188,8 +206,109 @@ def test_payload_trgm_index_is_usable_for_a_rare_term_ilike(postgres_repository)
     # 100k 行 + 稀有词下这是**自然**计划,不靠任何 GUC 强迫——表达式索引与查询
     # 形态不匹配(本迁移最脆的不变式)时,planner 会退回 ordinal 走查/nb 位图,
     # 这里响亮失败。
-    assert "idx_knowledge_objects_payload_trgm" in plan, plan
+    assert "idx_knowledge_objects_nb_payload_trgm" in plan, plan
     assert "idx_knowledge_objects_name_trgm" in plan, plan  # BitmapOr 的另一臂
+    # codex #636 R1 P1 的结构性判据:复合索引臂的 Index Cond 必须把 notebook_id
+    # 等值带进索引访问本身——这正是「全局位图、heap recheck 才丢行」教训
+    # (docs/operations.md)的反面。谓词形对了但 notebook_id 没进 Index Cond
+    # (例如有人把索引改回单表达式全局形)时,这条正则响亮失败。
+    assert re.search(
+        r"Bitmap Index Scan on idx_knowledge_objects_nb_payload_trgm\n"
+        r"\s+Index Cond: \(\(notebook_id = ",
+        plan,
+    ), plan
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
+def test_payload_index_stays_notebook_scoped_when_term_lives_in_another_notebook(
+    postgres_repository,
+):
+    """codex #636 R1 P1 的场景重演:词在**别的** notebook 里高频、在被查的
+    notebook 里不存在。legacy 单表达式全局 GIN 在这里会先建 ~2 万行的全局位图、
+    到 heap recheck 才按 notebook 丢行(docs/operations.md 已记录的超时教训);
+    复合形必须把 notebook 等值带进索引访问,位图从一开始就是空的。"""
+    assert (
+        PostgresMigrator(postgres_repository._runtime.database).migrate() == 42
+    )
+    nb_queried = _seed_notebook_with_source(
+        postgres_repository, "cross-nb-queried", source_id="src-a"
+    )
+    nb_other = _seed_notebook_with_source(
+        postgres_repository, "cross-nb-other", source_id="src-b"
+    )
+    runtime = postgres_repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
+        # 被查 notebook:100k 行填充,不含探针词——量级要大到「nb 前缀 btree
+        # 位图 + heap filter 全过一遍」真实地贵过复合 GIN 臂,否则 planner 对
+        # 小 notebook 选 nb 前缀位图(那也是 notebook 内的,不是本条要防的
+        # 全局位图病灶,但会让断言落空)。
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+            "created_at,updated_at,ordinal) "
+            "SELECT 'ko-q-'||g, %s, 'concept','approved', "
+            "jsonb_build_object('name','item '||g,'note','filler '||md5(g::text)), "
+            "'[]'::jsonb, 'src-a', %s, %s, g FROM generate_series(1, 100000) g",
+            (nb_queried, now, now),
+        )
+        # 另一个 notebook:2 万行全部含探针词——词在全库层面高度可选中,
+        # 但与被查 notebook 零交集。
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+            "created_at,updated_at,ordinal) "
+            "SELECT 'ko-o-'||g, %s, 'concept','approved', "
+            "jsonb_build_object('name','item '||g,'note',"
+            "'crossnbneedle payload '||md5(g::text)), "
+            "'[]'::jsonb, 'src-b', %s, %s, 100000+g "
+            "FROM generate_series(1, 20000) g",
+            (nb_other, now, now),
+        )
+    with runtime.database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
+        db.execute("ANALYZE knowledge_objects")
+
+    query_body = (
+        "SELECT id,object_type,payload FROM knowledge_objects "
+        "WHERE notebook_id=%s AND status!='deprecated' AND "
+        "((payload ->> 'name') COLLATE \"C\" ILIKE %s OR "
+        "(payload::text) COLLATE \"C\" ILIKE %s) "
+        "ORDER BY ordinal LIMIT %s"
+    )
+    pattern = "%crossnbneedle%"
+    with runtime.database.write() as db:
+        # 高频词的自然计划本来就可能选 ordinal 走查(LIMIT 早停),那不是这条
+        # 要钉的性质——这里强制 bitmap 路径,专门检查「一旦走本索引,位图是否
+        # notebook 内」。enable_indexscan 关的是 plain index scan(ordinal 走查),
+        # bitmap 家族由 enable_bitmapscan 单独控制,不受影响。
+        db.execute(
+            "SET LOCAL enable_seqscan = off; SET LOCAL enable_indexscan = off"
+        )
+        plan = "\n".join(
+            row["QUERY PLAN"]
+            for row in db.execute(
+                "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) "
+                + query_body,
+                (nb_queried, pattern, pattern, 10),
+            ).fetchall()
+        )
+    match = re.search(
+        r"Bitmap Index Scan on idx_knowledge_objects_nb_payload_trgm[^\n]*"
+        r"\(actual rows=(\d+)[^\n]*\)\n\s+Index Cond: \(\(notebook_id = ",
+        plan,
+    )
+    assert match, plan
+    # 位图行数是**索引访问返回**的 TID 数:notebook 内交集为空 → 0;
+    # 全局形会在这里返回 ~20000(另一 notebook 的所有命中行)。
+    assert int(match.group(1)) == 0, plan
+    # 真实执行结果:被查 notebook 里确实没有这个词。
+    with runtime.database.connect() as db:
+        rows = db.execute(
+            query_body, (nb_queried, pattern, pattern, 10)
+        ).fetchall()
+    assert rows == []
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
@@ -372,3 +491,108 @@ def test_h5_nonblank_equivalence_across_whitespace_edge_cases(postgres_repositor
     assert new_source_ids == old_source_ids
     # Only the genuinely non-blank rows survive both forms.
     assert new_ids == {"el-visible", "el-visible-padded", "el-mixed-visible-and-ws"}
+
+
+# ---------------------------------------------------------------------------
+# codex #636 R1 P2: migration 42 must validate a pre-existing same-named index
+# before recording its ledger entry -- IF NOT EXISTS alone would silently skip
+# creation over an INVALID residue row or an operator's wrong-shape index and
+# still mark the migration applied.
+# ---------------------------------------------------------------------------
+
+_COMPOSITE_GIN_DDL = (
+    "CREATE INDEX idx_knowledge_objects_nb_payload_trgm "
+    "ON knowledge_objects USING gin ("
+    "notebook_id public.text_ops, "
+    '((payload::text) COLLATE "C") public.gin_trgm_ops'
+    ") WHERE status != 'deprecated'"
+)
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
+def test_migration_rejects_a_same_named_wrong_shape_index(postgres_database):
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=41) == 41
+    with postgres_database.write() as db:
+        db.execute(
+            "CREATE INDEX idx_knowledge_objects_nb_payload_trgm "
+            "ON knowledge_objects USING btree (notebook_id)"
+        )
+    with pytest.raises(
+        psycopg.errors.RaiseException, match="does not match the expected definition"
+    ):
+        migrator.migrate()
+    # 账本没有前进——RAISE 让整个迁移事务(含 ledger INSERT)回滚。
+    assert migrator.migrate(target_version=41) == 41
+    # 运维按报错指引清掉同名冲突后,迁移正常走完。
+    with postgres_database.write() as db:
+        db.execute("DROP INDEX idx_knowledge_objects_nb_payload_trgm")
+    assert migrator.migrate() == 42
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
+def test_migration_rejects_an_invalid_same_named_index(postgres_database):
+    """真实的 INVALID 残留,不做 superuser 目录手术(质量评审 P4:CI 的 PG 角色
+    是 NOSUPERUSER,靠翻 pg_index 的版本在 CI 恒 skip,分支等于零覆盖):对已有
+    两行同 notebook_id 的表跑 CREATE UNIQUE INDEX CONCURRENTLY,第二阶段唯一性
+    失败会留下 indisvalid=false 的目录行——与中断的 CONCURRENTLY 构建同形。
+    DO 块先查 INVALID 再查形态,所以 match="INVALID" 同时区分了两条分支。"""
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=41) == 41
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks(id, name, created_at, updated_at) "
+            "VALUES ('nb-inv', 'invalid-residue', now(), now())"
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, created_at, updated_at, ordinal) "
+            "VALUES ('ko-inv-1', 'nb-inv', 'concept', now(), now(), 1), "
+            "('ko-inv-2', 'nb-inv', 'concept', now(), now(), 2)"
+        )
+    with psycopg.connect(
+        postgres_database.settings.database_url, autocommit=True
+    ) as conn:
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "CREATE UNIQUE INDEX CONCURRENTLY "
+                "idx_knowledge_objects_nb_payload_trgm "
+                "ON knowledge_objects (notebook_id)"
+            )
+        residue = conn.execute(
+            "SELECT i.indisvalid FROM pg_index i "
+            "JOIN pg_class c ON c.oid = i.indexrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = current_schema() "
+            "AND c.relname = 'idx_knowledge_objects_nb_payload_trgm'"
+        ).fetchone()
+    assert residue is not None and residue[0] is False
+    with pytest.raises(psycopg.errors.RaiseException, match="INVALID"):
+        migrator.migrate()
+    assert migrator.migrate(target_version=41) == 41
+    with postgres_database.write() as db:
+        db.execute("DROP INDEX idx_knowledge_objects_nb_payload_trgm")
+    assert migrator.migrate() == 42
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
+def test_migration_accepts_a_prebuilt_index_with_reloptions(postgres_database):
+    """质量评审 P1 的反面钉:DO 块比对的是与 _matches_shape 相同的语义维度,
+    不是 pg_get_indexdef 全文——运维对这条登记过写放大债的 GIN 做标准缓解
+    `SET (fastupdate = off)`(会进 indexdef 的 WITH 子句)后,迁移必须照常通过,
+    且 inspect 与迁移对同一目录行给同一结论。"""
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=41) == 41
+    with postgres_database.write() as db:
+        db.execute(_COMPOSITE_GIN_DDL)
+        db.execute(
+            "ALTER INDEX idx_knowledge_objects_nb_payload_trgm "
+            "SET (fastupdate = off)"
+        )
+    assert migrator.migrate() == 42
+    schema = _schema_of(postgres_database)
+    state = inspect_hotpath_indexes(
+        postgres_database.settings.database_url, schema=schema
+    )
+    by_name = {row["name"]: row["state"] for row in state["indexes"]}
+    assert by_name["idx_knowledge_objects_nb_payload_trgm"] == "存在"

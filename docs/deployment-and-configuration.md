@@ -295,10 +295,14 @@ DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
 
 PostgreSQL must use UTF-8 and have `pg_trgm` installed in `public`. The database owner may
 let migration 0001 create it, or a DBA may preinstall it. An extension of that name in
-another schema is rejected. PostgreSQL stores vectors as float32 `bytea`; pgvector is not
+another schema is rejected. Since schema v42, `btree_gin` in `public` is a prerequisite on
+the same terms: migration 0042 creates it when the migration role can (a trusted extension
+still needs CREATE on the database), and otherwise fails with an explicit
+preinstall-then-retry instruction — a DBA-preinstalled `public.btree_gin` satisfies it
+exactly like pg_trgm. PostgreSQL stores vectors as float32 `bytea`; pgvector is not
 required. Keep production at one backend worker (`--workers 1`).
 
-Large PostgreSQL databases should also install `btree_gin` in `public` and the two
+Large PostgreSQL databases should also install the two
 notebook-aware lexical indexes. The operator tool can create the extension when run as the
 database owner; it inspects by default and changes the database only with `--apply`:
 
@@ -328,14 +332,22 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 ```
 
 Batch 1's eight are plain btree (one partial, one expression) indexes, so those builds are
-fast even on large tables; batch 2's payload index IS a GIN over the full jsonb-as-text and
+fast even on large tables; batch 2's payload index IS a notebook-scoped
+composite partial GIN over the full jsonb-as-text (`notebook_id` leads via btree_gin,
+`WHERE status != 'deprecated'` — the same shape as the operational
+`idx_knowledge_objects_nb_name_trgm`, so a term concentrated in other notebooks never
+builds a global bitmap; `--apply` installs the btree_gin extension on demand) and
 is minutes-scale on a large `knowledge_objects` table — schedule the window accordingly. In
 every case `CREATE INDEX CONCURRENTLY` still takes a full table scan per index and should
 run outside peak hours on a busy database.
 Migrations `0039_hotpath_batch1_indexes.sql` and `0042_hotpath_batch2_search_indexes.sql` use plain `CREATE INDEX IF NOT EXISTS` (a
 migration runs inside a transaction, where `CONCURRENTLY` cannot run) and becomes a no-op
 ledger entry once this script has built every index; on a fresh database with no existing
-traffic, the migration alone is sufficient and running the script first is optional. If
+traffic, the migration alone is sufficient and running the script first is optional.
+Migration 0042 additionally validates any pre-existing same-named index before creating:
+an INVALID residue row or a wrong-shape name collision fails the migration loudly (with
+the exact online remediation in the error) instead of being silently skipped by
+`IF NOT EXISTS` while the ledger records success. If
 `--apply` reports an `INVALID` index (a prior `CONCURRENTLY` build that failed partway
 through), the tool prints the exact `DROP INDEX CONCURRENTLY <name>;` to run before
 retrying — it never drops that index on its own. Batch 1's indexes and the batch-2 GIN are pure read-path additions with no query or

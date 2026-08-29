@@ -2,10 +2,11 @@
 as ``test_hotpath_indexes.py``) for hot-path fix batch 2 (R6)'s two additions
 to ``HOTPATH_INDEX_SPECS``:
 
-  1. ``idx_knowledge_objects_payload_trgm`` (GIN trigram expression index) —
-     the first non-btree entry ``HotpathIndexSpec`` has ever carried, hence
-     this module's own cross-check of the ``using``/``ddl_columns`` fields
-     rather than reusing batch 1's plain-btree-only assumptions.
+  1. ``idx_knowledge_objects_nb_payload_trgm`` (notebook-scoped composite
+     partial GIN trigram index; codex #636 R1 P1) — the first non-btree entry
+     ``HotpathIndexSpec`` has ever carried, hence this module's own
+     cross-check of the ``using``/``ddl_columns`` fields rather than reusing
+     batch 1's plain-btree-only assumptions.
   2. ``idx_source_elements_nonblank`` (partial btree index keyed on the exact
      ``PY_WHITESPACE`` charset).
 
@@ -56,7 +57,7 @@ _MIGRATION = (
 )
 
 _BATCH2_NAMES = frozenset(
-    {"idx_knowledge_objects_payload_trgm", "idx_source_elements_nonblank"}
+    {"idx_knowledge_objects_nb_payload_trgm", "idx_source_elements_nonblank"}
 )
 
 # One statement, optionally "USING <access method>", a parenthesized column
@@ -134,12 +135,21 @@ def test_migration_statements_match_their_specs_verbatim():
     parsed = {entry["name"]: entry for entry in _parse_migration_statements()}
     by_name = {spec.name: spec for spec in HOTPATH_INDEX_SPECS}
 
-    gin_entry = parsed["idx_knowledge_objects_payload_trgm"]
-    gin_spec = by_name["idx_knowledge_objects_payload_trgm"]
+    gin_entry = parsed["idx_knowledge_objects_nb_payload_trgm"]
+    gin_spec = by_name["idx_knowledge_objects_nb_payload_trgm"]
     assert gin_entry["table"] == gin_spec.table
     assert gin_entry["using"] == gin_spec.using == "gin"
-    assert gin_entry["columns"] == gin_spec.column_list_sql()
-    assert gin_entry["predicate"] == gin_spec.predicate == ""
+    # The migration lays the two composite keys out on separate indented
+    # lines; the spec's ddl_columns is the same text single-line. Collapse
+    # whitespace on both sides — nothing else.
+    assert " ".join(str(gin_entry["columns"]).split()) == " ".join(
+        gin_spec.column_list_sql().split()
+    )
+    assert (
+        str(gin_entry["predicate"])
+        == gin_spec.predicate
+        == "status != 'deprecated'"
+    )
 
     partial_entry = parsed["idx_source_elements_nonblank"]
     partial_spec = by_name["idx_source_elements_nonblank"]
@@ -224,7 +234,7 @@ def test_gin_ddl_columns_match_search_py_payload_expression_verbatim():
 
     spec = next(
         spec for spec in HOTPATH_INDEX_SPECS
-        if spec.name == "idx_knowledge_objects_payload_trgm"
+        if spec.name == "idx_knowledge_objects_nb_payload_trgm"
     )
     # search.py's query source is a Python string literal, so its file bytes
     # carry the expression with escaped quotes (``\"C\"``); compare against
@@ -235,7 +245,7 @@ def test_gin_ddl_columns_match_search_py_payload_expression_verbatim():
     search_source = Path(search_module.__file__).read_text(encoding="utf-8")
     assert '"(payload::text) COLLATE \\"C\\" ILIKE %s' in search_source, (
         "search.py's payload ILIKE arm expression text changed — "
-        "idx_knowledge_objects_payload_trgm's ddl_columns must track it"
+        "idx_knowledge_objects_nb_payload_trgm's ddl_columns must track it"
     )
     assert '(payload::text) COLLATE "C"' in spec.ddl_columns
 
@@ -268,6 +278,43 @@ def test_no_eligibility_site_regresses_to_a_bound_param_btrim():
         assert "_NONBLANK_TEXT_SQL" in body, method_name
 
 
+def test_do_block_expected_values_reconcile_with_the_specs():
+    """迁移 0042 的先存索引校验 DO 块与 ``HOTPATH_INDEX_SPECS`` 是同一组语义
+    维度的两份手抄(迁移文件不能在 apply 时 import Python)——这里逐维对账:
+    DO 块 VALUES 里的 am/keys/opclasses/collations/predicate 必须恰好等于从
+    两条批 2 spec 推导出的规范化期望,任何一边单独改动都在此响亮失败。
+    (质量评审 P1 把 DO 块从「pg_get_indexdef 全文比对」改成语义维度比对——
+    全文比对会被 reloptions/TABLESPACE 这类存储子句误杀完好索引;live 测试
+    另有 fastupdate=off 的容忍用例与真目录的 accept/reject 路径。)"""
+    from app.repositories.postgres.hotpath_indexes import _normalized_expr
+
+    text = _migration_text()
+    pattern = re.compile(
+        r"\('(?P<name>idx_\w+)',\s*\n\s*'(?P<am>\w+)',\s*\n"
+        r"\s*ARRAY\[(?P<keys>[^\]]*)\],\s*\n"
+        r"\s*ARRAY\[(?P<opclasses>[^\]]*)\],\s*\n"
+        r"\s*ARRAY\[(?P<collations>[^\]]*)\],\s*\n"
+        r"\s*\$pred\$(?P<predicate>.*?)\$pred\$\)",
+        re.S,
+    )
+
+    def _items(raw: str) -> list[str]:
+        return [piece.strip()[1:-1] for piece in raw.split(",")]
+
+    parsed = {m.group("name"): m for m in pattern.finditer(text)}
+    assert set(parsed) == _BATCH2_NAMES, sorted(parsed)
+    by_name = {spec.name: spec for spec in HOTPATH_INDEX_SPECS}
+    for name in sorted(_BATCH2_NAMES):
+        spec, match = by_name[name], parsed[name]
+        assert match.group("am") == (spec.using or "btree"), name
+        assert _items(match.group("keys")) == [
+            _normalized_expr(column) for column in spec.columns
+        ], name
+        assert _items(match.group("opclasses")) == list(spec.opclasses), name
+        assert _items(match.group("collations")) == list(spec.collations), name
+        assert match.group("predicate") == _normalized_expr(spec.predicate_shape), name
+
+
 def test_same_named_btree_posing_as_the_gin_is_reported_unexpected():
     """codex #636 R1 P2 的钉:形态比对必须含访问方法/opclass——同名 btree(或非
     trgm opclass 的 GIN)即使 keys/predicate 碰巧一致,对 ILIKE 也零加速,三层
@@ -278,21 +325,39 @@ def test_same_named_btree_posing_as_the_gin_is_reported_unexpected():
     )
 
     spec = next(
-        s for s in HOTPATH_INDEX_SPECS if s.name == "idx_knowledge_objects_payload_trgm"
+        s for s in HOTPATH_INDEX_SPECS
+        if s.name == "idx_knowledge_objects_nb_payload_trgm"
     )
     good_row = {
         "keys": list(spec.columns),
         "predicate": spec.predicate_shape,
         "access_method": "gin",
-        "opclasses": ["public:gin_trgm_ops"],
-        "collations": ["pg_catalog:C"],
+        "opclasses": ["public:text_ops", "public:gin_trgm_ops"],
+        "collations": ["pg_catalog:C", "pg_catalog:C"],
     }
     assert _matches_shape(good_row, spec)
     assert not _matches_shape({**good_row, "access_method": "btree"}, spec)
-    assert not _matches_shape({**good_row, "opclasses": ["public:jsonb_ops"]}, spec)
+    assert not _matches_shape(
+        {**good_row, "opclasses": ["public:text_ops", "public:jsonb_ops"]}, spec
+    )
     # 质量评审 P1 的实证场景:手建时少写 COLLATE "C"——keys/predicate/am/opclass
-    # 全对,唯 collation 是列默认(空),planner 因 exprCollation 不匹配拒用。
-    assert not _matches_shape({**good_row, "collations": [""]}, spec)
+    # 全对,唯表达式键 collation 落回默认,planner 因 exprCollation 不匹配拒用。
+    assert not _matches_shape(
+        {**good_row, "collations": ["pg_catalog:C", "pg_catalog:default"]}, spec
+    )
+    # codex #636 R1 P1 的钉:少了 notebook_id 前置键的旧单表达式形(全局位图
+    # 跨 notebook 退化,docs/operations.md 已记录的教训)不许被认作就绪。
+    assert not _matches_shape(
+        {
+            **good_row,
+            "keys": ["(payload::text)"],
+            "opclasses": ["public:gin_trgm_ops"],
+            "collations": ["pg_catalog:C"],
+        },
+        spec,
+    )
+    # 同形但缺 partial 谓词(全表 GIN):也不许。
+    assert not _matches_shape({**good_row, "predicate": ""}, spec)
     # 批 1 的普通 btree 条目:期望 access_method 恒为 btree。
     plain = next(s for s in HOTPATH_INDEX_SPECS if s.using == "")
     plain_row = {

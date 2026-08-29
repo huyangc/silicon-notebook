@@ -12,10 +12,24 @@
 -- header comment: on a database with pre-existing production traffic, an
 -- operator runs scripts/build_hotpath_indexes.py --apply FIRST, online; on a
 -- fresh deploy this migration's two IF NOT EXISTS statements are sufficient by
--- themselves.
+-- themselves. Before creating anything, the DO block below validates any
+-- PRE-EXISTING same-named index (codex #636 R1 P2): a leftover INVALID
+-- catalog row from an interrupted CONCURRENTLY build, or an
+-- operator-hand-built index with the right name but the wrong access method /
+-- opclass / collation / expression, would otherwise make `IF NOT EXISTS`
+-- silently skip creation while this migration still records itself as
+-- applied -- the ledger would then claim an index that cannot serve its
+-- query. Both cases RAISE (fail the migration transaction, ledger not
+-- advanced) instead of auto-dropping: a non-CONCURRENT rebuild inside this
+-- transaction would take a long blocking lock on a large production table,
+-- so the operator resolves the residue online (DROP INDEX CONCURRENTLY +
+-- rerun the builder script) and only then migrates.
 --
--- Group 1: idx_knowledge_objects_payload_trgm (GIN, trigram)
---   ON knowledge_objects USING gin (((payload::text) COLLATE "C") public.gin_trgm_ops)
+-- Group 1: idx_knowledge_objects_nb_payload_trgm (composite partial GIN, trigram)
+--   ON knowledge_objects USING gin (
+--     notebook_id public.text_ops,
+--     ((payload::text) COLLATE "C") public.gin_trgm_ops
+--   ) WHERE status != 'deprecated'
 --   Serves search.py:notebook_knowledge_rows's payload-JSON ILIKE arm
 --   (`(payload::text) COLLATE "C" ILIKE %s`, search.py line ~846) -- the
 --   collection page's "search knowledge" leg. Production diag:
@@ -23,22 +37,48 @@
 --   supporting index, forcing the planner to walk the WHOLE
 --   `uq_knowledge_objects_ordinal` ordinal sequence rather than narrow first.
 --   A one-time 200k-row EXPLAIN (two disposable databases, both since dropped)
---   showed the rare-term case drop to a BitmapOr of this new index with the
---   pre-existing idx_knowledge_objects_name_trgm (0006_search_gin.sql) at
---   3.6ms; the common-term case is UNCHANGED (planner still prefers the cheap
+--   showed the rare-term case drop to 3.6ms -- measured on the PRE-REVIEW
+--   single-expression global GIN shape; the composite shape below is a strict
+--   narrowing of that index's bitmap (same trigram keys, intersected with the
+--   notebook equality), so the milliseconds-scale conclusion carries over
+--   even though the exact figure was not re-benchmarked (the live tests
+--   assert the composite plan shape instead). The common-term case is
+--   UNCHANGED (planner still prefers the cheap
 --   ordinal walk at ~0.02ms when the ILIKE pattern is not selective) -- this
 --   index only removes the rare-term catastrophic branch, and the query text
 --   itself is untouched (the expression here is byte-identical to search.py's
 --   own `(payload::text) COLLATE "C"`, so the planner can match it without any
 --   application-side change).
+--   WHY COMPOSITE + PARTIAL, not a bare single-expression GIN (codex #636 R1
+--   P1): docs/operations.md's "PostgreSQL notebook-aware lexical indexes"
+--   section documents this exact cross-notebook scaling failure for the
+--   legacy single-expression trigram indexes -- on a large shared table, a
+--   term that is selective globally but concentrated in OTHER notebooks
+--   still builds a global bitmap and discards almost every row only after
+--   heap recheck, reproducing the very timeout this index exists to fix.
+--   The fix is the same shape retrieval_indexes.py already ships for
+--   idx_knowledge_objects_nb_name_trgm: prepend `notebook_id` via
+--   `public.text_ops` (btree_gin, installed below by a guarded DO block --
+--   see its own comment; a DBA-preinstalled public.btree_gin satisfies it
+--   like 0002's pg_trgm) so the
+--   mandatory `notebook_id=%s` equality intersects INSIDE index access, and
+--   scope the index with `WHERE status != 'deprecated'` -- safe under
+--   generic plans too, because notebook_knowledge_rows spells
+--   `status!='deprecated'` as a literal in its SQL text (a bound parameter
+--   there could not prove the partial-predicate implication; see Group 2's
+--   generic-plan discussion for the full mechanics). The `nb_` name prefix
+--   follows the same notebook-scoped-composite convention as
+--   idx_knowledge_objects_nb_name_trgm / idx_chunks_nb_text_trgm.
 --   Write-amplification registered up front, not discovered later: a GIN
 --   trigram index over a whole jsonb payload cast to text runs roughly 1.5x
 --   the base table's own storage footprint (measured 60MB index / 40MB table
---   at 200k rows in the disposable benchmark database) -- at the production
---   scale of ~9.65M knowledge objects this is a double-digit-GB structure, and
---   every knowledge_objects INSERT/UPDATE now pays one more GIN maintenance
+--   at 200k rows in the disposable benchmark database; the notebook_id
+--   btree_gin key and the partial predicate shave a little off that, they do
+--   not change the order of magnitude) -- at the production scale of ~9.65M
+--   knowledge objects this is a double-digit-GB structure, and every
+--   knowledge_objects INSERT/UPDATE now pays one more GIN maintenance
 --   write. Rollback if this proves not worth its footprint:
---   `DROP INDEX CONCURRENTLY idx_knowledge_objects_payload_trgm;` -- purely
+--   `DROP INDEX CONCURRENTLY idx_knowledge_objects_nb_payload_trgm;` -- purely
 --   additive, no other code path depends on this index existing.
 --
 -- Group 2: idx_source_elements_nonblank (partial btree)
@@ -123,8 +163,137 @@
 -- block comment; the sqlite file itself is untouched). SQLITE_SCHEMA_VERSION is
 -- therefore untouched by this migration; only postgres_version advances.
 
-CREATE INDEX IF NOT EXISTS idx_knowledge_objects_payload_trgm
-  ON knowledge_objects USING gin (((payload::text) COLLATE "C") public.gin_trgm_ops);
+-- btree_gin supplies the gin-AM `public.text_ops` opclass the composite key
+-- needs. Unlike 0002's bare pg_trgm line, this install is wrapped so BOTH
+-- failure modes surface as an operator-actionable message instead of a raw
+-- permission/packaging error or (worse) a later cryptic unresolvable-opclass
+-- failure: the extension may be preinstalled by a DBA exactly like pg_trgm
+-- (docs/deployment-and-configuration.md lists both as prerequisites), and a
+-- migration-role CREATE needs CREATE on the database even for a trusted
+-- extension.
+DO $$
+DECLARE
+  ext_schema text;
+BEGIN
+  SELECT n.nspname INTO ext_schema
+  FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'btree_gin';
+  IF ext_schema IS NULL THEN
+    BEGIN
+      CREATE EXTENSION btree_gin WITH SCHEMA public;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'hotpath batch 2: installing btree_gin failed (%); preinstall it with a privileged role -- CREATE EXTENSION btree_gin WITH SCHEMA public; -- then migrate again',
+        SQLERRM;
+    END;
+  ELSIF ext_schema <> 'public' THEN
+    RAISE EXCEPTION 'hotpath batch 2: btree_gin is installed in schema % but must live in public (the composite index references its opclass as public.text_ops); reinstall it in public, then migrate again',
+      ext_schema;
+  END IF;
+END
+$$;
+
+-- Pre-existing same-named index validation (codex #636 R1 P2) -- see the
+-- header comment. The comparison deliberately reads the SAME semantic
+-- catalog dimensions hotpath_indexes.py's _matches_shape does -- access
+-- method, per-key pg_get_indexdef(...,n,true) echo, opclasses, collations,
+-- partial predicate via pg_get_expr, uniqueness, key count -- normalized the
+-- way _normalized_expr does (lowercase, collapse whitespace, strip ::text),
+-- NOT the full pg_get_indexdef() statement text: the full text also renders
+-- storage-only clauses (reloptions like `WITH (fastupdate=off)` -- the
+-- standard GIN write-amplification mitigation an operator may legitimately
+-- apply to exactly this index -- or a TABLESPACE), which would false-RAISE
+-- on a perfectly usable index while inspect_hotpath_indexes simultaneously
+-- reports it ready. Keeping both validators on one set of dimensions means
+-- they can never disagree about the same catalog row.
+-- backend/tests/test_hotpath_indexes_batch2.py re-derives every expected
+-- value below from HOTPATH_INDEX_SPECS and asserts it appears verbatim in
+-- this file, and the live tests cover the accept path (a script-built index,
+-- with and without reloptions), the wrong-shape reject, and the
+-- INVALID-residue reject.
+DO $$
+DECLARE
+  rec record;
+  existing record;
+  actual_keys text[];
+  actual_opclasses text[];
+  actual_collations text[];
+  actual_predicate text;
+BEGIN
+  FOR rec IN
+    SELECT * FROM (VALUES
+      ('idx_knowledge_objects_nb_payload_trgm',
+       'gin',
+       ARRAY['notebook_id', '(payload)'],
+       ARRAY['public:text_ops', 'public:gin_trgm_ops'],
+       ARRAY['pg_catalog:C', 'pg_catalog:C'],
+       $pred$status <> 'deprecated'$pred$),
+      ('idx_source_elements_nonblank',
+       'btree',
+       ARRAY['source_id', 'id'],
+       ARRAY['pg_catalog:text_ops', 'pg_catalog:text_ops'],
+       ARRAY['pg_catalog:C', 'pg_catalog:C'],
+       $pred$btrim(text, (((((((((((((((((((((((((((chr(9) || chr(10)) || chr(11)) || chr(12)) || chr(13)) || chr(28)) || chr(29)) || chr(30)) || chr(31)) || chr(32)) || chr(133)) || chr(160)) || chr(5760)) || chr(8192)) || chr(8193)) || chr(8194)) || chr(8195)) || chr(8196)) || chr(8197)) || chr(8198)) || chr(8199)) || chr(8200)) || chr(8201)) || chr(8202)) || chr(8232)) || chr(8233)) || chr(8239)) || chr(8287)) || chr(12288)) <> ''$pred$)
+    ) AS v(index_name, expected_am, expected_keys, expected_opclasses,
+           expected_collations, expected_predicate)
+  LOOP
+    SELECT i.indexrelid, i.indisvalid, i.indisready, i.indisunique,
+           i.indnkeyatts, i.indnatts,
+           i.indclass::oid[] AS opclass_oids,
+           i.indcollation::oid[] AS collation_oids,
+           am.amname,
+           pg_get_expr(i.indpred, i.indrelid, true) AS predicate
+    INTO existing
+    FROM pg_index i
+    JOIN pg_class idx ON idx.oid = i.indexrelid
+    JOIN pg_am am ON am.oid = idx.relam
+    JOIN pg_namespace ns ON ns.oid = idx.relnamespace
+    WHERE ns.nspname = current_schema() AND idx.relname = rec.index_name;
+    IF NOT FOUND THEN
+      CONTINUE;
+    END IF;
+    IF NOT existing.indisvalid OR NOT existing.indisready THEN
+      RAISE EXCEPTION 'hotpath batch 2: pre-existing index % is INVALID (an interrupted CONCURRENTLY build left it unusable); run DROP INDEX CONCURRENTLY %, rerun scripts/build_hotpath_indexes.py --apply, then migrate again',
+        rec.index_name, rec.index_name;
+    END IF;
+    actual_keys := ARRAY(
+      SELECT btrim(regexp_replace(replace(
+               lower(pg_get_indexdef(existing.indexrelid, n, true)),
+               '::text', ''), '\s+', ' ', 'g'))
+      FROM generate_series(1, existing.indnkeyatts) AS n ORDER BY n);
+    actual_opclasses := ARRAY(
+      SELECT opc_ns.nspname || ':' || opc.opcname
+      FROM unnest(existing.opclass_oids) WITH ORDINALITY op(oid, ord)
+      JOIN pg_opclass opc ON opc.oid = op.oid
+      JOIN pg_namespace opc_ns ON opc_ns.oid = opc.opcnamespace
+      ORDER BY op.ord);
+    actual_collations := ARRAY(
+      SELECT COALESCE(coll_ns.nspname || ':' || coll.collname, '')
+      FROM unnest(existing.collation_oids) WITH ORDINALITY co(oid, ord)
+      LEFT JOIN pg_collation coll ON coll.oid = co.oid
+      LEFT JOIN pg_namespace coll_ns ON coll_ns.oid = coll.collnamespace
+      ORDER BY co.ord);
+    actual_predicate := btrim(regexp_replace(replace(
+      lower(COALESCE(existing.predicate, '')), '::text', ''), '\s+', ' ', 'g'));
+    IF existing.amname <> rec.expected_am
+       OR existing.indisunique
+       OR existing.indnkeyatts <> array_length(rec.expected_keys, 1)
+       OR existing.indnatts <> array_length(rec.expected_keys, 1)
+       OR actual_keys <> rec.expected_keys
+       OR actual_opclasses <> rec.expected_opclasses
+       OR actual_collations <> rec.expected_collations
+       OR actual_predicate <> rec.expected_predicate THEN
+      RAISE EXCEPTION 'hotpath batch 2: pre-existing index % does not match the expected definition; resolve the name collision manually, then migrate again',
+        rec.index_name;
+    END IF;
+  END LOOP;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_payload_trgm
+  ON knowledge_objects USING gin (
+    notebook_id public.text_ops,
+    ((payload::text) COLLATE "C") public.gin_trgm_ops
+  ) WHERE status != 'deprecated';
 
 CREATE INDEX IF NOT EXISTS idx_source_elements_nonblank
   ON source_elements(source_id, id)

@@ -123,7 +123,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 ### `build_hotpath_indexes.py` —— 在线建立热路径修复索引（批 1 + 批 2，共十条）
 
 默认只读检查热路径修复的全部十条索引：批 1 六组共八条（`concept_clusters` 两条、三条反向 FK 覆盖、
-`knowledge_relations` 一条复合、`chunks(source_id, ordinal)`、`sources` 一条 partial），加批 2（迁移 0042）两条——`idx_knowledge_objects_payload_trgm`（payload 全文 GIN，服务集合页搜索 knowledge 腿，稀有词从 5.9s 降到毫秒级；生产 9.65M 行上体积按合成语料基准外推约为表段 1.5×（真实语料可能更大）、构建数分钟级，属登记过的写放大债，可 `DROP INDEX CONCURRENTLY` 无损回退）与 `idx_source_elements_nonblank`（体检 H5 的非空元素 partial）——是否
+`knowledge_relations` 一条复合、`chunks(source_id, ordinal)`、`sources` 一条 partial），加批 2（迁移 0042）两条——`idx_knowledge_objects_nb_payload_trgm`（notebook 域复合 partial payload 全文 GIN：btree_gin 令 `notebook_id` 前置、`WHERE status != 'deprecated'`，与 `idx_knowledge_objects_nb_name_trgm` 同形，词集中在别的 notebook 时不再建全局位图；服务集合页搜索 knowledge 腿，稀有词从 5.9s 降到毫秒级（5.9s→3.6ms 的对照基准测于评审前的单表达式全局形，复合形是它的严格收窄、量级结论沿用，精确数字未重测）；生产 9.65M 行上体积按合成语料基准外推约为表段 1.5×（真实语料可能更大）、构建数分钟级，属登记过的写放大债，可 `DROP INDEX CONCURRENTLY` 无损回退；`--apply` 会按需安装 btree_gin 扩展）与 `idx_source_elements_nonblank`（体检 H5 的非空元素 partial）——是否
 就绪；`--apply` 才会用 `CREATE INDEX CONCURRENTLY`（逐条独立语句，`autocommit=True`，不占
 事务）逐条建立。数据库 URL 从 `DATABASE_URL`（或 `--database-url-env` 指定的环境变量）读取
 且不打印：
