@@ -44,6 +44,9 @@ or architecture source of truth.
 
 - Make the smallest coherent change that fully satisfies the request. Do not modify unrelated
   files, discard user changes, or use destructive Git/filesystem commands to get a clean tree.
+- Run GitHub-facing operations (for example, pushing branches and creating, inspecting, or
+  merging pull requests and checking their CI) outside the sandbox; keep all other commands
+  and file edits inside the sandbox.
 - Do not infer authority for deployment, external messages, PR creation, merging, or other
   remote mutations from a local code-edit request.
 - Keep secrets, raw tokens, credentials, private paths, source content, prompts, evidence, and
