@@ -62,6 +62,54 @@
 }
 .ext-trust-deployment { border-color: var(--blue); background: var(--panel); color: var(--blue); }
 
+/* 运行状态列。builtin/未知信任档位是静态文字;deployment 行是徽标 + 启停按钮 +
+   紧邻的审计/错误微文案 —— 忙碌态、成功态、失败态全部落在这个单元格里,绝不
+   发页面顶部横幅。 */
+.ext-runtime-static { color: var(--muted); font-size: 13px; white-space: nowrap; }
+
+.ext-runtime-cell { display: flex; flex-direction: column; gap: 4px; min-width: 148px; max-width: 240px; }
+.ext-runtime-controls { display: flex; align-items: center; gap: 8px; }
+
+.ext-runtime-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ext-runtime-badge-disabled { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning); }
+
+.ext-runtime-btn {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ext-runtime-btn:hover:not(:disabled) { background: var(--soft); }
+.ext-runtime-btn:disabled { opacity: 0.6; cursor: default; }
+.ext-runtime-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* 不设 nowrap:updated_by 是 "user-<32 hex>" 共 37 字符的真实用户 id,连着一段
+   本地化时间会比这一列宽得多,让它换行 + 允许在任意字符间断行,不把整张表撑到
+   要横向滚动才能看别的列。 */
+.ext-runtime-audit { margin: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+/* 用 --danger 而不是 --warning:「已停用」徽标本来就占着 --warning 那个橙色,
+   同一个单元格里再来一段橙字会把「状态」和「这次操作失败了」混成一种颜色,
+   分不清哪个是哪个。先例:globals.css `.extension-alert--error` 同样用
+   --danger 表达「这是一次失败」。 */
+.ext-runtime-error { margin: 0; color: var(--danger); font-size: 11px; }
+
+/* 行视觉弱化:已停用的部署插件那一整行褪色,与「已启用」的行区分开——`color`
+   是可继承属性,`tr` 上设一次,`.ext-name` 等子元素没有自己的 color 覆盖,自然
+   跟着继承,不必再逐个子选择器重复同一个值。 */
+.ext-table tr.ext-row-runtime-disabled { color: var(--muted); }
+
 .ext-subrow td { background: var(--soft); padding: 6px 10px 12px 38px; }
 .ext-detail { display: grid; gap: 14px; }
 .ext-detail-title { margin: 0 0 6px; font-size: 13px; font-weight: 600; }

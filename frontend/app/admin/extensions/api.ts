@@ -43,6 +43,16 @@ export type LoadedExtension = Readonly<{
   trust: ExtensionTrust;
   contributions: readonly LoadedContribution[];
   uiContributions: readonly LoadedUiContribution[];
+  // 运行时开关现状——另一层,来自 `extension_runtime_toggles` 表,不是启动冻结的
+  // 装载拓扑。builtin 恒为 null(只读,不可开关)。deployment 行认不出/缺失时也
+  // 退回 null,渲染侧按「无法确认→当启用处理」兜底(与后端「无行=启用」同精神),
+  // 不把一个解析失败误判成「已停用」。
+  runtimeEnabled: boolean | null;
+  /** 上次改动这个开关的管理员 user id,原样显示,不翻译。 */
+  runtimeUpdatedBy: string | null;
+  /** 上次改动时间,ISO 字符串。SQLite/PG 两种形状都交给 `new Date()` 解析,
+   *  这里只负责透传,不做字符串切片。 */
+  runtimeUpdatedAt: string | null;
 }>;
 
 export type LoadedExtensionTopology = Readonly<{
@@ -70,6 +80,14 @@ function asList(value: unknown): readonly unknown[] {
 // 渲染侧走中性兜底词,而不是把后端的原始串直接上屏。
 function asTrust(value: unknown): ExtensionTrust {
   return value === "builtin" || value === "deployment" ? value : "unknown";
+}
+
+function asOptionalBool(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function asOptionalText(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 function parseContribution(value: unknown): LoadedContribution | null {
@@ -101,6 +119,9 @@ function parseExtension(value: unknown): LoadedExtension | null {
     uiContributions: asList(row?.ui_contributions)
       .map(parseUiContribution)
       .filter((item): item is LoadedUiContribution => item !== null),
+    runtimeEnabled: asOptionalBool(row?.runtime_enabled),
+    runtimeUpdatedBy: asOptionalText(row?.runtime_updated_by),
+    runtimeUpdatedAt: asOptionalText(row?.runtime_updated_at),
   };
 }
 
@@ -121,4 +142,41 @@ export async function fetchLoadedExtensions(): Promise<LoadedExtensionTopology> 
   return parseLoadedExtensions(
     await requestJson<unknown>("/admin/extensions", { tag: "admin" }),
   );
+}
+
+// --- PATCH /admin/extensions/{plugin_id}:运行时开关写入 --------------------
+
+export type ExtensionRuntimeUpdate = Readonly<{
+  pluginId: string;
+  runtimeEnabled: boolean;
+  runtimeUpdatedBy: string;
+  runtimeUpdatedAt: string;
+}>;
+
+/** 写响应的形状由后端 `AdminExtensionRuntimeResult` 冻结(四个字段全部必填),
+ *  但仍按本文件一贯的防御性风格解析:一次写请求成功与否由 HTTP 状态码判断
+ *  (失败已经在 `requestJson` 里抛成人话错误),这里只负责把 200 的正文兜住,
+ *  不因为响应体形状意外就让调用方拿到 `undefined.something`。 */
+function parseExtensionRuntimeUpdate(value: unknown, pluginId: string, enabled: boolean): ExtensionRuntimeUpdate {
+  const row = asRecord(value);
+  return {
+    pluginId: asText(row?.plugin_id) || pluginId,
+    runtimeEnabled: typeof row?.runtime_enabled === "boolean" ? row.runtime_enabled : enabled,
+    runtimeUpdatedBy: asText(row?.runtime_updated_by),
+    runtimeUpdatedAt: asText(row?.runtime_updated_at),
+  };
+}
+
+/** 开/关一个已装载的部署插件。非 admin/未知/builtin id 由后端 403/404,经
+ *  `requestJson` 统一抛成人话错误——调用方(页面)按行捕获,不发全局横幅。 */
+export async function setExtensionRuntimeEnabled(
+  pluginId: string,
+  enabled: boolean,
+): Promise<ExtensionRuntimeUpdate> {
+  const body = await requestJson<unknown>(`/admin/extensions/${encodeURIComponent(pluginId)}`, {
+    tag: "admin",
+    method: "PATCH",
+    body: JSON.stringify({ enabled }),
+  });
+  return parseExtensionRuntimeUpdate(body, pluginId, enabled);
 }
