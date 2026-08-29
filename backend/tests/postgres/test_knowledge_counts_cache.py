@@ -157,6 +157,86 @@ def test_pending_query_preserves_latest_run_and_visibility_semantics(postgres_da
         assert kcc._pending_query(connection, "nb-pending", visible_only=True) == 4
 
 
+def _insert_relation(
+    connection,
+    rel_id: str,
+    *,
+    notebook_id: str,
+    review_status: str = "pending",
+    created_at: datetime,
+) -> None:
+    connection.execute(
+        "INSERT INTO knowledge_relations"
+        "(id,notebook_id,source_object_id,target_object_id,edge_type,"
+        "review_status,created_at) "
+        "VALUES (%s,%s,%s,%s,'relates_to',%s,%s)",
+        (rel_id, notebook_id, f"{rel_id}-src", f"{rel_id}-tgt", review_status, created_at),
+    )
+
+
+def test_review_queue_total_is_seq_gated_against_real_postgres(postgres_database):
+    """R3 T-A3 移植主证:``review_queue_total`` 在真 PostgreSQL 上算对
+    (``review_status != 'rejected'``),并且真的按 ``kg_mutation_seq`` memo——直插
+    一条新边不 bump seq 时读到旧值,``invalidate``(安全阀)或 seq bump(正常路径)
+    都能让下一次读取反映新值。"""
+    assert PostgresMigrator(postgres_database).migrate() == 42
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    notebook_id = "nb-review-queue"
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,'review-queue',%s,%s)",
+            (notebook_id, now, now),
+        )
+        connection.execute(
+            "INSERT INTO unified_kg_state(notebook_id,kg_mutation_seq,updated_at) "
+            "VALUES (%s,1,%s)",
+            (notebook_id, now),
+        )
+        _insert_relation(connection, "rel-pending", notebook_id=notebook_id, created_at=now)
+        _insert_relation(
+            connection, "rel-verified", notebook_id=notebook_id,
+            review_status="verified", created_at=now,
+        )
+        _insert_relation(
+            connection, "rel-rejected", notebook_id=notebook_id,
+            review_status="rejected", created_at=now,
+        )
+
+    with postgres_database.connect() as connection:
+        # 2 个非 rejected(pending + verified),1 个 rejected 被排除在外。
+        assert kcc.review_queue_total(connection, notebook_id) == 2
+
+    # 直插一条新的非 rejected 边,不 bump kg_mutation_seq → memo 命中旧值。
+    with postgres_database.write() as connection:
+        _insert_relation(
+            connection, "rel-pending-2", notebook_id=notebook_id, created_at=now,
+        )
+
+    with postgres_database.connect() as connection:
+        assert kcc.review_queue_total(connection, notebook_id) == 2  # 仍是旧值
+
+    # invalidate 是安全阀:不依赖 seq bump 也能让下一次读取反映新值。
+    kcc.invalidate(notebook_id)
+    with postgres_database.connect() as connection:
+        assert kcc.review_queue_total(connection, notebook_id) == 3
+
+    # 正常路径:bump kg_mutation_seq(审核动作落库)后自动重算,不需要显式 invalidate。
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE knowledge_relations SET review_status='rejected' WHERE id=%s",
+            ("rel-verified",),
+        )
+        connection.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq=2 WHERE notebook_id=%s",
+            (notebook_id,),
+        )
+
+    with postgres_database.connect() as connection:
+        assert kcc.review_queue_total(connection, notebook_id) == 2
+
+
 def test_type_counts_and_chunk_count_are_seq_gated_against_real_postgres(
     postgres_database,
 ):

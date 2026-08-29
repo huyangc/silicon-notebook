@@ -16,6 +16,7 @@ from app.models.identity import UserProfile
 from app.models.knowledge import (
     DuplicateGroup,
     EdgeReviewItem,
+    EdgeReviewQueueResponse,
     EdgeReviewRequest,
     KnowledgeGraph,
     KnowledgeTypeCount,
@@ -249,13 +250,16 @@ def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
 # Edge trust & curation (Track E)
 # ---------------------------------------------------------------------------
 
-@router.get("/notebooks/{notebook_id}/edge-review-queue", response_model=List[EdgeReviewItem], dependencies=[Depends(require_notebook_read)])
-def edge_review_queue(notebook_id: str, limit: int = 100) -> List[EdgeReviewItem]:
-    """Return edges ranked by review priority (high centrality × low trust) desc.
+@router.get("/notebooks/{notebook_id}/edge-review-queue", response_model=EdgeReviewQueueResponse, dependencies=[Depends(require_notebook_read)])
+def edge_review_queue(notebook_id: str, limit: int = 100) -> EdgeReviewQueueResponse:
+    """Return edges ranked by review priority (high centrality × low trust) desc,
+    plus the queue's true total size (independent of `limit`; R3 T-A3).
     Excludes already-rejected edges.
     """
     try:
-        return repository().review_queue(notebook_id, limit=limit)
+        items = repository().review_queue(notebook_id, limit=limit)
+        total = repository().review_queue_total(notebook_id)
+        return EdgeReviewQueueResponse(items=items, total=total)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

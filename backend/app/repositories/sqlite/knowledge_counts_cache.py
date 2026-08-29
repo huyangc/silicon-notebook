@@ -62,6 +62,7 @@ _MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict(
 _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+_REVIEW_QUEUE_TOTAL: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _LOCK = threading.Lock()
 _INVALIDATION_EPOCH = 0
 _MAX_NOTEBOOKS = 512  # bounded LRU; counts dict per notebook is tiny (types×statuses)
@@ -286,6 +287,55 @@ def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
     return count
 
 
+def review_queue_total(db: sqlite3.Connection, notebook_id: str) -> int:
+    """Total size of the edge trust review queue (``review_status != 'rejected'``
+    edges in ``knowledge_relations``), memoized on ``(notebook_id,
+    kg_mutation_seq)``. Mirrors ``postgres/knowledge_counts_cache.review_queue_total``
+    (R3 T-A3) — backs the ``total`` field of ``GET
+    /notebooks/{id}/edge-review-queue``, independent of the ``limit``-bounded
+    queue itself.
+
+    Follows the epoch-guarded write-back shape of ``pending_source_count`` /
+    ``visible_pending_source_count`` above (not the unguarded
+    ``type_status_counts`` / ``chunk_count`` shape): this query is the same
+    cost class as pending-source (a plain sequential COUNT, no correlated
+    subqueries but still non-trivial on a large notebook), so it gets the same
+    protection against writing back a pre-invalidation snapshot.
+
+    Deliberately NOT part of ``warm_all`` — see the PostgreSQL mirror's
+    docstring for the cold-cost rationale (~1.1s on the largest production
+    library; lazy beats a startup warm most notebooks never need).
+
+    Known gap (registered, not fixed here — see the PostgreSQL mirror's
+    docstring for the full writeup): ``RepositoryFacade.add_relations``, a
+    test-only path, inserts relations without bumping ``kg_mutation_seq``, so
+    a test/fixture that warms this memo and then calls ``add_relations`` can
+    read a stale total until an unrelated seq-bumping write lands. R3 T-A2 is
+    expected to add an explicit ``invalidate()`` call there."""
+    seq = _mutation_seq(db, notebook_id)
+    with _LOCK:
+        hit = _REVIEW_QUEUE_TOTAL.get(notebook_id)
+        if hit is not None and hit[0] == seq:
+            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
+            return hit[1]
+        invalidation_epoch = _INVALIDATION_EPOCH
+
+    row = db.execute(
+        "SELECT COUNT(*) c FROM knowledge_relations "
+        "WHERE notebook_id=? AND review_status != 'rejected'",
+        (notebook_id,),
+    ).fetchone()
+    count = int(row["c"])
+
+    with _LOCK:
+        if invalidation_epoch == _INVALIDATION_EPOCH:
+            _REVIEW_QUEUE_TOTAL[notebook_id] = (seq, count)
+            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
+            while len(_REVIEW_QUEUE_TOTAL) > _MAX_NOTEBOOKS:
+                _REVIEW_QUEUE_TOTAL.popitem(last=False)
+    return count
+
+
 def warm_all(db: sqlite3.Connection, progress=None) -> int:
     """Prime all per-notebook open-path memos (``type_status_counts`` /
     both pending-source views / ``chunk_count``) for every live notebook, so the
@@ -339,8 +389,10 @@ def invalidate(notebook_id: "Optional[str]" = None) -> None:
             _PENDING.clear()
             _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
+            _REVIEW_QUEUE_TOTAL.clear()
         else:
             _MEMO.pop(notebook_id, None)
             _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)
+            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)

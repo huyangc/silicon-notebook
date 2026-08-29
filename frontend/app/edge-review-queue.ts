@@ -27,10 +27,17 @@ export type ReviewRelationResult = {
   review_status: EdgeReviewStatus;
 };
 
+// R3 T-A3: the endpoint returns the limit-bounded, priority-ranked page plus
+// the queue's true total (a seq-gated COUNT, independent of `limit`).
+export type EdgeReviewQueueResponse = {
+  items: EdgeReviewItem[];
+  total: number;
+};
+
 export const fetchEdgeReviewQueue = (
   notebookId: string,
   limit?: number
-): Promise<EdgeReviewItem[]> =>
+): Promise<EdgeReviewQueueResponse> =>
   requestJson(
     `/notebooks/${notebookId}/edge-review-queue${limit != null ? `?limit=${limit}` : ""}`,
     { tag: "edge-review-queue" },

@@ -298,13 +298,20 @@ def test_api_edge_review_queue_returns_items(client, repo):
     resp = client.get(f"/api/notebooks/{nb_id}/edge-review-queue")
     assert resp.status_code == 200
     body = resp.json()
-    assert isinstance(body, list) and body
-    # response_model=EdgeReviewItem serialization keeps the curation fields
+    # response_model=EdgeReviewQueueResponse: {"items": [...], "total": n} (R3 T-A3),
+    # not a bare list.
+    assert isinstance(body, dict) and {"items", "total"} <= set(body)
+    items = body["items"]
+    assert isinstance(items, list) and items
+    # response_model item shape keeps the curation fields
     assert {"rel_id", "trust_score", "edge_centrality", "review_priority",
-            "review_status"} <= set(body[0])
+            "review_status"} <= set(items[0])
     # Highest-risk first (priority desc)
-    priorities = [i["review_priority"] for i in body]
+    priorities = [i["review_priority"] for i in items]
     assert priorities == sorted(priorities, reverse=True)
+    # total is the true queue size, independent of any `limit` truncation —
+    # here the unlimited seed graph is small enough that it equals len(items).
+    assert body["total"] == len(items)
 
 
 def test_api_edge_review_queue_missing_notebook_404(client):
@@ -314,6 +321,7 @@ def test_api_edge_review_queue_missing_notebook_404(client):
 
 def test_api_review_relation_round_trip(client, repo):
     nb_id = _seed_graph(repo)
+    before = client.get(f"/api/notebooks/{nb_id}/edge-review-queue").json()
     rel_id = repo.review_queue(nb_id)[0]["rel_id"]
     resp = client.post(
         f"/api/notebooks/{nb_id}/relations/{rel_id}/review",
@@ -322,7 +330,9 @@ def test_api_review_relation_round_trip(client, repo):
     assert resp.json() == {"rel_id": rel_id, "review_status": "rejected"}
     # Rejected edge drops out of the queue surfaced by the API
     after = client.get(f"/api/notebooks/{nb_id}/edge-review-queue").json()
-    assert all(i["rel_id"] != rel_id for i in after)
+    assert all(i["rel_id"] != rel_id for i in after["items"])
+    # ...and the true total drops by exactly one rejected edge (not just the page).
+    assert after["total"] == before["total"] - 1
 
 
 def test_api_review_relation_bad_status_400(client, repo):

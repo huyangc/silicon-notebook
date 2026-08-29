@@ -353,6 +353,13 @@ class QueryStore:
         return knowledge_counts_cache.visible_pending_source_count(db, notebook_id)
 
     @staticmethod
+    def review_queue_total(db: Any, notebook_id: str) -> int:
+        # seq-gated 进程缓存(kg_mutation_seq),独立于 review_queue 的 limit 截断——
+        # 见 cache 模块 review_queue_total 的完整代价说明(R3 T-A3)。
+        from app.repositories.postgres import knowledge_counts_cache
+        return knowledge_counts_cache.review_queue_total(db, notebook_id)
+
+    @staticmethod
     def notebook_source_ids_among(db: Any, notebook_id: str, source_ids) -> set:
         """给定 source id 里属于本 notebook 的那一批——sqlite ``notebook_source_ids_among``
         的镜像(判据逐字一致:主键 id 命中 + ``notebook_id`` 等值,后者同样在调用侧比较,

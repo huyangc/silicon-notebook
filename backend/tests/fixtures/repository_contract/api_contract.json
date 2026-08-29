@@ -3350,6 +3350,28 @@
           "title": "EdgeReviewItem",
           "type": "object"
         },
+        "EdgeReviewQueueResponse": {
+          "description": "Response for GET /notebooks/{id}/edge-review-queue: the limit-bounded,\npriority-ranked page plus the queue's true total (a seq-gated COUNT,\nindependent of `limit`) so the UI can show \"共 N 条\" instead of just the\npage it was handed (R3 T-A3).",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/EdgeReviewItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "total": {
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total"
+          ],
+          "title": "EdgeReviewQueueResponse",
+          "type": "object"
+        },
         "EdgeReviewRequest": {
           "description": "Payload for POST /relations/{rel_id}/review.",
           "properties": {
@@ -16652,7 +16674,7 @@
       },
       "/api/notebooks/{notebook_id}/edge-review-queue": {
         "get": {
-          "description": "Return edges ranked by review priority (high centrality × low trust) desc.\nExcludes already-rejected edges.",
+          "description": "Return edges ranked by review priority (high centrality × low trust) desc,\nplus the queue's true total size (independent of `limit`; R3 T-A3).\nExcludes already-rejected edges.",
           "operationId": "edge_review_queue_api_notebooks__notebook_id__edge_review_queue_get",
           "parameters": [
             {
@@ -16680,11 +16702,7 @@
               "content": {
                 "application/json": {
                   "schema": {
-                    "items": {
-                      "$ref": "#/components/schemas/EdgeReviewItem"
-                    },
-                    "title": "Response Edge Review Queue Api Notebooks  Notebook Id  Edge Review Queue Get",
-                    "type": "array"
+                    "$ref": "#/components/schemas/EdgeReviewQueueResponse"
                   }
                 }
               },

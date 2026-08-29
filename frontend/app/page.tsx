@@ -1067,6 +1067,9 @@ export default function Home() {
   // 挂了 >1 个公共知识库时,点「提交晋升」先记下待定的知识对象 id,弹选择器要求选一个。
   const [pendingPromotionObjectId, setPendingPromotionObjectId] = useState<string | null>(null);
   const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
+  // R3 T-A3: the endpoint's true queue size, independent of the `limit`-bounded
+  // `edgeQueue` page above — shown in the modal header as "共 N 条".
+  const [edgeQueueTotal, setEdgeQueueTotal] = useState<number | null>(null);
   const [edgeBusy, setEdgeBusy] = useState(false);
   const edgeOperationRef = useRef<object | null>(null);
   // 分享(owner 侧):shareModal 存**当前**分享状态并驱动分享弹窗。它现在由
@@ -4600,8 +4603,11 @@ export default function Home() {
     const modalLease = rootModals.issue("edge-review", rootModals.captureWorkspaceOwner());
     if (!modalLease || modalLease.owner.kind !== "workspace" || modalLease.owner.notebookId !== notebookId) return;
     try {
-      const queue = await fetchEdgeReviewQueue(notebookId);
-      if (rootModals.publish(modalLease)) setEdgeQueue(queue);
+      const { items, total } = await fetchEdgeReviewQueue(notebookId);
+      if (rootModals.publish(modalLease)) {
+        setEdgeQueue(items);
+        setEdgeQueueTotal(total);
+      }
     } catch (error) {
       if (rootModals.leaseIsCurrent(modalLease)) throw error;
     }
@@ -4617,9 +4623,10 @@ export default function Home() {
       await reviewRelation(modalLease.owner.notebookId, relId, status);
       if (!rootModals.owns(modalLease)) return;
       setToast(status === "verified" ? "关系已确认" : "关系已拒绝，后续图推理将忽略它");
-      const queue = await fetchEdgeReviewQueue(modalLease.owner.notebookId);
+      const { items, total } = await fetchEdgeReviewQueue(modalLease.owner.notebookId);
       if (!rootModals.owns(modalLease)) return;
-      setEdgeQueue(queue);
+      setEdgeQueue(items);
+      setEdgeQueueTotal(total);
     } catch (error) {
       if (rootModals.owns(modalLease)) throw error;
     } finally {
@@ -4747,6 +4754,7 @@ export default function Home() {
         return;
       case "edge-review":
         setEdgeQueue(null);
+        setEdgeQueueTotal(null);
         return;
       case "answer-image-preview":
         setAnswerImagePreview(null);
@@ -8342,7 +8350,7 @@ export default function Home() {
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>关系审核队列</h2>
+                <h2>关系审核队列{edgeQueueTotal != null ? `（共 ${edgeQueueTotal} 条）` : ""}</h2>
                 <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
               </div>
               <button className="icon-button" onClick={() => rootModals.requestClose("edge-review", "button")} title="Close">×</button>

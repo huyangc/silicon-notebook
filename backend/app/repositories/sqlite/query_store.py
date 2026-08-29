@@ -426,6 +426,14 @@ class QueryStore:
         return knowledge_counts_cache.visible_pending_source_count(db, notebook_id)
 
     @staticmethod
+    def review_queue_total(db: sqlite3.Connection, notebook_id: str) -> int:
+        # seq-gated 进程缓存(kg_mutation_seq),独立于 review_queue 的 limit 截断——
+        # 镜像 postgres 侧同名方法(R3 T-A3)。
+        from app.repositories.sqlite import knowledge_counts_cache
+
+        return knowledge_counts_cache.review_queue_total(db, notebook_id)
+
+    @staticmethod
     def visible_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         """NotebookSummary's user-facing source count — excludes Memory-derived
         AND knowhow-table hidden synthetic sources (source_type IN ('memory',

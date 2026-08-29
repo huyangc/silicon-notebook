@@ -551,12 +551,6 @@
       },
       {
         "kind": "patch",
-        "path": "backend/tests/test_notebook_copy_stats_memo.py",
-        "scope": "<module>.test_copy_stats_memo_hit_runs_loader_once",
-        "target": "_connect"
-      },
-      {
-        "kind": "patch",
         "path": "backend/tests/test_query_hotpath_cache.py",
         "scope": "<module>.test_edge_centrality_bounded_load_no_full_objects_query",
         "target": "_connect"
@@ -627,14 +621,6 @@
         "kind": "patch",
         "path": "backend/tests/test_node_context.py",
         "scope": "<module>.test_element_texts_does_not_scan_entire_notebook",
-        "target": "_connect"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_notebook_copy_stats_memo.py",
-        "scope": "<module>.test_copy_stats_memo_hit_runs_loader_once",
         "target": "_connect"
       },
       {
@@ -1484,6 +1470,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.content_overview_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.extension_toggle_repository",
         "target": "_runtime"
       },
       {
@@ -4003,6 +3995,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.review_queue_total",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.revoke_agent_token",
         "target": "_runtime"
       },
@@ -5177,6 +5175,12 @@
         "path": "backend/app/api/deps.py",
         "scope": "<module>.checkup_service",
         "target": "checkup"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_vectors",
+        "target": "checkup"
       }
     ],
     "kind": "property",
@@ -5442,7 +5446,31 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_job_discovery_failure_is_logged_and_finally_still_runs",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
         "scope": "<module>.test_backfill_refuses_pending_pipeline_before_submit",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_vectors_admission_reuses_checkup_h45_cache",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_vectors_inflight_second_request_is_idempotent",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_vectors_not_inflight_is_admitted_and_registers_guard",
         "target": "configured"
       },
       {
@@ -5506,7 +5534,39 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_job_discovery_failure_is_logged_and_finally_still_runs",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
         "scope": "<module>.test_backfill_refuses_pending_pipeline_before_submit",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_vectors_admission_reuses_checkup_h45_cache",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_vectors_inflight_second_request_is_idempotent",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_vectors_not_inflight_is_admitted_and_registers_guard",
         "target": "configured"
       }
     ],
@@ -5767,7 +5827,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>._stream_ask_events",
+        "scope": "<module>._stream_ask_events._start_ask_stream",
         "target": "current_user"
       },
       {
@@ -5785,7 +5845,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>.ask_stream",
+        "scope": "<module>.ask_stream.prepare_ask_stream",
         "target": "current_user"
       },
       {
@@ -6631,7 +6691,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>.ask_stream",
+        "scope": "<module>.ask_stream.prepare_ask_stream",
         "target": "get_notebook"
       },
       {
@@ -7389,11 +7449,26 @@
         "path": "backend/app/services/notebook_scale.py",
         "scope": "<module>.NotebookScaleProfile.facts",
         "target": "load_notebook_scale_facts"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_copy_stats_memo.py",
+        "scope": "<module>._count_cold_loads",
+        "target": "load_notebook_scale_facts"
       }
     ],
     "kind": "method",
     "owner": "QueryStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "facts_repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_copy_stats_memo.py",
+        "scope": "<module>._count_cold_loads",
+        "target": "load_notebook_scale_facts"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str')"
   },
@@ -7403,12 +7478,6 @@
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>._backfill_vectors_job",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
-        "scope": "<module>.backfill_vectors",
         "target": "maintenance"
       },
       {
@@ -9416,6 +9485,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', limit: 'int' = 200) -> 'List[dict]'"
   },
+  "review_queue_total": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowledge_routes.py",
+        "scope": "<module>.edge_review_queue",
+        "target": "review_queue_total"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeGovernanceService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'int'"
+  },
   "root_dir": {
     "consumers": [
       {
@@ -9877,7 +9961,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>._stream_ask_events",
+        "scope": "<module>._stream_ask_events._start_ask_stream",
         "target": "start_ask_stream"
       }
     ],
@@ -10423,6 +10507,12 @@
   },
   "user_can_read_notebook": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_ask_detail",
+        "target": "user_can_read_notebook"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
