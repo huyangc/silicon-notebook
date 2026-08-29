@@ -531,6 +531,33 @@ def test_migration_rejects_a_same_named_wrong_shape_index(postgres_database):
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
+def test_migration_rejects_a_same_named_index_on_the_wrong_table(postgres_database):
+    """codex #636 R2 P2 的场景 1:1:chunks 恰好也有 (source_id, id, text) 且
+    三列同为 COLLATE "C",在它上面建同名同形 partial 索引,除表归属外每一维都
+    与期望一致。索引名是 schema 级唯一的,`CREATE INDEX IF NOT EXISTS` 会因此
+    静默跳过真正要建的 source_elements 索引——DO 块必须按 indrelid 拒绝。"""
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=41) == 41
+    nonblank_spec = next(
+        spec for spec in HOTPATH_INDEX_SPECS
+        if spec.name == "idx_source_elements_nonblank"
+    )
+    with postgres_database.write() as db:
+        db.execute(
+            "CREATE INDEX idx_source_elements_nonblank ON chunks(source_id, id) "
+            f"WHERE {nonblank_spec.predicate}"
+        )
+    with pytest.raises(
+        psycopg.errors.RaiseException, match="does not match the expected definition"
+    ):
+        migrator.migrate()
+    assert migrator.migrate(target_version=41) == 41
+    with postgres_database.write() as db:
+        db.execute("DROP INDEX idx_source_elements_nonblank")
+    assert migrator.migrate() == 42
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
 def test_migration_rejects_an_invalid_same_named_index(postgres_database):
     """真实的 INVALID 残留,不做 superuser 目录手术(质量评审 P4:CI 的 PG 角色
     是 NOSUPERUSER,靠翻 pg_index 的版本在 CI 恒 skip,分支等于零覆盖):对已有

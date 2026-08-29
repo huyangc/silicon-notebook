@@ -222,29 +222,38 @@ BEGIN
   FOR rec IN
     SELECT * FROM (VALUES
       ('idx_knowledge_objects_nb_payload_trgm',
+       'knowledge_objects',
        'gin',
        ARRAY['notebook_id', '(payload)'],
        ARRAY['public:text_ops', 'public:gin_trgm_ops'],
        ARRAY['pg_catalog:C', 'pg_catalog:C'],
        $pred$status <> 'deprecated'$pred$),
       ('idx_source_elements_nonblank',
+       'source_elements',
        'btree',
        ARRAY['source_id', 'id'],
        ARRAY['pg_catalog:text_ops', 'pg_catalog:text_ops'],
        ARRAY['pg_catalog:C', 'pg_catalog:C'],
        $pred$btrim(text, (((((((((((((((((((((((((((chr(9) || chr(10)) || chr(11)) || chr(12)) || chr(13)) || chr(28)) || chr(29)) || chr(30)) || chr(31)) || chr(32)) || chr(133)) || chr(160)) || chr(5760)) || chr(8192)) || chr(8193)) || chr(8194)) || chr(8195)) || chr(8196)) || chr(8197)) || chr(8198)) || chr(8199)) || chr(8200)) || chr(8201)) || chr(8202)) || chr(8232)) || chr(8233)) || chr(8239)) || chr(8287)) || chr(12288)) <> ''$pred$)
-    ) AS v(index_name, expected_am, expected_keys, expected_opclasses,
-           expected_collations, expected_predicate)
+    ) AS v(index_name, expected_table, expected_am, expected_keys,
+           expected_opclasses, expected_collations, expected_predicate)
   LOOP
+    -- tbl join (codex #636 R2 P2): index names are schema-wide, so a
+    -- same-named index on ANOTHER table (chunks has the very same
+    -- (source_id, id, text COLLATE "C") surface) could otherwise pass every
+    -- shape dimension while CREATE INDEX IF NOT EXISTS silently skips the
+    -- intended table.
     SELECT i.indexrelid, i.indisvalid, i.indisready, i.indisunique,
            i.indnkeyatts, i.indnatts,
            i.indclass::oid[] AS opclass_oids,
            i.indcollation::oid[] AS collation_oids,
            am.amname,
+           tbl.relname AS table_name,
            pg_get_expr(i.indpred, i.indrelid, true) AS predicate
     INTO existing
     FROM pg_index i
     JOIN pg_class idx ON idx.oid = i.indexrelid
+    JOIN pg_class tbl ON tbl.oid = i.indrelid
     JOIN pg_am am ON am.oid = idx.relam
     JOIN pg_namespace ns ON ns.oid = idx.relnamespace
     WHERE ns.nspname = current_schema() AND idx.relname = rec.index_name;
@@ -274,7 +283,8 @@ BEGIN
       ORDER BY co.ord);
     actual_predicate := btrim(regexp_replace(replace(
       lower(COALESCE(existing.predicate, '')), '::text', ''), '\s+', ' ', 'g'));
-    IF existing.amname <> rec.expected_am
+    IF existing.table_name <> rec.expected_table
+       OR existing.amname <> rec.expected_am
        OR existing.indisunique
        OR existing.indnkeyatts <> array_length(rec.expected_keys, 1)
        OR existing.indnatts <> array_length(rec.expected_keys, 1)

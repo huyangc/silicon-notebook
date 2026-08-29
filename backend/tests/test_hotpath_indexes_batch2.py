@@ -290,7 +290,7 @@ def test_do_block_expected_values_reconcile_with_the_specs():
 
     text = _migration_text()
     pattern = re.compile(
-        r"\('(?P<name>idx_\w+)',\s*\n\s*'(?P<am>\w+)',\s*\n"
+        r"\('(?P<name>idx_\w+)',\s*\n\s*'(?P<table>\w+)',\s*\n\s*'(?P<am>\w+)',\s*\n"
         r"\s*ARRAY\[(?P<keys>[^\]]*)\],\s*\n"
         r"\s*ARRAY\[(?P<opclasses>[^\]]*)\],\s*\n"
         r"\s*ARRAY\[(?P<collations>[^\]]*)\],\s*\n"
@@ -306,6 +306,7 @@ def test_do_block_expected_values_reconcile_with_the_specs():
     by_name = {spec.name: spec for spec in HOTPATH_INDEX_SPECS}
     for name in sorted(_BATCH2_NAMES):
         spec, match = by_name[name], parsed[name]
+        assert match.group("table") == spec.table, name
         assert match.group("am") == (spec.using or "btree"), name
         assert _items(match.group("keys")) == [
             _normalized_expr(column) for column in spec.columns
@@ -334,9 +335,17 @@ def test_same_named_btree_posing_as_the_gin_is_reported_unexpected():
         "access_method": "gin",
         "opclasses": ["public:text_ops", "public:gin_trgm_ops"],
         "collations": ["pg_catalog:C", "pg_catalog:C"],
+        "indisunique": False,
+        "indnkeyatts": 2,
+        "indnatts": 2,
     }
     assert _matches_shape(good_row, spec)
     assert not _matches_shape({**good_row, "access_method": "btree"}, spec)
+    # codex #636 R2 P2:声明 UNIQUE、或带 INCLUDE 附加列(indnatts > indnkeyatts)
+    # 的同名索引,keys/谓词全同也不许——否则 inspect 报就绪而迁移 DO 块按同维拒绝,
+    # 两个校验器对同一目录行给出相反结论。
+    assert not _matches_shape({**good_row, "indisunique": True}, spec)
+    assert not _matches_shape({**good_row, "indnatts": 3}, spec)
     assert not _matches_shape(
         {**good_row, "opclasses": ["public:text_ops", "public:jsonb_ops"]}, spec
     )
@@ -366,6 +375,9 @@ def test_same_named_btree_posing_as_the_gin_is_reported_unexpected():
         "access_method": "btree",
         "opclasses": list(plain.opclasses),
         "collations": list(plain.collations),
+        "indisunique": False,
+        "indnkeyatts": len(plain.columns),
+        "indnatts": len(plain.columns),
     }
     assert _matches_shape(plain_row, plain)
     assert not _matches_shape({**plain_row, "access_method": "gin"}, plain)
