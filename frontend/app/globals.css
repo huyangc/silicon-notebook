@@ -736,6 +736,64 @@ button.copy-result-failed:hover:not(:disabled) {
   background: #fff;
 }
 
+/* 打开中反馈(网格卡片与列表行同一套)。动作发出后按钮立刻 disabled,反馈落在按钮
+   自身:旋转指示 + 「打开中…」;打开成功切页/失败/被顶替时忙碌位清空,整块消失。
+
+   ⚠ 刻意**不**给按钮整体降不透明度。曾经写过 `opacity: .7`,它会把新加的这行反馈
+   文字连同底色一起压淡——实测「打开中…」对卡片底色只剩 2.28:1,远低于 13px 正文要
+   求的 4.5:1,等于为了表达「忙碌」把唯一说明忙碌的那句话压到看不清。忙碌由 spinner
+   与文案表达,不由整体变淡表达;按不动这件事由 :disabled 表达。 */
+.notebook-card-main.is-opening,
+.notebook-list-title.is-opening,
+/* 同一行里被一起禁用的三个数据格没有自己的忙碌标记(标记在同行的标题格上),
+   至少别再显示「可点」的手型。 */
+.notebook-list-row .notebook-list-cell:disabled {
+  cursor: default;
+}
+
+/* 状态行显式取正文级的 --ink,不跟 .notebook-card-meta 的浅灰(#78808c 在最浅的
+   一档卡片底色上只有 ~3.6:1,过不了 4.5:1)。写成后代选择器是为了压过同样落在这个
+   <p> 上的 `.notebook-card p`(0-1-1)——单类的 0-1-0 会输给它,颜色根本改不动。 */
+.notebook-card .notebook-card-open-status {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+/* 列表行的同一块。特指度要压过 `.notebook-list-title small`(0-1-1)那条浅灰规则,
+   所以写成后代选择器而不是单类。 */
+.notebook-list-title .notebook-list-open-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+/* 轨道用带透明度的墨色:原来的 var(--line)(#d8dee6)在浅色卡片底上几乎不可见,整个
+   圈只剩一小段弧在转。弧色 --blue(#1f5eff)对最浅的一档卡片底(#e4f6fb)仍有 ~4.6:1,
+   过非文字图形的 3:1。尺寸参照 .startup-spinner 缩小到卡片/行内联场景;关键帧直接
+   复用它的 startup-spin(逐字同义,不再另造一份)。 */
+.notebook-card-open-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(23, 32, 42, .28);
+  border-top-color: var(--blue);
+  animation: startup-spin .8s linear infinite;
+}
+
+/* 停用旋转后仍留下「墨色圈 + 蓝色顶弧」这个静态标记,加上旁边的「打开中…」文案,
+   忙碌态不依赖动画就能读出来。 */
+@media (prefers-reduced-motion: reduce) {
+  .notebook-card-open-spinner { animation: none; }
+}
+
 .card-search-hits {
   display: grid;
   gap: 4px;

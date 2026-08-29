@@ -42,6 +42,13 @@ const LONG_TASK_BUTTONS = [
   { match: "reviewAllMerges", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "kgGraph.reviewAllStarting" },
   { match: "retryIndexingPipelineRebuild(", why: "索引管线重试重建:排全库重建 job,成功后按钮随投影翻 pending 卸载,失败态可再点是合法重试", requires: "editor?.busy" },
   { match: "revertIndexingPipelineToBuiltin(", why: "切回内建索引管线:同上,排全库重建 job", requires: "editor?.busy" },
+  // 打开笔记本:大库的 load 相位(getNotebook + listSources)在后端要跑数秒,期间不禁用
+  // 就会被连点,每一次点击叠出一整套并行请求。这一条同时覆盖网格卡片主体
+  // (`.notebook-card-main`)与列表行里同一个动作的四个单元格(标题 + 来源/日期/角色),
+  // 因为它们的 onClick 都以 `openNotebook(notebook.id)` 起头——「⋮ 菜单」
+  // (openNotebookMenu)与「N 条记忆」(openNotebookMemory)是**另外的动作**,函数名不同,
+  // 天然不匹配,也确实不该禁用。
+  { match: "openNotebook(notebook.id)", why: "打开笔记本:load 相位数秒,连点会叠出多组并行请求(网格卡片 + 列表行四格)", requires: "openingNotebookId" },
 ];
 
 // 长任务入口的另一种形态：**file input**。外层 label 无法 :disabled,所以禁用位落在
@@ -73,6 +80,13 @@ function buttonsMatching(elements, match) {
 test("page.tsx 的长任务按钮都带非平凡的 disabled(点完不能再点)", async () => {
   const page = await parseModule("page.tsx");
   const buttons = jsxElements(page, "button");
+  // 与下面 file input 那条同一手法:`disabled` 绑的可能是一个派生常量(例如列表行里
+  // 每行算一次的 `const opening = openingNotebookId === notebook.id`)。只看绑定文本
+  // 会在 `requires` 这一关误报,所以统一解一层变量引用再找在飞标志。对本来就写内联
+  // 表达式的入口是无害的:查不到初始化器时拼接的是空串,判定与解析前逐字相同。
+  const initializers = new Map(
+    variableInitializersIn(page).map((item) => [item.name, item.initializer]),
+  );
   const offenders = [];
 
   for (const entry of LONG_TASK_BUTTONS) {
@@ -84,11 +98,15 @@ test("page.tsx 的长任务按钮都带非平凡的 disabled(点完不能再点)
     }
     for (const element of matched) {
       const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
+      const expression = disabled === undefined ? undefined : String(disabled).trim();
+      const resolved = expression === undefined
+        ? ""
+        : `${expression} ${initializers.get(expression) ?? ""}`;
       if (disabled === undefined) {
         offenders.push(`${entry.match}：缺 disabled —— ${entry.why}`);
-      } else if (TRIVIALLY_FALSE.has(String(disabled).trim())) {
+      } else if (TRIVIALLY_FALSE.has(expression)) {
         offenders.push(`${entry.match}：disabled=${disabled} 恒假，等于没写 —— ${entry.why}`);
-      } else if (entry.requires && !String(disabled).includes(entry.requires)) {
+      } else if (entry.requires && !resolved.includes(entry.requires)) {
         offenders.push(`${entry.match}：disabled=${disabled} 里没有在飞标志 ${entry.requires} —— ${entry.why}`);
       }
     }
