@@ -660,6 +660,24 @@ participant 拼接会复制完整 node map，并可能还原全部 CSR 边；对
 `SCALE_IDX_CACHE_MAX+1` 个索引仍走既有在线发布路径，应在变更前扩容并重启以重新建立
 readiness 保证。
 
+**检索热缓存（VectorCache）：** 进程内按「键族」分池的版本化缓存，装着 embedding 矩阵、
+分词语料、rustworkx 图、簇映射等条目，单条可达 GB 级。此前只有一道全进程 32 条的总上限，
+而单个大库自己就要占十几条，两三个活跃库互相挤兑——被挤掉的恰是冷载最贵的那些。现在按族
+分池，总上限退居兜底，内存由字节预算兜底。
+
+```text
+VECTOR_CACHE_PER_FAMILY_ENTRIES # 每个键族可常驻的**笔记本数**（默认 8，与 SCALE_IDX_CACHE_MAX 同一「几个库同时活跃」口径）。注意单位是笔记本不是条目：`matrix` 族每库存 4 条（四张 embedding 表），所以它的条目额度是 8×4=32。调小它就是「同时保温几个库」调小。
+VECTOR_CACHE_MAX_ENTRIES        # 全进程条目总数兜底（默认 128 ≈ 16 族 × 8 库；本版本之前是 32，那个值会让分池买不到东西）。它不该是常态约束，只防族数意外爆炸。
+VECTOR_CACHE_MAX_BYTES          # 常驻条目的**估算**字节预算（默认 16GiB，0=关闭）。超预算按全局 LRU 回收。估算按类型（numpy/scipy 用真实 nbytes，rustworkx 按节点+边数，容器按条目数×名义单价），是数量级估计而非精确会计。
+```
+
+RAM 配比：这三个旋钮与 `SCALE_IDX_CACHE_MAX` 一起决定进程常驻内存的上界。小内存部署
+（<32GB）建议先把 `VECTOR_CACHE_PER_FAMILY_ENTRIES` 调到 2–4（等于「只同时保温 2–4 个
+库」），再把 `VECTOR_CACHE_MAX_BYTES` 调到物理内存的三分之一左右；两者都调小时不必再动
+`VECTOR_CACHE_MAX_ENTRIES`。⚠ 不要把 `VECTOR_CACHE_PER_FAMILY_ENTRIES` 调到低于**一次
+提问的参与库数**（active + 挂载的参考库）：矩阵被逐出会让关系语义打分整段跳过（日志里
+是 `relation semantic scoring skipped` 这条 warning），那是问答质量下降，不只是变慢。
+
 **Notebook 拷贝 vs 只读分享——规模闸：** 分享一个 notebook 时,库足够小就给「深拷贝」,
 否则给只读「加入」。「足够小」(以及上面那条不可拷贝阈值)是同一组界限——必须**同时**低于
 全部三条才算可拷贝。深拷贝会把该 notebook 的**每一张表**读进内存做 id 重映射,所以最后一条

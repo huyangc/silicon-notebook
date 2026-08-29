@@ -4,9 +4,11 @@ The retrieval cache objects the facade constructor used to build inline move
 into the runtime's RetrievalSnapshotCache. The facade's `_vector_cache` /
 `_unified_cache` handles become write-through descriptors over the SAME
 objects (never facade-only copies), and every wired consumer — the
-KgMutationCoordinator, the KnowledgeLifecycleService's unified-graph memo,
-the NotebookScaleProfile copy-stats memo — keeps holding/reading them by
-identity. `invalidate_kg` is the KG key-family eviction every online mutation
+KgMutationCoordinator and the KnowledgeLifecycleService's unified-graph memo —
+keeps holding/reading them by identity. (The NotebookScaleProfile copy-stats
+memo was one of those consumers until R2-2 moved it into `notebook_scale`'s own
+bounded store; `invalidate_kg` still evicts that family, just through a call
+instead of a cache key.) `invalidate_kg` is the KG key-family eviction every online mutation
 funnels through (moved from the coordinator, itself moved from the facade in
 Task 14): the frozen phase matrix in mutation_phases.json replays unchanged.
 """
@@ -121,7 +123,6 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
         f"{nb}:elemchunk",
         f"{nb}:edge_centrality",
         f"{nb}:clustermap",
-        f"{nb}:copystats",
     ]
     for key in families:
         snapshots.get(key, ("v", 1), lambda: {})
@@ -134,6 +135,12 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     snapshots.get(f"{other}:kwtok", ("v", 1), lambda: {})
     snapshots.unified_cache[(nb, "concept")] = {"g": 1}
     snapshots.unified_cache[(other, "concept")] = {"g": 2}
+    # copystats: same frozen family, new home (R2-2). Warm both notebooks so the
+    # sweep's per-notebook scoping is still under test.
+    from app.services import notebook_scale
+
+    for notebook_id in (nb, other):
+        notebook_scale._memoized_copy_stats(notebook_id, ("v", 1), lambda: {"c": 1})
 
     snapshots.invalidate_kg(nb)
 
@@ -145,6 +152,8 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     assert snapshots.peek(f"{other}:kwtok", ("v", 1))
     assert (nb, "concept") not in snapshots.unified_cache
     assert (other, "concept") in snapshots.unified_cache
+    assert notebook_scale.copy_stats_cached_version(nb) is None
+    assert notebook_scale.copy_stats_cached_version(other) == ("v", 1)
 
 
 def test_invalidate_unified_drops_only_this_notebooks_graph_dict(repo):

@@ -321,9 +321,45 @@ class KnowledgeQueryService:
         )
 
     def annotate_edge_support(self, notebook_id: str, edges: List[dict]) -> List[dict]:
-        retrieval = self.retrieval()
-        support = retrieval.edge_support_map(notebook_id)
-        if not support:
+        """给本次响应内的边(≤300 条)标注 (support_count, source_count)。
+
+        热路径修复批 2 · R2-1(审计 KG-1):这里原来先取
+        ``retrieval.edge_support_map(notebook_id)`` —— canonical_relations
+        的**整表** dict(生产 8.35M 行 ≈3.6GB,见 ``graph_retrieval``
+        ``_edge_support_map`` 与 ``relation_support_count`` 的登记),而且那次
+        整表取值排在判空之前:一次空响应也照付。同一函数里的 cluster 折叠早已
+        改成有界点查(下面 ``cluster_fold_rows`` 那段),支撑数这一半漏掉了。
+
+        现在两半对称:先判空早退(零查询),非空时按本次边集的 canonical 三元组
+        走 ``relation_support_rows`` 定点查询(PK ``pk_canonical_relations``
+        精确命中,row-value IN,按 ``_SUPPORT_IN_CHUNK`` 分批)——与
+        ``GraphRetrievalService.relation_support_counts`` 同一形态、同一原语。
+
+        等价性(逐点对齐旧的整表 map):
+        - 折叠:不变,仍是 ``cluster_fold_rows`` + ``get(id, id)`` 回退。
+        - 命中:整表 map 的键是 ``(canonical_src, edge_type, canonical_tgt)``、
+          值是 ``(support_count, source_count)``;定点查询按同一主键取同两列,
+          所以命中项逐字相同。
+        - 反向兜底:旧写法 ``support.get(key) or support.get(反向 key)`` 在整表
+          map 里两个方向都在手。这里把**两个朝向**都放进查询集合,再在 Python
+          里保持「正向优先、正向缺失才用反向」的同一偏好——注意旧的 ``or`` 只在
+          正向为 ``None`` 时才落到反向(命中值是非空 tuple,恒为真),所以
+          「正向存在」与「正向为真」在这里是同一件事,不存在被 ``or`` 吞掉的
+          假值命中。
+        - 未命中:边原样返回(不加字段),与旧实现一致。
+        - 整表 map 为空(该库没有任何 canonical 关系)这一条旧早退不再需要:
+          定点查询在这种库上返回零行,所有边照样原样返回,值相同。代价是这类库
+          多付一次有界折叠 + 一次有界点查(各 ≤2·len(edges) 个绑定值、走 PK),
+          换掉的是一次 8.35M 行的整表扫描 —— 方向明确。
+
+        ``edge_support_map`` 至此不再被本路径调用;它仍是
+        ``graph_retrieval.relation_support_count`` 的实现细节(那条被刻意保留
+        为语义真源、由差分测试钉住),所以 ``:edge_support`` 缓存键族**不**在
+        本项里下线。
+        """
+        if not edges:
+            # 判空早退必须在任何查询之前(旧实现把整表取值排在这一步之前,
+            # 空响应也要付一次全表扫描)。
             return edges
         # Bound the canonical-fold lookup to just THESE edges' endpoints
         # (≤2·len(edges)) instead of loading the full cluster_map: at 8M
@@ -339,26 +375,61 @@ class KnowledgeQueryService:
             for oid in (edge["source_object_id"], edge["target_object_id"])
         })
         clusters: dict = {}
-        if ids:
-            with self.database.connect() as db:
+        keys: List[tuple] = []
+        with self.database.connect() as db:
+            if ids:
                 for start in range(0, len(ids), 900):
                     for row in self.unified_kg.cluster_fold_rows(
                         db, notebook_id, ids[start:start + 900]
                     ):
                         clusters[row["member_object_id"]] = row["canonical_id"]
+            for edge in edges:
+                keys.append((
+                    clusters.get(edge["source_object_id"], edge["source_object_id"]),
+                    edge["edge_type"],
+                    clusters.get(edge["target_object_id"], edge["target_object_id"]),
+                ))
+            support = self._edge_support_point_lookup(db, notebook_id, keys)
         result = []
-        for edge in edges:
-            key = (
-                clusters.get(edge["source_object_id"], edge["source_object_id"]),
-                edge["edge_type"],
-                clusters.get(edge["target_object_id"], edge["target_object_id"]),
-            )
+        for edge, key in zip(edges, keys):
             hit = support.get(key) or support.get((key[2], key[1], key[0]))
             result.append(
                 {**edge, "support_count": hit[0], "source_count": hit[1]}
                 if hit else edge
             )
         return result
+
+    # 与 ``GraphRetrievalService._RELATION_SUPPORT_IN_CHUNK`` 同值同理由:
+    # row-value IN 的绑定值个数必须封住(SQLite 表达式树上限 / PostgreSQL 规划
+    # 耗时),完整论证见 ``unified_kg_store.relation_support_rows`` 的 docstring。
+    # 这里刻意不 import 那个类常量:knowledge_query 不依赖 graph_retrieval 的
+    # 模块加载顺序(``retrieval`` 是懒回调),为一个整数换一条模块级依赖不值。
+    _SUPPORT_IN_CHUNK = 300
+
+    def _edge_support_point_lookup(
+        self, db, notebook_id: str, keys: Iterable[tuple]
+    ) -> Dict[tuple, tuple]:
+        """``{(canonical_src, edge_type, canonical_tgt): (support, source)}``
+        —— 只包含本次 ``keys`` 里**真实存在**的 canonical 边(缺席即未命中,
+        调用方原样返回该边),两个朝向都查(见 ``annotate_edge_support``)。
+
+        去重 + 排序后分批:sorted 而不是裸 set,理由与
+        ``relation_support_counts`` 相同 —— set 的迭代序随 ``PYTHONHASHSEED``
+        变化,会让同一逻辑输入在不同进程里切出不同的 SQL 文本。
+        """
+        lookup: set = set()
+        for key in keys:
+            lookup.add(tuple(key))
+            lookup.add((key[2], key[1], key[0]))
+        ordered = sorted(lookup)
+        support: Dict[tuple, tuple] = {}
+        for start in range(0, len(ordered), self._SUPPORT_IN_CHUNK):
+            batch = ordered[start:start + self._SUPPORT_IN_CHUNK]
+            for row in self.unified_kg.relation_support_rows(db, notebook_id, batch):
+                support[(row["canonical_src"], row["edge_type"], row["canonical_tgt"])] = (
+                    int(row["support_count"]), int(row["source_count"]),
+                )
+        return support
 
     def _participant_source(
         self, active_notebook_id: str, source_notebook_id: str

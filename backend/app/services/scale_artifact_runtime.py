@@ -116,7 +116,6 @@ class ScaleArtifactRuntime:
         viz_building_lock,
         notebooks,
         facts_repo,
-        snapshots,
         require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
@@ -145,7 +144,9 @@ class ScaleArtifactRuntime:
 
         self.notebooks = notebooks
         self.facts_repo = facts_repo
-        self.snapshots = snapshots
+        # ``snapshots``(RetrievalSnapshotCache)已随 R2-2 删除:它唯一的读者是
+        # 旧 ``notebook_copy_stats`` 传给 NotebookScaleProfile 的那份 VectorCache,
+        # 而 copy-stats memo 已经搬进 ``notebook_scale`` 自己的专池。
         # Z5: process-wide admission ceiling for scale build/fold execution.
         # Each notebook's build was previously a bare daemon thread with no
         # cross-notebook cap — an off-peak scheduler tick draining a long idle
@@ -240,7 +241,6 @@ class ScaleArtifactRuntime:
             self.settings,
             self.facts_repo,
             lambda current: tuple(self.version(current)),
-            self.snapshots.vector_cache,
         ).copy_stats(notebook_id)
 
     def set_building(self, value) -> None:

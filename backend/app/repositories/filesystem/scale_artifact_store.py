@@ -91,6 +91,47 @@ class ScaleArtifactStore:
             data = json.load(fh)
         return data if isinstance(data, dict) else None
 
+    def manifest_stat_signature(self, directory) -> "tuple | None":
+        """``directory/manifest.json`` 的**磁盘身份签名**,或文件不在时 ``None``。
+
+        热路径修复批 2 · R2-5(审计 P1-15):``_stale_manifest_admissible`` 每次
+        都用整份 ``read_manifest`` 做身份比对,而生产 manifest 里的
+        ``watermark_sources`` 有 48k 个元素(≈2MB JSON);冷路径一次
+        ``load(allow_stale=True)`` 要调它两次,一次提问又要 5–10 次
+        ``_scale_index(allow_stale=True)`` —— 每次提问 10–20MB 的 JSON 解析,
+        只为读出 ``version`` 与 ``pipeline_identity`` 两个字段。
+
+        JSON 没有「只解析头部字段」这回事(``read_manifest_version`` 省的也只是
+        返回值,不是解析),把 ``watermark_sources`` 拆成 manifest 旁的独立文件
+        是更大的改动(工件格式 + 迁移 + 读写两侧),本批不做。退而求其次:调用方
+        按这个签名 memo 解析结果,同一份磁盘工件只解析一次。
+
+        签名 = ``(st_mtime_ns, st_size, st_ino)``。三者都取:
+        · 索引发布是 ``.tmp`` 目录 + 原子 rename,换上来的是**另一个 inode**,
+          所以 ``st_ino`` 一变就必然重新解析;
+        · ``st_mtime_ns`` 是纳秒精度,不是 ``scale_manifest_identity`` 那种
+          秒级 mtime 会踩的同秒改写坑;
+        · ``st_size`` 再兜一层。
+        任何一项变化都强制重新解析,方向保守。``OSError``(含文件不存在)→
+        ``None``,调用方按「无工件」处理,与 ``read_manifest`` 的缺失分支同款
+        fail-soft。
+
+        ⚠ 前提写清楚(评审 P2-5):``st_mtime_ns`` 的「纳秒精度」是**文件系统的
+        属性,不是这个 API 的属性** —— ext4/APFS/XFS 给到亚微秒,而某些网络或
+        兼容文件系统(部分 NFS 挂载、FAT 派生)只有秒级甚至 2 秒粒度。签名在那
+        种存储上退化成 ``(秒级 mtime, size, inode)``。它仍然是安全的,因为本仓库
+        **生产上不存在原地改写 manifest 的写路径**:索引发布一律是「写 ``.tmp``
+        目录 + 原子 rename 换目录」,新文件必然是新 inode。粗粒度 mtime 只在
+        「同一 inode 上原地改写、且大小不变、且落在同一时间刻度内」时才会漏判,
+        而那条路径不存在。真要在这类存储上手工原地编辑 manifest,重启进程即可。
+        """
+        path = os.path.join(str(directory), "manifest.json")
+        try:
+            info = os.stat(path)
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size, info.st_ino)
+
     def read_manifest_version(self, directory):
         """廉价读 directory/manifest.json 的 version 字段(几 KB,sub-ms)。用于
         allow_stale 检索路径校验「进程缓存里的 stale 实例是否仍是当前磁盘索引」——

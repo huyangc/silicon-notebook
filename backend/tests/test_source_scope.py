@@ -446,6 +446,153 @@ def test_candidate_detects_hidden_participant_drift_through_source_store():
     assert _Candidates.sources.owner_calls == ["user-a", "user-a"]
 
 
+# ───────────── R2-3(热路径修复批 2 / 审计 ASK-5):漂移探针的 per-run memo ──
+def _drift_probe_double():
+    """记账版的 source store double —— 数两次 48k 级读各自被打了几轮。"""
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    class _Sources:
+        def __init__(self):
+            self.visible = ["s1"]
+            self.hidden = ["hidden-memory"]
+            self.visible_calls = 0
+            self.hidden_calls = 0
+
+        def all_visible_source_ids(self, _notebook_id):
+            self.visible_calls += 1
+            return list(self.visible)
+
+        def hidden_source_ids(self, _notebook_id, _owner_id):
+            self.hidden_calls += 1
+            return list(self.hidden)
+
+    class _Candidates:
+        def __init__(self):
+            self.sources = _Sources()
+
+        def probe(self, notebook_id="nb"):
+            return CandidateRetrievalService._unsafe_source_scope_restricted(
+                self, notebook_id
+            )
+
+    return _Candidates()
+
+
+def _frozen_all_selected_scope():
+    scope = SourceScope(mode="include", source_ids=["s1"], narrowed=False)
+    scope._hidden_source_ids = ["hidden-memory"]
+    scope._scope_owner_id = "user-a"
+    return scope
+
+
+def test_scope_drift_probe_is_memoized_within_one_retrieval_run():
+    """同一次 run 里多次调用:返回值一致,而两次 48k 级读只各打一轮。
+
+    **变异锚点**:把 ``memoized_run_probe(...)`` 换回直接 ``_probe()``
+    → visible/hidden 的调用计数会变成 3,这条报红。
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    candidates = _drift_probe_double()
+    with source_scope_context("nb", _frozen_all_selected_scope()):
+        with retrieval_run(run_kind="ask_graph"):
+            first = candidates.probe()
+            assert candidates.probe() is first
+            assert candidates.probe() is first
+
+    assert first is False
+    assert candidates.sources.visible_calls == 1
+    assert candidates.sources.hidden_calls == 1
+
+
+def test_scope_drift_probe_reprobes_in_a_new_retrieval_run():
+    """memo 挂在 run 上,不是全局的:换一次 run 必须重新探,并且看得见期间发生
+    的漂移(这条同时是 memo「不会永久钉住一个 False」的反向验证)。"""
+    from app.services.retrieval_run import retrieval_run
+
+    candidates = _drift_probe_double()
+    with source_scope_context("nb", _frozen_all_selected_scope()):
+        with retrieval_run(run_kind="ask_graph"):
+            assert candidates.probe() is False
+        candidates.sources.visible.append("s2-uploaded-mid-flight")
+        with retrieval_run(run_kind="ask_graph"):
+            assert candidates.probe() is True
+
+    assert candidates.sources.visible_calls == 2
+    # hidden 也读了两轮:两个读都是 ``source_scope_visible_universe_matches``
+    # 的实参,在调用之前就已经求值(那个函数内部的 visible 早退省的是比较,
+    # 不是读)。这里如实记录现状,不假装有一个不存在的短路。
+    assert candidates.sources.hidden_calls == 2
+
+
+def test_scope_drift_probe_reprobes_when_the_scope_object_changes_mid_run():
+    """一次 run 里 scope 可以被重新安装(插件引擎就这么做,见 ask_service 的
+    ``scope_stack.enter_context(source_scope_context(...))``)。memo 的身份键是
+    scope **对象**,所以换了 scope 必须重新探,绝不能把上一份 scope 的结论
+    发给新 scope。
+
+    **变异锚点**:把身份键从 scope 换成常量(或只按 notebook_id 记)→ 第二次
+    探测会复用第一次的 False,这条报红。
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    candidates = _drift_probe_double()
+    with retrieval_run(run_kind="ask_graph"):
+        with source_scope_context("nb", _frozen_all_selected_scope()):
+            assert candidates.probe() is False
+        # 新 scope 对象:冻结的 include 列表与现在的可见集合不再一致 → 漂移。
+        drifted = SourceScope(
+            mode="include", source_ids=["s1", "s-that-is-gone"], narrowed=False)
+        drifted._hidden_source_ids = ["hidden-memory"]
+        drifted._scope_owner_id = "user-a"
+        with source_scope_context("nb", drifted):
+            assert candidates.probe() is True
+
+    assert candidates.sources.visible_calls == 2
+
+
+def test_scope_drift_probe_reprobes_for_an_equal_but_distinct_scope_object():
+    """身份键按 ``is`` 比较,不是 ``==``(评审 P2-3)。
+
+    两个**取值相等**的 ``ActiveSourceScope`` 是两个对象,memo 必须重探:
+    · 正确性方向:相等即复用在今天成立,但那要依赖 ``__eq__`` 恒等于"同一份
+      冻结快照"这条不变量;而按对象身份判断不需要这条假设,方向保守。
+    · 性能方向(这才是选 ``is`` 的原因):``ActiveSourceScope.__eq__`` 会去哈希
+      两个 48k 元素的 frozenset —— 正是这个 memo 要省掉的开销,拿它当命中判据
+      等于把省下的钱原样花回去。
+
+    **变异锚点**:把 ``memoized_probe`` 里的 ``hit[0] is identity`` 改成
+    ``hit[0] == identity`` → 第二次探测复用第一次的结果,``visible_calls`` 只有
+    1,这条报红。
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    candidates = _drift_probe_double()
+    with retrieval_run(run_kind="ask_graph"):
+        first = _frozen_all_selected_scope()
+        second = _frozen_all_selected_scope()
+        assert first == second and first is not second, (
+            "夹具前提:两个 scope 取值相等但不是同一个对象")
+        with source_scope_context("nb", first):
+            assert candidates.probe() is False
+        with source_scope_context("nb", second):
+            assert candidates.probe() is False
+
+    assert candidates.sources.visible_calls == 2, (
+        "相等但不同的 scope 对象必须重探(身份按 is 判断)")
+
+
+def test_scope_drift_probe_outside_a_run_keeps_probing_every_call():
+    """run 之外(直接服务调用、后台作业)逐字保持改造前的行为:每次都现探,
+    所以同一次调用序列里的中途漂移照样立刻可见。"""
+    candidates = _drift_probe_double()
+    with source_scope_context("nb", _frozen_all_selected_scope()):
+        assert candidates.probe() is False
+        candidates.sources.visible.append("s2-uploaded-mid-flight")
+        assert candidates.probe() is True
+    assert candidates.sources.visible_calls == 2
+
+
 def test_candidate_without_active_scope_does_not_touch_source_store():
     from app.services.retrieval_candidates import CandidateRetrievalService
 

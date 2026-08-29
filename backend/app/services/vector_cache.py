@@ -7,6 +7,29 @@ single-flight: 同 key 并发 miss 只有一个线程跑 loader()，其余线程
 LRU: OrderedDict 保序，命中 move_to_end 刷新新鲜度，超过 max_entries 淘汰
 最旧条目——只影响性能（淘汰后下次重新构建），不影响正确性。
 
+分池（热路径修复批 2 · R2-4，审计 ASK-3）: 三道上限，从紧到松：
+
+1. **每键族**上限 ``per_family_entries``(默认 8,**单位是笔记本**)。族名从
+   key 的第一段冒号之后取(``{nb}:matrix:{table}`` → ``matrix``,所以四张
+   embedding 表归同一族)。这是本项真正要买的东西:改造前只有一道全进程 32 条
+   的总上限,而单个大库自己就要占十几条(四个矩阵 + kwtok + ppr_graph +
+   entchunk + elemchunk + clustermap + edge_centrality + …),**两个活跃库即
+   互相挤兑**,而被挤掉的恰好是冷载最贵的那些(GB 级矩阵、整表 dict)。按族
+   分池之后,矩阵族里可以同时住 8 个库的矩阵,谁也挤不掉谁。
+   ⚠ 单位是笔记本而不是条目:``matrix`` 族每库占 4 条,所以它的条目额度是
+   ``8 × 4 = 32``,见 ``_FAMILY_ENTRIES_PER_NOTEBOOK`` 处的完整说明(错配会
+   直接打到问答质量,不只是命中率)。
+2. **全局条目**上限 ``max_entries``:族数乘以族上限的兜底,防止「族名意外
+   爆炸」这类退化。它不再是常态下的约束条件(默认值随本项从 32 提到 128
+   = 16 族 × 8),所以也不再是挤兑的来源。
+3. **全局字节预算** ``max_bytes``:真正的内存兜底。条目字节按类型估算
+   (numpy 数组用 ``nbytes``;dict/set/大序列按条目数 × 一个名义单价;估不出
+   的类型按一个名义条目大小计)——**是数量级估计,不是精确会计**,它的职责是
+   在常驻集合真的膨胀时开始按 LRU 回收,而不是给分配器做账。设 0 即关闭。
+
+命中/未命中/淘汰计数见 ``stats()``,淘汰同时打日志(族上限 debug、总上限与
+字节预算 info——后者说明进程真的到内存兜底了,值得在运维日志里看见)。
+
 锁次序（避免死锁）: 任何时候都不持有 per-key 锁去申请全局锁；全局锁只保护
 锁表 / _store 的结构性操作（增删条目、移动顺序），从不在全局锁内执行 loader。
 拿全局锁 -> 释放全局锁 -> 拿 per-key 锁 -> 跑 loader（不持全局锁）-> 拿全局锁
@@ -18,9 +41,110 @@ pop，不无界增长；仍在使用（in-flight load 或排队等待者）时�
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections import OrderedDict
-from typing import Callable, Dict, Hashable, Tuple
+from typing import Any, Callable, Dict, Hashable, Tuple
+
+_log = logging.getLogger("silicon_notebook.vector_cache")
+
+# 字节估算的两个名义单价。都是**数量级**常数,不是精确会计——预算的职责是在
+# 常驻集合真的膨胀时按 LRU 开始回收,不是替分配器记账。
+# · _CONTAINER_ITEM_BYTES:一条 dict/set 条目的粗略常驻成本(哈希表槽 + 一个
+#   小 tuple/str 键 + 一个值)。8.35M 行的 canonical-relations dict 因此估到
+#   ~2GB,实测量级 3.6GB —— 同一个数量级,够用。
+# · _NOMINAL_ENTRY_BYTES:估不出大小的类型(rustworkx 图对象等)按这个计,于是
+#   这类条目上的字节预算自然退化成一道条目数上限,与条目上限的语义一致。
+_CONTAINER_ITEM_BYTES = 256
+_NOMINAL_ENTRY_BYTES = 1 << 20
+# 元素级递归只在**小**容器上做,元组/列表与 dict 同规则:
+# · ``{nb}:matrix:*`` 的值是 ``(ids, ndarray)`` 二元组;
+# · ``{nb}:scale_combined`` 的值是 5 个键的 **record 型 dict**,里面装着 CSR
+#   矩阵、百万级 list/dict/set 与一个 float64 数组。
+# 不递归进去这两种就分别只看见「一个 2 元容器」和「一个 5 键 dict」——评审实测
+# 后者被低估 3593×(恒记 1280 字节),16GiB 预算永远不会触发。
+# 反过来,大容器(几百万条的 ids 列表)不做逐元素递归:那会把估算变成一次全量
+# 遍历,按条目数 × 名义单价即可。
+_RECURSE_MAX_ITEMS = 8
+# 递归深度上限:record dict → 元组 → ndarray 这类嵌套两三层就到底了,给个上限
+# 免得任何意料之外的自引用结构把估算变成无限递归。
+_RECURSE_MAX_DEPTH = 3
+# scipy 稀疏矩阵的常驻大头就是这几个 ndarray(CSR/CSC 是 data/indices/indptr,
+# COO 是 data/row/col)。鸭子类型探测,不为估算把 scipy 拉进导入链。
+_SPARSE_ARRAY_ATTRS = ("data", "indices", "indptr", "row", "col")
+
+
+def estimate_entry_bytes(value: Any, _depth: int = 0) -> int:
+    """一条缓存值的常驻字节**数量级**估计(见上面几个常数的说明)。"""
+    try:
+        import numpy as np
+    except Exception:                                   # pragma: no cover
+        np = None
+    if np is not None and isinstance(value, np.ndarray):
+        return int(value.nbytes)
+    if isinstance(value, (str, bytes)):
+        return len(value)
+    if isinstance(value, (tuple, list)):
+        if len(value) <= _RECURSE_MAX_ITEMS and _depth < _RECURSE_MAX_DEPTH:
+            return sum(
+                estimate_entry_bytes(item, _depth + 1) for item in value
+            ) or _NOMINAL_ENTRY_BYTES
+        return len(value) * _CONTAINER_ITEM_BYTES
+    if isinstance(value, dict):
+        # record 型小 dict(``scale_combined``)递归其 **values**;大 dict
+        # (clustermap / edge_support 这类百万条映射)按条目数计价。
+        if len(value) <= _RECURSE_MAX_ITEMS and _depth < _RECURSE_MAX_DEPTH:
+            return sum(
+                estimate_entry_bytes(item, _depth + 1) for item in value.values()
+            ) or _NOMINAL_ENTRY_BYTES
+        return len(value) * _CONTAINER_ITEM_BYTES
+    if isinstance(value, (set, frozenset)):
+        return len(value) * _CONTAINER_ITEM_BYTES
+    if np is not None:
+        # scipy 稀疏矩阵:三个(或两个)ndarray 就是它的全部常驻体量。
+        sparse_bytes = sum(
+            int(getattr(value, name).nbytes)
+            for name in _SPARSE_ARRAY_ATTRS
+            if isinstance(getattr(value, name, None), np.ndarray)
+        )
+        if sparse_bytes:
+            return sparse_bytes
+    # rustworkx 图(``ppr_graph`` / ``fed_rxgraph``):没有 nbytes,但节点数与
+    # 边数是它体量的真信号(每个节点还挂着一个 payload dict)。
+    node_count = getattr(value, "num_nodes", None)
+    edge_count = getattr(value, "num_edges", None)
+    if callable(node_count) and callable(edge_count):
+        try:
+            return (int(node_count()) + int(edge_count())) * _CONTAINER_ITEM_BYTES
+        except Exception:                               # pragma: no cover
+            pass
+    return _NOMINAL_ENTRY_BYTES
+
+
+# 族上限的**单位是笔记本,不是条目**。绝大多数键族每库只存一条
+# (``{nb}:kwtok``、``{nb}:clustermap``、……),两者恰好相等;但 ``matrix`` 族
+# 每库存**四条**(knowledge / element / relation / chunk 四张 embedding 表),
+# 单位错配会让 per_family_entries=8 实际只装得下 2 个库 —— 3 个参与库的联邦
+# 提问必然挤兑(而全局上限还空着一百多个槽),被逐出的矩阵又会让
+# ``_vector_matrix_warm`` 的 peek 判冷,``_retrieve_relations_scored`` 整段跳过
+# 关系语义打分。那是问答质量红线,不是缓存命中率问题(评审 P1-1,实测复现)。
+# 所以按族登记「每库几条」,额度 = per_family_entries × 变体数;matrix 族因此是
+# 8 库 × 4 表 = 32 条,与 ``SCALE_IDX_CACHE_MAX``=8 的「8 个活跃库」同一口径。
+_FAMILY_ENTRIES_PER_NOTEBOOK = {"matrix": 4}
+
+
+def key_family(key: str) -> str:
+    """键族名:``{notebook}:{family}[:{variant}]`` 的中段。
+
+    ``{nb}:matrix:knowledge_embeddings`` → ``matrix``(四张 embedding 表因此
+    归一族);``{nb}:kwtok`` → ``kwtok``;没有冒号的 key(测试里的裸键)→ ``""``,
+    统一落进一个匿名族。notebook id 形如 ``nb-<hex>``,不含冒号。
+    """
+    head, separator, tail = key.partition(":")
+    if not separator:
+        return ""
+    family, _, _variant = tail.partition(":")
+    return family
 
 
 class _KeyLockEntry:
@@ -32,11 +156,90 @@ class _KeyLockEntry:
 
 
 class VectorCache:
-    def __init__(self, max_entries: int = 32) -> None:
+    def __init__(
+        self,
+        max_entries: int = 128,
+        *,
+        per_family_entries: int = 8,
+        max_bytes: int = 16 * 1024 ** 3,
+    ) -> None:
         self._store: "OrderedDict[str, Tuple[Hashable, dict]]" = OrderedDict()
         self._max_entries = max_entries
+        self._per_family_entries = per_family_entries
+        self._max_bytes = max_bytes
+        self._bytes: "Dict[str, int]" = {}
+        self._total_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._evictions: "Dict[str, int]" = {}
         self._global_lock = threading.Lock()
         self._key_locks: Dict[str, _KeyLockEntry] = {}
+
+    # ────────────────────────────────────────────────────── accounting ──
+    def _drop_locked(self, key: str, reason: str) -> None:
+        """调用方必须已持有 ``_global_lock``。"""
+        self._store.pop(key, None)
+        self._total_bytes -= self._bytes.pop(key, 0)
+        family = key_family(key)
+        self._evictions[family] = self._evictions.get(family, 0) + 1
+        if reason == "family":
+            _log.debug("vector_cache evict key=%s family=%s reason=%s", key, family, reason)
+        else:
+            _log.info(
+                "vector_cache evict key=%s family=%s reason=%s entries=%d est_bytes=%d",
+                key, family, reason, len(self._store), self._total_bytes,
+            )
+
+    def _family_quota(self, family: str) -> int:
+        """该族的**条目**额度 = ``per_family_entries``(单位:笔记本)× 该族每库
+        占用的条目数(见 ``_FAMILY_ENTRIES_PER_NOTEBOOK``)。"""
+        return self._per_family_entries * _FAMILY_ENTRIES_PER_NOTEBOOK.get(family, 1)
+
+    def _enforce_limits_locked(self, keep: str) -> None:
+        """三道上限,从紧到松(见模块 docstring)。``keep`` 是刚写入的 key,
+        任何一道都不得把它淘汰掉——否则调用方立刻又得冷载一次同一个值。"""
+        family = key_family(keep)
+        if self._per_family_entries > 0:
+            quota = self._family_quota(family)
+            in_family = [k for k in self._store if key_family(k) == family]
+            while len(in_family) > quota:
+                victim = in_family.pop(0)      # 全局 LRU 序 → 族内最旧的在前
+                if victim == keep:
+                    continue
+                self._drop_locked(victim, "family")
+        if self._max_entries > 0:
+            while len(self._store) > self._max_entries:
+                victim = next(iter(self._store))
+                if victim == keep:
+                    break
+                self._drop_locked(victim, "entries")
+        if self._max_bytes > 0:
+            while self._total_bytes > self._max_bytes and len(self._store) > 1:
+                victim = next(iter(self._store))
+                if victim == keep:
+                    break
+                self._drop_locked(victim, "bytes")
+
+    def stats(self) -> dict:
+        """命中/未命中/淘汰与每族驻留量的只读快照(运维观察 + 测试用)。"""
+        with self._global_lock:
+            per_family: Dict[str, int] = {}
+            for key in self._store:
+                family = key_family(key)
+                per_family[family] = per_family.get(family, 0) + 1
+            total = self._hits + self._misses
+            return {
+                "entries": len(self._store),
+                "estimated_bytes": self._total_bytes,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": (self._hits / total) if total else 0.0,
+                "entries_by_family": per_family,
+                "evictions_by_family": dict(self._evictions),
+                "max_entries": self._max_entries,
+                "per_family_entries": self._per_family_entries,
+                "max_bytes": self._max_bytes,
+            }
 
     def _acquire_key_lock(self, key: str) -> _KeyLockEntry:
         with self._global_lock:
@@ -58,7 +261,9 @@ class VectorCache:
             cached = self._store.get(key)
             if cached is not None and cached[0] == version:
                 self._store.move_to_end(key)
+                self._hits += 1
                 return cached[1]
+            self._misses += 1
 
         entry = self._acquire_key_lock(key)
         try:
@@ -68,16 +273,22 @@ class VectorCache:
                     cached = self._store.get(key)
                     if cached is not None and cached[0] == version:
                         self._store.move_to_end(key)
+                        self._hits += 1
                         return cached[1]
 
                 # loader 绝不在全局锁内运行。
                 value = loader()
+                # 字节估算同样在锁外做:它可能要走一遍 numpy 的 nbytes /
+                # len(),没有理由占着全局锁。
+                estimated = estimate_entry_bytes(value)
 
                 with self._global_lock:
+                    self._total_bytes -= self._bytes.pop(key, 0)
                     self._store[key] = (version, value)
                     self._store.move_to_end(key)
-                    while len(self._store) > self._max_entries:
-                        self._store.popitem(last=False)
+                    self._bytes[key] = estimated
+                    self._total_bytes += estimated
+                    self._enforce_limits_locked(keep=key)
                 return value
         finally:
             self._release_key_lock(key, entry)
@@ -85,6 +296,7 @@ class VectorCache:
     def invalidate(self, key: str) -> None:
         with self._global_lock:
             self._store.pop(key, None)
+            self._total_bytes -= self._bytes.pop(key, 0)
 
     def peek(self, key: str, version: Hashable) -> bool:
         """True 当且仅当 key 已缓存且版本匹配当前 version —— 不触发 loader、

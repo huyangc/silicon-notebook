@@ -623,7 +623,11 @@ def _build_retrieval_domain(foundation: _ProcessFoundation) -> _RetrievalDomain:
     return _RetrievalDomain(
         retrieval_snapshots=RetrievalSnapshotCache(
             vector_cache=VectorCache(
-                max_entries=foundation.settings.vector_cache_max_entries
+                max_entries=foundation.settings.vector_cache_max_entries,
+                per_family_entries=(
+                    foundation.settings.vector_cache_per_family_entries
+                ),
+                max_bytes=foundation.settings.vector_cache_max_bytes,
             ),
             unified_cache={},
         ),
@@ -1722,7 +1726,6 @@ class RepositoryRuntime:
             viz_building_lock=viz_building_lock,
             notebooks=self.catalog,
             facts_repo=self.queries,
-            snapshots=self.retrieval_snapshots,
             require_indexing_write=self.indexing_pipeline.require_write_admission,
         )
         return self.scale_artifacts
@@ -2060,9 +2063,10 @@ class RepositoryRuntime:
         resolution stays a per-access ContextVar chain), a fresh
         CommunityQueryService PER USE (``sibling_min_bridge`` read at call
         time — the frozen per-ask/per-engine construction), a fresh
-        NotebookScaleProfile PER ``_needs_index`` call (reads the CURRENT
-        ``retrieval_snapshots.vector_cache`` so facade-level cache swaps stay
-        observed), the catalog's notebook guard, the schema registry, the
+        NotebookScaleProfile PER ``_needs_index`` call (its copy-stats memo is
+        process-owned by ``notebook_scale`` since R2-2, so the profile itself
+        holds no cache state and re-reads the CURRENT settings/version each
+        call), the catalog's notebook guard, the schema registry, the
         lifecycle-owned community reports and the source-title projection."""
         if self.ask is not None:
             return self.ask
@@ -2089,7 +2093,6 @@ class RepositoryRuntime:
                     self.settings,
                     self.queries,
                     lambda nb: tuple(self.scale_artifacts.version(nb)),
-                    self.retrieval_snapshots.vector_cache,
                 ),
                 scale_index_probe=lambda nb: (
                     self.scale_artifacts.load(nb, allow_stale=True) is not None
