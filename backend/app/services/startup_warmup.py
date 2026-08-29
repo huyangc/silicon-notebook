@@ -290,12 +290,15 @@ def _start_admission_refresher(lease: object, repo: object) -> None:
     """Begin converging the admin extension-disable snapshot in this process.
 
     The snapshot itself is NOT best-effort — the composition root primed it
-    loudly while building ``repo``. This is only the low-frequency catch-up
-    that lets a process which did not perform an admin write notice one, so it
-    is ``getattr``-shaped and exception-swallowing like the crash-recovery
-    sweeps above: a narrow test double has no ``extension_toggles`` seat, and a
-    server that cannot start a convergence thread should serve with the
-    startup snapshot rather than refuse to become ready.
+    loudly while building ``repo``. The two quiet returns below are the two
+    legitimate "nothing to converge" shapes: a narrow test double with no
+    ``extension_toggles`` seat, and a deployment with zero loaded deployment
+    plugins. A *failure* to start the thread, by contrast, propagates and
+    fails this startup: a serving process with deployment plugins loaded and
+    no convergence mechanism would silently keep admitting a plugin another
+    worker's admin disabled, breaking the documented one-refresh-cycle
+    convergence guarantee — the same fail-loud posture extension discovery
+    and route mounting already take.
 
     The stop handle is filed on this cycle's lifecycle state, so every later
     exit stops exactly the thread this cycle started.
@@ -303,29 +306,20 @@ def _start_admission_refresher(lease: object, repo: object) -> None:
     store = getattr(getattr(repo, "_runtime", None), "extension_toggles", None)
     if store is None:
         return
-    try:
-        from app.core.config import get_settings
-        from app.services.extension_toggles import (
-            start_extension_admission_refresher,
-        )
+    from app.core.config import get_settings
+    from app.services.extension_toggles import (
+        start_extension_admission_refresher,
+    )
 
-        if not _deployment_plugins_are_loaded():
-            logger.info(
-                "startup: no deployment plugins loaded; extension admission "
-                "refresher not started"
-            )
-            return
-        stop = start_extension_admission_refresher(
-            store, get_settings().extension_admission_refresh_seconds
-        )
-    except Exception as exc:
-        # Class name only — extension-surface logging keeps exception text
-        # (which can embed a DSN or private path) out of the log (AGENTS.md).
-        logger.error(
-            "startup: extension admission refresher failed to start (%s)",
-            type(exc).__name__,
+    if not _deployment_plugins_are_loaded():
+        logger.info(
+            "startup: no deployment plugins loaded; extension admission "
+            "refresher not started"
         )
         return
+    stop = start_extension_admission_refresher(
+        store, get_settings().extension_admission_refresh_seconds
+    )
     if not _record_admission_refresher(lease, stop):
         # Defensive: the lease was detached between the bind above and this
         # line, so nobody's shutdown owns this thread. Reap it here rather

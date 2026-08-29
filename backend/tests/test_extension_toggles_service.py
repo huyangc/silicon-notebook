@@ -696,6 +696,41 @@ def test_failed_startup_stops_the_refresher_before_closing_the_pool(
     assert calls == ["stop", "close"]
 
 
+def test_a_refresher_that_cannot_start_fails_the_startup(
+    monkeypatch, loaded_deployment_plugin
+):
+    """With deployment plugins loaded, no convergence thread means no ready.
+
+    A serving process without the refresher would keep its startup snapshot
+    forever and silently continue admitting a plugin another worker's admin
+    disabled — so thread-start failure must fail the lifecycle (codex #635 R4
+    P1), not degrade into a quieter server.
+    """
+
+    from app.core import readiness
+    from app.services import extension_toggles, startup_warmup
+
+    def refuse(store, interval_seconds):
+        raise RuntimeError("no threads left")
+
+    monkeypatch.setattr(
+        extension_toggles, "start_extension_admission_refresher", refuse
+    )
+
+    calls: list[str] = []
+    store = _Store(_always(frozenset()))
+    repo = _warmed_repository_double(store, calls)
+    _install_repository_double(monkeypatch, repo)
+
+    lease = startup_warmup.begin_lifecycle()
+    assert startup_warmup.run_startup(lease) is None
+    assert readiness.snapshot()["ready"] is False
+    # The bound repository is closed by the failure path; nothing warms after
+    # the refusal because the refresher starts before the warm step.
+    assert calls == ["close"]
+    startup_warmup.close_repository(lease, None)
+
+
 def test_run_startup_passes_the_configured_interval_not_a_literal(
     monkeypatch, recorded_refresher, loaded_deployment_plugin
 ):
