@@ -245,6 +245,12 @@ import {
   type TransitionStep,
 } from "./notebook-transition";
 import {
+  beginOpen,
+  settleOpen,
+  shouldCoalesceOpen,
+  type NotebookOpenGuard,
+} from "./notebook-open-guard";
+import {
   doneItemDestination,
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
@@ -905,6 +911,12 @@ export default function Home() {
   // getNotebook + listSources snapshot instead of adding an effect-driven request.
   const activeNotebookIdRef = useRef<string | null>(null);
   const workspaceEpochRef = useRef(0);
+  // 同库连点合并:大库 openNotebook 的 load 相位要数秒,期间用户对同一张卡片连点
+  // 会叠出多组并行请求。guard 只记「当前在途的是哪本笔记本、哪一代」,异 id 仍然
+  // 放行(沿用 workspaceEpoch 顶替语义),settle 只清自己那一代——见
+  // notebook-open-guard.ts 顶部的语义说明。openingNotebookId 是渲染用的镜像。
+  const notebookOpenGuardRef = useRef<NotebookOpenGuard>(null);
+  const [openingNotebookId, setOpeningNotebookId] = useState<string | null>(null);
   const canWriteSources = workspaceCapabilities(
     currentNotebook?.access,
     currentUser?.role ?? "",
@@ -1721,7 +1733,11 @@ export default function Home() {
       }
       const workspace = parseWorkspaceHash(hash);
       if (workspace) {
-        openNotebook(workspace.notebookId, "none").catch(() => {
+        // coalesce:false —— hash 是唯一真相源(见本 effect 顶部注释)。用户在
+        // #memory=<id> 按返回时,在飞的 openNotebookMemory 打的是同一本库:合并早退会
+        // 让这次 popstate 什么都不做、也不自增 epoch,于是那次 memory 打开随后
+        // committed,把 URL 用 replaceState 改写回 #memory——返回键失效。必须顶替它。
+        openNotebook(workspace.notebookId, "none", undefined, { coalesce: false }).catch(() => {
           showCollection();
           setToast("笔记本链接不可用或已失效");
         });
@@ -2702,11 +2718,43 @@ export default function Home() {
     return true;
   }
 
+  /**
+   * 作废在途打开的 guard 与它的忙碌态。
+   *
+   * `openNotebook` 之外的每一处 `workspaceEpochRef` 自增都必须紧跟着调用它:那些导航
+   * 把在途的那次 open 顶死了(`isCurrent()` 从此恒假,永远不会 apply/conclude),可它的
+   * guard 还挂着——不清掉的话,同一本笔记本之后的点击会被这个僵尸 guard 吞到那次死跑
+   * 的请求收尾为止(请求挂死就是永远打不开),卡片还一直挂着假的「打开中…」。
+   *
+   * 与 `openNotebook` 自己 `finally` 里的 settle 不冲突:settle 只清自己那一代,guard
+   * 已被这里清空时 `settleOpen(null, ·)` 保持 null,state 也已经是 null,幂等。
+   */
+  function invalidateNotebookOpenGuard() {
+    notebookOpenGuardRef.current = null;
+    setOpeningNotebookId(null);
+  }
+
   async function openNotebook(
     notebookId: string,
     history: "push" | "none" = "push",
     actorIdOverride?: string,
+    // `coalesce: false` = 这次调用**不是**重复点击,而是一个新的目的地(见下面各调用点
+    // 的理由)。跳过的只有合并早退这一件事:仍然自增 epoch 顶替在途那次、仍然
+    // beginOpen 登记 guard,后续同 id 的卡片点击照样能合并到它上面。
+    opts?: { coalesce?: boolean },
   ): Promise<boolean> {
+    // 同库连点合并:在途的是同一本笔记本、且 guard 仍属当前代,就直接放弃,什么都不做
+    // ——不重置任何状态、不发请求。已经在飞的那一次自己会收尾。异 id 必须放行,
+    // 被外部导航顶过代的僵尸 guard 也必须放行(见 notebook-open-guard.ts 顶部说明)。
+    // ⚠ 这一句必须留在函数体第一位:挪到下面的 `++workspaceEpochRef.current` 之后,
+    // 双击就会自己把自己顶死(epoch 已经变了 → 不合并 → 但 isCurrent 恒假),那本库
+    // 从此永远打不开。
+    if (
+      (opts?.coalesce ?? true)
+      && shouldCoalesceOpen(notebookOpenGuardRef.current, notebookId, workspaceEpochRef.current)
+    ) {
+      return false;
+    }
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
@@ -2722,27 +2770,43 @@ export default function Home() {
     setUploadBusy(false);
     setUrlBusy(false);
     const workspaceEpoch = ++workspaceEpochRef.current;
+    // guard 借用同一个 workspaceEpoch 当自己的代号:每次调用都拿到独一无二的值,
+    // 天然满足「settle 只清自己那一代」,不必另起一套计数器。
+    notebookOpenGuardRef.current = beginOpen(notebookId, workspaceEpoch);
+    setOpeningNotebookId(notebookId);
     const transitionOwner = {
       actorId: actorIdOverride ?? currentUser?.id ?? "",
       notebookId,
       workspaceEpoch,
     };
     const isCurrent = () => workspaceEpochRef.current === workspaceEpoch;
-    const result = await runNotebookTransition<NotebookOpenLoad, NotebookOpenOutcome>({
-      steps: notebookTransitionSteps(transitionOwner),
-      enter: enterNotebookTransition,
-      load: () => openNotebookSnapshot(notebookId),
-      isCurrent,
-      apply: ({ notebook }) => applyOpenedNotebook(transitionOwner, notebook),
-      conclude: () => concludeOpenNotebook(notebookId, historyMode, isCurrent),
-    });
-    return result.status === "committed";
+    try {
+      const result = await runNotebookTransition<NotebookOpenLoad, NotebookOpenOutcome>({
+        steps: notebookTransitionSteps(transitionOwner),
+        enter: enterNotebookTransition,
+        load: () => openNotebookSnapshot(notebookId),
+        isCurrent,
+        apply: ({ notebook }) => applyOpenedNotebook(transitionOwner, notebook),
+        conclude: () => concludeOpenNotebook(notebookId, historyMode, isCurrent),
+      });
+      return result.status === "committed";
+    } finally {
+      // 只有本代的 settle 才清 guard/state——被更晚一次点击顶替的 guard 原样保留,
+      // 这次(迟到的)收尾不许抹掉新一次点击刚建立的忙碌态。
+      notebookOpenGuardRef.current = settleOpen(notebookOpenGuardRef.current, workspaceEpoch);
+      if (notebookOpenGuardRef.current === null) {
+        setOpeningNotebookId(null);
+      }
+    }
   }
 
   async function openNotebookMemory(notebookId: string, actorIdOverride?: string) {
     // 传 "none" 让 openNotebook 别写 history,自己下面这次 replaceState 独占写入——
     // 与本函数改动前的净效果逐字一致(旧代码是 replace 再 replace)。
-    if (!await openNotebook(notebookId, "none", actorIdOverride)) return;
+    // coalesce:false —— 目的地是**记忆视图**,与在途那次(可能停在 ask)不是同一件事。
+    // 合并掉就等于静默丢弃用户的意图:同一张卡片先点主体再点「N 条记忆」,第二次点击
+    // 会被吞掉,用户落在 ask 而不是 memory。
+    if (!await openNotebook(notebookId, "none", actorIdOverride, { coalesce: false })) return;
     setChatMode("memory");
     window.history.replaceState(null, "", memoryHash(notebookId));
   }
@@ -2755,7 +2819,9 @@ export default function Home() {
       showGroups({ groupId: item.group_id || "", tab: "requests" }, "push");
       return;
     }
-    if (!item.notebook_id || !await openNotebook(item.notebook_id)) return;
+    // coalesce:false —— 待办项的目的地是报告/治理/索引里的某个具体位置,不是「再点一次
+    // 同一张卡片」。被合并掉会静默丢弃这次深链意图,用户停在原视图。
+    if (!item.notebook_id || !await openNotebook(item.notebook_id, "push", undefined, { coalesce: false })) return;
     if (item.type === "report_outline") {
       switchChatMode("reports");
       if (item.report_id) reportWorkspace.focusReport(item.report_id);
@@ -2771,7 +2837,8 @@ export default function Home() {
     // 已经在这个库里就别再 push 一条重复的 #notebook=<同一 id>——按返回键会
     // 触发 openNotebook(id, "none") 全量重载,把用户从当前视图甩回 ask 聊天。
     const history = activeNotebookIdRef.current === d.notebook_id ? "none" : "push";
-    if (!await openNotebook(d.notebook_id, history)) return;
+    // coalesce:false —— 同上,已完成项的目的地是来源面板或知识图谱,不是重复点击。
+    if (!await openNotebook(d.notebook_id, history, undefined, { coalesce: false })) return;
     // 论文元数据补全完成应停在来源面板(设计稿 §3.3:作者/机构就在来源列表与详情
     // 里),别把用户甩进知识图谱。kind 缺省视作索引完成,索引路径行为逐字不变。
     if (doneItemDestination(d.kind) === "kg") {
@@ -2783,6 +2850,7 @@ export default function Home() {
     leaveWorkspaceOwners();
     closeKnowhow();
     workspaceEpochRef.current += 1;
+    invalidateNotebookOpenGuard();
     sourceLibrary.beginTransition();
     uploadRequestOwnerRef.current = null;
     urlRequestOwnerRef.current = null;
@@ -3739,6 +3807,7 @@ export default function Home() {
 
   async function openAskSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
+    invalidateNotebookOpenGuard();
     const rootTransition = rootModals.beginWorkspaceTransition();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -3756,6 +3825,7 @@ export default function Home() {
 
   function startNewAskSession() {
     const workspaceEpoch = ++workspaceEpochRef.current;
+    invalidateNotebookOpenGuard();
     const rootTransition = rootModals.beginWorkspaceTransition();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -4666,6 +4736,7 @@ export default function Home() {
 
   async function handleLogout() {
     workspaceEpochRef.current += 1;
+    invalidateNotebookOpenGuard();
     leaveActorOwners();
     titleSaveOperationRef.current = null;
     setTitleSaveInFlight(false);
@@ -4889,11 +4960,25 @@ export default function Home() {
   ) => (
     <article key={notebook.id} className={`notebook-card ${cardTone(index)}`}>
       <button className="card-menu" onClick={(event) => openNotebookMenu(notebook.id, event)} title="笔记本操作">⋮</button>
-      <button className="notebook-card-main" onClick={() => openNotebook(notebook.id).catch(reportError)}>
+      {/* 动作发出后立即禁用 + 忙碌指示(docs/development.md「长任务控件」硬约束)。
+          禁用后基线 :active 反馈按设计不再适用——spinner + 「打开中…」就是反馈。
+          ⋮ 菜单与「N 条记忆」是另外的动作,不在这颗按钮里,照旧可点。 */}
+      <button
+        className={`notebook-card-main${openingNotebookId === notebook.id ? " is-opening" : ""}`}
+        aria-busy={openingNotebookId === notebook.id || undefined}
+        disabled={openingNotebookId === notebook.id}
+        onClick={() => openNotebook(notebook.id).catch(reportError)}
+      >
         <div className="card-icon">{cardIcon(index, notebook)}</div>
         <div>
           <h2>{notebook.name}</h2>
           <p>{notebook.purpose || "No purpose set yet."}</p>
+          {openingNotebookId === notebook.id && (
+            <p className="notebook-card-open-status">
+              <span className="notebook-card-open-spinner" aria-hidden="true" />
+              打开中…
+            </p>
+          )}
           {isGroupGranted(notebook) && (
             <p className="notebook-card-meta">{grantedViaLabel(notebook)}</p>
           )}
@@ -5067,6 +5152,7 @@ export default function Home() {
             {notebookCollection.viewMode === "list" ? (
               <NotebookList
                 entries={notebookPartition.personal}
+                openingNotebookId={openingNotebookId}
                 openNotebook={(id) => openNotebook(id).catch(reportError)}
                 openMemory={(id) => openNotebookMemory(id).catch(reportError)}
                 openMenu={openNotebookMenu}
@@ -5103,6 +5189,7 @@ export default function Home() {
                   <NotebookList
                     entries={notebookPartition.group}
                     roleText="群组成员"
+                    openingNotebookId={openingNotebookId}
                     openNotebook={(id) => openNotebook(id).catch(reportError)}
                     openMemory={(id) => openNotebookMemory(id).catch(reportError)}
                     openMenu={openNotebookMenu}
@@ -5139,6 +5226,10 @@ export default function Home() {
           initialTab={groupNavigation.tab}
           onBack={showCollection}
           onChanged={() => { notebookCollection.refreshAfterAccessChange().catch(reportError); }}
+          /* 已知余量:群组页里的「打开笔记本」入口不带 is-opening 视觉态。忙碌位
+             (openingNotebookId)是 page.tsx 的本地 state,而 GroupsPage 是独立组件;
+             且这个入口一按整页就切走(群组页整体卸载),不像集合页那样留在原地等几秒。
+             合并 guard 本身照常生效(在 openNotebook 内部),重复点不会叠出并行请求。 */
           onOpenNotebook={(notebookId) => { void openNotebook(notebookId); }}
           onNavigate={(groupId, nextTab) => {
             setGroupNavigation({ groupId, tab: nextTab });
@@ -8213,6 +8304,7 @@ export default function Home() {
 function NotebookList({
   entries,
   roleText,
+  openingNotebookId,
   openNotebook,
   openMemory,
   openMenu
@@ -8220,6 +8312,12 @@ function NotebookList({
   entries: Array<{ notebook: NotebookSummary; index: number; hits: SearchHit[] }>;
   /** 覆盖「角色」列的文案。「群组」分区传「群组成员」;省略时按每行的 access 判。 */
   roleText?: string;
+  /**
+   * 正在打开的笔记本 id。列表视图与网格卡片是同一个动作的两种外观,忙碌反馈必须
+   * 同权:命中行的四个「打开」单元格立刻禁用并显示旋转指示,否则用户在列表里连点
+   * 依旧会叠出多组并行请求(网格那边已经挡住了,这边没挡就是同一个缺陷的另一半)。
+   */
+  openingNotebookId: string | null;
   openNotebook: (id: string) => void;
   openMemory: (id: string) => void;
   openMenu: (id: string, event: MouseEvent<HTMLButtonElement>) => void;
@@ -8232,23 +8330,39 @@ function NotebookList({
       <div className="notebook-list-header">
         <span>标题</span><span>来源</span><span>记忆</span><span>创建日期</span><span>角色</span><span />
       </div>
-      {entries.map(({ notebook, index, hits }) => (
+      {entries.map(({ notebook, index, hits }) => {
+        const opening = openingNotebookId === notebook.id;
+        return (
         <article className="notebook-list-row" key={notebook.id}>
-          <button className="notebook-list-title" onClick={() => openNotebook(notebook.id)}>
+          <button
+            className={`notebook-list-title${opening ? " is-opening" : ""}`}
+            aria-busy={opening || undefined}
+            disabled={opening}
+            onClick={() => openNotebook(notebook.id)}
+          >
             <span className="list-icon">{cardIcon(index, notebook)}</span>
             <span>
               <strong>{notebook.name}</strong>
+              {opening && (
+                <small className="notebook-list-open-status">
+                  <span className="notebook-card-open-spinner" aria-hidden="true" />
+                  打开中…
+                </small>
+              )}
               {isGroupGranted(notebook) && <small>{grantedViaLabel(notebook)}</small>}
               <SearchHits hits={hits} compact />
             </span>
           </button>
-          <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
+          {/* 三个数据格与标题同一个动作(打开这本库),所以同禁用。⋮ 菜单与「N 条记忆」
+              是另外的动作,不禁用。 */}
+          <button className="notebook-list-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
           <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
-          <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
-          <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>{notebookRoleText(notebook, roleText)}</button>
+          <button className="notebook-list-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
+          <button className="notebook-list-cell role-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebookRoleText(notebook, roleText)}</button>
           <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="笔记本操作">⋮</button>
         </article>
-      ))}
+        );
+      })}
     </section>
   );
 }
