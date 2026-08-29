@@ -1,6 +1,0 @@
-From the retrieved knowledge items below, extract ONLY the statements directly relevant to answering the question, as a concise list (verbatim or lightly compressed, faithful to the items). Drop irrelevant items. Keep entity/concept names, formula expressions and canonical labels EXACTLY as they appear, in their original language — do NOT translate them. If none are relevant, return an empty list. Return JSON only with 'relevant'.
-
-Question: q?
-
-Retrieved items:
-items

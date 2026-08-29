@@ -1,8 +1,0 @@
-You plan the OUTLINE of a deep technical report that answers an engineer's question from a document corpus. Produce 3-6 sections. Rules:
-- Sections follow the question's own structure; for a multi-layer mechanism question, one section per abstraction layer (e.g. circuit principle / device physics / statistical & solid-state physics / quantum-lattice origin / engineering requirements such as packaging & materials).
-- Do NOT include executive-summary / references / knowledge-gap sections — the system appends those automatically.
-- Each section: title (in the question's language), scope (one line, what the section must establish), sub_queries (2-4 focused ENGLISH retrieval queries for that section's evidence).
-
-Question: q?
-
-Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""]}]}

@@ -1,19 +1,28 @@
-"""Byte-equivalence and registry-invariant tests for the L0/L1/L2 prompt
-layering refactor (see ``app.services.prompt_layers``).
+"""Registry-invariant and wiring tests for the L0/L1/L2 prompt layering
+(see ``app.services.prompt_layers``).
 
-Section 1 re-renders the exact same calls the frozen snapshots under
-``backend/tests/fixtures/prompt_layer_snapshots/`` were generated from (by
-``scripts/generate_prompt_layer_snapshots.py``, run against pre-refactor
-``prompts.py``) and asserts byte-for-byte equality — this is the "zero
-behavior change" acceptance criterion for the whole refactor. Never
-regenerate those fixtures from the refactored code: that would make this
-test compare the refactor's output against itself. The case dict itself is
-loaded straight from the generator script (see ``_load_snapshot_cases``)
-rather than re-declared here, so there is exactly one place that knows what
-each snapshot case renders.
+What this file pins is the OBSERVABLE contract of the layering, all of it
+stable under legitimate prompt retuning:
+
+* every L1 fragment's registered text actually reaches a rendering of its
+  own prompt (wiring — an unwired or misrouted ``fragment_text()`` call
+  fails here);
+* the shape contract (sequence-number prefix, terminating newline /
+  trailing space) any future override must preserve;
+* naming, the closed fragment-id set, and boundary/text non-emptiness;
+* L2_BLOCKS reconciled both ways against real ``inspect.signature``
+  parameters;
+* the single-read-path guard (prompts.py may import only ``fragment_text``).
+
+The refactor that introduced the layering was additionally proven
+zero-behavior-change by a byte-exact snapshot suite frozen at baseline
+319f7aad and independently re-verified against the pre-refactor source
+(PR #637). That suite was retired before merge, per AGENTS.md's test
+policy ("observable behavior and semantic identities, not ...
+refactor-only golden snapshots"): once the refactor lands, byte snapshots
+would only ever fail on the next legitimate prompt retune.
 """
 import ast
-import importlib.util
 import inspect
 import re
 from pathlib import Path
@@ -23,49 +32,9 @@ import pytest
 from app.services import prompts
 from app.services.prompt_layers import L1_FRAGMENTS, L2_BLOCKS, fragment_text
 
-TESTS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = TESTS_DIR.parents[1]
-FIXTURES_DIR = TESTS_DIR / "fixtures" / "prompt_layer_snapshots"
-GENERATOR_SCRIPT = REPO_ROOT / "scripts" / "generate_prompt_layer_snapshots.py"
-
-
-def _load_snapshot_cases():
-    spec = importlib.util.spec_from_file_location(
-        "generate_prompt_layer_snapshots", GENERATOR_SCRIPT
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module._cases()
-
-
-CASES = _load_snapshot_cases()
-
-
-def _read_fixture(case: str) -> str:
-    return (FIXTURES_DIR / f"{case}.txt").read_text(encoding="utf-8")
-
 
 # --------------------------------------------------------------------------- #
-# 1. Snapshot byte-equivalence: every case the fixtures were generated from.
-# --------------------------------------------------------------------------- #
-
-@pytest.mark.parametrize("case", sorted(CASES))
-def test_prompt_rendering_matches_frozen_snapshot(case):
-    rendered = CASES[case]()
-    expected = _read_fixture(case)
-    assert rendered == expected, (
-        f"{case!r} rendering diverged from the frozen pre-refactor snapshot "
-        "— the L0/L1/L2 layering refactor must be zero-behavior-change"
-    )
-
-
-def test_all_fixture_files_are_covered_by_a_case():
-    fixture_names = {p.stem for p in FIXTURES_DIR.glob("*.txt")}
-    assert fixture_names == set(CASES)
-
-
-# --------------------------------------------------------------------------- #
-# 2. L1_FRAGMENTS naming invariants.
+# 1. L1_FRAGMENTS naming invariants.
 # --------------------------------------------------------------------------- #
 
 # A fragment_id's prefix does not always spell the full function name
@@ -131,7 +100,7 @@ def test_l1_fragment_count_is_nine():
 
 
 # --------------------------------------------------------------------------- #
-# 2b. L1_FRAGMENTS shape contract: the sequence-number prefix and the
+# 1b. L1_FRAGMENTS shape contract: the sequence-number prefix and the
 # terminating newline/trailing-space suffix are part of what any future
 # override must preserve (see each fragment's ``boundary``), not incidental
 # formatting — this table makes that machine-checked.
@@ -172,26 +141,38 @@ def test_fragment_text_shape_contract(fragment_id, required_prefix, required_suf
         )
 
 
-# Which rendered snapshot case(s) exercise each fragment's owning prompt_id,
-# used below to prove each fragment's text actually appears verbatim in at
-# least one rendering of its own prompt.
-_CASES_BY_PROMPT_ID = {
-    "answer_prompt": ["answer_default", "answer_history", "answer_sectioned_style"],
-    "expand_query_prompt": ["expand_basic", "expand_full"],
-    "query_intent_prompt": ["intent_default", "intent_confirm"],
-    "report_storm_outline_prompt": ["outline_storm"],
-    "report_section_prompt": ["section_parametric", "section_strict"],
-}
+# --------------------------------------------------------------------------- #
+# 1c. Wiring: every fragment's registered text appears verbatim in at least
+# one rendering of its own prompt. This survives legitimate retuning (the
+# assertion compares the registry text against the rendering that consumes
+# it), while an unwired fragment, a misrouted fragment_text() call, or a
+# fragment whose splice point was edited away all fail here.
+# --------------------------------------------------------------------------- #
+
+def _renderings_for(prompt_id: str) -> list:
+    if prompt_id == "answer_prompt":
+        return [
+            prompts.answer_prompt("q?", "k1: [concept] X — ctx"),
+            prompts.answer_prompt(
+                "q?", "k1: [concept] X — ctx", sectioned=True,
+                section_title="T", section_index=2, section_total=5,
+                style_block="[style] concise",
+            ),
+        ]
+    if prompt_id == "expand_query_prompt":
+        return [prompts.expand_query_prompt("compare A and B", want_types=True)]
+    if prompt_id == "query_intent_prompt":
+        return [prompts.query_intent_prompt("q?")]
+    if prompt_id == "report_storm_outline_prompt":
+        return [prompts.report_storm_outline_prompt("q?", corpus_map="CM")]
+    if prompt_id == "report_section_prompt":
+        return [prompts.report_section_prompt("T", "S", "q?", "k1: x")]
+    raise AssertionError(f"no rendering recipe for prompt_id {prompt_id!r}")
 
 
 def test_every_fragment_text_appears_verbatim_in_a_rendering_of_its_prompt():
     for fragment_id, fragment in L1_FRAGMENTS.items():
-        case_names = _CASES_BY_PROMPT_ID.get(fragment.prompt_id)
-        assert case_names, (
-            f"no known snapshot case for prompt_id {fragment.prompt_id!r} "
-            f"(fragment {fragment_id!r})"
-        )
-        renderings = [CASES[name]() for name in case_names]
+        renderings = _renderings_for(fragment.prompt_id)
         assert any(fragment.text in rendering for rendering in renderings), (
             f"{fragment_id!r}'s text does not appear verbatim in any "
             f"rendering of {fragment.prompt_id!r}"
@@ -210,7 +191,7 @@ def test_fragment_text_raises_key_error_for_unknown_id():
 
 
 # --------------------------------------------------------------------------- #
-# 3. L2_BLOCKS registry invariants — including reconciliation against real
+# 2. L2_BLOCKS registry invariants — including reconciliation against real
 # ``inspect.signature`` parameters, so this ~100 lines of metadata is a
 # checked contract rather than prose that can silently drift from the code.
 # --------------------------------------------------------------------------- #
@@ -295,7 +276,7 @@ def test_l2_blocks_backward_every_matching_parameter_is_declared():
 
 
 # --------------------------------------------------------------------------- #
-# 4. Single-read-path guard: prompts.py may only ever import fragment_text
+# 3. Single-read-path guard: prompts.py may only ever import fragment_text
 # from prompt_layers — never L1_FRAGMENTS itself (that would open a second,
 # unmanaged read path around the one sanctioned override seam).
 # --------------------------------------------------------------------------- #
