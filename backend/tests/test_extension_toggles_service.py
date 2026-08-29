@@ -248,10 +248,12 @@ def test_a_retired_refresher_does_not_publish_a_read_that_outlived_its_stop(
 ):
     """The bounded join is not a guarantee that the thread is gone.
 
-    A read stuck on a slow query can return after ``stop`` gave up waiting, by
-    which point a successor may already have published a newer snapshot.
-    Publishing then would roll the process back by up to one interval with no
-    later tick to correct it, so the read is discarded instead.
+    A read stuck on a slow query can return after ``stop`` gave up waiting.
+    Deliberately nobody else publishes here, so the publish token would NOT
+    save us — the retired read's token is still the highest one issued, and a
+    token check alone would happily install its stale value with no later tick
+    from that dead thread to correct it. Only the stop re-check refuses it,
+    which is why both guards exist.
     """
 
     read_started = threading.Event()
@@ -275,13 +277,141 @@ def test_a_retired_refresher_does_not_publish_a_read_that_outlived_its_stop(
     retired = _refresher_threads()
     assert len(retired) == 1, "the blocked thread should have outlived the join"
 
-    # A successor publishes while the retired read is still blocked.
-    extension_admission.publish_disabled_plugin_ids(frozenset({"corp.current"}))
     release_read.set()
     retired[0].join(10.0)
     assert not retired[0].is_alive()
 
-    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.current"})
+    assert extension_admission.disabled_plugin_ids() == frozenset()
+
+
+def test_publish_tokens_are_monotonic_and_reset_with_the_holder():
+    first = extension_admission.begin_publish()
+    second = extension_admission.begin_publish()
+    assert second > first
+
+    assert extension_admission.publish_disabled_plugin_ids(
+        frozenset({"corp.b"}), second
+    ) is True
+    # Refused even though nothing else published in between: the token says
+    # this caller's read is the older one, and that is all that matters.
+    assert extension_admission.publish_disabled_plugin_ids(
+        frozenset({"corp.a"}), first
+    ) is False
+    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.b"})
+    # A token is spent, not reusable.
+    assert extension_admission.publish_disabled_plugin_ids(
+        frozenset({"corp.c"}), second
+    ) is False
+    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.b"})
+
+    # The token-free form issues its own and therefore always wins.
+    assert extension_admission.publish_disabled_plugin_ids(
+        frozenset({"corp.d"})
+    ) is True
+    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.d"})
+
+    # Shape is checked before ordering: a caller with a bug hears about it
+    # even on a publish that was going to be dropped anyway.
+    doomed = extension_admission.begin_publish()
+    extension_admission.publish_disabled_plugin_ids(frozenset({"corp.e"}))
+    with pytest.raises(TypeError):
+        extension_admission.publish_disabled_plugin_ids("corp.x", doomed)
+
+    extension_admission.reset_for_tests()
+    assert extension_admission.disabled_plugin_ids() == frozenset()
+    assert extension_admission.begin_publish() == 1
+
+
+def test_a_tick_that_read_before_an_admin_write_cannot_undo_it(caplog):
+    """The race the publish token exists for.
+
+    The tick's SELECT starts before the admin's row is committed, so it can
+    only ever return the pre-write world; it finishes after the admin has
+    published. Last-writer-wins would re-enable the plugin an admin just
+    switched off, for up to a whole interval, with nothing to correct it until
+    the next tick.
+    """
+
+    read_started = threading.Event()
+    release_read = threading.Event()
+
+    def answer(reads):
+        if reads == 1:
+            read_started.set()
+            assert release_read.wait(10.0), "test never released the read"
+            return frozenset()  # the pre-write world: nothing disabled
+        return frozenset({"corp.disabled"})  # later reads see the commit
+
+    caplog.set_level(logging.DEBUG, logger=LOGGER_NAME)
+    tick_store = _Store(answer)
+    stop = extension_toggles.start_extension_admission_refresher(tick_store, 0.01)
+    try:
+        assert read_started.wait(10.0)
+
+        # The whole admin write path runs inside the tick's read window.
+        admin_store = _Store(_always(frozenset({"corp.disabled"})))
+        assert extension_toggles.refresh_extension_admission(
+            admin_store
+        ) == frozenset({"corp.disabled"})
+
+        release_read.set()
+        # Read 2 starting proves the blocked tick's publish already ran.
+        tick_store.wait_for_reads(2)
+        assert extension_admission.disabled_plugin_ids() == frozenset(
+            {"corp.disabled"}
+        )
+    finally:
+        release_read.set()
+        stop()
+
+    assert any(
+        "superseded" in record.getMessage()
+        for record in caplog.records
+        if record.name == LOGGER_NAME
+    ), "the stale tick's publish should have been refused, not applied"
+
+
+def test_an_older_read_cannot_overwrite_a_concurrent_newer_write():
+    """Two admin writes interleaving: the one that read first publishes last.
+
+    Same shape as the tick race above, without a refresher — this is what two
+    concurrent PATCHes do to each other.
+    """
+
+    read_started = threading.Event()
+    release_read = threading.Event()
+
+    def answer(_reads):
+        read_started.set()
+        assert release_read.wait(10.0), "test never released the read"
+        return frozenset({"corp.first"})
+
+    first_store = _Store(answer)
+    result: dict[str, frozenset[str]] = {}
+
+    def run_first() -> None:
+        result["live"] = extension_toggles.refresh_extension_admission(
+            first_store
+        )
+
+    worker = threading.Thread(target=run_first, name="admin-write-a")
+    worker.start()
+    try:
+        assert read_started.wait(10.0)
+        # The second write takes its token and publishes entirely inside the
+        # first one's read window.
+        extension_toggles.refresh_extension_admission(
+            _Store(_always(frozenset({"corp.second"})))
+        )
+    finally:
+        release_read.set()
+        worker.join(10.0)
+
+    assert not worker.is_alive()
+    assert extension_admission.disabled_plugin_ids() == frozenset({"corp.second"})
+    # The loser is told what is actually in effect, not what it read: a set it
+    # lost the race with was never in effect for anybody.
+    assert result["live"] == frozenset({"corp.second"})
 
 
 def test_an_invalid_snapshot_is_reported_every_tick_and_never_debounced(caplog):

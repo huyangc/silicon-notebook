@@ -29,6 +29,13 @@ it take effect at once; every other process notices within one tick. Offline
 CLIs and batch jobs get the prime and nothing more — they are short-lived, and
 a background thread reaching into a database an operator believes is quiesced
 would be worse than a snapshot that is a few minutes old.
+
+Inside the writing process those two publishers race, and a tick that started
+its query first can finish last — which is why every publish here carries a
+token taken *before* its read. The ordering argument lives in
+``app.core.extension_admission``; the rule to remember at this level is that
+a read and its publish are one unit, and the token is what marks where that
+unit began.
 """
 from __future__ import annotations
 
@@ -37,6 +44,7 @@ import threading
 from collections.abc import Callable
 
 from app.core.extension_admission import (
+    begin_publish,
     disabled_plugin_ids,
     publish_disabled_plugin_ids,
 )
@@ -53,11 +61,19 @@ logger = logging.getLogger("silicon_notebook.extension_admission")
 _STOP_JOIN_TIMEOUT_SECONDS = 5.0
 
 
-def _publish(disabled) -> frozenset[str]:
-    """Install ``disabled`` and report the change once, if it is one."""
+def _publish(disabled, token: int) -> bool:
+    """Install ``disabled`` under ``token`` and report the change, if any."""
 
     previous = disabled_plugin_ids()
-    publish_disabled_plugin_ids(disabled)
+    if not publish_disabled_plugin_ids(disabled, token):
+        # Debug, not warning: losing to a fresher publisher is the ordering
+        # rule working, not a fault. Nothing is lost — the snapshot that beat
+        # this one is already installed, and it is the newer of the two.
+        logger.debug(
+            "extension admission publish superseded by a newer one; "
+            "discarding this read"
+        )
+        return False
     published = disabled_plugin_ids()
     if published != previous:
         # Only on change, and count-only: an unchanged tick every few seconds
@@ -68,7 +84,7 @@ def _publish(disabled) -> frozenset[str]:
             "extension admission snapshot updated: %d plugin(s) disabled",
             len(published),
         )
-    return published
+    return True
 
 
 def refresh_extension_admission(
@@ -76,9 +92,19 @@ def refresh_extension_admission(
 ) -> frozenset[str]:
     """Read the toggle rows and install them as the process-wide snapshot.
 
-    Returns the set that is now live, so a caller that needs it (the admin
-    write path wants to answer with what it just published) does not have to
-    read the holder back.
+    Returns the set that is now live — which after a *superseded* publish is
+    the winner's, not this call's. That is the honest answer for the caller
+    that wants it (the admin write path answering with what is now in
+    effect): a set this call read but lost the race with was never in effect
+    for anyone.
+
+    The token is taken BEFORE the read, and that ordering is the whole point.
+    An admin write and a polling tick both do read-then-publish; the tick's
+    read can start before the admin's row is committed and finish after the
+    admin has published, so last-writer-wins would let the tick undo the
+    switch for a whole interval. Two concurrent admin writes interleave the
+    same way. Token order is read-start order, so the holder can drop exactly
+    the publishes whose data is stale. See ``app.core.extension_admission``.
 
     Store failures propagate on purpose — see the module docstring. Callers
     that must survive a failed read (only the refresher below) catch it there,
@@ -89,7 +115,9 @@ def refresh_extension_admission(
     a step this one-shot form has no reason to carry.
     """
 
-    return _publish(store.extension_runtime_disabled_ids())
+    token = begin_publish()
+    _publish(store.extension_runtime_disabled_ids(), token)
+    return disabled_plugin_ids()
 
 
 class _Refresher:
@@ -169,18 +197,28 @@ class _Refresher:
                 self._note_success()
 
     def _tick(self) -> None:
-        """One read, then one publish — unless this refresher retired between.
+        """Take a token, read, then publish — unless this refresher retired.
 
-        The re-check is the whole reason the loop does not just call
-        ``refresh_extension_admission``. ``stop`` waits a bounded time; a read
-        stuck on a slow query can outlast that wait and return afterwards, by
-        which point a *successor* refresher (a retried lifecycle, a second
-        lifespan) may already have published a newer snapshot. Publishing then
-        would roll the process back to a value up to one interval old, with no
-        further tick from this dead thread to correct it. Losing the read is
-        the cheap outcome; overwriting a live snapshot is not.
+        Two guards, for two different stale-read problems, and neither
+        subsumes the other:
+
+        - The **token**, taken before the read, is the general one: it drops
+          this read if anyone whose read started later has already published.
+          That is what stops a tick from undoing an admin's switch when the
+          tick's query began before the row was committed.
+        - The **stop re-check** is the specific one: a refresher that has been
+          told to stop must not act, even when its data would win. ``stop``
+          waits only a bounded time, so a read stuck on a slow query can
+          return after its owner gave up on it; if no successor has published
+          in the meantime, the token alone would happily let this dead thread
+          install a value up to one interval old, with no further tick from it
+          to correct that.
+
+        Checking the flag is also why the loop does not just call
+        ``refresh_extension_admission``.
         """
 
+        token = begin_publish()
         disabled = self._store.extension_runtime_disabled_ids()
         if self._stop_requested.is_set():
             logger.debug(
@@ -188,7 +226,7 @@ class _Refresher:
                 "while its read was in flight"
             )
             return
-        _publish(disabled)
+        _publish(disabled, token)
 
     def _note_programming_error(self) -> None:
         # Deliberately does not touch ``_consecutive_failures``: this is not
@@ -251,10 +289,9 @@ def start_extension_admission_refresher(
 
     "Stopped" is not the same as "gone": the join is bounded, so a predecessor
     wedged on a slow read can still be running when this returns. It cannot
-    affect anything — ``_tick`` re-checks the stop flag before it publishes,
-    so a retired thread's late read is discarded rather than overwriting this
-    refresher's snapshot — but a thread dump during an outage may legitimately
-    show two.
+    affect anything — its publish is refused twice over, by its own stop
+    re-check and by the publish token its read predates — but a thread dump
+    during an outage may legitimately show two.
 
     The returned callback stops *this* refresher only. Calling a stale one
     after a replacement is a no-op, so a caller cannot accidentally shut down
