@@ -1090,6 +1090,10 @@ export default function Home() {
   // 只读共享(Phase 2):退出共享请求覆盖;已分享总览 modal 的数据与开关
   const [leaveBusy, setLeaveBusy] = useState(false);
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
+  // 总览里正在被撤销的那一本(codex #631 R2 P2)。`shareBusy` 是全局的忙碌闸,拿它当**文案**
+  // 判据会让每一行的按钮都写「取消中…」——分享得多的用户读到的是「全都在取消」。闸(disabled)
+  // 仍然全局:一次只允许一个分享写操作;进行态文案只落在真正在动的那一行。
+  const [unsharingNotebookId, setUnsharingNotebookId] = useState<string | null>(null);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [contentOverview, setContentOverview] = useState<NotebookContentOverview | null>(null);
   const [contentOverviewLoading, setContentOverviewLoading] = useState(false);
@@ -4490,6 +4494,7 @@ export default function Home() {
     const operation = {};
     shareOperationRef.current = operation;
     setShareBusy(true);
+    setUnsharingNotebookId(notebookId);
     try {
       await unshareNotebook(notebookId);
       if (!rootModals.owns(modalLease)) return;
@@ -4502,9 +4507,12 @@ export default function Home() {
     } catch (error) {
       if (rootModals.owns(modalLease)) throw error;
     } finally {
+      // 进行态文案与忙碌闸在同一个判据下解除:两者必须同生同灭,否则会留下一行写着
+      // 「取消中…」却已经能点的按钮(或反过来:文案先掉、按钮还禁着)。
       if (shareOperationRef.current === operation) {
         shareOperationRef.current = null;
         setShareBusy(false);
+        setUnsharingNotebookId(null);
       }
     }
   }
@@ -6535,7 +6543,7 @@ export default function Home() {
                               className="sort-button danger-text"
                               disabled={shareBusy}
                               onClick={() => confirmUnshareFromOverview(item)}
-                            >{shareBusy ? "取消中…" : "取消链接分享"}</button>
+                            >{unsharingNotebookId === item.id ? "取消中…" : "取消链接分享"}</button>
                           </div>
                         </div>
                       )}
