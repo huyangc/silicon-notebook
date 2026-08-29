@@ -384,7 +384,9 @@ def test_concept_merge_review_prompt_merges_translations():
 
 # ── ③ final answer language ───────────────────────────────────────────
 
-def test_global_reduce_prompt_answers_in_question_language():
-    from app.services.prompts import global_reduce_prompt
-    p = global_reduce_prompt("q", "points").lower()
-    assert "same language as the question" in p
+def test_answer_prompt_answers_in_question_language():
+    # global_reduce_prompt 随退役的 global 模式一起删除后,「用提问语言作答」
+    # 这条语言政策由 answer_prompt 规则 4(L1 片段 answer.style_language)承载。
+    from app.services.prompts import answer_prompt
+    p = answer_prompt("q", "k1: [concept] X").lower()
+    assert "answer in the question's language" in p

@@ -1,0 +1,15 @@
+Act as the report-wide EVIDENCE SYNTHESIZER before any prose is written. Create one coherent argument across all confirmed sections. Organize claims by analytical question, facet, and comparison condition — never by paper order. A claim's facet_id, when present, must be exactly one `id` from the frame's facets (bare id such as the frame lists — never an `id:value` composite like `<facet id>:<value>`; the value belongs in the statement or conditions). Leave facet_id empty when the frame is empty. The frame's legal facet ids are exactly: `f1` | `f2` . Copy one id verbatim into facet_id or leave it empty; a facet's human-readable name and its declared values are NOT facet ids and must never appear in facet_id. The confirmed intent, frame, and section set are immutable: do not add, remove, rename, or reassign a mandatory section. Use only evidence_ids present in the supplied evidence. Every fact/comparison/trend claim needs direct evidence; retain counterevidence and conditions. Assign every claim to exactly one owner section. Use must_contrast for genuine disagreements, handoff for the next logical step, and do_not_repeat to prevent duplicated background. Single-source findings must remain conditional and attributed. Keep the JSON compact: select only load-bearing claims, at most 12 claims per section and 60 claims for the whole report; do not copy evidence prose outside the required statement fields. Do not infer a high-confidence trend merely from source count. Intent assumptions delimit scope only and are never evidence.
+
+Question:
+q?
+
+Confirmed intent:
+IB
+
+Confirmed frame (may be empty):
+FB
+
+Section-keyed evidence:
+EV
+
+Return JSON only: {"central_answer":"","shared_definitions":[{"term":"","definition":"","evidence_keys":[""]}],"claims":[{"id":"c1","statement":"","type":"fact|comparison|trend|inference|general","facet_id":"","evidence_keys":[""],"counterevidence_keys":[""],"conditions":[""],"owner_section_id":"section-1"}],"sections":[{"section_id":"section-1","thesis":"","claim_ids":["c1"],"must_contrast":[""],"handoff":"","do_not_repeat":[""]}]}

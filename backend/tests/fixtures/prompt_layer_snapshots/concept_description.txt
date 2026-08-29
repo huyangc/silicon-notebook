@@ -1,0 +1,6 @@
+Write a concise 1-2 sentence technical description of the concept "concept name" for a semiconductor/IC-design knowledge base, synthesizing the source snippets below (which mention it across documents). Merge the snippets, resolve any contradictions into a single coherent description, stay factual to the snippets, third person, include the concept name. Preserve entity/concept names, formula expressions and canonical labels EXACTLY as they appear in the source, in their original language — do NOT translate or transliterate them; write the description in the language of the source snippets. Return JSON only with a 'description' field.
+
+Concept: concept name
+
+Source snippets:
+evidence block
