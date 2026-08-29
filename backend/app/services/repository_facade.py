@@ -815,6 +815,7 @@ class RepositoryFacade:
         user_id: str,
         *,
         activity_type: Optional[str] = None,
+        include_inaccessible_questions: bool = False,
         notebook_id: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
@@ -825,6 +826,7 @@ class RepositoryFacade:
         return self._runtime.queries.list_user_activity(
             user_id,
             activity_type=activity_type,
+            include_inaccessible_questions=include_inaccessible_questions,
             notebook_id=notebook_id,
             since=since,
             until=until,
