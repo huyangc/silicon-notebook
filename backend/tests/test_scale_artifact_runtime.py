@@ -1317,3 +1317,27 @@ def test_allow_stale_rejects_artifacts_from_another_pipeline_generation():
         calls,
     )
     assert matched.load("nb", allow_stale=True) is not None
+
+
+def test_backoff_ceiling_below_base_is_rejected_at_settings_construction() -> None:
+    """封顶 < 起步的矛盾配置必须在启动期响亮拒绝(codex #627 R3 P2)。
+    两字段各自 ge=1 之外的交叉校验:运行侧 `_scale_record_failure` 用
+    `min(..., max(base, cap))` 兜底,矛盾组合会把实际封顶静默抬到 base
+    (base=600、max=60 实得恒 600s),与文档宣称的封顶语义相悖。"""
+    import pydantic
+
+    from app.core.config import Settings
+
+    with pytest.raises(pydantic.ValidationError, match="SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS"):
+        Settings(
+            database_url="sqlite:///backoff-validator-test.db",
+            scale_build_failure_backoff_seconds=600,
+            scale_build_failure_backoff_max_seconds=60,
+        )
+    # 合法组合(含相等)照常通过。
+    ok = Settings(
+        database_url="sqlite:///backoff-validator-test.db",
+        scale_build_failure_backoff_seconds=60,
+        scale_build_failure_backoff_max_seconds=60,
+    )
+    assert ok.scale_build_failure_backoff_max_seconds == 60

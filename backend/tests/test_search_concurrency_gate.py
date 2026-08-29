@@ -25,6 +25,12 @@ search (a ``threading.Event``, never a real database) to prove:
   still gets a thread out of the shared pool while a search burst queues.
   This is the P1 nail: flip the route back to ``def`` + a threading
   semaphore and this one goes red while the other two stay green.
+* **a cancelled request keeps its permit until its thread really finishes**
+  -- a disconnect/timeout/shutdown cannot stop a worker thread mid-scan, so
+  handing the permit back when the caller goes away would let the real
+  number of concurrent scans climb past the ceiling (codex #627 R3 P1).
+  Second nail: replace ``run_under_search_gate``'s protocol with a bare
+  ``async with`` and only the cancellation tests go red.
 """
 from __future__ import annotations
 
@@ -298,8 +304,12 @@ def test_http_search_route_is_async_and_threads_the_blocking_body() -> None:
     green while stalling every other coroutine in the process."""
     assert inspect.iscoroutinefunction(ask_routes.search_notebook)
     source = inspect.getsource(ask_routes.search_notebook)
-    assert "async with search_concurrency_gate()" in source
+    assert "run_under_search_gate(" in source
     assert "asyncio.to_thread" in source
+    # A bare `async with` on the semaphore is the cancellation bug (codex
+    # #627 R3 P1): it hands the permit back while the abandoned thread is
+    # still scanning. The permit protocol lives in run_under_search_gate.
+    assert "async with search_concurrency_gate" not in source
     # The rationale above lives in comments, not a docstring: FastAPI copies a
     # route function's docstring into OpenAPI's operation.description, and the
     # OpenAPI shape is a frozen contract (test_repository_api_contract.py).
@@ -378,15 +388,19 @@ def _capture_search_notebook_context(monkeypatch, repo):
     return captured["search_notebook_context"]
 
 
-def test_both_entry_points_use_the_same_gate_accessor() -> None:
-    # Identity of the accessor, not of a per-module copy: a second
+def test_both_entry_points_use_the_same_gate_helper() -> None:
+    # Identity of the shared helper, not of a per-module copy: a second
     # ``asyncio.Semaphore(4)`` would behave the same in isolation but would
-    # NOT throttle the other entry point. The behavioural proof is the test
-    # below; this one just localises the failure if someone re-imports.
-    assert ask_routes.search_concurrency_gate is search_concurrency.search_concurrency_gate
+    # NOT throttle the other entry point, and a hand-rolled acquire/release
+    # would not carry the cancellation protocol. The behavioural proofs are
+    # below; this one localises the failure if someone re-imports.
     assert (
-        memory_context.search_concurrency_gate
-        is search_concurrency.search_concurrency_gate
+        ask_routes.run_under_search_gate
+        is search_concurrency.run_under_search_gate
+    )
+    assert (
+        memory_context.run_under_search_gate
+        is search_concurrency.run_under_search_gate
     )
 
 
@@ -433,12 +447,235 @@ def test_mcp_entry_point_shares_the_gate_with_the_http_entry_point(monkeypatch) 
     asyncio.run(scenario())
 
 
+# ---------------------------------------------------------------------------
+# A cancelled request keeps its permit until its thread really finishes.
+# ---------------------------------------------------------------------------
+
+
+async def _start_one_abandoned_search(probe, start_call) -> None:
+    """Start one search, wait until its worker thread is inside the fake scan,
+    then cancel the caller. Returns with the thread STILL scanning."""
+    abandoned = asyncio.create_task(start_call())
+    await _await_holders(probe, 1, "the search that gets cancelled")
+
+    abandoned.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await abandoned
+    # Two properties at once: the cancellation reached the requester PROMPTLY
+    # (nobody is made to wait out a scan they no longer want), and the thread
+    # is still scanning, because a worker thread cannot be stopped. Reading
+    # 0 here means the second half is untrue in one of two ways -- either the
+    # body finished (impossible while `release` is unset), or the cancellation
+    # was made to block until the thread drained, which is what a bare
+    # `async with` + anyio's non-abandoning to_thread does on the MCP path.
+    assert probe.current == 1, (
+        "after cancelling, the fake search body should STILL be running in "
+        "its worker thread and the cancellation should already have reached "
+        "the caller"
+    )
+
+
+async def _newcomers_must_respect_the_abandoned_permit(probe, release) -> None:
+    """With one abandoned scan still running, only ``limit - 1`` newcomers may
+    enter. Releasing on cancellation would let ``limit`` of them in, so the
+    real number of concurrent scans would be ``limit + 1``."""
+    limit = search_concurrency_limit()
+    newcomers = [asyncio.create_task(_call_search_route()) for _ in range(limit)]
+    await asyncio.sleep(0.25)
+
+    assert probe.current == limit, (
+        f"{probe.current} scans are running at once (ceiling is {limit}). The "
+        "cancelled request handed its permit back while its worker thread was "
+        "still scanning, so a newcomer took a slot that is not free -- the "
+        "connection-pool exhaustion this gate exists to prevent, reachable "
+        "just by cancelling requests"
+    )
+
+    release.set()
+    await asyncio.gather(*newcomers)
+    assert probe.max_seen == limit
+
+
+def test_a_cancelled_http_search_keeps_its_permit_until_its_thread_finishes(
+    monkeypatch,
+) -> None:
+    """codex #627 R3 P1. The worker thread inside an ILIKE scan cannot be
+    cancelled, so the permit must outlive the requester."""
+    probe = _ConcurrencyProbe()
+    release = threading.Event()
+    monkeypatch.setattr(
+        ask_routes,
+        "notebook_catalog_repository",
+        lambda: _fake_http_repo(probe, release),
+    )
+
+    async def scenario() -> None:
+        await _start_one_abandoned_search(probe, _call_search_route)
+        await _newcomers_must_respect_the_abandoned_permit(probe, release)
+
+    asyncio.run(scenario())
+
+
+def test_a_cancelled_mcp_search_keeps_its_permit_until_its_thread_finishes(
+    monkeypatch,
+) -> None:
+    """Same protocol on the MCP entry point: an Agent that disconnects, or a
+    client-side timeout, cancels the tool call while ``load`` is mid-scan.
+
+    The MCP path's pre-fix exposure differed from the HTTP one and it is
+    worth naming. ``anyio.to_thread.run_sync`` does not abandon its thread on
+    cancellation, so a bare ``async with`` here did not hand the permit back
+    early -- it made the CANCELLATION block until the scan drained instead,
+    holding the caller for the whole abandoned scan. Both are wrong, in
+    opposite directions; the shared helper gives prompt cancellation *and* a
+    permit that outlives it. Under the bare-``async with`` mutation this test
+    goes red on the promptness half, the HTTP one on the ceiling half."""
+    probe = _ConcurrencyProbe()
+    release = threading.Event()
+    monkeypatch.setattr(
+        ask_routes,
+        "notebook_catalog_repository",
+        lambda: _fake_http_repo(probe, release),
+    )
+    mcp_repo = _FakeMcpRepo(probe, "mcp-caller", release)
+    search_notebook_context = _capture_search_notebook_context(monkeypatch, mcp_repo)
+
+    async def scenario() -> None:
+        await _start_one_abandoned_search(
+            probe,
+            lambda: search_notebook_context(query="q", ctx=_FakeCtx(), limit=12),
+        )
+        # The newcomers are HTTP callers: the abandoned MCP scan must hold a
+        # permit out of the SAME pool they draw from.
+        await _newcomers_must_respect_the_abandoned_permit(probe, release)
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_waiter_returns_every_permit_to_the_pool(monkeypatch) -> None:
+    """The other cancellation edge: a request cancelled while still QUEUED
+    never held a permit, and must not consume or strand one.
+    ``asyncio.Semaphore.acquire`` does that bookkeeping itself (it puts back a
+    permit it was handed but could not deliver); this pins the property so a
+    hand-rolled acquire/release cannot quietly lose it."""
+    limit = search_concurrency_limit()
+    probe = _ConcurrencyProbe()
+    release = threading.Event()
+    monkeypatch.setattr(
+        ask_routes,
+        "notebook_catalog_repository",
+        lambda: _fake_http_repo(probe, release),
+    )
+
+    async def scenario() -> None:
+        gate = search_concurrency_gate()
+        holders = [asyncio.create_task(_call_search_route()) for _ in range(limit)]
+        await _await_holders(probe, limit, "the gate holders")
+
+        queued = asyncio.create_task(_call_search_route())
+        await asyncio.sleep(0.15)
+        assert probe.current == limit, "the queued caller should not be scanning"
+
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+
+        release.set()
+        await asyncio.gather(*holders)
+
+        # Every permit is back: `limit` acquisitions must all succeed at once.
+        for _ in range(limit):
+            await asyncio.wait_for(gate.acquire(), 1)
+        assert gate.locked()
+        for _ in range(limit):
+            gate.release()
+
+    asyncio.run(scenario())
+
+
+def test_a_failing_search_returns_its_permit(monkeypatch) -> None:
+    """Release happens on every outcome, not just success: a repository that
+    raises must not strand a permit (the 404 path runs through here)."""
+    limit = search_concurrency_limit()
+
+    class _MissingRepo:
+        def search_notebook(self, notebook_id: str, q: str):
+            raise KeyError(notebook_id)
+
+    monkeypatch.setattr(ask_routes, "notebook_catalog_repository", _MissingRepo)
+
+    async def scenario() -> None:
+        gate = search_concurrency_gate()
+        for _ in range(limit + 2):
+            with pytest.raises(ask_routes.HTTPException) as excinfo:
+                await _call_search_route("missing-nb", "q")
+            assert excinfo.value.status_code == 404
+        for _ in range(limit):
+            await asyncio.wait_for(gate.acquire(), 1)
+        assert gate.locked()
+        for _ in range(limit):
+            gate.release()
+
+    asyncio.run(scenario())
+
+
+def test_an_abandoned_search_that_then_fails_still_returns_its_permit(
+    monkeypatch,
+) -> None:
+    """The two edges together: cancelled AND failing. Nobody is left to
+    receive the exception, so the release must come from the done-callback
+    rather than from any ``except`` on the caller's side.
+
+    (Python 3.13+ ``shield`` reports the discarded exception through the loop
+    exception handler; that log is accepted -- see the module docstring. What
+    must NOT happen is a stranded permit.)"""
+    limit = search_concurrency_limit()
+    probe = _ConcurrencyProbe()
+    release = threading.Event()
+
+    class _FailingRepo:
+        def search_notebook(self, notebook_id: str, q: str):
+            probe.enter(threading.current_thread().name)
+            try:
+                release.wait(_BODY_TIMEOUT)
+                raise KeyError(notebook_id)
+            finally:
+                probe.exit()
+
+    monkeypatch.setattr(ask_routes, "notebook_catalog_repository", _FailingRepo)
+
+    async def scenario() -> None:
+        gate = search_concurrency_gate()
+        await _start_one_abandoned_search(probe, _call_search_route)
+
+        release.set()
+        # Let the abandoned task finish failing and run its done-callback.
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if probe.current == 0:
+                break
+        assert probe.current == 0
+
+        for _ in range(limit):
+            await asyncio.wait_for(gate.acquire(), 1)
+        assert gate.locked()
+        for _ in range(limit):
+            gate.release()
+
+    asyncio.run(scenario())
+
+
 def test_mcp_tool_takes_the_gate_before_dispatching_its_worker_thread() -> None:
-    """Structural companion: the MCP handler must ``async with`` the gate on
-    the event loop and run ``_run_with_progress`` inside it. Acquiring from
-    inside ``load`` (the worker thread) is the P1 shape -- it would park a
-    waiting agent call on an anyio worker token, which is the shared budget
-    every synchronous endpoint draws from."""
+    """Structural companion: the MCP handler must go through the shared
+    ``run_under_search_gate`` helper on the event loop, with
+    ``_run_with_progress`` -- the call that dispatches the blocking ``load``
+    into a worker thread -- inside the work it hands over.
+
+    Two shapes this rules out: acquiring from inside ``load`` (the worker
+    thread) parks a waiting agent call on an anyio worker token, the shared
+    budget every synchronous endpoint draws from; and a bare ``async with``
+    on the semaphore returns the permit while an abandoned scan still runs.
+    """
     tree = ast.parse(Path(memory_context.__file__).read_text(encoding="utf-8"))
     handler = next(
         node for node in ast.walk(tree)
@@ -446,36 +683,59 @@ def test_mcp_tool_takes_the_gate_before_dispatching_its_worker_thread() -> None:
         and node.name == "search_notebook_context"
     )
 
-    gate_blocks = [
+    gate_calls = [
+        node for node in ast.walk(handler)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", "") == "run_under_search_gate"
+    ]
+    assert len(gate_calls) == 1, (
+        "search_notebook_context must run its search through the shared "
+        "run_under_search_gate helper exactly once"
+    )
+    assert not [
         node for node in ast.walk(handler)
         if isinstance(node, ast.AsyncWith)
         and any(
             isinstance(item.context_expr, ast.Call)
-            and getattr(item.context_expr.func, "id", "") == "search_concurrency_gate"
+            and getattr(item.context_expr.func, "id", "")
+            == "search_concurrency_gate"
             for item in node.items
         )
-    ]
-    assert len(gate_blocks) == 1, (
-        "search_notebook_context must acquire the shared gate exactly once, "
-        "with `async with` on the event loop"
+    ], (
+        "a bare `async with` on the semaphore releases the permit as soon as "
+        "a cancellation unwinds it, while the abandoned worker thread is "
+        "still scanning (codex #627 R3 P1)"
+    )
+
+    # The argument must be the nested coroutine function that owns the
+    # blocking dispatch -- not `_run_with_progress`'s already-started
+    # coroutine handed over bare.
+    handed_over = gate_calls[0].args[0]
+    assert isinstance(handed_over, ast.Name), (
+        "run_under_search_gate takes a zero-argument factory; it calls it "
+        "itself once a permit is in hand"
+    )
+    work_fn = next(
+        node for node in ast.walk(handler)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == handed_over.id
     )
     assert any(
         isinstance(node, ast.Call)
         and getattr(node.func, "id", "") == "_run_with_progress"
-        for node in ast.walk(gate_blocks[0])
+        for node in ast.walk(work_fn)
     ), (
         "_run_with_progress -- which dispatches the blocking load() into a "
-        "worker thread -- must run INSIDE the gate, i.e. the gate is taken "
-        "before the thread is dispatched"
+        "worker thread -- must run inside the gated work, i.e. the permit is "
+        "held before the thread is dispatched and until it finishes"
     )
 
     load_fn = next(
         node for node in ast.walk(handler)
         if isinstance(node, ast.FunctionDef) and node.name == "load"
     )
-    assert "search_concurrency_gate" not in {
+    assert not {
         node.id for node in ast.walk(load_fn) if isinstance(node, ast.Name)
-    }, (
+    } & {"search_concurrency_gate", "run_under_search_gate"}, (
         "load() runs in a worker thread; acquiring the gate there is exactly "
         "the thread-starving shape this fix removed"
     )

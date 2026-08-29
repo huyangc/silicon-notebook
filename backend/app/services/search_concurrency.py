@@ -35,8 +35,29 @@ coroutine: no thread, no connection, no anyio token -- effectively free, and
 capped only by however many requests the loop is already holding. Only the
 <= 4 winners are charged anything, one thread and one connection each, for
 the duration of the scan itself. Both entry points therefore acquire this
-gate with ``async with`` FROM the event loop and only afterwards hand the
-blocking search body to a worker thread.
+gate FROM the event loop, via ``run_under_search_gate``, and only afterwards
+hand the blocking search body to a worker thread.
+
+A cancelled request keeps its permit until its thread really finishes
+--------------------------------------------------------------------
+Both entry points go through ``run_under_search_gate`` rather than a plain
+``async with``, and the difference is the whole point (codex #627 R3 P1). A
+client that disconnects, times out, or is caught by a shutdown gets its
+request task cancelled -- but the worker thread already inside the ILIKE
+scan cannot be stopped, and neither can the DB connection it holds. With
+``async with`` the permit is handed back the instant the cancellation
+unwinds the block, so the next four requests walk in while the abandoned
+scan is *still running*: the real number of concurrent scans climbs past the
+ceiling and the connection pool is exhausted again -- exactly the failure
+the gate exists to stop, now reachable just by cancelling requests.
+
+The permit is therefore tied to the WORK, not to the awaiting coroutine: it
+is released from a done-callback on the task that owns the thread, so it
+comes back when the scan genuinely ends -- normally, on error, or long after
+the requester walked away. The cost model this leaves is honest: a cancelled
+search still costs its thread and its connection for as long as the scan
+takes, and still counts against the ceiling for that whole time. It just
+never costs MORE than an uncancelled one.
 
 Deliberately still no timeout on acquisition. A timeout that gave up and
 rejected a waiting request would silently shrink that request's result
@@ -75,8 +96,12 @@ instead of failing; that is what makes the module usable across successive
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 from app.core.config import get_settings
+
+T = TypeVar("T")
 
 _gate: asyncio.Semaphore | None = None
 _gate_loop: asyncio.AbstractEventLoop | None = None
@@ -101,10 +126,10 @@ def search_concurrency_gate() -> asyncio.Semaphore:
     Shared by both entry points: the HTTP ``GET /notebooks/{id}/search``
     route (``app.api.ask_routes.search_notebook``) and the MCP
     ``search_notebook_context`` tool (``app.api.mcp_tools.memory_context``).
-    Both must ``async with`` the object this returns, on the event loop,
-    *before* dispatching the blocking search body to a worker thread -- see
-    the module docstring for why waiting on a thread is the bug this shape
-    exists to prevent.
+    Neither should acquire this object directly: go through
+    ``run_under_search_gate``, which owns the acquire/release protocol that
+    keeps a cancelled request's permit tied to its still-running thread. This
+    accessor is the construction/identity seam underneath it.
 
     Raises ``RuntimeError`` when there is no running event loop, and when a
     second live loop asks for the gate (see "Single-loop assumption").
@@ -138,3 +163,48 @@ def search_concurrency_gate() -> asyncio.Semaphore:
             "stop throttling instead of failing."
         )
     return _gate
+
+
+async def run_under_search_gate(work: Callable[[], Awaitable[T]]) -> T:
+    """Run one search under the gate, holding the permit until ``work`` ends.
+
+    ``work`` is called once, on the event loop, after a permit is in hand; it
+    must return the awaitable that owns the blocking scan (``asyncio.to_thread``
+    for the HTTP route, ``_run_with_progress`` for the MCP tool).
+
+    The protocol, and why it is not a plain ``async with`` (codex #627 R3 P1):
+
+    * The permit is released from a done-callback on the task wrapping
+      ``work``, so it returns when the WORK finishes -- not when this
+      coroutine stops waiting for it. A worker thread mid-ILIKE-scan cannot
+      be cancelled, so releasing on cancellation would let the next caller in
+      while the abandoned scan still holds its thread and its connection, and
+      the real concurrency would climb past the ceiling.
+    * ``asyncio.shield`` is what makes those two moments differ: cancelling
+      our caller raises here and leaves the inner task running to completion.
+      The cancellation still propagates -- the requester is not made to wait
+      for a scan nobody wants any more -- it just does not take the permit
+      with it. (Note the MCP entry point had the mirror-image bug rather than
+      this one: ``anyio.to_thread.run_sync`` does not abandon its thread, so
+      a bare ``async with`` there held the CALLER for the whole abandoned
+      scan instead of releasing early. Both are fixed by the same shape.)
+    * If the abandoned scan then fails, Python 3.13+ ``shield`` reports that
+      exception through the loop's exception handler ("exception in shielded
+      future"). That is accepted, not worked around: the failure really did
+      happen and really was discarded, and one ERROR on a
+      disconnect-plus-failure path is worth more than silence. It is not an
+      "exception was never retrieved" leak, and it strands nothing -- the
+      permit is already back by then.
+    * A cancellation raised by ``acquire`` itself costs nothing: nothing is
+      registered yet, and ``asyncio.Semaphore.acquire`` puts back a permit it
+      was handed but could not return to us (CPython's own cancellation
+      bookkeeping), so there is no permit to leak on that path.
+    * ``release`` runs on the event loop from the callback, and runs on every
+      outcome -- success, exception, or cancellation of the inner task -- so
+      a failing scan cannot strand a permit either.
+    """
+    gate = search_concurrency_gate()
+    await gate.acquire()
+    task = asyncio.get_running_loop().create_task(work())
+    task.add_done_callback(lambda _finished: gate.release())
+    return await asyncio.shield(task)

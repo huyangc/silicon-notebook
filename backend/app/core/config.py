@@ -1280,6 +1280,22 @@ class Settings(BaseSettings):
             return None
         return normalize_database_url(value)
 
+    @model_validator(mode="after")
+    def validate_scale_build_backoff_ceiling(self):
+        """封顶必须 ≥ 起步(codex #627 R3 P2)。两个字段各自 ge=1 校验后仍可能组合出
+        `max < base`——运行侧 `_scale_record_failure` 的 `min(..., max(base, cap))` 会把
+        实际封顶静默抬到 base,与文档宣称的封顶语义相悖(如 base=600、max=60 实得 600s)。
+        与其静默改语义,不如在启动期把矛盾配置响亮拒绝。"""
+        if (
+            self.scale_build_failure_backoff_max_seconds
+            < self.scale_build_failure_backoff_seconds
+        ):
+            raise ValueError(
+                "SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS 必须 ≥ "
+                "SCALE_BUILD_FAILURE_BACKOFF_SECONDS(封顶不能低于起步延迟)"
+            )
+        return self
+
     @model_validator(mode="before")
     @classmethod
     def sanitize_invalid_database_url_inputs(cls, values):
