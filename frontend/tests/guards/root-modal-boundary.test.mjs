@@ -6,6 +6,7 @@ import {
   findFunctionIn,
   ifConditionsIn,
   importsIn,
+  jsxElements,
   parseModule,
 } from "../../test-support/semantic-source.mjs";
 
@@ -230,4 +231,44 @@ test("modal mutations suppress errors after their frozen lease becomes stale", (
   assert.match(catalogText, /const operationIsCurrent = \(\) => reviewAliveRef\.current && isCurrent\(\)/);
   assert.match(catalogText, /const result = await applyCommandCatalog[\s\S]{0,180}if \(!operationIsCurrent\(\)\) return/);
   assert.match(catalogText, /const result = await dismissCommandCatalog[\s\S]{0,180}if \(!operationIsCurrent\(\)\) return/);
+});
+
+// 无退路弹窗守卫 —— 「忙碌时把关闭入口一起 disable」会把用户锁死在弹窗里。
+//
+// 背景：notebook-editor / notebook-delete 这两个 slot 在 ROOT_MODAL_POLICIES 里
+// escape 与 backdrop 都是 false，而 `.utility-modal` 又是 `inset: 0` 的全屏遮罩——
+// 页面背后点不到、Esc 没反应、点遮罩不关。这种形态下，关闭入口是弹窗**唯一**的出口。
+// 一旦它跟着「保存中/删除中」一起被禁用，一个永不 settle 的请求（客户端没有超时）就只剩
+// 刷新页面一条路，用户已填好的表单内容也随之丢掉。
+//
+// 判据：凡 onClick 打的是这两个 slot 的 requestClose 的 <button>，都不许带 disabled。
+// 按 onClick 源码文本认身份，不认行号也不认按钮文案，按钮在文件里挪动或改文案都不报红。
+//
+// ⚠ 这条**不是**说「所有弹窗按钮都不该禁用」：同一个弹窗里的「保存 / 确认」照旧必须
+// 带 disabled（那是防重复提交，由 long-task-button-guard 与既有组件测试覆盖），被钉住
+// 的只有「离开这个弹窗」这一个动作。
+test("无 Escape / 无遮罩关闭的弹窗，其关闭入口不得被忙碌位禁用", () => {
+  const buttons = jsxElements(page, "button");
+  for (const slot of ["notebook-editor", "notebook-delete"]) {
+    // 前提：这两个 slot 确实两条退路都没有。哪天给它们开了 Escape，这条断言会先红，
+    // 提醒重新判断下面那条「关闭入口是唯一出口」还成不成立。
+    assert.match(
+      hookText,
+      new RegExp(`"${slot}": \\{[^}]*backdrop: false, escape: false`),
+      `${slot} 的策略不再是「无遮罩关闭 + 无 Escape」，请重新评估本守卫的前提`,
+    );
+    const dismissals = buttons.filter((element) => (
+      (element.bindings?.onClick ?? element.attributes?.onClick ?? "")
+        .includes(`rootModals.requestClose("${slot}", "button")`)
+    ));
+    assert.ok(dismissals.length >= 2, `${slot}: 期望至少「×」与「取消」两个关闭入口`);
+    for (const dismissal of dismissals) {
+      const disabled = dismissal.bindings?.disabled ?? dismissal.attributes?.disabled;
+      assert.equal(
+        disabled,
+        undefined,
+        `${slot}: 关闭入口带上了 disabled=${disabled}，忙碌时弹窗将没有任何出口`,
+      );
+    }
+  }
 });
