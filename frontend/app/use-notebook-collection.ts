@@ -376,14 +376,21 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   // would let a plain 保存 write the pre-write values back over what just landed.
   // Reload the projection and take the stale dialog down instead.
   const recoverFromAbandonedCommit = async (owner: CollectionOwner): Promise<void> => {
+    let refreshed = true;
     try {
       await effectsRef.current.refreshComposite(() => ownsIdentity(owner));
     } catch (error) {
+      refreshed = false;
       logDiagnostic("collection-refresh", error);
     }
     if (!ownsIdentity(owner)) return;
+    // Never claim a refresh that did not happen: on failure the row a reopened
+    // form would be built from is still behind the server, and saying so is the
+    // only thing left between the user and writing those old values back.
     effectsRef.current.notify(
-      "刚才停止等待的那次保存，已提交的部分已生效；列表已刷新，设置请重新打开确认。",
+      refreshed
+        ? "刚才停止等待的那次保存，已提交的部分已生效；列表已刷新，设置请重新打开确认。"
+        : "刚才停止等待的那次保存，已提交的部分已生效；列表暂未刷新，请先刷新页面再打开设置。",
     );
   };
 
@@ -837,12 +844,14 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     };
     editorSavingTokensRef.current.set(savingKey, savingToken);
     setEditor((value) => value ? { ...value, busy: true } : value);
-    // Did any server write land?  Paired with "the dialog on screen is no longer
-    // this operation's", that is the case where a reopened form holds a snapshot
-    // older than the server.  Either half alone is harmless: a save that failed
-    // with its own dialog still up committed nothing the form is behind, and
-    // #628 deliberately keeps that dialog open for a retry.
+    // The stale-form case is all three at once: something landed, the sequence
+    // did not finish, and the dialog on screen is no longer this operation's.
+    // Drop any one and the predicate misfires — nothing landed means the form is
+    // not behind the server; a finished sequence already refreshed the
+    // projection; and a dialog that was never replaced is this save's own, which
+    // #628 deliberately keeps open for a retry.
     let committedWrite = false;
+    let completed = false;
     try {
       const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
       await updateNotebook(current.target.id, notebookPatch);
@@ -859,6 +868,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const updated = await getNotebook(current.target.id);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
+      completed = true;
       // Every server write in the sequence has settled — release the notebook
       // before hiding the dialog and awaiting the slower collection refresh so
       // an immediate reopen starts with a usable form.
@@ -888,7 +898,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
     } finally {
-      releaseNotebook();
       if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
       // Settled on the notebook and on actor identity, not on this dialog
       // instance or the generation that started the write.  Dismissing and
@@ -901,24 +910,34 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // time this runs the notebook may already belong to a second write.
       // Only a dialog that is no longer this operation's can be holding the
       // stale snapshot; the same dialog still on screen was never replaced.
-      const abandonedAfterCommit = committedWrite
+      const abandonedAfterCommit = committedWrite && !completed
         && editorOperationRef.current !== operation;
-      if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
-        setEditor((value) => {
-          if (!value || value.target.id !== current.target.id) return value;
-          if (!rowCanManageContent(value.target.id)) {
+      if (abandonedAfterCommit) {
+        // Take the stale dialog down, then reload the projection.  The notebook
+        // stays held across the whole recovery — releasing first would let a
+        // reopen build a fresh dialog out of the very row this refresh is about
+        // to replace, and a plain 保存 on it would undo the committed write.
+        if (ownsIdentity(owner)) {
+          setEditor((value) => {
+            if (!value || value.target.id !== current.target.id) return value;
             editorOperationRef.current = null;
             return null;
-          }
-          // Abandoned after committing: any dialog still standing for this
-          // notebook was opened before that write landed, so its form is stale.
-          if (abandonedAfterCommit) {
-            editorOperationRef.current = null;
-            return null;
-          }
-          return value.busy ? { ...value, busy: false } : value;
-        });
-        if (abandonedAfterCommit) await recoverFromAbandonedCommit(owner);
+          });
+          await recoverFromAbandonedCommit(owner);
+        }
+        releaseNotebook();
+      } else {
+        releaseNotebook();
+        if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
+          setEditor((value) => {
+            if (!value || value.target.id !== current.target.id) return value;
+            if (!rowCanManageContent(value.target.id)) {
+              editorOperationRef.current = null;
+              return null;
+            }
+            return value.busy ? { ...value, busy: false } : value;
+          });
+        }
       }
     }
   }
@@ -944,15 +963,16 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     };
     editorSavingTokensRef.current.set(savingKey, savingToken);
     setEditor((value) => value ? { ...value, busy: true } : value);
-    // 同 saveEditor:落了写、而屏幕上的弹窗已经不是这次操作的,重开的那个就握着一份
-    // 早于服务端的快照。
+    // 同 saveEditor:三条同时成立才是陈旧快照(落了写、没走完、弹窗已不是这次操作的)。
     let committedWrite = false;
+    let completed = false;
     try {
       await setNotebookIndexingPipeline(current.target.id, pipelineId);
       committedWrite = true;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const updated = await getNotebook(current.target.id);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
+      completed = true;
       // 成功即关弹窗(镜像 saveEditor):弹窗没有活状态轮询,留着只会把一次性的
       // pending 响应冻在屏上——后台重建早已结束,界面还写着「重建中」并禁用整组
       // 单选,直到用户自己关掉重开(codex #602 R1 P2)。toast 已说明重建在进行;
@@ -973,7 +993,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         effectsRef.current.reportError(error);
       }
     } finally {
-      releaseNotebook();
       if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
       // Settled on the notebook and on actor identity, not on this dialog
       // instance or the generation that started the write.  Dismissing and
@@ -986,24 +1005,34 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // time this runs the notebook may already belong to a second write.
       // Only a dialog that is no longer this operation's can be holding the
       // stale snapshot; the same dialog still on screen was never replaced.
-      const abandonedAfterCommit = committedWrite
+      const abandonedAfterCommit = committedWrite && !completed
         && editorOperationRef.current !== operation;
-      if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
-        setEditor((value) => {
-          if (!value || value.target.id !== current.target.id) return value;
-          if (!rowCanManageContent(value.target.id)) {
+      if (abandonedAfterCommit) {
+        // Take the stale dialog down, then reload the projection.  The notebook
+        // stays held across the whole recovery — releasing first would let a
+        // reopen build a fresh dialog out of the very row this refresh is about
+        // to replace, and a plain 保存 on it would undo the committed write.
+        if (ownsIdentity(owner)) {
+          setEditor((value) => {
+            if (!value || value.target.id !== current.target.id) return value;
             editorOperationRef.current = null;
             return null;
-          }
-          // Abandoned after committing: any dialog still standing for this
-          // notebook was opened before that write landed, so its form is stale.
-          if (abandonedAfterCommit) {
-            editorOperationRef.current = null;
-            return null;
-          }
-          return value.busy ? { ...value, busy: false } : value;
-        });
-        if (abandonedAfterCommit) await recoverFromAbandonedCommit(owner);
+          });
+          await recoverFromAbandonedCommit(owner);
+        }
+        releaseNotebook();
+      } else {
+        releaseNotebook();
+        if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
+          setEditor((value) => {
+            if (!value || value.target.id !== current.target.id) return value;
+            if (!rowCanManageContent(value.target.id)) {
+              editorOperationRef.current = null;
+              return null;
+            }
+            return value.busy ? { ...value, busy: false } : value;
+          });
+        }
       }
     }
   }

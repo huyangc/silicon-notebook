@@ -825,6 +825,54 @@ test("a failed save keeps its own dialog open instead of treating it as abandone
   expect(effects.notify).not.toHaveBeenCalled();
 });
 
+test("recovery keeps the notebook held until the projection is actually reloaded", async () => {
+  // 提前释放会让「重开设置」拿到这次刷新即将替换掉的那一行，再存一次就把已经落库的值
+  // 写回旧值（codex #629 R5 P1）。
+  const stuck = deferred<NotebookSummary>();
+  const slowRefresh = deferred<void>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  vi.mocked(effects.refreshComposite).mockReturnValueOnce(slowRefresh.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  act(() => { value!.closeEditor(); });
+  await act(async () => stuck.resolve(notebook("a")));
+
+  // 刷新还在飞：这本库仍然占着，重开只能拿到在途态，存不出去。
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.busy).toBe(true);
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
+
+  await act(async () => slowRefresh.resolve(undefined));
+  await saving;
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.busy).toBe(false);
+});
+
+test("recovery does not claim a refresh that failed", async () => {
+  captureRefreshFailureLog();
+  const stuck = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  act(() => { value!.closeEditor(); });
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+
+  expect(effects.notify).toHaveBeenCalledWith(
+    "刚才停止等待的那次保存，已提交的部分已生效；列表暂未刷新，请先刷新页面再打开设置。",
+  );
+});
+
 test("an abandoned save that committed nothing leaves the reopened dialog usable", async () => {
   // 放弃 + 落过写 才构成陈旧快照。第一步就失败时什么都没落库，重开的表单并不落后于
   // 服务端——不该被撤下，也不该发「已提交的部分已生效」这种事实错误的提示。
