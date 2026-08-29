@@ -26,6 +26,10 @@ LRU: OrderedDict 保序，命中 move_to_end 刷新新鲜度，超过 max_entrie
    (numpy 数组用 ``nbytes``;dict/set/大序列按条目数 × 一个名义单价;估不出
    的类型按一个名义条目大小计)——**是数量级估计,不是精确会计**,它的职责是
    在常驻集合真的膨胀时开始按 LRU 回收,而不是给分配器做账。设 0 即关闭。
+   一条**自己就超过整条预算**的条目不驻留:值照常返回给本次调用方,但不进
+   缓存(下次同 key 再 ``get`` 会重新 load),并打一条 warning。否则它会永久
+   驻留在一个明确说了「常驻不超过 N」的预算里,还会把整个缓存饿死——它自己
+   占满预算,之后任何新条目一进来就把别人全逐光。
 
 命中/未命中/淘汰计数见 ``stats()``,淘汰同时打日志(族上限 debug、总上限与
 字节预算 info——后者说明进程真的到内存兜底了,值得在运维日志里看见)。
@@ -214,11 +218,36 @@ class VectorCache:
                     break
                 self._drop_locked(victim, "entries")
         if self._max_bytes > 0:
-            while self._total_bytes > self._max_bytes and len(self._store) > 1:
-                victim = next(iter(self._store))
-                if victim == keep:
-                    break
-                self._drop_locked(victim, "bytes")
+            oversized = self._bytes.get(keep, 0)
+            if oversized > self._max_bytes:
+                # 单条**自己**就超过整条预算 → 直接不驻留(codex PR#634 R1 P1-2)。
+                #
+                # 这个判断必须排在淘汰循环**之前**。此前那个循环止于
+                # ``len == 1``,于是这种条目会永久驻留 —— 违反预算「常驻不超过
+                # N」的字面意思;而它一旦被留下,下一次插入的字节回收又永远到
+                # 不了预算之下,会把每一条比它旧的条目一路逐光(实测:3 条常驻
+                # 小条目全毁,最后连它自己也没保住)。
+                # 但反过来,先跑循环再拒绝它同样是错的:那是**为一个注定留不下
+                # 的条目**把常驻集合清空,白毁一遍。所以先判、直接拒,一条都不逐。
+                #
+                # 值照常返回给调用方(本次调用不受影响),只是不进缓存:下次同
+                # key 再 get 会重新 load。想让它常驻就该把
+                # VECTOR_CACHE_MAX_BYTES 调大。
+                self._store.pop(keep, None)
+                self._total_bytes -= self._bytes.pop(keep, 0)
+                self._evictions[family] = self._evictions.get(family, 0) + 1
+                _log.warning(
+                    "vector_cache entry not retained: key=%s family=%s "
+                    "est_bytes=%d exceeds max_bytes=%d on its own; the value is "
+                    "still returned to the caller but will be reloaded next time",
+                    keep, family, oversized, self._max_bytes,
+                )
+            else:
+                while self._total_bytes > self._max_bytes and len(self._store) > 1:
+                    victim = next(iter(self._store))
+                    if victim == keep:
+                        break
+                    self._drop_locked(victim, "bytes")
 
     def stats(self) -> dict:
         """命中/未命中/淘汰与每族驻留量的只读快照(运维观察 + 测试用)。"""

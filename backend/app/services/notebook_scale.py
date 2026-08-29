@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from typing import Any, Callable, Hashable, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Hashable, Optional, Protocol, Tuple
 
 from app.core.config import Settings
 from app.domain.notebook_scale import NotebookScaleFacts
@@ -72,6 +72,34 @@ _COPY_STATS: "OrderedDict[str, Tuple[Hashable, dict]]" = OrderedDict()
 _GLOBAL_EPOCH = 0
 _EPOCHS: "OrderedDict[str, int]" = OrderedDict()
 
+# single-flight(codex PR#634 R1 P2):同一个 ``(notebook_id, version)`` 的并发冷
+# miss 只跑一次五条整表聚合,其余线程等同一个结果。
+#
+# 这一半是 R2-2 搬家时**丢掉**的能力:旧的 ``VectorCache.get`` 有 per-key
+# single-flight,而 ``knowledge_counts_cache`` 那个被照抄的形态没有(它的冷查询是
+# 单条 GROUP BY,重复跑一次不致命)。copy-stats 的冷载是**五条**整表聚合,而它一次
+# 提问要被问 5–10 次(每参与库一次的 ``_federated_graph_is_large``、
+# ``_lexical_knn_allowed``、chunk 暴力守卫、``requires_index`` …),这些调用点在
+# reasoning/report 的并发扇出里是真并发的 —— 一次冷启动因此可能同时打出十几组
+# 五条整表聚合。
+#
+# 键是 ``(notebook_id, version)`` 而不是只有 notebook:版本不同就是两次不同的
+# 计算,不该互相等待、更不该互相复用结果。
+_PENDING: "Dict[Tuple[str, Hashable], _PendingCopyStats]" = {}
+
+
+class _PendingCopyStats:
+    """一次在途冷载:值(或异常)算出来之后唤醒所有等待者。"""
+
+    __slots__ = ("ready", "value", "error", "epoch")
+
+    def __init__(self, epoch: Tuple[int, int]) -> None:
+        self.ready = threading.Event()
+        self.value: "Optional[dict]" = None
+        self.error: "Optional[BaseException]" = None
+        # 采样自 leader 进入时,写回守卫用它 —— 等待者不重复写回(见下)。
+        self.epoch = epoch
+
 
 def _epoch_of(notebook_id: str) -> Tuple[int, int]:
     """采样 ``(全局 epoch, 该 notebook 的 epoch)``。调用方必须已持有 ``_LOCK``。"""
@@ -81,23 +109,53 @@ def _epoch_of(notebook_id: str) -> Tuple[int, int]:
 def _memoized_copy_stats(
     notebook_id: str, version: Hashable, compute: Callable[[], dict]
 ) -> dict:
-    with _LOCK:
-        hit = _COPY_STATS.get(notebook_id)
-        if hit is not None and hit[0] == version:
-            _COPY_STATS.move_to_end(notebook_id)
-            return hit[1]
-        epoch = _epoch_of(notebook_id)
+    key = (notebook_id, version)
+    while True:
+        with _LOCK:
+            hit = _COPY_STATS.get(notebook_id)
+            if hit is not None and hit[0] == version:
+                _COPY_STATS.move_to_end(notebook_id)
+                return hit[1]
+            pending = _PENDING.get(key)
+            if pending is None:
+                pending = _PendingCopyStats(_epoch_of(notebook_id))
+                _PENDING[key] = pending
+                leader = True
+            else:
+                leader = False
 
-    # 聚合绝不在锁内跑(冷载在生产大库上是秒级)。
-    value = compute()
+        if not leader:
+            # 等待者:不跑聚合,拿 leader 的结果。leader 失败时同样醒来,并按
+            # 「不缓存毒值」的约定各自重试(回到循环顶部,可能成为新的 leader)
+            # —— 与 ``RetrievalRunState.memoized_embedding`` 的既有约定一致。
+            pending.ready.wait()
+            if pending.error is None and pending.value is not None:
+                return pending.value
+            continue
 
-    with _LOCK:
-        if epoch == _epoch_of(notebook_id):
-            _COPY_STATS[notebook_id] = (version, value)
-            _COPY_STATS.move_to_end(notebook_id)
-            while len(_COPY_STATS) > _MAX_NOTEBOOKS:
-                _COPY_STATS.popitem(last=False)
-    return value
+        # 聚合绝不在锁内跑(冷载在生产大库上是秒级)。
+        try:
+            value = compute()
+        except BaseException as exc:                     # noqa: BLE001
+            with _LOCK:
+                _PENDING.pop(key, None)                  # 有界:完成即清理
+            pending.error = exc
+            pending.ready.set()                          # 唤醒等待者后再抛
+            raise
+
+        with _LOCK:
+            # 写回守卫只由 **leader** 执行一次,用它自己进入时采样的 epoch:
+            # 等待者根本没跑 compute,没有「读之后到写之前」这个窗口需要守,
+            # 让它们再核一遍 epoch 只会在 leader 写回后又写一遍同一个值。
+            if pending.epoch == _epoch_of(notebook_id):
+                _COPY_STATS[notebook_id] = (version, value)
+                _COPY_STATS.move_to_end(notebook_id)
+                while len(_COPY_STATS) > _MAX_NOTEBOOKS:
+                    _COPY_STATS.popitem(last=False)
+            _PENDING.pop(key, None)                      # 有界:完成即清理
+        pending.value = value
+        pending.ready.set()
+        return value
 
 
 def invalidate_copy_stats(notebook_id: "Optional[str]" = None) -> None:
@@ -113,6 +171,8 @@ def invalidate_copy_stats(notebook_id: "Optional[str]" = None) -> None:
             _GLOBAL_EPOCH += 1
             _COPY_STATS.clear()
             _EPOCHS.clear()
+            # 在途 leader 的写回由它自己的 epoch 守卫拒掉;这里只清 memo,不动
+            # ``_PENDING``——强行清掉会让等待者永远等不到 ``ready``。
             return
         _EPOCHS[notebook_id] = _EPOCHS.get(notebook_id, 0) + 1
         _EPOCHS.move_to_end(notebook_id)

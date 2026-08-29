@@ -207,6 +207,9 @@ def test_packaged_index_migration_phases_are_exact():
         (37, "indexing_pipeline_staging"),
         (38, "agent_observation_kind"),
         (39, "hotpath_batch1_indexes"),
+        # 基线修复:0040 随 9be3d668(问答活动审计索引)入库时漏登记本清单,
+        # 使全量本地门恒红(标准/PG 两条 CI lane 都收不到本用例,故 CI 未拦住)。
+        (40, "ask_creator_activity_index"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:

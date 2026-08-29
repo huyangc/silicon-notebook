@@ -288,3 +288,123 @@ def test_ingestion_invalidation_clears_the_copy_stats_memo(repo):
     # 既有的开路计数失效没有被替换掉,copy-stats 是**新增**的一半。
     assert counts_calls == [nb.id]
     assert notebook_scale.copy_stats_cached_version(nb.id) is None
+
+
+# ─────────── P2(codex PR#634 R1):冷载的 single-flight —— R2-2 搬家时丢掉的 ──
+def test_concurrent_cold_loads_run_the_five_aggregates_once():
+    """同一个 ``(notebook_id, version)`` 的并发冷 miss 只跑一次五条整表聚合。
+
+    旧的 ``VectorCache.get`` 有 per-key single-flight;R2-2 照抄
+    ``knowledge_counts_cache`` 的形态时把它丢了(那边的冷查询是单条 GROUP BY,
+    重复跑一次不致命,copy-stats 是**五条**整表聚合,而且一次提问要被问 5–10 次,
+    在 reasoning/report 的并发扇出里是真并发)。
+
+    **变异锚点**:删掉 ``_memoized_copy_stats`` 的 ``_PENDING`` leader/follower
+    分支(退回「每个 miss 各自 compute」)→ ``calls`` 变成 2、follower 自己的
+    compute 也跑了,这条报红。
+    """
+    import threading
+    import time
+
+    from app.services import notebook_scale
+
+    notebook_scale.invalidate_copy_stats()
+    version = ("v", 1)
+    calls = {"n": 0}
+    follower_entered = threading.Event()
+    follower_computed = threading.Event()
+    release = threading.Event()
+    results: dict = {}
+
+    def leader_compute():
+        calls["n"] += 1
+        # 等 follower 真的进到 memo 里再返回,保证两者重叠。
+        follower_entered.wait(5)
+        release.wait(5)
+        return {"copyable": True, "size": {"bytes": 1}}
+
+    def follower_compute():
+        calls["n"] += 1
+        follower_computed.set()
+        return {"copyable": False, "size": {"bytes": 2}}
+
+    def leader():
+        results["leader"] = notebook_scale._memoized_copy_stats(
+            "nb-sf", version, leader_compute)
+
+    def follower():
+        follower_entered.set()
+        results["follower"] = notebook_scale._memoized_copy_stats(
+            "nb-sf", version, follower_compute)
+
+    t_leader = threading.Thread(target=leader)
+    t_leader.start()
+    # leader 已经在 compute 里(它在等 follower_entered)。
+    t_follower = threading.Thread(target=follower)
+    t_follower.start()
+    assert follower_entered.wait(5)
+    time.sleep(0.05)          # 让 follower 走到等待点
+    release.set()
+    t_leader.join(10)
+    t_follower.join(10)
+    assert not t_leader.is_alive() and not t_follower.is_alive()
+
+    assert calls["n"] == 1, f"并发冷 miss 只该跑一次聚合,跑了 {calls['n']} 次"
+    assert not follower_computed.is_set(), "等待者不得自己跑聚合"
+    assert results["follower"] is results["leader"], "等待者必须复用同一个结果"
+    # 有界性:完成即清理,不留在途条目。
+    assert notebook_scale._PENDING == {}
+
+
+def test_a_failed_cold_load_wakes_waiters_and_caches_no_poison():
+    """异常路径:leader 失败必须唤醒等待者(不能把它们挂死),而且不缓存毒值 ——
+    等待者各自重试,下一次成功的结果才进 memo。
+
+    **变异锚点**:去掉异常分支里的 ``pending.ready.set()`` → 等待者永远等不到,
+    这条测试超时/报红;去掉 ``_PENDING.pop`` → 有界性断言报红。
+    """
+    import threading
+
+    from app.services import notebook_scale
+
+    notebook_scale.invalidate_copy_stats()
+    version = ("v", 1)
+    follower_entered = threading.Event()
+    attempts = {"n": 0}
+    results: dict = {}
+    errors: list = []
+
+    def failing_compute():
+        attempts["n"] += 1
+        follower_entered.wait(5)
+        raise RuntimeError("aggregate blew up")
+
+    def retry_compute():
+        attempts["n"] += 1
+        return {"copyable": True, "size": {"bytes": 7}}
+
+    def leader():
+        try:
+            notebook_scale._memoized_copy_stats("nb-err", version, failing_compute)
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    def follower():
+        follower_entered.set()
+        results["follower"] = notebook_scale._memoized_copy_stats(
+            "nb-err", version, retry_compute)
+
+    t_leader = threading.Thread(target=leader)
+    t_leader.start()
+    t_follower = threading.Thread(target=follower)
+    t_follower.start()
+    t_leader.join(10)
+    t_follower.join(10)
+    assert not t_leader.is_alive() and not t_follower.is_alive(), (
+        "leader 失败后必须唤醒等待者,不能把它们挂死")
+
+    assert len(errors) == 1, "leader 自己仍要把异常抛给它的调用方"
+    assert results["follower"] == {"copyable": True, "size": {"bytes": 7}}
+    assert attempts["n"] == 2, "失败不缓存毒值:等待者必须自己重试一次"
+    assert notebook_scale.copy_stats_cached_version("nb-err") == version
+    assert notebook_scale._PENDING == {}
