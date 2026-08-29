@@ -355,6 +355,39 @@
               "title": "Id",
               "type": "string"
             },
+            "runtime_enabled": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Runtime Enabled"
+            },
+            "runtime_updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Runtime Updated At"
+            },
+            "runtime_updated_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Runtime Updated By"
+            },
             "trust": {
               "enum": [
                 "builtin",
@@ -408,6 +441,49 @@
             "kind"
           ],
           "title": "AdminExtensionContribution",
+          "type": "object"
+        },
+        "AdminExtensionRuntimeResult": {
+          "additionalProperties": false,
+          "properties": {
+            "plugin_id": {
+              "title": "Plugin Id",
+              "type": "string"
+            },
+            "runtime_enabled": {
+              "title": "Runtime Enabled",
+              "type": "boolean"
+            },
+            "runtime_updated_at": {
+              "title": "Runtime Updated At",
+              "type": "string"
+            },
+            "runtime_updated_by": {
+              "title": "Runtime Updated By",
+              "type": "string"
+            }
+          },
+          "required": [
+            "plugin_id",
+            "runtime_enabled",
+            "runtime_updated_by",
+            "runtime_updated_at"
+          ],
+          "title": "AdminExtensionRuntimeResult",
+          "type": "object"
+        },
+        "AdminExtensionRuntimeUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "title": "AdminExtensionRuntimeUpdate",
           "type": "object"
         },
         "AdminExtensionUiContribution": {
@@ -11505,7 +11581,7 @@
       },
       "/api/admin/extensions": {
         "get": {
-          "description": "已加载的扩展拓扑（部署运维只读视图）。仅 admin。\n\n白名单投影：绝不返回模块路径/文件路径/settings 值/reason/异常文本；\n拓扑在启动时已经冻结，被停用的插件从未进入 registry，因此不会出现\n在这里——没有 `enabled` 字段。",
+          "description": "已加载的扩展拓扑 + 运行时开关现状。仅 admin。\n\n两层语义，不同源，按行合成：\n\n* 装载拓扑（id/version/trust/display_name/contributions/ui_contributions）\n  仍是启动冻结的白名单投影——绝不返回模块路径/文件路径/settings 值/\n  reason/异常文本；TOML `enabled = false` 或未点名的插件从未进入\n  registry，因此不出现在这里，这一层本身依旧没有 `enabled` 字段（真源见\n  ``app/extensions/admin_projection.py``）。\n* 运行时开关（runtime_enabled/runtime_updated_by/runtime_updated_at）是\n  另一层：从 `extension_runtime_toggles` 表**现读**（不是进程内 admission\n  快照——管理页要看到的是 DB 里的真值，不是这个进程恰好收敛到的那一刻），\n  按 plugin_id 与上面的装载行合成。builtin 恒为\n  `None, None, None`（只读，不可开关）；已装载的 deployment 插件无开关行\n  时是 `True, None, None`（无行 = 启用），有行则如实返回。\n\n先取投影、只在其中确实出现过 `trust == \"deployment\"` 行时才查\n``list_extension_runtime_toggles()``：出厂默认零 deployment 插件是最常见\n的部署形态，这条路由不该为它凭空多一次 DB 查询（同一教义见\n``app.services.startup_warmup._deployment_plugins_are_loaded`` 与\n``app.extensions.http_router.collect_plugin_router_specs`` 的零贡献者\n早退——\"零插件是出厂默认，必须不花一分钱\"）。",
           "operationId": "list_admin_extensions_api_admin_extensions_get",
           "responses": {
             "200": {
@@ -11520,6 +11596,56 @@
             }
           },
           "summary": "List Admin Extensions"
+        }
+      },
+      "/api/admin/extensions/{plugin_id}": {
+        "patch": {
+          "description": "开/关一个已装载的 deployment 插件。仅 admin，装载拓扑不受影响。\n\n``plugin_id`` 必须落在「已装载 deployment 插件 id 集合」内——从这次请求\n自己现读的装载投影取（与 GET 同一份真源），不是 store 认识的任何东西。\n这一步同时挡掉 builtin、TOML 里未点名/已停用的插件、以及任何拼错的 id，\nstore 的 ValueError（空/纯空白 plugin_id）与无界写入面因此在这条路由下\n不可达——不会有人对着一个从未装载过的 id 在表里堆出行来。\n\n成功写行后立即 ``refresh_extension_admission``，让本进程的 registry 闸\n与插件路由闸当次生效，调用方（多半就是刚点了这个开关的管理员）不必等\n低频轮询收敛。两个管理员并发各改一次（甚至改同一个 plugin_id）不会互相\n回滚彼此的发布——较晚落地的那次读到的已经是较新的库内状态，刷新按序发布，\n本进程最终停在与 DB 一致的那个值上，不会因为两次刷新的先后交错而倒退回\n更早的快照。刷新失败是防御性的：写已经落库，只是这一个进程的内存快照要\n等下一轮轮询才追上——见下面的 ``except`` 分支。",
+          "operationId": "update_admin_extension_runtime_api_admin_extensions__plugin_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "plugin_id",
+              "required": true,
+              "schema": {
+                "title": "Plugin Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminExtensionRuntimeUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminExtensionRuntimeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin Extension Runtime"
         }
       },
       "/api/admin/model-services/test-all": {
