@@ -54,8 +54,8 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
     assert migrator.current_version() == 0
     assert migrator.migrate() == 42
     assert migrator.migrate() == 42
-    assert migrator.current_version() == 41
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 41
+    assert migrator.current_version() == 42
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 42
 
 
 @pytest.mark.postgres_integration
