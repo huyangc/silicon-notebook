@@ -50,9 +50,14 @@ _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 # _EPOCHS 是 per-notebook 代次,只被该 notebook 自己的 invalidate(nb) 推进——这样
 # nb-A 的一次几秒级冷查询不会被 nb-B 的 ingestion 误伤。_EPOCHS 本身是有界 LRU
 # (上限沿用 _MAX_NOTEBOOKS):它是 best-effort 安全阀,不是正确性权威(权威始终是
-# seq gate)——被淘汰的 notebook 代次退回默认值 0,最坏情况下只是让该 notebook
-# 「恰好在这次淘汰之后、下次 invalidate 之前」的一次在途写回多存活一轮,方向与
-# 现状(epoch 整体就是尽力而为的安全阀)一致,不引入新的正确性风险。
+# seq gate)——但淘汰必须 fail closed,不能让被淘汰的 notebook 代次静默退回默认值 0。
+# 反例(codex #621 R1 P2):冷查询采样到默认 epoch 0 → 该 notebook 被 invalidate
+# (epoch→1)→ 期间 ≥_MAX_NOTEBOOKS 个别的 notebook 也被 invalidate,把这个 notebook
+# 的 epoch 条目从 _EPOCHS 挤出去 → `_epoch_of` 又退回默认值 0,与采样时相同 → 写回
+# 守卫误判「没被 invalidate」,把 invalidate 之前的陈旧快照写进 memo,且在没有后续
+# seq bump 兜底的边缘上可能无限期陈旧。所以 `invalidate()` 每淘汰一个 _EPOCHS 条目
+# 就推进一次 _GLOBAL_EPOCH:被淘汰的 notebook 在途写回从「误放行」翻成「被拒绝」,
+# 方向保守——代价是多付一次冷查,绝不钉陈旧值。
 _GLOBAL_EPOCH = 0
 _EPOCHS: "OrderedDict[str, int]" = OrderedDict()
 
@@ -299,10 +304,13 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
     """清缓存(单 notebook 或全部)。非正确性必需(seq gate 已自失效),安全阀而已。
 
     ``notebook_id`` 给定时只推进该 notebook 自己的 epoch(``_EPOCHS[notebook_id]``)——
-    不影响任何别的 notebook 在途的冷查询写回。``notebook_id is None`` 时推进
-    ``_GLOBAL_EPOCH`` 并清空全部 memo;``_EPOCHS`` 也一并清空——全局代次已经变了,
-    残留的 per-notebook 代次不再有意义(下次读取时 ``_epoch_of`` 会用默认值 0
-    重新起算,不影响正确性)。"""
+    不影响任何别的 notebook 在途的冷查询写回,**除非**这次 invalidate 恰好把 ``_EPOCHS``
+    的有界 LRU 挤过上限:被淘汰出去的那个 notebook 的代次不能静默退回默认值 0(那会让
+    它自己在途的写回被误判成「没被 invalidate」),所以每淘汰一条就推进一次
+    ``_GLOBAL_EPOCH``,fail closed——代价是被牵连的 notebook 多付一次冷查,方向保守。
+    ``notebook_id is None`` 时推进 ``_GLOBAL_EPOCH`` 并清空全部 memo;``_EPOCHS`` 也
+    一并清空——全局代次已经变了,残留的 per-notebook 代次不再有意义(下次读取时
+    ``_epoch_of`` 会用默认值 0 重新起算,不影响正确性)。"""
     global _GLOBAL_EPOCH
     with _LOCK:
         if notebook_id is None:
@@ -317,6 +325,10 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
             _EPOCHS.move_to_end(notebook_id)
             while len(_EPOCHS) > _MAX_NOTEBOOKS:
                 _EPOCHS.popitem(last=False)
+                # fail closed:被淘汰的 notebook 的下一次 `_epoch_of` 采样必须与它
+                # 淘汰前的任何采样都不同,否则在途写回会把它误判成「没被 invalidate」
+                # (见模块 docstring 与 `_EPOCHS` 声明处的完整场景)。
+                _GLOBAL_EPOCH += 1
             _MEMO.pop(notebook_id, None)
             _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)

@@ -745,6 +745,9 @@ button.copy-result-failed:hover:not(:disabled) {
    与文案表达,不由整体变淡表达;按不动这件事由 :disabled 表达。 */
 .notebook-card-main.is-opening,
 .notebook-list-title.is-opening,
+/* 群组页的「打开笔记本」入口与集合页同权:忙碌反馈落在按钮自身,不再是「按下
+   整页就切走所以不用管」的已知余量(codex #621 R1 P2)。 */
+.group-notebook-open.is-opening,
 /* 同一行里被一起禁用的三个数据格没有自己的忙碌标记(标记在同行的标题格上),
    至少别再显示「可点」的手型。 */
 .notebook-list-row .notebook-list-cell:disabled {
@@ -12515,6 +12518,16 @@ select.group-input {
 .group-notebook-open strong { overflow: hidden; font-size: 15px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .group-notebook-open small { overflow: hidden; color: #6b7280; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .group-notebook-open:hover strong { text-decoration: underline; }
+
+/* 「打开中…」状态行:压过上面那条通用 `small` 规则的浅灰(0-2-0 > 0-1-1),换成
+   与 `.notebook-card-open-status` 同一档的正文级 --ink,并把 spinner 与文案摆成一行。 */
+.group-notebook-open .group-notebook-open-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  white-space: nowrap;
+}
 
 .group-notebook-mark {
   display: grid;

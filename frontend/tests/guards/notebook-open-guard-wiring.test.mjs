@@ -141,26 +141,27 @@ test("settleOpen 只出现在 finally 块里（不在 try 的成功路径上）"
   );
 });
 
-// —— ②b 「换目的地」的调用点必须显式退出合并 ————————————————————————————
+// —— ②b 「换目的地」的调用点必须显式退出合并（或改用 intent） ————————————————
 //
 // 合并早退与「被顶替」共用 `return false` 这一个返回值,所以凡是**目的地和在途那次
-// 不一样**的调用,都必须传 `{ coalesce: false }`,否则它的意图会被静默丢弃:
+// 不一样**的调用,都必须让合并判据失效——要么传 `{ coalesce: false }` 无条件顶替,
+// 要么传一个跟默认 "open" 不同的 `intent`,否则它的意图会被静默丢弃:
 //   · popstate:用户在 `#memory=<id>` 按返回 → 这次 openNotebook 若被合并早退,它既不
 //     做事也不自增 epoch,在飞的 openNotebookMemory 随后 committed,把 URL 用
-//     replaceState 改回 `#memory`——返回键失效,破坏「hash 是唯一真相源」。
-//   · openNotebookMemory:同一张卡片先点主体再点「N 条记忆」,第二次会被吞掉,用户落在
-//     ask 而不是 memory。
-//   · openPendingItem / openDoneItem:目的地是报告/治理/索引/来源面板里的具体位置。
+//     replaceState 改回 `#memory`——返回键失效,破坏「hash 是唯一真相源」。它要顶替
+//     的目的地不固定(可能是 open 也可能是 memory),没有一个 intent 能覆盖,所以继续
+//     用 coalesce:false。
+//   · openPendingItem / openDoneItem:目的地是报告/治理/索引/来源面板里的具体位置,
+//     同库同类型的不同条目之间 intent 也无法安全区分,继续用 coalesce:false。
 // 反过来,挂载还原与 onNotebookCreated **刻意**保持默认(合并):那里的重复调用是
 // StrictMode 双执行,去重正是想要的。
 const EXPLICIT_NO_COALESCE = {
-  openNotebookMemory: "目的地是记忆视图,不是重复点击同一张卡片",
   openPendingItem: "目的地是待办项指向的报告/治理/索引位置",
   openDoneItem: "目的地是来源面板或知识图谱",
   onPopState: "hash 是唯一真相源,返回键必须顶掉在飞的那次 open",
 };
 
-test("换目的地的四个调用点都显式传了 { coalesce: false }", () => {
+test("换目的地的三个调用点都显式传了 { coalesce: false }", () => {
   const offenders = [];
   for (const [scope, why] of Object.entries(EXPLICIT_NO_COALESCE)) {
     const calls = callSitesIn(findFunctionIn(page, "Home", scope))
@@ -180,6 +181,27 @@ test("换目的地的四个调用点都显式传了 { coalesce: false }", () => 
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+test("openNotebookMemory 靠 intent 换目的地,不再传 { coalesce: false }", () => {
+  // C1:合并判据升级为「同 id + 同 intent」之后,openNotebookMemory 不必再用
+  // coalesce:false 无条件顶替——它只需要一个跟默认 "open" 不同的 intent,让「普通
+  // 打开在途时点记忆」放行顶替,同时让「连点同一个记忆链接」照样合并(不再像
+  // coalesce:false 那样连点也逐次发出一整套请求,见 C1 的 PR 描述)。
+  const calls = callSitesIn(findFunctionIn(page, "Home", "openNotebookMemory"))
+    .filter((call) => call.target === "openNotebook");
+  assert.notEqual(calls.length, 0, "openNotebookMemory：找不到任何 openNotebook 调用（守卫失效）");
+  for (const call of calls) {
+    const opts = call.arguments[3];
+    assert.ok(
+      opts && /intent:\s*["']memory["']/.test(opts),
+      `openNotebookMemory：openNotebook(${call.arguments.join(", ")}) 没有传 intent: "memory"`,
+    );
+    assert.ok(
+      !opts || !/coalesce:\s*false/.test(opts),
+      `openNotebookMemory：openNotebook(${call.arguments.join(", ")}) 不该再传 coalesce: false`,
+    );
+  }
 });
 
 // —— ③ openNotebook 之外的每个 epoch 自增都要作废 guard ——————————————————
