@@ -415,19 +415,13 @@ def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch)
     assert result["status"] == "building"
     assert notebook.id in scale.building
     assert notebook.id not in scale.idle_queue
-    # `_start_daemon` is stubbed, so the claimed worker never wins a build
-    # slot: the notebook is a WAITER (queued shape, no off-peak fields) and,
-    # decisively for this test, holds no idle-queue entry.
-    claimed = scale.status(notebook.id)
-    assert claimed["state"] == "queued"
-    assert "offpeak_next_start_at" not in claimed
-    assert notebook.id in scale._scale_waiting
+    assert scale.status(notebook.id)["state"] == "building"
     assert [name for name, _target in launched].count(f"scaleidx-{notebook.id}") == 1
 
     # A genuinely newer follow-up remains queued behind the claimed build.
     assert scale.trigger(notebook.id, when="idle", mode="fold")["status"] == "queued"
     assert scale.idle_queue[notebook.id][0] == "fold"
-    assert scale.status(notebook.id)["state"] == "queued"
+    assert scale.status(notebook.id)["state"] == "building"
 
 
 def test_post_publication_rebuild_coalesces_busy_full_followup(repo, monkeypatch):
@@ -607,55 +601,80 @@ def test_idle_tick_restores_failed_item_and_continues_with_remaining_queue(
 # ---------------------------------------------------------------------------
 
 
-def test_scale_build_concurrency_is_capped_at_configured_limit(repo, monkeypatch):
-    """并发 2 上限:第 3 个 notebook 的 daemon 线程已经启动(admission 立即成功),
-    但真正执行 build 的临界区必须等前两个释放 slot——从不同时超过 2 个。"""
-    notebooks = [_seed(repo) for _ in range(3)]
+def _live_workers() -> int:
+    return sum(
+        1 for thread in threading.enumerate()
+        if thread.name.startswith("scaleidx-") and thread.name != "scaleidx-scheduler"
+    )
+
+
+def test_scale_build_worker_threads_are_bounded_by_the_ceiling(repo, monkeypatch):
+    """并发 2、队列 10:**线程数**封顶在 2,拿不到 slot 的 8 个库停在数据里
+    (_scale_pending),一条线程都不占。
+
+    此前是「先 spawn 再阻塞等票」:闸只限住了同时**执行**的数量,10 个库照样
+    10 条阻塞 daemon —— 低峰一次 drain 大队列,或反复取消+重触发,进程线程/
+    内存无界(codex PR#627 R1 P1)。"""
+    notebooks = [_seed(repo) for _ in range(10)]
     scale = repo._runtime.scale_artifacts
-    scale._scale_build_semaphore = threading.BoundedSemaphore(2)
     for notebook in notebooks:
-        with repo._write() as db:
-            db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+        _base_tier(repo, notebook)
+    scale._scale_build_semaphore = threading.BoundedSemaphore(2)
     monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
     monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
 
-    entered_lock = threading.Lock()
-    entered: list[str] = []
+    spawned: list[str] = []
+    real_start = scale._start_daemon
+
+    def counting_start(name, target):
+        if name != "scaleidx-scheduler":  # 调度器是常驻兜底,不是构建线程
+            spawned.append(name)
+        real_start(name, target)
+
+    monkeypatch.setattr(scale, "_start_daemon", counting_start)
+
+    state_lock = threading.Lock()
+    built: list[str] = []
     concurrent = 0
     peak_concurrent = 0
+    peak_live = 0
     release = threading.Event()
 
     def fake_build(notebook_id, **_kwargs):
-        nonlocal concurrent, peak_concurrent
-        with entered_lock:
-            entered.append(notebook_id)
+        nonlocal concurrent, peak_concurrent, peak_live
+        with state_lock:
             concurrent += 1
             peak_concurrent = max(peak_concurrent, concurrent)
-        assert release.wait(timeout=5)
-        with entered_lock:
+            peak_live = max(peak_live, _live_workers())
+        assert release.wait(timeout=10)
+        with state_lock:
             concurrent -= 1
+            built.append(notebook_id)
         return {}
 
     monkeypatch.setattr(scale.builder, "build", fake_build)
 
-    # Real daemon threads (default `_start_daemon`, not monkeypatched): admission
-    # must return immediately for all three even though only 2 can execute.
-    for notebook in notebooks:
-        assert scale._run_scale_op(notebook.id, "full") is True
+    started = [scale._run_scale_op(notebook.id, "full") for notebook in notebooks]
 
-    deadline = time.monotonic() + 5
-    while len(entered) < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert len(entered) == 2  # the 3rd is blocked on the semaphore, not yet inside
-    time.sleep(0.2)
-    assert len(entered) == 2  # still blocked — no drift under a short observation window
+    assert started == [True, True] + [False] * 8
+    assert len(spawned) == 2                     # 8 个库连线程都没起
+    assert len(scale._scale_pending) == 8        # 它们等在数据里
+    assert _live_workers() <= 2
+    assert set(scale._scale_pending) == {nb.id for nb in notebooks[2:]}
 
+    # 放行后靠 worker 收尾的 handoff 自动接续,全程线程数仍然有界。
     release.set()
-    deadline = time.monotonic() + 5
-    while len(entered) < 3 and time.monotonic() < deadline:
+    deadline = time.monotonic() + 20
+    while len(built) < 10 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert len(entered) == 3
+    assert len(built) == 10
+    assert scale._scale_pending == {}
     assert peak_concurrent <= 2
+    # 线程数不随**队列长度**增长:上限 2 + 收尾中(已放票、线程尚未退出)的少量
+    # 重叠。这里给的是宽松常数而非精确值 —— 收尾重叠取决于机器快慢,而真正锐利
+    # 的判据在上面那段(spawned == 2 / pending == 8)。回归形态是 10。
+    assert peak_live <= 6
+    assert len(spawned) == 10  # 每个库最终恰好起一次
 
     deadline = time.monotonic() + 5
     while any(nb.id in scale.building for nb in notebooks) and time.monotonic() < deadline:
@@ -839,7 +858,7 @@ def test_rebuild_after_publication_status_matches_what_was_registered(
 
     # 3) Backed off → still queued_followup, still a real entry.
     scale.building.discard(notebook.id)
-    scale._scale_waiting.pop(notebook.id, None)
+    scale._scale_pending.pop(notebook.id, None)
     scale.idle_queue.pop(notebook.id, None)
     scale._scale_record_failure(notebook.id)
     assert scale._scale_backoff_active(notebook.id) is True
@@ -895,107 +914,102 @@ def test_expired_failure_state_is_reclaimed_and_bounded(repo, monkeypatch):
     assert second.id not in scale._scale_failure_state
 
 
-def test_waiting_for_a_build_slot_reports_queued_and_can_be_cancelled(
-    repo, monkeypatch
-):
-    """P2-3:信号量在 spawn 后的线程里 acquire,所以低峰一次放 20 个库时多数
-    线程只是在等 slot。它们此前一律显示「构建中」且 cancel 一概返回
-    building_not_interruptible —— 明明一行活都还没干。"""
-    notebook = _seed(repo)
-    scale = repo._runtime.scale_artifacts
-    _base_tier(repo, notebook)
+def _occupy_all_slots(scale, monkeypatch, repo, capacity=1):
+    """Fill the concurrency ceiling with one blocking build and return the
+    handle that lets it finish (plus that notebook)."""
+    holder = _seed(repo)
+    _base_tier(repo, holder)
+    scale._scale_build_semaphore = threading.BoundedSemaphore(capacity)
     monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
     monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
-    builds: list[str] = []
-    monkeypatch.setattr(
-        scale.builder, "build", lambda nbid, **_k: builds.append(nbid) or {}
+    inside = threading.Event()
+    finish = threading.Event()
+    built: list[str] = []
+
+    def build(notebook_id, **_kwargs):
+        if notebook_id == holder.id:
+            inside.set()
+            assert finish.wait(timeout=10)
+        built.append(notebook_id)
+        return {}
+
+    monkeypatch.setattr(scale.builder, "build", build)
+    assert scale._run_scale_op(holder.id, "full") is True
+    assert inside.wait(timeout=5)
+    return holder, finish, built
+
+
+def test_slot_parked_notebook_reports_queued_and_cancels_without_a_thread(
+    repo, monkeypatch
+):
+    """P2-3:拿不到 slot 的库报「已排队」而不是「构建中」,而且 cancel 就是
+    删一条记录 —— 它背后压根没有线程要唤醒/中断。"""
+    scale = repo._runtime.scale_artifacts
+    holder, finish, built = _occupy_all_slots(scale, monkeypatch, repo)
+    notebook = _seed(repo)
+    _base_tier(repo, notebook)
+
+    assert scale._run_scale_op(notebook.id, "full") is False
+    assert notebook.id in scale._scale_pending
+    assert notebook.id not in scale.building          # 未认领:没在写产物
+    assert not any(
+        thread.name == f"scaleidx-{notebook.id}" for thread in threading.enumerate()
     )
 
-    # Occupy the only slot so the spawned worker is stuck waiting for one.
-    scale._scale_build_semaphore = threading.BoundedSemaphore(1)
-    scale._scale_build_semaphore.acquire()
-    assert scale._run_scale_op(notebook.id, "full") is True
-
-    deadline = time.monotonic() + 5
-    while notebook.id not in scale._scale_waiting and time.monotonic() < deadline:
-        time.sleep(0.01)
     status = scale.status(notebook.id)
     assert status["state"] == "queued"
-    assert status["building"] is False        # 没开跑就不能说「构建中」
-    assert notebook.id in scale.building      # 认领仍在:别的请求进不来
-    assert status["queue_position"] == 1 and status["queue_length"] == 1
+    assert status["building"] is False                # 没开跑就不能说「构建中」
+    assert (status["queue_position"], status["queue_length"]) == (1, 1)
     assert status["queued_at"]
     # 等的是执行 slot,不是低峰窗口 —— 不许下发「预计今天 02:00 后开始」。
     assert "offpeak_next_start_at" not in status
 
     cancelled = scale.cancel(notebook.id)
-    assert cancelled["cancelled"] is True
-    assert cancelled["reason"] == ""
-    assert notebook.id not in scale.building
-    assert notebook.id not in scale._scale_waiting
-
-    # 放行 slot:被取消的线程醒来后必须直接退出 —— 不建索引、不记退避、
-    # 并且把 slot 还回去(否则一次取消就永久漏掉一个并发名额)。
-    scale._scale_build_semaphore.release()
-    deadline = time.monotonic() + 5
-    while (
-        threading.active_count() > 1
-        and any(t.name == f"scaleidx-{notebook.id}" for t in threading.enumerate())
-        and time.monotonic() < deadline
-    ):
-        time.sleep(0.01)
-    assert not any(
-        t.name == f"scaleidx-{notebook.id}" for t in threading.enumerate()
-    )
-    assert builds == []
-    assert scale._scale_failure_state == {}
-    assert scale._scale_build_semaphore.acquire(timeout=1) is True
-    scale._scale_build_semaphore.release()
-
-
-def test_waiting_notebook_flips_to_building_once_it_wins_a_slot(repo, monkeypatch):
-    """等 slot 的库拿到名额后才转入「构建中」,状态与通知都在这一刻翻面。"""
-    notebook = _seed(repo)
-    scale = repo._runtime.scale_artifacts
-    _base_tier(repo, notebook)
-    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
-    monkeypatch.setattr(scale, "notify_index_done", lambda *_: None)
-    inside = threading.Event()
-    finish = threading.Event()
-
-    def blocking_build(_notebook_id, **_kwargs):
-        inside.set()
-        assert finish.wait(timeout=5)
-        return {}
-
-    monkeypatch.setattr(scale.builder, "build", blocking_build)
-    scale._scale_build_semaphore = threading.BoundedSemaphore(1)
-    scale._scale_build_semaphore.acquire()
-
-    assert scale._run_scale_op(notebook.id, "full") is True
-    deadline = time.monotonic() + 5
-    while notebook.id not in scale._scale_waiting and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert scale.status(notebook.id)["state"] == "queued"
-
-    scale._scale_build_semaphore.release()
-    assert inside.wait(timeout=5)
-    promoted = scale.status(notebook.id)
-    assert promoted["state"] == "building"
-    assert promoted["building"] is True
-    assert notebook.id not in scale._scale_waiting
-    # 真正开跑之后 cancel 才该说「不可中断」。
-    assert scale.cancel(notebook.id) == {
-        "cancelled": False,
-        "state": "building",
-        "reason": "building_not_interruptible",
+    assert cancelled == {
+        "cancelled": True,
+        "state": scale.status(notebook.id)["state"],
+        "reason": "",
     }
+    assert notebook.id not in scale._scale_pending
+    assert not any(
+        thread.name == f"scaleidx-{notebook.id}" for thread in threading.enumerate()
+    )
+
+    # 取消之后重新触发照常受理(仍无 slot → 重新入停车位,依旧零线程)。
+    assert scale._run_scale_op(notebook.id, "full") is False
+    assert notebook.id in scale._scale_pending
+    assert _live_workers() == 1  # 只有占位的那一条
 
     finish.set()
-    deadline = time.monotonic() + 5
-    while notebook.id in scale.building and time.monotonic() < deadline:
+    deadline = time.monotonic() + 10
+    while notebook.id in scale._scale_pending and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert notebook.id not in scale.building
+    assert built == [holder.id, notebook.id]
+
+
+def test_completed_build_hands_its_slot_to_the_parked_queue(repo, monkeypatch):
+    """P2-3/handoff:admission 不再阻塞线程等票,所以空出来的 slot 必须由收尾的
+    worker 主动交棒 —— 否则停车位上的活要等下一次调度器 tick(窗口外则遥遥无期)。"""
+    scale = repo._runtime.scale_artifacts
+    holder, finish, built = _occupy_all_slots(scale, monkeypatch, repo)
+    parked = [_seed(repo) for _ in range(2)]
+    for notebook in parked:
+        _base_tier(repo, notebook)
+        assert scale._run_scale_op(notebook.id, "full") is False
+    assert len(scale._scale_pending) == 2
+
+    # 没有任何 tick / 外部请求:只让占位的那次构建结束。
+    finish.set()
+    deadline = time.monotonic() + 10
+    while scale._scale_pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert scale._scale_pending == {}
+    assert sorted(built) == sorted([holder.id] + [nb.id for nb in parked])
+    deadline = time.monotonic() + 5
+    while _live_workers() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _live_workers() == 0
 
 
 # ---------------------------------------------------------------------------
