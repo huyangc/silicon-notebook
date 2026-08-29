@@ -71,6 +71,7 @@ test("清单按候选、生效中、已停用分组，右栏在选中之前只�
       item({ object_type: "failure_mode", status: "proposed", inherited: false, scope: "notebook", rationale: "反复出现的失效归因" }),
     ],
   });
+  expect(screen.getByText("这里显示当前笔记本实际采用的类型；修改的全局继承项只影响当前笔记本。")).toBeInTheDocument();
   const list = screen.getByLabelText("类型清单");
   for (const [title, count] of [["待批准的候选", "1"], ["生效中", "2"], ["已停用", "1"]] as const) {
     expect(within(list).getByText(title).parentElement).toHaveTextContent(count);
@@ -410,9 +411,9 @@ test("只读成员可以查看，但不会渲染任何写入控件", () => {
 
 // --- 作用范围：管理员的第二份注册表 ------------------------------------------
 
-test("管理员可切换全局基线，并看到它影响未覆盖笔记本的说明", () => {
+test("管理员可切换全局基线，并看到它影响未自定义相应内容类型笔记本的说明", () => {
   const callbacks = mount({ canManageGlobal: true, view: "global", canEdit: true, schemas: [item({ scope: "global", inherited: false, source: "custom" })] });
-  expect(screen.getByText("全局基线会影响所有尚未建立当前笔记本覆盖的笔记本。")).toBeInTheDocument();
+  expect(screen.getByText("全局基线会影响未自定义相应内容类型的笔记本。")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "全局基线" })).toHaveAttribute("aria-pressed", "true");
   // 全局视图里没有「归纳候选」——候选只从当前笔记本的内容里来。
   expect(screen.queryByRole("button", { name: "从当前笔记本归纳候选类型" })).not.toBeInTheDocument();
