@@ -1514,10 +1514,17 @@ export default function Home() {
         : current);
     }
     try {
-      await rebuildScaleIndex(nb, when, mode);
+      const result = await rebuildScaleIndex(nb, when, mode);
       if (when === "idle") {
         setToast("已排队，将在服务器空闲时（低峰）重建；完成后自动更新");
         // Reflect the queued state right away; the poll effect keeps it fresh.
+        fetchScaleIndexStatus(nb).then((s) => setScaleIndexStatus(s)).catch(() => {});
+      } else if (result.status === "queued") {
+        // 构建位已满：后端把这次「立即构建」停进 slot 等待队列（codex #627 R5 P2）。
+        // 如实说「已排队」而不是「已开始」——上面乐观置的 building 在这里立刻用服务端
+        // 真实快照纠正；轮询把 queued 视作未完工（见 shouldResumeScaleIndex），轮到
+        // slot 自动开跑直至完成。
+        setToast("构建位已满，已排队；轮到后自动开始构建，完成后自动更新");
         fetchScaleIndexStatus(nb).then((s) => setScaleIndexStatus(s)).catch(() => {});
       } else {
         setToast(mode === "fold"
