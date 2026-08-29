@@ -87,6 +87,9 @@ AMBIGUOUS_MEMBER_OWNERS = {
     "list_promotion_queue": "KnowledgeGovernanceService",
     "propose_promotion": "KnowledgeGovernanceService",
     "reject_promotion": "KnowledgeGovernanceService",
+    # 名字含 checkup 但不该落进任何 fragment 启发:facade 构造期挂上 runtime 事件插槽的
+    # H4/H5 失效转发器,语义归属 CheckupService(它转发的目标)。
+    "_invalidate_checkup_missing_vector_counts": "CheckupService",
 }
 
 ATTRIBUTE_MEMBER_OWNERS = {
