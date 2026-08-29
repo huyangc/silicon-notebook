@@ -50,6 +50,7 @@ from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.models.sources import PaginatedSources
 from app.services.extension_toggles import (
+    apply_admission_override,
     logger as extension_admission_logger,
     refresh_extension_admission,
 )
@@ -721,17 +722,21 @@ def update_admin_extension_runtime(
     try:
         refresh_extension_admission(store)
     except Exception as exc:
-        # 写路径的取舍：这次写已经落库，只是发布失败了。选择仍然返回成功
-        # ——而不是把一次数据库抖动变成管理员眼里的“操作失败”，同时如实
-        # 记一条日志：本进程的闸要等低频轮询下一轮收敛，不会永远停在旧快照上
-        # （那条轮询线程与这次写共享同一个 store/仓库）。plugin_id 不进日志——
-        # 复用 app.services.extension_toggles 的既有口径，那是运营者的数据。
-        # 异常同理只记类名不记文本/traceback：store 故障的异常文本可能内嵌
-        # DSN 或私有路径，扩展面日志家族的纪律是 content-free（AGENTS.md）。
+        # 写路径的取舍：这次写已经落库，只是发布前的整表回读失败了。不能就此
+        # 返回成功却让本进程继续放行该插件（那会违背「处理这次写的进程立即
+        # 生效」的成文保证），也不该把一次数据库抖动变成管理员眼里的「操作
+        # 失败」。所以退化为零 I/O 的本地快照运算：这次写的那一位是确定的
+        # 持久事实，直接按它翻转进程快照；其它插件的位由下一次成功刷新收敛。
+        # plugin_id 不进日志——复用 app.services.extension_toggles 的既有口径，
+        # 那是运营者的数据。异常同理只记类名不记文本/traceback：store 故障的
+        # 异常文本可能内嵌 DSN 或私有路径，扩展面日志家族的纪律是
+        # content-free（AGENTS.md）。
+        apply_admission_override(plugin_id, payload.enabled)
         extension_admission_logger.warning(
-            "extension admission refresh failed after an admin runtime-toggle "
-            "write (%s); the write is saved, this process will converge on "
-            "the background refresher's next tick",
+            "extension admission refresh read failed after an admin "
+            "runtime-toggle write (%s); the write is saved and this process "
+            "applied it locally, other rows converge on the background "
+            "refresher's next tick",
             type(exc).__name__,
         )
     return AdminExtensionRuntimeResult(

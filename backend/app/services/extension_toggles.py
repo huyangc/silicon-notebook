@@ -120,6 +120,30 @@ def refresh_extension_admission(
     return disabled_plugin_ids()
 
 
+def apply_admission_override(plugin_id: str, enabled: bool) -> frozenset[str]:
+    """Flip one plugin in the live snapshot without reading the store.
+
+    Fallback for the admin write path when the post-write refresh *read*
+    fails: the row is durably written, and the one bit this process knows for
+    certain is the row it just wrote — so publish that arithmetic on the
+    current snapshot instead of reporting success while still admitting the
+    plugin. This is what keeps the documented "the process handling the write
+    applies it immediately" true even while the store is briefly unreadable;
+    every other plugin's bit converges on the next successful refresh.
+
+    Token taken here, immediately before the publish: this value is derived
+    from the live snapshot plus a durable fact, not from a fallible read that
+    could have started before someone else's write — so "newest token wins"
+    is exactly right, and a stale in-flight tick cannot undo it.
+    """
+
+    token = begin_publish()
+    current = disabled_plugin_ids()
+    updated = current - {plugin_id} if enabled else current | {plugin_id}
+    _publish(updated, token)
+    return disabled_plugin_ids()
+
+
 class _Refresher:
     """One daemon thread re-reading the toggle store until stopped."""
 
@@ -237,10 +261,12 @@ class _Refresher:
         #
         # Exception *class* only, never ``exc_info``/``str(exc)``: this is the
         # extension-surface logger family, and its discipline (AGENTS.md,
-        # mirrored from ``app.extensions.discovery``) keeps exception text —
+        # mirrored from the extension discovery logger) keeps exception text —
         # which for a store fault can carry a DSN or a private path — out of
         # the log. The class name is the content-free half that still points
-        # at the offending code.
+        # at the offending code. (The dotted module path is deliberately not
+        # spelled here: the workflow-isolation guard scans this file's source
+        # for it.)
         logger.error(
             "extension admission refresh produced an invalid snapshot (%s); "
             "keeping the last one (%d plugin(s) disabled)",

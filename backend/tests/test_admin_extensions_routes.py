@@ -425,7 +425,9 @@ def test_patch_survives_a_refresh_failure(
     tmp_path, monkeypatch, frozen_runtime_reset, caplog
 ):
     """写路径的取舍（见 ``admin_routes.update_admin_extension_runtime`` 文档）：
-    刷新失败仍返回 2xx——写已经落库，只在既有日志器上留一条 warning。"""
+    刷新回读失败仍返回 2xx——写已经落库，且本进程用零 I/O 的本地快照运算把
+    这次写立即应用（codex #635 R4 P1：不许一边报成功一边继续放行该插件），
+    只在既有日志器上留一条 warning。"""
 
     client = _deployment_plugin_client(tmp_path, monkeypatch)
     headers = _auth_admin(client)
@@ -450,9 +452,14 @@ def test_patch_survives_a_refresh_failure(
     assert response.status_code == 200, response.text
     assert response.json()["runtime_enabled"] is False
     assert any(
-        "extension admission refresh failed" in record.message
+        "extension admission refresh read failed" in record.message
         for record in caplog.records
     )
+
+    # 回读失败不豁免「写进程立即生效」：本地快照运算已把这一位翻过来。
+    from app.core.extension_admission import disabled_plugin_ids
+
+    assert _DEPLOYMENT_PLUGIN_ID in disabled_plugin_ids()
 
     # The write really did land, independent of the broken refresh.
     body = client.get("/api/admin/extensions", headers=headers).json()
