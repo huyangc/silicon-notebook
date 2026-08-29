@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 61. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v61 and remains readable. Those migrations
+The current schema version is 62. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v62 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -405,8 +405,8 @@ SQLite v60 / PostgreSQL v38 adds `agent_observations.kind`: `'note'` for a
 line an Agent wrote through `add_observation` (every row that could exist
 before this hop, hence the default is the historical truth and no backfill
 runs), `'call'` for one recorded tool call against that notebook. One column
-only — no table, index, foreign key, or unique surface — so the current
-pairing stays SQLite 60 / PostgreSQL 38 / epoch 1 with the same 84 application
+only — no table, index, foreign key, or unique surface — so that
+pairing stayed SQLite 60 / PostgreSQL 38 / epoch 1 with the same 84 application
 tables, 113 replicated unique surfaces, and 12-row-slot bound. Ring eviction
 and the consolidation read are both scoped by `kind`, so call accounting can
 neither evict written notes nor reach a model prompt.
@@ -440,6 +440,14 @@ operator SOP. `idx_chunks_source` (added in migration 0003) is now fully
 covered by the new `idx_chunks_source_ordinal` and is registered
 write-amplification debt, not dropped in this batch — see migration
 0039's header comment.
+
+SQLite v62 / PostgreSQL v40 adds `idx_ask_jobs_creator_activity` on creator,
+the normalized absolute `created_at` expression, and `id`, in descending
+keyset order. The expression exactly matches the creator-wide question
+overview query, including its unresolved-timestamp sentinel, so every page can
+stop at `LIMIT` without a global `ask_jobs` scan or a temporary full-history
+sort. This adds no table, foreign key, or unique surface; the schema pair is
+SQLite 62 / PostgreSQL 40 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

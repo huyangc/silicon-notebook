@@ -3648,6 +3648,17 @@ HOTPATH_BATCH1_INDEXES = {
                   ON sources(notebook_id, source_type)
                   WHERE source_type IN ('memory', 'knowhow')""",
 }
+
+
+# v62: creator-wide question activity can follow its exact normalized
+# (created_at DESC, id DESC) keyset order from an index instead of scanning and
+# sorting the global ask_jobs table on every page.
+ASK_CREATOR_ACTIVITY_INDEXES = {
+    "idx_ask_jobs_creator_activity":
+        "CREATE INDEX idx_ask_jobs_creator_activity ON ask_jobs(created_by, "
+        "COALESCE(julianday(created_at), "
+        "julianday('0001-01-01T00:00:00+00:00')) DESC, id DESC)",
+}
 MIGRATION_MANIFEST = {
     (key[0], 61, *key[2:]): {
         **manifest,
@@ -3659,6 +3670,20 @@ MIGRATION_MANIFEST[(60, 61)] = {
     "tables": {},
     "columns": {},
     "indexes": HOTPATH_BATCH1_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+MIGRATION_MANIFEST = {
+    (key[0], 62, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **ASK_CREATOR_ACTIVITY_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(61, 62)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": ASK_CREATOR_ACTIVITY_INDEXES,
     "triggers": {},
     "views": {},
 }

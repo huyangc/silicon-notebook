@@ -104,7 +104,7 @@ def agent_profile_harness(request) -> AgentProfileHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 39
+    assert PostgresMigrator(database).migrate() == 40
     _seed(database, notebook_id=NOTEBOOK_ID)
     yield AgentProfileHarness(
         database=database,

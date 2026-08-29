@@ -93,7 +93,11 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # a chunks(source_id, "rowid") index would cost a write-side B-tree for zero
 # read benefit. Pure index additions: no table, column, foreign key, or
 # unique surface changes.
-SCHEMA_VERSION = 61
+# v62 adds the creator/time/id expression index used by the cross-notebook
+# question overview. Its expression is byte-for-byte aligned with the activity
+# query's normalized absolute-time ordering, so keyset LIMIT avoids a global
+# ask_jobs scan plus temp sort.
+SCHEMA_VERSION = 62
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3376,6 +3380,25 @@ class SqliteMigrator:
                   ON sources(notebook_id, source_type)
                   WHERE source_type IN ('memory', 'knowhow');
                 """
+            )
+
+    def _migration_62(self) -> None:
+        """Index the creator-wide question-overview keyset order.
+
+        ``ask_jobs.created_at`` contains both naive and offset timestamps, plus
+        historical empty strings. The expression therefore deliberately matches
+        ``sqlite.query_store._absolute_instant`` instead of indexing the raw text;
+        otherwise the planner could use an index whose order disagrees with the
+        public activity cursor.
+        """
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ask_jobs_creator_activity "
+                "ON ask_jobs("
+                "created_by, "
+                "COALESCE(julianday(created_at), "
+                "julianday('0001-01-01T00:00:00+00:00')) DESC, "
+                "id DESC)"
             )
 
     def _recover_interrupted_jobs(self) -> None:
