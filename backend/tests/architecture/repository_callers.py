@@ -119,6 +119,7 @@ FACADE_IMPORT_TARGETS = {
 
 PRIVATE_REASON_BY_PATH = {
     "backend/app/api/deps.py": "composition root extracts narrow runtime ports",
+    "backend/app/bootstrap.py": "composition root primes the extension admission snapshot from the runtime toggle seat",
     "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/knowhow_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/mcp_tools/maintenance.py": "API readiness checks the process-owned model provider",

@@ -17,6 +17,7 @@ from app.extensions.ui_projection import (
 )
 from app.repositories.factory import create_repository
 from app.repositories.ports import NotebookRepository
+from app.services.extension_toggles import refresh_extension_admission
 
 
 def application_extension_runtime() -> ExtensionRuntime:
@@ -61,7 +62,7 @@ def application_plugin_router_specs(
 
 def create_application_repository(settings: Settings) -> NotebookRepository:
     runtime = application_extension_runtime()
-    return create_repository(
+    repository = create_repository(
         settings,
         retrieval_contributor_host=runtime.retrieval_contributors,
         parser_provider_chain_host=runtime.parser_chain,
@@ -71,3 +72,29 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         indexing_pipeline_host=runtime.indexing_pipelines,
         gap_consult_host=runtime.gap_consult,
     )
+    # Prime the admission snapshot the extension registry reads. This is the
+    # one place it can happen: the registry was frozen above and the schema
+    # migrations ran inside ``create_repository``, so the toggle table exists
+    # by now and this read is safe — and every process that composes an
+    # application repository passes through here, so servers, maintenance CLIs
+    # and batch jobs all start with the admin's switches already in effect
+    # rather than with the empty default.
+    #
+    # The failure is NOT softened: a repository that cannot answer which
+    # plugins an admin disabled has no business being handed to a caller that
+    # is about to route requests through them, so the exception propagates and
+    # composition fails. But the half-built repository must not be abandoned on
+    # the way out — it already owns a connection pool (PostgreSQL) or open
+    # handles (SQLite), and nothing else holds a reference to close them once
+    # this frame unwinds. Close, then re-raise the original.
+    try:
+        refresh_extension_admission(
+            repository._runtime.extension_toggles  # type: ignore[attr-defined]
+        )
+    except BaseException:
+        try:
+            repository.close()
+        except Exception:  # never replace the prime's diagnostic
+            pass
+        raise
+    return repository

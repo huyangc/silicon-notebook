@@ -31,6 +31,12 @@ def open_cli_repository(settings: Settings) -> Iterator[NotebookRepository]:
 
     Both formal repository facades own runtime resources and expose ``close``;
     closing is unconditional on success, failure, and interruption.
+
+    The extension admission snapshot needs no priming call here: ``create_repository``
+    above is ``app.bootstrap.create_application_repository``, which primes it as
+    part of composition. A CLI gets that startup snapshot and no refresher —
+    the polling thread belongs to long-lived serving processes, not to a
+    command that runs against a database the operator believes is quiesced.
     """
 
     repository = create_repository(settings)

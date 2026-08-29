@@ -43,6 +43,12 @@ class _LifecycleState:
     status: str = "reserved"
     repository: object | None = None
     repository_factory: object | None = None
+    # Stop callback for the extension-admission refresher this cycle started,
+    # filed here for the same reason as the two above: shutdown has the lease,
+    # not the handle. Keeping it per-cycle rather than reaching for the
+    # module-global stop is what makes a defensive early return incapable of
+    # reaping a *successor* lifecycle's refresher.
+    admission_refresher_stop: object | None = None
 
 
 _active_lifecycle: _LifecycleState | None = None
@@ -227,6 +233,10 @@ def _fail_lifecycle(lease: object, exc: BaseException) -> None:
 
     # Keep the reservation while external driver cleanup runs. A retry cannot
     # start and reset readiness until the failed pool/cache are fully gone.
+    # The refresher goes first: a failure after warm-up began (the only window
+    # in which one exists) must not leave a thread polling the pool this is
+    # about to close, nor survive into the retry that replaces it.
+    _stop_admission_refresher(lease)
     try:
         if repo is not None:
             _close_repository_instance(repo)
@@ -255,6 +265,106 @@ def _fail_lifecycle(lease: object, exc: BaseException) -> None:
     # Never attach the original exception: a third-party driver may carry raw
     # conninfo in its traceback even though our adapter errors do not.
     logger.error("startup FAILED — service stays not-ready: %s", safe_error)
+
+
+def _deployment_plugins_are_loaded() -> bool:
+    """True when this process actually froze a deployment plugin.
+
+    A pure in-memory question — the registry was frozen before the repository
+    was composed — and the answer is almost always "no": the default
+    deployment loads only built-in bundles, which the admin gate can never
+    disable. Asking it here is what keeps a stock install (and the whole test
+    suite) at zero background threads and zero periodic queries for a feature
+    it does not use.
+    """
+    from app.bootstrap import application_extension_runtime
+
+    runtime = application_extension_runtime()
+    return any(
+        manifest.trust == "deployment"
+        for manifest in runtime.registry.manifests()
+    )
+
+
+def _start_admission_refresher(lease: object, repo: object) -> None:
+    """Begin converging the admin extension-disable snapshot in this process.
+
+    The snapshot itself is NOT best-effort — the composition root primed it
+    loudly while building ``repo``. This is only the low-frequency catch-up
+    that lets a process which did not perform an admin write notice one, so it
+    is ``getattr``-shaped and exception-swallowing like the crash-recovery
+    sweeps above: a narrow test double has no ``extension_toggles`` seat, and a
+    server that cannot start a convergence thread should serve with the
+    startup snapshot rather than refuse to become ready.
+
+    The stop handle is filed on this cycle's lifecycle state, so every later
+    exit stops exactly the thread this cycle started.
+    """
+    store = getattr(getattr(repo, "_runtime", None), "extension_toggles", None)
+    if store is None:
+        return
+    try:
+        from app.core.config import get_settings
+        from app.services.extension_toggles import (
+            start_extension_admission_refresher,
+        )
+
+        if not _deployment_plugins_are_loaded():
+            logger.info(
+                "startup: no deployment plugins loaded; extension admission "
+                "refresher not started"
+            )
+            return
+        stop = start_extension_admission_refresher(
+            store, get_settings().extension_admission_refresh_seconds
+        )
+    except Exception:
+        logger.exception("startup: extension admission refresher failed to start")
+        return
+    if not _record_admission_refresher(lease, stop):
+        # Defensive: the lease was detached between the bind above and this
+        # line, so nobody's shutdown owns this thread. Reap it here rather
+        # than leaving it polling a repository no one will close.
+        _run_admission_refresher_stop(stop)
+
+
+def _record_admission_refresher(lease: object, stop: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease:
+            return False
+        state.admission_refresher_stop = stop
+        return True
+
+
+def _run_admission_refresher_stop(stop: object) -> None:
+    try:
+        stop()  # type: ignore[operator]
+    except Exception:  # shutdown hygiene must never mask the real diagnostic
+        logger.error("extension admission refresher stop failed")
+
+
+def _stop_admission_refresher(lease: object) -> None:
+    """Stop the convergence thread this exact lifecycle started, if any.
+
+    Lease-scoped rather than process-global on purpose: a stale caller (a
+    defensive early return whose lease was detached) must not be able to reap
+    the refresher of whichever cycle owns the process now. Idempotent — the
+    handle is taken out of the state, so the overlapping paths (an early
+    return whose lifespan then also closes) cannot double-stop.
+
+    It runs BEFORE the pool is closed: the thread borrows a connection every
+    tick, and a refresh landing on a closing pool would log a database error
+    that has nothing to do with the shutdown actually in progress.
+    """
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease:
+            return
+        stop = state.admission_refresher_stop
+        state.admission_refresher_stop = None
+    if stop is not None:
+        _run_admission_refresher_stop(stop)
 
 
 def _sweep_agent_profile_chains(repo: object) -> None:
@@ -383,10 +493,21 @@ def run_startup(lease: object | None) -> object | None:
         if not _bind_repository_and_begin_warmup(lease, repo):
             # Defensive only: a valid lease cannot be detached during startup.
             # If that invariant is ever broken, do not leak the just-created
-            # composition root.
+            # composition root. There is deliberately no admission-refresher
+            # stop here: this cycle starts one only once the bind below
+            # succeeds, so it owns none — and a detached lease means some
+            # *other* cycle may be the live owner, whose refresher is not this
+            # branch's to reap.
             _close_repository_instance(repo)
             _clear_repository_cache(repository_factory)
             return None
+        # This repository now owns the process, so it is the one whose toggle
+        # rows this process should track. Started here rather than after
+        # ``mark_ready`` so the very first admitted request already sees a
+        # converging snapshot, and after the bind rather than before it so a
+        # lifecycle that never becomes the owner cannot leave a thread polling
+        # a repository nobody will close. Every later exit stops it again.
+        _start_admission_refresher(lease, repo)
         logger.info("startup: migrations + recovery done; warming open-path caches…")
 
         def _progress(done: int, total: int) -> None:
@@ -404,6 +525,7 @@ def run_startup(lease: object | None) -> object | None:
         )
         if preload_enabled and callable(preload):
             if not _begin_index_preload(lease):
+                _stop_admission_refresher(lease)
                 return None
 
             def _index_progress(done: int, count: int) -> None:
@@ -414,6 +536,7 @@ def run_startup(lease: object | None) -> object | None:
             )
             preload_summary = preload(progress=_index_progress)
         if not _mark_lifecycle_ready(lease, repo):
+            _stop_admission_refresher(lease)
             return None
         source_ingestion = getattr(
             getattr(repo, "_runtime", None), "source_ingestion", None
@@ -480,7 +603,13 @@ def close_repository(
         repository_factory = None if failed else state.repository_factory
 
     # The reservation remains active while the exact pool is closed and its
-    # cache entry cleared, so a fresh cycle cannot race cleanup.
+    # cache entry cleared, so a fresh cycle cannot race cleanup. This cycle's
+    # admission refresher is stopped BEFORE the close, and that order is the
+    # invariant: the thread borrows a connection every tick, so reaping it
+    # after the pool went away would log a database error belonging to nothing.
+    # (The ``failed`` form already stopped it in ``_fail_lifecycle``; the
+    # handle was taken out of the state there, so this is then a no-op.)
+    _stop_admission_refresher(lease)
     try:
         if not failed:
             _close_repository_instance(repository_instance)
