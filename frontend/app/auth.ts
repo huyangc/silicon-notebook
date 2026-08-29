@@ -34,7 +34,7 @@ function normalizeAuthUser(raw: AuthUser): AuthUser {
   return { ...raw, ui_mode: normalizeUiMode((raw as { ui_mode?: unknown }).ui_mode) };
 }
 
-const USERNAME_RE = /^[a-z]00\d{6}$/;
+const USERNAME_RE = /^[a-z][0-9]{8}$/;
 export function isValidUsername(username: string): boolean {
   return USERNAME_RE.test((username ?? "").trim());
 }

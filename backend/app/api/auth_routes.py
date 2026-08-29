@@ -10,7 +10,7 @@ auth_router = APIRouter(prefix="/auth")
 @auth_router.post("/register", response_model=AuthResult)
 def register(payload: AuthRequest) -> AuthResult:
     if not is_valid_username(payload.username):
-        raise user_error(400, "用户名须为「单个小写字母+00+六位数字」，如 a00123456")
+        raise user_error(400, "用户名须为「单个小写字母+八位数字」，如 a12345678")
     if not (payload.password or "").strip():
         raise user_error(400, "密码不能为空")
     try:

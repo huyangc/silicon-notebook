@@ -10,8 +10,8 @@ import hashlib
 import re
 import secrets
 
-# 单个小写字母 + 字面 "00" + 6 位数字，如 a00123456。
-USERNAME_RE = re.compile(r"^[a-z]00\d{6}$")
+# 单个小写字母 + 8 位 ASCII 数字，如 a12345678。
+USERNAME_RE = re.compile(r"^[a-z][0-9]{8}$")
 
 _PBKDF2_ITERATIONS = 200_000
 

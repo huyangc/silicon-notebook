@@ -21,9 +21,9 @@ test.after(() => {
   globalThis.window = originalWindow;
 });
 
-test("username accepts a single lowercase letter + 00 + 6 digits", () => {
-  assert.ok(isValidUsername("a00123456"));
-  assert.ok(isValidUsername("b00999999"));
+test("username accepts a single lowercase letter + 8 digits", () => {
+  assert.ok(isValidUsername("a12345678"));
+  assert.ok(isValidUsername("b01999999"));
   assert.ok(isValidUsername("m00000042"));
 });
 
@@ -31,9 +31,9 @@ test("username rejects bad shapes (incl. uppercase)", () => {
   assert.ok(!isValidUsername("00123456"));
   assert.ok(!isValidUsername("A00123456"));   // 大写
   assert.ok(!isValidUsername("ab00123456"));  // 多个字母
-  assert.ok(!isValidUsername("a0123456"));
-  assert.ok(!isValidUsername("a0012345"));
-  assert.ok(!isValidUsername("a001234567"));
+  assert.ok(!isValidUsername("a1234567"));
+  assert.ok(!isValidUsername("a123456789"));
+  assert.ok(!isValidUsername("a１２３４５６７８"));
 });
 
 test("login remains unauthenticated even when a stale token exists", async () => {

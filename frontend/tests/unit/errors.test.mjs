@@ -69,8 +69,8 @@ test("盖了章的 4xx detail 原样透传(保住可操作信息)", () => {
   assert.equal(humanizeHttpError(403, "仅管理员可管理晋升队列", true), "仅管理员可管理晋升队列");
   // 中文里混标识符 / 数字是正常文案,不该被闸2 误伤。
   assert.equal(
-    humanizeHttpError(400, "用户名须为「单个小写字母+00+六位数字」，如 a00123456", true),
-    "用户名须为「单个小写字母+00+六位数字」，如 a00123456"
+    humanizeHttpError(400, "用户名须为「单个小写字母+八位数字」，如 a12345678", true),
+    "用户名须为「单个小写字母+八位数字」，如 a12345678"
   );
 });
 
@@ -523,9 +523,9 @@ test("注册 400 的盖章 detail 原样保留(不被泛化成「操作失败」
 
   const { error: e2 } = await callFailing(
     () => registerUser("bad", "pw"),
-    markedResponse(400, { detail: "用户名须为「单个小写字母+00+六位数字」，如 a00123456" })
+    markedResponse(400, { detail: "用户名须为「单个小写字母+八位数字」，如 a12345678" })
   );
-  assert.equal(e2.message, "用户名须为「单个小写字母+00+六位数字」，如 a00123456");
+  assert.equal(e2.message, "用户名须为「单个小写字母+八位数字」，如 a12345678");
 });
 
 test("同一条注册 400,没盖章就只给通用文案", async () => {

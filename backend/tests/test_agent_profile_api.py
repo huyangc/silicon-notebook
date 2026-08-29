@@ -23,7 +23,7 @@ from app.repositories.ports import AGENT_OBSERVATION_RING_MAX, AGENT_OBSERVATION
 
 
 _PASSWORD = "pw12345678"
-# 用户名须为「单个小写字母 + 00 + 六位数字」——与 test_agent_profile_routes.py /
+# 用户名须为「单个小写字母 + 八位数字」——与 test_agent_profile_routes.py /
 # test_group_routes.py 同一个套路,换一个字母前缀避免与它们并行跑时撞用户名。
 _USERNAMES = iter(f"q{index:08d}" for index in range(1, 999))
 
