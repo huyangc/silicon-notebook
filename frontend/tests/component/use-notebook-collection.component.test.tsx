@@ -847,8 +847,12 @@ test("recovery keeps the notebook held until the projection is actually reloaded
   await act(async () => value!.saveEditor(editorPatch));
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
 
+  // 恢复跑完后，这个「恢复期间开出来的」弹窗同样建立在旧行上，而且已经没有任何在飞
+  // 写入能再解除它的忙碌——必须一并撤下，不能留一个永久禁用的框（codex #629 R6 P2）。
   await act(async () => slowRefresh.resolve(undefined));
   await saving;
+  expect(value!.editor).toBeNull();
+
   await act(async () => value!.openEditor("a"));
   expect(value!.editor?.busy).toBe(false);
 });
