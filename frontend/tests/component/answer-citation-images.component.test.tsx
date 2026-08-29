@@ -396,6 +396,30 @@ test("旧答案缺 images 字段时不插入附图区，其余引用仍可打开
   expect(screen.queryByRole("img")).toBeNull();
 });
 
+test("图片下方的引用可在已有浮层打开时一次点击切换", async () => {
+  const user = userEvent.setup();
+  const answer = anchorAnswerWithImages("带图结论 [k1]。\n\n图片下方的另一条结论 [k2]。");
+  answer.anchors.push({
+    ...answer.anchors[0],
+    key: "k2",
+    object_id: "el-2",
+    element_id: "el-2",
+    source_title: "第二篇来源论文",
+    images: [],
+  });
+  renderAnswer(answer);
+
+  await screen.findByRole("img", { name: "图 1：示意图" });
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  expect(within(screen.getByRole("dialog")).getByText(/来源论文/)).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "[2]" }));
+  expect(within(screen.getByRole("dialog")).getByText(/第二篇来源论文/)).toBeInTheDocument();
+
+  await user.pointer({ keys: "[MouseLeft]", target: document.body });
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 test("同一图片被正文多次引用时只在第一次出现处展示一次", async () => {
   const { container } = renderAnswer(anchorAnswerWithImages("第一处 [k1]。\n\n第二处 [k1]。"));
 

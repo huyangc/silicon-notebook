@@ -1701,6 +1701,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `CITATION_IMAGES_PER_REPORT`（每份深度报告已分配位数） | 24 |
 | `CITATION_IMAGE_CAPTION_CHARS`（图注截断长度） | 200 |
 
+**引用浮层切换。** 已有引用浮层打开时，单击同一回答里的另一枚引用标签会直接切换到该引用；点回答外部、外部滚动或按 Escape 仍会关闭浮层。
+
 ### Markdown 压缩包上传护栏
 
 | 上限 | 数值 |

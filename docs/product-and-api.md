@@ -2225,6 +2225,8 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | `CITATION_IMAGES_PER_REPORT` (allocated slots per Deep Report) | 24 |
 | `CITATION_IMAGE_CAPTION_CHARS` (caption truncation) | 200 |
 
+**Citation-popover switching.** While a citation popover is open, one click on another citation badge in the same answer switches directly to that citation; an outside press, external scroll, or Escape still closes it.
+
 ### Markdown bundle upload guardrails
 
 | Bound | Value |
