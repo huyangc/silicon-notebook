@@ -123,6 +123,24 @@ function publish(rows: NotebookSummary[]) {
   act(() => { value!.commitListSnapshot(read, rows); });
 }
 
+// refreshCompositeAfterCommit 刻意吞掉刷新失败——写入已经落库，不能被重分类成失败——
+// 但那条 catch 同时盖住了刷新自己的后半段状态写入，所以它必须留下可观测记录。用这个
+// 助手包住「故意让刷新失败」的用例：既钉住那条记录，也让测试输出不被真实 stderr 淹没。
+const installedSpies: Array<{ mockRestore: () => void }> = [];
+
+function captureRefreshFailureLog() {
+  const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+  installedSpies.push(spy);
+  return spy;
+}
+
+function expectRefreshFailureLogged(spy: ReturnType<typeof captureRefreshFailureLog>) {
+  expect(spy).toHaveBeenCalledWith(
+    "[collection] composite refresh after a committed write failed",
+    expect.any(Error),
+  );
+}
+
 const editorPatch = {
   name: "renamed",
   purpose: "",
@@ -159,6 +177,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  while (installedSpies.length) installedSpies.pop()!.mockRestore();
   vi.useRealTimers();
   cleanup();
 });
@@ -294,6 +313,7 @@ test("default creation releases its single-flight authority after failure", asyn
 });
 
 test("a committed creation still opens and reports success when collection refresh fails", async () => {
+  const logged = captureRefreshFailureLog();
   vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
   render(<Harness />);
 
@@ -304,6 +324,35 @@ test("a committed creation still opens and reports success when collection refre
   expect(effects.reportError).not.toHaveBeenCalled();
   expect(effects.notify).toHaveBeenCalledWith(
     "笔记本已创建，但列表暂未刷新；请稍后刷新页面。",
+  );
+  expectRefreshFailureLogged(logged);
+});
+
+test("a creation that neither refreshed nor opened does not send the user to a list without it", async () => {
+  captureRefreshFailureLog();
+  const openFailure = new Error("open failed");
+  vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
+  vi.mocked(effects.onNotebookCreated).mockRejectedValueOnce(openFailure);
+  render(<Harness />);
+
+  await act(async () => value!.createDefaultNotebook());
+
+  expect(effects.reportError).toHaveBeenCalledWith(openFailure);
+  expect(effects.notify).toHaveBeenCalledWith(
+    "笔记本已创建，但暂时没能打开、列表也暂未刷新；请稍后刷新页面。",
+  );
+});
+
+test("a creation that refreshed but failed to open still points at the list", async () => {
+  const openFailure = new Error("open failed");
+  vi.mocked(effects.onNotebookCreated).mockRejectedValueOnce(openFailure);
+  render(<Harness />);
+
+  await act(async () => value!.createDefaultNotebook());
+
+  expect(effects.reportError).toHaveBeenCalledWith(openFailure);
+  expect(effects.notify).toHaveBeenCalledWith(
+    "笔记本已创建，但暂时没能打开；请从列表重新打开。",
   );
 });
 
@@ -484,6 +533,7 @@ test("rename does not return stale detail after a successful refresh removes the
 });
 
 test("rename returns its committed detail when collection refresh fails", async () => {
+  const logged = captureRefreshFailureLog();
   const renamed = notebook("a");
   renamed.name = "renamed";
   notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
@@ -498,6 +548,7 @@ test("rename returns its committed detail when collection refresh fails", async 
   expect(effects.notify).toHaveBeenCalledWith(
     "笔记本名称已更新，但列表暂未刷新；请稍后刷新页面。",
   );
+  expectRefreshFailureLogged(logged);
 });
 
 test("rename is single-flight and releases its key after both success and failure", async () => {
@@ -639,6 +690,7 @@ test("a backend rejection after a transient list omission is reported instead of
 });
 
 test("a committed editor save is not reclassified as failed when collection refresh fails", async () => {
+  const logged = captureRefreshFailureLog();
   vi.mocked(effects.refreshComposite).mockRejectedValueOnce(new Error("refresh failed"));
   render(<Harness />);
   publish([notebook("a")]);
@@ -651,6 +703,86 @@ test("a committed editor save is not reclassified as failed when collection refr
   expect(effects.notify).toHaveBeenCalledWith(
     "笔记本信息已更新，但列表暂未刷新；请稍后刷新页面。",
   );
+  expectRefreshFailureLogged(logged);
+});
+
+test("dismissing settings during a save stops waiting and frees the seat for a retry", async () => {
+  const stuck = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  expect(value!.editor?.busy).toBe(true);
+
+  // 弹窗不接 Escape 也不接遮罩点击，关闭入口是保存期间唯一的出口。
+  act(() => { value!.closeEditor(); });
+  expect(value!.editor).toBeNull();
+  expect(effects.notify).toHaveBeenCalledWith(
+    "已停止等待保存结果；此前已提交的修改不会撤销，未提交的部分不会继续。",
+  );
+
+  // 座位已释放：重开设置后立刻可以再存一次，不必等挂死的那次收尾。
+  await act(async () => value!.openEditor("a"));
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
+  expect(basesApi.setBases).toHaveBeenCalledTimes(1);
+
+  // 被放弃的那次收尾时不许再碰任何界面状态。
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+  expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
+});
+
+test("closing settings without a save in flight says nothing", async () => {
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  act(() => { value!.closeEditor(); });
+
+  expect(value!.editor).toBeNull();
+  expect(effects.notify).not.toHaveBeenCalled();
+});
+
+test("reopening settings for another notebook releases the orphaned save seat", async () => {
+  const stuck = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  render(<Harness />);
+  publish([notebook("a"), notebook("b")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  await act(async () => value!.openEditor("b"));
+  expect(value!.editor?.target.id).toBe("b");
+
+  await act(async () => value!.saveEditor(editorPatch));
+
+  expect(notebookApi.updateNotebook).toHaveBeenNthCalledWith(2, "b", expect.anything());
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+});
+
+test("a save refuses to run while the open editor and the pending operation name different notebooks", async () => {
+  const pipeline = deferred<ReturnType<typeof indexingProjection>>();
+  render(<Harness />);
+  publish([notebook("a"), notebook("b")]);
+  await act(async () => value!.openEditor("a"));
+
+  // openEditor("b") 已经把 operation 换成 b，但它的投影还没回来，弹窗仍显示 a。
+  notebookApi.fetchNotebookIndexingPipeline.mockReturnValueOnce(pipeline.promise);
+  let opening!: Promise<boolean>;
+  act(() => { opening = value!.openEditor("b"); });
+  expect(value!.editor?.target.id).toBe("a");
+
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).not.toHaveBeenCalled();
+
+  await act(async () => pipeline.resolve(indexingProjection()));
+  await opening;
 });
 
 test("an immediate reopen after a committed save can unmount a base before refresh finishes", async () => {
@@ -752,6 +884,55 @@ test("an in-flight delete reports backend rejection after a transient list omiss
 
   expect(effects.reportError).toHaveBeenCalledWith(rejection);
   expect(value!.deletion).toBeNull();
+});
+
+test("dismissing the confirmation does not withdraw a DELETE already on the wire", async () => {
+  const deletion = deferred<undefined>();
+  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  act(() => { value!.closeDelete(); });
+  expect(value!.deletion).toBeNull();
+  expect(effects.notify).toHaveBeenCalledWith("删除请求仍在进行；结果稍后会反映在列表里。");
+
+  await act(async () => deletion.resolve(undefined));
+  await deleting;
+  expect(effects.onNotebookDeleted).toHaveBeenCalledWith("a");
+  expect(effects.notify).toHaveBeenCalledWith("笔记本已删除");
+  expect(value!.rows).toEqual([]);
+});
+
+test("a delete that fails after its confirmation was dismissed still reports", async () => {
+  const deletion = deferred<undefined>();
+  const rejection = new Error("delete rejected");
+  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  act(() => { value!.closeDelete(); });
+  await act(async () => deletion.reject(rejection));
+  await deleting;
+
+  expect(effects.reportError).toHaveBeenCalledWith(rejection);
+  expect(value!.rows.map((row) => row.id)).toEqual(["a"]);
+});
+
+test("closing the confirmation without a delete in flight says nothing", async () => {
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  act(() => { value!.closeDelete(); });
+
+  expect(value!.deletion).toBeNull();
+  expect(effects.notify).not.toHaveBeenCalled();
 });
 
 test("delete is single-flight and a pre-delete list cannot resurrect its tombstone", async () => {

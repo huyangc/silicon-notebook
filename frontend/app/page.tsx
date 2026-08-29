@@ -6780,7 +6780,13 @@ export default function Home() {
                   : "编辑当前笔记本的信息与索引管线。参考库挂载仍由库主配置。"}
                 </p>
               </div>
-              <button className="icon-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")} title="Close">×</button>
+              {/* 关闭入口在保存期间**不禁用**:这个 slot 不接 Escape、也不接遮罩点击
+                  (ROOT_MODAL_POLICIES 里 escape/backdrop 都是 false),遮罩又铺满整屏,
+                  所以一旦把它连同「取消」「保存」一起 disable,一个永不 settle 的请求
+                  就把用户锁死在弹窗里,只能刷新页面。按下 = 显式取消(closeEditor 的既有
+                  语义:后续写入步骤停在下一个检查点),并由它自己发一条说明已提交部分
+                  不会撤销的提示。 */}
+              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-editor", "button")} title="Close">×</button>
             </div>
             <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
@@ -6949,7 +6955,7 @@ export default function Home() {
                 <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(notebookCollection.editor?.target?.taxonomy ?? []).join(", ")} /></label>
               </section>
               <div className="modal-actions settings-footer">
-                <button type="button" className="sort-button" disabled={notebookCollection.editor?.busy} onClick={() => rootModals.requestClose("notebook-editor", "button")}>取消</button>
+                <button type="button" className="sort-button" onClick={() => rootModals.requestClose("notebook-editor", "button")}>{notebookCollection.editor?.busy ? "停止等待" : "取消"}</button>
                 <button type="submit" className="new-pill" disabled={notebookCollection.editor?.busy}>{notebookCollection.editor?.busy ? "保存中…" : "保存"}</button>
               </div>
             </form>
@@ -6972,10 +6978,13 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              <button className="icon-button" disabled={notebookCollection.deletion?.busy} onClick={() => rootModals.requestClose("notebook-delete", "button")} title="Close">×</button>
+              {/* 同 notebook-editor:这个 slot 也不接 Escape/遮罩点击,关闭入口不能被
+                  busy 禁用,否则一个挂死的 DELETE 就没有出口。已在飞的 DELETE 不因关框
+                  而撤销——它的成功/失败两路都绑在 actor 上,关框后照样落地并出提示。 */}
+              <button className="icon-button" onClick={() => rootModals.requestClose("notebook-delete", "button")} title="Close">×</button>
             </div>
             <div className="modal-actions padded">
-              <button className="sort-button" disabled={notebookCollection.deletion?.busy} onClick={() => rootModals.requestClose("notebook-delete", "button")}>取消</button>
+              <button className="sort-button" onClick={() => rootModals.requestClose("notebook-delete", "button")}>{notebookCollection.deletion?.busy ? "关闭" : "取消"}</button>
               <button className="new-pill danger-pill" disabled={notebookCollection.deletion?.busy} onClick={() => { void notebookCollection.confirmDelete(); }}>{notebookCollection.deletion?.busy ? "删除中…" : "确认"}</button>
             </div>
             </>)}

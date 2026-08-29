@@ -310,9 +310,16 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     try {
       await effectsRef.current.refreshComposite(() => owns(owner));
       return owns(owner);
-    } catch {
+    } catch (error) {
       // The write has already committed.  Callers disclose an unrefreshed
       // projection without reclassifying the durable action as failed.
+      //
+      // The cause still has to stay observable.  This catch also covers the
+      // composite's post-await state writes, so a programming error in them
+      // would otherwise reach the user as a bare "list not refreshed" and reach
+      // nobody else at all: reportError is deliberately not called here (it
+      // would contradict the success toast the caller is about to publish).
+      console.error("[collection] composite refresh after a committed write failed", error);
       return false;
     }
   };
@@ -584,7 +591,14 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       } catch (error) {
         if (owns(owner)) {
           effectsRef.current.reportError(error);
-          effectsRef.current.notify("笔记本已创建，但暂时没能打开；请从列表重新打开。");
+          // Only point at the list when the list actually has the notebook: on
+          // an unrefreshed projection it is not there, so "reopen it from the
+          // list" would name a row that does not exist yet.
+          effectsRef.current.notify(
+            refreshed
+              ? "笔记本已创建，但暂时没能打开；请从列表重新打开。"
+              : "笔记本已创建，但暂时没能打开、列表也暂未刷新；请稍后刷新页面。",
+          );
         }
         return;
       }
@@ -649,6 +663,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     if (!owner || !rowCanManageContent(notebookId)) return false;
     const operation: EditorOperation = { notebookId };
     editorOperationRef.current = operation;
+    // Replacing the operation orphans any save still in flight for the previous
+    // one: its remaining steps stop at the next editorOperationMayContinue and
+    // its editor view is already gone.  Release the single-flight seat with it,
+    // or the editor this call is opening has a silently dead save button until
+    // the orphan settles — saveEditor reads the seat as a plain latch, not as
+    // "a save for *this* operation".
+    editorSavingRef.current = null;
     editorRevokedOperationRef.current = null;
     try {
       const target = currentRow(notebookId);
@@ -693,10 +714,25 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   }
 
   function closeEditor() {
+    // Dismissing the dialog is explicit cancellation: the remaining write steps
+    // stop at the next checkpoint.  It is also the only exit the settings
+    // dialog has while a save is in flight (the modal takes no Escape and no
+    // backdrop click), so the outcome of the steps that already reached the
+    // server has to be said out loud rather than left to a silently vanished
+    // dialog.
+    const abandonedSave = Boolean(
+      editorSavingRef.current
+      && editorSavingRef.current === editorOperationRef.current
+    );
     editorOperationRef.current = null;
     editorSavingRef.current = null;
     editorRevokedOperationRef.current = null;
     setEditor(null);
+    if (abandonedSave) {
+      effectsRef.current.notify(
+        "已停止等待保存结果；此前已提交的修改不会撤销，未提交的部分不会继续。",
+      );
+    }
   }
 
   function toggleMountedBase(notebookId: string, selected: boolean) {
@@ -732,7 +768,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     if (!owner || !current || !owns(current.owner) || current.busy || editorSavingRef.current
       || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
-    if (!operation) return;
+    // Two notebook ids are in play once the seat is bound to an operation: the
+    // write steps below key off `current.target.id`, while the sticky-revocation
+    // bookkeeping in commitListSnapshot keys off `operation.notebookId`.  They
+    // can only diverge while an openEditor for a *different* notebook is in
+    // flight, and letting the pair drift would mark this save revoked from the
+    // other notebook's access.  Refuse instead of running on a split identity.
+    if (!operation || operation.notebookId !== current.target.id) return;
     editorSavingRef.current = operation;
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
@@ -803,7 +845,8 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     if (!owner || !current || !owns(current.owner) || current.busy || editorSavingRef.current
       || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
-    if (!operation) return;
+    // Same split-identity refusal as saveEditor — see the comment there.
+    if (!operation || operation.notebookId !== current.target.id) return;
     editorSavingRef.current = operation;
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
@@ -883,8 +926,19 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   }
 
   function closeDelete() {
+    // Unlike an editor save, a DELETE already on the wire is not stopped by
+    // dismissing the confirmation — its success path is gated on the actor, not
+    // on this dialog, and still removes the row and toasts.  Dismissing while it
+    // is in flight therefore has to say the request outlives the box.
+    const inFlightDelete = Boolean(
+      deletion
+      && deletingRef.current.has(`${deletion.owner.actorId}\0${deletion.target.id}`)
+    );
     deleteOperationRef.current = null;
     setDeletion(null);
+    if (inFlightDelete) {
+      effectsRef.current.notify("删除请求仍在进行；结果稍后会反映在列表里。");
+    }
   }
 
   async function confirmDelete(): Promise<void> {
@@ -924,7 +978,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       }
       if (owns(owner)) effectsRef.current.notify("笔记本已删除");
     } catch (error) {
-      if (owns(owner) && deleteOperationRef.current === operation) effectsRef.current.reportError(error);
+      // Reported on the same authority the success branch uses (the actor, not
+      // the dialog operation).  A DELETE cannot be withdrawn by closing the
+      // confirmation, so gating the failure on a still-open dialog would make
+      // success speak and failure stay silent for the very same request.
+      if (owns(owner)) effectsRef.current.reportError(error);
     } finally {
       deletingRef.current.delete(key);
       if (owns(owner) && deleteOperationRef.current === operation) {
