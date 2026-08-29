@@ -162,6 +162,37 @@ report_outline = "provider_default"''',
     assert registry.thinking_mode_for("source_summary") == "disabled"
 
 
+def test_registry_drops_retired_workload_entries_instead_of_failing(tmp_path):
+    """升级兼容:按旧示例生成的部署配置里还留着已退役的 graph_chain_verify
+    绑定/思考模式(graph 模式退役前它是合法词表),load() 必须接受并丢弃,
+    而不是当未知 workload 拒绝——退役能力不许把既有部署的启动搞挂。
+    退役条目甚至可以指向一个已不存在的 service:丢弃发生在一切校验之前。"""
+    path = _write_config(
+        tmp_path / "models.toml",
+        _service() + '''
+[bindings]
+ask_answer = "general"
+graph_chain_verify = "general"
+[thinking]
+graph_chain_verify = "enabled"''',
+    )
+    registry = SystemModelServiceRegistry.load(
+        _settings(path), {"GENERAL_KEY": "secret"}
+    )
+
+    assert registry.service_for("ask_answer") is not None
+    assert registry.service_for("graph_chain_verify") is None
+    assert registry.workloads_for("general") == (WORKLOADS["ask_answer"],)
+
+    stale_service = _write_config(
+        tmp_path / "stale.toml",
+        _service() + '''
+[bindings]
+graph_chain_verify = "service_that_no_longer_exists"''',
+    )
+    SystemModelServiceRegistry.load(_settings(stale_service), {"GENERAL_KEY": "secret"})
+
+
 @pytest.mark.parametrize(
     ("thinking", "match"),
     [

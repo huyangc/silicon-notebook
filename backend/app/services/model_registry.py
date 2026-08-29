@@ -205,6 +205,19 @@ WORKLOADS = workload_map(
 )
 
 
+# Workload ids that once existed and may still appear in deployed
+# MODEL_SERVICES_CONFIG files ([bindings]/[thinking]) generated from earlier
+# checked-in examples or the legacy migration script.  They are ACCEPTED and
+# DROPPED during load — the same upgrade contract as ask_modes._RETIRED_MODES:
+# retiring a capability must never brick startup for a configuration that was
+# valid before the upgrade.  Entries here carry no behavior; nothing reads a
+# retired binding after load.
+RETIRED_WORKLOADS = frozenset({
+    # graph ask mode retired (this branch); its chain-verification workload
+    # went with it.  verify_chain_edges survives as an unwired library helper.
+    "graph_chain_verify",
+})
+
 _SERVICE_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REQUIRED_SERVICE_KEYS = frozenset({
@@ -322,6 +335,11 @@ class SystemModelServiceRegistry:
 
         bindings: dict[str, str] = {}
         for workload_id, service_id in raw_bindings.items():
+            if workload_id in RETIRED_WORKLOADS:
+                # Dropped BEFORE every other check: the referenced service may
+                # itself have been removed alongside the retired workload, and
+                # a retired entry must not fail any validation it used to pass.
+                continue
             if workload_id not in WORKLOADS:
                 raise ValueError(f"unknown model workload binding: {workload_id}")
             if not isinstance(service_id, str) or service_id not in services:
@@ -335,6 +353,8 @@ class SystemModelServiceRegistry:
 
         thinking_modes: dict[str, ThinkingMode] = {}
         for workload_id, raw_mode in raw_thinking.items():
+            if workload_id in RETIRED_WORKLOADS:
+                continue
             workload = WORKLOADS.get(workload_id)
             if workload is None:
                 raise ValueError(f"unknown model thinking workload: {workload_id}")
