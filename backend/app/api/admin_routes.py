@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.api.deps import (
     _bearer_token,
     admin_query_repository,
+    extension_toggle_repository,
     get_current_user,
     model_status_service,
     identity_repository,
@@ -22,6 +23,8 @@ from app.models.admin import (
     ActivitySource,
     AdminExtension,
     AdminExtensionContribution,
+    AdminExtensionRuntimeResult,
+    AdminExtensionRuntimeUpdate,
     AdminExtensionUiContribution,
     AdminExtensionsResponse,
     AdminPasswordResetRequest,
@@ -46,6 +49,10 @@ from app.models.admin import (
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.models.sources import PaginatedSources
+from app.services.extension_toggles import (
+    logger as extension_admission_logger,
+    refresh_extension_admission,
+)
 from app.services.model_status import ModelStatusService
 from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
@@ -579,21 +586,10 @@ def evict_cache(
     return CacheEvictResult(evicted=backend.evict_tag(tag), scope=tag)
 
 
-# --- 扩展拓扑：只读运维视图 --------------------------------------------------
+# --- 扩展拓扑（装载态只读）+ 运行时开关（写 DB、本进程立即生效）--------------
 
 
-@router.get("/admin/extensions", response_model=AdminExtensionsResponse)
-def list_admin_extensions(
-    request: Request, user: UserProfile = Depends(get_current_user)
-) -> AdminExtensionsResponse:
-    """已加载的扩展拓扑（部署运维只读视图）。仅 admin。
-
-    白名单投影：绝不返回模块路径/文件路径/settings 值/reason/异常文本；
-    拓扑在启动时已经冻结，被停用的插件从未进入 registry，因此不会出现
-    在这里——没有 `enabled` 字段。
-    """
-    if user.role != "admin":
-        raise user_error(403, "仅管理员可查看已加载的扩展")
+def _extension_admin_projection(request: Request):
     # getattr with a default, not attribute access: Starlette's ``State``
     # raises AttributeError for an unset key, so ``state.x`` would bypass the
     # guard below entirely and surface as a 500 with a Starlette-worded message
@@ -602,8 +598,59 @@ def list_admin_extensions(
     projection = getattr(request.app.state, "extension_admin_projection", None)
     if not callable(projection):
         raise RuntimeError("application extension admin projection is unavailable")
-    return AdminExtensionsResponse(
-        extensions=[
+    return projection()
+
+
+@router.get("/admin/extensions", response_model=AdminExtensionsResponse)
+def list_admin_extensions(
+    request: Request, user: UserProfile = Depends(get_current_user)
+) -> AdminExtensionsResponse:
+    """已加载的扩展拓扑 + 运行时开关现状。仅 admin。
+
+    两层语义，不同源，按行合成：
+
+    * 装载拓扑（id/version/trust/display_name/contributions/ui_contributions）
+      仍是启动冻结的白名单投影——绝不返回模块路径/文件路径/settings 值/
+      reason/异常文本；TOML `enabled = false` 或未点名的插件从未进入
+      registry，因此不出现在这里，这一层本身依旧没有 `enabled` 字段（真源见
+      ``app/extensions/admin_projection.py``）。
+    * 运行时开关（runtime_enabled/runtime_updated_by/runtime_updated_at）是
+      另一层：从 `extension_runtime_toggles` 表**现读**（不是进程内 admission
+      快照——管理页要看到的是 DB 里的真值，不是这个进程恰好收敛到的那一刻），
+      按 plugin_id 与上面的装载行合成。builtin 恒为
+      `None, None, None`（只读，不可开关）；已装载的 deployment 插件无开关行
+      时是 `True, None, None`（无行 = 启用），有行则如实返回。
+
+    先取投影、只在其中确实出现过 `trust == "deployment"` 行时才查
+    ``list_extension_runtime_toggles()``：出厂默认零 deployment 插件是最常见
+    的部署形态，这条路由不该为它凭空多一次 DB 查询（同一教义见
+    ``app.services.startup_warmup._deployment_plugins_are_loaded`` 与
+    ``app.extensions.http_router.collect_plugin_router_specs`` 的零贡献者
+    早退——"零插件是出厂默认，必须不花一分钱"）。
+    """
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看已加载的扩展")
+    rows = tuple(_extension_admin_projection(request))
+    toggles: dict[str, dict] = {}
+    if any(row.trust == "deployment" for row in rows):
+        toggles = {
+            row["plugin_id"]: row
+            for row in extension_toggle_repository().list_extension_runtime_toggles()
+        }
+    extensions: list[AdminExtension] = []
+    for row in rows:
+        runtime_enabled: Optional[bool] = None
+        runtime_updated_by: Optional[str] = None
+        runtime_updated_at: Optional[str] = None
+        if row.trust == "deployment":
+            toggle = toggles.get(row.id)
+            if toggle is None:
+                runtime_enabled = True  # 无行 = 启用
+            else:
+                runtime_enabled = toggle["enabled"]
+                runtime_updated_by = toggle["updated_by"]
+                runtime_updated_at = toggle["updated_at"]
+        extensions.append(
             AdminExtension(
                 id=row.id,
                 version=row.version,
@@ -621,7 +668,73 @@ def list_admin_extensions(
                     )
                     for item in row.ui_contributions
                 ],
+                runtime_enabled=runtime_enabled,
+                runtime_updated_by=runtime_updated_by,
+                runtime_updated_at=runtime_updated_at,
             )
-            for row in projection()
-        ]
+        )
+    return AdminExtensionsResponse(extensions=extensions)
+
+
+@router.patch(
+    "/admin/extensions/{plugin_id}", response_model=AdminExtensionRuntimeResult
+)
+def update_admin_extension_runtime(
+    plugin_id: str,
+    payload: AdminExtensionRuntimeUpdate,
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminExtensionRuntimeResult:
+    """开/关一个已装载的 deployment 插件。仅 admin，装载拓扑不受影响。
+
+    ``plugin_id`` 必须落在「已装载 deployment 插件 id 集合」内——从这次请求
+    自己现读的装载投影取（与 GET 同一份真源），不是 store 认识的任何东西。
+    这一步同时挡掉 builtin、TOML 里未点名/已停用的插件、以及任何拼错的 id，
+    store 的 ValueError（空/纯空白 plugin_id）与无界写入面因此在这条路由下
+    不可达——不会有人对着一个从未装载过的 id 在表里堆出行来。
+
+    成功写行后立即 ``refresh_extension_admission``，让本进程的 registry 闸
+    与插件路由闸当次生效，调用方（多半就是刚点了这个开关的管理员）不必等
+    低频轮询收敛。两个管理员并发各改一次（甚至改同一个 plugin_id）不会互相
+    回滚彼此的发布——较晚落地的那次读到的已经是较新的库内状态，刷新按序发布，
+    本进程最终停在与 DB 一致的那个值上，不会因为两次刷新的先后交错而倒退回
+    更早的快照。刷新失败是防御性的：写已经落库，只是这一个进程的内存快照要
+    等下一轮轮询才追上——见下面的 ``except`` 分支。
+    """
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理扩展运行时开关")
+    loaded_deployment_ids = {
+        row.id
+        for row in _extension_admin_projection(request)
+        if row.trust == "deployment"
+    }
+    if plugin_id not in loaded_deployment_ids:
+        raise user_error(404, "该扩展不存在或不支持运行时开关")
+    store = extension_toggle_repository()
+    try:
+        row = store.set_extension_runtime_enabled(plugin_id, payload.enabled, user.id)
+    except PermissionError:
+        # 理论上不可达——上面已经检过角色——但绝不能把它泄漏成一条 500：一个
+        # 管理员会话在两次检查之间被别的会话降权，是可以想象的竞态，答案必须
+        # 和上面同一句话，而不是一条陌生的堆栈。
+        raise user_error(403, "仅管理员可管理扩展运行时开关")
+    try:
+        refresh_extension_admission(store)
+    except Exception:
+        # 写路径的取舍：这次写已经落库，只是发布失败了。选择仍然返回成功
+        # ——而不是把一次数据库抖动变成管理员眼里的“操作失败”，同时如实
+        # 记一条日志：本进程的闸要等低频轮询下一轮收敛，不会永远停在旧快照上
+        # （那条轮询线程与这次写共享同一个 store/仓库）。plugin_id 不进日志——
+        # 复用 app.services.extension_toggles 的既有口径，那是运营者的数据。
+        extension_admission_logger.warning(
+            "extension admission refresh failed after an admin runtime-toggle "
+            "write; the write is saved, this process will converge on the "
+            "background refresher's next tick",
+            exc_info=True,
+        )
+    return AdminExtensionRuntimeResult(
+        plugin_id=row["plugin_id"],
+        runtime_enabled=row["enabled"],
+        runtime_updated_by=row["updated_by"],
+        runtime_updated_at=row["updated_at"],
     )

@@ -22,7 +22,7 @@ import textwrap
 import threading
 
 import pytest
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -920,6 +920,211 @@ def test_plugin_routes_are_503_before_readiness(
         assert response.json()["ready"] is False
     finally:
         readiness.mark_ready()
+
+
+# --------------------------------------------------------------------------
+# Runtime admission gate: PATCH /api/admin/extensions/{plugin_id} vs. the
+# mounted HTTP router. See docs/superpowers/plans/2026-08-29-extension-
+# runtime-toggle.md — same admin action, same process-wide snapshot, two gate
+# points (this HTTP one, and the registry's own — see the third test below).
+# --------------------------------------------------------------------------
+
+
+def test_plugin_routes_are_403_once_an_admin_disables_the_plugin(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """The router-level admission gate takes effect in the same process,
+    within the very next request — no polling wait involved, because the
+    admin write path republishes ``app.core.extension_admission`` itself
+    before answering the PATCH.
+
+    Mutation test target: comment out the ``refresh_extension_admission(store)``
+    call in ``app.api.admin_routes.update_admin_extension_runtime`` and this
+    test goes red, because the old (empty) snapshot is still what the gate
+    below reads.
+    """
+
+    client = _client(tmp_path, monkeypatch)
+    admin_headers = _auth_admin(client)
+    user_headers = _auth(client, "z00880088")
+
+    response = client.patch(
+        f"/api/admin/extensions/{_PLUGIN_ID}",
+        json={"enabled": False},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_enabled"] is False
+
+    denied = client.get(f"{_MOUNT}/ping", headers=user_headers)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "该扩展已被管理员停用"
+    assert denied.headers.get("X-User-Message") == "1"
+
+    # Re-enabling restores the route just as immediately as disabling stopped it.
+    response = client.patch(
+        f"/api/admin/extensions/{_PLUGIN_ID}",
+        json={"enabled": True},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_enabled"] is True
+    restored = client.get(f"{_MOUNT}/ping", headers=user_headers)
+    assert restored.status_code == 200, restored.text
+
+
+def test_disabling_one_plugin_does_not_gate_another(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    other_ping_src = """
+    def build_router(context):
+        router = APIRouter()
+
+        @router.get("/ping")
+        def ping():
+            return {"ok": True}
+
+        return router
+    """
+    client = _client(tmp_path, monkeypatch, extra=(("corp.other", other_ping_src),))
+    admin_headers = _auth_admin(client)
+    user_headers = _auth(client, "z00990099")
+
+    response = client.patch(
+        f"/api/admin/extensions/{_PLUGIN_ID}",
+        json={"enabled": False},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+
+    assert client.get(f"{_MOUNT}/ping", headers=user_headers).status_code == 403
+    assert (
+        client.get(
+            f"{PLUGIN_ROUTE_PREFIX}/corp.other/ping", headers=user_headers
+        ).status_code
+        == 200
+    )
+
+
+def test_admin_toggle_flips_the_registry_gate_in_the_same_process(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """T2's registry gate (``contribution_availability``) and this module's
+    HTTP gate read the exact same admission snapshot; one admin action moves
+    both. Checked directly on the contribution rather than through a
+    retrieval/parser call because this fake plugin's only contribution is its
+    HTTP router.
+    """
+
+    from app.extension_sdk import AvailabilityStatus
+    from app.extensions.bootstrap import default_extension_runtime
+
+    client = _client(tmp_path, monkeypatch)
+    admin_headers = _auth_admin(client)
+    registry = default_extension_runtime().registry
+
+    before = registry.contribution_availability("corp.sample.router")
+    assert before.status is AvailabilityStatus.AVAILABLE
+
+    response = client.patch(
+        f"/api/admin/extensions/{_PLUGIN_ID}",
+        json={"enabled": False},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    after = registry.contribution_availability("corp.sample.router")
+    assert after.status is AvailabilityStatus.DISABLED
+    assert after.reason_code == "admin_disabled"
+
+    response = client.patch(
+        f"/api/admin/extensions/{_PLUGIN_ID}",
+        json={"enabled": True},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    restored = registry.contribution_availability("corp.sample.router")
+    assert restored.status is AvailabilityStatus.AVAILABLE
+
+
+def test_plugin_route_admission_gate_runs_immediately_after_authentication(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """Structural check on the *mounted* dependant tree, not a monkeypatch spy
+    on the factory function: every plugin route must carry exactly one
+    admission-gate node, and it must sit right after session auth — before
+    anything the plugin itself declared (a notebook gate, its own
+    ``current_actor`` dependency, ...).
+
+    Checking "was ``_extension_runtime_gate`` ever called" (the previous shape
+    of this test) is nearly tautological — ``mount_extension_routers`` only
+    ever calls it once per spec, in a loop with no branch, so the only way for
+    that assertion to fail is deleting the call outright, which the ``dependant``
+    walk below also catches, with the added value of pinning *where* the gate
+    sits in the evaluation order (see
+    ``test_disabled_plugin_route_still_401s_without_a_session`` right below
+    for why that order is itself part of the contract).
+
+    Identifying the gate node by its ``__code__`` object — not by identity or
+    by name — is deliberate: ``_extension_runtime_gate(plugin_id)`` returns a
+    fresh closure per call (one per mounted plugin, each bound to a different
+    ``plugin_id``), but every one of those closures shares the single function
+    body compiled for ``_gate`` in the module, so ``__code__`` is the stable
+    fingerprint regardless of which plugin_id produced the instance actually
+    mounted.
+
+    Mutation test target: drop the ``Depends(_extension_runtime_gate(...))``
+    entry from ``mount_extension_routers``'s ``include_router`` call and this
+    test goes red — no route carries a gate node at all.
+    """
+
+    from app.api import extension_routes
+    from app.api.deps import get_current_user
+
+    client = _client(tmp_path, monkeypatch)
+    gate_code = extension_routes._extension_runtime_gate("probe").__code__
+
+    plugin_routes = [
+        route
+        for route in client.app.routes
+        if isinstance(route, APIRoute) and route.path.startswith(_MOUNT)
+    ]
+    assert plugin_routes, "the fake plugin must have mounted at least one route"
+    for route in plugin_routes:
+        calls = [dependency.call for dependency in route.dependant.dependencies]
+        gate_positions = [
+            index
+            for index, call in enumerate(calls)
+            if getattr(call, "__code__", None) is gate_code
+        ]
+        assert len(gate_positions) == 1, (route.path, calls)
+        assert calls[0] is get_current_user, (route.path, calls)
+        assert gate_positions[0] == 1, (route.path, calls)
+
+
+def test_disabled_plugin_route_still_401s_without_a_session(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """认证先于闸：一个匿名请求先撞见 ``get_current_user`` 的 401，永远看不到
+    admission gate 的 403。这不是巧合而是 FastAPI 依赖求值本身的顺序保证——
+    ``solve_dependencies`` 按 ``dependant.dependencies`` 的顺序逐个
+    ``await``，前一个抛出的异常直接终止整个循环（见
+    ``fastapi.dependencies.utils.solve_dependencies``），从不会推进到下一个；
+    上一个测试已经钉住 ``get_current_user`` 排在 gate 之前，这里钉住那个顺序
+    真的兑现成了对外可观察的状态码。
+    """
+
+    client = _client(tmp_path, monkeypatch)
+    admin_headers = _auth_admin(client)
+
+    response = client.patch(
+        f"/api/admin/extensions/{_PLUGIN_ID}",
+        json={"enabled": False},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+
+    anonymous = client.get(f"{_MOUNT}/ping")
+    assert anonymous.status_code == 401
 
 
 # --------------------------------------------------------------------------

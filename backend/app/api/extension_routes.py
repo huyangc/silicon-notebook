@@ -48,7 +48,7 @@ must never come up half-wired.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import wraps
 import inspect
 import logging
@@ -76,6 +76,7 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.core.event_logging import EventLogger
+from app.core.extension_admission import disabled_plugin_ids
 from app.core.request_context import get_request_user
 from app.domain.extension_http import (
     PLUGIN_ROUTE_PREFIX,
@@ -928,6 +929,51 @@ def _run_plugin_router_validation(plugin_id: str, router: APIRouter) -> None:
         ) from None
 
 
+def _extension_runtime_gate(plugin_id: str) -> Callable[[], Awaitable[None]]:
+    """Router-level admission check: refuse every route once an admin has
+    disabled ``plugin_id`` at runtime.
+
+    Reads ``app.core.extension_admission.disabled_plugin_ids()`` — the exact
+    same zero-I/O, process-wide frozenset the registry's own contribution and
+    capability gates read (``app.extensions.registry``). This is the HTTP half
+    of that one admin switch: the registry gate stops a disabled plugin's
+    contributions/capabilities from being scheduled, this stops its mounted
+    router from ever answering a request. Built once per plugin at mount time
+    and closed only over ``plugin_id`` — a ``str`` — so the check itself never
+    touches the database, the registry, or anything importable only from
+    ``app.extensions``/``app.extension_sdk``.
+
+    ``async def``, deliberately, not a plain ``def``: FastAPI runs a
+    synchronous dependency through ``run_in_threadpool`` (see
+    ``fastapi.dependencies.utils.solve_dependencies``), and this check does
+    nothing but one frozenset membership test — paying a threadpool hop for
+    that on every single plugin request, forever, would be pure overhead for
+    a check that never blocks. A coroutine function is awaited directly on the
+    event loop instead.
+
+    This also means it is never touched by this module's 401→424
+    upstream-unauthorized translation, though for an unrelated reason:
+    ``_declared_in_core`` (below) classifies any callable whose ``__module__``
+    starts with ``"app."`` as core-owned, and this closure's ``__module__`` is
+    ``app.api.extension_routes`` — so ``_plugin_owned_dependants`` skips it the
+    same way it skips ``get_current_user``. Moot in practice (this gate only
+    ever raises 403, never 401), but it means a future change here never has
+    to reason about interacting with that translation.
+
+    The 403 text is an inline literal, not a module constant: both
+    ``scripts/check_ui_vocabulary.py`` and
+    ``test_user_error.py::test_static_user_error_messages_are_chinese`` read the
+    ``user_error()`` argument as an AST literal (see
+    ``_translate_unauthorized`` above for the same discipline).
+    """
+
+    async def _gate() -> None:
+        if plugin_id in disabled_plugin_ids():
+            raise user_error(403, "该扩展已被管理员停用")
+
+    return _gate
+
+
 def mount_extension_routers(
     app: FastAPI, specs: Sequence[PluginRouterSpec]
 ) -> None:
@@ -971,7 +1017,10 @@ def mount_extension_routers(
         app.include_router(
             router,
             prefix=f"{PLUGIN_ROUTE_PREFIX}/{spec.plugin_id}",
-            dependencies=[Depends(get_current_user)],
+            dependencies=[
+                Depends(get_current_user),
+                Depends(_extension_runtime_gate(spec.plugin_id)),
+            ],
         )
         for route in app.routes[mounted_from:]:
             if isinstance(route, APIRoute):

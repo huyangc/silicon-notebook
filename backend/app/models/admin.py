@@ -283,13 +283,19 @@ class CacheEvictResult(BaseModel):
     scope: str                     # 被清理的 tag 名，或 'all'
 
 
-# --- GET /admin/extensions：已加载扩展拓扑的只读运维视图 --------------------
+# --- GET /admin/extensions：已加载扩展拓扑 + 运行时开关现状 ------------------
 #
-# 白名单，恰好 6 个字段（id/version/trust/display_name/contributions/
-# ui_contributions），刻意**没有** `enabled`——拓扑启动冻结，被停用的插件根本
-# 没有进入 registry，一个恒为 true 的字段只会误导运维。真源见
-# backend/app/extensions/admin_projection.py 与
-# docs/superpowers/plans/2026-08-23-deployment-extensions-backend.md 主 agent 裁决 1。
+# 装载拓扑白名单，恰好 6 个字段（id/version/trust/display_name/contributions/
+# ui_contributions）——拓扑启动冻结，TOML `enabled = false` 或未点名的插件根本
+# 没有进入 registry，因此不出现在这里；这一层依旧**没有** `enabled` 字段，真源见
+# backend/app/extensions/admin_projection.py。
+#
+# 运行时开关是另一层，来自 `extension_runtime_toggles` 表：`runtime_enabled` /
+# `runtime_updated_by` / `runtime_updated_at` 三个字段由路由层现读 DB 后按
+# plugin_id 与上面的装载行合成（见 admin_routes.py::list_admin_extensions）。
+# builtin 插件恒为 `None, None, None`（只读，不可开关）；已装载的 deployment
+# 插件无开关行时是 `True, None, None`（无行 = 启用）。
+# docs/superpowers/plans/2026-08-29-extension-runtime-toggle.md。
 
 
 class AdminExtensionContribution(BaseModel):
@@ -317,6 +323,11 @@ class AdminExtension(BaseModel):
     display_name: str
     contributions: List[AdminExtensionContribution]
     ui_contributions: List[AdminExtensionUiContribution]
+    # 运行时开关现状（另一层，来自 DB，不是启动冻结的装载拓扑）。builtin 恒为
+    # None；已装载的 deployment 插件无开关行时是 True/None/None（无行 = 启用）。
+    runtime_enabled: Optional[bool] = None
+    runtime_updated_by: Optional[str] = None
+    runtime_updated_at: Optional[str] = None
 
 
 class AdminExtensionsResponse(BaseModel):
@@ -324,3 +335,29 @@ class AdminExtensionsResponse(BaseModel):
 
     api_version: Literal["1"] = "1"
     extensions: List[AdminExtension]
+
+
+# --- PATCH /api/admin/extensions/{plugin_id}：运行时开关写入 -----------------
+#
+# 仅 `trust == "deployment"` 且已装载的插件可开关；builtin、未装载的 id 一律
+# 404（路由层用「已装载 deployment 插件 id 集合」挡在 store 之前）。空路径段
+# （`.../admin/extensions/` 后面什么都不跟）根本到不了这条路由——`{plugin_id}`
+# 是 FastAPI 的非空路径参数，框架自己就 404 了，从不会进这个处理函数；store 自
+# 己对空/纯空白 plugin_id 的校验因此在这条路由下不可达，只是纯粹的防御纵深。
+# 写成功后返回刚落库的行——与 GET 合成出的三字段同名同形，前端可以直接
+# 用响应更新那一行,不必重新拉一次列表。
+
+
+class AdminExtensionRuntimeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class AdminExtensionRuntimeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plugin_id: str
+    runtime_enabled: bool
+    runtime_updated_by: str
+    runtime_updated_at: str
