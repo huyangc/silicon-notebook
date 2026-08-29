@@ -20,7 +20,7 @@ from app.core.memory_inputs import (
 )
 from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
 from app.services.agent_profile_block import resolve_agent_profile_names
-from app.services.search_concurrency import search_concurrency_gate
+from app.services.search_concurrency import run_under_search_gate
 
 from ._shared import (
     RESULT_LIMIT,
@@ -305,10 +305,17 @@ def register_memory_context_tools(
         # 无关。代价说明:排队等票的那段现在**不**发心跳(旧形态是在 load 里等,被
         # 心跳覆盖着)。这是自觉的取舍——等票的调用换来的是不再占住工作线程,而
         # 队列本身由 4 个在跑的搜索推进。
-        async with search_concurrency_gate():
-            rows = await _run_with_progress(
+        #
+        # 与 HTTP 入口同形地走 run_under_search_gate:Agent 断连或客户端超时会取消
+        # 这个工具调用,而 load 所在的工作线程停不下来。票绑在工作上,线程真正跑完
+        # 才归还(codex #627 R3 P1)。取消后 _run_with_progress 仍跑到底,它的心跳协程
+        # 由 runner 的 finally 里那次 tg.cancel_scope.cancel() 收掉,不会泄漏。
+        async def gated_search() -> list[dict[str, Any]]:
+            return await _run_with_progress(
                 ctx, load, label="search_notebook_context"
             )
+
+        rows = await run_under_search_gate(gated_search)
         cap = max(1, min(int(limit), RESULT_LIMIT))
         return _budget_response(
             {"notebook_id": notebook_id, "items": rows[:cap]},

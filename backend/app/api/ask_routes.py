@@ -71,7 +71,7 @@ from app.services.conversation_public_view import (
     resolve_conversation_asset_alias,
 )
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
-from app.services.search_concurrency import search_concurrency_gate
+from app.services.search_concurrency import run_under_search_gate
 from app.services.source_scope import retrieval_scope_receipt_context
 from app.api.task_stream import (
     ClosingStreamingResponse,
@@ -459,15 +459,19 @@ async def search_notebook(
     #
     # 刻意不设超时/拒绝——拒绝会静默收窄某次搜索的结果覆盖面。响应语义与同步版本
     # 逐字相同,包括 KeyError -> 404 这条映射。
+    #
+    # 走 run_under_search_gate 而不是裸 async with:客户端断连/超时/关停会取消这个
+    # 请求任务,但已经在扫描里的工作线程停不下来。裸 async with 会在取消展开时立刻
+    # 放票,后面四个请求随即进场,而被放弃的那次扫描还占着线程和连接——真实并发
+    # 超过上限,池耗尽重演(codex #627 R3 P1)。票绑在**工作**上,线程真正跑完才归还。
 
     def run_search() -> NotebookSearchResponse:
         return notebook_catalog_repository().search_notebook(notebook_id, q)
 
-    async with search_concurrency_gate():
-        try:
-            return await asyncio.to_thread(run_search)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        return await run_under_search_gate(lambda: asyncio.to_thread(run_search))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 def _intent_history(repo, notebook_id: str, conversation_id: str | None,
