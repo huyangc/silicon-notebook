@@ -1951,6 +1951,86 @@ def test_url_import_maps_unconfigured_parser_to_400(
     assert "X-User-Message" not in response.headers
 
 
+def _trusted_proxy_probe_client(tmp_path, monkeypatch):
+    """One app with the trusted-proxy env set, plus a probe spy and a quiet
+    scheduler. Shared by the injection test and its browser-route negative so
+    the two assert against the SAME deployment configuration."""
+
+    import app.api.source_routes as source_routes_module
+    from app.services import remote_sources
+    from app.services.remote_sources import PdfProbe
+
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        env={
+            "MINERU_API_TOKEN": "tok",
+            "URL_IMPORT_TRUSTED_PROXY_HOSTS": "http://127.0.0.1:8100",
+        },
+    )
+    probes: list[tuple] = []
+
+    def spy_probe(url, **kw):
+        probes.append((url, kw.get("allow_private")))
+        return PdfProbe(True, "", 1, "d.pdf")
+
+    monkeypatch.setattr(remote_sources, "probe_pdf", spy_probe)
+    monkeypatch.setattr(
+        source_routes_module.kg_scheduler, "submit_job", lambda fn, *a, **k: None
+    )
+    return client, probes
+
+
+def test_url_import_injects_the_deployment_trusted_proxy_whitelist(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """特性 A 唯一生产接线的回归钉：插件路由导入时，`URL_IMPORT_TRUSTED_PROXY_HOSTS`
+    里 origin 精确命中的 URL 收 `allow_private=True`，未命中收 `False`。
+
+    评审的变异实验证明此前把 `extension_routes` 那段 `trusted_proxy_origins=...`
+    注入整段删掉，全套测试照绿——服务层被 test_url_sources 钉死了，端到端这一跳
+    没有守卫；这条用例就是那一跳的守卫。"""
+
+    client, probes = _trusted_proxy_probe_client(tmp_path, monkeypatch)
+    headers = _auth(client, "z00144014")
+    notebook_id = _notebook(client, headers)
+    response = client.post(
+        f"{_MOUNT}/notebooks/{notebook_id}/import",
+        json={
+            "urls": [
+                "http://127.0.0.1:8100/export/a.pdf",
+                "https://pub.example/b.pdf",
+            ]
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert probes == [
+        ("http://127.0.0.1:8100/export/a.pdf", True),
+        ("https://pub.example/b.pdf", False),
+    ]
+
+
+def test_browser_url_route_never_receives_the_trusted_proxy_whitelist(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """红线守卫的另一半：同一部署（同一环境变量）下，浏览器的
+    `POST /api/notebooks/{id}/sources/url` 不注入白名单——probe 恒收
+    `allow_private=False`。将来有人为「两个半程对称」把白名单接到浏览器路由上
+    （下载半程读 settings，这个诱惑是现成的），这条立刻红。"""
+
+    client, probes = _trusted_proxy_probe_client(tmp_path, monkeypatch)
+    headers = _auth(client, "z00155015")
+    notebook_id = _notebook(client, headers)
+    response = client.post(
+        f"/api/notebooks/{notebook_id}/sources/url",
+        json={"urls": ["http://127.0.0.1:8100/export/a.pdf"]},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert probes == [("http://127.0.0.1:8100/export/a.pdf", False)]
+
+
 # --------------------------------------------------------------------------
 # The URL import port from an async handler (codex #578 R4 P1)
 # --------------------------------------------------------------------------
@@ -1987,14 +2067,14 @@ def async_port(tmp_path, monkeypatch, frozen_runtime_reset):
     imports: list[dict] = []
     real_import = source_routes_module.import_url_sources
 
-    def spy(notebook_id, urls):
+    def spy(notebook_id, urls, **kwargs):
         try:
             asyncio.get_running_loop()
             on_loop = True
         except RuntimeError:
             on_loop = False
         imports.append({"thread": threading.current_thread(), "on_loop": on_loop})
-        return real_import(notebook_id, urls)
+        return real_import(notebook_id, urls, **kwargs)
 
     monkeypatch.setattr(source_routes_module, "import_url_sources", spy)
     return client, _grant_world(client, "w"), imports

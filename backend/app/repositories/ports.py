@@ -569,7 +569,15 @@ class SourceRepository(Protocol):
     # ``add_url_sources`` keeps it in the slot the retired ``capacity`` budget
     # occupied, ``upload_sources`` appends it last — both choices exist so the
     # positional callers each method already had keep their argument order.
-    def add_url_sources(self, notebook_id: str, urls: Iterable[str], scheduler: SourceScheduler | None = None, capacity_limit: "int | None" = None, agent_profile_id: str = "") -> AddUrlSourcesResult: ...
+    # ``trusted_proxy_origins`` is the deployment's normalized trusted-proxy
+    # origin whitelist (None/empty = no exemption): the URL probe skips only
+    # the SSRF public-address check for URLs whose origin matches exactly.
+    # Only the plugin-port adapter passes it; browser/MCP callers never do.
+    # It gates the import PROBE half only — the parse-time download half reads
+    # the deployment settings itself (process_source), independent of this
+    # parameter, so passing a set the deployment did not configure still
+    # leaves the created source's download unexempted.
+    def add_url_sources(self, notebook_id: str, urls: Iterable[str], scheduler: SourceScheduler | None = None, capacity_limit: "int | None" = None, agent_profile_id: str = "", trusted_proxy_origins: "frozenset[str] | None" = None) -> AddUrlSourcesResult: ...
     def upload_sources(self, notebook_id: str, files: Iterable[UploadedSourceFile], scheduler: SourceScheduler | None = None, agent_profile_id: str = "", capacity_limit: "int | None" = None) -> list[UploadedSourceSummary]: ...
     def get_source(self, source_id: str) -> SourceDetail: ...
     def process_source(self, source_id: str) -> SourceSummary: ...

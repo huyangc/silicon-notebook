@@ -1823,10 +1823,12 @@ class RepositoryFacade:
         scheduler: Optional[Callable[[str], None]] = None,
         capacity_limit: Optional[int] = None,
         agent_profile_id: str = "",
+        trusted_proxy_origins: "frozenset[str] | None" = None,
     ) -> AddUrlSourcesResult:
         self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.source_ingestion.add_url_sources_compat(
-            notebook_id, urls, scheduler, capacity_limit, agent_profile_id
+            notebook_id, urls, scheduler, capacity_limit, agent_profile_id,
+            trusted_proxy_origins=trusted_proxy_origins,
         )
 
     def upload_sources(

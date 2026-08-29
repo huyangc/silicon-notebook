@@ -51,6 +51,17 @@ def local_repo(tmp_path, monkeypatch):
     return _repository(Settings())
 
 
+@pytest.fixture
+def local_trusted_repo(tmp_path, monkeypatch):
+    """local_repo + 部署级受信代理白名单（URL_IMPORT_TRUSTED_PROXY_HOSTS）。"""
+    _base_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
+    monkeypatch.setenv("URL_IMPORT_TRUSTED_PROXY_HOSTS", "http://127.0.0.1:8100")
+    return _repository(Settings())
+
+
 def test_add_url_sources_creates_and_rejects(cloud_repo, monkeypatch):
     nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
 
@@ -257,3 +268,158 @@ def test_url_scheduler_sees_committed_queued_row(cloud_repo, monkeypatch):
 
     res = cloud_repo.add_url_sources(nb.id, ["https://a/doc.pdf"], scheduler=scheduler)
     assert seen == [(res.created[0].id, "queued")]
+
+
+# --- 受信插件代理 SSRF 豁免（URL_IMPORT_TRUSTED_PROXY_HOSTS）--------------
+
+
+def test_add_url_sources_exempts_only_whitelisted_origins(cloud_repo, monkeypatch):
+    """probe 只对 origin 精确命中的 URL 收 allow_private=True；未列名恒 False。"""
+    nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
+    seen = []
+
+    def spy_probe(url, **kw):
+        seen.append((url, kw.get("allow_private")))
+        return PdfProbe(True, "", 10, "doc.pdf")
+
+    monkeypatch.setattr(remote_sources, "probe_pdf", spy_probe)
+    cloud_repo.add_url_sources(
+        nb.id,
+        [
+            "http://127.0.0.1:8100/export/a.pdf",
+            "http://127.0.0.1:8200/export/b.pdf",  # 不同端口 = 不同 origin
+            "https://pub.example/c.pdf",
+        ],
+        scheduler=lambda sid: None,
+        trusted_proxy_origins=frozenset({"http://127.0.0.1:8100"}),
+    )
+    assert seen == [
+        ("http://127.0.0.1:8100/export/a.pdf", True),
+        ("http://127.0.0.1:8200/export/b.pdf", False),
+        ("https://pub.example/c.pdf", False),
+    ]
+
+
+def test_add_url_sources_without_whitelist_never_exempts(cloud_repo, monkeypatch):
+    """浏览器/MCP 路径不传白名单 → allow_private 恒 False（历史行为逐位不变）。"""
+    nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
+    seen = []
+
+    def spy_probe(url, **kw):
+        seen.append(kw.get("allow_private"))
+        return PdfProbe(True, "", 10, "doc.pdf")
+
+    monkeypatch.setattr(remote_sources, "probe_pdf", spy_probe)
+    cloud_repo.add_url_sources(
+        nb.id, ["http://127.0.0.1:8100/a.pdf"], scheduler=lambda sid: None
+    )
+    assert seen == [False]
+
+
+def test_origin_normalization_and_whitelist_parsing():
+    from app.services.source_ingestion import _origin_of, trusted_proxy_origin_set
+
+    # 大小写统一 + 默认端口显式归一；path 不参与。
+    assert _origin_of("http://Proxy.Internal/a/b.pdf") == "http://proxy.internal:80"
+    assert _origin_of("HTTPS://Proxy.Internal") == "https://proxy.internal:443"
+    assert _origin_of("http://proxy.internal:8100/x?y=1") == "http://proxy.internal:8100"
+    assert _origin_of("http://proxy.internal:80/x") == _origin_of("http://proxy.internal/y")
+    # 不同端口 = 不同 origin。
+    assert _origin_of("http://h:8100") != _origin_of("http://h:8200")
+    # 非 http(s)/缺 host/端口无效/畸形串 → 空串（永不在任何白名单里）。
+    assert _origin_of("ftp://proxy.internal/a.pdf") == ""
+    assert _origin_of("http://") == ""
+    assert _origin_of("http://h:99999/a.pdf") == ""
+    assert _origin_of("http://[::1") == ""
+    assert _origin_of("") == ""
+    # 名单解析：逐项归一入集合，空段/畸形段丢弃；空串 → 空集合。
+    assert trusted_proxy_origin_set("") == frozenset()
+    assert trusted_proxy_origin_set(
+        " HTTP://127.0.0.1:8100 , ,ftp://x, https://Proxy.Internal/path-ignored "
+    ) == frozenset({"http://127.0.0.1:8100", "https://proxy.internal:443"})
+
+
+#: 两份 `_origin_of` 副本一致性钉的输入表：覆盖实现的每条分支（scheme 大小写与
+#: 非 http(s)、缺 host、http/https 默认端口两向、显式端口、越界端口、非数字端口、
+#: IPv6 字面量带/不带端口、无效 IPv6 括号、userinfo、path/query、空白与空串），
+#: 让任一侧将来单方面加一条归一规则时至少有一个采样落进新分支而立刻红。
+_ORIGIN_PARITY_CASES = [
+    "http://Proxy.Internal/a/b.pdf",
+    "HTTPS://Proxy.Internal",
+    "https://proxy.internal:443/x",
+    "http://proxy.internal:80/x",
+    "http://proxy.internal:8100/x?y=1#frag",
+    "ftp://proxy.internal/a.pdf",
+    "file:///etc/passwd",
+    "http://",
+    "http://h:99999/a.pdf",
+    "http://h:0x50/a.pdf",
+    "http://[::1]/a.pdf",
+    "http://[::1]:8100/a.pdf",
+    "http://[::1",
+    "http://user:pw@proxy.internal:8100/a.pdf",
+    "   ",
+    "",
+    "not a url",
+    "//proxy.internal/a.pdf",
+    "http:proxy.internal",
+]
+
+
+def test_parser_chain_origin_copy_matches_source_ingestion():
+    """parser_chain_execution._origin_of 是防 import 环的独立副本，必须逐位一致。"""
+    from app.services import parser_chain_execution, source_ingestion
+
+    for url in _ORIGIN_PARITY_CASES:
+        assert parser_chain_execution._origin_of(url) == source_ingestion._origin_of(
+            url
+        ), url
+
+
+def test_process_source_download_carries_trusted_proxy_exemption(
+    local_trusted_repo, monkeypatch
+):
+    """特性 B：process_source 的解析下载按部署白名单命中传 allow_private=True，
+    否则 probe 已豁免、来源已建，下载仍被拒 → 「已创建但解析失败」。"""
+    repo = local_trusted_repo
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf",
+        lambda url, **kw: PdfProbe(True, "", 10, "doc.pdf"),
+    )
+    res = repo.add_url_sources(
+        nb.id, ["http://127.0.0.1:8100/export/doc.pdf"], scheduler=lambda sid: None
+    )
+    downloads = []
+
+    def spy_download(url, dest, **kw):
+        downloads.append((url, kw.get("allow_private")))
+        Path(dest).write_bytes(b"%PDF-")
+
+    monkeypatch.setattr(remote_sources, "download_pdf", spy_download)
+    monkeypatch.setattr(
+        repo.mineru_client, "parse_with_images",
+        lambda path, name: ([{"type": "text", "text": "Proxied", "page_idx": 0}], {}),
+    )
+    repo.process_source(res.created[0].id)
+    assert downloads == [("http://127.0.0.1:8100/export/doc.pdf", True)]
+    assert repo.get_source(res.created[0].id).parse_status == "extracted"
+
+
+def test_process_source_download_defaults_to_no_exemption(local_repo, monkeypatch):
+    """未配置白名单（默认部署）时，解析下载收到 allow_private=False。"""
+    nb = local_repo.create_notebook(NotebookCreate(name="n"))
+    sid = _make_url_source(local_repo, monkeypatch, nb.id)
+    downloads = []
+
+    def spy_download(url, dest, **kw):
+        downloads.append((url, kw.get("allow_private")))
+        Path(dest).write_bytes(b"%PDF-")
+
+    monkeypatch.setattr(remote_sources, "download_pdf", spy_download)
+    monkeypatch.setattr(
+        local_repo.mineru_client, "parse_with_images",
+        lambda path, name: ([{"type": "text", "text": "Public", "page_idx": 0}], {}),
+    )
+    local_repo.process_source(sid)
+    assert downloads == [("https://a/doc.pdf", False)]

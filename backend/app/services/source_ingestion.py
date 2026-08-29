@@ -10,6 +10,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, List, Optional
+from urllib.parse import urlparse
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
@@ -80,6 +81,48 @@ RETYPE_REEXTRACT_FAILED_MESSAGE = (
 #: → 补跑一次）；上限只为挡住病态循环——有人不停改类型时，这条源不能永远占着 KG
 #: job 池的一个槽位。
 _DOC_TYPE_RECONCILE_MAX_ROUNDS = 3
+
+
+def _origin_of(url: str) -> str:
+    """把 URL 归一成 origin（``scheme://host[:port]``），供受信代理白名单精确匹配。
+
+    归一规则（``trusted_proxy_origin_set`` 用同一函数归一入集，两侧必然一致）：
+    scheme/host 统一小写；端口显式归一——http 缺端口补 80、https 补 443，显式端口
+    优先，故不同端口就是不同 origin；path/query/fragment 不参与匹配。解析失败、
+    非 http(s)、缺 host、端口无效一律返回空串——空串永远不在任何白名单集合里，
+    等价于「不命中」。
+
+    ``app.services.parser_chain_execution._origin_of`` 是本判定逻辑的独立副本
+    （import 方向所迫，见其 docstring）；两份必须逐位一致。
+    """
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return ""
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return ""
+        port = parsed.port
+    except ValueError:
+        return ""
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}:{port}"
+
+
+def trusted_proxy_origin_set(raw: str) -> "frozenset[str]":
+    """把 ``URL_IMPORT_TRUSTED_PROXY_HOSTS``（逗号分隔）解析成归一 origin 集合。
+
+    逐项经 ``_origin_of`` 归一入集合；空段与畸形段（归一结果为空串）直接丢弃。
+    默认空串 → 空集合 → 不豁免任何 URL，行为与该变量接入前逐位一致。
+    """
+    origins: set[str] = set()
+    for item in (raw or "").split(","):
+        origin = _origin_of(item.strip())
+        if origin:
+            origins.add(origin)
+    return frozenset(origins)
 
 
 class PartialKgRetryIncomplete(RuntimeError):
@@ -480,6 +523,7 @@ class SourceIngestionService:
         scheduler=None,
         capacity_limit=None,
         agent_profile_id: str = "",
+        trusted_proxy_origins: "frozenset[str] | None" = None,
     ) -> AddUrlSourcesResult:
         return self.add_url_sources(
             notebook_id,
@@ -488,6 +532,7 @@ class SourceIngestionService:
             self.pipeline_hooks(),
             capacity_limit=capacity_limit,
             agent_profile_id=agent_profile_id,
+            trusted_proxy_origins=trusted_proxy_origins,
         )
 
     def upload_sources_compat(
@@ -612,6 +657,7 @@ class SourceIngestionService:
         hooks: SourcePipelineHooks,
         capacity_limit: "int | None" = None,
         agent_profile_id: str = "",
+        trusted_proxy_origins: "frozenset[str] | None" = None,
     ) -> AddUrlSourcesResult:
         """逐 URL 初筛(空白跳过;非 PDF/不可达→rejected,不建来源);通过的建 source_url
         来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。
@@ -624,7 +670,16 @@ class SourceIngestionService:
         rejected(超限原因),一个无效链接仍不拖累整批。
 
         agent_profile_id 非空时把这批来源标成「Agent 添加」(v48 出处列),空串(所有既有
-        调用方的默认值)落 NULL = 人添加的,行为逐位不变。"""
+        调用方的默认值)落 NULL = 人添加的,行为逐位不变。
+
+        trusted_proxy_origins 是部署配置的受信代理 origin 白名单(已经
+        trusted_proxy_origin_set 归一)。origin 精确命中(_origin_of(url) 相等)的
+        URL 在探测时跳过 SSRF 公网地址检查(probe_pdf(allow_private=True));未命中
+        或名单为 None/空集 → 恒 False,行为逐位不变。只有插件端口适配器
+        (extension_routes._UrlSourceImportAdapter)会传它——浏览器路由与 MCP 工具
+        恒不传,故 probe 半程的豁免只对插件端口可达;请求级输入在任何路径上都
+        改不了名单本身。解析下载半程的豁免另由部署 settings 决定(见
+        _parser_trusted_proxy_origins),不随本参数。"""
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         self.require_indexing_write(notebook_id)
         # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
@@ -641,11 +696,14 @@ class SourceIngestionService:
         # 长清单时旧的纯内存短路不该退化成 N 次短写事务)。只在本请求内粘滞,
         # 仍比退役的「请求头冻结剩余额度」新鲜——中途释放的名额由下一次请求拿到。
         capacity_exhausted = False
+        trusted = trusted_proxy_origins or frozenset()
         for raw in urls:
             url = (raw or "").strip()
             if not url:
                 continue
-            probe = remote_sources.probe_pdf(url)
+            probe = remote_sources.probe_pdf(
+                url, allow_private=_origin_of(url) in trusted
+            )
             if not probe.ok:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
                 continue
@@ -1202,6 +1260,21 @@ class SourceIngestionService:
             db, source_id, notebook_id, clear_embeddings=clear_embeddings
         )
 
+    def _parser_trusted_proxy_origins(self) -> "frozenset[str]":
+        """受信代理白名单的解析下载半程取数口（特性 B）。
+
+        probe 阶段已豁免、来源已建后，若 ``ParserChainExecution._local_path``
+        下载待解析文件仍被公网检查拒绝，三条解析链全拿不到文件 → 「已创建但
+        解析失败」，故同一份部署白名单必须穿进解析下载。按 settings 在每次
+        调用时读取而非请求穿参：所有 reparse 入口（手动重解析/体检修复/失败
+        重试/批量摄取补跑）自动同享，也与 batch_ingest 运行期改 settings 的
+        既有惯例兼容。注意它按 origin 命中对**所有** kind='url' 的来源生效，
+        不限于插件建的——请求输入改不了名单，但名单里公网可解析的 origin 会让
+        浏览器建的同 origin 来源在下载半程（含重定向链）同获豁免，这正是
+        部署方声明「该 origin 受信」的含义本身（文档同口径登记）。
+        """
+        return trusted_proxy_origin_set(self.settings.url_import_trusted_proxy_hosts)
+
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -1280,6 +1353,7 @@ class SourceIngestionService:
                 ),
                 delete_source_images=lambda: self.delete_source_images(source_id),
                 event_sink=self.event_log.emit,
+                trusted_proxy_origins=self._parser_trusted_proxy_origins(),
             )
             parsed = parser_execution.run()
             parsed_assets_pending = parser_execution.materialized

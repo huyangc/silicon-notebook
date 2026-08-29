@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from app.domain.extensions import (
     PARSER_BUILTIN_PROVIDER,
@@ -90,6 +91,39 @@ class _ProposalToken:
     contribution_id: str
 
 
+def _origin_of(url: str) -> str:
+    """``app.services.source_ingestion._origin_of`` 判定逻辑的独立副本。
+
+    为什么是副本而不是共享单份：直接 import ``source_ingestion`` 不行——那个
+    模块 import 本模块（构造 ``ParserChainExecution`` 的正是它），反向 import
+    成环；上提到两侧都已依赖的 ``remote_sources`` 合并成单份则是刻意不做——
+    白名单的归一/解析语义（本函数 + ``trusted_proxy_origin_set``）是摄取层的
+    契约面，``remote_sources`` 作为出站网络层只认布尔 ``allow_private``、
+    不该知道白名单概念的存在。代价是两份实现必须逐位一致——白名单集合由
+    ``source_ingestion.trusted_proxy_origin_set`` 用它那份 ``_origin_of`` 归一
+    入集，本模块用这份对 ``source_url`` 归一后做精确匹配，任何一侧漂移都会让
+    命中静默失效；由 test_url_sources 的两份副本一致性用例按分支覆盖钉住。
+
+    归一规则：scheme/host 小写；http 缺端口补 80、https 补 443，显式端口优先；
+    path 不参与；解析失败/非 http(s)/缺 host/端口无效返回空串（空串永远不在
+    任何白名单集合里）。
+    """
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return ""
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return ""
+        port = parsed.port
+    except ValueError:
+        return ""
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}:{port}"
+
+
 class ParserChainExecution:
     """One source parse invocation projected into the frozen host topology."""
 
@@ -108,6 +142,7 @@ class ParserChainExecution:
         make_persist_image: Callable[[], Any],
         delete_source_images: Callable[[], None],
         event_sink: Callable[[dict[str, object]], None],
+        trusted_proxy_origins: "frozenset[str] | None" = None,
     ) -> None:
         self.host = host
         self.source_id = source_id
@@ -120,6 +155,9 @@ class ParserChainExecution:
         self.make_persist_image = make_persist_image
         self.delete_source_images = delete_source_images
         self.event_sink = event_sink
+        # 部署配置的受信代理 origin 白名单(source_ingestion.process_source 注入,
+        # 已归一);只影响 URL 来源在 _local_path 的下载是否豁免公网地址检查。
+        self._trusted_proxy_origins = frozenset(trusted_proxy_origins or ())
         self.cancellation = _NeverCancelled()
         suffix = ".pdf" if source_kind == "url" else Path(file_name).suffix.lower()
         self.source = ParserSourceDescriptor(source_kind, suffix)
@@ -422,7 +460,12 @@ class ParserChainExecution:
             fd, tmp = tempfile.mkstemp(suffix=".pdf")
             os.close(fd)
             self._temp_path = Path(tmp)
-            remote_sources.download_pdf(self.source_url, self._temp_path)
+            remote_sources.download_pdf(
+                self.source_url,
+                self._temp_path,
+                allow_private=_origin_of(self.source_url)
+                in self._trusted_proxy_origins,
+            )
         return self._temp_path
 
 

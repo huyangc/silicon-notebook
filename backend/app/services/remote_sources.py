@@ -24,12 +24,21 @@ def validate_public_http_url(
     url: str,
     *,
     resolver: Callable = socket.getaddrinfo,
+    allow_private: bool = False,
 ) -> ParseResult:
     """Validate an outbound URL and require every resolved address to be public.
 
     The check is intentionally applied immediately before the initial request
     and again for every redirect.  Rejecting a hostname when *any* answer is
     private prevents round-robin DNS from mixing public and internal targets.
+
+    ``allow_private=True`` skips ONLY the public-address rule (returning before
+    the resolver runs — a trusted proxy host may not resolve at all); the URL
+    shape checks (scheme / host / credentials / port validity) still apply. It
+    disables the SSRF guard for the whole request chain, redirects the remote
+    server answers included, so it may only ever be passed down the
+    deployment-configured trusted-proxy origin whitelist path — never from
+    anything reachable by browser or MCP request input.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -42,6 +51,8 @@ def validate_public_http_url(
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError as exc:
         raise UnsafeRemoteSourceURL("URL 端口无效") from exc
+    if allow_private:
+        return parsed
     try:
         answers = resolver(parsed.hostname, port, type=socket.SOCK_STREAM)
     except OSError as exc:
@@ -62,14 +73,22 @@ def validate_public_http_url(
 class _PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-apply the public-address policy to every redirect target."""
 
+    def __init__(self, *, allow_private: bool = False) -> None:
+        super().__init__()
+        self._allow_private = allow_private
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        validate_public_http_url(newurl)
+        validate_public_http_url(newurl, allow_private=self._allow_private)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _safe_urlopen(request: urllib.request.Request, timeout: float):
-    validate_public_http_url(request.full_url)
-    opener = urllib.request.build_opener(_PublicOnlyRedirectHandler())
+def _safe_urlopen(
+    request: urllib.request.Request, timeout: float, *, allow_private: bool = False
+):
+    validate_public_http_url(request.full_url, allow_private=allow_private)
+    opener = urllib.request.build_opener(
+        _PublicOnlyRedirectHandler(allow_private=allow_private)
+    )
     return opener.open(request, timeout=timeout)
 
 
@@ -93,8 +112,15 @@ def probe_pdf(
     *,
     timeout: float = 10.0,
     fetch: Optional[Callable[[str, float], FetchResult]] = None,
+    allow_private: bool = False,
 ) -> PdfProbe:
-    fetch = fetch or _default_fetch
+    """初筛 URL 是否指向可解析的 PDF（规则见模块 docstring）。
+
+    ``allow_private`` 只作用于默认网络层（透传 ``_safe_urlopen`` 的 SSRF 检查，
+    语义见 ``validate_public_http_url``）；注入了 ``fetch`` 时它不参与——网络
+    策略由注入方自负，与既有单测语义一致。
+    """
+    fetch = fetch or (lambda u, t: _default_fetch(u, t, allow_private=allow_private))
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return PdfProbe(False, "URL 必须以 http/https 开头", 0, "")
@@ -127,13 +153,16 @@ def download_pdf(
     timeout: float = 120.0,
     max_bytes: int = MAX_PDF_BYTES,
     opener: Optional[Callable[[str, float], object]] = None,
+    allow_private: bool = False,
 ) -> int:
     """流式下载 URL 到 dest（用于本地优先解析：先落盘再交给本地 MinerU）。
 
     超过 max_bytes 立即抛错并保证不残留半截文件；网络层经可注入的
     `opener(url, timeout) -> 支持 .read(size) 的上下文管理器` 完成，单测无需打网络。
+    ``allow_private`` 只作用于默认 opener（透传 ``_safe_urlopen`` 的 SSRF 检查）；
+    注入了 ``opener`` 时它不参与，网络策略由注入方自负。
     """
-    opener = opener or _default_opener
+    opener = opener or (lambda u, t: _default_opener(u, t, allow_private=allow_private))
     total = 0
     try:
         with opener(url, timeout) as stream, open(dest, "wb") as handle:  # type: ignore[union-attr]
@@ -154,9 +183,9 @@ def download_pdf(
     return total
 
 
-def _default_opener(url: str, timeout: float):
+def _default_opener(url: str, timeout: float, *, allow_private: bool = False):
     request = urllib.request.Request(url, method="GET")
-    return _safe_urlopen(request, timeout)
+    return _safe_urlopen(request, timeout, allow_private=allow_private)
 
 
 def _display_name(parsed: ParseResult) -> str:
@@ -166,10 +195,12 @@ def _display_name(parsed: ParseResult) -> str:
     return base
 
 
-def _default_fetch(url: str, timeout: float) -> FetchResult:
+def _default_fetch(
+    url: str, timeout: float, *, allow_private: bool = False
+) -> FetchResult:
     request = urllib.request.Request(url, method="GET")
     request.add_header("Range", "bytes=0-1023")
-    with _safe_urlopen(request, timeout) as response:
+    with _safe_urlopen(request, timeout, allow_private=allow_private) as response:
         status = getattr(response, "status", 200) or 200
         content_type = response.headers.get("Content-Type", "") or ""
         content_length = _total_length(response.headers)

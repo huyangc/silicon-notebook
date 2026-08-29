@@ -65,6 +65,7 @@ from starlette.responses import Response
 
 from app.api import deps as core_deps
 from app.api import source_routes
+from app.services import source_ingestion
 from app.api.task_stream import task_stream_response
 from app.api.deps import (
     get_current_user,
@@ -242,6 +243,18 @@ class _UrlSourceImportAdapter:
     background parse scheduler. The adapter only re-shapes the pydantic result
     into the domain dataclasses so a plugin never has to import
     ``app.models.sources``.
+
+    **Trusted-proxy SSRF exemption.** This adapter is the ONE place the
+    deployment's ``URL_IMPORT_TRUSTED_PROXY_HOSTS`` origin whitelist is
+    injected into the import *probe*: URLs whose origin exactly matches skip
+    only the SSRF public-address check. The whitelist is read from deployment
+    settings at call time — never from anything the plugin (or the request)
+    passes in — and the browser endpoint and MCP tools never pass it, so the
+    probe-side exemption is reachable through this port alone. The parse-time
+    download reads the same deployment whitelist itself (see
+    ``source_ingestion._parser_trusted_proxy_origins``), so it covers reparse
+    of every matching URL source. With an empty whitelist (the default)
+    behaviour is bit-for-bit the historical one.
     """
 
     def import_urls(
@@ -255,7 +268,13 @@ class _UrlSourceImportAdapter:
 
         _refuse_event_loop_thread()
         _authorized_notebook(_URL_IMPORT_CAPABILITY, notebook_id)
-        result = source_routes.import_url_sources(notebook_id, list(urls))
+        result = source_routes.import_url_sources(
+            notebook_id,
+            list(urls),
+            trusted_proxy_origins=source_ingestion.trusted_proxy_origin_set(
+                get_settings().url_import_trusted_proxy_hosts
+            ),
+        )
         return PluginUrlImportResult(
             created=tuple(
                 PluginImportedSource(
