@@ -17,7 +17,15 @@
 // `versionRecognized` 这类「与哪一行都无关」的整页级提示。每个插件的 pending/error
 // 状态各自独立存在 `runtimeRowState`(keyed by plugin id),互不影响;成功后的新
 // 状态完全来自服务端响应,不做乐观更新。
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
+
+// AGENTS.md「Interactive feedback」:动作结果反馈必须"clear that state on its own
+// timer"——错误态不能永驻到下次重试才消失。先例:`pending-center.tsx` 的
+// `PendingToast`(`useEffect` 依赖 `[toast, onClose]`,到点 `setTimeout(onClose,
+// 6000)`,依赖一变就靠 cleanup 清掉旧定时器)与 `copy-result.ts` 的
+// `useCopyResult`(同一个「setState 触发新 effect → cleanup 顺带取消旧定时器」
+// 写法,用在复制结果上)。这里复用同一个时长量级:错误文案比复制成功的两个字长,
+// 6 秒足够读完,又不会长到看起来"卡住了"。
 
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
@@ -72,6 +80,9 @@ type RuntimeRowState =
 
 const IDLE_ROW_STATE: RuntimeRowState = { kind: "idle" };
 
+/** 行内错误态自清所停留的时长。见上方 import 区那条注释的先例出处。 */
+const RUNTIME_ERROR_HOLD_MS = 6000;
+
 /** SQLite 裸本地 ISO(无时区)与 PG 带 `+00:00` 偏移两种形状都交给 `new Date()`
  *  解析,绝不做字符串切片。解析不出来时返回空串,调用方据此隐藏这段文案,而不是
  *  把 "Invalid Date" 露给用户。 */
@@ -106,14 +117,31 @@ function ExtensionRuntimeCell({
   extension,
   rowState,
   onToggle,
+  onErrorExpire,
 }: {
   extension: LoadedExtension;
   rowState: RuntimeRowState;
   onToggle: (pluginId: string, nextEnabled: boolean) => void;
+  /** 错误态到点自清的回调——只在**这个错误态还在**的时候才真的清(父组件按
+   *  这一条判断,不是这里判断);重试/新请求/这一行卸载都会先经 effect 的
+   *  cleanup 取消这次定时器,不会晚到清掉一次新的 pending/error。 */
+  onErrorExpire: (pluginId: string) => void;
 }) {
   const enabled = extension.runtimeEnabled !== false;
   const pending = rowState.kind === "pending";
   const audit = runtimeAuditText(extension.runtimeUpdatedBy, extension.runtimeUpdatedAt);
+
+  // 结果反馈定时自清(AGENTS.md「Interactive feedback」)。依赖数组里的
+  // `rowState` 是**新对象**:每次失败(哪怕连续两次失败、文案相同)`catch` 里都
+  // 会 new 一个 `{ kind: "error", notice }`,effect 因此重新跑,cleanup 先取消
+  // 上一次挂的定时器——重试点击把 rowState 换成 "pending" 同理触发 cleanup,
+  // 不会让一个过期定时器把新一轮状态误清回 idle。这一行的组件实例卸载时(拓扑
+  // 刷新后这个插件消失、或翻页之类)cleanup 照样跑,不泄漏定时器。
+  useEffect(() => {
+    if (rowState.kind !== "error") return;
+    const timer = window.setTimeout(() => onErrorExpire(extension.id), RUNTIME_ERROR_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [rowState, extension.id, onErrorExpire]);
   // 按钮的可见文案与可访问名同一个值:WCAG 2.5.3(Label in Name)要求可见文案
   // 必须是可访问名的子串,这里干脆让两者相等,再在后面缀插件名消歧——与本文件
   // 展开按钮 `aria-label={`${isOpen ? "收起" : "展开"} ${name} 的接入明细`}`
@@ -208,6 +236,24 @@ export default function AdminExtensionsPage() {
   // 每个插件各自的运行时开关写动作状态,keyed by plugin id。不在表里的行按
   // `IDLE_ROW_STATE` 处理——大多数行从没被点过,不必预填。
   const [runtimeRowState, setRuntimeRowState] = useState<Record<string, RuntimeRowState>>({});
+
+  // 错误态到点自清(AGENTS.md「Interactive feedback」)。必须和上面几个 hook 一样
+  // 摆在任何条件 return 之前——放到下面 loading/forbidden/error 三个早退分支之后
+  // 会违反 Hooks 规则(不同分支渲染出的 hook 调用次数不一致),React 直接报
+  // "Rendered more hooks than during the previous render" 崩掉,不是风格问题。
+  // `useCallback` 配空依赖数组让这个函数在所有渲染间保持同一个引用——它是
+  // `ExtensionRuntimeCell` 内那个 `useEffect` 的依赖之一,若每次渲染都发一个新的
+  // 函数引用,该 effect 会被这个无关的重渲染平白触发,一次次重挂定时器,导致
+  // 错误文案永远等不到自己到点(计时器被不断推迟重挂,却从来轮不到真正触发的
+  // 那一刻)。守卫条件(`current[pluginId]?.kind === "error"`)是双保险:正常情况
+  // 下重试早已经由 effect 的 cleanup 取消了这次定时器,不会跑到这里;这一条防的
+  // 是万一定时器仍然触发时,行状态已经不是当初调度它的那个错误(不会把一个新的
+  // error/pending 误清成 idle)。
+  const handleRuntimeErrorExpire = useCallback((pluginId: string) => {
+    setRuntimeRowState((current) =>
+      current[pluginId]?.kind === "error" ? { ...current, [pluginId]: IDLE_ROW_STATE } : current,
+    );
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -360,6 +406,7 @@ export default function AdminExtensionsPage() {
                             extension={extension}
                             rowState={runtimeRowState[extension.id] ?? IDLE_ROW_STATE}
                             onToggle={handleRuntimeToggle}
+                            onErrorExpire={handleRuntimeErrorExpire}
                           />
                         ) : extension.trust === "builtin" ? (
                           <span className="ext-runtime-static">始终启用</span>
