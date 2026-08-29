@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from typing import Any, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -677,6 +678,10 @@ def list_admin_extensions(
     return AdminExtensionsResponse(extensions=extensions)
 
 
+# 进程内「写库 + 发布」的串行闸（用途与取舍见 handler 内注释）。
+_RUNTIME_TOGGLE_WRITE_LOCK = threading.Lock()
+
+
 @router.patch(
     "/admin/extensions/{plugin_id}", response_model=AdminExtensionRuntimeResult
 )
@@ -712,33 +717,42 @@ def update_admin_extension_runtime(
     if plugin_id not in loaded_deployment_ids:
         raise user_error(404, "该扩展不存在或不支持运行时开关")
     store = extension_toggle_repository()
-    try:
-        row = store.set_extension_runtime_enabled(plugin_id, payload.enabled, user.id)
-    except PermissionError:
-        # 理论上不可达——上面已经检过角色——但绝不能把它泄漏成一条 500：一个
-        # 管理员会话在两次检查之间被别的会话降权，是可以想象的竞态，答案必须
-        # 和上面同一句话，而不是一条陌生的堆栈。
-        raise user_error(403, "仅管理员可管理扩展运行时开关")
-    try:
-        refresh_extension_admission(store)
-    except Exception as exc:
-        # 写路径的取舍：这次写已经落库，只是发布前的整表回读失败了。不能就此
-        # 返回成功却让本进程继续放行该插件（那会违背「处理这次写的进程立即
-        # 生效」的成文保证），也不该把一次数据库抖动变成管理员眼里的「操作
-        # 失败」。所以退化为零 I/O 的本地快照运算：这次写的那一位是确定的
-        # 持久事实，直接按它翻转进程快照；其它插件的位由下一次成功刷新收敛。
-        # plugin_id 不进日志——复用 app.services.extension_toggles 的既有口径，
-        # 那是运营者的数据。异常同理只记类名不记文本/traceback：store 故障的
-        # 异常文本可能内嵌 DSN 或私有路径，扩展面日志家族的纪律是
-        # content-free（AGENTS.md）。
-        apply_admission_override(plugin_id, payload.enabled)
-        extension_admission_logger.warning(
-            "extension admission refresh read failed after an admin "
-            "runtime-toggle write (%s); the write is saved and this process "
-            "applied it locally, other rows converge on the background "
-            "refresher's next tick",
-            type(exc).__name__,
-        )
+    # 「写库 + 发布」在本进程内串行化（codex #635 R5 P2）：两个管理员并发改同
+    # 一个插件、且较早那次的回读恰好失败时，若不加锁，较早请求的本地回退会
+    # 拿到更新的令牌、把较新裁决盖回旧值一个刷新周期。锁内提交序 = 发布序，
+    # 这一类倒置在进程内就不可能发生；跨进程的并发写本就按轮询收敛（成文
+    # 契约）。管理员开关是低频操作，这把锁没有吞吐代价。
+    with _RUNTIME_TOGGLE_WRITE_LOCK:
+        try:
+            row = store.set_extension_runtime_enabled(
+                plugin_id, payload.enabled, user.id
+            )
+        except PermissionError:
+            # 理论上不可达——上面已经检过角色——但绝不能把它泄漏成一条 500：一个
+            # 管理员会话在两次检查之间被别的会话降权，是可以想象的竞态，答案必须
+            # 和上面同一句话，而不是一条陌生的堆栈。
+            raise user_error(403, "仅管理员可管理扩展运行时开关")
+        try:
+            refresh_extension_admission(store)
+        except Exception as exc:
+            # 写路径的取舍：这次写已经落库，只是发布前的整表回读失败了。不能
+            # 就此返回成功却让本进程继续放行该插件（那会违背「处理这次写的
+            # 进程立即生效」的成文保证），也不该把一次数据库抖动变成管理员
+            # 眼里的「操作失败」。所以退化为零 I/O 的本地快照运算：这次写的
+            # 那一位是确定的持久事实，直接按它翻转进程快照；其它插件的位由
+            # 下一次成功刷新收敛。plugin_id 不进日志——复用
+            # app.services.extension_toggles 的既有口径，那是运营者的数据。
+            # 异常同理只记类名不记文本/traceback：store 故障的异常文本可能
+            # 内嵌 DSN 或私有路径，扩展面日志家族的纪律是 content-free
+            # （AGENTS.md）。
+            apply_admission_override(plugin_id, payload.enabled)
+            extension_admission_logger.warning(
+                "extension admission refresh read failed after an admin "
+                "runtime-toggle write (%s); the write is saved and this "
+                "process applied it locally, other rows converge on the "
+                "background refresher's next tick",
+                type(exc).__name__,
+            )
     return AdminExtensionRuntimeResult(
         plugin_id=row["plugin_id"],
         runtime_enabled=row["enabled"],
