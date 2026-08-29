@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 41
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 42
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,8 +52,8 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 41
-    assert migrator.migrate() == 41
+    assert migrator.migrate() == 42
+    assert migrator.migrate() == 42
     assert migrator.current_version() == 41
     assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 41
 
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 41
+    assert migrator.migrate() == 42
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 41
+        assert PostgresMigrator(databases[1]).migrate() == 42
     finally:
         for database in databases:
             database.close()
@@ -211,13 +211,14 @@ def test_packaged_index_migration_phases_are_exact():
         # 使全量本地门恒红(标准/PG 两条 CI lane 都收不到本用例,故 CI 未拦住)。
         (40, "ask_creator_activity_index"),
         (41, "extension_runtime_toggles"),
+        (42, "hotpath_batch2_search_indexes"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
-        # ``IF NOT EXISTS`` is optional here (only migration 39 uses it, for
-        # its no-op-once-the-offline-builder-already-ran semantics) — without
-        # skipping it the capture group would grab the literal word "IF" as
-        # the index name instead of the real one.
+        # ``IF NOT EXISTS`` is optional here (only migrations 39 and 41 use
+        # it, both for the same no-op-once-the-offline-builder-already-ran
+        # semantics) — without skipping it the capture group would grab the
+        # literal word "IF" as the index name instead of the real one.
         return [
             (bool(unique), name)
             for unique, name in re.findall(
@@ -455,6 +456,31 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(41) == []
     assert "CREATE TABLE extension_runtime_toggles" in migrations[41].sql
     assert "enabled boolean NOT NULL" in migrations[41].sql
+    # Migration 42 (hot-path fix batch 2 / R6) — one GIN trigram expression
+    # index and one partial btree index; see
+    # migrations/0042_hotpath_batch2_search_indexes.sql's header comment for
+    # the full production-diag evidence. Pure additions: no table, column, or
+    # FK changes.
+    v42_hotpath_indexes = index_declarations(42)
+    assert v42_hotpath_indexes == [
+        (False, "idx_knowledge_objects_payload_trgm"),
+        (False, "idx_source_elements_nonblank"),
+    ]
+    v42_ddl_only = "\n".join(
+        line for line in migrations[42].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert (
+        'USING gin (((payload::text) COLLATE "C") public.gin_trgm_ops)'
+        in v42_ddl_only
+    )
+    assert "ON source_elements(source_id, id)" in v42_ddl_only
+    # The partial predicate's charset must stay byte-identical to
+    # PY_WHITESPACE — see backend/tests/test_hotpath_indexes_batch2.py for the
+    # dedicated reconciliation test that re-derives this exact string from
+    # PY_WHITESPACE and cross-checks it against this same migration file.
+    assert "WHERE btrim(text, chr(9) || chr(10)" in v42_ddl_only
+    assert "|| chr(12288)) != ''" in v42_ddl_only
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

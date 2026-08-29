@@ -314,7 +314,7 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get hot-path fix batch 1's eight indexes
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index — ten in total; the GIN runs about 1.5x the knowledge_objects table segment and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
@@ -330,7 +330,7 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 Each is a plain btree (or one partial, one expression) index rather than a GIN index, so
 individual builds are fast even on large tables — but `CREATE INDEX CONCURRENTLY` still
 takes a full table scan per index and should run outside peak hours on a busy database.
-Migration `0039_hotpath_batch1_indexes.sql` uses plain `CREATE INDEX IF NOT EXISTS` (a
+Migrations `0039_hotpath_batch1_indexes.sql` and `0042_hotpath_batch2_search_indexes.sql` use plain `CREATE INDEX IF NOT EXISTS` (a
 migration runs inside a transaction, where `CONCURRENTLY` cannot run) and becomes a no-op
 ledger entry once this script has built every index; on a fresh database with no existing
 traffic, the migration alone is sufficient and running the script first is optional. If

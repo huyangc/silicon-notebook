@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 41
+    assert migrator.migrate() == 42
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -341,9 +341,15 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_sources_nb_hidden_type" in final_indexes
     # v40: creator-wide question overview keyset index.
     assert "idx_ask_jobs_creator_activity" in final_indexes
+    # v41 (hot-path fix batch 2 / R6) — see
+    # migrations/0042_hotpath_batch2_search_indexes.sql.
+    assert "idx_knowledge_objects_payload_trgm" in final_indexes
+    assert "idx_source_elements_nonblank" in final_indexes
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        41,
     ]
 
 
@@ -413,7 +419,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 41
+    assert migrator.migrate() == 42
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -476,7 +482,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 41
+    assert migrator.migrate() == 42
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -551,7 +557,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 41
+    assert migrator.migrate() == 42
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

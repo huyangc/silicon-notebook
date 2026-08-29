@@ -32,6 +32,7 @@ from app.repositories.ports import OfflineMaintenanceBusyError
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,与 sqlite maintenance 共用
 from app.domain.kg.source_partition import SOURCE_PARTITION_FORMAT_VERSION
+from psycopg import sql
 
 
 logger = logging.getLogger("silicon_notebook.postgres.maintenance")
@@ -52,6 +53,41 @@ _ASSET_SCAN_FETCH_ROWS = 200
 # for why), so a bounded batch keeps each individual DELETE well under the
 # startup-readiness time budget even if many jobs were interrupted at once.
 _RECOVERY_DELETE_BATCH_ROWS = 5000
+
+# 热路径修复批 2(R6)的「非空元素资格判定」谓词——单一定义点,供
+# count_missing_element_vectors 及其配套 discovery/page 站点(见各方法自己的调用)
+# 共用。用 ``psycopg.sql.Literal`` 把 PY_WHITESPACE 安全渲染成同值字面量后直接拼进 SQL
+# 文本,取代旧写法里把 PY_WHITESPACE 当 ``%s`` 绑定参数传入运行期——两种写法在
+# btrim 的运行期语义上逐字节等价(equivalence 由
+# backend/tests/test_hotpath_indexes_batch2.py 的 oracle 钉住,含各类空白字符边界行),
+# 唯一差别是「传参方式」。
+#
+# 这么改是为了让查询谓词与 migrations/0042_hotpath_batch2_search_indexes.sql 新增的
+# idx_source_elements_nonblank 分部索引谓词逐字节一致,并且让这个不变式**不依赖
+# PostgreSQL 的 plan cache 状态**:证明「查询谓词蕴含分部索引谓词」需要 planner 在
+# plan 时把两边都常量折叠成同一个值。``%s`` 绑定参数在 PostgreSQL 走 custom plan
+# (逐次按实际取值重新规划,psycopg 默认行为、也是本模块所有调用点的实际路径)时,
+# planner 确实能看到本次调用的实际取值并据此证明蕴含,与内联字面量表现一致——
+# 本地 PostgreSQL 16 实测已确认这一点(两种写法在 custom plan 下都选中该索引)。差异
+# 只在 PostgreSQL 退化到 generic/cached plan(取值对 planner 不再可见)时才会显现:
+# 此时绑定参数写法无法证明蕴含,退化为对 source_elements 的全表顺序扫描,而内联字面量
+# 因为压根不含这个参数位,不受 plan cache 状态影响,恒定选中该索引——已用
+# ``PREPARE``/``EXECUTE`` + ``SET plan_cache_mode=force_generic_plan`` 在本地
+# PostgreSQL 16 逐一实测两种写法在 generic plan 下的计划差异(绑定参数走 Seq Scan,
+# 内联字面量走 Index Only Scan),见
+# backend/tests/postgres/test_hotpath_indexes_batch2_live.py。这次改动因此是一次
+# **面向最坏情况的加固**而非修复一个默认路径下就会发生的已知回归——生产 diag 里 H5
+# 冷算 2.6s 的成因是「批 2 之前完全没有这条索引」(批 1 的解决部分),不是绑定参数本身;
+# 具体是否有生产连接池行为(如常驻连接上的重复调用、或 PgBouncer 等中间件)会把这条
+# 查询推向 generic plan 尚未实测确认,留给运维按 diag 工具持续观察。
+#
+# ⚠ SQLite 侧的孪生查询(sqlite/maintenance.py)刻意不做这个改动,继续用
+# ``TRIM(e.text, ?)`` 绑定参数:SQLite 没有「部分索引谓词蕴含」这个收益点可拿,两侧的
+# 「非空元素」计数语义仍然逐字符一致(由既有的跨后端等价测试钉住),只是这里的传参
+# 方式两侧从此不同——这是刻意分歧,不是遗漏。
+_NONBLANK_TEXT_SQL = "btrim(e.text, {}) <> ''".format(
+    sql.Literal(PY_WHITESPACE).as_string(None)
+)
 
 
 class PostgresMaintenanceAdapter:
@@ -900,6 +936,10 @@ class PostgresMaintenanceAdapter:
     # ``btrim(text, %s)`` 对应 sqlite 的 ``TRIM(text, ?)``)。element 侧的 TRIM charset 用共享的
     # PY_WHITESPACE(= Python str.strip() 全集),与嵌入资格过滤(embed_source 跳过 strip 空)一致。
     # checkup/backfill 后端中性,两后端跑同一套聚合/补齐逻辑,只是落到各自 maintenance。
+    #
+    # 热路径修复批 2(R6):以下 5 个「非空元素资格判定」站点(count_missing_element_vectors
+    # 及其配套 discovery/page 站点)改用模块级 ``_NONBLANK_TEXT_SQL`` 常量内联同值字面量,
+    # 不再把 PY_WHITESPACE 当 ``%s`` 绑定参数传入——见该常量定义处的完整理由。
 
     def count_missing_chunk_vectors(
         self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
@@ -930,10 +970,10 @@ class PostgresMaintenanceAdapter:
                 "JOIN sources s ON s.id = e.source_id "
                 "WHERE s.notebook_id=%s "
                 "AND s.source_type NOT IN ('memory', 'knowhow') "
-                "AND btrim(e.text, %s) != '' "
+                f"AND {_NONBLANK_TEXT_SQL} "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                 "WHERE v.element_id = e.id)" + clause,
-                (notebook_id, PY_WHITESPACE, *exclude),
+                (notebook_id, *exclude),
             ).fetchone()["c"])
 
     def missing_chunk_embedding_rows(
@@ -989,7 +1029,7 @@ class PostgresMaintenanceAdapter:
         to ``missing_element_embedding_rows`` (notebook, memory/knowhow exclusion,
         ``btrim`` non-empty, NOT EXISTS, optional source); only the projection
         changes. See ``missing_chunk_embedding_ids``."""
-        params: list = [notebook_id, PY_WHITESPACE]
+        params: list = [notebook_id]
         clause = ""
         if only_source_id is not None:
             clause = " AND e.source_id=%s"
@@ -1002,7 +1042,7 @@ class PostgresMaintenanceAdapter:
                     "JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=%s "
                     "AND s.source_type NOT IN ('memory', 'knowhow') "
-                    "AND btrim(e.text, %s) != '' "
+                    f"AND {_NONBLANK_TEXT_SQL} "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id=e.id)" + clause
                     + " ORDER BY e.id COLLATE \"C\"",
@@ -1087,7 +1127,7 @@ class PostgresMaintenanceAdapter:
         """⚠ **无界版,已无生产调用方**(审计批4):交互式 backfill 与离线 CLI 都改走
         ``missing_element_embedding_page``。保留作分页版判据的参考实现(测试做等价差分),
         新代码不要再调它。判据与分页版逐字一致,只是没有 keyset 窗口。"""
-        params: list = [notebook_id, PY_WHITESPACE]
+        params: list = [notebook_id]
         clause = ""
         if only_source_id is not None:
             clause += " AND e.source_id = %s"
@@ -1099,7 +1139,7 @@ class PostgresMaintenanceAdapter:
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=%s "
                     "AND s.source_type NOT IN ('memory', 'knowhow') "
-                    "AND btrim(e.text, %s) != '' "
+                    f"AND {_NONBLANK_TEXT_SQL} "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)" + clause + " ORDER BY e.id COLLATE \"C\"",
                     tuple(params),
@@ -1119,7 +1159,7 @@ class PostgresMaintenanceAdapter:
         ``missing_chunk_embedding_page``."""
         if limit <= 0:
             raise ValueError("limit must be positive")
-        params: list = [notebook_id, PY_WHITESPACE, after_id]
+        params: list = [notebook_id, after_id]
         clause = ""
         if only_source_id is not None:
             clause = " AND e.source_id=%s"
@@ -1133,7 +1173,7 @@ class PostgresMaintenanceAdapter:
                     "JOIN sources s ON s.id=e.source_id "
                     "WHERE s.notebook_id=%s "
                     "AND s.source_type NOT IN ('memory','knowhow') "
-                    "AND btrim(e.text,%s)<>'' AND e.id COLLATE \"C\">%s "
+                    f"AND {_NONBLANK_TEXT_SQL} AND e.id COLLATE \"C\">%s "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id=e.id)" + clause + " "
                     "ORDER BY e.id COLLATE \"C\" LIMIT %s",
@@ -1159,10 +1199,10 @@ class PostgresMaintenanceAdapter:
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=%s "
                     "AND s.source_type NOT IN ('memory', 'knowhow') "
-                    "AND btrim(e.text, %s) != '' "
+                    f"AND {_NONBLANK_TEXT_SQL} "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)",
-                    (notebook_id, PY_WHITESPACE),
+                    (notebook_id,),
                 ).fetchall()
             ]
 
