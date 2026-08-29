@@ -613,46 +613,55 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
     if elem_ok:
         sources |= set(mnt.missing_element_vector_source_ids(notebook_id))
     page = _backfill_page_rows(repo)
-    for source_id in sources:
-        with ingestion.hold_source_chunk_lock(source_id):
-            # Recheck after queueing and again at each source-generation lock;
-            # a pipeline switch aborts the job rather than being swallowed as
-            # one source's best-effort embedding failure.
-            repo.require_indexing_pipeline_write(notebook_id)
-            try:
-                if chunk_ok:
-                    ids = mnt.missing_chunk_embedding_ids(
-                        notebook_id, only_source_id=source_id
-                    )
-                    for start in range(0, len(ids), page):
-                        rows = _hydrate_in_id_order(
-                            mnt.chunk_texts_by_ids(ids[start:start + page])
+    try:
+        for source_id in sources:
+            with ingestion.hold_source_chunk_lock(source_id):
+                # Recheck after queueing and again at each source-generation lock;
+                # a pipeline switch aborts the job rather than being swallowed as
+                # one source's best-effort embedding failure.
+                repo.require_indexing_pipeline_write(notebook_id)
+                try:
+                    if chunk_ok:
+                        ids = mnt.missing_chunk_embedding_ids(
+                            notebook_id, only_source_id=source_id
                         )
-                        if not rows:
-                            continue
-                        mnt.embed_chunks_batch(
-                            notebook_id,
-                            [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
+                        for start in range(0, len(ids), page):
+                            rows = _hydrate_in_id_order(
+                                mnt.chunk_texts_by_ids(ids[start:start + page])
+                            )
+                            if not rows:
+                                continue
+                            mnt.embed_chunks_batch(
+                                notebook_id,
+                                [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
+                            )
+                except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
+                    pass
+                try:
+                    if elem_ok:
+                        ids = mnt.missing_element_embedding_ids(
+                            notebook_id, only_source_id=source_id
                         )
-            except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
-                pass
-            try:
-                if elem_ok:
-                    ids = mnt.missing_element_embedding_ids(
-                        notebook_id, only_source_id=source_id
-                    )
-                    for start in range(0, len(ids), page):
-                        rows = _hydrate_in_id_order(
-                            mnt.element_texts_by_ids(ids[start:start + page])
-                        )
-                        if not rows:
-                            continue
-                        mnt.embed_elements_batch(
-                            notebook_id,
-                            [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
-                        )
-            except Exception:  # noqa: BLE001
-                pass
+                        for start in range(0, len(ids), page):
+                            rows = _hydrate_in_id_order(
+                                mnt.element_texts_by_ids(ids[start:start + page])
+                            )
+                            if not rows:
+                                continue
+                            mnt.embed_elements_batch(
+                                notebook_id,
+                                [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
+                            )
+                except Exception:  # noqa: BLE001
+                    pass
+    finally:
+        # 体检 H4/H5 的**边界**事件失效(codex 质量评审 P1):embed 成功不 bump
+        # kg_mutation_seq,而「job 整个落在两次轮询之间」时租约快照也回到原值——没有
+        # 这一下,修复前的计数会被 memo 原样再端到背底 TTL(300s)。刻意只在 job 边界
+        # 发**一次**、不在每页发:job 运行中的每次轮询已被租约键变化逼成现算,且修复中
+        # 的源被租约排除在计数外,页级失效触发的重算可证明返回同一个数,纯付 anti-join
+        # 的钱。finally:中途异常(如管线切换中止)时已提交的页同样改变了计数。
+        repo._runtime.source_embedding.note_source_vectors_written(notebook_id)
 
 
 @router.post(

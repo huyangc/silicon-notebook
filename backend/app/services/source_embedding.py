@@ -43,6 +43,7 @@ class SourceEmbeddingService:
         event_log: EventLogger,
         now: Callable[[], str],
         invalidate_vector_matrix: "Callable[[str, str], None] | None" = None,
+        on_source_vectors_written: "Callable[[str], None] | None" = None,
     ) -> None:
         self.settings = settings
         self.sources = sources
@@ -61,6 +62,28 @@ class SourceEmbeddingService:
         # clock-independent guarantee (None = unwired: offline/test callers that
         # never build the cache). See the three batch embedders.
         self.invalidate_vector_matrix = invalidate_vector_matrix
+        # notebook_id -> 体检 H4/H5「缺向量计数」memo 的事件失效(facade 构造期把转发器
+        # 挂上 RepositoryRuntime.on_source_vectors_written;None = 未接线:离线/测试)。
+        # 为什么必须显式通知:向量 embed 成功不 bump kg_mutation_seq,租约键又捕获不到
+        # 「修复 job 整个落在两次轮询之间」的窗口——见 checkup 的 H4/H5 口径论证。
+        #
+        # ⚠ 通知在**边界**发,不在每次写发(codex 质量评审 P1):embed_elements_batch /
+        # embed_chunks_batch 是被 backfill job **按页**调用的分页原语,方法级通知会把一次
+        # 补齐放大成「页数次」失效——而修复中的源被租约排除在计数外,那些失效触发的重算
+        # 可证明返回同一个数,纯付全表 anti-join 的钱。故:整源路径 embed_source 自己通知
+        # (每源一次,无放大);分页原语**刻意不通知**,边界通知归调用方(交互式 backfill
+        # job 结束时经 note_source_vectors_written 发一次;ingestion 的调用方被
+        # build_chunks 的 seq bump + 租约覆盖,无需通知;knowhow 投影由投影结束的
+        # mark_unified_dirty 覆盖)。对象/关系向量与 H4/H5 无关,从不通知。
+        self.on_source_vectors_written = on_source_vectors_written
+
+    def note_source_vectors_written(self, notebook_id: str) -> None:
+        """element/chunk 向量写完的**边界**通知(见 __init__ 的通知面注释)。公开给
+        「不在租约/seq 覆盖下、又绕开 embed_source 整源路径」的调用方在自己的边界调用
+        ——今天只有交互式 backfill job(source_routes._backfill_vectors_job)一个。
+        No-op when unwired。"""
+        if self.on_source_vectors_written is not None:
+            self.on_source_vectors_written(notebook_id)
 
     def embed_knowledge(
         self, object_id: str, notebook_id: str, payload: dict
@@ -285,6 +308,8 @@ class SourceEmbeddingService:
             # than a return.
             if saw_pending:
                 self._evict_matrix(notebook_id, "element_embeddings")
+                # 同一 finally 语义:中途失败也可能已提交若干页 → 体检计数已变,照样通知。
+                self.note_source_vectors_written(notebook_id)
         if saw_pending:
             self.event_log.logger.info(
                 "embedded %s/%s elements for source %s",
@@ -371,6 +396,8 @@ class SourceEmbeddingService:
                         source_id, notebook_id, rows, created_at=now
                     )
                     written += len(rows)
+        # ⚠ 刻意**不**发体检 H4/H5 通知:本方法是 backfill job 按页调用的分页原语,
+        # 方法级通知会被放大成每页一次失效(见 __init__ 的通知面注释);边界通知归调用方。
         if not written:
             return 0
         self.event_log.logger.info(
@@ -653,6 +680,9 @@ class SourceEmbeddingService:
         vectors = embedder.embed_texts(texts)
         pairs = [(r["id"], vector) for r, vector in zip(rows, vectors)]
         self.vectors.replace_chunk_vectors(notebook_id, pairs, created_at=self.now())
+        # 刻意不发体检 H4/H5 通知:knowhow 投影按行调用本方法(大表重投影=行数次),
+        # 且投影结束的 mark_unified_dirty 已 bump seq、覆盖「投影落在两次轮询之间」的
+        # 窗口——见 __init__ 的通知面注释。
 
     def embed_chunks_for_source(self, source_id: str) -> None:
         """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
@@ -717,6 +747,8 @@ class SourceEmbeddingService:
                     )
         finally:
             self._evict_matrix(notebook_id, "chunk_embeddings")
+            # 体检 H4/H5 通知刻意不在这里发(分页原语,方法级通知会按页放大——见
+            # __init__ 的通知面注释);matrix 逐出没有这个问题:它是幂等 pop、无重算代价。
 
     def backfill_knowledge_embeddings(self, db, notebook_id: str,
                                       objects: List[dict], progress=None) -> None:

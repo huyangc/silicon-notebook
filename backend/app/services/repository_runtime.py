@@ -1053,11 +1053,13 @@ class RepositoryRuntime:
         self.agent_profile_jobs = agents.agent_profile_jobs
         self.retrieval_experience_jobs = agents.retrieval_experience_jobs
         self.search_profile_jobs = agents.search_profile_jobs
+        # 体检 H4/H5 事件失效插槽(facade 构造期挂转发器;详见 _notify_source_vectors_written)。
+        self.on_source_vectors_written: "Callable[[str], None] | None" = None
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
-        # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
+        # 本 runtime 只提供两个窄 seam 给它:``_active_source_ids_snapshot``,加上上面的插槽。
         # SQLite maintenance face(CLI/batch 组合根)同理不在 runtime 里——它由 facade 的
         # ``maintenance`` property 懒接线,因为它需要 embedder-bound retrieval provider,与
         # 上面的 ``ask`` 同一个理由。
@@ -1163,6 +1165,16 @@ class RepositoryRuntime:
             return set()
         with ingestion._active_sources_lock:
             return set(ingestion._active_sources) | set(ingestion._embedding_sources)
+
+    def _notify_source_vectors_written(self, notebook_id: str) -> None:
+        """element/chunk 向量落库后的事件转发:SourceEmbeddingService → 这里 → checkup 的
+        H4/H5 memo 失效。晚绑定读 ``on_source_vectors_written`` 插槽(__init__ 置 None,
+        facade 构造期挂上它的 __dict__ 晚解析转发器):插槽为 None 时天然 no-op——纯读
+        runtime(未挂 facade)本就没有 checkup 缓存可失效。单消费者、单槽,列表化留给
+        真出现第二个消费者那天。局部变量快照防「读判空与调用之间被换掉」的竞态窄缝。"""
+        callback = self.on_source_vectors_written
+        if callback is not None:
+            callback(notebook_id)
 
     @property
     def storage_dir(self) -> Path:
@@ -1360,6 +1372,9 @@ class RepositoryRuntime:
                     f"{notebook_id}:matrix:{table}"
                 )
             ),
+            # 体检 H4/H5 计数 memo 的事件失效——经 runtime 的晚绑定插槽转发(checkup 由
+            # facade 懒构造,构造时才挂上;见 __init__ 的插槽说明)。
+            on_source_vectors_written=self._notify_source_vectors_written,
         )
         self.source_chunking = SourceChunkingService(
             settings=self.settings,

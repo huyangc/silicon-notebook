@@ -892,6 +892,21 @@
     "scope": "facade",
     "signature": "(db, table: 'str', data: 'dict') -> 'None'"
   },
+  "_invalidate_checkup_missing_vector_counts": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.__init__",
+        "target": "_invalidate_checkup_missing_vector_counts"
+      }
+    ],
+    "kind": "private_wrapper",
+    "owner": "CheckupService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'None'"
+  },
   "_invalidate_unified_cache": {
     "consumers": [
       {
@@ -1547,6 +1562,24 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.resolve_conflicts",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>._optimize_knowhow_cell",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>._prepare_complete_knowhow_row",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.optimize_knowhow_cell_stream",
         "target": "_runtime"
       },
       {
@@ -4617,7 +4650,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity_limit: 'Optional[int]' = None, agent_profile_id: 'str' = '') -> 'AddUrlSourcesResult'"
+    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity_limit: 'Optional[int]' = None, agent_profile_id: 'str' = '', trusted_proxy_origins: \"'frozenset[str] | None'\" = None) -> 'AddUrlSourcesResult'"
   },
   "agent_memory_hits": {
     "consumers": [
@@ -4646,6 +4679,12 @@
         "kind": "attribute",
         "path": "backend/app/api/agent_profile_routes.py",
         "scope": "<module>.get_agent_observations",
+        "target": "agent_observations"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/_shared.py",
+        "scope": "<module>._record_agent_call",
         "target": "agent_observations"
       },
       {
@@ -4759,7 +4798,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.ask_notebook.run_ask",
+        "scope": "<module>._ask_actionable",
         "target": "ask"
       },
       {
@@ -5416,6 +5455,12 @@
         "target": "configured"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_refuses_pending_pipeline_before_submit",
+        "target": "configured"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/backfill_kg_embeddings.py",
         "scope": "<module>.main",
@@ -5461,6 +5506,14 @@
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_source_repair_api.py",
+        "scope": "<module>.test_backfill_refuses_pending_pipeline_before_submit",
         "target": "configured"
       }
     ],
@@ -5733,6 +5786,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask_stream",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.cancel_ask_job",
         "target": "current_user"
       },
@@ -5794,6 +5859,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.main",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.apply_plan",
         "target": "current_user"
       },
       {
@@ -6573,7 +6644,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>.preview_ask_intent.run_preview",
+        "scope": "<module>.preview_ask_intent.prepare_preview",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.preview_ask_intent_stream.prepare_preview",
         "target": "get_notebook"
       },
       {
@@ -6700,6 +6777,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_question_index",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.run_backfill_images",
         "target": "get_notebook"
       },
       {
@@ -7493,6 +7576,30 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>._discard_unreferenced",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>._source_pages",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.apply_plan",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.plan_for_source",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.maybe_sweep_orphan_assets._sweep",
         "target": "maintenance"
@@ -8035,13 +8142,40 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._resolve_auto_ask_request",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.preview_ask_intent.run_preview",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.preview_ask_intent_stream.run_preview",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_ask_modes_api.py",
+        "scope": "<module>.test_auto_mode_is_resolved_by_backend_before_durable_job",
         "target": "preview_reasoning_intent"
       }
     ],
     "kind": "method",
     "owner": "AskService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_ask_modes_api.py",
+        "scope": "<module>.test_auto_mode_is_resolved_by_backend_before_durable_job",
+        "target": "preview_reasoning_intent"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'"
   },
@@ -8664,6 +8798,30 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>.register_source_tools.reparse_source.run",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_vectors",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.reparse_sources",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._build_chunks_for_source",
         "target": "require_indexing_pipeline_write"
@@ -8689,7 +8847,31 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.build_scale_index",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.extract_source",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.fold_scale_index_delta",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.import_sources",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.parse_source",
         "target": "require_indexing_pipeline_write"
       },
       {
@@ -8719,6 +8901,42 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.relink_notebook_kg",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_conflict_resolution_job",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_notebook_relink_job",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_unified_kg_rebuild_job",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_conflict_resolution",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_notebook_relink",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.start_unified_kg_rebuild",
         "target": "require_indexing_pipeline_write"
       },
@@ -8733,11 +8951,40 @@
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.upload_sources",
         "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_kg_repository.py",
+        "scope": "<module>.test_extract_source_delegates_to_run_extraction",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_knowledge_lifecycle_delegation.py",
+        "scope": "<module>.test_facade_lifecycle_methods_delegate_to_the_runtime_instance",
+        "target": "require_indexing_pipeline_write"
       }
     ],
     "kind": "method",
     "owner": "RepositoryRuntime.indexing_pipeline",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_kg_repository.py",
+        "scope": "<module>.test_extract_source_delegates_to_run_extraction",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_knowledge_lifecycle_delegation.py",
+        "scope": "<module>.test_facade_lifecycle_methods_delegate_to_the_runtime_instance",
+        "target": "require_indexing_pipeline_write"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'None'"
   },
@@ -9201,7 +9448,7 @@
       }
     ],
     "kind": "method",
-    "owner": "KnowledgeLifecycleService",
+    "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'dict'"
@@ -9456,6 +9703,24 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.apply_plan",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.plan_for_source",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/image_backfill_phase.py",
+        "scope": "<module>.run_backfill_images",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.build_projector",
         "target": "settings"
@@ -9639,7 +9904,7 @@
       }
     ],
     "kind": "method",
-    "owner": "KnowledgeLifecycleService",
+    "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
@@ -10173,6 +10438,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/_shared.py",
+        "scope": "<module>._record_agent_call",
+        "target": "user_can_read_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/profiles.py",
         "scope": "<module>.register_profile_tools.add_observation.run",
         "target": "user_can_read_notebook"
@@ -10207,7 +10478,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/knowhow_routes.py",
-        "scope": "<module>.optimize_knowhow_cell",
+        "scope": "<module>._prepare_knowhow_cell_task",
         "target": "validate_cell_target"
       },
       {
@@ -10220,12 +10491,6 @@
         "kind": "attribute",
         "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cells_batch",
-        "target": "validate_cell_target"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/knowhow_routes.py",
-        "scope": "<module>.reformat_knowhow_cell",
         "target": "validate_cell_target"
       },
       {

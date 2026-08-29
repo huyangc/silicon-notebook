@@ -371,6 +371,10 @@ class RepositoryFacade:
                 notebook_id
             ),
         )
+        # 体检 H4/H5 事件失效插槽(竞态论证见 _invalidate_checkup_missing_vector_counts)。
+        self._runtime.on_source_vectors_written = (
+            self._invalidate_checkup_missing_vector_counts
+        )
         query_embedder = self._runtime.models.embedding("retrieval_query_embedding")
         self._runtime.set_embedder(query_embedder)
         self._runtime.wire_memory(
@@ -2088,6 +2092,18 @@ class RepositoryFacade:
 
     def _embed_source(self, source_id: str) -> None:
         return self._runtime.source_embedding.embed_source(source_id)
+
+    def _invalidate_checkup_missing_vector_counts(self, notebook_id: str) -> None:
+        """element/chunk 向量写事件 → 体检 H4/H5 memo 失效的转发终点(构造期挂上
+        ``runtime.on_source_vectors_written``,见 __init__)。按**调用时刻**的
+        ``__dict__`` 解析 checkup:未构造即 no-op(没有缓存可失效)。为什么不在 checkup
+        懒构造的 property 里直接绑实例(codex 质量评审 P1):property 的 check-then-set
+        无锁,并发首访会把回调永久接到被覆盖丢弃的那个实例上、事件通道静默哑掉,H4/H5
+        退化成纯背底 TTL;本转发器按调用时刻解析,双实例竞态的任一胜者都收得到通知,
+        与改动前「双构造无害」的形态一致。"""
+        checkup = self.__dict__.get("_checkup")
+        if checkup is not None:
+            checkup.invalidate_missing_vector_counts(notebook_id)
 
     def _embed_knowledge(
         self,

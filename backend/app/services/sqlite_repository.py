@@ -226,6 +226,11 @@ class SQLiteRepository(RepositoryFacade):
                 count_missing_element_vectors=(
                     lambda nb, exclude: self.maintenance.count_missing_element_vectors(nb, exclude)
                 ),
+                # H4/H5 memo 键的版本分量:只取三元组的 kg_mutation_seq(同 collection_catalog
+                # 的键论证——cluster/mention seq 与 chunk/element 集合无关)。
+                kg_mutation_seq=(
+                    lambda db, nb: int(rt.unified_kg.graph_seq_row(db, nb)[0])
+                ),
                 scale_index_state=(
                     lambda nb: str(rt.scale_artifacts.status(nb).get("state", ""))
                 ),
@@ -245,6 +250,9 @@ class SQLiteRepository(RepositoryFacade):
                 now=rt.seams.now,
                 event_log=rt.event_log,
             )
+            # 事件失效插槽已在 facade 构造期指向 __dict__ 晚解析的转发器(见
+            # RepositoryFacade.__init__)——这里**不要**再绑具体实例:并发首访的
+            # check-then-set 竞态会把通知永久接到被覆盖丢弃的实例上。
             self.__dict__["_checkup"] = c
         return c
 

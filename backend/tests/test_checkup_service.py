@@ -106,6 +106,9 @@ def _service(repo, notebook_id="nb-x", **overrides):
         queries=repo._runtime.queries,  # 真 QueryStore 实例(H2/H3/H6 走真 SQL)
         count_missing_chunk_vectors=lambda nb, exclude: 0,
         count_missing_element_vectors=lambda nb, exclude: 0,
+        # 默认恒 0(等价「seq 从不前进」)——H4/H5 memo 的租约键/TTL/事件失效行为不被
+        # seq 分量干扰;seq 驱动的失效由注入受控 seq 的专测覆盖。
+        kg_mutation_seq=lambda db, nb: 0,
         scale_index_state=lambda nb: "indexed",
         # 默认每次返回全新 sentinel → H7 memo 永不命中,seam-injection 测试仍见每次 scale_index_state
         # 调用(缓存行为由下面注入受控签名的专测覆盖)。
@@ -544,11 +547,12 @@ def test_notebook_source_ids_among_batches_large_id_lists(repo):
 
 
 def test_h45_memo_expires_after_ttl(repo, monkeypatch):
-    """租约完全不动时(如离线 CLI 在别的进程里写向量)靠 TTL 兜底:H4/H5 **至多陈旧
-    ``_H45_CACHE_TTL`` 秒(30s)**。这是登记接受的口径(体检是诊断面),已写进
-    docs/product-and-api*.md 的长任务按钮条与端点条目。
+    """**背底** TTL:键(租约+seq)与进程内事件都看不见的跨进程写(离线 CLI 在别的进程
+    里补向量/导入)靠它兜底——该场景下 H4/H5 至多陈旧 ``_H45_CACHE_TTL`` 秒(300s)。
+    进程内写路径不等 TTL(事件失效,见下面的 invalidation 用例)。口径已写进
+    docs/product-and-api*.md 的端点条目。
 
-    变异锚点:去掉 TTL 判定(只比租约快照)→ 时钟推过 TTL 后仍命中,``len(seen) == 4`` 红。"""
+    变异锚点:去掉 TTL 判定(只比键)→ 时钟推过 TTL 后仍命中,``len(seen) == 4`` 红。"""
     import app.services.checkup as checkup_mod
 
     clock = [1000.0]
@@ -593,6 +597,177 @@ def test_h45_count_failure_is_not_cached(repo):
         svc.run("nb-x")
     boom[0] = False
     assert _check(svc.run("nb-x"), "H4").count == 0   # 没被失败结论粘住
+
+
+def test_h45_memo_key_includes_kg_mutation_seq(repo):
+    """键分量二:kg_mutation_seq。chunk/element 集合本身的增删(build_chunks、
+    delete_source 的 FK 级联)bump 它——「删掉一个没向量的源」不经 embedding 写路径、
+    也未必持租约,没有 seq 分量就要等背底 TTL(300s)才可见。
+
+    变异锚点:键里去掉 seq 分量(退回纯租约键)→ seq 前进后第三次 run 命中旧条目,
+    ``len(seen) == 4`` 红。"""
+    seqs = [7]
+    svc, seen = _counting_service(repo, kg_mutation_seq=lambda db, nb: seqs[0])
+    svc.run("nb-x")
+    svc.run("nb-x")
+    assert len(seen) == 2                        # seq 未动 → 命中
+    seqs[0] = 8
+    svc.run("nb-x")
+    assert len(seen) == 4                        # seq 前进 → 失配重算
+
+
+def test_h45_explicit_invalidation_forces_recompute(repo):
+    """事件失效通道:向量 embed 成功不 bump seq,「补齐 job 整个落在两次轮询之间」时
+    租约快照又回到原值——键的两个分量都不动。invalidate_missing_vector_counts 是那扇
+    窗唯一的失效通道(旧方案靠 30s TTL 硬兜的正是它;现在用户盯着看的数是事件级新鲜)。
+
+    变异锚点:invalidate 里去掉 pop(以及代次推进)→ 第二次 run 命中修复前条目,
+    ``len(seen) == 2`` 红。"""
+    svc, seen = _counting_service(repo)
+    svc.run("nb-x")
+    svc.invalidate_missing_vector_counts("nb-x")
+    svc.run("nb-x")
+    assert len(seen) == 4
+
+
+def test_h45_invalidation_is_per_notebook(repo):
+    """失效按 notebook 分槽:nb-2 的嵌入完成不冲 nb-1 的缓存(与「键收窄到本库租约」
+    同一动机——别库活动不该让本库白付两条 anti-join)。"""
+    svc, seen = _counting_service(repo)
+    svc.run("nb-1")
+    svc.run("nb-2")
+    svc.invalidate_missing_vector_counts("nb-2")
+    svc.run("nb-1")                              # 未被 nb-2 的失效波及 → 命中
+    assert len(seen) == 4
+    svc.run("nb-2")                              # 被失效方 → 重算
+    assert len(seen) == 6
+
+
+def test_h45_invalidate_during_compute_prevents_stale_store(repo):
+    """失效代次守卫(镜像 postgres/knowledge_counts_cache 的 epoch):计算已在途、失效
+    才到——光 pop 槽拦不住计算完成后的写回把失效**前**的快照钉回去(H4/H5 的计数查询
+    在大库上要跑几秒,这扇窗是真实的)。写回前核对 (全局, 本库) 代次,期间被失效就丢弃
+    本次结果、下次现算。
+
+    变异锚点:去掉写回前的代次核对 → 陈旧结果被钉回,第二次 run 命中它,
+    ``len(seen) == 2`` 红。"""
+    svc_box: list = []
+    seen: list = []
+
+    def _chunk(nb, exclude):
+        seen.append(("chunk", nb, frozenset(exclude)))
+        # 模拟:计数查询进行中,嵌入 worker 恰好写完向量、触发失效。
+        svc_box[0].invalidate_missing_vector_counts(nb)
+        return 3
+
+    svc = _service(
+        repo,
+        count_missing_chunk_vectors=_chunk,
+        count_missing_element_vectors=(
+            lambda nb, exclude: seen.append(("elem", nb, frozenset(exclude))) or 5
+        ),
+    )
+    svc_box.append(svc)
+    svc.run("nb-x")                              # 计算期间被失效 → 结果不得写回
+    svc.run("nb-x")                              # 必须重算,不得命中被钉回的条目
+    assert len(seen) == 4
+
+
+def test_h45_epoch_eviction_fails_closed(repo, monkeypatch):
+    """代次表是有界 LRU,**淘汰一条就推进全局代次**(codex #621 R1 的 fail-closed 教训,
+    与 postgres/knowledge_counts_cache 同款):在途计算采样到本库默认代次 0 → 本库被失效
+    (代次 0→1)→ 别库的失效把这条代次挤出有界表 → 代次读数又退回默认 0、与采样时相同
+    ——没有全局代次,写回守卫会误判「没被失效」,把陈旧快照钉回去且再无 seq 兜底。
+
+    变异锚点:淘汰时不推进全局代次 → 写回误放行,第二次 run 命中陈旧条目,
+    ``len(seen) == 2`` 红。"""
+    import app.services.checkup as checkup_mod
+
+    monkeypatch.setattr(checkup_mod, "_H45_CACHE_MAX", 1)
+    svc_box: list = []
+    seen: list = []
+
+    def _chunk(nb, exclude):
+        seen.append(("chunk", nb, frozenset(exclude)))
+        svc_box[0].invalidate_missing_vector_counts(nb)          # 本库代次 0→1
+        svc_box[0].invalidate_missing_vector_counts("nb-other")  # 挤出本库的代次条目
+        return 3
+
+    svc = _service(
+        repo,
+        count_missing_chunk_vectors=_chunk,
+        count_missing_element_vectors=(
+            lambda nb, exclude: seen.append(("elem", nb, frozenset(exclude))) or 5
+        ),
+    )
+    svc_box.append(svc)
+    svc.run("nb-x")                              # 写回必须被全局代次拒绝
+    svc.run("nb-x")                              # 重算,不得命中
+    assert len(seen) == 4
+
+
+def test_backfill_job_end_invalidates_h45_via_facade_wiring(repo):
+    """接线闭环(facade 构造期挂 rt.on_source_vectors_written 转发器 → 补齐 job 结束时
+    note_source_vectors_written → checkup memo 失效):真 repo 上灌缺向量的 chunk 与
+    element,体检缓存住 H4/H5>0;跑真的 ``_backfill_vectors_job``(逐源持锁、FakeEmbedder
+    真嵌入、job 边界一次通知)后,**不推时钟、不动租约、seq 不变**,下一次体检立即归零。
+
+    变异锚点:facade 不挂插槽、或 job 末尾不通知(embed_*_batch 是分页原语、刻意不通知,
+    故没有别的失效通道)→ 第二次 run 命中修复前缓存,计数不归零红。"""
+    from app.api.source_routes import _backfill_vectors_job
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (f"ck-{sid}", nb.id, sid, "chunk text", _NOW),
+        )
+    first = repo.checkup.run(nb.id)
+    assert _check(first, "H4").count == 1                        # 缓存住修复前计数
+    assert _check(first, "H5").count == 1
+    _backfill_vectors_job(repo, nb.id)           # 直接同步跑真 job(不经 scheduler)
+    second = repo.checkup.run(nb.id)
+    assert _check(second, "H4").count == 0                       # job 边界事件,立即可见
+    assert _check(second, "H5").count == 0
+
+
+def test_backfill_job_notifies_h45_exactly_once(repo, monkeypatch):
+    """P1 修复确立的不变量:H4/H5 失效只在 job **边界**发一次,分页原语刻意不通知。
+    只断言「失效发生过」的 e2e 挡不住「把通知搬回 embed_*_batch 方法级」的回归——那正是
+    被评审否掉的按页放大形态(每页一次失效 × 轮询 = 每轮一对注定同值的全表 anti-join,
+    修复中的源被租约排除在计数外)。25 元素 + 页 10 → 3 页、3 次 embed_elements_batch,
+    通知仍须恰好一次。
+
+    变异锚点:①删掉 job finally 的通知 → calls == [] 红;②把通知搬回
+    embed_elements_batch 方法级 → 3 页 3 次,calls == [nb] 红。"""
+    from app.api import source_routes
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _seed_source(repo, nb.id, parse_status="extracted", n_elements=25)
+    monkeypatch.setattr(
+        repo, "configured", lambda wid: wid == "source_element_embedding"
+    )
+    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)   # 25 行 → 3 页
+    calls: list = []
+    forward = repo._runtime.on_source_vectors_written
+    repo._runtime.on_source_vectors_written = (
+        lambda notebook_id: (calls.append(notebook_id), forward(notebook_id))[-1]
+    )
+    source_routes._backfill_vectors_job(repo, nb.id)
+    assert calls == [nb.id]
+
+
+def test_embed_source_completion_invalidates_h45(repo):
+    """整源嵌入(ingestion / re-embed 路径的边界)完成也通知一次:embed_source 的
+    finally 每源一次、无按页放大。变异锚点:删掉 embed_source finally 里的通知 →
+    第二次 run 命中旧 H5(seq 与租约都没动,没有别的失效通道)红。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)
+    assert _check(repo.checkup.run(nb.id), "H5").count == 2      # 缓存住修复前计数
+    repo._runtime.source_embedding.embed_source(sid)
+    assert _check(repo.checkup.run(nb.id), "H5").count == 0      # 边界事件,立即可见
 
 
 # --------------------------------------------------------------------- H7

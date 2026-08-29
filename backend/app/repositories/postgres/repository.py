@@ -89,6 +89,10 @@ class PostgresRepository(RepositoryFacade):
                 count_missing_element_vectors=(
                     lambda nb, exclude: self.maintenance.count_missing_element_vectors(nb, exclude)
                 ),
+                # H4/H5 memo 键的版本分量:只取三元组的 kg_mutation_seq(同 sqlite 侧注释)。
+                kg_mutation_seq=(
+                    lambda db, nb: int(rt.unified_kg.graph_seq_row(db, nb)[0])
+                ),
                 scale_index_state=(
                     lambda nb: str(rt.scale_artifacts.status(nb).get("state", ""))
                 ),
@@ -106,5 +110,7 @@ class PostgresRepository(RepositoryFacade):
                 now=rt.seams.now,
                 event_log=rt.event_log,
             )
+            # 事件失效插槽已在 facade 构造期指向 __dict__ 晚解析的转发器(见
+            # RepositoryFacade.__init__),这里不再绑实例(与 sqlite 侧同构,理由见那边)。
             self.__dict__["_checkup"] = c
         return c
