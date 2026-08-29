@@ -227,6 +227,15 @@ class _FakeConnection:
                     "indisready": row.get("indisready", True),
                     "keys": row.get("keys", default_keys),
                     "predicate": row.get("predicate", default_predicate),
+                    "access_method": row.get(
+                        "access_method", (spec.using or "btree") if spec else "btree"
+                    ),
+                    "opclasses": row.get(
+                        "opclasses", list(spec.opclasses) if spec else []
+                    ),
+                    "collations": row.get(
+                        "collations", list(spec.collations) if spec else []
+                    ),
                 }
             )
         if upper.startswith("CREATE INDEX"):
@@ -240,6 +249,9 @@ class _FakeConnection:
                 "indisready": True,
                 "keys": list(spec.columns) if spec else [],
                 "predicate": spec.predicate_shape if spec else "",
+                "access_method": (spec.using or "btree") if spec else "btree",
+                "opclasses": list(spec.opclasses) if spec else [],
+                "collations": list(spec.collations) if spec else [],
             }
             return _FakeResult(None)
         raise AssertionError(f"unexpected statement issued: {text}")
@@ -444,3 +456,28 @@ def test_connect_calls_psycopg_connect_with_autocommit_true(monkeypatch):
         hotpath_indexes_module._connect("postgresql://fake/db")
     assert captured["url"] == "postgresql://fake/db"
     assert captured.get("autocommit") is True
+
+
+def test_inspect_reports_unexpected_for_a_btree_posing_as_the_gin(fake_connect):
+    """端到端(经 inspect_hotpath_indexes 而非私有函数)钉住 am/opclass/collation
+    进入形态比对:同名 btree 冒充批 2 的 GIN → UNEXPECTED,不是「存在」。"""
+    gin = next(
+        s for s in HOTPATH_INDEX_SPECS
+        if s.name == "idx_knowledge_objects_payload_trgm"
+    )
+    catalog = {
+        gin.name: {
+            "table": gin.table,
+            "indisvalid": True,
+            "indisready": True,
+            "keys": list(gin.columns),
+            "predicate": "",
+            "access_method": "btree",
+            "opclasses": ["pg_catalog:text_ops"],
+            "collations": ["pg_catalog:C"],
+        }
+    }
+    fake_connect(catalog)
+    state = inspect_hotpath_indexes("postgresql://fake/db")
+    by_name = {row["name"]: row["state"] for row in state["indexes"]}
+    assert by_name[gin.name] == "UNEXPECTED"

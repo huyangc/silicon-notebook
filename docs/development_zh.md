@@ -124,26 +124,14 @@ SQLite61/PG39/epoch1，应用表仍是 84 张、复制面 unique surface 仍是 
 SQLite v62 / PostgreSQL v40 增加 `idx_ask_jobs_creator_activity`，按创建者、归一后的
 `created_at` 绝对时刻表达式与 `id` 建立降序复合索引。索引表达式与跨笔记本「提问概览」
 查询逐字同形（包括不可解析时间的哨兵），所以每页能在 `LIMIT` 处停止，不再全表扫描
-`ask_jobs` 或为用户全部历史建立临时排序。它不增加表、外键或 unique surface；当前配对为
+`ask_jobs` 或为用户全部历史建立临时排序。它不增加表、外键或 unique surface；彼时配对为
 SQLite62/PG40/epoch1。
 
-SQLite v63 / PostgreSQL v41 增加 `extension_runtime_toggles`：部署插件的运行时启停开关加
-审计（谁、何时）。无行 = 启用，因此从未有管理员碰过这张表的部署行为与这张表出现之前
-逐字节相同。它双向都不带外键（`plugin_id` 是 `EXTENSIONS_CONFIG` 里的标识符，不是任何
-别的表的一行）也不加二级索引——这张表恒定只有几十行（每个被管理员碰过开关的插件一行），
-管理页面列出每一行、闸的刷新读（`enabled = false`）都只是一次廉价顺序扫描；`enabled`
-不在主键里，主键索引原本就服务不了这个过滤条件。闸本身求值时**不读**这张表：每次
-contribution/capability 判定读的是进程内快照，这张表只是快照背后的持久层，写入后立即
-让快照失效重建，其它进程靠低频轮询收敛——判定因此保持零 I/O，不会退化成每次判定打一次
-数据库。`enabled` 声明为 PostgreSQL `boolean`，不是本仓库通常「SQLite 整数开关 →
-PostgreSQL bigint」的惯例——因为这一列唯一的外部契约就是管理 API 层直接读出的 JSON
-字段 `runtime_enabled: bool`，没有别的内部读者需要跟 bigint 惯例对齐。SQLite 侧孪生的
-`enabled INTEGER` 列不加 `CHECK (enabled IN (0,1))`，与本 schema 其它 INTEGER 标志位列
-一致；0/1 之外的值会在 `sqlite_to_postgres.py` 的 `bool` 转换分支硬失败，而不是被悄悄
-折算，这是接受的取舍而非疏漏。v63/v41 只多加一张（叶、无父）表，配对随之变为 85 张应用表、114
-个复制面 unique surface（新表声明的主键就是它唯一的 unique surface）；FK 分支计数上界仍是
-12 个 row slot。PostgreSQL migration v41 是配对 schema，当前配对为 SQLite 63 / PostgreSQL
-41 / epoch 1。
+PostgreSQL v42（`0042_hotpath_batch2_search_indexes.sql`，热路径修复批 2）新增
+`idx_knowledge_objects_payload_trgm`（`((payload::text) COLLATE "C")` 上的 GIN
+trigram 索引，服务集合页搜索的 knowledge 腿）与 `idx_source_elements_nonblank`
+（非空元素资格谓词上的部分 btree，服务体检 H5）。本批刻意不动 SQLite。不增加表、
+外键或 unique surface；当前配对为 SQLite63/PG42/epoch1。
 
 只能在应用/API 与后台 writer 停止后执行：
 

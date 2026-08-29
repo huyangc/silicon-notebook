@@ -446,8 +446,16 @@ the normalized absolute `created_at` expression, and `id`, in descending
 keyset order. The expression exactly matches the creator-wide question
 overview query, including its unresolved-timestamp sentinel, so every page can
 stop at `LIMIT` without a global `ask_jobs` scan or a temporary full-history
-sort. This adds no table, foreign key, or unique surface; the schema pair is
-SQLite 62 / PostgreSQL 40 / epoch 1.
+sort. This adds no table, foreign key, or unique surface; the schema pair was
+SQLite 62 / PostgreSQL 40 / epoch 1 at that point.
+
+PostgreSQL v42 (`0042_hotpath_batch2_search_indexes.sql`, hot-path fix batch 2)
+adds `idx_knowledge_objects_payload_trgm` (a GIN trigram index over
+`((payload::text) COLLATE "C")`, serving the collection search's knowledge
+leg) and `idx_source_elements_nonblank` (a partial btree over the non-blank
+element eligibility predicate, serving checkup H5). SQLite is deliberately
+untouched by this batch. No table, foreign key, or unique surface changes; the
+current schema pair is SQLite 63 / PostgreSQL 42 / epoch 1.
 
 SQLite v63 / PostgreSQL v41 adds `extension_runtime_toggles`: the deployment-
 plugin runtime enable/disable switch plus audit (who, when). No row means
