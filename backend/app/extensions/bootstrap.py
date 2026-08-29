@@ -7,6 +7,10 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+# Import-time safe by construction: the holder is a standard-library-only
+# module with no settings read and no I/O, unlike ``app.core.config``, which
+# this module reads lazily inside the functions below.
+from app.core.extension_admission import disabled_plugin_ids
 from app.extension_sdk import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
@@ -117,10 +121,12 @@ def build_extension_registry(
     bundles: Iterable[ExtensionBundle] = (),
     *,
     capability_decisions: dict[str, CapabilityDecision] | None = None,
+    disabled_ids_provider: Callable[[], Set[str]] | None = None,
 ) -> ExtensionRegistry:
     return frozen_registry(
         bundles,
         capability_catalog=CapabilityDecisionCatalog(capability_decisions),
+        disabled_ids_provider=disabled_ids_provider,
     )
 
 
@@ -134,9 +140,12 @@ def build_extension_runtime(
     event_sink: Callable[[dict[str, object]], None] | None = None,
     trusted_report_exporter_plugins: frozenset[str] = frozenset(),
     plugin_settings: Mapping[str, object] | None = None,
+    disabled_ids_provider: Callable[[], Set[str]] | None = None,
 ) -> ExtensionRuntime:
     registry = build_extension_registry(
-        bundles, capability_decisions=capability_decisions
+        bundles,
+        capability_decisions=capability_decisions,
+        disabled_ids_provider=disabled_ids_provider,
     )
     return ExtensionRuntime(
         registry=registry,
@@ -337,6 +346,13 @@ def default_extension_runtime() -> ExtensionRuntime:
         return build_extension_runtime(
             bundles,
             capability_decisions=capability_decisions,
+            # The function object, not a snapshot of what it currently
+            # returns. ``lru_cache`` above freezes this topology for the
+            # process; the gate must *not* freeze with it, so the registry
+            # calls this per evaluation and reads whatever the holder holds at
+            # that moment — which is how an admin toggle converges without a
+            # restart despite the cached runtime.
+            disabled_ids_provider=disabled_plugin_ids,
             retrieval_admission_policies={
                 GENERATED_QUESTION_CONTRIBUTION_ID: "atomic",
                 SELECTED_SOURCE_GRAPH_CONTRIBUTION_ID: "atomic",

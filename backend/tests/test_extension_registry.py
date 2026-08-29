@@ -534,3 +534,410 @@ def test_registry_rejects_malformed_provided_capability_names(provides):
 
 def test_default_manifest_provides_is_empty():
     assert _manifest("plain_plugin").provides == ()
+
+
+# --- admin admission gate (runtime toggle read side) ------------------------
+
+
+@pytest.fixture
+def admission():
+    """The process-global disabled-plugin snapshot, empty on entry and exit."""
+
+    from app.core import extension_admission
+
+    extension_admission.reset_for_tests()
+    yield extension_admission
+    extension_admission.reset_for_tests()
+
+
+def _deployment(plugin_id, *declarations, provides=(), **kwargs):
+    return replace(
+        _manifest(plugin_id, *declarations, **kwargs),
+        trust="deployment",
+        provides=provides,
+    )
+
+
+def _probe_recording(calls):
+    def probe(_context):
+        calls.append(_context)
+        return Availability.available()
+
+    return probe
+
+
+def test_admission_holder_publishes_reads_back_resets_and_copies(admission):
+    assert admission.disabled_plugin_ids() == frozenset()
+
+    admission.publish_disabled_plugin_ids(frozenset({"corp.a", "corp.b"}))
+    assert admission.disabled_plugin_ids() == frozenset({"corp.a", "corp.b"})
+
+    # A publisher that hands over a mutable set must not keep a live handle on
+    # the snapshot: the holder copies, so a later mutation is not visible here.
+    mutable = {"corp.c"}
+    admission.publish_disabled_plugin_ids(mutable)
+    mutable.add("corp.d")
+    assert admission.disabled_plugin_ids() == frozenset({"corp.c"})
+
+    admission.reset_for_tests()
+    assert admission.disabled_plugin_ids() == frozenset()
+
+
+def test_disabled_deployment_contribution_is_gated_before_its_probe_runs(
+    admission,
+):
+    calls = []
+    declaration = ContributionDeclaration(
+        "corp.probe", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    registry = build_extension_registry(
+        (_Bundle(
+            _deployment("corp.plugin", declaration),
+            (object(),),
+            _probe_recording(calls),
+        ),),
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+
+    assert registry.contribution_availability("corp.probe").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert registry.availability("corp.probe").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert len(calls) == 2
+
+    admission.publish_disabled_plugin_ids(frozenset({"corp.plugin"}))
+
+    for gated in (
+        registry.contribution_availability("corp.probe"),
+        # ``availability`` holds no gate of its own: it inherits this one by
+        # delegating here (and the capability one through its ``requires``
+        # loop, which the cross-plugin case below covers).
+        registry.availability("corp.probe"),
+    ):
+        assert gated.status is AvailabilityStatus.DISABLED
+        assert gated.reason_code == "admin_disabled"
+    # The disabled plugin's own code never ran: a gate below the probe would
+    # still be asking a switched-off plugin whether it is available.
+    assert len(calls) == 2
+
+    admission.reset_for_tests()
+    assert registry.availability("corp.probe").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+
+
+def test_builtin_and_untouched_deployment_plugins_are_never_gated(admission):
+    builtin = ContributionDeclaration(
+        "builtin.probe", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    other = ContributionDeclaration(
+        "corp.other.probe", "ask.completed_observer", ContributionKind.OBSERVER
+    )
+    registry = build_extension_registry(
+        (
+            _Bundle(_manifest("corp.plugin", builtin), (object(),)),
+            _Bundle(_deployment("corp.other", other), (object(),)),
+        ),
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+    # Same id in the disabled set as the built-in bundle above: trust, not the
+    # id, decides what the gate may reach.
+    admission.publish_disabled_plugin_ids(
+        frozenset({"corp.plugin", "corp.absent"})
+    )
+
+    assert registry.availability("builtin.probe").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert registry.plugin_runtime_disabled("corp.plugin") is False
+    assert registry.availability("corp.other.probe").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert registry.plugin_runtime_disabled("corp.other") is False
+
+
+def test_capability_gate_covers_deployment_owners_and_spares_core_names(
+    admission,
+):
+    calls = []
+
+    def decision(context):
+        calls.append(context)
+        return Availability.available()
+
+    registry = build_extension_registry(
+        (
+            _Bundle(_deployment("corp.plugin", provides=("corp.cap",))),
+            _Bundle(replace(
+                _manifest("builtin.plugin"), provides=("builtin.cap",)
+            )),
+        ),
+        capability_decisions={
+            "corp.cap": decision,
+            "builtin.cap": decision,
+            # A core decision entry no manifest claims. Composition refuses a
+            # plugin that tries to claim one (discovery.py's
+            # ``plugin_capability_conflicts_core``), so a core name never
+            # acquires a gateable owner — not because of how it is spelled.
+            "model:scheduled_access": decision,
+        },
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+    admission.publish_disabled_plugin_ids(frozenset({"corp.plugin"}))
+
+    gated = registry.capability_availability("corp.cap")
+    assert gated.status is AvailabilityStatus.DISABLED
+    assert gated.reason_code == "admin_disabled"
+    assert calls == []
+
+    for ungated in ("builtin.cap", "model:scheduled_access"):
+        assert registry.capability_availability(ungated).status is (
+            AvailabilityStatus.AVAILABLE
+        )
+    assert len(calls) == 2
+
+
+def test_a_required_capability_is_gated_by_its_owner_not_by_its_consumer(
+    admission,
+):
+    """``availability``'s ``requires`` loop must ask the gated door.
+
+    The consumer here is *built-in*, so nothing about it is gateable; the only
+    thing an admin switched off is the deployment plugin that owns the
+    capability it requires. Reading the decision catalog directly in that loop
+    would answer AVAILABLE — while ``capability_availability`` answers DISABLED
+    for the very same name — and would run the disabled plugin's decision to
+    produce that answer.
+    """
+
+    calls = []
+
+    def owner_decision(context):
+        calls.append(context)
+        return Availability.available()
+
+    consumer = ContributionDeclaration(
+        "builtin.consumer.probe",
+        "retrieval.contributor",
+        ContributionKind.CONTRIBUTOR,
+    )
+    registry = build_extension_registry(
+        (
+            _Bundle(_deployment("corp.owner", provides=("corp.cap",))),
+            _Bundle(
+                _manifest("builtin.consumer", consumer, requires=("corp.cap",)),
+                (object(),),
+            ),
+        ),
+        capability_decisions={"corp.cap": owner_decision},
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+
+    assert registry.availability("builtin.consumer.probe").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert len(calls) == 1
+
+    admission.publish_disabled_plugin_ids(frozenset({"corp.owner"}))
+
+    for gated in (
+        registry.capability_availability("corp.cap"),
+        registry.availability("builtin.consumer.probe"),
+    ):
+        assert gated.status is AvailabilityStatus.DISABLED
+        assert gated.reason_code == "admin_disabled"
+    # The disabled owner's decision was not run to reach that verdict.
+    assert len(calls) == 1
+
+
+def test_any_owner_of_a_shared_capability_name_disables_it(admission):
+    """Composition rejects two plugins claiming one capability name, but this
+    class does not, so the ambiguity has a defined answer: any owner disabled
+    disables the name."""
+
+    calls = []
+    registry = build_extension_registry(
+        (
+            _Bundle(_deployment("corp.one", provides=("shared.cap",))),
+            _Bundle(_deployment("corp.two", provides=("shared.cap",))),
+        ),
+        capability_decisions={
+            "shared.cap": _probe_recording(calls),
+        },
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+    # Only one of the two owners is switched off.
+    admission.publish_disabled_plugin_ids(frozenset({"corp.two"}))
+
+    gated = registry.capability_availability("shared.cap")
+    assert gated.status is AvailabilityStatus.DISABLED
+    assert gated.reason_code == "admin_disabled"
+    assert calls == []
+
+
+def test_a_capability_a_builtin_also_provides_is_never_gated(admission):
+    """A name a built-in bundle provides stays out of the ownership map, so no
+    deployment plugin's toggle can reach it."""
+
+    calls = []
+    registry = build_extension_registry(
+        (
+            _Bundle(replace(
+                _manifest("builtin.owner"), provides=("shared.cap",)
+            )),
+            _Bundle(_deployment("corp.claimant", provides=("shared.cap",))),
+        ),
+        capability_decisions={
+            "shared.cap": _probe_recording(calls),
+        },
+        disabled_ids_provider=admission.disabled_plugin_ids,
+    )
+    admission.publish_disabled_plugin_ids(frozenset({"corp.claimant"}))
+
+    assert registry.capability_availability("shared.cap").status is (
+        AvailabilityStatus.AVAILABLE
+    )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        # The accident this check exists for: a bare id is iterable, so a
+        # coercing publisher would store its *characters* and disable nothing.
+        "corp.plugin",
+        ["corp.plugin"],
+        {"corp.plugin": True},
+        (name for name in ("corp.plugin",)),
+        frozenset({b"corp.plugin"}),
+        {"corp.plugin", None},
+    ],
+    ids=["str", "list", "dict", "generator", "bytes_member", "none_member"],
+)
+def test_publish_rejects_anything_that_is_not_a_set_of_str(admission, ids):
+    with pytest.raises(TypeError, match="disabled plugin ids must"):
+        admission.publish_disabled_plugin_ids(ids)
+    assert admission.disabled_plugin_ids() == frozenset()
+
+    # A ``dict``'s key view, unlike the dict itself, is a set of str.
+    admission.publish_disabled_plugin_ids({"corp.plugin": True}.keys())
+    assert admission.disabled_plugin_ids() == frozenset({"corp.plugin"})
+
+
+def test_a_broken_disabled_ids_provider_leaves_every_plugin_admitted():
+    """Read-side failure is always fail-*open*.
+
+    A provider owes the registry a set (the publisher enforces that shape
+    loudly at its own end). One that raises or returns something else is a
+    wiring bug the request path cannot fix and must not fail on, so the gate
+    disappears rather than guessing — the same direction "no toggle row =
+    enabled" points.
+    """
+
+    declaration = ContributionDeclaration(
+        "corp.probe", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+
+    def raising():
+        raise RuntimeError("refresher thread died")
+
+    for provider in (
+        raising,
+        lambda: None,
+        lambda: object(),
+        lambda: "corp.plugin",
+        lambda: ["corp.plugin"],
+    ):
+        registry = build_extension_registry(
+            (_Bundle(
+                _deployment(
+                    "corp.plugin", declaration, provides=("corp.cap",)
+                ),
+                (object(),),
+            ),),
+            capability_decisions={
+                "corp.cap": lambda _context: Availability.available()
+            },
+            disabled_ids_provider=provider,
+        )
+
+        assert registry.availability("corp.probe").status is (
+            AvailabilityStatus.AVAILABLE
+        )
+        assert registry.capability_availability("corp.cap").status is (
+            AvailabilityStatus.AVAILABLE
+        )
+        assert registry.plugin_runtime_disabled("corp.plugin") is False
+
+
+def test_a_provider_returning_a_plain_set_still_gates():
+    """Any ``collections.abc.Set`` is honoured, not just the ``frozenset`` the
+    holder happens to store: the gate only ever tests membership."""
+
+    declaration = ContributionDeclaration(
+        "corp.probe", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    registry = build_extension_registry(
+        (_Bundle(_deployment("corp.plugin", declaration), (object(),)),),
+        disabled_ids_provider=lambda: {"corp.plugin"},
+    )
+
+    assert registry.availability("corp.probe").reason_code == "admin_disabled"
+
+
+def test_plugin_runtime_disabled_requires_freeze_and_knows_three_answers(
+    admission,
+):
+    bundles = (
+        _Bundle(_deployment("corp.plugin")),
+        _Bundle(_manifest("builtin.plugin")),
+    )
+    unfrozen = ExtensionRegistry(
+        disabled_ids_provider=admission.disabled_plugin_ids
+    )
+    for bundle in bundles:
+        unfrozen.register(bundle)
+    with pytest.raises(ExtensionRegistryError, match="not frozen"):
+        unfrozen.plugin_runtime_disabled("corp.plugin")
+
+    registry = unfrozen.freeze()
+    admission.publish_disabled_plugin_ids(
+        frozenset({"corp.plugin", "builtin.plugin", "corp.never_loaded"})
+    )
+
+    assert registry.plugin_runtime_disabled("corp.plugin") is True
+    assert registry.plugin_runtime_disabled("builtin.plugin") is False
+    assert registry.plugin_runtime_disabled("corp.never_loaded") is False
+
+
+def test_registries_without_a_provider_ignore_the_published_snapshot(
+    admission,
+):
+    declaration = ContributionDeclaration(
+        "corp.probe", "retrieval.contributor", ContributionKind.CONTRIBUTOR
+    )
+    bundles = (_Bundle(
+        _deployment("corp.plugin", declaration, provides=("corp.cap",)),
+        (object(),),
+    ),)
+    decisions = {"corp.cap": lambda _context: Availability.available()}
+    admission.publish_disabled_plugin_ids(frozenset({"corp.plugin"}))
+
+    omitted = build_extension_registry(bundles, capability_decisions=decisions)
+    explicit_none = build_extension_registry(
+        bundles,
+        capability_decisions=decisions,
+        disabled_ids_provider=None,
+    )
+
+    for registry in (omitted, explicit_none):
+        assert registry.availability("corp.probe") == Availability.available()
+        assert registry.contribution_availability("corp.probe") == (
+            Availability.available()
+        )
+        assert registry.capability_availability("corp.cap") == (
+            Availability.available()
+        )
+        assert registry.plugin_runtime_disabled("corp.plugin") is False
