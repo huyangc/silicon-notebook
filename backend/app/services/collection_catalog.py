@@ -700,12 +700,16 @@ class CollectionCatalogService:
 
         ``knowledge_type_count_rows`` is the SAME port call
         ``notebook_catalog`` makes for the notebook summary — no second query
-        path.  But its cost is backend-dependent: on SQLite the store serves it
-        from the seq-gated memo (#245), while on PostgreSQL it is a live
-        ``GROUP BY object_type`` every time, which on a multi-million-object
-        library is a per-call scan we would otherwise pay on every build of
-        every notebook in scope.  So the catalog carries its own memo keyed on
-        the O(1) ``graph_seq_row`` read, and both backends end up paying one
+        path.  Both backends now serve it from their own seq-gated store-level
+        memo (SQLite: #245; PostgreSQL: the large-notebook-latency-analysis
+        port, ``postgres/knowledge_counts_cache.type_status_counts``) instead
+        of a live ``GROUP BY object_type`` per call.  This catalog-level memo
+        is still worth keeping on top of that, though: what it caches is not
+        the raw KG count but the Memory-deducted ASSEMBLED result for the
+        scope, and recomputing that assembly (even against an already-warm
+        store memo) still means one dict walk per notebook in scope on every
+        build.  So the catalog carries its own memo keyed on the O(1)
+        ``graph_seq_row`` read, and both backends end up paying one
         single-row seq read on the warm path.
 
         The key is ``kg_mutation_seq`` alone, NOT L2's ``sources`` fingerprint:

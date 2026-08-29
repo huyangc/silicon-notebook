@@ -180,21 +180,16 @@ class IndexProjectionStore:
     # ─────────────────────────────────────────────────── count snapshots ──
     def effective_object_count(self, notebook_id: str) -> int:
         """Non-deprecated knowledge-object count (viz sync-vs-background gate)."""
+        from app.repositories.postgres import knowledge_counts_cache
         with self.connect() as db:
-            return int(db.execute(
-                "SELECT COUNT(*) AS c FROM knowledge_objects "
-                "WHERE notebook_id=%s AND status!='deprecated'",
-                (notebook_id,),
-            ).fetchone()["c"])
+            return knowledge_counts_cache.active_object_count(db, notebook_id)
 
     def total_chunk_count(self, notebook_id: str) -> int:
         # Seq-gated memo: the chunks COUNT fires on every /scale-index/status
         # (i.e. every notebook open) and is cold-page-bound at millions of rows.
+        from app.repositories.postgres import knowledge_counts_cache
         with self.connect() as db:
-            return int(db.execute(
-                "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s",
-                (notebook_id,),
-            ).fetchone()["c"])
+            return knowledge_counts_cache.chunk_count(db, notebook_id)
 
     def is_mounted_by_anyone(self, notebook_id: str) -> bool:
         """被任何笔记本当作参考库挂着(Task 6:scale eligible() 的挂载分支)——

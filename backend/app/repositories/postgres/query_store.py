@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from psycopg import Error, sql
+from psycopg import sql
 
 from app.core.activity_time import (
     UNRESOLVED_INSTANT,
@@ -131,35 +131,13 @@ class QueryStore:
         self.settings = settings
 
     def warm_open_path_caches(self, progress=None) -> int:
-        """Warm PostgreSQL shared buffers for the same notebook-open queries."""
+        # 委托给 knowledge_counts_cache.warm_all——它现在是 type_status_counts /
+        # pending 两个变体 / chunk_count 四个 memo 共享的 warm 实现(镜像 sqlite
+        # query_store.warm_open_path_caches),不再由本方法自己拼 warm 循环。
+        from app.repositories.postgres import knowledge_counts_cache
+
         with self.database.connect() as db:
-            ids = [
-                row["id"]
-                for row in db.execute(
-                    "SELECT id FROM notebooks WHERE status<>'copying' ORDER BY id"
-                ).fetchall()
-            ]
-            total = len(ids)
-            for index, notebook_id in enumerate(ids, start=1):
-                try:
-                    self.knowledge_type_count_rows(
-                        db,
-                        notebook_id,
-                        ("approved", "reviewed", "project_specific", "conflict"),
-                    )
-                    self.pending_kg_source_count(db, notebook_id)
-                    self.visible_pending_kg_source_count(db, notebook_id)
-                    db.execute(
-                        "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s",
-                        (notebook_id,),
-                    ).fetchone()
-                except Error:
-                    # A warm miss affects latency only; later reads remain exact.
-                    db.rollback()
-                finally:
-                    if progress is not None:
-                        progress(index, total)
-            return total
+            return knowledge_counts_cache.warm_all(db, progress)
 
     def invalidate_knowledge_counts(self, notebook_id: str) -> None:
         # pending-source 计数现有 seq-gated 进程缓存(codex 第4轮 P2)——安全阀:写已落但其
@@ -187,14 +165,14 @@ class QueryStore:
     def knowledge_type_count_rows(
         db: Any, notebook_id: str, statuses: tuple[str, ...]
     ) -> "list[dict]":
-        values = list(statuses)
-        if not values:
-            return []
-        return db.execute(
-            "SELECT object_type,COUNT(*) AS c FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status=ANY(%s) GROUP BY object_type",
-            (notebook_id, values),
-        ).fetchall()
+        # Served from the seq-gated count cache (one GROUP BY per kg_mutation_seq
+        # instead of per open/list/poll). Returns row-like dicts with the same
+        # ["object_type"] / ["c"] keys the callers read. Empty statuses falls
+        # out of type_counts' own empty-whitelist handling (returns {}) —
+        # mirrors sqlite query_store.knowledge_type_count_rows.
+        from app.repositories.postgres import knowledge_counts_cache
+        counts = knowledge_counts_cache.type_counts(db, notebook_id, statuses)
+        return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
     @staticmethod
     def knowledge_type_count_rows_for_sources(
@@ -1045,14 +1023,10 @@ class QueryStore:
                     (notebook_id,),
                 ).fetchall()
             ]
-            knowledge_counts = {
-                row["object_type"]: int(row["c"])
-                for row in db.execute(
-                    "SELECT object_type,COUNT(*) AS c FROM knowledge_objects "
-                    "WHERE notebook_id=%s AND status!='deprecated' GROUP BY object_type",
-                    (notebook_id,),
-                ).fetchall()
-            }
+            # seq-gated count cache (non-deprecated) — same GROUP BY, memoized;
+            # mirrors sqlite query_store.notebook_analytics.
+            from app.repositories.postgres import knowledge_counts_cache
+            knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
             # Memory-derived AND knowhow-projection hidden synthetic sources
             # (source_type IN ('memory', 'knowhow')) are excluded — this feeds
             # the /analytics 看板 parse_status distribution, a user-facing
