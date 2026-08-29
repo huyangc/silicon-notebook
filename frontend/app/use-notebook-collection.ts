@@ -917,15 +917,21 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         // stays held across the whole recovery — releasing first would let a
         // reopen build a fresh dialog out of the very row this refresh is about
         // to replace, and a plain 保存 on it would undo the committed write.
+        const dropStaleDialog = () => setEditor((value) => {
+          if (!value || value.target.id !== current.target.id) return value;
+          editorOperationRef.current = null;
+          return null;
+        });
         if (ownsIdentity(owner)) {
-          setEditor((value) => {
-            if (!value || value.target.id !== current.target.id) return value;
-            editorOperationRef.current = null;
-            return null;
-          });
+          dropStaleDialog();
           await recoverFromAbandonedCommit(owner);
         }
         releaseNotebook();
+        // A slow recovery leaves room for the user to reopen in between, and
+        // openEditor renders that one busy because the notebook was still held.
+        // It is stale for the same reason and, now that nothing is in flight,
+        // nothing else would ever clear its busy state.
+        if (ownsIdentity(owner)) dropStaleDialog();
       } else {
         releaseNotebook();
         if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
@@ -1012,15 +1018,21 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         // stays held across the whole recovery — releasing first would let a
         // reopen build a fresh dialog out of the very row this refresh is about
         // to replace, and a plain 保存 on it would undo the committed write.
+        const dropStaleDialog = () => setEditor((value) => {
+          if (!value || value.target.id !== current.target.id) return value;
+          editorOperationRef.current = null;
+          return null;
+        });
         if (ownsIdentity(owner)) {
-          setEditor((value) => {
-            if (!value || value.target.id !== current.target.id) return value;
-            editorOperationRef.current = null;
-            return null;
-          });
+          dropStaleDialog();
           await recoverFromAbandonedCommit(owner);
         }
         releaseNotebook();
+        // A slow recovery leaves room for the user to reopen in between, and
+        // openEditor renders that one busy because the notebook was still held.
+        // It is stale for the same reason and, now that nothing is in flight,
+        // nothing else would ever clear its busy state.
+        if (ownsIdentity(owner)) dropStaleDialog();
       } else {
         releaseNotebook();
         if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
