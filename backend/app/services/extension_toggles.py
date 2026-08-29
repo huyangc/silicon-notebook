@@ -176,7 +176,7 @@ class _Refresher:
         while not self._stop_requested.wait(self._interval_seconds):
             try:
                 self._tick()
-            except TypeError:
+            except TypeError as exc:
                 # Split out of the de-bounced channel below on purpose. That
                 # channel exists for *environment* faults — a database that is
                 # down floods the log with identical warnings and tells the
@@ -186,13 +186,14 @@ class _Refresher:
                 # our own code, in a snapshot nobody will ever converge on
                 # until it is fixed. De-bouncing that to debug would hide it
                 # completely after the first tick, which is exactly backwards
-                # — so every occurrence is an error with its traceback. The
-                # thread stays alive because the fault is repairable from
-                # outside (a corrected store) and a retired refresher would
-                # then leave the process frozen on a stale snapshot forever.
-                self._note_programming_error()
-            except Exception:
-                self._note_failure()
+                # — so every occurrence is an error naming the exception
+                # class. The thread stays alive because the fault is
+                # repairable from outside (a corrected store) and a retired
+                # refresher would then leave the process frozen on a stale
+                # snapshot forever.
+                self._note_programming_error(exc)
+            except Exception as exc:
+                self._note_failure(exc)
             else:
                 self._note_success()
 
@@ -228,26 +229,34 @@ class _Refresher:
             return
         _publish(disabled, token)
 
-    def _note_programming_error(self) -> None:
+    def _note_programming_error(self, exc: BaseException) -> None:
         # Deliberately does not touch ``_consecutive_failures``: this is not
         # the outage the de-bounce counts, and it is not a recovery from one
         # either. An outage that is still running keeps its count so the
         # eventual recovery line stays truthful.
+        #
+        # Exception *class* only, never ``exc_info``/``str(exc)``: this is the
+        # extension-surface logger family, and its discipline (AGENTS.md,
+        # mirrored from ``app.extensions.discovery``) keeps exception text —
+        # which for a store fault can carry a DSN or a private path — out of
+        # the log. The class name is the content-free half that still points
+        # at the offending code.
         logger.error(
-            "extension admission refresh produced an invalid snapshot; "
+            "extension admission refresh produced an invalid snapshot (%s); "
             "keeping the last one (%d plugin(s) disabled)",
+            type(exc).__name__,
             len(disabled_plugin_ids()),
-            exc_info=True,
         )
 
-    def _note_failure(self) -> None:
+    def _note_failure(self, exc: BaseException) -> None:
         self._consecutive_failures += 1
         if self._consecutive_failures == 1:
+            # Same redaction as ``_note_programming_error``: class name only.
             logger.warning(
-                "extension admission refresh failed; keeping the last "
+                "extension admission refresh failed (%s); keeping the last "
                 "snapshot (%d plugin(s) disabled)",
+                type(exc).__name__,
                 len(disabled_plugin_ids()),
-                exc_info=True,
             )
         else:
             logger.debug(
