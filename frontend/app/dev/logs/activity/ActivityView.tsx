@@ -252,6 +252,12 @@ export function ActivityView({
   }, [loading, hasMore, cursor, userId, notebookId, activityType, since, until]);
 
   const selectActivityType = useCallback((next: ActivityTypeFilter) => {
+    // 失败后当前筛选仍保持选中；重复点击它应当兑现错误文案里的「请重试」，
+    // 而不是因为 state 值未变化而静默无事发生。
+    if (next === activityType && error) {
+      void reload();
+      return;
+    }
     setActivityType(next);
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
@@ -263,7 +269,7 @@ export function ActivityView({
       "",
       query ? `?${query}` : window.location.pathname,
     );
-  }, []);
+  }, [activityType, error, reload]);
 
   const toggleExpand = useCallback((id: string) => {
     const open = expandedRef.current.includes(id);

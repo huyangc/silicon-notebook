@@ -354,6 +354,25 @@ test("活动流重载期间禁用类型筛选，避免重复发起并发查询",
 });
 
 
+test("类型筛选失败后重复点击当前筛选会重新取数", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity
+    .mockRejectedValueOnce(new Error("boom"))
+    .mockResolvedValueOnce(page([ask("retry-1", "重试后看到的问题")]));
+  window.history.replaceState(null, "", "/dev/logs");
+
+  view();
+
+  expect(await screen.findByText("活动记录加载失败，请重试")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "全部" }));
+
+  expect(await screen.findByText("重试后看到的问题")).toBeInTheDocument();
+  expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText("活动记录加载失败，请重试")).not.toBeInTheDocument();
+});
+
+
 test("选中一条提问时取回它的详情，并复用既有推理轨迹面板", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
