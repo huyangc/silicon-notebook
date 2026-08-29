@@ -3617,5 +3617,52 @@ MIGRATION_MANIFEST[(59, 60)] = {
 }
 
 
+# v61: hot-path fix batch 1 — five previously-missing indexes on pre-existing
+# tables (parity with PostgreSQL migrations/0039_hotpath_batch1_indexes.sql;
+# the sixth PostgreSQL group, chunks(source_id, ordinal), has no SQLite twin —
+# see app/repositories/sqlite/migrations.py's _migration_61 docstring for why).
+# No new table, column, trigger, or view. SQL text matches sqlite_master
+# storage verbatim (SQLite strips "IF NOT EXISTS" and keeps the source
+# indentation, same as every other index-only hop above).
+HOTPATH_BATCH1_INDEXES = {
+    "idx_clusters_nb_canonical":
+        """CREATE INDEX idx_clusters_nb_canonical
+                  ON concept_clusters(notebook_id, canonical_id)""",
+    "idx_clusters_nb_canonical_name_lower":
+        """CREATE INDEX idx_clusters_nb_canonical_name_lower
+                  ON concept_clusters(notebook_id, lower(canonical_name))""",
+    "idx_extraction_runs_notebook":
+        """CREATE INDEX idx_extraction_runs_notebook
+                  ON extraction_runs(notebook_id)""",
+    "idx_knowledge_source_fact_elements_notebook":
+        """CREATE INDEX idx_knowledge_source_fact_elements_notebook
+                  ON knowledge_source_fact_elements(notebook_id)""",
+    "idx_memory_items_notebook":
+        """CREATE INDEX idx_memory_items_notebook
+                  ON memory_items(notebook_id)""",
+    "idx_knowledge_relations_nb_source_target_edge":
+        """CREATE INDEX idx_knowledge_relations_nb_source_target_edge
+                  ON knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)""",
+    "idx_sources_nb_hidden_type":
+        """CREATE INDEX idx_sources_nb_hidden_type
+                  ON sources(notebook_id, source_type)
+                  WHERE source_type IN ('memory', 'knowhow')""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 61, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **HOTPATH_BATCH1_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(60, 61)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": HOTPATH_BATCH1_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

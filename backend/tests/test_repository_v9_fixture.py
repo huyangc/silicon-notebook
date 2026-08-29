@@ -126,10 +126,13 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 部署级全局的 retrieval_experiences 检索策略经验库，以及 v55 Agentic Memory
     # P3 的 agent_observations 观察日志表 / user_profiles.search_profile_json
     # 检索偏好列、v56 群组唯一 owner 指针、v57 群组邀请能力、v58 索引管线
-    # desired/published identity、v59 未发布整本重建暂存表，以及 v60 把
+    # desired/published identity、v59 未发布整本重建暂存表，v60 把
     # agent_observations 分成「Agent 自己写下的短句」与「调用记账」两种的
-    # kind 列，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 60
+    # kind 列，以及 v61 热路径修复批 1 的五组索引（六组 PostgreSQL 侧对应
+    # migrations/0039_hotpath_batch1_indexes.sql，第 6 组
+    # chunks(source_id, ordinal) 在 SQLite 侧不适用，理由见
+    # _migration_61 的 docstring），合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 61
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

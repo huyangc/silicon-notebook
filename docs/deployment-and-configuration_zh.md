@@ -265,6 +265,36 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
+已有数据的 PostgreSQL 库还应在线建好热路径修复批 1 的六组共八条索引
+（`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
+反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
+`knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
+`chunks(source_id, ordinal)`，以及一条 partial 的 `sources(notebook_id, source_type)`
+索引），形态与上面的词法索引工具一致，同样是 inspect/apply 两档：
+
+```bash
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
+```
+
+每条都是普通 btree（其中一条 partial、一条表达式）索引而非 GIN，即使在大表上单条建索引
+也快——但 `CREATE INDEX CONCURRENTLY` 仍要对表做一次全表扫描，繁忙数据库上应避开高峰期。
+迁移文件 `0039_hotpath_batch1_indexes.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
+（迁移在事务里跑，`CONCURRENTLY` 进不了事务），一旦这个脚本已经把八条索引都建好，迁移
+落地时就是 no-op 的账本记录；全新部署、还没有生产流量的库，迁移本身已经够用，先跑脚本
+是可选项。`--apply` 若报告某条索引状态是 `INVALID`（此前一次 `CONCURRENTLY` 建索引中途
+失败留下的残留），工具会打印确切的 `DROP INDEX CONCURRENTLY <name>;` 指引，重跑前先手动
+执行——工具自己绝不会代劳删除。每条索引都是纯读路径新增，不改任何查询或服务代码；建完
+之后若该表写延迟劣化超过 20%，`DROP INDEX CONCURRENTLY <name>` 即可无副作用地移除它。
+
+本批已登记、暂不处理的写放大冗余债（删活索引是单独的、需人工拍板的操作）：既有的
+`idx_chunks_source`（0003 迁移加的）现在已被上面新增的 `idx_chunks_source_ordinal`
+完全覆盖，生产验证新索引稳定后可用 `DROP INDEX CONCURRENTLY idx_chunks_source` 下线。
+`knowledge_relations` 另有三条同前缀（`source_object_id` 一侧）的既有索引——
+`idx_knowledge_relations_nb_source`、`idx_knowledge_relations_nb_source_id`，加上本批新增的
+`idx_knowledge_relations_nb_source_target_edge`——这是本批之前就存在的重叠，不是本批引入、
+也不在本批处理。
+
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
 对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
 PostgreSQL 影子库。它要求 PostgreSQL 16、专用且可恢复的目标库、已验证的源/目标备份、

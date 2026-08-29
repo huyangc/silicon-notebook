@@ -314,6 +314,41 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
+An already-populated PostgreSQL database should also get hot-path fix batch 1's eight indexes
+across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
+`lower(canonical_name)` companion, three reverse-FK covers on
+`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
+`knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`,
+`chunks(source_id, ordinal)`, and a partial `sources(notebook_id, source_type)` index) built
+online, same inspect/apply shape as the retrieval-index tool above:
+
+```bash
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
+```
+
+Each is a plain btree (or one partial, one expression) index rather than a GIN index, so
+individual builds are fast even on large tables — but `CREATE INDEX CONCURRENTLY` still
+takes a full table scan per index and should run outside peak hours on a busy database.
+Migration `0039_hotpath_batch1_indexes.sql` uses plain `CREATE INDEX IF NOT EXISTS` (a
+migration runs inside a transaction, where `CONCURRENTLY` cannot run) and becomes a no-op
+ledger entry once this script has built every index; on a fresh database with no existing
+traffic, the migration alone is sufficient and running the script first is optional. If
+`--apply` reports an `INVALID` index (a prior `CONCURRENTLY` build that failed partway
+through), the tool prints the exact `DROP INDEX CONCURRENTLY <name>;` to run before
+retrying — it never drops that index on its own. Each index is a pure read-path addition
+with no query or service-code change; if write latency on its table regresses more than 20%
+after building one, `DROP INDEX CONCURRENTLY <name>` removes it with no other effect.
+
+Known, registered write-amplification debt from this batch (not addressed here — dropping a
+live index is a deliberate, separate operator call): the pre-existing `idx_chunks_source`
+(migration 0003) is now fully covered by the new `idx_chunks_source_ordinal` above and can be
+retired with `DROP INDEX CONCURRENTLY idx_chunks_source` once production has verified the new
+index is stable. `knowledge_relations` separately already carries three same-leading-prefix
+indexes on the `source_object_id` side (`idx_knowledge_relations_nb_source`,
+`idx_knowledge_relations_nb_source_id`, and now `idx_knowledge_relations_nb_source_target_edge`)
+— a pre-existing overlap this batch does not introduce and does not change.
+
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
 the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the
 delivered forward-shadow CLI can build and continuously maintain a PostgreSQL shadow while

@@ -1263,6 +1263,16 @@
         "type": "index"
       },
       {
+        "name": "idx_clusters_nb_canonical",
+        "sql_sha256": "678b9a6c1fcbf822379f6d7264192e08cf215cc4b97c442fd61b695c1f1148bc",
+        "type": "index"
+      },
+      {
+        "name": "idx_clusters_nb_canonical_name_lower",
+        "sql_sha256": "7d7db40c2187fb60cc0ba7f4a0333408e8a8228838b21df554c9f7293f033aac",
+        "type": "index"
+      },
+      {
         "name": "idx_clusters_nb_created",
         "sql_sha256": "62c104f28fe311793fec590a3bbc61fc9418f5f13d531de517f1723a860db089",
         "type": "index"
@@ -1310,6 +1320,11 @@
       {
         "name": "idx_element_embeddings_source",
         "sql_sha256": "1b8dd5c3a3b9639247543190697ab3d4e4c1de935b7805502cf3c7c9dac759cd",
+        "type": "index"
+      },
+      {
+        "name": "idx_extraction_runs_notebook",
+        "sql_sha256": "65ca1e78281dde05243e75b01a738f3adf89b217d76a88db54789f488b24f6e1",
         "type": "index"
       },
       {
@@ -1483,6 +1498,11 @@
         "type": "index"
       },
       {
+        "name": "idx_knowledge_relations_nb_source_target_edge",
+        "sql_sha256": "19c5e945de8a4769f975fe27e180a8eb42033fb86d5f8106489167546904a197",
+        "type": "index"
+      },
+      {
         "name": "idx_knowledge_relations_nb_target",
         "sql_sha256": "f25bc67538780ba51f2a077d1942bd82a24bb4eeb2cc2eb91a436748f0a9e97a",
         "type": "index"
@@ -1500,6 +1520,11 @@
       {
         "name": "idx_knowledge_source_fact_backfills_notebook",
         "sql_sha256": "400f0d31f61d471c6f16416fda942def416f2e423e157ce59d6d07894f5dc229",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_source_fact_elements_notebook",
+        "sql_sha256": "365e57f40f90109093298d3fc94ce3ed5129d578674ebd27ff7f76c75f9ec0e4",
         "type": "index"
       },
       {
@@ -1555,6 +1580,11 @@
       {
         "name": "idx_memory_embeddings_model",
         "sql_sha256": "d786eedc21fb5021df65b6130c2c4040b3d0e5cc4a78669d90f2a278c6f2821a",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_items_notebook",
+        "sql_sha256": "aa6b0b37236ebd6b4ac8cb418274a347918da4d83b7c7cca2ef06e6b5f804b6e",
         "type": "index"
       },
       {
@@ -1685,6 +1715,11 @@
       {
         "name": "idx_sources_memory_id",
         "sql_sha256": "d78fb168a9a353f96b63a5117d60334ba4398552d97a43ff2ec244713671c759",
+        "type": "index"
+      },
+      {
+        "name": "idx_sources_nb_hidden_type",
+        "sql_sha256": "ad04b1a8a13dfa692a01594e73f829d05b279d75c3b9d8159dc2fe3d03a488a7",
         "type": "index"
       },
       {
@@ -2268,6 +2303,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 60
+    "user_version": 61
   }
 }
