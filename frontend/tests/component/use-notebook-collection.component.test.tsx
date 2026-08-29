@@ -409,6 +409,26 @@ test("failed indexing rebuild can retry the same selected pipeline", async () =>
   );
 });
 
+test("an explicit permission downgrade stops indexing restart before detail refresh", async () => {
+  const restart = deferred<ReturnType<typeof indexingProjection>>();
+  notebookApi.setNotebookIndexingPipeline.mockReturnValueOnce(restart.promise);
+  render(<Harness />);
+  publish([notebook("shared", "reader", true)]);
+  await act(async () => value!.openEditor("shared"));
+
+  let restarting!: Promise<void>;
+  act(() => { restarting = value!.revertIndexingPipelineToBuiltin(); });
+  publish([notebook("shared", "reader", false)]);
+  await act(async () => restart.resolve(indexingProjection({ changed: true })));
+  await restarting;
+
+  expect(notebookApi.getNotebook).not.toHaveBeenCalled();
+  expect(effects.notify).toHaveBeenCalledWith(
+    "权限已变更，已停止继续操作；此前已提交的修改不会撤销。",
+  );
+  expect(value!.editor).toBeNull();
+});
+
 test("rename reports a committed write even when the refreshed list loses manage access", async () => {
   const renamed = notebook("shared");
   renamed.name = "renamed";
@@ -503,7 +523,7 @@ test("rename is single-flight and releases its key after both success and failur
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(3);
 });
 
-test("editor open is latest-wins and an in-flight list projection cannot truncate save", async () => {
+test("editor open is latest-wins and an explicit permission downgrade survives later omission", async () => {
   const mountableA = deferred<never[]>();
   const basesA = deferred<never[]>();
   const pipelineA = deferred<ReturnType<typeof indexingProjection>>();
@@ -537,10 +557,39 @@ test("editor open is latest-wins and an in-flight list projection cannot truncat
   act(() => { saving = value!.saveEditor({ ...editorPatch, name: "b" }); });
   publish([notebook("b", "reader")]);
   expect(value!.editor?.busy).toBe(true);
+  publish([]);
+  expect(value!.editor?.busy).toBe(true);
   await act(async () => update.resolve(notebook("b")));
   await saving;
-  expect(basesApi.setBases).toHaveBeenCalledWith("b", []);
-  expect(notebookApi.getNotebook).toHaveBeenCalledWith("b");
+  expect(basesApi.setBases).not.toHaveBeenCalled();
+  expect(notebookApi.getNotebook).not.toHaveBeenCalled();
+  expect(effects.onNotebookUpdated).not.toHaveBeenCalled();
+  expect(effects.notify).toHaveBeenCalledWith(
+    "权限已变更，已停止继续操作；此前已提交的修改不会撤销。",
+  );
+  expect(value!.editor).toBeNull();
+});
+
+test("a reauthorized editor can retry after the denied attempt itself fails", async () => {
+  const firstUpdate = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(firstUpdate.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let firstSave!: Promise<void>;
+  act(() => { firstSave = value!.saveEditor(editorPatch); });
+  publish([notebook("a", "reader")]);
+  publish([notebook("a")]);
+  await act(async () => firstUpdate.reject(new Error("first PATCH failed")));
+  await firstSave;
+  expect(value!.editor?.busy).toBe(false);
+
+  await act(async () => value!.saveEditor(editorPatch));
+
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
+  expect(basesApi.setBases).toHaveBeenCalledTimes(1);
+  expect(notebookApi.getNotebook).toHaveBeenCalledTimes(1);
   expect(effects.onNotebookUpdated).toHaveBeenCalledTimes(1);
 });
 
