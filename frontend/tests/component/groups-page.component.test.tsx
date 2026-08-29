@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -84,11 +84,12 @@ beforeEach(() => {
   vi.mocked(listMyPendingShareRequests).mockResolvedValue([]);
 });
 
-function renderPage(detail: GroupDetail = OWNER_DETAIL) {
+function renderPage(detail: GroupDetail = OWNER_DETAIL, openingNotebookId: string | null = null) {
   vi.mocked(listGroups).mockResolvedValue([detail]);
   vi.mocked(getGroup).mockResolvedValue(detail);
   const onChanged = vi.fn();
   const onNavigate = vi.fn();
+  const onOpenNotebook = vi.fn();
   render(
     <GroupsPage
       currentUserId="u1"
@@ -97,11 +98,12 @@ function renderPage(detail: GroupDetail = OWNER_DETAIL) {
       initialGroupId={detail.id}
       onBack={vi.fn()}
       onChanged={onChanged}
-      onOpenNotebook={vi.fn()}
+      openingNotebookId={openingNotebookId}
+      onOpenNotebook={onOpenNotebook}
       onNavigate={onNavigate}
     />,
   );
-  return { onChanged, onNavigate };
+  return { onChanged, onNavigate, onOpenNotebook };
 }
 
 test("独立页面集中展示群组知识库，并只列出当前用户可管理的待添加 Notebook", async () => {
@@ -120,6 +122,22 @@ test("独立页面集中展示群组知识库，并只列出当前用户可管�
   await user.click(screen.getByRole("checkbox", { name: /先进封装工艺/ }));
   await user.click(screen.getByRole("button", { name: "添加已选（1）" }));
   await waitFor(() => expect(shareNotebookToGroup).toHaveBeenCalledWith("nb-owned", "g1", { manage: false }));
+});
+
+test("正在打开的群组知识库显示忙碌反馈：按钮禁用、aria-busy、点击不触发 onOpenNotebook", async () => {
+  // C3(codex #621 R1 P2):群组页的「打开笔记本」入口与集合页同权,不再是「按下
+  // 整页就切走所以不用管」的已知余量。
+  const user = userEvent.setup();
+  const { onOpenNotebook } = renderPage(OWNER_DETAIL, "nb-shared");
+
+  const openButton = await screen.findByRole("button", { name: /共享可靠性资料/ });
+  expect(openButton).toBeDisabled();
+  expect(openButton).toHaveAttribute("aria-busy", "true");
+  expect(openButton).toHaveClass("is-opening");
+  expect(within(openButton).getByText("打开中…")).toBeInTheDocument();
+
+  await user.click(openButton);
+  expect(onOpenNotebook).not.toHaveBeenCalled();
 });
 
 test("owner 转让需要二次确认，新 owner 由服务端返回且旧 owner 保留管理员提示", async () => {
@@ -313,6 +331,7 @@ test("剪贴板挂着时切了群组，失败不去选中另一个群组的邀�
       notebooks={NOTEBOOKS}
       onBack={vi.fn()}
       onChanged={vi.fn()}
+      openingNotebookId={null}
       onOpenNotebook={vi.fn()}
       onNavigate={vi.fn()}
     />,

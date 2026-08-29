@@ -275,6 +275,54 @@ def test_lru_eviction_evicts_the_oldest_notebook_first(monkeypatch):
     assert db.chunk_calls == 4
 
 
+class _EvictingInterruptDB(_FakeDB):
+    """在冷查询 SQL(``match`` 子串)执行期间(锁外阶段)先 invalidate 目标 notebook,
+    再 invalidate 足够多的其它 notebook,把目标 notebook 刚推进的 ``_EPOCHS`` 条目从
+    有界 LRU 里挤出去——验证 C2:被挤出去之后,目标 notebook 的写回必须仍然被拒绝
+    (fail closed),不能因为 ``_epoch_of`` 退回默认值 0 而被误判成「没被 invalidate」。
+    只触发一次,避免递归/重复失效。"""
+
+    def __init__(self, seq: int, *, target_notebook: str, match: str, filler_count: int, **kwargs):
+        super().__init__(seq, **kwargs)
+        self._target_notebook = target_notebook
+        self._match = match
+        self._filler_count = filler_count
+        self._fired = False
+
+    def execute(self, sql, params=()):
+        cursor = super().execute(sql, params)
+        if not self._fired and self._match in sql:
+            self._fired = True
+            kcc.invalidate(self._target_notebook)
+            for i in range(self._filler_count):
+                kcc.invalidate(f"nb-filler-{i}")
+        return cursor
+
+
+def test_epoch_lru_eviction_fails_closed_for_evicted_notebook(monkeypatch):
+    """C2(codex #621 R1 P2):目标 notebook 的 epoch 条目一旦被有界 LRU 淘汰出
+    ``_EPOCHS``,``_epoch_of`` 会退回默认值 0——如果淘汰不推进全局代次,这次在途写回
+    会被误判成「没被 invalidate」,把 invalidate 之前的陈旧快照写进 memo。
+
+    变异复现:把 ``invalidate()`` 淘汰分支里新加的 ``_GLOBAL_EPOCH += 1`` 去掉,这条
+    用例必须变红——被淘汰后 `_epoch_of` 与采样时的 epoch 重新相等,写回被误放行,
+    ``nb-target`` 会留下 memo。"""
+    kcc.invalidate()
+    monkeypatch.setattr(kcc, "_MAX_NOTEBOOKS", 2)
+    db = _EvictingInterruptDB(
+        seq=1,
+        target_notebook="nb-target",
+        match="GROUP BY object_type, status",
+        filler_count=3,  # 超过 _MAX_NOTEBOOKS(2),确保 nb-target 被挤出 _EPOCHS
+    )
+    result = kcc.type_status_counts(db, "nb-target")
+    assert result == {("concept", "approved"): 42}  # 这次返回值仍正确
+    assert "nb-target" not in kcc._EPOCHS  # 佐证:目标 notebook 的 epoch 条目确实被淘汰
+    assert "nb-target" not in kcc._MEMO  # 写回被拒:目标库没有留下 memo 条目
+    assert kcc.type_status_counts(db, "nb-target") == {("concept", "approved"): 42}
+    assert db.type_status_calls == 2  # 下一次读确实重查了(没有被陈旧地钉在 memo 里)
+
+
 class _WarmDB(_FakeDB):
     """warm_all 的 fake db:notebooks 列表固定,某个 notebook 的 GROUP BY 故意抛
     ``psycopg.Error``,断言 warm_all 吞掉它、rollback、并继续处理下一个 notebook

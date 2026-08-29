@@ -69,6 +69,9 @@ type GroupsPageProps = {
   initialTab?: GroupPageTab;
   onBack: () => void;
   onChanged: () => void;
+  /** 正在打开的笔记本 id(与集合页 `openingNotebookId` 同一份状态的镜像)。
+   * 群组页的「打开笔记本」入口与集合页的卡片是同一个动作,忙碌反馈必须同权。 */
+  openingNotebookId: string | null;
   onOpenNotebook: (notebookId: string) => void;
   onNavigate: (groupId: string, tab: GroupPageTab) => void;
 };
@@ -104,6 +107,7 @@ export function GroupsPage({
   initialTab = "notebooks",
   onBack,
   onChanged,
+  openingNotebookId,
   onOpenNotebook,
   onNavigate,
 }: GroupsPageProps) {
@@ -442,10 +446,27 @@ export function GroupsPage({
                 ) : <div className="group-notebook-grid">{shared.map((item) => {
                   const adminsManage = item.roles.includes("admin");
                   const ICanManageNotebook = manageableById.has(item.notebook_id);
+                  const opening = openingNotebookId === item.notebook_id;
                   return <article className="group-notebook-card" key={item.notebook_id}>
-                    <button className="group-notebook-open" onClick={() => onOpenNotebook(item.notebook_id)}>
+                    {/* 群组页与集合页同权的忙碌反馈:命中即刻禁用 + spinner + 「打开中…」,
+                        不再是「按下整页就切走所以不用管」的已知余量。 */}
+                    <button
+                      className={`group-notebook-open${opening ? " is-opening" : ""}`}
+                      aria-busy={opening || undefined}
+                      disabled={opening}
+                      onClick={() => onOpenNotebook(item.notebook_id)}
+                    >
                       <span className="group-notebook-mark"><Library size={19} /></span>
-                      <span><strong>{item.name}</strong><small>所有者 {item.owner_username || "—"}</small></span>
+                      <span>
+                        <strong>{item.name}</strong>
+                        <small>所有者 {item.owner_username || "—"}</small>
+                        {opening && (
+                          <small className="group-notebook-open-status">
+                            <span className="notebook-card-open-spinner" aria-hidden="true" />
+                            打开中…
+                          </small>
+                        )}
+                      </span>
                     </button>
                     <div className="group-notebook-meta">
                       <span className={adminsManage ? "group-access-chip manage" : "group-access-chip"}>

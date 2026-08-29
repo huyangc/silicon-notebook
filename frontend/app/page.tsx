@@ -1737,6 +1737,9 @@ export default function Home() {
         // #memory=<id> 按返回时,在飞的 openNotebookMemory 打的是同一本库:合并早退会
         // 让这次 popstate 什么都不做、也不自增 epoch,于是那次 memory 打开随后
         // committed,把 URL 用 replaceState 改写回 #memory——返回键失效。必须顶替它。
+        // 不改用 intent:popstate 要顶替的是「hash 指向的目的地」,不是「某个固定
+        // intent」——它可能顶替 open,也可能顶替 memory,intent 维度在这里没有一个
+        // 固定值可填,必须继续用 coalesce:false 无条件顶替。
         openNotebook(workspace.notebookId, "none", undefined, { coalesce: false }).catch(() => {
           showCollection();
           setToast("笔记本链接不可用或已失效");
@@ -2740,21 +2743,26 @@ export default function Home() {
     actorIdOverride?: string,
     // `coalesce: false` = 这次调用**不是**重复点击,而是一个新的目的地(见下面各调用点
     // 的理由)。跳过的只有合并早退这一件事:仍然自增 epoch 顶替在途那次、仍然
-    // beginOpen 登记 guard,后续同 id 的卡片点击照样能合并到它上面。
-    opts?: { coalesce?: boolean },
+    // beginOpen 登记 guard,后续同 id 同 intent 的卡片点击照样能合并到它上面。
+    // `intent` 默认 "open"(普通打开);目的地不同的调用(如 openNotebookMemory)传
+    // 自己的 intent——合并判据从「同 id」升级为「同 id + 同 intent」(见
+    // notebook-open-guard.ts 顶部语义⑤),不必再靠 coalesce:false 强制放行。
+    opts?: { coalesce?: boolean; intent?: string },
   ): Promise<boolean> {
-    // 同库连点合并:在途的是同一本笔记本、且 guard 仍属当前代,就直接放弃,什么都不做
-    // ——不重置任何状态、不发请求。已经在飞的那一次自己会收尾。异 id 必须放行,
-    // 被外部导航顶过代的僵尸 guard 也必须放行(见 notebook-open-guard.ts 顶部说明)。
+    // 同库同 intent 连点合并:在途的是同一本笔记本、同一代、同一个目的地,就直接放弃,
+    // 什么都不做——不重置任何状态、不发请求。已经在飞的那一次自己会收尾。异 id、
+    // 异 intent(语义⑤,换目的地)必须放行,被外部导航顶过代的僵尸 guard 也必须放行
+    // (见 notebook-open-guard.ts 顶部说明)。
     // ⚠ 这一句必须留在函数体第一位:挪到下面的 `++workspaceEpochRef.current` 之后,
     // 双击就会自己把自己顶死(epoch 已经变了 → 不合并 → 但 isCurrent 恒假),那本库
     // 从此永远打不开。
     if (
       (opts?.coalesce ?? true)
-      && shouldCoalesceOpen(notebookOpenGuardRef.current, notebookId, workspaceEpochRef.current)
+      && shouldCoalesceOpen(notebookOpenGuardRef.current, notebookId, workspaceEpochRef.current, opts?.intent ?? "open")
     ) {
       return false;
     }
+    const intent = opts?.intent ?? "open";
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
@@ -2772,7 +2780,7 @@ export default function Home() {
     const workspaceEpoch = ++workspaceEpochRef.current;
     // guard 借用同一个 workspaceEpoch 当自己的代号:每次调用都拿到独一无二的值,
     // 天然满足「settle 只清自己那一代」,不必另起一套计数器。
-    notebookOpenGuardRef.current = beginOpen(notebookId, workspaceEpoch);
+    notebookOpenGuardRef.current = beginOpen(notebookId, workspaceEpoch, intent);
     setOpeningNotebookId(notebookId);
     const transitionOwner = {
       actorId: actorIdOverride ?? currentUser?.id ?? "",
@@ -2803,10 +2811,12 @@ export default function Home() {
   async function openNotebookMemory(notebookId: string, actorIdOverride?: string) {
     // 传 "none" 让 openNotebook 别写 history,自己下面这次 replaceState 独占写入——
     // 与本函数改动前的净效果逐字一致(旧代码是 replace 再 replace)。
-    // coalesce:false —— 目的地是**记忆视图**,与在途那次(可能停在 ask)不是同一件事。
-    // 合并掉就等于静默丢弃用户的意图:同一张卡片先点主体再点「N 条记忆」,第二次点击
-    // 会被吞掉,用户落在 ask 而不是 memory。
-    if (!await openNotebook(notebookId, "none", actorIdOverride, { coalesce: false })) return;
+    // intent: "memory" —— 目的地差异现在由 intent 表达,不再用 coalesce:false 硬顶替:
+    // 普通打开(intent "open")在途时点「N 条记忆」照常顶替它(intent 不同,语义⑤),
+    // 不会静默丢弃用户「先点主体、再点记忆」的第二次点击;而连点同一张卡片的「N 条
+    // 记忆」(intent 都是 "memory")会被合并,不会像 coalesce:false 那样每次连点都
+    // 叠出一整套 getNotebook+listSources——这正是这颗 guard 本来要防的过载。
+    if (!await openNotebook(notebookId, "none", actorIdOverride, { intent: "memory" })) return;
     setChatMode("memory");
     window.history.replaceState(null, "", memoryHash(notebookId));
   }
@@ -2821,6 +2831,10 @@ export default function Home() {
     }
     // coalesce:false —— 待办项的目的地是报告/治理/索引里的某个具体位置,不是「再点一次
     // 同一张卡片」。被合并掉会静默丢弃这次深链意图,用户停在原视图。
+    // 不改用 intent:不同待办项(report_outline/governance/index)可能指向同一本库、
+    // 且这个函数本身没有区分它们的 intent 字符串可用——同库同类型的两条不同待办项
+    // 之间 intent 也无法安全区分「是不是同一个目的地」,必须继续用 coalesce:false
+    // 强制顶替。
     if (!item.notebook_id || !await openNotebook(item.notebook_id, "push", undefined, { coalesce: false })) return;
     if (item.type === "report_outline") {
       switchChatMode("reports");
@@ -2838,6 +2852,9 @@ export default function Home() {
     // 触发 openNotebook(id, "none") 全量重载,把用户从当前视图甩回 ask 聊天。
     const history = activeNotebookIdRef.current === d.notebook_id ? "none" : "push";
     // coalesce:false —— 同上,已完成项的目的地是来源面板或知识图谱,不是重复点击。
+    // 不改用 intent:同一本库连续两条已完成项(比如两次 index 完成通知)可能同 kind,
+    // intent 无法安全区分「这次和在途那次是不是同一个目的地」,必须继续用
+    // coalesce:false 强制顶替。
     if (!await openNotebook(d.notebook_id, history, undefined, { coalesce: false })) return;
     // 论文元数据补全完成应停在来源面板(设计稿 §3.3:作者/机构就在来源列表与详情
     // 里),别把用户甩进知识图谱。kind 缺省视作索引完成,索引路径行为逐字不变。
@@ -5226,10 +5243,8 @@ export default function Home() {
           initialTab={groupNavigation.tab}
           onBack={showCollection}
           onChanged={() => { notebookCollection.refreshAfterAccessChange().catch(reportError); }}
-          /* 已知余量:群组页里的「打开笔记本」入口不带 is-opening 视觉态。忙碌位
-             (openingNotebookId)是 page.tsx 的本地 state,而 GroupsPage 是独立组件;
-             且这个入口一按整页就切走(群组页整体卸载),不像集合页那样留在原地等几秒。
-             合并 guard 本身照常生效(在 openNotebook 内部),重复点不会叠出并行请求。 */
+          // 群组页与集合页同权的忙碌反馈。
+          openingNotebookId={openingNotebookId}
           onOpenNotebook={(notebookId) => { void openNotebook(notebookId); }}
           onNavigate={(groupId, nextTab) => {
             setGroupNavigation({ groupId, tab: nextTab });
