@@ -6,7 +6,7 @@
  */
 "use client";
 
-import { MouseEvent, type ReactNode } from "react";
+import { useRef, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -74,59 +74,87 @@ export function AnswerMarkdown({
     ]),
   );
 
+  // React treats the functions in `components` as component *types*. Rebuilding those
+  // functions on every AnswerMarkdown render therefore unmounts and remounts every
+  // customized subtree, even when the answer itself did not change. In particular, an
+  // unrelated parent update (such as typing in the next Ask input) used to replace the
+  // citation-image <aside>, which made AuthedImage revoke its object URL, show loading,
+  // and fetch the same asset again: the visible image flashed on every keystroke.
+  //
+  // Keep the component types stable for this AnswerMarkdown instance, while reading the
+  // latest render data through a ref. Citation selection/callbacks can still change
+  // immediately without turning those ordinary updates into subtree replacement.
+  const renderStateRef = useRef({
+    refsByCitationKey,
+    selectedReferenceId,
+    onReferenceClick,
+    renderCitationImages,
+  });
+  renderStateRef.current = {
+    refsByCitationKey,
+    selectedReferenceId,
+    onReferenceClick,
+    renderCitationImages,
+  };
+
   // -----------------------------------------------------------------------
   // 自定义 <a> 渲染：cite: 开头 → 引用徽章；其余 → 普通新标签链接
   // -----------------------------------------------------------------------
-  const components = {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    a({ href, children }: { href?: string; children?: React.ReactNode }) {
-      if (href?.startsWith("cite:")) {
-        const key = href.slice(5);
-        const reference = refsByCitationKey[key];
-        if (reference) {
-          const isSelected = selectedReferenceId === reference.id;
-          return (
-            <span className="cite-chip-wrap">
-              <button
-                type="button"
-                aria-expanded={isSelected}
-                className={`cite-chip${isSelected ? " active" : ""}`}
-                onClick={(event) => onReferenceClick(reference, event)}
-              >
-                {children}
-              </button>
-            </span>
-          );
+  const componentsRef = useRef<Parameters<typeof ReactMarkdown>[0]["components"] | null>(null);
+  if (componentsRef.current === null) {
+    componentsRef.current = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      a({ href, children }: { href?: string; children?: React.ReactNode }) {
+        if (href?.startsWith("cite:")) {
+          const key = href.slice(5);
+          const state = renderStateRef.current;
+          const reference = state.refsByCitationKey[key];
+          if (reference) {
+            const isSelected = state.selectedReferenceId === reference.id;
+            return (
+              <span className="cite-chip-wrap">
+                <button
+                  type="button"
+                  aria-expanded={isSelected}
+                  className={`cite-chip${isSelected ? " active" : ""}`}
+                  onClick={(event) => state.onReferenceClick(reference, event)}
+                >
+                  {children}
+                </button>
+              </span>
+            );
+          }
+          // key 不在映射里，fallback 为文本
+          return <span>{children}</span>;
         }
-        // key 不在映射里，fallback 为文本
-        return <span>{children}</span>;
-      }
-      // 普通外链
-      return (
-        <a href={href} target="_blank" rel="noreferrer">
-          {children}
-        </a>
-      );
-    },
-    // 给代码块加现有样式 class，保持外观一致
-    pre({ children }: { children?: React.ReactNode }) {
-      return <pre className="answer-code">{children}</pre>;
-    },
-    // 表格外层包装
-    table({ children }: { children?: React.ReactNode }) {
-      return (
-        <div className="answer-table-wrap">
-          <table className="answer-table">{children}</table>
-        </div>
-      );
-    },
-    aside({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
-      const raw = node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE];
-      const items = citationImageSlotItems(raw);
-      if (items.length > 0) return renderCitationImages?.(items) ?? null;
-      return <aside>{children}</aside>;
-    },
-  } as Parameters<typeof ReactMarkdown>[0]["components"];
+        // 普通外链
+        return (
+          <a href={href} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        );
+      },
+      // 给代码块加现有样式 class，保持外观一致
+      pre({ children }: { children?: React.ReactNode }) {
+        return <pre className="answer-code">{children}</pre>;
+      },
+      // 表格外层包装
+      table({ children }: { children?: React.ReactNode }) {
+        return (
+          <div className="answer-table-wrap">
+            <table className="answer-table">{children}</table>
+          </div>
+        );
+      },
+      aside({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
+        const raw = node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE];
+        const items = citationImageSlotItems(raw);
+        if (items.length > 0) return renderStateRef.current.renderCitationImages?.(items) ?? null;
+        return <aside>{children}</aside>;
+      },
+    };
+  }
+  const components = componentsRef.current;
 
   return (
     <div className="answer-markdown">
