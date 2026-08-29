@@ -12984,10 +12984,13 @@ select.group-input {
   flex: 0 0 auto;
 }
 
-/* 由 flex 接管高度(覆盖公共 max-height);`min-height: 0` 是 flex 子项能真正收缩的前提,
-   没有它清单区会以内容高度为下限,把卡片重新撑出视口。 */
+/* 由 flex 接管高度(覆盖公共 max-height)。下限不是 0(codex #631 R4 P2):flex 子项的
+   `min-height: 0` 允许它一路收到 0,而它自己还挂着 `overflow-y: auto` —— 视口矮过头尾两块
+   之和时,整卡滚动只能滚到头部与底栏,中间那个零高的滚动容器把**每一行笔记本和它的动作**
+   全锁在里面。改钉 140px(与 `.source-modal-card > .source-detail-body` 同一档):清单区永远
+   留着约两行的可视高度,放不下时由上面那条整卡滚动兜底。 */
 .share-overview-card > .source-detail-body {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 140px;
   max-height: none;
 }
