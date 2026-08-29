@@ -12962,3 +12962,27 @@ select.group-input {
   border-top: 1px solid var(--line);
   background: var(--panel);
 }
+
+/* 卡片限高在视口内并纵向布局(codex #631 R1 P2)。「完成」挪出滚动区之后,卡片高度 =
+   头部(约 110px)+ 至多 70vh 的清单 + 底栏(68px):700px 高的视口上就已经超出
+   `.utility-modal` 的可用高度(视口 - 48px 内边距),而那层遮罩是 `place-items:center`
+   的固定层、自己不滚,卡片又是 `overflow:hidden` —— 溢出的头部与底栏会被裁掉且**够不着**。
+   与 `.source-modal-card` 同一处置:整卡限高,清单区让高并在自己内部滚,头尾恒可达。 */
+.utility-modal-card.share-overview-card {
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.share-overview-card > .source-modal-header,
+.share-overview-card > .share-overview-footer {
+  flex: 0 0 auto;
+}
+
+/* 由 flex 接管高度(覆盖公共 max-height);`min-height: 0` 是 flex 子项能真正收缩的前提,
+   没有它清单区会以内容高度为下限,把卡片重新撑出视口。 */
+.share-overview-card > .source-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
