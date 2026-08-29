@@ -31,6 +31,15 @@ _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
 # (``_DELETE_OBJECT_BATCH_SIZE`` / ``CHUNK_ELEMENT_LOOKUP_BATCH``).
 _REVIEW_ENDPOINT_LOOKUP_BATCH = 500
 
+# How many ``concept_clusters.id`` values one orphan-sweep DELETE may carry.
+# The sweep's PAGE is wider (``_ORPHAN_SWEEP_BATCH_SIZE``, tuned for round
+# trips); PostgreSQL passes the whole page as a single ``= ANY(%s)`` array, but
+# SQLite has to expand one placeholder per id, so a page is cut into slices at
+# the store-wide expanded-``IN`` ceiling rather than binding thousands of
+# parameters in one statement.  Cost is unchanged: ⌈page/chunk⌉ statements,
+# each ≤ chunk primary-key probes.
+_SWEEP_DELETE_ID_CHUNK = 500
+
 
 def _review_endpoint_ids(relation_rows) -> List[str]:
     """Distinct object ids appearing on either end of the given relations,
@@ -162,13 +171,63 @@ class GovernanceStore:
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
-    def sweep_orphan_clusters(db: sqlite3.Connection, notebook_id: str) -> int:
-        cur = db.execute(
-            "DELETE FROM concept_clusters WHERE notebook_id=? AND member_object_id NOT IN "
-            "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
-            (notebook_id, notebook_id),
-        )
-        return int(cur.rowcount)
+    def sweep_orphan_clusters_page(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        after_object_type: str,
+        after_member_object_id: str,
+        limit: int,
+    ) -> "tuple[list, int]":
+        """Z6: SQLite twin of the PostgreSQL keyset batch — see that adapter's
+        docstring for the full cost model and rationale, including the measured
+        reason ② is driven off the page's PRIMARY KEYS rather than re-expressed
+        as a key range (① a pure keyset page read bounded by ``LIMIT``, so the
+        SCANNED rows — not just the deleted ones — are what the batch size caps;
+        ② a delete over at most one page of ``id``s, one ``NOT EXISTS``
+        primary-key probe per row; both statements O(page); notebook-scoped
+        ``k.notebook_id = c.notebook_id`` preserving the ORIGINAL semantics
+        bit-for-bit).
+
+        The one shape difference from the PostgreSQL twin: no ``= ANY(?)`` in
+        SQLite, so the id list is spelled as an expanded ``IN (?,?,…)`` and cut
+        into ``_SWEEP_DELETE_ID_CHUNK`` slices — same ceiling the rest of the
+        SQLite adapters use for expanded id lists (``_DELETE_OBJECT_BATCH_SIZE``
+        / ``_IN_CHUNK``), so one page never turns into a statement with
+        thousands of bound parameters. Each slice is still ≤ the chunk and the
+        page total is still O(page).
+
+        Returns ``(page_rows, deleted_count)`` — the caller advances its cursor
+        over the SCANNED page and stops on a short page, so a batch that
+        deletes nothing (the common case) still makes progress."""
+        page = db.execute(
+            "SELECT object_type, member_object_id, id FROM concept_clusters"
+            " WHERE notebook_id = ?"
+            "   AND (object_type, member_object_id) > (?, ?)"
+            " ORDER BY object_type, member_object_id"
+            " LIMIT ?",
+            (notebook_id, after_object_type, after_member_object_id, limit),
+        ).fetchall()
+        if not page:
+            return [], 0
+        cluster_ids = [row["id"] for row in page]
+        deleted = 0
+        for start in range(0, len(cluster_ids), _SWEEP_DELETE_ID_CHUNK):
+            chunk = cluster_ids[start : start + _SWEEP_DELETE_ID_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            deleted += len(db.execute(
+                "DELETE FROM concept_clusters AS c"
+                " WHERE c.notebook_id = ?"
+                f"   AND c.id IN ({placeholders})"
+                "   AND NOT EXISTS ("
+                "     SELECT 1 FROM knowledge_objects k"
+                "     WHERE k.id = c.member_object_id AND k.notebook_id = c.notebook_id"
+                "   )"
+                # ⚠ 裸 `id`,不是 `c.id`:SQLite 的 RETURNING 子句里看不见 DELETE 目标的
+                # 别名(`no such column: c.id`),而 WHERE 里看得见。PG 侧写成同一形态。
+                " RETURNING id",
+                (notebook_id, *chunk),
+            ).fetchall())
+        return page, deleted
 
     @staticmethod
     def incremental_cluster_rows(db: sqlite3.Connection, notebook_id: str, object_type: str):

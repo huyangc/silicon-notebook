@@ -757,6 +757,9 @@ SCALE_INDEX_AUTO_ENABLED   # auto-build/refresh the scale index for large notebo
 SCALE_INDEX_AUTO_WHEN      # "idle"=queue for the off-peak window (default) | "now"=build immediately
 STARTUP_PRELOAD_SCALE_INDEXES # load every published scale index + enabled ANN + safe single-index PPR core before readiness (default true)
 SCALE_IDX_CACHE_MAX        # max resident scale indexes; must be >= the published live-index count when preload is enabled (default 8)
+SCALE_BUILD_CONCURRENCY    # process-wide cap on concurrently running scale index build/fold operations (default 2). Each build used to run on its own unbounded daemon thread, so the off-peak scheduler could start the whole idle queue's threads at once and spike memory/CPU on the host; a build beyond the cap blocks on this limit before it starts (its own run time once started is unaffected).
+SCALE_BUILD_FAILURE_BACKOFF_SECONDS     # minimum delay before an *automatic* retry (scheduler/post-publish follow-up — never an explicit user "rebuild now" click) of a failed scale build/fold for the same notebook (default 60). Exponential: doubles on each consecutive failure.
+SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS # ceiling on that exponential backoff (default 1800), so a persistently failing notebook's retries space out instead of growing without bound while still never retrying back-to-back and burning a concurrency slot on a build that will fail again immediately.
 ```
 
 With startup preload enabled, `/api/ready` remains false during the

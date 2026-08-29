@@ -3261,10 +3261,17 @@ class RepositoryFacade:
 
     def trigger_scale_index_rebuild(self, notebook_id: str, when: str = "now",
                                     mode: str = "auto") -> dict:
-        """Compatibility delegate to runtime rebuild scheduling."""
+        """Compatibility delegate to runtime rebuild scheduling.
+
+        Both current consumers (the HTTP rebuild endpoint and the MCP build
+        tool) are explicit, deliberate one-off requests — never an internal
+        automatic retry — so this is unconditionally a ``manual`` trigger and
+        exempt from the Z5 failure backoff (see
+        ``ScaleArtifactRuntime.trigger``).
+        """
         self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.scale_artifacts.trigger(
-            notebook_id, when=when, mode=mode
+            notebook_id, when=when, mode=mode, manual=True
         )
 
     def _dequeue_scale_idle(self, notebook_id: str) -> bool:

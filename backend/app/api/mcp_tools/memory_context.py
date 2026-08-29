@@ -20,6 +20,7 @@ from app.core.memory_inputs import (
 )
 from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
 from app.services.agent_profile_block import resolve_agent_profile_names
+from app.services.search_concurrency import search_concurrency_gate
 
 from ._shared import (
     RESULT_LIMIT,
@@ -293,9 +294,21 @@ def register_memory_context_tools(
                 )
             return rows
 
-        rows = await _run_with_progress(
-            ctx, load, label="search_notebook_context"
-        )
+        # Z8 (P0 止血): 与 HTTP /notebooks/{id}/search 共用同一个进程级并发闸
+        # (search_concurrency.search_concurrency_gate())。闸**在事件循环上、派发
+        # 工作线程之前**拿——不是在 load 里面。在线程里阻塞式 acquire 会让每个
+        # 等待者占住一个 anyio 工作线程 token,而那 40 个 token 是全站同步端点共享
+        # 的,一次搜索突发就能把整个 API 面饿死(批 0 评审 P1)。这里等待的是一个
+        # 挂起的协程,不占线程。
+        #
+        # 持闸期间跑 _run_with_progress,所以心跳照常:它跑在事件循环上,与工作线程
+        # 无关。代价说明:排队等票的那段现在**不**发心跳(旧形态是在 load 里等,被
+        # 心跳覆盖着)。这是自觉的取舍——等票的调用换来的是不再占住工作线程,而
+        # 队列本身由 4 个在跑的搜索推进。
+        async with search_concurrency_gate():
+            rows = await _run_with_progress(
+                ctx, load, label="search_notebook_context"
+            )
         cap = max(1, min(int(limit), RESULT_LIMIT))
         return _budget_response(
             {"notebook_id": notebook_id, "items": rows[:cap]},

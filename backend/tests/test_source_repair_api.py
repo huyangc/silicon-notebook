@@ -279,6 +279,175 @@ def test_backfill_vectors_accepts_when_matching_workload_configured(tmp_path, mo
     assert len(calls) == 1
 
 
+# --- Z7: 受理判定改走体检缓存 + per-notebook 单飞 + job 侧发现失败记账 --------
+
+
+def test_backfill_vectors_admission_reuses_checkup_h45_cache(tmp_path, monkeypatch):
+    """Z7①:受理判定复用 CheckupService 的 H4/H5 缓存(PR #625 的事件/版本驱动 memo),
+    不再独立重打两条整表反连接 COUNT。预热一次看板缓存(模拟真实时序:用户先看到体检
+    面板、再点「补齐向量」)后,再次读同一个 (本库活跃租约快照, kg_mutation_seq) 键必须
+    命中缓存——若受理判定退回直打 maintenance 的 COUNT,以下打桩会让测试立刻失败。
+
+    Z7 窄读口:受理判定改走 ``CheckupService.missing_vector_counts()``,不再调整套
+    ``run()``(它无条件多算 H2/H3 各一次全库 sources anti-join + H7 索引状态探针)——
+    boom 掉 ``run()`` 本身,确认 backfill 请求路径完全不碰它。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "j00300311")
+    nb = _notebook(client, headers, "bf-cache")
+
+    from app.api.deps import repository
+
+    repo = repository()
+    _seed_source_with_elements(repo, nb, "src-cache")  # H5 > 0
+    monkeypatch.setattr(repo, "configured", lambda wid: True)
+    calls = _spy_submit_job(monkeypatch)
+
+    warm = repo.checkup.run(nb)
+    assert next(i.count for i in warm.checks if i.code == "H5") > 0
+
+    def _boom(*_a, **_k):
+        raise AssertionError(
+            "backfill-vectors admission must not re-trigger maintenance COUNT "
+            "once the checkup H4/H5 cache is already warm"
+        )
+
+    def _boom_run(*_a, **_k):
+        raise AssertionError(
+            "backfill-vectors admission must use the narrow missing_vector_counts() "
+            "read port, not the full checkup run()"
+        )
+
+    monkeypatch.setattr(repo.maintenance, "count_missing_chunk_vectors", _boom)
+    monkeypatch.setattr(repo.maintenance, "count_missing_element_vectors", _boom)
+    monkeypatch.setattr(repo.checkup, "run", _boom_run)
+
+    r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["accepted"] is True
+    assert len(calls) == 1
+
+
+def test_backfill_vectors_inflight_second_request_is_idempotent(tmp_path, monkeypatch):
+    """Z7②:per-notebook 单飞(进程内 set+lock,与 kg_building 同型)。同一 notebook 在飞
+    时的二次请求幂等受理(accepted=True),不重复提交 scheduler job——刻意不是 409,理由见
+    backfill_vectors 路由 docstring 的取舍说明。
+
+    Z7 单飞先于体检重排:在飞的二次请求必须在查单飞集合那一刻就早退,**零**体检/COUNT
+    调用——boom 掉 missing_vector_counts()与两条 maintenance COUNT,若路由退回「先算
+    计数、再查单飞」的旧序,这里会立刻炸。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "k00300312")
+    nb = _notebook(client, headers, "bf-inflight")
+
+    from app.api.deps import repository
+    from app.api import source_routes
+
+    repo = repository()
+    _seed_source_with_elements(repo, nb, "src-inflight")
+    monkeypatch.setattr(repo, "configured", lambda wid: True)
+    calls = _spy_submit_job(monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise AssertionError(
+            "inflight fast path must return before any checkup/COUNT query runs"
+        )
+
+    monkeypatch.setattr(repo.checkup, "missing_vector_counts", _boom)
+    monkeypatch.setattr(repo.checkup, "run", _boom)
+    monkeypatch.setattr(repo.maintenance, "count_missing_chunk_vectors", _boom)
+    monkeypatch.setattr(repo.maintenance, "count_missing_element_vectors", _boom)
+
+    with source_routes._backfill_vectors_inflight_lock:
+        source_routes._backfill_vectors_inflight.add(nb)
+    try:
+        r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["accepted"] is True
+        assert len(calls) == 0  # 幂等受理:不重复提交
+    finally:
+        with source_routes._backfill_vectors_inflight_lock:
+            source_routes._backfill_vectors_inflight.discard(nb)
+
+
+def test_backfill_vectors_not_inflight_is_admitted_and_registers_guard(
+    tmp_path, monkeypatch
+):
+    """一次正常受理必须真的登记进单飞集合(否则「同一 notebook 在飞时二次请求幂等受理」
+    这条防线形同虚设——集合永远是空的,第二次请求也会被当成「不在飞」重新受理)。用真实
+    的 ``kg_scheduler.submit_job``(不打桩),让后台线程池实际跑一次 job,job 结束的
+    finally 会自行释放守卫——用有界轮询等它释放,而不是断言「提交那一刻」的瞬时状态。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "m00300314")
+    nb = _notebook(client, headers, "bf-registers")
+
+    from app.api.deps import repository
+    from app.api import source_routes
+
+    repo = repository()
+    _seed_source_with_elements(repo, nb, "src-registers")
+    monkeypatch.setattr(repo, "configured", lambda wid: True)
+    # embed_elements_batch 是唯一会真正调用嵌入模型的一步;打桩成 no-op,job 其余逻辑
+    # (发现、hydrate、单飞释放)照常真跑。
+    monkeypatch.setattr(repo.maintenance, "embed_elements_batch", lambda *_a, **_k: None)
+
+    r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["accepted"] is True
+
+    import time
+
+    deadline = time.monotonic() + 5
+    while (
+        nb in source_routes._backfill_vectors_inflight
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert nb not in source_routes._backfill_vectors_inflight  # job 结束后守卫已释放
+
+
+def test_backfill_job_discovery_failure_is_logged_and_finally_still_runs(
+    tmp_path, monkeypatch, caplog
+):
+    """Z7③:发现查询此前**在 try 之外**——超时/异常会绕开 finally,既不触发 H4/H5 的
+    边界失效通知,也不释放(改动后新增的)单飞守卫,异常本身在 kg_scheduler 的
+    fire-and-forget Future 里静默消失。现在挪进 try 并加一条 except,发现阶段的失败
+    必须记账可见(日志),finally 必须照常执行。"""
+    import logging
+
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "n00300315")
+    nb = _notebook(client, headers, "bf-discovery-fail")
+
+    from app.api.deps import repository
+    from app.api import source_routes
+
+    repo = repository()
+    _seed_source_with_elements(repo, nb, "src-fail")
+    monkeypatch.setattr(repo, "configured", lambda wid: True)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("discovery query timed out")
+
+    monkeypatch.setattr(repo.maintenance, "missing_chunk_vector_source_ids", _boom)
+
+    noted = []
+    monkeypatch.setattr(
+        repo._runtime.source_embedding,
+        "note_source_vectors_written",
+        lambda notebook_id: noted.append(notebook_id),
+    )
+
+    with source_routes._backfill_vectors_inflight_lock:
+        source_routes._backfill_vectors_inflight.add(nb)
+
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.backfill_vectors"):
+        source_routes._backfill_vectors_job(repo, nb)  # 必须不向上抛
+
+    assert noted == [nb]  # finally 仍然跑了(H4/H5 边界失效通知)
+    assert "backfill-vectors job 失败" in caplog.text
+    assert nb not in source_routes._backfill_vectors_inflight  # 单飞守卫已释放
+
+
 def test_reparse_rejects_hidden_projection_source(tmp_path, monkeypatch):
     """memory/knowhow 隐藏合成源无 file_path、由投影服务维护——即便属于本 notebook,也不能喂给
     文档解析 process_source(会标失败/清派生态)。owner 从引用数据带来的隐藏源 id 静默跳过(codex)。"""

@@ -1598,6 +1598,8 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def active_object_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
+    def count_active_objects(db: object, notebook_id: str) -> int: ...
+    @staticmethod
     def community_context_rows(db: object, notebook_id: str, members: object) -> list[Any]: ...
     @staticmethod
     def concept_embedding_rows(db: object, notebook_id: str) -> list[Any]: ...
@@ -3610,7 +3612,23 @@ class GovernanceStorePort(Protocol):
     @staticmethod
     def merge_evidence(base_evidence: list, source_evidence: list) -> list: ...
     @staticmethod
-    def sweep_orphan_clusters(db: object, notebook_id: str) -> int: ...
+    def sweep_orphan_clusters_page(
+        db: object,
+        notebook_id: str,
+        after_object_type: str,
+        after_member_object_id: str,
+        limit: int,
+    ) -> tuple[list[Any], int]:
+        """One keyset batch of the orphan-cluster sweep: scan ``≤ limit``
+        cluster rows after the ``(after_object_type, after_member_object_id)``
+        cursor, delete whichever of them are orphans.
+
+        Returns ``(page_rows, deleted_count)``. ``page_rows`` are the SCANNED
+        keys in ``(object_type, member_object_id)`` order — the batch bound is
+        on scanned rows, so the cursor advances over rows the batch did not
+        delete, and ``deleted_count == 0`` must not be read as "sweep done"
+        (a short page is what ends it)."""
+        ...
     @staticmethod
     def incremental_cluster_rows(
         db: object, notebook_id: str, object_type: str

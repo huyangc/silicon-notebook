@@ -71,6 +71,7 @@ from app.services.conversation_public_view import (
     resolve_conversation_asset_alias,
 )
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
+from app.services.search_concurrency import search_concurrency_gate
 from app.services.source_scope import retrieval_scope_receipt_context
 from app.api.task_stream import (
     ClosingStreamingResponse,
@@ -437,14 +438,36 @@ def _require_ask_available(
 
 
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
-def search_notebook(
+async def search_notebook(
     notebook_id: str,
     q: str = Query(""),
 ) -> NotebookSearchResponse:
-    try:
+    # 说明写成注释而不是 docstring:FastAPI 会把路由函数的 docstring 原样搬进
+    # OpenAPI 的 operation.description,而 OpenAPI 形状是冻结契约
+    # (tests/test_repository_api_contract.py)。给内部读者的解释不该改公开契约。
+    #
+    # Z8 (P0 止血): 服务端并发闸,与 MCP search_notebook_context 共用同一个信号量
+    # (见 search_concurrency 模块 docstring)。
+    #
+    # 刻意是 async def 而不是同步路由。同步路由跑在 Starlette 的 anyio 线程池里
+    # (40 个 token,**全站同步端点共享**),在那里阻塞式 acquire 会让每个等待者占住
+    # 一个 token:一次 10 用户 x 前端 4 路扇出的搜索突发就能把 40 个 token 全部占满,
+    # /notebooks、来源列表、checkup、上传统统拿不到线程——闸本身变成全站宕机的成因
+    # (批 0 评审 P1)。改成 async 之后等待发生在事件循环上,等待者是一个挂起的协程:
+    # 不占线程、不占连接、不占 token;只有拿到票的那 <= 4 个才用 asyncio.to_thread
+    # 各占一条线程和一条连接跑真正的扫描。
+    #
+    # 刻意不设超时/拒绝——拒绝会静默收窄某次搜索的结果覆盖面。响应语义与同步版本
+    # 逐字相同,包括 KeyError -> 404 这条映射。
+
+    def run_search() -> NotebookSearchResponse:
         return notebook_catalog_repository().search_notebook(notebook_id, q)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
+
+    async with search_concurrency_gate():
+        try:
+            return await asyncio.to_thread(run_search)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 def _intent_history(repo, notebook_id: str, conversation_id: str | None,
@@ -803,10 +826,24 @@ async def _stream_ask_events(
     # the detached worker. The block contains no ``yield`` -- set and reset
     # happen inside one ``__anext__``, never across a suspension point.
     with retrieval_scope_receipt_context(scope_receipt):
-        events = repo.start_ask_stream(
-            notebook_id, payload, spec,
-            user_id=repo.current_user().id,
-        )
+        # Z4: repo.start_ask_stream() 本身是同步 DB/编排调用(register+begin+
+        # 合成 start 事件),不下沉到线程会阻塞事件循环。asyncio.to_thread 会
+        # copy_context() 后在该线程内跑 func,所以上面刚 set 的
+        # retrieval_scope_receipt_context 依旧对这次调用(以及它内部
+        # background_jobs.submit 的第二层 copy_context)可见 —— 与本函数
+        # docstring 要求的"同一个 __anext__、不跨 yield"一致,这里跨的是
+        # await,不是该 async generator 自己的 yield。用一个零参闭包(而不是
+        # 直接把 repo.start_ask_stream 当可调用对象传给 to_thread)包一层,
+        # 是为了让 test_repository_protocol_coverage.py 的 AskStreamPort
+        # 调用面扫描(按字面 ``repo.start_ask_stream(...)`` 调用形态识别)仍能
+        # 认出这个调用点——纯按引用传参会让它从「被调用」变成「被引用」。
+        def _start_ask_stream():
+            return repo.start_ask_stream(
+                notebook_id, payload, spec,
+                user_id=repo.current_user().id,
+            )
+
+        events = await asyncio.to_thread(_start_ask_stream)
     last_delivery = monotonic()
     # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
@@ -893,32 +930,53 @@ async def _stream_auto_ask_events(
 @router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
 async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
     repo = repository()
-    try:
-        notebook = repo.get_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-    spec = None
-    if payload.mode != AUTO_MODE:
+
+    # Z4: 这整段(get_notebook + _require_ask_available[含 48k 级 all_visible_
+    # source_ids/hidden_source_ids 回表] + _intent_history)原来在事件循环线程
+    # 上直接跑,大库上是秒级同步阻塞。逐字对齐 preview_ask_intent/
+    # preview_ask_intent_stream 的 prepare_preview() 包装形态:同一批同步调用
+    # 打包成一个函数,整体丢进 asyncio.to_thread,异常(KeyError→404、
+    # UnknownAskMode→422、_require_ask_available 的 409/422)原样从线程里抛出、
+    # 经 await 传播回来,语义不变。
+    def prepare_ask_stream():
         try:
-            spec = resolve_mode(payload.mode, _extension_ask_modes())
-        except UnknownAskMode as exc:
-            raise HTTPException(status_code=422, detail={
-                "error": "unknown ask mode", "mode": exc.mode,
-                "valid": _valid_ask_mode_ids()})
-        _validate_confirmed_reasoning_intent(payload, spec)
-    resolved_source_scope, resolved_base_scope = _require_ask_available(
-        notebook, repo, payload.source_scope, payload.base_scope
-    )  # 空库/空检索范围权威拒绝
-    payload = _apply_resolved_scopes(
-        payload, resolved_source_scope, resolved_base_scope
-    )
-    if spec is None:
-        history = _intent_history(
-            repo,
-            notebook_id,
-            payload.conversation_id,
-            repo.current_user().id,
+            notebook = repo.get_notebook(notebook_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+        spec = None
+        if payload.mode != AUTO_MODE:
+            try:
+                spec = resolve_mode(payload.mode, _extension_ask_modes())
+            except UnknownAskMode as exc:
+                raise HTTPException(status_code=422, detail={
+                    "error": "unknown ask mode", "mode": exc.mode,
+                    "valid": _valid_ask_mode_ids()})
+            _validate_confirmed_reasoning_intent(payload, spec)
+        resolved_source_scope, resolved_base_scope = _require_ask_available(
+            notebook, repo, payload.source_scope, payload.base_scope
+        )  # 空库/空检索范围权威拒绝
+        updated_payload = _apply_resolved_scopes(
+            payload, resolved_source_scope, resolved_base_scope
         )
+        history = None
+        if spec is None:
+            history = _intent_history(
+                repo,
+                notebook_id,
+                updated_payload.conversation_id,
+                repo.current_user().id,
+            )
+        return (
+            notebook, spec, updated_payload,
+            resolved_source_scope, resolved_base_scope, history,
+        )
+
+    (
+        notebook, spec, payload,
+        resolved_source_scope, resolved_base_scope, history,
+    ) = await asyncio.to_thread(prepare_ask_stream)
+
+    if spec is None:
         return ClosingStreamingResponse(
             _stream_auto_ask_events(
                 repo,

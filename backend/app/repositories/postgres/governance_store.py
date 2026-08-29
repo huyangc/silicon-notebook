@@ -244,13 +244,105 @@ class GovernanceStore:
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
-    def sweep_orphan_clusters(db: Any, notebook_id: str) -> int:
-        cur = db.execute(
-            "DELETE FROM concept_clusters WHERE notebook_id=%s AND member_object_id NOT IN "
-            "(SELECT id FROM knowledge_objects WHERE notebook_id=%s)",
-            (notebook_id, notebook_id),
-        )
-        return int(cur.rowcount)
+    def sweep_orphan_clusters_page(
+        db: Any,
+        notebook_id: str,
+        after_object_type: str,
+        after_member_object_id: str,
+        limit: int,
+    ) -> "tuple[list, int]":
+        """Z6: one keyset batch of the orphan-cluster sweep — scan ``≤ limit``
+        cluster rows, delete whichever of THOSE rows are orphans.
+
+        Cost model (this is the whole point of the two-statement shape):
+
+        * ① page read — ``notebook_id = %s`` equality plus a row-wise
+          ``(object_type, member_object_id) > (cursor)`` range on the existing
+          ``uq_clusters_notebook_type_member(notebook_id, object_type,
+          member_object_id)`` UNIQUE index, ``ORDER BY`` the same key,
+          ``LIMIT %s``. Pure keyset paging with NO orphan predicate: the scan
+          stops after ``limit`` index entries, so the statement is **strictly
+          O(page)** no matter how many cluster rows the notebook has, and no
+          matter how many of them are orphans. No tie-break on ``id`` is needed
+          (that triple is unique). The explicit ``COLLATE "C"`` matches the
+          column-level ``text COLLATE "C"`` of ``0001_initial.sql``, so it IS
+          the index's own collation — the index stays usable and the ordering
+          stays byte-wise, the same total order the SQLite twin gets for free.
+          Measured on a 1M-row notebook (local PG 16, page 5000): Index Scan,
+          76 buffers, 0.65 ms — and identical at a deep cursor as at a cold
+          one, which is what "independent of N" means here.
+        * ② bounded delete — driven off the page's PRIMARY KEYS
+          (``c.id = ANY(%s)``, at most ``limit`` of them), with the orphan test
+          as a correlated ``NOT EXISTS`` probe against ``knowledge_objects``'s
+          primary key. Also **O(page)**.
+
+        ⚠ ② deliberately does NOT re-express the page as a key RANGE
+          (``> cursor AND <= page_end``), which reads more elegant and was
+          measured to be wrong: with no ``LIMIT`` to make the index attractive,
+          the planner takes the row-comparison as a mere *filter* and picks a
+          Seq Scan of the whole notebook slice plus a Hash Anti Join that hashes
+          EVERY ``knowledge_objects`` row — on the same 1M-row fixture, 5000
+          rows deleted after touching 1,000,000 (201 ms, and linear in N). The
+          PK-list form on that same fixture plans as Index Scan + Nested Loop
+          Anti Join, 5000 index probes, 5.3 ms. A PK ``= ANY`` cannot degrade
+          into a slice scan; a range predicate can, and silently.
+
+        A full sweep of a notebook holding N cluster rows is therefore
+        ``ceil(N / limit)`` batches, O(N) in total but with every statement
+        bounded by the page — versus the two shapes this replaces, BOTH of
+        which put an O(N) statement on the upload hot path:
+
+        * the original single-shot ``member_object_id NOT IN (SELECT id FROM
+          knowledge_objects WHERE notebook_id=%s)`` anti-join (materialised the
+          whole per-notebook id set, joined it against every cluster row);
+        * its first batched rewrite, whose ``LIMIT`` sat on a subquery already
+          filtered by ``NOT EXISTS`` — so the LIMIT bounded the DELETED rows,
+          not the SCANNED ones. With zero orphans (the normal state, since the
+          producers are zeroed out) every batch still scanned the notebook's
+          entire cluster slice before returning empty; with many orphans each
+          batch re-scanned the whole remaining range. That is the P1 this
+          shape fixes.
+
+        ``k.notebook_id = c.notebook_id`` in the NOT EXISTS probe preserves the
+        ORIGINAL notebook-scoped semantics bit-for-bit: a ``member_object_id``
+        that exists as a knowledge-object id but under a DIFFERENT notebook
+        must still count as orphan for this notebook (exactly what the old
+        ``WHERE notebook_id=%s`` on the NOT IN subquery enforced) — dropping
+        that join condition would silently change which rows are orphan. The
+        ``c.notebook_id = %s`` predicate rides along on the DELETE for the same
+        reason ``KnowledgeStore._delete_object_id_batch`` carries one: the
+        statement states its own scope instead of resting on the remote fact
+        that the ids came from a notebook-scoped page.
+
+        Returns ``(page_rows, deleted_count)``. ``page_rows`` are the rows
+        SCANNED this batch, in key order: the caller feeds the last one's
+        ``(object_type, member_object_id)`` back as the next cursor (so the
+        cursor advances over scanned rows, deleted or not) and stops when the
+        page is short. ``deleted_count`` is how many of them were orphans — 0
+        is the common case and must NOT stop the loop."""
+        page = db.execute(
+            "SELECT object_type, member_object_id, id FROM concept_clusters"
+            " WHERE notebook_id = %s"
+            "   AND (object_type COLLATE \"C\", member_object_id COLLATE \"C\") > (%s, %s)"
+            " ORDER BY object_type COLLATE \"C\", member_object_id COLLATE \"C\""
+            " LIMIT %s",
+            (notebook_id, after_object_type, after_member_object_id, limit),
+        ).fetchall()
+        if not page:
+            return [], 0
+        deleted = db.execute(
+            "DELETE FROM concept_clusters AS c"
+            " WHERE c.notebook_id = %s"
+            "   AND c.id = ANY(%s)"
+            "   AND NOT EXISTS ("
+            "     SELECT 1 FROM knowledge_objects k"
+            "     WHERE k.id = c.member_object_id AND k.notebook_id = c.notebook_id"
+            "   )"
+            # 裸 `id` 与 SQLite 孪生同形(那边的 RETURNING 看不见 DELETE 目标别名)。
+            " RETURNING id",
+            (notebook_id, [row["id"] for row in page]),
+        ).fetchall()
+        return page, len(deleted)
 
     @staticmethod
     def incremental_cluster_rows(db: Any, notebook_id: str, object_type: str):
