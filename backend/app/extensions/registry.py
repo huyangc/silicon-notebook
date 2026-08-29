@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Set
 from dataclasses import dataclass
 import re
 from types import MappingProxyType
-from typing import Iterable
+from typing import Callable, Iterable, Mapping
 
 from app.extension_sdk import (
     ASK_ENGINE_POINT,
@@ -38,6 +39,12 @@ _WORKSPACE_UI_SLOTS = frozenset({
     "workspace.side_panel",
     "source.detail_section",
 })
+# One shared immutable verdict for every admission-gated evaluation. It is a
+# frozen dataclass, so handing the same instance to every caller is safe, and
+# ``admin_disabled`` satisfies ``_STABLE_REASON`` like any probe-supplied code.
+_ADMIN_DISABLED = Availability(
+    AvailabilityStatus.DISABLED, reason_code="admin_disabled"
+)
 
 
 @dataclass(frozen=True)
@@ -81,11 +88,19 @@ class ExtensionRegistry:
 
     Availability probes remain live and are called for each request/context.
     Freezing topology therefore never snapshots provider health, permissions,
-    configuration, or other request-time state.
+    configuration, or other request-time state. The admin admission gate
+    (``disabled_ids_provider``) is live in exactly the same sense: freezing
+    settles *which* plugins the gate may apply to, never whether it currently
+    applies to any of them — that verdict is re-read from the process snapshot
+    on every evaluation, which is what lets an administrator switch a
+    deployment plugin off without a restart.
     """
 
     def __init__(
-        self, capability_catalog: CapabilityDecisionCatalog | None = None
+        self,
+        capability_catalog: CapabilityDecisionCatalog | None = None,
+        *,
+        disabled_ids_provider: Callable[[], Set[str]] | None = None,
     ) -> None:
         self._frozen = False
         self._capabilities = capability_catalog or EMPTY_CAPABILITY_CATALOG
@@ -93,6 +108,17 @@ class ExtensionRegistry:
         self._contributions: dict[str, RegisteredContribution] = {}
         self._points: dict[str, list[RegisteredContribution]] = defaultdict(list)
         self._ui_contributions: dict[str, tuple[str, UiContributionDeclaration]] = {}
+        # ``None`` means no gate at all: every evaluation below then takes the
+        # same path it took before this parameter existed, down to the returned
+        # objects. Registries built by tests and by any caller that has not
+        # opted in stay in that state.
+        self._disabled_ids_provider = disabled_ids_provider
+        # Filled by ``freeze``; empty until then, and unreachable before then
+        # because every consumer goes through ``_require_frozen``.
+        self._gateable_plugin_ids: frozenset[str] = frozenset()
+        self._gateable_capability_owners: Mapping[str, frozenset[str]] = (
+            MappingProxyType({})
+        )
 
     @property
     def frozen(self) -> bool:
@@ -328,6 +354,7 @@ class ExtensionRegistry:
                 registrations.sort(
                     key=lambda item: item.contribution.declaration.id
                 )
+        self._freeze_admission_scope()
         self._manifests = MappingProxyType(dict(self._manifests))  # type: ignore[assignment]
         self._contributions = MappingProxyType(  # type: ignore[assignment]
             dict(self._contributions)
@@ -340,6 +367,92 @@ class ExtensionRegistry:
         )
         self._frozen = True
         return self
+
+    def _freeze_admission_scope(self) -> None:
+        """Settle *what the admission gate is allowed to reach*, once.
+
+        Two frozen facts, both pure topology: the set of deployment-trust
+        plugin ids, and which of them owns each capability name. Nothing here
+        asks whether anything is currently disabled — that stays live.
+
+        Only ``trust == "deployment"`` plugins are gateable. Built-in bundles
+        ship with this build and are not administrable, so their ids never
+        enter the set and the capabilities they provide never enter the
+        mapping; core's own capability names (the decisions the composition
+        root mints, which no manifest ``provides``) are absent for the same
+        reason, so a core decision can never be gated by a plugin's toggle.
+
+        Ownership is stored as a *set* of ids per capability rather than a
+        single id even though composition admits exactly one owner
+        (``capability_decisions_from_bundles`` rejects a name claimed twice,
+        by core or by another plugin, at startup). This class does not itself
+        enforce that uniqueness — a registry assembled directly, as tests do,
+        can hold two deployment manifests providing one name — and a
+        ``dict[str, str]`` would silently resolve such a pair by registration
+        order. A set answers it explicitly instead: any owner disabled
+        disables the capability.
+        """
+
+        gateable: dict[str, set[str]] = {}
+        builtin_provided: set[str] = set()
+        deployment_ids: set[str] = set()
+        for plugin_id, manifest in self._manifests.items():
+            if manifest.trust != "deployment":
+                builtin_provided.update(manifest.provides)
+                continue
+            deployment_ids.add(plugin_id)
+            for capability in manifest.provides:
+                gateable.setdefault(capability, set()).add(plugin_id)
+        self._gateable_plugin_ids = frozenset(deployment_ids)
+        self._gateable_capability_owners = MappingProxyType({
+            capability: frozenset(owners)
+            for capability, owners in gateable.items()
+            if capability not in builtin_provided
+        })
+
+    def _disabled_ids(self) -> Set[str]:
+        """The live disabled-plugin snapshot, or the empty set.
+
+        A provider is out-of-registry code, and this runs inside request-path
+        availability evaluation, so a raising provider must not become a
+        request failure. A broken gate degrades to *no gate*, matching the
+        storage layer's "no row = enabled" default: an operator who never
+        disabled anything, and an operator whose refresh just broke, both keep
+        every loaded plugin admitted.
+
+        The snapshot is used, never rebuilt: membership and ``isdisjoint`` are
+        all the gate needs, so nothing is allocated per evaluation. Shape is
+        the publisher's contract — ``app.core.extension_admission`` rejects a
+        non-set loudly when it is *published* — and a provider that returns
+        some other shape anyway is a wiring bug this path can only fail open
+        on, exactly as it does for one that raises.
+        """
+
+        provider = self._disabled_ids_provider
+        if provider is None:
+            return frozenset()
+        try:
+            disabled = provider()
+        except Exception:
+            return frozenset()
+        return disabled if isinstance(disabled, Set) else frozenset()
+
+    def _plugin_admission_blocked(self, plugin_id: str) -> bool:
+        return (
+            plugin_id in self._gateable_plugin_ids
+            and plugin_id in self._disabled_ids()
+        )
+
+    def plugin_runtime_disabled(self, plugin_id: str) -> bool:
+        """True when an admin has switched this deployment plugin off.
+
+        False for a built-in plugin, for an id this registry never loaded, and
+        for every plugin when no provider is wired — the three ways a caller
+        can ask about something the gate does not reach.
+        """
+
+        self._require_frozen()
+        return self._plugin_admission_blocked(plugin_id)
 
     def _validate_dependencies(self) -> None:
         known = set(self._manifests)
@@ -482,7 +595,15 @@ class ExtensionRegistry:
             )
         manifest = self._manifests[registered.plugin_id]
         for capability in manifest.requires:
-            decision = self._capabilities.availability(capability, context)
+            # Through ``capability_availability``, not the catalog directly:
+            # a required capability can be *another* plugin's, and that owner
+            # may be the one an admin disabled. Reading the catalog here would
+            # both answer AVAILABLE for a capability the very same registry
+            # calls DISABLED one method over, and run the disabled plugin's
+            # decision to get that answer. A capability with no gateable owner
+            # — core's own, or a built-in's — costs one absent dict lookup on
+            # the way through.
+            decision = self.capability_availability(capability, context)
             if decision.status is not AvailabilityStatus.AVAILABLE:
                 return decision
         return self.contribution_availability(contribution_id, context)
@@ -490,15 +611,43 @@ class ExtensionRegistry:
     def capability_availability(
         self, capability: str, context: object | None = None
     ) -> Availability:
-        """Evaluate one frozen capability decision without a contribution probe."""
+        """Evaluate one frozen capability decision without a contribution probe.
+
+        Second of the two admission gate points. This entry is not reachable
+        only through ``availability`` — ``parser_chain`` and ``retrieval`` call
+        it directly to ask "can this capability be used at all", with no
+        contribution in hand — so gating it separately is what keeps a disabled
+        plugin's capability from being consulted through that door. A capability
+        with no gateable owner (core's own, or one a built-in provides) never
+        matches and falls straight through to the catalog, unchanged.
+        """
 
         self._require_frozen()
+        owners = self._gateable_capability_owners.get(capability)
+        # ``isdisjoint`` rather than ``&``: the question is whether *any* owner
+        # is disabled, and intersecting builds a set to throw away.
+        if owners and not owners.isdisjoint(self._disabled_ids()):
+            return _ADMIN_DISABLED
         return self._capabilities.availability(capability, context)
 
     def contribution_availability(
         self, contribution_id: str, context: object | None = None
     ) -> Availability:
-        """Evaluate only the contribution's I/O-free live probe."""
+        """Evaluate only the contribution's I/O-free live probe.
+
+        First of the two admission gate points, and the reason the gate is not
+        installed in ``availability`` alone: ``retrieval`` and ``parser_chain``
+        reach this method directly for every contributor and chain link they
+        dispatch, so a gate one level up would leave exactly those two hosts
+        running a disabled plugin's code. ``availability`` inherits the gate
+        from here instead — its ``requires`` loop reads the catalog directly,
+        but it finishes by delegating to this method, so every host that goes
+        through it (ask, ask_engine, indexing, report, report_export,
+        gap_consult) is gated too, without a third copy of the check.
+
+        The gate sits above the probe, not beside it: a disabled plugin's own
+        code must not run, and it is not asked whether it is available.
+        """
 
         self._require_frozen()
         registered = self._contributions.get(contribution_id)
@@ -507,6 +656,8 @@ class ExtensionRegistry:
                 AvailabilityStatus.UNAVAILABLE,
                 reason_code="unknown_contribution",
             )
+        if self._plugin_admission_blocked(registered.plugin_id):
+            return _ADMIN_DISABLED
         probe = registered.contribution.availability
         if probe is None:
             return Availability.available()
@@ -549,8 +700,11 @@ def frozen_registry(
     bundles: Iterable[ExtensionBundle] = (),
     *,
     capability_catalog: CapabilityDecisionCatalog | None = None,
+    disabled_ids_provider: Callable[[], Set[str]] | None = None,
 ) -> ExtensionRegistry:
-    registry = ExtensionRegistry(capability_catalog)
+    registry = ExtensionRegistry(
+        capability_catalog, disabled_ids_provider=disabled_ids_provider
+    )
     for bundle in bundles:
         registry.register(bundle)
     return registry.freeze()

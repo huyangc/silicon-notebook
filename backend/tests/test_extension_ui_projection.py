@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 
@@ -116,6 +116,80 @@ def test_projection_evaluates_each_unique_capability_once_per_request():
     )
     assert len(project_ui_contributions(registry, object())) == 2
     assert calls == 1
+
+
+def _deployment_bundle() -> _UiBundle:
+    manifest = _bundle().manifest
+    return _UiBundle(replace(
+        manifest,
+        id="corp.ui",
+        display_name="Corp UI",
+        trust="deployment",
+        # ``corp.ui.available`` is deliberately absent from ``provides``: this
+        # plugin declares a capability someone else decides. The registry's
+        # capability-level gate therefore has no owner to match, leaving the
+        # projection's own row-level gate as the only thing that can disable
+        # this row — which is exactly the case that would silently regress if
+        # the row check were dropped as redundant.
+        ui_contributions=(UiContributionDeclaration(
+            id="corp-panel",
+            slot="workspace.side_panel",
+            capability="corp.ui.available",
+        ),),
+    ))
+
+
+def _counting_decisions(calls: dict[str, int]):
+    def decision(capability):
+        def decide(_context):
+            calls[capability] += 1
+            return Availability.available()
+
+        return decide
+
+    return {capability: decision(capability) for capability in calls}
+
+
+def test_disabled_deployment_row_skips_its_capability_and_spares_builtins():
+    calls = {"sample.ui.available": 0, "corp.ui.available": 0}
+    registry = build_extension_registry(
+        (_bundle(), _deployment_bundle()),
+        capability_decisions=_counting_decisions(calls),
+        disabled_ids_provider=lambda: frozenset({"corp.ui"}),
+    )
+
+    rows = {row.contribution_id: row for row in project_ui_contributions(
+        registry, object()
+    )}
+    assert rows["corp-panel"].available is False
+    assert rows["corp-panel"].unavailable_reason == "disabled"
+    assert rows["sample-panel"].available is True
+    assert rows["sample-panel"].unavailable_reason is None
+    # The disabled row's decision was never consulted; the built-in row's was.
+    assert calls == {"sample.ui.available": 1, "corp.ui.available": 0}
+
+
+def test_static_ui_contract_ignores_the_admission_gate():
+    """``ui_contribution_contract`` is the cross-stack *topology*, which the
+    frontend registry and the committed fixture are compared against. A
+    runtime toggle must not move it — the row stays, and only its live
+    availability changes."""
+
+    bundles = (_bundle(), _deployment_bundle())
+    decisions = _counting_decisions(
+        {"sample.ui.available": 0, "corp.ui.available": 0}
+    )
+    ungated = build_extension_registry(bundles, capability_decisions=decisions)
+    gated = build_extension_registry(
+        bundles,
+        capability_decisions=decisions,
+        disabled_ids_provider=lambda: frozenset({"corp.ui"}),
+    )
+
+    assert ui_contribution_contract(gated) == ui_contribution_contract(ungated)
+    assert [row["contribution_id"] for row in ui_contribution_contract(gated)] == [
+        "corp-panel", "sample-panel"
+    ]
 
 
 @pytest.fixture
