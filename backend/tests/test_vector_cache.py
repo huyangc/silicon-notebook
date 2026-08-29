@@ -746,3 +746,38 @@ def test_negative_cache_budgets_are_rejected_at_settings_construction() -> None:
     with pytest.raises(pydantic.ValidationError):
         Settings(database_url="sqlite:///gate-test.db", vector_cache_max_bytes=-1)
     assert Settings(database_url="sqlite:///gate-test.db", vector_cache_max_bytes=0).vector_cache_max_bytes == 0
+
+
+def test_concurrent_followers_count_one_outcome_per_get() -> None:
+    """并发同 key miss:leader 构建、follower 双检复用——每次 get() 恰记一个结果
+    (codex #634 R5 P2:此前 follower 记「一 miss + 一 hit」,总数与命中率失真)。"""
+    import threading
+
+    from app.services.vector_cache import VectorCache
+
+    cache = VectorCache(max_entries=8, per_family_entries=8, max_bytes=0)
+    gate = threading.Event()
+    loads = []
+
+    def loader():
+        gate.wait(5.0)
+        loads.append(1)
+        return {"v": 1}
+
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(cache.get("nb:kwtok", ("v1",), loader)))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    gate.set()
+    for t in threads:
+        t.join(10.0)
+    stats = cache.stats()
+    assert len(loads) == 1  # single-flight:只有 leader 真跑 loader
+    assert stats["hits"] + stats["misses"] == 2  # 两次 get() 恰记两个结果
+    assert stats["misses"] == 2 and stats["hits"] == 0
+    # 预热后的第三次才是 hit
+    cache.get("nb:kwtok", ("v1",), loader)
+    assert cache.stats()["hits"] == 1
