@@ -370,6 +370,23 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     }
   };
 
+  // A save the user stopped waiting for can still commit its first step(s) on the
+  // server.  When that lands after the dialog was dismissed, the collection — and
+  // any editor form built from it — is behind the server: re-enabling that form
+  // would let a plain 保存 write the pre-write values back over what just landed.
+  // Reload the projection and take the stale dialog down instead.
+  const recoverFromAbandonedCommit = async (owner: CollectionOwner): Promise<void> => {
+    try {
+      await effectsRef.current.refreshComposite(() => ownsIdentity(owner));
+    } catch (error) {
+      logDiagnostic("collection-refresh", error);
+    }
+    if (!ownsIdentity(owner)) return;
+    effectsRef.current.notify(
+      "刚才停止等待的那次保存，已提交的部分已生效；列表已刷新，设置请重新打开确认。",
+    );
+  };
+
   function activateActor(nextActorId: string) {
     if (!nextActorId || actorIdRef.current === nextActorId || actorIdRef.current !== null) return;
     actorDetachedRef.current = false;
@@ -820,9 +837,16 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     };
     editorSavingTokensRef.current.set(savingKey, savingToken);
     setEditor((value) => value ? { ...value, busy: true } : value);
+    // Did any server write land?  Paired with "the dialog on screen is no longer
+    // this operation's", that is the case where a reopened form holds a snapshot
+    // older than the server.  Either half alone is harmless: a save that failed
+    // with its own dialog still up committed nothing the form is behind, and
+    // #628 deliberately keeps that dialog open for a retry.
+    let committedWrite = false;
     try {
       const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
       await updateNotebook(current.target.id, notebookPatch);
+      committedWrite = true;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const pipelineResult = await applyIndexingPipelineSelection(
         current,
@@ -875,6 +899,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // `!editorSaveOutstanding` is what keeps a *newer* save's dialog busy: a
       // save released its key before the refresh it is still awaiting, so by the
       // time this runs the notebook may already belong to a second write.
+      // Only a dialog that is no longer this operation's can be holding the
+      // stale snapshot; the same dialog still on screen was never replaced.
+      const abandonedAfterCommit = committedWrite
+        && editorOperationRef.current !== operation;
       if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
         setEditor((value) => {
           if (!value || value.target.id !== current.target.id) return value;
@@ -882,8 +910,15 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
             editorOperationRef.current = null;
             return null;
           }
+          // Abandoned after committing: any dialog still standing for this
+          // notebook was opened before that write landed, so its form is stale.
+          if (abandonedAfterCommit) {
+            editorOperationRef.current = null;
+            return null;
+          }
           return value.busy ? { ...value, busy: false } : value;
         });
+        if (abandonedAfterCommit) await recoverFromAbandonedCommit(owner);
       }
     }
   }
@@ -909,8 +944,12 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     };
     editorSavingTokensRef.current.set(savingKey, savingToken);
     setEditor((value) => value ? { ...value, busy: true } : value);
+    // 同 saveEditor:落了写、而屏幕上的弹窗已经不是这次操作的,重开的那个就握着一份
+    // 早于服务端的快照。
+    let committedWrite = false;
     try {
       await setNotebookIndexingPipeline(current.target.id, pipelineId);
+      committedWrite = true;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const updated = await getNotebook(current.target.id);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
@@ -945,6 +984,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // `!editorSaveOutstanding` is what keeps a *newer* save's dialog busy: a
       // save released its key before the refresh it is still awaiting, so by the
       // time this runs the notebook may already belong to a second write.
+      // Only a dialog that is no longer this operation's can be holding the
+      // stale snapshot; the same dialog still on screen was never replaced.
+      const abandonedAfterCommit = committedWrite
+        && editorOperationRef.current !== operation;
       if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
         setEditor((value) => {
           if (!value || value.target.id !== current.target.id) return value;
@@ -952,8 +995,15 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
             editorOperationRef.current = null;
             return null;
           }
+          // Abandoned after committing: any dialog still standing for this
+          // notebook was opened before that write landed, so its form is stale.
+          if (abandonedAfterCommit) {
+            editorOperationRef.current = null;
+            return null;
+          }
           return value.busy ? { ...value, busy: false } : value;
         });
+        if (abandonedAfterCommit) await recoverFromAbandonedCommit(owner);
       }
     }
   }
@@ -1063,11 +1113,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       }
       if (owns(owner)) effectsRef.current.notify("笔记本已删除");
     } catch (error) {
-      // Reported on the same authority the success branch uses (the actor, not
-      // the dialog operation).  A DELETE cannot be withdrawn by closing the
-      // confirmation, so gating the failure on a still-open dialog would make
-      // success speak and failure stay silent for the very same request.
-      if (owns(owner)) effectsRef.current.reportError(error);
+      // Reported on the same authority the success branch and the busy recovery
+      // use — actor identity, not the dialog operation and not the generation
+      // that started the DELETE.  The confirmation is deliberately shown as busy
+      // across a re-login, so its outcome has to reach that same dialog; gating
+      // the failure any tighter would make success speak and failure stay silent
+      // for the very same request.
+      if (ownsIdentity(owner)) effectsRef.current.reportError(error);
     } finally {
       deletingRef.current.delete(key);
       // Settled on the notebook and on actor identity, not on the confirmation

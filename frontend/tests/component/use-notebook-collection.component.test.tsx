@@ -754,11 +754,19 @@ test("a dismissed save keeps its notebook single-flight until the server answers
   await act(async () => value!.saveEditor(editorPatch));
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
 
+  // 那次写入落定时已经提交过 PATCH，而这个重开的弹窗是在它之前建的表单快照——
+  // 原样放行「保存」会把刚落库的值写回旧值，所以它被关掉并重拉一次投影
+  //（codex #629 R4 P1）。
   await act(async () => stuck.resolve(notebook("a")));
   await saving;
-  expect(value!.editor?.busy).toBe(false);
+  expect(value!.editor).toBeNull();
+  expect(effects.notify).toHaveBeenCalledWith(
+    "刚才停止等待的那次保存，已提交的部分已生效；列表已刷新，设置请重新打开确认。",
+  );
 
-  // 落定之后才允许第二次写入。
+  // 重新打开（这次拿到的是刷新后的行）之后才允许第二次写入。
+  await act(async () => value!.openEditor("a"));
+  expect(value!.editor?.busy).toBe(false);
   await act(async () => value!.saveEditor(editorPatch));
   expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(2);
 });
@@ -801,6 +809,70 @@ test("a second save keeps the notebook while the first one unwinds its refresh",
   await secondSave;
 });
 
+test("a failed save keeps its own dialog open instead of treating it as abandoned", async () => {
+  // 与「提交后被放弃」区分开：请求**失败**时表单快照并没有落后于服务端，#628 刻意
+  // 让这个弹窗留在原地供重试，不该被当成陈旧快照关掉，也不该发重新载入提示。
+  const rejection = new Error("bases rejected");
+  basesApi.setBases.mockRejectedValueOnce(rejection);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  await act(async () => value!.saveEditor(editorPatch));
+
+  expect(effects.reportError).toHaveBeenCalledWith(rejection);
+  expect(value!.editor?.busy).toBe(false);
+  expect(effects.notify).not.toHaveBeenCalled();
+});
+
+test("an abandoned save that committed nothing leaves the reopened dialog usable", async () => {
+  // 放弃 + 落过写 才构成陈旧快照。第一步就失败时什么都没落库，重开的表单并不落后于
+  // 服务端——不该被撤下，也不该发「已提交的部分已生效」这种事实错误的提示。
+  const stuck = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  act(() => { value!.closeEditor(); });
+  await act(async () => value!.openEditor("a"));
+
+  await act(async () => stuck.reject(new Error("PATCH failed")));
+  await saving;
+
+  expect(value!.editor?.busy).toBe(false);
+  expect(effects.refreshComposite).not.toHaveBeenCalled();
+  expect(effects.notify).not.toHaveBeenCalledWith(
+    "刚才停止等待的那次保存，已提交的部分已生效；列表已刷新，设置请重新打开确认。",
+  );
+});
+
+test("a reopened stale form cannot write the abandoned save's values back", async () => {
+  // openEditor 的表单快照取自当时的 collection 行。放弃的那次写入落库之后，这份快照
+  // 就早于服务端；若原样放行「保存」，一次未经编辑的提交就会把刚落库的值写回旧值。
+  const stuck = deferred<NotebookSummary>();
+  notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openEditor("a"));
+
+  let saving!: Promise<void>;
+  act(() => { saving = value!.saveEditor(editorPatch); });
+  act(() => { value!.closeEditor(); });
+  await act(async () => value!.openEditor("a"));
+
+  await act(async () => stuck.resolve(notebook("a")));
+  await saving;
+
+  // 弹窗已被撤下，陈旧表单再也提交不出去；投影也重新拉过一次。
+  expect(value!.editor).toBeNull();
+  expect(effects.refreshComposite).toHaveBeenCalledTimes(1);
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).toHaveBeenCalledTimes(1);
+});
+
 test("an outstanding write on one notebook does not block another notebook's settings", async () => {
   const stuck = deferred<NotebookSummary>();
   notebookApi.updateNotebook.mockReturnValueOnce(stuck.promise);
@@ -839,8 +911,12 @@ test("a settings dialog reopened after re-login still recovers from its old writ
   await act(async () => value!.openEditor("a"));
   expect(value!.editor?.busy).toBe(true);
 
+  // 落定之后必须回到可用状态（而不是永远卡在忙碌）——这里是「提交过就重开」那一路，
+  // 所以它被关掉并重拉投影；关键是它没有停在忙碌上。
   await act(async () => stuck.resolve(notebook("a")));
   await saving;
+  expect(value!.editor).toBeNull();
+  await act(async () => value!.openEditor("a"));
   expect(value!.editor?.busy).toBe(false);
 });
 
@@ -1086,6 +1162,32 @@ test("a completed delete does not close a confirmation opened for another notebo
   // A 删成功不该顺手把 B 的确认框关掉（codex #629 R3 P2）。
   expect(value!.deletion?.target.id).toBe("b");
   expect(value!.rows.map((row) => row.id)).toEqual(["b"]);
+});
+
+test("a delete that fails after re-login reports into the dialog it recovered", async () => {
+  // 确认框刻意跨 actor 世代显示为在途，那么它的失败也必须按同一条身份权威汇报——
+  // 否则忙碌位悄悄清掉，用户得不到任何解释（codex #629 R4 P2）。
+  const stuck = deferred<undefined>();
+  const rejection = new Error("delete rejected");
+  notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
+  const view = render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.confirmDelete(); });
+  act(() => { value!.closeDelete(); });
+
+  view.rerender(<Harness actorId={null} />);
+  view.rerender(<Harness actorId="user-a" />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+
+  await act(async () => stuck.reject(rejection));
+  await deleting;
+
+  expect(effects.reportError).toHaveBeenCalledWith(rejection);
+  expect(value!.deletion?.busy).toBe(false);
 });
 
 test("closing the confirmation without a delete in flight says nothing", async () => {
