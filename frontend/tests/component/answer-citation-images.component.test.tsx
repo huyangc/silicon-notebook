@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLayoutEffect, useRef, useState } from "react";
 import { beforeAll, beforeEach, expect, test, vi } from "vitest";
@@ -71,6 +71,35 @@ test("附图无需打开引用浮层，直接插在命中引用的段落之后",
   expect(imageRegion.nextElementSibling).toBe(secondParagraph);
   expect(within(imageRegion).getByText("模型未直接读取图片")).toBeInTheDocument();
   expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1);
+});
+
+test("回答外的输入状态更新时已加载附图保持挂载且不重复取图", async () => {
+  const answer = anchorAnswerWithImages();
+  const view = renderAnswer(answer);
+  const image = await screen.findByRole("img", { name: "图 1：示意图" });
+  expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1);
+
+  // Ask 输入框每敲一个字都会让页面壳重新渲染 AnswerView。这里用与回答内容无关的
+  // prop 变化模拟那次父级更新：图片节点不能被 react-markdown 的自定义组件换型，
+  // 否则 AuthedImage 会先 revoke object URL、再请求一次，用户看到的就是闪动。
+  view.rerender(
+    <AnswerView
+      answer={answer}
+      feedbackSent=""
+      onFeedback={() => undefined}
+      onOpenKnowledgeGraph={() => undefined}
+      onOpenKnowhowRow={() => undefined}
+      notebookId="nb-1"
+      notebookNames={{}}
+      onBuildScaleIndex={() => undefined}
+      buildingScaleIndex
+      onSaveMemory={() => undefined}
+      memorySaved={false}
+    />,
+  );
+
+  await waitFor(() => expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole("img", { name: "图 1：示意图" })).toBe(image);
 });
 
 test("caption 只作为图片 alt，不在正文或引用浮层重复显示", async () => {
