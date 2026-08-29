@@ -4174,9 +4174,35 @@ export default function Home() {
     if (!currentNotebook) return;
     const state = tierActionState(currentNotebook);
     const target = state.action === "unset" ? "personal" : "base";
-    const updated = await setNotebookTier(currentNotebook.id, target);
-    setCurrentNotebook(updated as NotebookSummary);
-    await loadNotebookCollection();
+    const notebookId = currentNotebook.id;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const stillCurrent = () => workspaceRequestIsCurrent(
+      false,
+      workspaceEpoch,
+      workspaceEpochRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
+    );
+    let updated: Awaited<ReturnType<typeof setNotebookTier>>;
+    try {
+      updated = await setNotebookTier(notebookId, target);
+    } catch (error) {
+      // The caller owns user-visible error reporting.  Do not let a rejected
+      // request from a workspace the user has already left reach that caller.
+      if (stillCurrent()) throw error;
+      return;
+    }
+    if (!stillCurrent()) return;
+    setCurrentNotebook((current) => (
+      current?.id === notebookId ? updated as NotebookSummary : current
+    ));
+    try {
+      await loadNotebookCollection({ guard: stillCurrent });
+    } catch (error) {
+      if (stillCurrent()) throw error;
+      return;
+    }
+    if (!stillCurrent()) return;
     setToast(
       target === "base"
         ? "已设为公共知识库 — 其他笔记本可以在设置里把它挂为参考库"
