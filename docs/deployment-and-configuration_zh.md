@@ -265,7 +265,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
-已有数据的 PostgreSQL 库还应在线建好热路径修复批 1 的六组共八条索引
+已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引，共十条；GIN 体积约为 knowledge_objects 表段的 1.5×，属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
 （`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
 反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
@@ -279,7 +279,7 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 
 每条都是普通 btree（其中一条 partial、一条表达式）索引而非 GIN，即使在大表上单条建索引
 也快——但 `CREATE INDEX CONCURRENTLY` 仍要对表做一次全表扫描，繁忙数据库上应避开高峰期。
-迁移文件 `0039_hotpath_batch1_indexes.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
+迁移文件 `0039_hotpath_batch1_indexes.sql` 与 `0042_hotpath_batch2_search_indexes.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
 （迁移在事务里跑，`CONCURRENTLY` 进不了事务），一旦这个脚本已经把八条索引都建好，迁移
 落地时就是 no-op 的账本记录；全新部署、还没有生产流量的库，迁移本身已经够用，先跑脚本
 是可选项。`--apply` 若报告某条索引状态是 `INVALID`（此前一次 `CONCURRENTLY` 建索引中途

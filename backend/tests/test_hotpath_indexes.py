@@ -98,12 +98,31 @@ def test_migration_file_exists_and_is_parseable():
     )
 
 
+# The eight batch-1 names this migration (0039) alone is responsible for.
+# HOTPATH_INDEX_SPECS grew a batch-2 addition (two more names, living in a
+# separate migration file, 0041) with its own reconciliation test --
+# see backend/tests/test_hotpath_indexes_batch2.py -- so this test's job is
+# scoped to exactly these eight, not to HOTPATH_INDEX_SPECS's total size.
+_BATCH1_NAMES = frozenset(
+    {
+        "idx_clusters_nb_canonical",
+        "idx_clusters_nb_canonical_name_lower",
+        "idx_extraction_runs_notebook",
+        "idx_knowledge_source_fact_elements_notebook",
+        "idx_memory_items_notebook",
+        "idx_knowledge_relations_nb_source_target_edge",
+        "idx_chunks_source_ordinal",
+        "idx_sources_nb_hidden_type",
+    }
+)
+
+
 def test_all_eight_migration_statements_match_a_spec_verbatim():
     parsed = _parse_migration_specs()
     by_name = {spec.name: spec for spec in HOTPATH_INDEX_SPECS}
-    assert len(parsed) == len(HOTPATH_INDEX_SPECS), (
-        "migration file and HOTPATH_INDEX_SPECS must define the same number "
-        f"of indexes: migration has {len(parsed)}, module has {len(HOTPATH_INDEX_SPECS)}"
+    assert {entry["name"] for entry in parsed} == _BATCH1_NAMES, (
+        "migration 0039 must declare exactly the eight batch-1 names, no more, "
+        f"no less: parsed {[entry['name'] for entry in parsed]}"
     )
     seen = set()
     for entry in parsed:
@@ -114,9 +133,7 @@ def test_all_eight_migration_statements_match_a_spec_verbatim():
         assert entry["table"] == spec.table, name
         assert entry["columns"] == spec.columns, name
         assert entry["predicate"] == spec.predicate, name
-    assert seen == set(by_name), (
-        f"HOTPATH_INDEX_SPECS defines names the migration is missing: {set(by_name) - seen}"
-    )
+    assert seen == _BATCH1_NAMES
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or concurrently build hot-path fix batch 1's eight PostgreSQL
+"""Inspect or concurrently build the accumulated hot-path fix PostgreSQL
 indexes (six query-family groups).
 
     python3 scripts/build_hotpath_indexes.py                 # inspect (default)
@@ -9,12 +9,12 @@ Shape mirrors ``scripts/build_postgres_retrieval_indexes.py`` (argparse,
 ``--database-url-env`` defaulting to ``DATABASE_URL``, the URL is never
 printed, ``database_identity(...)`` must resolve to ``postgresql``, inspect
 vs apply, ``--lock-timeout-seconds``). See
-``app/repositories/postgres/hotpath_indexes.py`` for the eight index
+``app/repositories/postgres/hotpath_indexes.py`` for the index
 definitions and ``migrations/0039_hotpath_batch1_indexes.sql`` for the full
 per-group "which query family does this serve" evidence.
 
 Relationship to the migration: this script is how an operator builds these
-eight indexes on an already-populated, already-serving-traffic production
+indexes (batch 1: six query-family groups, eight btree/partial indexes; batch 2: the payload-search GIN + the checkup-H5 partial index — ten in total) on an already-populated, already-serving-traffic production
 database WITHOUT taking a blocking lock (``CREATE INDEX CONCURRENTLY``, one
 statement per index, no transaction). Migration 0039 in
 ``backend/app/repositories/postgres/migrations/`` uses plain
@@ -47,7 +47,7 @@ from app.repositories.postgres.hotpath_indexes import (  # noqa: E402
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Inspect or concurrently build hot-path fix batch 1's eight PostgreSQL "
+            "Inspect or concurrently build the accumulated hot-path fix PostgreSQL "
             "indexes (six query-family groups). The database URL is read from an "
             "environment variable and never printed."
         )

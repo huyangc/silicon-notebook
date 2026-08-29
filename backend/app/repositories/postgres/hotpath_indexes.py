@@ -1,14 +1,29 @@
-"""Online-safe PostgreSQL builder for hot-path fix batch 1's six index groups
-(eight indexes).
+"""Online-safe PostgreSQL builder for the accumulated hot-path fix indexes.
 
-This is the sibling of ``retrieval_indexes.py`` (GIN trigram indexes) but for
-eight plain btree/partial indexes across six query-family groups -- see
+Batch 1 contributed six query-family groups (eight plain btree/partial
+indexes) -- see
 ``backend/app/repositories/postgres/migrations/0039_hotpath_batch1_indexes.sql``
-for the full "which query family does this serve" evidence per group. That
-migration and this module are two independent hand-authored copies of the
-same eight index shapes on purpose (a migration file cannot import Python at
-apply time), so ``backend/tests/test_hotpath_indexes.py`` parses both and
-cross-checks them statement-by-statement to catch drift.
+for the full "which query family does this serve" evidence per group. Batch 2
+(R6) added a second migration,
+``backend/app/repositories/postgres/migrations/0042_hotpath_batch2_search_indexes.sql``,
+contributing one GIN expression index (this module's first non-btree entry,
+hence the ``using``/``ddl_columns`` fields below) and one partial btree index.
+Both migrations and this module's ``HOTPATH_INDEX_SPECS`` are independent
+hand-authored copies of the same index shapes on purpose (a migration file
+cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
+cross-checks migration 0039 against its eight batch-1 specs, and
+``backend/tests/test_hotpath_indexes_batch2.py`` cross-checks migration 0041
+against its two batch-2 specs, so neither pairing can silently drift. One
+shared builder/inspector serves every batch: there is a single advisory lock
+name and a single ``HOTPATH_INDEX_SPECS`` tuple that grows with each batch,
+not a lock/tuple per batch.
+
+This is the sibling of ``retrieval_indexes.py`` (GIN trigram indexes for
+large, notebook-scoped tables) but far simpler: every spec here is either a
+plain btree/partial index, or (since batch 2) a single-expression GIN index
+that needs no per-notebook composite key and no legacy-index retirement
+dance, so ``HotpathIndexSpec`` stays a flat dataclass instead of
+``retrieval_indexes.py``'s richer ``IndexShape``/collation-oid machinery.
 
 Inspecting is always safe (read-only ``pg_index``/``pg_class`` catalog
 queries, no advisory lock). Building is online-safe: every ``CREATE INDEX``
@@ -28,6 +43,8 @@ import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,H5 谓词字面量的唯一真源
+
 
 HOTPATH_INDEX_LOCK_NAME = "silicon-notebook:postgres-hotpath-indexes:v1"
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -41,6 +58,14 @@ class HotpathIndexError(RuntimeError):
 class HotpathIndexSpec:
     name: str
     table: str
+    # The catalog's own per-key shape used for ``_matches_shape`` comparison --
+    # i.e. exactly what ``pg_get_indexdef(indexrelid, n, true)`` reports back
+    # for each key column, WITHOUT any ``COLLATE``/opclass qualifier (a live
+    # PostgreSQL 16 instance never echoes those back in the per-column form
+    # even when the DDL declared them -- empirically verified; see this
+    # module's tests). For a plain btree spec this doubles as the DDL text
+    # too (``ddl_columns`` is left "" and ``column_list_sql`` falls back to
+    # joining these).
     columns: tuple[str, ...]
     predicate: str  # "" for a full (non-partial) index; verbatim DDL text
     # PostgreSQL's own canonical ``pg_get_expr()`` rendering of ``predicate``,
@@ -53,17 +78,31 @@ class HotpathIndexSpec:
     # against a live PostgreSQL 16 instance -- see this module's tests.
     predicate_shape: str
     serves: str  # short human description of the query family this serves
+    # "" (default) => plain btree, no ``USING`` clause (byte-identical to
+    # batch 1's original DDL template). Any other value (e.g. "gin") adds
+    # ``USING <value>`` before the column list.
+    using: str = ""
+    # Override for ``column_list_sql()``'s DDL text when it must carry
+    # qualifiers (``COLLATE``, an opclass) that the bare ``columns`` shape
+    # above deliberately omits so it can still be compared against what the
+    # catalog echoes back. "" (default) means "DDL text == columns joined by
+    # ', '" (batch 1's plain btree case, unchanged).
+    ddl_columns: str = ""
 
     def column_list_sql(self) -> str:
-        return ", ".join(self.columns)
+        return self.ddl_columns or ", ".join(self.columns)
 
     def ddl(self, schema: str, *, concurrently: bool) -> sql.Composed:
         concurrently_kw = sql.SQL("CONCURRENTLY ") if concurrently else sql.SQL("")
-        stmt = sql.SQL("CREATE INDEX {concurrently}IF NOT EXISTS {index} ON {schema}.{table}({columns})").format(
+        using_kw = sql.SQL(f" USING {self.using} ") if self.using else sql.SQL("")
+        stmt = sql.SQL(
+            "CREATE INDEX {concurrently}IF NOT EXISTS {index} ON {schema}.{table}{using}({columns})"
+        ).format(
             concurrently=concurrently_kw,
             index=sql.Identifier(self.name),
             schema=sql.Identifier(schema),
             table=sql.Identifier(self.table),
+            using=using_kw,
             columns=sql.SQL(self.column_list_sql()),
         )
         if self.predicate:
@@ -146,6 +185,72 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
             "source_type = ANY (ARRAY['memory'::text, 'knowhow'::text])"
         ),
         serves="source_store.py:hidden_source_ids",
+    ),
+    # -- Batch 2 (R6): search + checkup H5 index pair -- see
+    # migrations/0042_hotpath_batch2_search_indexes.sql for the full
+    # production-diag evidence (5.9s -> 3.6ms / 2.6s cold-scan numbers) and
+    # backend/tests/test_hotpath_indexes_batch2.py for this module's own
+    # migration<->spec and PY_WHITESPACE<->literal reconciliation tests.
+    HotpathIndexSpec(
+        name="idx_knowledge_objects_payload_trgm",
+        table="knowledge_objects",
+        using="gin",
+        # Bare per-key shape a live catalog read reports back for this
+        # expression key -- COLLATE and the opclass are never echoed in the
+        # per-column ``pg_get_indexdef(indexrelid, n, true)`` form even
+        # though the DDL below declares them (empirically verified against a
+        # live PostgreSQL 16 instance; see idx_source_elements_nonblank's own
+        # note on the same asymmetry for a partial predicate).
+        columns=("(payload::text)",),
+        # The real DDL text: must stay byte-identical to
+        # search.py's own ``(payload::text) COLLATE "C"`` ILIKE-arm
+        # expression (search.py:846) so the GIN index actually covers that
+        # query's operator, and to migrations/0006_search_gin.sql's
+        # idx_knowledge_objects_name_trgm sibling's double-parenthesized
+        # ``((expr) COLLATE "C") opclass`` form.
+        ddl_columns='((payload::text) COLLATE "C") public.gin_trgm_ops',
+        predicate="",
+        predicate_shape="",
+        serves="search.py:notebook_knowledge_rows (payload ILIKE probe)",
+    ),
+    HotpathIndexSpec(
+        name="idx_source_elements_nonblank",
+        table="source_elements",
+        columns=("source_id", "id"),
+        # ``PY_WHITESPACE``-keyed non-blank predicate, rendered as a flat
+        # ``chr(N) || chr(N) || ...`` concatenation (same style as
+        # ``knowhow_store.py``'s ``_PG_TRIM_CHARS`` and
+        # migrations/0005_memory_knowhow_governance_indexes.sql's
+        # normalized-anchor index) so the DDL text is *derived from*
+        # ``PY_WHITESPACE`` rather than hand-transcribed -- eliminating the
+        # transcription-drift risk the task called out as this batch's
+        # easiest way to get it wrong. Must stay semantically identical to
+        # postgres/maintenance.py's ``_NONBLANK_TEXT_SQL`` (see that
+        # module) and to migrations/0042_hotpath_batch2_search_indexes.sql's
+        # copy of this same expression.
+        predicate=(
+            "btrim(text, "
+            + " || ".join(f"chr({ord(character)})" for character in PY_WHITESPACE)
+            + ") != ''"
+        ),
+        # PostgreSQL's ``pg_get_expr()`` re-serializes the flat ``||`` chain
+        # above into a fully left-associated, fully parenthesized operator
+        # tree AND rewrites ``!=`` to ``<>`` -- both empirically captured
+        # against a live PostgreSQL 16 instance (see this module's
+        # docstring and backend/tests/test_hotpath_indexes_batch2.py, which
+        # re-derives this exact string from ``PY_WHITESPACE`` and asserts it
+        # against a live catalog read so a future deparser change fails
+        # loudly here instead of silently under-matching in production).
+        predicate_shape=(
+            "btrim(text, ((((((((((((((((((((((((((("
+            "chr(9) || chr(10)) || chr(11)) || chr(12)) || chr(13)) || chr(28)) "
+            "|| chr(29)) || chr(30)) || chr(31)) || chr(32)) || chr(133)) || chr(160)) "
+            "|| chr(5760)) || chr(8192)) || chr(8193)) || chr(8194)) || chr(8195)) "
+            "|| chr(8196)) || chr(8197)) || chr(8198)) || chr(8199)) || chr(8200)) "
+            "|| chr(8201)) || chr(8202)) || chr(8232)) || chr(8233)) || chr(8239)) "
+            "|| chr(8287)) || chr(12288)) <> ''::text"
+        ),
+        serves="postgres/maintenance.py: H5 non-blank element eligibility (count_missing_element_vectors et al.)",
     ),
 )
 
