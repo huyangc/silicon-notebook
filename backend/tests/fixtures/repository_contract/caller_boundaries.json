@@ -261,9 +261,33 @@
     {
       "count": 1,
       "kind": "independent_private",
-      "path": "backend/app/api/mcp_server.py",
+      "path": "backend/app/api/knowhow_routes.py",
       "reason": "API readiness checks the process-owned model provider",
-      "scope": "<module>.create_memory_mcp.build_kg.run",
+      "scope": "<module>._optimize_knowhow_cell",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/knowhow_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>._prepare_complete_knowhow_row",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/knowhow_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.optimize_knowhow_cell_stream",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/mcp_tools/maintenance.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.register_maintenance_tools.build_kg.run",
       "target": "_runtime"
     },
     {
@@ -272,6 +296,14 @@
       "path": "backend/app/api/report_routes.py",
       "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>._report_llm_ready",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/report_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.export_reports_endpoint",
       "target": "_runtime"
     },
     {
@@ -291,7 +323,7 @@
       "target": "_runtime"
     },
     {
-      "count": 1,
+      "count": 2,
       "kind": "independent_private",
       "path": "backend/app/api/source_routes.py",
       "reason": "API readiness checks the process-owned model provider",
@@ -1903,6 +1935,70 @@
     {
       "count": 1,
       "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._connect",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._pick_notebook_id",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._sample_canonical",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.audit_indexes",
+      "target": "connection.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.audit_reverse_fk_indexes",
+      "target": "connection.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.run_diagnostics",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.run_row_count",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_pg_hotpaths.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.run_statement",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
       "path": "scripts/diag_slow.py",
       "reason": "read-only host database diagnostic",
       "scope": "<module>._sample_typeof",
@@ -2131,6 +2227,14 @@
       "reason": "temporary copies used by the offline two-database merge tool",
       "scope": "<module>._assert_global_schema_compatibility",
       "target": "conn_b.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>._evict_experiences_to_limit",
+      "target": "conn.execute"
     },
     {
       "count": 1,
