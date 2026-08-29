@@ -134,6 +134,7 @@ export function ActivityStream({
             <button
               aria-pressed={activityType === option.value}
               className={`activity-type-button${activityType === option.value ? " active" : ""}`}
+              disabled={loading}
               key={option.value || "all"}
               onClick={() => onActivityTypeChange(option.value)}
               type="button"
