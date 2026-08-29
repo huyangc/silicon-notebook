@@ -149,28 +149,42 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   const editorOperationRef = useRef<EditorOperation | null>(null);
   const deleteOperationRef = useRef<object | null>(null);
   const createOperationRef = useRef<{ owner: CollectionOwner; token: object } | null>(null);
-  // Tie the single-flight seat to the editor operation that acquired it.  A
-  // successful save closes the editor before the post-write collection refresh
-  // finishes, so a bare boolean can leak forever when the user reopens settings
-  // and replaces editorOperationRef before the old finally block runs.
-  const editorSavingRef = useRef<EditorOperation | null>(null);
-  const editorSaveAbortRef = useRef<AbortController | null>(null);
+  // Outstanding editor writes, keyed by actor+notebook exactly like deletingRef.
+  //
+  // Not a single seat and not an operation identity: dismissing the dialog stops
+  // the *remaining* steps of a save, but it cannot recall the request already on
+  // the server — aborting the browser fetch only stops the client from awaiting
+  // the response, the handler keeps running.  So the key is held until the
+  // client actually sees that write settle, and a second save for the same
+  // notebook is refused until then; otherwise the abandoned handler could finish
+  // after the retry and put the values the user walked away from back.  Keying
+  // per notebook (rather than one hook-wide latch) keeps a different notebook's
+  // settings usable while one notebook's write is outstanding.
+  //
+  // Entries are removed unconditionally at settlement — never on an authority
+  // change — so a logout/login cycle cannot strand a key that nothing will clear.
+  const editorSavingIdsRef = useRef(new Set<string>());
   const editorRevokedOperationRef = useRef<EditorOperation | null>(null);
   const deletingRef = useRef(new Set<string>());
   const renamingRef = useRef(new Map<string, object>());
   const tombstonesRef = useRef(new Map<string, Set<string>>());
   const deleteGenerationRef = useRef(new Map<string, number>());
 
-  // Cancel whatever request an abandoned save still has on the wire.
-  //
-  // Stopping at the next checkpoint is not enough once the user is free to start
-  // another save: a PATCH / pipeline / PUT bases that lands *after* the retry
-  // would overwrite the values the user just typed with the ones they walked
-  // away from.  Every caller either replaces or clears editorOperationRef in the
-  // same breath, so the abort rejection lands in a branch that is already silent.
-  const abortAbandonedEditorSave = () => {
-    editorSaveAbortRef.current?.abort();
-    editorSaveAbortRef.current = null;
+  const operationKey = (actor: string, notebookId: string): string => (
+    `${actor}\0${notebookId}`
+  );
+
+  const editorSaveOutstanding = (actor: string | null, notebookId: string): boolean => (
+    actor !== null && editorSavingIdsRef.current.has(operationKey(actor, notebookId))
+  );
+
+  // The dialog currently on screen belongs to the operation in editorOperationRef;
+  // "is its write outstanding" is the question every visibility rule below asks.
+  const activeEditorSaveOutstanding = (): boolean => {
+    const operation = editorOperationRef.current;
+    return Boolean(
+      operation && editorSaveOutstanding(actorIdRef.current, operation.notebookId)
+    );
   };
 
   const clearVisibleState = () => {
@@ -207,8 +221,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     editorOperationRef.current = null;
     deleteOperationRef.current = null;
     createOperationRef.current = null;
-    editorSavingRef.current = null;
-    abortAbandonedEditorSave();
+    // editorSavingIdsRef is deliberately untouched: its entries are owned by the
+    // requests that created them and are removed when those settle.  Dropping
+    // them here would let a re-login start a second write over one that is still
+    // running, and (mirroring deletingRef) would strand a dialog reopened by the
+    // same actor at busy with nothing left to clear it.
     editorRevokedOperationRef.current = null;
   };
 
@@ -334,8 +351,15 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // would otherwise reach the user as a bare "list not refreshed" and reach
       // nobody else at all: reportError is deliberately not called here (it
       // would contradict the success toast the caller is about to publish).
-      // The raw error never reaches console directly — logDiagnostic is the
-      // single truncating/flattening boundary for untranslated diagnostics.
+      //
+      // logDiagnostic — not console.error — is the repository's single sink for
+      // untranslated diagnostics (errors.ts 顶部的用法表；它统一截断并压平成一行).
+      // 取舍登记(codex #629 R2 P2，已驳回)：评审建议连诊断本身也不要落，只留一个
+      // content-free 标记。不采纳——errors-guard.test.mjs 里那条
+      // `use-report-workspace` 断言(不许 console.error、必须 logDiagnostic)正是
+      // 仓库对这条通道的既定裁决，改成无内容标记会让这个 catch 既不上屏也不可排查，
+      // 与它存在的理由相反。AGENTS.md 那条「异常原文不进日志」约束的是外发日志与
+      // content-free 遥测，不是这条本地开发者通道。
       logDiagnostic("collection-refresh", error);
       return false;
     }
@@ -387,7 +411,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const activeEditorOperation = editorOperationRef.current;
     if (
       activeEditorOperation
-      && editorSavingRef.current === activeEditorOperation
+      && activeEditorSaveOutstanding()
       && rowExplicitlyDeniesManageContent(activeEditorOperation.notebookId)
     ) {
       // Once this operation observes an explicit revocation it cannot be made
@@ -406,18 +430,14 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // save is in flight.  Keep the disabled editor visible and let the API
       // authorization on each remaining write decide; otherwise this snapshot
       // silently cancels the operation between PATCH and PUT.
-      if (
-        editorOperationRef.current
-        && editorSavingRef.current === editorOperationRef.current
-      ) return current;
+      if (activeEditorSaveOutstanding()) return current;
       editorOperationRef.current = null;
-      editorSavingRef.current = null;
       editorRevokedOperationRef.current = null;
       return null;
     });
     setDeletion((current) => {
       if (!current || ownerIds.has(current.target.id)) return current;
-      const key = `${current.owner.actorId}\0${current.target.id}`;
+      const key = operationKey(current.owner.actorId, current.target.id);
       // As with editor saves, a list projection is not cancellation authority
       // for a request that has already reached the server.  Keep the disabled
       // confirmation visible so either success or failure has somewhere to land.
@@ -633,7 +653,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   async function renameNotebook(notebookId: string, name: string): Promise<NotebookSummary | null> {
     const owner = captureOwner();
     if (!owner || !rowCanRename(notebookId)) return null;
-    const key = `${owner.actorId}\0${notebookId}`;
+    const key = operationKey(owner.actorId, notebookId);
     if (renamingRef.current.has(key)) return null;
     const token = {};
     renamingRef.current.set(key, token);
@@ -680,14 +700,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     if (!owner || !rowCanManageContent(notebookId)) return false;
     const operation: EditorOperation = { notebookId };
     editorOperationRef.current = operation;
-    // Replacing the operation orphans any save still in flight for the previous
-    // one: its remaining steps stop at the next editorOperationMayContinue and
-    // its editor view is already gone.  Release the single-flight seat with it,
-    // or the editor this call is opening has a silently dead save button until
-    // the orphan settles — saveEditor reads the seat as a plain latch, not as
-    // "a save for *this* operation".
-    editorSavingRef.current = null;
-    abortAbandonedEditorSave();
     editorRevokedOperationRef.current = null;
     try {
       const target = currentRow(notebookId);
@@ -721,7 +733,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         mountedIds: mountEdges.map((edge) => edge.id),
         indexingPipeline,
         selectedPipelineId: normalizeIndexingPipelineId(indexingPipeline.pipeline_id),
-        busy: false,
+        // Reopened over an outstanding write, this dialog must show that write
+        // rather than offer a 保存 that saveEditor would silently refuse.  The
+        // settling request clears it (matched on the notebook, not on this
+        // dialog instance).
+        busy: editorSaveOutstanding(owner.actorId, notebookId),
       });
       closeMenu();
       return true;
@@ -738,13 +754,8 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     // backdrop click), so the outcome of the steps that already reached the
     // server has to be said out loud rather than left to a silently vanished
     // dialog.
-    const abandonedSave = Boolean(
-      editorSavingRef.current
-      && editorSavingRef.current === editorOperationRef.current
-    );
+    const abandonedSave = activeEditorSaveOutstanding();
     editorOperationRef.current = null;
-    editorSavingRef.current = null;
-    abortAbandonedEditorSave();
     editorRevokedOperationRef.current = null;
     setEditor(null);
     if (abandonedSave) {
@@ -773,56 +784,50 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   async function applyIndexingPipelineSelection(
     current: EditorView,
     desiredPipelineId: string,
-    signal: AbortSignal,
   ): Promise<IndexingPipelineResponse | null> {
     if (
       !current.canManageContent
       || indexingPipelineIdsEqual(current.indexingPipeline?.pipeline_id, desiredPipelineId)
     ) return current.indexingPipeline;
-    return setNotebookIndexingPipeline(current.target.id, desiredPipelineId || null, signal);
+    return setNotebookIndexingPipeline(current.target.id, desiredPipelineId || null);
   }
 
   async function saveEditor(patch: NotebookEditorPatch): Promise<void> {
     const owner = captureOwner();
     const current = editor;
-    if (!owner || !current || !owns(current.owner) || current.busy || editorSavingRef.current
+    if (!owner || !current || !owns(current.owner) || current.busy
+      || editorSaveOutstanding(owner.actorId, current.target.id)
       || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
-    // Two notebook ids are in play once the seat is bound to an operation: the
-    // write steps below key off `current.target.id`, while the sticky-revocation
-    // bookkeeping in commitListSnapshot keys off `operation.notebookId`.  They
-    // can only diverge while an openEditor for a *different* notebook is in
-    // flight, and letting the pair drift would mark this save revoked from the
-    // other notebook's access.  Refuse instead of running on a split identity.
+    // Two notebook ids are in play once a write is outstanding: the steps below
+    // key off `current.target.id`, while the sticky-revocation bookkeeping in
+    // commitListSnapshot keys off `operation.notebookId`.  They can only diverge
+    // while an openEditor for a *different* notebook is in flight, and letting
+    // the pair drift would mark this save revoked from the other notebook's
+    // access.  Refuse instead of running on a split identity.
     if (!operation || operation.notebookId !== current.target.id) return;
-    const abort = new AbortController();
-    const releaseSeat = () => {
-      if (editorSavingRef.current === operation) editorSavingRef.current = null;
-      if (editorSaveAbortRef.current === abort) editorSaveAbortRef.current = null;
-    };
-    editorSavingRef.current = operation;
-    editorSaveAbortRef.current = abort;
+    const savingKey = operationKey(owner.actorId, current.target.id);
+    editorSavingIdsRef.current.add(savingKey);
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
       const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
-      await updateNotebook(current.target.id, notebookPatch, abort.signal);
+      await updateNotebook(current.target.id, notebookPatch);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const pipelineResult = await applyIndexingPipelineSelection(
         current,
         normalizeIndexingPipelineId(indexingPipelineId),
-        abort.signal,
       );
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const bases = current.canConfigureNotebook
-        ? await setBases(current.target.id, current.mountedIds, abort.signal)
+        ? await setBases(current.target.id, current.mountedIds)
         : current.mountEdges;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
-      const updated = await getNotebook(current.target.id, abort.signal);
+      const updated = await getNotebook(current.target.id);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
-      // The server-side write sequence is complete.  Release the save seat
+      // Every server write in the sequence has settled — release the notebook
       // before hiding the dialog and awaiting the slower collection refresh so
-      // an immediate reopen starts with a fresh, usable operation.
-      releaseSeat();
+      // an immediate reopen starts with a usable form.
+      editorSavingIdsRef.current.delete(savingKey);
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, bases);
       const refreshed = await refreshCompositeAfterCommit(owner);
@@ -848,16 +853,21 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     } catch (error) {
       if (owns(owner) && editorOperationRef.current === operation) effectsRef.current.reportError(error);
     } finally {
-      releaseSeat();
+      editorSavingIdsRef.current.delete(savingKey);
       if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
-      if (owns(owner) && editorOperationRef.current === operation) {
+      // Settled on the notebook and on actor identity, not on this dialog
+      // instance or the generation that started the write.  Dismissing and
+      // reopening the dialog replaces editorOperationRef, and a logout/login
+      // cycle replaces the generation — keying the release on either would
+      // strand the reopened dialog at busy with nothing left to clear it.
+      if (ownsIdentity(owner)) {
         setEditor((value) => {
-          if (!value) return value;
+          if (!value || value.target.id !== current.target.id) return value;
           if (!rowCanManageContent(value.target.id)) {
             editorOperationRef.current = null;
             return null;
           }
-          return { ...value, busy: false };
+          return value.busy ? { ...value, busy: false } : value;
         });
       }
     }
@@ -869,29 +879,25 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   ): Promise<void> {
     const owner = captureOwner();
     const current = editor;
-    if (!owner || !current || !owns(current.owner) || current.busy || editorSavingRef.current
+    if (!owner || !current || !owns(current.owner) || current.busy
+      || editorSaveOutstanding(owner.actorId, current.target.id)
       || !rowCanManageContent(current.target.id)) return;
     const operation = editorOperationRef.current;
     // Same split-identity refusal as saveEditor — see the comment there.
     if (!operation || operation.notebookId !== current.target.id) return;
-    const abort = new AbortController();
-    const releaseSeat = () => {
-      if (editorSavingRef.current === operation) editorSavingRef.current = null;
-      if (editorSaveAbortRef.current === abort) editorSaveAbortRef.current = null;
-    };
-    editorSavingRef.current = operation;
-    editorSaveAbortRef.current = abort;
+    const savingKey = operationKey(owner.actorId, current.target.id);
+    editorSavingIdsRef.current.add(savingKey);
     setEditor((value) => value ? { ...value, busy: true } : value);
     try {
-      await setNotebookIndexingPipeline(current.target.id, pipelineId, abort.signal);
+      await setNotebookIndexingPipeline(current.target.id, pipelineId);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
-      const updated = await getNotebook(current.target.id, abort.signal);
+      const updated = await getNotebook(current.target.id);
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       // 成功即关弹窗(镜像 saveEditor):弹窗没有活状态轮询,留着只会把一次性的
       // pending 响应冻在屏上——后台重建早已结束,界面还写着「重建中」并禁用整组
       // 单选,直到用户自己关掉重开(codex #602 R1 P2)。toast 已说明重建在进行;
       // 重开设置时会重新取一次实时投影。
-      releaseSeat();
+      editorSavingIdsRef.current.delete(savingKey);
       setEditor(null);
       effectsRef.current.onNotebookUpdated(updated, current.mountEdges);
       const refreshed = await refreshCompositeAfterCommit(owner);
@@ -907,16 +913,21 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         effectsRef.current.reportError(error);
       }
     } finally {
-      releaseSeat();
+      editorSavingIdsRef.current.delete(savingKey);
       if (editorRevokedOperationRef.current === operation) editorRevokedOperationRef.current = null;
-      if (owns(owner) && editorOperationRef.current === operation) {
+      // Settled on the notebook and on actor identity, not on this dialog
+      // instance or the generation that started the write.  Dismissing and
+      // reopening the dialog replaces editorOperationRef, and a logout/login
+      // cycle replaces the generation — keying the release on either would
+      // strand the reopened dialog at busy with nothing left to clear it.
+      if (ownsIdentity(owner)) {
         setEditor((value) => {
-          if (!value) return value;
+          if (!value || value.target.id !== current.target.id) return value;
           if (!rowCanManageContent(value.target.id)) {
             editorOperationRef.current = null;
             return null;
           }
-          return { ...value, busy: false };
+          return value.busy ? { ...value, busy: false } : value;
         });
       }
     }
@@ -958,7 +969,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         owner,
         target,
         mountedByCount: count,
-        busy: deletingRef.current.has(`${owner.actorId}\0${notebookId}`),
+        busy: deletingRef.current.has(operationKey(owner.actorId, notebookId)),
       });
       closeMenu();
       return true;
@@ -975,7 +986,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     // is in flight therefore has to say the request outlives the box.
     const inFlightDelete = Boolean(
       deletion
-      && deletingRef.current.has(`${deletion.owner.actorId}\0${deletion.target.id}`)
+      && deletingRef.current.has(operationKey(deletion.owner.actorId, deletion.target.id))
     );
     deleteOperationRef.current = null;
     setDeletion(null);
@@ -988,7 +999,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const owner = captureOwner();
     const current = deletion;
     if (!owner || !current || !owns(current.owner) || !rowIsOwner(current.target.id)) return;
-    const key = `${owner.actorId}\0${current.target.id}`;
+    const key = operationKey(owner.actorId, current.target.id);
     if (deletingRef.current.has(key)) return;
     const operation = deleteOperationRef.current;
     if (!operation) return;
@@ -1028,12 +1039,13 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (owns(owner)) effectsRef.current.reportError(error);
     } finally {
       deletingRef.current.delete(key);
-      // Settled on the notebook, not on the confirmation instance: dismissing
-      // and reopening the box replaces deleteOperationRef, and keying the
-      // release on the old operation would strand the reopened confirmation at
-      // busy forever.  Any confirmation showing this notebook is the one this
-      // request was reporting into.
-      if (owns(owner)) {
+      // Settled on the notebook and on actor identity, not on the confirmation
+      // instance or the generation that started the DELETE: dismissing and
+      // reopening replaces deleteOperationRef, and a logout/login cycle replaces
+      // the generation while deletingRef stays keyed by the same actor id.
+      // Keying the release on either would strand the reopened confirmation at
+      // busy with nothing left to clear it.
+      if (ownsIdentity(owner)) {
         setDeletion((value) => {
           if (!value || value.target.id !== current.target.id) return value;
           if (!rowIsOwner(value.target.id)) {
@@ -1053,13 +1065,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   const menuNotebook = visible && menuNotebookId
     ? rows.find((row) => row.id === menuNotebookId) ?? null
     : null;
-  const editorSaveInFlight = Boolean(
-    editorOperationRef.current
-    && editorSavingRef.current === editorOperationRef.current
-  );
+  const editorSaveInFlight = activeEditorSaveOutstanding();
   const deletionInFlight = Boolean(
     deletion
-    && deletingRef.current.has(`${deletion.owner.actorId}\0${deletion.target.id}`)
+    && deletingRef.current.has(operationKey(deletion.owner.actorId, deletion.target.id))
   );
 
   return {
