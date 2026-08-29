@@ -318,8 +318,13 @@ def _start_admission_refresher(lease: object, repo: object) -> None:
         stop = start_extension_admission_refresher(
             store, get_settings().extension_admission_refresh_seconds
         )
-    except Exception:
-        logger.exception("startup: extension admission refresher failed to start")
+    except Exception as exc:
+        # Class name only — extension-surface logging keeps exception text
+        # (which can embed a DSN or private path) out of the log (AGENTS.md).
+        logger.error(
+            "startup: extension admission refresher failed to start (%s)",
+            type(exc).__name__,
+        )
         return
     if not _record_admission_refresher(lease, stop):
         # Defensive: the lease was detached between the bind above and this

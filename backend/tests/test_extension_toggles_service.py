@@ -196,7 +196,10 @@ def test_refresher_warns_once_per_outage_and_reports_the_recovery(caplog):
 
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
     assert "keeping the last snapshot" in warnings[0].getMessage()
-    assert warnings[0].exc_info is not None  # the traceback is the diagnosis
+    # Class name only, never exc_info/str(exc): extension-surface logging is
+    # content-free (a store fault's text can embed a DSN or a private path).
+    assert "RuntimeError" in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
     # Every failing tick after the first is debug-level only.
     assert len([r for r in records if r.levelno == logging.DEBUG]) >= 2
 
@@ -436,7 +439,9 @@ def test_an_invalid_snapshot_is_reported_every_tick_and_never_debounced(caplog):
     errors = [r for r in records if r.levelno == logging.ERROR]
     assert len(errors) >= 3, [r.getMessage() for r in records]
     assert all("invalid snapshot" in r.getMessage() for r in errors)
-    assert all(r.exc_info is not None for r in errors)
+    # Same content-free discipline as the outage channel: class name only.
+    assert all("TypeError" in r.getMessage() for r in errors)
+    assert all(r.exc_info is None for r in errors)
     # Not routed through the outage channel at all.
     assert not [
         r for r in records if "keeping the last snapshot" in r.getMessage()
