@@ -715,6 +715,7 @@ class QueryStore:
         self,
         user_id: str,
         *,
+        activity_type: str | None = None,
         notebook_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -747,10 +748,13 @@ class QueryStore:
         depends on ``.isoformat()``'s variable-width fractional-second
         rendering.
 
-        Scope is owner-only for all three types (same as the SQLite twin):
-        rows the user produced inside *someone else's* shared notebook are
-        deliberately absent — the usage totals count them, this expanded feed
-        does not.
+        ``activity_type`` is applied before each table's LIMIT, matching the
+        SQLite twin, so a one-type feed remains complete across pages.
+
+        Mixed activity and source/report filters are owner-only, matching the
+        SQLite twin. The unscoped ask-only question overview is the deliberate
+        exception: it follows the usage total's ``created_by`` attribution and
+        includes the viewed user's submissions in shared notebooks.
         """
         limit = max(1, min(200, int(limit)))
         fetch_limit = limit + 1
@@ -804,7 +808,8 @@ class QueryStore:
                         (user_id,),
                     ).fetchall()
                 ]
-            if not owned_notebook_ids:
+            all_question_submissions = activity_type == "ask" and notebook_id is None
+            if not owned_notebook_ids and not all_question_submissions:
                 # 三类都按自有笔记本收窄,一个都没有就没有任何活动可列。
                 return empty
             owned_placeholders = ",".join("%s" for _ in owned_notebook_ids)
@@ -812,38 +817,48 @@ class QueryStore:
             # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,理由同 SQLite 侧)。
             # notebook_id 已在上面解析成 owned_notebook_ids == [notebook_id],这条 IN
             # 同时兑现了「按库过滤」和「归属校验」,不需要第二条谓词。
-            ask_params: list[Any] = [user_id, *owned_notebook_ids]
-            ask_range_clause, ask_range_params = _range_and_cursor_clause("")
-            ask_params.extend(ask_range_params)
-            ask_rows = db.execute(
-                "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
-                "question, mode, status, answer_id, error FROM ask_jobs "
-                f"WHERE created_by = %s AND notebook_id IN ({owned_placeholders})"
-                f"{ask_range_clause} "
-                f"ORDER BY {_absolute_instant('created_at')} DESC, "
-                "id COLLATE \"C\" DESC LIMIT %s",
-                [*ask_params, fetch_limit],
-            ).fetchall()
+            ask_rows = []
+            if activity_type in (None, "ask"):
+                ask_notebook_clause = ""
+                ask_params: list[Any] = [user_id]
+                if not all_question_submissions:
+                    ask_notebook_clause = (
+                        f" AND notebook_id IN ({owned_placeholders})"
+                    )
+                    ask_params.extend(owned_notebook_ids)
+                ask_range_clause, ask_range_params = _range_and_cursor_clause("")
+                ask_params.extend(ask_range_params)
+                ask_rows = db.execute(
+                    "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
+                    "question, mode, status, answer_id, error FROM ask_jobs "
+                    f"WHERE created_by = %s{ask_notebook_clause}"
+                    f"{ask_range_clause} "
+                    f"ORDER BY {_absolute_instant('created_at')} DESC, "
+                    "id COLLATE \"C\" DESC LIMIT %s",
+                    [*ask_params, fetch_limit],
+                ).fetchall()
 
             # 2. 来源:sources 没有 created_by 列,靠"该用户自己的笔记本 id"限定范围
             # (与 list_user_notebooks 同口径),VISIBLE_SOURCE_TYPES_PREDICATE 排除
             # 隐藏合成源,source_paper_meta LEFT JOIN 一次带出 is_paper/paper_title。
             # s.doc_type / s.error_message 一并带出仅用于 Python 侧派生
             # paper_meta_status / parse_quality_warning,两者都不作为返回字段。
-            source_params: list[Any] = list(owned_notebook_ids)
-            source_range_clause, source_range_params = _range_and_cursor_clause("s.")
-            source_params.extend(source_range_params)
-            source_rows = db.execute(
-                "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
-                "s.source_type, s.parse_status, s.status, s.error_message, "
-                "s.doc_type, m.is_paper, m.paper_title "
-                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
-                f"WHERE s.notebook_id IN ({owned_placeholders}) "
-                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
-                f"ORDER BY {_absolute_instant('s.created_at')} DESC, "
-                "s.id COLLATE \"C\" DESC LIMIT %s",
-                [*source_params, fetch_limit],
-            ).fetchall()
+            source_rows = []
+            if activity_type in (None, "source"):
+                source_params: list[Any] = list(owned_notebook_ids)
+                source_range_clause, source_range_params = _range_and_cursor_clause("s.")
+                source_params.extend(source_range_params)
+                source_rows = db.execute(
+                    "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
+                    "s.source_type, s.parse_status, s.status, s.error_message, "
+                    "s.doc_type, m.is_paper, m.paper_title "
+                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                    f"WHERE s.notebook_id IN ({owned_placeholders}) "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
+                    f"ORDER BY {_absolute_instant('s.created_at')} DESC, "
+                    "s.id COLLATE \"C\" DESC LIMIT %s",
+                    [*source_params, fetch_limit],
+                ).fetchall()
 
             # 2b. extraction_warning 是「最近一次 extraction_runs.error_message 里的
             # windows_failed=N/T 标记」派生态,单独一条批量查询(不是逐行 N+1),只对
@@ -868,18 +883,20 @@ class QueryStore:
             # 3. 报告:与提问同口径(created_by + 自有笔记本)。understanding_json 一并
             # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
             # row_to_dict 同一套 jsonb 提取,不发明第二套写法),本身不作为返回字段。
-            report_params: list[Any] = [user_id, *owned_notebook_ids]
-            report_range_clause, report_range_params = _range_and_cursor_clause("")
-            report_params.extend(report_range_params)
-            report_rows = db.execute(
-                "SELECT id, notebook_id, created_at, updated_at, question, depth, "
-                "status, understanding_json FROM reports "
-                f"WHERE created_by = %s AND notebook_id IN ({owned_placeholders})"
-                f"{report_range_clause} "
-                f"ORDER BY {_absolute_instant('created_at')} DESC, "
-                "id COLLATE \"C\" DESC LIMIT %s",
-                [*report_params, fetch_limit],
-            ).fetchall()
+            report_rows = []
+            if activity_type in (None, "report"):
+                report_params: list[Any] = [user_id, *owned_notebook_ids]
+                report_range_clause, report_range_params = _range_and_cursor_clause("")
+                report_params.extend(report_range_params)
+                report_rows = db.execute(
+                    "SELECT id, notebook_id, created_at, updated_at, question, depth, "
+                    "status, understanding_json FROM reports "
+                    f"WHERE created_by = %s AND notebook_id IN ({owned_placeholders})"
+                    f"{report_range_clause} "
+                    f"ORDER BY {_absolute_instant('created_at')} DESC, "
+                    "id COLLATE \"C\" DESC LIMIT %s",
+                    [*report_params, fetch_limit],
+                ).fetchall()
 
         pool: list[dict[str, Any]] = []
         for row in ask_rows:

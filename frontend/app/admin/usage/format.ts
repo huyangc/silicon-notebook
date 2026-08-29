@@ -10,7 +10,7 @@ export function formatLastActive(iso: string | null | undefined): string {
 }
 
 export function logsDrillHref(userId: string): string {
-  return `/dev/logs?owner=${encodeURIComponent(userId)}`;
+  return `/dev/logs?owner=${encodeURIComponent(userId)}&view=activity&activity_type=ask`;
 }
 
 // 管理端文档上限输入的合法区间,与后端 admin_routes 的范围校验保持一致。前端先

@@ -2,7 +2,13 @@
 // backend/app/api/admin_routes.py (see types.ts header for the contract note).
 import { performApiRequest } from "../../../api-client.ts";
 import { readHttpError, throwHumanizedHttpError } from "../../../errors.ts";
-import type { ActivityCursor, ActivityResponse, AskDetail, PaginatedSources } from "./types";
+import type {
+  ActivityCursor,
+  ActivityResponse,
+  ActivityTypeFilter,
+  AskDetail,
+  PaginatedSources,
+} from "./types";
 
 const TAG = "admin-activity";
 
@@ -25,6 +31,7 @@ async function get<T>(path: string): Promise<T> {
 }
 
 export type FetchUserActivityParams = {
+  activityType?: Exclude<ActivityTypeFilter, "">;
   notebookId?: string;
   // 半开区间:created_at >= since、created_at < until。原样传字符串,不在前端
   // 做时区/格式转换——两个视图共享顶部同一条范围条,值从范围条控件原样带过来。
@@ -37,12 +44,13 @@ export type FetchUserActivityParams = {
   limit?: number;
 };
 
-// GET /admin/users/{user_id}/activity?notebook_id=&since=&until=&before_ts=&before_id=&limit=
+// GET /admin/users/{user_id}/activity?activity_type=&notebook_id=&since=&until=&before_ts=&before_id=&limit=
 export function fetchUserActivity(
   userId: string,
   params: FetchUserActivityParams = {},
 ): Promise<ActivityResponse> {
   const qs = new URLSearchParams();
+  if (params.activityType) qs.set("activity_type", params.activityType);
   if (params.notebookId) qs.set("notebook_id", params.notebookId);
   if (params.since) qs.set("since", params.since);
   if (params.until) qs.set("until", params.until);

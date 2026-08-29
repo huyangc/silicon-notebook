@@ -27,6 +27,7 @@ export function ActivityScopePanel({
   identityErrored,
   onRetryNotebooks,
   notebookId,
+  allNotebooksLabel = "全部笔记本",
   onSelectNotebook,
   expanded,
   onToggleExpand,
@@ -46,6 +47,8 @@ export function ActivityScopePanel({
   identityErrored?: boolean;
   onRetryNotebooks: () => void;
   notebookId: string;
+  /** 提问概览的全局范围还包含该用户在共享笔记本里的提交。 */
+  allNotebooksLabel?: string;
   onSelectNotebook: (id: string) => void;
   expanded: string[];
   onToggleExpand: (id: string) => void;
@@ -65,7 +68,7 @@ export function ActivityScopePanel({
           onClick={() => onSelectNotebook(ALL_NOTEBOOKS)}
           type="button"
         >
-          <span className="activity-nb-name">全部笔记本</span>
+          <span className="activity-nb-name">{allNotebooksLabel}</span>
         </button>
         {loading && notebooks.length === 0 ? <div className="empty">加载中…</div> : null}
         {!loading && failure ? (

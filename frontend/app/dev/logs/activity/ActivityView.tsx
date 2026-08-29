@@ -15,10 +15,22 @@ import { mergeActivityPages } from "./format.ts";
 import { ActivityDetail } from "./ActivityDetail.tsx";
 import { ActivityScopePanel, ALL_NOTEBOOKS, type SourceListState } from "./ActivityScopePanel.tsx";
 import { ActivityStream, activityKey } from "./ActivityStream.tsx";
-import type { ActivityCursor, ActivityItem, ActivitySource, AskDetail } from "./types";
+import type {
+  ActivityCursor,
+  ActivityItem,
+  ActivitySource,
+  ActivityTypeFilter,
+  AskDetail,
+} from "./types";
 
 const PAGE = 50;
 const SOURCE_PAGE = 50;
+
+function initialActivityType(): ActivityTypeFilter {
+  if (typeof window === "undefined") return "";
+  const value = new URLSearchParams(window.location.search).get("activity_type");
+  return value === "ask" || value === "source" || value === "report" ? value : "";
+}
 
 /**
  * 403 是「换个人看」而不是「再试一次」。
@@ -67,6 +79,7 @@ export function ActivityView({
   const [notebooksFailure, setNotebooksFailure] = useState("");
   const [forbidden, setForbidden] = useState(false);
   const [notebookId, setNotebookId] = useState(ALL_NOTEBOOKS);
+  const [activityType, setActivityType] = useState<ActivityTypeFilter>(initialActivityType);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [sources, setSources] = useState<Record<string, SourceListState>>({});
 
@@ -86,8 +99,8 @@ export function ActivityView({
   // 响应——管理员对笔记本 A 点了「加载更多」、响应未回时切到 B，那一页必须在这里
   // 被丢掉，否则会被静默拼进 B 的列表。
   const streamScopeKey = useMemo(
-    () => JSON.stringify([scopeKey, userId, notebookId]),
-    [scopeKey, userId, notebookId],
+    () => JSON.stringify([scopeKey, userId, notebookId, activityType]),
+    [scopeKey, userId, notebookId, activityType],
   );
   const streamScopeRef = useRef(streamScopeKey);
   const userIdRef = useRef(userId);
@@ -170,6 +183,7 @@ export function ActivityView({
     setLoading(true);
     try {
       const page = await fetchUserActivity(userId, {
+        ...(activityType ? { activityType } : {}),
         notebookId: notebookId || undefined,
         since,
         until,
@@ -195,7 +209,7 @@ export function ActivityView({
         && requestedScopeKey === streamScopeRef.current
       ) setLoading(false);
     }
-  }, [userId, notebookId, since, until]);
+  }, [userId, notebookId, activityType, since, until]);
 
   useEffect(() => {
     void reload();
@@ -208,6 +222,7 @@ export function ActivityView({
     setLoading(true);
     try {
       const page = await fetchUserActivity(userId, {
+        ...(activityType ? { activityType } : {}),
         notebookId: notebookId || undefined,
         since,
         until,
@@ -234,7 +249,21 @@ export function ActivityView({
         && requestedScopeKey === streamScopeRef.current
       ) setLoading(false);
     }
-  }, [loading, hasMore, cursor, userId, notebookId, since, until]);
+  }, [loading, hasMore, cursor, userId, notebookId, activityType, since, until]);
+
+  const selectActivityType = useCallback((next: ActivityTypeFilter) => {
+    setActivityType(next);
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (next) params.set("activity_type", next);
+    else params.delete("activity_type");
+    const query = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      query ? `?${query}` : window.location.pathname,
+    );
+  }, []);
 
   const toggleExpand = useCallback((id: string) => {
     const open = expandedRef.current.includes(id);
@@ -355,6 +384,7 @@ export function ActivityView({
       {error ? <div className="errorbar">{error}</div> : null}
       <div className="logview-body logview-activity-body">
         <ActivityScopePanel
+          allNotebooksLabel={activityType === "ask" ? "全部提问（含共享笔记本）" : undefined}
           expanded={expanded}
           failure={notebooksFailure}
           identityErrored={identityErrored}
@@ -369,12 +399,14 @@ export function ActivityView({
           sources={sources}
         />
         <ActivityStream
+          activityType={activityType}
           hasMore={hasMore}
           identityErrored={identityErrored}
           items={items}
           loading={pending || loading}
           now={now}
           onLoadMore={() => void loadMore()}
+          onActivityTypeChange={selectActivityType}
           onSelect={selectItem}
           selectedKey={selectedKey}
         />

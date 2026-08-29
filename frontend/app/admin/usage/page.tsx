@@ -546,7 +546,7 @@ export default function AdminUsagePage() {
               <SortableHeader label="提问" sortKey="questions" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="报告" sortKey="reports" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <th>日志</th>
+              <th>用户分析</th>
               <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>密码</th>
               <th>权限管理</th>
@@ -587,7 +587,7 @@ export default function AdminUsagePage() {
                   <td>{u.questions}</td>
                   <td>{u.reports}</td>
                   <td>{formatLastActive(u.last_active)}</td>
-                  <td><a href={logsDrillHref(u.id)}>查看日志</a></td>
+                  <td><a href={logsDrillHref(u.id)}>查看提问</a></td>
                   <td className="usage-limit-cell">
                     {u.role === "admin" ? (
                       // 管理员的笔记本豁免(写路径 owner-only ⇒ owner 即当前 admin),显示「不限」不可编辑。

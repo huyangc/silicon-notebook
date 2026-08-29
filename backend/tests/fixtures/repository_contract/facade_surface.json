@@ -5456,6 +5456,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_notifies_h45_exactly_once",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_source_repair_api.py",
         "scope": "<module>.test_backfill_refuses_pending_pipeline_before_submit",
         "target": "configured"
@@ -5506,6 +5512,14 @@
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_notifies_h45_exactly_once",
         "target": "configured"
       },
       {

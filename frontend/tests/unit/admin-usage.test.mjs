@@ -22,7 +22,10 @@ test("formatLastActive 处理空值与格式", () => {
 });
 
 test("logsDrillHref 编码 owner", () => {
-  assert.equal(logsDrillHref("user-abc123"), "/dev/logs?owner=user-abc123");
+  assert.equal(
+    logsDrillHref("user-abc123"),
+    "/dev/logs?owner=user-abc123&view=activity&activity_type=ask",
+  );
 });
 
 test("parseUploadLimit 接受区间内整数、拒绝越界与非整数", () => {
