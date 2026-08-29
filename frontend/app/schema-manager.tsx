@@ -98,9 +98,9 @@ type Pane =
   | { kind: "create" };
 
 function scopeHint(view: SchemaView, canEdit: boolean): string {
-  if (view === "global") return "全局基线会影响所有尚未建立当前笔记本覆盖的笔记本。";
+  if (view === "global") return "全局基线会影响未自定义相应内容类型的笔记本。";
   return canEdit
-    ? "这里显示当前笔记本实际采用的类型；修改全局继承项会只在当前笔记本建立覆盖。"
+    ? "这里显示当前笔记本实际采用的类型；修改的全局继承项只影响当前笔记本。"
     : "你拥有只读权限，可以查看当前笔记本实际采用的类型。";
 }
 
