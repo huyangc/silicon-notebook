@@ -170,6 +170,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // 「每次首页落地都变化、load-more 追加期间稳定」的世代号。镜像自
   // conceptMembersEpochRef(ref 不触发子组件 effect,故需 state)。
   const [conceptDetailGeneration, setConceptDetailGeneration] = useState(0);
+  // codex #639 R4 P2(AGENTS.md Interactive feedback):load-more 失败必须在
+  // 按钮紧邻处给结果,不能只发页面横幅。失败置位、重试/新首页落地清零。
+  const [conceptMembersLoadError, setConceptMembersLoadError] = useState(false);
   // Hub-cluster member pagination (R3·T-B2). `conceptDetail` itself carries
   // the cursor (`next_cursor`) and the accumulated `members`/`attached`/
   // `evidence` — every place that lands a fresh FIRST page replaces the
@@ -221,6 +224,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     conceptMembersEpochRef.current += 1;
     conceptDetailContextRef.current = detail ? context : null;
     setConceptMembersLoadingMore(false);
+    setConceptMembersLoadError(false);
     setConceptDetailGeneration(conceptMembersEpochRef.current);
     setConceptDetail(detail);
   };
@@ -546,6 +550,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       || owner.notebookId !== context.notebookId) return;
     const epoch = conceptMembersEpochRef.current;
     setConceptMembersLoadingMore(true);
+    setConceptMembersLoadError(false);
     try {
       const page = await fetchConceptDetail(
         context.notebookId, context.nodeId, context.sourceNotebookId, cursor,
@@ -573,7 +578,12 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         member_total: page.member_total ?? current.member_total,
       } : current));
     } catch (error) {
-      if (owns(owner) && epoch === conceptMembersEpochRef.current) effectsRef.current.reportError(error);
+      if (owns(owner) && epoch === conceptMembersEpochRef.current) {
+        // 横幅照旧(全局错误通道),但本地失败态才是按钮紧邻反馈的载体
+        // (codex #639 R4 P2 / AGENTS.md Interactive feedback)。
+        setConceptMembersLoadError(true);
+        effectsRef.current.reportError(error);
+      }
     } finally {
       if (epoch === conceptMembersEpochRef.current) setConceptMembersLoadingMore(false);
     }
@@ -1185,6 +1195,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       conceptDetail: visible ? conceptDetail : null,
       conceptDetailGeneration,
       conceptMembersLoadingMore: visible && conceptMembersLoadingMore,
+      conceptMembersLoadError: visible && conceptMembersLoadError,
       nodeContext: visible ? nodeContext : null,
       reviewBusy: visible && reviewBusy,
       decidingMerge: visible ? decidingMerge : null,

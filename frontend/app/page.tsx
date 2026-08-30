@@ -8150,7 +8150,9 @@ export default function Home() {
                           >
                             {kgGraph.conceptMembersLoadingMore
                               ? "加载中…"
-                              : `加载更多成员（已加载 ${kgGraph.conceptDetail.members.length}/${kgGraph.conceptDetail.member_total}）`}
+                              : kgGraph.conceptMembersLoadError
+                                ? "加载失败，点击重试"
+                                : `加载更多成员（已加载 ${kgGraph.conceptDetail.members.length}/${kgGraph.conceptDetail.member_total}）`}
                           </button>
                         )}
                       </>
