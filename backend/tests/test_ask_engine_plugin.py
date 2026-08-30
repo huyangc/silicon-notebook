@@ -757,8 +757,8 @@ def test_plugin_port_universe_excludes_sources_added_after_an_all_selected_freez
     拿这份清单建的 ``source_origin`` 判定),所以
     ``scoped_allowed_source_ids`` 的交集是这里唯一的执法点。
 
-    **变异锚点**:让 ``narrowed is False`` 早退时也原样透传显式清单
-    (即不看 ``explicit``)→ ``source-drifted`` 出现在 seam 收到的清单里,
+    **变异锚点**:让 ``scoped_allowed_source_ids`` 在带显式清单时原样透传
+    (不与冻结清单取交集)→ ``source-drifted`` 出现在 seam 收到的清单里,
     本条报红。
     """
     repo, active_id, base_id, _alice_id, bob_id = scoped_sql_repo

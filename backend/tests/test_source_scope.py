@@ -341,9 +341,10 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
 
 
 def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
-    """全选冻结出的 ``narrowed is False`` 既不影响 restricted 判断,也(R1 行为
-    恢复,审计 ASK-1)不再让 ``scoped_allowed_source_ids`` 把全量可见+隐藏源
-    物化成显式 tuple——它必须原样透传成 ``None``,同 unscoped 一样。"""
+    """全选冻结出的 ``narrowed is False`` 不影响 restricted 判断,也不影响天花板
+    的**形状**:``scoped_allowed_source_ids`` 照样把可见+隐藏源物化成显式
+    tuple 下推。narrowed 决定的是路由 lane,不是要不要过滤(见
+    ``retrieval_candidates._lexical_gate_source_scoped``)。"""
     resolved = _validate_source_scope(
         _ScopeRepo(["s1"], 1, hidden=["hidden-memory", "hidden-knowhow"]),
         _notebook(),
@@ -358,13 +359,13 @@ def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
     with source_scope_context("nb", resolved):
         assert scoped_conversation_history("prior answer") == "prior answer"
         assert source_scope_restricted() is False
-        # R1 行为恢复(审计 ASK-1,P0):全选冻结(narrowed=False)不再把全量
-        # 可见+隐藏源物化成显式 tuple——下游一切按
-        # `allowed_source_ids is not None` 驱动的快路径(语料语言闸/GiST KNN/
-        # 未降级 FTS)必须看到与「无 scope」相同的 None,候选宇宙才能恢复到
-        # 全选本该有的样子。最终证据仍由 source_allowed 等结果侧防线裁剪,
-        # 见本文件下方 source_allowed 断言。
-        assert scoped_allowed_source_ids("nb") is None
+        # ⛔ 全选冻结也下推:这份清单不是「产出方本来会读到的宇宙」——隐藏半
+        # 按请求人过滤过,而且它是快照不是实时集合。改成 None 会让别人的私有
+        # Memory 元素/KG 对象与冻结后新增的来源一起去争 Top-K(codex #640 R1
+        # 两条 P1)。
+        assert scoped_allowed_source_ids("nb") == (
+            "hidden-knowhow", "hidden-memory", "s1"
+        )
         assert source_allowed("nb", "s1") is True
         assert source_allowed("nb", "hidden-memory") is True
         assert source_allowed("nb", "hidden-knowhow") is True
@@ -422,29 +423,30 @@ def test_narrowed_scope_excludes_hidden_projection_sources():
         assert source_allowed("nb", "hidden-memory") is False
 
 
-def test_scoped_allowed_source_ids_narrowed_tri_state():
-    """R1 行为恢复(审计 ASK-1,P0)的显式三态钉,外加 ``explicit`` 这一维:
+def test_scoped_allowed_source_ids_is_blind_to_narrowed_tri_state():
+    """⛔ ``narrowed`` 的三个取值都不得改变天花板的形状(codex #640 R1,两条 P1)。
+
     同一份冻结的 include 清单(可见 ``s1`` + 隐藏 ``hidden-memory``),
-    ``narrowed`` 三个取值下 ``scoped_allowed_source_ids`` 必须给出三种不同的
-    返回形状——
+    ``narrowed`` 取 ``True`` / ``False`` / ``None`` 三态,
+    ``scoped_allowed_source_ids`` 必须逐字给出同一份物化清单。
 
-    * ``True``  真收窄:原样物化冻结清单(交集/ceiling),行为不变。
-    * ``False`` 浏览器默认全选冻结:**不带显式清单**时退化成「无 scope」的
-      返回形状 ``None``。下游一切按 ``allowed_source_ids is not None`` 驱动的
-      分支(语料语言闸、GiST KNN 快路径、未降级 FTS)才能因此恢复到无 scope
-      时的快路径,这正是 R1 要恢复的行为。
-    * ``None``  历史直接构造 / 早于该字段的遗留 scope:必须保持改动前的
-      字节兼容物化行为不变,``is False`` 判断刻意不匹配 ``None``。
+    曾经写过一版让 ``narrowed is False``(浏览器默认全选)退化成 ``None`` 的
+    快路径,理由是「冻结清单就是实时宇宙,过滤是恒真谓词」。两个前提都不成立:
 
-    快路径**只**属于 ``explicit is None``。带显式清单时(narrowed 取值无关)
-    必须与冻结清单取交集:调用方那份清单是**实时**枚举出来的(插件端口就在
-    构造时枚举 ``all_visible_source_ids``),原样透传等于把冻结之后新增的来源
-    放进 run。这一条是 R1 首版的语义洞:元素检索那条路没有结果侧防线
-    (``RetrievedElement`` 无 notebook_id、``filter_retrieval_items`` 不套它),
-    这里的交集就是它唯一的执法点。
+    * 冻结清单是 ``可见 ∪ 隐藏(请求人)``,而不带清单的产出方读到的是
+      ``可见 ∪ 隐藏(每一个成员)``。共享库里别人的私有 Memory 投影只落在后者,
+      而元素臂与两条 KG 臂都没有自己的 actor 谓词(全检索路径上只有
+      ``question_index_rows`` / ``retrieval_contribution_rows`` 有),于是别人的
+      私有 Memory 元素与 Memory 派生 KG 对象会去争 Top-K。漂移探针也救不了:
+      它比对的正是 ``可见`` 与 ``隐藏(请求人)``,那半它从来没见过。
+    * 即使两个集合真的相等,那也只是「被问的那一瞬间」相等。探针返回之后、
+      产出方 ``SELECT`` 之前完成抽取的来源,就在读里而不在冻结里。
 
-    **变异锚点**:把 ``narrowed is False`` 的早退恢复成不看 ``explicit``
-    (即显式清单也直通)→ 下面 ``("s1",)`` 那条报红。
+    性能诉求改由**路由**满足(``retrieval_candidates._lexical_gate_source_scoped``),
+    不由天花板形状满足。
+
+    **变异锚点**:在 ``scoped_allowed_source_ids`` 里恢复任何
+    ``narrowed is False`` 形状的早退 → ``narrowed=False`` 那一组报红。
     """
     def _scope(narrowed):
         scope = ResolvedSourceScope(
@@ -453,31 +455,24 @@ def test_scoped_allowed_source_ids_narrowed_tri_state():
         scope._hidden_source_ids = ["hidden-memory"]
         return scope
 
-    with source_scope_context("nb", _scope(True)):
-        assert set(scoped_allowed_source_ids("nb")) == {"s1", "hidden-memory"}, (
-            "真收窄:仍然原样物化冻结清单"
-        )
-        assert scoped_allowed_source_ids("nb", ["s1", "drifted-in"]) == ("s1",)
-
-    with source_scope_context("nb", _scope(False)):
-        assert scoped_allowed_source_ids("nb") is None, (
-            "R1:全选冻结不带显式清单时必须退化成 None,同无 scope 一样"
-        )
-        assert scoped_allowed_source_ids("nb", ["s1", "drifted-in"]) == ("s1",), (
-            "narrowed=False 带显式清单时必须与冻结清单取交集——原样透传就是"
-            "把冻结后新增的来源放进 run(实时枚举的清单不是天花板)"
-        )
-        assert scoped_allowed_source_ids(
-            "nb", ["s1", "hidden-memory"]
-        ) == ("s1", "hidden-memory"), (
-            "交集只丢冻结清单之外的 id:隐藏半在天花板内,不得被顺手裁掉"
-        )
-
-    with source_scope_context("nb", _scope(None)):
-        assert set(scoped_allowed_source_ids("nb")) == {"s1", "hidden-memory"}, (
-            "narrowed=None 是遗留直接构造路径,字节兼容不许破——原样物化"
-        )
-        assert scoped_allowed_source_ids("nb", ["s1", "drifted-in"]) == ("s1",)
+    for narrowed in (True, False, None):
+        with source_scope_context("nb", _scope(narrowed)):
+            assert scoped_allowed_source_ids("nb") == (
+                "hidden-memory", "s1"
+            ), f"narrowed={narrowed!r} 必须物化同一份冻结清单"
+            # 调用方那份清单是**实时**枚举出来的(插件端口就在构造时枚举
+            # ``all_visible_source_ids``),原样透传等于把冻结之后新增的来源放进
+            # run。元素检索那条路没有结果侧防线(``RetrievedElement`` 无
+            # notebook_id、``filter_retrieval_items`` 不套它),这里的交集就是它
+            # 唯一的执法点。
+            assert scoped_allowed_source_ids(
+                "nb", ["s1", "drifted-in"]
+            ) == ("s1",), f"narrowed={narrowed!r} 带显式清单必须取交集"
+            assert scoped_allowed_source_ids(
+                "nb", ["s1", "hidden-memory"]
+            ) == ("s1", "hidden-memory"), (
+                "交集只丢冻结清单之外的 id:隐藏半在天花板内,不得被顺手裁掉"
+            )
 
 
 def test_candidate_detects_hidden_participant_drift_through_source_store():
@@ -695,13 +690,13 @@ def test_all_selected_freeze_reopens_the_restricted_lane_once_sources_drift(
     去争 Top-K 再在结果侧丢掉——「post-filtering alone is not authority because
     excluded candidates can consume Top-K or supply hidden graph premises」。
 
-    R1 首版把 ``narrowed is False`` 一律早退成 None,于是 ``_retrieve_scored``
-    的 ``source_filter is not None and (...)`` 直接短路,漂移探针一次都不被调,
-    受限词法 lane 死掉——正是 #634 R2-3 留档明令禁止的形态。
+    曾经写过一版让 ``narrowed is False`` 一律早退成 None 的快路径,于是
+    ``_retrieve_scored`` 的 ``source_filter is not None and (...)`` 直接短路,
+    漂移探针一次都不被调,受限词法 lane 死掉——正是 #634 R2-3 留档明令禁止的
+    形态。
 
-    **变异锚点**:去掉 ``_scoped_allowed_with_drift_guard`` 的漂移回落(直接调
-    ``scoped_allowed_source_ids``)→ 探针不再被调、``kg_source_scoped_fts`` 不再
-    出现,本条报红。
+    **变异锚点**:让 ``scoped_allowed_source_ids`` 在 ``narrowed is False`` 时
+    返回 None → 探针不再被调、``kg_source_scoped_fts`` 不再出现,本条报红。
     """
     from app.models.source_scope import ResolvedSourceScope
 
@@ -739,11 +734,13 @@ def test_all_selected_freeze_reopens_the_restricted_lane_once_sources_drift(
     )
 
 
-def test_all_selected_freeze_without_drift_keeps_the_unscoped_fast_path(
+def test_all_selected_freeze_without_drift_keeps_the_unscoped_lane(
     tmp_path, monkeypatch
 ):
-    """对照臂(R1 的等价面,不许因漂移回落而回归):宇宙没漂移时探针可以被调,
-    但判定为 False,天花板保持 ``None``——受限词法 lane 一次都不能出现。"""
+    """对照臂:宇宙没漂移时探针判定为 False,于是 KG 候选**路由**保持无 scope
+    那一条(notebook ANN + 词法并集),受限词法 lane 一次都不能出现——即便天花板
+    这份清单照样被冻结、照样在证据水合处生效。路由跟着 narrowing 走,过滤跟着
+    ceiling 走,两者不同源。"""
     from app.models.source_scope import ResolvedSourceScope
 
     repo, notebook_id, add_source, add_object = _drift_lane_notebook(
@@ -765,22 +762,24 @@ def test_all_selected_freeze_without_drift_keeps_the_unscoped_fast_path(
         f"未漂移的全选冻结不得被判为受限,实际 {probe}"
     )
     assert all(site != "kg_source_scoped_fts" for site, _allowed in lane), (
-        f"未漂移时必须保持无 scope 的快路径候选路由,实际 lane 调用为 {lane}"
+        f"未漂移时必须保持无 scope 的候选路由,实际 lane 调用为 {lane}"
     )
     assert all(allowed is None for _site, allowed in lane), (
-        f"未漂移时不得下推任何 allow-list,实际 lane 调用为 {lane}"
+        "无 scope 那条路由的词法臂本来就不带 allow-list(证据水合处才用天花板),"
+        f"实际 lane 调用为 {lane}"
     )
 
 
-def test_library_exclusion_still_denies_before_the_all_selected_fast_path():
-    """顺序不变量(P2-2):库维度排除必须在本地全选快路径**之前**判定。
+def test_library_exclusion_denies_before_any_local_dimension_branch():
+    """顺序不变量(P2-2):库维度排除必须在本地维度的任何分支**之前**判定。
 
     ``covers_notebook`` 的拒绝分支返回 ``()``(显式拒绝,SQL 侧在 LIMIT 前就空),
-    而全选快路径返回 ``None``(无天花板)。两者的返回形状语义相反,所以把快路径
-    分支上移到拒绝分支之前,会把「这个库整体不参与」变成「这个库没有限制」。
+    而「本地天花板不绑定这个库」返回 ``None``(无天花板)。两者的返回形状语义
+    相反,所以任何被上移到拒绝分支之前的本地分支,都会把「这个库整体不参与」
+    变成「这个库没有限制」。
 
-    **变异锚点**:把 ``narrowed is False`` 的早退挪到 ``covers_notebook`` 判定
-    之前 → 下面第一条断言从 ``()`` 变成 ``None``,本条报红。
+    **变异锚点**:把 ``not scope.ceiling_active or notebook_id != ...`` 那条
+    早退挪到 ``covers_notebook`` 判定之前 → 第一条断言从 ``()`` 变成 ``None``。
     """
     local = SourceScope(mode="include", source_ids=["s1"], narrowed=False)
     base = BaseNotebookScope(
@@ -791,9 +790,9 @@ def test_library_exclusion_still_denies_before_the_all_selected_fast_path():
             "被排除的参考库是显式拒绝,绝不能因为本地维度全选而变成「无限制」"
         )
         assert scoped_allowed_source_ids("excluded-base", ["b1"]) == ()
-        # 对照:参与的库不受本地复选框影响,本地全选也仍然是 None。
+        # 对照:参与的库不受本地复选框影响。
         assert scoped_allowed_source_ids("kept-base", ["b1"]) == ("b1",)
-        assert scoped_allowed_source_ids("nb") is None
+        assert scoped_allowed_source_ids("nb") == ("s1",)
 
 
 def test_candidate_without_active_scope_does_not_touch_source_store():
@@ -1280,10 +1279,10 @@ def test_hidden_half_never_carries_another_members_private_memory(
 
 def test_boundary_ceiling_is_owner_scoped_end_to_end(tmp_path, monkeypatch):
     """入口层到消费侧的整条链:B 的默认全选请求冻出的上限里没有 A 的私有 Memory,
-    而 B 自己的 Memory 与共享的 Knowhow 都在。R1 行为恢复(审计 ASK-1):这份
-    上限仍然是结果侧 source_allowed 的裁剪依据,但 scoped_allowed_source_ids
-    这个 producer 入口在 narrowed=False 时不再把它物化成显式 tuple——必须
-    原样退化成 None,让候选生成侧看到与「无 scope」相同的形状。"""
+    而 B 自己的 Memory 与共享的 Knowhow 都在。这份上限既是结果侧 source_allowed
+    的裁剪依据,也是 producer 入口 scoped_allowed_source_ids 下推的那份清单——
+    默认全选(narrowed=False)同样下推:元素臂与 KG 臂没有自己的 actor 谓词,
+    不下推就等于让 A 的私有 Memory 元素/对象去争 Top-K。"""
     from app.services.sqlite_repository import reset_request_user, set_request_user
 
     repo, notebook_id, _alice, bob = _shared_notebook_with_two_members(
@@ -1310,11 +1309,81 @@ def test_boundary_ceiling_is_owner_scoped_end_to_end(tmp_path, monkeypatch):
         assert source_allowed(notebook_id, "src-memory-alice") is False, (
             "别人的私有 Memory 投影证据不得参与"
         )
-        # R1 行为恢复:narrowed=False(默认全选)不再把这份上限物化给
-        # producer——None 才是「恢复到无 scope 时的候选宇宙」该有的返回值,
-        # 结果侧的 source_allowed(上面已断言)才是真正裁掉别人私有 Memory 的
-        # 防线,不靠这里的物化清单。
-        assert scoped_allowed_source_ids(notebook_id) is None
+        # ⛔ codex #640 R1 P1-a:这份 owner 收窄过的上限必须真的到达 producer。
+        # 换成 None,元素臂(``retrieval_element_rows`` 无 memory/owner 谓词)
+        # 与两条 KG 臂就会把 A 的私有 Memory 行读进候选池。
+        assert set(scoped_allowed_source_ids(notebook_id)) == {
+            "src-visible", "src-knowhow", "src-memory-bob"
+        }
+        assert "src-memory-alice" not in scoped_allowed_source_ids(notebook_id)
+
+
+def test_element_producer_never_reads_another_members_memory_unfiltered(
+    tmp_path, monkeypatch
+):
+    """⛔ codex #640 R1 P1-a 的 producer 级钉:元素臂必须在 ``LIMIT`` 之前拿到
+    owner 收窄过的清单,而不是「无限制」。
+
+    ``retrieval_element_rows`` 的无清单分支是
+    ``FROM source_elements e JOIN sources s ... WHERE s.notebook_id=?``——没有
+    ``source_type`` 过滤,也没有 ``memory_items.created_by`` 谓词。整条检索路径上
+    只有 ``question_index_rows`` 与 ``retrieval_contribution_rows`` 自带 actor
+    谓词;元素臂与两条 KG 臂全靠这份清单。所以「全选冻结等于实时宇宙、可以不下推」
+    这个论证在共享库里是假的:A 的私有 Memory 投影只在 producer 那一侧的宇宙里,
+    冻结清单里从来没有它——漂移探针也看不见它(它比对的正是可见半与请求人的
+    隐藏半)。
+
+    **变异锚点**:让 ``scoped_allowed_source_ids`` 在 ``narrowed is False`` 时
+    返回 None → 元素臂收到 None(整库读),本条报红。
+    """
+    from app.services.sqlite_repository import reset_request_user, set_request_user
+
+    repo, notebook_id, _alice, bob = _shared_notebook_with_two_members(
+        tmp_path, monkeypatch
+    )
+    token = set_request_user(bob)
+    try:
+        resolved = _validate_source_scope(
+            repo, repo.get_notebook(notebook_id),
+            SourceScope(mode="exclude", source_ids=[]),
+        )
+    finally:
+        reset_request_user(token)
+
+    unbounded: list[object] = []
+    bounded: list[object] = []
+    candidates = repo.retrieval.candidates
+    monkeypatch.setattr(
+        candidates, "_gather_elements",
+        lambda db, nb_id, with_vectors=True, allowed_source_ids=None: (
+            unbounded.append(allowed_source_ids) or []
+        ),
+    )
+    monkeypatch.setattr(
+        candidates, "_retrieve_chunks",
+        lambda nb_id, query, **kwargs: (
+            bounded.append(kwargs.get("allowed_source_ids")) or ([], [], None)
+        ),
+    )
+    # copyable=True:整库直读那一支只在**没有天花板**时才可达,所以它一次都不该
+    # 被走到——这正是 P1-a 的泄漏形状。
+    monkeypatch.setattr(candidates, "notebook_copy_stats",
+                        lambda _nb: {"copyable": True, "size": {}})
+    with source_scope_context(notebook_id, resolved):
+        candidates._retrieve_elements(notebook_id, "私有内容", limit=4)
+
+    assert unbounded == [], (
+        "全选冻结绝不能落到整库元素直读:那一支的 SQL 没有 memory/owner 谓词,"
+        f"A 的私有 Memory 元素会整批进候选池,实际 {unbounded}"
+    )
+    assert bounded, "元素臂必须走有界的 chunk 召回分支"
+    for allowed in bounded:
+        assert allowed is not None, (
+            "全选冻结也必须给元素臂一份清单——None 会让 A 的私有 Memory 元素"
+            "进入候选池并占用 Top-K"
+        )
+        assert "src-memory-alice" not in set(allowed)
+        assert "src-memory-bob" in set(allowed)
 
 
 def test_shared_notebook_is_not_permanently_judged_drifted(tmp_path, monkeypatch):

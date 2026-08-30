@@ -552,18 +552,16 @@ class PluginRetrievalAccess:
             # element seam has no result-side fence to drop it later
             # (RetrievedElement carries no notebook_id, and the port's own
             # post-check judges hits against the very ``source_origin`` map
-            # built here).  An all-selected freeze deliberately does NOT take
-            # the "no ceiling" fast path when an explicit list is supplied —
-            # see ``scoped_allowed_source_ids``.
+            # built here).
             scoped_source_ids = scoped_allowed_source_ids(notebook_id, source_ids)
             if scoped_source_ids is None:
-                # Unreachable under that contract (a non-None ``explicit``
-                # returns a tuple on every branch, ``()`` included).  Kept as
-                # a shape guard only, so a future contract change surfaces as
-                # the historical whole-list behavior rather than an iteration
-                # over None — but if it ever fires, the drift fence above is
-                # the thing that has been lost, and this line is where to
-                # start looking.
+                # Only reachable for a notebook no ceiling binds (no scope, or
+                # a mounted base library under an unscoped run).  Kept as a
+                # shape guard so a future contract change surfaces as the
+                # historical whole-list behavior rather than an iteration over
+                # None — but if it ever fires for the ACTIVE notebook, the
+                # drift fence above is what has been lost, and this line is
+                # where to start looking.
                 scoped_source_ids = source_ids
             for source_id in scoped_source_ids:
                 value = str(source_id or "")
