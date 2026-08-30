@@ -13,7 +13,10 @@ tests freeze the EXACT per-operation order matrix:
                            commit and the run finishing); invalidate stays a
                            single run-level `finally` call after every source;
                            no side effects anywhere when zero edges added
-    set_edge_review        relation transaction; dirty; invalidate
+    set_edge_review        relation UPDATE + dirty bump in ONE transaction
+                           (mark_unified_kg_dirty_in_tx, R2 P2 fix, codex
+                           #638 R2); invalidate stays a separate post-commit
+                           call
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + cluster-seq bump in one transaction;
                            invalidate only when rows added
@@ -25,7 +28,9 @@ tests freeze the EXACT per-operation order matrix:
     update_knowledge       object transaction; best-effort embed; invalidate; dirty
     merge_knowledge        evidence/provenance/source-status transaction;
                            dirty; invalidate
-    edge conflict discard  edge transaction; dirty; invalidate; second dirty bump
+    edge conflict discard  edge UPDATE + dirty bump in ONE transaction (rides
+                           set_edge_review, R2 P2 fix); invalidate; second
+                           dirty bump (post-commit, belt-and-suspenders)
     node conflict discard/modify
                            object transaction; invalidate; dirty; second dirty bump
     confirm_conflict       apply mutation, then candidate-status transaction
@@ -120,6 +125,21 @@ def _spy_cluster_seq(repo, monkeypatch, events):
         return original(db, notebook_id)
 
     monkeypatch.setattr(coordinator, "bump_cluster_mutation_seq", wrapped)
+
+
+def _spy_dirty_in_tx(repo, monkeypatch, events):
+    """Wrap (and still delegate) the in-transaction dirty bump — the seam
+    ``set_edge_review`` rides since the R2 P2 fix (codex #638 R2), same
+    wrap-and-delegate shape as ``_spy_cluster_seq``: callers need the real
+    return value (the freshly-bumped seq), not a pure recorder."""
+    coordinator = repo._runtime.kg_mutations
+    original = coordinator.mark_unified_kg_dirty_in_tx
+
+    def wrapped(db, notebook_id):
+        events.append("dirty")
+        return original(db, notebook_id)
+
+    monkeypatch.setattr(coordinator, "mark_unified_kg_dirty_in_tx", wrapped)
 
 
 def _spy_embed_store(repo, monkeypatch, events):
@@ -291,15 +311,29 @@ def test_relink_zero_added_edges_has_no_side_effects(repo, monkeypatch):
 # -------------------------------------------------------------- edge review
 
 
-def test_set_edge_review_commits_then_dirty_then_invalidate(repo, monkeypatch):
+def test_set_edge_review_bumps_dirty_inside_the_transaction_then_invalidates(
+    repo, monkeypatch
+):
+    """R2 P2 fix (codex #638 R2): the dirty bump now rides INSIDE the same
+    write transaction as the review_status UPDATE (mark_unified_kg_dirty_in_tx,
+    same shape write_clusters/append_clusters already use for their own
+    cluster-seq bump) instead of committing in a separate transaction AFTER
+    the UPDATE's own commit — see review_queue_memo's module docstring for
+    the two races that separation used to open. invalidate stays a separate
+    post-commit call, unchanged."""
     notebook_id, _objects, relation_ids = _seed_kg(repo, "edge review phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
-    _spy_coordinator(repo, monkeypatch, events)
+    monkeypatch.setattr(
+        repo._runtime.kg_mutations,
+        "invalidate_unified_cache",
+        lambda notebook_id: events.append("invalidate"),
+    )
+    _spy_dirty_in_tx(repo, monkeypatch, events)
 
     repo.set_edge_review(notebook_id, relation_ids[0], "rejected")
 
-    assert events == ["write.begin", "write.commit", "dirty", "invalidate"]
+    assert events == ["write.begin", "dirty", "write.commit", "invalidate"]
 
 
 # ------------------------------------------------------------------ clusters
@@ -505,10 +539,17 @@ def test_merge_knowledge_commits_then_dirty_then_invalidate(repo, monkeypatch):
 
 
 def test_edge_conflict_discard_adds_a_second_dirty_bump(repo, monkeypatch):
+    """The loser edge's rejection rides ``set_edge_review`` (R2 P2 fix, codex
+    #638 R2: its own dirty bump now happens INSIDE its write transaction, so
+    the first "dirty" moves before "write.commit" instead of after);
+    ``apply_conflict_resolution``'s explicit belt-and-suspenders SECOND bump
+    is unchanged — still the post-tx, non-tx ``mark_unified_kg_dirty`` call
+    ``_spy_coordinator`` observes."""
     notebook_id, _objects, relation_ids = _seed_kg(repo, "edge conflict phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
 
     out = repo.apply_conflict_resolution(
         notebook_id,
@@ -521,7 +562,7 @@ def test_edge_conflict_discard_adds_a_second_dirty_bump(repo, monkeypatch):
 
     assert out == {"action": "discard", "loser": relation_ids[1]}
     assert events == [
-        "write.begin", "write.commit", "dirty", "invalidate", "dirty"
+        "write.begin", "dirty", "write.commit", "invalidate", "dirty"
     ]
 
 

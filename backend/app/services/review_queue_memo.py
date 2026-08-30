@@ -109,6 +109,59 @@ copy-on-write 是两件事的基础:``top()`` 的命中拷贝可以在**锁外**
 list 引用不会被就地改写),而 ``carry`` 也不会改到任何已经交出去的引用。未被
 改动的 item dict 在新旧两个 list 之间共享——安全,因为本模块从不就地改 item。
 
+## 为什么 bump 必须与状态写同一事务(R2 P2,codex #638 R2)
+
+``carry`` 自己的锁内 ``expected_seq`` 核对只保证「续下去的这份内容不比标签
+新」,它**不**、也不可能核对「这个新标签配的 status,是不是真的是那次让 DB
+seq 走到这个值的提交所写的值」——那个事实由**调用方**(``set_edge_review``)
+保证:它必须确保自己传给 ``carry``/``invalidate`` 的 ``new_seq``,就是**它自己
+这次 UPDATE 的提交**产生的那个 seq,不是「随便某个时刻点读到的当前 seq」。
+R1 v4 的实现不满足这一点——``set_edge_review`` 分三段跑:UPDATE 提交(事务 1)、
+``mark_unified_kg_dirty`` 单独提交(事务 2)、再用一个**全新连接**点读当前
+``kg_mutation_seq``(不带锁的读)。三段之间的间隙足够放进另一个并发写者的
+完整读写周期,两条真实的坏结果由此而来:
+
+1. **交叉提交序(P2-a)**:并发写者 A(pending→verified)与 B(verified→pending)
+   写同一条边。若 A 的 UPDATE 先提交(DB 暂时是 verified),随后 B 的整个三段
+   ——UPDATE(DB 变成 pending)、bump、点读——抢在 A 的 bump 段之前跑完并把 memo
+   续到「seq=Sb,status=pending」,那么 A 恢复后再跑自己的 bump(把 seq 推到
+   ``Sb+1``)、点读(读到的正是这个 ``Sb+1``,因为点读读的是"世界当前值"而不是
+   "A 自己那次提交产生的值"),再拿 ``expected_seq=Sb`` 去 carry——这个值**恰好**
+   等于 B 刚续上的标签,核对通过,carry 把 memo 覆盖成「seq=Sb+1,status=
+   verified」。可是 DB 的终态是 B 写的 **pending**(B 的 UPDATE 提交在 A 之后)。
+   memo 从此永久地把一个更大、看着合法的 seq 和错误的 status 焊在一起——
+   ``expected_seq`` 核对挡不住这个,因为它核对的是"标签是否连续",不是"这个
+   标签该配哪个 status"。
+2. **段间失败(P2-b)**:UPDATE 段已提交,但 bump 段(或它之后的点读)在这之后
+   抛异常——DB 已经是新状态,``set_edge_review`` 却在 carry/invalidate 都没跑到
+   之前就把异常扔给了调用方。memo 还挂着旧 seq 标着的旧排名/旧总量,此后每一次
+   「取队列」都会命中它、端出已经被拒绝/已经通过的边和陈旧的 ``total``——直到
+   某次不相关的写把 seq 顶到别的值才会失效,这个陈旧窗口没有上界。
+
+两条的共同病根是同一个:**UPDATE 的提交、bump 的提交、以及"哪个 seq 值算这次
+写自己的"这三件事之间没有原子性**。修法(R2)是让 bump——以及它的 seq 读
+回——搬进与 UPDATE **同一个**事务(``KgMutationCoordinator.
+mark_unified_kg_dirty_in_tx``,读回走同一连接上的 ``graph_seq_row``,读的是
+这次事务自己刚写下、尚未提交的值——同连接读自己未提交的写,两个后端都保证)。
+这样两条窗口都不再存在:
+
+- P2-a:两个事务只要写集合有交集(同一条 relation 行,或者——bump 段落在同一
+  个 notebook 的 ``unified_kg_state`` 行,任何两次 bump 都会碰这一行)就必然被
+  底层隔离机制串行化(PG 行锁 / SQLite 单写者串行)——先提交的那个先拿到较小的
+  seq,后提交的那个后拿到较大的 seq,而且"较大的 seq"与"较大的那个事务写下的
+  status"现在由**同一次提交**产生,不可能被拆开、被另一个写者的 bump 插在
+  中间错配。
+- P2-b:UPDATE 与 bump(与它的读回)现在共享同一个 COMMIT/ROLLBACK 边界——
+  bump 段失败会把 UPDATE 一起回滚,``set_edge_review`` 整体失败,DB 与 memo
+  都还是写之前的样子,不存在"DB 已变、memo 未变"这种中间态;真正提交之后、
+  ``carry``/``invalidate`` 调用之前若还有别的原因崩溃,memo 只会**落后**(下一
+  次读因为 seq 不等而 miss、重新冷算,吐出与 DB 一致的新结果),不会**领先**或
+  **错配**——这正是模块开头"读序契约"一直要求的安全方向。
+
+变异锚点:把 bump(与它的读回)挪回 UPDATE 所在事务之外,必须让下面这个并发
+交错重演测试报红——见 ``backend/tests/test_edge_review_queue.py::
+test_concurrent_opposite_flips_never_leave_the_memo_disagreeing_with_the_db``。
+
 ## epoch / LRU
 
 形态照 ``postgres/knowledge_counts_cache.py`` 中 epoch 保护**最严**的那两个 memo

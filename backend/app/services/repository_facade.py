@@ -2722,14 +2722,18 @@ class RepositoryFacade:
         # facade `_write` seat, so begin/commit phase traces are unchanged.
         self._runtime.kg_mutations.mark_unified_kg_dirty(notebook_id)
 
-    def _mark_unified_kg_dirty_in_tx(self, db, notebook_id: str) -> None:
+    def _mark_unified_kg_dirty_in_tx(self, db, notebook_id: str) -> int:
         # In-transaction twin of `_mark_unified_kg_dirty`: rides a write
         # transaction the CALLER already holds open (relink_notebook_kg's
-        # per-source commit) instead of opening its own — the dirty bump
-        # commits atomically with the edges it accompanies, so a kill -9
-        # between that commit and the run's finally cannot leave committed
-        # edges invisible to kg_mutation_seq.
-        self._runtime.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
+        # per-source commit, and — R2 P2 fix, codex #638 R2 — set_edge_review's
+        # own UPDATE) instead of opening its own — the dirty bump commits
+        # atomically with the write it accompanies, so a kill -9 between that
+        # commit and the run's finally cannot leave committed edges invisible
+        # to kg_mutation_seq. Returns the freshly-bumped seq (read back on the
+        # SAME connection, before commit) so a caller that needs its own
+        # bump's value atomically paired with its own write (set_edge_review's
+        # memo carry) never has to re-open a connection after commit.
+        return self._runtime.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
 
     def _bump_cluster_mutation_seq(self, db, notebook_id: str) -> None:
         # Task 14: coordinator-owned in-transaction primitive (写簇+bump 同

@@ -1801,7 +1801,7 @@ class RepositoryRuntime:
         get_notebook: Callable[[str], Any], current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
-        mark_unified_kg_dirty_in_tx: Callable[[Any, str], None],
+        mark_unified_kg_dirty_in_tx: Callable[[Any, str], int],
         bump_cluster_mutation_seq: Callable[..., None],
         embed_objects_batch: Callable[..., None],
         embed_relations_batch: Callable[..., None],
@@ -1834,7 +1834,10 @@ class RepositoryRuntime:
         seats stay effective — ``mark_unified_kg_dirty_in_tx`` is the
         in-transaction twin ``relink_notebook_kg`` rides so the dirty bump
         commits atomically with the per-source edge insert instead of a
-        `finally` a kill -9 could skip); ``llm``/``kg_llm``
+        `finally` a kill -9 could skip, and — R2 P2 fix, codex #638 R2 — the
+        same twin ``KnowledgeGovernanceService.set_edge_review`` rides so its
+        seq bump and same-tx seq readback commit atomically with its own
+        review_status UPDATE); ``llm``/``kg_llm``
         resolve the facade's frozen model-client properties per call (class-
         property monkeypatches keep working); the scale/viz callables are
         TEMPORARY Gate-6 adapters (scale-index load / ANN open / viz index /
@@ -1854,16 +1857,25 @@ class RepositoryRuntime:
         the frozen confirm_conflict phase contract patches that method."""
 
         def read_kg_mutation_seq(notebook_id: str) -> int:
-            # R3 T-A3 P1-2 / v4: ``set_edge_review`` needs the just-bumped
-            # ``kg_mutation_seq`` AFTER its ``mark_unified_kg_dirty`` write
-            # commits, to retag the review-queue ranking memo (items + total,
-            # v4) onto the correct new seq via ``ReviewQueueMemo.carry``.
-            # ``mark_unified_kg_dirty`` itself returns nothing (see
-            # kg_mutation.py), so this reads back
-            # through the existing ``unified_kg.graph_seq_row`` read-only
-            # channel other services (checkup/collection_catalog/graph_retrieval)
-            # already use for the same triple — a NEW ``connect()`` after the
-            # bump's own transaction has committed, so it observes the fresh value.
+            # R3 T-A3 P1-2 / v4: point-in-time ``kg_mutation_seq`` read used by
+            # the review-queue memo's own read-order contract (``review_queue``
+            # / ``review_queue_page``'s ``read_seq`` callback, invoked BEFORE
+            # a cold ``compute()`` — see review_queue_memo's module
+            # docstring). A NEW ``connect()`` is correct here: these are
+            # ordinary reads with no write to pair the seq with, through the
+            # existing ``unified_kg.graph_seq_row`` read-only channel other
+            # services (checkup/collection_catalog/graph_retrieval) already
+            # use for the same triple.
+            #
+            # ``set_edge_review`` no longer uses this callable for its OWN
+            # bump (R2 P2 fix, codex #638 R2): reading the just-bumped seq
+            # through a brand new post-commit connection let a concurrent
+            # writer's own bump land in between, decoupling "the seq this
+            # call's carry uses" from "the write this call actually made" —
+            # see review_queue_memo's module docstring for the two races that
+            # opened. It now gets its seq from ``mark_unified_kg_dirty_in_tx``'s
+            # return value instead, read back on the SAME connection inside
+            # the SAME transaction as its own review_status UPDATE.
             with connect() as db:
                 return int(self.unified_kg.graph_seq_row(db, notebook_id)[0])
 
@@ -1888,6 +1900,7 @@ class RepositoryRuntime:
             set_conflict_status=set_conflict_status,
             memory_store=self.memory_store,
             kg_mutation_seq=read_kg_mutation_seq,
+            mark_unified_kg_dirty_in_tx=mark_unified_kg_dirty_in_tx,
             review_queue_memo=self.review_queue_memo,
         )
         if self.memory_service is not None:
