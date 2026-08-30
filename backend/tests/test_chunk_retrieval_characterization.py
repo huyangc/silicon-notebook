@@ -612,6 +612,115 @@ def test_retrieve_chunks_large_library_copyable_degrades(repo, monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 6b. R1 行为恢复(审计 ASK-1,P0):narrowed=False 全选冻结不得把语料语言闸/
+#     allowed_source_ids 压上慢路径;narrowed=True 的真收窄路径不回归。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_retrieve_chunks_all_selected_frozen_scope_takes_unscoped_fast_path(
+    repo, monkeypatch
+):
+    """全选冻结(narrowed=False)下 _retrieve_chunks 必须走跟「无 scope」逐字
+    相同的候选路径:`_lexical_corpus_langs` 收到 source_scoped=False(语料语言
+    闸不被跳过),`_retrieve_chunks_fts_degraded` 收到的 allowed_source_ids 是
+    None(不落源限定的有界候选查询臂,而是 test 6 覆盖的「大库无 ANN → FTS 降
+    级」臂),且两条路径产出的候选集(chunk_id/score/relevance)逐字相同——这是
+    R1 的等价 oracle:全选冻结只是恢复行为,不是新增或削减候选。对照:同一份
+    来源清单在 narrowed=True(真收窄)下 source_scoped 必须是 True,且
+    allowed_source_ids 原样透传给降级臂——不回归。"""
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+    # 未建 scale 索引 → ANN 分支不可用,自然落到大库/降级路径(同 test 6)。
+
+    corpus_lang_calls = []
+    orig_corpus_langs = repo.retrieval.candidates._lexical_corpus_langs
+
+    def _spy_corpus_langs(notebook_id, *, source_scoped=False):
+        corpus_lang_calls.append(source_scoped)
+        return orig_corpus_langs(notebook_id, source_scoped=source_scoped)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_corpus_langs", _spy_corpus_langs
+    )
+
+    fts_degraded_calls = []
+    orig_fts_degraded = repo.retrieval.candidates._retrieve_chunks_fts_degraded
+
+    def _spy_fts_degraded(notebook_id, query, query_vector, recall, n_chunks,
+                          **kwargs):
+        fts_degraded_calls.append(kwargs.get("allowed_source_ids"))
+        return orig_fts_degraded(
+            notebook_id, query, query_vector, recall, n_chunks, **kwargs
+        )
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", _spy_fts_degraded
+    )
+
+    # ── 等价 oracle 基线:完全不进入任何 source_scope_context(「无 scope」)。
+    corpus_lang_calls.clear()
+    fts_degraded_calls.clear()
+    scored_unscoped, _ids_u, _mat_u = repo.retrieval.candidates._retrieve_chunks(
+        nb.id, "bandgap"
+    )
+    unscoped_corpus_lang_calls = list(corpus_lang_calls)
+    unscoped_fts_degraded_calls = list(fts_degraded_calls)
+
+    all_selected_scope = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=False
+    )
+    corpus_lang_calls.clear()
+    fts_degraded_calls.clear()
+    with source_scope_context(nb.id, all_selected_scope):
+        scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
+
+    assert corpus_lang_calls == [False] == unscoped_corpus_lang_calls, (
+        "R1:narrowed=False 全选冻结必须让语料语言闸看到 source_scoped=False,"
+        f"同无 scope 一样,实际全选={corpus_lang_calls} 无 scope={unscoped_corpus_lang_calls}"
+    )
+    assert fts_degraded_calls == [None] == unscoped_fts_degraded_calls, (
+        "R1:narrowed=False 时 allowed_source_ids 必须原样退化成 None,走大库"
+        f"降级臂而非源限定有界候选查询臂,实际全选={fts_degraded_calls} "
+        f"无 scope={unscoped_fts_degraded_calls}"
+    )
+    assert len(scored) >= 1
+    assert all(c.chunk_id.startswith("ck-") for c in scored)
+    # 逐字候选集对比(RetrievedChunk 的 __eq__ 比较 chunk_id/score/relevance/…,
+    # 唯独排除 retrieval_supports,见 app.domain.retrieval——支持链路带 tuple
+    # 顺序但打分与候选身份才是等价 oracle 真正要钉的东西)。
+    assert scored == scored_unscoped, (
+        "R1 等价 oracle:全选冻结(narrowed=False)与无 scope 的候选集必须逐字"
+        "相同——全选只恢复行为,既不新增也不削减候选"
+    )
+
+    # 对照:同一份清单真收窄(narrowed=True)时不得回归——source_scoped 必须
+    # 是 True,allowed_source_ids 必须原样透传成显式清单。
+    corpus_lang_calls.clear()
+    fts_degraded_calls.clear()
+    narrowed_scope = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=True
+    )
+    with source_scope_context(nb.id, narrowed_scope):
+        scored2, _ids2, _mat2 = repo.retrieval.candidates._retrieve_chunks(
+            nb.id, "bandgap"
+        )
+
+    assert corpus_lang_calls == [True], (
+        f"对照:narrowed=True 真收窄不得回归成 source_scoped=False,实际 {corpus_lang_calls}"
+    )
+    assert fts_degraded_calls == [(sid,)], (
+        f"对照:narrowed=True 时 allowed_source_ids 必须原样透传,实际 {fts_degraded_calls}"
+    )
+    assert len(scored2) >= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 7. ANN fail-open(返回 None)→ 非大库场景落全表暴力并返回非空 scored(锁 10491-92 后 fallthrough)
 # ═══════════════════════════════════════════════════════════════════════════
 

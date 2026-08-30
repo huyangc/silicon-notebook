@@ -90,6 +90,14 @@ AMBIGUOUS_MEMBER_OWNERS = {
     # 名字含 checkup 但不该落进任何 fragment 启发:facade 构造期挂上 runtime 事件插槽的
     # H4/H5 失效转发器,语义归属 CheckupService(它转发的目标)。
     "_invalidate_checkup_missing_vector_counts": "CheckupService",
+    # 多语句体(`with self._write() as db: ... / if not preserve_existing: ...`,
+    # codex #638 R4)逃过 delegate_owners 的单行委托推断——那条推断只认「函数体是
+    # 一句 `return self._runtime.X.y(...)` 转发」的形状。owner 镜像它的姐妹
+    # `_finish_extraction_run`(同一对 begin/finish 生命周期方法,同样落在
+    # `self._runtime.knowledge` 这个 KnowledgeStore 座位上)。`SURFACE_SOURCE_COMMIT`
+    # 早于这个成员引入,`_owners_at_commit` 的历史快照里没有它,兜底 `_owner_for`
+    # 又没有任何 fragment 命中「extraction」,两条路都够不到,必须在这里显式登记。
+    "_begin_extraction_run": "KnowledgeStore",
 }
 
 ATTRIBUTE_MEMBER_OWNERS = {

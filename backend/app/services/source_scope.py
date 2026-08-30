@@ -462,6 +462,37 @@ def scoped_allowed_source_ids(
     apply before LIMIT.  The exclude branch remains for direct service callers:
     it can narrow an existing explicit list, while result-boundary filtering
     remains the fail-closed fallback when no universe was supplied.
+
+    R1 behavior restoration (audit ASK-1, P0): an all-selected freeze
+    (``narrowed is False``) must return exactly what an unscoped run would
+    have returned -- ``allowed`` untouched, never the materialized
+    visible+hidden ceiling -- because every hot-path candidate producer
+    branches on ``allowed_source_ids is not None`` to pick its fast path
+    (the lexical corpus-language gate, the GiST KNN native path, un-degraded
+    elements/chunks retrieval). Handing those producers an explicit tuple
+    that happened to equal the whole universe silently pushed every browser
+    default-selection run onto the same slow path a real narrowing requires,
+    for zero narrowing benefit. ``narrowed`` is a three-state fact and this
+    function must treat each state differently, on purpose:
+
+    * ``True``  -- a real narrowing: fall through unchanged and return the
+      frozen include/exclude intersection below, exactly as before this fix.
+    * ``False`` -- the browser's default "everything checked" freeze: short-
+      circuit here to ``allowed`` (``None`` on the common no-explicit-list
+      call), so downstream producers see "no ceiling" and take the same fast
+      path an unscoped run would. This only restores candidates that a real
+      "no scope" run would already have produced -- it is not new leniency:
+      ``source_allowed`` / ``filter_evidence`` / ``filter_retrieval_items``
+      still cut final evidence down to the visible+hidden universe at the
+      result boundary, and none of them call this function, so that fence is
+      untouched.
+    * ``None`` -- legacy/direct-construction scopes that predate the
+      server-computed bit (or bypass ``_validate_source_scope`` entirely):
+      ``is False`` deliberately does not match ``None``, so this state keeps
+      falling through to the historical byte-identical materialized-tuple
+      behavior. ``plugin_ask_engine.py`` already treats a ``None`` return
+      from this function as "use the full source list" rather than
+      "unbounded" -- the same fallback shape this state preserves.
     """
     allowed = (
         tuple(dict.fromkeys(str(value) for value in explicit if str(value)))
@@ -478,7 +509,15 @@ def scoped_allowed_source_ids(
         # ``is not None``, exactly as the include-ceiling branch below already
         # requires.
         return ()
-    if not scope.ceiling_active or notebook_id != scope.notebook_id:
+    if (
+        not scope.ceiling_active
+        or notebook_id != scope.notebook_id
+        # ``is False``, never ``not scope.narrowed``: narrowed is a three-state
+        # fact and ``None`` (legacy/direct-construction scopes) must keep
+        # falling through to the materialized-tuple branch below, not be
+        # misread here as "not narrowed" alongside the real ``False`` case.
+        or scope.narrowed is False
+    ):
         return allowed
     if scope.mode == "include":
         ceiling = scope.source_ids | scope.hidden_source_ids
