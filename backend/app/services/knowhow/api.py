@@ -292,7 +292,7 @@ def build_projector(repo: Any) -> KnowhowProjector:
         embedding=rt.source_embedding,
         note_model_error=rt.models.note_model_error,
         invalidate_unified_cache=rt.kg_mutations.invalidate_unified_cache,
-        mark_unified_dirty=rt.kg_mutations.mark_unified_kg_dirty,
+        mark_unified_dirty_in_tx=rt.kg_mutations.mark_unified_kg_dirty_in_tx,
         new_id=rt.seams.new_id,
         now=rt.seams.now,
     )

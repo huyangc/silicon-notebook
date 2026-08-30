@@ -1779,10 +1779,22 @@ class SourceIngestionService:
                     clear_embeddings=True,
                 )
                 self.sources.delete_source_row(db, source_id)
+            # codex #638 R5: this transaction DELETES knowledge_objects /
+            # knowledge_relations / concept_clusters rows (via
+            # clear_source_extraction_state → clear_source_graph_state), so its
+            # seq bump belongs inside it — the same rule R4 applied to
+            # begin_extraction_run's clear. The bump used to sit three
+            # statements past the commit, behind two filesystem teardowns
+            # (source file, MinerU images) that can raise; when they did, the
+            # graph rows were gone but kg_mutation_seq had not moved, and every
+            # seq-keyed memo went on serving the deleted source's relations
+            # until an unrelated write bumped the notebook. Kept UNCONDITIONAL
+            # (outside the existence guard), exactly as the post-commit call
+            # was: this change moves the bump's time point, never its count.
+            self.kg_mutations.mark_unified_kg_dirty_in_tx(db, source.notebook_id)
         self.source_files.delete(source.file_path)
         self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)
-        hooks.mark_unified_dirty(source.notebook_id)
         # A deletion changes the corpus exactly as much as an addition does —
         # and it is the event that most often invalidates an existing
         # understanding block (the document a claim cited is gone). Last step,

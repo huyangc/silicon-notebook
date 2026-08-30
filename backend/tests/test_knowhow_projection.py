@@ -94,7 +94,7 @@ def projector(repo) -> KnowhowProjector:
         embedding=rt.source_embedding,
         note_model_error=rt.models.note_model_error,
         invalidate_unified_cache=rt.kg_mutations.invalidate_unified_cache,
-        mark_unified_dirty=rt.kg_mutations.mark_unified_kg_dirty,
+        mark_unified_dirty_in_tx=rt.kg_mutations.mark_unified_kg_dirty_in_tx,
         new_id=rt.seams.new_id,
         now=rt.seams.now,
     )
@@ -1417,7 +1417,7 @@ def test_unconfigured_embedder_is_not_a_failure(tmp_path, monkeypatch):
         embedding=rt.source_embedding,
         note_model_error=rt.models.note_model_error,
         invalidate_unified_cache=rt.kg_mutations.invalidate_unified_cache,
-        mark_unified_dirty=rt.kg_mutations.mark_unified_kg_dirty,
+        mark_unified_dirty_in_tx=rt.kg_mutations.mark_unified_kg_dirty_in_tx,
         new_id=rt.seams.new_id,
         now=rt.seams.now,
     )
@@ -1857,6 +1857,55 @@ def test_project_table_existence_check_and_terminal_write_are_atomic(
     assert orphaned_kos == 0
     with pytest.raises(KeyError):
         repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+def _kg_mutation_seq(repo, notebook_id: str) -> int:
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+    return int(row["kg_mutation_seq"]) if row is not None else 0
+
+
+def test_projection_bumps_the_kg_seq_with_its_own_publication_transaction(
+    repo, projector, table_id, notebook_id, embedder, monkeypatch
+):
+    """codex #638 R5(全矩阵清点):投影的发布事务 delete-and-reinsert
+    ``knowledge_objects``/``knowledge_relations``/``concept_clusters``,所以它的
+    ``kg_mutation_seq`` bump 必须与这些行同一次提交,不能挂在提交之后的收尾里。
+
+    这里让紧跟在发布事务之后的那一步(``bump_knowhow_mutation_seq``)抛错来复现:
+    图行已经落库,一个 post-tx 的 bump 会被整个跳过,seq 停在投影之前——所有 seq
+    键的读侧(排名 memo、计数、聚类版本)从此对这批新对象失明,直到某次不相关的
+    KG 写把它顶开。修法后 seq 已随行提交,收尾失败只丢收尾。
+
+    变异锚点:把 ``mark_unified_dirty_in_tx`` 挪回 ``with self.database.write()``
+    之外,下面的 seq 断言会红。"""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+    seq_before = _kg_mutation_seq(repo, notebook_id)
+
+    def _boom(_table_id: str) -> int:
+        raise RuntimeError("knowhow seq bump failed")
+
+    monkeypatch.setattr(store, "bump_knowhow_mutation_seq", _boom)
+
+    with pytest.raises(RuntimeError, match="knowhow seq bump failed"):
+        projector.project_table(table_id)
+
+    with repo._connect() as db:
+        published = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert published > 0, "the publication transaction itself must have committed"
+    assert _kg_mutation_seq(repo, notebook_id) > seq_before, (
+        "the projected graph rows are durable, so their seq bump must have "
+        "committed with them rather than in a skippable post-commit tail"
+    )
 
 
 # ---------------------------------------------------------------------------

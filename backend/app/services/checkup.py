@@ -382,15 +382,16 @@ class CheckupService:
         之间、租约回到原值」那扇键失效捕获不到、旧方案靠 30s TTL 硬兜的窗。不按页/批
         通知的理由见 invalidate 的 docstring(codex 质量评审 P1)。其余进程内写路径不需
         通知:ingestion/reparse 被 build_chunks 的 seq bump + 租约覆盖;knowhow 投影
-        (含 embed_chunk_ids 与 carry-over 直写)由投影**正常结束**的 mark_unified_dirty
-        覆盖——投影在 bump 前早退(目标表已删的 target_exists 短路、KO 发布事务抛错)
-        时已提交的行落入背底 TTL,见下。
+        (含 embed_chunk_ids 与 carry-over 直写)由投影**正常结束**的
+        mark_unified_dirty_in_tx 覆盖(codex #638 R5 起随 KO 发布事务提交,比原来的
+        提交后调用更早、更不可能漏)——投影在 bump 前早退(目标表已删的 target_exists
+        短路、KO 发布事务抛错并连 bump 一起回滚)时已提交的行落入背底 TTL,见下。
         写回前核对 (全局, 本库) 失效代次二元组,防止失效期间已在途的计算把失效前的快照
         钉回去(镜像 postgres/knowledge_counts_cache 的 epoch 守卫)。
 
         **背底 TTL(``_H45_CACHE_TTL``,300s)**:键与事件都只对本进程可见;跨进程写
         (离线 CLI ``run_embed`` / batch ingest)、上面登记的 seq 覆盖不到的边角(半途
-        解析、knowhow 投影在 mark_unified_dirty 前早退/抛错、knowhow transfer 的重投影
+        解析、knowhow 投影在 mark_unified_dirty_in_tx 前早退/抛错、knowhow transfer 的重投影
         调度被吞、seq 归零重爬撞值),以及任何未来漏挂通知的路径,都由 TTL 兜底,计数
         至多陈旧 300 秒。交互式「补齐向量」是进程内路径,
         忙碌位解除跟随事件级新鲜的计数,不再多按住一个 TTL——docs/product-and-api*.md

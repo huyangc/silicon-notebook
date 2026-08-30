@@ -681,7 +681,7 @@ class SourceEmbeddingService:
         pairs = [(r["id"], vector) for r, vector in zip(rows, vectors)]
         self.vectors.replace_chunk_vectors(notebook_id, pairs, created_at=self.now())
         # 刻意不发体检 H4/H5 通知:knowhow 投影按行调用本方法(大表重投影=行数次),
-        # 且投影结束的 mark_unified_dirty 已 bump seq、覆盖「投影落在两次轮询之间」的
+        # 且投影发布事务里的 mark_unified_dirty_in_tx 已 bump seq、覆盖「投影落在两次轮询之间」的
         # 窗口——见 __init__ 的通知面注释。
 
     def embed_chunks_for_source(self, source_id: str) -> None:

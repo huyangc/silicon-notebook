@@ -953,6 +953,62 @@ def test_extraction_reset_is_visible_to_a_sibling_runtimes_warm_memo(tmp_path, m
         repo_a.set_edge_review(nb.id, stale_rel_id, "verified")
 
 
+def test_source_deletion_bumps_the_seq_even_if_the_image_cleanup_raises(
+    repo, monkeypatch
+):
+    """codex #638 R5(全矩阵清点):``delete_source`` 的写事务删掉该源全部
+    ``knowledge_objects``/``knowledge_relations``/``concept_clusters``
+    (``clear_source_extraction_state`` → ``clear_source_graph_state``),
+    与 R4 堵掉的重抽取清理是同一形状,所以它的 bump 也必须在**同一个事务**里。
+
+    修法前 bump 排在提交之后、两次文件系统清理(源文件、MinerU 图片资产)之后——
+    这里让图片清理抛错来复现:图行已经删掉,而 ``kg_mutation_seq`` 一动不动,暖着的
+    ``ReviewQueueMemo`` 于是无限期端出这条已删来源的边(seq 闸对它天然失明,而
+    这条路径上没有任何显式失效能救它——跨进程的兄弟 runtime 更是永远收不到)。
+
+    变异锚点:把 ``mark_unified_kg_dirty_in_tx`` 挪回 ``with self.write()`` 之外
+    (恢复 post-tx bump),下面 seq 与队列两条断言都会红。"""
+    bind_chat_client(repo, "kg_extract", _FakeLLM(_ONE_RELATION_GRAPH))
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source_for_reset(repo, nb.id)
+    repo._run_extraction(sid)
+    assert len(repo.relations_for_notebook(nb.id)) == 1
+
+    warmed = {item["rel_id"] for item in repo.review_queue(nb.id)}
+    assert warmed
+    memo = repo._runtime.review_queue_memo
+    warm_seq = memo.cached_seq(nb.id)
+    assert warm_seq is not None
+
+    def _boom(source_id: str) -> None:
+        raise RuntimeError("asset store unavailable")
+
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion, "delete_source_images", _boom
+    )
+
+    with pytest.raises(RuntimeError):
+        repo.delete_source(sid)
+
+    assert repo.relations_for_notebook(nb.id) == [], (
+        "the teardown transaction itself committed — only the post-commit "
+        "filesystem cleanup failed"
+    )
+    with repo._connect() as db:
+        (seq_after,) = db.execute(
+            "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()
+    assert seq_after > warm_seq, (
+        "the graph rows are gone, so their seq bump must have committed with "
+        "them — a post-commit bump is skipped entirely on this path"
+    )
+    # Nothing explicitly invalidated the memo (delete_source raised before its
+    # own invalidate call); the seq gate alone must catch it.
+    assert memo.cached_seq(nb.id) == warm_seq
+    assert {item["rel_id"] for item in repo.review_queue(nb.id)} == set()
+
+
 def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeypatch):
     frozen = json.loads(PHASES.read_text(encoding="utf-8"))["process_source"]
     assert frozen["sequence"] == [

@@ -690,7 +690,10 @@ class KnowledgeLifecycleService:
         预分配，跨块关系仍能正确 remap。Relations 引用不到的 local id 静默跳过。
         ``replace_source`` 把旧图清理并入同一事务；新图写入失败时旧图保持不变。
         ``source_generation`` 仅由 ingestion 的 extraction run 传入；存在时
-        同事务发布独立的 source-local facts，普通治理/测试写入保持原行为。"""
+        同事务发布独立的 source-local facts，普通治理/测试写入保持原行为。
+        ``kg_mutation_seq`` 的 bump 也在这**同一个**事务里（codex #638 R5 P1，
+        见循环尾部的注释）：图行与它的世代号一起提交，embedding 只在之后跑，
+        既不能推迟这次 bump，也不能因为失败而把它整个吞掉。"""
         CHUNK = 1000
         now = self._now()
         local_to_id: Dict[str, str] = {}
@@ -839,6 +842,30 @@ class KnowledgeLifecycleService:
                       r["source_object_id"], r["target_object_id"], r["edge_type"],
                       json.dumps(r["evidence"], ensure_ascii=False), now) for r in chunk],
                 )
+            # codex #638 R5 P1: the seq bump commits WITH the graph rows, not
+            # after the embeddings below. Every object/relation chunk shares
+            # this one transaction, so this is simultaneously "the last graph
+            # write's transaction" and "the only one" — the bump can neither
+            # be seen without the rows nor the rows without the bump. Before
+            # this it ran post-embed, which opened two windows: (a) for the
+            # WHOLE embedding pass (minutes on a large source) the rows were
+            # committed and visible while kg_mutation_seq had not moved, so a
+            # seq-keyed reader — ReviewQueueMemo above all, whose entry the
+            # re-extraction clear (R4) had just legitimately re-tagged — kept
+            # serving its stale ranking AND total; and (b) on the
+            # non-replacement path an embedding failure re-raises, skipping
+            # the bump entirely, so that staleness lasted until some unrelated
+            # KG write happened to bump the notebook again. Embedding failure
+            # can no longer strand the seq: the rows and their generation
+            # number are already durable together, and a reader that misses
+            # the vectors sees a consistent committed state, never a stale
+            # one. Ordering note: no seq consumer wants the bump to trail the
+            # embeddings — the embedding COUNT is its OWN term in
+            # _cluster_input_version (emb_c), checkup keys vectors on explicit
+            # hooks (it states outright that a successful embed does not bump
+            # this seq), and notebook_scale expands five tables including the
+            # embedding one.
+            self._mark_unified_kg_dirty_in_tx(db, notebook_id)
         try:
             self._embed_objects_batch(notebook_id, objects)
         except Exception:
@@ -859,8 +886,9 @@ class KnowledgeLifecycleService:
                 "the complete graph is retained for backfill",
                 source_id,
             )
+        # Cache eviction stays post-commit (cheap, process-local, and safe to
+        # run late — the seq gate above is what protects sibling processes).
         self._invalidate_unified_cache(notebook_id)
-        self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)
 
     def complete_relations_for_source(
@@ -1256,6 +1284,12 @@ class KnowledgeLifecycleService:
                         })
                         existing.add(key)
                     inserted = self.knowledge.insert_completion_relations(db, relation_rows)
+                    if inserted:
+                        # codex #638 R5: one transaction PER PAGE, so the bump
+                        # rides each page's own insert (relink_notebook_kg's
+                        # shape) instead of a run tail that was stale for every
+                        # page but the last and lost if a later page raised.
+                        self._mark_unified_kg_dirty_in_tx(db, notebook_id)
                 else:
                     inserted = 0
                 status = "completed" if page["exhausted"] else "pending"
@@ -1278,8 +1312,8 @@ class KnowledgeLifecycleService:
                 self.event_log.logger.exception(
                     "completion relation embedding failed for %s", source_id
                 )
+            # Bump already rode each page's own insert; only eviction is left.
             self._invalidate_unified_cache(notebook_id)
-            self._mark_unified_kg_dirty(notebook_id)
         emit_stats()
         return stats
 

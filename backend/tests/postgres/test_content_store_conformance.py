@@ -2353,7 +2353,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
         embedding=SimpleNamespace(vectors=vectors),
         note_model_error=lambda *_args, **_kwargs: None,
         invalidate_unified_cache=lambda _notebook_id: None,
-        mark_unified_dirty=lambda _notebook_id: None,
+        mark_unified_dirty_in_tx=lambda _db, _notebook_id: 0,
         new_id=seams.new_id,
         now=seams.now,
     )
@@ -2471,7 +2471,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
         ),
         note_model_error=lambda *_args, **_kwargs: None,
         invalidate_unified_cache=lambda _notebook_id: None,
-        mark_unified_dirty=lambda _notebook_id: None,
+        mark_unified_dirty_in_tx=lambda _db, _notebook_id: 0,
         new_id=seams.new_id,
         now=seams.now,
     )
@@ -2585,7 +2585,7 @@ def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
         ),
         note_model_error=lambda *_args, **_kwargs: None,
         invalidate_unified_cache=lambda _notebook_id: None,
-        mark_unified_dirty=lambda _notebook_id: None,
+        mark_unified_dirty_in_tx=lambda _db, _notebook_id: 0,
         new_id=seams.new_id,
         now=seams.now,
     )
@@ -2703,7 +2703,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
             ),
             note_model_error=lambda *_args, **_kwargs: None,
             invalidate_unified_cache=lambda _notebook_id: None,
-            mark_unified_dirty=lambda _notebook_id: None,
+            mark_unified_dirty_in_tx=lambda _db, _notebook_id: 0,
             new_id=seams.new_id,
             now=seams.now,
         )
