@@ -842,6 +842,108 @@ def test_retrieve_elements_all_selected_frozen_scope_keeps_the_language_gate_ope
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 6c-2. codex #640 R4(P2):R2 的一刀切把「调用方自己真正给的窄清单」也判成了
+#     上下文——违反 docs/product-and-api.md:89「producer-supplied allow-lists
+#     enter that [restricted] lane」。出处现在由调用方声明(``producer_explicit``
+#     形参),不再从清单形状倒推:
+#       (a) 调用方自己给的真窄清单、未声明出处 → 默认落在契约安全侧
+#           (``producer_explicit`` 缺省 True) → 语言闸判 True(受限 lane)。
+#       (b) 插件缝(``_federated_retrieve_elements_impl``)的全宇宙枚举清单仍是
+#           上下文,必须显式声明 ``producer_explicit=False`` → 语言闸继续判
+#           False——R2-P1 的既有钉不得回退。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_retrieve_elements_producer_supplied_narrow_list_enters_the_restricted_lane(
+    repo, monkeypatch
+):
+    """codex #640 R4 P2(a):调用方自己给 ``_retrieve_elements`` 一份真窄清单、
+    不带任何 request scope 时,语料语言闸必须看到 ``source_scoped=True``——一个
+    真正 producer 级的窄清单不能被当成上下文天花板对待
+    (docs/product-and-api.md:89)。
+
+    **变异锚点**:把 ``_retrieve_elements`` 里 ``producer_explicit`` 的默认值改回
+    ``False``(或让它在 ``caller_supplied_list`` 为真时仍强制 ``False``)→
+    corpus_lang_calls 变成 ``[False]``,本条报红。
+    """
+    from app.services.source_scope import current_source_scope
+
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    corpus_lang_calls = []
+    orig_corpus_langs = repo.retrieval.candidates._lexical_corpus_langs
+
+    def _spy_corpus_langs(notebook_id, *, source_scoped=False):
+        corpus_lang_calls.append(source_scoped)
+        return orig_corpus_langs(notebook_id, source_scoped=source_scoped)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_corpus_langs", _spy_corpus_langs
+    )
+
+    # 没有任何 request scope 在场 -- current_source_scope() 必须为 None,证明
+    # 下面的 True 判决来自 producer_explicit 的默认声明,不是request scope 的
+    # 收窄位。
+    assert current_source_scope() is None
+    elements = repo.retrieval.candidates._retrieve_elements(
+        nb.id, "bandgap", limit=4, allowed_source_ids=[sid],
+    )
+
+    assert corpus_lang_calls == [True], (
+        "codex #640 R4 P2:调用方自己给的窄清单必须让语言闸判 source_scoped=True,"
+        f"实际 {corpus_lang_calls}"
+    )
+    assert len(elements) >= 1
+
+
+def test_federated_retrieve_elements_plugin_enumeration_stays_out_of_the_restricted_lane(
+    repo, monkeypatch
+):
+    """codex #640 R4 P2(b)对照:插件元素检索缝(``_federated_retrieve_elements_impl``,
+    镜像 ``PluginRetrievalAccess`` 逐次下推的全宇宙枚举清单)即便传了一份非空清单,
+    也必须继续让语言闸判 ``source_scoped=False``——它是上下文,不是 producer 的
+    窄清单,R2 P1 修的这条不得因 R4 反转默认值而回归。
+
+    **变异锚点**:把 ``_federated_retrieve_elements_impl`` 对 ``_retrieve_elements``
+    的调用改成不显式声明 ``producer_explicit=False``(落回 R4 的默认 True)→
+    corpus_lang_calls 变成 ``[True]``,本条报红。
+    """
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    corpus_lang_calls = []
+    orig_corpus_langs = repo.retrieval.candidates._lexical_corpus_langs
+
+    def _spy_corpus_langs(notebook_id, *, source_scoped=False):
+        corpus_lang_calls.append(source_scoped)
+        return orig_corpus_langs(notebook_id, source_scoped=source_scoped)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_corpus_langs", _spy_corpus_langs
+    )
+
+    # 全宇宙枚举形状:插件端口在构造时把该 notebook 全部可见来源都塞进
+    # allowed_source_keys(此处只有一个来源,形状仍是「枚举」而非「筛选」)。
+    elements = repo.retrieval.candidates.federated_retrieve_elements(
+        nb.id, "bandgap", allowed_source_keys=[(nb.id, sid)], limit=4,
+    )
+
+    assert corpus_lang_calls == [False], (
+        "codex #640 R2 P1(经 R4 复核未回归):插件元素检索缝的全宇宙枚举清单"
+        f"必须继续保持语言闸打开(source_scoped=False),实际 {corpus_lang_calls}"
+    )
+    assert len(elements) >= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 6d. codex #640 R2(P2):全选冻结之后来源宇宙漂移,chunk/keyword/KG 三条词法臂
 #     必须一致地路由回受限 lane——docs/product-and-api.md:89「A frozen-universe
 #     drift makes the run genuinely bounded again and returns it to the
