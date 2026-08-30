@@ -3,7 +3,11 @@ from types import SimpleNamespace
 from pydantic import ValidationError
 
 from app.models.common import Evidence
-from app.models.source_scope import ResolvedSourceScope, SourceScope
+from app.models.source_scope import (
+    BaseNotebookScope,
+    ResolvedSourceScope,
+    SourceScope,
+)
 from app.models.notebooks import NotebookSummary
 from app.api.ask_routes import _require_ask_available, _validate_source_scope
 from fastapi import HTTPException
@@ -419,18 +423,28 @@ def test_narrowed_scope_excludes_hidden_projection_sources():
 
 
 def test_scoped_allowed_source_ids_narrowed_tri_state():
-    """R1 行为恢复(审计 ASK-1,P0)的显式三态钉:同一份冻结的 include 清单
-    (可见 ``s1`` + 隐藏 ``hidden-memory``),``narrowed`` 三个取值下
-    ``scoped_allowed_source_ids`` 必须给出三种不同的返回形状——
+    """R1 行为恢复(审计 ASK-1,P0)的显式三态钉,外加 ``explicit`` 这一维:
+    同一份冻结的 include 清单(可见 ``s1`` + 隐藏 ``hidden-memory``),
+    ``narrowed`` 三个取值下 ``scoped_allowed_source_ids`` 必须给出三种不同的
+    返回形状——
 
     * ``True``  真收窄:原样物化冻结清单(交集/ceiling),行为不变。
-    * ``False`` 浏览器默认全选冻结:必须退化成「无 scope」的返回形状——
-      常见的无显式清单调用得到 ``None``,带显式清单的调用原样透传该清单、
-      不被冻结清单二次收窄。下游一切按 ``allowed_source_ids is not None``
-      驱动的分支(语料语言闸、GiST KNN 快路径、未降级 FTS)才能因此恢复到
-      无 scope 时的快路径,这正是本条修复要恢复的行为。
+    * ``False`` 浏览器默认全选冻结:**不带显式清单**时退化成「无 scope」的
+      返回形状 ``None``。下游一切按 ``allowed_source_ids is not None`` 驱动的
+      分支(语料语言闸、GiST KNN 快路径、未降级 FTS)才能因此恢复到无 scope
+      时的快路径,这正是 R1 要恢复的行为。
     * ``None``  历史直接构造 / 早于该字段的遗留 scope:必须保持改动前的
       字节兼容物化行为不变,``is False`` 判断刻意不匹配 ``None``。
+
+    快路径**只**属于 ``explicit is None``。带显式清单时(narrowed 取值无关)
+    必须与冻结清单取交集:调用方那份清单是**实时**枚举出来的(插件端口就在
+    构造时枚举 ``all_visible_source_ids``),原样透传等于把冻结之后新增的来源
+    放进 run。这一条是 R1 首版的语义洞:元素检索那条路没有结果侧防线
+    (``RetrievedElement`` 无 notebook_id、``filter_retrieval_items`` 不套它),
+    这里的交集就是它唯一的执法点。
+
+    **变异锚点**:把 ``narrowed is False`` 的早退恢复成不看 ``explicit``
+    (即显式清单也直通)→ 下面 ``("s1",)`` 那条报红。
     """
     def _scope(narrowed):
         scope = ResolvedSourceScope(
@@ -443,19 +457,27 @@ def test_scoped_allowed_source_ids_narrowed_tri_state():
         assert set(scoped_allowed_source_ids("nb")) == {"s1", "hidden-memory"}, (
             "真收窄:仍然原样物化冻结清单"
         )
+        assert scoped_allowed_source_ids("nb", ["s1", "drifted-in"]) == ("s1",)
 
     with source_scope_context("nb", _scope(False)):
         assert scoped_allowed_source_ids("nb") is None, (
-            "R1:全选冻结必须退化成 None,同无 scope 一样"
+            "R1:全选冻结不带显式清单时必须退化成 None,同无 scope 一样"
         )
-        assert scoped_allowed_source_ids("nb", ["s1", "other"]) == ("s1", "other"), (
-            "narrowed=False 时显式清单原样透传,不被冻结清单二次收窄"
+        assert scoped_allowed_source_ids("nb", ["s1", "drifted-in"]) == ("s1",), (
+            "narrowed=False 带显式清单时必须与冻结清单取交集——原样透传就是"
+            "把冻结后新增的来源放进 run(实时枚举的清单不是天花板)"
+        )
+        assert scoped_allowed_source_ids(
+            "nb", ["s1", "hidden-memory"]
+        ) == ("s1", "hidden-memory"), (
+            "交集只丢冻结清单之外的 id:隐藏半在天花板内,不得被顺手裁掉"
         )
 
     with source_scope_context("nb", _scope(None)):
         assert set(scoped_allowed_source_ids("nb")) == {"s1", "hidden-memory"}, (
             "narrowed=None 是遗留直接构造路径,字节兼容不许破——原样物化"
         )
+        assert scoped_allowed_source_ids("nb", ["s1", "drifted-in"]) == ("s1",)
 
 
 def test_candidate_detects_hidden_participant_drift_through_source_store():
@@ -595,6 +617,183 @@ def test_scope_drift_probe_reprobes_across_scope_reinstalls():
             assert candidates.probe() is True
 
     assert candidates.sources.visible_calls == 2
+
+
+def _drift_lane_notebook(tmp_path, monkeypatch):
+    """真库最小场:一个 notebook,按需插入可见来源与带 evidence 的 KG 对象。
+
+    刻意用真 ``SQLiteRepository`` 而不是 double:这条钉子要走的是
+    ``_retrieve_scored`` 的**真实**候选路由(受限词法 lane 的 site 与它收到的
+    allowed_source_ids),而 double 只能证明我自己写的 if 分支自洽。
+    """
+    from app.core.config import Settings
+    from app.models.schemas import NotebookCreate
+    from app.services.sqlite_repository import SQLiteRepository
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'drift-lane.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings(_env_file=None))
+    notebook_id = repo.create_notebook(NotebookCreate(name="漂移")).id
+
+    def add_source(source_id: str) -> None:
+        repo._runtime.source_store.insert_source(
+            source_id=source_id, notebook_id=notebook_id, title=source_id,
+            source_type="pdf", status="active", parse_status="parsed",
+            file_name="", file_path="", file_size=0, file_hash="",
+            summary="", doc_type="",
+        )
+
+    def add_object(local_id: str, source_id: str, name: str) -> None:
+        repo.store_kg(notebook_id, None, [{
+            "local_id": local_id,
+            "object_type": "concept",
+            "payload": {"name": name},
+            "evidence": [{
+                "source_id": source_id, "source_title": source_id,
+                "element_id": f"el-{local_id}", "element_type": "paragraph",
+                "location_label": "1", "quoted_span": name, "confidence": 1.0,
+            }],
+        }], [])
+
+    return repo, notebook_id, add_source, add_object
+
+
+def _lexical_lane_spy(candidates, monkeypatch):
+    """记下 ``_lexical_object_hits`` 每次调用的 (site, allowed_source_ids)。"""
+    seen: list[tuple[str, object]] = []
+    original = candidates._lexical_object_hits
+
+    def _spy(db, notebook_id, query, recall, **kwargs):
+        seen.append((kwargs.get("site"), kwargs.get("allowed_source_ids")))
+        return original(db, notebook_id, query, recall, **kwargs)
+
+    monkeypatch.setattr(candidates, "_lexical_object_hits", _spy)
+    return seen
+
+
+def _drift_probe_spy(candidates, monkeypatch):
+    """记下漂移探针每次调用的判定结果(仍然真调,不改判)。"""
+    verdicts: list[bool] = []
+    original = candidates._unsafe_source_scope_restricted
+
+    def _spy(notebook_id):
+        verdict = original(notebook_id)
+        verdicts.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(candidates, "_unsafe_source_scope_restricted", _spy)
+    return verdicts
+
+
+def test_all_selected_freeze_reopens_the_restricted_lane_once_sources_drift(
+    tmp_path, monkeypatch
+):
+    """⛔ 契约钉(docs/product-and-api.md 检索范围一节):全选冻结之后有来源完成
+    抽取时,来源可分区检索必须**在 I/O 前**按冻结清单继续,而不是让漂移来源先
+    去争 Top-K 再在结果侧丢掉——「post-filtering alone is not authority because
+    excluded candidates can consume Top-K or supply hidden graph premises」。
+
+    R1 首版把 ``narrowed is False`` 一律早退成 None,于是 ``_retrieve_scored``
+    的 ``source_filter is not None and (...)`` 直接短路,漂移探针一次都不被调,
+    受限词法 lane 死掉——正是 #634 R2-3 留档明令禁止的形态。
+
+    **变异锚点**:去掉 ``_scoped_allowed_with_drift_guard`` 的漂移回落(直接调
+    ``scoped_allowed_source_ids``)→ 探针不再被调、``kg_source_scoped_fts`` 不再
+    出现,本条报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+
+    repo, notebook_id, add_source, add_object = _drift_lane_notebook(
+        tmp_path, monkeypatch
+    )
+    add_source("src-frozen")
+    add_object("frozen", "src-frozen", "bandgap reference")
+    candidates = repo.retrieval.candidates
+
+    frozen = ResolvedSourceScope(
+        mode="include", source_ids=["src-frozen"], narrowed=False
+    )
+    # 冻结之后才完成抽取的来源(并发上传):它不在冻结快照里。
+    add_source("src-drifted")
+    add_object("drifted", "src-drifted", "bandgap reference")
+
+    lane = _lexical_lane_spy(candidates, monkeypatch)
+    probe = _drift_probe_spy(candidates, monkeypatch)
+    with source_scope_context(notebook_id, frozen):
+        hits = candidates._retrieve_scored(notebook_id, "bandgap")
+
+    assert probe, "漂移探针必须被调用——短路掉它就是 #634 R2-3 的违规形态"
+    assert probe[-1] is True, "冻结后新增可见来源必须被判为漂移"
+    assert ("kg_source_scoped_fts", ("src-frozen",)) in lane, (
+        "漂移后受限词法 lane 必须收到物化的冻结清单(在 LIMIT 之前),"
+        f"实际 lane 调用为 {lane}"
+    )
+    drifted_sources = {
+        evidence.source_id
+        for hit in hits for evidence in hit.evidence
+    }
+    assert "src-drifted" not in drifted_sources, (
+        "漂移来源的对象不得进入候选结果"
+    )
+
+
+def test_all_selected_freeze_without_drift_keeps_the_unscoped_fast_path(
+    tmp_path, monkeypatch
+):
+    """对照臂(R1 的等价面,不许因漂移回落而回归):宇宙没漂移时探针可以被调,
+    但判定为 False,天花板保持 ``None``——受限词法 lane 一次都不能出现。"""
+    from app.models.source_scope import ResolvedSourceScope
+
+    repo, notebook_id, add_source, add_object = _drift_lane_notebook(
+        tmp_path, monkeypatch
+    )
+    add_source("src-frozen")
+    add_object("frozen", "src-frozen", "bandgap reference")
+    candidates = repo.retrieval.candidates
+
+    frozen = ResolvedSourceScope(
+        mode="include", source_ids=["src-frozen"], narrowed=False
+    )
+    lane = _lexical_lane_spy(candidates, monkeypatch)
+    probe = _drift_probe_spy(candidates, monkeypatch)
+    with source_scope_context(notebook_id, frozen):
+        candidates._retrieve_scored(notebook_id, "bandgap")
+
+    assert all(verdict is False for verdict in probe), (
+        f"未漂移的全选冻结不得被判为受限,实际 {probe}"
+    )
+    assert all(site != "kg_source_scoped_fts" for site, _allowed in lane), (
+        f"未漂移时必须保持无 scope 的快路径候选路由,实际 lane 调用为 {lane}"
+    )
+    assert all(allowed is None for _site, allowed in lane), (
+        f"未漂移时不得下推任何 allow-list,实际 lane 调用为 {lane}"
+    )
+
+
+def test_library_exclusion_still_denies_before_the_all_selected_fast_path():
+    """顺序不变量(P2-2):库维度排除必须在本地全选快路径**之前**判定。
+
+    ``covers_notebook`` 的拒绝分支返回 ``()``(显式拒绝,SQL 侧在 LIMIT 前就空),
+    而全选快路径返回 ``None``(无天花板)。两者的返回形状语义相反,所以把快路径
+    分支上移到拒绝分支之前,会把「这个库整体不参与」变成「这个库没有限制」。
+
+    **变异锚点**:把 ``narrowed is False`` 的早退挪到 ``covers_notebook`` 判定
+    之前 → 下面第一条断言从 ``()`` 变成 ``None``,本条报红。
+    """
+    local = SourceScope(mode="include", source_ids=["s1"], narrowed=False)
+    base = BaseNotebookScope(
+        mode="include", notebook_ids=["kept-base"], narrowed=True
+    )
+    with source_scope_context("nb", local, base):
+        assert scoped_allowed_source_ids("excluded-base") == (), (
+            "被排除的参考库是显式拒绝,绝不能因为本地维度全选而变成「无限制」"
+        )
+        assert scoped_allowed_source_ids("excluded-base", ["b1"]) == ()
+        # 对照:参与的库不受本地复选框影响,本地全选也仍然是 None。
+        assert scoped_allowed_source_ids("kept-base", ["b1"]) == ("b1",)
+        assert scoped_allowed_source_ids("nb") is None
 
 
 def test_candidate_without_active_scope_does_not_touch_source_store():

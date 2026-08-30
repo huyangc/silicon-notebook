@@ -328,6 +328,60 @@ class _RetrievalState:
              if callable(hidden_ids) else None),
         )
 
+    def _scoped_allowed_with_drift_guard(
+        self, notebook_id: str, explicit=None
+    ) -> tuple[str, ...] | None:
+        """``scoped_allowed_source_ids`` plus the drift half of the ceiling.
+
+        THE single seam every candidate producer in this module uses, and the
+        reason none of them may call ``scoped_allowed_source_ids`` directly.
+        That function's all-selected fast path (R1, audit ASK-1) returns
+        ``None`` because the frozen list and the live universe are the same
+        set -- a fact about the instant it is asked.  A source that finishes
+        extraction after validation breaks that equality, and from then on
+        "no list" would mean the drifted source's chunks/elements/KG rows
+        compete for Top-K.  That is precisely the shape the retrieval-scope
+        contract rules out (``docs/product-and-api.md``: unsafe channels close
+        **before I/O**, because "post-filtering alone is not authority --
+        excluded candidates can consume Top-K or supply hidden graph
+        premises"), so this seam re-materializes the frozen ceiling for the
+        drifted case and hands it down before ``LIMIT``.
+
+        The probe is asked ONLY where the fast path can actually have dropped
+        a ceiling -- this notebook's own all-selected include freeze -- so an
+        unscoped run, a base-library query and a narrowed run each cost what
+        they always did (zero extra reads; a narrowed run already gets a
+        non-``None`` list and returns above).  ⛔ The verdict is never cached:
+        see ``_unsafe_source_scope_restricted`` for that contract and the
+        reverted attempt (#634 R2-3).
+        """
+        from app.services.source_scope import (
+            current_source_scope,
+            frozen_ceiling_source_ids,
+            scoped_allowed_source_ids,
+        )
+
+        allowed = scoped_allowed_source_ids(notebook_id, explicit)
+        if allowed is not None:
+            return allowed
+        scope = current_source_scope()
+        if (
+            scope is None
+            or scope.narrowed is not False
+            or scope.mode != "include"
+            or notebook_id != scope.notebook_id
+        ):
+            # Every other ``None`` is one this function never withheld: no
+            # scope, a legacy/narrowed scope (which returns a list above), an
+            # exclude-shaped scope (enforced by subtraction at the result
+            # boundary, exactly as before R1), or a mounted base library.
+            return allowed
+        if not self._unsafe_source_scope_restricted(notebook_id):
+            return allowed
+        # narrowed is False, so the probe can only have answered True because
+        # the visible/hidden universe drifted away from the freeze.
+        return frozen_ceiling_source_ids(notebook_id)
+
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
         if database is not None:
             return self.knowledge.any_mounted_has_kg_on(database, notebook_id)
@@ -1354,14 +1408,11 @@ class CandidateRetrievalService(_RetrievalState):
         # (column-name) type — exactly "flag on AND this notebook has knowhow
         # graph content" (or a caller explicitly asked for one). Flag off /
         # non-knowhow ⇒ empty ⇒ pure no-op, no bridge query, no injection.
-        from app.services.source_scope import scoped_allowed_source_ids
-
-        # Keep the caller's intent separate from the frozen request ceiling.
-        # ``scoped_allowed_source_ids`` intentionally returns a tuple for both
-        # a genuinely narrowed run and an API-resolved "all selected" snapshot;
-        # candidate routing must not infer channel safety from that shape.
+        # Keep the caller's intent separate from the frozen request ceiling:
+        # a producer-supplied list always means the source-restricted lane,
+        # while the request ceiling only means it when it is actually binding.
         explicit_source_filter = allowed_source_ids is not None
-        allowed_source_ids = scoped_allowed_source_ids(
+        allowed_source_ids = self._scoped_allowed_with_drift_guard(
             notebook_id, allowed_source_ids
         )
         source_filter = (
@@ -1370,6 +1421,24 @@ class CandidateRetrievalService(_RetrievalState):
         )
         if source_filter is not None and not source_filter:
             return []
+        # Truth table after the drift guard -- ``source_filter is not None`` is
+        # again an exact "a list is binding on this query" test, which is why
+        # it may lead the conjunction (before the guard it was a broken proxy:
+        # an all-selected freeze returned None even under drift, short-
+        # circuiting the probe away and killing this lane):
+        #   explicit list (any scope)         → filter set, restricted=True
+        #   narrowed / legacy include ceiling → filter set, probe True  → True
+        #   all-selected freeze, no drift     → filter None             → False
+        #   all-selected freeze, drifted      → frozen ceiling, probe True → True
+        #   exclude-shaped scope, no list     → filter None             → False
+        #     (unchanged since before R1: its deny-list has never been an
+        #      allow-list, and the result boundary is what applies it)
+        #   base library / no scope, no list  → filter None             → False
+        #   library excluded by base scope    → filter (), returned [] above
+        # The probe runs a second time here on purpose: it is a live question
+        # whose answer may not be carried across call sites (see
+        # ``_unsafe_source_scope_restricted``), and it is skipped entirely for
+        # an explicit list and for the common ``source_filter is None`` case.
         source_candidates_restricted = bool(
             source_filter is not None
             and (
@@ -1880,9 +1949,7 @@ class CandidateRetrievalService(_RetrievalState):
                            limit: int = 8, *,
                            allowed_source_ids=None) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
-        from app.services.source_scope import scoped_allowed_source_ids
-
-        allowed_source_ids = scoped_allowed_source_ids(
+        allowed_source_ids = self._scoped_allowed_with_drift_guard(
             notebook_id, allowed_source_ids
         )
         if (allowed_source_ids is not None
@@ -2193,7 +2260,6 @@ class CandidateRetrievalService(_RetrievalState):
         """Evaluate the optional index behind one all-or-nothing boundary."""
         scored, _ids, _matrix = baseline
 
-        from app.services.source_scope import scoped_allowed_source_ids
         from app.services.retrieval import (
             RetrievalSupport,
             add_chunk_supports,
@@ -2201,7 +2267,15 @@ class CandidateRetrievalService(_RetrievalState):
         )
         from app.services.vector_index import build_matrix, top_k_sims
 
-        allowed = scoped_allowed_source_ids(notebook_id, allowed_source_ids)
+        # Two independent bounds, and the scan gate below is NOT the scope one:
+        # ``limit=scan_limit + 1`` bounds the row set for every scope shape
+        # (that is what makes the all-selected fast path's ``None`` safe to
+        # scan at all), while this seam decides WHICH rows are eligible --
+        # including re-materializing the frozen ceiling under drift, so a
+        # source added after validation cannot supply a generated question.
+        allowed = self._scoped_allowed_with_drift_guard(
+            notebook_id, allowed_source_ids
+        )
         scan_limit = self.settings.generated_question_max_scan_rows
         rows = self.chunks.question_index_rows(
             notebook_id,
@@ -2336,9 +2410,7 @@ class CandidateRetrievalService(_RetrievalState):
     ):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
         (matrix 行已 L2 归一化, 点积即余弦)。"""
-        from app.services.source_scope import scoped_allowed_source_ids
-
-        allowed_source_ids = scoped_allowed_source_ids(
+        allowed_source_ids = self._scoped_allowed_with_drift_guard(
             notebook_id, allowed_source_ids
         )
         from app.services.retrieval import (
@@ -2812,9 +2884,7 @@ class CandidateRetrievalService(_RetrievalState):
         if not needle:
             return []
         recall = recall or self.settings.chunk_recall
-        from app.services.source_scope import scoped_allowed_source_ids
-
-        allowed_source_ids = scoped_allowed_source_ids(notebook_id)
+        allowed_source_ids = self._scoped_allowed_with_drift_guard(notebook_id)
         try:
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=allowed_source_ids is not None)

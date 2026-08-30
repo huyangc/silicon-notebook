@@ -546,8 +546,24 @@ class PluginRetrievalAccess:
                 *all_visible_source_ids(notebook_id),
                 *hidden_source_ids(notebook_id, actor_id),
             )))
+            # ``source_ids`` is enumerated LIVE, so the intersection is what
+            # freezes it: a source that finished extracting after validation
+            # is in the live half and not in the frozen ceiling, and the
+            # element seam has no result-side fence to drop it later
+            # (RetrievedElement carries no notebook_id, and the port's own
+            # post-check judges hits against the very ``source_origin`` map
+            # built here).  An all-selected freeze deliberately does NOT take
+            # the "no ceiling" fast path when an explicit list is supplied —
+            # see ``scoped_allowed_source_ids``.
             scoped_source_ids = scoped_allowed_source_ids(notebook_id, source_ids)
             if scoped_source_ids is None:
+                # Unreachable under that contract (a non-None ``explicit``
+                # returns a tuple on every branch, ``()`` included).  Kept as
+                # a shape guard only, so a future contract change surfaces as
+                # the historical whole-list behavior rather than an iteration
+                # over None — but if it ever fires, the drift fence above is
+                # the thing that has been lost, and this line is where to
+                # start looking.
                 scoped_source_ids = source_ids
             for source_id in scoped_source_ids:
                 value = str(source_id or "")

@@ -16,7 +16,15 @@ silent, so both names appear in every accessor:
    checked", because the freeze is what stops a source uploaded (or a library
    mounted) after validation from joining a run a detached worker may still be
    executing hours later.  Ask ``source_scope_ceiling_active()`` /
-   ``base_scope_ceiling_active()``.
+   ``base_scope_ceiling_active()``.  How that ceiling is *enforced* on the
+   producer side has two modes, and they are equivalent, not alternatives: an
+   all-selected freeze whose universe has not drifted is enforced by equality
+   (the frozen list IS the live universe, so the predicate is vacuously true
+   and ``scoped_allowed_source_ids`` hands producers no list at all), while a
+   narrowed run -- or an all-selected run whose universe HAS drifted -- is
+   enforced by materializing the frozen list before ``LIMIT``.  Neither mode
+   lets a concurrently added source widen a run in flight; see
+   ``scoped_allowed_source_ids`` / ``frozen_ceiling_source_ids``.
 2. NARROWING -- "did the user actually shrink this dimension, so a channel must
    be switched off?"  False for a full selection: declining to narrow must not
    cost the user their PPR, private Memory, community reports or corpus
@@ -97,7 +105,11 @@ class ActiveSourceScope:
         include-list that happened to contain the whole visible universe is
         not a narrowed run, so graph channels may stay enabled, but the frozen
         list must still constrain source-partitioned candidate generation and
-        final evidence if sources change while the run is in flight.
+        final evidence if sources change while the run is in flight.  For that
+        all-selected case the constraint is carried by *equality* while the
+        universe still matches the snapshot and by the materialized list once
+        it does not (``frozen_ceiling_source_ids``, reached through the drift
+        probe) -- "is a ceiling in force" never depends on which of the two.
         """
         return self.mode == "include" or bool(self.source_ids)
 
@@ -452,6 +464,53 @@ def scoped_participants(notebook_ids: Iterable[str]) -> tuple[str, ...]:
     )
 
 
+def _frozen_include_ceiling(notebook_id: str) -> frozenset[str] | None:
+    """The frozen visible+hidden include ceiling for ``notebook_id``, as a set.
+
+    ``None`` means "this scope has no include ceiling that binds this
+    notebook" -- no scope at all, a different (base-library) notebook, or an
+    exclude-shaped scope, whose deny-list is enforced by subtraction rather
+    than by an allow-list.  Kept private and set-shaped because both consumers
+    want membership tests, not order: ``scoped_allowed_source_ids`` intersects
+    an explicit list against it, and ``frozen_ceiling_source_ids`` sorts it
+    once for SQL.
+    """
+    scope = current_source_scope()
+    if (
+        scope is None
+        or notebook_id != scope.notebook_id
+        or not scope.ceiling_active
+        or scope.mode != "include"
+    ):
+        return None
+    return scope.source_ids | scope.hidden_source_ids
+
+
+def frozen_ceiling_source_ids(notebook_id: str) -> tuple[str, ...] | None:
+    """Materialize the frozen include ceiling for a producer, or ``None``.
+
+    The DRIFT half of the ceiling contract, and the reason it exists as its
+    own entry point rather than living inside ``scoped_allowed_source_ids``:
+    that function's all-selected fast path returns ``None`` because the frozen
+    list and the live universe are the same set, which is a fact about the
+    *moment it is asked*, not a property of the scope.  Once a source finishes
+    extraction mid-run the two sets diverge and the vacuous predicate becomes a
+    real one, so the caller that detected the drift needs a way to ask for the
+    list the fast path declined to build.  ``retrieval_candidates
+    ._scoped_allowed_with_drift_guard`` is that caller; the probe deciding
+    *whether* to ask is deliberately not part of this module (it needs live
+    repository reads, and it must stay un-memoised -- see that probe's
+    docstring for the contract and the reverted attempt).
+
+    ``None`` for every scope shape that has no include allow-list to hand down
+    (no scope, a base-library notebook, an exclude-shaped scope).  Callers must
+    branch on ``is not None``: an empty tuple is a real, fully-restricting
+    ceiling (a run frozen over a notebook that had no sources yet).
+    """
+    ceiling = _frozen_include_ceiling(notebook_id)
+    return None if ceiling is None else tuple(sorted(ceiling))
+
+
 def scoped_allowed_source_ids(
     notebook_id: str, explicit: Iterable[str] | None = None
 ) -> tuple[str, ...] | None:
@@ -464,35 +523,58 @@ def scoped_allowed_source_ids(
     remains the fail-closed fallback when no universe was supplied.
 
     R1 behavior restoration (audit ASK-1, P0): an all-selected freeze
-    (``narrowed is False``) must return exactly what an unscoped run would
-    have returned -- ``allowed`` untouched, never the materialized
-    visible+hidden ceiling -- because every hot-path candidate producer
-    branches on ``allowed_source_ids is not None`` to pick its fast path
-    (the lexical corpus-language gate, the GiST KNN native path, un-degraded
-    elements/chunks retrieval). Handing those producers an explicit tuple
-    that happened to equal the whole universe silently pushed every browser
-    default-selection run onto the same slow path a real narrowing requires,
-    for zero narrowing benefit. ``narrowed`` is a three-state fact and this
-    function must treat each state differently, on purpose:
+    (``narrowed is False``) that is asked WITHOUT an explicit list must return
+    exactly what an unscoped run would have returned -- ``None``, never the
+    materialized visible+hidden ceiling -- because every hot-path candidate
+    producer branches on ``allowed_source_ids is not None`` to pick its fast
+    path (the lexical corpus-language gate, the GiST KNN native path,
+    un-degraded elements/chunks retrieval). Handing those producers an
+    explicit tuple that happened to equal the whole universe silently pushed
+    every browser default-selection run onto the same slow path a real
+    narrowing requires, for zero narrowing benefit.
+
+    That fast path is a claim about TWO dimensions, and both conditions are
+    load-bearing:
+
+    ``narrowed``, a three-state fact:
 
     * ``True``  -- a real narrowing: fall through unchanged and return the
       frozen include/exclude intersection below, exactly as before this fix.
-    * ``False`` -- the browser's default "everything checked" freeze: short-
-      circuit here to ``allowed`` (``None`` on the common no-explicit-list
-      call), so downstream producers see "no ceiling" and take the same fast
-      path an unscoped run would. This only restores candidates that a real
-      "no scope" run would already have produced -- it is not new leniency:
-      ``source_allowed`` / ``filter_evidence`` / ``filter_retrieval_items``
-      still cut final evidence down to the visible+hidden universe at the
-      result boundary, and none of them call this function, so that fence is
-      untouched.
+    * ``False`` -- the browser's default "everything checked" freeze: the
+      frozen list equals the live universe, so filtering by it is a vacuously
+      true predicate and may be dropped.  It is dropped only for the moment
+      the question is asked: once the universe drifts (a source uploaded after
+      validation finishes extracting) the predicate stops being vacuous, and
+      the ceiling comes back through ``frozen_ceiling_source_ids`` at the one
+      caller that probes for drift.  Dropping it here is therefore not new
+      leniency -- it restores exactly the candidates a real "no scope" run
+      would already have produced, under a universe proven identical.
     * ``None`` -- legacy/direct-construction scopes that predate the
       server-computed bit (or bypass ``_validate_source_scope`` entirely):
       ``is False`` deliberately does not match ``None``, so this state keeps
       falling through to the historical byte-identical materialized-tuple
-      behavior. ``plugin_ask_engine.py`` already treats a ``None`` return
-      from this function as "use the full source list" rather than
-      "unbounded" -- the same fallback shape this state preserves.
+      behavior.
+
+    ``explicit``, which must be ``None`` for the fast path to apply:
+
+    * ``explicit is None`` -- the producer asked "what is my ceiling?" and the
+      honest all-selected answer is "the whole notebook", i.e. no list.
+    * ``explicit is not None`` -- the producer supplied its own universe and
+      is asking for the INTERSECTION.  Returning it unchanged would publish
+      whatever that caller happened to enumerate, and callers enumerate LIVE
+      (``plugin_ask_engine`` builds its ``source_keys`` from
+      ``all_visible_source_ids`` at port-construction time).  Live ∩ frozen is
+      the frozen universe; live passed through is the drifted one.  This is
+      the ONLY enforcement point on the plugin element path: ``RetrievedElement``
+      carries no ``notebook_id``, ``filter_retrieval_items`` is not applied to
+      it, and the port's own post-check judges an element by the very
+      ``source_origin`` map built from that list -- so a drifted source that
+      got into the list would be retrieved AND issued as evidence.  Every
+      other consumer of this function does have a result-side fence
+      (``source_allowed`` / ``filter_evidence`` / ``filter_retrieval_items``,
+      none of which call this function, so that fence is untouched by the fast
+      path); the element path does not, and the intersection is what stands in
+      its place.
     """
     allowed = (
         tuple(dict.fromkeys(str(value) for value in explicit if str(value)))
@@ -507,7 +589,9 @@ def scoped_allowed_source_ids(
         # LIMIT.  Returning None here would be misread as unbounded by any
         # downstream ``if allowed:`` truthiness check -- callers must branch on
         # ``is not None``, exactly as the include-ceiling branch below already
-        # requires.
+        # requires.  Deliberately FIRST: a library-excluded notebook denies
+        # everything regardless of the local dimension's shape, so no branch
+        # added below may ever be hoisted above it.
         return ()
     if (
         not scope.ceiling_active
@@ -516,11 +600,14 @@ def scoped_allowed_source_ids(
         # fact and ``None`` (legacy/direct-construction scopes) must keep
         # falling through to the materialized-tuple branch below, not be
         # misread here as "not narrowed" alongside the real ``False`` case.
-        or scope.narrowed is False
+        # ``allowed is None``, because the all-selected fast path may only
+        # DROP a vacuous predicate, never PASS THROUGH a caller-supplied live
+        # universe -- see the ``explicit`` dimension above.
+        or (scope.narrowed is False and allowed is None)
     ):
         return allowed
-    if scope.mode == "include":
-        ceiling = scope.source_ids | scope.hidden_source_ids
+    ceiling = _frozen_include_ceiling(notebook_id)
+    if ceiling is not None:
         if allowed is None:
             return tuple(sorted(ceiling))
         return tuple(value for value in allowed if value in ceiling)
