@@ -335,6 +335,256 @@ def test_concept_detail_attached_and_evidence_are_page_scoped(repo):
     assert [a["payload"]["name"] for a in page2["attached"]] == [claim_of_tag[second_tag]]
     assert page2["next_cursor"] is None
 
+
+# R5 P1 (concept-detail dense-hub P1 fix): `concept_neighbor_rows`'s
+# `member_ids` became PAGE-local under R3·T-B2 pagination, so a relation to a
+# same-cluster member on a DIFFERENT page used to look like a genuine
+# external neighbor to the "not in member_set" check — fully hydrated
+# (payload/evidence) before the service layer's `object_type != "concept"`
+# filter threw it away. For a dense hub (thousands/millions of members) that
+# is an unbounded read. These lock the fix: same-cluster cross-page members
+# never reach `attached`'s OUTPUT (already true, via the belt-and-suspenders
+# `object_type` filter) AND never get HYDRATED (the actual fix), while the
+# legacy unbounded (`limit=None`) read's behavior is unchanged.
+
+def test_concept_detail_attached_excludes_cross_page_cluster_members(repo):
+    """Dense-hub cross-page scenario: a same-cluster relation must never
+    surface in `attached`, and the genuine external neighbor must still.
+    Mutation-checked below (`test_concept_neighbor_rows_...`) that the
+    exclusion is what does this, not the pre-existing `object_type` filter
+    alone."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    hub_count = 6
+    objs = [
+        {"local_id": f"m{i}", "object_type": "concept",
+         "payload": {"name": "HUB", "section_path": ""}, "evidence": []}
+        for i in range(hub_count)
+    ] + [
+        {"local_id": "ext", "object_type": "claim",
+         "payload": {"name": "external fact", "section_path": ""}, "evidence": []}
+    ]
+    # A path graph over every hub member: whichever physical member ends up
+    # sorted LAST (the one `limit=hub_count-1` pushes to page 2 below) is
+    # guaranteed to have at least one chain edge to a page-1 member, in
+    # either direction -- so the cross-page case is exercised regardless of
+    # which local_id the store assigns the highest generated id to.
+    chain = [
+        {"source_local_id": f"m{i}", "target_local_id": f"m{i+1}",
+         "edge_type": "related_to", "evidence": []}
+        for i in range(hub_count - 1)
+    ]
+    # "ext" is wired to EVERY hub member (not just one) for the same
+    # sort-order-independence reason -- `attached` dedups by the other
+    # object's id, so this still yields exactly one attached entry.
+    ext_edges = [
+        {"source_local_id": "ext", "target_local_id": f"m{i}",
+         "edge_type": "about", "evidence": []}
+        for i in range(hub_count)
+    ]
+    repo.store_kg(nb.id, None, objs, chain + ext_edges)
+    repo.rebuild_unified_kg(nb.id)
+    from collections import Counter
+    cmap = repo.cluster_map(nb.id)
+    cid = Counter(cmap.values()).most_common(1)[0][0]  # the hub_count-member HUB cluster
+
+    full = repo.concept_detail(nb.id, cid, limit=None)  # oracle: legacy unbounded read
+    full_ids = sorted(m["id"] for m in full["members"])
+    assert len(full_ids) == hub_count
+    # Full-oracle regression (item 5 of the fix plan): the unbounded read's
+    # `member_set` covers the WHOLE cluster, so an in-cluster relation could
+    # never look like an external neighbor even before this fix -- confirms
+    # the fix changes nothing here.
+    assert [a["payload"]["name"] for a in full["attached"]] == ["external fact"]
+
+    last_id = full_ids[-1]
+    page1 = repo.concept_detail(nb.id, cid, limit=hub_count - 1)
+    assert [m["id"] for m in page1["members"]] == full_ids[:-1]
+    assert page1["next_cursor"] == full_ids[-2]
+    attached_ids_page1 = {a["id"] for a in page1["attached"]}
+    assert last_id not in attached_ids_page1  # cross-page cluster-mate excluded
+    assert [a["payload"]["name"] for a in page1["attached"]] == ["external fact"]
+
+
+def test_concept_neighbor_rows_probes_and_excludes_same_cluster_members(repo):
+    """Repo-layer contract (mutation-checked, see report): `concept_neighbor_rows`
+    issues a same-cluster membership probe against `concept_clusters` BEFORE
+    hydrating attached candidates, and the hydrated set (`by_other`) never
+    contains a same-cluster id -- only the genuine external one."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        for i in range(3):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"member-{i}", nb.id, "concept", "active", "{}", "[]",
+                 "2024-01-01", "2024-01-01"),
+            )
+            db.execute(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"cc-{i}", nb.id, "canon-probe", f"member-{i}", "HUB", "concept",
+                 "2024-01-01"),
+            )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("ext-1", nb.id, "claim", "active", json.dumps({"name": "external"}), "[]",
+             "2024-01-01", "2024-01-01"),
+        )
+        # member-0 (page-local) --related_to--> member-2 (same cluster, OTHER page)
+        db.execute(
+            "INSERT INTO knowledge_relations "
+            "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("rel-cross-page", nb.id, "member-0", "member-2", "related_to", "[]",
+             "2024-01-01"),
+        )
+        # ext-1 --about--> member-0 (genuine external neighbor)
+        db.execute(
+            "INSERT INTO knowledge_relations "
+            "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("rel-ext", nb.id, "ext-1", "member-0", "about", "[]", "2024-01-01"),
+        )
+
+    knowledge = repo._runtime.knowledge_query.knowledge
+    probes: list = []
+
+    class Recorder:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, sql, parameters=()):
+            text = " ".join(str(sql).split())
+            if text.startswith("SELECT member_object_id FROM concept_clusters"):
+                probes.append((text, list(parameters)))
+            return self.connection.execute(sql, parameters)
+
+    with repo._connect() as db:
+        rel_edges, by_other = knowledge.concept_neighbor_rows(
+            Recorder(db), nb.id, "canon-probe", ["member-0", "member-1"],
+        )
+
+    assert probes, "same-cluster membership probe must run"
+    assert "member_object_id IN (" in probes[0][0]
+    assert probes[0][1][:2] == [nb.id, "canon-probe"]
+    assert "member-2" in probes[0][1][2:]
+
+    assert "member-2" not in by_other  # same-cluster cross-page member never hydrated
+    assert "ext-1" in by_other          # genuine external neighbor still hydrated
+
+
+def test_concept_neighbor_rows_batches_over_900_candidates(repo):
+    """SQLite parameter-cap correctness (item 5's ">900 候选" case): both the
+    same-cluster exclusion probe AND the attached-candidate hydration must
+    batch when the candidate count exceeds `batch_size` (default 900) --
+    otherwise a dense hub's cross-page candidate count can exceed
+    SQLITE_MAX_VARIABLE_NUMBER outright. 905 same-cluster candidates (must
+    ALL be excluded) plus 905 genuinely-external candidates (must ALL be
+    hydrated) push both the exclusion probe and the hydration read past one
+    batch."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    same_cluster_count = 905
+    external_count = 905
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("page-0", nb.id, "concept", "active", "{}", "[]", "2024-01-01", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("cc-page-0", nb.id, "canon-batch", "page-0", "HUB", "concept", "2024-01-01"),
+        )
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [(f"sc-{i}", nb.id, "concept", "active", "{}", "[]", "2024-01-01", "2024-01-01")
+             for i in range(same_cluster_count)],
+        )
+        db.executemany(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(f"cc-sc-{i}", nb.id, "canon-batch", f"sc-{i}", "HUB", "concept", "2024-01-01")
+             for i in range(same_cluster_count)],
+        )
+        db.executemany(
+            "INSERT INTO knowledge_relations "
+            "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(f"rel-sc-{i}", nb.id, "page-0", f"sc-{i}", "related_to", "[]", "2024-01-01")
+             for i in range(same_cluster_count)],
+        )
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [(f"ext-{i}", nb.id, "claim", "active", "{}", "[]", "2024-01-01", "2024-01-01")
+             for i in range(external_count)],
+        )
+        db.executemany(
+            "INSERT INTO knowledge_relations "
+            "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(f"rel-ext-{i}", nb.id, f"ext-{i}", "page-0", "about", "[]", "2024-01-01")
+             for i in range(external_count)],
+        )
+
+    knowledge = repo._runtime.knowledge_query.knowledge
+    probes: list = []
+    hydrations: list = []
+
+    class Recorder:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, sql, parameters=()):
+            text = " ".join(str(sql).split())
+            if text.startswith("SELECT member_object_id FROM concept_clusters"):
+                probes.append(list(parameters))
+            elif text.startswith("SELECT id, object_type, payload, evidence FROM knowledge_objects"):
+                hydrations.append(list(parameters))
+            return self.connection.execute(sql, parameters)
+
+    with repo._connect() as db:
+        rel_edges, by_other = knowledge.concept_neighbor_rows(
+            Recorder(db), nb.id, "canon-batch", ["page-0"],
+        )
+
+    # Exclusion probe: 1810 total candidates (905 same-cluster + 905
+    # external) batched at 900 -> [900, 900, 10].
+    assert [len(p) - 2 for p in probes] == [900, 900, 10]
+    probed_ids = {value for params in probes for value in params[2:]}
+    assert probed_ids == {f"sc-{i}" for i in range(same_cluster_count)} | {
+        f"ext-{i}" for i in range(external_count)
+    }
+
+    # Hydration: only the 905 survivors (external) are ever read, batched at
+    # 900 -> [900, 5].
+    assert [len(p) for p in hydrations] == [900, 5]
+    hydrated_ids = {value for params in hydrations for value in params}
+    assert hydrated_ids == {f"ext-{i}" for i in range(external_count)}
+
+    assert len(by_other) == external_count
+    assert set(by_other) == {f"ext-{i}" for i in range(external_count)}
+    for i in range(same_cluster_count):
+        assert f"sc-{i}" not in by_other
+
+
 def test_confirm_merge_unions_clusters_on_rebuild(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"current mirror","section_path":""},"evidence":[]}], [])

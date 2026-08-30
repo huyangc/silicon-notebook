@@ -527,8 +527,21 @@ class KnowledgeQueryService:
                 "next_cursor": None,
             }
         with self.database.connect() as db:
+            # `canonical_id` travels down so the store can exclude same-
+            # cluster members that live on a DIFFERENT page from the
+            # "attached" candidate set before hydrating them (R5 P1 fix).
+            # This RESTORES the legacy unbounded read's semantics rather than
+            # adding a new filter: that read's `member_set` covered the
+            # WHOLE cluster, so a same-cluster endpoint could never look like
+            # an external neighbor. Page-local `member_ids` broke that
+            # invariant for cross-page cluster-mates; without the exclusion,
+            # a dense hub could force this call to hydrate full
+            # payload/evidence for an unbounded number of them, only to have
+            # them discarded by the `object_type != "concept"` filter below
+            # (unchanged — it still does its own, independent job of hiding
+            # cross-CLUSTER concept neighbors from "attached").
             relation_edges, other_objects = self.knowledge.concept_neighbor_rows(
-                db, notebook_id, member_ids
+                db, notebook_id, canonical_id, member_ids
             )
         # `attached`/`evidence` are computed over THIS PAGE's members only
         # (registered display-semantics change, R3·T-B2): each page reports

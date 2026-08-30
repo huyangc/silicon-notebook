@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from app.models.knowledge import KnowledgeUpdate
-from app.repositories.postgres._store_utils import normalize_timestamp
+from app.repositories.postgres._store_utils import execute_many, normalize_timestamp
 from app.repositories.postgres.embedding_store import EmbeddingStore as PostgresEmbeddingStore
 from app.repositories.postgres.governance_store import GovernanceStore as PostgresGovernanceStore
 from app.repositories.postgres.index_projection_store import (
@@ -1976,6 +1976,195 @@ def test_cluster_append_dedupes_repeated_member_within_one_input(
             "member_object_id": "ko-repeated-input-member",
         }
     ]
+
+
+# R5 P1 (PG twin of the SQLite unit tests in
+# tests/test_unified_kg_repository.py -- see those for the full mutation
+# rationale): `concept_neighbor_rows`'s attached-candidate set used to be
+# hydrated (full payload/evidence) BEFORE the caller's `object_type !=
+# "concept"` filter could discard a same-cluster member that lives on a
+# different keyset page than the members this call was given. For a dense
+# hub that is an unbounded read. These lock the fix directly at the
+# repository layer (SQL capture), where the belt-and-suspenders
+# `object_type` filter can't mask a boundedness regression the way it does
+# at the service/output layer.
+
+def test_postgres_concept_neighbor_rows_excludes_cross_page_cluster_members(
+    knowledge_harness,
+):
+    """Repo-layer contract: a same-cluster membership probe against
+    `concept_clusters` must run before hydration, and the hydrated set
+    (`by_other`) must never contain a same-cluster id -- only the genuine
+    external one."""
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.write() as connection:
+        for i in range(3):
+            connection.execute(
+                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                "payload,evidence,created_at,updated_at) "
+                "VALUES (%s,'nb-personal','concept','approved','{}','[]',%s,%s)",
+                (f"member-pg-{i}", NOW, NOW),
+            )
+            connection.execute(
+                "INSERT INTO concept_clusters(id,notebook_id,canonical_id,"
+                "member_object_id,canonical_name,created_at) "
+                "VALUES (%s,'nb-personal','canon-probe-pg',%s,'HUB',%s)",
+                (f"cc-pg-{i}", f"member-pg-{i}", NOW),
+            )
+        connection.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+            "payload,evidence,created_at,updated_at) "
+            "VALUES ('ext-pg-1','nb-personal','claim','approved',%s,'[]',%s,%s)",
+            (json.dumps({"name": "external"}), NOW, NOW),
+        )
+        # member-pg-0 (page-local) --related_to--> member-pg-2 (same cluster, OTHER page)
+        connection.execute(
+            "INSERT INTO knowledge_relations(id,notebook_id,source_object_id,"
+            "target_object_id,edge_type,created_at) "
+            "VALUES ('rel-pg-cross-page','nb-personal','member-pg-0','member-pg-2',"
+            "'related_to',%s)",
+            (NOW,),
+        )
+        # ext-pg-1 --about--> member-pg-0 (genuine external neighbor)
+        connection.execute(
+            "INSERT INTO knowledge_relations(id,notebook_id,source_object_id,"
+            "target_object_id,edge_type,created_at) "
+            "VALUES ('rel-pg-ext','nb-personal','ext-pg-1','member-pg-0','about',%s)",
+            (NOW,),
+        )
+
+    probes: list = []
+
+    class Recorder:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            if sql.startswith("SELECT member_object_id FROM concept_clusters"):
+                probes.append((sql, list(params or [])))
+            return self.connection.execute(query, params)
+
+    with knowledge_harness.database.connect() as connection:
+        rel_edges, by_other = store.concept_neighbor_rows(
+            Recorder(connection), "nb-personal", "canon-probe-pg",
+            ["member-pg-0", "member-pg-1"],
+        )
+
+    assert probes, "same-cluster membership probe must run"
+    assert "member_object_id = ANY(" in probes[0][0]
+    assert probes[0][1][0] == "nb-personal" and probes[0][1][1] == "canon-probe-pg"
+    assert "member-pg-2" in probes[0][1][2]
+
+    assert "member-pg-2" not in by_other  # same-cluster cross-page member never hydrated
+    assert "ext-pg-1" in by_other          # genuine external neighbor still hydrated
+
+
+def test_postgres_concept_neighbor_rows_batches_over_900_candidates(knowledge_harness):
+    """PostgreSQL's ``= ANY(%s)`` carries no bind-parameter cap, but the
+    exclusion probe and hydration read must still batch at 900 (memory/
+    latency pacing, and behavioral alignment with the SQLite twin, which
+    DOES need it). 905 same-cluster candidates (all excluded) plus 905
+    genuinely-external candidates (all hydrated) push both past one batch."""
+    store = knowledge_harness.knowledge
+    same_cluster_count = 905
+    external_count = 905
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+            "payload,evidence,created_at,updated_at) "
+            "VALUES ('page-pg-0','nb-personal','concept','approved','{}','[]',%s,%s)",
+            (NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO concept_clusters(id,notebook_id,canonical_id,"
+            "member_object_id,canonical_name,created_at) "
+            "VALUES ('cc-pg-page-0','nb-personal','canon-batch-pg','page-pg-0','HUB',%s)",
+            (NOW,),
+        )
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+            "payload,evidence,created_at,updated_at) VALUES (%s,'nb-personal',"
+            "'concept','approved','{}','[]',%s,%s)",
+            [(f"sc-pg-{i}", NOW, NOW) for i in range(same_cluster_count)],
+        )
+        execute_many(
+            connection,
+            "INSERT INTO concept_clusters(id,notebook_id,canonical_id,"
+            "member_object_id,canonical_name,created_at) VALUES (%s,'nb-personal',"
+            "'canon-batch-pg',%s,'HUB',%s)",
+            [(f"cc-sc-pg-{i}", f"sc-pg-{i}", NOW) for i in range(same_cluster_count)],
+        )
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_relations(id,notebook_id,source_object_id,"
+            "target_object_id,edge_type,created_at) VALUES (%s,'nb-personal',"
+            "'page-pg-0',%s,'related_to',%s)",
+            [(f"rel-sc-pg-{i}", f"sc-pg-{i}", NOW) for i in range(same_cluster_count)],
+        )
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+            "payload,evidence,created_at,updated_at) VALUES (%s,'nb-personal',"
+            "'claim','approved','{}','[]',%s,%s)",
+            [(f"ext-pg-{i}", NOW, NOW) for i in range(external_count)],
+        )
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_relations(id,notebook_id,source_object_id,"
+            "target_object_id,edge_type,created_at) VALUES (%s,'nb-personal',"
+            "%s,'page-pg-0','about',%s)",
+            [(f"rel-ext-pg-{i}", f"ext-pg-{i}", NOW) for i in range(external_count)],
+        )
+
+    probes: list = []
+    hydrations: list = []
+
+    class Recorder:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            if sql.startswith("SELECT member_object_id FROM concept_clusters"):
+                probes.append(list(params or []))
+            elif sql.startswith(
+                "SELECT id, object_type, payload, evidence FROM knowledge_objects"
+            ):
+                hydrations.append(list(params or []))
+            return self.connection.execute(query, params)
+
+    with knowledge_harness.database.connect() as connection:
+        rel_edges, by_other = store.concept_neighbor_rows(
+            Recorder(connection), "nb-personal", "canon-batch-pg", ["page-pg-0"],
+        )
+
+    # Exclusion probe: 1810 total candidates (905 same-cluster + 905
+    # external), each `ANY(%s)` call carrying one batch of <= 900 -> three
+    # calls of [900, 900, 10].
+    assert [len(p[2]) for p in probes] == [900, 900, 10]
+    probed_ids = {value for p in probes for value in p[2]}
+    assert probed_ids == {f"sc-pg-{i}" for i in range(same_cluster_count)} | {
+        f"ext-pg-{i}" for i in range(external_count)
+    }
+
+    # Hydration: only the 905 survivors (external) are ever read, batched at
+    # 900 -> [900, 5].
+    assert [len(p) for p in hydrations] == [900, 5]
+    hydrated_ids = {value for params in hydrations for value in params}
+    assert hydrated_ids == {f"ext-pg-{i}" for i in range(external_count)}
+
+    assert len(by_other) == external_count
+    assert set(by_other) == {f"ext-pg-{i}" for i in range(external_count)}
+    for i in range(same_cluster_count):
+        assert f"sc-pg-{i}" not in by_other
 
 
 @pytest.mark.postgres_integration

@@ -2995,10 +2995,56 @@ class KnowledgeStore:
 
     @staticmethod
     def concept_neighbor_rows(
-        db: sqlite3.Connection, notebook_id: str, member_ids: "List[str]"
+        db: sqlite3.Connection, notebook_id: str, canonical_id: str,
+        member_ids: "List[str]", *, batch_size: int = 900,
     ) -> "tuple[List[dict], Dict[str, dict]]":
         """Relations touching the member set plus the batch-read non-member
-        endpoint objects: returns (rel_edges, objects_by_id)."""
+        endpoint objects: returns (rel_edges, objects_by_id).
+
+        R3·T-B2 pagination made ``member_ids`` PAGE-local (it used to be the
+        whole cluster). A relation whose other endpoint is a member of the
+        SAME cluster on a DIFFERENT page therefore now looks, to the
+        page-local ``member_set`` check below, exactly like a genuine
+        external neighbor: it is not "in member_set" either. The legacy
+        unbounded read never had this problem — its member_set covered the
+        WHOLE cluster, so a same-cluster endpoint could never fail that
+        check. This is restoring that semantics, not adding a new filter:
+        before hydrating candidates, one extra batched membership probe
+        drops any candidate that ``concept_clusters`` says belongs to THIS
+        canonical id, so a dense hub (a cluster with thousands/millions of
+        members) can no longer force this function to hydrate full
+        payload/evidence for an unbounded number of cross-page cluster-mates
+        only to have the caller discard them via the (still-present, still
+        doing its own independent job for cross-CLUSTER concept neighbors)
+        ``object_type != 'concept'`` filter downstream.
+
+        Membership-probe query shape and safety: ``SELECT member_object_id
+        FROM concept_clusters WHERE notebook_id=? AND canonical_id=? AND
+        member_object_id IN (batch)``, batched at ``batch_size`` (SQLite has
+        no expression-count cap this low, but batching keeps memory/latency
+        bounded and matches the PostgreSQL twin's pacing). Empirically
+        verified (EXPLAIN QUERY PLAN, 1500-row concept_clusters fixture, 900
+        placeholders): ``SEARCH concept_clusters USING COVERING INDEX
+        idx_clusters_nb_canonical_member (notebook_id=? AND canonical_id=?
+        AND member_object_id=?)`` — the three-column composite index
+        (migration 0043) is an exact match for all three predicate columns,
+        so SQLite's no-ANALYZE planner picks it as a *covering* index scan
+        (no table row lookup at all) rather than falling back to a
+        residual-filter scan the way ``GovernanceStore.
+        _existing_cluster_members``'s sibling ``duplicate_member_rows``
+        precedent warns about (that precedent's hazard is a bare-``id``
+        equality competing against a *different*, less-specific
+        ``notebook_id`` index; here every predicate column lives together in
+        ONE index that is a strict superset of every other index touching
+        this table, so there is no less-specific competitor for the planner
+        to prefer instead).
+
+        The attached-candidate hydration query below is unconditionally
+        batched too (same ``batch_size``) — SQLite's compiled-in
+        ``SQLITE_MAX_VARIABLE_NUMBER`` bounds how many ``?`` placeholders one
+        statement can carry, so an un-batched ``id IN (...)`` over a hub's
+        full attached-candidate set (which used to be unbounded before this
+        fix) could exceed it."""
         member_set = set(member_ids)
         placeholders = ",".join("?" for _ in member_set)
         member_list = list(member_set)
@@ -3026,14 +3072,34 @@ class KnowledgeStore:
                 attached_ids.add(other)
                 rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
 
+        if attached_ids:
+            candidates = list(attached_ids)
+            same_cluster_ids: set = set()
+            for offset in range(0, len(candidates), batch_size):
+                batch = candidates[offset:offset + batch_size]
+                batch_placeholders = ",".join("?" for _ in batch)
+                same_cluster_ids.update(
+                    row["member_object_id"] for row in db.execute(
+                        f"SELECT member_object_id FROM concept_clusters "
+                        f"WHERE notebook_id=? AND canonical_id=? "
+                        f"AND member_object_id IN ({batch_placeholders})",
+                        [notebook_id, canonical_id, *batch],
+                    ).fetchall()
+                )
+            attached_ids -= same_cluster_ids
+
         by_other: Dict[str, dict] = {}
         if attached_ids:
-            attached_placeholders = ",".join("?" for _ in attached_ids)
-            attached_rows = db.execute(
-                f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
-                f"WHERE id IN ({attached_placeholders}) AND status!='deprecated'",
-                list(attached_ids),
-            ).fetchall()
+            attached_list = list(attached_ids)
+            attached_rows: List[sqlite3.Row] = []
+            for offset in range(0, len(attached_list), batch_size):
+                batch = attached_list[offset:offset + batch_size]
+                attached_placeholders = ",".join("?" for _ in batch)
+                attached_rows.extend(db.execute(
+                    f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
+                    f"WHERE id IN ({attached_placeholders}) AND status!='deprecated'",
+                    batch,
+                ).fetchall())
             by_other = {
                 row["id"]: {
                     "id": row["id"],
