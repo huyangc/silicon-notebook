@@ -3061,17 +3061,48 @@ class KnowledgeStore:
 
     @staticmethod
     def concept_cluster_detail_rows(
-        db: Any, notebook_id: str, canonical_id: str
+        db: Any,
+        notebook_id: str,
+        canonical_id: str,
+        *,
+        limit: Optional[int] = None,
+        after: str = "",
     ) -> "tuple[List[dict], str]":
         """Cluster member rows (joined onto live knowledge_objects) plus the
-        canonical name for one concept cluster."""
-        cluster_rows = db.execute(
+        canonical name for one concept cluster. Keyset-paginated by
+        ``member_object_id`` (KG-4 hub-cluster fix, R3·T-B2): a hub concept's
+        member set has no bound otherwise, and this join returns full
+        payload/evidence per row. ``ORDER BY ... COLLATE "C"`` pins byte-order
+        comparison so this side's page order matches the SQLite mirror, whose
+        default TEXT collation (BINARY) already compares UTF-8 text the same
+        way — no equivalent COLLATE clause is needed there. The keyset
+        comparison key carries the SAME explicit collation as the sort key
+        (repo-wide convention — see e.g.
+        ``postgres/maintenance.py::image_backfill_source_page`` and
+        ``tests/test_image_backfill_transaction_guard.py``): today every id
+        column is already declared ``text COLLATE "C"``
+        (``migrations/0001_initial.sql``), so a bare comparison behaves
+        identically and no runtime test can tell the two apart — this is
+        defense in depth against a future column-level collation change
+        silently splitting the compare/sort order and dropping members
+        mid-page. ``limit=None`` keeps the legacy unbounded (but now
+        deterministically ordered) read for internal callers that still need
+        the full member set in one shot."""
+        query = (
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
             "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-            "WHERE cc.notebook_id=%s AND cc.canonical_id=%s AND ko.status!='deprecated'",
-            (notebook_id, canonical_id),
-        ).fetchall()
+            "WHERE cc.notebook_id=%s AND cc.canonical_id=%s AND ko.status!='deprecated'"
+        )
+        params: list = [notebook_id, canonical_id]
+        if after:
+            query += ' AND cc.member_object_id COLLATE "C" > %s'
+            params.append(after)
+        query += ' ORDER BY cc.member_object_id COLLATE "C"'
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(limit)
+        cluster_rows = db.execute(query, tuple(params)).fetchall()
         name_row = db.execute(
             "SELECT canonical_name FROM concept_clusters WHERE notebook_id=%s AND canonical_id=%s LIMIT 1",
             (notebook_id, canonical_id),
@@ -3080,6 +3111,21 @@ class KnowledgeStore:
             _compat_rows(cluster_rows, payload=True, evidence=True),
             (name_row["canonical_name"] if name_row else ""),
         )
+
+    @staticmethod
+    def concept_cluster_member_total(db: Any, notebook_id: str, canonical_id: str) -> int:
+        """COUNT with the SAME predicate shape as concept_cluster_detail_rows
+        (JOIN knowledge_objects ... AND ko.status!='deprecated') — design
+        review B8 (hard): a bare ``COUNT(*) FROM concept_clusters`` would
+        count deprecated members and make pagination look like it never
+        reaches the end."""
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM concept_clusters cc "
+            "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+            "WHERE cc.notebook_id=%s AND cc.canonical_id=%s AND ko.status!='deprecated'",
+            (notebook_id, canonical_id),
+        ).fetchone()
+        return int(row["c"]) if row else 0
 
     @staticmethod
     def concept_neighbor_rows(

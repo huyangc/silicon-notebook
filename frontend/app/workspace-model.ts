@@ -807,6 +807,11 @@ export type ConceptDetailResp = {
   members: KgObject[];
   attached: KgObject[];
   evidence: EvidenceItem[];
+  // Hub-cluster member pagination (R3·T-B2): `attached`/`evidence` are scoped
+  // to `members` on THIS page, not the whole cluster — paging through every
+  // page still surfaces the complete set.
+  member_total: number;
+  next_cursor: string | null;
 };
 export type KgOccurrence = {
   quoted_span?: string;

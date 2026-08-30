@@ -9854,6 +9854,22 @@ button.tag:hover {
   font-style: normal;
 }
 
+.kg-load-more-members {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px dashed #dbe3ef;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--blue);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.kg-load-more-members:disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+
 /* --- 图谱分析(只读诊断报告,kg-analysis-view.tsx)---------------------------
    排版原则:每一块都是「标题 + 异常小字 + 新鲜度一行」的同一骨架,数字列右对齐、
    等宽数字,长文本一律省略号截断——同类控件成列对齐,不做粗糙堆叠。 */

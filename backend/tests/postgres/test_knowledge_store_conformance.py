@@ -5945,3 +5945,87 @@ def test_prune_cluster_rows_for_source_wipes_all_on_teardown(knowledge_harness):
             "WHERE notebook_id='nb-personal'").fetchall()
     assert pruned == 2
     assert remaining == []
+
+
+def _seed_hub_cluster_members(harness, canonical_id, member_ids, *, deprecated_ids=()) -> None:
+    """A single concept_clusters canonical_id with one concept knowledge_objects
+    row per member id (R3·T-B2 hub-cluster pagination fixtures)."""
+    with harness.database.write() as connection:
+        for member_id in member_ids:
+            status = "deprecated" if member_id in deprecated_ids else "approved"
+            connection.execute(
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+                " created_at,updated_at) "
+                "VALUES (%s,'nb-personal','concept',%s,%s::jsonb,'[]'::jsonb,"
+                "'source-golden',%s,%s)",
+                (member_id, status, json.dumps({"name": "HUB"}), NOW, NOW),
+            )
+            connection.execute(
+                "INSERT INTO concept_clusters"
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                " object_type,canonical_description,created_at) "
+                "VALUES (%s,'nb-personal',%s,%s,'HUB','concept','',%s)",
+                (f"cc-{member_id}", canonical_id, member_id, NOW),
+            )
+
+
+def test_postgres_concept_cluster_detail_rows_keyset_pagination_matches_full_read(
+    knowledge_harness,
+):
+    """R3·T-B2 (KG-4 hub-cluster fix): `concept_cluster_detail_rows` used to
+    return a hub cluster's ENTIRE member set (full payload/evidence,
+    unbounded) — production has seen 8-9M cluster rows for one hub concept.
+    Keyset pagination must (a) page to the exact same set as the legacy
+    unbounded read (`limit=None`, the oracle), in ascending
+    `member_object_id` order, and (b) `concept_cluster_member_total` must
+    exclude deprecated members using the SAME predicate as the page query
+    (design review B8, mutation-checked in test_unified_kg_repository.py —
+    a bare ``COUNT(*) FROM concept_clusters`` would count a deprecated
+    member and pagination would look like it never reaches the end)."""
+    store = knowledge_harness.knowledge
+    member_ids = [f"ko-hub-{i:03d}" for i in range(12)]
+    _seed_hub_cluster_members(
+        knowledge_harness, "hub-cid", member_ids + ["ko-hub-dep"],
+        deprecated_ids=["ko-hub-dep"],
+    )
+
+    with knowledge_harness.database.connect() as connection:
+        full_rows, name = store.concept_cluster_detail_rows(connection, "nb-personal", "hub-cid")
+        total = store.concept_cluster_member_total(connection, "nb-personal", "hub-cid")
+
+    assert name == "HUB"
+    assert total == len(member_ids)  # deprecated member excluded from the total
+    full_ids = [row["member_object_id"] for row in full_rows]
+    assert full_ids == sorted(member_ids)  # ORDER BY applied; deprecated row excluded
+
+    seen: list[str] = []
+    after = ""
+    pages = 0
+    with knowledge_harness.database.connect() as connection:
+        while True:
+            page_rows, _ = store.concept_cluster_detail_rows(
+                connection, "nb-personal", "hub-cid", limit=5, after=after,
+            )
+            pages += 1
+            assert pages <= 4  # ceil(12/5) == 3; guards against an infinite loop on a bug
+            ids = [row["member_object_id"] for row in page_rows]
+            assert ids == sorted(ids)
+            if seen:
+                assert seen[-1] < ids[0]  # strictly increasing across pages too
+            seen.extend(ids)
+            if len(ids) < 5:
+                break
+            after = ids[-1]
+    assert pages == 3  # 5 + 5 + 2
+    assert seen == sorted(member_ids)  # union == oracle set
+    assert "ko-hub-dep" not in seen
+
+# The keyset comparison/sort key's explicit `COLLATE "C"` cannot be locked by
+# a runtime test: every id column is already declared `text COLLATE "C"` at
+# the DDL level (migrations/0001_initial.sql), so a bare comparison behaves
+# identically today (confirmed empirically against this suite's own
+# knowledge_harness — see test_concept_cluster_collation_guard.py's docstring
+# for the mutation result). The source-text guard lives there, mirroring
+# test_image_backfill_transaction_guard.py's
+# test_postgres_keyset_compares_on_the_same_collation_it_orders_by.

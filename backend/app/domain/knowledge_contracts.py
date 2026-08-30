@@ -86,6 +86,13 @@ KG_SOURCE_PAGE_MAX = 200
 # 多少」与「库里存了多少」永远分得开(载荷同时给 returned / stored / stored_total)。
 KG_COMMUNITY_EDGES_MAX = 2000
 
+# `concept_detail` 的 hub 簇成员分页大小(KG-4 应用侧修复,R3·T-B2)。生产已见
+# 8-9M 簇行的 hub 簇——`concept_cluster_detail_rows` 此前无 LIMIT,一次性把全部
+# 成员连同 payload/evidence 整批返回。200 与 KG_SOURCE_PAGE_MAX 同量级,既是默认
+# 页大小也是硬上限;`attached`/`evidence` 随之改为按页内成员计算(分页语义,见
+# product-and-api 文档),前端「加载更多成员」翻页即可看到完整集合。
+CONCEPT_DETAIL_PAGE_MAX = 200
+
 
 class KnowledgeGraphTooLargeError(Exception):
     """Raised by knowledge_graph() (legacy GET /notebooks/{id}/graph) when the

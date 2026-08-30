@@ -145,6 +145,7 @@ export function useKgWorkspace({
     toggleType: graph.toggleType,
     clearTypes: graph.clearTypes,
     selectNode: graph.selectNode,
+    loadMoreConceptMembers: graph.loadMoreConceptMembers,
     reviewPendingMerges: graph.reviewPendingMerges,
     reviewAllMerges: graph.reviewAllMerges,
     decideMerge: graph.decideMerge,
