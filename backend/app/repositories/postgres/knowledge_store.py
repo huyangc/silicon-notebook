@@ -3144,10 +3144,51 @@ class KnowledgeStore:
 
     @staticmethod
     def concept_neighbor_rows(
-        db: Any, notebook_id: str, member_ids: "List[str]"
+        db: Any, notebook_id: str, canonical_id: str, member_ids: "List[str]",
+        *, batch_size: int = 900,
     ) -> "tuple[List[dict], Dict[str, dict]]":
         """Relations touching the member set plus the batch-read non-member
-        endpoint objects: returns (rel_edges, objects_by_id)."""
+        endpoint objects: returns (rel_edges, objects_by_id).
+
+        R3·T-B2 pagination made ``member_ids`` PAGE-local (it used to be the
+        whole cluster). A relation whose other endpoint is a member of the
+        SAME cluster on a DIFFERENT page therefore now looks, to the
+        page-local ``member_set`` check below, exactly like a genuine
+        external neighbor: it is not "in member_set" either. The legacy
+        unbounded read never had this problem — its member_set covered the
+        WHOLE cluster, so a same-cluster endpoint could never fail that
+        check. This is restoring that semantics, not adding a new filter:
+        before hydrating candidates, one extra batched membership probe
+        drops any candidate that ``concept_clusters`` says belongs to THIS
+        canonical id, so a dense hub (a cluster with thousands/millions of
+        members) can no longer force this function to hydrate full
+        payload/evidence for an unbounded number of cross-page cluster-mates
+        only to have the caller discard them via the (still-present, still
+        doing its own independent job for cross-CLUSTER concept neighbors)
+        ``object_type != 'concept'`` filter downstream.
+
+        Membership-probe query shape: ``SELECT member_object_id FROM
+        concept_clusters WHERE notebook_id=%s AND canonical_id=%s AND
+        member_object_id = ANY(%s)``, batched at ``batch_size`` — same "PK
+        `= ANY`, not a range predicate" safe form as
+        ``GovernanceStore.sweep_orphan_clusters_page``'s bounded delete (see
+        that method's docstring for the measured planner contrast): all
+        three predicate columns are plain equalities against the
+        ``idx_clusters_nb_canonical_member(notebook_id, canonical_id,
+        member_object_id)`` composite index (migration 0043), which is an
+        exact match and a strict superset of every other index on this
+        table, so there is no less-specific competitor index the planner
+        could degrade to. ``ANY(%s)`` itself carries no bind-parameter cap
+        on PostgreSQL (a single array parameter) — batching here is for
+        memory/latency pacing, matching the SQLite twin's batching (which
+        DOES need it: ``SQLITE_MAX_VARIABLE_NUMBER``).
+
+        The attached-candidate hydration query below is unconditionally
+        batched too (same ``batch_size``) for the same pacing reason, and to
+        keep both backends' behavior aligned now that the candidate set this
+        function hydrates is no longer implicitly bounded by "one page's
+        relations" (a hub's cross-page cluster-mates used to inflate it
+        without limit before the exclusion above)."""
         member_set = set(member_ids)
         placeholders = ",".join("%s" for _ in member_set)
         member_list = list(member_set)
@@ -3175,14 +3216,33 @@ class KnowledgeStore:
                 attached_ids.add(other)
                 rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
 
+        if attached_ids:
+            candidates = list(attached_ids)
+            same_cluster_ids: set = set()
+            for offset in range(0, len(candidates), batch_size):
+                batch = candidates[offset:offset + batch_size]
+                same_cluster_ids.update(
+                    row["member_object_id"] for row in db.execute(
+                        "SELECT member_object_id FROM concept_clusters "
+                        "WHERE notebook_id=%s AND canonical_id=%s "
+                        "AND member_object_id = ANY(%s)",
+                        (notebook_id, canonical_id, batch),
+                    ).fetchall()
+                )
+            attached_ids -= same_cluster_ids
+
         by_other: Dict[str, dict] = {}
         if attached_ids:
-            attached_placeholders = ",".join("%s" for _ in attached_ids)
-            attached_rows = db.execute(
-                f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
-                f"WHERE id IN ({attached_placeholders}) AND status!='deprecated'",
-                list(attached_ids),
-            ).fetchall()
+            attached_list = list(attached_ids)
+            attached_rows: List[Any] = []
+            for offset in range(0, len(attached_list), batch_size):
+                batch = attached_list[offset:offset + batch_size]
+                attached_placeholders = ",".join("%s" for _ in batch)
+                attached_rows.extend(db.execute(
+                    f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
+                    f"WHERE id IN ({attached_placeholders}) AND status!='deprecated'",
+                    batch,
+                ).fetchall())
             by_other = {
                 row["id"]: {
                     "id": row["id"],
