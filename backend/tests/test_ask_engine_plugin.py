@@ -745,6 +745,62 @@ def test_plugin_port_private_memory_ceiling_uses_the_exact_actor_in_sql(
     assert seen[base_id] == ("source-base",)
 
 
+def test_plugin_port_universe_excludes_sources_added_after_an_all_selected_freeze(
+    scoped_sql_repo, monkeypatch
+):
+    """全选冻结(narrowed=False)之后新增的来源不得进入端口宇宙。
+
+    端口在**每次**提问时按 ``all_visible_source_ids``/``hidden_source_ids``
+    实时枚举来源;把这份实时清单当天花板下推,等于让冻结之后完成抽取的来源
+    参与本次 run。元素检索这条路没有结果侧防线(``RetrievedElement`` 不带
+    notebook_id、``filter_retrieval_items`` 不套它,端口自己的签发后复核又正是
+    拿这份清单建的 ``source_origin`` 判定),所以
+    ``scoped_allowed_source_ids`` 的交集是这里唯一的执法点。
+
+    **变异锚点**:让 ``narrowed is False`` 早退时也原样透传显式清单
+    (即不看 ``explicit``)→ ``source-drifted`` 出现在 seam 收到的清单里,
+    本条报红。
+    """
+    repo, active_id, base_id, _alice_id, bob_id = scoped_sql_repo
+    seen: dict[str, tuple[str, ...]] = {}
+    candidates = repo.retrieval.candidates
+
+    def before_limit(notebook_id, _query, *, recall, allowed_source_ids):
+        del recall
+        seen[notebook_id] = tuple(allowed_source_ids)
+        return [], [], None
+
+    monkeypatch.setattr(candidates, "_retrieve_chunks", before_limit)
+    frozen = ResolvedSourceScope(
+        mode="include",
+        source_ids=["source-selected", "source-outside"],
+        narrowed=False,
+    )
+    frozen._hidden_source_ids = ["source-knowhow", "source-memory-bob"]
+    frozen._scope_owner_id = bob_id
+    # 冻结之后才完成抽取的来源(并发上传):实时枚举看得到它,冻结快照里没有。
+    repo._runtime.source_store.insert_source(
+        source_id="source-drifted", notebook_id=active_id, title="drifted",
+        source_type="pdf", status="active", parse_status="parsed",
+        file_name="", file_path="", file_size=0, file_hash="", summary="",
+        doc_type="",
+    )
+
+    with source_scope_context(active_id, frozen, None):
+        access = _live_scoped_access(repo, active_id, bob_id)
+        assert access.search("query", 1) == ()
+
+    assert "source-drifted" not in seen[active_id], (
+        "冻结之后新增的来源不得通过端口的实时枚举进入本次 run"
+    )
+    assert set(seen[active_id]) == {
+        "source-selected", "source-outside",
+        "source-knowhow", "source-memory-bob",
+    }, "端口宇宙必须正好是冻结快照 ∩ 实时枚举"
+    # 参考库维度不受本地天花板影响,照旧参与。
+    assert seen[base_id] == ("source-base",)
+
+
 def test_model_and_trace_ports_enforce_budgets_without_leaking_raw_errors():
     class Client:
         configured = True
