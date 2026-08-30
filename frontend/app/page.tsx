@@ -8123,7 +8123,7 @@ export default function Home() {
                     {kgGraph.conceptDetail && (
                       <>
                         <h4>出处</h4>
-                        <KgEvidenceList evidence={kgGraph.conceptDetail.evidence} resetKey={kgGraph.conceptDetail.canonical_id} />
+                        <KgEvidenceList evidence={kgGraph.conceptDetail.evidence} resetKey={`${kgGraph.conceptDetail.canonical_id}:${kgGraph.conceptDetailGeneration}`} />
                         <h4>相关节点</h4>
                         {relatedNodeGroups.length === 0 ? <p className="tool-hint">无</p> : relatedNodeGroups.map((group) => (
                           <section className="kg-related-group" key={group.type}>

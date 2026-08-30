@@ -250,6 +250,27 @@ test("loadMoreConceptMembers keeps the first page's member_total when a later pa
   expect(result.current.view.conceptDetail?.member_total).toBe(430);
 });
 
+test("a same-concept first-page refresh bumps conceptDetailGeneration (codex #639 R2 P2)", async () => {
+  // KgEvidenceList's resetKey is `canonical_id:conceptDetailGeneration` —
+  // a merge/rebuild refresh of the SAME concept keeps canonical_id constant,
+  // so only the generation bump resets the progressive-disclosure count.
+  // Mutation-checked: dropping setConceptDetailGeneration(...) from
+  // setConceptDetailFirstPage turns this red.
+  const harness = createTestKgAuthority();
+  const { result } = await openWithConceptSelected(harness);
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m2"));
+  const before = result.current.view.conceptDetailGeneration;
+
+  kgApi.rejectMerge.mockResolvedValue({ ok: true });
+  kgApi.fetchPendingMerges.mockResolvedValue([]);
+  kgApi.fetchConceptDetail.mockResolvedValueOnce(conceptPage(["m1", "m2"], "m2"));
+  const candidate: PendingMerge = { id: "cand-gen", canonical_a: "k1", canonical_b: "k9", score: 0.9, status: "pending" };
+  await act(async () => {
+    await result.current.decideMerge(candidate, false);
+  });
+  expect(result.current.view.conceptDetailGeneration).toBeGreaterThan(before);
+});
+
 test("loadMoreConceptMembers dedupes attached objects repeated across pages (R3 PR-B P1-2)", async () => {
   // Mutation-checked: reverting to a bare `[...current.attached,
   // ...page.attached]` concatenation turns this red — "a1" would appear
