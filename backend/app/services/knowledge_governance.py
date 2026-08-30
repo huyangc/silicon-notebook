@@ -1979,7 +1979,37 @@ class KnowledgeGovernanceService:
         is preserved, just scoped to each (tiny) same-seed block; keyword overlap only
         (no vectors are loaded — nothing scales with the notebook's embedding count).
         Cross-seed *semantic* near-dups (different names, similar meaning) are out of
-        scope here; the clustering / emb_synonym pass merges those on KG rebuild."""
+        scope here; the clustering / emb_synonym pass merges those on KG rebuild.
+
+        R3 T-B1 (KG-3, audit P0): the read is now TWO passes instead of one
+        full ``payload``+``evidence`` scan of the whole (notebook, object_type)
+        slice (``_knowledge_objects`` — still used verbatim by other
+        consumers, untouched here). Normalization itself is NOT pushed into
+        SQL (design review judgement 1: ``kg_merge_seed._norm``'s NFKC+\\w
+        folding and PostgreSQL's ``lower()``/regexp do not agree byte-for-byte
+        on non-ASCII input) — instead the CANDIDATE SET is made cheap to read
+        by construction:
+
+        Pass 1 (``duplicate_seed_rows``) reads only what ``by_seed`` grouping
+        needs — ``payload["name"]`` for concept/claim/formula, the full
+        payload (for ``payload["steps"]``'s signature) for procedure — with
+        ``status != 'deprecated'`` pushed into SQL. The seed/alias functions
+        (``build_acronym_alias_map`` / ``_seed_with_alias``) and the grouping
+        loop below are UNCHANGED from before this split; only their input
+        rows got thinner, so the candidate set they produce is identical by
+        construction.
+
+        Pass 2 (``duplicate_member_rows``) then reads the FULL payload — but
+        ONLY for objects that landed in a block of >=2 (a real duplicate
+        candidate); every singleton-seed object, typically the bulk of a
+        notebook, is never read a second time. Its return order is
+        unspecified, so the backfill below re-keys by id and re-applies pass
+        1's order — the ORDER BY parity with ``_knowledge_objects`` that the
+        by_seed insertion order, each block's member order, and the final
+        sort's stable tie-break all depend on would otherwise be silently
+        lost to whatever order ``id = ANY(...)``/``id IN (...)`` happens to
+        return.
+        """
         from app.services.kg_merge import (
             build_acronym_alias_map, _seed_with_alias,
             seed_concept, seed_claim, seed_formula, seed_procedure,
@@ -1991,23 +2021,93 @@ class KnowledgeGovernanceService:
 
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            objs = self._knowledge_objects(db, notebook_id, object_type, statuses=None)
-        objs = [o for o in objs if o.get("status") != "deprecated"]
+            seed_rows = self.knowledge.duplicate_seed_rows(db, notebook_id, object_type)
+            if object_type == "procedure":
+                objs = [
+                    {"id": r["id"], "status": r["status"], "payload": r["payload"]}
+                    for r in seed_rows
+                ]
+            else:
+                # SQL already extracted payload.name; NULL means "absent, JSON
+                # null, or a payload that is not an object" — all of which the
+                # old ``dict.get("name", "")`` (or, for a non-string/non-None
+                # value, the old full-payload read) turned into "" or fed
+                # verbatim into ``_norm``. ``str()`` here is the SAME
+                # registered dialect-reconciling coercion the review-queue
+                # endpoint read uses (``review_queue`` above) — a string or
+                # integer ``name`` renders identically on both backends; a
+                # bool/float/object/array can render differently across
+                # PostgreSQL's ``->>`` and SQLite's ``json_extract`` + ``str()``
+                # (not a regression: both engines only reach this coercion for
+                # shapes the OLD unrestricted ``_norm(non_str)`` path would
+                # already raise on).
+                objs = [
+                    {
+                        "id": r["id"],
+                        "status": r["status"],
+                        "payload": {
+                            "name": str(r["name"]) if r["name"] is not None else ""
+                        },
+                    }
+                    for r in seed_rows
+                ]
 
-        # Block by seed: only same-normalized-name objects become candidates.
-        alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
-        by_seed: Dict[str, List[dict]] = {}
-        for o in objs:
-            seed = _seed_with_alias(
-                {"name": o["payload"].get("name", ""), "payload": o["payload"]},
-                seed_fn, alias_map)
-            if seed:
-                by_seed.setdefault(seed, []).append(o)
+            # Block by seed: only same-normalized-name objects become candidates.
+            # This loop and the seed/alias functions it calls are UNCHANGED from
+            # before the two-pass split — only ``objs``'s construction moved.
+            alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
+            by_seed: Dict[str, List[dict]] = {}
+            for o in objs:
+                seed = _seed_with_alias(
+                    {"name": o["payload"].get("name", ""), "payload": o["payload"]},
+                    seed_fn, alias_map)
+                if seed:
+                    by_seed.setdefault(seed, []).append(o)
+
+            # Pass 2: only blocks that already have >=2 members can possibly be a
+            # duplicate group — singleton blocks (the common case) are dropped
+            # right here without ever reading their full payload.
+            pending_ids = [
+                o["id"] for members in by_seed.values() if len(members) >= 2
+                for o in members
+            ]
+            full_by_id: Dict[str, dict] = {}
+            if pending_ids:
+                full_rows = self.knowledge.duplicate_member_rows(
+                    db, notebook_id, pending_ids
+                )
+                full_by_id = {r["id"]: r["payload"] for r in full_rows}
 
         groups: List[DuplicateGroup] = []
         for members in by_seed.values():
             if len(members) < 2:
                 continue
+            # Re-key onto pass 2's full payload IN PASS-1 ORDER — ``members``
+            # is already in that order (each block is built by appending pass
+            # 1's rows in the order pass 1 returned them; pass 2's OWN row
+            # order is explicitly unspecified and must not leak here). A
+            # member can, in principle, drop out of pass 2's result between
+            # the two reads (e.g. a concurrent hard delete) — fall back to
+            # the thin pass-1 payload rather than raising, so this stays
+            # lossless-in-practice.
+            #
+            # "evidence": [] (design review B5a): ``_knowledge_similarity``
+            # below reads ``a["evidence"]``, but is always called with
+            # ``element_vectors={}``, which makes its ONLY reader of
+            # "evidence" — the semantic/vector branch — unreachable dead
+            # code. An empty list is therefore semantically equivalent to the
+            # full evidence array pass 2 deliberately does not fetch; taking
+            # this shortcut back out (fetching evidence "to be safe") would
+            # undo the whole point of this narrowing.
+            full_members = [
+                {
+                    "id": o["id"],
+                    "status": o["status"],
+                    "payload": full_by_id.get(o["id"], o["payload"]),
+                    "evidence": [],
+                }
+                for o in members
+            ]
             # Same seed = same normalized name/statement = the duplicate signal
             # (consistent with how the KG clustering merges variants, incl. case /
             # whitespace / acronym). similarity is a display hint only: max pairwise
@@ -2015,15 +2115,18 @@ class KnowledgeGovernanceService:
             # same-name block stays bounded, and with {} vectors so nothing loads
             # the embedding table.
             best = 1.0
-            if len(members) <= 25:
+            if len(full_members) <= 25:
                 best = 0.0
-                for i in range(len(members)):
-                    for j in range(i + 1, len(members)):
-                        best = max(best, self._knowledge_similarity(members[i], members[j], {}))
+                for i in range(len(full_members)):
+                    for j in range(i + 1, len(full_members)):
+                        best = max(
+                            best,
+                            self._knowledge_similarity(full_members[i], full_members[j], {}),
+                        )
             groups.append(DuplicateGroup(
                 object_type=object_type,
                 similarity=round(best, 3),
-                members=[self._knowledge_ref(m, object_type) for m in members],
+                members=[self._knowledge_ref(m, object_type) for m in full_members],
             ))
         groups.sort(key=lambda g: (-len(g.members), -g.similarity))
         return groups

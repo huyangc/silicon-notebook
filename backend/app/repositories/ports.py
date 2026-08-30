@@ -1839,6 +1839,56 @@ class KnowledgeStorePort(Protocol):
     def retrieval_objects_compat(self, db: object, notebook_id: str, object_type: str, statuses: object, id_filter: object) -> list[dict]: ...
     @staticmethod
     def delete_relations_for_source(db: object, source_id: str) -> None: ...
+    @staticmethod
+    def duplicate_seed_rows(
+        db: object, notebook_id: str, object_type: str
+    ) -> list[dict[str, Any]]:
+        """R3 T-B1 (KG-3) dedup pass 1 -- the thin BLOCKING projection
+        ``find_duplicates`` needs to build ``by_seed``, in place of shipping
+        every object's full ``payload``+``evidence`` for the type
+        (``retrieval_objects``) when most objects land in a singleton block
+        and are never looked at again.
+
+        ``status != 'deprecated'`` is pushed down (the old code fetched every
+        status and filtered in Python): no LIMIT sits above this predicate,
+        so the total row count visited is unchanged -- only the per-row
+        transfer/construction cost for excluded rows is removed.
+
+        Rows for ``object_type in {'concept','claim','formula'}`` carry a raw
+        ``name`` column (``payload->>'name'`` / ``json_extract(payload,
+        '$.name')`` -- dialect-native type, NOT yet coerced to text) because
+        the seed function and the acronym alias map only ever read
+        ``payload["name"]``. ``object_type == 'procedure'`` carries the FULL
+        ``payload`` instead, under the ``payload`` key -- ``seed_procedure``
+        also needs ``payload["steps"]``'s signature, which has no scalar SQL
+        projection. Ordered ``created_at ASC, id ASC``, identical to
+        ``retrieval_objects``'s no-id-filter branch: ``find_duplicates``'s
+        ``by_seed`` insertion order, each block's member order, and the
+        final stable sort's tie-break all derive from this order.
+        """
+        ...
+    @staticmethod
+    def duplicate_member_rows(
+        db: object, notebook_id: str, object_ids: Sequence[str], *, batch_size: int = 900
+    ) -> list[dict[str, Any]]:
+        """R3 T-B1 (KG-3) dedup pass 2 -- the FULL ``payload`` backfill for
+        the members of blocks ``duplicate_seed_rows`` grouped to >=2 members
+        (singleton blocks -- the majority of a notebook's objects -- never
+        reach this read).
+
+        ``evidence`` is deliberately NOT selected: the only reader,
+        ``KnowledgeGovernanceService._knowledge_similarity``, is called with
+        ``element_vectors={}`` from ``find_duplicates``, which makes its
+        evidence-vector branch unreachable dead code (design review B5a) --
+        the caller fills ``"evidence": []`` in Python instead of shipping the
+        column.
+
+        Return order is UNSPECIFIED -- callers needing pass-1 order (this
+        method's only consumer does) must re-key the result by ``id`` and
+        re-apply pass 1's order themselves; batching this by ``object_ids``
+        chunks would scramble a single global order anyway.
+        """
+        ...
 
 
 @runtime_checkable

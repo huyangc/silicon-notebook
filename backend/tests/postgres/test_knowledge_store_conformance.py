@@ -5650,6 +5650,139 @@ def test_postgres_review_queue_rows_paginates_endpoint_lookup(
 
 
 # --------------------------------------------------------------------------
+# R3 T-B1 (KG-3) — find_duplicates 两趟取数
+# (`duplicate_seed_rows`/`duplicate_member_rows` 在 PostgreSQL 上此前**从未
+#  执行过**:新写的 `payload->>'name'`、`status != 'deprecated'` 下推与
+#  `id = ANY(...)` 回填必须真跑一遍,而不是只在 SQLite 上绿。)
+# --------------------------------------------------------------------------
+
+def _seed_dedup_fixture(harness) -> None:
+    with harness.database.write() as connection:
+        for object_id, payload, status in (
+            ("ko-dd-a", {"name": "Amplifier"}, "approved"),
+            ("ko-dd-b", {"name": "amplifier"}, "approved"),
+            ("ko-dd-dead", {"name": "AMPLIFIER"}, "deprecated"),
+            ("ko-dd-single", {"name": "Cascode"}, "approved"),
+        ):
+            connection.execute(
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+                " created_at,updated_at) "
+                "VALUES (%s,'nb-personal','concept',%s,%s::jsonb,'[]'::jsonb,"
+                "'source-golden',%s,%s)",
+                (object_id, status, json.dumps(payload), NOW, NOW),
+            )
+
+
+def test_postgres_duplicate_seed_rows_pushes_the_deprecated_filter_into_sql(
+    knowledge_harness,
+):
+    _seed_dedup_fixture(knowledge_harness)
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        rows = store.duplicate_seed_rows(connection, "nb-personal", "concept")
+
+    ids = {row["id"] for row in rows}
+    assert ids == {"ko-dd-a", "ko-dd-b", "ko-dd-single"}
+    assert "ko-dd-dead" not in ids
+    # R3 T-B1: only `name` travels for non-procedure types — never the whole
+    # payload document (that is the read this narrowing removes).
+    by_id = {row["id"]: row["name"] for row in rows}
+    assert by_id["ko-dd-a"] == "Amplifier"
+    assert "payload" not in rows[0]
+
+
+def test_postgres_duplicate_seed_rows_renders_a_non_string_name_as_text(
+    knowledge_harness,
+):
+    """R3 T-B1 registered robustness change, PostgreSQL half — same
+    reasoning as `review_queue_rows`'s equivalent test above: a numeric
+    `payload.name` used to reach `_norm` as an `int` (via the full-payload
+    read) and raise. `->>` renders it as text, matching what the SQLite twin
+    produces via `json_extract` + the caller's `str()`."""
+    _seed_dedup_fixture(knowledge_harness)
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "UPDATE knowledge_objects SET payload=%s::jsonb WHERE id=%s",
+            (json.dumps({"name": 42}), "ko-dd-a"),
+        )
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        rows = store.duplicate_seed_rows(connection, "nb-personal", "concept")
+    assert {row["id"]: row["name"] for row in rows}["ko-dd-a"] == "42"
+    # (`->>` itself already yields text on PostgreSQL; the `str()`-or-''
+    # coercion for a SQL NULL happens in the SERVICE layer, exercised by the
+    # SQLite-side oracle equivalence tests in test_dedup_read_narrowing.py.)
+
+
+def test_postgres_duplicate_seed_rows_carries_the_full_payload_for_procedures(
+    knowledge_harness,
+):
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO knowledge_objects"
+            "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+            " created_at,updated_at) "
+            "VALUES ('ko-dd-proc','nb-personal','procedure','approved',%s::jsonb,"
+            "'[]'::jsonb,'source-golden',%s,%s)",
+            (json.dumps({"name": "Boot", "steps": [{"name": "Power On"}]}), NOW, NOW),
+        )
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        rows = store.duplicate_seed_rows(connection, "nb-personal", "procedure")
+
+    assert len(rows) == 1
+    assert rows[0]["payload"] == {"name": "Boot", "steps": [{"name": "Power On"}]}
+    assert "name" not in rows[0]
+
+
+def test_postgres_duplicate_member_rows_reads_only_the_requested_ids(
+    knowledge_harness,
+):
+    _seed_dedup_fixture(knowledge_harness)
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        rows = store.duplicate_member_rows(
+            connection, "nb-personal", ["ko-dd-a", "ko-dd-b"]
+        )
+
+    assert {row["id"] for row in rows} == {"ko-dd-a", "ko-dd-b"}
+    by_id = {row["id"]: row["payload"] for row in rows}
+    assert by_id["ko-dd-a"]["name"] == "Amplifier"
+    assert "evidence" not in rows[0]
+
+
+def test_postgres_duplicate_member_rows_stays_notebook_scoped(knowledge_harness):
+    """Even though `find_duplicates` never hands it a cross-notebook id, the
+    predicate itself must still scope by notebook — proving the SQL text
+    guard (`notebook_id=%s AND id = ANY(...)`) actually holds on a live
+    database, not just in a fake-cursor capture (see
+    test_dedup_read_narrowing.py::test_pg_member_lookup_sql_keeps_the_notebook_predicate)."""
+    _seed_dedup_fixture(knowledge_harness)
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) VALUES ('nb-dd-other','nb-dd-other','',"
+            "'thermal','ready','user-golden',%s,%s,'personal')",
+            (NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO knowledge_objects"
+            "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+            " created_at,updated_at) "
+            "VALUES ('ko-dd-stranger','nb-dd-other','concept','approved',%s::jsonb,"
+            "'[]'::jsonb,'',%s,%s)",
+            (json.dumps({"name": "Stranger"}), NOW, NOW),
+        )
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        rows = store.duplicate_member_rows(
+            connection, "nb-personal", ["ko-dd-a", "ko-dd-stranger"]
+        )
+    assert {row["id"] for row in rows} == {"ko-dd-a"}
+
+
+# --------------------------------------------------------------------------
 # P1 批 D — orphan 簇的精确清理 + 无 ANN 桥接的 concept 向量收窄
 # (两条 SQL 在 PostgreSQL 上此前**从未执行过**:`clear_source_graph_state` 与
 #  `embedding_rows` 都没有 conformance 覆盖,新写的 ANY(%s) 删除与 JOIN 收窄
