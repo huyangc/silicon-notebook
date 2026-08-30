@@ -26,6 +26,7 @@ from app.domain.extensions import (
 )
 from app.domain.gap_consult import GapConsultHostPort
 from app.domain.ask_engine import AskEngineHostPort
+from app.domain.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX
 from app.domain.indexing_pipeline import (
     IndexingPipelineHostPort,
     IndexingPipelineStalePlanError,
@@ -2936,7 +2937,7 @@ class RepositoryFacade:
         canonical_id: str,
         *,
         source_notebook_id: str = "",
-        limit: int | None = 200,
+        limit: int | None = CONCEPT_DETAIL_PAGE_MAX,
         after: str = "",
     ) -> dict:
         return self._runtime.knowledge_query.concept_detail(

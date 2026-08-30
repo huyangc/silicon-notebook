@@ -202,13 +202,52 @@ def test_concept_detail_pagination_union_matches_full_oracle(repo):
         if seen:
             assert seen[-1] < page_ids[0]  # strictly increasing across pages too
         seen.extend(page_ids)
-        assert page["member_total"] == 430  # same seq/version, same total on every page
+        # R3 PR-B P1-1: the COUNT is only re-run on the FIRST page (`after`
+        # unset) — a hub cluster's total would otherwise be re-priced on
+        # every "load more" page for no display benefit. Later pages answer
+        # `None`; the frontend merge carries the first page's total forward.
+        if pages == 1:
+            assert page["member_total"] == 430
+        else:
+            assert page["member_total"] is None
         if not page["next_cursor"]:
             break
         assert page["next_cursor"] == page_ids[-1]
         after = page["next_cursor"]
     assert pages == 5  # 4 full pages of 90 + one page of 70
     assert seen == sorted(m["id"] for m in full["members"])  # union == oracle set, no dup/gap
+
+
+def test_concept_detail_second_page_skips_the_member_count(repo, monkeypatch):
+    """R3 PR-B P1-1 (store-level counter assertion): a "load more" request
+    (non-empty `after`) must NOT re-issue `concept_cluster_member_total`'s
+    COUNT — that query is O(cluster size), the same order of cost as the
+    legacy unbounded read this pagination replaced, so re-running it every
+    page would repay almost the whole cost this feature exists to cut.
+    Mutation-checked: removing the `if not after:` guard around the COUNT
+    call in `KnowledgeQueryService._concept_detail` turns this red (the
+    counter reaches 2, and page 2's `member_total` is no longer `None`)."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    cid = _hub_cluster(repo, nb.id, 5)
+
+    knowledge = repo._runtime.knowledge_query.knowledge
+    original = knowledge.concept_cluster_member_total
+    calls: list = []
+
+    def _counting(db, notebook_id, canonical_id):
+        calls.append((notebook_id, canonical_id))
+        return original(db, notebook_id, canonical_id)
+
+    monkeypatch.setattr(knowledge, "concept_cluster_member_total", _counting)
+
+    first = repo.concept_detail(nb.id, cid, limit=2)
+    assert len(calls) == 1
+    assert first["member_total"] == 5
+    assert first["next_cursor"]
+
+    second = repo.concept_detail(nb.id, cid, limit=2, after=first["next_cursor"])
+    assert len(calls) == 1  # no additional COUNT on the second page
+    assert second["member_total"] is None
 
 def test_concept_detail_next_cursor_boundary_cases(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

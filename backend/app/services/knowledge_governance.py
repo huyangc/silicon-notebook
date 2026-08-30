@@ -189,6 +189,15 @@ class KnowledgeGovernanceService:
         # the governance store instead of the full-row compatibility reader.
         self._edge_centrality_map = edge_centrality_map
         self._embed_knowledge = embed_knowledge
+        # R3 PR-B P3-3: no production call site in THIS class invokes
+        # `self._knowledge_objects` (find_duplicates moved onto the R3 T-B1
+        # two-pass `duplicate_seed_rows`/`duplicate_member_rows` reads
+        # instead). The only remaining caller is the pre-two-pass-split
+        # oracle in `backend/tests/test_dedup_read_narrowing.py`
+        # (`_old_find_duplicates`), which calls it directly as
+        # `governance._knowledge_objects(...)` to freeze the exact read this
+        # narrowing replaced. Removing this seat needs that test's oracle
+        # rewritten in the same change, not dropped on its own.
         self._knowledge_objects = knowledge_objects
         self._as_retrieved = as_retrieved
         self._rule_card = rule_card
@@ -2088,8 +2097,25 @@ class KnowledgeGovernanceService:
             # order is explicitly unspecified and must not leak here). A
             # member can, in principle, drop out of pass 2's result between
             # the two reads (e.g. a concurrent hard delete) — fall back to
-            # the thin pass-1 payload rather than raising, so this stays
-            # lossless-in-practice.
+            # the thin pass-1 payload rather than raising, so this member is
+            # never silently dropped from its group. R3 PR-B P3-4 (honest
+            # accounting, not "lossless"): for ``procedure`` this fallback IS
+            # lossless — pass 1 already carries the full payload for that
+            # type. For every OTHER type the pass-1 fallback payload is only
+            # ``{"name": ...}`` (see above), so on this rare race:
+            #   - ``headline`` (below, via ``_knowledge_ref``) degrades to the
+            #     bare ``object_type`` literal if ``name`` itself was empty —
+            #     the richer fallback keys (``term``/``definition``/etc.) it
+            #     would otherwise fall through to are gone.
+            #   - ``similarity`` (``_knowledge_similarity`` → ``payload_join``)
+            #     degrades to comparing bare ``name`` text only, losing
+            #     whatever additional keyword signal the full payload's other
+            #     fields (``definition``/``statement``/...) would have added.
+            # The window this can be observed in is extremely narrow (needs
+            # BOTH the concurrent-delete race AND, for the headline case, an
+            # empty ``name``), and it affects only the display of an existing
+            # group, never which objects are grouped — but it is a real,
+            # visible degradation, not a no-op.
             #
             # "evidence": [] (design review B5a): ``_knowledge_similarity``
             # below reads ``a["evidence"]``, but is always called with

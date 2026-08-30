@@ -2947,7 +2947,15 @@ class KnowledgeStore:
         same ordering, so no explicit COLLATE clause is needed here.
         ``limit=None`` keeps the legacy unbounded (but now deterministically
         ordered) read for internal callers that still need the full member
-        set in one shot."""
+        set in one shot.
+
+        R3 PR-B P2-1: mirrors the PostgreSQL side's redundant seek predicate
+        on ``ko.id`` when ``after`` is set — same equivalence proof (the join
+        condition ``ko.id=cc.member_object_id`` makes ``ko.id > after`` and
+        ``cc.member_object_id > after`` logically the same set of rows), same
+        motivation (give SQLite's planner a seek condition on the
+        ``knowledge_objects`` side too, so a mid-cluster page does not have to
+        scan that table from its start up to the cursor)."""
         query = (
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
@@ -2956,7 +2964,8 @@ class KnowledgeStore:
         )
         params: list = [notebook_id, canonical_id]
         if after:
-            query += " AND cc.member_object_id > ?"
+            query += " AND cc.member_object_id > ? AND ko.id > ?"
+            params.append(after)
             params.append(after)
         query += " ORDER BY cc.member_object_id"
         if limit is not None:

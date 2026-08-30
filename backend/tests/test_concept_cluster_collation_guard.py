@@ -50,6 +50,16 @@ def test_postgres_concept_cluster_keyset_compares_on_the_same_collation_it_order
         "用例全绿，但列级 collation 一变，比较序与排序序分叉，翻页会静默漏成员"
     )
     assert "AND cc.member_object_id > %s" not in sql, "残留了不带 collation 的比较键"
+    # R3 PR-B P2-1: the redundant `ko.id` seek predicate (provably equivalent
+    # given the `ko.id=cc.member_object_id` join — see the function's
+    # docstring) must carry the SAME collation as the other two keys, for the
+    # same reason: today's column-level collation makes a bare comparison
+    # behave identically, so only a behaviour-blind source guard catches a
+    # future divergence.
+    assert 'AND ko.id COLLATE "C" > %s' in sql, (
+        "keyset 比较键漏了 ko.id 的冗余谓词（R3 PR-B P2-1）或漏了 COLLATE \"C\""
+    )
+    assert "AND ko.id > %s" not in sql, "残留了不带 collation 的 ko.id 比较键"
 
 
 def test_postgres_concept_cluster_member_total_shares_the_page_query_predicate():

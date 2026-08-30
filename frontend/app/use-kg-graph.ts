@@ -56,6 +56,7 @@ import {
 import type { KgOwnerAuthority } from "./use-kg-owner";
 import type {
   ConceptDetailResp,
+  KgObject,
   KgSearchHit,
   MergeReviewJob,
   NotebookSummary,
@@ -103,6 +104,21 @@ const ownerKey = (owner: Pick<KgWorkspaceOwner, "actorId" | "notebookId">): stri
 const NO_SEARCH_HITS: KgSearchHit[] = Object.freeze([] as KgSearchHit[]) as KgSearchHit[];
 const NO_SELECTED_TYPES: string[] = Object.freeze([] as string[]) as string[];
 const NO_PENDING_MERGES: PendingMerge[] = Object.freeze([] as PendingMerge[]) as PendingMerge[];
+
+// R3 PR-B P1-2: `attached` across concept-detail hub-cluster pages can repeat
+// the same adjacency object (it is not partitioned by member — see
+// `loadMoreConceptMembers`'s merge below). Keeps the FIRST occurrence, same
+// order otherwise.
+function dedupeKgObjectsById(items: KgObject[]): KgObject[] {
+  const seen = new Set<string>();
+  const result: KgObject[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+}
 
 export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   const { ownerVersion, currentOwner, owns, ownsIdentity, beginOperation, ownsOperation } = authority;
@@ -509,9 +525,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   };
 
   // Hub-cluster "load more members" (R3·T-B2). Appends the next page's
-  // members/attached/evidence onto the already-loaded ones; `member_total`/
-  // `next_cursor`/`canonical_name` are taken from the fresh page response
-  // (same values as before except `next_cursor`, which advances or clears).
+  // members/attached/evidence onto the already-loaded ones; `next_cursor`/
+  // `canonical_name` are taken from the fresh page response (same values as
+  // before except `next_cursor`, which advances or clears).
   // Guarded by `conceptMembersEpochRef` against a first page landing (via
   // `setConceptDetailFirstPage`, e.g. selecting a different node, or a
   // merge-decision/rebuild refresh) while this request is in flight — a
@@ -532,8 +548,23 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       setConceptDetail((current) => (current ? {
         ...page,
         members: [...current.members, ...page.members],
-        attached: [...current.attached, ...page.attached],
+        // R3 PR-B P1-2: `attached` is deduplicated by id across pages — a
+        // hub cluster's adjacency objects are not partitioned by member, so
+        // the same attached object can be reachable from more than one
+        // member and reappear on a later page (React list key collisions,
+        // inflated per-type counts in `relatedNodeGroups`). `evidence` is
+        // intentionally NOT deduplicated here: each page's evidence already
+        // came out unique per that page's own members (knowledge_query.py's
+        // page-scoped evidence flattening), and two different members can
+        // legitimately share the same evidence item text without it being a
+        // "duplicate" the same way an attached object's identity is.
+        attached: dedupeKgObjectsById([...current.attached, ...page.attached]),
         evidence: [...current.evidence, ...page.evidence],
+        // R3 PR-B P1-1: the backend only recomputes `member_total` on the
+        // first page — later pages answer `null` (see workspace-model.ts).
+        // `...page` above would otherwise clobber the real total already
+        // held in `current` with that `null`; keep the first page's value.
+        member_total: page.member_total ?? current.member_total,
       } : current));
     } catch (error) {
       if (owns(owner) && epoch === conceptMembersEpochRef.current) effectsRef.current.reportError(error);

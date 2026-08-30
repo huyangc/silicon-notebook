@@ -281,6 +281,57 @@ def test_pass2_backfill_is_reordered_to_pass1_order_regardless_of_sql_row_order(
     assert [m.id for m in groups[0].members] == ids
 
 
+# ── SQL-text guard: pass 1's SQLite projection contract ─────────────────────
+
+def _captured_seed_rows_sql(object_type: str) -> list:
+    class _Cursor:
+        def fetchall(self):
+            return []
+
+    class _SqlCapture:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append(" ".join(str(sql).split()))
+            return _Cursor()
+
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+
+    capture = _SqlCapture()
+    KnowledgeStore.duplicate_seed_rows(capture, "nb-shape", object_type)
+    return [sql for sql in capture.statements if "FROM knowledge_objects" in sql]
+
+
+def test_sqlite_seed_rows_sql_projects_only_the_name():
+    """R3 PR-B P2-2: pass 1 (`duplicate_seed_rows`, non-procedure branch)
+    must extract ``payload.name`` in SQL, never project the whole ``payload``
+    document — that full-payload read is exactly what this narrowing exists
+    to remove (see the module docstring). The PostgreSQL twin already has a
+    BEHAVIOUR guard for this (`test_postgres_duplicate_seed_rows_pushes_the_
+    deprecated_filter_into_sql`'s ``assert "payload" not in rows[0]``, in
+    `backend/tests/postgres/test_knowledge_store_conformance.py`); the SQLite
+    side had none, so reverting the SQLite branch to ``SELECT *`` (or to
+    projecting the bare ``payload`` column) passed every equivalence oracle
+    in this file — `_old_find_duplicates` re-derives the same `name` from
+    whatever shape the row comes back in, so the oracle is blind to the
+    projection itself. Pinned as SQL TEXT for the same reason as
+    `test_governance_read_narrowing.py::
+    test_endpoint_lookup_sql_projects_only_the_name`: only the query shape
+    can witness the narrowing stays in place."""
+    for sql in _captured_seed_rows_sql("concept"):
+        projection = sql.split("FROM")[0]
+        assert "json_extract(payload, '$.name') AS name" in projection, (
+            f"payload.name must be extracted in SQL: {sql}"
+        )
+        assert "payload" not in projection.replace(
+            "json_extract(payload, '$.name')", ""
+        ), (
+            "pass 1 must NOT also project the whole payload document for a "
+            f"non-procedure type — that is the read this narrowing removes: {sql}"
+        )
+
+
 # ── SQL-text guards: pass 2's SQLite planner-safety contract ────────────────
 
 def _captured_member_lookup_sql(object_ids) -> list:
