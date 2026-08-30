@@ -135,9 +135,45 @@ def _lexical_gate_drift_probe(retrieval_state, notebook_id: str) -> bool:
     instead). Such a double answers "no drift", the same as the pre-#640-R2
     baseline for every caller that never reaches this branch. This does NOT
     memoise the probe itself — every call here still re-reads it fresh; it
-    only centralizes the fallback for callers that may not have it at all."""
+    only centralizes the fallback for callers that may not have it at all.
+
+    codex #640 R3 P2: fail-open on ANY exception the probe itself raises, not
+    just a missing/non-callable attribute.  Two of this wrapper's three call
+    sites (``_retrieve_chunks_multi``, ``_keyword_chunk_candidates``) invoke it
+    OUTSIDE their own fail-open ``try/except`` block — it runs once, before
+    the multi-query fan-out or before the FTS ``try`` further down — so an
+    unguarded probe exception there would propagate past this ROUTING-only
+    verdict and take the whole chunk/keyword arm (and therefore the ask) down
+    with it, exactly the failure mode every other lexical helper in this file
+    (``_lexical_corpus_langs``, ``_lexical_object_hits``) already refuses to
+    allow. "No drift" is the safe answer on failure for the same reason the
+    missing-probe branch above already answers it that way: it routes to the
+    SAME lane an unprobed/absent probe already takes (the pre-#640-R2
+    baseline), never disables the enforcement predicate itself (that is pushed
+    down unconditionally regardless of this verdict — see
+    ``_lexical_gate_source_scoped``), and can only ever pick the wrong lexical
+    TERM SET for this one call, never let an out-of-scope row through.  The
+    diagnostic event is best-effort: a double with no usable ``event_log``
+    (the same ``SimpleNamespace`` this function already tolerates above) must
+    not turn a swallowed probe failure into a new, unswallowed emit failure.
+    """
     probe = getattr(retrieval_state, "_unsafe_source_scope_restricted", None)
-    return bool(probe(notebook_id)) if callable(probe) else False
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe(notebook_id))
+    except Exception as exc:  # noqa: BLE001 — a routing-only probe must never break retrieval
+        emit = getattr(getattr(retrieval_state, "event_log", None), "emit", None)
+        if callable(emit):
+            try:
+                emit({
+                    "kind": "lexical_gate_probe_failed",
+                    "notebook_id": notebook_id,
+                    "error_type": type(exc).__name__,
+                })
+            except Exception:  # noqa: BLE001 — diagnostics must never break retrieval
+                pass
+        return False
 
 
 # codex #640 R2 P2: ``_retrieve_chunks_multi`` fans a single chunk-arm entry
@@ -371,7 +407,7 @@ class _RetrievalState:
         )
 
     def _lexical_gate_source_scoped(
-        self, allowed_source_ids, *, explicit: bool = False,
+        self, allowed_source_ids, notebook_id: str, *, explicit: bool = False,
         drifted: bool = False,
     ) -> bool:
         """Does this query's source predicate actually BOUND the lexical scan?
@@ -388,24 +424,56 @@ class _RetrievalState:
         exactly what happens (audit ASK-1; measured 64 terms/29.7s cold vs 3
         terms/0.26s warm for the same 26 rows).
 
-        Four answers, one conjunction:
+        ``notebook_id`` -- codex #640 R3 P1: the notebook this ONE call is
+        actually querying, required so the two request-scope-derived answers
+        below can be judged against the RIGHT library.  Mirrors
+        ``source_scope.scoped_allowed_source_ids``'s own
+        ``notebook_id != scope.notebook_id`` branch: ``source_scope_restricted()``
+        and ``drifted`` both describe the SCOPE's own (active/main) notebook,
+        never any mounted reference library the same retrieval arm may also be
+        querying. Before this parameter existed, a federated call for a
+        mounted library (``_federated_retrieve_elements_impl`` ->
+        ``_retrieve_elements(participant_notebook_id, ...)`` ->
+        ``_retrieve_chunks_baseline``) inherited the ACTIVE notebook's
+        ``source_scope_restricted()``/drift verdicts wholesale: a genuinely
+        narrowed active notebook made every mounted library's lexical gate
+        report "bounded" too, even though the list reaching this call for that
+        library is the full context ceiling (``scoped_allowed_source_ids``
+        returns it unfiltered for ``notebook_id != scope.notebook_id`` --
+        the ceiling only intersects the scope's own notebook), reopening the
+        unbounded lexical probe set on the mounted library.
+
+        Five answers, one conjunction:
 
         * ``allowed_source_ids is None`` -- no predicate at all (no scope, a
           mounted base library, an exclude-shaped scope).  Not bounded.
         * ``explicit`` -- the CALL CHAIN explicitly attests this list is a
           producer's own, genuinely narrow universe (not merely non-``None``
-          -- see the callers).  Bounded, whatever the request scope says.
+          -- see the callers).  Bounded, whatever the request scope says --
+          and whatever notebook it is for, since this is a producer's own
+          attestation about ITS OWN query, not a read of the ambient scope.
+        * ``notebook_id == scope.notebook_id`` -- whether this call is even
+          asking about the scope's own (active/main) notebook.  A mounted
+          reference library is a DIFFERENT notebook than the one the freeze
+          describes, so neither of the next two answers may be consulted for
+          it -- see the ``notebook_id`` paragraph above.
         * the request's own NARROWING bit (``source_scope_restricted()``),
           which is free (a contextvar read): a user who really unchecked
           sources leaves a predicate that bounds the scan, while a default
-          full selection does not.
+          full selection does not.  Only consulted when ``notebook_id`` is
+          the scope's own notebook.
         * ``drifted`` -- the frozen all-selected ceiling no longer equals the
           live universe, so the predicate it pushes down is now genuinely
           smaller than "the whole notebook" (``docs/product-and-api.md``,
           source-selected-retrieval-scope: "A frozen-universe drift makes the
           run genuinely bounded again and returns it to the restricted
           lane" -- the KG lexical lane already honours this; codex #640 R2
-          P2 caught chunk/keyword lagging it).
+          P2 caught chunk/keyword lagging it).  Also only consulted when
+          ``notebook_id`` is the scope's own notebook -- ``drifted`` is
+          itself computed by probing THAT ``notebook_id`` (see
+          ``_lexical_gate_drift_probe``/``_unsafe_source_scope_restricted``),
+          so a caller that already probed the right library will see this
+          branch's own notebook check agree with it by construction.
 
         codex #640 R2 P1: ``explicit`` must never be inferred from
         "``allowed_source_ids is not None``" one level removed from the
@@ -435,12 +503,23 @@ class _RetrievalState:
         parameter -- see ``_retrieve_chunks_multi`` and
         ``_keyword_chunk_candidates``.
         """
-        from app.services.source_scope import source_scope_restricted
+        from app.services.source_scope import current_source_scope, source_scope_restricted
 
-        return bool(
-            allowed_source_ids is not None
-            and (explicit or source_scope_restricted() or drifted)
-        )
+        if allowed_source_ids is None:
+            return False
+        if explicit:
+            return True
+        scope = current_source_scope()
+        if scope is None or scope.notebook_id != notebook_id:
+            # The two scope-derived answers below describe the SCOPE's own
+            # notebook only (see the ``notebook_id`` paragraph above). A call
+            # for any other notebook_id -- a mounted reference library in a
+            # federated arm -- must not borrow the active notebook's
+            # narrowing/drift verdicts; its own allowed_source_ids here is a
+            # context ceiling, never evidence that THIS library's scan
+            # narrowed.
+            return False
+        return bool(source_scope_restricted() or drifted)
 
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
         if database is not None:
@@ -2528,7 +2607,8 @@ class CandidateRetrievalService(_RetrievalState):
         if drifted is None:
             drifted = _lexical_gate_drift_probe(self, notebook_id)
         source_restricted = self._lexical_gate_source_scoped(
-            allowed_source_ids, explicit=producer_explicit, drifted=drifted,
+            allowed_source_ids, notebook_id,
+            explicit=producer_explicit, drifted=drifted,
         )
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
@@ -3050,7 +3130,7 @@ class CandidateRetrievalService(_RetrievalState):
         # still pushed down unconditionally regardless of this verdict).
         drifted = _lexical_gate_drift_probe(self, notebook_id)
         source_restricted = self._lexical_gate_source_scoped(
-            allowed_source_ids, drifted=drifted
+            allowed_source_ids, notebook_id, drifted=drifted
         )
         try:
             corpus_langs = self._lexical_corpus_langs(
