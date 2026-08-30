@@ -34,7 +34,11 @@ tests freeze the EXACT per-operation order matrix:
                            in ONE transaction (codex #638 R5); best-effort
                            embed; invalidate
     update_knowledge       object transaction + dirty bump in ONE transaction
-                           (codex #638 R5); best-effort embed; invalidate
+                           (codex #638 R5); best-effort embed — a payload
+                           edit REPLACES the object's existing vector, which
+                           carries its OWN second dirty bump inside that
+                           replace's own transaction (codex #638 R6 P1: emb_c
+                           COUNT(*) cannot see a same-row upsert); invalidate
     merge_knowledge        evidence/provenance/source-status transaction +
                            dirty bump in ONE transaction (codex #638 R5);
                            invalidate
@@ -44,7 +48,11 @@ tests freeze the EXACT per-operation order matrix:
     node conflict discard/modify
                            object transaction + dirty bump (rides
                            update_knowledge, codex #638 R5); invalidate;
-                           second dirty bump (post-commit)
+                           second dirty bump (post-commit) — "modify" ALSO
+                           carries update_knowledge's own THIRD bump, inside
+                           the payload re-embed's replace transaction (codex
+                           #638 R6 P1); "discard" is status-only (no embed,
+                           no third bump)
     confirm_conflict       apply mutation, then candidate-status transaction
     unified rebuild        cluster rewrite + cluster seq; NO kg_mutation_seq bump
     deep copy / migration / fixture
@@ -160,12 +168,25 @@ def _spy_dirty_in_tx(repo, monkeypatch, events):
 
 
 def _spy_embed_store(repo, monkeypatch, events):
-    """Record the best-effort payload-embed hook at the embedding-store seam
-    (pure recorder: the hook's own flush transaction is not under test)."""
+    """Wrap (and still delegate) the best-effort payload-embed hook at the
+    embedding-store seam. Was a pure recorder before codex #638 R6 P1 (the
+    hook's own flush transaction was not under test); now update_knowledge
+    threads its in-tx dirty callback INTO that flush transaction (see
+    ``SourceEmbeddingService.embed_knowledge``'s docstring), so this seam
+    must actually run the write — its "write.begin"/"dirty"/"write.commit"
+    are observed through the SAME instrumented seams as every other write,
+    not synthesized here."""
+    original = repo._runtime.embedding_store.replace_knowledge_vectors
+
+    def wrapped(notebook_id, rows, created_at="", mark_dirty_in_tx=None):
+        events.append("embed")
+        return original(
+            notebook_id, rows, created_at=created_at,
+            mark_dirty_in_tx=mark_dirty_in_tx,
+        )
+
     monkeypatch.setattr(
-        repo._runtime.embedding_store,
-        "replace_knowledge_vectors",
-        lambda notebook_id, rows, created_at="": events.append("embed"),
+        repo._runtime.embedding_store, "replace_knowledge_vectors", wrapped
     )
 
 
@@ -508,7 +529,14 @@ def test_approve_promotion_bumps_inside_the_transaction_then_embeds(
     """codex #638 R5: the base-object insert and its dirty bump share one
     transaction, so the bump precedes the best-effort payload embed instead of
     trailing it. That embed is not wrapped in try/except here, so the old
-    ex-post bump was simply skipped whenever the embedder was down."""
+    ex-post bump was simply skipped whenever the embedder was down.
+
+    codex #638 R6 P1: approve_promotion's embed is a first-time INSERT for a
+    brand-new base object_id (never a same-row replace — see kg_mutation's
+    VECTOR-REPLACE CENSUS), so it passes no ``mark_dirty_in_tx`` and gets no
+    second bump — only the "write.begin"/"write.commit" pair around the
+    (now genuinely executed, not stubbed) vector INSERT itself, no "dirty"
+    inside it."""
     personal = repo.create_notebook(NotebookCreate(name="personal"))
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
@@ -526,7 +554,9 @@ def test_approve_promotion_bumps_inside_the_transaction_then_embeds(
     repo.approve_promotion(candidate["id"])
 
     assert events == [
-        "write.begin", "dirty", "write.commit", "embed", "invalidate"
+        "write.begin", "dirty", "write.commit",       # base-object insert
+        "embed", "write.begin", "write.commit",       # vector INSERT, no bump
+        "invalidate",
     ]
 
 
@@ -539,7 +569,13 @@ def test_update_knowledge_bumps_inside_the_transaction_then_embeds(
     """codex #638 R5: the object UPDATE and its dirty bump share one
     transaction, so the bump precedes the best-effort re-embed instead of
     trailing it — no window where the edited row is durable under the old
-    seq, and no way for a crash between the two commits to strand it there."""
+    seq, and no way for a crash between the two commits to strand it there.
+
+    codex #638 R6 P1: the re-embed itself REPLACES the object's existing
+    vector (same object_id), which emb_c's COUNT(*) cannot see — so it now
+    carries its OWN second bump, inside ITS OWN write transaction (a second
+    "write.begin"/"dirty"/"write.commit" triple after "embed", before
+    "invalidate")."""
     notebook_id, object_ids, _relations = _seed_kg(repo, "update phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
@@ -551,7 +587,9 @@ def test_update_knowledge_bumps_inside_the_transaction_then_embeds(
         notebook_id, object_ids[0], KnowledgeUpdate(payload={"name": "renamed"})
     )
     assert events == [
-        "write.begin", "dirty", "write.commit", "embed", "invalidate"
+        "write.begin", "dirty", "write.commit",           # object update
+        "embed", "write.begin", "dirty", "write.commit",  # vector replace (R6 P1)
+        "invalidate",
     ]
 
     # Status-only edit skips the payload re-embed; the in-tx bump is unchanged.
@@ -560,6 +598,95 @@ def test_update_knowledge_bumps_inside_the_transaction_then_embeds(
         notebook_id, object_ids[0], KnowledgeUpdate(status="reviewed")
     )
     assert events == ["write.begin", "dirty", "write.commit", "invalidate"]
+
+
+def test_update_knowledge_vector_replace_advances_seq_past_concurrent_reader(
+    repo, monkeypatch
+):
+    """Reproduces the codex #638 R6 race directly, in seq VALUES rather than
+    event names: a concurrent reader landing in the window BETWEEN
+    update_knowledge's row-update commit (bump to N) and its vector-replace
+    commit sees seq N paired with the STILL-OLD vector — exactly what a
+    racing unified-KG rebuild would read and stamp as "current" at seq N,
+    with nothing to ever invalidate it again if the replace did not bump.
+    The fix: the replace's OWN bump advances seq a SECOND time (to N+1), so
+    that stale-looking snapshot is provably not the last word — the very
+    next seq read moves past it, and a seq-keyed cache built from it is due
+    for a recompute.
+
+    Also covers the failure boundary: when the embed store itself raises,
+    the vector never changes, so seq must NOT advance a second time either —
+    it stops at N, identical to pre-R6-P1 behavior (the row edit's own R5
+    bump is untouched either way)."""
+    import numpy as np
+
+    from app.domain.vector_index import decode_vector
+
+    notebook_id, object_ids, _relations = _seed_kg(repo, "vector replace race")
+    object_id = object_ids[0]
+
+    def _seq() -> int:
+        with repo._connect() as db:
+            return repo._runtime.unified_kg.graph_seq_row(db, notebook_id)[0]
+
+    def _vector():
+        with repo._connect() as db:
+            row = db.execute(
+                "SELECT vector FROM knowledge_embeddings WHERE object_id=?",
+                (object_id,),
+            ).fetchone()
+        return decode_vector(row["vector"]) if row else None
+
+    seq_before = _seq()
+    old_vector = _vector()
+    assert old_vector is not None  # store_kg already embedded it while seeding
+
+    # Land the "concurrent reader" exactly between the two commits: hook the
+    # embed step's ENTRY, which runs strictly after update_object_in_
+    # transaction's `with self._write()` block has already exited (committed)
+    # and strictly before replace_knowledge_vectors opens its own transaction.
+    concurrent_read: dict = {}
+    original_embed = repo._runtime.source_embedding.embed_knowledge
+
+    def spy_embed(*args, **kwargs):
+        concurrent_read["seq"] = _seq()
+        concurrent_read["vector"] = _vector()
+        return original_embed(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo._runtime.source_embedding, "embed_knowledge", spy_embed
+    )
+
+    repo.update_knowledge(
+        notebook_id, object_id, KnowledgeUpdate(payload={"name": "renamed for race"})
+    )
+
+    # The row-update's own bump (codex #638 R5) already landed by the time the
+    # vector-replace transaction opened...
+    assert concurrent_read["seq"] == seq_before + 1
+    # ...paired with the STALE vector — the exact race codex #638 R6 P1 closes.
+    assert np.array_equal(concurrent_read["vector"], old_vector)
+
+    # The fix: the replace advances seq a SECOND time, past the stale
+    # snapshot a concurrent reader could have taken away as "current".
+    seq_after = _seq()
+    new_vector = _vector()
+    assert seq_after == seq_before + 2
+    assert not np.array_equal(new_vector, old_vector)
+
+    # Failure boundary: an embed-store outage must not fabricate a second
+    # bump for a vector that never actually changed.
+    seq_before_failure = _seq()
+    monkeypatch.setattr(
+        repo._runtime.embedding_store,
+        "replace_knowledge_vectors",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("embed store down")),
+    )
+    repo.update_knowledge(
+        notebook_id, object_id, KnowledgeUpdate(payload={"name": "renamed again"})
+    )
+    assert _seq() == seq_before_failure + 1              # row bump only, exactly one
+    assert np.array_equal(_vector(), new_vector)          # vector untouched by the failure
 
 
 def test_merge_knowledge_bumps_inside_the_transaction_then_invalidates(
@@ -618,7 +745,9 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
     R5), so the FIRST "dirty" moves before "write.commit";
     ``apply_conflict_resolution``'s explicit belt-and-suspenders SECOND bump
     is unchanged — still the post-tx, non-tx call ``_spy_coordinator``
-    observes, at the very end."""
+    observes, at the very end. "modify" carries a THIRD bump (codex #638 R6
+    P1): its payload re-embed REPLACES the object's vector, inside that
+    replace's own transaction, between "embed" and "invalidate"."""
     notebook_id, object_ids, _relations = _seed_kg(repo, "node conflict phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
@@ -634,7 +763,8 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
         resolution="discard",
         winner_ref=object_ids[0],
     )
-    # status-only update_knowledge (no embed) + the second dirty bump
+    # status-only update_knowledge (no embed, no R6 P1 bump) + the second
+    # dirty bump
     assert events == [
         "write.begin", "dirty", "write.commit", "invalidate", "dirty"
     ]
@@ -649,9 +779,12 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
         winner_ref=object_ids[0],
         resolved_payload={"name": "modified"},
     )
-    # payload update_knowledge (embed) + the second dirty bump
+    # payload update_knowledge (embed, carrying its own R6 P1 replace bump)
+    # + apply_conflict_resolution's belt-and-suspenders second bump
     assert events == [
-        "write.begin", "dirty", "write.commit", "embed", "invalidate", "dirty"
+        "write.begin", "dirty", "write.commit",           # object update
+        "embed", "write.begin", "dirty", "write.commit",  # vector replace (R6 P1)
+        "invalidate", "dirty",                             # belt-and-suspenders
     ]
 
 
@@ -684,11 +817,14 @@ def test_confirm_conflict_applies_mutation_before_candidate_status(
 
     repo.confirm_conflict(notebook_id, candidate_id)
 
-    # The KG mutation (now bumping inside its own transaction, codex #638 R5)
-    # still commits fully before the candidate-status transaction opens —
-    # that boundary is the point of this test and is unchanged.
+    # The KG mutation (now bumping inside its own transaction, codex #638 R5,
+    # plus its own R6 P1 vector-replace bump) still commits fully before the
+    # candidate-status transaction opens — that boundary is the point of
+    # this test and is unchanged.
     assert events == [
-        "write.begin", "dirty", "write.commit", "embed", "invalidate", "dirty",
+        "write.begin", "dirty", "write.commit",           # object update
+        "embed", "write.begin", "dirty", "write.commit",  # vector replace (R6 P1)
+        "invalidate", "dirty",                             # belt-and-suspenders
         "write.begin", "candidate-status", "write.commit",
     ]
 

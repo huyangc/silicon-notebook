@@ -116,9 +116,17 @@ class EmbeddingStore:
         rows: Sequence[tuple],
         *,
         created_at: str,
+        mark_dirty_in_tx: "Callable[[object, str], int] | None" = None,
     ) -> None:
+        """``mark_dirty_in_tx``, when given, is invoked with THIS transaction's
+        connection right after the vector rows commit — see
+        ``SourceEmbeddingService.embed_knowledge``'s docstring (codex #638 R6
+        P1) for why a vector REPLACE needs its own atomic seq bump while a
+        first-time embed does not. None for every caller but that one
+        (default preserves the old no-bump behavior byte-for-byte)."""
         self._replace_simple(
-            "knowledge_embeddings", notebook_id, rows, created_at=created_at
+            "knowledge_embeddings", notebook_id, rows, created_at=created_at,
+            mark_dirty_in_tx=mark_dirty_in_tx,
         )
 
     def replace_relation_vectors(
@@ -150,6 +158,7 @@ class EmbeddingStore:
         rows: Sequence[tuple],
         *,
         created_at: str,
+        mark_dirty_in_tx: "Callable[[object, str], int] | None" = None,
     ) -> None:
         encoded = self._encoded_rows(rows)
         if not encoded:
@@ -172,6 +181,8 @@ class EmbeddingStore:
                     statement,
                     [(row_id, notebook_id, vector, created) for row_id, vector in encoded],
                 )
+            if mark_dirty_in_tx is not None:
+                mark_dirty_in_tx(connection, notebook_id)
 
     @staticmethod
     def _table_identifiers(table: str, id_col: str):

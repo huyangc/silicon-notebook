@@ -88,7 +88,12 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
                            wrapped in try/except, so the ex-post bump used to
                            be skipped outright on an embedder outage.
     update_knowledge       object transaction + dirty bump in ONE transaction
-                           (codex #638 R5); best-effort embed; invalidate
+                           (codex #638 R5); best-effort embed — when the
+                           payload was edited, this REPLACES the object's
+                           existing knowledge_embeddings row, so it carries
+                           its OWN second dirty bump inside the vector
+                           write's own transaction (codex #638 R6 P1 — see
+                           the VECTOR-REPLACE CENSUS below); invalidate
     merge_knowledge        transaction + dirty bump in ONE transaction
                            (codex #638 R5); invalidate
     conflict discard/modify  ... plus a second dirty bump (post-tx,
@@ -143,6 +148,77 @@ Graph-row writers, all now in-transaction (✓ = already was):
                                                   not a licence for a second
                                                   online entry (see red lines).
 
+VECTOR-REPLACE CENSUS — codex #638 R6 P1
+-----------------------------------------
+R5's rule above covers rows in ``knowledge_objects`` / ``knowledge_relations``
+/ ``concept_clusters``. It says nothing about ``knowledge_embeddings`` (the
+per-object payload vector table), because R5's own bump already accounted for
+that table's usual case: ``_cluster_input_version``'s ``emb_c`` term is
+``COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?``, and every call
+site below except one only ever INSERTs a vector for a BRAND-NEW object_id —
+the row count changes, emb_c already reflects it, no second bump is needed.
+
+R6 found the one exception: ``update_knowledge``'s best-effort re-embed
+REPLACES the vector of an object that already had one (same object_id,
+INSERT OR REPLACE / ON CONFLICT DO UPDATE) — row count unchanged, emb_c
+blind to it. The object's OWN row bump (R5, above) already advanced
+kg_mutation_seq once for the payload edit, so a reader racing the gap
+between that commit and the embed's own (a real embedder HTTP call sits in
+between) sees the NEW seq paired with the OLD vector — and because the count
+never moves again, nothing ever re-triggers a rebuild to fix it. The fix:
+the replace's own transaction (``replace_knowledge_vectors``, both backends)
+takes an optional ``mark_dirty_in_tx`` invoked on ITS OWN connection right
+after the row commits — a SECOND call to the same single dirty entry
+(``mark_unified_kg_dirty_in_tx``), not a new one, same shape as
+``apply_conflict_resolution``'s belt-and-suspenders second bump below. Every
+other call site passes nothing (``mark_dirty_in_tx=None``, the parameter's
+default), so this is additive: none of them change behavior.
+
+    store_kg (embed_objects_batch)        INSERT — objects carry freshly
+                                           allocated ``ko-`` ids (store_kg
+                                           always mints them, replace_source
+                                           or not); emb_c moves with the row
+                                           count. No bump added.
+    complete_relations_for_source
+      (embed_relations_batch)             INSERT — relations carry freshly
+                                           allocated ``rel-`` ids per page;
+                                           same shape as store_kg. No bump.
+    update_knowledge (_embed_knowledge)   REPLACE of an existing object_id's
+                                           vector on a payload edit. THE FIX:
+                                           second bump inside the vector
+                                           write's own transaction.
+    merge_knowledge                       No embed call at all — deprecates
+                                           the loser object in place and
+                                           never touches its vector. N/A.
+    approve_promotion (_embed_knowledge,
+      both call sites)                    INSERT only: the memory-promotion
+                                           branch embeds
+                                           ``created_object_ids`` (freshly
+                                           created, never the pre-existing
+                                           ``merged_object_ids``); the direct
+                                           branch embeds only when
+                                           ``approval.created_new_object`` is
+                                           True. A promotion that merges into
+                                           an existing base object never
+                                           re-embeds it. No bump added.
+    delete_source (teardown)              Deletes ``knowledge_embeddings``
+                                           rows (``clear_embeddings=True``)
+                                           inside the SAME transaction as the
+                                           graph-row delete + its R5 bump —
+                                           never a separate replace step, so
+                                           already atomic without help.
+    knowhow _project_table_locked /
+      delete_table_projection             Write ``chunk_embeddings``, not
+                                           ``knowledge_embeddings`` — a
+                                           different table emb_c never reads.
+                                           Out of scope for this gate.
+    backfill_knowledge_embeddings          Explicitly filters to object ids
+      (ask()-triggered)                   MISSING a vector
+                                           (``embedded_object_ids``) before
+                                           embedding; rides the same
+                                           INSERT-only ``embed_objects_batch``
+                                           as store_kg. No bump added.
+
 Deliberately NOT moved into a transaction, with the reason for each:
 
     delete_notebook_kg          Cannot bump: it DELETES the unified_kg_state
@@ -181,12 +257,21 @@ Deliberately NOT moved into a transaction, with the reason for each:
                                 CLI/batch. Not graph rows.
 
 Red lines:
-- ``mark_unified_kg_dirty`` stays the ONLY online entry that advances
-  kg_mutation_seq (single choke point — see the update_knowledge/re-embed
-  bypass lesson). Do not add a second dirty entry.
+- ``mark_unified_kg_dirty`` / ``mark_unified_kg_dirty_in_tx`` stay the ONLY
+  online entry that advances kg_mutation_seq (single choke point — see the
+  update_knowledge/re-embed bypass lesson). Do not add a second dirty ENTRY.
+  Calling the SAME entry a second time from a second commit (update_
+  knowledge's R6 P1 vector-replace bump, apply_conflict_resolution's belt-
+  and-suspenders bump) is not a second entry — it is fine, and the ONLY
+  sanctioned way to advance the seq a second time within one logical
+  operation.
 - The dirty bump's write transaction rides the FACADE's ``_write``
   compatibility seat (injected ``write`` callable, resolved per call), so the
-  frozen begin/commit phase traces and failure injections keep observing it.
+  frozen begin/commit phase traces and failure injections keep observing it
+  — including when the bump is invoked from inside ``replace_knowledge_
+  vectors``'s own transaction (embedding_store's ``write`` is bound to the
+  SAME facade seat via ``RepositoryRuntime.wire_persistence``, not a private
+  connection of its own).
 - The unified/vector caches are the runtime-owned RetrievalSnapshotCache's
   objects (Task 17), read through by identity — never replacement copies: the
   ``unified_cache``/``vector_cache`` properties alias the SAME objects the

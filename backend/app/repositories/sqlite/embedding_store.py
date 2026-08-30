@@ -54,7 +54,14 @@ class EmbeddingStore:
         rows: Sequence[tuple],
         *,
         created_at: str,
+        mark_dirty_in_tx: "Callable[[object, str], int] | None" = None,
     ) -> None:
+        """``mark_dirty_in_tx``, when given, is invoked with THIS transaction's
+        connection right after the vector rows commit — see
+        ``SourceEmbeddingService.embed_knowledge``'s docstring (codex #638 R6
+        P1) for why a vector REPLACE needs its own atomic seq bump while a
+        first-time embed does not. None for every caller but that one
+        (default preserves the old no-bump behavior byte-for-byte)."""
         if not rows:
             return
         with self.write() as db:
@@ -64,6 +71,8 @@ class EmbeddingStore:
                 [(oid, notebook_id, encode_vector(vec), created_at)
                  for oid, vec in rows],
             )
+            if mark_dirty_in_tx is not None:
+                mark_dirty_in_tx(db, notebook_id)
 
     def replace_relation_vectors(
         self,
