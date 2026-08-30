@@ -203,7 +203,7 @@ class KnowhowProjector:
         embedding: SourceEmbeddingService,
         note_model_error: Callable[..., None],
         invalidate_unified_cache: Callable[[str], None],
-        mark_unified_dirty: Callable[[str], None],
+        mark_unified_dirty_in_tx: Callable[[Any, str], int],
         new_id: Callable[[str], str],
         now: Callable[[], str],
     ) -> None:
@@ -216,7 +216,12 @@ class KnowhowProjector:
         self.embedding = embedding
         self.note_model_error = note_model_error
         self.invalidate_unified_cache = invalidate_unified_cache
-        self.mark_unified_dirty = mark_unified_dirty
+        # codex #638 R5: the projector writes knowledge_objects /
+        # knowledge_relations / concept_clusters directly, so it takes the
+        # IN-TRANSACTION bump seat only — a post-commit ``mark_unified_kg_dirty``
+        # would reopen the "rows committed, seq unmoved" window on both of its
+        # graph-writing paths. There is deliberately no non-tx seat here.
+        self.mark_unified_dirty_in_tx = mark_unified_dirty_in_tx
         self.new_id = new_id
         self.now = now
 
@@ -537,6 +542,17 @@ class KnowhowProjector:
                             )
                     if edge_rows:
                         self.knowledge.insert_relation_chunk(db, edge_rows)
+                    # Same commit as the delete-and-reinsert above (codex #638
+                    # R5). This branch always rewrites graph rows (the three
+                    # deletes are unconditional), and it is the only branch that
+                    # reaches the old post-commit bump — the `not target_exists`
+                    # bail below returns before it — so the bump count is
+                    # unchanged; only its commit boundary moved. Reaching it via
+                    # the ex-post call meant a reprojection could be durable
+                    # while kg_mutation_seq still described the pre-projection
+                    # graph, which is exactly what the seq gate exists to
+                    # prevent.
+                    self.mark_unified_dirty_in_tx(db, notebook_id)
 
             if not target_exists:
                 for row_id, _status in row_results:
@@ -547,7 +563,6 @@ class KnowhowProjector:
 
             projected_mutation_seq = self.knowhow.bump_knowhow_mutation_seq(table_id)
             self.invalidate_unified_cache(notebook_id)
-            self.mark_unified_dirty(notebook_id)
         except Exception:
             for row_id, _status in row_results:
                 self.knowhow.set_knowhow_row_projection_if_table_seq(
@@ -879,8 +894,12 @@ class KnowhowProjector:
                 self.knowledge.delete_objects_by_source(db, hidden_source_id)
                 self.sources.replace_elements(db, hidden_source_id, [], created_at=now)
                 self.sources.delete_source_row(db, hidden_source_id)
+            # Teardown deletes graph rows, so its seq bump commits with them
+            # (codex #638 R5). UNCONDITIONAL, outside the existence guard, to
+            # match the post-commit call it replaces one-for-one: this moves the
+            # bump's time point, not its count.
+            self.mark_unified_dirty_in_tx(db, notebook_id)
         self.invalidate_unified_cache(notebook_id)
-        self.mark_unified_dirty(notebook_id)
 
     # ------------------------------------------- legacy-model migration
     def reproject_legacy_tables(self) -> "list[str]":

@@ -551,6 +551,121 @@ def test_delete_notebook_kg_invalidates_the_review_queue_ranking(repo):
     assert repo.review_queue(nb_id) == []
 
 
+# ── codex #638 R5 P1:store_kg 的 bump 与图行同事务 ────────────────────────
+
+
+def _graph_seq(repo, nb_id: str) -> int:
+    """``unified_kg_state.kg_mutation_seq`` 的当前值(行缺失记 0)。"""
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+_ONE_MORE_EDGE_OBJECTS = [
+    {"local_id": "N1", "object_type": "Claim",
+     "payload": {"name": "Late Claim"}, "evidence": []},
+    {"local_id": "N2", "object_type": "Concept",
+     "payload": {"name": "Late Concept"}, "evidence": []},
+]
+_ONE_MORE_EDGE_RELATIONS = [
+    {"source_local_id": "N1", "target_local_id": "N2",
+     "edge_type": "defines", "evidence": []},
+]
+
+
+def test_store_kg_bump_is_visible_to_the_review_queue_while_it_still_embeds(
+    repo, monkeypatch
+):
+    """codex #638 R5 P1(a):``store_kg`` 提交图行之后要跑 embedding(生产上分钟级),
+    修法前 bump 排在 embedding **之后**——整个 embedding 期间「行已提交、seq 未动」,
+    暖着的 ``ReviewQueueMemo`` 靠 seq 闸挡不住,持续端出陈旧的 items 与 total。
+
+    这里在 embedding 回调里当场重演一次并发读:那一刻图行已经落库,所以一个正确的
+    实现必须已经把 seq 推过 memo 的标签,读到的队列必须包含刚写进去的那条边。
+
+    变异锚点:把 ``_mark_unified_kg_dirty_in_tx`` 挪回 ``with self._write()`` 之外
+    (即恢复 embedding 之后的 post-tx bump),下面两条断言都会红——seq 原地不动,
+    队列端出的还是暖那一刻的旧集合。"""
+    nb_id = _seed_graph(repo)
+    warm_rel_ids = {item["rel_id"] for item in repo.review_queue(nb_id)}
+    memo = repo._runtime.review_queue_memo
+    warm_seq = memo.cached_seq(nb_id)
+    assert warm_seq is not None
+    assert warm_seq == _graph_seq(repo, nb_id)
+
+    observed: dict = {}
+
+    def _observe_mid_embed(notebook_id, items, progress=None, commit_every=None):
+        # The graph rows are committed by now; read the queue exactly as a
+        # concurrent request would — through the same warm memo.
+        observed["seq"] = _graph_seq(repo, nb_id)
+        observed["rel_ids"] = {i["rel_id"] for i in repo.review_queue(nb_id)}
+
+    monkeypatch.setattr(
+        repo._runtime.source_embedding, "embed_objects_batch", _observe_mid_embed
+    )
+
+    repo.store_kg(
+        nb_id, None,
+        [dict(o) for o in _ONE_MORE_EDGE_OBJECTS],
+        [dict(r) for r in _ONE_MORE_EDGE_RELATIONS],
+    )
+
+    assert observed["seq"] > warm_seq, (
+        "the graph rows are already committed at this point, so their seq bump "
+        "must have committed with them — not be waiting on the embeddings"
+    )
+    assert len(observed["rel_ids"]) == len(warm_rel_ids) + 1, (
+        "a read landing during the embedding pass must see the just-committed "
+        "edge, not the ranking the memo was warmed with"
+    )
+    assert observed["rel_ids"] > warm_rel_ids
+
+
+def test_store_kg_embedding_failure_still_leaves_the_seq_advanced(
+    repo, monkeypatch
+):
+    """codex #638 R5 P1(b):非替换路径上 embedding 抛异常会把异常抛回调用方——
+    修法前 bump 排在它之后,于是**整个被跳过**:图行永久留在库里而 seq 一动不动,
+    暖着的 memo 从此无限期端出陈旧结果,直到某次不相关的 KG 写把 seq 顶开。
+
+    修法后行与 seq 已经一起提交,embedding 失败只影响向量:seq 已前进,memo 的
+    标签因此失配,下一次读冷算出与 DB 一致的结果。"""
+    nb_id = _seed_graph(repo)
+    warm_rel_ids = {item["rel_id"] for item in repo.review_queue(nb_id)}
+    memo = repo._runtime.review_queue_memo
+    warm_seq = memo.cached_seq(nb_id)
+    assert warm_seq is not None
+
+    def _boom(notebook_id, items, progress=None, commit_every=None):
+        raise RuntimeError("embedder down")
+
+    monkeypatch.setattr(
+        repo._runtime.source_embedding, "embed_objects_batch", _boom
+    )
+
+    with pytest.raises(RuntimeError):
+        repo.store_kg(
+            nb_id, None,
+            [dict(o) for o in _ONE_MORE_EDGE_OBJECTS],
+            [dict(r) for r in _ONE_MORE_EDGE_RELATIONS],
+        )
+
+    assert _graph_seq(repo, nb_id) > warm_seq, (
+        "an embedding failure must not swallow the bump for rows that are "
+        "already durable"
+    )
+    # store_kg raised before its cache-eviction tail, so nothing explicitly
+    # cleared the memo — the seq gate alone has to catch this.
+    assert memo.cached_seq(nb_id) == warm_seq
+    live_rel_ids = {item["rel_id"] for item in repo.review_queue(nb_id)}
+    assert len(live_rel_ids) == len(warm_rel_ids) + 1
+    assert memo.cached_seq(nb_id) == _graph_seq(repo, nb_id)
+
+
 def test_add_relations_facade_path_resets_the_cached_total(repo):
     """F1 / T-A3 v4: RepositoryFacade.add_relations is a raw-insert path that
     bypasses store_kg's kg_mutation_seq bump. It must explicitly invalidate

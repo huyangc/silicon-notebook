@@ -1776,6 +1776,23 @@ class KnowledgeGovernanceService:
                     "base_object_ids": [approval.base_object_id] if approval.base_object_id else [],
                     "merged_into": cand["base_match_id"] or "",
                 }
+            # Past both idempotent early returns, so this call really did write
+            # base-corpus knowledge_objects (+ provenance). The seq bump rides
+            # THIS transaction (codex #638 R5) instead of trailing the
+            # best-effort embed below — that embed is NOT wrapped in a
+            # try/except here, so an embedder outage used to propagate out of
+            # this method and skip the bump altogether, leaving freshly
+            # promoted base objects permanently outside kg_mutation_seq's view
+            # (every seq-keyed memo of the BASE notebook — review queue,
+            # counts, cluster-input version — kept answering from before the
+            # promotion). Both branches dirty the notebook the rows landed in,
+            # which is the base notebook, not the personal one in the URL.
+            self._mark_unified_kg_dirty_in_tx(
+                db,
+                memory_approval[0]["base_notebook_id"]
+                if memory_approval is not None
+                else approval.base_notebook_id,
+            )
 
         if memory_approval is not None:
             memory_result, base_ids = memory_approval
@@ -1789,7 +1806,6 @@ class KnowledgeGovernanceService:
                         json.loads(payload_row["payload"] or "{}"),
                     )
             self._invalidate_unified_cache(memory_result["base_notebook_id"])
-            self._mark_unified_kg_dirty(memory_result["base_notebook_id"])
             return {
                 "candidate_id": candidate_id,
                 "base_object_id": base_ids[0] if base_ids else "",
@@ -1807,7 +1823,6 @@ class KnowledgeGovernanceService:
                 approval.base_object_id, approval.base_notebook_id, src_payload
             )
         self._invalidate_unified_cache(approval.base_notebook_id)
-        self._mark_unified_kg_dirty(approval.base_notebook_id)
         return {
             "candidate_id": candidate_id,
             "base_object_id": approval.base_object_id,
@@ -1882,6 +1897,17 @@ class KnowledgeGovernanceService:
             row = self.governance_store.update_object_in_transaction(
                 db, notebook_id, knowledge_id, payload, now
             )
+            # A node edit is a clustering input: a payload/name change moves its
+            # normalized-name seed (→ cross-doc cluster membership), a re-embed
+            # changes its ANN vector, and a status flip changes which objects are
+            # clustered. The bump therefore rides THIS transaction (codex #638
+            # R5) rather than trailing the best-effort re-embed below: the
+            # knowledge_objects row and the generation number that announces it
+            # commit together, so no reader can see the edited row under the old
+            # seq — the window that let rebuild_unified_kg's skip gate and
+            # ReviewQueueMemo's seq gate serve a stale product across the whole
+            # re-embed, and that a crash in between made permanent.
+            self._mark_unified_kg_dirty_in_tx(db, row["notebook_id"])
         # WS4: re-embed payload-level vector when the payload was edited.
         if payload.payload is not None:
             try:
@@ -1891,12 +1917,6 @@ class KnowledgeGovernanceService:
             except Exception:
                 pass
         self._invalidate_unified_cache(row["notebook_id"])
-        # A node edit is a clustering input: a payload/name change moves its
-        # normalized-name seed (→ cross-doc cluster membership), a re-embed changes
-        # its ANN vector, and a status flip changes which objects are clustered.
-        # Mark dirty so kg_mutation_seq advances and rebuild_unified_kg's skip gate
-        # can't serve a stale clustering after an in-place rename/re-embed.
-        self._mark_unified_kg_dirty(row["notebook_id"])
         obj = {
             "id": row["id"],
             "payload": json.loads(row["payload"] or "{}"),
@@ -2001,10 +2021,15 @@ class KnowledgeGovernanceService:
             row = self.governance_store.merge_objects_in_transaction(
                 db, notebook_id, source_id, into_id, now
             )
-        # merge deprecates one object in place (COUNT unchanged) — bump the
-        # monotonic seq so _scale_index_version / _cluster_input_version fast
-        # paths (keyed on kg_mutation_seq) don't miss this same-second edit.
-        self._mark_unified_kg_dirty(row["notebook_id"])
+            # merge deprecates one object in place (COUNT unchanged) — bump the
+            # monotonic seq so _scale_index_version / _cluster_input_version fast
+            # paths (keyed on kg_mutation_seq) don't miss this same-second edit.
+            # In THIS transaction (codex #638 R5): the deprecation and the seq
+            # that announces it commit together, so a crash — or any exception
+            # between the two commits — can no longer leave a merged-away object
+            # sitting behind an unmoved seq, invisible to every seq-keyed memo
+            # until an unrelated write happens along.
+            self._mark_unified_kg_dirty_in_tx(db, row["notebook_id"])
         self._invalidate_unified_cache(row["notebook_id"])
         obj = {
             "id": row["id"],

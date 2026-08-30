@@ -14,7 +14,11 @@ breaks ONE phase and asserts exactly what the frozen matrix says survives.
                                    committed resolution mutation applied
                                    (hooks for the mutation already ran)
     update_knowledge embed         best-effort embed failure still
-                                   invalidates and marks dirty
+                                   invalidates and marks dirty — and since
+                                   codex #638 R5 the bump already committed
+                                   with the row BEFORE the embed ran, so it
+                                   no longer depends on that failure being
+                                   swallowed at all
 
 Injection rides component seams (runtime.knowledge / runtime.governance /
 runtime.embedding_store), mirroring how the frozen phase-contract suite
@@ -58,6 +62,19 @@ def _spy_coordinator(repo, monkeypatch, events):
         "mark_unified_kg_dirty",
         lambda notebook_id: events.append("dirty"),
     )
+    # codex #638 R5: most graph-row writers now bump INSIDE their own write
+    # transaction, so a spy on the post-commit entry alone would silently stop
+    # observing them. Wrap-and-delegate (callers may need the real seq back);
+    # note this records the CALL, so a bump that is later rolled back with its
+    # transaction still shows up — every failure injected in this file lands
+    # before its operation's bump, so the traces stay unambiguous.
+    original_in_tx = coordinator.mark_unified_kg_dirty_in_tx
+
+    def _in_tx(db, notebook_id):
+        events.append("dirty")
+        return original_in_tx(db, notebook_id)
+
+    monkeypatch.setattr(coordinator, "mark_unified_kg_dirty_in_tx", _in_tx)
 
 
 def _claim(local_id, name):
@@ -262,14 +279,19 @@ def test_confirm_conflict_status_failure_leaves_mutation_committed(
         ).fetchone()["status"]
     assert payload["name"] == "after"          # resolution mutation committed
     assert candidate_status == "pending"       # status transaction failed
-    # The mutation's own post-commit hooks ran BEFORE the status failure
-    # (update_knowledge invalidate→dirty, plus the conflict path's second bump).
-    assert events == ["invalidate", "dirty", "dirty"]
+    # The mutation's own hooks ran BEFORE the status failure: update_knowledge's
+    # bump (in its own transaction since codex #638 R5, hence first) and its
+    # invalidate, plus the conflict path's second, post-commit bump.
+    assert events == ["dirty", "invalidate", "dirty"]
 
 
 def test_update_knowledge_embed_failure_still_invalidates_and_marks_dirty(
     repo, monkeypatch
 ):
+    """codex #638 R5 strengthened this boundary rather than weakening it: the
+    bump no longer merely *survives* a best-effort embed failure, it committed
+    with the row before the embed was ever attempted, so it cannot depend on
+    that failure being swallowed."""
     notebook = repo.create_notebook(NotebookCreate(name="embed boundary"))
     object_id = repo._test_insert_object(
         notebook.id, "claim", {"name": "embed me"}
@@ -294,4 +316,4 @@ def test_update_knowledge_embed_failure_still_invalidates_and_marks_dirty(
             "SELECT payload FROM knowledge_objects WHERE id=?", (object_id,)
         ).fetchone()["payload"])
     assert payload["name"] == "renamed"
-    assert events == ["invalidate", "dirty"]
+    assert events == ["dirty", "invalidate"]

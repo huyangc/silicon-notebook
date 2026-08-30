@@ -51,6 +51,28 @@ KG job publish / ``set_edge_review`` / 删除路径,逐条抽查过)。(3) 是 (
 所以它保留了展开五张表的 ``version_for``;这里的产物不依赖那些,三样输入全部
 落在 ``kg_mutation_seq`` 的覆盖面内。
 
+### 从「逐豁口登记」升级为「矩阵全量清点」(codex #638 R5)
+
+上面说的「每一条生产写路径都汇流到 ``mark_unified_kg_dirty``」只保证 bump
+**会发生**,不保证它**何时**发生——而「何时」正是本 memo 的正确性所系。R2
+(``set_edge_review``)、R4(重抽取清理)、R5(``store_kg``)是同一个缺陷的三次
+现形:bump 落在数据事务**之后**时,存在一个「图行已提交、seq 未动」的窗口,
+本 memo 在窗口内会持续端出陈旧的 items 与 total;而窗口内的任何一次异常
+(``store_kg`` 的 embedding 失败、``delete_source`` 的文件清理抛错、
+``approve_promotion`` 未加保护的 embed)会把 bump **整个跳过**,陈旧就此没有
+上界,直到某次不相关的 KG 写才被顶掉。
+
+R5 因此不再逐个堵,而是把 ``kg_mutation.py`` 顶部的操作矩阵**全量清点**了一遍,
+并立下不变量:**凡提交 ``knowledge_objects`` / ``knowledge_relations`` /
+``concept_clusters`` 行的事务,其 seq bump 必须与这些行同一次提交**。清点表
+(逐操作打钩/改法/不能改的理由)见 ``kg_mutation.py`` 模块 docstring 的
+「FULL CENSUS」段,那里是权威,本处不复制。
+
+对本 memo 的意义:失效完备性论证的第二半——「bump 与内容同时可见」——现在有了
+覆盖全矩阵的支撑,而不再是逐个 code review 出来的个案结论。下面登记的三条豁口里,
+第 3 条已由 R4 关闭(原文保留存档);仍然有效的是前两条,它们的性质与上面这一族
+**不同**:不是 bump 晚了,而是那条路径的 seq **根本不前进**。
+
 **已知豁口**——不是「漏了一条 bump」,而是那条路径的 seq **根本不前进**,所以
 seq 闸对它们天然无效:
 

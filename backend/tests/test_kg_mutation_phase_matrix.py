@@ -5,7 +5,14 @@ kg_mutation_seq dirty bump) now route through ``runtime.kg_mutations``. These
 tests freeze the EXACT per-operation order matrix:
 
     store_kg               object chunks of 1000; relation chunks of 1000;
-                           object embed; relation embed; invalidate; dirty
+                           dirty bump — ALL in ONE transaction
+                           (mark_unified_kg_dirty_in_tx, codex #638 R5 P1);
+                           then object embed; relation embed; invalidate
+    complete_relations_for_source
+                           one transaction PER PAGE, each page's relation
+                           insert carrying its own dirty bump when it inserted
+                           rows (codex #638 R5); embed + invalidate in the run
+                           tail
     relink_notebook_kg     dirty rides EACH SOURCE's own relation transaction
                            (mark_unified_kg_dirty_in_tx, committed atomically
                            with that source's edge insert — a `finally`-keyed
@@ -23,23 +30,33 @@ tests freeze the EXACT per-operation order matrix:
     confirm/reject merge   candidate transaction; invalidate; dirty
     review_pending_merges  decision transaction; dirty then invalidate
                            only when decisions exist
-    approve_promotion      candidate/base/provenance transaction;
-                           best-effort embed; invalidate; dirty
-    update_knowledge       object transaction; best-effort embed; invalidate; dirty
-    merge_knowledge        evidence/provenance/source-status transaction;
-                           dirty; invalidate
+    approve_promotion      candidate/base/provenance transaction + dirty bump
+                           in ONE transaction (codex #638 R5); best-effort
+                           embed; invalidate
+    update_knowledge       object transaction + dirty bump in ONE transaction
+                           (codex #638 R5); best-effort embed; invalidate
+    merge_knowledge        evidence/provenance/source-status transaction +
+                           dirty bump in ONE transaction (codex #638 R5);
+                           invalidate
     edge conflict discard  edge UPDATE + dirty bump in ONE transaction (rides
                            set_edge_review, R2 P2 fix); invalidate; second
                            dirty bump (post-commit, belt-and-suspenders)
     node conflict discard/modify
-                           object transaction; invalidate; dirty; second dirty bump
+                           object transaction + dirty bump (rides
+                           update_knowledge, codex #638 R5); invalidate;
+                           second dirty bump (post-commit)
     confirm_conflict       apply mutation, then candidate-status transaction
     unified rebuild        cluster rewrite + cluster seq; NO kg_mutation_seq bump
     deep copy / migration / fixture
                            never call the coordinator
 
-The asymmetries (dirty-then-invalidate vs invalidate-then-dirty, the conflict
-double-bumps) are frozen baseline behavior — do NOT normalize them here.
+The remaining asymmetries (which of invalidate/second-bump comes first, the
+conflict double-bumps) are frozen baseline behavior — do NOT normalize them
+here.  What is NO LONGER an asymmetry, and must not be reintroduced: whether
+a graph-row write's own bump commits with its rows.  codex #638 R5 swept the
+whole matrix and made that uniform — see ``kg_mutation``'s module docstring
+("FULL CENSUS") for the per-operation result and for the operations
+deliberately left with a post-commit or absent bump.
 
 The Task-1 fixture ``mutation_phases.json`` is treated as READ-ONLY input:
 these tests replay it, they never regenerate it.
@@ -224,6 +241,9 @@ def test_frozen_mutation_matrix_documents_the_exemptions():
 
 
 def test_store_kg_preserves_post_commit_order(repo, monkeypatch):
+    """codex #638 R5 P1: the dirty bump moved from the post-embed tail INTO
+    the graph-row transaction, so it now precedes both embeds; only the cache
+    eviction is left after them."""
     runtime = repo._runtime
     events = []
     monkeypatch.setattr(
@@ -243,20 +263,30 @@ def test_store_kg_preserves_post_commit_order(repo, monkeypatch):
         "invalidate_unified_cache",
         lambda notebook_id: events.append("invalidate"),
     )
+    # Pure recorder (no delegation) here, unlike ``_spy_dirty_in_tx``: this
+    # case drives a synthetic notebook id that has no ``notebooks`` row, so a
+    # real bump would trip unified_kg_state's foreign key. store_kg ignores the
+    # returned seq, so nothing under test needs the delegation.
+    monkeypatch.setattr(
+        runtime.kg_mutations,
+        "mark_unified_kg_dirty_in_tx",
+        lambda db, notebook_id: events.append("dirty") or 0,
+    )
     monkeypatch.setattr(
         runtime.kg_mutations,
         "mark_unified_kg_dirty",
-        lambda notebook_id: events.append("dirty"),
+        lambda notebook_id: events.append("dirty.post_tx"),
     )
     repo.store_kg("nb", None, [], [])
     assert events == [
-        "embed_objects", "embed_relations", "invalidate", "dirty"
+        "dirty", "embed_objects", "embed_relations", "invalidate"
     ]
 
 
 def test_store_kg_chunks_thousand_rows_before_embeds_and_hooks(repo, monkeypatch):
-    """1500 objects / 1200 relations share one source-atomic transaction,
-    then embeds, invalidate, and dirty run only after that commit."""
+    """1500 objects / 1200 relations share one source-atomic transaction —
+    and since codex #638 R5 P1 so does the dirty bump, which therefore lands
+    BEFORE that commit. Embeds and invalidate follow it."""
     notebook = repo.create_notebook(NotebookCreate(name="chunked"))
     objects = [_claim(f"L{i}", f"claim {i}") for i in range(1500)]
     relations = [
@@ -279,17 +309,18 @@ def test_store_kg_chunks_thousand_rows_before_embeds_and_hooks(repo, monkeypatch
         lambda notebook_id, rel_items: events.append("embed_relations"),
     )
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
 
     n_obj, n_rel = repo.store_kg(notebook.id, None, objects, relations)
 
     assert (n_obj, n_rel) == (1500, 1200)
     assert events == [
         "write.begin",
+        "dirty",
         "write.commit",
         "embed_objects",
         "embed_relations",
         "invalidate",
-        "dirty",
     ]
 
 
@@ -471,9 +502,13 @@ def test_review_pending_merges_dirty_then_invalidate_only_with_decisions(
 # ---------------------------------------------------------------- promotion
 
 
-def test_approve_promotion_commits_then_embeds_then_invalidate_then_dirty(
+def test_approve_promotion_bumps_inside_the_transaction_then_embeds(
     repo, monkeypatch
 ):
+    """codex #638 R5: the base-object insert and its dirty bump share one
+    transaction, so the bump precedes the best-effort payload embed instead of
+    trailing it. That embed is not wrapped in try/except here, so the old
+    ex-post bump was simply skipped whenever the embedder was down."""
     personal = repo.create_notebook(NotebookCreate(name="personal"))
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
@@ -485,54 +520,64 @@ def test_approve_promotion_commits_then_embeds_then_invalidate_then_dirty(
     events = []
     _trace_transactions(repo, monkeypatch, events)
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
     _spy_embed_store(repo, monkeypatch, events)
 
     repo.approve_promotion(candidate["id"])
 
     assert events == [
-        "write.begin", "write.commit", "embed", "invalidate", "dirty"
+        "write.begin", "dirty", "write.commit", "embed", "invalidate"
     ]
 
 
 # --------------------------------------------------- knowledge update / merge
 
 
-def test_update_knowledge_commits_then_embeds_then_invalidate_then_dirty(
+def test_update_knowledge_bumps_inside_the_transaction_then_embeds(
     repo, monkeypatch
 ):
+    """codex #638 R5: the object UPDATE and its dirty bump share one
+    transaction, so the bump precedes the best-effort re-embed instead of
+    trailing it — no window where the edited row is durable under the old
+    seq, and no way for a crash between the two commits to strand it there."""
     notebook_id, object_ids, _relations = _seed_kg(repo, "update phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
     _spy_embed_store(repo, monkeypatch, events)
 
     repo.update_knowledge(
         notebook_id, object_ids[0], KnowledgeUpdate(payload={"name": "renamed"})
     )
     assert events == [
-        "write.begin", "write.commit", "embed", "invalidate", "dirty"
+        "write.begin", "dirty", "write.commit", "embed", "invalidate"
     ]
 
-    # Status-only edit skips the payload re-embed but keeps invalidate→dirty.
+    # Status-only edit skips the payload re-embed; the in-tx bump is unchanged.
     events.clear()
     repo.update_knowledge(
         notebook_id, object_ids[0], KnowledgeUpdate(status="reviewed")
     )
-    assert events == ["write.begin", "write.commit", "invalidate", "dirty"]
+    assert events == ["write.begin", "dirty", "write.commit", "invalidate"]
 
 
-def test_merge_knowledge_commits_then_dirty_then_invalidate(repo, monkeypatch):
+def test_merge_knowledge_bumps_inside_the_transaction_then_invalidates(
+    repo, monkeypatch
+):
     notebook_id, object_ids, _relations = _seed_kg(repo, "merge objects phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
 
     repo.merge_knowledge(
         notebook_id, object_ids[1], MergeRequest(into_id=object_ids[0])
     )
 
-    # Mirror-image of update_knowledge — frozen asymmetry, do not normalize.
-    assert events == ["write.begin", "write.commit", "dirty", "invalidate"]
+    # codex #638 R5: the deprecation and its seq bump are one commit; only the
+    # process-local cache eviction is left after it.
+    assert events == ["write.begin", "dirty", "write.commit", "invalidate"]
 
 
 # ------------------------------------------------------- conflict resolution
@@ -569,10 +614,16 @@ def test_edge_conflict_discard_adds_a_second_dirty_bump(repo, monkeypatch):
 def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
     repo, monkeypatch
 ):
+    """``update_knowledge``'s own bump now rides its transaction (codex #638
+    R5), so the FIRST "dirty" moves before "write.commit";
+    ``apply_conflict_resolution``'s explicit belt-and-suspenders SECOND bump
+    is unchanged — still the post-tx, non-tx call ``_spy_coordinator``
+    observes, at the very end."""
     notebook_id, object_ids, _relations = _seed_kg(repo, "node conflict phase")
     events = []
     _trace_transactions(repo, monkeypatch, events)
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
     _spy_embed_store(repo, monkeypatch, events)
 
     repo.apply_conflict_resolution(
@@ -585,7 +636,7 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
     )
     # status-only update_knowledge (no embed) + the second dirty bump
     assert events == [
-        "write.begin", "write.commit", "invalidate", "dirty", "dirty"
+        "write.begin", "dirty", "write.commit", "invalidate", "dirty"
     ]
 
     events.clear()
@@ -600,7 +651,7 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
     )
     # payload update_knowledge (embed) + the second dirty bump
     assert events == [
-        "write.begin", "write.commit", "embed", "invalidate", "dirty", "dirty"
+        "write.begin", "dirty", "write.commit", "embed", "invalidate", "dirty"
     ]
 
 
@@ -620,6 +671,7 @@ def test_confirm_conflict_applies_mutation_before_candidate_status(
     events = []
     _trace_transactions(repo, monkeypatch, events)
     _spy_coordinator(repo, monkeypatch, events)
+    _spy_dirty_in_tx(repo, monkeypatch, events)
     _spy_embed_store(repo, monkeypatch, events)
     governance = repo._runtime.governance
     original_status = governance.set_conflict_status
@@ -632,8 +684,11 @@ def test_confirm_conflict_applies_mutation_before_candidate_status(
 
     repo.confirm_conflict(notebook_id, candidate_id)
 
+    # The KG mutation (now bumping inside its own transaction, codex #638 R5)
+    # still commits fully before the candidate-status transaction opens —
+    # that boundary is the point of this test and is unchanged.
     assert events == [
-        "write.begin", "write.commit", "embed", "invalidate", "dirty", "dirty",
+        "write.begin", "dirty", "write.commit", "embed", "invalidate", "dirty",
         "write.begin", "candidate-status", "write.commit",
     ]
 
