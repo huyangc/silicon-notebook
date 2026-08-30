@@ -3087,7 +3087,21 @@ class KnowledgeStore:
         silently splitting the compare/sort order and dropping members
         mid-page. ``limit=None`` keeps the legacy unbounded (but now
         deterministically ordered) read for internal callers that still need
-        the full member set in one shot."""
+        the full member set in one shot.
+
+        R3 PR-B P2-1: when ``after`` is set, the WHERE clause also repeats
+        the seek predicate on ``ko.id`` (``AND ko.id COLLATE "C" > %s``),
+        provably redundant given the join condition ``ko.id=cc.member_object_id``
+        — anything satisfying ``cc.member_object_id COLLATE "C" > after``
+        satisfies ``ko.id COLLATE "C" > after`` too, and vice versa, so the
+        result set is unchanged. What changes is the plan: without this,
+        PostgreSQL's merge join can start its ``ko`` (knowledge_objects)
+        side scan from the beginning of the table and filter down, which on
+        a mid-cluster page means scanning every row up to the cursor before
+        it can start returning members (measured: 200,603 rows / 104ms for a
+        mid-page cursor). With the redundant predicate the planner has a
+        seek condition on ``ko.id`` too and starts the scan at the cursor
+        (603 rows / 2.2ms for the same page)."""
         query = (
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
@@ -3096,7 +3110,8 @@ class KnowledgeStore:
         )
         params: list = [notebook_id, canonical_id]
         if after:
-            query += ' AND cc.member_object_id COLLATE "C" > %s'
+            query += ' AND cc.member_object_id COLLATE "C" > %s AND ko.id COLLATE "C" > %s'
+            params.append(after)
             params.append(after)
         query += ' ORDER BY cc.member_object_id COLLATE "C"'
         if limit is not None:

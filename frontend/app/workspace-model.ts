@@ -810,7 +810,12 @@ export type ConceptDetailResp = {
   // Hub-cluster member pagination (R3·T-B2): `attached`/`evidence` are scoped
   // to `members` on THIS page, not the whole cluster — paging through every
   // page still surfaces the complete set.
-  member_total: number;
+  // R3 PR-B P1-1: the backend only re-runs the COUNT on the FIRST page
+  // (`after` unset) — a hub cluster's total is otherwise re-priced on every
+  // "load more" page for no display benefit. Later pages answer `null`; the
+  // merge in `use-kg-graph.ts`'s `loadMoreConceptMembers` carries the first
+  // page's real total forward instead of clobbering it with this `null`.
+  member_total: number | null;
   next_cursor: string | null;
 };
 export type KgOccurrence = {

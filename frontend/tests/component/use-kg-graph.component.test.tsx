@@ -119,19 +119,31 @@ const emptyNeighbors = {
   locating_unavailable: false, source_notebook_id: "",
 } as unknown as KgNeighborsResp;
 
-function conceptPage(members: string[], nextCursor: string | null): ConceptDetailResp {
+function conceptPage(
+  members: string[],
+  nextCursor: string | null,
+  // R3 PR-B P1-1/P1-2: `attached` ids and `member_total` are overridable so
+  // a test can shape a later page the way the real backend does — repeating
+  // an `attached` id across pages, or answering `member_total: null` on
+  // every page after the first.
+  options: { attached?: string[]; memberTotal?: number | null } = {},
+): ConceptDetailResp {
+  const { attached = [], memberTotal = 5 } = options;
   return {
     canonical_id: "k1",
     canonical_name: "HUB",
     members: members.map((id) => ({ id, object_type: "concept", payload: { name: id }, evidence: [] })),
-    attached: [],
+    attached: attached.map((id) => ({ id, object_type: "claim", payload: { name: id }, evidence: [] })),
     evidence: [],
-    member_total: 5,
+    member_total: memberTotal,
     next_cursor: nextCursor,
   };
 }
 
-async function openWithConceptSelected(harness: ReturnType<typeof createTestKgAuthority>) {
+async function openWithConceptSelected(
+  harness: ReturnType<typeof createTestKgAuthority>,
+  firstPage: ConceptDetailResp = conceptPage(["m1", "m2"], "m2"),
+) {
   harness.establish("user-a", "notebook-a");
   kgApi.fetchUnifiedGraph.mockResolvedValue(conceptGraphResponse);
   kgApi.fetchPendingMerges.mockResolvedValue([]);
@@ -157,7 +169,7 @@ async function openWithConceptSelected(harness: ReturnType<typeof createTestKgAu
   }));
   await rendered.result.current.openGraph();
   await waitFor(() => expect(rendered.result.current.view.graph).not.toBeNull());
-  kgApi.fetchConceptDetail.mockResolvedValueOnce(conceptPage(["m1", "m2"], "m2"));
+  kgApi.fetchConceptDetail.mockResolvedValueOnce(firstPage);
   await rendered.result.current.selectNode("k1");
   return rendered;
 }
@@ -213,4 +225,49 @@ test("a fresh first page landing while a load-more is in flight wins — the sta
   });
   expect(result.current.view.conceptDetail?.members.map((m) => m.id)).toEqual(["m9"]);
   expect(result.current.view.conceptDetail?.next_cursor).toBeNull();
+});
+
+test("loadMoreConceptMembers keeps the first page's member_total when a later page answers null (R3 PR-B P1-1)", async () => {
+  // Mutation-checked: dropping the `member_total: page.member_total ??
+  // current.member_total` override (letting `...page` clobber it) turns
+  // this red — the merged view would carry `null` instead of 430 after
+  // page 2 lands.
+  const harness = createTestKgAuthority();
+  const { result } = await openWithConceptSelected(
+    harness,
+    conceptPage(["m1", "m2"], "m2", { memberTotal: 430 }),
+  );
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m2"));
+  expect(result.current.view.conceptDetail?.member_total).toBe(430);
+
+  // The backend only recomputes the COUNT on the first page (`after` unset)
+  // — every later page answers `member_total: null`.
+  kgApi.fetchConceptDetail.mockResolvedValueOnce(
+    conceptPage(["m3", "m4"], "m4", { memberTotal: null }),
+  );
+  await act(async () => { await result.current.loadMoreConceptMembers(); });
+
+  expect(result.current.view.conceptDetail?.member_total).toBe(430);
+});
+
+test("loadMoreConceptMembers dedupes attached objects repeated across pages (R3 PR-B P1-2)", async () => {
+  // Mutation-checked: reverting to a bare `[...current.attached,
+  // ...page.attached]` concatenation turns this red — "a1" would appear
+  // twice in the merged list.
+  const harness = createTestKgAuthority();
+  const { result } = await openWithConceptSelected(
+    harness,
+    conceptPage(["m1", "m2"], "m2", { attached: ["a1", "a2"] }),
+  );
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m2"));
+  expect(result.current.view.conceptDetail?.attached.map((n) => n.id)).toEqual(["a1", "a2"]);
+
+  // Page 2's adjacency read reaches "a1" again (a hub cluster's attached
+  // objects are not partitioned by member) plus one genuinely new id.
+  kgApi.fetchConceptDetail.mockResolvedValueOnce(
+    conceptPage(["m3", "m4"], "m4", { attached: ["a1", "a3"] }),
+  );
+  await act(async () => { await result.current.loadMoreConceptMembers(); });
+
+  expect(result.current.view.conceptDetail?.attached.map((n) => n.id)).toEqual(["a1", "a2", "a3"]);
 });
