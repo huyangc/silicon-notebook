@@ -391,6 +391,9 @@ class KnowledgeLifecycleService:
         note_model_error: Callable[..., None],
         participant_notebook_ids: Callable[[str], List[str]],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
+        invalidate_review_queue_memo: Callable[[str], None] = (
+            lambda _notebook_id: None
+        ),
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -441,6 +444,7 @@ class KnowledgeLifecycleService:
         self._note_model_error = note_model_error
         self.participant_notebook_ids = participant_notebook_ids
         self._invalidate_knowledge_counts = invalidate_knowledge_counts
+        self._invalidate_review_queue_memo = invalidate_review_queue_memo
         # Keep algorithm callbacks late-bound through ``self`` so established
         # lifecycle monkeypatch seams and the caller's ContextVar context remain
         # authoritative when a background worker enters the collaborator.
@@ -501,6 +505,12 @@ class KnowledgeLifecycleService:
         # a freshly copy_notebook'd nb whose counts were cached at seq 0). Drop the
         # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
         self._invalidate_knowledge_counts(notebook_id)
+        # R3 T-A2: the review-queue RANKING memo is keyed on the same seq and so
+        # has the same aliasing exposure — and a worse one, because it survives
+        # a re-ingest that climbs back to a seq it already holds an entry for
+        # (the counts would at least be re-read on the way up). Drop it here for
+        # the same reason, one line apart, so the two never diverge.
+        self._invalidate_review_queue_memo(notebook_id)
         return counts
 
     def prepare_indexing_pipeline_kg(

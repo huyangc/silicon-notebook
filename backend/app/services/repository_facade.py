@@ -2298,6 +2298,11 @@ class RepositoryFacade:
         # memo, then seeds relations via this path, then reads again never
         # sees a stale count.
         self._runtime.queries.invalidate_knowledge_counts(notebook_id)
+        # R3 T-A2: the review-queue RANKING memo is gated on the same seq and
+        # therefore has the same gap — a fixture that warms the ranking, seeds
+        # relations here, then reads the queue again would otherwise be served
+        # the pre-insert ranking. Same call site, same reason, one line apart.
+        self._runtime.review_queue_memo.invalidate(notebook_id)
         return result
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],

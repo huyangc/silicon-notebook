@@ -112,6 +112,7 @@ RUNTIME_ATTRIBUTES = [
     "retrieval_experience_jobs",
     "retrieval_experiences",
     "retrieval_snapshots",
+    "review_queue_memo",
     "root_dir",
     "scale_artifact_store",
     "scale_artifacts",

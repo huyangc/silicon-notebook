@@ -350,6 +350,28 @@ class GovernanceStore:
           — a behaviour test cannot see this (fixture-scale EXPLAIN does not
           reproduce the regression), which is exactly how it slipped through
           review once.
+
+        * R3 T-A1: the endpoint projection extracts
+          ``json_extract(payload, '$.name')`` in SQL instead of shipping the
+          whole ``payload`` document.  The consumer reads exactly two fields off
+          these rows — ``object_type`` and ``payload["name"]`` — so every other
+          key of every endpoint object's payload was pure transfer/parse cost
+          (~500k endpoint rows on the largest production notebook).
+          ``json_extract`` yields SQL NULL for a missing key, a JSON ``null`` or
+          a non-object payload, and the caller normalises NULL to ``""`` — what
+          the old ``dict.get("name", "")`` produced for the first two.
+          Registered robustness change (same class as the anchor pushdown's): a
+          NON-STRING ``name`` (e.g. a number) used to reach ``edge_trust._norm``
+          as an ``int`` and raise a 500; the caller's ``str()`` coercion now
+          renders it the same text the PostgreSQL twin's ``->>`` produces.
+          A malformed ``payload`` still fails the request on both paths (here
+          ``json_extract`` raises, before it was the caller's ``json.loads``);
+          no ``json_valid`` guard is added, because widening that shape is a
+          behaviour change this equivalence-only narrowing does not carry.
+
+          ⚠ ``name`` deliberately does NOT move into the relation JOIN — see the
+          PostgreSQL twin's docstring for the read-amplification and
+          cross-notebook-naming reasons.
         """
         relations = connection.execute(
             "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
@@ -380,7 +402,8 @@ class GovernanceStore:
             placeholders = ",".join("?" for _ in batch)
             objects.extend(
                 row for row in connection.execute(
-                    "SELECT id, object_type, payload, notebook_id "
+                    "SELECT id, object_type, "
+                    "json_extract(payload, '$.name') AS name, notebook_id "
                     f"FROM knowledge_objects WHERE id IN ({placeholders})",
                     tuple(batch),
                 ).fetchall()

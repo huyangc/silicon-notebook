@@ -52,6 +52,10 @@ from app.repositories.ports import (
     RepositoryRow,
 )
 from app.services.retrieval import cosine, keyword_score
+from app.services.review_queue_memo import (
+    REVIEW_QUEUE_MEMO_ITEMS,
+    ReviewQueueMemo,
+)
 
 
 # SQLite default SQLITE_MAX_VARIABLE_NUMBER-safe chunk size for `IN (...)`
@@ -168,6 +172,7 @@ class KnowledgeGovernanceService:
         invalidate_knowledge_counts: Callable[[str], None],
         carry_review_queue_total: Callable[[str, int, int], None],
         kg_mutation_seq: Callable[[str], int],
+        review_queue_memo: ReviewQueueMemo,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -195,6 +200,9 @@ class KnowledgeGovernanceService:
         self._invalidate_knowledge_counts_fn = invalidate_knowledge_counts
         self._carry_review_queue_total_fn = carry_review_queue_total
         self._kg_mutation_seq_fn = kg_mutation_seq
+        # R3 T-A2: runtime-owned ranking memo (one per RepositoryRuntime), NOT
+        # a module global — see review_queue_memo's module docstring.
+        self._review_queue_memo = review_queue_memo
 
     @staticmethod
     def promotion_dict(row, *, payload=None, evidence=None) -> dict:
@@ -213,7 +221,47 @@ class KnowledgeGovernanceService:
     # ------------------------------------------------------------------
 
     def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
-        """Return edges ranked by review priority = edge_centrality * (1 - trust_score).
+        """Edges ranked by review priority, served from the seq-gated ranking
+        memo whenever ``0 <= limit <= REVIEW_QUEUE_MEMO_ITEMS`` (R3 T-A2).
+
+        The memo caches the top ``REVIEW_QUEUE_MEMO_ITEMS`` items keyed on
+        ``kg_mutation_seq``, so the full scan + scoring + betweenness run below
+        happens once per KG version instead of once per request (the honest
+        framing is "less often", not "cheaper": the cold path's cost is
+        unchanged — see ``review_queue_memo``'s module docstring).  Slicing a
+        cached ``nlargest(M)`` at ``limit <= M`` is bit-identical to
+        ``nlargest(limit)``: nlargest's decoration carries a strictly
+        decreasing counter, so ties resolve by input order, and that order is
+        preserved on a prefix.
+
+        ``limit < 0`` (a "drop the tail" slice) and ``limit > M`` (deeper than
+        the memo holds) bypass the memo entirely and take the cold path — same
+        semantics they have always had.
+
+        The seq point-read happens BEFORE the data read; that ordering is the
+        memo's read-order contract, enforced inside ``ReviewQueueMemo.top``.
+        """
+        self.get_notebook(notebook_id)
+        if 0 <= limit <= REVIEW_QUEUE_MEMO_ITEMS:
+            return self._review_queue_memo.top(
+                notebook_id,
+                limit,
+                lambda: self._kg_mutation_seq_fn(notebook_id),
+                lambda: self._rank_review_queue(
+                    notebook_id, REVIEW_QUEUE_MEMO_ITEMS
+                ),
+            )
+        return self._rank_review_queue(notebook_id, limit)
+
+    def _rank_review_queue(self, notebook_id: str, limit: int) -> List[dict]:
+        """Rank every non-rejected edge by review priority = edge_centrality *
+        (1 - trust_score) and return the top ``limit``.
+
+        This is the COLD path — the whole read + score + rank the memo above
+        exists to run once per KG version.  It deliberately does NOT call
+        ``get_notebook``: its two callers (the memo's loader and the
+        memo-bypassing limits) both already did, and a loader that re-validated
+        would put a query inside the single-flight critical path.
 
         Only edges with review_status != 'rejected' are included (rejected edges are
         excluded from reasoning and need no further review).
@@ -224,10 +272,18 @@ class KnowledgeGovernanceService:
         trust_score combines evidence anchoring + cross-doc corroboration + type validity.
 
         The store hands back a pushed-down ``has_anchor`` flag instead of every
-        edge's evidence JSON, and only the objects that actually appear on a
-        relation endpoint — see ``GovernanceStore.review_queue_rows``.  The
-        corroboration aggregation stays in Python because its grouping key runs
-        through ``edge_trust._norm``.
+        edge's evidence JSON, only the objects that actually appear on a
+        relation endpoint, and (R3 T-A1) those endpoints' ``payload["name"]``
+        extracted in SQL instead of the whole payload document — see
+        ``GovernanceStore.review_queue_rows``.  The corroboration aggregation
+        stays in Python because its grouping key runs through
+        ``edge_trust._norm``.
+
+        ``node_types`` is still built from the (notebook-FILTERED) endpoint
+        batch, while the displayed ``_src_type``/``_tgt_type`` still come from
+        the relation JOIN.  That asymmetry is deliberate and load-bearing (a
+        cross-notebook endpoint stays unnamed and untyped for scoring, but its
+        type is still shown) — do not "unify" it.
 
         The object narrowing is lossless.  The anchor pushdown is lossless for
         every evidence shape that used to produce a response, but NOT for the
@@ -240,13 +296,11 @@ class KnowledgeGovernanceService:
         further downstream.
         """
         import heapq
-        import json as _json
         from app.services.kg.edge_trust import (
             compute_trust_score, corroboration_counts,
             corroboration_score_from_count,
         )
 
-        self.get_notebook(notebook_id)
         with self._connect() as db:
             rel_rows, obj_rows = self.governance_store.review_queue_rows(
                 db, notebook_id
@@ -256,8 +310,14 @@ class KnowledgeGovernanceService:
         node_names: dict = {}
         for r in obj_rows:
             node_types[r["id"]] = r["object_type"]
-            p = _json.loads(r["payload"] or "{}")
-            node_names[r["id"]] = p.get("name", "")
+            # SQL already extracted payload.name; NULL means "absent, JSON null,
+            # or a payload that is not an object" — all of which the old
+            # ``dict.get("name", "")`` (or a raise) turned into "". ``str()``
+            # normalises the two dialects onto one text: PostgreSQL's ``->>``
+            # renders a non-string scalar itself, SQLite's ``json_extract``
+            # hands back the scalar for Python to render the same way.
+            name = r["name"]
+            node_names[r["id"]] = str(name) if name is not None else ""
 
         rels = []
         for r in rel_rows:
@@ -362,6 +422,11 @@ class KnowledgeGovernanceService:
         immediately before THIS write's own bump, so a stale/mismatched entry
         (another writer raced in, or the memo was never warm) is dropped
         rather than guessed at — see ``carry_review_queue_total``'s docstring.
+
+        R3 T-A2 reuses that SAME decision point for the ranking memo: the two
+        memos are carried or invalidated together, on one condition evaluated
+        once, so they can never disagree about whether this write moved queue
+        membership.  See ``ReviewQueueMemo.carry``.
         """
         if status not in self._REVIEW_STATUSES:
             raise ValueError(
@@ -378,8 +443,20 @@ class KnowledgeGovernanceService:
         if prev_status in non_rejected and status in non_rejected:
             new_seq = self._kg_mutation_seq_fn(notebook_id)
             self._carry_review_queue_total_fn(notebook_id, new_seq - 1, new_seq)
+            # Same transition test, same expected_seq: this flip changes no
+            # ranking input either (trust/corroboration/centrality never read
+            # review_status), so the ranked top-M carries forward with the one
+            # item's status rewritten copy-on-write.
+            self._review_queue_memo.carry(
+                notebook_id, new_seq - 1, new_seq, rel_id, status
+            )
         else:
             self._invalidate_knowledge_counts_fn(notebook_id)
+            # Either side 'rejected' (including rejected->pending, i.e. undoing
+            # a rejection, which puts the edge BACK into the set and changes the
+            # topology corroboration/centrality are computed over) — drop the
+            # ranking rather than carry it.
+            self._review_queue_memo.invalidate(notebook_id)
         # Invalidate cached graph so _federated_rx_graph rebuilds on next access
         # (belt-and-braces: its per-status-count version key would also catch
         # the flip on its own).

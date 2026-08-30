@@ -65,6 +65,7 @@ from app.services.report_execution import (
 )
 from app.services.report_application import ReportApplicationService
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
+from app.services.review_queue_memo import ReviewQueueMemo
 from app.services.retrieval_candidates import CandidateRetrievalService
 from app.services.retrieval_service import RetrievalService
 from app.services.scale_artifact_catalog import ScaleArtifactCatalog
@@ -551,6 +552,14 @@ class _KnowledgeDomain:
     # facade `_write` transaction seat) only exist once the facade constructor
     # reaches them.  The caches come from the retrieval domain's snapshots.
     kg_mutations: "KgMutationCoordinator | None"
+    # R3 T-A2: the review-queue ranking memo. Seam-free (a lock, an OrderedDict
+    # and a seq the SERVICE reads through its injected closure), so the runtime
+    # owns it eagerly here — one instance per runtime, exactly like the
+    # retrieval domain's CopyStatsMemo. Deliberately NOT inside
+    # RetrievalSnapshotCache: that class's ``invalidate_kg`` fires on every
+    # online KG mutation, INCLUDING every ``set_edge_review`` click, which would
+    # wipe the ranking the carry-forward exists to keep warm.
+    review_queue_memo: ReviewQueueMemo
     # Finished by wire_knowledge_lifecycle(): their collaborators (the facade
     # `_write`/`_connect` transaction seats, the facade-owned unified/viz cache
     # objects, the coordinator-backed dirty/invalidate wrappers, the
@@ -591,6 +600,7 @@ def _build_knowledge_domain(
             current_user_id=current_user_id,
         ),
         kg_mutations=None,
+        review_queue_memo=ReviewQueueMemo(),
         knowledge_governance=None,
         knowledge_lifecycle=None,
         knowledge_query=None,
@@ -1032,6 +1042,7 @@ class RepositoryRuntime:
         self.kg_analysis = knowledge.kg_analysis
         self.schema_registry = knowledge.schema_registry
         self.kg_mutations = knowledge.kg_mutations
+        self.review_queue_memo = knowledge.review_queue_memo
         self.knowledge_governance = knowledge.knowledge_governance
         self.knowledge_lifecycle = knowledge.knowledge_lifecycle
         self.knowledge_query = knowledge.knowledge_query
@@ -1884,6 +1895,7 @@ class RepositoryRuntime:
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
             carry_review_queue_total=self.queries.carry_review_queue_total,
             kg_mutation_seq=read_kg_mutation_seq,
+            review_queue_memo=self.review_queue_memo,
         )
         if self.memory_service is not None:
             self.memory_service.set_promotion_service(self.knowledge_governance)
@@ -1927,6 +1939,7 @@ class RepositoryRuntime:
             note_model_error=note_model_error,
             participant_notebook_ids=self.notebook_store.participant_notebook_ids,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
+            invalidate_review_queue_memo=self.review_queue_memo.invalidate,
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
         return self.knowledge_lifecycle
