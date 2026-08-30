@@ -28,6 +28,19 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
                            R2 P2 fix, codex #638 R2 — see review_queue_memo's
                            module docstring for the two races this closes);
                            invalidate stays a separate post-commit call
+    begin_extraction_run   when preserve_existing=False, the source-graph clear
+                           (clear_source_graph_state — knowledge_relations/
+                           knowledge_objects for that source) + dirty bump ride
+                           ONE transaction (mark_unified_kg_dirty_in_tx, codex
+                           #638 R4 P2), opened by the FACADE (`_write`) rather
+                           than the store's self-contained `begin_extraction` —
+                           stores don't import this coordinator. A clear with
+                           no matching bump left review_queue_memo's seq gate
+                           unable to see the delete (the fallback-to-store
+                           invalidate call is process-local and cannot reach a
+                           sibling process's warm memo); see review_queue_memo's
+                           module docstring, gap 3. No bump when
+                           preserve_existing=True (nothing was cleared).
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + bump in one transaction; invalidate when added
     confirm/reject merge   transaction; invalidate; dirty

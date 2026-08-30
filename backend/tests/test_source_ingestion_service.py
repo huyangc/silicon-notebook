@@ -813,24 +813,7 @@ def test_extraction_relink_ordering_and_stale_source_cleanup_match_master(repo):
     assert len(repo.relations_for_notebook(nb.id)) == 1
 
 
-def test_extraction_reset_without_seq_bump_invalidates_the_review_queue_memo(repo):
-    """P0(R3 T-A1/T-A2 双评审收敛):``begin_extraction_run(preserve_existing=
-    False)`` 走 ``clear_source_graph_state`` 删掉该源全部 knowledge_relations/
-    knowledge_objects,但那条路径只删不写,**不** bump ``kg_mutation_seq``。一次
-    重新抽取如果在删图之后失败退出(这里用「未配置模型」复现——``finish_
-    extraction_run(..., 'completed', 'no-llm')`` 直接返回,全程没有
-    ``store_kg``/``mark_unified_kg_dirty``),seq 因此原地不动。暖过的
-    ``ReviewQueueMemo`` 若不在这条路径上显式失效,会继续端出已经被删除的边——
-    下一次对它 ``set_edge_review`` 必得 404(``KeyError``)。"""
-    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
-        "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram",
-             "evidence": "Engram is a memory architecture"},
-            {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
-             "evidence": "Engram improves perplexity"},
-        ],
-        "edges": []})))
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
+def _seed_source_for_reset(repo, nb_id: str) -> str:
     sid = f"src-{uuid4().hex[:10]}"
     now = _now()
     with repo._write() as db:
@@ -839,13 +822,40 @@ def test_extraction_reset_without_seq_bump_invalidates_the_review_queue_memo(rep
             "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
             "VALUES (?,?,?, 'markdown','extracted','parsed', 'doc.md','',0,'','',"
             "'academic_paper',?,?)",
-            (sid, nb.id, "Doc", now, now))
+            (sid, nb_id, "Doc", now, now))
         db.execute(
             "INSERT INTO source_elements (id,source_id,element_type,location_label,"
             "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
             (f"el-{sid}-0001", sid, "paragraph", "p1",
              "Engram is a memory architecture. Engram improves perplexity.",
              "{}", now))
+    return sid
+
+
+_ONE_RELATION_GRAPH = json.dumps({
+    "nodes": [
+        {"local_id": "a", "type": "Concept", "name": "Engram",
+         "evidence": "Engram is a memory architecture"},
+        {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+         "evidence": "Engram improves perplexity"},
+    ],
+    "edges": []})
+
+
+def test_extraction_reset_advances_seq_so_the_review_queue_memo_misses(repo):
+    """codex #638 R4 P2:``begin_extraction_run(preserve_existing=False)`` 走
+    ``clear_source_graph_state`` 删掉该源全部 knowledge_relations/
+    knowledge_objects。``RepositoryFacade._begin_extraction_run`` 现在把这次
+    clear 与 ``mark_unified_kg_dirty_in_tx`` 放进同一个写事务,所以即使重新抽取
+    随后失败退出(这里用「未配置模型」复现——``finish_extraction_run(...,
+    'completed', 'no-llm')`` 直接返回,全程没有 ``store_kg``/
+    ``mark_unified_kg_dirty``),清图这一步本身也已经把 ``kg_mutation_seq``
+    推进。暖过的 ``ReviewQueueMemo`` 靠自己的 seq 闸(不依赖任何显式 invalidate
+    调用)就必须在下一次读时 miss、重算——继续端出已删除的边会让下一次对它
+    ``set_edge_review`` 得到 404(``KeyError``)。"""
+    bind_chat_client(repo, "kg_extract", _FakeLLM(_ONE_RELATION_GRAPH))
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source_for_reset(repo, nb.id)
     repo._run_extraction(sid)
     rels = repo.relations_for_notebook(nb.id)
     assert len(rels) == 1, f"deterministic relink must reconnect degree-0 nodes: {rels}"
@@ -854,23 +864,93 @@ def test_extraction_reset_without_seq_bump_invalidates_the_review_queue_memo(rep
     warmed = repo.review_queue(nb.id)
     stale_rel_id = next(i["rel_id"] for i in warmed if i["rel_id"] == rels[0]["id"])
     assert stale_rel_id in {i["rel_id"] for i in repo.review_queue(nb.id)}
+    memo = repo._runtime.review_queue_memo
+    seq_before = memo.cached_seq(nb.id)
+    assert seq_before is not None
 
     # A second extraction attempt with no model configured: begin_extraction_run
     # deletes the source's graph, then run_extraction bails via the "no-llm"
-    # branch without ever calling store_kg/mark_unified_kg_dirty.
+    # branch without ever calling store_kg/mark_unified_kg_dirty — but the
+    # clear itself already bumped kg_mutation_seq in the SAME transaction.
     bind_chat_client(repo, "kg_extract", UnconfiguredChatClient())
     repo._run_extraction(sid)
     assert repo.relations_for_notebook(nb.id) == [], (
         "the graph must really be cleared by the reset, not merely re-scored"
     )
+    with repo._connect() as db:
+        (seq_after,) = db.execute(
+            "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()
+    assert seq_after > seq_before, (
+        "the graph clear must advance kg_mutation_seq in its own transaction, "
+        "not leave it exactly where the extraction failure found it"
+    )
+    # The memo entry is still tagged at the pre-reset seq: it is stale, not
+    # explicitly cleared (there is no invalidate call left on this path).
+    assert memo.cached_seq(nb.id) == seq_before
 
     live_rel_ids = {item["rel_id"] for item in repo.review_queue(nb.id)}
     assert stale_rel_id not in live_rel_ids, (
         "the review queue must not keep serving an edge the extraction reset "
         "already deleted"
     )
+    # The seq-gated read above must have recomputed and overwritten the entry.
+    assert memo.cached_seq(nb.id) == seq_after
     with pytest.raises(KeyError):
         repo.set_edge_review(nb.id, stale_rel_id, "verified")
+
+
+def test_extraction_reset_is_visible_to_a_sibling_runtimes_warm_memo(tmp_path, monkeypatch):
+    """codex #638 R4 P2(跨进程完备性):``ReviewQueueMemo`` 是 runtime-owned、
+    process-local 的——两个独立 ``RepositoryRuntime``(这里用两个共享同一个
+    sqlite 文件的 ``SQLiteRepository`` 模拟两个进程,例如 API server 与一次
+    离线摄取脚本)各自持有自己的一份,互不可见、互不能显式 invalidate 对方。
+
+    修法前(豁口三未堵):B 进程的重抽取清理只删行、不 bump seq,A 进程暖过的
+    memo 永远看不到这次删除(A 自己没有收到,也不可能收到,任何显式失效调用)。
+    修法后:B 的清理与 seq bump 同一个事务提交,A 下一次读单靠 seq 闸(它读的是
+    共享 DB 上的同一个 kg_mutation_seq 列,不是进程内状态)就必须 miss、重算出
+    与 DB 一致的结果。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    settings = Settings()
+    repo_a = _repository(settings)
+    repo_b = _repository(settings)
+    assert repo_a._runtime.review_queue_memo is not repo_b._runtime.review_queue_memo
+
+    bind_chat_client(repo_b, "kg_extract", _FakeLLM(_ONE_RELATION_GRAPH))
+    nb = repo_b.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source_for_reset(repo_b, nb.id)
+    repo_b._run_extraction(sid)
+    rels = repo_b.relations_for_notebook(nb.id)
+    assert len(rels) == 1
+
+    # A (a fully separate runtime/process) warms ITS OWN memo by reading the
+    # queue through its own instance.
+    warmed = repo_a.review_queue(nb.id)
+    stale_rel_id = next(i["rel_id"] for i in warmed if i["rel_id"] == rels[0]["id"])
+    assert repo_a._runtime.review_queue_memo.cached_seq(nb.id) is not None
+
+    # B resets the source (no model configured) — clears the graph, bumps the
+    # shared DB's kg_mutation_seq in the same transaction. A receives NO
+    # notification of any kind (no shared process, no invalidate call reaches
+    # it) — only the shared seq column can inform A's next read.
+    bind_chat_client(repo_b, "kg_extract", UnconfiguredChatClient())
+    repo_b._run_extraction(sid)
+    assert repo_b.relations_for_notebook(nb.id) == []
+
+    # A's next read must miss its stale entry and recompute a result
+    # consistent with the DB — not keep serving the edge B already deleted.
+    live_rel_ids = {item["rel_id"] for item in repo_a.review_queue(nb.id)}
+    assert stale_rel_id not in live_rel_ids, (
+        "sibling runtime A's warm memo must not keep serving an edge that "
+        "runtime B's extraction reset already deleted from the shared DB"
+    )
+    with pytest.raises(KeyError):
+        repo_a.set_edge_review(nb.id, stale_rel_id, "verified")
 
 
 def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeypatch):
