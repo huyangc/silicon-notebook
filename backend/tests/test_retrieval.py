@@ -535,16 +535,25 @@ def test_copyable_selected_element_search_routes_scope_into_bounded_chunks(
         ),
     )
 
-    def scoped_chunks(notebook_id, query, recall=0, *, allowed_source_ids=None):
-        calls.append((notebook_id, query, recall, tuple(allowed_source_ids or ())))
+    def scoped_chunks(notebook_id, query, recall=0, *, allowed_source_ids=None,
+                       producer_explicit=False):
+        calls.append((
+            notebook_id, query, recall, tuple(allowed_source_ids or ()),
+            producer_explicit,
+        ))
         return [], [], None
 
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", scoped_chunks)
     assert repo.retrieval.retrieve_elements(
         "nb", "target command", allowed_source_ids=("A", "B")
     ) == []
+    # codex #640 R4 P2: a caller-supplied list with no scope in force is a
+    # genuine producer attestation (docs/product-and-api.md:89) -- the R4
+    # default -- so it must reach ``_retrieve_chunks`` as
+    # ``producer_explicit=True``, not silently dropped back to R2's blanket
+    # ``False``.
     assert calls == [(
-        "nb", "target command", repo.settings.chunk_recall, ("A", "B")
+        "nb", "target command", repo.settings.chunk_recall, ("A", "B"), True,
     )]
 
 

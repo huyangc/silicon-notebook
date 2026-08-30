@@ -1952,7 +1952,21 @@ class CandidateRetrievalService(_RetrievalState):
         self, active_notebook_id: str, query: str, *,
         allowed_source_keys, limit: int = 8,
     ) -> List[RetrievedElement]:
-        """Search raw elements only in explicitly authorized participants."""
+        """Search raw elements only in explicitly authorized participants.
+
+        codex #640 R4 P2: ``allowed_source_keys`` (``PluginRetrievalAccess``'s
+        ``source_keys``, plugin_ask_engine.py) is a LIVE enumeration of each
+        participant's whole visible+hidden universe intersected with the
+        frozen ceiling -- structurally the all-selected shape, not a
+        producer's own narrowed filter, even on a genuinely narrowed run
+        (that seam pushes the full list either way; see its own comment
+        "元素检索仍逐次下推完整清单"). ``_retrieve_elements`` therefore must
+        be told ``producer_explicit=False`` explicitly here -- its own
+        default flipped to ``True`` in R4 for real producer-narrow callers,
+        and inferring this seam's provenance from "the list is non-``None``"
+        would reopen exactly the unbounded corpus-language probe codex #640
+        R2 P1 closed for it.
+        """
         with self._connect() as db:
             notebook_ids, _tier_map = self.notebooks.participant_tiers(
                 db, active_notebook_id
@@ -1981,6 +1995,10 @@ class CandidateRetrievalService(_RetrievalState):
             hits.extend(self._retrieve_elements(
                 notebook_id, query, limit=limit,
                 allowed_source_ids=source_ids,
+                # See the docstring above: this is a contextual live
+                # enumeration, never a producer's own narrow filter --
+                # must not fall back to ``_retrieve_elements``'s R4 default.
+                producer_explicit=False,
             ))
         hits.sort(key=lambda item: item.score, reverse=True)
         return hits[:limit]
@@ -2084,33 +2102,58 @@ class CandidateRetrievalService(_RetrievalState):
         return NeighborExpansion(out, truncated)
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8, *,
-                           allowed_source_ids=None) -> List[RetrievedElement]:
+                           allowed_source_ids=None,
+                           producer_explicit: bool = True) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2).
 
-        ``allowed_source_ids`` reaching this method is ALWAYS a CONTEXTUAL
-        ceiling, never a producer's own genuinely-narrow filter, whichever of
-        its two provenances it has: (1) the caller passed nothing and the
-        line below materializes it from the ambient frozen scope (an
-        all-selected freeze included — see ``source_scope.scoped_allowed_source_ids``);
-        or (2) it arrived from ``_federated_retrieve_elements_impl`` /
-        ``PluginRetrievalAccess`` (plugin_ask_engine.py), whose
-        ``source_keys`` are a LIVE enumeration of that notebook's whole
-        visible+hidden universe intersected with the same frozen ceiling —
-        structurally the all-selected shape again, not a request that
-        actually narrowed anything (that file's own comment: "元素检索仍逐次
-        下推完整清单", unlike the KG seam which sends no list at all when
-        unnarrowed). Neither provenance is what
-        ``_lexical_gate_source_scoped``'s ``explicit`` means, so the chunk-arm
-        call below must always attest ``producer_explicit=False`` — codex
-        #640 R2 P1: inferring it from "the list is non-None" here re-disables
-        the corpus-language gate for every default (all-selected) ask that
-        reaches element fallback, reinstating the unbounded probe set
-        ``LEXICAL_LANGUAGE_GATE_ENABLED`` exists to stop.
+        codex #640 R4 P2: provenance is what the CALLER declares, never
+        inferred from the list's shape. ``allowed_source_ids`` reaching this
+        method has two possible origins, and each drives the chunk-arm
+        ``producer_explicit`` attestation below differently:
+
+        (1) the caller passed a real list of its own and stands behind it as
+            a genuinely narrow filter (``docs/product-and-api.md``:89 —
+            "a producer-supplied explicit allow-list enters the source-
+            restricted lexical lane"). This is the CONTRACT-SAFE default: an
+            unrecognized/未声明 caller that hands this method a real list is
+            assumed to mean it, so ``producer_explicit`` defaults to
+            ``True`` and is honoured for the chunk-arm call whenever a list
+            was actually supplied.
+        (2) the caller passed nothing and the line below materializes the
+            list from the ambient frozen scope (an all-selected freeze
+            included — see ``source_scope.scoped_allowed_source_ids``). This
+            path is ALWAYS a contextual ceiling, never a producer
+            attestation, so ``producer_explicit`` is forced ``False``
+            regardless of the parameter's value whenever no list reached
+            this call.
+
+        The one caller that must override the default is
+        ``_federated_retrieve_elements_impl`` / ``PluginRetrievalAccess``
+        (plugin_ask_engine.py): its ``source_keys`` are a LIVE enumeration of
+        a notebook's whole visible+hidden universe intersected with the same
+        frozen ceiling — structurally the all-selected shape again, not a
+        request that actually narrowed anything (that file's own comment:
+        "元素检索仍逐次下推完整清单", unlike the KG seam which sends no list
+        at all when unnarrowed). That call site passes
+        ``producer_explicit=False`` explicitly — codex #640 R2 P1's actual
+        fix (never infer ``explicit`` from "the list is non-``None``")
+        still holds for that one seam.  What R4 reverses is only the
+        DEFAULT R2 gave every OTHER caller: R2's blanket
+        ``producer_explicit=False`` swept in real producer-narrow callers
+        too, silently dropping the ":89" contract for them — with ANN
+        unavailable, such a call could lose the selected source's own
+        language terms at the corpus-language gate and return zero evidence.
         """
         from app.services.source_scope import scoped_allowed_source_ids
 
+        caller_supplied_list = allowed_source_ids is not None
         allowed_source_ids = scoped_allowed_source_ids(
             notebook_id, allowed_source_ids
+        )
+        # A list materialized from ambient scope (no caller-supplied list)
+        # is never a producer attestation, whatever the parameter default is.
+        element_producer_explicit = (
+            bool(producer_explicit) if caller_supplied_list else False
         )
         if (allowed_source_ids is not None
                 or not self.notebook_copy_stats(notebook_id)["copyable"]):
@@ -2120,6 +2163,9 @@ class CandidateRetrievalService(_RetrievalState):
             # 来源范围不论 notebook 是否 copyable 都走这条路：一个
             # 小文件仍可以产生大量 element/vector，所以 copyable 不是
             # 选定来源的候选行数上限。
+            chunk_kwargs = (
+                {"producer_explicit": True} if element_producer_explicit else {}
+            )
             chunks, _ids, _matrix = self._retrieve_chunks(
                 notebook_id,
                 query,
@@ -2130,13 +2176,14 @@ class CandidateRetrievalService(_RetrievalState):
                 # deployment-owned quality/cost rail for this candidate family.
                 recall=max(self.settings.chunk_recall, limit * 4, limit),
                 allowed_source_ids=allowed_source_ids,
-                # See the docstring above: this list is a contextual ceiling
-                # at both of its possible origins, never producer-explicit —
-                # ``producer_explicit`` defaults to ``False``, which is
-                # already the correct value, so it is deliberately left
-                # unpassed here rather than spelled out as a kwarg: a full
-                # test double standing in for ``_retrieve_chunks`` (several
-                # exist) then needs no knowledge of this parameter at all.
+                # See the docstring above: only a genuinely producer-explicit
+                # caller gets ``producer_explicit=True`` spelled out here; the
+                # contextual-ceiling path (scope-materialized OR the plugin
+                # seam's declared-``False`` live enumeration) leaves it
+                # unpassed so ``_retrieve_chunks``'s own ``False`` default
+                # applies and existing test doubles standing in for it need
+                # no knowledge of this parameter at all.
+                **chunk_kwargs,
             )
             elements = self._retrieve_elements_from_chunks(
                 query, chunks, limit=limit
@@ -2578,10 +2625,15 @@ class CandidateRetrievalService(_RetrievalState):
         ``producer_explicit`` -- codex #640 R2 P1: this must be the caller's
         OWN attestation that ``allowed_source_ids`` is a producer-supplied,
         genuinely narrow list, never inferred from "is not None" here.
-        ``_retrieve_elements`` passes a materialized CONTEXTUAL ceiling down
-        this same path (to push its predicate into chunk recall) and must
-        pass ``producer_explicit=False`` even though its list is non-``None``
-        -- see that method and ``_lexical_gate_source_scoped``.
+        ``_retrieve_elements`` forwards its own caller's declared provenance
+        down this same path (to push its predicate into chunk recall):
+        ``producer_explicit=True`` when its OWN caller supplied a real list
+        and stood behind it (codex #640 R4 P2 default, ``docs/product-and-
+        api.md``:89), left unpassed (this method's ``False`` default
+        applies) when the list is instead a materialized CONTEXTUAL ceiling
+        -- either the ambient-scope materialization or the plugin element
+        seam's declared-``False`` live enumeration -- see that method and
+        ``_lexical_gate_source_scoped``.
 
         ``drifted`` -- the once-per-arm ``_unsafe_source_scope_restricted``
         answer.  Resolution order: (1) this explicit kwarg, for direct
