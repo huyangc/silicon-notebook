@@ -573,10 +573,10 @@ def test_copyable_selected_chunk_search_always_uses_bounded_fts(
     )
 
     def bounded(notebook_id, query, query_vector, recall, n_chunks, *,
-                allowed_source_ids=None):
+                allowed_source_ids=None, source_restricted=False):
         calls.append((
             notebook_id, query, recall, n_chunks,
-            tuple(allowed_source_ids or ()),
+            tuple(allowed_source_ids or ()), source_restricted,
         ))
         return [], [], None
 
@@ -586,7 +586,9 @@ def test_copyable_selected_chunk_search_always_uses_bounded_fts(
     assert repo.retrieval.candidates._retrieve_chunks(
         "nb", "target command", recall=7, allowed_source_ids=("A", "B")
     ) == ([], [], None)
-    assert calls == [("nb", "target command", 7, -1, ("A", "B"))]
+    # 显式来源清单永远是真收窄的那条 lane(不看请求 scope),所以语料语言闸这里
+    # 照旧关闭——见 ``_lexical_gate_source_scoped``。
+    assert calls == [("nb", "target command", 7, -1, ("A", "B"), True)]
 
 
 def test_keyword_score_ignores_stopwords():

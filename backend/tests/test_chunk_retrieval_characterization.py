@@ -612,21 +612,32 @@ def test_retrieve_chunks_large_library_copyable_degrades(repo, monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6b. R1 行为恢复(审计 ASK-1,P0):narrowed=False 全选冻结不得把语料语言闸/
-#     allowed_source_ids 压上慢路径;narrowed=True 的真收窄路径不回归。
+# 6b. R1(审计 ASK-1,P0):narrowed=False 全选冻结必须恢复语料语言闸这条
+#     **路由**,同时照常把冻结清单下推给 SQL;narrowed=True 的真收窄路径不回归。
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_retrieve_chunks_all_selected_frozen_scope_takes_unscoped_fast_path(
+def test_retrieve_chunks_all_selected_frozen_scope_restores_the_language_gate(
     repo, monkeypatch
 ):
-    """全选冻结(narrowed=False)下 _retrieve_chunks 必须走跟「无 scope」逐字
-    相同的候选路径:`_lexical_corpus_langs` 收到 source_scoped=False(语料语言
-    闸不被跳过),`_retrieve_chunks_fts_degraded` 收到的 allowed_source_ids 是
-    None(不落源限定的有界候选查询臂,而是 test 6 覆盖的「大库无 ANN → FTS 降
-    级」臂),且两条路径产出的候选集(chunk_id/score/relevance)逐字相同——这是
-    R1 的等价 oracle:全选冻结只是恢复行为,不是新增或削减候选。对照:同一份
-    来源清单在 narrowed=True(真收窄)下 source_scoped 必须是 True,且
-    allowed_source_ids 原样透传给降级臂——不回归。"""
+    """全选冻结(narrowed=False)下 _retrieve_chunks 的两个维度必须分开:
+
+    * **路由**恢复到跟「无 scope」一样——`_lexical_corpus_langs` 收到
+      source_scoped=False,语料语言闸不被跳过。它的豁免理由(「受限运行的词法臂
+      是唯一候选来源,而且来源谓词把扫描收窄了」)对真收窄成立、对全选不成立:
+      全选的谓词覆盖整库,正是这道闸要挡的病态全库探针(实测 64 词项 29.7s vs
+      3 词项 0.26s)。
+    * **过滤**不放松——`_retrieve_chunks_fts_degraded` 仍然收到物化的冻结清单
+      (元素臂与 KG 臂没有自己的 actor 谓词,清单是别人的私有 Memory 与并发上传
+      唯一的 LIMIT 前防线;codex #640 R1 两条 P1)。
+
+    等价 oracle:未漂移全选与无 scope 的候选集(chunk_id/score/relevance)必须逐
+    字相同——冻结清单此时恰好覆盖整库,下推它一条候选都不改。
+
+    对照:同一份来源清单在 narrowed=True(真收窄)下 source_scoped 必须是 True。
+
+    **变异锚点**:把 ``_lexical_gate_source_scoped`` 换回
+    ``allowed_source_ids is not None`` → 全选那一组的 corpus_lang_calls 变成
+    ``[True]``,本条报红。"""
     from app.models.source_scope import ResolvedSourceScope
     from app.services.source_scope import source_scope_context
 
@@ -684,10 +695,12 @@ def test_retrieve_chunks_all_selected_frozen_scope_takes_unscoped_fast_path(
         "R1:narrowed=False 全选冻结必须让语料语言闸看到 source_scoped=False,"
         f"同无 scope 一样,实际全选={corpus_lang_calls} 无 scope={unscoped_corpus_lang_calls}"
     )
-    assert fts_degraded_calls == [None] == unscoped_fts_degraded_calls, (
-        "R1:narrowed=False 时 allowed_source_ids 必须原样退化成 None,走大库"
-        f"降级臂而非源限定有界候选查询臂,实际全选={fts_degraded_calls} "
-        f"无 scope={unscoped_fts_degraded_calls}"
+    assert unscoped_fts_degraded_calls == [None], (
+        f"无 scope 本来就没有 allow-list,实际 {unscoped_fts_degraded_calls}"
+    )
+    assert fts_degraded_calls == [(sid,)], (
+        "全选冻结仍然必须把物化的冻结清单下推到 LIMIT 之前(别人的私有 Memory "
+        f"与并发上传唯一的防线),实际 {fts_degraded_calls}"
     )
     assert len(scored) >= 1
     assert all(c.chunk_id.startswith("ck-") for c in scored)
@@ -695,8 +708,8 @@ def test_retrieve_chunks_all_selected_frozen_scope_takes_unscoped_fast_path(
     # 唯独排除 retrieval_supports,见 app.domain.retrieval——支持链路带 tuple
     # 顺序但打分与候选身份才是等价 oracle 真正要钉的东西)。
     assert scored == scored_unscoped, (
-        "R1 等价 oracle:全选冻结(narrowed=False)与无 scope 的候选集必须逐字"
-        "相同——全选只恢复行为,既不新增也不削减候选"
+        "R1 等价 oracle:未漂移全选冻结(narrowed=False)与无 scope 的候选集必须"
+        "逐字相同——冻结清单此时恰好覆盖整库,下推它一条候选都不改"
     )
 
     # 对照:同一份清单真收窄(narrowed=True)时不得回归——source_scoped 必须

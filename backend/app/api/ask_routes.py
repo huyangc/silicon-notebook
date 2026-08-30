@@ -126,15 +126,15 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
 
     The browser uses exclusions while "all" is selected because that keeps
     toggles compact.  Workers must not carry that moving definition: normalize
-    it once to an include-list so concurrent uploads cannot widen the run.
-    That guarantee is what travels; the *form* it takes downstream is decided
-    per query by ``source_scope.scoped_allowed_source_ids``.  A narrowed run —
-    and an all-selected run whose universe has since drifted — pushes this
-    list below every producer's LIMIT.  An all-selected run whose universe
-    still matches it pushes nothing, because filtering a universe by itself
-    changes no candidate: the freeze is then carried by the drift probe that
-    re-checks the equality, plus the result-boundary fences.  ``narrowed``
-    below is what tells those consumers which of the two they are in.
+    it once to an include-list so concurrent uploads cannot widen the run and
+    every candidate producer can push the same allow-list below its LIMIT —
+    an all-selected freeze included, because this list is NOT the universe an
+    unfiltered producer would read (it excludes other members' private Memory
+    projections, and it is a snapshot rather than a live set).  ``narrowed``
+    below therefore never decides whether the list is pushed down; it decides
+    whether a producer's source predicate actually BOUNDS its scan, which is
+    what the lexical corpus-language gate routes on (``retrieval_candidates
+    ._lexical_gate_source_scoped``).
 
     The hidden half is read FOR THE REQUESTING USER.  Knowhow projection
     sources are notebook-wide (every member reads the table itself), but a
