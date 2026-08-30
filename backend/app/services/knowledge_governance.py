@@ -169,6 +169,7 @@ class KnowledgeGovernanceService:
         set_conflict_status: Callable[[str, str, str], None],
         memory_store: MemoryStorePort,
         kg_mutation_seq: Callable[[str], int],
+        mark_unified_kg_dirty_in_tx: Callable[[Any, str], int],
         review_queue_memo: ReviewQueueMemo,
     ) -> None:
         self.settings = settings
@@ -194,6 +195,11 @@ class KnowledgeGovernanceService:
         self._set_conflict_status = set_conflict_status
         self.memory_store = memory_store
         self._kg_mutation_seq_fn = kg_mutation_seq
+        # R2 P2 fix (codex #638 R2): in-transaction dirty bump + same-tx seq
+        # readback, used ONLY by set_edge_review (see its docstring) so the
+        # seq bump commits atomically with its own review_status UPDATE
+        # instead of racing a separate post-commit bump+read.
+        self._mark_unified_kg_dirty_in_tx = mark_unified_kg_dirty_in_tx
         # R3 T-A2: runtime-owned ranking memo (one per RepositoryRuntime), NOT
         # a module global — see review_queue_memo's module docstring.
         self._review_queue_memo = review_queue_memo
@@ -460,19 +466,35 @@ class KnowledgeGovernanceService:
         graph-reasoning call sees the updated set of active edges.
 
         R3 T-A3 P1-2 / v4: ``update_edge_review`` returns the PREVIOUS status,
-        so after the ``kg_mutation_seq`` bump this can tell whether the
-        transition can carry-forward the ranking memo — items AND total in one
-        entry since v4 (pure verified<->pending flip, membership unchanged —
-        cheap retag) or must let it go cold (either side 'rejected' —
-        membership may have actually changed, a fresh scan is the safe move).
-        The carry is keyed on ``new_seq - 1``: the seq this memo would have
-        been tagged at immediately before THIS write's own bump, so a
-        stale/mismatched entry (another writer raced in, or the memo was
-        never warm) is dropped rather than guessed at — see
-        ``ReviewQueueMemo.carry``'s docstring.  ``total`` needs no separate
-        carry call: it lives in the SAME memo entry as the ranking and
-        ``ReviewQueueMemo.carry`` leaves it untouched (verified/pending never
-        changes the non-rejected count).
+        so once the seq bump lands this can tell whether the transition can
+        carry-forward the ranking memo — items AND total in one entry since
+        v4 (pure verified<->pending flip, membership unchanged — cheap retag)
+        or must let it go cold (either side 'rejected' — membership may have
+        actually changed, a fresh scan is the safe move). The carry is keyed
+        on ``new_seq - 1``: the seq this memo would have been tagged at
+        immediately before THIS write's own bump, so a stale/mismatched entry
+        (another writer raced in, or the memo was never warm) is dropped
+        rather than guessed at — see ``ReviewQueueMemo.carry``'s docstring.
+        ``total`` needs no separate carry call: it lives in the SAME memo
+        entry as the ranking and ``ReviewQueueMemo.carry`` leaves it untouched
+        (verified/pending never changes the non-rejected count).
+
+        R2 P2 fix (codex #638 R2): the UPDATE, the ``kg_mutation_seq`` bump,
+        and the readback of the new seq all ride the SAME write transaction
+        now (``mark_unified_kg_dirty_in_tx``), instead of the UPDATE
+        committing in its own transaction, the bump committing in a SECOND,
+        separate transaction, and the new seq being read back through a
+        THIRD, brand-new post-commit connection. That three-way split let two
+        concurrent writers' bump-and-read steps interleave independently of
+        which writer's UPDATE actually became the DB's terminal value (P2-a),
+        and left no way to tell "UPDATE committed, bump never ran" (a genuine
+        partial failure) from "everything committed, only the post-commit
+        memo bookkeeping choked" (P2-b) — either could strand the memo
+        pointing at a status the DB no longer has, with no bound on how long
+        the staleness could persist. See ``review_queue_memo``'s module
+        docstring ("为什么 bump 必须与状态写同一事务") for both scenarios
+        spelled out and the correctness argument for why one atomic
+        transaction closes them.
         """
         if status not in self._REVIEW_STATUSES:
             raise ValueError(
@@ -481,13 +503,26 @@ class KnowledgeGovernanceService:
             prev_status = self.governance_store.update_edge_review(
                 db, notebook_id, rel_id, status
             )
-        # review_status flips in place (relation COUNT unchanged) — bump the
-        # monotonic seq so seq-keyed fast paths (_scale_index_version /
-        # _cluster_input_version) don't serve a stale version for this edit.
-        self._mark_unified_kg_dirty(notebook_id)
+            # review_status flips in place (relation COUNT unchanged) — bump
+            # the monotonic seq, in THIS SAME transaction, so seq-keyed fast
+            # paths (_scale_index_version / _cluster_input_version) don't
+            # serve a stale version for this edit, AND so the seq this call's
+            # memo carry uses is the exact one this UPDATE's own commit
+            # produced — never a later value some other writer's bump
+            # advanced to in between (R2 P2-a) and never orphaned by a bump
+            # that only ran, or only got read back, after this UPDATE was
+            # already irrevocably committed (R2 P2-b).
+            new_seq = self._mark_unified_kg_dirty_in_tx(db, notebook_id)
+        # Everything above is one commit/rollback unit: if the bump (or its
+        # same-tx readback) had failed, the UPDATE would have rolled back
+        # with it — there is no "DB changed, seq did not" straddle to reach
+        # this line from. Only what follows can still fail independently, and
+        # if it does, the memo is left exactly where it was BEFORE this call
+        # (strictly stale — its tag no longer matches the seq just committed
+        # above — never wrongly agreeing with the new DB state); the next
+        # read misses on that stale tag and cold-recomputes.
         non_rejected = self._NON_REJECTED_REVIEW_STATUSES
         if prev_status in non_rejected and status in non_rejected:
-            new_seq = self._kg_mutation_seq_fn(notebook_id)
             # This flip changes no ranking input either (trust/corroboration/
             # centrality never read review_status) and no total (both sides
             # are counted the same way), so the ranked top-M AND the total

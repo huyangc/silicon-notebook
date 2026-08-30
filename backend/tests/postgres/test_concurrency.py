@@ -1406,6 +1406,11 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
         set_conflict_status=lambda *_args: None,
         memory_store=store,
         kg_mutation_seq=lambda _notebook_id: 0,
+        # Not exercised by this test (it drives promotion approval, not
+        # set_edge_review) — a trivial stand-in like the other collaborators
+        # above, added because the R2 P2 fix (codex #638 R2) widened
+        # KnowledgeGovernanceService's constructor with this new seat.
+        mark_unified_kg_dirty_in_tx=lambda _connection, _notebook_id: 0,
         review_queue_memo=ReviewQueueMemo(),
     )
     revoked_uncommitted = threading.Event()

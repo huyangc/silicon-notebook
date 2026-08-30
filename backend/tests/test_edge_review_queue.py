@@ -3,6 +3,9 @@
 Uses a real SQLiteRepository (in-memory / tmp_path) with FakeEmbedder.
 Synthetic graph with 4 nodes and 3 edges.
 """
+import threading
+from contextlib import contextmanager
+
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -154,6 +157,175 @@ def test_governance_store_update_edge_review_missing_relation_raises_keyerror(re
             repo._runtime.governance.update_edge_review(
                 db, nb_id, "rel-does-not-exist", "verified"
             )
+
+
+# ── R2 P2 (codex #638 R2): bump-in-tx fix — concurrent/failure edge cases ────
+
+def test_concurrent_opposite_flips_never_leave_the_memo_disagreeing_with_the_db(
+    repo, monkeypatch
+):
+    """P2-a reproduction + fix confirmation. Two writers flip the SAME
+    relation to opposite non-rejected statuses. This forces the exact
+    interleave codex described: writer A's call is paused RIGHT AFTER its
+    first write-transaction commits (lock already released, so this is a
+    real inter-transaction window, not a hold-the-lock stall), writer B's
+    ENTIRE set_edge_review call is allowed to run to completion while A is
+    paused, and only THEN is A allowed to resume and reach its own memo
+    carry/invalidate call.
+
+    Before the R2 fix (bump + seq-readback living in a SEPARATE, later
+    transaction/connection from the UPDATE) this interleave lets A resume
+    with a seq value that has since been advanced by B's own bump, carry
+    successfully against B's already-correct memo entry, and overwrite it
+    with A's status at a seq that still looks perfectly valid — the DB ends
+    up with B's write but the memo ends up with A's status. After the fix
+    (bump + readback inside the SAME transaction as the UPDATE) A's own
+    new_seq is fixed the moment its transaction commits, before B can even
+    start — B's own carry then targets a memo tag A has not written yet and
+    is correctly dropped, and A's later carry finds nothing to overwrite.
+    The invariant this test pins: whatever the memo ends up holding for this
+    relation, it never disagrees with the DB while still looking like a
+    valid (non-dropped) entry.
+
+    Mutation self-check (see the task report): reverting set_edge_review to
+    the old three-transaction shape makes this test fail exactly as
+    described above; restoring the fix makes it pass again.
+    """
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue_page(nb_id)["items"][0]["rel_id"]  # warm the memo
+
+    database = repo._runtime.database
+    original_write = database.write
+    commit_count = {"n": 0}
+    count_lock = threading.Lock()
+    reached_pause = threading.Event()
+    release_pause = threading.Event()
+
+    @contextmanager
+    def controlled_write():
+        with original_write() as db:
+            yield db
+        # `original_write`'s own __exit__ already committed and released the
+        # write lock by this point — this is a genuine POST-commit,
+        # lock-free window, not a stall while holding the lock.
+        with count_lock:
+            commit_count["n"] += 1
+            first = commit_count["n"] == 1
+        if first:
+            reached_pause.set()
+            assert release_pause.wait(timeout=5), "test deadlocked waiting to be released"
+
+    monkeypatch.setattr(database, "write", controlled_write)
+
+    outcome = {}
+
+    def call_a():
+        repo.set_edge_review(nb_id, rel_id, "verified")
+        outcome["a_done"] = True
+
+    def call_b():
+        repo.set_edge_review(nb_id, rel_id, "pending")
+        outcome["b_done"] = True
+
+    thread_a = threading.Thread(target=call_a)
+    thread_a.start()
+    assert reached_pause.wait(timeout=5), "writer A never reached its post-commit pause"
+
+    thread_b = threading.Thread(target=call_b)
+    thread_b.start()
+    thread_b.join(timeout=5)
+    assert outcome.get("b_done"), "writer B's whole call must complete while A is paused"
+
+    release_pause.set()
+    thread_a.join(timeout=5)
+    assert outcome.get("a_done"), "writer A must resume and complete after release"
+
+    with repo._connect() as db:
+        db_status = db.execute(
+            "SELECT review_status FROM knowledge_relations WHERE id=?", (rel_id,)
+        ).fetchone()["review_status"]
+    assert db_status == "pending", "B's UPDATE committed last, so it is the DB's terminal value"
+
+    memo = repo._runtime.review_queue_memo
+    entry = memo._store.get(nb_id)
+    if entry is not None:
+        _seq, items, _total = entry
+        memo_status = next(
+            (i["review_status"] for i in items if i["rel_id"] == rel_id), None
+        )
+        if memo_status is not None:
+            assert memo_status == db_status, (
+                "memo carried a status that disagrees with the committed DB "
+                "state under a seq tag that still looked valid — the R2 P2-a bug"
+            )
+
+
+def test_set_edge_review_rolls_back_atomically_when_the_dirty_bump_fails(repo, monkeypatch):
+    """P2-b (first form), now unconstructable in its original shape: the
+    dirty bump rides the SAME transaction as the review_status UPDATE, so a
+    failure inside it can no longer land between an already-committed UPDATE
+    and a bump that silently never ran — the whole transaction rolls back
+    together. DB and memo end up exactly as they were before the call."""
+    nb_id = _seed_graph(repo)
+    page_before = repo.review_queue_page(nb_id)  # warm the memo
+    rel_id = page_before["items"][0]["rel_id"]
+    memo = repo._runtime.review_queue_memo
+    seq_before = memo.cached_seq(nb_id)
+    assert seq_before is not None
+
+    def boom(connection, notebook_id):
+        raise RuntimeError("injected dirty-bump failure")
+
+    monkeypatch.setattr(repo._runtime.kg_mutations, "mark_unified_kg_dirty_in_tx", boom)
+
+    with pytest.raises(RuntimeError, match="injected dirty-bump failure"):
+        repo.set_edge_review(nb_id, rel_id, "verified")
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT review_status FROM knowledge_relations WHERE id=?", (rel_id,)
+        ).fetchone()
+    assert row["review_status"] == "pending", "the UPDATE must roll back together with the bump"
+    assert memo.cached_seq(nb_id) == seq_before, "memo must be untouched by the aborted write"
+
+
+def test_set_edge_review_carry_failure_after_commit_leaves_a_stale_memo_that_recomputes_correctly(
+    repo, monkeypatch
+):
+    """P2-b (second form): the UPDATE+bump transaction has ALREADY committed
+    by the time carry() would run. Injecting a failure right at that boundary
+    (immediately after commit, immediately before the memo bookkeeping) shows
+    the safe direction the fix guarantees: the memo is left exactly as it was
+    BEFORE this call — strictly stale, since its tag can no longer match the
+    seq this call's transaction already committed — never wrongly agreeing
+    with the new DB state. The next read misses on that stale tag and
+    cold-recomputes a result that matches the DB."""
+    nb_id = _seed_graph(repo)
+    page_before = repo.review_queue_page(nb_id)  # warm the memo
+    rel_id = page_before["items"][0]["rel_id"]
+    memo = repo._runtime.review_queue_memo
+    seq_before = memo.cached_seq(nb_id)
+    assert seq_before is not None
+    real_carry = memo.carry
+
+    def failing_carry(*args, **kwargs):
+        raise RuntimeError("injected carry failure")
+
+    monkeypatch.setattr(memo, "carry", failing_carry)
+
+    with pytest.raises(RuntimeError, match="injected carry failure"):
+        repo.set_edge_review(nb_id, rel_id, "verified")  # pending -> verified (would carry)
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT review_status FROM knowledge_relations WHERE id=?", (rel_id,)
+        ).fetchone()
+    assert row["review_status"] == "verified", "the UPDATE+bump already committed before carry ran"
+    assert memo.cached_seq(nb_id) == seq_before, "memo must be untouched — stale, not wrong"
+
+    monkeypatch.setattr(memo, "carry", real_carry)
+    page_after = repo.review_queue_page(nb_id)  # stale tag -> cold recompute
+    assert {i["rel_id"]: i["review_status"] for i in page_after["items"]}[rel_id] == "verified"
 
 
 def test_set_edge_review_verified_flip_carries_the_memo_without_cold_recompute(

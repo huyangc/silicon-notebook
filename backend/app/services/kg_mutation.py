@@ -23,7 +23,11 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
                            been committed so far" (cheap in-process cache
                            eviction — safe to defer/dedupe across sources).
                            No-op anywhere when zero edges were written.
-    set_edge_review        transaction; dirty; invalidate
+    set_edge_review        relation UPDATE + dirty bump + same-tx seq readback
+                           in ONE transaction (mark_unified_kg_dirty_in_tx,
+                           R2 P2 fix, codex #638 R2 — see review_queue_memo's
+                           module docstring for the two races this closes);
+                           invalidate stays a separate post-commit call
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + bump in one transaction; invalidate when added
     confirm/reject merge   transaction; invalidate; dirty
@@ -104,16 +108,31 @@ class KgMutationCoordinator:
         with self._write() as db:
             self.mark_unified_kg_dirty_in_tx(db, notebook_id)
 
-    def mark_unified_kg_dirty_in_tx(self, connection: Any, notebook_id: str) -> None:
+    def mark_unified_kg_dirty_in_tx(self, connection: Any, notebook_id: str) -> int:
         """Same effects as ``mark_unified_kg_dirty``, but riding a write
         transaction the CALLER already holds open, rather than opening its
-        own.  Exists for one reason: ``relink_notebook_kg`` commits per
-        source, and a `finally`-keyed dirty bump cannot survive a kill -9
-        landing between a source's commit and the run's finally — the seq
-        advance has to be atomic with the edge insert it accompanies, or a
-        killed process can leave real edges in the database that never
-        escaped kg_mutation_seq (see the coordinator's module docstring for
-        why that permanently short-circuits 「刷新图谱」 for that notebook)."""
+        own.  Exists for two reasons now:
+
+        1. ``relink_notebook_kg`` commits per source, and a `finally`-keyed
+           dirty bump cannot survive a kill -9 landing between a source's
+           commit and the run's finally — the seq advance has to be atomic
+           with the edge insert it accompanies, or a killed process can leave
+           real edges in the database that never escaped kg_mutation_seq (see
+           the coordinator's module docstring for why that permanently
+           short-circuits 「刷新图谱」 for that notebook).
+        2. ``set_edge_review`` (R2 P2 fix, codex #638 R2) needs the bump AND
+           the freshly-bumped seq value ATOMIC with its own review_status
+           UPDATE — see ``review_queue_memo``'s module docstring for the two
+           races a separate post-commit bump+read used to open.
+
+        Returns the freshly-bumped ``kg_mutation_seq``, read back on the SAME
+        connection (so it observes this call's own uncommitted write —
+        ordinary read-your-writes within one transaction, true for both
+        backends) rather than a new post-commit connection that could race
+        another writer's own bump. Existing callers that only cared about the
+        side effect (``relink_notebook_kg``) simply ignore the return value —
+        this is a backward-compatible signature widening, not a behavior
+        change for them."""
         now = self._now()
         self.unified_store.mark_dirty(connection, notebook_id, now)
         # Re-arm maybe_auto_index's once-set: the index this nb was previously
@@ -126,6 +145,7 @@ class KgMutationCoordinator:
         # re-samples. This is the single mutation funnel, so it covers chunk adds,
         # re-chunk, re-embed and KG edits — the cheapest correct invalidation site.
         self.notebook_languages.pop(notebook_id, None)
+        return int(self.unified_store.graph_seq_row(connection, notebook_id)[0])
 
     def bump_cluster_mutation_seq(
         self, connection: object, notebook_id: str
