@@ -2936,11 +2936,15 @@ class RepositoryFacade:
         canonical_id: str,
         *,
         source_notebook_id: str = "",
+        limit: int | None = 200,
+        after: str = "",
     ) -> dict:
         return self._runtime.knowledge_query.concept_detail(
             notebook_id,
             canonical_id,
             source_notebook_id=source_notebook_id,
+            limit=limit,
+            after=after,
         )
 
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):

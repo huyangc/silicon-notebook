@@ -29,6 +29,7 @@ from app.services import background_jobs
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
+    CONCEPT_DETAIL_PAGE_MAX,
     KG_COMMUNITY_EDGES_MAX,
     KG_SOURCE_PAGE_MAX,
 )
@@ -353,12 +354,19 @@ def get_concept_detail(
     notebook_id: str,
     canonical_id: str,
     source_notebook_id: str = Query(""),
+    limit: int = Query(
+        CONCEPT_DETAIL_PAGE_MAX, ge=1, le=CONCEPT_DETAIL_PAGE_MAX,
+        description="hub 簇成员分页大小(keyset);默认与上限都是一页",
+    ),
+    after: str = Query("", description="上一页最后一个成员 id(keyset 游标)"),
 ) -> dict:
     try:
         return repository().concept_detail(
             notebook_id,
             canonical_id,
             source_notebook_id=source_notebook_id or notebook_id,
+            limit=limit,
+            after=after,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Concept not found")

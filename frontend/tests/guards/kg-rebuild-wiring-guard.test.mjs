@@ -122,7 +122,22 @@ test("rebuild refresh reaccounts the selected concept after replacing the graph"
   assert.match(refresh, /const selection = selectedNodeIdRef\.current/);
   assert.match(refresh, /setUnifiedGraph\(graph\)/);
   assert.match(refresh, /fetchConceptDetail\(owner\.notebookId, selected\.id\)/);
-  assert.match(refresh, /setConceptDetail\(detail\)/);
+  // R3·T-B2 (design review B8): a rebuild refresh lands a FRESH first page,
+  // so it must reset the hub-cluster "load more" accumulated state
+  // (epoch bump + fresh fetch context) via setConceptDetailFirstPage —
+  // not just replace conceptDetail's fields with the raw setter, which
+  // would leave a stale cursor/accumulated list pointing at the pre-rebuild
+  // page.
+  assert.match(
+    refresh,
+    /setConceptDetailFirstPage\(\s*\{ notebookId: owner\.notebookId, nodeId: selected\.id, sourceNotebookId: "" \},\s*detail,/,
+  );
+  assert.match(refresh, /\} else \{\s*setConceptDetailFirstPage\(null, null\);\s*\}/);
+  assert.equal(
+    refresh.includes("setConceptDetail("),
+    false,
+    "must route through setConceptDetailFirstPage, not the raw setter, to reset accumulated load-more state",
+  );
   assert.match(refresh, /setNodeContext\(null\)/);
 });
 

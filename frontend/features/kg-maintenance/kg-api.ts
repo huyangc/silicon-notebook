@@ -115,11 +115,19 @@ export const fetchKgNeighbors = (
     options,
   );
 
-export const fetchConceptDetail = (nb: string, id: string, sourceNotebookId = "") =>
-  requestJson<ConceptDetailResp>(
-    `/notebooks/${nb}/concepts/${encodeURIComponent(id)}/detail${sourceNotebookId ? `?source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`,
+// `after` is the hub-cluster member keyset cursor (R3·T-B2): the `id` of the
+// last member on the previous page, or "" for the first page. Omitting it
+// (the common call shape below) is the first page — backward compatible.
+export const fetchConceptDetail = (nb: string, id: string, sourceNotebookId = "", after = "") => {
+  const params = new URLSearchParams();
+  if (sourceNotebookId) params.set("source_notebook_id", sourceNotebookId);
+  if (after) params.set("after", after);
+  const query = params.toString();
+  return requestJson<ConceptDetailResp>(
+    `/notebooks/${nb}/concepts/${encodeURIComponent(id)}/detail${query ? `?${query}` : ""}`,
     options,
   );
+};
 
 export const fetchNodeContext = (nb: string, id: string, sourceNotebookId = "") =>
   requestJson<NodeContext>(

@@ -14,7 +14,7 @@ from app.models.knowledge import (
 )
 from app.services.retrieval import RetrievedKnowledge
 from app.services.extraction_profiles import OBJECT_SCHEMAS, OBJECT_TYPE_LABELS, ObjectSchema
-from app.services.knowledge_contracts import KnowledgeGraphTooLargeError
+from app.services.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX, KnowledgeGraphTooLargeError
 from app.services.model_work import ModelProviderError
 
 
@@ -447,15 +447,42 @@ class KnowledgeQueryService:
         canonical_id: str,
         *,
         source_notebook_id: str = "",
+        limit: Optional[int] = CONCEPT_DETAIL_PAGE_MAX,
+        after: str = "",
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        return self._concept_detail(source_id, canonical_id)
+        return self._concept_detail(source_id, canonical_id, limit=limit, after=after)
 
-    def _concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
+    def _concept_detail(
+        self,
+        notebook_id: str,
+        canonical_id: str,
+        *,
+        limit: Optional[int] = CONCEPT_DETAIL_PAGE_MAX,
+        after: str = "",
+    ) -> dict:
+        # Hub-cluster member pagination (KG-4 application-side fix, R3·T-B2):
+        # `concept_cluster_detail_rows` used to return every member (plus
+        # full payload/evidence) unbounded — production has seen 8-9M cluster
+        # rows for a single hub concept. `limit=None` keeps the legacy
+        # unbounded read available for internal callers (e.g. the pagination
+        # equality oracle in tests) that still need the whole member set in
+        # one shot.
+        #
+        # `next_cursor` is derived by over-fetching one extra row past
+        # `limit` and trimming it off, rather than comparing against
+        # `member_total`: it stays correct even if the member set changes
+        # between this page's row read and the separate COUNT query below,
+        # and needs no notion of "how many members came before this page".
+        fetch_limit = None if limit is None else limit + 1
         with self.database.connect() as db:
             cluster_rows, name = self.knowledge.concept_cluster_detail_rows(
-                db, notebook_id, canonical_id
+                db, notebook_id, canonical_id, limit=fetch_limit, after=after
             )
+        next_cursor = None
+        if limit is not None and len(cluster_rows) > limit:
+            cluster_rows = cluster_rows[:limit]
+            next_cursor = cluster_rows[-1]["member_object_id"]
         members = []
         member_ids = []
         for row in cluster_rows:
@@ -466,6 +493,10 @@ class KnowledgeQueryService:
                 "evidence": json.loads(row["evidence"] or "[]"),
             })
             member_ids.append(row["member_object_id"])
+        with self.database.connect() as db:
+            member_total = self.knowledge.concept_cluster_member_total(
+                db, notebook_id, canonical_id
+            )
         if not member_ids:
             return {
                 "canonical_id": canonical_id,
@@ -473,11 +504,18 @@ class KnowledgeQueryService:
                 "members": [],
                 "attached": [],
                 "evidence": [],
+                "member_total": member_total,
+                "next_cursor": None,
             }
         with self.database.connect() as db:
             relation_edges, other_objects = self.knowledge.concept_neighbor_rows(
                 db, notebook_id, member_ids
             )
+        # `attached`/`evidence` are computed over THIS PAGE's members only
+        # (registered display-semantics change, R3·T-B2): each page reports
+        # the adjacency/evidence of the members it just returned, not the
+        # whole cluster. Paging through every page still surfaces the
+        # complete set — pagination, not truncation.
         attached = []
         seen = set()
         for edge in relation_edges:
@@ -503,6 +541,8 @@ class KnowledgeQueryService:
             "members": [by_id[item] for item in member_ids if item in by_id],
             "attached": attached,
             "evidence": evidence,
+            "member_total": member_total,
+            "next_cursor": next_cursor,
         }
 
     def node_context(

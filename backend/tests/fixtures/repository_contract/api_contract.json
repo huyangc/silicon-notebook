@@ -16347,6 +16347,32 @@
                 "title": "Source Notebook Id",
                 "type": "string"
               }
+            },
+            {
+              "description": "hub 簇成员分页大小(keyset);默认与上限都是一页",
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 200,
+                "description": "hub 簇成员分页大小(keyset);默认与上限都是一页",
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "description": "上一页最后一个成员 id(keyset 游标)",
+              "in": "query",
+              "name": "after",
+              "required": false,
+              "schema": {
+                "default": "",
+                "description": "上一页最后一个成员 id(keyset 游标)",
+                "title": "After",
+                "type": "string"
+              }
             }
           ],
           "responses": {

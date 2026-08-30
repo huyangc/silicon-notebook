@@ -2932,22 +2932,57 @@ class KnowledgeStore:
 
     @staticmethod
     def concept_cluster_detail_rows(
-        db: sqlite3.Connection, notebook_id: str, canonical_id: str
+        db: sqlite3.Connection,
+        notebook_id: str,
+        canonical_id: str,
+        *,
+        limit: Optional[int] = None,
+        after: str = "",
     ) -> "tuple[List[sqlite3.Row], str]":
         """Cluster member rows (joined onto live knowledge_objects) plus the
-        canonical name for one concept cluster."""
-        cluster_rows = db.execute(
+        canonical name for one concept cluster. Keyset-paginated by
+        ``member_object_id`` (KG-4 hub-cluster fix, R3·T-B2) — mirrors the
+        PostgreSQL side's ``ORDER BY ... COLLATE "C"``: SQLite's default TEXT
+        collation (BINARY) already compares UTF-8 text byte-for-byte, the
+        same ordering, so no explicit COLLATE clause is needed here.
+        ``limit=None`` keeps the legacy unbounded (but now deterministically
+        ordered) read for internal callers that still need the full member
+        set in one shot."""
+        query = (
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
             "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
-            (notebook_id, canonical_id),
-        ).fetchall()
+            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'"
+        )
+        params: list = [notebook_id, canonical_id]
+        if after:
+            query += " AND cc.member_object_id > ?"
+            params.append(after)
+        query += " ORDER BY cc.member_object_id"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        cluster_rows = db.execute(query, tuple(params)).fetchall()
         name_row = db.execute(
             "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
             (notebook_id, canonical_id),
         ).fetchone()
         return cluster_rows, (name_row["canonical_name"] if name_row else "")
+
+    @staticmethod
+    def concept_cluster_member_total(db: sqlite3.Connection, notebook_id: str, canonical_id: str) -> int:
+        """COUNT with the SAME predicate shape as concept_cluster_detail_rows
+        (JOIN knowledge_objects ... AND ko.status!='deprecated') — design
+        review B8 (hard): a bare ``COUNT(*) FROM concept_clusters`` would
+        count deprecated members and make pagination look like it never
+        reaches the end."""
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM concept_clusters cc "
+            "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
+            (notebook_id, canonical_id),
+        ).fetchone()
+        return int(row["c"]) if row else 0
 
     @staticmethod
     def concept_neighbor_rows(

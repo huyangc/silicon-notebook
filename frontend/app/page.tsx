@@ -8143,6 +8143,18 @@ export default function Home() {
                             </div>
                           </section>
                         ))}
+                        {kgGraph.conceptDetail.next_cursor && (
+                          <button
+                            type="button"
+                            className="kg-load-more-members"
+                            disabled={kgGraph.conceptMembersLoadingMore}
+                            onClick={() => kgWorkspace.loadMoreConceptMembers().catch(reportError)}
+                          >
+                            {kgGraph.conceptMembersLoadingMore
+                              ? "加载中…"
+                              : `加载更多成员（已加载 ${kgGraph.conceptDetail.members.length}/${kgGraph.conceptDetail.member_total}）`}
+                          </button>
+                        )}
                       </>
                     )}
                     {!kgGraph.conceptDetail && kgGraph.nodeContext && (kgGraph.nodeContext.occurrences ?? []).length > 0 && (

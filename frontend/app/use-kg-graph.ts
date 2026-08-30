@@ -148,6 +148,20 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   selectedNodeIdRef.current = selectedNodeId;
   const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
+  const [conceptMembersLoadingMore, setConceptMembersLoadingMore] = useState(false);
+  // Hub-cluster member pagination (R3·T-B2). `conceptDetail` itself carries
+  // the cursor (`next_cursor`) and the accumulated `members`/`attached`/
+  // `evidence` — every place that lands a fresh FIRST page replaces the
+  // whole object wholesale, which is what resets the "load more" accumulated
+  // state (design review B8: the three call sites that (re)fetch a first
+  // page — selectNode, decideMerge's post-decision refresh, and
+  // refreshAfterRebuild — must not leave a stale cursor/accumulated list
+  // pointing at a superseded page). `conceptMembersEpochRef` additionally
+  // guards a load-more request in flight when one of those three call sites
+  // lands a new first page (or clears the detail entirely) before it
+  // resolves — the epoch bump discards the stale response.
+  const conceptMembersEpochRef = useRef(0);
+  const conceptDetailContextRef = useRef<{ notebookId: string; nodeId: string; sourceNotebookId: string } | null>(null);
   const [nodeContext, setNodeContext] = useState<NodeContext | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [decidingMerge, setDecidingMerge] = useState<{ id: string; confirm: boolean } | null>(null);
@@ -169,6 +183,24 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
 
   const publishError = (owner: KgWorkspaceOwner, error: unknown) => {
     if (owns(owner)) effectsRef.current.reportError(error);
+  };
+
+  // Every place that lands a FRESH first page (or clears the detail
+  // entirely) must go through here: it bumps the epoch (discarding any
+  // "load more" response still in flight against the superseded page) and
+  // records the request context `loadMoreConceptMembers` needs to fetch the
+  // next page (R3·T-B2, design review B8 — the three call sites at
+  // selectNode / decideMerge's refresh / refreshAfterRebuild must reset the
+  // accumulated "load more" state, not just replace `conceptDetail`'s
+  // top-level fields).
+  const setConceptDetailFirstPage = (
+    context: { notebookId: string; nodeId: string; sourceNotebookId: string } | null,
+    detail: ConceptDetailResp | null,
+  ) => {
+    conceptMembersEpochRef.current += 1;
+    conceptDetailContextRef.current = detail ? context : null;
+    setConceptMembersLoadingMore(false);
+    setConceptDetail(detail);
   };
 
   const clearSearchTimer = () => {
@@ -197,7 +229,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     setUnifiedStatus(null);
     setSelectedNodeId(null);
     setPendingFocusId(null);
-    setConceptDetail(null);
+    setConceptDetailFirstPage(null, null);
     setNodeContext(null);
     setReviewBusy(false);
     setDecidingMerge(null);
@@ -276,7 +308,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     setGraphOpen(true);
     setAnalysisOpen(false);
     setSelectedNodeId(null);
-    setConceptDetail(null);
+    setConceptDetailFirstPage(null, null);
     setNodeContext(null);
     setSearch("");
     setSearchHits([]);
@@ -421,7 +453,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     const requestId = ++graphNodeRequestRef.current;
     const sourceNotebookId = nodeNotebookRef.current.get(nodeId) || owner.notebookId;
     setSelectedNodeId(nodeId);
-    setConceptDetail(null);
+    setConceptDetailFirstPage(null, null);
     setNodeContext(null);
     effectsRef.current.focusGraphNode(nodeId);
     let resolvedSourceNotebookId = sourceNotebookId;
@@ -457,7 +489,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       try {
         const detail = await fetchConceptDetail(owner.notebookId, nodeId, resolvedSourceNotebookId);
         if (owns(owner) && requestId === graphNodeRequestRef.current && selectedNodeIdRef.current === nodeId) {
-          setConceptDetail(detail);
+          setConceptDetailFirstPage(
+            { notebookId: owner.notebookId, nodeId, sourceNotebookId: resolvedSourceNotebookId },
+            detail,
+          );
         }
       } catch (error) {
         if (owns(owner) && requestId === graphNodeRequestRef.current) publishError(owner, error);
@@ -471,6 +506,40 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         setNodeContext(context);
       }
     } catch { /* node context is best effort */ }
+  };
+
+  // Hub-cluster "load more members" (R3·T-B2). Appends the next page's
+  // members/attached/evidence onto the already-loaded ones; `member_total`/
+  // `next_cursor`/`canonical_name` are taken from the fresh page response
+  // (same values as before except `next_cursor`, which advances or clears).
+  // Guarded by `conceptMembersEpochRef` against a first page landing (via
+  // `setConceptDetailFirstPage`, e.g. selecting a different node, or a
+  // merge-decision/rebuild refresh) while this request is in flight — a
+  // stale response must not get merged onto a page it no longer matches.
+  const loadMoreConceptMembers = async () => {
+    const owner = currentOwner();
+    const context = conceptDetailContextRef.current;
+    const cursor = conceptDetail?.next_cursor;
+    if (!owner || !context || !cursor || conceptMembersLoadingMore
+      || owner.notebookId !== context.notebookId) return;
+    const epoch = conceptMembersEpochRef.current;
+    setConceptMembersLoadingMore(true);
+    try {
+      const page = await fetchConceptDetail(
+        context.notebookId, context.nodeId, context.sourceNotebookId, cursor,
+      );
+      if (!owns(owner) || epoch !== conceptMembersEpochRef.current) return;
+      setConceptDetail((current) => (current ? {
+        ...page,
+        members: [...current.members, ...page.members],
+        attached: [...current.attached, ...page.attached],
+        evidence: [...current.evidence, ...page.evidence],
+      } : current));
+    } catch (error) {
+      if (owns(owner) && epoch === conceptMembersEpochRef.current) effectsRef.current.reportError(error);
+    } finally {
+      if (epoch === conceptMembersEpochRef.current) setConceptMembersLoadingMore(false);
+    }
   };
 
   useEffect(() => {
@@ -639,9 +708,14 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       if (selected?.object_type === "concept") {
         const detail = await fetchConceptDetail(owner.notebookId, selected.id).catch(() => null);
         if (owns(owner) && ownsOperation("merge-decision", operation)
-          && selectedNodeIdRef.current === selection) setConceptDetail(detail);
+          && selectedNodeIdRef.current === selection) {
+          setConceptDetailFirstPage(
+            { notebookId: owner.notebookId, nodeId: selected.id, sourceNotebookId: "" },
+            detail,
+          );
+        }
       } else {
-        setConceptDetail(null);
+        setConceptDetailFirstPage(null, null);
       }
       if (!selected) setNodeContext(null);
     } catch (error) {
@@ -691,9 +765,14 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       const selected = selection ? graph.nodes.find((node) => node.id === selection) : null;
       if (selected?.object_type === "concept") {
         const detail = await fetchConceptDetail(owner.notebookId, selected.id).catch(() => null);
-        if (owns(owner) && selectedNodeIdRef.current === selection) setConceptDetail(detail);
+        if (owns(owner) && selectedNodeIdRef.current === selection) {
+          setConceptDetailFirstPage(
+            { notebookId: owner.notebookId, nodeId: selected.id, sourceNotebookId: "" },
+            detail,
+          );
+        }
       } else {
-        setConceptDetail(null);
+        setConceptDetailFirstPage(null, null);
       }
       if (!selected) setNodeContext(null);
     } catch (error) {
@@ -1067,6 +1146,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       status: visible ? unifiedStatus : null,
       selectedNodeId: visible ? selectedNodeId : null,
       conceptDetail: visible ? conceptDetail : null,
+      conceptMembersLoadingMore: visible && conceptMembersLoadingMore,
       nodeContext: visible ? nodeContext : null,
       reviewBusy: visible && reviewBusy,
       decidingMerge: visible ? decidingMerge : null,
@@ -1092,6 +1172,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     toggleType,
     clearTypes,
     selectNode,
+    loadMoreConceptMembers,
     reviewPendingMerges,
     reviewAllMerges,
     decideMerge,

@@ -155,6 +155,146 @@ def test_concept_detail_lists_members_and_attached(repo):
     assert detail["canonical_name"] == "MOSFET"
     assert any(x["object_type"]=="claim" for x in detail["attached"])
     assert detail["evidence"]
+    # R3·T-B2 pagination fields: default page (200) fits everything here.
+    assert detail["member_total"] == 1
+    assert detail["next_cursor"] is None
+
+# R3·T-B2 (KG-4 application-side fix): `concept_cluster_detail_rows` used to
+# return a hub cluster's entire member set (with full payload/evidence)
+# unbounded. These lock the keyset-paginated replacement: page union equals
+# the legacy unbounded read (kept as `limit=None`, the oracle), `member_total`
+# uses the SAME predicate as the page query (design review B8 — a bare
+# `COUNT(*) FROM concept_clusters` would count deprecated members), and
+# `attached`/`evidence` are scoped to the page's own members (registered
+# display-semantics change).
+
+def _hub_cluster(repo, nb_id, count):
+    """`count` concept objects with an identical (post-normalization) name,
+    which cluster into a single canonical id on rebuild."""
+    repo.store_kg(nb_id, None, [
+        {"local_id": f"m{i}", "object_type": "concept",
+         "payload": {"name": "HUB", "section_path": ""}, "evidence": []}
+        for i in range(count)
+    ], [])
+    repo.rebuild_unified_kg(nb_id)
+    from collections import Counter
+    cmap = repo.cluster_map(nb_id)
+    return Counter(cmap.values()).most_common(1)[0][0]
+
+def test_concept_detail_pagination_union_matches_full_oracle(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    cid = _hub_cluster(repo, nb.id, 430)  # > one default page (200), > one 90-sized page too
+
+    full = repo.concept_detail(nb.id, cid, limit=None)  # oracle: legacy unbounded read
+    assert len(full["members"]) == 430
+    assert full["member_total"] == 430
+    assert full["next_cursor"] is None
+
+    seen: list[str] = []
+    after = ""
+    pages = 0
+    while True:
+        page = repo.concept_detail(nb.id, cid, limit=90, after=after)
+        pages += 1
+        assert pages <= 6  # ceil(430/90) == 5; guards against an infinite loop on a bug
+        page_ids = [m["id"] for m in page["members"]]
+        assert page_ids == sorted(page_ids)  # keyset order within the page
+        if seen:
+            assert seen[-1] < page_ids[0]  # strictly increasing across pages too
+        seen.extend(page_ids)
+        assert page["member_total"] == 430  # same seq/version, same total on every page
+        if not page["next_cursor"]:
+            break
+        assert page["next_cursor"] == page_ids[-1]
+        after = page["next_cursor"]
+    assert pages == 5  # 4 full pages of 90 + one page of 70
+    assert seen == sorted(m["id"] for m in full["members"])  # union == oracle set, no dup/gap
+
+def test_concept_detail_next_cursor_boundary_cases(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    cid = _hub_cluster(repo, nb.id, 5)
+
+    # Empty cluster (bogus canonical id): no members, no crash, no phantom cursor.
+    empty = repo.concept_detail(nb.id, "bogus-canonical-id", limit=200)
+    assert empty == {
+        "canonical_id": "bogus-canonical-id", "canonical_name": "",
+        "members": [], "attached": [], "evidence": [],
+        "member_total": 0, "next_cursor": None,
+    }
+
+    # Exact full page (limit == member_total): every member fits, no next page.
+    exact = repo.concept_detail(nb.id, cid, limit=5)
+    assert len(exact["members"]) == 5 and exact["next_cursor"] is None
+
+    # Last page reached via keyset walk: a short final page also has no next cursor.
+    first = repo.concept_detail(nb.id, cid, limit=3)
+    assert len(first["members"]) == 3 and first["next_cursor"] is not None
+    last = repo.concept_detail(nb.id, cid, limit=3, after=first["next_cursor"])
+    assert len(last["members"]) == 2 and last["next_cursor"] is None
+
+def test_concept_detail_member_total_excludes_deprecated_members(repo):
+    """Design review B8 (hard, mutation-checked): member_total must use the
+    SAME predicate as the page query (JOIN knowledge_objects ...
+    AND status != 'deprecated'). A bare COUNT(*) FROM concept_clusters would
+    count a deprecated member and pagination would look like it never
+    reaches the end."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    cid = _hub_cluster(repo, nb.id, 4)
+    full = repo.concept_detail(nb.id, cid, limit=None)
+    assert full["member_total"] == 4
+    deprecated_id = full["members"][0]["id"]
+    with repo._connect() as db:
+        db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?", (deprecated_id,))
+        db.commit()
+    after = repo.concept_detail(nb.id, cid, limit=None)
+    assert after["member_total"] == 3  # deprecated member dropped from both rows and total
+    assert deprecated_id not in {m["id"] for m in after["members"]}
+
+def test_concept_detail_attached_and_evidence_are_page_scoped(repo):
+    """Registered display-semantics change (R3·T-B2): attached/evidence are
+    computed over the CURRENT PAGE's members only, not the whole cluster.
+    Paging through every page still surfaces the complete set."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "ma", "object_type": "concept", "payload": {"name": "HUB", "section_path": ""},
+         "evidence": [{"source_id": "s", "source_title": "D", "element_id": "e", "element_type": "p",
+                       "location_label": "1", "quoted_span": "tag-A", "confidence": 1.0}]},
+        {"local_id": "mb", "object_type": "concept", "payload": {"name": "HUB", "section_path": ""},
+         "evidence": [{"source_id": "s", "source_title": "D", "element_id": "e", "element_type": "p",
+                       "location_label": "1", "quoted_span": "tag-B", "confidence": 1.0}]},
+        {"local_id": "ka", "object_type": "claim", "payload": {"name": "claim-A", "section_path": ""}, "evidence": []},
+        {"local_id": "kb", "object_type": "claim", "payload": {"name": "claim-B", "section_path": ""}, "evidence": []},
+    ], [
+        {"source_local_id": "ka", "target_local_id": "ma", "edge_type": "about", "evidence": []},
+        {"source_local_id": "kb", "target_local_id": "mb", "edge_type": "about", "evidence": []},
+    ])
+    repo.rebuild_unified_kg(nb.id)
+    from collections import Counter
+    cmap = repo.cluster_map(nb.id)
+    cid = Counter(cmap.values()).most_common(1)[0][0]  # the 2-member HUB cluster (claims are singletons)
+
+    full = repo.concept_detail(nb.id, cid, limit=None)
+    assert len(full["members"]) == 2
+    # Map each member's generated id back to its own tag/claim via the raw
+    # per-member evidence carried on `members[i]` (untouched by the flattened
+    # `evidence` enrichment below it).
+    tag_of = {m["id"]: m["evidence"][0]["quoted_span"] for m in full["members"]}
+    claim_of_tag = {"tag-A": "claim-A", "tag-B": "claim-B"}
+
+    page1 = repo.concept_detail(nb.id, cid, limit=1)
+    first_id = page1["members"][0]["id"]
+    first_tag = tag_of[first_id]
+    assert [ev["quoted_span"] for ev in page1["evidence"]] == [first_tag]
+    assert [a["payload"]["name"] for a in page1["attached"]] == [claim_of_tag[first_tag]]
+    assert page1["next_cursor"] == first_id
+
+    page2 = repo.concept_detail(nb.id, cid, limit=1, after=page1["next_cursor"])
+    second_id = page2["members"][0]["id"]
+    second_tag = tag_of[second_id]
+    assert second_tag != first_tag
+    assert [ev["quoted_span"] for ev in page2["evidence"]] == [second_tag]
+    assert [a["payload"]["name"] for a in page2["attached"]] == [claim_of_tag[second_tag]]
+    assert page2["next_cursor"] is None
 
 def test_confirm_merge_unions_clusters_on_rebuild(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

@@ -5283,7 +5283,7 @@
     "owner": "KnowledgeQueryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', canonical_id: 'str', *, source_notebook_id: 'str' = '') -> 'dict'"
+    "signature": "(self, notebook_id: 'str', canonical_id: 'str', *, source_notebook_id: 'str' = '', limit: 'int | None' = 200, after: 'str' = '') -> 'dict'"
   },
   "concept_whitelist_add": {
     "consumers": [
