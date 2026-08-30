@@ -1853,21 +1853,13 @@ class RepositoryRuntime:
         — ``set_conflict_status`` resolves the FACADE wrapper per call because
         the frozen confirm_conflict phase contract patches that method."""
 
-        def review_queue_total(notebook_id: str) -> int:
-            # R3 T-A3: seq-gated COUNT via the QueryStorePort seat (``self.queries``
-            # already exists on the runtime — set in __init__ from ``seats.queries``),
-            # not a new compound facade port. Uses the SAME ``connect`` seat the rest
-            # of this method's read paths ride, so transaction-counting/failure-
-            # injection monkeypatches keep observing it.
-            with connect() as db:
-                return self.queries.review_queue_total(db, notebook_id)
-
         def read_kg_mutation_seq(notebook_id: str) -> int:
-            # R3 T-A3 P1-2: ``set_edge_review`` needs the just-bumped
+            # R3 T-A3 P1-2 / v4: ``set_edge_review`` needs the just-bumped
             # ``kg_mutation_seq`` AFTER its ``mark_unified_kg_dirty`` write
-            # commits, to retag the review-queue count memos onto the correct
-            # new seq via ``carry_review_queue_total``. ``mark_unified_kg_dirty``
-            # itself returns nothing (see kg_mutation.py), so this reads back
+            # commits, to retag the review-queue ranking memo (items + total,
+            # v4) onto the correct new seq via ``ReviewQueueMemo.carry``.
+            # ``mark_unified_kg_dirty`` itself returns nothing (see
+            # kg_mutation.py), so this reads back
             # through the existing ``unified_kg.graph_seq_row`` read-only
             # channel other services (checkup/collection_catalog/graph_retrieval)
             # already use for the same triple — a NEW ``connect()`` after the
@@ -1895,9 +1887,6 @@ class RepositoryRuntime:
             rule_card=rule_card,
             set_conflict_status=set_conflict_status,
             memory_store=self.memory_store,
-            review_queue_total=review_queue_total,
-            invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
-            carry_review_queue_total=self.queries.carry_review_queue_total,
             kg_mutation_seq=read_kg_mutation_seq,
             review_queue_memo=self.review_queue_memo,
         )

@@ -3995,7 +3995,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.review_queue_total",
+        "scope": "<module>.RepositoryFacade.review_queue_page",
         "target": "_runtime"
       },
       {
@@ -9470,35 +9470,20 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', limit: 'int' = 50, confirm_threshold: 'Optional[float]' = None, separate_threshold: 'Optional[float]' = None) -> 'dict'"
   },
-  "review_queue": {
+  "review_queue_page": {
     "consumers": [
       {
         "kind": "attribute",
         "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.edge_review_queue",
-        "target": "review_queue"
+        "target": "review_queue_page"
       }
     ],
     "kind": "method",
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', limit: 'int' = 200) -> 'List[dict]'"
-  },
-  "review_queue_total": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/knowledge_routes.py",
-        "scope": "<module>.edge_review_queue",
-        "target": "review_queue_total"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowledgeGovernanceService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'int'"
+    "signature": "(self, notebook_id: 'str', limit: 'int' = 100) -> 'Dict[str, Any]'"
   },
   "root_dir": {
     "consumers": [

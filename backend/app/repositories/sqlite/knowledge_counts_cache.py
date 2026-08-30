@@ -35,13 +35,16 @@ existing invalidate hooks cover them for free):
     (``from_row`` on every open, ~2s cold at 48k sources). Sound because a bare
     source add is element-less (never pending) and every real transition (parse,
     extract, source/KG delete) bumps the seq or hits ``invalidate``.
-  * ``review_queue_total`` (R3 T-A3) — ``COUNT(*) FROM knowledge_relations
-    WHERE review_status != 'rejected'`` backing the edge-review-queue's
-    ``total`` field, epoch-guarded the same way the two pending-source views
-    are (not the unguarded ``type_status_counts``/``chunk_count`` shape) —
-    see its own docstring below for the carry-forward it ALSO gets from
-    ``set_edge_review`` (a review decision is itself a KG mutation, so a
-    plain seq gate alone would go cold on every click).
+R3 T-A3 v4 note: the edge-review-queue's ``total`` field used to be a 5th
+memo here (``review_queue_total`` + a ``carry_review_queue_total`` retag,
+epoch-guarded the same way the two pending-source views are). codex #638 R1
+found that shape produced items/total from two independent seq-gated reads
+that could straddle a KG mutation and disagree about which version they
+described. v4 moved ``total`` into
+``app.services.review_queue_memo.ReviewQueueMemo`` instead, alongside the
+ranking items it is counted with (same lock, same seq, same cold scan) — this
+module no longer carries anything review-queue-shaped.
+
 Sources COUNT / ``source_ids`` are deliberately NOT cached here: ``create_source``
 inserts a row without bumping the seq, so a seq-keyed memo would drift — and they
 stay cheap without a memo. The user-facing source count
@@ -69,7 +72,6 @@ _MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict(
 _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_REVIEW_QUEUE_TOTAL: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _LOCK = threading.Lock()
 _INVALIDATION_EPOCH = 0
 _MAX_NOTEBOOKS = 512  # bounded LRU; counts dict per notebook is tiny (types×statuses)
@@ -294,96 +296,6 @@ def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
     return count
 
 
-def review_queue_total(db: sqlite3.Connection, notebook_id: str) -> int:
-    """Total size of the edge trust review queue (``review_status != 'rejected'``
-    edges in ``knowledge_relations``), memoized on ``(notebook_id,
-    kg_mutation_seq)``. Mirrors ``postgres/knowledge_counts_cache.review_queue_total``
-    (R3 T-A3) — backs the ``total`` field of ``GET
-    /notebooks/{id}/edge-review-queue``, independent of the ``limit``-bounded
-    queue itself.
-
-    Follows the epoch-guarded write-back shape of ``pending_source_count`` /
-    ``visible_pending_source_count`` above (not the unguarded
-    ``type_status_counts`` / ``chunk_count`` shape): this query is the same
-    cost class as pending-source (a plain sequential COUNT, no correlated
-    subqueries but still non-trivial on a large notebook), so it gets the same
-    protection against writing back a pre-invalidation snapshot.
-
-    Deliberately NOT part of ``warm_all`` — see the PostgreSQL mirror's
-    docstring for the cold-cost rationale (~1.1s on the largest production
-    library; lazy beats a startup warm most notebooks never need).
-
-    NOT "every request after is a memo hit until the next KG mutation" — the
-    review queue's OWN curation action (``set_edge_review``) is itself a KG
-    mutation that bumps ``kg_mutation_seq`` on every decision. Whether the
-    NEXT read is warm depends on ``carry_review_queue_total`` below:
-    ``set_edge_review`` calls it right after its bump for a pure
-    verified<->pending flip (queue membership/COUNT unchanged), retagging the
-    memo onto the new seq for free; a transition touching 'rejected' on
-    either side skips the carry and goes cold — membership may have actually
-    changed.
-
-    Gap closed (was registered as a known gap; F1): ``RepositoryFacade.
-    add_relations``, a test-only path, inserts relations straight through
-    ``KnowledgeStorePort.add_relations_current`` without bumping
-    ``kg_mutation_seq`` itself, but the facade method now explicitly calls
-    ``invalidate_knowledge_counts(notebook_id)`` right after the insert (see
-    ``repository_facade.add_relations``), so this memo cannot serve a stale
-    total across that fixture path either."""
-    seq = _mutation_seq(db, notebook_id)
-    with _LOCK:
-        hit = _REVIEW_QUEUE_TOTAL.get(notebook_id)
-        if hit is not None and hit[0] == seq:
-            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
-            return hit[1]
-        invalidation_epoch = _INVALIDATION_EPOCH
-
-    row = db.execute(
-        "SELECT COUNT(*) c FROM knowledge_relations "
-        "WHERE notebook_id=? AND review_status != 'rejected'",
-        (notebook_id,),
-    ).fetchone()
-    count = int(row["c"])
-
-    with _LOCK:
-        if invalidation_epoch == _INVALIDATION_EPOCH:
-            _REVIEW_QUEUE_TOTAL[notebook_id] = (seq, count)
-            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
-            while len(_REVIEW_QUEUE_TOTAL) > _MAX_NOTEBOOKS:
-                _REVIEW_QUEUE_TOTAL.popitem(last=False)
-    return count
-
-
-def carry_review_queue_total(notebook_id: str, expected_seq: int, new_seq: int) -> None:
-    """Cheap retag for the common ``set_edge_review`` case where a
-    verified<->pending flip changes NEITHER review-queue membership NOR its
-    COUNT (only a transition touching 'rejected' can do that — see
-    ``review_queue_total``'s docstring above and the R3 T-A3 design doc's
-    carry contract). Mirrors ``postgres/knowledge_counts_cache.
-    carry_review_queue_total``. Called by ``KnowledgeGovernanceService.
-    set_edge_review`` immediately after its ``kg_mutation_seq`` bump, so a
-    bare verified<->pending toggle stays a memo hit instead of paying the
-    ~1.1s cold COUNT on every click through the review queue.
-
-    Strictly a retag: the cached VALUE is never touched, only its ``seq``
-    label moves from ``expected_seq`` to ``new_seq``. Entirely under
-    ``_LOCK`` — no unlock-then-recompute window to race, so (unlike the
-    epoch-guarded writeback above) a plain strict equality check is enough:
-    the entry's cached seq must equal ``expected_seq`` exactly; any mismatch
-    pops the entry instead of guessing. A cold recompute on the next read is
-    always safe; a stale retag is not."""
-    with _LOCK:
-        hit = _REVIEW_QUEUE_TOTAL.get(notebook_id)
-        if hit is None:
-            return
-        seq, value = hit
-        if seq == expected_seq:
-            _REVIEW_QUEUE_TOTAL[notebook_id] = (new_seq, value)
-            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
-        else:
-            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)
-
-
 def warm_all(db: sqlite3.Connection, progress=None) -> int:
     """Prime the FOUR open-path memos every notebook open/board/status-poll
     reaches (``type_status_counts`` / both pending-source views /
@@ -391,11 +303,11 @@ def warm_all(db: sqlite3.Connection, progress=None) -> int:
     fresh process start is served warm instead of paying the cold GROUP BY +
     correlated scans (see module docstring).
 
-    ``review_queue_total`` (the fifth seq-gated memo, R3 T-A3) is
-    DELIBERATELY excluded — see its own docstring for the cold-cost
-    rationale (~1.1s on the largest production library; most notebooks'
-    users never open the review queue). It stays lazy: cold on first access,
-    warm via its own seq-gate / carry after.
+    The edge-review-queue's true total is NOT a memo in this module — R3 T-A3
+    v4 moved it into ``app.services.review_queue_memo.ReviewQueueMemo``,
+    alongside the ranking items it is counted with in the same cold scan (see
+    that module's docstring; this file's module docstring records why the
+    module-global 5th-memo shape it used to have here was removed).
 
     Called once at startup behind the readiness gate by the facade
     ``warm_open_path_caches``. The notebook-id query lives HERE (store-owned SQL)
@@ -444,10 +356,8 @@ def invalidate(notebook_id: "Optional[str]" = None) -> None:
             _PENDING.clear()
             _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
-            _REVIEW_QUEUE_TOTAL.clear()
         else:
             _MEMO.pop(notebook_id, None)
             _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)
-            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)

@@ -21,10 +21,18 @@ invalidate 时推进,外部无关 notebook 的 ingestion 不再牵连它;仍保�
 刻意差异(比 sqlite 版严格一点):sqlite 的 ``type_status_counts`` 写回不做 epoch 检查
 (它只有一个 ``_MEMO`` 消费者形态历史更早,当时判断该窗口足够窄可以不设防;且 sqlite
 侧 pending memo 用的是全局单值 epoch,没有 per-notebook 隔离)。PG 这里从
-``type_status_counts`` 到 ``chunk_count`` 到两个 pending 视图,再到 ``review_queue_total``
-(R3 T-A3),五个 memo 统一套上 per-notebook epoch 守卫——原因是 PG 面对的大库冷查询窗口(几秒级)比 sqlite 场景长得多,
+``type_status_counts`` 到 ``chunk_count`` 到两个 pending 视图,四个 memo 统一套上
+per-notebook epoch 守卫——原因是 PG 面对的大库冷查询窗口(几秒级)比 sqlite 场景长得多,
 全局 epoch 在这个窗口内被无关库的高频 ingestion 持续作废的概率显著更高,窄窗口下可以
 不设防的假设在这里不成立,所以选择更精细的隔离而不是复用 sqlite 的从简版本。
+
+(R3 T-A3 曾在这里加过第 5 个 memo ``review_queue_total`` 及其 ``carry_review_
+queue_total`` retag——codex #638 R1 指出 module-global 键跨 runtime 混串、且
+端点两次独立读会产生 items/total 跨版本不一致的响应;v4 把队列总量挪进
+``app.services.review_queue_memo.ReviewQueueMemo``,与排名 items 同一个条目、
+同一把锁、同一次冷算,runtime-owned、无跨进程/跨 runtime 混串面。这里的第 5
+memo 已随之整体撤除,包括这个 docstring 曾经的措辞——见该模块的 module docstring
+获取现在的权威口径。)
 """
 from __future__ import annotations
 
@@ -44,7 +52,6 @@ _MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict(
 _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_REVIEW_QUEUE_TOTAL: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 
 # invalidation epoch:写回前重新核对「读之后到写之前,这个 notebook(或全局)没被
 # invalidate 过」。_GLOBAL_EPOCH 只被 invalidate(None) 推进(清空全部缓存那条路径);
@@ -84,8 +91,8 @@ def _seq_gated(
     notebook_id: str,
     compute: "Callable[[], Any]",
 ) -> Any:
-    """五个 memo(``_MEMO`` / ``_CHUNKS`` / ``_PENDING`` / ``_VISIBLE_PENDING`` /
-    ``_REVIEW_QUEUE_TOTAL``)共享的 seq-gated 读写骨架:命中同 ``kg_mutation_seq`` 直接返回;miss 时锁外跑
+    """四个 memo(``_MEMO`` / ``_CHUNKS`` / ``_PENDING`` / ``_VISIBLE_PENDING``)
+    共享的 seq-gated 读写骨架:命中同 ``kg_mutation_seq`` 直接返回;miss 时锁外跑
     ``compute()``,写回前重新核对 ``(全局 epoch, 该 notebook 的 epoch)`` 二元组没有
     在计算期间变化——只有这个 notebook 自己被 invalidate,或全局被清空,才会拒绝写回;
     别的 notebook 的 invalidate 不影响。"""
@@ -182,87 +189,6 @@ def chunk_count(db: Any, notebook_id: str) -> int:
     return _seq_gated(_CHUNKS, db, notebook_id, compute)
 
 
-def review_queue_total(db: Any, notebook_id: str) -> int:
-    """Total size of the edge trust review queue (``review_status != 'rejected'``
-    edges in ``knowledge_relations``), memoized on ``(notebook_id,
-    kg_mutation_seq)`` via the shared ``_seq_gated`` skeleton — same epoch/LRU
-    guarantees as the four siblings above. Backs the ``GET
-    /notebooks/{id}/edge-review-queue`` response's ``total`` field (R3 T-A3):
-    the queue itself stays ``limit``-bounded (``review_queue``'s top-M
-    ranking), so callers need this independent COUNT to know how many edges
-    remain unreviewed beyond the page they were handed.
-
-    Deliberately NOT part of ``warm_all``: cold it is a sequential COUNT(*)
-    scan gated only by ``idx_knowledge_relations_nb_review`` (no GROUP BY, no
-    correlated LATERAL joins) but still ~1.1s on the largest production
-    library — a startup warm of every notebook would pay that for a value
-    most notebooks' users never open the review queue for. Lazy: the first
-    request against a given notebook's queue pays the cold COUNT once.
-
-    NOT "every request after is a memo hit until the next KG mutation" — the
-    review queue's OWN curation action (``set_edge_review``) is itself a KG
-    mutation that bumps ``kg_mutation_seq`` on every single decision, so a
-    naive seq-gate would force a fresh cold COUNT on every click through the
-    queue. Whether the NEXT read after a decision is warm instead depends on
-    ``carry_review_queue_total`` below: ``KnowledgeGovernanceService.
-    set_edge_review`` calls it right after its bump whenever the transition
-    is a pure verified<->pending flip (queue membership/COUNT unchanged), so
-    those retag the memo onto the new seq for free. A transition touching
-    'rejected' on either side skips the carry and lets the memo go cold —
-    membership may have actually changed, so a fresh COUNT is required.
-
-    Gap closed (was registered as a known gap; F1): ``RepositoryFacade.
-    add_relations`` — a test-only path used by fixtures that inserts
-    relations straight through ``KnowledgeStorePort.add_relations_current``
-    without going through ``store_kg`` — does NOT bump ``kg_mutation_seq``
-    itself, but the facade method now explicitly calls
-    ``invalidate_knowledge_counts(notebook_id)`` right after the insert (see
-    ``repository_facade.add_relations``), so this memo cannot serve a stale
-    total across that fixture path either.
-    """
-
-    def compute() -> int:
-        row = db.execute(
-            "SELECT COUNT(*) AS c FROM knowledge_relations "
-            "WHERE notebook_id=%s AND review_status != 'rejected'",
-            (notebook_id,),
-        ).fetchone()
-        return int(row["c"])
-
-    return _seq_gated(_REVIEW_QUEUE_TOTAL, db, notebook_id, compute)
-
-
-def carry_review_queue_total(notebook_id: str, expected_seq: int, new_seq: int) -> None:
-    """Cheap retag for the common ``set_edge_review`` case where a
-    verified<->pending flip changes NEITHER review-queue membership NOR its
-    COUNT (only a transition touching 'rejected' can do that — see
-    ``review_queue_total``'s docstring above and the R3 T-A3 design doc's
-    carry contract). Called by ``KnowledgeGovernanceService.set_edge_review``
-    immediately after its ``kg_mutation_seq`` bump, so a bare verified<->
-    pending toggle stays a memo hit instead of paying the ~1.1s cold COUNT on
-    every click through the review queue.
-
-    Strictly a retag: the cached VALUE is never touched, only its ``seq``
-    label moves from ``expected_seq`` to ``new_seq``. Guarded the same way
-    ``_seq_gated``'s writeback is guarded — entirely under ``_LOCK``, so
-    unlike ``_seq_gated`` there is no unlock-then-recompute window to race:
-    the entry's cached seq must equal ``expected_seq`` exactly (the caller
-    passes ``new_seq - 1``, the seq it observed immediately before its own
-    bump); any mismatch — another writer's bump interleaved, or the memo was
-    never warm for this notebook — pops the entry instead of guessing. A cold
-    recompute on the next read is always safe; a stale retag is not."""
-    with _LOCK:
-        hit = _REVIEW_QUEUE_TOTAL.get(notebook_id)
-        if hit is None:
-            return
-        seq, value = hit
-        if seq == expected_seq:
-            _REVIEW_QUEUE_TOTAL[notebook_id] = (new_seq, value)
-            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
-        else:
-            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)
-
-
 def warm_all(db: Any, progress=None) -> int:
     """Prime the FOUR open-path memos every notebook open/board/status-poll
     reaches (``type_status_counts`` / both pending-source views /
@@ -271,12 +197,11 @@ def warm_all(db: Any, progress=None) -> int:
     correlated scans (see module docstring; sqlite 镜像见
     ``sqlite/knowledge_counts_cache.warm_all``)。
 
-    ``review_queue_total`` (the fifth seq-gated memo, R3 T-A3) is
-    DELIBERATELY excluded here — see its own docstring for the cold-cost
-    rationale (~1.1s on the largest production library; most notebooks'
-    users never open the review queue, so a startup warm of every notebook
-    would pay that cost for a value most requests never need). It stays
-    lazy: cold on first access, warm via its own seq-gate / carry after.
+    The edge-review-queue's true total is NOT one of these four — it lives in
+    ``app.services.review_queue_memo.ReviewQueueMemo`` (runtime-owned, next to
+    the ranking it is counted alongside; see that module's docstring), not in
+    this module at all (R3 T-A3 v4 removed the module-global ``review_queue_
+    total`` memo that used to live here).
 
     Best-effort: 每个 notebook 一个独立事务尝试,``psycopg.Error`` 被吞掉——但 PG
     的事务语义要求出错后必须 ``rollback()`` 才能让连接在下一次 ``execute`` 继续可用
@@ -402,11 +327,13 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
     一并清空——全局代次已经变了,残留的 per-notebook 代次不再有意义(下次读取时
     ``_epoch_of`` 会用默认值 0 重新起算,不影响正确性)。
 
-    ``_REVIEW_QUEUE_TOTAL``(T-A3)加入了下面两个分支的显式 clear/pop——核实过
-    这一步**不是**自动的:本函数按名字枚举每个 memo 字典,新增一个 memo 字典必须
-    在这里显式登记才会被安全阀覆盖,否则「写已落但 seq bump 未提交」那个边缘窗口
-    对新 memo 依旧成立(seq gate 本身仍是正确性权威,只是这一处 best-effort 安全阀
-    会漏了它)。"""
+    本函数按名字枚举每个 memo 字典,新增一个 memo 字典必须在这里显式登记才会被安全阀
+    覆盖,否则「写已落但 seq bump 未提交」那个边缘窗口对新 memo 依旧成立(seq gate
+    本身仍是正确性权威,只是这一处 best-effort 安全阀会漏了它)。
+
+    (``_REVIEW_QUEUE_TOTAL`` 曾经是这四个之外的第 5 个 memo,R3 T-A3 v4 整体撤除——
+    队列总量现在随排名一起存在 ``ReviewQueueMemo`` 里,那个 memo 有自己独立的
+    ``invalidate()``,不受这里管辖。)"""
     global _GLOBAL_EPOCH
     with _LOCK:
         if notebook_id is None:
@@ -415,7 +342,6 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
             _PENDING.clear()
             _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
-            _REVIEW_QUEUE_TOTAL.clear()
             _EPOCHS.clear()
         else:
             _EPOCHS[notebook_id] = _EPOCHS.get(notebook_id, 0) + 1
@@ -430,7 +356,6 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
             _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)
-            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)
 
 
 __all__ = [
@@ -442,7 +367,5 @@ __all__ = [
     "warm_all",
     "pending_source_count",
     "visible_pending_source_count",
-    "review_queue_total",
-    "carry_review_queue_total",
     "invalidate",
 ]

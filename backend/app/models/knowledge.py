@@ -129,9 +129,10 @@ class EdgeReviewItem(BaseModel):
 
 class EdgeReviewQueueResponse(BaseModel):
     """Response for GET /notebooks/{id}/edge-review-queue: the limit-bounded,
-    priority-ranked page plus the queue's true total (a seq-gated COUNT,
-    independent of `limit`) so the UI can show "共 N 条" instead of just the
-    page it was handed (R3 T-A3)."""
+    priority-ranked page plus the queue's true total (independent of `limit`)
+    so the UI can show "共 N 条" instead of just the page it was handed (R3
+    T-A3). `total` is the SAME KG version as `items` (R3 T-A3 v4) — both come
+    from one seq-gated ranking-memo entry, never two independent reads."""
     items: List[EdgeReviewItem]
     total: int
 

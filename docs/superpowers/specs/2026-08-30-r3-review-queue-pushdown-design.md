@@ -127,31 +127,36 @@ Python 打分与 `heapq.nlargest`）。唯一改动：端点对象批取的投�
 fail-closed/读序变异锚点/「verified 翻转后同进程下一次取队列不冷算」计数器
 断言/跨进程模拟（连 bump 两次）必须重算/返回值突变不影响 memo。
 
-### T-A3 review_queue_total（独立，可并行）
+### T-A3 review_queue_total（v4：total 随排名 memo 同版本，codex #638 R1）
 
-- `knowledge_counts_cache.py`（PG+SQLite 镜像）加第 5 个 seq-gated memo
-  `review_queue_total`：`COUNT(*) WHERE notebook_id=%s AND
-  review_status!='rejected'`。**epoch 保护对齐 pending/visible_pending
-  两个 memo 的形态**（不是 type_status_counts 的无 epoch 形）。**不进**
-  `warm_all`（大库冷 COUNT ~1.1s，懒算）。seq 闸完备性：knowledge_relations
-  的生产写路径均 bump（关系补全/store_kg/job publish 已抽查）；豁口
-  facade `add_relations` 与 T-A2 同一处置（显式 invalidate）。
-- **total memo 的 carry（质量评审 P1-2）**：审核循环里每次 verified/
-  pending 判定都 bump seq，若无处置，每次点击都付一次 ~1.1s 冷 COUNT 且
-  结果逐值相同。counts_cache 增加 `carry_review_queue_total(nb,
-  expected_seq, new_seq)`（锁内 seq 严格比对后仅改标签），由
-  `set_edge_review` 按上面 T-A2 的同一前值条件调用（T-A3 先落此钩子，
-  T-A2 复用同一处置点）。docstring 不得声称「下次必命中」——要写明
-  审核动作本身就是 KG mutation，命中依赖 carry。
-- API 形状：`GET /notebooks/{id}/edge-review-queue` 响应从
-  `List[EdgeReviewItem]` 改为 `{"items": [...], "total": n}`。前端标题在
-  `total > items.length` 时必须同时给出截断提示（「共 N 条 · 显示前 M
-  条」），不得只声称总量（质量评审 P1-1）；完整分页归 R4/后续。**契约面同
-  diff**：`scripts/generate_repository_contract_fixtures.py` 重生成
-  `backend/tests/fixtures/repository_contract/api_contract.json`；
-  `backend/tests/test_edge_review_queue.py:301` 的 list 断言更新；前端
-  `edge-review-queue.ts` + `page.tsx`；`docs/product-and-api.md` 与
-  `docs/product-and-api_zh.md` **成对**更新（AGENTS.md routing 的双语对）。
+初版把 total 做成 knowledge_counts_cache 的第 5 个 module-global memo。codex
+R1 三条 P2 指向同一根因：module-global 键跨 runtime 混串（与既有四 memo 同形
+的家族债，但新增面不该扩大它）、端点两次独立读产生 items>total 的自相矛盾
+响应、两个新增 ports 方法推高零松弛棘轮。v4 用一个设计变更同时化解：
+
+- **total 存进 ReviewQueueMemo 条目**：冷算时 `len(rel_rows)` 顺带记录，
+  条目 = (seq, items_topM, total)。carry（verified↔pending）total 不变、
+  仅随条目 retag；rejected/删除路径整条失效。runtime-owned 实例状态，
+  无跨 runtime 混串面。
+- **端点单调用**：service/facade 以 `review_queue_page(nb, limit) ->
+  {"items", "total"}` 替换 v3 的 `review_queue_total` facade 成员（净成员数
+  不变）；路由只调它——items 与 total 永远同一 seq 版本。直通路径
+  （limit<0 或 >M）冷算一趟同时得出两者。`review_queue(nb, limit)` 原签名
+  保留（逐位等值 oracle 的对照面不动）。
+- **counts_cache 第 5 memo 全家撤除**（PG/SQLite memo、carry 钩子、两个
+  ports 方法、query_store 转发、对应测试）：total 已随排名 memo 存取，
+  这套失去唯一消费者；ports 计数回到 896（对 master 零增长）。
+  update_edge_review 返回 prev 保留（排名 carry 需要）；add_relations 的
+  counts 失效撤回（其余四 memo 不读 relations），排名 memo 失效保留。
+- API 形状：`GET /notebooks/{id}/edge-review-queue` 响应 `{"items","total"}`
+  不变。**契约面同 diff**：api_contract 应零差异；facade_surface/
+  allowed_names/ownership 按成员替换重生成；
+  `scripts/generate_repository_contract_fixtures.py`。前端不变（形状同）。
+  前端标题在 `total > items.length` 时给出截断提示（「共 N 条 · 显示前 M
+  条」）；完整分页归 R4/后续。
+- 诊断探针 `knowledge_relations_review_count` 的 provenance 指向排名 memo
+  冷路径（governance 服务）。文档（product-and-api en/zh）的 total 语义
+  描述改为「与 items 同版本的队列总量」。
 
 ## PR-B：查重 + 概念详情
 

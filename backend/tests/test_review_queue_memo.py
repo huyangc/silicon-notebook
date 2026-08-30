@@ -1,10 +1,15 @@
 # backend/tests/test_review_queue_memo.py
-"""R3 T-A2 — ``ReviewQueueMemo`` 的单元契约。
+"""R3 T-A2 — ``ReviewQueueMemo`` 的单元契约(T-A3 v4 加入 ``total``,codex #638 R1)。
 
 这里全部是**纯**测试:memo 不碰数据库,seq 与冷算都是注入的可调用对象,所以每条
 性质都能被单独钉住,而不是靠一个端到端场景顺带覆盖。端到端(审核循环真的不再
-重算、rejected 真的失效、add_relations 豁口真的被堵)在
+重算、rejected 真的失效、add_relations 豁口真的被堵、items/total 同版本一致)在
 ``backend/tests/test_edge_review_queue.py``。
+
+``compute``/``top()`` 的返回值形状是 ``(items, total)``:v4 把队列真实总量从
+``knowledge_counts_cache`` 的第 5 个 module-global memo挪进了这里,与排名 items
+绑在同一个条目、同一把锁、同一次 compute 上,消灭了 v3 两次独立读可能跨版本
+不一致的自相矛盾响应。
 """
 import concurrent.futures
 import heapq
@@ -26,6 +31,14 @@ def _items(*rel_ids, status: str = "pending") -> list:
     ]
 
 
+def _value(*rel_ids, status: str = "pending", total=None) -> tuple:
+    """``compute()``的标准返回形状:``(items, total)``。``total`` 默认等于条目数
+    (最常见情形——排名 items 就是全部非 rejected 关系);测试总量与条目数刻意不同
+    的场景(比如「memo 命中时 total 不重算」)显式传入。"""
+    items = _items(*rel_ids, status=status)
+    return items, (len(items) if total is None else total)
+
+
 # ── 读序契约(硬)──────────────────────────────────────────────────────────
 
 def test_cold_compute_must_read_the_seq_before_the_data():
@@ -42,11 +55,11 @@ def test_cold_compute_must_read_the_seq_before_the_data():
     def read_seq() -> int:
         return world["seq"]
 
-    def compute() -> list:
+    def compute() -> tuple:
         world["computes"] += 1
         # 另一个写者在取数期间提交:seq 前进,内容随之更新。
         world["seq"] += 1
-        return _items(f"r-at-seq-{world['seq']}")
+        return _value(f"r-at-seq-{world['seq']}")
 
     memo.top("nb", 5, read_seq, compute)
     # 标签必须是取数**之前**读到的那个 seq,不是取数之后的。
@@ -63,23 +76,24 @@ def test_same_seq_is_served_without_recomputing():
     memo = ReviewQueueMemo()
     calls = {"n": 0}
 
-    def compute() -> list:
+    def compute() -> tuple:
         calls["n"] += 1
-        return _items("r1", "r2", "r3")
+        return _value("r1", "r2", "r3")
 
-    first = memo.top("nb", 3, lambda: 9, compute)
-    second = memo.top("nb", 3, lambda: 9, compute)
+    first, first_total = memo.top("nb", 3, lambda: 9, compute)
+    second, second_total = memo.top("nb", 3, lambda: 9, compute)
     assert calls["n"] == 1
     assert first == second
+    assert first_total == second_total == 3
 
 
 def test_a_new_seq_recomputes():
     memo = ReviewQueueMemo()
     calls = {"n": 0}
 
-    def compute() -> list:
+    def compute() -> tuple:
         calls["n"] += 1
-        return _items(f"r{calls['n']}")
+        return _value(f"r{calls['n']}")
 
     memo.top("nb", 3, lambda: 9, compute)
     memo.top("nb", 3, lambda: 10, compute)
@@ -87,52 +101,92 @@ def test_a_new_seq_recomputes():
     assert memo.cached_seq("nb") == 10
 
 
-def test_limit_slices_the_cached_ranking():
+def test_limit_slices_the_cached_ranking_but_not_the_total():
+    """``limit`` 只截 items——``total`` 是队列真实总量,与 ``limit`` 无关,任何
+    切片深度读到的都是同一个数。"""
     memo = ReviewQueueMemo()
     ranking = _items("r1", "r2", "r3", "r4")
-    memo.top("nb", 4, lambda: 1, lambda: ranking)
-    assert [i["rel_id"] for i in memo.top("nb", 2, lambda: 1, lambda: [])] == [
-        "r1", "r2",
-    ]
-    assert memo.top("nb", 0, lambda: 1, lambda: []) == []
+    memo.top("nb", 4, lambda: 1, lambda: (ranking, 4))
+    items, total = memo.top("nb", 2, lambda: 1, lambda: (None, None))
+    assert [i["rel_id"] for i in items] == ["r1", "r2"]
+    assert total == 4
+    items0, total0 = memo.top("nb", 0, lambda: 1, lambda: (None, None))
+    assert items0 == []
+    assert total0 == 4
 
 
 def test_returned_items_are_detached_from_the_memo():
     """返回值不与 memo 共享任何可变对象:调用方(乃至 API 序列化层)怎么改都
     碰不到缓存里的那份。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 1, lambda: _items("r1", "r2"))
+    memo.top("nb", 5, lambda: 1, lambda: _value("r1", "r2"))
 
-    handed_out = memo.top("nb", 5, lambda: 1, lambda: [])
+    handed_out, _total = memo.top("nb", 5, lambda: 1, lambda: (None, None))
     handed_out[0]["review_status"] = "MUTATED"
     handed_out.append({"rel_id": "injected"})
     del handed_out[0]
 
-    fresh = memo.top("nb", 5, lambda: 1, lambda: [])
+    fresh, fresh_total = memo.top("nb", 5, lambda: 1, lambda: (None, None))
     assert [i["rel_id"] for i in fresh] == ["r1", "r2"]
     assert {i["review_status"] for i in fresh} == {"pending"}
+    assert fresh_total == 2
 
 
 def test_two_readers_do_not_share_the_returned_objects():
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 1, lambda: _items("r1"))
-    a = memo.top("nb", 5, lambda: 1, lambda: [])
-    b = memo.top("nb", 5, lambda: 1, lambda: [])
+    memo.top("nb", 5, lambda: 1, lambda: _value("r1"))
+    a, _ = memo.top("nb", 5, lambda: 1, lambda: (None, None))
+    b, _ = memo.top("nb", 5, lambda: 1, lambda: (None, None))
     assert a == b
     assert a is not b
     assert a[0] is not b[0]
+
+
+# ── total 的独立性(T-A3 v4)───────────────────────────────────────────────
+
+def test_total_is_not_recomputed_on_a_memo_hit():
+    """T-A3 v4 主判据 / 变异锚点:memo 命中时 ``total`` 必须是**第一次** compute
+    的那份,不能在命中路径上悄悄再跑一次独立的计数——这正是 v3 两次独立读会
+    跨版本不一致的病灶。用一个「每次真冷算都吐出不同 total」的 world 模拟:如果
+    实现被改回「items 走缓存、total 另外单独算一次」,``total_calls`` 会变成 2、
+    两次读到的 total 也会不相等,本条立刻报红。"""
+    memo = ReviewQueueMemo()
+    world = {"total_calls": 0}
+
+    def compute() -> tuple:
+        world["total_calls"] += 1
+        return _items("r1", "r2"), 100 + world["total_calls"]
+
+    _items1, total1 = memo.top("nb", 5, lambda: 1, compute)
+    _items2, total2 = memo.top("nb", 5, lambda: 1, compute)
+
+    assert world["total_calls"] == 1, "命中不得触发第二次冷算"
+    assert total1 == total2 == 101, (
+        "第二次读到的 total 必须是缓存的那份(101),不是重新算出的 102——"
+        "否则就是 v3 病灶重现:total 与 items 可能来自不同版本"
+    )
+
+
+def test_total_survives_a_limit_bypassing_read_at_the_same_seq():
+    """同一个 seq 下,不同 ``limit`` 的多次读必须看到同一个 ``total``(它不随
+    ``limit`` 变化,是队列的真实总量)。"""
+    memo = ReviewQueueMemo()
+    memo.top("nb", 5, lambda: 1, lambda: _value("r1", "r2", "r3", total=30))
+    _, total_a = memo.top("nb", 1, lambda: 1, lambda: (None, None))
+    _, total_b = memo.top("nb", 0, lambda: 1, lambda: (None, None))
+    assert total_a == total_b == 30
 
 
 # ── carry-forward ─────────────────────────────────────────────────────────
 
 def test_carry_retags_and_rewrites_only_that_relation():
     memo = ReviewQueueMemo()
-    before = memo.top("nb", 5, lambda: 7, lambda: _items("r1", "r2", "r3"))
+    before, before_total = memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2", "r3"))
 
     memo.carry("nb", 7, 8, "r2", "verified")
 
     assert memo.cached_seq("nb") == 8
-    after = memo.top("nb", 5, lambda: 8, lambda: [])
+    after, after_total = memo.top("nb", 5, lambda: 8, lambda: (None, None))
     assert [i["rel_id"] for i in after] == [i["rel_id"] for i in before]
     assert [i["review_status"] for i in after] == [
         "pending", "verified", "pending",
@@ -141,6 +195,25 @@ def test_carry_retags_and_rewrites_only_that_relation():
     assert [i["review_priority"] for i in after] == [
         i["review_priority"] for i in before
     ]
+    assert after_total == before_total
+
+
+def test_carry_preserves_total_across_a_status_flip():
+    """T-A3 v4 主判据:verified<->pending 翻转不改变非 rejected 集合的大小,
+    所以 ``carry`` 必须原样保留 ``total``,只挪标签——绝不重算。变异锚点:如果
+    ``carry`` 被改成「顺带 total-=0 之外的任何调整」或掉了 total 字段,本条报红。"""
+    memo = ReviewQueueMemo()
+    _items0, total0 = memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2", total=42))
+    assert total0 == 42
+
+    memo.carry("nb", 7, 8, "r1", "verified")
+
+    # compute 若被调用会吐出一个明显不同的 total(999),用来证明这次读没有冷算。
+    after_items, after_total = memo.top(
+        "nb", 5, lambda: 8, lambda: (_items("should-not-be-used"), 999)
+    )
+    assert after_total == 42
+    assert [i["review_status"] for i in after_items] == ["verified", "pending"]
 
 
 def test_carry_retags_even_when_the_relation_is_not_in_the_top_m():
@@ -148,20 +221,21 @@ def test_carry_retags_even_when_the_relation_is_not_in_the_top_m():
     priority 不含 ``review_status``,所以这次迁移对榜单毫无影响——丢掉条目只会
     白付一次冷算。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 7, lambda: _items("r1", "r2"))
+    memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2"))
 
     memo.carry("nb", 7, 8, "not-on-the-board", "verified")
 
     assert memo.cached_seq("nb") == 8
-    after = memo.top("nb", 5, lambda: 8, lambda: [])
+    after, after_total = memo.top("nb", 5, lambda: 8, lambda: (None, None))
     assert [i["rel_id"] for i in after] == ["r1", "r2"]
     assert {i["review_status"] for i in after} == {"pending"}
+    assert after_total == 2
 
 
 def test_carry_drops_the_entry_when_the_seq_does_not_match():
     """别的写者插了队(或这本从来没暖过这个版本):整条丢弃,不猜。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 7, lambda: _items("r1"))
+    memo.top("nb", 5, lambda: 7, lambda: _value("r1"))
 
     memo.carry("nb", 5, 9, "r1", "verified")   # expected 5 ≠ cached 7
 
@@ -182,7 +256,7 @@ def test_carry_does_not_mutate_a_list_already_handed_out():
     进 ``_store`` 内部:carry 前后分别记下 items list 与被改那条 item 的
     ``id()``,两者都必须换成新对象,旧对象的内容也不能被那次 carry 动过。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 7, lambda: _items("r1", "r2"))
+    memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2"))
 
     before_list = memo._store["nb"][1]
     before_item = next(item for item in before_list if item["rel_id"] == "r1")
@@ -219,13 +293,13 @@ def test_concurrent_cold_misses_run_one_compute():
     entered = threading.Event()
     release = threading.Event()
 
-    def compute() -> list:
+    def compute() -> tuple:
         calls.append(1)
         entered.set()
         assert release.wait(10)
-        return _items("r1")
+        return _value("r1")
 
-    def reader() -> list:
+    def reader() -> tuple:
         return memo.top("nb", 5, lambda: 4, compute)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -239,9 +313,9 @@ def test_concurrent_cold_misses_run_one_compute():
 
     assert len(calls) == 1
     assert len(out) == 4
-    assert all(result == _items("r1") for result in out)
+    assert all(result == (_items("r1"), 1) for result in out)
     # 等待者拿到的也必须是自己的那份拷贝,不是 leader 的那个 list。
-    assert len({id(result) for result in out}) == 4
+    assert len({id(result[0]) for result in out}) == 4
 
 
 def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry():
@@ -254,13 +328,13 @@ def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry()
     entered = threading.Event()
     release = threading.Event()
 
-    def compute() -> list:
+    def compute() -> tuple:
         state["calls"] += 1
         entered.set()
         assert release.wait(10)
         raise RuntimeError("cold ranking failed")
 
-    def call() -> list:
+    def call() -> tuple:
         return memo.top("nb", 5, lambda: 3, compute)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -287,14 +361,14 @@ def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recom
     release = threading.Event()
     compute_seconds = 0.05
 
-    def compute() -> list:
+    def compute() -> tuple:
         calls["n"] += 1
         entered.set()
         assert release.wait(10)
         time.sleep(compute_seconds)
         raise RuntimeError("cold ranking failed")
 
-    def call() -> list:
+    def call() -> tuple:
         return memo.top("nb", 5, lambda: 9, compute)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
@@ -315,8 +389,8 @@ def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recom
 
     # 失败后新请求仍从头当 leader(不做负缓存):同一个 seq,一个全新的、
     # 会成功的 compute 必须真的被调用并生效,不被上一次的失败钉死。
-    fresh = memo.top("nb", 5, lambda: 9, lambda: _items("recovered"))
-    assert fresh == _items("recovered")
+    fresh, fresh_total = memo.top("nb", 5, lambda: 9, lambda: _value("recovered"))
+    assert (fresh, fresh_total) == (_items("recovered"), 1)
     assert calls["n"] == 1, "the fresh call must run its OWN compute, not the failing one"
 
 
@@ -331,10 +405,10 @@ def test_a_blocked_cold_compute_for_one_notebook_does_not_block_another():
     entered = threading.Event()
     release = threading.Event()
 
-    def blocked_compute() -> list:
+    def blocked_compute() -> tuple:
         entered.set()
         assert release.wait(10)
-        return _items("a1")
+        return _value("a1")
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     try:
@@ -342,7 +416,7 @@ def test_a_blocked_cold_compute_for_one_notebook_does_not_block_another():
         assert entered.wait(10)
 
         other_future = pool.submit(
-            memo.top, "nb-B", 5, lambda: 1, lambda: _items("b1")
+            memo.top, "nb-B", 5, lambda: 1, lambda: _value("b1")
         )
         # nb-B 不需要等 nb-A 的 compute() 结束——给一个远小于 10s 门的短超时。
         other = other_future.result(timeout=1)
@@ -350,8 +424,8 @@ def test_a_blocked_cold_compute_for_one_notebook_does_not_block_another():
         release.set()
         pool.shutdown(wait=True)
 
-    assert other == _items("b1")
-    assert blocked_future.result(timeout=10) == _items("a1")
+    assert other == (_items("b1"), 1)
+    assert blocked_future.result(timeout=10) == (_items("a1"), 1)
 
 
 def test_writeback_from_a_slow_stale_leader_does_not_downgrade_a_fresher_entry():
@@ -362,28 +436,29 @@ def test_writeback_from_a_slow_stale_leader_does_not_downgrade_a_fresher_entry()
     entered = threading.Event()
     release = threading.Event()
 
-    def slow_compute() -> list:
+    def slow_compute() -> tuple:
         entered.set()
         assert release.wait(10)
-        return _items("stale")
+        return _value("stale")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         slow_future = pool.submit(memo.top, "nb", 5, lambda: 1, slow_compute)
         assert entered.wait(10)
 
         # 一个更新的 seq 在慢 leader 仍卡在 compute() 里的时候完成并写回。
-        fresh = memo.top("nb", 5, lambda: 2, lambda: _items("fresh"))
-        assert fresh == _items("fresh")
+        fresh, fresh_total = memo.top("nb", 5, lambda: 2, lambda: _value("fresh"))
+        assert (fresh, fresh_total) == (_items("fresh"), 1)
 
         release.set()
         stale_result = slow_future.result(timeout=10)
 
     # 慢 leader 仍然把它自己算出来的值交给它自己的调用方——写回守卫只挡
     # store,不改变 leader 对自己调用者的承诺。
-    assert stale_result == _items("stale")
+    assert stale_result == (_items("stale"), 1)
     assert memo.cached_seq("nb") == 2
-    after = memo.top("nb", 5, lambda: 2, lambda: [])
+    after, after_total = memo.top("nb", 5, lambda: 2, lambda: (None, None))
     assert [item["rel_id"] for item in after] == ["fresh"]
+    assert after_total == 1
 
 
 # ── epoch / LRU ───────────────────────────────────────────────────────────
@@ -393,10 +468,10 @@ def test_invalidate_during_a_cold_compute_rejects_the_writeback():
     entered = threading.Event()
     release = threading.Event()
 
-    def compute() -> list:
+    def compute() -> tuple:
         entered.set()
         assert release.wait(10)
-        return _items("r1")
+        return _value("r1")
 
     reader = threading.Thread(target=lambda: memo.top("nb", 5, lambda: 2, compute))
     reader.start()
@@ -419,10 +494,10 @@ def test_evicting_the_epoch_table_fails_closed():
     entered = threading.Event()
     release = threading.Event()
 
-    def compute() -> list:
+    def compute() -> tuple:
         entered.set()
         assert release.wait(10)
-        return _items("r1")
+        return _value("r1")
 
     reader = threading.Thread(target=lambda: memo.top("nb", 5, lambda: 2, compute))
     reader.start()
@@ -438,8 +513,8 @@ def test_evicting_the_epoch_table_fails_closed():
 
 def test_invalidate_all_clears_every_notebook():
     memo = ReviewQueueMemo()
-    memo.top("nb-a", 5, lambda: 1, lambda: _items("r1"))
-    memo.top("nb-b", 5, lambda: 1, lambda: _items("r2"))
+    memo.top("nb-a", 5, lambda: 1, lambda: _value("r1"))
+    memo.top("nb-b", 5, lambda: 1, lambda: _value("r2"))
     memo.invalidate()
     assert memo.cached_seq("nb-a") is None
     assert memo.cached_seq("nb-b") is None
@@ -447,8 +522,8 @@ def test_invalidate_all_clears_every_notebook():
 
 def test_per_notebook_invalidate_does_not_touch_a_sibling():
     memo = ReviewQueueMemo()
-    memo.top("nb-a", 5, lambda: 1, lambda: _items("r1"))
-    memo.top("nb-b", 5, lambda: 1, lambda: _items("r2"))
+    memo.top("nb-a", 5, lambda: 1, lambda: _value("r1"))
+    memo.top("nb-b", 5, lambda: 1, lambda: _value("r2"))
     memo.invalidate("nb-a")
     assert memo.cached_seq("nb-a") is None
     assert memo.cached_seq("nb-b") == 1
@@ -457,7 +532,7 @@ def test_per_notebook_invalidate_does_not_touch_a_sibling():
 def test_the_store_is_bounded():
     memo = ReviewQueueMemo(max_notebooks=2)
     for index in range(5):
-        memo.top(f"nb-{index}", 5, lambda: 1, lambda: _items("r1"))
+        memo.top(f"nb-{index}", 5, lambda: 1, lambda: _value("r1"))
     resident = [
         f"nb-{index}" for index in range(5)
         if memo.cached_seq(f"nb-{index}") is not None
