@@ -53,21 +53,26 @@ def _seed_user(database: SqliteDatabase, *, user_id: str, role: str) -> None:
         )
 
 
-def test_fresh_database_reaches_schema_version_63_with_the_table_present(
+def test_fresh_database_reaches_current_schema_version_with_the_table_present(
     tmp_path: Path,
 ):
+    """Schema version 63 is where ``extension_runtime_toggles`` itself
+    landed (_migration_63); the table must still be present after later
+    migrations (currently through v64's unrelated concept_clusters keyset
+    index) run on top of it, so this asserts against the live
+    ``SCHEMA_VERSION`` head rather than a number that drifts every time an
+    unrelated migration is added."""
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'fresh.db'}")
     db = SqliteDatabase(settings, tmp_path)
     applied = SqliteMigrator(db, settings).migrate()
-    assert applied and applied[-1] == 63
-    assert SCHEMA_VERSION == 63
+    assert applied and applied[-1] == SCHEMA_VERSION
     with db.connect() as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name='extension_runtime_toggles'"
         ).fetchone()
-    assert version == 63
+    assert version == SCHEMA_VERSION
     assert table is not None
 
 

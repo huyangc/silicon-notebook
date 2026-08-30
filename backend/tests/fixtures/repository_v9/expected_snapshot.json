@@ -1273,6 +1273,11 @@
         "type": "index"
       },
       {
+        "name": "idx_clusters_nb_canonical_member",
+        "sql_sha256": "87ec18477aa4112c371908cd729e0757c3e082f37a9943aafface1d30493af3b",
+        "type": "index"
+      },
+      {
         "name": "idx_clusters_nb_canonical_name_lower",
         "sql_sha256": "7d7db40c2187fb60cc0ba7f4a0333408e8a8228838b21df554c9f7293f033aac",
         "type": "index"
@@ -2313,6 +2318,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 63
+    "user_version": 64
   }
 }

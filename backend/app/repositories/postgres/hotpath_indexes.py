@@ -8,16 +8,19 @@ for the full "which query family does this serve" evidence per group. Batch 2
 ``backend/app/repositories/postgres/migrations/0042_hotpath_batch2_search_indexes.sql``,
 contributing one notebook-scoped composite partial GIN index (this module's
 first non-btree entry, hence the ``using``/``ddl_columns`` fields below) and
-one partial btree index.
-Both migrations and this module's ``HOTPATH_INDEX_SPECS`` are independent
+one partial btree index. Batch 3 added a third migration,
+``backend/app/repositories/postgres/migrations/0043_concept_cluster_keyset_index.sql``,
+contributing one plain (non-partial) composite btree keyset-covering index.
+Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
-cross-checks migration 0039 against its eight batch-1 specs, and
+cross-checks migration 0039 against its eight batch-1 specs,
 ``backend/tests/test_hotpath_indexes_batch2.py`` cross-checks migration 0042
-against its two batch-2 specs, so neither pairing can silently drift. One
-shared builder/inspector serves every batch: there is a single advisory lock
-name and a single ``HOTPATH_INDEX_SPECS`` tuple that grows with each batch,
-not a lock/tuple per batch.
+against its two batch-2 specs, and ``backend/tests/test_hotpath_indexes_batch3.py``
+cross-checks migration 0043 against its one batch-3 spec, so no pairing can
+silently drift. One shared builder/inspector serves every batch: there is a
+single advisory lock name and a single ``HOTPATH_INDEX_SPECS`` tuple that
+grows with each batch, not a lock/tuple per batch.
 
 This is the sibling of ``retrieval_indexes.py`` (GIN trigram indexes for
 large, notebook-scoped tables) but far simpler: every spec here is either a
@@ -286,6 +289,27 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
             "|| chr(8287)) || chr(12288)) <> ''::text"
         ),
         serves="postgres/maintenance.py: H5 non-blank element eligibility (count_missing_element_vectors et al.)",
+    ),
+    # -- Batch 3: concept-cluster keyset covering index -- see
+    # migrations/0043_concept_cluster_keyset_index.sql for the full
+    # production evidence and backend/tests/test_hotpath_indexes_batch3.py
+    # for this module's own migration<->spec reconciliation test.
+    HotpathIndexSpec(
+        name="idx_clusters_nb_canonical_member",
+        table="concept_clusters",
+        columns=("notebook_id", "canonical_id", "member_object_id"),
+        predicate="",
+        predicate_shape="",
+        # 三列建表即 COLLATE "C"(0001_initial.sql:144-155),普通 btree 继承列
+        # collation,与 knowledge_store.py:concept_cluster_detail_rows 自己的
+        # `COLLATE "C"` 比较/排序键逐字匹配——声明出来让同名错 collation 的
+        # 手建索引同样被拒。opclass 为 pg_catalog 默认 text_ops。
+        opclasses=("pg_catalog:text_ops", "pg_catalog:text_ops", "pg_catalog:text_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C"),
+        serves=(
+            "knowledge_store.py:concept_cluster_detail_rows / "
+            "concept_cluster_member_total (concept-detail hub-cluster keyset pagination)"
+        ),
     ),
 )
 

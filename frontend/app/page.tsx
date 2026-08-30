@@ -12,6 +12,7 @@ import {
   type AnswerImagePreviewRequest,
 } from "./image-preview";
 import { KgEvidenceBody } from "./kg-evidence-body";
+import { KgEvidenceList, kgConfidenceLabel } from "./kg-evidence-list";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
@@ -268,7 +269,6 @@ import {
   type ConversationSummary,
   type DuplicateGroup,
   type Evidence,
-  type EvidenceItem,
   type FgLink,
   type FgNode,
   type Health,
@@ -8123,9 +8123,7 @@ export default function Home() {
                     {kgGraph.conceptDetail && (
                       <>
                         <h4>出处</h4>
-                        {kgGraph.conceptDetail.evidence.length === 0 ? <p className="tool-hint">无</p> : kgGraph.conceptDetail.evidence.slice(0, 20).map((ev, i) => (
-                          <KgEvidenceCard evidence={ev} index={i} key={`${ev.source_id}-${ev.element_id}-${i}`} />
-                        ))}
+                        <KgEvidenceList evidence={kgGraph.conceptDetail.evidence} resetKey={kgGraph.conceptDetail.canonical_id} />
                         <h4>相关节点</h4>
                         {relatedNodeGroups.length === 0 ? <p className="tool-hint">无</p> : relatedNodeGroups.map((group) => (
                           <section className="kg-related-group" key={group.type}>
@@ -8589,41 +8587,6 @@ function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
       <div>{first.location_label}</div>
       <div>{first.quoted_span}</div>
     </div>
-  );
-}
-
-function kgConfidenceLabel(confidence?: number) {
-  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return "";
-  const normalized = confidence > 1 ? confidence : confidence * 100;
-  return `置信 ${Math.round(normalized)}%`;
-}
-
-function KgEvidenceCard({ evidence, index }: { evidence: EvidenceItem; index: number }) {
-  const sourceLabel = evidence.source_title || evidence.source_id || "未知来源";
-  const meta = [
-    evidence.location_label,
-    label(ELEMENT_TYPE, evidence.element_type, ""),
-    kgConfidenceLabel(evidence.confidence)
-  ].filter(Boolean);
-
-  return (
-    <article className="kg-evidence-card">
-      <div className="kg-evidence-header">
-        <span className="kg-evidence-index">{index + 1}</span>
-        <div className="kg-evidence-source">
-          <strong title={sourceLabel}>{sourceLabel}</strong>
-          {meta.length > 0 && (
-            <div className="kg-evidence-meta">
-              {meta.map((item) => <span key={item}>{item}</span>)}
-            </div>
-          )}
-        </div>
-      </div>
-      <KgEvidenceBody
-        elementType={evidence.element_type}
-        text={evidence.element_text || evidence.quoted_span}
-      />
-    </article>
   );
 }
 

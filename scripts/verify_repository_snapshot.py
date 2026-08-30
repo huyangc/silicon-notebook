@@ -3718,5 +3718,29 @@ MIGRATION_MANIFEST[(62, 63)] = {
 }
 
 
+# v64: hot-path fix batch 3 -- the concept-detail hub-cluster keyset page's
+# ORDER BY member_object_id can follow index order instead of scanning and
+# sorting the whole (notebook_id, canonical_id) slice on every later page.
+CONCEPT_CLUSTER_KEYSET_INDEXES = {
+    "idx_clusters_nb_canonical_member":
+        "CREATE INDEX idx_clusters_nb_canonical_member "
+        "ON concept_clusters(notebook_id, canonical_id, member_object_id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 64, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **CONCEPT_CLUSTER_KEYSET_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(63, 64)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": CONCEPT_CLUSTER_KEYSET_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

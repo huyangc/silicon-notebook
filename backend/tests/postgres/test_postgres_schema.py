@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 42
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 43
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 42
-    assert migrator.migrate() == 42
-    assert migrator.current_version() == 42
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 42
+    assert migrator.migrate() == 43
+    assert migrator.migrate() == 43
+    assert migrator.current_version() == 43
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 43
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 42
+    assert migrator.migrate() == 43
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 42
+        assert PostgresMigrator(databases[1]).migrate() == 43
     finally:
         for database in databases:
             database.close()
@@ -212,6 +212,7 @@ def test_packaged_index_migration_phases_are_exact():
         (40, "ask_creator_activity_index"),
         (41, "extension_runtime_toggles"),
         (42, "hotpath_batch2_search_indexes"),
+        (43, "concept_cluster_keyset_index"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -493,6 +494,29 @@ def test_packaged_index_migration_phases_are_exact():
     # PY_WHITESPACE and cross-checks it against this same migration file.
     assert "WHERE btrim(text, chr(9) || chr(10)" in v42_ddl_only
     assert "|| chr(12288)) != ''" in v42_ddl_only
+
+    # Migration 43 (hot-path fix batch 3) — one plain composite btree keyset-
+    # covering index on concept_clusters; see
+    # migrations/0043_concept_cluster_keyset_index.sql's header comment for
+    # the full evidence. Pure addition: no table, column, or FK changes. The
+    # migration also validates any pre-existing same-named index before
+    # creating (same DO-block pattern as migration 0042).
+    v43_hotpath_indexes = index_declarations(43)
+    assert v43_hotpath_indexes == [
+        (False, "idx_clusters_nb_canonical_member"),
+    ]
+    v43_ddl_only = "\n".join(
+        line for line in migrations[43].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert (
+        "ON concept_clusters(notebook_id, canonical_id, member_object_id)"
+        in v43_ddl_only
+    )
+    # P2-style validation block: fail-loud on INVALID residue / shape
+    # mismatch, and never auto-drop inside the migration transaction.
+    assert "RAISE EXCEPTION" in v43_ddl_only
+    assert "DROP INDEX CONCURRENTLY" in v43_ddl_only  # operator guidance text
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

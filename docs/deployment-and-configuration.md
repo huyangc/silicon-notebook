@@ -318,13 +318,14 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index — ten in total; the GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index — eleven in total; the GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`,
-`chunks(source_id, ordinal)`, and a partial `sources(notebook_id, source_type)` index) built
-online, same inspect/apply shape as the retrieval-index tool above:
+`chunks(source_id, ordinal)`, and a partial `sources(notebook_id, source_type)` index) plus
+batch 3's `concept_clusters(notebook_id, canonical_id, member_object_id)` keyset-covering
+index, built online, same inspect/apply shape as the retrieval-index tool above:
 
 ```bash
 PYTHONPATH=backend python scripts/build_hotpath_indexes.py
@@ -337,14 +338,17 @@ composite partial GIN over the full jsonb-as-text (`notebook_id` leads via btree
 `WHERE status != 'deprecated'` — the same shape as the operational
 `idx_knowledge_objects_nb_name_trgm`, so a term concentrated in other notebooks never
 builds a global bitmap; `--apply` installs the btree_gin extension on demand) and
-is minutes-scale on a large `knowledge_objects` table — schedule the window accordingly. In
+is minutes-scale on a large `knowledge_objects` table — schedule the window accordingly.
+Batch 3's keyset-covering index is a plain (non-partial) btree, same seconds-scale build
+profile as batch 1's, with none of the GIN-specific concerns above. In
 every case `CREATE INDEX CONCURRENTLY` still takes a full table scan per index and should
 run outside peak hours on a busy database.
-Migrations `0039_hotpath_batch1_indexes.sql` and `0042_hotpath_batch2_search_indexes.sql` use plain `CREATE INDEX IF NOT EXISTS` (a
+Migrations `0039_hotpath_batch1_indexes.sql`, `0042_hotpath_batch2_search_indexes.sql`, and
+`0043_concept_cluster_keyset_index.sql` use plain `CREATE INDEX IF NOT EXISTS` (a
 migration runs inside a transaction, where `CONCURRENTLY` cannot run) and becomes a no-op
 ledger entry once this script has built every index; on a fresh database with no existing
 traffic, the migration alone is sufficient and running the script first is optional.
-Migration 0042 additionally validates any pre-existing same-named index before creating:
+Migrations 0042 and 0043 additionally validate any pre-existing same-named index before creating:
 an INVALID residue row or a wrong-shape name collision fails the migration loudly (with
 the exact online remediation in the error) instead of being silently skipped by
 `IF NOT EXISTS` while the ledger records success. If
@@ -365,7 +369,11 @@ retired with `DROP INDEX CONCURRENTLY idx_chunks_source` once production has ver
 index is stable. `knowledge_relations` separately already carries three same-leading-prefix
 indexes on the `source_object_id` side (`idx_knowledge_relations_nb_source`,
 `idx_knowledge_relations_nb_source_id`, and now `idx_knowledge_relations_nb_source_target_edge`)
-— a pre-existing overlap this batch does not introduce and does not change.
+— a pre-existing overlap this batch does not introduce and does not change. Batch 3 registers
+a second case: the pre-existing `idx_clusters_nb_canonical` (migration 0039) is now a strict
+prefix of the new `idx_clusters_nb_canonical_member` and can be retired with
+`DROP INDEX CONCURRENTLY idx_clusters_nb_canonical` once production has verified the new
+index is stable.
 
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
 the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the

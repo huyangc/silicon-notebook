@@ -120,10 +120,10 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 `docs/operations_zh.md` 的「PostgreSQL notebook-aware 词法索引」。索引只改变 planner 候选裁剪，
 不改变检索谓词、打分或排序。
 
-### `build_hotpath_indexes.py` —— 在线建立热路径修复索引（批 1 + 批 2，共十条）
+### `build_hotpath_indexes.py` —— 在线建立热路径修复索引（批 1 + 批 2 + 批 3，共十一条）
 
-默认只读检查热路径修复的全部十条索引：批 1 六组共八条（`concept_clusters` 两条、三条反向 FK 覆盖、
-`knowledge_relations` 一条复合、`chunks(source_id, ordinal)`、`sources` 一条 partial），加批 2（迁移 0042）两条——`idx_knowledge_objects_nb_payload_trgm`（notebook 域复合 partial payload 全文 GIN：btree_gin 令 `notebook_id` 前置、`WHERE status != 'deprecated'`，与 `idx_knowledge_objects_nb_name_trgm` 同形，词集中在别的 notebook 时不再建全局位图；服务集合页搜索 knowledge 腿，稀有词从 5.9s 降到毫秒级（5.9s→3.6ms 的对照基准测于评审前的单表达式全局形，复合形是它的严格收窄、量级结论沿用，精确数字未重测）；生产 9.65M 行上体积按合成语料基准外推约为表段 1.5×（真实语料可能更大）、构建数分钟级，属登记过的写放大债，可 `DROP INDEX CONCURRENTLY` 无损回退；`--apply` 会按需安装 btree_gin 扩展）与 `idx_source_elements_nonblank`（体检 H5 的非空元素 partial）——是否
+默认只读检查热路径修复的全部十一条索引：批 1 六组共八条（`concept_clusters` 两条、三条反向 FK 覆盖、
+`knowledge_relations` 一条复合、`chunks(source_id, ordinal)`、`sources` 一条 partial），加批 2（迁移 0042）两条——`idx_knowledge_objects_nb_payload_trgm`（notebook 域复合 partial payload 全文 GIN：btree_gin 令 `notebook_id` 前置、`WHERE status != 'deprecated'`，与 `idx_knowledge_objects_nb_name_trgm` 同形，词集中在别的 notebook 时不再建全局位图；服务集合页搜索 knowledge 腿，稀有词从 5.9s 降到毫秒级（5.9s→3.6ms 的对照基准测于评审前的单表达式全局形，复合形是它的严格收窄、量级结论沿用，精确数字未重测）；生产 9.65M 行上体积按合成语料基准外推约为表段 1.5×（真实语料可能更大）、构建数分钟级，属登记过的写放大债，可 `DROP INDEX CONCURRENTLY` 无损回退；`--apply` 会按需安装 btree_gin 扩展）与 `idx_source_elements_nonblank`（体检 H5 的非空元素 partial），再加批 3（迁移 0043）一条——`idx_clusters_nb_canonical_member`：`concept_clusters(notebook_id, canonical_id, member_object_id)` 普通复合 btree，服务概念详情 hub 簇 keyset 分页的 `ORDER BY member_object_id`，秒级构建，无 GIN 那些顾虑；既有的 `idx_clusters_nb_canonical` 现在是它的严格前缀，同样登记为写放大冗余债、本批不下线——是否
 就绪；`--apply` 才会用 `CREATE INDEX CONCURRENTLY`（逐条独立语句，`autocommit=True`，不占
 事务）逐条建立。数据库 URL 从 `DATABASE_URL`（或 `--database-url-env` 指定的环境变量）读取
 且不打印：
@@ -137,12 +137,13 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 残留），工具打印确切的 `DROP INDEX CONCURRENTLY <name>;` 指引后以退出码 1 结束，重跑前
 先手动执行——工具自己绝不会代劳删除，也不会跳过其余仍缺失的索引继续建。若某条索引存在
 但列序或谓词与预期不符（同名但形态不同的手建索引），工具同样报错拒绝，绝不把它当成自己
-的产物修复或删除。批 1 每条都是普通 btree（其中一条 partial、一条表达式）索引，批 2 的 payload 一条是 GIN，单条
+的产物修复或删除。批 1 与批 3 每条都是普通 btree（批 1 其中一条 partial、一条表达式）索引，批 2 的 payload 一条是 GIN，单条
 建索引通常秒级，但 `CREATE INDEX CONCURRENTLY` 仍要对表做一次全表扫描，繁忙数据库上应
 避开高峰期。
 
-与迁移 `0039_hotpath_batch1_indexes.sql` 的先后关系：该迁移在事务里用普通
-`CREATE INDEX IF NOT EXISTS` 声明同样八条索引，`CONCURRENTLY` 进不了事务，所以已有生产
+与迁移 `0039_hotpath_batch1_indexes.sql`（同理 `0042_hotpath_batch2_search_indexes.sql`、
+`0043_concept_cluster_keyset_index.sql`）的先后关系：这些迁移在事务里用普通
+`CREATE INDEX IF NOT EXISTS` 声明同一批索引，`CONCURRENTLY` 进不了事务，所以已有生产
 流量的库应先跑本脚本 `--apply` 在线建好，迁移落地时就是 no-op 的账本记录；全新部署、还
 没有生产流量的库，迁移本身已经够用，先跑本脚本是可选项。完整运维步骤见
 `docs/deployment-and-configuration_zh.md` 的热路径索引一节。
