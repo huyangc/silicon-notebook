@@ -171,8 +171,19 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // conceptMembersEpochRef(ref 不触发子组件 effect,故需 state)。
   const [conceptDetailGeneration, setConceptDetailGeneration] = useState(0);
   // codex #639 R4 P2(AGENTS.md Interactive feedback):load-more 失败必须在
-  // 按钮紧邻处给结果,不能只发页面横幅。失败置位、重试/新首页落地清零。
+  // 按钮紧邻处给结果,不能只发页面横幅。失败置位、重试/新首页落地清零;
+  // 且按契约原文「clear that state on its own timer」定时自动还原
+  // (codex #639 R6 P2)——定时器带 epoch 守卫,新首页落地后过期回调不再清
+  // (它清的是已被换代的状态,虽同值无害,守卫保持口径一致)。
   const [conceptMembersLoadError, setConceptMembersLoadError] = useState(false);
+  const conceptMembersLoadErrorTimerRef = useRef<number | null>(null);
+  const clearConceptMembersLoadErrorTimer = () => {
+    if (conceptMembersLoadErrorTimerRef.current !== null) {
+      window.clearTimeout(conceptMembersLoadErrorTimerRef.current);
+      conceptMembersLoadErrorTimerRef.current = null;
+    }
+  };
+  useEffect(() => clearConceptMembersLoadErrorTimer, []);
   // Hub-cluster member pagination (R3·T-B2). `conceptDetail` itself carries
   // the cursor (`next_cursor`) and the accumulated `members`/`attached`/
   // `evidence` — every place that lands a fresh FIRST page replaces the
@@ -224,6 +235,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     conceptMembersEpochRef.current += 1;
     conceptDetailContextRef.current = detail ? context : null;
     setConceptMembersLoadingMore(false);
+    clearConceptMembersLoadErrorTimer();
     setConceptMembersLoadError(false);
     setConceptDetailGeneration(conceptMembersEpochRef.current);
     setConceptDetail(detail);
@@ -550,6 +562,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       || owner.notebookId !== context.notebookId) return;
     const epoch = conceptMembersEpochRef.current;
     setConceptMembersLoadingMore(true);
+    clearConceptMembersLoadErrorTimer();
     setConceptMembersLoadError(false);
     try {
       const page = await fetchConceptDetail(
@@ -582,6 +595,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         // 横幅照旧(全局错误通道),但本地失败态才是按钮紧邻反馈的载体
         // (codex #639 R4 P2 / AGENTS.md Interactive feedback)。
         setConceptMembersLoadError(true);
+        clearConceptMembersLoadErrorTimer();
+        conceptMembersLoadErrorTimerRef.current = window.setTimeout(() => {
+          conceptMembersLoadErrorTimerRef.current = null;
+          if (epoch === conceptMembersEpochRef.current) setConceptMembersLoadError(false);
+        }, 4000);
         effectsRef.current.reportError(error);
       }
     } finally {

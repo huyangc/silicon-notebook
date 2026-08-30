@@ -271,6 +271,33 @@ test("a failed load-more sets the local error state and a retry clears it (codex
   expect(result.current.view.conceptDetail?.members.map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
 });
 
+test("the load-more failure label clears itself on a timer (codex #639 R6 P2)", async () => {
+  // AGENTS.md:104-107 — outcome state must "clear that state on its own
+  // timer". Mutation-checked: dropping the setTimeout in the catch turns
+  // this red (the error state would persist past the 4s window).
+  // Setup runs on REAL timers (openWithConceptSelected's waitFor hangs
+  // under a fake clock); the fake clock is installed only around the
+  // failure + auto-clear window, and restored in finally so a failure here
+  // cannot leak fake timers into the following tests.
+  const harness = createTestKgAuthority();
+  const { result } = await openWithConceptSelected(harness);
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m2"));
+
+  vi.useFakeTimers();
+  try {
+    kgApi.fetchConceptDetail.mockRejectedValueOnce(new Error("boom"));
+    await act(async () => { await result.current.loadMoreConceptMembers(); });
+    expect(result.current.view.conceptMembersLoadError).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(result.current.view.conceptMembersLoadError).toBe(false);
+    // The accumulated page state is untouched by the label reset.
+    expect(result.current.view.conceptDetail?.next_cursor).toBe("m2");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("a same-concept first-page refresh bumps conceptDetailGeneration (codex #639 R2 P2)", async () => {
   // KgEvidenceList's resetKey is `canonical_id:conceptDetailGeneration` —
   // a merge/rebuild refresh of the SAME concept keeps canonical_id constant,
