@@ -18,7 +18,13 @@ breaks ONE phase and asserts exactly what the frozen matrix says survives.
                                    codex #638 R5 the bump already committed
                                    with the row BEFORE the embed ran, so it
                                    no longer depends on that failure being
-                                   swallowed at all
+                                   swallowed at all. The vector-replace's own
+                                   SECOND bump (codex #638 R6 P1) never runs
+                                   either — it lives inside
+                                   replace_knowledge_vectors, past the point
+                                   this injection raises — which is exactly
+                                   right: the vector never changed, so
+                                   nothing needs a seq that says it did
 
 Injection rides component seams (runtime.knowledge / runtime.governance /
 runtime.embedding_store), mirroring how the frozen phase-contract suite
@@ -280,9 +286,12 @@ def test_confirm_conflict_status_failure_leaves_mutation_committed(
     assert payload["name"] == "after"          # resolution mutation committed
     assert candidate_status == "pending"       # status transaction failed
     # The mutation's own hooks ran BEFORE the status failure: update_knowledge's
-    # bump (in its own transaction since codex #638 R5, hence first) and its
-    # invalidate, plus the conflict path's second, post-commit bump.
-    assert events == ["dirty", "invalidate", "dirty"]
+    # row-update bump (in its own transaction since codex #638 R5, hence
+    # first), its payload re-embed's OWN second bump (codex #638 R6 P1 — a
+    # "modify" resolution always carries a payload, so the vector replace
+    # always fires here) and its invalidate, plus the conflict path's THIRD,
+    # post-commit belt-and-suspenders bump.
+    assert events == ["dirty", "dirty", "invalidate", "dirty"]
 
 
 def test_update_knowledge_embed_failure_still_invalidates_and_marks_dirty(
@@ -291,7 +300,16 @@ def test_update_knowledge_embed_failure_still_invalidates_and_marks_dirty(
     """codex #638 R5 strengthened this boundary rather than weakening it: the
     bump no longer merely *survives* a best-effort embed failure, it committed
     with the row before the embed was ever attempted, so it cannot depend on
-    that failure being swallowed."""
+    that failure being swallowed.
+
+    codex #638 R6 P1: the vector-replace's OWN bump (``mark_dirty_in_tx``,
+    resolved inside ``replace_knowledge_vectors``) never even gets a chance
+    to run here — the embed store raises before touching its parameters, the
+    SAME semantics as "the vector never changed, so its seq contribution
+    never changes either" (see kg_mutation's VECTOR-REPLACE CENSUS). The
+    lambda accepts (and ignores) ``mark_dirty_in_tx`` purely so the call
+    still reaches the intended RuntimeError instead of failing on an
+    unexpected keyword argument."""
     notebook = repo.create_notebook(NotebookCreate(name="embed boundary"))
     object_id = repo._test_insert_object(
         notebook.id, "claim", {"name": "embed me"}
@@ -301,7 +319,7 @@ def test_update_knowledge_embed_failure_still_invalidates_and_marks_dirty(
     monkeypatch.setattr(
         repo._runtime.embedding_store,
         "replace_knowledge_vectors",
-        lambda notebook_id, rows, created_at="": (
+        lambda notebook_id, rows, created_at="", mark_dirty_in_tx=None: (
             (_ for _ in ()).throw(RuntimeError("embed store down"))
         ),
     )

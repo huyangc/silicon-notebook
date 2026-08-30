@@ -1034,6 +1034,65 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
 
 
 @pytest.mark.postgres_integration
+def test_postgres_replace_knowledge_vectors_mark_dirty_rides_same_transaction(
+    postgres_database,
+):
+    """codex #638 R6 P1: ``mark_dirty_in_tx``, when passed, must run on the
+    SAME connection/transaction the vector row commits on — the whole point
+    is that a concurrent reader can never observe the new vector under the
+    OLD kg_mutation_seq (or vice versa). A first-time embed (no callback)
+    must NOT bump the seq at all — that write's contribution to
+    ``_cluster_input_version`` is the knowledge_embeddings ROW COUNT itself
+    (emb_c), which an unconditional bump here would double-count."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 42
+    _seed_catalog(postgres_database)
+    store = PostgresEmbeddingStore(write=postgres_database.write)
+
+    # First-time embed (store_kg / approve_promotion shape): no callback ->
+    # no bump. Confirms the parameter is opt-in, not unconditional.
+    vec_a = np.asarray([1.0, 0.0], dtype=np.float32)
+    store.replace_knowledge_vectors("nb-personal", [("ko-r6", vec_a)], created_at=NOW)
+    with postgres_database.connect() as connection:
+        seq_after_insert = PostgresUnifiedKgStore.graph_seq_row(
+            connection, "nb-personal"
+        )[0]
+    assert seq_after_insert == 0
+
+    # Replace (update_knowledge's re-embed shape): callback fires -> bump,
+    # on the connection the INSERT ... ON CONFLICT DO UPDATE just committed
+    # on, never a separate/later transaction.
+    calls: list[tuple[str, int]] = []
+
+    def mark_dirty_in_tx(connection, notebook_id):
+        seq_mid_tx = PostgresUnifiedKgStore.graph_seq_row(connection, notebook_id)[0]
+        PostgresUnifiedKgStore.mark_dirty(connection, notebook_id, NOW)
+        calls.append((notebook_id, seq_mid_tx))
+        return int(PostgresUnifiedKgStore.graph_seq_row(connection, notebook_id)[0])
+
+    vec_b = np.asarray([0.0, 1.0], dtype=np.float32)
+    store.replace_knowledge_vectors(
+        "nb-personal", [("ko-r6", vec_b)], created_at=NOW,
+        mark_dirty_in_tx=mark_dirty_in_tx,
+    )
+
+    assert calls == [("nb-personal", 0)]  # ran once, saw the pre-bump seq
+    with postgres_database.connect() as connection:
+        seq_after_replace = PostgresUnifiedKgStore.graph_seq_row(
+            connection, "nb-personal"
+        )[0]
+        rows = store.vector_rows(
+            connection, "nb-personal", "knowledge_embeddings", "object_id"
+        )
+    assert seq_after_replace == 1
+    [row] = [r for r in rows if r["vid"] == "ko-r6"]
+    np.testing.assert_array_equal(
+        np.frombuffer(row["vector"], dtype=np.float32), vec_b
+    )
+
+
+@pytest.mark.postgres_integration
 def test_postgres_vector_pages_keyset_pagination_matches_inserted_set(
     postgres_database,
 ):

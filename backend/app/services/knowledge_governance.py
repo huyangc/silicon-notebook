@@ -162,7 +162,7 @@ class KnowledgeGovernanceService:
         mark_unified_kg_dirty: Callable[[str], None],
         model_clients: Any,
         edge_centrality_map: Callable[[str], Dict[str, float]],
-        embed_knowledge: Callable[[str, str, dict], None],
+        embed_knowledge: Callable[..., None],
         knowledge_objects: Callable[..., List[dict]],
         as_retrieved: Callable[[dict, str], Any],
         rule_card: Callable[[Any], RuleCard],
@@ -1909,10 +1909,26 @@ class KnowledgeGovernanceService:
             # re-embed, and that a crash in between made permanent.
             self._mark_unified_kg_dirty_in_tx(db, row["notebook_id"])
         # WS4: re-embed payload-level vector when the payload was edited.
+        #
+        # codex #638 R6 P1: this REPLACES the object's existing knowledge_
+        # embeddings row (same object_id, UPSERT) — invisible to
+        # _cluster_input_version's emb_c COUNT(*), unlike the row bump above.
+        # A second in-tx bump therefore rides the vector write's OWN
+        # transaction (mark_dirty_in_tx=, resolved inside
+        # replace_knowledge_vectors — see SourceEmbeddingService.embed_
+        # knowledge's docstring): without it, a concurrent unified-KG rebuild
+        # racing between this method's two commits can read the OLD vector
+        # while kg_mutation_seq already reads N (bumped above) and stamp its
+        # product with seq N — current-looking, wrong content, and nothing
+        # ever bumps again to invalidate it (the row itself did not change a
+        # second time). This is a SECOND call to the same single dirty entry
+        # (mark_unified_kg_dirty_in_tx), not a new one — same shape as
+        # apply_conflict_resolution's belt-and-suspenders second bump.
         if payload.payload is not None:
             try:
                 self._embed_knowledge(
-                    knowledge_id, row["notebook_id"], json.loads(row["payload"] or "{}")
+                    knowledge_id, row["notebook_id"], json.loads(row["payload"] or "{}"),
+                    mark_dirty_in_tx=self._mark_unified_kg_dirty_in_tx,
                 )
             except Exception:
                 pass

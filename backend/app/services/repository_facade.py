@@ -661,8 +661,8 @@ class RepositoryFacade:
             edge_centrality_map=lambda notebook_id: (
                 self._edge_centrality_map(notebook_id)
             ),
-            embed_knowledge=lambda object_id, notebook_id, payload: (
-                self._embed_knowledge(object_id, notebook_id, payload)
+            embed_knowledge=lambda object_id, notebook_id, payload, mark_dirty_in_tx=None: (
+                self._embed_knowledge(object_id, notebook_id, payload, mark_dirty_in_tx=mark_dirty_in_tx)
             ),
             knowledge_objects=lambda db, notebook_id, object_type, **kw: (
                 self._knowledge_objects(db, notebook_id, object_type, **kw)
@@ -2137,11 +2137,19 @@ class RepositoryFacade:
         object_id: str,
         notebook_id: str,
         payload: Dict[str, object],
+        *,
+        mark_dirty_in_tx: "Callable[[Any, str], int] | None" = None,
     ) -> None:
         """Embed a knowledge object's own payload text (WS4: payload-level
-        vectors, not just evidence-element vectors). No-op without embeddings."""
+        vectors, not just evidence-element vectors). No-op without embeddings.
+
+        ``mark_dirty_in_tx``: threaded straight through to
+        ``SourceEmbeddingService.embed_knowledge`` — see its docstring (codex
+        #638 R6 P1) for when a caller must pass it (a payload REPLACE on an
+        already-embedded object) versus leave it ``None`` (a first embed of a
+        brand-new object)."""
         return self._runtime.source_embedding.embed_knowledge(
-            object_id, notebook_id, payload
+            object_id, notebook_id, payload, mark_dirty_in_tx=mark_dirty_in_tx
         )
 
     def _flush_object_vectors(self, notebook_id: str, rows: list) -> None:

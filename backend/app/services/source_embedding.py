@@ -86,8 +86,31 @@ class SourceEmbeddingService:
             self.on_source_vectors_written(notebook_id)
 
     def embed_knowledge(
-        self, object_id: str, notebook_id: str, payload: dict
+        self,
+        object_id: str,
+        notebook_id: str,
+        payload: dict,
+        *,
+        mark_dirty_in_tx: "Callable[[Any, str], int] | None" = None,
     ) -> None:
+        """Re-embed one knowledge object's payload text.
+
+        ``mark_dirty_in_tx``: an in-transaction ``kg_mutation_seq`` bump
+        (``KgMutationCoordinator.mark_unified_kg_dirty_in_tx``), threaded down
+        from the caller and invoked, when given, on the SAME connection/
+        transaction ``replace_knowledge_vectors`` commits the vector row on
+        (codex #638 R6 P1). Pass it ONLY when this call REPLACES an existing
+        object's vector (``update_knowledge``'s payload re-embed): that write
+        is a same-row UPSERT, invisible to ``_cluster_input_version``'s emb_c
+        COUNT(*) term, so it needs its own seq advance or a concurrent unified-
+        KG rebuild can read the stale vector under the row's ALREADY-bumped
+        seq and stamp a product that is current-looking but built from
+        yesterday's vector, forever (nothing else ever re-triggers it). Leave
+        it ``None`` for a first-time embed of a brand-new object (store_kg /
+        approve_promotion): that write changes the embeddings ROW COUNT,
+        which emb_c already reflects — a second bump there would just be
+        redundant, not incorrect, so this stays opt-in per call site rather
+        than unconditional."""
         workload_id = "knowledge_object_embedding"
         embedder = self.embedder(workload_id)
         if not getattr(embedder, "configured", True):
@@ -102,7 +125,8 @@ class SourceEmbeddingService:
         except Exception:
             return
         self.vectors.replace_knowledge_vectors(
-            notebook_id, [(object_id, vector)], created_at=self.now()
+            notebook_id, [(object_id, vector)], created_at=self.now(),
+            mark_dirty_in_tx=mark_dirty_in_tx,
         )
 
     def flush_object_vectors(self, notebook_id: str, rows: list) -> None:
