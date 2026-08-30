@@ -108,12 +108,19 @@ Python 打分与 `heapq.nlargest`）。唯一改动：端点对象批取的投�
   （epoch 校验防失效期写回）。`limit < 0` 或 `limit > M` 直通冷路径不经
   memo（语义=现状）。切片等价性：`nlargest(M)` 前缀 = `nlargest(limit)`
   （堆的稳定并列随前缀转移）。
-- `set_edge_review`：UPDATE + bump 后读回 new_seq；status ∈ {pending,
-  verified} → `memo.carry(nb, expected_seq=new_seq-1, rel_id, status)`：
-  锁内 entry.seq==expected 时 **copy-on-write**（新 list + 该 rel 的新
-  dict）更新 `review_status` 并 retag new_seq；**rel 不在 top-M 内时同样
-  retag**（内容本就不含它，无需改）；seq 不符整条丢弃。status=='rejected'
-  → `memo.invalidate(nb)`。
+- `set_edge_review`：**carry 必须以前值为条件（质量评审 P1-2 引出的规格
+  修订）**——该方法允许任意迁移，包括 rejected→pending（撤销拒绝），那会把
+  边加回集合并改变拓扑/corr/计数。`update_edge_review` 改为返回 prev_status
+  （PG 用 UPDATE...FROM(SELECT...FOR UPDATE) old RETURNING old.prev；SQLite
+  同事务 SELECT 后 UPDATE）。UPDATE + bump 后读回 new_seq：
+  - prev ∈ {pending,verified} **且** new ∈ {pending,verified} →
+    `memo.carry(nb, expected_seq=new_seq-1, rel_id, status)`：锁内
+    entry.seq==expected 时 **copy-on-write**（新 list + 该 rel 的新 dict）
+    更新 `review_status` 并 retag new_seq；**rel 不在 top-M 内时同样
+    retag**；seq 不符整条丢弃。同时对 review_queue_total memo 做同款
+    retag（值不变、标签 +1）。
+  - 迁移任一侧涉及 'rejected'（含 rejected→rejected 幂等写）→ 排名 memo
+    与 total memo 一并 invalidate（集合/拓扑可能已变，宁可重算）。
 - centrality 的既有失效路径不动。
 
 验收：carry 命中/不在 top-M 仍 retag/seq 不符丢弃/single-flight/LRU
@@ -129,8 +136,17 @@ fail-closed/读序变异锚点/「verified 翻转后同进程下一次取队列�
   `warm_all`（大库冷 COUNT ~1.1s，懒算）。seq 闸完备性：knowledge_relations
   的生产写路径均 bump（关系补全/store_kg/job publish 已抽查）；豁口
   facade `add_relations` 与 T-A2 同一处置（显式 invalidate）。
+- **total memo 的 carry（质量评审 P1-2）**：审核循环里每次 verified/
+  pending 判定都 bump seq，若无处置，每次点击都付一次 ~1.1s 冷 COUNT 且
+  结果逐值相同。counts_cache 增加 `carry_review_queue_total(nb,
+  expected_seq, new_seq)`（锁内 seq 严格比对后仅改标签），由
+  `set_edge_review` 按上面 T-A2 的同一前值条件调用（T-A3 先落此钩子，
+  T-A2 复用同一处置点）。docstring 不得声称「下次必命中」——要写明
+  审核动作本身就是 KG mutation，命中依赖 carry。
 - API 形状：`GET /notebooks/{id}/edge-review-queue` 响应从
-  `List[EdgeReviewItem]` 改为 `{"items": [...], "total": n}`。**契约面同
+  `List[EdgeReviewItem]` 改为 `{"items": [...], "total": n}`。前端标题在
+  `total > items.length` 时必须同时给出截断提示（「共 N 条 · 显示前 M
+  条」），不得只声称总量（质量评审 P1-1）；完整分页归 R4/后续。**契约面同
   diff**：`scripts/generate_repository_contract_fixtures.py` 重生成
   `backend/tests/fixtures/repository_contract/api_contract.json`；
   `backend/tests/test_edge_review_queue.py:301` 的 list 断言更新；前端

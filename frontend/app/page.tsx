@@ -106,7 +106,7 @@ import { parseUrlLines } from "./url-sources";
 import {
   normalizedNotebookName,
 } from "./notebook-creation";
-import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
+import { fetchEdgeReviewQueue, reviewRelation, formatEdgeReviewQueueTitle, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
@@ -8350,7 +8350,7 @@ export default function Home() {
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>关系审核队列{edgeQueueTotal != null ? `（共 ${edgeQueueTotal} 条）` : ""}</h2>
+                <h2>关系审核队列{formatEdgeReviewQueueTitle(edgeQueueTotal, (edgeQueue ?? []).length)}</h2>
                 <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
               </div>
               <button className="icon-button" onClick={() => rootModals.requestClose("edge-review", "button")} title="Close">×</button>

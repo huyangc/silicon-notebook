@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { fetchEdgeReviewQueue, reviewRelation } from "../../app/edge-review-queue.ts";
+import {
+  fetchEdgeReviewQueue,
+  reviewRelation,
+  formatEdgeReviewQueueTitle,
+} from "../../app/edge-review-queue.ts";
 
 function withFetchStub(run, body = {}) {
   const calls = [];
@@ -51,3 +55,21 @@ test("reviewRelation POSTs the review endpoint with the status body", () =>
     assert.strictEqual(calls[0].init.method, "POST");
     assert.deepStrictEqual(JSON.parse(calls[0].init.body), { status: "verified" });
   }));
+
+// R3 T-A3 review (P1-1): the modal title must disclose truncation instead of
+// only claiming a total when the page is a strict subset of the real queue.
+test("formatEdgeReviewQueueTitle shows only the total when the page is complete", () => {
+  assert.strictEqual(formatEdgeReviewQueueTitle(3, 3), "（共 3 条）");
+  assert.strictEqual(formatEdgeReviewQueueTitle(0, 0), "（共 0 条）");
+});
+
+test("formatEdgeReviewQueueTitle discloses truncation when total exceeds the page", () => {
+  assert.strictEqual(
+    formatEdgeReviewQueueTitle(120, 100),
+    "（共 120 条 · 显示前 100 条）"
+  );
+});
+
+test("formatEdgeReviewQueueTitle renders nothing while total is not yet known", () => {
+  assert.strictEqual(formatEdgeReviewQueueTitle(null, 0), "");
+});

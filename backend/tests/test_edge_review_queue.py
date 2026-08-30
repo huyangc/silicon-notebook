@@ -129,6 +129,135 @@ def test_set_edge_review_invalid_status_raises(repo):
         repo.set_edge_review(nb_id, rel_id, "bogus_status")
 
 
+# ── R3 T-A3 review (P1-2 / S1 / F1) ──────────────────────────────────────────
+
+def test_governance_store_update_edge_review_returns_prev_status(repo):
+    """update_edge_review's return value contract (P1-2): it must hand back the
+    PREVIOUS review_status, not None — a fresh relation starts 'pending'."""
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    with repo._write() as db:
+        prev = repo._runtime.governance.update_edge_review(db, nb_id, rel_id, "verified")
+    assert prev == "pending"
+    with repo._write() as db:
+        prev2 = repo._runtime.governance.update_edge_review(db, nb_id, rel_id, "rejected")
+    assert prev2 == "verified"
+
+
+def test_governance_store_update_edge_review_missing_relation_raises_keyerror(repo):
+    """rowcount==0 (no matching id/notebook) must still raise KeyError, not
+    silently return None — regression guard for the SELECT-then-UPDATE
+    rewrite of the old cur.rowcount check."""
+    nb_id = _seed_graph(repo)
+    with repo._write() as db:
+        with pytest.raises(KeyError):
+            repo._runtime.governance.update_edge_review(
+                db, nb_id, "rel-does-not-exist", "verified"
+            )
+
+
+def _spy_carry_and_invalidate(governance, monkeypatch):
+    """Wrap the governance service's injected carry/invalidate callables with
+    counters, delegating to the REAL implementations so the underlying
+    knowledge_counts_cache module state stays authentic (not faked)."""
+    calls = {"carry": 0, "invalidate": 0}
+    orig_carry = governance._carry_review_queue_total_fn
+    orig_invalidate = governance._invalidate_knowledge_counts_fn
+
+    def spy_carry(nb, expected_seq, new_seq):
+        calls["carry"] += 1
+        return orig_carry(nb, expected_seq, new_seq)
+
+    def spy_invalidate(nb):
+        calls["invalidate"] += 1
+        return orig_invalidate(nb)
+
+    monkeypatch.setattr(governance, "_carry_review_queue_total_fn", spy_carry)
+    monkeypatch.setattr(governance, "_invalidate_knowledge_counts_fn", spy_invalidate)
+    return calls
+
+
+def test_set_edge_review_verified_flip_carries_total_without_cold_count(repo, monkeypatch):
+    """P1-2: a pure pending->verified flip must carry-forward the
+    review_queue_total memo (cheap retag), NOT invalidate it — and the retag
+    must actually save the next read from a cold COUNT (counter assertion on
+    the real sqlite knowledge_counts_cache module)."""
+    from app.repositories.sqlite import knowledge_counts_cache as kcc
+
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    total_before = repo.review_queue_total(nb_id)  # warm the memo (cold COUNT #1)
+    calls = _spy_carry_and_invalidate(repo._runtime.knowledge_governance, monkeypatch)
+
+    repo.set_edge_review(nb_id, rel_id, "verified")  # pending -> verified
+
+    assert calls == {"carry": 1, "invalidate": 0}
+    # The memo entry survives with the SAME value, just retagged — a stale
+    # entry would have been popped by invalidate() instead.
+    assert nb_id in kcc._REVIEW_QUEUE_TOTAL
+    assert kcc._REVIEW_QUEUE_TOTAL[nb_id][1] == total_before
+    assert repo.review_queue_total(nb_id) == total_before  # served warm, not a fresh cold COUNT
+
+
+def test_set_edge_review_reject_invalidates_total(repo, monkeypatch):
+    """P1-2: a transition touching 'rejected' must invalidate (not carry) the
+    review_queue_total memo — queue membership may have actually changed."""
+    from app.repositories.sqlite import knowledge_counts_cache as kcc
+
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    repo.review_queue_total(nb_id)  # warm the memo
+    calls = _spy_carry_and_invalidate(repo._runtime.knowledge_governance, monkeypatch)
+
+    repo.set_edge_review(nb_id, rel_id, "rejected")  # pending -> rejected
+
+    assert calls == {"carry": 0, "invalidate": 1}
+    assert nb_id not in kcc._REVIEW_QUEUE_TOTAL  # popped, not stale-retagged
+
+
+def test_set_edge_review_unreject_invalidates_total(repo, monkeypatch):
+    """P1-2: rejected -> pending (undoing a rejection) is exactly as
+    membership-changing as the forward direction and must also invalidate,
+    never carry — the edge re-enters the (review_status != 'rejected') set."""
+    from app.repositories.sqlite import knowledge_counts_cache as kcc
+
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    repo.set_edge_review(nb_id, rel_id, "rejected")
+    repo.review_queue_total(nb_id)  # warm again post-reject
+    calls = _spy_carry_and_invalidate(repo._runtime.knowledge_governance, monkeypatch)
+
+    repo.set_edge_review(nb_id, rel_id, "pending")  # rejected -> pending (un-reject)
+
+    assert calls == {"carry": 0, "invalidate": 1}
+    assert nb_id not in kcc._REVIEW_QUEUE_TOTAL
+
+
+def test_review_queue_total_missing_notebook_raises_keyerror(repo):
+    """S1: review_queue_total must guard notebook existence the SAME way
+    review_queue already does (symmetry) — a direct/service-level caller
+    (bypassing the API route's own dependency) must see the same failure."""
+    with pytest.raises(KeyError):
+        repo.review_queue_total("does-not-exist")
+
+
+def test_add_relations_facade_path_invalidates_review_queue_total(repo):
+    """F1: RepositoryFacade.add_relations is a raw-insert path that bypasses
+    store_kg's kg_mutation_seq bump. It must explicitly invalidate the
+    knowledge_counts_cache memos (incl. review_queue_total) itself so a
+    fixture that warms the memo, then seeds via this path, then reads again
+    never sees a stale total."""
+    from app.repositories.sqlite import knowledge_counts_cache as kcc
+
+    nb_id = _seed_graph(repo)
+    repo.review_queue_total(nb_id)  # warm the memo
+    assert nb_id in kcc._REVIEW_QUEUE_TOTAL
+
+    repo.add_relations(nb_id, "", [])  # no-op insert, but still the facade path
+
+    assert nb_id not in kcc._REVIEW_QUEUE_TOTAL  # explicitly invalidated
+
+
 # ── Feedback loop: rejected edges demoted in graph ───────────────────────────
 # C3 (hotpath cleanup): this section used to test the feedback loop through
 # `SqliteRepository._rx_graph`, the single-notebook reasoning-graph loader.

@@ -25,7 +25,7 @@ miss it). Rebuild deliberately keeps ``kg_mutation_seq`` stable, which is correc
 here: a rebuild re-clusters but does not add/remove/re-status objects, so counts
 are unchanged across it.
 
-Two sibling open-path scans share the SAME seq gate and ``invalidate`` (so the
+Three sibling open-path scans share the SAME seq gate and ``invalidate`` (so the
 existing invalidate hooks cover them for free):
   * ``chunk_count`` — ``COUNT(*) FROM chunks`` (``/scale-index/status`` open path).
     Sound on ``kg_mutation_seq`` because the sole chunk writer
@@ -35,6 +35,13 @@ existing invalidate hooks cover them for free):
     (``from_row`` on every open, ~2s cold at 48k sources). Sound because a bare
     source add is element-less (never pending) and every real transition (parse,
     extract, source/KG delete) bumps the seq or hits ``invalidate``.
+  * ``review_queue_total`` (R3 T-A3) — ``COUNT(*) FROM knowledge_relations
+    WHERE review_status != 'rejected'`` backing the edge-review-queue's
+    ``total`` field, epoch-guarded the same way the two pending-source views
+    are (not the unguarded ``type_status_counts``/``chunk_count`` shape) —
+    see its own docstring below for the carry-forward it ALSO gets from
+    ``set_edge_review`` (a review decision is itself a KG mutation, so a
+    plain seq gate alone would go cold on every click).
 Sources COUNT / ``source_ids`` are deliberately NOT cached here: ``create_source``
 inserts a row without bumping the seq, so a seq-keyed memo would drift — and they
 stay cheap without a memo. The user-facing source count
@@ -306,12 +313,23 @@ def review_queue_total(db: sqlite3.Connection, notebook_id: str) -> int:
     docstring for the cold-cost rationale (~1.1s on the largest production
     library; lazy beats a startup warm most notebooks never need).
 
-    Known gap (registered, not fixed here — see the PostgreSQL mirror's
-    docstring for the full writeup): ``RepositoryFacade.add_relations``, a
-    test-only path, inserts relations without bumping ``kg_mutation_seq``, so
-    a test/fixture that warms this memo and then calls ``add_relations`` can
-    read a stale total until an unrelated seq-bumping write lands. R3 T-A2 is
-    expected to add an explicit ``invalidate()`` call there."""
+    NOT "every request after is a memo hit until the next KG mutation" — the
+    review queue's OWN curation action (``set_edge_review``) is itself a KG
+    mutation that bumps ``kg_mutation_seq`` on every decision. Whether the
+    NEXT read is warm depends on ``carry_review_queue_total`` below:
+    ``set_edge_review`` calls it right after its bump for a pure
+    verified<->pending flip (queue membership/COUNT unchanged), retagging the
+    memo onto the new seq for free; a transition touching 'rejected' on
+    either side skips the carry and goes cold — membership may have actually
+    changed.
+
+    Gap closed (was registered as a known gap; F1): ``RepositoryFacade.
+    add_relations``, a test-only path, inserts relations straight through
+    ``KnowledgeStorePort.add_relations_current`` without bumping
+    ``kg_mutation_seq`` itself, but the facade method now explicitly calls
+    ``invalidate_knowledge_counts(notebook_id)`` right after the insert (see
+    ``repository_facade.add_relations``), so this memo cannot serve a stale
+    total across that fixture path either."""
     seq = _mutation_seq(db, notebook_id)
     with _LOCK:
         hit = _REVIEW_QUEUE_TOTAL.get(notebook_id)
@@ -336,11 +354,48 @@ def review_queue_total(db: sqlite3.Connection, notebook_id: str) -> int:
     return count
 
 
+def carry_review_queue_total(notebook_id: str, expected_seq: int, new_seq: int) -> None:
+    """Cheap retag for the common ``set_edge_review`` case where a
+    verified<->pending flip changes NEITHER review-queue membership NOR its
+    COUNT (only a transition touching 'rejected' can do that — see
+    ``review_queue_total``'s docstring above and the R3 T-A3 design doc's
+    carry contract). Mirrors ``postgres/knowledge_counts_cache.
+    carry_review_queue_total``. Called by ``KnowledgeGovernanceService.
+    set_edge_review`` immediately after its ``kg_mutation_seq`` bump, so a
+    bare verified<->pending toggle stays a memo hit instead of paying the
+    ~1.1s cold COUNT on every click through the review queue.
+
+    Strictly a retag: the cached VALUE is never touched, only its ``seq``
+    label moves from ``expected_seq`` to ``new_seq``. Entirely under
+    ``_LOCK`` — no unlock-then-recompute window to race, so (unlike the
+    epoch-guarded writeback above) a plain strict equality check is enough:
+    the entry's cached seq must equal ``expected_seq`` exactly; any mismatch
+    pops the entry instead of guessing. A cold recompute on the next read is
+    always safe; a stale retag is not."""
+    with _LOCK:
+        hit = _REVIEW_QUEUE_TOTAL.get(notebook_id)
+        if hit is None:
+            return
+        seq, value = hit
+        if seq == expected_seq:
+            _REVIEW_QUEUE_TOTAL[notebook_id] = (new_seq, value)
+            _REVIEW_QUEUE_TOTAL.move_to_end(notebook_id)
+        else:
+            _REVIEW_QUEUE_TOTAL.pop(notebook_id, None)
+
+
 def warm_all(db: sqlite3.Connection, progress=None) -> int:
-    """Prime all per-notebook open-path memos (``type_status_counts`` /
-    both pending-source views / ``chunk_count``) for every live notebook, so the
-    first open / board / status-poll after a fresh process start is served warm
-    instead of paying the cold GROUP BY + correlated scans (see module docstring).
+    """Prime the FOUR open-path memos every notebook open/board/status-poll
+    reaches (``type_status_counts`` / both pending-source views /
+    ``chunk_count``) for every live notebook, so the first request after a
+    fresh process start is served warm instead of paying the cold GROUP BY +
+    correlated scans (see module docstring).
+
+    ``review_queue_total`` (the fifth seq-gated memo, R3 T-A3) is
+    DELIBERATELY excluded — see its own docstring for the cold-cost
+    rationale (~1.1s on the largest production library; most notebooks'
+    users never open the review queue). It stays lazy: cold on first access,
+    warm via its own seq-gate / carry after.
 
     Called once at startup behind the readiness gate by the facade
     ``warm_open_path_caches``. The notebook-id query lives HERE (store-owned SQL)

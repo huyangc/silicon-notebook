@@ -43,6 +43,21 @@ export const fetchEdgeReviewQueue = (
     { tag: "edge-review-queue" },
   );
 
+// R3 T-A3 review (P1-1): the modal header must not claim a total without also
+// disclosing that the visible list is a truncated page of it. `total` is the
+// true seq-gated queue size; `itemsCount` is how many rows the page actually
+// rendered (the `limit`-bounded ranking). `total` unknown yet (still loading)
+// renders no suffix at all — the bare "关系审核队列" heading.
+export const formatEdgeReviewQueueTitle = (
+  total: number | null,
+  itemsCount: number
+): string => {
+  if (total == null) return "";
+  return total > itemsCount
+    ? `（共 ${total} 条 · 显示前 ${itemsCount} 条）`
+    : `（共 ${total} 条）`;
+};
+
 export const reviewRelation = (
   notebookId: string,
   relId: string,

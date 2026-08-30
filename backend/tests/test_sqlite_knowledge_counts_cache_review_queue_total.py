@@ -163,6 +163,92 @@ def test_review_queue_total_epoch_guard_is_global_not_per_notebook():
     assert db.review_queue_total_calls == 2  # 因为没留 memo,下一次读又重查了一次
 
 
+def test_review_queue_total_reads_seq_before_running_count():
+    """P2-2(硬读序契约):冷路径必须先点读 ``kg_mutation_seq``,再跑 COUNT——内容
+    永远不旧于标签,反序会让 carry 把陈旧内容续成新版本。断言 fake db 收到的头两条
+    SQL 顺序:第一条是 seq 点读,第二条才是 COUNT。
+
+    变异复现:把 ``review_queue_total`` 内部顺序改成「先跑冷 COUNT 再读 seq」会让
+    这条用例失败——第一条 SQL 会变成 ``FROM knowledge_relations``。"""
+    kcc.invalidate()
+    order: list[str] = []
+
+    class _OrderedDB(_FakeDB):
+        def execute(self, sql, params=()):
+            if "kg_mutation_seq" in sql:
+                order.append("seq")
+            elif "FROM knowledge_relations" in sql:
+                order.append("count")
+            return super().execute(sql, params)
+
+    db = _OrderedDB(seq=1, review_queue_total=17)
+    assert kcc.review_queue_total(db, "nb-order") == 17
+    assert order[:2] == ["seq", "count"]
+
+
+def test_carry_review_queue_total_retags_seq_label_only():
+    """P1-2:seq 匹配时只改标签(seq→new_seq),缓存的 VALUE 原样不动——验证「verified
+    翻转后 total 不冷算」的计数器断言:carry 之后再读一次,不触发新的冷 COUNT。"""
+    kcc.invalidate()
+    db = _FakeDB(seq=1, review_queue_total=17)
+    assert kcc.review_queue_total(db, "nb-carry") == 17
+    assert db.review_queue_total_calls == 1
+
+    kcc.carry_review_queue_total("nb-carry", expected_seq=1, new_seq=2)
+    assert kcc._REVIEW_QUEUE_TOTAL["nb-carry"] == (2, 17)  # 标签前移,值不变
+
+    db.seq = 2  # 模拟 set_edge_review 的 kg_mutation_seq 已经真的 bump 到 2
+    assert kcc.review_queue_total(db, "nb-carry") == 17
+    assert db.review_queue_total_calls == 1  # 没有新的冷 COUNT——carry 命中
+
+
+def test_carry_review_queue_total_drops_entry_on_seq_mismatch():
+    """seq 不符时 carry 必须丢弃该条目(fail-closed),不能猜测/硬套新标签——下一次
+    读会重新冷算而不是返回一个可能挂错版本的旧值。"""
+    kcc.invalidate()
+    db = _FakeDB(seq=1, review_queue_total=17)
+    assert kcc.review_queue_total(db, "nb-mismatch") == 17
+    assert db.review_queue_total_calls == 1
+
+    kcc.carry_review_queue_total("nb-mismatch", expected_seq=5, new_seq=6)
+    assert "nb-mismatch" not in kcc._REVIEW_QUEUE_TOTAL  # 条目被丢弃
+
+    db.seq = 6
+    assert kcc.review_queue_total(db, "nb-mismatch") == 17
+    assert db.review_queue_total_calls == 2  # 丢弃后确实重新冷算了
+
+
+def test_carry_review_queue_total_is_a_noop_when_memo_is_cold():
+    """从未暖过的 notebook 调用 carry 必须是安全的 no-op,不能凭空造出一条 memo。"""
+    kcc.invalidate()
+    kcc.carry_review_queue_total("nb-never-warm", expected_seq=1, new_seq=2)
+    assert "nb-never-warm" not in kcc._REVIEW_QUEUE_TOTAL
+
+
+def test_invalidate_none_clears_every_memo():
+    """P2-1/S3:全局失效必须清空全部 5 个 memo,而不仅仅是其中几个——把「新增 memo
+    必须在 invalidate() 里登记」这条约定配上守卫。
+
+    变异复现:删掉 ``invalidate()`` 里任意一个 ``.clear()`` 调用,这条用例必须变红。"""
+    kcc.invalidate()
+    db = _FakeDB(seq=1, chunk_count=7, review_queue_total=9)
+    kcc.type_status_counts(db, "nb-all")
+    kcc.pending_source_count(db, "nb-all")
+    kcc.visible_pending_source_count(db, "nb-all")
+    kcc.chunk_count(db, "nb-all")
+    kcc.review_queue_total(db, "nb-all")
+    assert kcc._MEMO and kcc._PENDING and kcc._VISIBLE_PENDING
+    assert kcc._CHUNKS and kcc._REVIEW_QUEUE_TOTAL
+
+    kcc.invalidate()  # 全局清空形态(notebook_id=None)
+
+    assert kcc._MEMO == {}
+    assert kcc._PENDING == {}
+    assert kcc._VISIBLE_PENDING == {}
+    assert kcc._CHUNKS == {}
+    assert kcc._REVIEW_QUEUE_TOTAL == {}
+
+
 def test_review_queue_total_not_included_in_warm_all():
     """T-A3 明确不进 warm_all(大库冷 COUNT ~1.1s,懒算)——warm_all 跑完之后,
     review_queue_total 这个 notebook 仍应是冷(memo 里没有它的条目)。"""

@@ -165,6 +165,9 @@ class KnowledgeGovernanceService:
         set_conflict_status: Callable[[str, str, str], None],
         memory_store: MemoryStorePort,
         review_queue_total: Callable[[str], int],
+        invalidate_knowledge_counts: Callable[[str], None],
+        carry_review_queue_total: Callable[[str, int, int], None],
+        kg_mutation_seq: Callable[[str], int],
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -189,6 +192,9 @@ class KnowledgeGovernanceService:
         self._set_conflict_status = set_conflict_status
         self.memory_store = memory_store
         self._review_queue_total_fn = review_queue_total
+        self._invalidate_knowledge_counts_fn = invalidate_knowledge_counts
+        self._carry_review_queue_total_fn = carry_review_queue_total
+        self._kg_mutation_seq_fn = kg_mutation_seq
 
     @staticmethod
     def promotion_dict(row, *, payload=None, evidence=None) -> dict:
@@ -319,8 +325,23 @@ class KnowledgeGovernanceService:
         independent of any ``limit`` passed to ``review_queue`` — a seq-gated
         ``COUNT(*)`` served by the injected query port (R3 T-A3), not a
         Python len() over the (already limited) ranked items ``review_queue``
-        returns."""
+        returns.
+
+        Calls ``self.get_notebook`` first (S1: symmetry with ``review_queue``
+        above) so a nonexistent notebook raises ``KeyError`` from THIS method
+        directly rather than depending on a caller-side guard (the API route
+        already 404s via its own dependency, but a direct/service-level or
+        facade-level caller must see the same failure ``review_queue`` gives)."""
+        self.get_notebook(notebook_id)
         return self._review_queue_total_fn(notebook_id)
+
+    # Transitions where NEITHER side is 'rejected' change no ranking input
+    # (trust/corr/centrality never read review_status) NOR the review-queue
+    # COUNT (`review_status != 'rejected'` — pending/verified are both on the
+    # "in" side of that predicate). Only a transition touching 'rejected' on
+    # either end (including the rejected->rejected no-op write) can move
+    # queue membership. R3 T-A3 P1-2 / T-A2 carry contract.
+    _NON_REJECTED_REVIEW_STATUSES = frozenset({"pending", "verified"})
 
     def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
         """Persist review_status on a knowledge_relation.
@@ -330,16 +351,35 @@ class KnowledgeGovernanceService:
         Raises KeyError if the relation does not exist in this notebook.
         Invalidates the federated reasoning graph cache so the next
         graph-reasoning call sees the updated set of active edges.
+
+        R3 T-A3 P1-2: ``update_edge_review`` returns the PREVIOUS status, so
+        after the ``kg_mutation_seq`` bump this can tell whether the
+        transition can carry-forward the ``review_queue_total`` count memo
+        (pure verified<->pending flip, membership unchanged — cheap retag) or
+        must let it go cold (either side 'rejected' — membership may have
+        actually changed, a fresh COUNT is the safe move). The carry is keyed
+        on ``new_seq - 1``: the seq this memo would have been tagged at
+        immediately before THIS write's own bump, so a stale/mismatched entry
+        (another writer raced in, or the memo was never warm) is dropped
+        rather than guessed at — see ``carry_review_queue_total``'s docstring.
         """
         if status not in self._REVIEW_STATUSES:
             raise ValueError(
                 f"review_status must be one of {sorted(self._REVIEW_STATUSES)}, got {status!r}")
         with self._write() as db:
-            self.governance_store.update_edge_review(db, notebook_id, rel_id, status)
+            prev_status = self.governance_store.update_edge_review(
+                db, notebook_id, rel_id, status
+            )
         # review_status flips in place (relation COUNT unchanged) — bump the
         # monotonic seq so seq-keyed fast paths (_scale_index_version /
         # _cluster_input_version) don't serve a stale version for this edit.
         self._mark_unified_kg_dirty(notebook_id)
+        non_rejected = self._NON_REJECTED_REVIEW_STATUSES
+        if prev_status in non_rejected and status in non_rejected:
+            new_seq = self._kg_mutation_seq_fn(notebook_id)
+            self._carry_review_queue_total_fn(notebook_id, new_seq - 1, new_seq)
+        else:
+            self._invalidate_knowledge_counts_fn(notebook_id)
         # Invalidate cached graph so _federated_rx_graph rebuilds on next access
         # (belt-and-braces: its per-status-count version key would also catch
         # the flip on its own).
