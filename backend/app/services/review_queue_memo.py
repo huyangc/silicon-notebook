@@ -51,33 +51,36 @@ KG job publish / ``set_edge_review`` / 删除路径,逐条抽查过)。(3) 是 (
 所以它保留了展开五张表的 ``version_for``;这里的产物不依赖那些,三样输入全部
 落在 ``kg_mutation_seq`` 的覆盖面内。
 
-**已知豁口(三处,都已堵)**——三处都不是「漏了一条 bump」,而是那条路径的 seq
-**根本不前进**,所以 seq 闸对它们天然无效,必须显式失效:
+**已知豁口**——不是「漏了一条 bump」,而是那条路径的 seq **根本不前进**,所以
+seq 闸对它们天然无效:
 
 1. ``RepositoryFacade.add_relations``(``repository_facade.py``)是 fixture/测试
    专用的裸插入,直接走 ``KnowledgeStorePort.add_relations_current``,**不** bump。
    照 ``knowledge_query.insert_test_object`` 的先例,该方法内显式调用本 memo 的
-   ``invalidate``(与它已有的 ``invalidate_knowledge_counts`` 并排)。
+   ``invalidate``(与它已有的 ``invalidate_knowledge_counts`` 并排)——这是**唯一**
+   还需要显式失效的豁口:它是测试专用的裸写路径,不值得为它接一条生产 bump。
 2. ``KnowledgeLifecycleService.delete_notebook_kg`` 删掉 ``unified_kg_state``
    整行,于是 seq **归零重爬**——不是单调前进,而是**别名**:一次 delete + 重抽
    之后 seq 会重新爬回它离开时的那些值,与那时**完全不同**的图内容撞上同一个
    标签。这正是那里已经显式 ``invalidate_knowledge_counts`` 的原因(见该方法的
-   注释),本 memo 在同一处并排失效。它比计数更需要这一手:计数在重爬途中被
-   任何一次读覆盖,而排名条目只在真的有人取队列时才被覆盖,一次「删完直接重抽
-   到底、中途没人看队列」就能撞上。
+   注释),本 memo 在同一处并排失效,**暂未**跟进「保留行 + 同事务 bump」的修法
+   (codex #638 R4 P2 评审发现:``unified_kg_state`` 行若保留,
+   ``kg_analysis._state_view`` 用 ``kg_mutation_seq==0`` 兼「行缺失」判定
+   ``present``的既有契约会被打破——``test_born_state_row_reports_like_a_never_
+   written_notebook`` 钉死了这个判据。这处冲突已上报,留待与该契约的维护者
+   一起决定解法,本豁口继续显式失效,不依赖 seq 闸)。
 3. ``SourceIngestionService.run_extraction`` 在 ``preserve_existing=False`` 时
    走 ``begin_extraction_run`` → ``clear_source_graph_state``,删掉该源全部
-   ``knowledge_relations``/``knowledge_objects``,同样**不** bump——它只清旧图,
-   ``mark_unified_kg_dirty`` 要等后面 ``store_kg`` 真落新对象/关系才会被调用。
-   与前两处**不同**:这不是 fixture 专用的裸写,也不是删库重建的运维路径,而是
-   **每一次重新抽取**都会走到的常规用户操作(手动重解析/失败重试/批量摄取
-   补跑皆同此)。清空旧图之后若抽取本身失败退出(最常见:没配模型),
-   ``kg_mutation_seq`` 原地不动,暖过的排名 memo 会继续端出已经被删除的边——
-   下一次对它 ``set_edge_review`` 必得 404。在
-   ``SourceIngestionService._invalidate_corpus_scale_memos``(与 copy-stats/
-   开路计数失效同一处调用点、同一注入形态)里显式 ``invalidate``。见
+   ``knowledge_relations``/``knowledge_objects``。与前两处**不同**:这不是
+   fixture 专用的裸写,也不是删库重建的运维路径,而是**每一次重新抽取**都会走到
+   的常规用户操作(手动重解析/失败重试/批量摄取补跑皆同此)。**codex #638 R4
+   P2 已堵**:``RepositoryFacade._begin_extraction_run`` 现在把这次 clear 与
+   ``mark_unified_kg_dirty_in_tx`` 放进同一个写事务(该方法的 docstring),所以
+   即使抽取本身随后失败退出(最常见:没配模型),清图这一步本身已经把 seq 推
+   进——本 memo 的 seq 闸单独就能挡住陈旧条目,``SourceIngestionService.
+   _invalidate_corpus_scale_memos`` 里原有的显式失效已作为冗余移除。见
    ``backend/tests/test_source_ingestion_service.py::
-   test_extraction_reset_without_seq_bump_invalidates_the_review_queue_memo``。
+   test_extraction_reset_advances_seq_so_the_review_queue_memo_misses``。
 
 ## 读序契约(硬)
 

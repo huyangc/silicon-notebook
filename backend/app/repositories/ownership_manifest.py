@@ -444,6 +444,7 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_mark_unified_kg_dirty_in_tx'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._begin_extraction_run', kind='attribute', target='_mark_unified_kg_dirty_in_tx'),
         ),
         patches=(
         ),
@@ -1180,6 +1181,7 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_write'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._begin_extraction_run', kind='attribute', target='_write'),
         ),
         patches=(
         ),

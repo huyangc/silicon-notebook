@@ -2074,16 +2074,39 @@ class RepositoryFacade:
         indexing_pipeline_id: str = "",
         indexing_pipeline_version: str = "builtin.chunk.v1",
     ) -> None:
-        """Open one source run, optionally retaining its graph for safe retry."""
-        return self._runtime.knowledge.begin_extraction(
-            source_id,
-            notebook_id,
-            run_id,
-            created_at,
-            preserve_existing=preserve_existing,
-            indexing_pipeline_id=indexing_pipeline_id,
-            indexing_pipeline_version=indexing_pipeline_version,
-        )
+        """Open one source run, optionally retaining its graph for safe retry.
+
+        codex #638 R4 P2: when ``preserve_existing`` is False the store-level
+        ``begin_extraction_run`` clears this source's ``knowledge_relations``/
+        ``knowledge_objects`` up front (``clear_source_graph_state``) — a real
+        graph mutation that must advance ``kg_mutation_seq``, or a warm
+        ``review_queue_memo`` in ANOTHER process sharing this DB keeps serving
+        the just-deleted edges indefinitely (seq-gated memos only invalidate
+        on a seq change; this repository's own process-local invalidate call
+        — ``SourceIngestionService._invalidate_corpus_scale_memos`` — cannot
+        reach a sibling process). The bump therefore rides the SAME write
+        transaction as the clear (``mark_unified_kg_dirty_in_tx``, the
+        ``set_edge_review`` R2 precedent): opened here at the facade instead
+        of inside the store's self-contained ``begin_extraction`` (which used
+        to own this transaction and had no coordinator access — stores don't
+        import services), so a crash between the clear committing and the
+        bump committing is impossible; either both land or neither does.
+        Conditioned on ``not preserve_existing`` — a preserved-graph retry
+        deletes nothing, so bumping there would just be a gratuitous
+        cache-wide invalidation with no matching content change."""
+        with self._write() as db:
+            self._runtime.knowledge.begin_extraction_run(
+                db,
+                source_id,
+                notebook_id,
+                run_id,
+                created_at,
+                preserve_existing=preserve_existing,
+                indexing_pipeline_id=indexing_pipeline_id,
+                indexing_pipeline_version=indexing_pipeline_version,
+            )
+            if not preserve_existing:
+                self._mark_unified_kg_dirty_in_tx(db, notebook_id)
 
     def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:
         return self._runtime.knowledge.finish_extraction(run_id, status, message)

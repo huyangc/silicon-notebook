@@ -1516,10 +1516,6 @@ class RepositoryRuntime:
             # copy-stats memo 是 runtime-owned 的(codex PR#634 R2 P2-2),所以
             # 摄取路径的失效走注入回调,与上面那条同一形态。
             invalidate_copy_stats=self.retrieval_snapshots.copy_stats_memo.invalidate,
-            # review-queue 排名 memo 同样 runtime-owned(R3 T-A2),同一注入
-            # 形态(P0,R3 T-A1/T-A2 双评审收敛):抽取重置删图不 bump seq,必须
-            # 从这里显式失效,见 ``review_queue_memo`` 模块 docstring 豁口三。
-            invalidate_review_queue_memo=self.review_queue_memo.invalidate,
         )
         # Memory-KG bridge (memory-kg-extract Task 3): MemoryService is wired
         # earlier (wire_memory, before wire_knowledge_lifecycle), but
