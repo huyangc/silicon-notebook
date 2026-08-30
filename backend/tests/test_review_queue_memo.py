@@ -6,8 +6,12 @@
 重算、rejected 真的失效、add_relations 豁口真的被堵)在
 ``backend/tests/test_edge_review_queue.py``。
 """
+import concurrent.futures
 import heapq
 import threading
+import time
+
+import pytest
 
 from app.services.review_queue_memo import (
     REVIEW_QUEUE_MEMO_ITEMS,
@@ -171,18 +175,43 @@ def test_carry_on_a_cold_notebook_is_a_no_op():
 
 
 def test_carry_does_not_mutate_a_list_already_handed_out():
-    """copy-on-write:``top`` 在锁外做拷贝,靠的就是这条——carry 换新 list,不改
-    任何还在别人手上的引用。"""
+    """F1(codex 复审):CoW 的真正保证点在 memo **内部**,不在 ``top()`` 的返回值
+    上——``top()`` 已经用 ``_slice_copy`` 把返回值和内部状态彻底隔离开,所以对着
+    ``top()`` 的返回值搞「就地改」变异根本测不出任何东西(旧版本这条测试就是
+    这样断言的,评审实测把 ``carry`` 改成原地 mutate、26 次全绿)。这里直接够
+    进 ``_store`` 内部:carry 前后分别记下 items list 与被改那条 item 的
+    ``id()``,两者都必须换成新对象,旧对象的内容也不能被那次 carry 动过。"""
     memo = ReviewQueueMemo()
     memo.top("nb", 5, lambda: 7, lambda: _items("r1", "r2"))
-    in_flight = memo.top("nb", 5, lambda: 7, lambda: [])
+
+    before_list = memo._store["nb"][1]
+    before_item = next(item for item in before_list if item["rel_id"] == "r1")
 
     memo.carry("nb", 7, 8, "r1", "verified")
 
-    assert [i["review_status"] for i in in_flight] == ["pending", "pending"]
+    after_list = memo._store["nb"][1]
+    after_item = next(item for item in after_list if item["rel_id"] == "r1")
+
+    assert after_list is not before_list, (
+        "carry must swap in a brand-new list, not mutate the old one in place"
+    )
+    assert after_item is not before_item, (
+        "the touched item must be a new dict, not an in-place edit of the old one"
+    )
+    assert before_item["review_status"] == "pending", (
+        "the old (pre-carry) dict must be left untouched by the mutation"
+    )
+    assert after_item["review_status"] == "verified"
 
 
 # ── single-flight ─────────────────────────────────────────────────────────
+#
+# 这一节里凡是让某个线程执行 ``assert release.wait(10)`` 的用例,一律改用
+# ``concurrent.futures`` 拿 ``Future``:线程内部的断言失败(或任何异常)必须能
+# 传到主线程的断言里,而不是被 Python 的默认线程异常钩子悄悄吞掉、只在 pytest
+# 里冒一条 ``PytestUnhandledThreadExceptionWarning`` ——旧写法下超时会被判定
+# 为「线程整个失败了但主线程看不到」,测试反而可能因为主线程侧的弱断言继续
+# 走通,是一种假绿(codex 复审实测复现)。
 
 def test_concurrent_cold_misses_run_one_compute():
     memo = ReviewQueueMemo()
@@ -196,19 +225,17 @@ def test_concurrent_cold_misses_run_one_compute():
         assert release.wait(10)
         return _items("r1")
 
-    out: list = []
+    def reader() -> list:
+        return memo.top("nb", 5, lambda: 4, compute)
 
-    def reader() -> None:
-        out.append(memo.top("nb", 5, lambda: 4, compute))
-
-    threads = [threading.Thread(target=reader) for _ in range(4)]
-    threads[0].start()
-    assert entered.wait(10)
-    for thread in threads[1:]:
-        thread.start()
-    release.set()
-    for thread in threads:
-        thread.join(10)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        leader_future = pool.submit(reader)
+        assert entered.wait(10)
+        follower_futures = [pool.submit(reader) for _ in range(3)]
+        release.set()
+        out = [leader_future.result(timeout=10)] + [
+            future.result(timeout=10) for future in follower_futures
+        ]
 
     assert len(calls) == 1
     assert len(out) == 4
@@ -217,7 +244,11 @@ def test_concurrent_cold_misses_run_one_compute():
     assert len({id(result) for result in out}) == 4
 
 
-def test_a_failed_cold_compute_is_not_cached_and_wakes_the_waiters():
+def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry():
+    """P2-4(codex 复审):single-flight 的 follower 必须直接继承 leader 的异常,
+    不再各自转正、串行重跑同一次注定会失败的冷算(旧契约是 follower ``continue``
+    重试,下面这条精确取代那份旧断言)。失败之后 memo 里什么都不缓存,包括
+    ``cached_seq``。"""
     memo = ReviewQueueMemo()
     state = {"calls": 0}
     entered = threading.Event()
@@ -225,35 +256,134 @@ def test_a_failed_cold_compute_is_not_cached_and_wakes_the_waiters():
 
     def compute() -> list:
         state["calls"] += 1
-        if state["calls"] == 1:
-            entered.set()
-            assert release.wait(10)
-            raise RuntimeError("cold ranking failed")
-        return _items("r1")
+        entered.set()
+        assert release.wait(10)
+        raise RuntimeError("cold ranking failed")
 
-    errors: list = []
-    out: list = []
+    def call() -> list:
+        return memo.top("nb", 5, lambda: 3, compute)
 
-    def leader() -> None:
-        try:
-            memo.top("nb", 5, lambda: 3, compute)
-        except RuntimeError as exc:
-            errors.append(exc)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        leader_future = pool.submit(call)
+        assert entered.wait(10)
+        waiter_future = pool.submit(call)
+        release.set()
+        with pytest.raises(RuntimeError, match="cold ranking failed"):
+            leader_future.result(timeout=10)
+        with pytest.raises(RuntimeError, match="cold ranking failed"):
+            waiter_future.result(timeout=10)
 
-    leader_thread = threading.Thread(target=leader)
-    leader_thread.start()
-    assert entered.wait(10)
-    waiter = threading.Thread(
-        target=lambda: out.append(memo.top("nb", 5, lambda: 3, compute))
+    assert state["calls"] == 1, "the waiter must inherit the failure, not recompute"
+    assert memo.cached_seq("nb") is None
+
+
+def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recompute():
+    """P2-4 加用例:N 个并发 follower 全部要快速拿到同一型异常。变异锚点——把
+    follower 分支从「继承异常」改回旧的「continue 重试」——会让 ``calls`` 从 1
+    涨回 N,墙钟也跟着从 1 倍冷算耗时涨到 N 倍(串行重跑同一次必败的冷算)。"""
+    memo = ReviewQueueMemo()
+    calls = {"n": 0}
+    entered = threading.Event()
+    release = threading.Event()
+    compute_seconds = 0.05
+
+    def compute() -> list:
+        calls["n"] += 1
+        entered.set()
+        assert release.wait(10)
+        time.sleep(compute_seconds)
+        raise RuntimeError("cold ranking failed")
+
+    def call() -> list:
+        return memo.top("nb", 5, lambda: 9, compute)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        leader_future = pool.submit(call)
+        assert entered.wait(10)
+        follower_futures = [pool.submit(call) for _ in range(5)]
+        release.set()
+        started = time.monotonic()
+        for future in [leader_future, *follower_futures]:
+            with pytest.raises(RuntimeError, match="cold ranking failed"):
+                future.result(timeout=10)
+        elapsed = time.monotonic() - started
+
+    assert calls["n"] == 1, "only the leader may run the cold ranking"
+    assert elapsed < compute_seconds * 5, (
+        "followers must not serially re-run the failing cold path"
     )
-    waiter.start()
-    release.set()
-    leader_thread.join(10)
-    waiter.join(10)
 
-    assert errors, "the failing leader must still raise to its own caller"
-    assert out == [_items("r1")], "the waiter must retry, not inherit the failure"
-    assert memo.cached_seq("nb") == 3
+    # 失败后新请求仍从头当 leader(不做负缓存):同一个 seq,一个全新的、
+    # 会成功的 compute 必须真的被调用并生效,不被上一次的失败钉死。
+    fresh = memo.top("nb", 5, lambda: 9, lambda: _items("recovered"))
+    assert fresh == _items("recovered")
+    assert calls["n"] == 1, "the fresh call must run its OWN compute, not the failing one"
+
+
+def test_a_blocked_cold_compute_for_one_notebook_does_not_block_another():
+    """P2-2(codex 复审):``top`` 绝不能在持有全局锁的情况下跑 ``compute()``——
+    否则 nb-A 的一次慢冷算会把 nb-B 的读也一起拖住。变异锚点:把
+    ``value = compute()`` 挪进 ``with self._lock:`` 块内,本条会因为 nb-B 的
+    调用超时而报红(评审实测这个变异在旧的两条「靠线程超时」的用例上 20/20
+    仍然绿)。用 ``try/finally`` 保证不管 nb-B 那一步是否超时,``release`` 都会
+    被设置,阻塞的 nb-A leader 不会把整个测试进程吊死。"""
+    memo = ReviewQueueMemo()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_compute() -> list:
+        entered.set()
+        assert release.wait(10)
+        return _items("a1")
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    try:
+        blocked_future = pool.submit(memo.top, "nb-A", 5, lambda: 1, blocked_compute)
+        assert entered.wait(10)
+
+        other_future = pool.submit(
+            memo.top, "nb-B", 5, lambda: 1, lambda: _items("b1")
+        )
+        # nb-B 不需要等 nb-A 的 compute() 结束——给一个远小于 10s 门的短超时。
+        other = other_future.result(timeout=1)
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+    assert other == _items("b1")
+    assert blocked_future.result(timeout=10) == _items("a1")
+
+
+def test_writeback_from_a_slow_stale_leader_does_not_downgrade_a_fresher_entry():
+    """P2-3(codex 复审):慢 leader 用旧 seq 算出来的值,不能在一个更新的 seq
+    已经写回之后,姗姗来迟地把 store 覆盖回旧版本。变异锚点:去掉写回前的单调
+    守卫(``existing is None or existing[0] <= seq``),本条报红。"""
+    memo = ReviewQueueMemo()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_compute() -> list:
+        entered.set()
+        assert release.wait(10)
+        return _items("stale")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        slow_future = pool.submit(memo.top, "nb", 5, lambda: 1, slow_compute)
+        assert entered.wait(10)
+
+        # 一个更新的 seq 在慢 leader 仍卡在 compute() 里的时候完成并写回。
+        fresh = memo.top("nb", 5, lambda: 2, lambda: _items("fresh"))
+        assert fresh == _items("fresh")
+
+        release.set()
+        stale_result = slow_future.result(timeout=10)
+
+    # 慢 leader 仍然把它自己算出来的值交给它自己的调用方——写回守卫只挡
+    # store,不改变 leader 对自己调用者的承诺。
+    assert stale_result == _items("stale")
+    assert memo.cached_seq("nb") == 2
+    after = memo.top("nb", 5, lambda: 2, lambda: [])
+    assert [item["rel_id"] for item in after] == ["fresh"]
 
 
 # ── epoch / LRU ───────────────────────────────────────────────────────────
@@ -353,4 +483,6 @@ def test_a_deep_nlargest_prefix_equals_a_shallow_nlargest():
 
 
 def test_the_memo_depth_is_the_advertised_constant():
-    assert REVIEW_QUEUE_MEMO_ITEMS == 1000
+    """P1(codex 复审):M 降到 200——够覆盖 ``review_queue`` 两处未传 limit 的
+    默认值(service/facade 的 200、路由的 100),不需要 1000 那么深。"""
+    assert REVIEW_QUEUE_MEMO_ITEMS == 200

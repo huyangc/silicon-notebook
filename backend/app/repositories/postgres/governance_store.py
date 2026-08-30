@@ -443,8 +443,16 @@ class GovernanceStore:
         for the first two.  Registered robustness change (same class as the
         anchor pushdown's): a NON-STRING ``name`` (e.g. a number) used to reach
         ``edge_trust._norm`` as an ``int`` and raise a 500; it now participates
-        in scoring as its text form, and ``->>`` renders it the same way the
-        SQLite twin's ``json_extract`` + ``str()`` does.
+        in scoring as its text form.  ``->>`` renders it the SAME text the
+        SQLite twin's ``json_extract`` + ``str()`` does ONLY for a string or an
+        integer ``name`` (registered narrowing, codex R3 double review) — a
+        JSON bool renders "true"/"false" here vs "1"/"0" on the SQLite side, a
+        float can differ in trailing-zero/exponent formatting, and an
+        object/array's compact-JSON text is not byte-identical across the two
+        engines' serializers.  Not a regression (the OLD path raised on both
+        dialects for all of those shapes), but cross-dialect corroboration
+        counts and the displayed name can differ for a non-string/non-integer
+        ``name`` — registered, not guarded against.
 
         ⚠ ``name`` deliberately does NOT move into the relation JOIN.  That
         would replace ~500k deduplicated endpoint lookups with 8.35M edges × 2

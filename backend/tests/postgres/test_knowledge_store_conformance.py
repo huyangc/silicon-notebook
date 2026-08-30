@@ -5493,8 +5493,12 @@ def test_postgres_review_queue_rows_renders_a_non_string_name_as_text(
     """R3 T-A1 registered robustness change, PostgreSQL half: a numeric
     ``payload.name`` used to reach ``edge_trust._norm`` as an ``int`` and raise
     a 500.  ``->>`` renders it as text, matching what the SQLite twin produces
-    via ``json_extract`` + the caller's ``str()`` (both dialects must land on
-    the SAME text — that equality is the cross-backend contract)."""
+    via ``json_extract`` + the caller's ``str()``.  That cross-backend text
+    equality is registered ONLY for a string or an integer ``name`` (codex R3
+    double review narrowed the earlier "same text for any scalar" claim — a
+    bool/float/object can render differently across the two dialects; see the
+    store docstrings).  This test's own fixture uses an integer (``42``), so
+    the assertion below stays exactly what it always was."""
     _seed_review_queue_fixture(knowledge_harness)
     with knowledge_harness.database.write() as connection:
         connection.execute(
