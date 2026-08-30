@@ -250,6 +250,27 @@ test("loadMoreConceptMembers keeps the first page's member_total when a later pa
   expect(result.current.view.conceptDetail?.member_total).toBe(430);
 });
 
+test("a failed load-more sets the local error state and a retry clears it (codex #639 R4 P2)", async () => {
+  // AGENTS.md Interactive feedback: the button itself must show the failure
+  // (banner alone is not enough). Mutation-checked: dropping
+  // setConceptMembersLoadError(true) from the catch turns this red.
+  const harness = createTestKgAuthority();
+  const { result } = await openWithConceptSelected(harness);
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m2"));
+  expect(result.current.view.conceptMembersLoadError).toBe(false);
+
+  kgApi.fetchConceptDetail.mockRejectedValueOnce(new Error("boom"));
+  await act(async () => { await result.current.loadMoreConceptMembers(); });
+  expect(result.current.view.conceptMembersLoadError).toBe(true);
+  expect(result.current.view.conceptMembersLoadingMore).toBe(false);
+
+  // Retrying clears the error state up front and succeeds.
+  kgApi.fetchConceptDetail.mockResolvedValueOnce(conceptPage(["m3"], null));
+  await act(async () => { await result.current.loadMoreConceptMembers(); });
+  expect(result.current.view.conceptMembersLoadError).toBe(false);
+  expect(result.current.view.conceptDetail?.members.map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
+});
+
 test("a same-concept first-page refresh bumps conceptDetailGeneration (codex #639 R2 P2)", async () => {
   // KgEvidenceList's resetKey is `canonical_id:conceptDetailGeneration` —
   // a merge/rebuild refresh of the SAME concept keeps canonical_id constant,
