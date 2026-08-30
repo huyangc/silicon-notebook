@@ -241,6 +241,161 @@ def test_review_queue_total_missing_notebook_raises_keyerror(repo):
         repo.review_queue_total("does-not-exist")
 
 
+# ── R3 T-A2: 排名 memo 的端到端(审核循环不再每次重排) ─────────────────────
+
+def _count_cold_rankings(governance, monkeypatch):
+    """给 ``_rank_review_queue``(冷路径:全量取数 + 打分 + betweenness)套计数器,
+    委托真实实现,所以命中/未命中之外的一切行为都保持原样。"""
+    calls = {"n": 0}
+    original = governance._rank_review_queue
+
+    def spy(notebook_id, limit):
+        calls["n"] += 1
+        return original(notebook_id, limit)
+
+    monkeypatch.setattr(governance, "_rank_review_queue", spy)
+    return calls
+
+
+def test_review_queue_verified_flip_carries_the_ranking_without_recomputing(
+    repo, monkeypatch
+):
+    """T-A2 主判据:一次 pending->verified 的审核判定之后,同进程的下一次取队列
+    **不得**再跑一遍冷排名——而且续下来的那份必须与真正重算的结果逐位相同。"""
+    nb_id = _seed_graph(repo)
+    before = repo.review_queue(nb_id)                      # 冷算一次,暖起来
+    rel_id = before[0]["rel_id"]
+    calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
+
+    repo.set_edge_review(nb_id, rel_id, "verified")
+    carried = repo.review_queue(nb_id)
+
+    assert calls["n"] == 0, "verified<->pending 翻转不得触发冷排名"
+    assert [i["rel_id"] for i in carried] == [i["rel_id"] for i in before]
+    assert [i["review_priority"] for i in carried] == [
+        i["review_priority"] for i in before
+    ]
+    assert {i["rel_id"]: i["review_status"] for i in carried}[rel_id] == "verified"
+    # 续来的这份 == 真重算的那份(carry 的正确性,不只是「没重算」)。
+    repo._runtime.review_queue_memo.invalidate(nb_id)
+    assert repo.review_queue(nb_id) == carried
+    assert calls["n"] == 1
+
+
+def test_review_queue_reject_invalidates_the_ranking(repo):
+    """任一侧涉及 'rejected' 的迁移会改变集合与拓扑——排名 memo 必须被丢掉,
+    而不是像 verified 翻转那样续标签。"""
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
+
+    repo.set_edge_review(nb_id, rel_id, "rejected")
+
+    assert memo.cached_seq(nb_id) is None
+    assert rel_id not in {i["rel_id"] for i in repo.review_queue(nb_id)}
+
+
+def test_review_queue_unreject_invalidates_the_ranking(repo):
+    """撤销拒绝(rejected -> pending)把边**加回**集合,与正向一样改变拓扑与
+    corroboration 分组;carry 在这里是错的。"""
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    repo.set_edge_review(nb_id, rel_id, "rejected")
+    repo.review_queue(nb_id)                               # 重新暖起来(不含该边)
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
+
+    repo.set_edge_review(nb_id, rel_id, "pending")
+
+    assert memo.cached_seq(nb_id) is None
+    assert rel_id in {i["rel_id"] for i in repo.review_queue(nb_id)}
+
+
+def test_two_uncarried_bumps_force_a_recompute(repo, monkeypatch):
+    """跨进程模拟:别的进程连 bump 两次 seq(本进程收不到任何 carry),于是本地
+    条目的标签落后两个版本。此后哪怕来一次 verified 翻转,它的 carry 也会因为
+    ``expected_seq`` 不符而整条丢弃——绝不把陈旧内容续成新版本。"""
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    memo = repo._runtime.review_queue_memo
+    warm_seq = memo.cached_seq(nb_id)
+
+    repo._mark_unified_kg_dirty(nb_id)                     # 另一个进程的两次 KG 变更
+    repo._mark_unified_kg_dirty(nb_id)
+    assert memo.cached_seq(nb_id) == warm_seq              # 本地标签没动
+
+    calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
+    repo.set_edge_review(nb_id, rel_id, "verified")
+    assert memo.cached_seq(nb_id) is None, "seq 不符必须丢弃,不得续标签"
+    repo.review_queue(nb_id)
+    assert calls["n"] == 1
+
+
+def test_review_queue_bypasses_the_memo_outside_the_cached_depth(repo, monkeypatch):
+    """``limit < 0``(「掐掉尾巴」的切片)与 ``limit > M``(比 memo 存的还深)直通
+    冷路径,语义 = 现状;区间内的 limit 仍然走 memo。"""
+    from app.services.review_queue_memo import REVIEW_QUEUE_MEMO_ITEMS
+
+    nb_id = _seed_graph(repo)
+    repo.review_queue(nb_id)                               # 暖起来
+    calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
+
+    repo.review_queue(nb_id, limit=-1)
+    repo.review_queue(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS + 1)
+    assert calls["n"] == 2
+
+    repo.review_queue(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS)
+    repo.review_queue(nb_id, limit=0)
+    assert calls["n"] == 2
+
+
+def test_review_queue_result_mutation_does_not_reach_the_memo(repo):
+    nb_id = _seed_graph(repo)
+    handed_out = repo.review_queue(nb_id)
+    expected = [dict(item) for item in handed_out]
+    handed_out[0]["review_status"] = "MUTATED"
+    handed_out[0]["review_priority"] = -999.0
+    handed_out.pop()
+
+    assert repo.review_queue(nb_id) == expected
+
+
+def test_review_queue_missing_notebook_raises_keyerror(repo):
+    """``get_notebook`` 仍在 memo 之前:一个不存在的 notebook 必须照旧抛
+    ``KeyError``,不能因为「先查 memo」而变成一次静默的空队列。"""
+    with pytest.raises(KeyError):
+        repo.review_queue("does-not-exist")
+
+
+def test_add_relations_facade_path_invalidates_the_review_queue_ranking(repo):
+    """T-A2 的同一处豁口:``add_relations`` 不 bump ``kg_mutation_seq``,排名 memo
+    与计数 memo 一样必须在那里被显式失效。"""
+    nb_id = _seed_graph(repo)
+    repo.review_queue(nb_id)
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
+
+    repo.add_relations(nb_id, "", [])
+
+    assert memo.cached_seq(nb_id) is None
+
+
+def test_delete_notebook_kg_invalidates_the_review_queue_ranking(repo):
+    """``delete_notebook_kg`` 掉 ``unified_kg_state`` 整行,seq 因此**归零重爬**
+    ——不是单调前进,而是别名:重抽会让 seq 爬回它离开时的值,配上完全不同的图。
+    该方法已经为同一个理由显式失效计数 memo;排名 memo 必须并排跟上。"""
+    nb_id = _seed_graph(repo)
+    repo.review_queue(nb_id)
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
+
+    repo.delete_notebook_kg(nb_id)
+
+    assert memo.cached_seq(nb_id) is None
+    assert repo.review_queue(nb_id) == []
+
+
 def test_add_relations_facade_path_invalidates_review_queue_total(repo):
     """F1: RepositoryFacade.add_relations is a raw-insert path that bypasses
     store_kg's kg_mutation_seq bump. It must explicitly invalidate the

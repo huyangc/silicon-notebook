@@ -230,29 +230,15 @@ def test_review_queue_rows_drops_evidence_column(repo):
         assert "has_anchor" in keys
 
 
-def test_endpoint_lookup_sql_keeps_no_notebook_predicate():
-    """The endpoint lookup must issue a BARE ``id IN (...)``.
+def _captured_endpoint_lookups() -> list:
+    """Run ``review_queue_rows`` against a fake connection and return the
+    endpoint-lookup statements it issued, whitespace-normalised.
 
-    Without ``ANALYZE`` — which this repository never runs on production
-    databases — SQLite plans ``WHERE notebook_id=? AND id IN (...)`` as
-    ``idx_knowledge_objects_nb_* (notebook_id=?)``, walking every object of the
-    notebook once per batch (measured on a 200k-row database: 0.138s →
-    14.155s, a ×103 regression on the very read this narrowing exists to
-    shrink).  A bare ``id IN (...)`` takes the primary key with or without
-    statistics.  Same conclusion, recipe and guard style as
-    ``query_store.notebook_source_ids`` / ``maintenance.chunk_texts_by_ids`` and
-    ``test_canonical_relations.py::test_relation_support_rows_issues_row_value_in_not_or_chain``.
-
-    This is pinned as SQL TEXT because a behaviour test cannot see it: at
-    fixture scale SQLite picks the primary key either way, so EXPLAIN cannot
-    tell the two spellings apart — which is precisely how the regression got
-    past one round of review.  ``notebook_id`` must instead be projected, so
-    the filter is still applied (see the equivalence tests above).
-    """
-    # No real connection: a fake db that answers the relation read with two
-    # endpoints, so the endpoint lookup is actually issued, and records the SQL.
+    No real database: the fake answers the relation read with two endpoints so
+    the endpoint lookup is actually issued, and records every statement.  Two
+    SQL-text guards below read this — each pins a different property of the
+    same statement, and neither may be relaxed to accommodate the other."""
     relation_rows = [{"source_object_id": "ko-a", "target_object_id": "ko-b"}]
-    assert _review_endpoint_ids(relation_rows) == ["ko-a", "ko-b"]
 
     class _Cursor:
         def __init__(self, rows):
@@ -279,13 +265,58 @@ def test_endpoint_lookup_sql_keeps_no_notebook_predicate():
         if "FROM knowledge_objects" in sql and " IN (" in sql
     ]
     assert lookups, f"expected an endpoint lookup, got: {capture.statements}"
-    for sql in lookups:
+    return lookups
+
+
+def test_endpoint_lookup_sql_keeps_no_notebook_predicate():
+    """The endpoint lookup must issue a BARE ``id IN (...)``.
+
+    Without ``ANALYZE`` — which this repository never runs on production
+    databases — SQLite plans ``WHERE notebook_id=? AND id IN (...)`` as
+    ``idx_knowledge_objects_nb_* (notebook_id=?)``, walking every object of the
+    notebook once per batch (measured on a 200k-row database: 0.138s →
+    14.155s, a ×103 regression on the very read this narrowing exists to
+    shrink).  A bare ``id IN (...)`` takes the primary key with or without
+    statistics.  Same conclusion, recipe and guard style as
+    ``query_store.notebook_source_ids`` / ``maintenance.chunk_texts_by_ids`` and
+    ``test_canonical_relations.py::test_relation_support_rows_issues_row_value_in_not_or_chain``.
+
+    This is pinned as SQL TEXT because a behaviour test cannot see it: at
+    fixture scale SQLite picks the primary key either way, so EXPLAIN cannot
+    tell the two spellings apart — which is precisely how the regression got
+    past one round of review.  ``notebook_id`` must instead be projected, so
+    the filter is still applied (see the equivalence tests above).
+    """
+    assert _review_endpoint_ids(
+        [{"source_object_id": "ko-a", "target_object_id": "ko-b"}]
+    ) == ["ko-a", "ko-b"]
+    for sql in _captured_endpoint_lookups():
         assert "notebook_id = ?" not in sql and "notebook_id=?" not in sql, (
             "the endpoint lookup must NOT carry a notebook_id predicate — "
             f"it degrades to a per-batch notebook scan without ANALYZE: {sql}")
         assert "notebook_id" in sql.split("FROM")[0], (
             "notebook_id must still be PROJECTED so the caller can filter on "
             f"it: {sql}")
+
+
+def test_endpoint_lookup_sql_projects_only_the_name():
+    """R3 T-A1: the endpoint lookup must extract ``payload.name`` in SQL, never
+    project the whole ``payload`` document.
+
+    Pinned as SQL TEXT for the same reason as the predicate guard above: the
+    equivalence oracles stay green either way (the narrowing is lossless), so
+    only the query shape can witness that the narrowing is still in place.  The
+    predicate ban above is NOT relaxed by this — both guards read the same
+    statements, each asserting its own property."""
+    for sql in _captured_endpoint_lookups():
+        projection = sql.split("FROM")[0]
+        assert "json_extract(payload, '$.name')" in projection, (
+            "payload.name must be extracted in SQL (R3 T-A1): " f"{sql}")
+        assert "payload" not in projection.replace(
+            "json_extract(payload, '$.name')", ""
+        ), (
+            "the endpoint lookup must NOT also project the whole payload "
+            f"document — that is the read this narrowing removes: {sql}")
 
 
 def test_review_queue_rows_filters_cross_notebook_endpoints(repo):
@@ -407,6 +438,52 @@ def test_anchor_pushdown_survives_shapes_that_crashed_the_old_read(
         rel_rows, _obj = GovernanceStore.review_queue_rows(db, nb_id)
     assert rel_rows
     assert all(not row["has_anchor"] for row in rel_rows)
+
+
+# ── R3 T-A1: payload.name 的 SQL 提取 ────────────────────────────────────
+
+def test_endpoint_name_extraction_matches_the_payload_read(repo):
+    """The names the queue scores with must be exactly what parsing the whole
+    payload used to yield — for the ordinary string case, that is the oracle
+    comparison above; here we also pin that the projection really carries the
+    name (a store-level read that a NULL-everywhere regression would break
+    while every equivalence oracle stayed green, since both sides would then
+    score ``""``)."""
+    nb_id, _ = _seed_graph_with_isolated_objects(repo)
+    with repo._connect() as db:
+        _rel, obj_rows = GovernanceStore.review_queue_rows(db, nb_id)
+        payloads = {
+            r["id"]: json.loads(r["payload"] or "{}")
+            for r in db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
+                (nb_id,),
+            ).fetchall()
+        }
+    assert obj_rows
+    assert {r["id"]: r["name"] for r in obj_rows} == {
+        r["id"]: payloads[r["id"]]["name"] for r in obj_rows
+    }
+    assert all(r["name"] for r in obj_rows), "fixture names must be non-empty"
+
+
+def test_review_queue_scores_a_non_string_name_that_crashed_the_old_read(repo):
+    """Registered robustness change (R3 T-A1, same class as the anchor
+    pushdown's): a numeric ``payload.name`` reached ``edge_trust._norm`` as an
+    ``int`` and raised — a 500 for the whole queue.  It now participates in
+    scoring as its TEXT form, identical to what PostgreSQL's ``->>`` renders."""
+    nb_id, _ = _seed_graph_with_isolated_objects(repo)
+    with repo._write() as db:
+        db.execute(
+            'UPDATE knowledge_objects SET payload=\'{"name": 42}\' '
+            "WHERE notebook_id=?",
+            (nb_id,),
+        )
+    with pytest.raises(AttributeError):
+        _old_review_queue(repo, nb_id)
+    items = repo.review_queue(nb_id)
+    assert items
+    assert {i["source_name"] for i in items} == {"42"}
+    assert {i["target_name"] for i in items} == {"42"}
 
 
 # ── 批 A: nlargest 与稳定排序切片逐位等价 ───────────────────────────────

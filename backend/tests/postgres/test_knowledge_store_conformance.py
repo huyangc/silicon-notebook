@@ -5478,7 +5478,34 @@ def test_postgres_review_queue_rows_reads_only_live_endpoint_objects(
     # isolated objects and the rejected edge's exclusive endpoint stay unread.
     assert {row["id"] for row in objects} == {"ko-rq-src", "ko-rq-tgt"}
     assert len(objects) == 2, "endpoints must not be duplicated across batches"
-    assert json.loads(objects[0]["payload"])  # payload still arrives as JSON text
+    # R3 T-A1: the whole payload document no longer travels — the projection is
+    # ``payload->>'name'``, already text, and nothing else of the payload rides
+    # along for the caller to re-parse.
+    assert {row["id"]: row["name"] for row in objects} == {
+        "ko-rq-src": "ko-rq-src", "ko-rq-tgt": "ko-rq-tgt",
+    }
+    assert "payload" not in objects[0]
+
+
+def test_postgres_review_queue_rows_renders_a_non_string_name_as_text(
+    knowledge_harness,
+):
+    """R3 T-A1 registered robustness change, PostgreSQL half: a numeric
+    ``payload.name`` used to reach ``edge_trust._norm`` as an ``int`` and raise
+    a 500.  ``->>`` renders it as text, matching what the SQLite twin produces
+    via ``json_extract`` + the caller's ``str()`` (both dialects must land on
+    the SAME text — that equality is the cross-backend contract)."""
+    _seed_review_queue_fixture(knowledge_harness)
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "UPDATE knowledge_objects SET payload=%s::jsonb WHERE id=%s",
+            (json.dumps({"name": 42}), "ko-rq-src"),
+        )
+    with knowledge_harness.database.connect() as connection:
+        _relations, objects = knowledge_harness.governance.review_queue_rows(
+            connection, "nb-personal"
+        )
+    assert {row["id"]: row["name"] for row in objects}["ko-rq-src"] == "42"
 
 
 def test_postgres_review_queue_rows_drops_evidence_for_an_anchor_flag(

@@ -1338,6 +1338,7 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
     from app.core.config import Settings
     from app.repositories.postgres.knowledge_store import KnowledgeStore
     from app.services.knowledge_governance import KnowledgeGovernanceService
+    from app.services.review_queue_memo import ReviewQueueMemo
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
     assert PostgresMigrator(postgres_database).migrate() == 42
@@ -1408,6 +1409,7 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
         invalidate_knowledge_counts=lambda _notebook_id: None,
         carry_review_queue_total=lambda _notebook_id, _expected_seq, _new_seq: None,
         kg_mutation_seq=lambda _notebook_id: 0,
+        review_queue_memo=ReviewQueueMemo(),
     )
     revoked_uncommitted = threading.Event()
     approval_started = threading.Event()

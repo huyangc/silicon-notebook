@@ -429,7 +429,30 @@ class GovernanceStore:
         The endpoint lookup keeps its ``notebook_id`` predicate in SQL: unlike
         SQLite, PostgreSQL plans ``notebook_id = %s AND id = ANY(%s)`` as an
         ``pk_knowledge_objects`` scan with ``notebook_id`` as a filter, so there
-        is no full-partition regression to dodge here."""
+        is no full-partition regression to dodge here.
+
+        R3 T-A1: the endpoint projection extracts ``payload->>'name'`` in SQL
+        instead of shipping the whole ``payload`` document.  The consumer
+        (``knowledge_governance.review_queue``) reads exactly two fields off
+        these rows — ``object_type`` and ``payload["name"]`` — so every other
+        key of every endpoint object's payload was pure transfer/parse cost
+        (~500k endpoint rows on the largest production notebook, each payload a
+        full claim/concept document).  ``->>`` returns SQL NULL for a missing
+        key, a JSON ``null``, or a non-object payload; the caller normalises
+        NULL to ``""``, which is what the old ``dict.get("name", "")`` produced
+        for the first two.  Registered robustness change (same class as the
+        anchor pushdown's): a NON-STRING ``name`` (e.g. a number) used to reach
+        ``edge_trust._norm`` as an ``int`` and raise a 500; it now participates
+        in scoring as its text form, and ``->>`` renders it the same way the
+        SQLite twin's ``json_extract`` + ``str()`` does.
+
+        ⚠ ``name`` deliberately does NOT move into the relation JOIN.  That
+        would replace ~500k deduplicated endpoint lookups with 8.35M edges × 2
+        payload dereferences (read amplification), and it would resolve names
+        for CROSS-NOTEBOOK endpoints that this notebook-scoped lookup leaves
+        unnamed — changing the corroboration triple (pinned by
+        ``test_governance_read_narrowing.py::
+        test_review_queue_rows_filters_cross_notebook_endpoints``)."""
         relations = connection.execute(
             "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
             "kr.edge_type, kr.source_id, kr.review_status, "
@@ -453,13 +476,16 @@ class GovernanceStore:
         for offset in range(0, len(endpoint_ids), _REVIEW_ENDPOINT_LOOKUP_BATCH):
             batch = endpoint_ids[offset : offset + _REVIEW_ENDPOINT_LOOKUP_BATCH]
             objects.extend(connection.execute(
-                "SELECT id, object_type, payload FROM knowledge_objects "
+                "SELECT id, object_type, payload->>'name' AS name "
+                "FROM knowledge_objects "
                 "WHERE notebook_id = %s AND id = ANY(%s)",
                 (notebook_id, batch),
             ).fetchall())
         return (
             _compat_rows(relations),
-            _compat_rows(objects, json_columns=(("payload", {}),)),
+            # No ``json_columns``: ``name`` already arrives as text, so there is
+            # no document left to re-serialize for the caller to re-parse.
+            _compat_rows(objects),
         )
 
     @staticmethod
