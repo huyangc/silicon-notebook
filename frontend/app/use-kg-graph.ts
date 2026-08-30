@@ -165,6 +165,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
   const [conceptMembersLoadingMore, setConceptMembersLoadingMore] = useState(false);
+  // codex #639 R2 P2:同一概念的 merge/rebuild 刷新会落一个全新首页,但
+  // canonical_id 不变——渐进披露(KgEvidenceList 的 resetKey)需要一个
+  // 「每次首页落地都变化、load-more 追加期间稳定」的世代号。镜像自
+  // conceptMembersEpochRef(ref 不触发子组件 effect,故需 state)。
+  const [conceptDetailGeneration, setConceptDetailGeneration] = useState(0);
   // Hub-cluster member pagination (R3·T-B2). `conceptDetail` itself carries
   // the cursor (`next_cursor`) and the accumulated `members`/`attached`/
   // `evidence` — every place that lands a fresh FIRST page replaces the
@@ -216,6 +221,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     conceptMembersEpochRef.current += 1;
     conceptDetailContextRef.current = detail ? context : null;
     setConceptMembersLoadingMore(false);
+    setConceptDetailGeneration(conceptMembersEpochRef.current);
     setConceptDetail(detail);
   };
 
@@ -1177,6 +1183,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       status: visible ? unifiedStatus : null,
       selectedNodeId: visible ? selectedNodeId : null,
       conceptDetail: visible ? conceptDetail : null,
+      conceptDetailGeneration,
       conceptMembersLoadingMore: visible && conceptMembersLoadingMore,
       nodeContext: visible ? nodeContext : null,
       reviewBusy: visible && reviewBusy,

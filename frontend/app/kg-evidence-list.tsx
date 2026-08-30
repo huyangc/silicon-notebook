@@ -45,9 +45,12 @@ export function KgEvidenceCard({ evidence, index }: { evidence: EvidenceItem; in
 
 /**
  * 出处列表的渐进披露（codex PR #639 R1 P2）：初始只渲染前 20 条，「显示更多
- * 出处」按钮每次 +20。`resetKey` 标识「同一个概念」——概念详情里「加载更多
- * 成员」会把新成员的出处并进同一份 `evidence`（`resetKey` 不变，保留用户
- * 已展开的进度）；换节点/首页重载会换 `resetKey`（概念详情用 canonical_id），
+ * 出处」按钮每次 +20。`resetKey` 标识「同一份首页世代」——概念详情里「加载
+ * 更多成员」把新成员的出处并进同一份 `evidence`（`resetKey` 不变，保留用户
+ * 已展开的进度）；换节点或**任何**首页重载（含同概念的 merge/rebuild 刷新，
+ * codex #639 R2 P2——canonical_id 单独作键在这里不变化）会换 `resetKey`
+ * （概念详情用 `canonical_id:conceptDetailGeneration`，世代号在
+ * setConceptDetailFirstPage 每次首页落地时自增），
  * 回落到 20 条。这条重置规则是本组件唯一的状态管理职责，其余渲染都是纯函数。
  */
 export function KgEvidenceList({ evidence, resetKey }: { evidence: EvidenceItem[]; resetKey: string }) {
