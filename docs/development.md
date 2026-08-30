@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 63. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v63 and remains readable. Those migrations
+The current schema version is 64. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v64 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -462,8 +462,8 @@ eligibility predicate, serving checkup H5). The migration installs btree_gin
 same-named index — an INVALID residue or a wrong-shape name collision fails
 the migration loudly instead of being silently skipped by `IF NOT EXISTS`.
 SQLite is deliberately untouched by this batch. No table, foreign key, or
-unique surface changes; the current schema pair is SQLite 63 / PostgreSQL 42 /
-epoch 1.
+unique surface changes; the schema pair was SQLite 63 / PostgreSQL 42 /
+epoch 1 at that point.
 
 SQLite v63 / PostgreSQL v41 adds `extension_runtime_toggles`: the deployment-
 plugin runtime enable/disable switch plus audit (who, when). No row means
@@ -494,6 +494,30 @@ replicated unique surfaces (the new table's declared PK is its only unique
 surface); the branch-counted bound remains exactly 12 row slots. PostgreSQL
 migration v41 is the paired schema; the schema pair was SQLite 63 /
 PostgreSQL 41 / epoch 1 at that point.
+
+PostgreSQL v43 (`0043_concept_cluster_keyset_index.sql`, hot-path fix batch 3)
+adds `idx_clusters_nb_canonical_member` on `concept_clusters(notebook_id,
+canonical_id, member_object_id)`; SQLite v64 adds the identical index (parity,
+`_migration_64`). It serves `concept_cluster_detail_rows`/
+`concept_cluster_member_total`'s concept-detail hub-cluster keyset page: the
+pre-existing `idx_clusters_nb_canonical` (v39/v61) only covers the
+`notebook_id=?, canonical_id=?` equality prefix, so a hub concept's later
+pages (after the first) paid an explicit Sort over the whole matching slice
+before the `ORDER BY member_object_id` keyset predicate and `LIMIT` could
+trim it down; the trailing `member_object_id` key lets the planner walk the
+same index in that order directly, with no separate sort step. A plain
+(non-partial) three-column btree over already-narrow text columns — no
+GIN-specific concerns (fastupdate, multi-minute builds, double-digit-GB
+footprint) like v42's payload trigram index — builds in seconds even at
+production scale. On PostgreSQL, the migration also validates any
+pre-existing same-named index before creating (same DO-block pattern as
+migration 0042's, codex #636 R1 P2). The pre-existing `idx_clusters_nb_canonical`
+is now a strict prefix of the new index and is registered write-amplification
+debt, not dropped in this batch — same convention as `idx_chunks_source`'s
+retirement note in migration 0039's own header comment. No table, column,
+foreign key, or unique surface changes, so the pairing stays the same 85
+application tables, 114 replicated unique surfaces, and 12-row-slot bound;
+the current schema pair is SQLite 64 / PostgreSQL 43 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

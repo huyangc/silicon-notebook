@@ -128,7 +128,7 @@ def _insert_report(connection, report_id, notebook_id, created_by, created_at, *
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 42
+    assert PostgresMigrator(postgres_database).migrate() == 43
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 

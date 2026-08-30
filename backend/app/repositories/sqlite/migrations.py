@@ -100,7 +100,11 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # v63 adds extension_runtime_toggles — the deployment-plugin runtime
 # enable/disable switch + audit (who, when). No row means enabled, so a
 # fresh/unmodified deployment behaves exactly as before this table existed.
-SCHEMA_VERSION = 63
+# v64 adds idx_clusters_nb_canonical_member on concept_clusters(notebook_id,
+# canonical_id, member_object_id) — hot-path fix batch 3, parity with
+# PostgreSQL migration 0043. Pure index addition backing the concept-detail
+# hub-cluster keyset page's ORDER BY member_object_id.
+SCHEMA_VERSION = 64
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3445,6 +3449,36 @@ class SqliteMigrator:
                 );
                 """
             )
+
+    def _migration_64(self) -> None:
+        """热路径修复批 3:概念簇 keyset 覆盖索引,parity 于 PostgreSQL
+        ``0043_concept_cluster_keyset_index.sql``(该文件的头注释有完整的
+        「服务哪条查询」证据,这里不重复)。纯增量索引——不改任何查询语句、
+        不改任何服务代码。
+
+        ``idx_clusters_nb_canonical_member`` ON
+        ``concept_clusters(notebook_id, canonical_id, member_object_id)``——
+        服务 ``concept_cluster_detail_rows``/``concept_cluster_member_total``
+        (概念详情 hub 簇 keyset 分页与其配套计数)的
+        ``WHERE notebook_id=? AND canonical_id=? ... ORDER BY member_object_id``。
+        既有的 ``idx_clusters_nb_canonical``(_migration_61)只覆盖等值前缀,
+        不带 member_object_id 顺序信息——hub 概念的后续分页(第二页起)因此要
+        对整簇成员排序一次才能应用 keyset 谓词与 LIMIT。这条三列复合索引把
+        排序键并进同一条索引,SQLite 的 planner 能直接按索引序取出结果,无需
+        额外排序步骤(与 PostgreSQL 侧同一物理设计;两条迁移是独立手写的
+        同形拷贝——一份 SQL 文件无法在 apply 时 import Python)。
+
+        既有的 ``idx_clusters_nb_canonical`` 现在是这条新索引的严格前缀,
+        登记为写放大冗余债、本迁移不下线——沿用 ``idx_chunks_source`` 在
+        _migration_61 里的先例(该索引后来被 ``idx_chunks_source_ordinal``
+        完全覆盖,同样只登记不下线)。
+        """
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_clusters_nb_canonical_member "
+                "ON concept_clusters(notebook_id, canonical_id, member_object_id)"
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'

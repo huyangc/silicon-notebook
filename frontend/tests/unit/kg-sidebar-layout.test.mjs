@@ -11,21 +11,36 @@ import {
 
 
 test("KG sidebar composes structured evidence cards", async () => {
+  // KgEvidenceCard (and its progressive-disclosure wrapper KgEvidenceList)
+  // moved out of page.tsx into their own module (codex PR #639 R1 P2) so the
+  // "show more evidence" reveal/reset behaviour is directly unit-testable —
+  // see kg-evidence-list.component.test.tsx. KgOccurrenceCard stays in
+  // page.tsx (it serves the non-concept-detail occurrence fallback path
+  // only, no progressive disclosure).
   const page = await parseModule("page.tsx");
-  const functionNames = new Set(
+  const evidenceList = await parseModule("kg-evidence-list.tsx");
+  const pageFunctionNames = new Set(
     declarations(page)
       .filter((finding) => finding.kind === "function")
       .map((finding) => finding.name),
   );
-  const evidenceCards = jsxElements(page, "article")
-    .filter(({ attributes }) => (
-      typeof attributes.className === "string"
-      && attributes.className.includes("kg-evidence-card")
-    ));
+  const evidenceListFunctionNames = new Set(
+    declarations(evidenceList)
+      .filter((finding) => finding.kind === "function")
+      .map((finding) => finding.name),
+  );
+  const evidenceCards = [
+    ...jsxElements(page, "article"),
+    ...jsxElements(evidenceList, "article"),
+  ].filter(({ attributes }) => (
+    typeof attributes.className === "string"
+    && attributes.className.includes("kg-evidence-card")
+  ));
 
-  assert.equal(functionNames.has("KgEvidenceCard"), true);
-  assert.equal(functionNames.has("KgOccurrenceCard"), true);
-  assert.ok(evidenceCards.length >= 3);
+  assert.equal(evidenceListFunctionNames.has("KgEvidenceCard"), true);
+  assert.equal(evidenceListFunctionNames.has("KgEvidenceList"), true);
+  assert.equal(pageFunctionNames.has("KgOccurrenceCard"), true);
+  assert.ok(evidenceCards.length >= 2);
 });
 
 

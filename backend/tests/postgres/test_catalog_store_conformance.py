@@ -97,7 +97,7 @@ def catalog_harness(request) -> CatalogHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 42
+    assert PostgresMigrator(database).migrate() == 43
     notebook_id, source_id = "nb-catalog", "src-catalog"
     _seed(database, notebook_id=notebook_id, source_id=source_id)
     yield CatalogHarness(

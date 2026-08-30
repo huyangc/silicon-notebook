@@ -27,9 +27,9 @@ Contract under test:
      ``_NONBLANK_TEXT_SQL`` query-side literal must all trace back to the
      SAME ``PY_WHITESPACE`` constant byte-for-byte. A one-character edit to
      any of these four in isolation must fail one of the assertions here.
-  3. ``HOTPATH_INDEX_SPECS`` totals ten entries (eight batch-1 + two
-     batch-2), and the two new ones carry the ``using``/``ddl_columns``
-     fields this batch's DDL genuinely needs.
+  3. ``HOTPATH_INDEX_SPECS`` totals eleven entries (eight batch-1 + two
+     batch-2 + one batch-3), and the two batch-2 entries carry the
+     ``using``/``ddl_columns`` fields this batch's DDL genuinely needs.
 
 See ``backend/tests/postgres/test_hotpath_indexes_batch2_live.py`` for the
 live-PostgreSQL half (real catalog rendering, real EXPLAIN plan proof) that a
@@ -125,9 +125,9 @@ def test_migration_file_exists_and_declares_exactly_two_statements():
 def test_batch2_specs_are_present_and_batch1_is_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH2_NAMES <= names
-    assert len(HOTPATH_INDEX_SPECS) == 10, (
-        "expected eight batch-1 plus two batch-2 entries in HOTPATH_INDEX_SPECS, "
-        f"found {len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
+    assert len(HOTPATH_INDEX_SPECS) == 11, (
+        "expected eight batch-1 plus two batch-2 plus one batch-3 entry in "
+        f"HOTPATH_INDEX_SPECS, found {len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
 
 

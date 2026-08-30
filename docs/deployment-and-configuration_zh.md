@@ -268,12 +268,13 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
-已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引，共十条；GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
+已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引，共十一条；GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
 （`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
 反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
 `chunks(source_id, ordinal)`，以及一条 partial 的 `sources(notebook_id, source_type)`
-索引），形态与上面的词法索引工具一致，同样是 inspect/apply 两档：
+索引），加批 3 的 `concept_clusters(notebook_id, canonical_id, member_object_id)`
+keyset 覆盖索引，形态与上面的词法索引工具一致，同样是 inspect/apply 两档：
 
 ```bash
 PYTHONPATH=backend python scripts/build_hotpath_indexes.py
@@ -285,12 +286,14 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 前置、`WHERE status != 'deprecated'`，与运维侧 `idx_knowledge_objects_nb_name_trgm`
 同形——词集中在别的 notebook 时不会建全局位图；`--apply` 会按需安装 btree_gin 扩展），
 对整个 jsonb-as-text 建索引，在大 `knowledge_objects` 表上单条构建是分钟级，安排窗口
-时按此预估。无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
+时按此预估。批 3 的 keyset 覆盖索引是普通（非 partial）btree，与批 1 同样是秒级构建，
+没有上面 GIN 那些顾虑。无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
 做一次全表扫描，繁忙数据库上应避开高峰期。
-迁移文件 `0039_hotpath_batch1_indexes.sql` 与 `0042_hotpath_batch2_search_indexes.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
+迁移文件 `0039_hotpath_batch1_indexes.sql`、`0042_hotpath_batch2_search_indexes.sql` 与
+`0043_concept_cluster_keyset_index.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
 （迁移在事务里跑，`CONCURRENTLY` 进不了事务），一旦这个脚本已经把全部索引建好，迁移
 落地时就是 no-op 的账本记录；全新部署、还没有生产流量的库，迁移本身已经够用，先跑脚本
-是可选项。迁移 0042 落地前还会校验同名先存索引：INVALID 残留或异形名字冲突会让迁移带着
+是可选项。迁移 0042 与 0043 落地前还会校验同名先存索引：INVALID 残留或异形名字冲突会让迁移带着
 确切的在线处置指引响亮失败，而不是被 `IF NOT EXISTS` 静默跳过、账本却记成功。
 `--apply` 若报告某条索引状态是 `INVALID`（此前一次 `CONCURRENTLY` 建索引中途
 失败留下的残留），工具会打印确切的 `DROP INDEX CONCURRENTLY <name>;` 指引，重跑前先手动
@@ -303,7 +306,9 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 `knowledge_relations` 另有三条同前缀（`source_object_id` 一侧）的既有索引——
 `idx_knowledge_relations_nb_source`、`idx_knowledge_relations_nb_source_id`，加上本批新增的
 `idx_knowledge_relations_nb_source_target_edge`——这是本批之前就存在的重叠，不是本批引入、
-也不在本批处理。
+也不在本批处理。批 3 另登记一条：既有的 `idx_clusters_nb_canonical`（0039 迁移）现在已被
+新增的 `idx_clusters_nb_canonical_member` 完全覆盖，生产验证新索引稳定后可用
+`DROP INDEX CONCURRENTLY idx_clusters_nb_canonical` 下线。
 
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
 对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
