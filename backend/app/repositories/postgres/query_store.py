@@ -145,14 +145,6 @@ class QueryStore:
         from app.repositories.postgres import knowledge_counts_cache
         knowledge_counts_cache.invalidate(notebook_id)
 
-    def carry_review_queue_total(
-        self, notebook_id: str, expected_seq: int, new_seq: int
-    ) -> None:
-        # Pure in-memory retag (R3 T-A3 P1-2) — no connection needed. See
-        # knowledge_counts_cache.carry_review_queue_total for the contract.
-        from app.repositories.postgres import knowledge_counts_cache
-        knowledge_counts_cache.carry_review_queue_total(notebook_id, expected_seq, new_seq)
-
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.
     @staticmethod
@@ -359,13 +351,6 @@ class QueryStore:
         # checkup H6:seq-gated 缓存,前端自动拉 checkup 时大库不再每次全扫(codex 第4轮 P2)。
         from app.repositories.postgres import knowledge_counts_cache
         return knowledge_counts_cache.visible_pending_source_count(db, notebook_id)
-
-    @staticmethod
-    def review_queue_total(db: Any, notebook_id: str) -> int:
-        # seq-gated 进程缓存(kg_mutation_seq),独立于 review_queue 的 limit 截断——
-        # 见 cache 模块 review_queue_total 的完整代价说明(R3 T-A3)。
-        from app.repositories.postgres import knowledge_counts_cache
-        return knowledge_counts_cache.review_queue_total(db, notebook_id)
 
     @staticmethod
     def notebook_source_ids_among(db: Any, notebook_id: str, source_ids) -> set:

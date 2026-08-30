@@ -168,9 +168,6 @@ class KnowledgeGovernanceService:
         rule_card: Callable[[Any], RuleCard],
         set_conflict_status: Callable[[str, str, str], None],
         memory_store: MemoryStorePort,
-        review_queue_total: Callable[[str], int],
-        invalidate_knowledge_counts: Callable[[str], None],
-        carry_review_queue_total: Callable[[str, int, int], None],
         kg_mutation_seq: Callable[[str], int],
         review_queue_memo: ReviewQueueMemo,
     ) -> None:
@@ -196,9 +193,6 @@ class KnowledgeGovernanceService:
         self._rule_card = rule_card
         self._set_conflict_status = set_conflict_status
         self.memory_store = memory_store
-        self._review_queue_total_fn = review_queue_total
-        self._invalidate_knowledge_counts_fn = invalidate_knowledge_counts
-        self._carry_review_queue_total_fn = carry_review_queue_total
         self._kg_mutation_seq_fn = kg_mutation_seq
         # R3 T-A2: runtime-owned ranking memo (one per RepositoryRuntime), NOT
         # a module global — see review_queue_memo's module docstring.
@@ -240,10 +234,17 @@ class KnowledgeGovernanceService:
 
         The seq point-read happens BEFORE the data read; that ordering is the
         memo's read-order contract, enforced inside ``ReviewQueueMemo.top``.
+
+        Signature/semantics preserved bit-for-bit from before T-A3 v4 (the
+        bit-identical oracle in ``test_governance_read_narrowing.py`` /
+        ``test_query_hotpath_cache.py`` compares against THIS method) — it
+        discards the ``total`` half of ``_rank_review_queue``'s/the memo's
+        return value.  ``review_queue_page`` below is the sibling that keeps
+        both halves.
         """
         self.get_notebook(notebook_id)
         if 0 <= limit <= REVIEW_QUEUE_MEMO_ITEMS:
-            return self._review_queue_memo.top(
+            items, _total = self._review_queue_memo.top(
                 notebook_id,
                 limit,
                 lambda: self._kg_mutation_seq_fn(notebook_id),
@@ -251,11 +252,55 @@ class KnowledgeGovernanceService:
                     notebook_id, REVIEW_QUEUE_MEMO_ITEMS
                 ),
             )
-        return self._rank_review_queue(notebook_id, limit)
+            return items
+        items, _total = self._rank_review_queue(notebook_id, limit)
+        return items
 
-    def _rank_review_queue(self, notebook_id: str, limit: int) -> List[dict]:
+    def review_queue_page(self, notebook_id: str, limit: int = 100) -> Dict[str, Any]:
+        """``{"items": [...], "total": n}`` — the edge-review-queue endpoint's
+        ONE call (R3 T-A3 v4, codex #638 R1).
+
+        v3 served ``items``/``total`` from two independent calls
+        (``review_queue`` + a separate ``review_queue_total`` seq-gated COUNT
+        memo living in ``knowledge_counts_cache``).  Two independent reads can
+        straddle a KG mutation that lands between them — an edge reviewed
+        (thus removed from/added back to the queue) right after the first call
+        commits but before the second one reads changes ``total`` without
+        changing the ``items`` the caller already has (or vice versa),
+        producing a response where ``total < len(items)`` or a page whose
+        ``total`` does not describe the version it was rendered from.  This
+        method reads both from the SAME ``ReviewQueueMemo`` entry (same seq,
+        same lock, same ``compute()`` call when cold), so they can never
+        disagree about which KG version they describe.
+
+        ``0 <= limit <= REVIEW_QUEUE_MEMO_ITEMS`` hits/warms the memo exactly
+        like ``review_queue`` does; ``limit < 0`` or ``limit > M`` takes the
+        cold path directly — ONE scan produces both ``items`` and ``total``
+        there too (``_rank_review_queue`` always returns the pair).
+        """
+        self.get_notebook(notebook_id)
+        if 0 <= limit <= REVIEW_QUEUE_MEMO_ITEMS:
+            items, total = self._review_queue_memo.top(
+                notebook_id,
+                limit,
+                lambda: self._kg_mutation_seq_fn(notebook_id),
+                lambda: self._rank_review_queue(
+                    notebook_id, REVIEW_QUEUE_MEMO_ITEMS
+                ),
+            )
+            return {"items": items, "total": total}
+        items, total = self._rank_review_queue(notebook_id, limit)
+        return {"items": items, "total": total}
+
+    def _rank_review_queue(
+        self, notebook_id: str, limit: int
+    ) -> "tuple[List[dict], int]":
         """Rank every non-rejected edge by review priority = edge_centrality *
-        (1 - trust_score) and return the top ``limit``.
+        (1 - trust_score) and return ``(top limit items, total non-rejected
+        edge count)`` — the SAME scan yields both (R3 T-A3 v4): ``total`` is
+        just ``len()`` of the relation rows this method already read, so
+        computing it costs nothing extra and it can never drift from the
+        items it was counted alongside.
 
         This is the COLD path — the whole read + score + rank the memo above
         exists to run once per KG version.  It deliberately does NOT call
@@ -385,29 +430,21 @@ class KnowledgeGovernanceService:
         # O(E log E) — the queue ranks every non-rejected edge but serves ~100.
         # A NEGATIVE limit is the one shape it cannot express (``items[:-1]``
         # means "drop the tail", not "take none"), so that path keeps the sort.
+        #
+        # ``total`` = ``len(rels)`` (R3 T-A3 v4): every relation row this scan
+        # read became exactly one ``rels``/``items`` entry (no further Python
+        # filtering happens after ``review_queue_rows`` already excluded
+        # rejected edges in SQL), so this is the true non-rejected queue size,
+        # not an approximation of it.
+        total = len(rels)
         if limit < 0:
             items.sort(key=lambda x: x["review_priority"], reverse=True)
-            return items[:limit]
-        return heapq.nlargest(limit, items, key=lambda x: x["review_priority"])
-
-    def review_queue_total(self, notebook_id: str) -> int:
-        """Total edge-review-queue size (``review_status != 'rejected'``),
-        independent of any ``limit`` passed to ``review_queue`` — a seq-gated
-        ``COUNT(*)`` served by the injected query port (R3 T-A3), not a
-        Python len() over the (already limited) ranked items ``review_queue``
-        returns.
-
-        Calls ``self.get_notebook`` first (S1: symmetry with ``review_queue``
-        above) so a nonexistent notebook raises ``KeyError`` from THIS method
-        directly rather than depending on a caller-side guard (the API route
-        already 404s via its own dependency, but a direct/service-level or
-        facade-level caller must see the same failure ``review_queue`` gives)."""
-        self.get_notebook(notebook_id)
-        return self._review_queue_total_fn(notebook_id)
+            return items[:limit], total
+        return heapq.nlargest(limit, items, key=lambda x: x["review_priority"]), total
 
     # Transitions where NEITHER side is 'rejected' change no ranking input
     # (trust/corr/centrality never read review_status) NOR the review-queue
-    # COUNT (`review_status != 'rejected'` — pending/verified are both on the
+    # total (`review_status != 'rejected'` — pending/verified are both on the
     # "in" side of that predicate). Only a transition touching 'rejected' on
     # either end (including the rejected->rejected no-op write) can move
     # queue membership. R3 T-A3 P1-2 / T-A2 carry contract.
@@ -422,21 +459,20 @@ class KnowledgeGovernanceService:
         Invalidates the federated reasoning graph cache so the next
         graph-reasoning call sees the updated set of active edges.
 
-        R3 T-A3 P1-2: ``update_edge_review`` returns the PREVIOUS status, so
-        after the ``kg_mutation_seq`` bump this can tell whether the
-        transition can carry-forward the ``review_queue_total`` count memo
-        (pure verified<->pending flip, membership unchanged — cheap retag) or
-        must let it go cold (either side 'rejected' — membership may have
-        actually changed, a fresh COUNT is the safe move). The carry is keyed
-        on ``new_seq - 1``: the seq this memo would have been tagged at
-        immediately before THIS write's own bump, so a stale/mismatched entry
-        (another writer raced in, or the memo was never warm) is dropped
-        rather than guessed at — see ``carry_review_queue_total``'s docstring.
-
-        R3 T-A2 reuses that SAME decision point for the ranking memo: the two
-        memos are carried or invalidated together, on one condition evaluated
-        once, so they can never disagree about whether this write moved queue
-        membership.  See ``ReviewQueueMemo.carry``.
+        R3 T-A3 P1-2 / v4: ``update_edge_review`` returns the PREVIOUS status,
+        so after the ``kg_mutation_seq`` bump this can tell whether the
+        transition can carry-forward the ranking memo — items AND total in one
+        entry since v4 (pure verified<->pending flip, membership unchanged —
+        cheap retag) or must let it go cold (either side 'rejected' —
+        membership may have actually changed, a fresh scan is the safe move).
+        The carry is keyed on ``new_seq - 1``: the seq this memo would have
+        been tagged at immediately before THIS write's own bump, so a
+        stale/mismatched entry (another writer raced in, or the memo was
+        never warm) is dropped rather than guessed at — see
+        ``ReviewQueueMemo.carry``'s docstring.  ``total`` needs no separate
+        carry call: it lives in the SAME memo entry as the ranking and
+        ``ReviewQueueMemo.carry`` leaves it untouched (verified/pending never
+        changes the non-rejected count).
         """
         if status not in self._REVIEW_STATUSES:
             raise ValueError(
@@ -452,20 +488,19 @@ class KnowledgeGovernanceService:
         non_rejected = self._NON_REJECTED_REVIEW_STATUSES
         if prev_status in non_rejected and status in non_rejected:
             new_seq = self._kg_mutation_seq_fn(notebook_id)
-            self._carry_review_queue_total_fn(notebook_id, new_seq - 1, new_seq)
-            # Same transition test, same expected_seq: this flip changes no
-            # ranking input either (trust/corroboration/centrality never read
-            # review_status), so the ranked top-M carries forward with the one
-            # item's status rewritten copy-on-write.
+            # This flip changes no ranking input either (trust/corroboration/
+            # centrality never read review_status) and no total (both sides
+            # are counted the same way), so the ranked top-M AND the total
+            # carry forward together with the one item's status rewritten
+            # copy-on-write.
             self._review_queue_memo.carry(
                 notebook_id, new_seq - 1, new_seq, rel_id, status
             )
         else:
-            self._invalidate_knowledge_counts_fn(notebook_id)
             # Either side 'rejected' (including rejected->pending, i.e. undoing
             # a rejection, which puts the edge BACK into the set and changes the
-            # topology corroboration/centrality are computed over) — drop the
-            # ranking rather than carry it.
+            # topology corroboration/centrality are computed over, and the
+            # total) — drop the ranking+total rather than carry them.
             self._review_queue_memo.invalidate(notebook_id)
         # Invalidate cached graph so _federated_rx_graph rebuilds on next access
         # (belt-and-braces: its per-status-count version key would also catch

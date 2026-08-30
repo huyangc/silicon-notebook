@@ -70,11 +70,18 @@ which index the planner can use):
   - canonical_relations_count  app/repositories/postgres/unified_kg_store.py
                                 UnifiedKgStore.canonical_relations_count
   - knowledge_relations_review_count
-                                app/repositories/postgres/knowledge_counts_cache.py
-                                review_queue_total (the real business query
+                                app/repositories/postgres/governance_store.py
+                                GovernanceStore.review_queue_rows (WHERE-clause
+                                shape only — the real statement SELECTs full
+                                rows, not COUNT(*)). This predicate is the read
                                 behind GET /notebooks/{id}/edge-review-queue's
-                                `total` field, R3 T-A3 — no longer a predicate
-                                pre-paved for a query that did not exist yet)
+                                `total` field (R3 T-A3 v4): the COUNT itself is
+                                ``len()`` over review_queue_rows' Python result
+                                in KnowledgeGovernanceService._rank_review_queue,
+                                folded into the same seq-gated ReviewQueueMemo
+                                entry as the ranking — no longer a standalone
+                                SQL COUNT living in knowledge_counts_cache.py
+                                (where this predicate lived pre-v4)
   - concept_clusters_canonical_id_probe
                                 app/repositories/postgres/knowledge_store.py
                                 (canonical_name lookup by (notebook_id, canonical_id))
@@ -202,7 +209,8 @@ HOT_STATEMENTS: tuple[StatementSpec, ...] = (
         + "SELECT COUNT(*) AS c FROM knowledge_relations "
         "WHERE notebook_id=%(notebook_id)s AND review_status!='rejected'",
         ("notebook_id",),
-        provenance="knowledge_counts_cache.py:review_queue_total",
+        provenance="governance_store.py:review_queue_rows (WHERE shape) — "
+        "counted in knowledge_governance.py:_rank_review_queue, the ranking-memo cold path (R3 T-A3 v4)",
     ),
     StatementSpec(
         "concept_clusters_canonical_id_probe",

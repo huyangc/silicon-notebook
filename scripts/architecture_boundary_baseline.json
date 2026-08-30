@@ -239,7 +239,7 @@
         "revert_knowhow_table",
         "review_pending_merges",
         "review_queue",
-        "review_queue_total",
+        "review_queue_page",
         "revoke_agent_token",
         "root_dir",
         "run_conflict_resolution_job",
@@ -340,7 +340,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "ports_protocol_method_count": 898,
+  "ports_protocol_method_count": 896,
   "function_length_ceiling": {
     "backend/app/api/mcp_tools/memory_context.py::register_memory_context_tools.ask_notebook": 157,
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 160,

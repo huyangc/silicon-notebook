@@ -2292,16 +2292,19 @@ class RepositoryFacade:
         )
         # F1 (R3 T-A3 review): this test/fixture-only raw insert bypasses
         # store_kg's kg_mutation_seq bump, which is what the seq-gated
-        # knowledge_counts_cache memos (incl. review_queue_total) rely on to
+        # review-queue RANKING memo (items + total, v4) relies on to
         # self-invalidate. Mirrors knowledge_query.insert_test_object's same
-        # precedent — drop the cache explicitly so a fixture that warms a
-        # memo, then seeds relations via this path, then reads again never
-        # sees a stale count.
-        self._runtime.queries.invalidate_knowledge_counts(notebook_id)
-        # R3 T-A2: the review-queue RANKING memo is gated on the same seq and
-        # therefore has the same gap — a fixture that warms the ranking, seeds
-        # relations here, then reads the queue again would otherwise be served
-        # the pre-insert ranking. Same call site, same reason, one line apart.
+        # precedent — drop it explicitly so a fixture that warms the ranking,
+        # seeds relations via this path, then reads the queue again never
+        # sees a stale ranking/total.
+        #
+        # v4 (codex #638 R1): the ``knowledge_counts_cache.invalidate_knowledge_
+        # counts`` call that used to sit here was added SOLELY to protect the
+        # (now-removed) ``review_queue_total`` module-global memo — none of
+        # the four remaining counts_cache memos (type/status counts, chunk
+        # count, the two pending-source views) read ``knowledge_relations``,
+        # so a relations-only insert never staled any of them. Removed rather
+        # than left as a no-op call.
         self._runtime.review_queue_memo.invalidate(notebook_id)
         return result
 
@@ -2438,11 +2441,16 @@ class RepositoryFacade:
         facade's _edge_centrality_map port). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.review_queue(notebook_id, limit)
 
-    def review_queue_total(self, notebook_id: str) -> int:
-        """Total edge-review-queue size, independent of any ``limit`` passed to
-        ``review_queue`` — a seq-gated COUNT(*) (R3 T-A3), not a Python len()
-        over the (already limited) ranked items ``review_queue`` returns."""
-        return self._runtime.knowledge_governance.review_queue_total(notebook_id)
+    def review_queue_page(self, notebook_id: str, limit: int = 100) -> Dict[str, Any]:
+        """``{"items": [...], "total": n}`` in ONE call (R3 T-A3 v4, codex
+        #638 R1) — both halves come from the SAME seq-gated ranking-memo entry
+        (or the same single cold scan), so they can never describe two
+        different KG versions the way two independent v3 calls could.
+        KnowledgeGovernanceService owns the orchestration; frozen-signature
+        delegate."""
+        return self._runtime.knowledge_governance.review_queue_page(
+            notebook_id, limit
+        )
 
     def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
         """Persist review_status on a knowledge_relation —

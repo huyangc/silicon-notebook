@@ -3351,7 +3351,7 @@
           "type": "object"
         },
         "EdgeReviewQueueResponse": {
-          "description": "Response for GET /notebooks/{id}/edge-review-queue: the limit-bounded,\npriority-ranked page plus the queue's true total (a seq-gated COUNT,\nindependent of `limit`) so the UI can show \"共 N 条\" instead of just the\npage it was handed (R3 T-A3).",
+          "description": "Response for GET /notebooks/{id}/edge-review-queue: the limit-bounded,\npriority-ranked page plus the queue's true total (independent of `limit`)\nso the UI can show \"共 N 条\" instead of just the page it was handed (R3\nT-A3). `total` is the SAME KG version as `items` (R3 T-A3 v4) — both come\nfrom one seq-gated ranking-memo entry, never two independent reads.",
           "properties": {
             "items": {
               "items": {
@@ -16674,7 +16674,7 @@
       },
       "/api/notebooks/{notebook_id}/edge-review-queue": {
         "get": {
-          "description": "Return edges ranked by review priority (high centrality × low trust) desc,\nplus the queue's true total size (independent of `limit`; R3 T-A3).\nExcludes already-rejected edges.",
+          "description": "Return edges ranked by review priority (high centrality × low trust) desc,\nplus the queue's true total size (independent of `limit`; R3 T-A3 v4).\nExcludes already-rejected edges.\n\nONE call (``review_queue_page``) instead of the v3 shape's two independent\nreads — ``items`` and ``total`` come from the same seq-gated memo entry so\nthey can never describe two different KG versions.",
           "operationId": "edge_review_queue_api_notebooks__notebook_id__edge_review_queue_get",
           "parameters": [
             {

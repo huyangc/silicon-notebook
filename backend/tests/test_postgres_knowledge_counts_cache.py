@@ -24,9 +24,8 @@ class _Cursor:
 
 
 class _FakeDB:
-    """按 SQL 关键字分流到五类计数器:seq 读不计入任何一类;GROUP BY object_type,
-    status → type_status_calls;``FROM chunks`` → chunk_calls;``FROM
-    knowledge_relations`` → review_queue_total_calls(R3 T-A3);其余(pending 相关
+    """按 SQL 关键字分流到四类计数器:seq 读不计入任何一类;GROUP BY object_type,
+    status → type_status_calls;``FROM chunks`` → chunk_calls;其余(pending 相关
     子查询)→ query_calls(向后兼容既有用例的属性名)。"""
 
     def __init__(
@@ -35,21 +34,18 @@ class _FakeDB:
         *,
         type_rows=None,
         chunk_count: int = 42,
-        review_queue_total: int = 17,
     ):
         self.seq = seq
         self.query_calls = 0
         self.pending_sql: list[str] = []
         self.type_status_calls = 0
         self.chunk_calls = 0
-        self.review_queue_total_calls = 0
         self._type_rows = (
             [{"object_type": "concept", "status": "approved", "c": 42}]
             if type_rows is None
             else type_rows
         )
         self._chunk_count = chunk_count
-        self._review_queue_total = review_queue_total
 
     def execute(self, sql, params=()):
         if "kg_mutation_seq" in sql:
@@ -60,9 +56,6 @@ class _FakeDB:
         if "FROM chunks" in sql:
             self.chunk_calls += 1
             return _Cursor(row={"c": self._chunk_count})
-        if "FROM knowledge_relations" in sql:
-            self.review_queue_total_calls += 1
-            return _Cursor(row={"c": self._review_queue_total})
         self.query_calls += 1  # pending 相关子查询
         self.pending_sql.append(sql)
         return _Cursor(row={"c": 42})
@@ -209,110 +202,24 @@ def test_chunk_count_is_seq_gated_memo_independent_from_type_memo():
     assert db.type_status_calls == 1
 
 
-def test_review_queue_total_is_seq_gated_memo_independent_from_other_memos():
-    """R3 T-A3:review_queue_total 复用同一 ``_seq_gated`` 骨架——同 seq 不重查、
-    seq 变重查、invalidate(安全阀)后重查,且是独立键空间(不借用/不污染 chunk 或
-    type/status memo 的命中计数)。"""
-    kcc.invalidate()
-    db = _FakeDB(seq=1, review_queue_total=17)
-    assert kcc.review_queue_total(db, "nb-r") == 17
-    assert kcc.review_queue_total(db, "nb-r") == 17
-    assert db.review_queue_total_calls == 1  # 同 kg_mutation_seq → 只跑一次冷 COUNT
-
-    db.seq = 2  # kg_mutation_seq bump(审核动作落库)
-    assert kcc.review_queue_total(db, "nb-r") == 17
-    assert db.review_queue_total_calls == 2  # seq 变 → 重查
-
-    kcc.invalidate("nb-r")  # 安全阀
-    assert kcc.review_queue_total(db, "nb-r") == 17
-    assert db.review_queue_total_calls == 3  # invalidate 后重查
-
-    # 独立键空间:同一个 notebook_id 在 chunk/type 两边各自第一次访问都得真冷查。
-    assert kcc.chunk_count(db, "nb-r") == 42
-    assert db.chunk_calls == 1
-    assert kcc.type_status_counts(db, "nb-r") == {("concept", "approved"): 42}
-    assert db.type_status_calls == 1
-    assert db.review_queue_total_calls == 3  # 没有被上面两次别的 memo 访问牵连
-
-
-def test_review_queue_total_reads_seq_before_running_count():
-    """P2-2(硬读序契约):冷路径必须先点读 ``kg_mutation_seq``,再跑 COUNT——内容
-    永远不旧于标签,反序会让 carry 把陈旧内容续成新版本。断言 fake db 收到的头两条
-    SQL 顺序:第一条是 seq 点读,第二条才是 COUNT。
-
-    变异复现:把 ``_seq_gated`` 内部顺序改成「先跑 compute() 再读 seq」会让这条用例
-    失败——第一条 SQL 会变成 ``FROM knowledge_relations``。"""
-    kcc.invalidate()
-    order: list[str] = []
-
-    class _OrderedDB(_FakeDB):
-        def execute(self, sql, params=()):
-            if "kg_mutation_seq" in sql:
-                order.append("seq")
-            elif "FROM knowledge_relations" in sql:
-                order.append("count")
-            return super().execute(sql, params)
-
-    db = _OrderedDB(seq=1, review_queue_total=17)
-    assert kcc.review_queue_total(db, "nb-order") == 17
-    assert order[:2] == ["seq", "count"]
-
-
-def test_carry_review_queue_total_retags_seq_label_only():
-    """P1-2:seq 匹配时只改标签(seq→new_seq),缓存的 VALUE 原样不动——验证「verified
-    翻转后 total 不冷算」的计数器断言:carry 之后再读一次,不触发新的冷 COUNT。"""
-    kcc.invalidate()
-    db = _FakeDB(seq=1, review_queue_total=17)
-    assert kcc.review_queue_total(db, "nb-carry") == 17
-    assert db.review_queue_total_calls == 1
-
-    kcc.carry_review_queue_total("nb-carry", expected_seq=1, new_seq=2)
-    assert kcc._REVIEW_QUEUE_TOTAL["nb-carry"] == (2, 17)  # 标签前移,值不变
-
-    db.seq = 2  # 模拟 set_edge_review 的 kg_mutation_seq 已经真的 bump 到 2
-    assert kcc.review_queue_total(db, "nb-carry") == 17
-    assert db.review_queue_total_calls == 1  # 没有新的冷 COUNT——carry 命中
-
-
-def test_carry_review_queue_total_drops_entry_on_seq_mismatch():
-    """seq 不符时 carry 必须丢弃该条目(fail-closed),不能猜测/硬套新标签——下一次
-    读会重新冷算而不是返回一个可能挂错版本的旧值。"""
-    kcc.invalidate()
-    db = _FakeDB(seq=1, review_queue_total=17)
-    assert kcc.review_queue_total(db, "nb-mismatch") == 17
-    assert db.review_queue_total_calls == 1
-
-    # expected_seq 与缓存里实际的标签(1)不符——比如中途有另一个写者插了一脚。
-    kcc.carry_review_queue_total("nb-mismatch", expected_seq=5, new_seq=6)
-    assert "nb-mismatch" not in kcc._REVIEW_QUEUE_TOTAL  # 条目被丢弃
-
-    db.seq = 6
-    assert kcc.review_queue_total(db, "nb-mismatch") == 17
-    assert db.review_queue_total_calls == 2  # 丢弃后确实重新冷算了
-
-
-def test_carry_review_queue_total_is_a_noop_when_memo_is_cold():
-    """从未暖过的 notebook 调用 carry 必须是安全的 no-op,不能凭空造出一条 memo。"""
-    kcc.invalidate()
-    kcc.carry_review_queue_total("nb-never-warm", expected_seq=1, new_seq=2)
-    assert "nb-never-warm" not in kcc._REVIEW_QUEUE_TOTAL
-
-
 def test_invalidate_none_clears_every_memo():
-    """P2-1/S3:全局失效必须清空全部 5 个 memo,而不仅仅是其中几个——把「新增 memo
+    """P2-1/S3:全局失效必须清空全部 4 个 memo,而不仅仅是其中几个——把「新增 memo
     必须在 invalidate() 里登记」这条约定配上守卫。
+
+    (T-A3 v4:这里曾经是 5 个 memo——``review_queue_total`` 已随 codex #638 R1
+    整体撤除,总量现在存在 ``app.services.review_queue_memo.ReviewQueueMemo``
+    里,不受这个模块的 invalidate() 管辖,见该模块 module docstring。)
 
     变异复现:删掉 ``invalidate()`` 里任意一个 ``.clear()`` 调用,这条用例必须变红。"""
     kcc.invalidate()
-    db = _FakeDB(seq=1, chunk_count=7, review_queue_total=9)
+    db = _FakeDB(seq=1, chunk_count=7)
     kcc.type_status_counts(db, "nb-all")
     kcc.pending_source_count(db, "nb-all")
     kcc.visible_pending_source_count(db, "nb-all")
     kcc.chunk_count(db, "nb-all")
-    kcc.review_queue_total(db, "nb-all")
-    # 五个 memo 全部非空(populate 成功,后面的清空断言才有意义)。
+    # 四个 memo 全部非空(populate 成功,后面的清空断言才有意义)。
     assert kcc._MEMO and kcc._PENDING and kcc._VISIBLE_PENDING
-    assert kcc._CHUNKS and kcc._REVIEW_QUEUE_TOTAL
+    assert kcc._CHUNKS
 
     kcc.invalidate()  # 全局清空形态(notebook_id=None)
 
@@ -320,19 +227,6 @@ def test_invalidate_none_clears_every_memo():
     assert kcc._PENDING == {}
     assert kcc._VISIBLE_PENDING == {}
     assert kcc._CHUNKS == {}
-    assert kcc._REVIEW_QUEUE_TOTAL == {}
-
-
-def test_review_queue_total_not_included_in_warm_all():
-    """T-A3 明确不进 warm_all(大库冷 COUNT ~1.1s,懒算)——warm_all 跑完之后,
-    review_queue_total 这个 notebook 仍应是冷(memo 里没有它的条目)。"""
-    kcc.invalidate()
-    db = _WarmDB(fail_notebook="nb-broken")
-    kcc.warm_all(db)
-    assert "nb-ok" not in kcc._REVIEW_QUEUE_TOTAL
-    # 但按需调用时仍然可用、仍然走 seq-gated memo。
-    assert kcc.review_queue_total(db, "nb-ok") == db._review_queue_total
-    assert "nb-ok" in kcc._REVIEW_QUEUE_TOTAL
 
 
 class _InterruptingDB(_FakeDB):
@@ -388,38 +282,6 @@ def test_epoch_guard_is_per_notebook_other_notebook_invalidate_does_not_block():
     assert "nb-mine" in kcc._CHUNKS  # 写回成功
     assert kcc.chunk_count(db, "nb-mine") == 7
     assert db.chunk_calls == 1  # 没有被误伤,不需要重查
-
-
-def test_review_queue_total_epoch_guard_rejects_writeback_mid_query():
-    """R3 T-A3 镜像 F2:review_queue_total 的冷 COUNT 执行期间,同一 notebook 被
-    invalidate → 本次返回值仍正确,但不留 memo,下一次读会重查。
-
-    变异复现:把 ``_seq_gated`` 写回守卫改成 ``if True:`` 会让这条用例失败。"""
-    kcc.invalidate()
-    db = _InterruptingDB(
-        seq=1, interrupt_notebook="nb-review-race", match="FROM knowledge_relations",
-        review_queue_total=17,
-    )
-    result = kcc.review_queue_total(db, "nb-review-race")
-    assert result == 17  # 这次返回值仍正确
-    assert "nb-review-race" not in kcc._REVIEW_QUEUE_TOTAL  # 没有留下 memo(写回被拒)
-    assert kcc.review_queue_total(db, "nb-review-race") == 17
-    assert db.review_queue_total_calls == 2  # 下一次读确实重查了
-
-
-def test_review_queue_total_epoch_guard_is_per_notebook():
-    """R3 T-A3 镜像 F1:冷查询期间,invalidate 的是**另一个** notebook → 写回不受
-    影响,memo 正常命中。"""
-    kcc.invalidate()
-    db = _InterruptingDB(
-        seq=1, interrupt_notebook="nb-other", match="FROM knowledge_relations",
-        review_queue_total=17,
-    )
-    result = kcc.review_queue_total(db, "nb-mine")
-    assert result == 17
-    assert "nb-mine" in kcc._REVIEW_QUEUE_TOTAL  # 写回成功
-    assert kcc.review_queue_total(db, "nb-mine") == 17
-    assert db.review_queue_total_calls == 1  # 没有被误伤,不需要重查
 
 
 def test_lru_eviction_evicts_the_oldest_notebook_first(monkeypatch):

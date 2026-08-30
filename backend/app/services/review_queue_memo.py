@@ -1,4 +1,5 @@
-"""审核队列排名的 runtime-owned 有界 memo(R3 T-A2,热路径修复批 2)。
+"""审核队列排名的 runtime-owned 有界 memo(R3 T-A2,热路径修复批 2;T-A3 v4 加入
+``total``,codex #638 R1)。
 
 现场(审计 KG-2,P0):``KnowledgeGovernanceService.review_queue`` 每一次请求都
 把该 notebook 的**全部非 rejected 关系**取回(生产最大库 8.35M 行),在 Python 里
@@ -6,6 +7,15 @@
 更糟的是审核循环本身:每按一次「通过/存疑」都 bump ``kg_mutation_seq``,把
 ``_edge_centrality_map`` 的 version-cache 一并打失效——于是下一次取队列连
 betweenness 都要重算。
+
+T-A3 v4:队列的真实总量(``review_status != 'rejected'`` 的关系数)现在也存进
+本 memo 的条目里,与排名 items 绑在同一个 seq 标签上——``compute`` 回调返回
+``(items, total)``,``top()`` 也返回 ``(items, total)``。总量的初版曾经是
+``knowledge_counts_cache`` 的第 5 个 module-global memo,codex #638 R1 指出那
+会导致端点两次独立读产生 items/total 跨版本不一致的自相矛盾响应;v4 把 total
+挪进这里,与 items 天然同一把锁、同一个 seq、同一次 compute,不可能跨版本。
+carry 只 retag 标签,不碰 total(verified/pending 翻转不改变集合大小);
+invalidate 连 items 带 total 一并清空(reject 类迁移可能真的改变了集合)。
 
 本 memo 承担 KG-2 的**读侧主修复**,口径要如实说清楚:**降频不降幅**。冷算的
 量级一点没变(仍是全量扫描 + 全量打分 + 一次 betweenness);变的是它从「每请求
@@ -21,6 +31,9 @@ betweenness 都要重算。
 1. 该 notebook 的非 rejected ``knowledge_relations`` 行;
 2. 这些关系端点对象的 ``payload.name`` 与 ``object_type``;
 3. edge betweenness centrality map。
+
+``total`` 不是第四样输入——它就是 (1) 的 ``len()``,同一次扫描顺带算出来,不
+额外读任何东西,因此失效完备性论证覆盖 items 也就覆盖了 total。
 
 (1)(2) 的每一条**生产**写路径都汇流到 ``mark_unified_kg_dirty`` —— 它是
 ``kg_mutation_seq`` 在本仓库里唯一的前进点(``store_kg`` / 关系补全 /
@@ -142,7 +155,7 @@ class _PendingRanking:
 
     def __init__(self, epoch: Tuple[int, int]) -> None:
         self.ready = threading.Event()
-        self.value: "Optional[List[dict]]" = None
+        self.value: "Optional[Tuple[List[dict], int]]" = None
         self.error: "Optional[BaseException]" = None
         # 采样自 leader 进入时,写回守卫用它——等待者不重复写回(见 ``top``)。
         self.epoch = epoch
@@ -164,7 +177,7 @@ class ReviewQueueMemo:
     def __init__(self, max_notebooks: int = _MAX_NOTEBOOKS) -> None:
         self._lock = threading.Lock()
         self._max_notebooks = max_notebooks
-        self._store: "OrderedDict[str, Tuple[int, List[dict]]]" = OrderedDict()
+        self._store: "OrderedDict[str, Tuple[int, List[dict], int]]" = OrderedDict()
         self._global_epoch = 0
         self._epochs: "OrderedDict[str, int]" = OrderedDict()
         # single-flight:同一个 ``(notebook_id, seq)`` 的并发冷 miss 只跑一次全量
@@ -181,13 +194,17 @@ class ReviewQueueMemo:
         notebook_id: str,
         limit: int,
         read_seq: Callable[[], int],
-        compute: Callable[[], List[dict]],
-    ) -> List[dict]:
-        """该 notebook 排名前 ``limit`` 条(``limit <= REVIEW_QUEUE_MEMO_ITEMS``)。
+        compute: Callable[[], Tuple[List[dict], int]],
+    ) -> Tuple[List[dict], int]:
+        """该 notebook 排名前 ``limit`` 条 + 队列真实总量(``limit <=
+        REVIEW_QUEUE_MEMO_ITEMS``)。
 
-        ``read_seq`` 点读 ``kg_mutation_seq``,``compute`` 算出**完整的** top-M 列表
-        (调用方负责让它就是 ``REVIEW_QUEUE_MEMO_ITEMS`` 深)。两者的调用顺序是本
-        模块的读序契约,见模块 docstring。
+        ``read_seq`` 点读 ``kg_mutation_seq``,``compute`` 算出**完整的**
+        ``(top-M 列表, 总量)``(调用方负责让列表就是 ``REVIEW_QUEUE_MEMO_ITEMS``
+        深,总量是同一次扫描里 ``len(非 rejected 关系行)``)。两者的调用顺序是本
+        模块的读序契约,见模块 docstring。返回值的 total 与 items 永远同一个 seq
+        版本——它们来自同一次 ``compute()``、存在同一个 store 条目里,不存在
+        「items 命中缓存、total 另外算」这种会跨版本的路径。
         """
         seq = int(read_seq())        # ← 读序契约:seq 先于数据,不得交换
         key = (notebook_id, seq)
@@ -195,7 +212,7 @@ class ReviewQueueMemo:
             hit = self._store.get(notebook_id)
             if hit is not None and hit[0] == seq:
                 self._store.move_to_end(notebook_id)
-                cached: "Optional[List[dict]]" = hit[1]
+                cached: "Optional[Tuple[List[dict], int]]" = (hit[1], hit[2])
                 pending: "Optional[_PendingRanking]" = None
                 leader = False
             else:
@@ -208,7 +225,8 @@ class ReviewQueueMemo:
 
         if cached is not None:
             # 锁外拷贝:carry 是 copy-on-write,这份引用不会被就地改写。
-            return _slice_copy(cached, limit)
+            items, total = cached
+            return _slice_copy(items, limit), total
         # 到这里 ``pending`` 必非 None:上面的 else 支要么取到在途的那个,
         # 要么自己建了一个。
         if not leader:
@@ -221,7 +239,8 @@ class ReviewQueueMemo:
             pending.ready.wait()
             if pending.error is not None:
                 raise pending.error
-            return _slice_copy(pending.value, limit)
+            items, total = pending.value
+            return _slice_copy(items, limit), total
 
         try:
             value = compute()    # 冷算绝不在锁内跑(大库上是秒级)
@@ -232,6 +251,7 @@ class ReviewQueueMemo:
             pending.ready.set()                          # 唤醒等待者后再抛
             raise
 
+        items, total = value
         with self._lock:
             # 写回守卫只由 **leader** 执行一次,用它自己进入时采样的 epoch:
             # 等待者没跑 compute,没有「读之后到写之前」这个窗口需要守。
@@ -244,14 +264,14 @@ class ReviewQueueMemo:
             if pending.epoch == self._epoch_of(notebook_id):
                 existing = self._store.get(notebook_id)
                 if existing is None or existing[0] <= seq:
-                    self._store[notebook_id] = (seq, value)
+                    self._store[notebook_id] = (seq, items, total)
                     self._store.move_to_end(notebook_id)
                     while len(self._store) > self._max_notebooks:
                         self._store.popitem(last=False)
             self._pending.pop(key, None)                 # 有界:完成即清理
         pending.value = value
         pending.ready.set()
-        return _slice_copy(value, limit)
+        return _slice_copy(items, limit), total
 
     def carry(
         self,
@@ -276,6 +296,10 @@ class ReviewQueueMemo:
         ``rel_id`` 不在 top-M 内时**照样 retag**:它是否落榜只由 ``review_priority``
         决定,而 priority 不含 ``review_status``,所以这次迁移对榜单的内容与顺序
         都没有影响。此时唯一的改动就是标签。
+
+        ``total``(T-A3 v4)**原样不变**——verified/pending 之间的翻转不改变
+        ``review_status != 'rejected'`` 集合的大小,只有条目本身的字段变了,所以
+        这里只搬运 ``hit[2]``,不重新计数。
         """
         with self._lock:
             hit = self._store.get(notebook_id)
@@ -291,7 +315,7 @@ class ReviewQueueMemo:
                 if item.get("rel_id") == rel_id else item
                 for item in hit[1]
             ]
-            self._store[notebook_id] = (new_seq, items)
+            self._store[notebook_id] = (new_seq, items, hit[2])
             self._store.move_to_end(notebook_id)
 
     def invalidate(self, notebook_id: "Optional[str]" = None) -> None:

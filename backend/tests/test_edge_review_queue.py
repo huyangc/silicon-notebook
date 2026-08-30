@@ -156,89 +156,72 @@ def test_governance_store_update_edge_review_missing_relation_raises_keyerror(re
             )
 
 
-def _spy_carry_and_invalidate(governance, monkeypatch):
-    """Wrap the governance service's injected carry/invalidate callables with
-    counters, delegating to the REAL implementations so the underlying
-    knowledge_counts_cache module state stays authentic (not faked)."""
-    calls = {"carry": 0, "invalidate": 0}
-    orig_carry = governance._carry_review_queue_total_fn
-    orig_invalidate = governance._invalidate_knowledge_counts_fn
-
-    def spy_carry(nb, expected_seq, new_seq):
-        calls["carry"] += 1
-        return orig_carry(nb, expected_seq, new_seq)
-
-    def spy_invalidate(nb):
-        calls["invalidate"] += 1
-        return orig_invalidate(nb)
-
-    monkeypatch.setattr(governance, "_carry_review_queue_total_fn", spy_carry)
-    monkeypatch.setattr(governance, "_invalidate_knowledge_counts_fn", spy_invalidate)
-    return calls
-
-
-def test_set_edge_review_verified_flip_carries_total_without_cold_count(repo, monkeypatch):
-    """P1-2: a pure pending->verified flip must carry-forward the
-    review_queue_total memo (cheap retag), NOT invalidate it — and the retag
-    must actually save the next read from a cold COUNT (counter assertion on
-    the real sqlite knowledge_counts_cache module)."""
-    from app.repositories.sqlite import knowledge_counts_cache as kcc
-
+def test_set_edge_review_verified_flip_carries_the_memo_without_cold_recompute(
+    repo, monkeypatch
+):
+    """T-A3 v4 (codex #638 R1): a pure pending->verified flip must carry-
+    forward the ranking memo — items AND total live in ONE entry now — via a
+    cheap retag, NOT a cold recompute. The retagged total must be exactly the
+    value the earlier cold scan produced, not a fresh count (counter
+    assertion on the real ``_rank_review_queue`` cold path)."""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
-    total_before = repo.review_queue_total(nb_id)  # warm the memo (cold COUNT #1)
-    calls = _spy_carry_and_invalidate(repo._runtime.knowledge_governance, monkeypatch)
+    page_before = repo.review_queue_page(nb_id)  # warm the memo (cold scan #1)
+    rel_id = page_before["items"][0]["rel_id"]
+    calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
 
     repo.set_edge_review(nb_id, rel_id, "verified")  # pending -> verified
 
-    assert calls == {"carry": 1, "invalidate": 0}
-    # The memo entry survives with the SAME value, just retagged — a stale
-    # entry would have been popped by invalidate() instead.
-    assert nb_id in kcc._REVIEW_QUEUE_TOTAL
-    assert kcc._REVIEW_QUEUE_TOTAL[nb_id][1] == total_before
-    assert repo.review_queue_total(nb_id) == total_before  # served warm, not a fresh cold COUNT
+    assert calls["n"] == 0, "verified<->pending 翻转不得触发冷排名/冷计数"
+    page_after = repo.review_queue_page(nb_id)
+    assert calls["n"] == 0, "served warm (carried), not a fresh cold scan"
+    assert page_after["total"] == page_before["total"]
+    assert {i["rel_id"]: i["review_status"] for i in page_after["items"]}[rel_id] == "verified"
 
 
-def test_set_edge_review_reject_invalidates_total(repo, monkeypatch):
-    """P1-2: a transition touching 'rejected' must invalidate (not carry) the
-    review_queue_total memo — queue membership may have actually changed."""
-    from app.repositories.sqlite import knowledge_counts_cache as kcc
-
+def test_set_edge_review_reject_invalidates_the_memo_and_recomputes_total(repo):
+    """T-A3 v4: a transition touching 'rejected' must invalidate (not carry)
+    the ranking memo — queue membership actually changed, so the next read's
+    total must reflect exactly one fewer non-rejected edge."""
     nb_id = _seed_graph(repo)
-    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
-    repo.review_queue_total(nb_id)  # warm the memo
-    calls = _spy_carry_and_invalidate(repo._runtime.knowledge_governance, monkeypatch)
+    page_before = repo.review_queue_page(nb_id)
+    rel_id = page_before["items"][0]["rel_id"]
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
 
     repo.set_edge_review(nb_id, rel_id, "rejected")  # pending -> rejected
 
-    assert calls == {"carry": 0, "invalidate": 1}
-    assert nb_id not in kcc._REVIEW_QUEUE_TOTAL  # popped, not stale-retagged
+    assert memo.cached_seq(nb_id) is None  # popped, not stale-retagged
+    page_after = repo.review_queue_page(nb_id)
+    assert page_after["total"] == page_before["total"] - 1
+    assert all(i["rel_id"] != rel_id for i in page_after["items"])
 
 
-def test_set_edge_review_unreject_invalidates_total(repo, monkeypatch):
-    """P1-2: rejected -> pending (undoing a rejection) is exactly as
+def test_set_edge_review_unreject_invalidates_the_memo_and_recomputes_total(repo):
+    """T-A3 v4: rejected -> pending (undoing a rejection) is exactly as
     membership-changing as the forward direction and must also invalidate,
-    never carry — the edge re-enters the (review_status != 'rejected') set."""
-    from app.repositories.sqlite import knowledge_counts_cache as kcc
-
+    never carry — the edge re-enters the (review_status != 'rejected') set,
+    so total climbs back up by exactly one."""
     nb_id = _seed_graph(repo)
     rel_id = repo.review_queue(nb_id)[0]["rel_id"]
     repo.set_edge_review(nb_id, rel_id, "rejected")
-    repo.review_queue_total(nb_id)  # warm again post-reject
-    calls = _spy_carry_and_invalidate(repo._runtime.knowledge_governance, monkeypatch)
+    page_after_reject = repo.review_queue_page(nb_id)  # warm again post-reject
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
 
     repo.set_edge_review(nb_id, rel_id, "pending")  # rejected -> pending (un-reject)
 
-    assert calls == {"carry": 0, "invalidate": 1}
-    assert nb_id not in kcc._REVIEW_QUEUE_TOTAL
+    assert memo.cached_seq(nb_id) is None
+    page_after_unreject = repo.review_queue_page(nb_id)
+    assert page_after_unreject["total"] == page_after_reject["total"] + 1
+    assert rel_id in {i["rel_id"] for i in page_after_unreject["items"]}
 
 
-def test_review_queue_total_missing_notebook_raises_keyerror(repo):
-    """S1: review_queue_total must guard notebook existence the SAME way
+def test_review_queue_page_missing_notebook_raises_keyerror(repo):
+    """S1: review_queue_page must guard notebook existence the SAME way
     review_queue already does (symmetry) — a direct/service-level caller
     (bypassing the API route's own dependency) must see the same failure."""
     with pytest.raises(KeyError):
-        repo.review_queue_total("does-not-exist")
+        repo.review_queue_page("does-not-exist")
 
 
 # ── R3 T-A2: 排名 memo 的端到端(审核循环不再每次重排) ─────────────────────
@@ -396,21 +379,131 @@ def test_delete_notebook_kg_invalidates_the_review_queue_ranking(repo):
     assert repo.review_queue(nb_id) == []
 
 
-def test_add_relations_facade_path_invalidates_review_queue_total(repo):
-    """F1: RepositoryFacade.add_relations is a raw-insert path that bypasses
-    store_kg's kg_mutation_seq bump. It must explicitly invalidate the
-    knowledge_counts_cache memos (incl. review_queue_total) itself so a
-    fixture that warms the memo, then seeds via this path, then reads again
-    never sees a stale total."""
-    from app.repositories.sqlite import knowledge_counts_cache as kcc
-
+def test_add_relations_facade_path_resets_the_cached_total(repo):
+    """F1 / T-A3 v4: RepositoryFacade.add_relations is a raw-insert path that
+    bypasses store_kg's kg_mutation_seq bump. It must explicitly invalidate
+    the ranking memo (items AND total, v4 — one entry, not the old separate
+    counts_cache memo) itself so a fixture that warms it, then seeds via this
+    path, then reads again never sees a stale total."""
     nb_id = _seed_graph(repo)
-    repo.review_queue_total(nb_id)  # warm the memo
-    assert nb_id in kcc._REVIEW_QUEUE_TOTAL
+    repo.review_queue_page(nb_id)  # warm the memo
+    memo = repo._runtime.review_queue_memo
+    assert memo.cached_seq(nb_id) is not None
 
     repo.add_relations(nb_id, "", [])  # no-op insert, but still the facade path
 
-    assert nb_id not in kcc._REVIEW_QUEUE_TOTAL  # explicitly invalidated
+    assert memo.cached_seq(nb_id) is None  # explicitly invalidated
+
+
+# ── R3 T-A3 v4: items/total 同版本一致性(codex #638 R1)────────────────────
+
+def test_review_queue_page_hit_does_not_recompute_the_ranking_or_total(repo, monkeypatch):
+    """memo 命中时 total 不重算:同一 KG 版本下多次 ``review_queue_page`` 只跑
+    一次冷排名/冷计数(计数器断言),且两次读到的 items/total 逐位相同。"""
+    nb_id = _seed_graph(repo)
+    calls = _count_cold_rankings(repo._runtime.knowledge_governance, monkeypatch)
+
+    first = repo.review_queue_page(nb_id)
+    second = repo.review_queue_page(nb_id)
+
+    assert calls["n"] == 1
+    assert first == second
+
+
+def test_review_queue_page_direct_bypass_path_computes_the_true_total(repo):
+    """直通路径(``limit`` 超出 memo 深度,或为负)与 memo 路径必须在同一个
+    seq 上算出相同的 ``total``——都来自 ``_rank_review_queue`` 同一次扫描,
+    并且都必须等于对 ``knowledge_relations`` 直接做 ``COUNT(*)`` 得到的真值。"""
+    from app.services.review_queue_memo import REVIEW_QUEUE_MEMO_ITEMS
+
+    nb_id = _seed_graph(repo)
+    memo_page = repo.review_queue_page(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS)
+    direct_page_over = repo.review_queue_page(nb_id, limit=REVIEW_QUEUE_MEMO_ITEMS + 1)
+    direct_page_negative = repo.review_queue_page(nb_id, limit=-1)
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_relations "
+            "WHERE notebook_id=? AND review_status != 'rejected'",
+            (nb_id,),
+        ).fetchone()
+    true_total = int(row["c"])
+
+    assert memo_page["total"] == true_total
+    assert direct_page_over["total"] == true_total
+    assert direct_page_negative["total"] == true_total
+
+
+def test_review_queue_page_total_tracks_the_true_count_across_interleaved_rejects(repo):
+    """items/total 同版本一致性,以一串连续的 reject 决定模拟多版本推进
+    (每做一次决定就立刻重新读一次 page):``total`` 必须始终等于「这次读到的
+    items 所属那个 KG 版本」里非 rejected 的真实关系数,而不是任何更早或更晚
+    版本的计数——不允许 items 已经反映某次 reject、total 却还没反映(或反过来)
+    这种跨版本自相矛盾。"""
+    nb_id = _seed_graph(repo)
+    page = repo.review_queue_page(nb_id)
+    all_rel_ids = [item["rel_id"] for item in page["items"]]
+    assert len(all_rel_ids) >= 2, "seed graph 需要至少两条边才能测多次 reject 交错"
+
+    for rel_id in all_rel_ids:
+        repo.set_edge_review(nb_id, rel_id, "rejected")
+        page = repo.review_queue_page(nb_id)
+        with repo._connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_relations "
+                "WHERE notebook_id=? AND review_status != 'rejected'",
+                (nb_id,),
+            ).fetchone()
+        assert page["total"] == int(row["c"])
+        assert rel_id not in {i["rel_id"] for i in page["items"]}
+
+
+def test_review_queue_page_stays_internally_consistent_when_a_reject_races_the_cold_scan(
+    repo, monkeypatch
+):
+    """并发交错(注入模拟):另一个请求在本次冷扫描的「取数」阶段(seq 已经点读
+    完毕之后)插队做了一次 reject 决定并提交。读序契约保证这次冷算的 items 与
+    total 仍然出自SAME一次扫描——要么两者都还没反映那次 reject,要么两者都已
+    反映,绝不会一半新一半旧(比如 total 已经扣掉了那条边、items 里却还留着它)。
+    这次结果的标签必然落后于世界的最新 seq,所以下一次读会因为 seq 不等而重新
+    冷算,吐出真正干净的新版本。"""
+    nb_id = _seed_graph(repo)
+    page0 = repo.review_queue_page(nb_id)  # warm once
+    rel_id_to_reject = page0["items"][0]["rel_id"]
+    governance = repo._runtime.knowledge_governance
+    original_rank = governance._rank_review_queue
+    fired = {"done": False}
+
+    def racing_rank(notebook_id, limit):
+        if not fired["done"]:
+            fired["done"] = True
+            # 模拟另一个并发请求在本次冷算读数据之前完成了一次 reject 并提交。
+            repo.set_edge_review(notebook_id, rel_id_to_reject, "rejected")
+        return original_rank(notebook_id, limit)
+
+    monkeypatch.setattr(governance, "_rank_review_queue", racing_rank)
+    repo._runtime.review_queue_memo.invalidate(nb_id)  # force the next read cold
+
+    page1 = repo.review_queue_page(nb_id)
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT review_status FROM knowledge_relations WHERE id=?",
+            (rel_id_to_reject,),
+        ).fetchone()
+    assert row["review_status"] == "rejected"  # the injected race really landed
+
+    # 内部一致性:racing_rank 在真正读数据之前就提交了 reject,所以这次扫描看到
+    # 的的确是 reject 之后的干净状态——items 与 total 必须彼此吻合。
+    contains = rel_id_to_reject in {i["rel_id"] for i in page1["items"]}
+    assert not contains
+    assert page1["total"] == page0["total"] - 1
+
+    # 下一次读必须是全新、自洽的一次冷算(seq 已经因 reject 前进,memo 被打上的
+    # 标签落后于世界最新版本),而不是续用被打断的那一份——结果应当保持稳定。
+    page2 = repo.review_queue_page(nb_id)
+    assert page2["total"] == page1["total"]
+    assert page2["items"] == page1["items"]
 
 
 # ── Feedback loop: rejected edges demoted in graph ───────────────────────────

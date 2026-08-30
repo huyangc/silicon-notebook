@@ -1044,7 +1044,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revert_knowhow_table', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_pending_merges', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue_total', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue_page', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revoke_agent_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_conflict_resolution_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_merge_review_job', kind='attribute', target='_runtime'),
@@ -3158,21 +3158,11 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
-        name='review_queue',
+        name='review_queue_page',
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.edge_review_queue', kind='attribute', target='review_queue'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='review_queue_total',
-        owner='KnowledgeGovernanceService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.edge_review_queue', kind='attribute', target='review_queue_total'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.edge_review_queue', kind='attribute', target='review_queue_page'),
         ),
         patches=(
         ),
