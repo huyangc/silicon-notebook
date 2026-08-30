@@ -1255,6 +1255,73 @@ class KnowledgeStore:
             if "last_reviewed" in row.keys() else "",
         } for row in rows]
 
+    @staticmethod
+    def duplicate_seed_rows(
+        db: Any, notebook_id: str, object_type: str,
+    ) -> List[dict]:
+        """R3 T-B1 (KG-3) dedup pass 1 -- see the ``KnowledgeStorePort``
+        docstring for the shared rationale (evidence-free thin BLOCKING
+        projection, ``status`` pushdown, ORDER BY parity with
+        ``retrieval_objects``).
+
+        ``payload->>'name'`` returns SQL NULL for a missing key, a JSON
+        ``null``, or a non-object payload -- ``find_duplicates`` applies the
+        SAME ``str(name) if name is not None else ""`` coercion the
+        review-queue endpoint read uses (``KnowledgeGovernanceService.
+        review_queue``), so a string/integer name renders identically on both
+        backends; see that call site's docstring for the registered
+        (pre-existing, non-regressing) cross-dialect divergence on other JSON
+        scalar shapes."""
+        if object_type == "procedure":
+            rows = db.execute(
+                "SELECT id, status, payload FROM knowledge_objects "
+                "WHERE notebook_id=%s AND object_type=%s AND status != 'deprecated' "
+                "ORDER BY created_at ASC, id ASC",
+                (notebook_id, object_type),
+            ).fetchall()
+            return [{
+                "id": row["id"],
+                "status": row["status"],
+                "payload": json_value(row["payload"], {}),
+            } for row in rows]
+        rows = db.execute(
+            "SELECT id, status, payload->>'name' AS name FROM knowledge_objects "
+            "WHERE notebook_id=%s AND object_type=%s AND status != 'deprecated' "
+            "ORDER BY created_at ASC, id ASC",
+            (notebook_id, object_type),
+        ).fetchall()
+        return [{
+            "id": row["id"],
+            "status": row["status"],
+            "name": row["name"],
+        } for row in rows]
+
+    @staticmethod
+    def duplicate_member_rows(
+        db: Any, notebook_id: str, object_ids: Sequence[str], *, batch_size: int = 900,
+    ) -> List[dict]:
+        """R3 T-B1 (KG-3) dedup pass 2 -- see ``KnowledgeStorePort`` for the
+        shared rationale (no ``evidence`` column; unspecified row order).
+
+        ``notebook_id`` stays in the predicate alongside ``id = ANY(...)`` --
+        unlike the SQLite twin below, PostgreSQL plans this as a primary-key
+        scan with ``notebook_id`` evaluated as a filter, not a per-batch
+        notebook-wide scan (same conclusion as ``GovernanceStore.
+        review_queue_rows``'s endpoint lookup)."""
+        ids = list(dict.fromkeys(object_ids))
+        rows: List[Any] = []
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            rows.extend(db.execute(
+                "SELECT id, payload FROM knowledge_objects "
+                "WHERE notebook_id=%s AND id = ANY(%s)",
+                (notebook_id, batch),
+            ).fetchall())
+        return [{
+            "id": row["id"],
+            "payload": json_value(row["payload"], {}),
+        } for row in rows]
+
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
         ids = [e for e in element_ids if e]
         if not ids:

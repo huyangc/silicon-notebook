@@ -1083,6 +1083,86 @@ class KnowledgeStore:
             "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
         } for row in rows]
 
+    @staticmethod
+    def duplicate_seed_rows(
+        db: sqlite3.Connection, notebook_id: str, object_type: str,
+    ) -> List[dict]:
+        """R3 T-B1 (KG-3) dedup pass 1 -- SQLite twin of the PostgreSQL
+        implementation; see ``KnowledgeStorePort`` for the shared rationale
+        (evidence-free thin BLOCKING projection, ``status`` pushdown, ORDER
+        BY parity with ``retrieval_objects``).
+
+        ``json_extract(payload, '$.name')`` yields SQLite's own native type
+        for the JSON scalar (str/int/float/None, and 0/1 for a JSON bool) --
+        NOT text like the PostgreSQL twin's ``->>``. ``find_duplicates``
+        applies the SAME ``str(name) if name is not None else ""`` coercion
+        used by the review-queue endpoint read
+        (``KnowledgeGovernanceService.review_queue``) to reconcile the two
+        dialects onto the same text for a string/integer name; see that call
+        site's docstring for the registered (pre-existing, non-regressing)
+        divergence on other JSON scalar shapes."""
+        if object_type == "procedure":
+            rows = db.execute(
+                "SELECT id, status, payload FROM knowledge_objects "
+                "WHERE notebook_id=? AND object_type=? AND status != 'deprecated' "
+                "ORDER BY created_at ASC, id ASC",
+                (notebook_id, object_type),
+            ).fetchall()
+            return [{
+                "id": row["id"],
+                "status": row["status"],
+                "payload": json.loads(row["payload"] or "{}"),
+            } for row in rows]
+        rows = db.execute(
+            "SELECT id, status, json_extract(payload, '$.name') AS name "
+            "FROM knowledge_objects "
+            "WHERE notebook_id=? AND object_type=? AND status != 'deprecated' "
+            "ORDER BY created_at ASC, id ASC",
+            (notebook_id, object_type),
+        ).fetchall()
+        return [{
+            "id": row["id"],
+            "status": row["status"],
+            "name": row["name"],
+        } for row in rows]
+
+    @staticmethod
+    def duplicate_member_rows(
+        db: sqlite3.Connection, notebook_id: str, object_ids: Sequence[str],
+        *, batch_size: int = 900,
+    ) -> List[dict]:
+        """R3 T-B1 (KG-3) dedup pass 2 -- see ``KnowledgeStorePort`` for the
+        shared rationale (no ``evidence`` column; unspecified row order).
+
+        ⚠ Bare ``id IN (...)``, NOT ``notebook_id=? AND id IN (...)`` -- same
+        planner hazard as ``GovernanceStore.review_queue_rows``'s endpoint
+        lookup (``sqlite/governance_store.py``): without ``ANALYZE`` (never
+        run on production databases here), SQLite plans the combined
+        predicate as a per-batch notebook-wide scan instead of a primary-key
+        seek, and pass 1's blocks are exactly the "many ids out of one big
+        notebook" shape that triggers it (measured elsewhere in this
+        repository: 0.138s -> 14.155s on a 200k-row database for the same
+        recipe). ``notebook_id`` is projected instead and checked in
+        Python -- there is no "read a lot then filter" risk because the
+        result set is already capped by the id list."""
+        ids = list(dict.fromkeys(object_ids))
+        rows: List[sqlite3.Row] = []
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(
+                row for row in db.execute(
+                    "SELECT id, payload, notebook_id FROM knowledge_objects "
+                    f"WHERE id IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                if row["notebook_id"] == notebook_id
+            )
+        return [{
+            "id": row["id"],
+            "payload": json.loads(row["payload"] or "{}"),
+        } for row in rows]
+
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
         ids = [e for e in element_ids if e]
         if not ids:
