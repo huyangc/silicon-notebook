@@ -586,8 +586,21 @@ def test_copyable_selected_chunk_search_always_uses_bounded_fts(
     assert repo.retrieval.candidates._retrieve_chunks(
         "nb", "target command", recall=7, allowed_source_ids=("A", "B")
     ) == ([], [], None)
-    # 显式来源清单永远是真收窄的那条 lane(不看请求 scope),所以语料语言闸这里
-    # 照旧关闭——见 ``_lexical_gate_source_scoped``。
+    # codex #640 R2 P1:一个非 None 的 allowed_source_ids 本身不再是「真收窄」的
+    # 证明——``_retrieve_elements`` 把它自己物化出的**上下文天花板**用完全相同的
+    # 参数形状传给这同一个方法,所以只看「非 None」推 explicit 会让全选冻结的
+    # 元素回退臂重新关闭语料语言闸(见该方法与 ``_lexical_gate_source_scoped``
+    # 的说明)。不带 ``producer_explicit=True``、也没有真收窄的 request scope 时,
+    # 语料语言闸保持打开(source_restricted=False)。
+    assert calls == [("nb", "target command", 7, -1, ("A", "B"), False)]
+
+    # 对照:调用方显式 attest ``producer_explicit=True``(真正的 producer 级
+    # 收窄清单)时,豁免照旧生效——这条腿没有回归。
+    calls.clear()
+    assert repo.retrieval.candidates._retrieve_chunks(
+        "nb", "target command", recall=7, allowed_source_ids=("A", "B"),
+        producer_explicit=True,
+    ) == ([], [], None)
     assert calls == [("nb", "target command", 7, -1, ("A", "B"), True)]
 
 

@@ -7,6 +7,7 @@ by their owning stores.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import itertools
 import logging
@@ -117,6 +118,47 @@ def _first_relation_sample(raw: object) -> str:
     if isinstance(samples, list) and samples:
         return str(samples[0])
     return ""
+
+
+def _lexical_gate_drift_probe(retrieval_state, notebook_id: str) -> bool:
+    """Once-per-arm-entry wrapper around ``_unsafe_source_scope_restricted``
+    for the lexical-gate ROUTING callers (``_retrieve_chunks_multi``,
+    ``_retrieve_chunks_baseline``, ``_keyword_chunk_candidates``) — codex #640
+    R2 P2.  A module-level function, not a method, and doubly ``getattr``-
+    guarded (missing attribute AND non-callable): production ``retrieval_state``
+    always has the real probe, but a couple of existing tests invoke one of
+    those three methods unbound against a bare ``SimpleNamespace``/adapter
+    double standing in for ``self`` that has no ``_RetrievalState`` surface at
+    all (see ``test_multi_query_native_cancellation_is_not_swallowed`` — a
+    method lookup like ``self._lexical_gate_drift_probe`` would itself raise
+    ``AttributeError`` on that double, which is why this lives at module scope
+    instead). Such a double answers "no drift", the same as the pre-#640-R2
+    baseline for every caller that never reaches this branch. This does NOT
+    memoise the probe itself — every call here still re-reads it fresh; it
+    only centralizes the fallback for callers that may not have it at all."""
+    probe = getattr(retrieval_state, "_unsafe_source_scope_restricted", None)
+    return bool(probe(notebook_id)) if callable(probe) else False
+
+
+# codex #640 R2 P2: ``_retrieve_chunks_multi`` fans a single chunk-arm entry
+# out to one ``_retrieve_chunks`` call per sub-query (a ThreadPoolExecutor, one
+# COPIED context per task).  Threading the once-per-arm drift verdict down as
+# an ordinary keyword argument on ``_retrieve_chunks`` would change that
+# method's call-time signature for every one of its many existing test
+# doubles (several suites replace ``_retrieve_chunks`` wholesale with a
+# narrower fake and would raise ``TypeError`` on an unexpected kwarg). A
+# contextvar sidesteps that: ``_retrieve_chunks_multi`` sets it once, each
+# sub-query's copied ``Context`` snapshots that one value, and only the real,
+# never-mocked ``_retrieve_chunks_baseline`` reads it back — a full-method
+# fake never even looks at it.  Scope is exactly one ``_retrieve_chunks_multi``
+# call (set immediately before the fan-out, reset in a ``finally`` right
+# after building the per-task context copies): this is NOT the run/request-
+# level memoisation codex #634 R1 rejected, and it is never read for a scope
+# ENFORCEMENT decision — see ``_lexical_gate_source_scoped``'s docstring for
+# why a routing-only use tolerates this while enforcement never may.
+_CHUNK_ARM_DRIFTED: contextvars.ContextVar[Optional[bool]] = contextvars.ContextVar(
+    "_chunk_arm_drifted", default=None
+)
 
 
 class _RetrievalState:
@@ -329,7 +371,8 @@ class _RetrievalState:
         )
 
     def _lexical_gate_source_scoped(
-        self, allowed_source_ids, *, explicit: bool = False
+        self, allowed_source_ids, *, explicit: bool = False,
+        drifted: bool = False,
     ) -> bool:
         """Does this query's source predicate actually BOUND the lexical scan?
 
@@ -345,33 +388,58 @@ class _RetrievalState:
         exactly what happens (audit ASK-1; measured 64 terms/29.7s cold vs 3
         terms/0.26s warm for the same 26 rows).
 
-        Three answers, one conjunction:
+        Four answers, one conjunction:
 
         * ``allowed_source_ids is None`` -- no predicate at all (no scope, a
           mounted base library, an exclude-shaped scope).  Not bounded.
-        * ``explicit`` -- a producer supplied its own, genuinely narrow
-          universe.  Bounded, whatever the request scope says.
-        * otherwise the request's own NARROWING bit, which is free (a
-          contextvar read) and is the right question here: a user who really
-          unchecked sources leaves a predicate that bounds the scan, while a
-          default full selection does not.
+        * ``explicit`` -- the CALL CHAIN explicitly attests this list is a
+          producer's own, genuinely narrow universe (not merely non-``None``
+          -- see the callers).  Bounded, whatever the request scope says.
+        * the request's own NARROWING bit (``source_scope_restricted()``),
+          which is free (a contextvar read): a user who really unchecked
+          sources leaves a predicate that bounds the scan, while a default
+          full selection does not.
+        * ``drifted`` -- the frozen all-selected ceiling no longer equals the
+          live universe, so the predicate it pushes down is now genuinely
+          smaller than "the whole notebook" (``docs/product-and-api.md``,
+          source-selected-retrieval-scope: "A frozen-universe drift makes the
+          run genuinely bounded again and returns it to the restricted
+          lane" -- the KG lexical lane already honours this; codex #640 R2
+          P2 caught chunk/keyword lagging it).
 
-        ⛔ Deliberately NOT the drift probe, on both counts.  Semantically, a
-        drifted all-selected list still spans essentially the whole notebook,
-        so exempting it would reinstate the same unbounded probe set.  On cost,
-        this is called once per sub-query on the chunk arms, and the probe is
-        two live repository reads that may not be memoised (see
-        ``_unsafe_source_scope_restricted``) -- paying it here would multiply
-        the very reads the gate was added to save.  The KG lane's own
-        ``source_candidates_restricted`` asks a DIFFERENT question (may this
-        run still touch the notebook-wide ANN?), which must react to drift, and
-        keeps the probe.
+        codex #640 R2 P1: ``explicit`` must never be inferred from
+        "``allowed_source_ids is not None``" one level removed from the
+        caller either.  ``_retrieve_elements`` materializes the frozen
+        ceiling before it ever reaches here (so it can push the predicate
+        into its own chunk-recall sub-call); that materialized list is a
+        CONTEXTUAL ceiling, not a producer's own narrow filter, and callers
+        must pass ``explicit=False`` for it even though the list is non-
+        ``None``.
+
+        ``drifted`` is NOT a green light to call ``_unsafe_source_scope_restricted``
+        again in here, and it is NOT a run/request-level cache of that probe
+        either -- both would repeat the exact mistake codex #634 R1 rejected
+        (a stale verdict outliving the read it was based on).  The
+        distinction that keeps this callable: that probe answers a SCOPE
+        ENFORCEMENT question (may an unpartitioned channel touch the whole
+        graph before I/O?) and a stale answer there can let excluded rows
+        occupy Top-K -- so it is re-read on every enforcement use, never
+        cached anywhere.  This gate answers a ROUTING question (which lexical
+        term set do we search with?); the source predicate itself is pushed
+        down unconditionally either way (see ``_retrieve_chunks_fts_degraded``),
+        so a momentarily-stale ``drifted`` here can only pick the wrong term
+        set for one arm's one call, never let an out-of-scope row through.
+        Callers therefore probe ``_unsafe_source_scope_restricted`` at most
+        ONCE per retrieval-arm entry (not per sub-query, not across arms, not
+        across requests) and thread the single answer down as an explicit
+        parameter -- see ``_retrieve_chunks_multi`` and
+        ``_keyword_chunk_candidates``.
         """
         from app.services.source_scope import source_scope_restricted
 
         return bool(
             allowed_source_ids is not None
-            and (explicit or source_scope_restricted())
+            and (explicit or source_scope_restricted() or drifted)
         )
 
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
@@ -1938,7 +2006,28 @@ class CandidateRetrievalService(_RetrievalState):
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8, *,
                            allowed_source_ids=None) -> List[RetrievedElement]:
-        """Keyword+semantic search over raw source_elements (fallback layer 2)."""
+        """Keyword+semantic search over raw source_elements (fallback layer 2).
+
+        ``allowed_source_ids`` reaching this method is ALWAYS a CONTEXTUAL
+        ceiling, never a producer's own genuinely-narrow filter, whichever of
+        its two provenances it has: (1) the caller passed nothing and the
+        line below materializes it from the ambient frozen scope (an
+        all-selected freeze included — see ``source_scope.scoped_allowed_source_ids``);
+        or (2) it arrived from ``_federated_retrieve_elements_impl`` /
+        ``PluginRetrievalAccess`` (plugin_ask_engine.py), whose
+        ``source_keys`` are a LIVE enumeration of that notebook's whole
+        visible+hidden universe intersected with the same frozen ceiling —
+        structurally the all-selected shape again, not a request that
+        actually narrowed anything (that file's own comment: "元素检索仍逐次
+        下推完整清单", unlike the KG seam which sends no list at all when
+        unnarrowed). Neither provenance is what
+        ``_lexical_gate_source_scoped``'s ``explicit`` means, so the chunk-arm
+        call below must always attest ``producer_explicit=False`` — codex
+        #640 R2 P1: inferring it from "the list is non-None" here re-disables
+        the corpus-language gate for every default (all-selected) ask that
+        reaches element fallback, reinstating the unbounded probe set
+        ``LEXICAL_LANGUAGE_GATE_ENABLED`` exists to stop.
+        """
         from app.services.source_scope import scoped_allowed_source_ids
 
         allowed_source_ids = scoped_allowed_source_ids(
@@ -1962,6 +2051,13 @@ class CandidateRetrievalService(_RetrievalState):
                 # deployment-owned quality/cost rail for this candidate family.
                 recall=max(self.settings.chunk_recall, limit * 4, limit),
                 allowed_source_ids=allowed_source_ids,
+                # See the docstring above: this list is a contextual ceiling
+                # at both of its possible origins, never producer-explicit —
+                # ``producer_explicit`` defaults to ``False``, which is
+                # already the correct value, so it is deliberately left
+                # unpassed here rather than spelled out as a kwarg: a full
+                # test double standing in for ``_retrieve_chunks`` (several
+                # exist) then needs no knowledge of this parameter at all.
             )
             elements = self._retrieve_elements_from_chunks(
                 query, chunks, limit=limit
@@ -2116,13 +2212,16 @@ class CandidateRetrievalService(_RetrievalState):
         return [*result, *additions]
     def _retrieve_chunks(
         self, notebook_id: str, query: str, recall: int = 0, *,
-        allowed_source_ids=None,
+        allowed_source_ids=None, producer_explicit: bool = False,
+        drifted: Optional[bool] = None,
     ):
         baseline = self._retrieve_chunks_baseline(
             notebook_id,
             query,
             recall,
             allowed_source_ids=allowed_source_ids,
+            producer_explicit=producer_explicit,
+            drifted=drifted,
         )
         return self._run_chunk_candidate_contributors(
             notebook_id,
@@ -2391,22 +2490,45 @@ class CandidateRetrievalService(_RetrievalState):
 
     def _retrieve_chunks_baseline(
         self, notebook_id: str, query: str, recall: int = 0, *,
-        allowed_source_ids=None,
+        allowed_source_ids=None, producer_explicit: bool = False,
+        drifted: Optional[bool] = None,
     ):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
-        (matrix 行已 L2 归一化, 点积即余弦)。"""
+        (matrix 行已 L2 归一化, 点积即余弦)。
+
+        ``producer_explicit`` -- codex #640 R2 P1: this must be the caller's
+        OWN attestation that ``allowed_source_ids`` is a producer-supplied,
+        genuinely narrow list, never inferred from "is not None" here.
+        ``_retrieve_elements`` passes a materialized CONTEXTUAL ceiling down
+        this same path (to push its predicate into chunk recall) and must
+        pass ``producer_explicit=False`` even though its list is non-``None``
+        -- see that method and ``_lexical_gate_source_scoped``.
+
+        ``drifted`` -- the once-per-arm ``_unsafe_source_scope_restricted``
+        answer.  Resolution order: (1) this explicit kwarg, for direct
+        callers/tests that want to inject a verdict; (2) ``_CHUNK_ARM_DRIFTED``,
+        set by a multi-sub-query caller (``_retrieve_chunks_multi``) so the
+        probe is not repeated per sub-query — see that method for why a
+        contextvar carries it instead of a call-site kwarg; (3) a fresh probe
+        taken right here, correct for any direct/single caller (this method's
+        own tests, ``_retrieve_elements``) since a single call to this method
+        is trivially "once per arm" already.
+        """
         from app.services.source_scope import scoped_allowed_source_ids
 
         # The list binds this query either way; ``source_restricted`` is the
         # separate LANE question both lexical arms below need — see
         # ``_lexical_gate_source_scoped``.  Computed once here and threaded
         # down so both lexical arms answer it identically.
-        explicit_source_filter = allowed_source_ids is not None
         allowed_source_ids = scoped_allowed_source_ids(
             notebook_id, allowed_source_ids
         )
+        if drifted is None:
+            drifted = _CHUNK_ARM_DRIFTED.get()
+        if drifted is None:
+            drifted = _lexical_gate_drift_probe(self, notebook_id)
         source_restricted = self._lexical_gate_source_scoped(
-            allowed_source_ids, explicit=explicit_source_filter
+            allowed_source_ids, explicit=producer_explicit, drifted=drifted,
         )
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
@@ -2813,14 +2935,40 @@ class CandidateRetrievalService(_RetrievalState):
     # boundaries use the public RetrievalPort method above.
     def _hydrate_chunk_candidates(self, cand_ids):
         return self.hydrate_chunk_candidates(cand_ids)
-    def _retrieve_chunks_multi(self, notebook_id, sub_queries):
+    def _retrieve_chunks_multi(self, notebook_id, sub_queries, *,
+                               drifted: Optional[bool] = None):
         """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
-        ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
+        ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。
+
+        ``_unsafe_source_scope_restricted`` 探针在这里现探**一次**——这是「多
+        子查询」这一个 chunk 臂的唯一入口(``_gather_vector_chunks``/端口
+        ``retrieve_chunk_candidates_multi`` 都落到这里),不现探会让 N 个子查询
+        各自现探 N 次。答案经 ``_CHUNK_ARM_DRIFTED`` 下传给每个子查询任务,而不是
+        作为 ``_retrieve_chunks`` 调用点的关键字参数——多个既有测试套件把
+        ``_retrieve_chunks`` 整体换成签名更窄的替身,新增调用点关键字参数会让那些
+        替身当场 ``TypeError``;真正读这个 contextvar 的只有从不被替身覆盖的
+        ``_retrieve_chunks_baseline``,替身完全看不见也不受影响。作用域严格是
+        这一次 ``_retrieve_chunks_multi`` 调用(fan-out 前 set、构完每个任务的
+        context 副本后 finally 里 reset),不是缓存到 run/请求上(codex #634 R1
+        禁的是那种跨调用复用;这里每次 ``_retrieve_chunks_multi`` 调用仍各自现探
+        一次,答案也从不跨调用复用)。"""
         from concurrent.futures import ThreadPoolExecutor
         from app.services.retrieval import partition_generated_question_chunks
 
+        if drifted is None:
+            drifted = _lexical_gate_drift_probe(self, notebook_id)
+
         import contextvars as _cv
-        tasks = [(q, _cv.copy_context()) for q in sub_queries]
+        token = _CHUNK_ARM_DRIFTED.set(drifted)
+        try:
+            tasks = [(q, _cv.copy_context()) for q in sub_queries]
+        finally:
+            # Every task's Context is already a snapshot taken above; resetting
+            # the live var here cannot affect those copies, and doing it before
+            # the fan-out even runs keeps this var's live window as narrow as
+            # possible.
+            _CHUNK_ARM_DRIFTED.reset(token)
+
         def _one(task):
             q, ctx = task
             try:
@@ -2894,7 +3042,16 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.source_scope import scoped_allowed_source_ids
 
         allowed_source_ids = scoped_allowed_source_ids(notebook_id)
-        source_restricted = self._lexical_gate_source_scoped(allowed_source_ids)
+        # This method is the whole keyword arm's one call per ask (see the
+        # docstring above), so the drift probe is genuinely taken once here —
+        # not memoised anywhere, just read fresh for this one call and used
+        # only for the two lexical arms' routing below (see
+        # ``_lexical_gate_source_scoped``; the source predicate itself is
+        # still pushed down unconditionally regardless of this verdict).
+        drifted = _lexical_gate_drift_probe(self, notebook_id)
+        source_restricted = self._lexical_gate_source_scoped(
+            allowed_source_ids, drifted=drifted
+        )
         try:
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=source_restricted)

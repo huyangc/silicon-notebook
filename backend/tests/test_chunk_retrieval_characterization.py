@@ -64,6 +64,26 @@ def _seed_chunks(repo, texts):
     return nb, sid
 
 
+def _add_chunk_source(repo, nb_id, texts):
+    """往已有 notebook 里追加一个来源+chunk(镜像 ``_seed_chunks``,但复用既有
+    notebook 而不是新建一个)——用于模拟「冻结快照之后才完成抽取的并发上传」。"""
+    sid = f"src-{uuid.uuid4().hex[:8]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,file_size,"
+            "file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb_id, "Doc2", "document", "s2.md", "/tmp/s2.md", 0, "h2", "", "", "extracted", now, now))
+        for i, t in enumerate(texts, 1):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", t, "{}", now))
+    repo._chunk_and_embed_source(sid)
+    return sid
+
+
 class _FakeLLM:
     """配置好的假答案 LLM:chat_json 回定长 JSON;markers 控制答案里引用哪些 [k]。"""
     configured = True
@@ -731,6 +751,240 @@ def test_retrieve_chunks_all_selected_frozen_scope_restores_the_language_gate(
         f"对照:narrowed=True 时 allowed_source_ids 必须原样透传,实际 {fts_degraded_calls}"
     )
     assert len(scored2) >= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6c. codex #640 R2(P1):元素回退臂(_retrieve_elements → 内部 _retrieve_chunks)
+#     必须把它自己物化出的天花板标记为「上下文」而非 explicit——语料语言闸的
+#     路由判据不能看「清单是否非 None」,否则全选冻结(narrowed=False)一进元素
+#     回退臂就会把语言闸重新关掉,原样复现审计 ASK-1 的病态探测集(措辞见
+#     _lexical_gate_source_scoped/_retrieve_chunks_baseline 的说明)。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_retrieve_elements_all_selected_frozen_scope_keeps_the_language_gate_open(
+    repo, monkeypatch
+):
+    """全选冻结(narrowed=False)下 ``_retrieve_elements`` 落到 chunk 回退分支
+    (物化出非 None 的天花板并转发给内部 ``_retrieve_chunks``)时,语料语言闸必须
+    看到 ``source_scoped=False``——同「无 scope」/test 6b 的 ``_retrieve_chunks``
+    结论一致,只是这次经由 ``_retrieve_elements`` 触发,证明 P1 那次「非 None 倒推
+    explicit」不会在这条调用链上死灰复燃。
+
+    **变异锚点**:把 ``_retrieve_elements`` 对内部 ``_retrieve_chunks`` 的调用改回
+    传 ``producer_explicit=True``(或把 ``_retrieve_chunks_baseline`` 的
+    ``producer_explicit`` 重新从 ``allowed_source_ids is not None`` 倒推)→
+    corpus_lang_calls 变成 ``[True]``,本条报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    corpus_lang_calls = []
+    orig_corpus_langs = repo.retrieval.candidates._lexical_corpus_langs
+
+    def _spy_corpus_langs(notebook_id, *, source_scoped=False):
+        corpus_lang_calls.append(source_scoped)
+        return orig_corpus_langs(notebook_id, source_scoped=source_scoped)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_corpus_langs", _spy_corpus_langs
+    )
+
+    all_selected_scope = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=False
+    )
+    with source_scope_context(nb.id, all_selected_scope):
+        elements = repo.retrieval.candidates._retrieve_elements(
+            nb.id, "bandgap", limit=4
+        )
+
+    assert corpus_lang_calls == [False], (
+        "codex #640 R2 P1:全选冻结经元素回退臂也必须让语料语言闸看到 "
+        f"source_scoped=False,实际 {corpus_lang_calls}"
+    )
+    assert len(elements) >= 1
+
+    # 对照:同一份清单真收窄(narrowed=True)时不得回归——元素回退臂的语言闸
+    # 必须继续为受限运行打开受限 lane。
+    corpus_lang_calls.clear()
+    narrowed_scope = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=True
+    )
+    with source_scope_context(nb.id, narrowed_scope):
+        repo.retrieval.candidates._retrieve_elements(nb.id, "bandgap", limit=4)
+    assert corpus_lang_calls == [True], (
+        f"对照:narrowed=True 真收窄不得回归成 source_scoped=False,实际 {corpus_lang_calls}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6d. codex #640 R2(P2):全选冻结之后来源宇宙漂移,chunk/keyword/KG 三条词法臂
+#     必须一致地路由回受限 lane——docs/product-and-api.md:89「A frozen-universe
+#     drift makes the run genuinely bounded again and returns it to the
+#     restricted lane」。KG 臂的漂移路由是 codex #634 R1 已经修好、
+#     test_source_scope.py 的 test_all_selected_freeze_reopens_the_restricted_lane_once_sources_drift
+#     已经钉住的形态;这条测试补的是 chunk/keyword 两臂原先缺失的那一半,并且
+#     三臂在同一份冻结/漂移快照下一次性证明判据一致。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_universe_drift_after_all_selected_freeze_reopens_all_three_lexical_arms(
+    repo, monkeypatch
+):
+    """全选冻结(narrowed=False)但宇宙未漂移时,chunk/keyword/KG 三臂都必须保持
+    语言闸打开(source_scoped=False,同「无 scope」);冻结快照之外插入一个新来源
+    (chunk + KG 对象都有)之后,三臂都必须改判为受限(source_scoped=True)。
+
+    **变异锚点**:把 ``_lexical_gate_source_scoped`` verdict 公式里的
+    ``or drifted`` 项去掉 → 漂移那组三个调用全部退回 ``False``,本条报红
+    (chunk/keyword 两臂;KG 臂走的是独立的 ``source_candidates_restricted``
+    公式,不经过 ``_lexical_gate_source_scoped``,所以那条腿的回归由
+    test_source_scope.py 的既有钉子单独覆盖——这里只验证三者当前判据一致)。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+    repo.store_kg(nb.id, None, [{
+        "local_id": "frozen", "object_type": "concept",
+        "payload": {"name": "bandgap reference"},
+        "evidence": [{"source_id": sid, "source_title": "Doc",
+                      "element_id": f"el-{sid}-0001", "element_type": "paragraph",
+                      "location_label": "p1", "quoted_span": "bandgap",
+                      "confidence": 1.0}],
+    }], [])
+
+    corpus_lang_calls = []
+    orig_corpus_langs = repo.retrieval.candidates._lexical_corpus_langs
+
+    def _spy_corpus_langs(notebook_id, *, source_scoped=False):
+        corpus_lang_calls.append(source_scoped)
+        return orig_corpus_langs(notebook_id, source_scoped=source_scoped)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_corpus_langs", _spy_corpus_langs
+    )
+
+    frozen_scope = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=False
+    )
+
+    def _probe_all_three_arms():
+        repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
+        repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "bandgap")
+        repo.retrieval.candidates._retrieve_scored(nb.id, "bandgap")
+
+    # ── 无漂移对照:三条臂都必须保持无 scope 的语言闸(source_scoped=False)。
+    corpus_lang_calls.clear()
+    with source_scope_context(nb.id, frozen_scope):
+        _probe_all_three_arms()
+    assert corpus_lang_calls == [False, False, False], (
+        "无漂移的全选冻结下,chunk/keyword/KG 三臂都不得受限,实际(顺序 "
+        f"chunk/keyword/KG)= {corpus_lang_calls}"
+    )
+
+    # ── 制造漂移:冻结快照之外插入一个新来源(带 chunk + KG 对象),让可见宇宙
+    #    不再等于冻结快照——同一份 frozen_scope 仍然只列 sid(narrowed=False)。
+    sid2 = _add_chunk_source(repo, nb.id, ["drifted source body content " * 5])
+    repo.backfill_chunk_fts(nb.id)
+    repo.store_kg(nb.id, None, [{
+        "local_id": "drifted", "object_type": "concept",
+        "payload": {"name": "bandgap reference"},
+        "evidence": [{"source_id": sid2, "source_title": "Doc2",
+                      "element_id": f"el-{sid2}-0001", "element_type": "paragraph",
+                      "location_label": "p1", "quoted_span": "bandgap",
+                      "confidence": 1.0}],
+    }], [])
+
+    corpus_lang_calls.clear()
+    with source_scope_context(nb.id, frozen_scope):
+        _probe_all_three_arms()
+    assert corpus_lang_calls == [True, True, True], (
+        "codex #640 R2 P2:漂移之后 chunk/keyword/KG 三臂都必须回到受限词法 "
+        f"lane,实际(顺序 chunk/keyword/KG)= {corpus_lang_calls}"
+    )
+
+
+def test_universe_drift_probe_runs_at_most_once_per_retrieval_arm_entry(
+    repo, monkeypatch
+):
+    """codex #640 R2 P2:漂移探针在**每个检索臂入口至多调一次**——chunk 臂的
+    多子查询扇出(``_retrieve_chunks_multi``)不得让 N 个子查询各自现探 N 次,
+    keyword 臂本来就只调用一次。这不是把探针缓存到 run/请求上(那是 codex
+    #634 R1 明令禁止的形态,见 ``_unsafe_source_scope_restricted`` 的说明)——
+    这里钉的是「一次 arm 调用只探一次」,不是「一次 run 只探一次」:第二次
+    独立调用 ``_retrieve_chunks_multi``/``_keyword_chunk_candidates`` 必须
+    重新现探,不能复用上一次的答案(第二段断言)。
+
+    **变异锚点**:把 ``_retrieve_chunks_multi`` 改回让每个子查询各自调用
+    ``_lexical_gate_drift_probe``(即去掉 ``_CHUNK_ARM_DRIFTED`` 下传)→
+    3 子查询那组探针调用次数从 1 变成 3,本条报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    probe_calls = []
+    orig_probe = repo.retrieval.candidates._unsafe_source_scope_restricted
+
+    def _spy_probe(notebook_id):
+        verdict = orig_probe(notebook_id)
+        probe_calls.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_unsafe_source_scope_restricted", _spy_probe
+    )
+
+    frozen_scope = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=False
+    )
+
+    # 3 个子查询的一次 fan-out:探针必须只被现探一次,而不是三次。
+    probe_calls.clear()
+    with source_scope_context(nb.id, frozen_scope):
+        repo.retrieval.candidates._retrieve_chunks_multi(
+            nb.id, ["bandgap", "reference", "topic"]
+        )
+    assert probe_calls == [False], (
+        f"3 子查询 fan-out 内探针必须只现探一次,实际调用次数 {len(probe_calls)}"
+        f"(结果 {probe_calls})"
+    )
+
+    # keyword 臂本就只调用一次。
+    probe_calls.clear()
+    with source_scope_context(nb.id, frozen_scope):
+        repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "bandgap")
+    assert probe_calls == [False], (
+        f"keyword 臂必须只现探一次,实际 {probe_calls}"
+    )
+
+    # 对照:不是「缓存到 run/请求」——同一个 with 块里再调一次 fan-out,必须
+    # 重新现探(不是复用上一次留下的答案、也不是干脆不再探)。
+    probe_calls.clear()
+    with source_scope_context(nb.id, frozen_scope):
+        repo.retrieval.candidates._retrieve_chunks_multi(nb.id, ["bandgap"])
+        repo.retrieval.candidates._retrieve_chunks_multi(nb.id, ["reference"])
+    assert probe_calls == [False, False], (
+        "两次独立的 _retrieve_chunks_multi 调用必须各自现探一次(不是缓存到 "
+        f"run/请求上只探一次),实际 {probe_calls}"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
