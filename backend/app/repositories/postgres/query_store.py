@@ -145,6 +145,14 @@ class QueryStore:
         from app.repositories.postgres import knowledge_counts_cache
         knowledge_counts_cache.invalidate(notebook_id)
 
+    def carry_review_queue_total(
+        self, notebook_id: str, expected_seq: int, new_seq: int
+    ) -> None:
+        # Pure in-memory retag (R3 T-A3 P1-2) — no connection needed. See
+        # knowledge_counts_cache.carry_review_queue_total for the contract.
+        from app.repositories.postgres import knowledge_counts_cache
+        knowledge_counts_cache.carry_review_queue_total(notebook_id, expected_seq, new_seq)
+
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.
     @staticmethod

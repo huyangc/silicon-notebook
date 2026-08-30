@@ -2287,9 +2287,18 @@ class RepositoryFacade:
 
     def add_relations(self, notebook_id: str, source_id: str,
                       relations: List[dict]) -> int:
-        return self._runtime.knowledge.add_relations_current(
+        result = self._runtime.knowledge.add_relations_current(
             notebook_id, source_id, relations
         )
+        # F1 (R3 T-A3 review): this test/fixture-only raw insert bypasses
+        # store_kg's kg_mutation_seq bump, which is what the seq-gated
+        # knowledge_counts_cache memos (incl. review_queue_total) rely on to
+        # self-invalidate. Mirrors knowledge_query.insert_test_object's same
+        # precedent — drop the cache explicitly so a fixture that warms a
+        # memo, then seeds relations via this path, then reads again never
+        # sees a stale count.
+        self._runtime.queries.invalidate_knowledge_counts(notebook_id)
+        return result
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:

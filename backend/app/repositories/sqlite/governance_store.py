@@ -391,14 +391,33 @@ class GovernanceStore:
     @staticmethod
     def update_edge_review(
         connection: sqlite3.Connection, notebook_id: str, relation_id: str, status: str
-    ) -> None:
-        cur = connection.execute(
+    ) -> str:
+        """Set ``review_status`` and return the PREVIOUS value (R3 T-A3 P1-2,
+        mirrors the PostgreSQL sibling above) — same-transaction SELECT then
+        UPDATE. sqlite has no ``UPDATE...FROM...RETURNING`` construct that
+        yields a pre-update column in one statement, but the caller
+        (``set_edge_review``) already holds the writer lock via ``_write``
+        before either statement runs, so there is no window for a concurrent
+        writer to slip a second UPDATE between this SELECT and this UPDATE —
+        the two together are as atomic as the PostgreSQL single statement.
+
+        Deliberately does NOT validate ``status`` against ``_REVIEW_STATUSES``
+        (unlike the PostgreSQL sibling) — that asymmetry predates this change
+        and stays: the allowed-status set and error behavior are unchanged by
+        this fix, only the return value is new."""
+        row = connection.execute(
+            "SELECT review_status FROM knowledge_relations WHERE id=? AND notebook_id=?",
+            (relation_id, notebook_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"relation {relation_id!r} not found in notebook {notebook_id!r}")
+        prev_status = row["review_status"]
+        connection.execute(
             "UPDATE knowledge_relations SET review_status=? "
             "WHERE id=? AND notebook_id=?",
             (status, relation_id, notebook_id),
         )
-        if cur.rowcount == 0:
-            raise KeyError(f"relation {relation_id!r} not found in notebook {notebook_id!r}")
+        return prev_status
 
     # ------------------------------------------------------------ clusters
     @staticmethod

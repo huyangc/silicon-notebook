@@ -1847,6 +1847,19 @@ class RepositoryRuntime:
             with connect() as db:
                 return self.queries.review_queue_total(db, notebook_id)
 
+        def read_kg_mutation_seq(notebook_id: str) -> int:
+            # R3 T-A3 P1-2: ``set_edge_review`` needs the just-bumped
+            # ``kg_mutation_seq`` AFTER its ``mark_unified_kg_dirty`` write
+            # commits, to retag the review-queue count memos onto the correct
+            # new seq via ``carry_review_queue_total``. ``mark_unified_kg_dirty``
+            # itself returns nothing (see kg_mutation.py), so this reads back
+            # through the existing ``unified_kg.graph_seq_row`` read-only
+            # channel other services (checkup/collection_catalog/graph_retrieval)
+            # already use for the same triple — a NEW ``connect()`` after the
+            # bump's own transaction has committed, so it observes the fresh value.
+            with connect() as db:
+                return int(self.unified_kg.graph_seq_row(db, notebook_id)[0])
+
         self.knowledge_governance = KnowledgeGovernanceService(
             settings=self.settings,
             event_log=self.event_log,
@@ -1868,6 +1881,9 @@ class RepositoryRuntime:
             set_conflict_status=set_conflict_status,
             memory_store=self.memory_store,
             review_queue_total=review_queue_total,
+            invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
+            carry_review_queue_total=self.queries.carry_review_queue_total,
+            kg_mutation_seq=read_kg_mutation_seq,
         )
         if self.memory_service is not None:
             self.memory_service.set_promotion_service(self.knowledge_governance)

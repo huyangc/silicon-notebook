@@ -70,9 +70,11 @@ which index the planner can use):
   - canonical_relations_count  app/repositories/postgres/unified_kg_store.py
                                 UnifiedKgStore.canonical_relations_count
   - knowledge_relations_review_count
-                                app/repositories/postgres/governance_store.py
-                                edge review queue predicate
-                                (``notebook_id=%s AND review_status!='rejected'``)
+                                app/repositories/postgres/knowledge_counts_cache.py
+                                review_queue_total (the real business query
+                                behind GET /notebooks/{id}/edge-review-queue's
+                                `total` field, R3 T-A3 — no longer a predicate
+                                pre-paved for a query that did not exist yet)
   - concept_clusters_canonical_id_probe
                                 app/repositories/postgres/knowledge_store.py
                                 (canonical_name lookup by (notebook_id, canonical_id))
@@ -200,7 +202,7 @@ HOT_STATEMENTS: tuple[StatementSpec, ...] = (
         + "SELECT COUNT(*) AS c FROM knowledge_relations "
         "WHERE notebook_id=%(notebook_id)s AND review_status!='rejected'",
         ("notebook_id",),
-        provenance="governance_store.py: edge review queue predicate",
+        provenance="knowledge_counts_cache.py:review_queue_total",
     ),
     StatementSpec(
         "concept_clusters_canonical_id_probe",

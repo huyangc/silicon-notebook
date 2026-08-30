@@ -1430,6 +1430,67 @@ def test_retrieve_neighbors_excludes_rejected_relations_on_postgres(
     ).hits == []
 
 
+def test_update_edge_review_returns_prev_status_on_postgres(knowledge_harness):
+    """R3 T-A3 P1-2: update_edge_review must return the PREVIOUS review_status
+    (not None) via the UPDATE...FROM(SELECT...FOR UPDATE)...RETURNING form —
+    a fresh relation starts 'pending', and each further transition's prev
+    must reflect what was actually persisted."""
+    objects = [
+        (
+            object_id,
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": object_id}),
+            json.dumps(_evidence()),
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for object_id in ("ko-prev-status-source", "ko-prev-status-target")
+    ]
+    relation = (
+        "rel-prev-status",
+        "nb-personal",
+        "source-golden",
+        "ko-prev-status-source",
+        "ko-prev-status-target",
+        "derived_from",
+        json.dumps(_evidence()),
+        NOW,
+    )
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, [relation])
+        prev1 = knowledge_harness.governance.update_edge_review(
+            connection, "nb-personal", "rel-prev-status", "verified",
+        )
+    assert prev1 == "pending"
+
+    with knowledge_harness.database.write() as connection:
+        prev2 = knowledge_harness.governance.update_edge_review(
+            connection, "nb-personal", "rel-prev-status", "rejected",
+        )
+    assert prev2 == "verified"
+
+    with knowledge_harness.database.write() as connection:
+        prev3 = knowledge_harness.governance.update_edge_review(
+            connection, "nb-personal", "rel-prev-status", "pending",
+        )
+    assert prev3 == "rejected"
+
+
+def test_update_edge_review_missing_relation_raises_keyerror_on_postgres(knowledge_harness):
+    """rowcount==0 (no matching id/notebook) must still raise KeyError, not
+    silently return None from an empty RETURNING set — regression guard for
+    the UPDATE...FROM...RETURNING rewrite of the old cur.rowcount check."""
+    with knowledge_harness.database.write() as connection:
+        with pytest.raises(KeyError):
+            knowledge_harness.governance.update_edge_review(
+                connection, "nb-personal", "rel-does-not-exist", "verified",
+            )
+
+
 def test_relation_connected_probe_returns_only_candidate_ids_on_postgres(
     knowledge_harness,
 ):

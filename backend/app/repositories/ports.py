@@ -3650,7 +3650,14 @@ class GovernanceStorePort(Protocol):
     @staticmethod
     def update_edge_review(
         connection: object, notebook_id: str, relation_id: str, status: str
-    ) -> None: ...
+    ) -> str:
+        """Set ``review_status``, return the PREVIOUS value (R3 T-A3 P1-2) —
+        callers use it to decide whether the review-queue count memos can
+        carry-forward (verified<->pending) or must invalidate (either side
+        'rejected'). Raises ``KeyError`` if the relation is not found in the
+        notebook; allowed-status validation/error behavior is backend-specific
+        and unchanged by this contract."""
+        ...
     @staticmethod
     def find_base_match(object_type: str, payload: dict, rows: object) -> str: ...
 
@@ -4076,6 +4083,19 @@ class QueryStorePort(Protocol):
         returns (R3 T-A3)."""
         ...
     def invalidate_knowledge_counts(self, notebook_id: str) -> None: ...
+    def carry_review_queue_total(
+        self, notebook_id: str, expected_seq: int, new_seq: int
+    ) -> None:
+        """Cheap retag for ``review_queue_total``'s memo (R3 T-A3 P1-2): a
+        verified<->pending flip changes neither queue membership nor its
+        COUNT, so ``KnowledgeGovernanceService.set_edge_review`` calls this
+        right after its ``kg_mutation_seq`` bump instead of letting the memo
+        go cold. Pure in-memory retag under the module lock — no query, no
+        db argument. If the cached entry's tag does not equal ``expected_seq``
+        exactly, the entry is dropped (fail-closed) rather than guessed at;
+        the value itself is never touched, only its seq label moves to
+        ``new_seq``."""
+        ...
     def list_user_usage(self) -> list[dict[str, Any]]: ...
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]: ...
     def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool: ...

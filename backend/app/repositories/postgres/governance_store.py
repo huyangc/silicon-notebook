@@ -465,16 +465,35 @@ class GovernanceStore:
     @staticmethod
     def update_edge_review(
         connection: Any, notebook_id: str, relation_id: str, status: str
-    ) -> None:
+    ) -> str:
+        """Set ``review_status`` and return the PREVIOUS value (R3 T-A3 P1-2) —
+        callers (``KnowledgeGovernanceService.set_edge_review``) need it to
+        decide whether a transition can carry-forward the review-queue count
+        memos (verified<->pending, neither side 'rejected') or must invalidate
+        them (either side 'rejected', including the rejected->rejected no-op).
+
+        Single UPDATE...FROM(SELECT...FOR UPDATE) RETURNING: the subquery locks
+        the target row and captures its PRE-update ``review_status`` as
+        ``prev`` in the same statement the UPDATE applies the new value in —
+        no separate SELECT round-trip, and no window between reading prev and
+        writing new where a concurrent writer could interleave. Zero matching
+        rows (bad id/notebook) makes the join produce zero rows, so
+        ``fetchone()`` returns ``None`` — same "not found" signal the old
+        ``cur.rowcount == 0`` check used, now via RETURNING's row count
+        instead of the UPDATE's own rowcount."""
         if status not in _REVIEW_STATUSES:
             raise ValueError(f"invalid edge review status: {status!r}")
-        cur = connection.execute(
+        row = connection.execute(
             "UPDATE knowledge_relations SET review_status=%s "
-            "WHERE id=%s AND notebook_id=%s",
+            "FROM (SELECT id, review_status AS prev FROM knowledge_relations "
+            "WHERE id=%s AND notebook_id=%s FOR UPDATE) old "
+            "WHERE knowledge_relations.id=old.id "
+            "RETURNING old.prev",
             (status, relation_id, notebook_id),
-        )
-        if cur.rowcount == 0:
+        ).fetchone()
+        if row is None:
             raise KeyError(f"relation {relation_id!r} not found in notebook {notebook_id!r}")
+        return row["prev"]
 
     # ------------------------------------------------------------ clusters
     @staticmethod
