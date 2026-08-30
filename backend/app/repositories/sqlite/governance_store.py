@@ -363,11 +363,29 @@ class GovernanceStore:
           Registered robustness change (same class as the anchor pushdown's): a
           NON-STRING ``name`` (e.g. a number) used to reach ``edge_trust._norm``
           as an ``int`` and raise a 500; the caller's ``str()`` coercion now
-          renders it the same text the PostgreSQL twin's ``->>`` produces.
+          renders it text.  That text matches the PostgreSQL twin's ``->>``
+          ONLY for a string or an integer ``name`` (registered narrowing, codex
+          R3 double review) — a JSON bool comes back as SQLite integer 0/1 (so
+          ``str()`` yields "0"/"1"), where PostgreSQL's ``->>`` renders
+          "false"/"true"; a float can differ in trailing-zero/exponent
+          formatting between Python's ``repr`` and PostgreSQL's numeric text;
+          and an object/array's compact-JSON serialization is not
+          byte-identical across the two engines.  None of that is a regression
+          (the OLD path raised on both dialects for every one of those shapes),
+          but a non-string/non-integer ``name`` can leave cross-dialect
+          corroboration counts and the displayed name different — registered,
+          not guarded against.
           A malformed ``payload`` still fails the request on both paths (here
           ``json_extract`` raises, before it was the caller's ``json.loads``);
           no ``json_valid`` guard is added, because widening that shape is a
           behaviour change this equivalence-only narrowing does not carry.
+          Same non-guard for an EMPTY-STRING ``payload``: the old path's
+          ``json.loads(row["payload"] or "{}")`` tolerated it, but
+          ``json_extract('', ...)`` raises.  Not reachable in practice — the
+          column is ``payload TEXT NOT NULL DEFAULT '{}'`` and every write path
+          serializes through ``json.dumps`` — so this is registered, not
+          guarded against (widening it would be the same kind of behaviour
+          change as the ``json_valid`` guard above).
 
           ⚠ ``name`` deliberately does NOT move into the relation JOIN — see the
           PostgreSQL twin's docstring for the read-amplification and

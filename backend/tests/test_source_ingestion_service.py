@@ -31,6 +31,7 @@ from app.services.source_ingestion import SourceIngestionService, SourcePipeline
 from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.model_testkit import UnconfiguredChatClient
 
 ROOT = Path(__file__).resolve().parents[2]
 PHASES = (
@@ -810,6 +811,66 @@ def test_extraction_relink_ordering_and_stale_source_cleanup_match_master(repo):
         ).fetchone()
     assert n2 == n1
     assert len(repo.relations_for_notebook(nb.id)) == 1
+
+
+def test_extraction_reset_without_seq_bump_invalidates_the_review_queue_memo(repo):
+    """P0(R3 T-A1/T-A2 双评审收敛):``begin_extraction_run(preserve_existing=
+    False)`` 走 ``clear_source_graph_state`` 删掉该源全部 knowledge_relations/
+    knowledge_objects,但那条路径只删不写,**不** bump ``kg_mutation_seq``。一次
+    重新抽取如果在删图之后失败退出(这里用「未配置模型」复现——``finish_
+    extraction_run(..., 'completed', 'no-llm')`` 直接返回,全程没有
+    ``store_kg``/``mark_unified_kg_dirty``),seq 因此原地不动。暖过的
+    ``ReviewQueueMemo`` 若不在这条路径上显式失效,会继续端出已经被删除的边——
+    下一次对它 ``set_edge_review`` 必得 404(``KeyError``)。"""
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
+        "nodes": [
+            {"local_id": "a", "type": "Concept", "name": "Engram",
+             "evidence": "Engram is a memory architecture"},
+            {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+             "evidence": "Engram improves perplexity"},
+        ],
+        "edges": []})))
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?, 'markdown','extracted','parsed', 'doc.md','',0,'','',"
+            "'academic_paper',?,?)",
+            (sid, nb.id, "Doc", now, now))
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            (f"el-{sid}-0001", sid, "paragraph", "p1",
+             "Engram is a memory architecture. Engram improves perplexity.",
+             "{}", now))
+    repo._run_extraction(sid)
+    rels = repo.relations_for_notebook(nb.id)
+    assert len(rels) == 1, f"deterministic relink must reconnect degree-0 nodes: {rels}"
+
+    # Warm the memo: it now caches this one relation's rel_id.
+    warmed = repo.review_queue(nb.id)
+    stale_rel_id = next(i["rel_id"] for i in warmed if i["rel_id"] == rels[0]["id"])
+    assert stale_rel_id in {i["rel_id"] for i in repo.review_queue(nb.id)}
+
+    # A second extraction attempt with no model configured: begin_extraction_run
+    # deletes the source's graph, then run_extraction bails via the "no-llm"
+    # branch without ever calling store_kg/mark_unified_kg_dirty.
+    bind_chat_client(repo, "kg_extract", UnconfiguredChatClient())
+    repo._run_extraction(sid)
+    assert repo.relations_for_notebook(nb.id) == [], (
+        "the graph must really be cleared by the reset, not merely re-scored"
+    )
+
+    live_rel_ids = {item["rel_id"] for item in repo.review_queue(nb.id)}
+    assert stale_rel_id not in live_rel_ids, (
+        "the review queue must not keep serving an edge the extraction reset "
+        "already deleted"
+    )
+    with pytest.raises(KeyError):
+        repo.set_edge_review(nb.id, stale_rel_id, "verified")
 
 
 def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeypatch):

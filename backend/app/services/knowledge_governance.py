@@ -313,9 +313,19 @@ class KnowledgeGovernanceService:
             # SQL already extracted payload.name; NULL means "absent, JSON null,
             # or a payload that is not an object" — all of which the old
             # ``dict.get("name", "")`` (or a raise) turned into "". ``str()``
-            # normalises the two dialects onto one text: PostgreSQL's ``->>``
-            # renders a non-string scalar itself, SQLite's ``json_extract``
-            # hands back the scalar for Python to render the same way.
+            # normalises the two dialects onto the SAME text ONLY for a string
+            # or an integer ``name`` (registered narrowing, codex R3 double
+            # review): PostgreSQL's ``->>`` and SQLite's ``json_extract`` +
+            # ``str()`` agree there, but not for every JSON scalar — a bool
+            # renders as "true"/"false" here vs "1"/"0" via SQLite's own
+            # integer coercion, a float can differ in trailing-zero/exponent
+            # formatting, and an object/array's compact-JSON text formatting is
+            # not byte-identical across the two engines' serializers. None of
+            # that is a regression (the OLD path raised on all of those shapes,
+            # on both dialects, so any rendering is strictly more available
+            # than a 500), but it means a non-string/non-integer ``name`` can
+            # make corroboration counts and the displayed name differ across
+            # dialects — registered, not guarded against.
             name = r["name"]
             node_names[r["id"]] = str(name) if name is not None else ""
 

@@ -226,6 +226,13 @@ class SourceIngestionService:
         # memo 是 runtime-owned 的(codex PR#634 R2 P2-2),服务层不许去摸模块级
         # 全局,也不该自己去 runtime 里翻。
         invalidate_copy_stats: Callable[[str], None] = lambda _notebook_id: None,
+        # review-queue 排名 memo 的失效通路(P0,R3 T-A1/T-A2 双评审收敛)。同上
+        # 一条同一注入形态、同一 no-op 默认:``begin_extraction_run`` 走
+        # ``preserve_existing=False`` 时删掉该源的全部 knowledge_relations/
+        # knowledge_objects 却不 bump kg_mutation_seq(见
+        # ``review_queue_memo`` 模块 docstring 的豁口三),必须在这里显式失效,
+        # 否则暖过的排名 memo 会继续端出已经被删除的边。
+        invalidate_review_queue_memo: Callable[[str], None] = lambda _notebook_id: None,
         # Agentic Memory P1 (T4). Defaulted to a no-op for the same reason
         # ``invalidate_knowledge_counts`` above is: narrow test doubles and any
         # runtime that never wires the understanding feature must keep
@@ -273,6 +280,7 @@ class SourceIngestionService:
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         self.invalidate_knowledge_counts = invalidate_knowledge_counts
         self.invalidate_copy_stats = invalidate_copy_stats
+        self.invalidate_review_queue_memo = invalidate_review_queue_memo
         self.note_corpus_change = note_corpus_change
 
         self.require_indexing_write = require_indexing_write
@@ -1237,7 +1245,8 @@ class SourceIngestionService:
         return ""
 
     def _invalidate_corpus_scale_memos(self, notebook_id: str) -> None:
-        """摄取改了语料规模 → 同时失效**开路计数** memo 与 **copy-stats** memo。
+        """摄取改了语料规模 → 同时失效**开路计数** memo、**copy-stats** memo、
+        与**审核队列排名** memo。
 
         R2 评审 P2-1:copy-stats 的版本键(``ScaleArtifactRuntime.version()``)
         里没有 ``sources`` 表的信号 —— 一次上传/删除只在它顺带 bump 了
@@ -1250,11 +1259,21 @@ class SourceIngestionService:
         失效调用点上把 copy-stats 一并失效:服务层调用、与后端无关、零新增查询,
         也不新增调用点(替换的是同一处 ``invalidate_knowledge_counts``)。
 
-        两条失效都走 runtime 注入的回调(codex PR#634 R2 P2-2):memo 是
+        R3 T-A1/T-A2 双评审收敛(P0):这个调用点在 ``run_extraction`` 里紧跟在
+        ``begin_extraction_run`` 之后(见调用处)——后者在
+        ``preserve_existing=False`` 时会先把该源的旧图整个删掉,却因为「只删不
+        写」而**不** bump ``kg_mutation_seq``(``review_queue_memo`` 模块
+        docstring 的豁口三)。抽取如果在删图之后失败退出(最常见:没配模型),
+        seq 原地不动,而暖过的排名 memo 会继续端出已经被删除的边。这里把它一并
+        失效:即使 ``preserve_existing=True`` 也顺带调用,多付的只是下一次读的
+        一次冷算,而不是让排名 memo 悄悄跟丢一次删除。
+
+        三条失效都走 runtime 注入的回调(codex PR#634 R2 P2-2):memo 是
         runtime-owned 的,服务层不许调模块级全局函数,也不该自己去 runtime 里翻。
         """
         self.invalidate_knowledge_counts(notebook_id)
         self.invalidate_copy_stats(notebook_id)
+        self.invalidate_review_queue_memo(notebook_id)
 
     def _admit_and_freeze_pipeline(self, notebook_id: str) -> tuple[str, str]:
         """注册 → 准入 → 冻结,三步配对不可拆(codex #602 R5/R14 P1)。

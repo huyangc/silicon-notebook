@@ -25,17 +25,20 @@ betweenness 都要重算。
 (1)(2) 的每一条**生产**写路径都汇流到 ``mark_unified_kg_dirty`` —— 它是
 ``kg_mutation_seq`` 在本仓库里唯一的前进点(``store_kg`` / 关系补全 /
 KG job publish / ``set_edge_review`` / 删除路径,逐条抽查过)。(3) 是 (1)(2) 的
-**纯函数**:``_edge_centrality_map`` 只读关系行,连 payload 都不读(见
-``repository_facade._edge_centrality_map`` 的 docstring);它自己的 vector-cache
-键另有 settings 维度,但 settings 变化伴随进程重启,而本 memo 是 process-local,
-重启即空。
+**纯函数**:``_edge_centrality_map`` 读关系行,也读端点的
+``knowledge_objects(id, object_type)``(见 ``edge_centrality_source_rows``——
+度数排名与有界子图的建图都要靠 ``object_type``),但连 ``payload`` 都不读(见
+``repository_facade._edge_centrality_map`` 的 docstring);``knowledge_objects``
+的写路径与(1)(2)走的是同一条 ``mark_unified_kg_dirty`` 前进点,所以仍在 seq
+覆盖面内。它自己的 vector-cache 键另有 settings 维度,但 settings 变化伴随
+进程重启,而本 memo 是 process-local,重启即空。
 
 与 ``notebook_scale.py`` 拒绝「单用 ``kg_mutation_seq`` 当键」的先例**不冲突**:
 那里的产物(copy_stats)还依赖 embedding 表、簇代次、mention 代次与若干 settings,
 所以它保留了展开五张表的 ``version_for``;这里的产物不依赖那些,三样输入全部
 落在 ``kg_mutation_seq`` 的覆盖面内。
 
-**已知豁口(两处,都已堵)**——两处都不是「漏了一条 bump」,而是那条路径的 seq
+**已知豁口(三处,都已堵)**——三处都不是「漏了一条 bump」,而是那条路径的 seq
 **根本不前进**,所以 seq 闸对它们天然无效,必须显式失效:
 
 1. ``RepositoryFacade.add_relations``(``repository_facade.py``)是 fixture/测试
@@ -49,6 +52,19 @@ KG job publish / ``set_edge_review`` / 删除路径,逐条抽查过)。(3) 是 (
    注释),本 memo 在同一处并排失效。它比计数更需要这一手:计数在重爬途中被
    任何一次读覆盖,而排名条目只在真的有人取队列时才被覆盖,一次「删完直接重抽
    到底、中途没人看队列」就能撞上。
+3. ``SourceIngestionService.run_extraction`` 在 ``preserve_existing=False`` 时
+   走 ``begin_extraction_run`` → ``clear_source_graph_state``,删掉该源全部
+   ``knowledge_relations``/``knowledge_objects``,同样**不** bump——它只清旧图,
+   ``mark_unified_kg_dirty`` 要等后面 ``store_kg`` 真落新对象/关系才会被调用。
+   与前两处**不同**:这不是 fixture 专用的裸写,也不是删库重建的运维路径,而是
+   **每一次重新抽取**都会走到的常规用户操作(手动重解析/失败重试/批量摄取
+   补跑皆同此)。清空旧图之后若抽取本身失败退出(最常见:没配模型),
+   ``kg_mutation_seq`` 原地不动,暖过的排名 memo 会继续端出已经被删除的边——
+   下一次对它 ``set_edge_review`` 必得 404。在
+   ``SourceIngestionService._invalidate_corpus_scale_memos``(与 copy-stats/
+   开路计数失效同一处调用点、同一注入形态)里显式 ``invalidate``。见
+   ``backend/tests/test_source_ingestion_service.py::
+   test_extraction_reset_without_seq_bump_invalidates_the_review_queue_memo``。
 
 ## 读序契约(硬)
 
@@ -102,14 +118,21 @@ from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Tuple
 
 # 缓存的排名深度。``review_queue(nb, limit)`` 在 ``0 <= limit <= M`` 时走 memo;
-# 更大或负的 limit 直通冷路径(语义 = 现状)。切片等价性:``nlargest(M)`` 的前缀
+# 更大或负的 limit 直通冷路径(语义 = 现状)。M 必须覆盖两处未传 limit 的默认值——
+# ``KnowledgeGovernanceService.review_queue``/``RepositoryFacade.review_queue``
+# 的默认 ``limit=200`` 与路由 ``edge_review_queue`` 的默认 ``limit=100``——否则
+# 最常见的「不传 limit」调用直接绕开 memo。切片等价性:``nlargest(M)`` 的前缀
 # 就是 ``nlargest(limit)``——nlargest 的装饰键带一个严格递减的计数器,并列因此按
 # 输入序解决,而输入序在前缀上不变。
-REVIEW_QUEUE_MEMO_ITEMS = 1000
+REVIEW_QUEUE_MEMO_ITEMS = 200
 
-# 有界 LRU 的默认上限。每条值是 ≤1000 个小 dict(十来个标量字段),512 本满载也是
-# 几十 MB 量级的上界——与它替换掉的「每请求一次 8.35M 行扫描」不是一个量级。
-_MAX_NOTEBOOKS = 512
+# 有界 LRU 的默认上限。每条值是 ≤200(REVIEW_QUEUE_MEMO_ITEMS)个小 dict(十来个
+# 标量字段)。诚实的量级(P1,codex 复审——「几十 MB」此前是猜的):深度遍历
+# 实测——对满载 200 条 item 递归 ``sys.getsizeof`` 每个 dict/key/value 求和,
+# 不是只对外层 list 调一次——单本约 0.34MB,按 128 本满载外推 ≈44MB;这是量级
+# 上界,不是精确值,但足以确认它与它替换掉的「每请求一次 8.35M 行扫描」不是
+# 一个量级。
+_MAX_NOTEBOOKS = 128
 
 
 class _PendingRanking:
@@ -168,56 +191,67 @@ class ReviewQueueMemo:
         """
         seq = int(read_seq())        # ← 读序契约:seq 先于数据,不得交换
         key = (notebook_id, seq)
-        while True:
+        with self._lock:
+            hit = self._store.get(notebook_id)
+            if hit is not None and hit[0] == seq:
+                self._store.move_to_end(notebook_id)
+                cached: "Optional[List[dict]]" = hit[1]
+                pending: "Optional[_PendingRanking]" = None
+                leader = False
+            else:
+                cached = None
+                pending = self._pending.get(key)
+                leader = pending is None
+                if leader:
+                    pending = _PendingRanking(self._epoch_of(notebook_id))
+                    self._pending[key] = pending
+
+        if cached is not None:
+            # 锁外拷贝:carry 是 copy-on-write,这份引用不会被就地改写。
+            return _slice_copy(cached, limit)
+        # 到这里 ``pending`` 必非 None:上面的 else 支要么取到在途的那个,
+        # 要么自己建了一个。
+        if not leader:
+            # 等待者不跑冷算,拿 leader 的结果——包括失败:leader 抛出的异常
+            # 原样继承给每一个在等的 follower(P2-4,codex 复审),不再各自转正、
+            # 串行重跑同一次注定会失败的冷算——N 个并发 follower 曾经会把墙钟
+            # 拉长到 N 倍单次冷算耗时,现在是 1 倍。失败之后 leader 已经把
+            # ``_pending`` 条目摘掉(见下面 except 分支),所以下一次(非并发的)
+            # 请求会重新从头当 leader——不做负缓存,不会把这次失败钉死。
+            pending.ready.wait()
+            if pending.error is not None:
+                raise pending.error
+            return _slice_copy(pending.value, limit)
+
+        try:
+            value = compute()    # 冷算绝不在锁内跑(大库上是秒级)
+        except BaseException as exc:                     # noqa: BLE001
             with self._lock:
-                hit = self._store.get(notebook_id)
-                if hit is not None and hit[0] == seq:
-                    self._store.move_to_end(notebook_id)
-                    cached: "Optional[List[dict]]" = hit[1]
-                    pending: "Optional[_PendingRanking]" = None
-                    leader = False
-                else:
-                    cached = None
-                    pending = self._pending.get(key)
-                    leader = pending is None
-                    if leader:
-                        pending = _PendingRanking(self._epoch_of(notebook_id))
-                        self._pending[key] = pending
+                self._pending.pop(key, None)             # 有界:完成即清理
+            pending.error = exc
+            pending.ready.set()                          # 唤醒等待者后再抛
+            raise
 
-            if cached is not None:
-                # 锁外拷贝:carry 是 copy-on-write,这份引用不会被就地改写。
-                return _slice_copy(cached, limit)
-            # 到这里 ``pending`` 必非 None:上面的 else 支要么取到在途的那个,
-            # 要么自己建了一个。
-            if not leader:
-                # 等待者不跑冷算,拿 leader 的结果。leader 失败时同样醒来,并按
-                # 「不缓存毒值」的约定各自重试(回到循环顶部,可能成为新 leader)。
-                pending.ready.wait()
-                if pending.error is None and pending.value is not None:
-                    return _slice_copy(pending.value, limit)
-                continue
-
-            try:
-                value = compute()    # 冷算绝不在锁内跑(大库上是秒级)
-            except BaseException as exc:                     # noqa: BLE001
-                with self._lock:
-                    self._pending.pop(key, None)             # 有界:完成即清理
-                pending.error = exc
-                pending.ready.set()                          # 唤醒等待者后再抛
-                raise
-
-            with self._lock:
-                # 写回守卫只由 **leader** 执行一次,用它自己进入时采样的 epoch:
-                # 等待者没跑 compute,没有「读之后到写之前」这个窗口需要守。
-                if pending.epoch == self._epoch_of(notebook_id):
+        with self._lock:
+            # 写回守卫只由 **leader** 执行一次,用它自己进入时采样的 epoch:
+            # 等待者没跑 compute,没有「读之后到写之前」这个窗口需要守。
+            #
+            # 单调守卫(P2-3,codex 复审):epoch 守卫只挡 invalidate() 打的失效,
+            # 挡不住「慢 leader 用旧 seq 算出来的值,在一个更新的 seq 已经写回
+            # 之后才姗姗来迟」——两次冷算可以并发在飞(seq 在第一次冷算跑到一半
+            # 时前进,催生了第二个 ``(nb, new_seq)`` 的独立 single-flight,它跑
+            # 得更快先写回)。旧 seq 的写回绝不能覆盖新 seq 已经落的条目。
+            if pending.epoch == self._epoch_of(notebook_id):
+                existing = self._store.get(notebook_id)
+                if existing is None or existing[0] <= seq:
                     self._store[notebook_id] = (seq, value)
                     self._store.move_to_end(notebook_id)
                     while len(self._store) > self._max_notebooks:
                         self._store.popitem(last=False)
-                self._pending.pop(key, None)                 # 有界:完成即清理
-            pending.value = value
-            pending.ready.set()
-            return _slice_copy(value, limit)
+            self._pending.pop(key, None)                 # 有界:完成即清理
+        pending.value = value
+        pending.ready.set()
+        return _slice_copy(value, limit)
 
     def carry(
         self,
@@ -264,9 +298,18 @@ class ReviewQueueMemo:
         """清 memo(单 notebook 或全部)。
 
         seq 闸本身已经自失效,这里是安全阀:挡住「写已落、但它的 seq bump 尚未
-        提交」这个边缘,以及 ``add_relations`` 那条**根本不 bump** 的 fixture 路径
-        (见模块 docstring 的豁口一节)。``notebook_id`` 为 ``None`` 时清空全部
-        (运维与测试用)。
+        提交」这个边缘,以及三处 seq **根本不前进**的路径(fixture 裸插入 /
+        notebook 删库重爬 / 抽取重置删图,见模块 docstring 的豁口一节)。
+
+        不打断在途的 follower(P2-5,codex 复审):它们已经拿着这次
+        ``top()`` 调用之前采样的 ``pending`` 引用等在 ``ready`` 上,本方法只清
+        ``_store``/推进 epoch,不碰 ``_pending``——它们会等到 leader 算完、
+        拿到**失效前**的那份值(memo 的读序契约本就保证这份值不会比它的标签更
+        新,只是变旧了),而不是白等一个永远不会被 set 的 ``Event``。这个「失效
+        与在途读交错」的窗口只存在于 seq **不动**的删除路径上:所有生产失效点
+        都是「先推进 seq、再落新内容」同时完成的,窗口天然不存在;那些 seq 不动
+        的路径已经在各自的调用点显式调了这里。``notebook_id`` 为 ``None`` 时
+        清空全部(运维与测试用)。
         """
         with self._lock:
             if notebook_id is None:
