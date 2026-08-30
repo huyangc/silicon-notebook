@@ -727,7 +727,7 @@
     "owner": "SourceEmbeddingService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, object_id: 'str', notebook_id: 'str', payload: 'Dict[str, object]') -> 'None'"
+    "signature": "(self, object_id: 'str', notebook_id: 'str', payload: 'Dict[str, object]', *, mark_dirty_in_tx: \"'Callable[[Any, str], int] | None'\" = None) -> 'None'"
   },
   "_embed_objects_batch": {
     "consumers": [
@@ -1047,13 +1047,19 @@
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__.<lambda>",
         "target": "_mark_unified_kg_dirty_in_tx"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._begin_extraction_run",
+        "target": "_mark_unified_kg_dirty_in_tx"
       }
     ],
     "kind": "private_wrapper",
     "owner": "KgMutationCoordinator",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, db, notebook_id: 'str') -> 'None'"
+    "signature": "(self, db, notebook_id: 'str') -> 'int'"
   },
   "_migrator": {
     "consumers": [
@@ -4584,6 +4590,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__.<lambda>",
+        "target": "_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._begin_extraction_run",
         "target": "_write"
       }
     ],

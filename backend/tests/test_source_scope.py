@@ -337,6 +337,9 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
 
 
 def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
+    """全选冻结出的 ``narrowed is False`` 既不影响 restricted 判断,也(R1 行为
+    恢复,审计 ASK-1)不再让 ``scoped_allowed_source_ids`` 把全量可见+隐藏源
+    物化成显式 tuple——它必须原样透传成 ``None``,同 unscoped 一样。"""
     resolved = _validate_source_scope(
         _ScopeRepo(["s1"], 1, hidden=["hidden-memory", "hidden-knowhow"]),
         _notebook(),
@@ -351,9 +354,13 @@ def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
     with source_scope_context("nb", resolved):
         assert scoped_conversation_history("prior answer") == "prior answer"
         assert source_scope_restricted() is False
-        assert scoped_allowed_source_ids("nb") == (
-            "hidden-knowhow", "hidden-memory", "s1"
-        )
+        # R1 行为恢复(审计 ASK-1,P0):全选冻结(narrowed=False)不再把全量
+        # 可见+隐藏源物化成显式 tuple——下游一切按
+        # `allowed_source_ids is not None` 驱动的快路径(语料语言闸/GiST KNN/
+        # 未降级 FTS)必须看到与「无 scope」相同的 None,候选宇宙才能恢复到
+        # 全选本该有的样子。最终证据仍由 source_allowed 等结果侧防线裁剪,
+        # 见本文件下方 source_allowed 断言。
+        assert scoped_allowed_source_ids("nb") is None
         assert source_allowed("nb", "s1") is True
         assert source_allowed("nb", "hidden-memory") is True
         assert source_allowed("nb", "hidden-knowhow") is True
@@ -409,6 +416,46 @@ def test_narrowed_scope_excludes_hidden_projection_sources():
         assert source_scope_visible_universe_matches("nb", ["s1", "s2", "s3"]) is True
         assert scoped_allowed_source_ids("nb") == ("s1",)
         assert source_allowed("nb", "hidden-memory") is False
+
+
+def test_scoped_allowed_source_ids_narrowed_tri_state():
+    """R1 行为恢复(审计 ASK-1,P0)的显式三态钉:同一份冻结的 include 清单
+    (可见 ``s1`` + 隐藏 ``hidden-memory``),``narrowed`` 三个取值下
+    ``scoped_allowed_source_ids`` 必须给出三种不同的返回形状——
+
+    * ``True``  真收窄:原样物化冻结清单(交集/ceiling),行为不变。
+    * ``False`` 浏览器默认全选冻结:必须退化成「无 scope」的返回形状——
+      常见的无显式清单调用得到 ``None``,带显式清单的调用原样透传该清单、
+      不被冻结清单二次收窄。下游一切按 ``allowed_source_ids is not None``
+      驱动的分支(语料语言闸、GiST KNN 快路径、未降级 FTS)才能因此恢复到
+      无 scope 时的快路径,这正是本条修复要恢复的行为。
+    * ``None``  历史直接构造 / 早于该字段的遗留 scope:必须保持改动前的
+      字节兼容物化行为不变,``is False`` 判断刻意不匹配 ``None``。
+    """
+    def _scope(narrowed):
+        scope = ResolvedSourceScope(
+            mode="include", source_ids=["s1"], narrowed=narrowed
+        )
+        scope._hidden_source_ids = ["hidden-memory"]
+        return scope
+
+    with source_scope_context("nb", _scope(True)):
+        assert set(scoped_allowed_source_ids("nb")) == {"s1", "hidden-memory"}, (
+            "真收窄:仍然原样物化冻结清单"
+        )
+
+    with source_scope_context("nb", _scope(False)):
+        assert scoped_allowed_source_ids("nb") is None, (
+            "R1:全选冻结必须退化成 None,同无 scope 一样"
+        )
+        assert scoped_allowed_source_ids("nb", ["s1", "other"]) == ("s1", "other"), (
+            "narrowed=False 时显式清单原样透传,不被冻结清单二次收窄"
+        )
+
+    with source_scope_context("nb", _scope(None)):
+        assert set(scoped_allowed_source_ids("nb")) == {"s1", "hidden-memory"}, (
+            "narrowed=None 是遗留直接构造路径,字节兼容不许破——原样物化"
+        )
 
 
 def test_candidate_detects_hidden_participant_drift_through_source_store():
@@ -1034,7 +1081,10 @@ def test_hidden_half_never_carries_another_members_private_memory(
 
 def test_boundary_ceiling_is_owner_scoped_end_to_end(tmp_path, monkeypatch):
     """入口层到消费侧的整条链:B 的默认全选请求冻出的上限里没有 A 的私有 Memory,
-    而 B 自己的 Memory 与共享的 Knowhow 都在。"""
+    而 B 自己的 Memory 与共享的 Knowhow 都在。R1 行为恢复(审计 ASK-1):这份
+    上限仍然是结果侧 source_allowed 的裁剪依据,但 scoped_allowed_source_ids
+    这个 producer 入口在 narrowed=False 时不再把它物化成显式 tuple——必须
+    原样退化成 None,让候选生成侧看到与「无 scope」相同的形状。"""
     from app.services.sqlite_repository import reset_request_user, set_request_user
 
     repo, notebook_id, _alice, bob = _shared_notebook_with_two_members(
@@ -1061,9 +1111,11 @@ def test_boundary_ceiling_is_owner_scoped_end_to_end(tmp_path, monkeypatch):
         assert source_allowed(notebook_id, "src-memory-alice") is False, (
             "别人的私有 Memory 投影证据不得参与"
         )
-        assert set(scoped_allowed_source_ids(notebook_id)) == {
-            "src-visible", "src-knowhow", "src-memory-bob"
-        }
+        # R1 行为恢复:narrowed=False(默认全选)不再把这份上限物化给
+        # producer——None 才是「恢复到无 scope 时的候选宇宙」该有的返回值,
+        # 结果侧的 source_allowed(上面已断言)才是真正裁掉别人私有 Memory 的
+        # 防线,不靠这里的物化清单。
+        assert scoped_allowed_source_ids(notebook_id) is None
 
 
 def test_shared_notebook_is_not_permanently_judged_drifted(tmp_path, monkeypatch):

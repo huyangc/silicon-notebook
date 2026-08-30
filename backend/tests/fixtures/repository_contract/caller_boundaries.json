@@ -159,6 +159,14 @@
       "kind": "independent_private",
       "path": "backend/app/api/deps.py",
       "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.extension_toggle_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
       "scope": "<module>.group_repository",
       "target": "_runtime"
     },
@@ -336,6 +344,14 @@
       "path": "backend/app/api/source_routes.py",
       "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>.backfill_paper_metadata",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/bootstrap.py",
+      "reason": "composition root primes the extension admission snapshot from the runtime toggle seat",
+      "scope": "<module>.create_application_repository",
       "target": "_runtime"
     },
     {
