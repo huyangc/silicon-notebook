@@ -84,6 +84,24 @@ def _add_chunk_source(repo, nb_id, texts):
     return sid
 
 
+def _capture_events(repo, monkeypatch):
+    """Spy on ``repo.event_log.emit`` and return the list it appends to.
+
+    Mirrors ``tests/test_chunk_bruteforce_guard.py``'s helper of the same
+    name -- same idiom, kept local here so this file's fixtures stay
+    self-contained.
+    """
+    events = []
+    orig_emit = repo.event_log.emit
+
+    def spy_emit(event, **kw):
+        events.append(event)
+        return orig_emit(event, **kw)
+
+    monkeypatch.setattr(repo.event_log, "emit", spy_emit)
+    return events
+
+
 class _FakeLLM:
     """配置好的假答案 LLM:chat_json 回定长 JSON;markers 控制答案里引用哪些 [k]。"""
     configured = True
@@ -985,6 +1003,222 @@ def test_universe_drift_probe_runs_at_most_once_per_retrieval_arm_entry(
         "两次独立的 _retrieve_chunks_multi 调用必须各自现探一次(不是缓存到 "
         f"run/请求上只探一次),实际 {probe_calls}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6e. codex #640 R3(P1):``_lexical_gate_source_scoped`` 必须按**被查询的**
+#     notebook_id 裁决,不能借用 request scope 那个(主库)的收窄/漂移状态——
+#     否则主库收窄时,联邦 element/chunk 检索对**挂载引用库**转发的全量上下文
+#     清单也会被误判为「真收窄」,语言闸被错误关闭,大挂载库复现审计 ASK-1
+#     的无界词法探针集(这次发生在挂载库而非主库)。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_lexical_gate_source_scoped_judges_the_queried_notebook_not_the_scope_one(
+    repo,
+):
+    """直接对 ``_lexical_gate_source_scoped`` 钉真值表(不经过完整检索链路,
+    这个方法本身是纯读 contextvar + 形参的判定,直接测最贴近 bug 的形状)。
+
+    真值表(scope.notebook_id = 主库,被查询的 notebook_id 分别取主库/挂载库):
+
+    | scope 状态                  | 主库 verdict | 挂载库 verdict |
+    |------------------------------|:------------:|:--------------:|
+    | narrowed=True(真收窄)       | True         | False          |
+    | narrowed=False 未漂移        | False        | False          |
+    | narrowed=False 已漂移        | True         | False          |
+
+    **变异锚点**:把 verdict 公式里 ``scope.notebook_id != notebook_id`` 那条
+    判别去掉(直接对任何 notebook_id 都读 ``source_scope_restricted()``/
+    ``drifted``)→ 挂载库那一列全部从 False 变成跟主库一样,本条报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    candidates = repo.retrieval.candidates
+    main_nb_id = "nb-main"
+    mounted_nb_id = "nb-mounted"
+
+    # ── narrowed=True(真收窄):主库 True,挂载库 False。
+    narrowed_scope = ResolvedSourceScope(
+        mode="include", source_ids=["s1"], narrowed=True
+    )
+    with source_scope_context(main_nb_id, narrowed_scope):
+        assert candidates._lexical_gate_source_scoped(("s1",), main_nb_id) is True, (
+            "主库真收窄:语言闸判定必须 True(源谓词已经收窄扫描)"
+        )
+        assert candidates._lexical_gate_source_scoped(
+            ("s2", "s3"), mounted_nb_id
+        ) is False, (
+            "codex #640 R3 P1:挂载库不得借用主库的真收窄状态,verdict 必须 False"
+        )
+
+    # ── narrowed=False 未漂移:两者都 False(默认全选,语言闸继续工作)。
+    all_selected_scope = ResolvedSourceScope(
+        mode="include", source_ids=["s1"], narrowed=False
+    )
+    with source_scope_context(main_nb_id, all_selected_scope):
+        assert candidates._lexical_gate_source_scoped(
+            ("s1",), main_nb_id, drifted=False
+        ) is False
+        assert candidates._lexical_gate_source_scoped(
+            ("s2",), mounted_nb_id, drifted=False
+        ) is False
+
+        # ── narrowed=False 已漂移:主库 True(冻结宇宙不再等于活宇宙),
+        #    挂载库仍 False——``drifted`` 是主库自己探测出来的答案,不描述
+        #    任何其他 notebook_id。
+        assert candidates._lexical_gate_source_scoped(
+            ("s1",), main_nb_id, drifted=True
+        ) is True
+        assert candidates._lexical_gate_source_scoped(
+            ("s2",), mounted_nb_id, drifted=True
+        ) is False, (
+            "codex #640 R3 P1:主库漂移不得外溢到挂载库的语言闸判定"
+        )
+
+    # ── explicit 不受 notebook_id 影响:生产者自己的窄清单,无论对哪个
+    #    notebook_id 都直接判 True(它不读 scope)。
+    with source_scope_context(main_nb_id, narrowed_scope):
+        assert candidates._lexical_gate_source_scoped(
+            ("s9",), mounted_nb_id, explicit=True
+        ) is True
+
+
+def test_lexical_gate_ignores_active_notebook_narrowing_for_a_different_notebook_id(
+    repo, monkeypatch
+):
+    """端到端版本:通过真正的 ``_retrieve_chunks_baseline`` 调用(联邦检索对
+    挂载引用库转发的那条调用链的下一跳),证明主库收窄不会让挂载库的
+    ``_lexical_corpus_langs`` 收到 ``source_scoped=True``。
+
+    **变异锚点**:同上一条——去掉 ``notebook_id`` 判别 → 挂载库那组
+    ``corpus_lang_calls`` 从 ``[False]`` 变成 ``[True]``,本条报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    main_nb, main_sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(main_nb.id)
+    mounted_nb, mounted_sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(mounted_nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    corpus_lang_calls = []
+    orig_corpus_langs = repo.retrieval.candidates._lexical_corpus_langs
+
+    def _spy_corpus_langs(notebook_id, *, source_scoped=False):
+        corpus_lang_calls.append(source_scoped)
+        return orig_corpus_langs(notebook_id, source_scoped=source_scoped)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_lexical_corpus_langs", _spy_corpus_langs
+    )
+
+    narrowed_scope = ResolvedSourceScope(
+        mode="include", source_ids=[main_sid], narrowed=True
+    )
+    with source_scope_context(main_nb.id, narrowed_scope):
+        # 对照:主库自身真收窄 → 必须继续判 True,不得回归。
+        corpus_lang_calls.clear()
+        repo.retrieval.candidates._retrieve_chunks_baseline(
+            main_nb.id, "bandgap", allowed_source_ids=(main_sid,)
+        )
+        assert corpus_lang_calls == [True], (
+            f"对照:主库真收窄必须继续判 True,实际 {corpus_lang_calls}"
+        )
+
+        # 挂载引用库:同一个「主库已收窄」的请求上下文里,联邦检索把它自己的
+        # 全量上下文清单(而非真收窄)转发到这里——语言闸必须继续判 False。
+        corpus_lang_calls.clear()
+        repo.retrieval.candidates._retrieve_chunks_baseline(
+            mounted_nb.id, "bandgap", allowed_source_ids=(mounted_sid,)
+        )
+        assert corpus_lang_calls == [False], (
+            "codex #640 R3 P1:主库收窄不得外溢到挂载引用库的语言闸判定,"
+            f"实际 {corpus_lang_calls}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6f. codex #640 R3(P2):漂移探针(``_lexical_gate_drift_probe``)本身失败必须
+#     fail-open——它的两个调用点(``_retrieve_chunks_multi`` 的一次性现探、
+#     ``_keyword_chunk_candidates`` 的唯一一次现探)都在各自的 fail-open
+#     ``try/except`` 之外调用它,探针异常若不在 wrapper 内部接住就会直接炸穿
+#     整条检索臂,甚至整个 Ask。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_lexical_gate_drift_probe_fails_open_on_probe_exception(repo, monkeypatch):
+    """``_unsafe_source_scope_restricted`` 抛异常时,``_lexical_gate_drift_probe``
+    必须吞掉它、发 ``lexical_gate_probe_failed`` 诊断事件(不带查询文本/凭据)、
+    返回 False(无漂移=安全路由裁决——语言闸的路由判定失灵只会选错词项集,
+    来源谓词本身仍无条件下推,见该函数 docstring)。
+
+    **变异锚点**:把 ``_lexical_gate_drift_probe`` 里包住 ``probe(notebook_id)``
+    的 ``try/except`` 去掉 → 本条在 probe 抛出处直接冒泡,报红。
+    """
+    from app.services.retrieval_candidates import _lexical_gate_drift_probe
+
+    events = _capture_events(repo, monkeypatch)
+
+    def _boom(notebook_id):
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_unsafe_source_scope_restricted", _boom
+    )
+
+    verdict = _lexical_gate_drift_probe(repo.retrieval.candidates, "nb-x")
+
+    assert verdict is False, f"探针失败必须 fail-open 到 False,实际 {verdict}"
+    failed = [e for e in events if e.get("kind") == "lexical_gate_probe_failed"]
+    assert len(failed) == 1, f"探针失败必须发恰好一条诊断事件,实际 {failed}"
+    assert failed[0]["notebook_id"] == "nb-x"
+    assert failed[0]["error_type"] == "RuntimeError"
+    # 诊断事件不带查询文本/凭据——只有定位所需的三个字段。
+    assert set(failed[0]) == {"kind", "notebook_id", "error_type"}
+
+
+def test_chunk_multi_and_keyword_arms_survive_a_failing_drift_probe(repo, monkeypatch):
+    """探针失败不得炸穿调用它的检索臂——``_retrieve_chunks_multi``(子查询扇出
+    前的一次现探)与 ``_keyword_chunk_candidates``(唯一一次现探)都必须靠
+    ``_lexical_gate_drift_probe`` 自己的 fail-open 兜底完成检索,而不是依赖
+    调用点各自的 ``try/except``(它们的现探恰好都在各自块之外)。
+
+    **变异锚点**:同上一条——去掉 wrapper 内的 ``try/except`` → 两个调用都
+    直接抛出 ``RuntimeError``,本条报红。
+    """
+    nb, sid = _seed_chunks(
+        repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    def _boom(notebook_id):
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_unsafe_source_scope_restricted", _boom
+    )
+
+    # 不得抛出——多子查询扇出前的一次现探(_CHUNK_ARM_DRIFTED 下传前)。
+    collected, per_query, ids, mat = repo.retrieval.candidates._retrieve_chunks_multi(
+        nb.id, ["bandgap", "reference"]
+    )
+    assert isinstance(collected, dict)
+    assert len(collected) >= 1, "探针失败不得让子查询扇出本身也丢候选"
+
+    # 不得抛出——keyword 臂唯一一次现探。
+    scored = repo.retrieval.candidates._keyword_chunk_candidates(
+        nb.id, "bandgap reference"
+    )
+    assert isinstance(scored, list)
+    assert len(scored) >= 1, "探针失败不得让 keyword 臂丢候选"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
