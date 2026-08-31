@@ -125,6 +125,19 @@ class _ImportPipelineIdentityDrifted(RuntimeError):
     already gets below."""
 
 
+class _ImportPipelineIdentityUnverifiable(RuntimeError):
+    """Internal to ``run_import`` (codex PR#643 R19 P2-b): the R5 pre-rename
+    identity re-read itself could not be completed (a dropped connection, a
+    statement timeout) rather than completing and finding a drift. Caught
+    separately from the generic ``except BaseException`` staging-failure
+    handler below so this reads as an actionable ``ScaleBuildCliFailure`` —
+    not a raw database exception escaping ``main()`` — and, like the drift
+    case right above, so the (possibly multi-GB) staged copies are kept for
+    inspection/retry rather than discarded: nothing was published yet, so
+    there is nothing to roll back, and re-staging is real work an operator
+    should not have to repeat while diagnosing a transient failure."""
+
+
 # ─────────────────────────────────────────────────────── migration ledger ──
 
 def packaged_migrations() -> tuple:
@@ -1676,7 +1689,27 @@ def run_import(
             # validated against, right before the first rename — the staging
             # copy above is the slow, interruptible part, and a claim/identity
             # proven fresh before it says nothing about what is live now.
-            current_pipeline_identity = projections.pipeline_identity(notebook_id)
+            #
+            # codex PR#643 R19 P2-b: the read itself — not just its answer —
+            # can fail (a dropped connection, a statement timeout). Translate
+            # that into ``_ImportPipelineIdentityUnverifiable`` here, inside
+            # this same guarded block, so it is caught by the dedicated
+            # handler below rather than falling through to the generic
+            # ``except BaseException`` staging-discard path further down.
+            # ``KeyboardInterrupt`` is re-raised unchanged: this keeps the
+            # existing "Ctrl-C before any rename discards only this run's own
+            # staging" contract exactly as it was.
+            try:
+                current_pipeline_identity = projections.pipeline_identity(
+                    notebook_id
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception as error:  # noqa: BLE001 - translated, not raw
+                raise _ImportPipelineIdentityUnverifiable(
+                    f"the live pipeline identity for {notebook_id} could not "
+                    f"be re-verified before publishing: {error!r}"
+                ) from error
             if list(current_pipeline_identity) != list(expected_pipeline_identity):
                 raise _ImportPipelineIdentityDrifted(
                     f"the live pipeline identity for {notebook_id} changed "
@@ -1743,6 +1776,26 @@ def run_import(
                 f"{error}. Nothing was published; the staged copies are left "
                 "on disk for inspection. Re-export the package with a current "
                 "checkout against the new pipeline and re-run import."
+            ) from None
+        except _ImportPipelineIdentityUnverifiable as error:
+            # codex PR#643 R19 P2-b: caught here — before the generic
+            # ``except BaseException`` below — so this does NOT run
+            # ``discard_staging_unless_publishing``. Nothing was renamed
+            # (this read happens strictly before the ``with guard:`` publish
+            # loop), so, like the drift case just above, the staged copies
+            # are worth keeping rather than discarding: the package itself
+            # may be fine and re-running import is cheap, whereas re-staging
+            # a multi-GB package is not.
+            report(
+                "staged but the pipeline identity could not be re-verified: "
+                f"{list(staged)}"
+            )
+            raise ScaleBuildCliFailure(
+                f"{error}. Nothing was published; the staged copies are left "
+                f"on disk under `{{root}}.tmp-{handle.claim_token}` for "
+                "inspection (`inspect` will list them). Re-run import once "
+                "the failure above is resolved — the package does not need "
+                "to be re-exported."
             ) from None
         except ScaleBuildLockLost as error:
             # The claim is the reason a second writer cannot be here; losing it
