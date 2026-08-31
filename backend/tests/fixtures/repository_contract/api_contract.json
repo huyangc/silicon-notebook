@@ -12891,6 +12891,64 @@
           "summary": "Get Admin User Notebook Sources"
         }
       },
+      "/api/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}": {
+        "get": {
+          "description": "Exact read-only source projection for admin analysis deep links.",
+          "operationId": "get_admin_user_notebook_source_api_admin_users__user_id__notebooks__notebook_id__sources__source_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ActivitySource"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin User Notebook Source"
+        }
+      },
       "/api/admin/users/{user_id}/reset-password": {
         "post": {
           "description": "管理员重置某用户密码；目标用户的浏览器会话全部吊销，需用新密码重新登录。\nauth_optional 部署的匿名回退(无 token 即视作种子管理员)不放行——改密是\n锁死型操作，当事人无法自救，必须由真实登录的管理员会话发起。",
