@@ -970,7 +970,11 @@ companion's `parent_version` equals the main manifest's `version` and refuses
 otherwise. A present companion with no readable `manifest.json`, or a live
 `kg_viz` the serving-side loader reads as "no viz", refuses the same way:
 copying either verbatim would produce a package this CLI's own `import`
-validation necessarily rejects.
+validation necessarily rejects. Once every root is copied (and re-verified),
+`export` reads every copied file one more time to build `transfer_manifest.json`
+— a full SHA-256 and byte count per file, written at the package's top level
+(never inside a root, so `import` never copies it into a live artifact
+directory) — see "What must be pinned across the two machines" below.
 
 The serving process's standalone **viz** rebuild takes that same per-notebook
 claim — for the whole of its build *and* its publish — and writes `kg_viz`
@@ -992,7 +996,15 @@ companion's `parent_version` gate makes an unpaired companion unreadable
 (degrading to "no companion") rather than describing a different generation.
 Copying — the slow, failure-prone half — happens entirely inside a
 claim-unique `.tmp-<token>` staging directory (see below); the live tree is
-untouched until the final renames.
+untouched until the final renames. `import` requires the package to carry
+`export`'s transfer manifest and, once every root finishes staging, reads
+every staged file one more time and checks it against that manifest — full
+byte count and SHA-256, not just the cheap `.npy`/`.npz` header checks above
+— before any rename; any mismatch (a missing or unlisted file, wrong size,
+wrong hash) fails the run, discards this run's staged copies, and leaves the
+live tree untouched. This is what catches a transfer that truncates a file's
+payload after an intact header, or corrupts `ann.bin` (which has no header at
+all) without changing its size.
 
 An optional root (`kg_viz` or the companion — never the main index, whose
 absence is refused outright) that the **package omits** is not simply left
@@ -1144,6 +1156,7 @@ the ordinary facade path — see the leftovers section below):
 | `--from` package location | must not equal or sit inside any of the notebook's own artifact roots (`kg_index`, `kg_viz`, the source-partition companion), their `.old`, or any `.tmp`/`.tmp-<token>` staging directory `prepare_staging_directory` would clear for one of them | `import` refuses, exit code `1`, before anything is copied — publishing would rename that root to `.old` and delete it (or, for a `.tmp*` staging directory, `rmtree` it before the copy even starts), silently deleting the operator's own input package |
 | Present `kg_viz` root | a `kg_viz` directory the package carries must read back through the serving-side `load_viz_index` (manifest.json, viz.npz and viz_adj.npz all present and consistent) | `import` refuses — an empty or incomplete viz directory would otherwise atomically replace a healthy live viz root with a tree the serving side reads as "no viz", while the import still reports success. A package that simply omits `kg_viz` is unaffected |
 | Main-index array headers | every required `.npy` the manifest declares a count for must have a readable header, and `graph.npz` a readable matrix shape (header-only reads: milliseconds even on a multi-GB package) | `import` refuses, naming the file as `truncated or malformed`. A present-but-unreadable array used to be skipped as "unchecked": the package published, replaced a healthy live index, and only then was rejected by `load_scale_index`, leaving the notebook with no scale core until an operator noticed. A manifest that declares no count for an array, or a count for an array the package does not carry, is unaffected |
+| Transfer integrity | the package must carry `export`'s `transfer_manifest.json` (full SHA-256 + byte count per file); every file `import` stages must match it exactly (same path set, same size, same hash) | `import` refuses if the manifest is missing or malformed (exit `2`, before anything is staged), or fails the run if any staged file mismatches it (exit `1`, naming the first missing/extra file or the first wrong size/hash, and discarding this run's staged copies) — the live tree is untouched either way. This is what catches a `.npy` truncated after an intact header, or a corrupted `ann.bin` (no header at all) of the same size, neither of which the header-only checks above can see |
 | numpy / scipy | same version recommended | warning only: npy/npz carry a format version and fail loudly |
 | Production `.env` | the build host must use the production `.env` (the storage root may differ) | not checked automatically — operational discipline |
 

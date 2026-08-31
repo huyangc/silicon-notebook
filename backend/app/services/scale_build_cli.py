@@ -21,6 +21,18 @@ Three properties make that safe, and each is enforced here:
 3. **Atomic publication** — every root is staged in ``{live}.tmp`` and renamed
    into place, and the claim is re-verified in the instant before the first
    rename. ``SIGINT`` is masked across the rename sequence.
+4. **Payload integrity** — ``export`` writes a full-payload SHA-256/byte-count
+   manifest (``transfer_manifest.json``) beside the copied roots, and
+   ``import`` requires one and checks every STAGED file against it before any
+   rename (codex PR#643 R24 P1). The cheap header-only checks
+   (``artifact_inventory_error``) catch a truncated/malformed ``.npy``/
+   ``.npz`` HEADER; they cannot see a payload truncated or corrupted after an
+   intact header, or a format like ``ann.bin`` with no header at all. Without
+   this, such a transfer passes every other gate, replaces a healthy live
+   index atomically, and only fails once the serving loader or ANN opener
+   tries to read the missing bytes — silent retrieval degradation. See
+   ``verify_staged_transfer``'s docstring for why the check runs against the
+   staged copies rather than the source package.
 
 Receipts are content-free: notebook ids the operator typed, fixed artifact file
 names, sizes, counts and versions. The database URL is never printed.
@@ -28,6 +40,7 @@ names, sizes, counts and versions. The database URL is never printed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -35,7 +48,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
@@ -106,6 +119,13 @@ _COUNTED_ARRAYS = {
     "n_chunk_ann": "chunk_ann_labels.npy",
     "n_relation_ann": "relation_ann_labels.npy",
 }
+
+# codex PR#643 R24 P1: the full-payload transfer manifest. Written by
+# ``export`` at the TOP of the package (never inside a root — see
+# ``write_transfer_manifest``), so ``import`` never copies it into a live
+# artifact directory.
+TRANSFER_MANIFEST_FILENAME = "transfer_manifest.json"
+_TRANSFER_HASH_CHUNK_BYTES = 1024 * 1024  # 1 MiB
 
 
 class ScaleBuildCliError(RuntimeError):
@@ -644,6 +664,271 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
     return None
 
 
+def _hash_file(path: Path) -> tuple[str, int]:
+    """SHA-256 and byte count of one file, read in fixed-size chunks.
+
+    This is the deliberately EXPENSIVE full-payload read that
+    ``npy_row_count``/``_graph_shape`` stay header-only to avoid (codex
+    PR#643 R24 P1): it never holds a whole multi-GB artifact in memory, but it
+    does read every byte, once, from disk. Called at most twice per file per
+    command — once by ``export`` while building the manifest, once by
+    ``import`` while checking a staged copy against it — never inside a loop
+    that could turn one file into repeated full reads.
+    """
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_TRANSFER_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+    return digest.hexdigest(), total
+
+
+def _root_files(directory: Path) -> list[Path]:
+    """Every regular file under ``directory``, sorted for a deterministic walk."""
+    files = [Path(current) / name for current, _dirs, names in os.walk(directory) for name in names]
+    files.sort()
+    return files
+
+
+def build_transfer_manifest(destination: Path, roots: Iterable[str]) -> dict:
+    """Per-file SHA-256/byte-count for every file under ``destination``'s root
+    directories (codex PR#643 R24 P1).
+
+    ``roots`` is the set of root NAMES to look for directly under
+    ``destination`` (ordinarily ``exported`` from ``run_export`` — the roots
+    this run actually copied — or ``PUBLISH_ORDER`` for a caller that does not
+    know in advance which are present); a name with no directory under
+    ``destination`` is silently skipped, the same "absent root is not an
+    error" contract every other package-shape check in this module already
+    applies to the optional roots.
+
+    Keys are ``"<root>/<relative path>"`` with POSIX separators, so the
+    manifest is portable across the platform that exported it and the one
+    that imports it. Pure computation — no filesystem write; see
+    ``write_transfer_manifest``.
+    """
+    files: dict[str, dict] = {}
+    for name in roots:
+        root_dir = destination / name
+        if not root_dir.is_dir():
+            continue
+        for path in _root_files(root_dir):
+            relative = f"{name}/{path.relative_to(root_dir).as_posix()}"
+            digest, size = _hash_file(path)
+            files[relative] = {"bytes": size, "sha256": digest}
+    return {"files": files}
+
+
+def write_transfer_manifest(
+    destination: Path, roots: Iterable[str], report: Callable[[str], None]
+) -> dict:
+    """Compute ``build_transfer_manifest`` and persist it at the package top.
+
+    Called by ``run_export`` only after every root has been copied AND R20's
+    per-copy claim re-verification above has passed for all of them — the
+    manifest must describe bytes that are actually known-good copies of what
+    was live, not a copy still in flight.
+
+    No further claim re-verification follows this write (codex PR#643 R24
+    P1): the manifest describes bytes that are ALREADY on disk at
+    ``destination``, outside every live artifact root. A claim lost after this
+    point cannot make the recorded bytes wrong — only a claim lost DURING a
+    copy could do that, and R20's per-root re-verification above already
+    covers it. This function never touches the live tree.
+
+    Written at ``destination`` itself (the package top level), never inside
+    one of the ``roots`` subdirectories, so ``import``'s staging copy (which
+    only ever copies ``package / <root name>``) never carries it into a live
+    artifact directory.
+    """
+    payload = build_transfer_manifest(destination, roots)
+    total_bytes = sum(entry["bytes"] for entry in payload["files"].values())
+    manifest_path = destination / TRANSFER_MANIFEST_FILENAME
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    report(
+        f"transfer manifest: {len(payload['files'])} files, {total_bytes} bytes "
+        f"(written to {manifest_path})"
+    )
+    return payload
+
+
+def _read_transfer_manifest(package: Path) -> dict:
+    """Parse and shape-check ``transfer_manifest.json`` at the package top.
+
+    HARD requirement (codex PR#643 R24 P1): this CLI has not shipped yet, so
+    there is no compatibility obligation to an older package that predates
+    this file — a missing manifest is refused outright, pointing the operator
+    at re-exporting with the current checkout, which always writes one.
+
+    Shape only: a dict with a ``"files"`` dict whose every entry is
+    ``{"bytes": non-negative int, "sha256": 64-hex-char str}``. This does NOT
+    read any artifact payload or compare against anything on disk — that is
+    ``verify_staged_transfer``'s job, run later once staging has produced
+    staged copies to check against. Called from both ``validate_import_package``
+    (the early presence/shape gate) and ``verify_staged_transfer`` (which
+    needs the parsed content); parsing twice is cheap — this file lists
+    file names and hashes, not payload.
+    """
+    path = package / TRANSFER_MANIFEST_FILENAME
+    if not path.is_file():
+        raise ScaleBuildCliError(
+            f"{package} has no {TRANSFER_MANIFEST_FILENAME}; this CLI refuses "
+            "to import a package with no transfer manifest. Without it, an "
+            "off-host transfer that truncates a .npy's payload after an "
+            "intact header (or corrupts ann.bin, which carries no header at "
+            "all) would pass every other check and only fail once it is "
+            "already live. Re-export the package with the current checkout, "
+            "which always writes one."
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ScaleBuildCliError(
+            f"{path} is not readable JSON ({error!r}); re-export the package "
+            "with a current checkout"
+        ) from None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        raise ScaleBuildCliError(
+            f'{path} is not a usable transfer manifest (expected a JSON '
+            'object with a "files" object); re-export the package with a '
+            "current checkout"
+        )
+    for relative, entry in data["files"].items():
+        bytes_ok = (
+            isinstance(entry, dict)
+            and isinstance(entry.get("bytes"), int)
+            and not isinstance(entry.get("bytes"), bool)
+            and entry["bytes"] >= 0
+        )
+        sha_ok = (
+            isinstance(entry, dict)
+            and isinstance(entry.get("sha256"), str)
+            and len(entry["sha256"]) == 64
+        )
+        if not isinstance(relative, str) or not bytes_ok or not sha_ok:
+            raise ScaleBuildCliError(
+                f"{path} entry {relative!r} is not a usable "
+                '{"bytes": non-negative int, "sha256": 64-hex-char str} '
+                "record; re-export the package with a current checkout"
+            )
+    return data
+
+
+def verify_staged_transfer(package: Path, staged: dict[str, Path]) -> None:
+    """Full-payload check of every STAGED file against the transfer manifest.
+
+    codex PR#643 R24 P1: ``artifact_inventory_error`` only reads ``.npy``/
+    ``.npz`` HEADERS, so a transfer that truncates a file's payload after an
+    intact header sails through that cheap check, gets published atomically
+    over a healthy live index, and only fails once the serving loader or the
+    ANN opener tries to read the missing bytes — silent retrieval
+    degradation. ``ann.bin`` has no header check at all; only its existence
+    is verified elsewhere. This runs the expensive, whole-payload read the
+    header check deliberately skips — but only ONCE, and only here.
+
+    Checked against the STAGED copies (``{root}.tmp-<claim_token>``), not the
+    source ``package``: staging is a plain ``copytree``, so a corrupted
+    package produces an identically corrupted staged copy, but the reverse
+    is also a real failure mode this must catch — a local staging copy
+    corrupted by THIS run's own ``copytree`` (a flaky disk, a source edited
+    concurrently). Checking ``package`` instead would miss that second one.
+
+    Runs AFTER staging completes and BEFORE the pre-rename pipeline identity
+    read (see ``run_import``): staging is already the expensive part of this
+    command, so failing here, before any rename, while the live tree is
+    still untouched and the staged copies are the only thing worth
+    discarding, is strictly cheaper than discovering the same corruption
+    after publish.
+
+    Any mismatch is unconditionally fatal and raises a plain
+    ``ScaleBuildCliFailure`` rather than doing its own cleanup: this
+    deliberately does NOT distinguish "missing"/"extra" from "wrong
+    size"/"wrong hash" the way the pipeline-identity checks distinguish
+    "drifted" from "unverifiable" — a corrupted stage has no salvage value
+    (unlike an identity that merely could not be re-verified, where the
+    staged bytes may still be fine). Raising a plain ``ScaleBuildCliFailure``
+    here, before anything has been published, means it falls through to the
+    existing generic ``except BaseException`` handler in ``run_import``,
+    which already discards every staged copy for a run that published
+    nothing — the same "no salvage value" cleanup this needs, with no
+    parallel implementation.
+
+    Only roots actually in ``staged`` (the package included them) are
+    checked; a root the package OMITS never reaches staging at all (see
+    ``retiring`` in ``run_import``), and the manifest correspondingly has no
+    entries for it either.
+    """
+    manifest = _read_transfer_manifest(package)
+    files = manifest["files"]
+    manifest_path = package / TRANSFER_MANIFEST_FILENAME
+    for name in PUBLISH_ORDER:
+        if name not in staged:
+            continue
+        target = staged[name]
+        prefix = f"{name}/"
+        expected = {
+            relative[len(prefix):]: entry
+            for relative, entry in files.items()
+            if relative.startswith(prefix)
+        }
+        actual = {
+            path.relative_to(target).as_posix(): path
+            for path in _root_files(target)
+        }
+        missing = sorted(set(expected) - set(actual))
+        if missing:
+            raise ScaleBuildCliFailure(
+                f"the staged transfer does not match {manifest_path}: "
+                f"{name}/{missing[0]} is listed in the transfer manifest but "
+                "missing from the staged copy (missing). The staged copies "
+                "for this run were not published and have been discarded — a "
+                "corrupted stage has no salvage value. The live tree is "
+                "untouched; re-transfer or re-export the package and re-run "
+                "import."
+            )
+        extra = sorted(set(actual) - set(expected))
+        if extra:
+            raise ScaleBuildCliFailure(
+                f"the staged transfer does not match {manifest_path}: "
+                f"{name}/{extra[0]} is present in the staged copy but not "
+                "listed in the transfer manifest (extra). The staged copies "
+                "for this run were not published and have been discarded — a "
+                "corrupted stage has no salvage value. The live tree is "
+                "untouched; re-transfer or re-export the package and re-run "
+                "import."
+            )
+        for relative in sorted(expected):
+            entry = expected[relative]
+            digest, size = _hash_file(actual[relative])
+            if size != entry["bytes"]:
+                raise ScaleBuildCliFailure(
+                    f"the staged transfer does not match {manifest_path}: "
+                    f"{name}/{relative} is {size} bytes in the staged copy, "
+                    f"the manifest recorded {entry['bytes']} (bytes). The "
+                    "staged copies for this run were not published and have "
+                    "been discarded — a corrupted stage has no salvage "
+                    "value. The live tree is untouched; re-transfer or "
+                    "re-export the package and re-run import."
+                )
+            if digest != entry["sha256"]:
+                raise ScaleBuildCliFailure(
+                    f"the staged transfer does not match {manifest_path}: "
+                    f"{name}/{relative} sha256 is {digest} in the staged "
+                    f"copy, the manifest recorded {entry['sha256']} "
+                    "(sha256). The staged copies for this run were not "
+                    "published and have been discarded — a corrupted stage "
+                    "has no salvage value. The live tree is untouched; "
+                    "re-transfer or re-export the package and re-run import."
+                )
+
+
 def _require_package_belongs_to(
     manifest: dict, main: Path, notebook_id: str, known_source_ids
 ) -> None:
@@ -739,6 +1024,15 @@ def validate_import_package(
 
     ``numpy``/``scipy`` mismatches only warn: ``.npy``/``.npz`` carry a format
     version and fail loudly, so they cannot degrade silently.
+
+    codex PR#643 R24 P1: a transfer manifest (``TRANSFER_MANIFEST_FILENAME``)
+    is also a hard requirement, checked here for PRESENCE AND SHAPE only (see
+    ``_read_transfer_manifest``) — a package with none, or one that is not
+    parseable JSON in the expected shape, is refused right here alongside the
+    other structural checks. The actual per-file payload comparison against
+    the STAGED copies happens later, in ``run_import``'s
+    ``verify_staged_transfer`` call, once staging has produced staged copies
+    to check against; this function never reads artifact payload.
     """
     main = package / MAIN_ROOT
     if not main.is_dir():
@@ -750,6 +1044,9 @@ def validate_import_package(
         raise ScaleBuildCliError(f"{main} has no manifest.json")
     if manifest.get("version") is None:
         raise ScaleBuildCliError(f"{main}/manifest.json has no version")
+    # codex PR#643 R24 P1: shape only — see ``_read_transfer_manifest`` and
+    # the docstring above.
+    _read_transfer_manifest(package)
     _require_package_belongs_to(
         manifest, main, expected_notebook_id, known_source_ids
     )
@@ -1245,6 +1542,14 @@ def run_export(
     ``--to <kg_index>/out`` grows ``<kg_index>/out/kg_index/out/kg_index/...``
     without bound, and every one of those nested copies also writes into the
     supposedly read-only live index (codex PR#643 R2 P2).
+
+    codex PR#643 R24 P1: after every root is copied, this also reads every
+    byte of every copied file ONE more time to build ``transfer_manifest.json``
+    (``write_transfer_manifest``) — one full extra read of the whole package
+    on top of the copy itself. This CLI is an offline/maintenance tool run
+    beside, not on, the request path, so the extra pass is an acceptable
+    fixed cost for catching a transfer that silently truncates or corrupts a
+    payload; see the module docstring's "Payload integrity" property.
     """
     store = repository._runtime.scale_artifact_store  # noqa: SLF001
     roots = artifact_roots(store, notebook_id)
@@ -1324,6 +1629,12 @@ def run_export(
                 )
             exported.append(name)
             report(f"exported {name}")
+        # codex PR#643 R24 P1: a full-payload transfer manifest, written only
+        # once every root has been copied AND the per-copy claim
+        # re-verification above (R20) has passed for every one of them — see
+        # ``write_transfer_manifest``'s docstring for the format and for why
+        # no further claim re-verification follows this write.
+        write_transfer_manifest(destination, exported, report)
         # Read the manifest that was just copied into `destination`, not the
         # live one: the claim releases when this block exits, and another
         # builder can publish a new generation the instant it does. Reading
@@ -1354,6 +1665,13 @@ def run_import(
     tree); it happens entirely in ``.tmp`` directories with the live tree
     untouched. Only when every root is staged does the claim get re-verified and
     the renames run, under ``SIGINT`` masking.
+
+    codex PR#643 R24 P1: staging is followed by ONE full extra read of the
+    entire staged tree (``verify_staged_transfer``, full-payload SHA-256
+    against the export's transfer manifest) before any rename — offline,
+    maintenance-path cost, the same trade this CLI already makes for
+    ``export``'s matching extra read; see the module docstring's "Payload
+    integrity" property.
 
     codex PR#643 R5 P1: the import claim (T-W1's per-notebook advisory lock)
     does not block ``execute_indexing_pipeline_rebuild`` from completing a
@@ -1709,6 +2027,16 @@ def run_import(
                 staged[name] = target
                 shutil.copytree(source, target, dirs_exist_ok=True)
                 report(f"staged {name}")
+
+            # codex PR#643 R24 P1: full-payload verification of every staged
+            # file against the export's transfer manifest, run right after
+            # staging finishes and before any rename — see
+            # ``verify_staged_transfer``'s docstring for why the STAGED
+            # copies (not ``package``) are checked, and why a mismatch here
+            # falls through to the generic ``except BaseException`` handler
+            # below (which discards every staged copy for a run that
+            # published nothing) rather than doing its own cleanup.
+            verify_staged_transfer(package, staged)
 
             # codex PR#643 R5 P1: re-verify the identity the package was
             # validated against, right before the first rename — the staging
