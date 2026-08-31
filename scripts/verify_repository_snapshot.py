@@ -3792,6 +3792,9 @@ RETAINED_USER_ACTIVITY_INDEXES = {
     "idx_retained_activity_expires":
         """CREATE INDEX idx_retained_activity_expires
                   ON retained_user_activity(julianday(expires_at))""",
+    "idx_retained_activity_notebook":
+        """CREATE INDEX idx_retained_activity_notebook
+                  ON retained_user_activity(notebook_id)""",
 }
 MIGRATION_MANIFEST = {
     (key[0], 65, *key[2:]): {
