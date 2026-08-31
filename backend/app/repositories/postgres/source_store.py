@@ -1546,6 +1546,19 @@ class SourceStore:
         now = self.now()
         raw_json = json_value(meta.get("raw_json") or {}, {})
         with self.database.write() as connection:
+            notebook = connection.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE",
+                (notebook_id,),
+            ).fetchone()
+            if notebook is None:
+                raise KeyError(notebook_id)
+            source = connection.execute(
+                "SELECT id FROM sources WHERE id=%s AND notebook_id=%s "
+                "FOR KEY SHARE",
+                (source_id, notebook_id),
+            ).fetchone()
+            if source is None:
+                raise KeyError(source_id)
             connection.execute(
                 "INSERT INTO source_paper_meta"
                 "(source_id,notebook_id,is_paper,paper_title,venue,pub_year,doi,keywords,"

@@ -21,6 +21,7 @@ from app.repositories.postgres.memory_store import MemoryStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.notebook_store import NotebookStore
 from app.repositories.postgres.query_store import QueryStore
+from app.repositories.postgres.source_store import SourceStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 
@@ -662,6 +663,110 @@ def test_single_conversation_delete_holds_root_against_notebook_delete(
             allow_single_delete.set()
         assert conversation_future.result(timeout=5) is None
         assert notebook_future.result(timeout=5) == []
+
+
+@pytest.mark.postgres_integration
+def test_paper_meta_upsert_locks_parents_before_notebook_delete(
+    postgres_database, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('paper-delete-owner','paper-delete@x','Paper Delete','user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('paper-delete-nb','Paper Delete','paper-delete-owner','ready',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,created_at,updated_at) VALUES ('paper-delete-source',"
+            "'paper-delete-nb','Fallback Title','pdf','extracted','extracted',"
+            "'paper.pdf',%s,%s)",
+            (now, now),
+        )
+
+    sources = SourceStore(postgres_database, now=lambda: now)
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    sources.upsert_paper_meta(
+        "paper-delete-source",
+        "paper-delete-nb",
+        {
+            "is_paper": True,
+            "paper_title": "Original Paper",
+            "authors": [{"position": 0, "name": "Original Author"}],
+        },
+    )
+    upsert_reached_meta = threading.Event()
+    allow_meta_upsert = threading.Event()
+    thread_role = threading.local()
+    original_write = postgres_database.write
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, statement, *args, **kwargs):
+            if "INSERT INTO source_paper_meta" in statement:
+                upsert_reached_meta.set()
+                assert allow_meta_upsert.wait(timeout=10)
+            return self._connection.execute(statement, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    @contextmanager
+    def coordinated_write(*args, **kwargs):
+        with original_write(*args, **kwargs) as connection:
+            if getattr(thread_role, "value", "") == "upsert":
+                yield ConnectionProxy(connection)
+            else:
+                yield connection
+
+    monkeypatch.setattr(postgres_database, "write", coordinated_write)
+
+    def update_paper_meta():
+        thread_role.value = "upsert"
+        return sources.upsert_paper_meta(
+            "paper-delete-source",
+            "paper-delete-nb",
+            {
+                "is_paper": True,
+                "paper_title": "Updated Paper",
+                "authors": [{"position": 0, "name": "Updated Author"}],
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        upsert_future = executor.submit(update_paper_meta)
+        assert upsert_reached_meta.wait(timeout=5)
+        notebook_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "paper-delete-nb"
+        )
+        try:
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM notebooks", notebook_future
+            )
+        finally:
+            allow_meta_upsert.set()
+        assert upsert_future.result(timeout=5) is None
+        assert notebook_future.result(timeout=5) == []
+
+    with postgres_database.connect() as connection:
+        retained = connection.execute(
+            "SELECT display_title FROM retained_user_activity "
+            "WHERE activity_type='source' AND record_id='paper-delete-source'"
+        ).fetchone()
+    assert retained["display_title"] == "Updated Paper"
 
 
 @pytest.mark.postgres_integration
