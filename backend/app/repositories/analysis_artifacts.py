@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -198,8 +199,12 @@ class AnalysisArtifactStore:
         source_root = self.root / "issues" / notebook_id / source_id
         if not source_root.is_dir():
             return
-        for metadata_path in source_root.glob("*/issue.json"):
-            self._redact_issue(metadata_path, occurred_at, notebook_deleted=False)
+        try:
+            for metadata_path in list(source_root.glob("*/issue.json")):
+                self._redact_issue(metadata_path, occurred_at, notebook_deleted=False)
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+            self._remove_empty_parents(source_root.parent, self.root / "issues")
 
     def redact_notebook(self, notebook_id: str, *, occurred_at: str) -> None:
         spreadsheet_root = self.root / "spreadsheets" / notebook_id
@@ -208,8 +213,11 @@ class AnalysisArtifactStore:
         issue_root = self.root / "issues" / notebook_id
         if not issue_root.is_dir():
             return
-        for metadata_path in issue_root.glob("*/*/issue.json"):
-            self._redact_issue(metadata_path, occurred_at, notebook_deleted=True)
+        try:
+            for metadata_path in list(issue_root.glob("*/*/issue.json")):
+                self._redact_issue(metadata_path, occurred_at, notebook_deleted=True)
+        finally:
+            shutil.rmtree(issue_root, ignore_errors=True)
 
     def _redact_issue(
         self, metadata_path: Path, occurred_at: str, *, notebook_deleted: bool
@@ -220,8 +228,13 @@ class AnalysisArtifactStore:
             return
         if not isinstance(issue, dict):
             return
+        category = str(issue.get("category") or "")
+        if category not in ISSUE_CATEGORIES:
+            return
         self._delete_payload(metadata_path.parent)
+        neutral_id = secrets.token_hex(16)
         issue.update({
+            "id": f"analysis-redacted-{neutral_id}",
             "owner_id": "",
             "notebook_id": "",
             "notebook_name": "",
@@ -235,7 +248,10 @@ class AnalysisArtifactStore:
             "notebook_deleted": notebook_deleted,
             "updated_at": occurred_at,
         })
-        _atomic_json(metadata_path, issue)
+        redacted_path = (
+            self.root / "issues" / "redacted" / neutral_id / category / "issue.json"
+        )
+        _atomic_json(redacted_path, issue)
 
     def list_issues(
         self,

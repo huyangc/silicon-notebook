@@ -42,6 +42,11 @@ _STRONG_TABLE_OPERATION_TERMS = (
     "汇总", "合计", "总和", "平均", "最大值", "最小值", "中位数", "排名", "筛选",
     "过滤", "分组", "透视", "占比", "同比", "环比", "缺失值", "重复值",
 )
+_CLEAR_TABLE_OPERATION_PATTERNS = (
+    re.compile(r"\bgroup\s+by\b"),
+    re.compile(r"\b(?:sum|average|count)\b.{1,80}\bby\b"),
+    re.compile(r"\btop\s+\d+\b"),
+)
 
 
 class SpreadsheetCompileError(RuntimeError):
@@ -89,7 +94,7 @@ def _contains_intent_term(text: str, term: str) -> bool:
 
 def _has_spreadsheet_intent(question: str) -> bool:
     text = question.casefold()
-    if any(_contains_intent_term(text, term) for term in _STRONG_TABLE_OPERATION_TERMS):
+    if any(pattern.search(text) is not None for pattern in _CLEAR_TABLE_OPERATION_PATTERNS):
         return True
     has_context = any(
         _contains_intent_term(text, term) for term in _SPREADSHEET_CONTEXT_TERMS
@@ -97,7 +102,16 @@ def _has_spreadsheet_intent(question: str) -> bool:
     has_analysis = any(
         _contains_intent_term(text, term) for term in _GENERIC_ANALYSIS_TERMS
     )
-    return has_context and has_analysis
+    has_table_operation = any(
+        _contains_intent_term(text, term) for term in _STRONG_TABLE_OPERATION_TERMS
+    )
+    has_unambiguous_chinese_operation = any(
+        not term.isascii() and _contains_intent_term(text, term)
+        for term in _STRONG_TABLE_OPERATION_TERMS
+    )
+    return has_unambiguous_chinese_operation or (
+        has_context and (has_analysis or has_table_operation)
+    )
 
 
 def _numeric(value: Any) -> float | None:
@@ -132,8 +146,13 @@ def _column_name(index: int) -> str:
 def _unique_headers(values: Sequence[Any]) -> list[str]:
     seen: Counter[str] = Counter()
     headers: list[str] = []
-    for index, value in enumerate(values):
-        base = _display_cell(value).strip() or f"列 {_column_name(index)}"
+    for value in values:
+        base = _display_cell(value).strip()
+        if not base:
+            raise SpreadsheetCompileError(
+                "SPREADSHEET_HEADER_MISSING",
+                "工作表的数据区域存在缺失表头，当前无法可靠分析。",
+            )
         seen[base] += 1
         headers.append(base if seen[base] == 1 else f"{base} ({seen[base]})")
     return headers
@@ -469,7 +488,8 @@ class SpreadsheetAnalysisService:
                 rows: list[dict[str, Any]] = []
                 for row_index in range(sheet.nrows):
                     values = [
-                        self._compile_cell(value) for value in sheet.row_values(row_index)
+                        self._compile_xls_cell(cell, book=book, xlrd=xlrd)
+                        for cell in sheet.row(row_index)
                     ]
                     while values and values[-1] in (None, ""):
                         values.pop()
@@ -489,6 +509,28 @@ class SpreadsheetAnalysisService:
             return sheets
         finally:
             book.release_resources()
+
+    def _compile_xls_cell(self, cell: Any, *, book: Any, xlrd: Any) -> Any:
+        if cell.ctype in {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}:
+            value: Any = None
+        elif cell.ctype == xlrd.XL_CELL_DATE:
+            try:
+                value = xlrd.xldate_as_datetime(cell.value, book.datemode)
+            except Exception as exc:
+                raise SpreadsheetCompileError(
+                    "SPREADSHEET_INVALID_XLS_DATE",
+                    "旧版 Excel 包含无法解析的日期单元格。",
+                ) from exc
+        elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+            value = bool(cell.value)
+        elif cell.ctype == xlrd.XL_CELL_ERROR:
+            error_code = int(cell.value)
+            value = xlrd.error_text_from_code.get(
+                error_code, f"#ERROR_{error_code}"
+            )
+        else:
+            value = cell.value
+        return self._compile_cell(value)
 
     def _sheet_manifest(
         self,

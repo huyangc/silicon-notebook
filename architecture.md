@@ -219,7 +219,7 @@ Ask/Memory/Knowhow 内容、prompt/model message、SQL 文本/参数、authoriza
   → 标记 unified KG / index 维护状态，由独立维护路径处理
 ```
 
-source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析保留 source 行与原始文件；它替换旧 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。Excel 快照在 authoritative elements 已提交、来源 parse lock 仍由本代持有时生成，所以快照中的行锚点与本代 elements 一致；专业编译失败不回滚 elements 或改 source 状态。来源 pipeline 终态失败自动归档 `source_parse`，之后用户侧重新解析成功会自动 resolve 并删隔离副本。删除 source/notebook 复用生命周期清理，立即删除快照/隔离副本并把留存问题脱敏；管理员没有写入口。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
+source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析保留 source 行与原始文件；它替换旧 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。Excel 快照在 authoritative elements 已提交、来源 parse lock 仍由本代持有时生成，所以快照中的行锚点与本代 elements 一致；专业编译失败不回滚 elements 或改 source 状态。来源 pipeline 终态失败自动归档 `source_parse`，之后用户侧重新解析成功会自动 resolve 并删隔离副本。删除 source/notebook 复用生命周期清理，立即删除快照/隔离副本，并把留存问题迁移到新生成的中性案例 ID 和不含原标识的归档路径后脱敏；管理员没有写入口。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
 
 ### 3.2 Ask 与 detached job
 

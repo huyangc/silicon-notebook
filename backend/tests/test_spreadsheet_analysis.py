@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -341,7 +342,14 @@ def test_ambiguous_single_characters_do_not_trigger_spreadsheet_planning(tmp_pat
         row_element_ids={},
     )
 
-    for question in ("银行政策是什么", "执行这个方案", "分析这个方案"):
+    for question in (
+        "银行政策是什么",
+        "执行这个方案",
+        "分析这个方案",
+        "count the references in this PDF",
+        "top competitors in this market",
+        "group the arguments by theme",
+    ):
         planner = _CapturingProfilePlanner()
         results, trace = service.analyze(
             notebook_id="nb-1",
@@ -352,6 +360,17 @@ def test_ambiguous_single_characters_do_not_trigger_spreadsheet_planning(tmp_pat
         assert results == []
         assert trace is None
         assert planner.prompt == ""
+
+    planner = _CapturingProfilePlanner()
+    results, trace = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="sum Amount by Region",
+        planner_client=planner,
+    )
+    assert results
+    assert trace is not None
+    assert planner.prompt
 
 
 def test_reasoning_spreadsheet_lane_honors_exclude_scope():
@@ -478,6 +497,113 @@ def test_oversized_cell_is_rejected_without_truncation(tmp_path):
     assert issue["code"] == "SPREADSHEET_CELL_TOO_LONG"
 
 
+def test_missing_header_is_rejected_instead_of_synthesized(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append(["Region", None, "Owner"])
+    sheet.append(["East", 10, "A"])
+    workbook.save(path)
+    settings = _settings(tmp_path)
+    artifacts = AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30)
+    service = SpreadsheetAnalysisService(
+        artifacts=artifacts,
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    ) is False
+    [issue] = artifacts.list_issues(status="open")
+    assert issue["code"] == "SPREADSHEET_HEADER_MISSING"
+
+
+def test_legacy_xls_preserves_date_boolean_error_and_number_types(
+    tmp_path, monkeypatch
+):
+    class _Cell:
+        def __init__(self, ctype, value):
+            self.ctype = ctype
+            self.value = value
+
+    class _Sheet:
+        name = "Legacy"
+        nrows = 2
+        ncols = 4
+
+        @staticmethod
+        def row(index):
+            if index == 0:
+                return [
+                    _Cell(1, value)
+                    for value in ("Date", "Flag", "Error", "Number")
+                ]
+            return [
+                _Cell(3, 46024.0),
+                _Cell(4, 1),
+                _Cell(5, 42),
+                _Cell(2, 3.5),
+            ]
+
+        @staticmethod
+        def row_values(index):
+            raise AssertionError("typed XLS cells must not be reduced to raw values")
+
+    class _Book:
+        nsheets = 1
+        datemode = 0
+
+        def __init__(self):
+            self.sheet = _Sheet()
+            self.released = False
+
+        def sheet_by_index(self, index):
+            assert index == 0
+            return self.sheet
+
+        def unload_sheet(self, index):
+            assert index == 0
+
+        def release_resources(self):
+            self.released = True
+
+    book = _Book()
+    fake_xlrd = SimpleNamespace(
+        XL_CELL_EMPTY=0,
+        XL_CELL_TEXT=1,
+        XL_CELL_NUMBER=2,
+        XL_CELL_DATE=3,
+        XL_CELL_BOOLEAN=4,
+        XL_CELL_ERROR=5,
+        XL_CELL_BLANK=6,
+        error_text_from_code={42: "#N/A"},
+        open_workbook=lambda *args, **kwargs: book,
+        xldate_as_datetime=lambda value, datemode: datetime(2026, 1, 2, 3, 4, 5),
+    )
+    monkeypatch.setitem(sys.modules, "xlrd", fake_xlrd)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+
+    [manifest] = service._compile_xls(tmp_path / "legacy.xls", {})
+
+    assert manifest["rows"][0]["cells"] == [
+        "2026-01-02T03:04:05",
+        True,
+        "#N/A",
+        3.5,
+    ]
+    assert book.released is True
+
+
 def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     store = AnalysisArtifactStore(tmp_path, retention_days=2)
     source_path = tmp_path / "source.pdf"
@@ -523,6 +649,13 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     assert redacted["notebook_name"] == ""
     assert redacted["source_title"] == ""
     assert redacted["file_name"] == ""
+    assert "nb-1" not in redacted["id"]
+    assert "src-1" not in redacted["id"]
+    assert not (store.root / "issues" / "nb-1").exists()
+    [metadata_path] = list((store.root / "issues").glob("*/*/*/issue.json"))
+    relative_path = str(metadata_path.relative_to(store.root / "issues"))
+    assert "nb-1" not in relative_path
+    assert "src-1" not in relative_path
 
     assert store.list_issues(
         now=datetime(2026, 9, 1, 1, tzinfo=timezone.utc)

@@ -2488,7 +2488,9 @@ user-selected source scope contains a compiled workbook and the question has an 
 spreadsheet intent. Include/exclude scopes are resolved through the same frozen `allows`
 semantics as retrieval; excluded workbooks never reach the planner. Intent requires either
 explicit workbook/table context plus an analysis phrase, or an unambiguous table operation;
-an isolated `行`/`列` character inside an unrelated word does not qualify. The lane then
+an isolated `行`/`列` character inside an unrelated word does not qualify, and bare English
+verbs such as `count`, `top`, or `group` require table context unless they form a clear
+construction such as `sum Amount by Region`. The lane then
 reuses the deployment's existing `reasoning_agent` chat workload
 for at most one bounded planning call—there is no general-purpose SDK agent—and validates
 the result into the closed operations `profile`, `aggregate`, `top`, and `filter`. Aggregation
@@ -2533,7 +2535,8 @@ user-initiated reparse automatically resolves the matching issue and deletes its
 copy; expiry is a hard read boundary and physical cleanup occurs on issue reads. Source or
 notebook deletion immediately removes the spreadsheet snapshot and quarantine copy, clears
 owner/source/notebook linkage, names, ids, filenames, and hashes, and retains only
-category/time and a redacted summary until expiry. This filesystem redaction is best-effort
+category/time and a redacted summary under a new neutral case id and identifier-free archive
+path until expiry. This filesystem redaction is best-effort
 after a committed notebook deletion: a cleanup I/O failure is logged without making the
 already-completed DELETE appear to fail.
 
