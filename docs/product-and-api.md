@@ -742,7 +742,7 @@ other clients apply a flat per-call ceiling instead. `ask_notebook` in `reasonin
 routinely runs for minutes (plan, federated retrieval, reflect loop, synthesis) and
 `build_kg` can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 23 core tools therefore runs its blocking body
+answer was about to arrive. Every one of the 24 core tools therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -811,7 +811,7 @@ that cannot interpolate persists the raw header instead: use least-privilege sco
 expiry, protect the local config, and revoke/rotate the token after use.
 
 Every new MCP session must call `select_notebook` before a data tool. The default core tool set
-is these 23 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 23 tools, not a larger combined
+is these 24 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 24 tools, not a larger combined
 catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
@@ -822,13 +822,13 @@ catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Citation point-read | `get_cited_element` | `knowledge:read` |
 | Source management | `add_source_text`, `add_source_file`, `add_source_url`, `reparse_source` | `sources:write` (owner-only) |
 | Source deletion | `delete_source` | `sources:delete` (owner-only, Agent-added rows only) |
-| Source read | `get_source_status` | `knowledge:read` |
+| Source read | `list_sources`, `get_source_status` | `knowledge:read` |
 | Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
 | Build read | `get_build_status` | `knowledge:read` |
 | Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `agent_profile:read` / `agent_observation:write` |
 
 The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
-exactly the 23 tools above, derived live from the seven core registrars, and
+exactly the 24 tools above, derived live from the seven core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
 repeats live token/scope/allowlist/membership checks, and every write scope is forced through the
 owner-only notebook gate. Results are copied into a bounded shape while being built -- no deeper than 5 levels, with
@@ -891,6 +891,19 @@ notebook's own sources plus the reference libraries it currently mounts.
 **selected notebook only** — never the mounted participant set, and never a hidden
 `memory`/`knowhow` projection row. That is narrower than `get_cited_element`, which
 deliberately spans the mounted reference libraries because an answer's citations already do.
+
+`list_sources(offset=0, limit=20)` is the read-side inventory for the selected notebook and
+requires `knowledge:read`. It reuses the HTTP Sources panel's `list_sources_page` projection,
+including its stable `(created_at, id)` order and its single visibility predicate: direct
+user-visible imported sources only, excluding hidden Memory/Knowhow projection rows and
+sources owned by mounted reference notebooks. Each row returns `source_id`, the canonical
+display `title`, `file_name`, `source_type`, `doc_type`, a stored `summary` excerpt, parse and
+KG state, `agent_created`, and `created_at`; it never returns `file_path`, raw
+`error_message`, or file hashes. `limit` is capped at 20 by the shared MCP result rail. The
+response carries `total_count`, the actual `offset`/`limit`, and `next_offset`; callers follow
+`next_offset` until it is null. If the shared 12,000-byte response rail has to remove trailing
+rows, `next_offset` is recomputed from the rows actually delivered, so pagination cannot skip
+user data, and the ordinary `truncation` metadata still discloses the reduction.
 
 `add_source_text` files a Markdown document from text the Agent
 provides: `title` is at most 200 characters and `content_md` must be

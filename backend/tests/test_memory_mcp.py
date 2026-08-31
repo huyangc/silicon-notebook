@@ -1250,6 +1250,7 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         assert (await client.call(
             "ask_notebook", {"question": "No scope", "mode": "chunk"}
         )).isError
+        assert (await client.call("list_sources")).isError
         # Agentic Memory P3 (T3): the two newest data tools, each pinned by
         # their own scope like everything else above.
         assert (await client.call("get_notebook_profile", {})).isError
@@ -2334,8 +2335,8 @@ async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
 
 
 # --------------------------------------------------------------------------- #
-# Agent source management: add_source_text / add_source_url / get_source_status
-# / reparse_source / delete_source.
+# Agent source inventory and management: list_sources / add_source_text /
+# add_source_url / get_source_status / reparse_source / delete_source.
 # --------------------------------------------------------------------------- #
 _SOURCE_READ = ["knowledge:read"]
 _SOURCE_WRITE = ["knowledge:read", "sources:write"]
@@ -2361,6 +2362,122 @@ def _agent_token(
         mcp_env[user].id, profile.id, scopes,
         notebook_ids[0], notebook_ids, None,
     ).token
+
+
+@pytest.mark.anyio
+async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_env):
+    """The MCP inventory reuses the browser list's visibility and title rules.
+
+    It lists only direct, user-visible rows of the selected notebook; hidden
+    synthetic rows and mounted-library rows stay out. Pagination remains
+    followable through ``next_offset`` and the response never exposes private
+    source diagnostics.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    other_id = mcp_env["other"].id
+    with repo._write() as db:
+        for values in (
+            (
+                "list-source-a", notebook_id, "上传名 A", "pdf", "ready",
+                "parsed", "a.pdf", "/private/source/a.pdf", 101, "hash-a",
+                "第一篇摘要", "academic_paper", "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+            (
+                "list-source-b", notebook_id, "文档 B", "markdown", "ready",
+                "failed", "b.md", "/private/source/b.md", 202, "hash-b",
+                "第二篇摘要", "textbook", "2026-01-02T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+            ),
+            (
+                "list-source-hidden", notebook_id, "私有 Memory 投影", "memory",
+                "ready", "parsed", "", "/private/source/memory.md", 0,
+                "hash-hidden", "不得披露", "", "2026-01-03T00:00:00Z",
+                "2026-01-03T00:00:00Z",
+            ),
+            (
+                "list-source-mounted", other_id, "参考库文档", "pdf", "ready",
+                "parsed", "mounted.pdf", "/private/source/mounted.pdf", 303,
+                "hash-mounted", "只属于参考库", "academic_paper",
+                "2026-01-04T00:00:00Z", "2026-01-04T00:00:00Z",
+            ),
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+                "file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                values,
+            )
+        db.execute(
+            "INSERT INTO source_paper_meta "
+            "(source_id,notebook_id,is_paper,paper_title,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "list-source-a", notebook_id, 1, "论文显示名 A",
+                "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+            ),
+        )
+        db.execute(
+            "UPDATE sources SET error_message=? WHERE id=?",
+            ("/Users/operator/private failure", "list-source-b"),
+        )
+    mcp_env["service"].replace_notebook_bases(
+        notebook_id, [other_id], mcp_env["alice"].id
+    )
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
+    ) as client:
+        assert (await client.call("list_sources")).isError
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": notebook_id}
+        ))
+        first = _payload(await client.call(
+            "list_sources", {"offset": 0, "limit": 1}
+        ))
+        second = _payload(await client.call(
+            "list_sources", {"offset": first["next_offset"], "limit": 1}
+        ))
+        assert (await client.call(
+            "list_sources", {"offset": -1, "limit": 1}
+        )).isError
+
+    assert first["notebook_id"] == notebook_id
+    assert first["total_count"] == 2
+    assert first["offset"] == 0 and first["limit"] == 1
+    assert first["next_offset"] == 1
+    assert first["items"] == [{
+        "source_id": "list-source-a",
+        "title": "论文显示名 A",
+        "file_name": "a.pdf",
+        "source_type": "pdf",
+        "doc_type": "academic_paper",
+        "summary": "第一篇摘要",
+        "parse_status": "parsed",
+        "status": "ready",
+        "parse_failed": False,
+        "parse_quality_warning": False,
+        "indexing_chunk_fallback": False,
+        "element_count": 0,
+        "kg_extracted": False,
+        "kg_analyzed_empty": False,
+        "agent_created": False,
+        "created_at": "2026-01-01T00:00:00Z",
+    }]
+    assert second["total_count"] == 2
+    assert second["next_offset"] is None
+    assert second["items"][0]["source_id"] == "list-source-b"
+    assert second["items"][0]["parse_failed"] is True
+    serialized = json.dumps((first, second), ensure_ascii=False)
+    assert "list-source-hidden" not in serialized
+    assert "list-source-mounted" not in serialized
+    assert "error_message" not in serialized
+    assert "/private/source" not in serialized
+    assert "/Users/operator" not in serialized
+    _assert_budgeted(first)
+    _assert_budgeted(second)
 
 
 @pytest.fixture
