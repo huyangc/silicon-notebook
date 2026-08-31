@@ -290,6 +290,14 @@ class PostgresDatabase:
         self._scale_build_lock_slots = threading.BoundedSemaphore(
             self._scale_build_lock_capacity
         )
+        # Active dedicated lock sessions (P2, codex PR#643 R33): the pool
+        # only tracks pooled connections, so without this registry a held
+        # scale-build claim outlives ``close()`` — the advisory lock stays
+        # granted, other instances keep seeing the notebook busy, and a
+        # detached worker's ``verify_held`` still answers True after
+        # repository shutdown.
+        self._scale_build_lock_registry_lock = threading.Lock()
+        self._active_scale_build_locks: set = set()
         self._opened = False
         self._closed = False
         self._pool: ConnectionPool[psycopg.Connection[PostgresRow]] = ConnectionPool(
@@ -720,12 +728,22 @@ class PostgresDatabase:
         if not acquired:
             self._close_and_release_lock_session(connection)
             return None
-        return PostgresScaleBuildLock(
+        handle = PostgresScaleBuildLock(
             connection,
             _SCALE_BUILD_LOCK_NAMESPACE,
             lock_key,
-            self._scale_build_lock_slots.release,
+            lambda: self._retire_scale_build_lock(handle),
         )
+        with self._scale_build_lock_registry_lock:
+            self._active_scale_build_locks.add(handle)
+        return handle
+
+    def _retire_scale_build_lock(self, handle) -> None:
+        """The handle's ``on_release``: give the session budget back and drop
+        it from the active registry (P2, codex PR#643 R33)."""
+        with self._scale_build_lock_registry_lock:
+            self._active_scale_build_locks.discard(handle)
+        self._scale_build_lock_slots.release()
 
     def _close_and_release_lock_session(self, connection) -> None:
         """Give the session budget back on every path that keeps no handle."""
@@ -737,9 +755,22 @@ class PostgresDatabase:
         self._scale_build_lock_slots.release()
 
     def close(self) -> None:
-        """Close the pool once. Closing an unopened/already-closed pool is safe."""
+        """Close the pool once. Closing an unopened/already-closed pool is safe.
+
+        Also releases every still-held scale-build lock session (P2, codex
+        PR#643 R33): those dedicated connections live outside the pool, so
+        closing only the pool would leave their advisory locks granted —
+        other instances keep seeing the notebook busy, and a detached build
+        worker's ``verify_held`` keeps answering True after this repository
+        shut down. ``release()`` is idempotent and thread-safe, so racing a
+        worker's own release is harmless; after this, that worker's next
+        ``verify_held`` answers False and its publish refuses."""
         with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
             self._pool.close()
+        with self._scale_build_lock_registry_lock:
+            active = list(self._active_scale_build_locks)
+        for handle in active:
+            handle.release()
