@@ -46,3 +46,6 @@ CREATE INDEX idx_retained_activity_owner_created
 
 CREATE INDEX idx_retained_activity_expires
   ON retained_user_activity (expires_at);
+
+CREATE INDEX idx_retained_activity_notebook
+  ON retained_user_activity (notebook_id);
