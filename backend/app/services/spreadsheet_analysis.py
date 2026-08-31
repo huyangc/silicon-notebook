@@ -592,6 +592,7 @@ class SpreadsheetAnalysisService:
         *,
         notebook_id: str,
         source_ids: Sequence[str],
+        source_refs: Sequence[tuple[str, str]] | None = None,
         question: str,
         planner_client: Any,
         cancel_event: Any = None,
@@ -600,11 +601,14 @@ class SpreadsheetAnalysisService:
             return [], None
         if not _has_spreadsheet_intent(question):
             return [], None
+        manifest_refs = source_refs or tuple(
+            (notebook_id, source_id) for source_id in source_ids
+        )
         manifests = [
             manifest
-            for source_id in source_ids
+            for manifest_notebook_id, source_id in manifest_refs
             if (manifest := self.artifacts.load_spreadsheet_manifest(
-                notebook_id, source_id
+                manifest_notebook_id, source_id
             )) is not None
         ]
         if not manifests:
@@ -1213,7 +1217,7 @@ def spreadsheet_prompt_block(
             "object_type": "element" if element_id else "source",
             "name": f"{result.sheet}!{result.range}",
             "definition": "电子表格确定性分析结果",
-            "snippet": lines[-1][:300],
+            "snippet": lines[-1],
             "source_id": result.source_id,
             "element_id": element_id,
             "source_title": result.source_title,

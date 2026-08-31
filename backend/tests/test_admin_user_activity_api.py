@@ -472,6 +472,35 @@ def test_notebook_sources_allowed_for_admin(client):
     assert resp.status_code == 200
 
 
+def test_exact_source_detail_is_read_only_and_admin_accessible(client):
+    admin = _auth_admin(client)
+    owner = _auth(client, 33)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "Private notebook")
+    with _repo()._write() as db:
+        _insert_source(
+            db,
+            "src-private",
+            notebook_id,
+            "2026-08-01T10:00:00",
+            title="Private source",
+            file_name="private.xlsx",
+        )
+
+    response = client.get(
+        f"/api/admin/users/{owner_id}/notebooks/{notebook_id}/sources/src-private",
+        headers=admin,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "src-private"
+    assert body["notebook_id"] == notebook_id
+    assert body["display_title"] == "Private source"
+    assert "file_path" not in body
+    assert "error_message" not in body
+
+
 def test_notebook_sources_not_owned_by_target_user_404(client):
     """notebook_id belongs to a different user than the {user_id} path
     segment — must 404 (not leak existence via 403), even for an admin

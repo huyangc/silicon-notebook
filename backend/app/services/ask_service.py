@@ -3297,25 +3297,36 @@ class AskService:
             return []
         try:
             notebook_id = prepared.notebook_id
-            visible_source_ids = tuple(
-                self.ask_engine_visible_sources(notebook_id)
-            )
-            if runtime.scope is None:
-                frozen_source_ids = visible_source_ids
-            else:
-                frozen_source_ids = tuple(
-                    source_id for source_id in visible_source_ids
-                    if runtime.scope.allows(notebook_id, source_id)
-                )
             hidden_source_ids = set(
                 self.ask_engine_hidden_sources(notebook_id, prepared.user_id)
+            )
+            participant_notebook_ids = tuple(dict.fromkeys((
+                notebook_id,
+                *self.ask_engine_participant_notebooks(notebook_id),
+            )))
+            source_refs = tuple(
+                (participant_notebook_id, source_id)
+                for participant_notebook_id in participant_notebook_ids
+                for source_id in self.ask_engine_visible_sources(
+                    participant_notebook_id
+                )
+                if (
+                    runtime.scope is None
+                    or runtime.scope.allows(participant_notebook_id, source_id)
+                )
+                and not (
+                    participant_notebook_id == notebook_id
+                    and source_id in hidden_source_ids
+                )
             )
             results, step = self.spreadsheet_analysis.analyze(
                 notebook_id=notebook_id,
                 source_ids=tuple(
-                    source_id for source_id in frozen_source_ids
-                    if source_id not in hidden_source_ids
+                    source_id
+                    for source_notebook_id, source_id in source_refs
+                    if source_notebook_id == notebook_id
                 ),
+                source_refs=source_refs,
                 question=prepared.research_question,
                 planner_client=self.model_clients.chat("reasoning_agent"),
                 cancel_event=runtime.cancellation,

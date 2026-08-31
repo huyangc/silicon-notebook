@@ -9,6 +9,7 @@ import {
   FORBIDDEN_SENTINEL,
   fetchUserActivity,
   fetchUserAskDetail,
+  fetchUserNotebookSource,
   fetchUserNotebookSources,
 } from "./api.ts";
 import { mergeActivityPages } from "./format.ts";
@@ -30,6 +31,22 @@ function initialActivityType(): ActivityTypeFilter {
   if (typeof window === "undefined") return "";
   const value = new URLSearchParams(window.location.search).get("activity_type");
   return value === "ask" || value === "source" || value === "report" ? value : "";
+}
+
+function initialSourceTarget(): {
+  ownerId: string;
+  notebookId: string;
+  sourceId: string;
+} {
+  if (typeof window === "undefined") {
+    return { ownerId: "", notebookId: "", sourceId: "" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    ownerId: params.get("owner") || "",
+    notebookId: params.get("notebook_id") || "",
+    sourceId: params.get("source_id") || "",
+  };
 }
 
 /**
@@ -85,6 +102,8 @@ export function ActivityView({
   const [activityType, setActivityType] = useState<ActivityTypeFilter>(
     fixedActivityType ?? initialActivityType,
   );
+  const sourceTarget = useMemo(initialSourceTarget, []);
+  const sourceTargetKeyRef = useRef("");
   const [expanded, setExpanded] = useState<string[]>([]);
   const [sources, setSources] = useState<Record<string, SourceListState>>({});
 
@@ -343,6 +362,38 @@ export function ActivityView({
   const selectSource = useCallback((source: ActivitySource) => {
     setSelected(source);
   }, []);
+
+  useEffect(() => {
+    const targetKey = [
+      userId,
+      sourceTarget.ownerId,
+      sourceTarget.notebookId,
+      sourceTarget.sourceId,
+    ].join("\u0000");
+    if (
+      !userId
+      || sourceTarget.ownerId !== userId
+      || !sourceTarget.notebookId
+      || !sourceTarget.sourceId
+      || sourceTargetKeyRef.current === targetKey
+    ) return;
+    if (notebookId !== sourceTarget.notebookId) {
+      setNotebookId(sourceTarget.notebookId);
+      return;
+    }
+    sourceTargetKeyRef.current = targetKey;
+    fetchUserNotebookSource(
+      userId, sourceTarget.notebookId, sourceTarget.sourceId,
+    )
+      .then((source) => {
+        if (sourceTargetKeyRef.current === targetKey) setSelected(source);
+      })
+      .catch((cause) => {
+        if (sourceTargetKeyRef.current !== targetKey) return;
+        if (isForbidden(cause)) setForbidden(true);
+        else setError(toUserMessage(cause, "来源详情加载失败，请重试"));
+      });
+  }, [notebookId, sourceTarget, userId]);
 
   useEffect(() => {
     if (!selected || selected.type !== "ask" || !userId) {

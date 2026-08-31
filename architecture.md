@@ -268,7 +268,7 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 当前 Ask mode registry 的默认路径是 `chunk`；`reasoning` 为严格 KG 路径，迭代执行计划、检索、反思并流式产出 trace。自动界面的请求级 `mode="auto"` 刻意不进入 registry：API 在持久会话/job 创建前调用既有 corpus-blind 问题理解 seam，把结构化意图按封闭规则解析成 `chunk`/`reasoning`，深入分析直接复用该合同作为自动确认；歧义、模型未配置或理解失败保守落 `chunk`。因此持久化 mode、retrieval-run kind 与引擎真源仍只有稳定 registry id，高级界面的具名选择不经过自动路由。退役 mode id 只保留兼容映射，不能改回默认模式。
 
-Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之前。它只读取冻结的可见来源 ceiling（显式选择，或当次全选快照，再减隐藏合成来源），且仅在命中分析意图与已有快照时付 planner 成本；结果作为 `ResponseDraftInput.spreadsheet_results` 进入合成，并同时追加 `AskResponse.result_sets(kind="spreadsheet")` 与可点击来源引用。lane 内任何异常都只记录稳定异常类型并 fail-open，不能放宽 scope、阻塞原回答或修改用户来源。
+Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之前。它遍历冻结参与集中的当前笔记本及获准挂载库，只读取各自通过 `ActiveSourceScope.allows(owner_notebook_id, source_id)` 的可见来源 ceiling（显式选择，或当次全选快照，再减当前库隐藏合成来源），并按来源所属笔记本读取快照；仅在命中分析意图与已有快照时付 planner 成本。结果作为 `ResponseDraftInput.spreadsheet_results` 进入合成，并同时追加 `AskResponse.result_sets(kind="spreadsheet")` 与可点击来源引用。lane 内任何异常都只记录稳定异常类型并 fail-open，不能放宽 scope、阻塞原回答或修改用户来源。
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 

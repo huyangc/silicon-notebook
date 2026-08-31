@@ -188,6 +188,35 @@ def test_planner_selects_whitelisted_grouped_aggregate(tmp_path):
     assert result.rows[1].cells == {"Region": "West", "Amount · sum": "20"}
 
 
+def test_analysis_loads_manifest_from_owning_participant_notebook(tmp_path):
+    path = tmp_path / "base-sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    source = _source(path)
+    source.id = "base-sheet"
+    source.notebook_id = "base-kept"
+    assert service.compile_source(
+        source, notebook_name="Base", owner_id="owner-base", row_element_ids={}
+    )
+
+    [result], trace = service.analyze(
+        notebook_id="nb-1",
+        source_ids=(),
+        source_refs=(("base-kept", "base-sheet"),),
+        question="分析挂载参考库中的 Excel 数据概况",
+        planner_client=_OfflinePlanner(),
+    )
+
+    assert result.source_id == "base-sheet"
+    assert trace is not None
+
+
 def test_result_preview_is_bounded_by_cells_and_serialized_bytes(tmp_path):
     path = tmp_path / "wide.xlsx"
     workbook = Workbook()
@@ -240,6 +269,11 @@ def test_result_preview_is_bounded_by_cells_and_serialized_bytes(tmp_path):
     )
     assert len(prompt.encode("utf-8")) <= 300
     assert evidence
+    _, full_evidence = spreadsheet_prompt_block(
+        [result], preview_rows=100, max_bytes=65_536
+    )
+    assert "v" * 300 in full_evidence["k6001"]["snippet"]
+    assert len(full_evidence["k6001"]["snippet"]) > 300
 
 
 def test_spreadsheet_output_and_prompt_budgets_are_validated(tmp_path):
@@ -396,17 +430,27 @@ def test_reasoning_spreadsheet_lane_honors_exclude_scope():
     class _CapturingAnalysis:
         def __init__(self) -> None:
             self.source_ids = ()
+            self.source_refs = ()
 
         def analyze(self, **kwargs):
             self.source_ids = kwargs["source_ids"]
+            self.source_refs = kwargs["source_refs"]
             return [], None
 
     analysis = _CapturingAnalysis()
     service = object.__new__(AskService)
     service.spreadsheet_analysis = analysis
-    service.ask_engine_visible_sources = lambda notebook_id: (
-        "src-kept", "src-excluded", "src-hidden"
+    service.ask_engine_participant_notebooks = lambda notebook_id: (
+        "nb-1", "base-kept", "base-excluded"
     )
+    visible_by_notebook = {
+        "nb-1": ("src-kept", "src-excluded", "src-hidden"),
+        "base-kept": ("base-sheet",),
+        "base-excluded": ("excluded-base-sheet",),
+    }
+    service.ask_engine_visible_sources = lambda notebook_id: visible_by_notebook[
+        notebook_id
+    ]
     service.ask_engine_hidden_sources = lambda notebook_id, user_id: ("src-hidden",)
     service.model_clients = SimpleNamespace(chat=lambda workload: _OfflinePlanner())
     runtime = SimpleNamespace(
@@ -414,6 +458,8 @@ def test_reasoning_spreadsheet_lane_honors_exclude_scope():
             notebook_id="nb-1",
             mode="exclude",
             source_ids=frozenset({"src-excluded"}),
+            base_mode="include",
+            base_notebook_ids=frozenset({"base-kept"}),
         ),
         cancellation=None,
         trace_sink=None,
@@ -426,6 +472,10 @@ def test_reasoning_spreadsheet_lane_honors_exclude_scope():
 
     assert service._spreadsheet_reasoning_results(prepared, runtime, []) == []
     assert analysis.source_ids == ("src-kept",)
+    assert analysis.source_refs == (
+        ("nb-1", "src-kept"),
+        ("base-kept", "base-sheet"),
+    )
 
 
 def test_planner_cancellation_is_not_downgraded_to_local_profile(tmp_path):

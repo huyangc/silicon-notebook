@@ -5,6 +5,7 @@ import { readHttpError, throwHumanizedHttpError } from "../../../errors.ts";
 import type {
   ActivityCursor,
   ActivityResponse,
+  ActivitySource,
   ActivityTypeFilter,
   AskDetail,
   PaginatedSources,
@@ -80,6 +81,17 @@ export function fetchUserNotebookSources(
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return get<PaginatedSources>(
     `/admin/users/${encodeURIComponent(userId)}/notebooks/${encodeURIComponent(notebookId)}/sources${suffix}`,
+  );
+}
+
+// GET /admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}
+export function fetchUserNotebookSource(
+  userId: string,
+  notebookId: string,
+  sourceId: string,
+): Promise<ActivitySource> {
+  return get<ActivitySource>(
+    `/admin/users/${encodeURIComponent(userId)}/notebooks/${encodeURIComponent(notebookId)}/sources/${encodeURIComponent(sourceId)}`,
   );
 }
 

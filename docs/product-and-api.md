@@ -2486,7 +2486,8 @@ source's ordinary parse status or remove it from text retrieval.
 Only `reasoning` Ask can consume the snapshot. The lane remains dormant unless the frozen,
 user-selected source scope contains a compiled workbook and the question has an analytical
 spreadsheet intent. Include/exclude scopes are resolved through the same frozen `allows`
-semantics as retrieval; excluded workbooks never reach the planner. Intent requires either
+semantics as retrieval across the active notebook and every allowed mounted participant;
+excluded workbooks and excluded reference libraries never reach the planner. Intent requires either
 explicit workbook/table context plus an analysis phrase, or an unambiguous table operation;
 an isolated `行`/`列` character inside an unrelated word does not qualify, and bare English
 verbs such as `count`, `top`, or `group` require table context unless they form a clear
@@ -2504,6 +2505,8 @@ one aggregate byte rail; omitted fields are never cut mid-value, and a result wa
 when that projection was partial. The persisted/browser result is independently bounded by
 rows, cells (headers included), and serialized table bytes, while synthesis receives a further
 row-and-byte-bounded preview.
+Every spreadsheet evidence line admitted under that preview byte rail is retained whole in
+the citable evidence map; it is never subjected to a second hidden character slice.
 
 The professional compiler refuses shapes it cannot analyze without guessing: unreadable,
 damaged or encrypted workbooks; missing headers; dimension/sheet limits; cells over the
@@ -2544,7 +2547,9 @@ The administrator's **User usage overview** keeps its existing user-table column
 two sheets next to it: **Question analysis** (the existing “View questions” link now opens
 this fixed-Ask activity view) and **Parsing issues**. Both are read-only. Parsing issues can
 be filtered by user, status, and category; a live source links to the original notebook and
-source detail, while a deleted source shows only the redacted summary. The administrator has
+the exact source's read-only administrator detail in User activity (rather than the ordinary
+workspace, whose owner/member guard still applies), while a deleted source shows only the
+redacted summary. The administrator has
 no reparse, bulk retry, close, quarantine-delete, or case-purge endpoint/control and therefore
 cannot mutate a user's notebook through this feature.
 
@@ -2552,6 +2557,10 @@ cannot mutate a user's notebook through this feature.
   read-only list; `status` is empty/`open`/`resolved`, `category` is empty/`source_parse`/
   `spreadsheet_analysis`, and `limit` is `1..500` (default 200). There is deliberately no
   POST/PATCH/DELETE companion.
+- `GET /api/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}` — the
+  content-minimal, read-only exact-source projection used by that analysis deep link; it
+  returns 404 unless the notebook belongs to the path user and the source is a live visible
+  source in that notebook.
 
 ## Admin observability: user activity (`/dev/logs`)
 

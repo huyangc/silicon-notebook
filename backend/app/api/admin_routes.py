@@ -525,6 +525,36 @@ def get_admin_user_notebook_sources(
     return repository().list_sources_page(notebook_id, offset, limit)
 
 
+@router.get(
+    "/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}",
+    response_model=ActivitySource,
+)
+def get_admin_user_notebook_source(
+    user_id: str,
+    notebook_id: str,
+    source_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> ActivitySource:
+    """Exact read-only source projection for admin analysis deep links."""
+    _require_activity_enabled()
+    _require_self_or_admin(user, user_id)
+    if not _notebook_owned_by_user(user_id, notebook_id):
+        raise HTTPException(status_code=404, detail="notebook not found")
+    repo = repository()
+    if source_id not in set(repo.all_visible_source_ids(notebook_id)):
+        raise HTTPException(status_code=404, detail="source not found")
+    try:
+        detail = repo.get_source(source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="source not found") from None
+    if detail.notebook_id != notebook_id:
+        raise HTTPException(status_code=404, detail="source not found")
+    raw = detail.model_dump()
+    raw["source_type"] = raw.pop("type", "")
+    raw["parse_failed"] = detail.parse_status == "failed"
+    return _activity_source_item(raw)
+
+
 @router.get("/admin/users/{user_id}/asks/{job_id}", response_model=AskDetail)
 def get_admin_user_ask_detail(
     user_id: str,

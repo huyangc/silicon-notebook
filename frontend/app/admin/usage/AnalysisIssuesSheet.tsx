@@ -108,8 +108,8 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
                 <td>{item.updated_at.replace("T", " ").slice(0, 16)}</td>
                 <td>{item.expires_at.replace("T", " ").slice(0, 16)}</td>
                 <td>
-                  {item.notebook_id && !item.notebook_deleted
-                    ? <a href={`/#notebook=${encodeURIComponent(item.notebook_id)}${item.source_id ? `&source=${encodeURIComponent(item.source_id)}` : ""}`}>打开原笔记本</a>
+                  {item.notebook_id && item.source_id && !item.source_deleted && !item.notebook_deleted
+                    ? <a href={`/dev/logs?view=activity&owner=${encodeURIComponent(item.owner_id)}&activity_type=source&notebook_id=${encodeURIComponent(item.notebook_id)}&source_id=${encodeURIComponent(item.source_id)}`}>查看来源详情</a>
                     : <span>仅保留脱敏摘要</span>}
                 </td>
               </tr>

@@ -5,6 +5,7 @@ import { expect, test, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   fetchUserActivity: vi.fn(),
   fetchUserAskDetail: vi.fn(),
+  fetchUserNotebookSource: vi.fn(),
   fetchUserNotebookSources: vi.fn(),
   fetchUserNotebooks: vi.fn(),
 }));
@@ -13,6 +14,7 @@ vi.mock("../../app/dev/logs/activity/api.ts", () => ({
   FORBIDDEN_SENTINEL: "forbidden",
   fetchUserActivity: mocks.fetchUserActivity,
   fetchUserAskDetail: mocks.fetchUserAskDetail,
+  fetchUserNotebookSource: mocks.fetchUserNotebookSource,
   fetchUserNotebookSources: mocks.fetchUserNotebookSources,
 }));
 vi.mock("../../app/admin/usage/notebooks.ts", () => ({
@@ -136,6 +138,30 @@ function sourcePage(items: ReturnType<typeof failedSource>[], total = 2) {
 function view() {
   return render(<ActivityView now={NOW} scopeKey='["activity","user-1",""]' userId="user-1" />);
 }
+
+
+test("解析问题深链通过管理员只读端点精确打开来源详情", async () => {
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource.mockResolvedValue(streamSource());
+
+  view();
+
+  expect(await screen.findByRole("heading", { name: "季度报告" })).toBeInTheDocument();
+  expect(mocks.fetchUserNotebookSource).toHaveBeenCalledWith(
+    "user-1", "nb-1", "src-1",
+  );
+  expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith(
+    "user-1",
+    expect.objectContaining({ activityType: "source", notebookId: "nb-1" }),
+  );
+  window.history.replaceState({}, "", "/dev/logs");
+});
 
 
 test("左栏列出该用户的笔记本与界面词计数（提问用 questions，不是会话容器数）", async () => {
