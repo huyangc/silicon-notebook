@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 from app.core.config import Settings
 from app.core import diagnostics_runtime as diagnostics
+from app.repositories.scale_build_lock import UNSUPPORTED_SCALE_BUILD_LOCK
 from app.repositories.sqlite.write_lock_stats import WriteLockStats
 
 
@@ -698,6 +699,18 @@ class SqliteDatabase:
         """
         del table_id
         yield
+
+    def try_scale_build_lock(self, notebook_id: str):
+        """SQLite has no cross-process scale-build lock — say so explicitly.
+
+        Returning the UNSUPPORTED sentinel (rather than a nullcontext that
+        would read as "granted") is what lets the offline build CLI refuse a
+        SQLite deployment instead of racing an in-process build over the same
+        ``{scale_dir}.tmp``. The serving process falls back to its in-process
+        ``building`` claim, which is the only mutex this backend ever had.
+        """
+        del notebook_id
+        return UNSUPPORTED_SCALE_BUILD_LOCK
 
 # _caller_site() 里 _is_write_frame() 用来识别 write() 自己那一帧的 code 对象。
 # 放在类体之后取(而非放进类体内部或 _caller_site 旁):必须等 @contextmanager

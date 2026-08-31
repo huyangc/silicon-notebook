@@ -1754,6 +1754,11 @@ class RepositoryRuntime:
             facts_repo=self.queries,
             copy_stats_memo=self.retrieval_snapshots.copy_stats_memo,
             require_indexing_write=self.indexing_pipeline.require_write_admission,
+            # W-CLI: per-notebook build claim across processes. Taken from the
+            # database this coordinator already owns rather than added to the
+            # facade surface — the adapter decides whether the backend can
+            # provide one, and the service never inspects the URL scheme.
+            scale_build_lock=self.database.try_scale_build_lock,
         )
         return self.scale_artifacts
 

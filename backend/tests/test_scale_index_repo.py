@@ -104,11 +104,11 @@ def test_kg_matrix_is_released_before_persist(repo, monkeypatch):
     persist_state: dict = {}
     real_save = builder.artifacts.save_full
 
-    def spy_save(notebook_id, artifacts):
+    def spy_save(notebook_id, artifacts, **kwargs):
         _gc.collect()
         ref = ref_holder.get("kg")
         persist_state["alive"] = ref is not None and ref() is not None
-        return real_save(notebook_id, artifacts)
+        return real_save(notebook_id, artifacts, **kwargs)
 
     monkeypatch.setattr(builder.artifacts, "save_full", spy_save)
 

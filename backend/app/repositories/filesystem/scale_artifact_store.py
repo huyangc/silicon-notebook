@@ -27,8 +27,9 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
+from app.repositories.scale_build_lock import ScaleBuildLockLost
 from app.services.kg import scale_index as scale_index_module
 from app.services.kg import viz_index as viz_index_module
 
@@ -176,7 +177,13 @@ class ScaleArtifactStore:
             str(self.viz_dir(notebook_id)), **artifacts
         )
 
-    def save_full(self, notebook_id: str, artifacts: ScaleBuildArtifacts) -> dict:
+    def save_full(
+        self,
+        notebook_id: str,
+        artifacts: ScaleBuildArtifacts,
+        *,
+        verify_held: Optional[Callable[[], bool]] = None,
+    ) -> dict:
         """Full rebuild: stage into {scale_dir}.tmp, then publish atomically.
 
         Writing straight into the live directory meant a rebuild that died
@@ -194,7 +201,10 @@ class ScaleArtifactStore:
         """
         temporary = self.prepare_fold_directory(notebook_id)
         manifest = scale_index_module.save_scale_index(str(temporary), **artifacts)
-        self.swap_fold_directory(notebook_id, temporary)
+        # The claim is re-verified here rather than at build entry: the staging
+        # above is the hours-long part, and a claim proven fresh before it says
+        # nothing about who owns the directory now.
+        self.swap_fold_directory(notebook_id, temporary, verify_held=verify_held)
         return manifest
 
     def save_source_partitions(
@@ -346,7 +356,13 @@ class ScaleArtifactStore:
         os.makedirs(tmp_dir, exist_ok=True)
         return Path(tmp_dir)
 
-    def swap_fold_directory(self, notebook_id: str, temporary) -> None:
+    def swap_fold_directory(
+        self,
+        notebook_id: str,
+        temporary,
+        *,
+        verify_held: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Atomic-swap sequence (caller holds the building lock):
         live → .old, temporary → live, rm .old. If publishing temporary
         fails after the first rename, restore .old → live before re-raising
@@ -356,7 +372,21 @@ class ScaleArtifactStore:
         index, but a first-ever full rebuild has no live directory yet — so the
         live → .old step is skipped when out_dir is absent. Rollback semantics
         are unchanged: only a live directory that was actually set aside can be
-        (and needs to be) put back."""
+        (and needs to be) put back.
+
+        ``verify_held`` re-checks the caller's cross-process build claim in the
+        last instant before the first rename — the one step that destroys the
+        published artifact. A claim that evaporated mid-build (killed lock
+        session, failed over database) means another process may already be
+        publishing here, so the build is abandoned: nothing is renamed, the
+        staged ``.tmp`` is left on disk, and the failure is loud. Callers with
+        no cross-process claim (SQLite, direct builder use) pass nothing."""
+        if verify_held is not None and not verify_held():
+            raise ScaleBuildLockLost(
+                "scale build lock was lost before the artifact swap for "
+                f"{notebook_id}; nothing was published and the staged build "
+                f"remains at {self.scale_dir(notebook_id)}.tmp"
+            )
         out_dir = str(self.scale_dir(notebook_id))
         old_dir = out_dir + ".old"
         if os.path.exists(old_dir):

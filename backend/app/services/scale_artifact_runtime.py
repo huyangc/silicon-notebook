@@ -11,7 +11,15 @@ import datetime
 import threading
 import time
 import weakref
-from typing import Any, Callable, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Optional
+
+from app.repositories.scale_build_lock import (
+    UNSUPPORTED_SCALE_BUILD_LOCK,
+    ScaleBuildAlreadyBuilding,
+    ScaleBuildBusy,
+    ScaleBuildLock,
+)
 
 
 # Outcome of one admission attempt in ``_admit_scale_op`` — the three cases a
@@ -118,6 +126,7 @@ class ScaleArtifactRuntime:
         facts_repo,
         copy_stats_memo,
         require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
+        scale_build_lock: Callable[[str], Optional[ScaleBuildLock]] | None = None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -190,6 +199,18 @@ class ScaleArtifactRuntime:
         # see the ``manual`` parameter on ``_run_scale_op``.
         self._scale_failure_lock = threading.Lock()
         self._scale_failure_state: dict[str, tuple[int, float]] = {}
+        # W-CLI: the per-notebook build claim that also excludes OTHER
+        # processes (the offline build CLI, a second service replica). Backends
+        # without one hand back the UNSUPPORTED sentinel, so this seam is never
+        # a bare None at the call sites below.
+        self._scale_build_lock = scale_build_lock
+        # Claims held by in-flight builds in THIS process, so the swap step can
+        # re-verify the very handle its build was admitted on. Deliberately not
+        # guarded by ``building_lock``: the fold path re-verifies from inside a
+        # ``with self.building_lock`` block, and reusing that lock here would
+        # deadlock the swap it is supposed to protect.
+        self._scale_lock_handles_lock = threading.Lock()
+        self._scale_build_lock_handles: dict[str, ScaleBuildLock] = {}
         if getattr(require_indexing_write, "__self__", None) is not None:
             self._require_indexing_write_ref = weakref.WeakMethod(
                 require_indexing_write
@@ -216,6 +237,7 @@ class ScaleArtifactRuntime:
         self.builder.building = self.building
         self.builder.building_lock = self.building_lock
         self.builder.notify_index_done = self.notify_index_done
+        self.builder.verify_scale_build_lock = self.verify_scale_build_lock
 
     def get_notebook(self, notebook_id: str):
         return self.notebooks.get_notebook(notebook_id)
@@ -704,15 +726,142 @@ class ScaleArtifactRuntime:
             "viz_stale": not fresh,
         }
 
+    # ------------------------------ cross-process build claim
+
+    def _acquire_scale_build_lock(
+        self, notebook_id: str
+    ) -> Optional[ScaleBuildLock]:
+        """Try this notebook's cross-process build claim; ``None`` = busy.
+
+        Fails CLOSED. An unreachable or erroring lock backend cannot authorize
+        a build: the whole point of the claim is that a second writer would
+        publish over the same artifact directory, and a build admitted without
+        one is exactly the race the claim exists to prevent. The caller's busy
+        path leaves the durable queue entry alone, so the work returns on a
+        later tick rather than being lost.
+        """
+        acquire = self._scale_build_lock
+        if acquire is None:
+            return UNSUPPORTED_SCALE_BUILD_LOCK
+        try:
+            return acquire(notebook_id)
+        except Exception:  # noqa: BLE001 - an unusable lock means "not now"
+            try:
+                self.event_log.logger.exception(
+                    "scale build lock probe failed for %s", notebook_id
+                )
+            except Exception:
+                pass
+            return None
+
+    @staticmethod
+    def _release_scale_build_handle(handle: Optional[ScaleBuildLock]) -> None:
+        if handle is None:
+            return
+        try:
+            handle.release()
+        except Exception:  # noqa: BLE001 - release is best-effort by contract
+            pass
+
+    def _register_scale_build_lock(
+        self, notebook_id: str, handle: ScaleBuildLock
+    ) -> None:
+        """Publish the handle the swap step will re-verify against.
+
+        Must happen BEFORE the worker that owns the handle can run, or a build
+        could reach its swap with no claim registered and re-verify nothing.
+        """
+        with self._scale_lock_handles_lock:
+            self._scale_build_lock_handles[notebook_id] = handle
+
+    def _discard_scale_build_lock(self, notebook_id: str) -> None:
+        """Unregister and release this notebook's claim (idempotent)."""
+        with self._scale_lock_handles_lock:
+            handle = self._scale_build_lock_handles.pop(notebook_id, None)
+        self._release_scale_build_handle(handle)
+
+    def verify_scale_build_lock(self, notebook_id: str) -> bool:
+        """Whether this notebook's registered claim is still provably held.
+
+        Wired into the builder and consulted by the artifact store immediately
+        before the swap. No registered claim means this build never took one
+        (an unwired builder used directly in a test); there is nothing to
+        re-verify and nothing that could have been lost.
+        """
+        with self._scale_lock_handles_lock:
+            handle = self._scale_build_lock_handles.get(notebook_id)
+        if handle is None:
+            return True
+        try:
+            return bool(handle.verify_held())
+        except Exception:  # noqa: BLE001 - unverifiable == lost
+            return False
+
+    @contextmanager
+    def _claim_scale_build(self, notebook_id: str) -> Iterator[None]:
+        """Claim one notebook for a SYNCHRONOUS build/fold on this thread.
+
+        Closes the historical gap where ``build()`` claimed nothing at all and
+        ``fold()`` claimed only in-process: the facade's ``build_scale_index``
+        (offline batch ingest) now excludes both the service's own workers and
+        any other process. The two claims are taken cross-process first so a
+        holder in this very process is reported by the same code path as a
+        holder elsewhere.
+        """
+        handle = self._acquire_scale_build_lock(notebook_id)
+        if handle is None:
+            raise ScaleBuildBusy(
+                f"another process is building the scale index for {notebook_id}"
+            )
+        try:
+            with self.building_lock:
+                if notebook_id in self.building:
+                    raise ScaleBuildAlreadyBuilding(
+                        f"a scale index build for {notebook_id} is already running"
+                    )
+                self.building.add(notebook_id)
+        except BaseException:
+            self._release_scale_build_handle(handle)
+            raise
+        self._register_scale_build_lock(notebook_id, handle)
+        try:
+            yield
+        finally:
+            # Cross-process claim first: releasing it before the in-process one
+            # means the only window another admission can see is "in-process
+            # busy", which every caller already handles.
+            self._discard_scale_build_lock(notebook_id)
+            with self.building_lock:
+                self.building.discard(notebook_id)
+
     def build(
         self,
         notebook_id: str,
         on_stage: Optional[Callable[[str, int], None]] = None,
+        *,
+        assume_locked: bool = False,
     ) -> dict:
-        return self.builder.build(notebook_id, on_stage=on_stage)
+        """``assume_locked`` is for the admitted worker, which already holds
+        both claims (``_admit_scale_op`` took them and handed them over)."""
+        if assume_locked:
+            return self.builder.build(notebook_id, on_stage=on_stage)
+        with self._claim_scale_build(notebook_id):
+            return self.builder.build(notebook_id, on_stage=on_stage)
 
     def fold(self, notebook_id: str, assume_locked: bool = False) -> dict:
-        return self.builder.fold(notebook_id, assume_locked=assume_locked)
+        if assume_locked:
+            return self.builder.fold(notebook_id, assume_locked=True)
+        try:
+            with self._claim_scale_build(notebook_id):
+                # The claim above IS this call's in-process mutex, so the
+                # builder must not take a second (nested) one. That also moves
+                # the completion notification the builder used to emit up here
+                # — the same shape the admitted worker's tail already has.
+                result = self.builder.fold(notebook_id, assume_locked=True)
+        except ScaleBuildAlreadyBuilding:
+            return {"status": "already_building"}
+        self.notify_index_done(notebook_id)
+        return result
 
     def build_viz(self, notebook_id: str) -> Optional[dict]:
         return self.builder.build_viz(notebook_id)
@@ -1208,148 +1357,239 @@ class ScaleArtifactRuntime:
 
             publish_snapshot(self._resolve_index_owner(notebook_id))
             return _SCALE_OP_QUEUED
+        # W-CLI: the cross-process claim is probed BEFORE the concurrency
+        # ticket, so a notebook an offline builder already owns never burns a
+        # slot. It is non-blocking; failing it is indistinguishable from (and
+        # handled exactly like) "this process is already building it".
+        lock_handle = self._acquire_scale_build_lock(notebook_id)
+        if lock_handle is None:
+            return self._queue_for_busy_claim(
+                notebook_id, queue_full_if_busy=queue_full_if_busy
+            )
+        return self._admit_claimed_scale_op(
+            notebook_id,
+            mode,
+            lock_handle,
+            supersede_idle=supersede_idle,
+            claim_idle=claim_idle,
+            claim_pending=claim_pending,
+            queue_full_if_busy=queue_full_if_busy,
+        )
+
+    def _queue_for_busy_claim(
+        self, notebook_id: str, *, queue_full_if_busy: bool
+    ) -> str:
+        """Outcome for a notebook whose build claim is held by someone else.
+
+        Deliberately the same shape as the in-process ``building`` branch of
+        ``_admit_claimed_scale_op``: work already parked in a queue stays
+        exactly where it is, a caller that owes a durable follow-up gets one
+        registered, and nothing else is touched. In particular no failure is
+        recorded — an offline build that legitimately runs for 40 minutes must
+        not push this notebook's automatic-retry backoff to its ceiling.
+
+        No pending-bus snapshot is pushed either, mirroring that same branch:
+        a busy notebook's queue entry surfaces with the next snapshot rather
+        than inventing a notification the in-process case never sent.
+        """
+        if queue_full_if_busy:
+            with self.building_lock:
+                self._queue_full_followup(notebook_id)
+            return _SCALE_OP_QUEUED
+        return _SCALE_OP_REFUSED
+
+    def _admit_claimed_scale_op(
+        self,
+        notebook_id: str,
+        mode: str,
+        lock_handle: ScaleBuildLock,
+        *,
+        supersede_idle: bool,
+        claim_idle: bool,
+        claim_pending: bool,
+        queue_full_if_busy: bool,
+    ) -> str:
+        """Second half of admission, holding this notebook's build claim.
+
+        Same ownership discipline as the concurrency ticket: from here on every
+        exit either hands ``lock_handle`` to the worker (whose finally releases
+        it) or releases it right here. The ``handed_off`` flag plus the finally
+        below is what makes that literal instead of a rule to remember.
+        """
         removed_idle_entry = None
         removed_pending_entry = None
         parked = False
-        with self.building_lock:
-            if notebook_id in self.building:
-                if queue_full_if_busy:
-                    self._queue_full_followup(notebook_id)
-                    return _SCALE_OP_QUEUED
-                return _SCALE_OP_REFUSED
-            # Does the work this call claims to consume still exist? Checked
-            # before taking a ticket so a stale drain cannot borrow one.
-            if claim_idle and notebook_id not in self.idle_queue:
-                return _SCALE_OP_REFUSED
-            if claim_pending and notebook_id not in self._scale_pending:
-                return _SCALE_OP_REFUSED
-            if not self._scale_build_semaphore.acquire(blocking=False):
-                # Every slot is busy. Park the request as data — parking it as
-                # a blocked thread is what made the ceiling meaningless
-                # (codex PR#627 R1 P1). Work already parked in a queue stays
-                # exactly where it is; only a fresh immediate request needs a
-                # record of its own. A freed slot comes back to it through
-                # ``_handoff_free_slot`` / the scheduler tick.
-                if claim_idle or claim_pending:
-                    # Already parked in a queue a drain is walking; leave it.
-                    return _SCALE_OP_QUEUED
-                if supersede_idle:
-                    # An immediate request outranks this notebook's own
-                    # off-peak entry even when it has to wait for a slot: it
-                    # will run strictly sooner, so no work is lost.
-                    self.idle_queue.pop(notebook_id, None)
-                self._park_pending(notebook_id, mode)
-                parked = True
-            else:
-                # A ticket is held from here on: every exit must either hand it
-                # to the worker (which releases it in its finally) or release
-                # it.
-                if claim_idle:
-                    removed_idle_entry = self.idle_queue.pop(notebook_id)
-                    mode = removed_idle_entry[0]
-                elif claim_pending:
-                    removed_pending_entry = self._scale_pending.pop(notebook_id)
-                    mode = removed_pending_entry[0]
-                elif supersede_idle:
-                    removed_idle_entry = self.idle_queue.pop(notebook_id, None)
-                if removed_pending_entry is None:
-                    # This request is about to run, so its own parked copy (if
-                    # any) must not start a second time for the same notebook.
-                    removed_pending_entry = self._scale_pending.pop(
-                        notebook_id, None
-                    )
-                self.building.add(notebook_id)
-        # owner 复用完成通知那套解析,fail-open 在 publish_snapshot 内。
-        from app.services.pending_bus import publish_snapshot
+        handed_off = False
+        try:
+            with self.building_lock:
+                if notebook_id in self.building:
+                    if queue_full_if_busy:
+                        self._queue_full_followup(notebook_id)
+                        return _SCALE_OP_QUEUED
+                    return _SCALE_OP_REFUSED
+                # Does the work this call claims to consume still exist? Checked
+                # before taking a ticket so a stale drain cannot borrow one.
+                if claim_idle and notebook_id not in self.idle_queue:
+                    return _SCALE_OP_REFUSED
+                if claim_pending and notebook_id not in self._scale_pending:
+                    return _SCALE_OP_REFUSED
+                if not self._scale_build_semaphore.acquire(blocking=False):
+                    # Every slot is busy. Park the request as data — parking it
+                    # as a blocked thread is what made the ceiling meaningless
+                    # (codex PR#627 R1 P1). Work already parked in a queue stays
+                    # exactly where it is; only a fresh immediate request needs a
+                    # record of its own. A freed slot comes back to it through
+                    # ``_handoff_free_slot`` / the scheduler tick.
+                    if claim_idle or claim_pending:
+                        # Already parked in a queue a drain is walking; leave it.
+                        return _SCALE_OP_QUEUED
+                    if supersede_idle:
+                        # An immediate request outranks this notebook's own
+                        # off-peak entry even when it has to wait for a slot: it
+                        # will run strictly sooner, so no work is lost.
+                        self.idle_queue.pop(notebook_id, None)
+                    self._park_pending(notebook_id, mode)
+                    parked = True
+                else:
+                    # A ticket is held from here on: every exit must either hand
+                    # it to the worker (which releases it in its finally) or
+                    # release it.
+                    if claim_idle:
+                        removed_idle_entry = self.idle_queue.pop(notebook_id)
+                        mode = removed_idle_entry[0]
+                    elif claim_pending:
+                        removed_pending_entry = self._scale_pending.pop(
+                            notebook_id
+                        )
+                        mode = removed_pending_entry[0]
+                    elif supersede_idle:
+                        removed_idle_entry = self.idle_queue.pop(
+                            notebook_id, None
+                        )
+                    if removed_pending_entry is None:
+                        # This request is about to run, so its own parked copy
+                        # (if any) must not start a second time for the same
+                        # notebook.
+                        removed_pending_entry = self._scale_pending.pop(
+                            notebook_id, None
+                        )
+                    self.building.add(notebook_id)
+            # owner 复用完成通知那套解析,fail-open 在 publish_snapshot 内。
+            from app.services.pending_bus import publish_snapshot
 
-        if parked:
-            # The completion handoff normally wakes parked work; the scheduler
-            # is the floor under it if no worker tail ever runs (hard-killed
-            # process, or a slot held by a build that outlives this request).
-            self._ensure_scheduler()
-            # 与 trigger(when="idle") 对称:新出现的「已排队」项要立刻推给铃铛,
-            # 否则要等重连才看得到(codex R5 P2)。
+            if parked:
+                # The completion handoff normally wakes parked work; the
+                # scheduler is the floor under it if no worker tail ever runs
+                # (hard-killed process, or a slot held by a build that outlives
+                # this request).
+                self._ensure_scheduler()
+                # 与 trigger(when="idle") 对称:新出现的「已排队」项要立刻推给铃铛,
+                # 否则要等重连才看得到(codex R5 P2)。
+                publish_snapshot(self._resolve_index_owner(notebook_id))
+                return _SCALE_OP_QUEUED
+            # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
+            # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
             publish_snapshot(self._resolve_index_owner(notebook_id))
-            return _SCALE_OP_QUEUED
-        # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
-        # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
-        publish_snapshot(self._resolve_index_owner(notebook_id))
 
-        def run() -> None:
-            # This worker owns the concurrency ticket its admitting thread
-            # took; the finally below is the single release site.
-            succeeded = False
-            try:
-                operation = self._resolve_mode(notebook_id, mode)
-                if operation == "fold":
-                    self.fold(notebook_id, assume_locked=True)
-                else:
-                    self.build(notebook_id)
-                succeeded = True
-            except Exception:  # noqa: BLE001 - daemon is fail-open
+            def run() -> None:
+                # This worker owns the concurrency ticket AND the build claim
+                # its admitting thread took; the finally below is the single
+                # release site for both.
+                succeeded = False
                 try:
-                    self.event_log.logger.exception(
-                        "scale op failed for %s", notebook_id
-                    )
-                except Exception:
-                    pass
-            finally:
+                    operation = self._resolve_mode(notebook_id, mode)
+                    if operation == "fold":
+                        self.fold(notebook_id, assume_locked=True)
+                    else:
+                        self.build(notebook_id, assume_locked=True)
+                    succeeded = True
+                except Exception:  # noqa: BLE001 - daemon is fail-open
+                    try:
+                        self.event_log.logger.exception(
+                            "scale op failed for %s", notebook_id
+                        )
+                    except Exception:
+                        pass
+                finally:
+                    self._scale_build_semaphore.release()
+                    if succeeded:
+                        self._scale_record_success(notebook_id)
+                    else:
+                        self._scale_record_failure(notebook_id)
+                    # Cross-process claim before the in-process one: the only
+                    # window another admission can observe is then "in-process
+                    # busy", which every caller already handles, instead of
+                    # "free here but still locked in the database".
+                    self._discard_scale_build_lock(notebook_id)
+                    with self.building_lock:
+                        self.building.discard(notebook_id)
+                    if succeeded:
+                        self.notify_index_done(notebook_id)
+                    # A corpus publication that landed while this build was
+                    # running records a coalesced full follow-up. Claim it
+                    # immediately rather than waiting for the off-peak
+                    # scheduler; the completed artifact may span the old and
+                    # new generations.
+                    try:
+                        self._run_scale_op(
+                            notebook_id, "auto", claim_idle=True
+                        )
+                    except Exception:  # noqa: BLE001 - daemon tail is fail-open
+                        try:
+                            self.event_log.logger.exception(
+                                "scale follow-up start failed for %s",
+                                notebook_id,
+                            )
+                        except Exception:
+                            pass
+                    # The slot this worker just released is the only thing the
+                    # parked queues are waiting for, and nothing else is
+                    # watching for it — without this handoff a pending entry
+                    # would sit until the next scheduler tick (or, outside the
+                    # off-peak window, until some unrelated request arrived).
+                    try:
+                        self._handoff_free_slot()
+                    except Exception:  # noqa: BLE001 - daemon tail is fail-open
+                        try:
+                            self.event_log.logger.exception(
+                                "scale slot handoff failed after %s", notebook_id
+                            )
+                        except Exception:
+                            pass
+
+            # Registered BEFORE the worker can exist: a build must never reach
+            # its swap with no claim published for the store to re-verify.
+            self._register_scale_build_lock(notebook_id, lock_handle)
+            handed_off = True
+            try:
+                self._start_daemon(f"scaleidx-{notebook_id}", run)
+            except Exception:
+                # The worker never got either of the two things this thread
+                # took for it. Both go back, and so does every displaced queue
+                # entry; note that no failure is RECORDED here — the build was
+                # never attempted, so the backoff window must not move.
+                handed_off = False
+                with self._scale_lock_handles_lock:
+                    self._scale_build_lock_handles.pop(notebook_id, None)
                 self._scale_build_semaphore.release()
-                if succeeded:
-                    self._scale_record_success(notebook_id)
-                else:
-                    self._scale_record_failure(notebook_id)
                 with self.building_lock:
                     self.building.discard(notebook_id)
-                if succeeded:
-                    self.notify_index_done(notebook_id)
-                # A corpus publication that landed while this build was
-                # running records a coalesced full follow-up. Claim it
-                # immediately rather than waiting for the off-peak scheduler;
-                # the completed artifact may span the old and new generations.
-                try:
-                    self._run_scale_op(
-                        notebook_id, "auto", claim_idle=True
-                    )
-                except Exception:  # noqa: BLE001 - daemon tail stays fail-open
-                    try:
-                        self.event_log.logger.exception(
-                            "scale follow-up start failed for %s", notebook_id
+                    # Starting the immediate worker failed before it could do
+                    # any work.  Restore the displaced requests unless a newer
+                    # one was queued in the meantime.
+                    if removed_idle_entry is not None:
+                        self.idle_queue.setdefault(
+                            notebook_id, removed_idle_entry
                         )
-                    except Exception:
-                        pass
-                # The slot this worker just released is the only thing the
-                # parked queues are waiting for, and nothing else is watching
-                # for it — without this handoff a pending entry would sit
-                # until the next scheduler tick (or, outside the off-peak
-                # window, until some unrelated request happened to arrive).
-                try:
-                    self._handoff_free_slot()
-                except Exception:  # noqa: BLE001 - daemon tail stays fail-open
-                    try:
-                        self.event_log.logger.exception(
-                            "scale slot handoff failed after %s", notebook_id
+                    if removed_pending_entry is not None:
+                        self._scale_pending.setdefault(
+                            notebook_id, removed_pending_entry
                         )
-                    except Exception:
-                        pass
-
-        try:
-            self._start_daemon(f"scaleidx-{notebook_id}", run)
-        except Exception:
-            self._scale_build_semaphore.release()  # the worker never got it
-            with self.building_lock:
-                self.building.discard(notebook_id)
-                # Starting the immediate worker failed before it could do any
-                # work.  Restore the displaced requests unless a newer one was
-                # queued in the meantime.
-                if removed_idle_entry is not None:
-                    self.idle_queue.setdefault(notebook_id, removed_idle_entry)
-                if removed_pending_entry is not None:
-                    self._scale_pending.setdefault(
-                        notebook_id, removed_pending_entry
-                    )
-            raise
-        return _SCALE_OP_STARTED
+                raise
+            return _SCALE_OP_STARTED
+        finally:
+            if not handed_off:
+                self._release_scale_build_handle(lock_handle)
 
     def rebuild_after_publication(self, notebook_id: str) -> dict:
         """Start a full build or coalesce one immediate post-build follow-up.

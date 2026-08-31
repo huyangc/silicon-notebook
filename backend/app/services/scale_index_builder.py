@@ -91,6 +91,12 @@ class ScaleIndexBuilder:
         self.building_lock = building_lock
         self.notify_index_done = notify_index_done
         self.now = now
+        # Re-verification of this build's cross-process claim, consulted in the
+        # last instant before the artifact swap. Retargeted by
+        # ``ScaleArtifactRuntime`` alongside ``building``/``building_lock``; a
+        # builder used directly (tests, no runtime) holds no claim and so has
+        # nothing to re-verify.
+        self.verify_scale_build_lock: Callable[[str], bool] = lambda _nb: True
 
     def _rebuild_source_partitions(
         self, notebook_id: str, parent_version: Any
@@ -467,6 +473,13 @@ class ScaleIndexBuilder:
                 self.projections.source_ids(notebook_id)
             ),
             "built_at": self.now(),
+            # W-CLI T-W3: the hnswlib/numpy/scipy versions this artifact was
+            # built with. Optional by construction (older artifacts have no
+            # such key); the load side warns on an hnswlib mismatch and the
+            # offline CLI's ``import`` refuses one outright.
+            scale_index_module.MANIFEST_LIBRARY_KEY: (
+                scale_index_module.runtime_library_versions()
+            ),
             # Wall clock from entry to this manifest being assembled. This is a
             # deliberate approximation (hence "约" in user-facing copy): it
             # excludes the subsequent persist I/O (cannot include the duration
@@ -509,6 +522,11 @@ class ScaleIndexBuilder:
                 "prebuilt_relation_ann": relation_ann_index,
                 "ef_construction": self.settings.hnsw_ef_construction,
             },
+            # Re-verify the cross-process build claim in the last instant
+            # before the swap (the store calls this immediately before its
+            # first rename); a lost claim abandons the build instead of
+            # publishing over whoever owns the directory now.
+            verify_held=lambda: self.verify_scale_build_lock(notebook_id),
         )
         if bool(
             getattr(
@@ -790,6 +808,13 @@ class ScaleIndexBuilder:
                 {
                     "version": self.version(notebook_id),
                     "pipeline_identity": pipeline_identity,
+                    # W-CLI T-W3: refreshed, never inherited from ``idx``. A
+                    # fold appends to the .bin with THIS process's hnswlib, so
+                    # the published artifact belongs to this process's library
+                    # set even when the base was built elsewhere.
+                    scale_index_module.MANIFEST_LIBRARY_KEY: (
+                        scale_index_module.runtime_library_versions()
+                    ),
                     "watermark_sources": sorted(
                         self.projections.source_ids(notebook_id)
                     ),
@@ -810,7 +835,13 @@ class ScaleIndexBuilder:
             scale_index_module.save_fold_manifest(str(temporary), manifest)
 
             with self.building_lock:
-                self.artifacts.swap_fold_directory(notebook_id, temporary)
+                self.artifacts.swap_fold_directory(
+                    notebook_id,
+                    temporary,
+                    # Same last-instant re-verification as the full rebuild —
+                    # a fold's swap is equally destructive.
+                    verify_held=lambda: self.verify_scale_build_lock(notebook_id),
+                )
                 self.invalidate_scale_cache(notebook_id)
             if bool(
                 getattr(
