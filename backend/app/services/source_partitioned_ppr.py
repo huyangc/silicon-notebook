@@ -379,6 +379,22 @@ class SourcePartitionedPprService:
         # unaffected by this). One stat of the companion root's manifest
         # before touching the cache gives that generation a comparable
         # signature.
+        # Hold through probe/lazy-load/combine: BOTH probes run inside the
+        # cache lock (P2, codex PR#643 R29) — a request delayed behind
+        # another loader would otherwise compare a freshly cached graph
+        # against pre-lock signatures, evict the entry that is already
+        # current, reload the same generation and record it under the stale
+        # signatures: reload churn and a transiently duplicated bounded CSR
+        # exactly during live publication. ``invalidate`` re-enters the
+        # RLock safely, and a raise releases it on unwind.
+        with self._lock:
+            return self._graph_locked(
+                notebook_id, source_ids, parent_version, source_signatures, key
+            )
+
+    def _graph_locked(
+        self, notebook_id, source_ids, parent_version, source_signatures, key
+    ):
         disk_signature = self._companion_signature(notebook_id)
         if disk_signature is MANIFEST_ABSENT:
             # P1, codex PR#643 R12: the companion root is provably GONE — a
@@ -405,75 +421,72 @@ class SourcePartitionedPprService:
         # predicate, so a moved main generation supersedes the entry and the
         # cold path re-runs its pairing gates against the new live manifest.
         main_signature = self._main_signature(notebook_id)
-        # Hold through lazy load/combine: concurrent cold requests for one
-        # identity open one selected partition set and retain one CSR.
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                cached_graph, cached_signature, cached_main_signature = cached
-                if not _companion_signature_superseded(
-                    cached_signature, disk_signature
-                ) and not _companion_signature_superseded(
-                    cached_main_signature, main_signature
-                ):
-                    self._cache.move_to_end(key)
-                    return cached_graph, True
-                # Superseded: drop it now so a concurrent reader under this
-                # same key cannot be handed the retired object while this
-                # call reloads below.
-                self._cache.pop(key, None)
-            if len(self._cache) >= self._CACHE_ENTRIES:
-                self._cache.popitem(last=False)
-            # P1, codex PR#643 R28: the cold load has its own TOCTOU — the
-            # main root can be swapped AFTER ``main_signature`` was captured
-            # (and after the loader's internal pairing gate read the OLD
-            # ``build_id``) but before the old companion finishes loading.
-            # Caching that graph would pair the previous build's companion
-            # with the newly published main generation. So the main root is
-            # re-probed AFTER the load; if it moved, both signatures are
-            # refreshed and the load runs once more — the loader's pairing
-            # gate then runs against the new live manifest and refuses a
-            # stale companion itself. A second move mid-retry fails closed;
-            # the next request heals.
-            for _attempt in (0, 1):
-                partitions = self._artifacts.load_source_partitions(
-                    notebook_id,
-                    source_ids,
-                    expected_parent_version=parent_version,
-                    expected_source_signatures=source_signatures,
-                    max_nodes=(
-                        int(self._settings.source_subgraph_max_objects)
-                        + int(self._settings.source_subgraph_max_chunks)
-                        + int(
-                            self._settings.source_subgraph_max_cluster_memberships
-                        )
-                    ),
-                    max_nnz=2
-                    * (
-                        int(self._settings.source_subgraph_max_relations)
-                        + int(self._settings.source_subgraph_max_memberships)
-                        + int(
-                            self._settings.source_subgraph_max_cluster_memberships
-                        )
-                    ),
-                )
-                graph = self._combine(partitions)
-                post_main_signature = self._main_signature(notebook_id)
-                if not _companion_signature_superseded(
-                    main_signature, post_main_signature
-                ):
-                    self._cache[key] = (graph, disk_signature, main_signature)
-                    return graph, False
-                main_signature = post_main_signature
-                disk_signature = self._companion_signature(notebook_id)
-                if disk_signature is MANIFEST_ABSENT:
-                    self.invalidate(notebook_id)
-                    raise SourcePartitionUnavailable(
-                        "source_partition_artifact_unavailable"
+        cached = self._cache.get(key)
+        if cached is not None:
+            cached_graph, cached_signature, cached_main_signature = cached
+            if not _companion_signature_superseded(
+                cached_signature, disk_signature
+            ) and not _companion_signature_superseded(
+                cached_main_signature, main_signature
+            ):
+                self._cache.move_to_end(key)
+                return cached_graph, True
+            # Superseded: drop it now so a concurrent reader under this
+            # same key cannot be handed the retired object while this
+            # call reloads below.
+            self._cache.pop(key, None)
+        if len(self._cache) >= self._CACHE_ENTRIES:
+            self._cache.popitem(last=False)
+        # P1, codex PR#643 R28: the cold load has its own TOCTOU — the
+        # main root can be swapped AFTER ``main_signature`` was captured
+        # (and after the loader's internal pairing gate read the OLD
+        # ``build_id``) but before the old companion finishes loading.
+        # Caching that graph would pair the previous build's companion
+        # with the newly published main generation. So the main root is
+        # re-probed AFTER the load; if it moved, both signatures are
+        # refreshed and the load runs once more — the loader's pairing
+        # gate then runs against the new live manifest and refuses a
+        # stale companion itself. A second move mid-retry fails closed;
+        # the next request heals.
+        for _attempt in (0, 1):
+            partitions = self._artifacts.load_source_partitions(
+                notebook_id,
+                source_ids,
+                expected_parent_version=parent_version,
+                expected_source_signatures=source_signatures,
+                max_nodes=(
+                    int(self._settings.source_subgraph_max_objects)
+                    + int(self._settings.source_subgraph_max_chunks)
+                    + int(
+                        self._settings.source_subgraph_max_cluster_memberships
                     )
-            raise SourcePartitionUnavailable(
-                "source_partition_artifact_unavailable"
+                ),
+                max_nnz=2
+                * (
+                    int(self._settings.source_subgraph_max_relations)
+                    + int(self._settings.source_subgraph_max_memberships)
+                    + int(
+                        self._settings.source_subgraph_max_cluster_memberships
+                    )
+                ),
             )
+            graph = self._combine(partitions)
+            post_main_signature = self._main_signature(notebook_id)
+            if not _companion_signature_superseded(
+                main_signature, post_main_signature
+            ):
+                self._cache[key] = (graph, disk_signature, main_signature)
+                return graph, False
+            main_signature = post_main_signature
+            disk_signature = self._companion_signature(notebook_id)
+            if disk_signature is MANIFEST_ABSENT:
+                self.invalidate(notebook_id)
+                raise SourcePartitionUnavailable(
+                    "source_partition_artifact_unavailable"
+                )
+        raise SourcePartitionUnavailable(
+            "source_partition_artifact_unavailable"
+        )
 
     def retrieve(
         self,

@@ -170,6 +170,53 @@ def test_exact_reloads_after_a_generation_swap_are_single_flight(tmp_path):
     assert all(r is not None and r.manifest["marker"] == "gen-2" for r in results)
 
 
+def test_a_stale_pre_lock_signature_does_not_evict_a_current_entry(tmp_path):
+    """codex PR#643 R29 P1: a request can capture the manifest signature just
+    before a same-version publication, then wait on the per-notebook lock
+    while another request loads and caches the NEW generation. The in-lock
+    double-check must re-probe the signature — comparing against the stale
+    pre-lock capture would evict the already-current entry, reload the same
+    multi-GB artifact and tag it with the old signature (another reload on
+    the next request, two copies transiently resident).
+
+    Scripted single-threaded: the first ``_manifest_signature`` call (the
+    pre-lock capture) answers the OLD generation's signature; every later
+    call answers the real one.
+
+    Mutation anchor: drop the in-lock ``_manifest_signature`` re-probe and
+    this goes red — ``load_calls`` rises and the cache entry is re-adopted.
+    """
+    version = {"value": ["v-stable"]}
+    catalog, store, _cache = _catalog(tmp_path, version)
+    _publish(catalog, "nb", {"version": ["v-stable"], "marker": "gen-1"})
+    first = catalog.load("nb", allow_stale=False)
+    stale_signature = store.manifest_stat_signature(
+        catalog.artifacts.scale_dir("nb")
+    )
+    _publish(catalog, "nb", {"version": ["v-stable"], "marker": "gen-2"})
+    current = catalog.load("nb", allow_stale=False)
+    assert current is not first and current.manifest["marker"] == "gen-2"
+    loads_before = store.load_calls
+
+    real = catalog._manifest_signature
+    answers = iter([stale_signature])
+
+    def scripted(notebook_id):
+        try:
+            return next(answers)
+        except StopIteration:
+            return real(notebook_id)
+
+    catalog._manifest_signature = scripted  # type: ignore[method-assign]
+    again = catalog.load("nb", allow_stale=False)
+
+    assert again is current, (
+        "the in-lock re-probe must accept the entry another request already "
+        "loaded for the current generation"
+    )
+    assert store.load_calls == loads_before, "no redundant reload"
+
+
 def test_a_new_artifact_is_reloaded_on_the_drifted_stale_path(tmp_path):
     """allow_stale 的第二处判等(cur 已漂移、按**磁盘** version 复用)同样是盲区:
     ``disk_ver`` 来自新解析的 manifest,值一样就会把旧对象交出去。"""
@@ -337,6 +384,10 @@ def test_one_load_stats_the_manifest_exactly_once(tmp_path, allow_stale, warm):
 
     冷路径尤其容易退化:``_stale_manifest_admissible`` 在单飞锁前后各调一次,
     再加上换代判据自己那次,不共用就是一次 load 三次 stat。
+
+    诚实预算(codex PR#643 R29 P1 之后):暖命中仍是恰好 1 次;冷路径是
+    2 次——锁前那次快路径判等,加锁内那次**重探**(等锁期间盘面可能又换
+    了代,拿陈旧签名 double-check 会误逐+旧签名入账)。
     """
     version = {"value": ["v-stable"]}
     catalog, store, _cache = _catalog(tmp_path, version)
@@ -346,8 +397,9 @@ def test_one_load_stats_the_manifest_exactly_once(tmp_path, allow_stale, warm):
 
     store.stat_calls = 0
     assert catalog.load("nb", allow_stale=allow_stale) is not None
-    assert store.stat_calls == 1, (
-        f"one load must stat once, stat'd {store.stat_calls} times")
+    budget = 1 if warm else 2
+    assert store.stat_calls == budget, (
+        f"this load's stat budget is {budget}, stat'd {store.stat_calls} times")
 
 
 def test_the_added_stat_is_orders_of_magnitude_below_a_manifest_read(tmp_path):
