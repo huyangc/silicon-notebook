@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,7 +62,11 @@ _RUN_KINDS = frozenset({
     "report_planning",
     "report_generation",
 })
-_MAX_MANIFEST_BYTES = 1024 * 1024
+_MANIFEST_SCAN_CHARS = 64 * 1024
+_MANIFEST_SCAN_OVERLAP = 256
+_N_CHUNKS_PATTERN = re.compile(
+    r'"n_chunks"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)'
+)
 
 
 def _finite_number(value: Any) -> float | None:
@@ -97,21 +102,43 @@ class Samples:
         )
 
 
+def _stream_manifest_chunk_count(manifest_path: Path) -> int | None:
+    """Find generated manifest ``n_chunks`` with bounded memory.
+
+    Production manifests embed every watermark source id and can be multiple
+    MiB.  A whole-file size cutoff therefore rejects the largest, most useful
+    notebooks; reading the whole file before checking the cutoff is not a
+    memory bound either.  The artifact writer emits one top-level numeric
+    ``n_chunks`` field, so scan incrementally with enough overlap for a key and
+    JSON number split across chunks.  No source id or other payload is retained.
+    """
+    tail = ""
+    with manifest_path.open("r", encoding="utf-8", errors="strict") as handle:
+        while True:
+            chunk = handle.read(_MANIFEST_SCAN_CHARS)
+            if not chunk:
+                return None
+            window = tail + chunk
+            match = _N_CHUNKS_PATTERN.search(window)
+            if match is not None:
+                value = _finite_number(match.group(1))
+                if value is None or value < 0 or not float(value).is_integer():
+                    return None
+                return int(value)
+            tail = window[-_MANIFEST_SCAN_OVERLAP:]
+
+
 def load_indexed_chunk_counts(index_root: Path) -> dict[str, int]:
-    """Read only bounded manifest metadata, keyed internally by notebook id."""
+    """Read only constant-memory manifest metadata, keyed by notebook id."""
     counts: dict[str, int] = {}
     if not index_root.is_dir():
         return counts
     for manifest_path in sorted(index_root.glob("*/manifest.json")):
         try:
-            raw = manifest_path.read_bytes()
-            if len(raw) > _MAX_MANIFEST_BYTES:
-                continue
-            manifest = json.loads(raw.decode("utf-8", "strict"))
-            value = _finite_number(manifest.get("n_chunks"))
+            value = _stream_manifest_chunk_count(manifest_path)
             if value is not None:
-                counts[manifest_path.parent.name] = int(value)
-        except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+                counts[manifest_path.parent.name] = value
+        except (OSError, UnicodeError):
             continue
     return counts
 

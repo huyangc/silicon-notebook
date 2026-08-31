@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -76,3 +77,32 @@ def test_unknown_manifest_stays_explicit():
 
     assert "unknown" in report
     assert "ok=1" in report
+
+
+def test_large_valid_manifest_is_classified_without_a_whole_file_cutoff(tmp_path):
+    notebook_dir = tmp_path / "nb-large"
+    notebook_dir.mkdir()
+    manifest = {
+        "version": ["v1"],
+        "n_chunks": 1_870_000,
+        "watermark_sources": [f"source-{index:06d}" for index in range(80_000)],
+    }
+    manifest_path = notebook_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert manifest_path.stat().st_size > 1024 * 1024
+
+    assert diag.load_indexed_chunk_counts(tmp_path) == {
+        "nb-large": 1_870_000,
+    }
+
+
+def test_streaming_manifest_scan_handles_key_split_across_read_chunks(tmp_path):
+    notebook_dir = tmp_path / "nb-split"
+    notebook_dir.mkdir()
+    padding = "x" * (diag._MANIFEST_SCAN_CHARS - 7)
+    (notebook_dir / "manifest.json").write_text(
+        json.dumps({"padding": padding, "n_chunks": 42}),
+        encoding="utf-8",
+    )
+
+    assert diag.load_indexed_chunk_counts(tmp_path) == {"nb-split": 42}
