@@ -114,6 +114,62 @@ def test_a_new_artifact_with_the_same_version_is_reloaded(tmp_path, allow_stale)
     assert store.load_calls == 2
 
 
+def test_exact_reloads_after_a_generation_swap_are_single_flight(tmp_path):
+    """codex PR#643 R21 P1:同版本 import 换代那一刻,签名失效让所有并发
+    exact(allow_stale=False)读同时脱缓存;exact 路径原来没有 stale 冷路径那把
+    per-nb 单飞锁,N 个并发 graph/status 请求就各自 load 一份多 GB 的索引——
+    恰好在发布完成后打爆内存。exact 重载必须走同一把锁并在锁内 double-check。
+
+    **变异锚点**:去掉 exact 分支的 ``_notebook_load_lock``/double-check →
+    多个线程各自 load,``load_calls`` > 1,本条报红。
+    """
+    version = {"value": ["v-stable"]}
+    settings = Settings(storage_dir=str(tmp_path))
+    store = _CountingStore(settings)
+    original_load = _CountingStore.load_scale
+
+    def slow_load(self, notebook_id):
+        time.sleep(0.05)  # 给并发线程留出叠上来的窗口
+        return original_load(self, notebook_id)
+
+    store.load_scale = slow_load.__get__(store)
+    cache: dict = {}
+    locks: dict = {}
+    catalog = ScaleArtifactCatalog(
+        artifacts=store,
+        settings=settings,
+        version=lambda _notebook_id: version["value"],
+        scale_cache=lambda: cache,
+        load_lock=threading.Lock,
+        load_locks=lambda: locks,
+        note_model_error=lambda *a, **k: None,
+    )
+    _publish(catalog, "nb", {"version": ["v-stable"], "marker": "gen-1"})
+    assert catalog.load("nb", allow_stale=False).manifest["marker"] == "gen-1"
+
+    # 同版本换代:每个并发读都会看到签名失效。
+    _publish(catalog, "nb", {"version": ["v-stable"], "marker": "gen-2"})
+    store.load_calls = 0
+    barrier = threading.Barrier(6)
+    results = []
+
+    def read() -> None:
+        barrier.wait()
+        results.append(catalog.load("nb", allow_stale=False))
+
+    threads = [threading.Thread(target=read) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert store.load_calls == 1, (
+        "one generation swap must trigger exactly one exact reload, "
+        f"not {store.load_calls}"
+    )
+    assert all(r is not None and r.manifest["marker"] == "gen-2" for r in results)
+
+
 def test_a_new_artifact_is_reloaded_on_the_drifted_stale_path(tmp_path):
     """allow_stale 的第二处判等(cur 已漂移、按**磁盘** version 复用)同样是盲区:
     ``disk_ver`` 来自新解析的 manifest,值一样就会把旧对象交出去。"""

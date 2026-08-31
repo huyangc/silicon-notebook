@@ -274,12 +274,21 @@ class ScaleArtifactCatalog:
             return cached
         if not allow_stale:
             # version-exact:字节不变——load,manifest==cur 才 cache 并返回,否则 None。
-            idx = self.artifacts.load_scale(notebook_id)
-            if idx is None:
+            # codex PR#643 R21 P1:与下面 stale 冷路径同一把 per-nb 单飞锁。
+            # 同版本 import 原子换代后,签名失效让**所有**并发 exact 读同时脱
+            # 缓存;不串行就是 N 个 graph/status 请求各自 load 一份多 GB 的
+            # CSR/ANN——恰好在发布完成那一刻打爆内存。锁内 double-check 用
+            # 本次 load 的同一个签名(与 stale 路径同款纪律,不再 stat)。
+            with self._notebook_load_lock(notebook_id):
+                cached = self.scale_cache().get(notebook_id)
+                if self._still_current(cached, cur, signature):
+                    return cached
+                idx = self.artifacts.load_scale(notebook_id)
+                if idx is None:
+                    return None
+                if idx.manifest.get("version") == cur:
+                    return self._adopt(notebook_id, idx, signature)
                 return None
-            if idx.manifest.get("version") == cur:
-                return self._adopt(notebook_id, idx, signature)
-            return None
         # allow_stale:按磁盘身份复用。cached 若仍是当前磁盘索引(其 version == 磁盘
         # manifest version **且**签名同代)→ 直接返回(handle 存活,零重载)。管线
         # 身份闸见 _stale_manifest_admissible;签名共用上面那一次 stat。
@@ -290,13 +299,7 @@ class ScaleArtifactCatalog:
         if self._still_current(cached, disk_ver, signature):
             return cached
         # cold:单飞加载。全局锁只护锁表,load 在 per-nb 锁内、不持全局锁。
-        with self.load_lock():
-            locks = self.load_locks()
-            nb_lock = locks.get(notebook_id)
-            if nb_lock is None:
-                nb_lock = threading.Lock()
-                locks[notebook_id] = nb_lock
-        with nb_lock:
+        with self._notebook_load_lock(notebook_id):
             # double-check:等锁期间别的线程可能已加载好当前磁盘索引。身份仍走
             # 本次 load 的那一个签名(memo 命中,不再 stat)。
             cached = self.scale_cache().get(notebook_id)
@@ -312,6 +315,18 @@ class ScaleArtifactCatalog:
             if idx is None:
                 return None
             return self._adopt(notebook_id, idx, signature)
+
+    def _notebook_load_lock(self, notebook_id: str) -> threading.Lock:
+        """这一个 notebook 的加载单飞锁(exact 与 stale 冷路径共用一把)。
+
+        全局锁只护锁表本身;真正的 load 在 per-nb 锁内、不持全局锁。"""
+        with self.load_lock():
+            locks = self.load_locks()
+            nb_lock = locks.get(notebook_id)
+            if nb_lock is None:
+                nb_lock = threading.Lock()
+                locks[notebook_id] = nb_lock
+        return nb_lock
 
     def _still_current(self, cached, version, signature) -> bool:
         """进程缓存里这一个实例,现在还能直接交出去吗?
