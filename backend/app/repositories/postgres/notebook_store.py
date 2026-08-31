@@ -400,13 +400,20 @@ class NotebookStore:
             "parse_status,parse_failed,depth,generation_started_at,deleted_at,"
             "expires_at"
         )
+        refresh_on_conflict = (
+            " ON CONFLICT(activity_type,record_id) DO UPDATE SET "
+            + ",".join(
+                f"{column}=excluded.{column}"
+                for column in common_columns.split(",")[2:]
+            )
+        )
         connection.execute(
             f"INSERT INTO retained_user_activity ({common_columns}) "
             "SELECT 'ask',j.id,j.created_by,j.notebook_id,n.created_by,n.name,"
             "j.created_at,j.updated_at,j.asked_at,j.conversation_id,j.question,"
             "j.mode,j.status,'','','','',false,0,'',%s,%s "
             "FROM ask_jobs j JOIN notebooks n ON n.id=j.notebook_id "
-            "WHERE j.notebook_id=%s ON CONFLICT DO NOTHING",
+            "WHERE j.notebook_id=%s" + refresh_on_conflict,
             (deleted_at, expires_at, notebook_id),
         )
         connection.execute(
@@ -422,8 +429,8 @@ class NotebookStore:
             "CASE WHEN s.parse_status='failed' THEN true ELSE false END,0,'',%s,%s "
             "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
             "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
-            f"WHERE s.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
-            "ON CONFLICT DO NOTHING",
+            f"WHERE s.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+            + refresh_on_conflict,
             (deleted_at, expires_at, notebook_id),
         )
         connection.execute(
@@ -432,8 +439,8 @@ class NotebookStore:
             "r.created_at,r.updated_at,'','',r.question,'',r.status,'','','','',"
             "false,r.depth,COALESCE(r.understanding_json->>"
             "'_generation_started_at',''),%s,%s FROM reports r "
-            "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=%s "
-            "ON CONFLICT DO NOTHING",
+            "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=%s"
+            + refresh_on_conflict,
             (deleted_at, expires_at, notebook_id),
         )
 

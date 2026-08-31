@@ -465,13 +465,20 @@ class NotebookStore:
             "parse_status,parse_failed,depth,generation_started_at,deleted_at,"
             "expires_at"
         )
+        refresh_on_conflict = (
+            " ON CONFLICT(activity_type,record_id) DO UPDATE SET "
+            + ",".join(
+                f"{column}=excluded.{column}"
+                for column in common_columns.split(",")[2:]
+            )
+        )
         db.execute(
             f"INSERT INTO retained_user_activity ({common_columns}) "
             "SELECT 'ask',j.id,j.created_by,j.notebook_id,n.created_by,n.name,"
             "j.created_at,j.updated_at,j.asked_at,j.conversation_id,j.question,"
             "j.mode,j.status,'','','','',0,0,'',?,? "
             "FROM ask_jobs j JOIN notebooks n ON n.id=j.notebook_id "
-            "WHERE j.notebook_id=? ON CONFLICT(activity_type,record_id) DO NOTHING",
+            "WHERE j.notebook_id=?" + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
         )
         db.execute(
@@ -487,8 +494,8 @@ class NotebookStore:
             "CASE WHEN s.parse_status='failed' THEN 1 ELSE 0 END,0,'',?,? "
             "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
             "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
-            f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
-            "ON CONFLICT(activity_type,record_id) DO NOTHING",
+            f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+            + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
         )
         db.execute(
@@ -497,8 +504,8 @@ class NotebookStore:
             "r.created_at,r.updated_at,'','',r.question,'',r.status,'','','','',"
             "0,r.depth,COALESCE(json_extract(r.understanding_json,"
             "'$._generation_started_at'),''),?,? FROM reports r "
-            "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=? "
-            "ON CONFLICT(activity_type,record_id) DO NOTHING",
+            "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=?"
+            + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
         )
 

@@ -996,3 +996,55 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     repo._migrator.recover_interrupted_jobs()
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM retained_user_activity").fetchone()[0] == 0
+
+
+def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
+    """A merge-era key collision restarts retention at the real deletion."""
+    notebook_store = repo._runtime.notebook_store
+    with repo._write() as db:
+        _insert_user(db, "u-refresh", "a00000009")
+        _insert_notebook(db, "n-refresh", "u-refresh")
+        _insert_ask(
+            db, "ask-refresh", "n-refresh", "u-refresh",
+            "2026-08-01T01:00:00+00:00", question="old ask",
+        )
+        _insert_source(
+            db, "src-refresh", "n-refresh", "2026-08-01T02:00:00+00:00",
+            title="old source",
+        )
+        _insert_report(
+            db, "rep-refresh", "n-refresh", "u-refresh",
+            "2026-08-01T03:00:00+00:00", question="old report",
+        )
+
+    # Model the supported merge state: an older retained snapshot and the
+    # still-live aggregate carry the same activity primary keys.
+    notebook_store.now = lambda: "2026-08-01T12:00:00+00:00"
+    with repo._write() as db:
+        notebook_store._retain_user_activity_before_delete(db, "n-refresh")
+        db.execute("UPDATE notebooks SET name='Renamed notebook' WHERE id='n-refresh'")
+        db.execute("UPDATE ask_jobs SET question='new ask' WHERE id='ask-refresh'")
+        db.execute("UPDATE sources SET title='new source' WHERE id='src-refresh'")
+        db.execute("UPDATE reports SET question='new report' WHERE id='rep-refresh'")
+
+    deleted_at = "2026-08-31T12:00:00+00:00"
+    notebook_store.now = lambda: deleted_at
+    notebook_store.delete_row_and_orphan_embeddings("n-refresh")
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT activity_type,notebook_name,question,display_title,"
+            "deleted_at,expires_at FROM retained_user_activity "
+            "WHERE notebook_id='n-refresh' ORDER BY activity_type"
+        ).fetchall()
+    assert len(rows) == 3
+    by_type = {row["activity_type"]: row for row in rows}
+    assert {row["notebook_name"] for row in rows} == {"Renamed notebook"}
+    assert by_type["ask"]["question"] == "new ask"
+    assert by_type["report"]["question"] == "new report"
+    assert by_type["source"]["display_title"] == "new source"
+    assert {row["deleted_at"] for row in rows} == {deleted_at}
+    for row in rows:
+        refreshed_expiry = parse_activity_instant(row["expires_at"], field="expires_at")
+        refreshed_deletion = parse_activity_instant(row["deleted_at"], field="deleted_at")
+        assert (refreshed_expiry - refreshed_deletion).days == 180

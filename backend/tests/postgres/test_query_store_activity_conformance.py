@@ -776,3 +776,72 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
     assert store.list_user_activity(
         "u-retained", include_inaccessible_questions=True, limit=50,
     )["items"] == []
+
+
+def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
+    postgres_database, store
+):
+    from app.repositories.postgres.notebook_store import NotebookStore
+
+    old_deletion = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    actual_deletion = datetime(2026, 8, 31, 12, tzinfo=timezone.utc)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-refresh")
+        _insert_notebook(connection, "n-refresh", "u-refresh")
+        _insert_ask(
+            connection, "ask-refresh", "n-refresh", "u-refresh", NOW,
+            question="old ask",
+        )
+        _insert_source(
+            connection, "src-refresh", "n-refresh", NOW, title="old source",
+        )
+        _insert_report(
+            connection, "rep-refresh", "n-refresh", "u-refresh", NOW,
+            question="old report",
+        )
+
+    old_store = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: old_deletion,
+        activity_retention_days=180,
+    )
+    with postgres_database.write() as connection:
+        old_store._retain_user_activity_before_delete(connection, "n-refresh")
+        connection.execute(
+            "UPDATE notebooks SET name='Renamed notebook' WHERE id='n-refresh'"
+        )
+        connection.execute(
+            "UPDATE ask_jobs SET question='new ask' WHERE id='ask-refresh'"
+        )
+        connection.execute(
+            "UPDATE sources SET title='new source' WHERE id='src-refresh'"
+        )
+        connection.execute(
+            "UPDATE reports SET question='new report' WHERE id='rep-refresh'"
+        )
+
+    deleting_store = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: actual_deletion,
+        activity_retention_days=180,
+    )
+    deleting_store.delete_row_and_orphan_embeddings("n-refresh")
+
+    with postgres_database.connect() as connection:
+        rows = connection.execute(
+            "SELECT activity_type,notebook_name,question,display_title,"
+            "deleted_at,expires_at FROM retained_user_activity "
+            "WHERE notebook_id='n-refresh' ORDER BY activity_type"
+        ).fetchall()
+    assert len(rows) == 3
+    by_type = {row["activity_type"]: row for row in rows}
+    assert {row["notebook_name"] for row in rows} == {"Renamed notebook"}
+    assert by_type["ask"]["question"] == "new ask"
+    assert by_type["report"]["question"] == "new report"
+    assert by_type["source"]["display_title"] == "new source"
+    assert {row["deleted_at"] for row in rows} == {actual_deletion}
+    assert {
+        (row["expires_at"] - row["deleted_at"]).days for row in rows
+    } == {180}
