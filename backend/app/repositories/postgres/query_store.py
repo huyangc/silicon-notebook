@@ -567,9 +567,12 @@ class QueryStore:
                     "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
                     "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
                     "UNION ALL "
-                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
-                    "WHERE activity_type='source' AND expires_at>CURRENT_TIMESTAMP "
-                    "GROUP BY actor_id) retained_counts GROUP BY k"
+                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "FROM retained_user_activity a "
+                    "WHERE a.activity_type='source' AND a.expires_at>CURRENT_TIMESTAMP "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) "
+                    "GROUP BY a.actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             conversations = {
@@ -584,9 +587,12 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
                     "UNION ALL "
-                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
-                    "WHERE activity_type='ask' AND expires_at>CURRENT_TIMESTAMP "
-                    "GROUP BY actor_id) retained_counts GROUP BY k"
+                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "FROM retained_user_activity a "
+                    "WHERE a.activity_type='ask' AND a.expires_at>CURRENT_TIMESTAMP "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) "
+                    "GROUP BY a.actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             # 报告按**创建者**归集,不按笔记本 owner——与 SQLite 侧同一条裁决,
@@ -597,9 +603,12 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM reports GROUP BY created_by "
                     "UNION ALL "
-                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
-                    "WHERE activity_type='report' AND expires_at>CURRENT_TIMESTAMP "
-                    "GROUP BY actor_id) retained_counts GROUP BY k"
+                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "FROM retained_user_activity a "
+                    "WHERE a.activity_type='report' AND a.expires_at>CURRENT_TIMESTAMP "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) "
+                    "GROUP BY a.actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             active = {
@@ -960,6 +969,8 @@ class QueryStore:
                 retained_rows = db.execute(
                     "SELECT a.* FROM retained_user_activity a "
                     "WHERE a.actor_id=%s AND a.expires_at>CURRENT_TIMESTAMP"
+                    " AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id)"
                     f"{retained_scope}{retained_range} "
                     f"ORDER BY {_absolute_instant('a.created_at')} DESC,"
                     "a.record_id COLLATE \"C\" DESC LIMIT %s",

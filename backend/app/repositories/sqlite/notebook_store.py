@@ -459,6 +459,14 @@ class NotebookStore:
             "WHERE julianday(expires_at) <= julianday(?)",
             (deleted_text,),
         )
+        # An offline merge can place an older archive beside a live copy of
+        # the same notebook. Replace that archive as a set: rows removed from
+        # the live aggregate must not survive merely because no new row exists
+        # to hit their primary key during the upsert below.
+        db.execute(
+            "DELETE FROM retained_user_activity WHERE notebook_id=?",
+            (notebook_id,),
+        )
         common_columns = (
             "activity_type,record_id,actor_id,notebook_id,notebook_owner_id,"
             "notebook_name,created_at,updated_at,asked_at,conversation_id,"

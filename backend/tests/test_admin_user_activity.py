@@ -1008,6 +1008,10 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
             db, "ask-refresh", "n-refresh", "u-refresh",
             "2026-08-01T01:00:00+00:00", question="old ask",
         )
+        _insert_ask(
+            db, "ask-removed", "n-refresh", "u-refresh",
+            "2026-08-01T01:30:00+00:00", question="removed before deletion",
+        )
         _insert_source(
             db, "src-refresh", "n-refresh", "2026-08-01T02:00:00+00:00",
             title="old source",
@@ -1025,8 +1029,31 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
         notebook_store._retain_user_activity_before_delete(db, "n-refresh")
         db.execute("UPDATE notebooks SET name='Renamed notebook' WHERE id='n-refresh'")
         db.execute("UPDATE ask_jobs SET question='new ask' WHERE id='ask-refresh'")
+        db.execute("DELETE FROM ask_jobs WHERE id='ask-removed'")
         db.execute("UPDATE sources SET title='new source' WHERE id='src-refresh'")
         db.execute("UPDATE reports SET question='new report' WHERE id='rep-refresh'")
+
+    # While a merged live aggregate exists, its older retained lifecycle is
+    # entirely hidden: no duplicate identity/count, and no stale direct detail.
+    live_activity = repo.list_user_activity(
+        "u-refresh", include_inaccessible_questions=True, limit=50,
+    )
+    assert len(live_activity["items"]) == 3
+    assert {item["id"] for item in live_activity["items"]} == {
+        "ask-refresh", "src-refresh", "rep-refresh",
+    }
+    live_usage = next(
+        row for row in repo.list_user_usage() if row["id"] == "u-refresh"
+    )
+    assert live_usage["sources"] == 1
+    assert live_usage["questions"] == 1
+    assert live_usage["reports"] == 1
+    with pytest.raises(KeyError):
+        repo.ask_job_detail("ask-removed")
+
+    # Malformed historical JSON must not turn the subsequent notebook delete
+    # into an undeletable transaction.
+    with repo._write() as db:
         db.execute(
             "UPDATE reports SET understanding_json='{broken' WHERE id='rep-refresh'"
         )
@@ -1043,6 +1070,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
             "WHERE notebook_id='n-refresh' ORDER BY activity_type"
         ).fetchall()
     assert len(rows) == 3
+    assert {row["activity_type"] for row in rows} == {"ask", "report", "source"}
     by_type = {row["activity_type"]: row for row in rows}
     assert {row["notebook_name"] for row in rows} == {"Renamed notebook"}
     assert by_type["ask"]["question"] == "new ask"

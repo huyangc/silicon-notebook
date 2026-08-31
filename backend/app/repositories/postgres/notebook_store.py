@@ -394,6 +394,12 @@ class NotebookStore:
             "DELETE FROM retained_user_activity WHERE expires_at<=%s",
             (deleted_at,),
         )
+        # Replace a merge-era archive as one set so activities removed from
+        # the surviving live aggregate cannot linger until an older expiry.
+        connection.execute(
+            "DELETE FROM retained_user_activity WHERE notebook_id=%s",
+            (notebook_id,),
+        )
         common_columns = (
             "activity_type,record_id,actor_id,notebook_id,notebook_owner_id,"
             "notebook_name,created_at,updated_at,asked_at,conversation_id,"

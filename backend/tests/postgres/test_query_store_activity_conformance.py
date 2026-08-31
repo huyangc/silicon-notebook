@@ -792,6 +792,10 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
             connection, "ask-refresh", "n-refresh", "u-refresh", NOW,
             question="old ask",
         )
+        _insert_ask(
+            connection, "ask-removed", "n-refresh", "u-refresh", NOW,
+            question="removed before deletion",
+        )
         _insert_source(
             connection, "src-refresh", "n-refresh", NOW, title="old source",
         )
@@ -817,12 +821,27 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
         connection.execute(
             "UPDATE ask_jobs SET question='new ask' WHERE id='ask-refresh'"
         )
+        connection.execute("DELETE FROM ask_jobs WHERE id='ask-removed'")
         connection.execute(
             "UPDATE sources SET title='new source' WHERE id='src-refresh'"
         )
         connection.execute(
             "UPDATE reports SET question='new report' WHERE id='rep-refresh'"
         )
+
+    live_activity = store.list_user_activity(
+        "u-refresh", include_inaccessible_questions=True, limit=50,
+    )
+    assert len(live_activity["items"]) == 3
+    assert {item["id"] for item in live_activity["items"]} == {
+        "ask-refresh", "src-refresh", "rep-refresh",
+    }
+    live_usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-refresh"
+    )
+    assert live_usage["sources"] == 1
+    assert live_usage["questions"] == 1
+    assert live_usage["reports"] == 1
 
     deleting_store = NotebookStore(
         postgres_database,
@@ -839,6 +858,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
             "WHERE notebook_id='n-refresh' ORDER BY activity_type"
         ).fetchall()
     assert len(rows) == 3
+    assert {row["activity_type"] for row in rows} == {"ask", "report", "source"}
     by_type = {row["activity_type"]: row for row in rows}
     assert {row["notebook_name"] for row in rows} == {"Renamed notebook"}
     assert by_type["ask"]["question"] == "new ask"
