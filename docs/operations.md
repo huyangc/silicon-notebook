@@ -962,7 +962,11 @@ differently:
   are back on the previous generation; the rest are still exactly as this run
   published them, and each of those is printed with its own recovery `mv`.
   Exit `1`. If the rollback was running because a Ctrl-C hit the post-swap
-  identity read, the message names both causes.
+  identity read, the message names both causes. A **filesystem error** inside
+  one root's rollback renames stops the walk the same way — except that root
+  can no longer be assumed to hold either shape, so it is reported with the
+  observed presence of each of its paths and the end state a manual recovery
+  should reach, instead of a single `mv`.
 - **during the final `.old` cleanup** — the import itself SUCCEEDED. Every
   root is live, identity-verified and correct; only the deletion of the
   previous generation stopped, because after a lost claim a `.old` may be a

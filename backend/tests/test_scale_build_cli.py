@@ -817,6 +817,67 @@ def test_import_rolls_back_when_pipeline_identity_drifts_during_the_swap(
         )
 
 
+def test_a_filesystem_failure_during_rollback_stops_and_reports_observed_state(
+    storage, store, tmp_path
+):
+    """codex PR#643 R14 P2: only ``ScaleBuildLockLost`` used to stop the
+    rollback walk — an ``OSError`` from ``rollback_swap`` (first rename
+    landed, ``.old`` restore did not) escaped as a raw traceback, leaving a
+    partially reverted tree with none of the per-root recovery this helper
+    promises. It must stop the walk exactly like a lost claim, report the
+    failed root's OBSERVED path states (its shape can no longer be assumed),
+    the published shape of every root behind it, and surface as
+    ``ScaleBuildCliFailure``.
+
+    Mutation anchor: drop the ``except OSError`` branch and this goes red —
+    the raw ``OSError`` escapes instead of the ``ScaleBuildCliFailure``.
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def drifting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return base(notebook_id)
+        return ["acme-pipeline", "3"]
+
+    projections.pipeline_identity = drifting  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    real_rollback = store.rollback_swap
+
+    def failing_rollback(live, temporary, preserved, **kwargs):
+        if f"{os.sep}kg_viz{os.sep}" in str(live):
+            raise OSError("disk gone read-only under the second rename")
+        return real_rollback(live, temporary, preserved, **kwargs)
+
+    store.rollback_swap = failing_rollback  # type: ignore[method-assign]
+    messages: list[str] = []
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="mid-rename"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=messages.append,
+        )
+
+    # Walk order is newest-first: the main root rolled back before the
+    # failure, the viz root failed, the companion behind it was never tried.
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the root reverted before the failure stays reverted"
+    )
+    observed = [m for m in messages if m.startswith("kg_viz: rollback stopped")]
+    assert len(observed) == 1, "the failed root gets an observed-state report"
+    assert "present" in observed[0] and "Manual recovery" in observed[0]
+    assert any(
+        m.startswith("kg_index_partitions: still live") for m in messages
+    ), "roots behind the failure keep the published-shape recovery line"
+
+
 def test_import_rolls_back_when_post_swap_verification_is_interrupted(
     storage, store, tmp_path
 ):

@@ -938,6 +938,45 @@ def unrolled_root_recovery(
     )
 
 
+def interrupted_rollback_state(
+    name: str, live: Path, temporary: Optional[Path], preserved: bool
+) -> str:
+    """What is ACTUALLY on disk for a root whose rollback renames failed
+    partway (codex PR#643 R14 P2 — a filesystem error, not a lost claim).
+
+    Unlike ``unrolled_root_recovery`` this cannot assume the published shape
+    still holds: ``rollback_swap`` is two renames, and an ``OSError`` can land
+    after the first, so guessing which single ``mv`` remains would be exactly
+    the trap. Report each concrete path's observed presence and the end state
+    a manual recovery should reach instead.
+    """
+    old = f"{live}.old"
+    observed = [
+        f"{live} {'present' if os.path.exists(str(live)) else 'absent'}",
+        f"{old} {'present' if os.path.exists(old) else 'absent'}",
+    ]
+    if temporary is not None:
+        observed.append(
+            f"{temporary} "
+            f"{'present' if os.path.exists(str(temporary)) else 'absent'}"
+        )
+    goals = []
+    if preserved or temporary is None:
+        goals.append(f"the previous generation restored at {live} (from {old})")
+    else:
+        goals.append(f"{live} absent (this root had no previous generation)")
+    if temporary is not None:
+        goals.append(f"this run's tree back at {temporary}")
+    return (
+        f"{name}: rollback stopped mid-rename — observed now: "
+        + "; ".join(observed)
+        + ". Manual recovery should end with "
+        + " and ".join(goals)
+        + ", via `mv` on the paths above once `inspect` confirms no other "
+        "builder owns this notebook"
+    )
+
+
 def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> dict:
     """Read-only: what is on disk, what the database thinks, who holds the claim.
 
@@ -1422,6 +1461,13 @@ def run_import(
             pending = list(reversed(published))
             reverted: list[str] = []
             lost: Optional[ScaleBuildLockLost] = None
+            # A filesystem failure inside ``rollback_swap`` (codex PR#643 R14
+            # P2) — e.g. the first rename landed and restoring ``.old`` did
+            # not — leaves THAT root in a mixed state neither recovery shape
+            # below can assume. It stops the walk exactly like a lost claim,
+            # but its root gets an observed-state report instead of a
+            # published-shape one.
+            failed: Optional[tuple[str, OSError]] = None
             # One guard around the whole rollback, same reasoning as the
             # publish loop below: an interrupt between two roots' rollback
             # renames would leave the set mismatched.
@@ -1439,18 +1485,46 @@ def run_import(
                     except ScaleBuildLockLost as error:
                         lost = error
                         break
+                    except OSError as error:
+                        failed = (name, error)
+                        break
                     reverted.append(name)
             if rollback_guard.interrupted:
                 report(
                     "the deferred interrupt is being honoured now: the "
                     "rollback completed first"
                 )
-            if lost is None:
+            if lost is None and failed is None:
                 report(
                     f"rolled back after publish: {reason}; reverted roots: "
                     f"{reverted}"
                 )
                 return reverted
+            if failed is not None:
+                failed_name, failure = failed
+                report(interrupted_rollback_state(
+                    failed_name, roots[failed_name], *swap_state[failed_name]
+                ))
+                stalled = [
+                    name
+                    for name in pending
+                    if name not in reverted and name != failed_name
+                ]
+                for name in stalled:
+                    temporary, preserved = swap_state[name]
+                    report(unrolled_root_recovery(
+                        name, roots[name], temporary, preserved
+                    ))
+                raise ScaleBuildCliFailure(
+                    f"rolling back {failed_name} failed mid-rename "
+                    f"({failure}). The rollback that was under way ({reason}) "
+                    f"stopped there: {reverted or 'no root'} rolled back, "
+                    f"{failed_name} in the mixed state reported above, "
+                    f"{stalled} left exactly as this run published them. Run "
+                    "`inspect` to confirm no other builder owns this "
+                    "notebook, then restore each root above by hand; the "
+                    "staged copies are left on disk."
+                ) from failure
             stalled = [name for name in pending if name not in reverted]
             for name in stalled:
                 temporary, preserved = swap_state[name]
