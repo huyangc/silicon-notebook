@@ -1012,6 +1012,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
             db, "src-refresh", "n-refresh", "2026-08-01T02:00:00+00:00",
             title="old source",
         )
+        _insert_paper_meta(db, "src-refresh", "n-refresh", "\t\n")
         _insert_report(
             db, "rep-refresh", "n-refresh", "u-refresh",
             "2026-08-01T03:00:00+00:00", question="old report",
@@ -1026,6 +1027,9 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
         db.execute("UPDATE ask_jobs SET question='new ask' WHERE id='ask-refresh'")
         db.execute("UPDATE sources SET title='new source' WHERE id='src-refresh'")
         db.execute("UPDATE reports SET question='new report' WHERE id='rep-refresh'")
+        db.execute(
+            "UPDATE reports SET understanding_json='{broken' WHERE id='rep-refresh'"
+        )
 
     deleted_at = "2026-08-31T12:00:00+00:00"
     notebook_store.now = lambda: deleted_at
@@ -1034,7 +1038,8 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
     with repo._connect() as db:
         rows = db.execute(
             "SELECT activity_type,notebook_name,question,display_title,"
-            "deleted_at,expires_at FROM retained_user_activity "
+            "generation_started_at,deleted_at,expires_at "
+            "FROM retained_user_activity "
             "WHERE notebook_id='n-refresh' ORDER BY activity_type"
         ).fetchall()
     assert len(rows) == 3
@@ -1042,6 +1047,7 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
     assert {row["notebook_name"] for row in rows} == {"Renamed notebook"}
     assert by_type["ask"]["question"] == "new ask"
     assert by_type["report"]["question"] == "new report"
+    assert by_type["report"]["generation_started_at"] == ""
     assert by_type["source"]["display_title"] == "new source"
     assert {row["deleted_at"] for row in rows} == {deleted_at}
     for row in rows:

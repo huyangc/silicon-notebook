@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable, Literal, Sequence
 
 from app.core.activity_time import activity_retention_window
+from app.domain.source_display import source_display_title
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -416,22 +417,33 @@ class NotebookStore:
             "WHERE j.notebook_id=%s" + refresh_on_conflict,
             (deleted_at, expires_at, notebook_id),
         )
-        connection.execute(
-            f"INSERT INTO retained_user_activity ({common_columns}) "
-            "SELECT 'source',s.id,n.created_by,s.notebook_id,n.created_by,n.name,"
-            "s.created_at,s.updated_at,'','','','',s.status,"
-            "CASE WHEN COALESCE(pm.is_paper,0)=1 "
-            "AND btrim(COALESCE(pm.paper_title,''))<>'' "
-            "THEN btrim(pm.paper_title) ELSE btrim(CASE "
-            "WHEN COALESCE(s.title,'')<>'' THEN s.title "
-            "ELSE COALESCE(s.file_name,'') END) END,"
-            "s.file_name,s.source_type,s.parse_status,"
-            "CASE WHEN s.parse_status='failed' THEN true ELSE false END,0,'',%s,%s "
+        source_rows = connection.execute(
+            "SELECT s.id,s.notebook_id,n.created_by AS notebook_owner_id,"
+            "n.name AS notebook_name,s.created_at,s.updated_at,s.status,"
+            "s.title,s.file_name,s.source_type,s.parse_status,"
+            "pm.is_paper,pm.paper_title "
             "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
             "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
-            f"WHERE s.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
-            + refresh_on_conflict,
-            (deleted_at, expires_at, notebook_id),
+            f"WHERE s.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+            (notebook_id,),
+        ).fetchall()
+        values_sql = ",".join("%s" for _ in common_columns.split(","))
+        execute_many(
+            connection,
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            f"VALUES ({values_sql}){refresh_on_conflict}",
+            [
+                (
+                    "source", row["id"], row["notebook_owner_id"],
+                    row["notebook_id"], row["notebook_owner_id"],
+                    row["notebook_name"], row["created_at"], row["updated_at"],
+                    "", "", "", "", row["status"], source_display_title(row),
+                    row["file_name"], row["source_type"], row["parse_status"],
+                    row["parse_status"] == "failed", 0, "", deleted_at,
+                    expires_at,
+                )
+                for row in source_rows
+            ],
         )
         connection.execute(
             f"INSERT INTO retained_user_activity ({common_columns}) "

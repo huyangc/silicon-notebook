@@ -795,6 +795,9 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
         _insert_source(
             connection, "src-refresh", "n-refresh", NOW, title="old source",
         )
+        _insert_paper_meta(
+            connection, "src-refresh", "n-refresh", "\t\n"
+        )
         _insert_report(
             connection, "rep-refresh", "n-refresh", "u-refresh", NOW,
             question="old report",
