@@ -1800,7 +1800,7 @@
       },
       {
         "name": "idx_wishes_kind_created",
-        "sql_sha256": "2ea22181f7db2b362b602b7f44a516484cae9b2f5343127d0d17481eaa43424b",
+        "sql_sha256": "0f52c399a910cb2a896ac2a55d845fea06172f1c4d5146c8238423b744502238",
         "type": "index"
       },
       {

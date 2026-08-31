@@ -3874,7 +3874,7 @@ WISH_WALL_TABLES = {
 WISH_WALL_INDEXES = {
     "idx_wishes_kind_created":
         "CREATE INDEX idx_wishes_kind_created\n"
-        "                  ON wishes(kind, created_at DESC, id DESC)",
+        "                  ON wishes(kind, julianday(created_at) DESC, id DESC)",
     "idx_wish_votes_user":
         "CREATE INDEX idx_wish_votes_user\n"
         "                  ON wish_votes(user_id, wish_id)",
