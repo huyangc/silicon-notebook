@@ -166,6 +166,28 @@ PYTHONPATH=backend python scripts/batch_ingest.py question-index \
   --notebook-id nb-xxxx --confirm-service-stopped
 ```
 
+### `build_scale_index.py` —— 与服务并存的离线 / 异机 scale 索引构建
+
+上面 `batch_ingest.py index` 是**停服**通道（数据库级全局 advisory lock）。这条是
+**并存**通道：取 per-notebook 跨进程锁、`.tmp` + 原子 rename，服务按既有逐请求探测
+自动换代，**不用重启**。只支持 PostgreSQL（SQLite 单进程部署没有跨进程锁，直接拒绝）。
+必须用**生产 `.env`** 运行，组装仓库前会用裸连接校验迁移账本与本 checkout 一致；
+组合根显式 `migrate=False, seed=False`，绝不对在役库跑迁移、也绝不改写 admin 凭据。
+
+```bash
+PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxxx
+PYTHONPATH=backend python scripts/build_scale_index.py build   --notebook nb-xxxx [--full|--fold]
+PYTHONPATH=backend python scripts/build_scale_index.py export  --notebook nb-xxxx --to DIR
+PYTHONPATH=backend python scripts/build_scale_index.py import  --notebook nb-xxxx --from DIR
+```
+
+`--statement-timeout-seconds`（默认 86400）是全局参数，写在子命令**之前**。`import`
+会硬拒 pipeline 身份、embedding 维度和 hnswlib 版本失配（后者可用
+`--allow-library-mismatch` 覆盖），numpy/scipy 只告警。退出码：0 成功 / 1 已开始但失败
+（锁被占、构建失败、swap 前复验失败）/ 2 未动手就拒绝 / 130 Ctrl-C。
+异机三步、两机 pin 清单、连接预算、PgBouncer 前提、`.old` 恢复与 allow_pickle 来源约束
+见 `docs/operations_zh.md` 的「离线 / 异机 scale 构建」。
+
 ---
 
 ## 二、检索 / chunk 运维

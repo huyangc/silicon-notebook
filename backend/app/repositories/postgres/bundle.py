@@ -58,15 +58,36 @@ def _in_batches(ids: object, seams: RepositorySeams):
 
 
 def _initialize(
-    database: PostgresDatabase, settings: Settings, seams: RepositorySeams
+    database: PostgresDatabase,
+    settings: Settings,
+    seams: RepositorySeams,
+    *,
+    migrate: bool = True,
+    seed: bool = True,
 ) -> None:
     """Migrate, then seed bootstrap metadata.
 
     This runs before any store is constructed. The only account inserted into
     a fresh database is the built-in admin; no notebook/source/demo data is
     ever created here.
+
+    Both steps are separately switchable because a process can legitimately
+    need the stores WITHOUT owning the schema (W-CLI T-W2's offline build CLI
+    runs beside a live service against the live database). Migrating from such
+    a process would execute DDL the running service never asked for, and
+    seeding is worse than that: the ``UPDATE users`` below is unconditional and
+    re-hashes ``settings.admin_password`` with a fresh salt every time, so a
+    composition rooted in an environment without ``ADMIN_PASSWORD`` silently
+    resets the production admin credential. The stopped-service gate used to
+    stand in for both; an online companion process has no such gate and must
+    turn them off explicitly. Defaults stay ``True``: every existing caller
+    (server startup, maintenance CLIs, tests) owns the schema and keeps its
+    exact current behaviour.
     """
-    PostgresMigrator(database).migrate()
+    if migrate:
+        PostgresMigrator(database).migrate()
+    if not seed:
+        return
     now = normalize_timestamp(seams.now())
     from app.domain.auth_utils import hash_password
     from app.domain.kg.names import normalize_name as whitelist_norm
@@ -163,8 +184,16 @@ class PostgresPersistenceBundle(PersistenceBundle):
 
 
 class PostgresPersistenceBundleFactory:
-    def __init__(self) -> None:
+    def __init__(self, *, migrate: bool = True, seed: bool = True) -> None:
+        """``migrate``/``seed`` are the schema-ownership seam; see ``_initialize``.
+
+        They live on the factory rather than on ``create`` because ``create``
+        is called by ``RepositoryFacade.__init__`` with a fixed argument list —
+        the composing process chooses the policy, the facade never does.
+        """
         self._database: PostgresDatabase | None = None
+        self._migrate = migrate
+        self._seed = seed
 
     def close(self) -> None:
         if self._database is not None:
@@ -180,7 +209,13 @@ class PostgresPersistenceBundleFactory:
         database = PostgresDatabase(settings, root_dir)
         self._database = database
         try:
-            _initialize(database, settings, seams)
+            _initialize(
+                database,
+                settings,
+                seams,
+                migrate=self._migrate,
+                seed=self._seed,
+            )
             identity = IdentityStore(database, settings)
             notebooks = NotebookStore(
                 database,

@@ -472,4 +472,9 @@ def test_production_ingestion_has_one_host_route_and_no_legacy_dispatcher():
         assert forbidden not in ingestion
     assert "parse_source_file" not in facade
     assert "parse_source_file" not in sqlite_facade
-    assert "parser_provider_chain_host=runtime.parser_chain" in bootstrap
+    # The seat is named once, in the single host list every application
+    # repository is composed from (the server and the offline scale-build CLI
+    # both take it from ``application_repository_hosts``), so a composition
+    # cannot quietly come up with no parser chain.
+    assert '"parser_provider_chain_host": runtime.parser_chain' in bootstrap
+    assert bootstrap.count("parser_provider_chain_host") == 1

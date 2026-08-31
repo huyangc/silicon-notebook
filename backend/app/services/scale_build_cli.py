@@ -1,0 +1,926 @@
+"""W-CLI T-W2 — the offline scale-index build CLI (``scripts/build_scale_index.py``).
+
+An independent process that builds, exports and imports a notebook's scale
+index **beside a live service** against the same database and artifact tree.
+The serving process picks a newly published artifact up on its own (per-request
+probing, see ``scale_artifact_catalog.load``); no restart, no notification
+channel.
+
+Three properties make that safe, and each is enforced here:
+
+1. **Mutual exclusion** — every destructive subcommand takes the per-notebook
+   cross-process build claim (T-W1). SQLite has no such claim, so this CLI
+   refuses SQLite outright rather than pretending; a single-process deployment
+   has no scenario for it anyway.
+2. **Schema ownership** — this process does NOT own the schema. It composes the
+   repository with ``migrate=False, seed=False`` and verifies, on a bare
+   connection before composing anything, that the ledger in the live database
+   matches the migrations in this checkout. Migrating would apply DDL the
+   running service never asked for; seeding would silently reset the production
+   admin credential (``bundle._initialize``'s unconditional ``UPDATE users``).
+3. **Atomic publication** — every root is staged in ``{live}.tmp`` and renamed
+   into place, and the claim is re-verified in the instant before the first
+   rename. ``SIGINT`` is masked across the rename sequence.
+
+Receipts are content-free: notebook ids the operator typed, fixed artifact file
+names, sizes, counts and versions. The database URL is never printed.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import sys
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Callable, Iterator, Optional
+
+from app.core.config import Settings
+from app.core.database_url import database_identity
+from app.repositories.scale_build_lock import ScaleBuildBusy, ScaleBuildLockLost
+from app.services.kg.scale_index import (
+    MANIFEST_LIBRARY_KEY,
+    runtime_library_versions,
+)
+
+
+# A build on a 9M-object library runs for hours; the online default (30s, sized
+# for interactive requests) would kill it. Applied to ``Settings`` BEFORE the
+# repository is composed: the pool's connection configure/reset callbacks issue
+# ``RESET ALL``, so a ``SET`` on a borrowed connection is wiped before it can
+# take effect. The pool reads this number once, at construction.
+DEFAULT_STATEMENT_TIMEOUT_SECONDS = 86_400
+
+# Publication order for an import. The companion goes first and the main index
+# last, so any interruption between renames leaves the *live* index on its
+# previous generation. Both partial states are fail-soft rather than wrong: the
+# companion's ``parent_version`` gate refuses a companion that does not match
+# the live main index, so a mismatched pair degrades to "no companion", never
+# to "companion describing a different generation".
+PUBLISH_ORDER = ("kg_index_partitions", "kg_viz", "kg_index")
+
+MAIN_ROOT = "kg_index"
+COMPANION_ROOT = "kg_index_partitions"
+
+# Artifacts the main root always carries, plus the ones its manifest flags
+# promise. Derived from ``kg.scale_index.save_scale_index`` / ``load_scale_index``.
+_CORE_FILES = (
+    "manifest.json",
+    "graph.npz",
+    "node_ids.npy",
+    "idf.npy",
+    "chunk_index.npy",
+    "ann_labels.npy",
+)
+_FLAGGED_FILES = {
+    "has_viz": ("viz.npz", "viz_adj.npz"),
+    "has_chunk_ann": ("chunk_ann.bin", "chunk_ann_labels.npy"),
+    "has_chunk_ann_sources": (
+        "chunk_ann_source_names.npy",
+        "chunk_ann_source_codes.npy",
+        "chunk_ann_source_counts.npy",
+    ),
+    "has_relation_ann": ("relation_ann.bin", "relation_ann_labels.npy"),
+}
+# manifest count key → the .npy whose row count must equal it.
+_COUNTED_ARRAYS = {
+    "n_nodes": "node_ids.npy",
+    "n_ann": "ann_labels.npy",
+    "n_chunk_ann": "chunk_ann_labels.npy",
+    "n_relation_ann": "relation_ann_labels.npy",
+}
+
+
+class ScaleBuildCliError(RuntimeError):
+    """Refused before any work was attempted. Operator-facing; exit code 2."""
+
+
+class ScaleBuildCliFailure(RuntimeError):
+    """The command was attempted and failed. Operator-facing; exit code 1."""
+
+
+# ─────────────────────────────────────────────────────── migration ledger ──
+
+def packaged_migration_count() -> int:
+    """How many migrations this checkout carries."""
+    from app.repositories.postgres import migrator as migrator_module
+
+    return len(
+        migrator_module.load_migrations(
+            Path(migrator_module.__file__).with_name("migrations")
+        )
+    )
+
+
+def verify_migration_ledger(database_url: str) -> tuple[int, int]:
+    """Refuse to run against a database whose schema is not this code's schema.
+
+    The whole premise of an off-host build is that the builder and the serving
+    process agree on what the data means. The ledger is the cheapest hard
+    evidence of that: an off-host checkout one migration behind (or ahead) reads
+    columns the live service does not have, or misses ones it does, and the
+    artifact it produces is quietly wrong rather than loudly broken.
+
+    Read on a bare connection, before the repository (and its pool) exists, so a
+    refusal costs one connection and leaves no trace in the live database.
+    """
+    import psycopg
+
+    expected = packaged_migration_count()
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        present = connection.execute(
+            "SELECT to_regclass('silicon_schema_migrations') IS NOT NULL"
+        ).fetchone()[0]
+        if not present:
+            raise ScaleBuildCliError(
+                "the target database has no silicon_schema_migrations ledger; "
+                "this CLI never migrates — start the service (or a maintenance "
+                "CLI) against it once before building here"
+            )
+        row = connection.execute(
+            "SELECT max(version) FROM silicon_schema_migrations"
+        ).fetchone()
+    applied = int(row[0]) if row and row[0] is not None else 0
+    if applied != expected:
+        raise ScaleBuildCliError(
+            f"migration ledger mismatch: the database is at version {applied}, "
+            f"this checkout carries {expected}. Check out the exact revision the "
+            "service is running (this CLI deliberately does not migrate)."
+        )
+    return applied, expected
+
+
+# ────────────────────────────────────────────────────────── composition ──
+
+def resolve_settings(
+    statement_timeout_seconds: int = DEFAULT_STATEMENT_TIMEOUT_SECONDS,
+) -> Settings:
+    """Production settings with the offline statement timeout applied.
+
+    ``Settings()`` is read from the operator's environment/``.env`` — the
+    documentation requires running this with the *production* env file, because
+    the storage root, embedding dimension and pipeline configuration all have to
+    match the service whose artifacts are being replaced.
+    """
+    if statement_timeout_seconds <= 0:
+        raise ScaleBuildCliError("--statement-timeout-seconds must be positive")
+    settings = Settings()
+    return settings.model_copy(
+        update={"postgres_statement_timeout_seconds": int(statement_timeout_seconds)}
+    )
+
+
+def require_postgres(settings: Settings) -> None:
+    if database_identity(settings.database_url).scheme != "postgresql":
+        raise ScaleBuildCliError(
+            "this CLI requires PostgreSQL. A SQLite deployment is single-process "
+            "by construction: it has no cross-process build claim, so an offline "
+            "builder could not be excluded from the serving process and both "
+            "would race on the same artifact directory. Build in-process instead."
+        )
+
+
+@contextmanager
+def open_scale_build_repository(settings: Settings) -> Iterator[object]:
+    """Compose the live-service repository WITHOUT owning its schema.
+
+    The seats come from the same ``bootstrap`` helper the server uses, so the
+    indexing pipeline this build runs under is the one the service publishes.
+    The PostgreSQL adapter is named directly (rather than going through the
+    backend-neutral ``create_repository`` selector) because the schema-ownership
+    seam is PostgreSQL-only and ``require_postgres`` has already run.
+    """
+    from app.bootstrap import (
+        application_extension_runtime,
+        application_repository_hosts,
+        prime_extension_admission,
+    )
+    from app.repositories.postgres.repository import PostgresRepository
+
+    runtime = application_extension_runtime()
+    repository = PostgresRepository(
+        settings,
+        migrate=False,
+        seed=False,
+        **application_repository_hosts(runtime),  # type: ignore[arg-type]
+    )
+    # Closes the repository itself if priming fails; do not double-close.
+    prime_extension_admission(repository)
+    try:
+        yield repository
+    finally:
+        repository.close()
+
+
+def artifact_roots(store, notebook_id: str) -> dict[str, Path]:
+    """The three independent on-disk roots one notebook's index spans."""
+    return {
+        MAIN_ROOT: Path(str(store.scale_dir(notebook_id))),
+        "kg_viz": Path(str(store.viz_dir(notebook_id))),
+        COMPANION_ROOT: Path(str(store.source_partition_dir(notebook_id))),
+    }
+
+
+@contextmanager
+def claim_notebook(repository, notebook_id: str) -> Iterator[object]:
+    """Hold this notebook's cross-process build claim for the whole command.
+
+    ``build`` does NOT use this — the runtime's own ``build``/``fold`` take the
+    claim and hand it to the swap's re-verification, and a second claim from
+    this process's own separate lock session would simply refuse itself.
+    """
+    database = repository._runtime.database  # noqa: SLF001 — CLI composition root
+    handle = database.try_scale_build_lock(notebook_id)
+    if handle is None:
+        raise ScaleBuildCliFailure(
+            f"the scale-build claim for {notebook_id} is held by another process "
+            "(a service worker, a maintenance CLI, or another run of this tool). "
+            "Nothing was changed; retry once it finishes."
+        )
+    try:
+        yield handle
+    finally:
+        handle.release()
+
+
+# ─────────────────────────────────────────────────── interrupt handling ──
+
+class SwapInterruptGuard:
+    """Defer ``SIGINT`` across the rename sequence.
+
+    The renames are the only steps that destroy a published artifact, and they
+    are milliseconds long. A ``KeyboardInterrupt`` landing between the
+    ``live → .old`` and ``tmp → live`` renames leaves the notebook with no live
+    index at all — the one window in the whole command where Ctrl-C can lose
+    data. So the signal is recorded and re-raised after the sequence completes.
+    """
+
+    def __init__(self, report: Callable[[str], None]) -> None:
+        self._report = report
+        self._previous = None
+        self._installed = False
+        self.interrupted = False
+
+    def _handle(self, _signum, _frame) -> None:
+        self.interrupted = True
+        self._report(
+            "interrupt received during the artifact swap; finishing the rename "
+            "sequence first (this takes milliseconds)"
+        )
+
+    def __enter__(self) -> "SwapInterruptGuard":
+        # Signal handlers can only be installed on the main thread; a worker
+        # thread simply gets no masking rather than a crash.
+        if threading.current_thread() is threading.main_thread():
+            self._previous = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._handle)
+            self._installed = True
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self._installed:
+            signal.signal(signal.SIGINT, self._previous)
+            self._installed = False
+        # Only re-raise when the guarded block itself succeeded: a real failure
+        # is the more informative one and must not be replaced.
+        if self.interrupted and exc_type is None:
+            raise KeyboardInterrupt
+        return False
+
+
+def discard_staging(paths, report: Callable[[str], None]) -> None:
+    """Remove the ``.tmp`` directories this run staged, and say which."""
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                shutil.rmtree(path, ignore_errors=True)
+                report(f"removed staged build directory {path}")
+        except OSError as error:  # noqa: PERF203 - one report per root
+            report(f"could not remove staged build directory {path}: {error!r}")
+
+
+# ──────────────────────────────────────────────────────────── validation ──
+
+def _read_manifest(directory: Path) -> Optional[dict]:
+    path = directory / "manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ScaleBuildCliError(
+            f"{path} is not readable JSON ({error!r})"
+        ) from None
+    if not isinstance(data, dict):
+        raise ScaleBuildCliError(f"{path} is not a JSON object")
+    return data
+
+
+def npy_row_count(path: Path) -> Optional[int]:
+    """Row count from a ``.npy`` HEADER — no array data, no unpickling.
+
+    Object arrays (``node_ids``/``ann_labels``) would need ``allow_pickle`` to
+    materialize, which is an arbitrary-code-execution surface; the header is
+    plain and tells us everything the count check needs.
+    """
+    from numpy.lib import format as npy_format
+
+    try:
+        with open(path, "rb") as handle:
+            version = npy_format.read_magic(handle)
+            if version == (1, 0):
+                shape, _fortran, _dtype = npy_format.read_array_header_1_0(handle)
+            elif version == (2, 0):
+                shape, _fortran, _dtype = npy_format.read_array_header_2_0(handle)
+            else:
+                return None
+    except (OSError, ValueError):
+        return None
+    return int(shape[0]) if shape else 0
+
+
+def _graph_shape(path: Path) -> Optional[tuple[int, int]]:
+    """``graph.npz``'s declared matrix shape, read without the data members."""
+    import numpy as np
+
+    try:
+        with np.load(path) as archive:
+            if "shape" not in archive.files:
+                return None
+            shape = tuple(int(value) for value in archive["shape"])
+    except (OSError, ValueError, KeyError):
+        return None
+    return shape if len(shape) == 2 else None
+
+
+def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
+    """Missing files or manifest counts that disagree with the arrays on disk.
+
+    Header-only: the check is O(number of files), not O(index size), so it runs
+    in milliseconds on a multi-GB package.
+    """
+    required = list(_CORE_FILES)
+    if int(manifest.get("n_ann") or 0) > 0:
+        required.append("ann.bin")
+    for flag, files in _FLAGGED_FILES.items():
+        if manifest.get(flag):
+            required.extend(files)
+    missing = [name for name in required if not (directory / name).exists()]
+    if missing:
+        return f"the package is missing {', '.join(sorted(missing))}"
+
+    for key, filename in _COUNTED_ARRAYS.items():
+        expected = manifest.get(key)
+        if not isinstance(expected, int) or isinstance(expected, bool):
+            continue
+        path = directory / filename
+        if not path.exists():
+            continue
+        actual = npy_row_count(path)
+        if actual is not None and actual != expected:
+            return (
+                f"manifest.{key}={expected} but {filename} holds {actual} rows"
+            )
+    nodes = manifest.get("n_nodes")
+    shape = _graph_shape(directory / "graph.npz")
+    if isinstance(nodes, int) and not isinstance(nodes, bool) and shape is not None:
+        if shape != (nodes, nodes):
+            return (
+                f"manifest.n_nodes={nodes} but graph.npz is {shape[0]}×{shape[1]}"
+            )
+    return None
+
+
+def validate_import_package(
+    package: Path,
+    *,
+    expected_pipeline_identity,
+    runtime_dim: int,
+    runtime_libraries: dict,
+    allow_library_mismatch: bool = False,
+) -> tuple[dict, list[str]]:
+    """Everything that must be true before a foreign package touches live disk.
+
+    Returns ``(main manifest, warnings)``; every refusal raises.
+
+    The first three checks refuse rather than warn because each failure mode is
+    *silent* at serve time. The standing redline for this whole batch is
+    "answer quality does not change", and an index that quietly answers nothing
+    is the worst possible violation of it:
+
+    1. ``pipeline_identity`` — a mismatched identity makes the retrieval side
+       discard the scale core wholesale (``scale_artifact_catalog``'s pipeline
+       gate) and fall back to live retrieval, with no error anywhere.
+    2. ``dim`` — a mismatched embedding width makes ``open_ann`` fail open, i.e.
+       zero recall with a healthy-looking index. A package with no ``dim`` at
+       all is refused for the same reason: it cannot be shown to match, and this
+       is the one path where the artifact came from another machine.
+    3. ``hnswlib`` — the ``.bin`` carries no format version header, so a
+       version mismatch can load "successfully" and return garbage, which the
+       fail-open again swallows into silent zero recall. Strict equality, and
+       an unknown version on either side counts as a mismatch.
+       ``--allow-library-mismatch`` downgrades this one to a warning; there is
+       deliberately no override for the first two.
+
+    ``numpy``/``scipy`` mismatches only warn: ``.npy``/``.npz`` carry a format
+    version and fail loudly, so they cannot degrade silently.
+    """
+    main = package / MAIN_ROOT
+    if not main.is_dir():
+        raise ScaleBuildCliError(
+            f"{package} does not look like an export: no {MAIN_ROOT}/ directory"
+        )
+    manifest = _read_manifest(main)
+    if manifest is None:
+        raise ScaleBuildCliError(f"{main} has no manifest.json")
+    if manifest.get("version") is None:
+        raise ScaleBuildCliError(f"{main}/manifest.json has no version")
+
+    warnings: list[str] = []
+
+    from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
+
+    # Legacy artifacts predate the plugin pipeline and carry no identity; the
+    # retrieval side reads them as the builtin identity, so this does too.
+    package_identity = list(
+        manifest.get("pipeline_identity") or ["", BUILTIN_INDEXING_PIPELINE_VERSION]
+    )
+    if package_identity != list(expected_pipeline_identity):
+        raise ScaleBuildCliError(
+            f"pipeline identity mismatch: the package was built by "
+            f"{package_identity}, this notebook publishes "
+            f"{list(expected_pipeline_identity)}. Importing it would make the "
+            "retrieval side discard the scale core silently."
+        )
+
+    package_dim = manifest.get("dim")
+    if not isinstance(package_dim, int) or isinstance(package_dim, bool):
+        raise ScaleBuildCliError(
+            f"{main}/manifest.json has no usable dim; the embedding width "
+            "cannot be verified and a mismatch degrades to silent zero recall"
+        )
+    if int(package_dim) != int(runtime_dim):
+        raise ScaleBuildCliError(
+            f"embedding dimension mismatch: the package was built at "
+            f"dim={package_dim}, this deployment runs at dim={runtime_dim}"
+        )
+
+    recorded = manifest.get(MANIFEST_LIBRARY_KEY)
+    recorded = recorded if isinstance(recorded, dict) else {}
+    package_hnswlib = str(recorded.get("hnswlib") or "")
+    running_hnswlib = str(runtime_libraries.get("hnswlib") or "")
+    if not package_hnswlib or not running_hnswlib or package_hnswlib != running_hnswlib:
+        detail = (
+            f"the package was built with hnswlib "
+            f"{package_hnswlib or '(unrecorded)'}, this machine runs "
+            f"{running_hnswlib or '(unknown)'}"
+        )
+        if not allow_library_mismatch:
+            raise ScaleBuildCliError(
+                f"hnswlib version mismatch: {detail}. ann.bin has no format "
+                "version header, so a mismatch can degrade to silent zero "
+                "recall. Pin both machines to the same version, or pass "
+                "--allow-library-mismatch if you have verified it is safe."
+            )
+        warnings.append(f"hnswlib version mismatch accepted on request: {detail}")
+    for library in ("numpy", "scipy"):
+        package_version = str(recorded.get(library) or "")
+        running_version = str(runtime_libraries.get(library) or "")
+        if package_version and running_version and package_version != running_version:
+            warnings.append(
+                f"{library} version differs (package {package_version}, "
+                f"machine {running_version}); npy/npz carry a format version "
+                "and fail loudly, so this is informational"
+            )
+
+    inventory = artifact_inventory_error(main, manifest)
+    if inventory is not None:
+        raise ScaleBuildCliError(f"the package is incomplete: {inventory}")
+
+    companion = package / COMPANION_ROOT
+    companion_manifest = _read_manifest(companion) if companion.is_dir() else None
+    if companion_manifest is not None:
+        parent = companion_manifest.get("parent_version")
+        if parent != manifest.get("version"):
+            raise ScaleBuildCliError(
+                "the source-partition companion in this package belongs to a "
+                f"different generation (parent_version={parent!r}, main index "
+                f"version={manifest.get('version')!r})"
+            )
+    return manifest, warnings
+
+
+def companion_generation_error(roots: dict[str, Path]) -> Optional[str]:
+    """The same parent-version gate over LIVE roots, for export."""
+    companion_manifest = (
+        _read_manifest(roots[COMPANION_ROOT])
+        if roots[COMPANION_ROOT].is_dir()
+        else None
+    )
+    if companion_manifest is None:
+        return None
+    main_manifest = _read_manifest(roots[MAIN_ROOT])
+    main_version = None if main_manifest is None else main_manifest.get("version")
+    parent = companion_manifest.get("parent_version")
+    if parent != main_version:
+        return (
+            "the live source-partition companion belongs to a different "
+            f"generation (parent_version={parent!r}, main index version="
+            f"{main_version!r}); rebuild the index before exporting"
+        )
+    return None
+
+
+# ───────────────────────────────────────────────────────────── reporting ──
+
+def directory_report(path: Path) -> dict:
+    """File count and total bytes for one root — never file *contents*."""
+    if not path.exists():
+        return {"present": False}
+    files = 0
+    total = 0
+    for current, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(current, name))
+            except OSError:
+                continue
+            files += 1
+    return {"present": True, "files": files, "bytes": total}
+
+
+def _runtime_dim(settings: Settings) -> int:
+    from app.services.vector_index import resolve_runtime_dim
+
+    return int(resolve_runtime_dim(settings) or settings.embed_dim)
+
+
+# ────────────────────────────────────────────────────────── subcommands ──
+
+def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> dict:
+    """Read-only: what is on disk, what the database thinks, who holds the claim.
+
+    ``scale_index_status`` is the same call the service's own status endpoint
+    makes, including its full delta scan — a few seconds on a very large
+    notebook. That is the point: "is this artifact stale, and by how much" is
+    the question an operator is actually asking before deciding build vs fold.
+    """
+    runtime = repository._runtime  # noqa: SLF001 — CLI composition root
+    store = runtime.scale_artifact_store
+    roots = artifact_roots(store, notebook_id)
+    try:
+        status = repository.scale_index_status(notebook_id)
+    except KeyError:
+        raise ScaleBuildCliError(f"unknown notebook: {notebook_id}") from None
+
+    manifest = _read_manifest(roots[MAIN_ROOT])
+    database_version = runtime.scale_artifacts.version(notebook_id)
+    # Probe-and-release: the only correct way to answer "is anybody building
+    # this right now" without a lock table of our own. Holding it any longer
+    # would make an inspection block a real build.
+    database = runtime.database
+    probe = database.try_scale_build_lock(notebook_id)
+    if probe is None:
+        lock_state = "held_elsewhere"
+    else:
+        probe.release()
+        lock_state = "free"
+
+    leftovers = {}
+    for name, live in roots.items():
+        for suffix in (".tmp", ".old"):
+            candidate = Path(str(live) + suffix)
+            if candidate.exists():
+                leftovers[name + suffix] = directory_report(candidate)
+
+    receipt = {
+        "notebook_id": notebook_id,
+        "state": status.get("state"),
+        "exists": bool(status.get("exists")),
+        "building": bool(status.get("building")),
+        "delta_chunks": status.get("delta_chunks"),
+        "total_chunks": status.get("total_chunks"),
+        "build_claim": lock_state,
+        "manifest": None
+        if manifest is None
+        else {
+            "version": manifest.get("version"),
+            "pipeline_identity": manifest.get("pipeline_identity"),
+            "dim": manifest.get("dim"),
+            "n_nodes": manifest.get("n_nodes"),
+            "n_ann": manifest.get("n_ann"),
+            "n_chunks": manifest.get("n_chunks"),
+            "built_at": manifest.get("built_at"),
+            "total_build_ms": manifest.get("total_build_ms"),
+            "build_ms": manifest.get("build_ms"),
+            "library_versions": manifest.get(MANIFEST_LIBRARY_KEY),
+        },
+        "version_matches_database": (
+            manifest is not None
+            and manifest.get("version") == database_version
+        ),
+        "roots": {name: directory_report(live) for name, live in roots.items()},
+        "leftovers": leftovers,
+        "runtime_dim": _runtime_dim(repository.settings),
+        "runtime_library_versions": _runtime_libraries(),
+    }
+    if leftovers:
+        report(
+            "leftover staging/rollback directories are present; a `.old` "
+            "directory can be restored with `mv {dir}.old {dir}`"
+        )
+    return receipt
+
+
+def _runtime_libraries() -> dict:
+    return runtime_library_versions()
+
+
+def run_build(
+    repository,
+    notebook_id: str,
+    *,
+    mode: str,
+    report: Callable[[str], None],
+) -> dict:
+    """Full rebuild or delta fold through the ordinary facade entry points.
+
+    Those already take the per-notebook claim (T-W1's ``_claim_scale_build``),
+    already hand its ``verify_held`` to the swap, and already publish the
+    companion when the deployment's switch is on — so the offline path and the
+    online path are literally the same code, which is the only way "the offline
+    builder produces what the service would have produced" stays true.
+    """
+    store = repository._runtime.scale_artifact_store  # noqa: SLF001
+    staging = [
+        Path(str(live) + ".tmp")
+        for live in artifact_roots(store, notebook_id).values()
+    ]
+    started = time.perf_counter()
+    try:
+        if mode == "fold":
+            result = repository.fold_scale_index_delta(notebook_id)
+        else:
+            def on_stage(stage: str, elapsed_ms: int) -> None:
+                report(f"stage {stage}: {elapsed_ms} ms")
+
+            result = repository.build_scale_index(notebook_id, on_stage)
+    except KeyboardInterrupt:
+        # An interrupted build leaves an incomplete ``.tmp`` behind; the next
+        # build would discard it anyway, so remove it now and say where it was
+        # rather than leaving a multi-GB directory unexplained.
+        discard_staging(staging, report)
+        raise
+    except ScaleBuildBusy as error:
+        raise ScaleBuildCliFailure(
+            f"{error}. Nothing was published; retry once the other builder "
+            "finishes."
+        ) from None
+    except ScaleBuildLockLost as error:
+        raise ScaleBuildCliFailure(
+            f"{error} Investigate why the lock session died (an idle reaper, a "
+            "failover, a terminated backend) before retrying."
+        ) from None
+    report(f"{mode} finished in {round(time.perf_counter() - started, 1)}s")
+    return {"notebook_id": notebook_id, "mode": mode, "result": result}
+
+
+def run_export(
+    repository, notebook_id: str, destination: Path, report: Callable[[str], None]
+) -> dict:
+    """Copy the live roots out under the claim.
+
+    The claim matters even though export writes nothing to the artifact tree: a
+    ``copytree`` racing a publish would walk one root before its swap and
+    another after it, producing a package that mixes two generations — and the
+    companion is rebuilt *after* the main swap, so that window exists by design.
+    """
+    store = repository._runtime.scale_artifact_store  # noqa: SLF001
+    roots = artifact_roots(store, notebook_id)
+    if not (roots[MAIN_ROOT] / "manifest.json").is_file():
+        raise ScaleBuildCliError(
+            f"{notebook_id} has no published scale index to export"
+        )
+    if destination.exists():
+        if not destination.is_dir():
+            raise ScaleBuildCliError(f"--to {destination} is not a directory")
+        if any(destination.iterdir()):
+            raise ScaleBuildCliError(f"--to {destination} exists and is not empty")
+
+    with claim_notebook(repository, notebook_id):
+        problem = companion_generation_error(roots)
+        if problem is not None:
+            raise ScaleBuildCliError(problem)
+        destination.mkdir(parents=True, exist_ok=True)
+        exported = []
+        for name in PUBLISH_ORDER:
+            live = roots[name]
+            if not live.is_dir():
+                continue
+            shutil.copytree(live, destination / name)
+            exported.append(name)
+            report(f"exported {name}")
+    manifest = _read_manifest(roots[MAIN_ROOT]) or {}
+    return {
+        "notebook_id": notebook_id,
+        "to": str(destination),
+        "roots": exported,
+        "version": manifest.get("version"),
+        "library_versions": manifest.get(MANIFEST_LIBRARY_KEY),
+    }
+
+
+def run_import(
+    repository,
+    notebook_id: str,
+    package: Path,
+    *,
+    allow_library_mismatch: bool,
+    report: Callable[[str], None],
+) -> dict:
+    """Validate a package, stage all of its roots, then publish them atomically.
+
+    Staging is the expensive, failure-prone half (a full copy of a multi-GB
+    tree); it happens entirely in ``.tmp`` directories with the live tree
+    untouched. Only when every root is staged does the claim get re-verified and
+    the renames run, under ``SIGINT`` masking.
+    """
+    runtime = repository._runtime  # noqa: SLF001
+    store = runtime.scale_artifact_store
+    roots = artifact_roots(store, notebook_id)
+    settings = repository.settings
+
+    with claim_notebook(repository, notebook_id) as handle:
+        manifest, warnings = validate_import_package(
+            package,
+            expected_pipeline_identity=runtime.index_projections.pipeline_identity(
+                notebook_id
+            ),
+            runtime_dim=_runtime_dim(settings),
+            runtime_libraries=_runtime_libraries(),
+            allow_library_mismatch=allow_library_mismatch,
+        )
+        for warning in warnings:
+            report(f"warning: {warning}")
+
+        staged: dict[str, Path] = {}
+        published: list[str] = []
+        try:
+            for name in PUBLISH_ORDER:
+                source = package / name
+                if not source.is_dir():
+                    continue
+                target = store.prepare_staging_directory(roots[name])
+                staged[name] = target
+                shutil.copytree(source, target, dirs_exist_ok=True)
+                report(f"staged {name}")
+
+            with SwapInterruptGuard(report):
+                for name in PUBLISH_ORDER:
+                    if name not in staged:
+                        continue
+                    store.swap_staging_directory(
+                        roots[name], staged[name], verify_held=handle.verify_held
+                    )
+                    published.append(name)
+                    staged.pop(name)
+        except ScaleBuildLockLost as error:
+            # The claim is the reason a second writer cannot be here; losing it
+            # mid-publish means abandoning the operation with the live tree as
+            # it stands, NOT deleting the staged copies an operator may need.
+            report(f"published before the claim was lost: {published or 'nothing'}")
+            raise ScaleBuildCliFailure(
+                f"{error} Nothing further was published; the staged copies are "
+                "left on disk for inspection."
+            ) from None
+        except BaseException:
+            # Covers a staging failure (nothing renamed yet, live tree pristine)
+            # and Ctrl-C. Only this run's own ``.tmp`` directories are removed.
+            if published:
+                report(f"already published before the failure: {published}")
+            discard_staging(list(staged.values()), report)
+            raise
+
+    return {
+        "notebook_id": notebook_id,
+        "from": str(package),
+        "roots": published,
+        "version": manifest.get("version"),
+        "warnings": warnings,
+    }
+
+
+# ──────────────────────────────────────────────────────────────── argv ──
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="build_scale_index.py",
+        description=(
+            "Build, export and import a notebook's scale index from a process "
+            "that runs beside the live service. PostgreSQL only; the database "
+            "URL comes from the environment and is never printed."
+        ),
+    )
+    parser.add_argument(
+        "--statement-timeout-seconds",
+        type=int,
+        default=DEFAULT_STATEMENT_TIMEOUT_SECONDS,
+        help=(
+            "per-statement timeout for this process only (default: 86400). The "
+            "online default is sized for interactive requests and would kill a "
+            "multi-hour build."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    inspect = subparsers.add_parser(
+        "inspect", help="read-only report on one notebook's artifacts and claim"
+    )
+    inspect.add_argument("--notebook", required=True)
+
+    build = subparsers.add_parser("build", help="rebuild or fold the index")
+    build.add_argument("--notebook", required=True)
+    mode = build.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--full",
+        dest="mode",
+        action="store_const",
+        const="full",
+        help="full rebuild (default)",
+    )
+    mode.add_argument(
+        "--fold",
+        dest="mode",
+        action="store_const",
+        const="fold",
+        help="fold the delta into the published artifact",
+    )
+    build.set_defaults(mode="full")
+
+    export = subparsers.add_parser("export", help="copy the artifacts to a directory")
+    export.add_argument("--notebook", required=True)
+    export.add_argument("--to", required=True)
+
+    importer = subparsers.add_parser(
+        "import", help="publish artifacts built elsewhere"
+    )
+    importer.add_argument("--notebook", required=True)
+    importer.add_argument("--from", dest="source", required=True)
+    importer.add_argument(
+        "--allow-library-mismatch",
+        action="store_true",
+        help=(
+            "accept an hnswlib version difference between the building machine "
+            "and this one. Only for a difference you have verified; the .bin "
+            "format carries no version header."
+        ),
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+
+    def report(message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+    try:
+        settings = resolve_settings(args.statement_timeout_seconds)
+        require_postgres(settings)
+        verify_migration_ledger(settings.database_url)
+        with open_scale_build_repository(settings) as repository:
+            if args.command == "inspect":
+                receipt = run_inspect(repository, args.notebook, report)
+            elif args.command == "build":
+                receipt = run_build(
+                    repository, args.notebook, mode=args.mode, report=report
+                )
+            elif args.command == "export":
+                receipt = run_export(
+                    repository, args.notebook, Path(args.to), report
+                )
+            else:
+                receipt = run_import(
+                    repository,
+                    args.notebook,
+                    Path(args.source),
+                    allow_library_mismatch=args.allow_library_mismatch,
+                    report=report,
+                )
+    except ScaleBuildCliError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except ScaleBuildCliFailure as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        # The messages above say exactly what was staged, published or removed;
+        # claiming "nothing happened" here would be a guess.
+        print("interrupted", file=sys.stderr)
+        return 130
+    print(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    return 0

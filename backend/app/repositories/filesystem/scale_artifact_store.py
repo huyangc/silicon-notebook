@@ -231,11 +231,7 @@ class ScaleArtifactStore:
         )
 
         live = self.source_partition_dir(notebook_id)
-        temporary = Path(str(live) + ".tmp")
-        old = Path(str(live) + ".old")
-        if temporary.exists():
-            shutil.rmtree(temporary)
-        temporary.mkdir(parents=True, exist_ok=True)
+        temporary = self.prepare_staging_directory(live)
         published = 0
         unavailable = 0
         for source_id in source_ids:
@@ -262,25 +258,12 @@ class ScaleArtifactStore:
         with open(temporary / "manifest.json", "w") as handle:
             json.dump(manifest, handle, ensure_ascii=False)
 
-        if old.exists():
-            shutil.rmtree(old)
-        preserved = live.exists()
-        if preserved:
-            os.rename(live, old)
-        try:
-            os.rename(temporary, live)
-        except Exception as publish_error:
-            if preserved:
-                try:
-                    os.rename(old, live)
-                except Exception as rollback_error:
-                    publish_error.add_note(
-                        "source partition rollback failed; previous artifact "
-                        f"remains at {old}: {rollback_error!r}"
-                    )
-            raise
-        if preserved:
-            shutil.rmtree(old, ignore_errors=True)
+        # Same tmp+rename publish as the main root, from the same primitive.
+        # No ``verify_held``: the companion rebuild runs inside the build that
+        # already re-verified the claim for its main swap, and this root's
+        # ``parent_version`` gate makes a stale companion unreadable rather
+        # than wrong.
+        self.swap_staging_directory(live, temporary)
         return manifest
 
     def load_source_partitions(
@@ -344,35 +327,39 @@ class ScaleArtifactStore:
         ]
 
     # ──────────────────────────────────────────────────────── fold swap ──
-    def prepare_fold_directory(self, notebook_id: str) -> Path:
-        """Staging for BOTH fold and full rebuild (the name predates save_full
-        joining; renaming it would churn ownership_manifest.py and the existing
-        suites for no functional gain). Resets {scale_dir}.tmp — leftovers from
-        an interrupted fold or rebuild are discarded — and hands it back; the
-        live artifact is untouched until swap_fold_directory."""
-        tmp_dir = str(self.scale_dir(notebook_id)) + ".tmp"
+    @staticmethod
+    def prepare_staging_directory(live) -> Path:
+        """Reset and hand back ``{live}.tmp`` for ANY artifact root.
+
+        W-CLI T-W2 generalized this (and ``swap_staging_directory`` below) from
+        "the notebook's main scale directory" to "a live directory": an offline
+        import publishes THREE roots — the main index, the viz index and the
+        source-partition companion — and "main atomic, the rest copied straight
+        over the live tree" is not a publishing story anybody can reason about.
+        The two notebook-scoped wrappers below keep the original call shape.
+        """
+        tmp_dir = str(live) + ".tmp"
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
         os.makedirs(tmp_dir, exist_ok=True)
         return Path(tmp_dir)
 
-    def swap_fold_directory(
-        self,
-        notebook_id: str,
+    @staticmethod
+    def swap_staging_directory(
+        live,
         temporary,
         *,
         verify_held: Optional[Callable[[], bool]] = None,
     ) -> None:
-        """Atomic-swap sequence (caller holds the building lock):
+        """Atomic-swap sequence for ANY artifact root (caller holds the claim):
         live → .old, temporary → live, rm .old. If publishing temporary
         fails after the first rename, restore .old → live before re-raising
         the original publish error. A failed rollback leaves .old intact.
 
-        Serves fold AND full rebuild. Fold only ever runs on top of an existing
-        index, but a first-ever full rebuild has no live directory yet — so the
-        live → .old step is skipped when out_dir is absent. Rollback semantics
-        are unchanged: only a live directory that was actually set aside can be
-        (and needs to be) put back.
+        A first-ever publish has no live directory yet — so the live → .old
+        step is skipped when it is absent. Rollback semantics follow: only a
+        live directory that was actually set aside can be (and needs to be) put
+        back.
 
         ``verify_held`` re-checks the caller's cross-process build claim in the
         last instant before the first rename — the one step that destroys the
@@ -381,13 +368,13 @@ class ScaleArtifactStore:
         publishing here, so the build is abandoned: nothing is renamed, the
         staged ``.tmp`` is left on disk, and the failure is loud. Callers with
         no cross-process claim (SQLite, direct builder use) pass nothing."""
+        out_dir = str(live)
         if verify_held is not None and not verify_held():
             raise ScaleBuildLockLost(
                 "scale build lock was lost before the artifact swap for "
-                f"{notebook_id}; nothing was published and the staged build "
-                f"remains at {self.scale_dir(notebook_id)}.tmp"
+                f"{out_dir}; nothing was published and the staged build "
+                f"remains at {out_dir}.tmp"
             )
-        out_dir = str(self.scale_dir(notebook_id))
         old_dir = out_dir + ".old"
         if os.path.exists(old_dir):
             shutil.rmtree(old_dir)
@@ -402,9 +389,29 @@ class ScaleArtifactStore:
                     os.rename(old_dir, out_dir)
                 except Exception as rollback_error:
                     publish_error.add_note(
-                        "scale fold rollback failed; previous artifact remains "
-                        f"at {old_dir}: {rollback_error!r}"
+                        "scale artifact rollback failed; previous artifact "
+                        f"remains at {old_dir}: {rollback_error!r}"
                     )
             raise
         if preserved:
             shutil.rmtree(old_dir, ignore_errors=True)
+
+    def prepare_fold_directory(self, notebook_id: str) -> Path:
+        """Staging for BOTH fold and full rebuild (the name predates save_full
+        joining; renaming it would churn ownership_manifest.py and the existing
+        suites for no functional gain). Resets {scale_dir}.tmp — leftovers from
+        an interrupted fold or rebuild are discarded — and hands it back; the
+        live artifact is untouched until swap_fold_directory."""
+        return self.prepare_staging_directory(self.scale_dir(notebook_id))
+
+    def swap_fold_directory(
+        self,
+        notebook_id: str,
+        temporary,
+        *,
+        verify_held: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """The notebook's main scale root, published by the primitive above."""
+        self.swap_staging_directory(
+            self.scale_dir(notebook_id), temporary, verify_held=verify_held
+        )
