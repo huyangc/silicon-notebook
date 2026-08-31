@@ -81,6 +81,50 @@ def test_a_second_process_cannot_take_a_held_scale_build_lock(
     regained.release()
 
 
+def test_database_close_releases_a_still_held_scale_build_lock(
+    postgres_database, postgres_settings
+):
+    """P2, codex PR#643 R33: the dedicated lock session lives outside the
+    pool, so ``close()`` used to leave a held claim granted — other
+    instances kept seeing the notebook busy and a detached worker's
+    ``verify_held`` stayed True after repository shutdown. ``close()`` now
+    releases every registered active handle.
+
+    Mutation anchor: drop the active-handle release loop from ``close()``
+    and this goes red — the second process still sees the claim held.
+    """
+    other = _second_process(postgres_settings)
+    holder = _second_process(postgres_settings)
+    try:
+        handle = holder.try_scale_build_lock("nb-close-releases")
+        assert handle is not None
+        assert other.try_scale_build_lock("nb-close-releases") is None
+
+        holder.close()
+
+        assert handle.verify_held() is False, (
+            "a claim must not survive its repository's shutdown"
+        )
+        regained = other.try_scale_build_lock("nb-close-releases")
+        assert regained is not None, (
+            "another instance must be able to take the claim after shutdown"
+        )
+        regained.release()
+    finally:
+        other.close()
+        holder.close()
+
+
+def test_a_normal_release_leaves_no_handle_in_the_registry(postgres_database):
+    handle = postgres_database.try_scale_build_lock("nb-registry")
+    assert handle is not None
+    with postgres_database._scale_build_lock_registry_lock:
+        assert handle in postgres_database._active_scale_build_locks
+    handle.release()
+    with postgres_database._scale_build_lock_registry_lock:
+        assert handle not in postgres_database._active_scale_build_locks
+
+
 def test_a_held_lock_verifies_itself_and_a_released_one_does_not(
     postgres_database,
 ):
