@@ -1,123 +1,173 @@
-# W-CLI：离线 scale build CLI（设计与实施规格）
+# W-CLI：离线 scale build CLI（设计与实施规格 v2，经 opus 设计评审修订）
 
 热路径修复计划批 2 的 W-CLI 项（批 3 之前安全操作 9M 库检索索引的前提工具）。
 三条红线不变：不降检索性能、不降 KG 抽取性能、不改问答结果质量。
 
 ## 目标与非目标
 
-目标：一个可与**运行中的服务并存**的独立进程构建通道——同库取数、复用
-`.tmp`+原子 swap、per-notebook 跨进程单飞、服务进程按既有逐请求探测自动
-换代（无需重启）；支持在另一台大内存机器构建后把工件拷回（rename 原子
-落位）。动机数据：49 万对象库曾把 64GB 机器内存打爆（2026-07-02 事故档），
-scale index 常驻 ~5GB、构建峰值曾达 40GB。
+目标：一个可与**运行中的服务并存**的独立进程构建通道——同库取数、`.tmp`+
+原子 swap、per-notebook 跨进程单飞、服务进程按既有逐请求探测自动换代
+（无需重启）；支持异机构建后工件拷回（rename 原子落位）。动机：49 万对象
+库曾把 64GB 机器打爆（2026-07-02 事故档），scale index 常驻 ~5GB。
 
-非目标：不改构建算法本身；不做跨进程通知通道（换代靠既有逐请求探测）；
-不动 maintenance CLI（停服 + 全局锁）的既有语义。
+非目标：不改构建算法；不做跨进程通知通道；不动 maintenance CLI（停服 +
+全局锁）语义；不引入 flock 类新机制（SQLite 部署由 CLI 拒绝闭合，见 T-W2）。
 
-## 摸底结论中承重的四条（评审请核）
+## 摸底结论（v2 精确化，评审已逐条核实）
 
-1. `batch_ingest.py index` 已是离线构建入口，但它经
-   `open_maintenance_cli_repository`（停服确认 + **数据库级全局** advisory
-   lock）——语义是「服务已停的维护」。W-CLI 的全部意义在**在线伴随**，
-   不能复用该组合根；需要新的轻组合根（仓库组装、无停服闸、无全局锁）。
-2. `repository_facade.build_scale_index` 绕过 `_admit_scale_op`——**当前
-   没有任何 per-notebook 互斥**（进程内 CLI-vs-调度器、跨进程皆无）；两个
-   构建者会争 `.tmp`、后到者顶替先到者。这是 W-CLI 顺带要堵的现存缺口。
-3. 换代读取：`ScaleArtifactCatalog.load()` 逐请求探测（version_signal 单行
-   SELECT + manifest `(mtime_ns,size,ino)` 签名），外部 rename 产生新 inode
-   自然被感知——**新数据触发的重建无需任何服务侧改动即生效**。盲区：
-   「数据不变、产物变化」（修复/换 HNSW 参数重建）时 version 值不变，
-   exact 与 allow_stale 两路都按值判等命中旧对象，重启前不生效。
-4. 工件设计上可移植（manifest 无机器绑定、npy/npz 平台无关、hnswlib .bin
-   是数据不是机器码），唯一风险是**两台机器的 hnswlib/numpy/scipy 版本
-   一致性**——当前零校验零记录。source-partition companion 与主索引是
-   世代绑定（operations.md:829），必须同批产出同批拷回。
+1. `batch_ingest index` 经 `open_maintenance_cli_repository`：停服闸 +
+   **数据库级全局** advisory lock（固定 key 0x53494C49434F4E）——是「服务
+   已停」通道，W-CLI 不能复用。
+2. 互斥现状的精确表述：`build()` 全程不碰 `building_lock`/`building`
+   （facade `build_scale_index` 也绕过 `_admit_scale_op`）；`fold()` 有
+   进程内 `building` 认领但**看不见** build；跨进程三条路径皆无互斥；
+   `prepare_fold_directory` 会 rmtree 别人正在写的 `.tmp`。
+3. 换代读取逐请求探测（version_signal + manifest 磁盘签名），外部 rename
+   产生新 inode 自然感知；盲区=「数据不变、产物变化」时两条路径按
+   version 值判等命中旧对象（T-W3 解决）。
+4. 工件可移植（manifest 无机器绑定、npy/npz 平台无关、hnswlib .bin 是
+   数据）；风险=两机 hnswlib/numpy/scipy 版本（requirements 只有下界
+   `>=`，漂移是常态）**与代码/迁移账本版本**。
+5. **评审最重发现**：组装仓库的 bundle `_initialize` 会 (a) 跑迁移
+   （bundle.py:68——异机新 checkout 对在役库执行未预期 DDL），(b) **无
+   条件 UPDATE user-local 的 admin 凭据**（bundle.py:101-106，salt 每次
+   随机——异机 .env 缺 ADMIN_PASSWORD 时把生产密码静默改成默认值）。
+   停服闸此前兜住了这两条；在线伴随进程必须显式关闭它们。
 
 ## 任务拆分
 
-### T-W1 per-notebook 跨进程锁 + 服务侧准入探测
+### T-W1 per-notebook 跨进程锁 + 服务侧准入探测（opus 实现）
 
-- 新原语（形态：`offline_maintenance_lock` 的 session 级
-  `pg_try_advisory_lock` + 专用非池化连接 + finally unlock 结构，配
-  `cluster_lock.py` 的命名空间 key 风格）：
-  `scale_build_lock(notebook_id)`，key =
-  `f"silicon-notebook:scale-build:{notebook_id}"` → `hashtextextended(k,0)`。
-  持有横跨整个构建（分钟~几十分钟），**不得**用事务级锁。SQLite 部署
-  no-op 兜底（判 backend scheme，照 maintenance_cli 的判别方式）。落点在
-  repositories 层（postgres 侧实现 + 端口/组合按既有分层惯例）。
-- 服务侧 `_admit_scale_op`：启动构建线程前对该 notebook 做一次**非阻塞
-  探测式获取**；拿不到（外部 CLI 在建）→ 按既有 QUEUED/退避语义处理
-  （不新增状态面；复用 `_scale_pending`/idle 队列的既有归宿，探测失败视作
-  暂不可建）。服务进程拿到锁后持有至构建结束（同一专用连接）。
-- `repository_facade.build_scale_index`（batch_ingest index 也走它）同样
-  收进锁——现存的「三条路径无互斥」缺口一并闭合。
-- 测试：双进程模拟（两个连接各自 try lock）互斥；服务准入在锁被占时
-  QUEUED 不阻塞线程；锁持有者异常退出（连接断）锁自动释放（session 级
-  语义,断连即释——测试钉住）；SQLite no-op。
+**锁原语**（落点 repositories 层，postgres/sqlite 两适配器各一份实现，
+服务层不嗅 scheme）：
+- 模板照 `database.py:400-430` 的 `table_projection_lock`（**不是**
+  offline_maintenance_lock）：专用非池化会话 + **双参**
+  `pg_try_advisory_lock(namespace, key)`（namespace 取固定 int32 常量，
+  key = notebook_id 哈希归一 int32；双参让 pg_locks 探查直读两列，规避
+  单参 64 位负 key 重组陷阱——评审实测 200 样本 108 负）+ 信号量限制此类
+  连接数。SQLite 适配器返回「不支持」哨兵（不是 nullcontext no-op——
+  CLI 据此拒绝，见 T-W2；服务进程内互斥由 T-W1 服务侧改动补齐）。
+- **会话韧性（阻塞级）**：锁会话上显式 `SET idle_session_timeout = 0`
+  （USERSET；托管 PG 常开该参数，会杀 idle 持锁会话=锁静默释放）+
+  conninfo keepalives（idle/interval/count）；任何 SET 必须在
+  `_restore_session_defaults` 的 `RESET ALL` 之后执行（照
+  database.py:418-424 的既有写法与注释）。
+- **swap 前复验持锁（阻塞级，比心跳更关键）**：`swap` 是唯一破坏性步骤，
+  执行前在锁会话上复验锁仍在手（一次 SELECT 自查双参锁存在）；复验失败
+  =构建作废、`.tmp` 留置、响亮报错（绝不 swap）。
+- 锁所有权跨线程：contextmanager 跨不了线程——手工 enter/exit，纪律同
+  并发票据：「每一个出口要么把锁交给 worker、要么自己释放」（写测试钉）。
 
-### T-W2 CLI 本体 `scripts/build_scale_index.py`
+**服务侧准入**：
+- `_admit_scale_op`（scale_artifact_runtime.py:1095-1315）在拿信号量票据
+  **之前**做非阻塞探测式获取（拿到即持有并移交 worker；拿不到→QUEUED
+  归宿照 `_scale_pending`/idle 既有语义）。**探测失败的回滚纪律（阻塞级）**：
+  若实现上探测只能放在 claim/票据之后，失败路径必须照 :1301-1314 的
+  `_start_daemon` 失败分支完整回滚（释放票据、`building.discard`、还原
+  队列条目），且**不得**调 `_scale_record_failure`（外部 CLI 建 40 分钟
+  不能把该库自动重试退避推到上限）。
+- `build()` 与 `fold()` 统一收进 `building` 认领 + 新锁（现存缺口一并
+  闭合）；facade `build_scale_index` 因此获得互斥。batch_ingest index
+  在停服场景拿不到 per-nb 锁时（顺序恒为全局锁→per-nb 锁、非阻塞 try，
+  无死锁环）转成可读 busy 错误 + 明确退出码，说明前序阶段成果已落库。
+- **锁 seam 从 `wire_scale_runtime`（repository_runtime.py:1698-1756）
+  内部自持的 database/maintenance 取，不新增 facade 参数**——三道零松弛
+  机械门（ports 计数 898、facade allowed_names 只缩不长、
+  `RepositoryFacade.__init__` 行数 474）任何一道都不许因此动；若端口
+  确需新方法，棘轮同 diff 且在 PR 里引用 64d5aa10 先例。
 
-argparse 骨架照 `build_hotpath_indexes.py`（`--database-url-env` 默认
-DATABASE_URL、URL 永不打印、退出码 0/1/2、内容无关 JSON 收据）。子命令：
+测试：双连接互斥；断连自动释锁；swap 前复验失败不 swap；准入探测失败
+完整回滚（队列条目不丢、退避不记——变异钉）；SQLite 哨兵；锁移交纪律。
 
-- `inspect --notebook <id>`（只读，默认）：manifest 摘要（version/计数/
-  built_at/total_build_ms/库版本字段）、磁盘工件清单与大小、与 DB 当前
-  version_signal 的比对（是否已陈旧）、锁占用状态。
-- `build --notebook <id> [--full|--fold] [--statement-timeout-seconds N]`：
-  新轻组合根组装仓库（不停服闸、不占全局锁），取 per-notebook 锁，构建
-  连接放宽 statement_timeout（默认给个大值,operations 惯例 86400,只影响
-  本 CLI 连接），走既有 `build/fold` → `.tmp`+swap。进度经既有 on_stage
-  回调打印分段计时。companion（source-partition）随
-  `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED` 与在线行为一致同批产出。
-- `export --notebook <id> --to <dir>` / `import --notebook <id> --from <dir>`：
-  异机通道。export 把 live 工件目录（主索引 + companion + viz,若在）打包
-  复制到目标目录（只读源,不动 live）；import 在目标机取 per-notebook 锁 →
-  校验（manifest 可解析、计数与文件齐全、庫版本字段与本机装载库比对,
-  不符**警告**不拒绝——见 T-W3）→ `.tmp` 复制 → 原子 swap（复用
-  prepare/swap 原语）。companion 与主索引强制同批（缺一方拒绝,
-  operations.md:829 的世代绑定）。
-- 运行位置：脚本自带 `sys.path.insert(ROOT/backend)`（照 hotpath 脚本），
-  `_ROOT_DIR` 锚定已与 CWD 无关——文档写明「storage_dir 归属于脚本所在
-  checkout 的根」，异机部署提醒各机各锚。
-- 测试：CLI 冒烟（本地一次性 PG + 小库构建全链路）；import 的原子性
-  （swap 失败回滚、半拷贝不落 live）；export/import 往返后 inspect 一致；
-  锁被占时 build/import 退出码非 0 且给指引。
+### T-W2 CLI 本体 `scripts/build_scale_index.py`（T-W1 后，impl-task）
 
-### T-W3 版本字段与「产物变化」换代盲区
+argparse 骨架照 `build_hotpath_indexes.py`（URL 永不打印、退出码 0/1/2、
+内容无关收据）。**轻组合根（阻塞级）**：`PostgresPersistenceBundleFactory`
+开 `migrate=False, seed=False` 缝（默认 True 保持现状，既有全部调用方
+零变化），CLI 组装走该缝；组装前用裸连接读 `silicon_schema_migrations`
+账本与本 checkout `len(migrations)` 比对，不一致→退出码 2 + 指引（异机
+代码版本必须与在役服务一致）；文档硬性要求用生产 `.env` 运行。
+`--statement-timeout-seconds`（默认 86400）**在组装仓库之前**改
+`settings.postgres_statement_timeout_seconds`（池的 configure/reset 回调
+会 RESET ALL 抹掉借出连接上的 SET——评审点名的假达成陷阱）。
 
-- manifest 新增可选键 `library_versions`（hnswlib/numpy/scipy 的
-  `__version__`,构建时写入）。`load_scale_index` 的「缺键放行」校验模型
-  下安全新增;加载/import 时与本机版本比对,不符发 warning 事件（不拒绝——
-  hnswlib 未承诺跨版本兼容但同版本必然兼容,警告给运维决策）。
-- 换代盲区收窄：catalog 的判等在 version 值相同处**再比一层磁盘签名**
-  （`(mtime_ns,size,ino)`,签名机制已有）——值同而签名变 → 视为新代重载。
-  两条路径（exact 内存缓存命中、allow_stale 判定）都补。语义论证写进
-  docstring：签名变化只可能来自 swap（写路径唯一）,重载是保守方向,
-  不影响任何现有等价面;正常运行中签名不变,零额外 stat 开销增量
-  （allow_stale 路径本就每次 stat）——exact 路径新增一次 stat,量级与
-  version_signal 的单行 SELECT 同级,如实登记。
-- 测试：同 version 换产物（模拟修复性重建拷回）→ 下一次 load 拿到新
-  实例（改前会拿旧——变异锚点）;签名未变不重载（计数器）。
+子命令：
+- `inspect --notebook <id>`（只读）：manifest 摘要（version/计数/built_at/
+  build_ms/library_versions）、工件清单与大小、与 DB version_signal 比对、
+  `.tmp`/`.old` 残留及大小、锁占用（探测方式=非阻塞 try + 立即 unlock，
+  语义正确且最简）。未知 notebook→退出码 2 + 可读消息（不许 KeyError
+  裸奔；status() 会抛 KeyError，包住）。
+- `build --notebook <id> [--full|--fold]`：SQLite 后端拒绝（退出码 2 +
+  说明单进程部署无跨进程场景）；取 per-nb 锁→既有 build/fold→swap 前
+  复验；进度经 on_stage 打印分段计时；companion 随
+  SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED 与在线一致。**swap 期间
+  屏蔽 SIGINT**；Ctrl-C 清理自己的 `.tmp` 并打印路径。
+- `export --notebook <id> --to <dir>`：**也取 per-nb 锁**（评审 3c：swap
+  两次 rename 之间的 copytree 会拷出跨代混合集合；companion 在主 swap
+  之后才重建，天然有主新伴旧窗口）；打包主索引 + companion（存在时校验
+  `parent_version == 主 version`，不符拒绝导出）+ viz（存在时）。
+- `import --notebook <id> --from <dir>`：取 per-nb 锁→校验→三根各自
+  `.tmp`+rename 原子落位→swap 前复验持锁。校验清单（**前两项拒绝而非
+  警告**——红线「不改问答质量」）：
+  1. `manifest["pipeline_identity"]` 与当前已发布管线身份一致（不符则
+     检索侧会整体丢弃 scale 核静默退化——catalog.py:131-140）；
+  2. `manifest["dim"]` 与本机 embed 维一致（不符则 open_ann fail-open
+     静默零召回）；
+  3. hnswlib 版本严格相等，默认**拒绝**（`--allow-library-mismatch`
+     覆盖；.bin 无格式版本头，失配可能被 fail-open 吞成静默零召回）；
+     numpy/scipy 不符警告；
+  4. manifest 可解析、计数与文件齐全；companion 存在时
+     `parent_version == 主 version`（**缺失即放行**——开关关闭时构建的
+     包本就无 companion，条件化而非「缺一方拒绝」）。
+  三根原子性（评审 3a）：prepare/swap 原语现硬编码 kg_index 一根，
+  companion 的原子发布内联在 save_source_partitions、viz 根裸写无
+  staging——将 prepare/swap **泛化为按任意 live 目录**的原语（或等价的
+  每根实现），import 三根都走 tmp+rename；不许出现「主原子、其余裸拷」。
 
-### T-W4 文档与运维
+测试：CLI 冒烟（本地一次性 PG 小库全链路 build→export→import→inspect
+一致）；import 原子性（swap 失败回滚、半拷贝不落 live）；四项校验各自
+拒绝路径；锁被占退出码非 0；SQLite 拒绝；SIGINT 清理。
 
-- `docs/operations.md`/`_zh.md` 新段「离线/异机 scale 构建」：何时用
-  （大库首建/重建、内存受限的生产机）、同机在线用法、异机三步
-  （build→export/scp→import）、**两机库版本 pin 要求**、statement_timeout
-  说明、与 batch_ingest index（停服维护通道）的分工表。
-- `scripts/README.md` 增条目；`deployment` 文档若有 scale 相关段核对。
-- fangan 收官时再记。
+### T-W3 版本字段与「产物变化」换代盲区（opus 实现，可与 T-W1 并行）
+
+- manifest 新增可选键 `library_versions`（hnswlib/numpy/scipy），构建时
+  写入（builder manifest 组装处）；加载侧对 hnswlib 失配发 warning 事件
+  （import 的硬拒在 T-W2 层）。
+- catalog 判等在 version 值相同处**再比磁盘签名**：两条路径共用的内存
+  命中早退（catalog.py:156-159）是必须补的位置——**成本如实登记（评审
+  9）**：新增 stat 落在两条路径的最热共用分支（静态大库每次提问 5-10 次
+  load），不是「本就每次 stat」；stat 暖 dentry ~µs 级远低于
+  version_signal 的单行 SELECT，验收时**实测**（characterization 计时或
+  微基准数字入 PR）。缓存的 ScaleIndex 携带加载时签名（照
+  `_ann_load_states` 的 setattr 先例）；与 `_manifest_identity` memo 共用
+  同一次 `manifest_stat_signature` 调用，一次 load 不 stat 两遍。
+- 测试：同 version 换产物→下一次 load 新实例（变异锚点：去掉签名比对
+  红）；签名未变不重载（计数器）；stat 次数=每 load 一次。
+
+### T-W4 文档与运维（impl-task，随 T-W2 收尾）
+
+- `docs/operations.md`/`_zh.md` +「离线/异机 scale 构建」段：同机在线
+  用法、异机三步（build→scp→import）、**两机 pin 清单（代码版本/迁移
+  账本 + hnswlib/numpy/scipy）**、statement_timeout、连接预算（服务侧
+  每并发构建 + CLI 各占一条非池化连接，max_connections 紧的部署注意）、
+  PgBouncer 前提声明（transaction pooling 下 session 级 advisory lock
+  失效，本通道要求 session pooling 或直连）、`.old` 残留人工恢复
+  （`mv {dir}.old {dir}`）、**allow_pickle 来源约束（只 import 自己在
+  受控机器构建的工件——npy 反序列化=任意代码执行面）**。
+- `docs/development.md`/`_zh.md`（离线索引通道的既有落点）与
+  `docs/deployment-and-configuration.md`/`_zh.md` 成对更新；
+  `scripts/README.md` 增条目；fangan 收官时记。
 
 ## 明确不做
 
-- 跨进程通知/缓存 bust 通道（逐请求探测已够,盲区由 T-W3 签名层解决）。
-- 构建算法/内存优化（另有 2026-07-02 计划管辖）。
-- maintenance CLI 语义变化;batch_ingest index 保留原样（停服通道）,仅
-  经 facade 顺带获得 per-notebook 锁。
+- 跨进程通知/缓存 bust 通道；构建算法/内存优化（2026-07-02 计划管辖）；
+- maintenance CLI 语义变化（batch_ingest index 保留停服通道，仅顺带获得
+  per-nb 锁与 busy 错误形）；
+- flock：SQLite 部署由 CLI 拒绝闭合，不引入平台锁。
 
 ## 门与流程
 
-T-W1 → T-W2 → T-W3 可部分并行（W3 的 catalog 改动独立文件）；每任务
-实现（T-W1/T-W3 判断力要求高用 opus 实现,T-W2/T-W4 impl-task/sonnet）→
-spec-review + code-quality-review（opus）→ 汇成一个 PR → check.sh + PG
-lane + codex 闭环 → 合入。
+T-W1 与 T-W3 并行（无文件重叠）→ T-W2 → T-W4；每任务双内部评审（opus）
+→ 汇成一个 PR → check.sh + PG lane + codex 闭环。零松弛机械门（ports
+898、facade allowed_names、`RepositoryFacade.__init__` 474、
+ownership_manifest 重生成）在「T-W1 锁 seam」一节已约束，评审按此核。
