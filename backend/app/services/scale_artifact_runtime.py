@@ -444,9 +444,18 @@ class ScaleArtifactRuntime:
         # live. Recheck the live path once: a manifest there is the new
         # generation's real signature; still absent is durable.
         recheck = probe(self.artifacts.viz_dir(notebook_id))
-        if recheck is MANIFEST_ABSENT:
-            return MANIFEST_ABSENT
-        return recheck
+        if recheck is not MANIFEST_ABSENT:
+            return recheck
+        # codex PR#643 R25 P2 (same as the companion probe): back-to-back
+        # publications can thread all three probes — a second publish can
+        # rename live away right before the live recheck. One last ``.old``
+        # look: a publisher mid-swap leaves its ``.old`` visible, so four
+        # consecutive misses is durable absence.
+        if probe(str(self.artifacts.viz_dir(notebook_id)) + ".old") is not (
+            MANIFEST_ABSENT
+        ):
+            return None
+        return MANIFEST_ABSENT
 
     @staticmethod
     def _recordable_viz_signature(signature: Any) -> Any:

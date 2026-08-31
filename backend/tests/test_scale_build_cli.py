@@ -1744,6 +1744,39 @@ def test_import_refuses_a_package_where_an_optional_root_is_a_regular_file(
     )
 
 
+def test_import_refuses_a_transfer_that_dropped_a_whole_listed_root(
+    repository, store, tmp_path
+):
+    """codex PR#643 R25 P1: an off-host transfer can lose an ENTIRE optional
+    directory while ``transfer_manifest.json`` still lists its files. The
+    per-root file comparison never visits a root that is not in ``staged``,
+    so without a root-set check ``run_import`` reads the loss as an
+    intentional omission, RETIRES the healthy live root and reports success.
+
+    Mutation anchor: drop the manifest-roots vs staged-roots comparison in
+    ``verify_staged_transfer`` and this goes red — the import succeeds and
+    the live viz root is retired.
+    """
+    _seed_live(store, "nb-1")
+    package = _full_package(tmp_path)
+    shutil.rmtree(package / "kg_viz")  # the manifest still lists kg_viz/*
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="whole root"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    viz_dir = Path(store.viz_dir("nb-1"))
+    assert (viz_dir / "manifest.json").is_file(), (
+        "the healthy live viz root must not be retired"
+    )
+    assert not Path(f"{viz_dir}.old").exists()
+
+
 def test_import_refuses_a_package_where_an_optional_root_is_a_dangling_symlink(
     repository, store, tmp_path
 ):

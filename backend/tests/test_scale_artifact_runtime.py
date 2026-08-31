@@ -692,6 +692,36 @@ def test_a_viz_swap_completed_between_probes_is_not_read_as_retirement(
     assert notebook.id in scale.viz_cache
 
 
+def test_a_second_viz_publication_racing_the_recheck_stays_fail_soft(
+    repo, monkeypatch
+):
+    """codex PR#643 R25 P2, viz mirror: three consecutive misses can all be
+    explained by two back-to-back publications; the final ``.old`` look
+    catches the second publisher mid-swap and stays fail-soft.
+
+    Mutation anchor: drop the final ``.old`` look in ``_viz_signature`` and
+    this goes red — the warm index is evicted mid-publication.
+    """
+    notebook, scale, first = _warm_standalone_viz(repo)
+    monkeypatch.setattr(scale.builder, "build_viz", lambda *_: None)
+    live = Path(str(repo._runtime.scale_artifact_store.viz_dir(notebook.id)))
+    live.rename(str(live) + ".old")
+    real = scale.artifacts.manifest_stat_signature
+    answers = iter([MANIFEST_ABSENT, MANIFEST_ABSENT, MANIFEST_ABSENT])
+
+    def racing(directory):
+        try:
+            return next(answers)
+        except StopIteration:
+            return real(directory)
+
+    monkeypatch.setattr(scale.artifacts, "manifest_stat_signature", racing)
+    assert scale.viz_index(notebook.id) is first, (
+        "a second publication racing the recheck must stay fail-soft"
+    )
+    assert notebook.id in scale.viz_cache
+
+
 def test_an_adapter_without_a_stat_probe_keeps_its_warm_viz(repo, monkeypatch):
     """Negative anchor: "no probe on this adapter" is not "changed". Old test
     doubles and any artifacts adapter without ``manifest_stat_signature`` keep
