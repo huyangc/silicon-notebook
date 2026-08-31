@@ -1270,7 +1270,7 @@ def run_export(
         if any(destination.iterdir()):
             raise ScaleBuildCliError(f"--to {destination} exists and is not empty")
 
-    with claim_notebook(repository, notebook_id):
+    with claim_notebook(repository, notebook_id) as handle:
         problem = companion_generation_error(roots)
         if problem is not None:
             raise ScaleBuildCliError(problem)
@@ -1290,6 +1290,7 @@ def run_export(
                 "graph view triggers it) or remove the broken directory "
                 "before exporting"
             )
+        created_destination = not destination.exists()
         destination.mkdir(parents=True, exist_ok=True)
         exported = []
         for name in PUBLISH_ORDER:
@@ -1297,6 +1298,30 @@ def run_export(
             if not live.is_dir():
                 continue
             shutil.copytree(live, destination / name)
+            # codex PR#643 R20 P1: a copytree of a multi-GB root can outlive
+            # the advisory-lock session (failover, backend termination).
+            # Export writes nothing to the artifact tree, but once the claim
+            # is gone another builder can legally swap a root MID-WALK or
+            # between roots — the copy just made (or the next one) then mixes
+            # two generations, and for a same-version rebuild no later
+            # generation check can tell. Re-verify after every copy; on a
+            # lost claim the package on disk is unusable evidence, so remove
+            # what this run wrote and fail loudly instead of reporting a
+            # mixed package as success.
+            if handle.verify_held is not None and not handle.verify_held():
+                if created_destination:
+                    shutil.rmtree(destination, ignore_errors=True)
+                else:
+                    for copied in (*exported, name):
+                        shutil.rmtree(destination / copied, ignore_errors=True)
+                raise ScaleBuildCliFailure(
+                    f"the scale-build claim for {notebook_id} was lost while "
+                    f"copying {name}; another builder may have republished a "
+                    "root mid-copy, so the partial package cannot be trusted "
+                    f"and was removed from {destination}. The live tree is "
+                    "untouched. Re-run export once `inspect` shows the claim "
+                    "is free."
+                )
             exported.append(name)
             report(f"exported {name}")
         # Read the manifest that was just copied into `destination`, not the
