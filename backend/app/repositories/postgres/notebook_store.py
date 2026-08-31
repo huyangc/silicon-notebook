@@ -369,10 +369,37 @@ class NotebookStore:
             # FOR UPDATE: after this point a concurrent ask/source/report can
             # neither commit between the snapshot and cascade nor be silently
             # deleted without entering the snapshot.
-            connection.execute(
+            notebook_row = connection.execute(
                 "SELECT id FROM notebooks WHERE id=%s FOR UPDATE",
                 (notebook_id,),
             ).fetchone()
+            if notebook_row is None:
+                # A duplicate request that waited behind the winning delete
+                # must not erase the archive the winner just committed.
+                return []
+            # The parent lock blocks new FK children, but an update that keeps
+            # the same notebook_id takes no parent-key lock. Lock every row
+            # whose current metadata enters the snapshot so a pre-existing
+            # updater either commits before these reads or loses the row to
+            # the subsequent cascade; source paper metadata participates in
+            # display-title synthesis and belongs to the same boundary.
+            connection.execute(
+                "SELECT id FROM ask_jobs WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchall()
+            connection.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchall()
+            connection.execute(
+                "SELECT source_id FROM source_paper_meta "
+                "WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchall()
+            connection.execute(
+                "SELECT id FROM reports WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchall()
             rows = connection.execute(
                 "SELECT file_path FROM sources WHERE notebook_id=%s", (notebook_id,)
             ).fetchall()

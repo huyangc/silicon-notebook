@@ -490,12 +490,16 @@ def get_admin_user_ask_detail(
         job = repo.ask_job_detail(job_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
-    if job["created_by"] != user_id:
-        raise HTTPException(status_code=404, detail="ask job not found")
-    if user.role != "admin" and not repo.user_can_read_notebook(
-        job["notebook_id"], user.id
-    ):
-        raise HTTPException(status_code=404, detail="ask job not found")
+
+    def require_job_access(candidate: dict) -> None:
+        if candidate["created_by"] != user_id:
+            raise HTTPException(status_code=404, detail="ask job not found")
+        if user.role != "admin" and not repo.user_can_read_notebook(
+            candidate["notebook_id"], user.id
+        ):
+            raise HTTPException(status_code=404, detail="ask job not found")
+
+    require_job_access(job)
 
     asked_at = job.get("asked_at") or ""
     answered_at = ""
@@ -507,6 +511,20 @@ def get_admin_user_ask_detail(
         if detail is not None:
             answer = detail["payload"]
             answered_at = str(detail["payload"].get("answered_at") or "")
+        else:
+            # Notebook deletion can commit after ask_job_detail's final live
+            # check but before this separately bounded answer lookup. Re-read
+            # the lifecycle once: a newly retained row must replace the stale
+            # live shell instead of rendering a false “no answer” state.
+            try:
+                refreshed = repo.ask_job_detail(job_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="ask job not found")
+            require_job_access(refreshed)
+            if refreshed.get("notebook_deleted_at"):
+                job = refreshed
+                asked_at = job.get("asked_at") or ""
+                conversation_id = job.get("conversation_id") or ""
 
     return AskDetail(
         job_id=job["job_id"],

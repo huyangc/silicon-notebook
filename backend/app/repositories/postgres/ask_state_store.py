@@ -561,10 +561,7 @@ class AskStateStore:
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error,asked_at FROM ask_jobs WHERE id=%s", (job_id,)).fetchone()
-            if row is None:
+            def retained_detail() -> dict:
                 retained = db.execute(
                     "SELECT record_id,notebook_id,actor_id,notebook_name,"
                     "conversation_id,mode,question,status,asked_at,deleted_at,"
@@ -593,7 +590,17 @@ class AskStateStore:
                     "notebook_deleted_at": iso_timestamp(retained["deleted_at"]),
                     "retained_until": iso_timestamp(retained["expires_at"]),
                 }
+
+            row = db.execute(
+                "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
+                "answer_id,error,asked_at FROM ask_jobs WHERE id=%s", (job_id,)).fetchone()
+            if row is None:
+                return retained_detail()
             trace = self.read_trace(db, job_id)
+            if db.execute(
+                "SELECT 1 FROM notebooks WHERE id=%s", (row["notebook_id"],)
+            ).fetchone() is None:
+                return retained_detail()
         return {"job_id": row["id"], "notebook_id": row["notebook_id"],
                 "conversation_id": row["conversation_id"], "created_by": row["created_by"],
                 "mode": row["mode"], "question": row["question"], "status": row["status"],
