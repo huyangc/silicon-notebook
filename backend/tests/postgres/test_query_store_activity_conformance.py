@@ -128,7 +128,7 @@ def _insert_report(connection, report_id, notebook_id, created_by, created_at, *
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 43
+    assert PostgresMigrator(postgres_database).migrate() == 44
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -720,3 +720,59 @@ def test_latest_extraction_run_breaks_created_at_ties_by_ordinal(postgres_databa
     result = store.list_user_activity("u1", limit=50)
     by_id = {item["id"]: item for item in result["items"]}
     assert by_id["src-1"]["extraction_warning"] is None
+
+
+def test_deleted_notebook_activity_projection_matches_sqlite(
+    postgres_database, store
+):
+    from app.repositories.postgres.notebook_store import NotebookStore
+
+    created_at = datetime.now(timezone.utc).replace(microsecond=0)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-retained")
+        _insert_notebook(connection, "n-retained", "u-retained")
+        _insert_ask(
+            connection, "ask-retained", "n-retained", "u-retained", created_at,
+            question="retained question",
+        )
+        _insert_source(
+            connection, "src-retained", "n-retained", created_at,
+            title="retained source",
+        )
+        _insert_report(
+            connection, "rep-retained", "n-retained", "u-retained", created_at,
+            question="retained report prompt",
+        )
+
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: datetime.now(timezone.utc),
+        activity_retention_days=180,
+    )
+    notebooks.delete_row_and_orphan_embeddings("n-retained")
+
+    result = store.list_user_activity(
+        "u-retained", include_inaccessible_questions=True, limit=50,
+    )
+    assert {item["id"] for item in result["items"]} == {
+        "ask-retained", "src-retained", "rep-retained",
+    }
+    assert all(item["notebook_name"] == "NB-n-retained" for item in result["items"])
+    assert all(item["notebook_deleted_at"] for item in result["items"])
+    assert all(item["retained_until"] for item in result["items"])
+
+    usage = next(row for row in store.list_user_usage() if row["id"] == "u-retained")
+    assert usage["notebooks"] == 0
+    assert usage["sources"] == 1
+    assert usage["questions"] == 1
+    assert usage["reports"] == 1
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE retained_user_activity "
+            "SET expires_at=CURRENT_TIMESTAMP - INTERVAL '1 second'"
+        )
+    assert store.list_user_activity(
+        "u-retained", include_inaccessible_questions=True, limit=50,
+    )["items"] == []

@@ -53,6 +53,9 @@ export function toActivitySource(
     extraction_warning: source.extraction_warning ?? "",
     parse_quality_warning: Boolean(source.parse_quality_warning),
     paper_meta_status: source.paper_meta_status ?? "",
+    notebook_name: "",
+    notebook_deleted_at: "",
+    retained_until: "",
   };
 }
 

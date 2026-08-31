@@ -29,6 +29,15 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings())
 
 
+def test_user_activity_retention_setting_is_bounded(monkeypatch):
+    monkeypatch.setenv("USER_ACTIVITY_RETENTION_DAYS", "30")
+    assert Settings().user_activity_retention_days == 30
+    for invalid in ("0", "3651"):
+        monkeypatch.setenv("USER_ACTIVITY_RETENTION_DAYS", invalid)
+        with pytest.raises(ValueError):
+            Settings()
+
+
 def _insert_user(db, user_id: str, username: str) -> None:
     db.execute(
         "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at)"
@@ -858,3 +867,132 @@ def test_ask_page_boundary_follows_created_at_not_asked_at(repo):
         before_id=page["next_cursor"]["id"], limit=2,
     )
     assert [item["id"] for item in second["items"]] == ["a-3", "a-2"]
+
+
+def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
+    """Deleting the aggregate keeps the admin-analysis projection, not content."""
+    created_at = "2026-08-30T10:00:00+00:00"
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_notebook(db, "n1", "u1")
+        db.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("conv-1", "n1", "private conversation", "u1", created_at, created_at),
+        )
+        _insert_source(
+            db, "src-1", "n1", created_at,
+            title="", file_name="private.pdf",
+        )
+        _insert_report(
+            db, "rep-1", "n1", "u1", created_at,
+            question="Report prompt", depth=4,
+        )
+        db.execute(
+            "UPDATE reports SET sections_json=? WHERE id='rep-1'",
+            (json.dumps([{"content": "private report body"}]),),
+        )
+        db.execute(
+            "INSERT INTO answers "
+            "(id,notebook_id,question,payload,created_at,conversation_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "ans-1", "n1", "Private question",
+                json.dumps({"answer": "private answer body"}),
+                created_at, "conv-1",
+            ),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs "
+            "(id,notebook_id,conversation_id,created_by,mode,question,status,"
+            "asked_at,answer_id,error,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "ask-1", "n1", "conv-1", "u1", "reasoning",
+                "Private question", "done", created_at, "ans-1",
+                "private server error",
+                created_at, created_at,
+            ),
+        )
+        db.execute(
+            "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
+            "VALUES (?,?,?,?)",
+            (
+                "ask-1", 0,
+                json.dumps({"detail": "private reasoning trace"}), created_at,
+            ),
+        )
+
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
+
+    with repo._connect() as db:
+        assert db.execute("SELECT 1 FROM notebooks WHERE id='n1'").fetchone() is None
+        assert db.execute("SELECT 1 FROM answers WHERE id='ans-1'").fetchone() is None
+        assert db.execute(
+            "SELECT 1 FROM ask_trace_steps WHERE job_id='ask-1'"
+        ).fetchone() is None
+        retained = db.execute(
+            "SELECT activity_type,record_id,notebook_name,deleted_at,expires_at "
+            "FROM retained_user_activity ORDER BY activity_type"
+        ).fetchall()
+        assert [(row["activity_type"], row["record_id"]) for row in retained] == [
+            ("ask", "ask-1"), ("report", "rep-1"), ("source", "src-1"),
+        ]
+        archive_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(retained_user_activity)")
+        }
+        assert not {
+            "answer", "answer_id", "error", "trace", "trace_json", "sections_json",
+            "source_content", "citation",
+        } & archive_columns
+        deleted_at = parse_activity_instant(retained[0]["deleted_at"], field="deleted_at")
+        expires_at = parse_activity_instant(retained[0]["expires_at"], field="expires_at")
+        assert (expires_at - deleted_at).days == 180
+
+    activity = repo.list_user_activity(
+        "u1", include_inaccessible_questions=True, limit=50,
+    )
+    assert {item["id"] for item in activity["items"]} == {
+        "ask-1", "src-1", "rep-1",
+    }
+    assert all(item["notebook_name"] == "NB-n1" for item in activity["items"])
+    source_item = next(item for item in activity["items"] if item["type"] == "source")
+    assert source_item["display_title"] == "private.pdf"
+    detail = repo.ask_job_detail("ask-1")
+    assert detail["trace"] == []
+    assert detail["answer_id"] == ""
+    assert detail["error"] == ""
+    assert detail["notebook_name"] == "NB-n1"
+
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["notebooks"] == 0
+    assert usage["sources"] == 1
+    assert usage["conversations"] == 1
+    assert usage["questions"] == 1
+    assert usage["reports"] == 1
+    assert usage["last_active"] == created_at
+
+    # Expiry is a hard read gate even before physical maintenance runs.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE retained_user_activity SET expires_at='2000-01-01T00:00:00+00:00'"
+        )
+    assert repo.list_user_activity(
+        "u1", include_inaccessible_questions=True, limit=50,
+    )["items"] == []
+    expired_usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert expired_usage["sources"] == 0
+    # Conversations have an existing notebook-independent lifecycle and are
+    # therefore unaffected by this retention window.
+    assert expired_usage["conversations"] == 1
+    assert expired_usage["questions"] == 0
+    assert expired_usage["reports"] == 0
+    assert expired_usage["last_active"] == created_at
+    with pytest.raises(KeyError):
+        repo.ask_job_detail("ask-1")
+
+    repo._migrator.recover_interrupted_jobs()
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM retained_user_activity").fetchone()[0] == 0

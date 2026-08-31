@@ -4,6 +4,7 @@ import json
 import sqlite3
 from typing import Callable, List, Literal, Sequence
 
+from app.core.activity_time import activity_retention_window
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
@@ -17,6 +18,7 @@ from app.repositories.sqlite.mount_sql import (
 # re-export keeps the Task-8 import sites (facade / notebook_catalog)
 # pointing at the SAME tuple.
 from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
+from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 
 
 class NotebookStore:
@@ -32,10 +34,12 @@ class NotebookStore:
         *,
         new_id: Callable[[str], str],
         now: Callable[[], str],
+        activity_retention_days: int,
     ) -> None:
         self.database = database
         self.new_id = new_id
         self.now = now
+        self.activity_retention_days = int(activity_retention_days)
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         ids = list(dict.fromkeys(notebook_id for notebook_id in notebook_ids if notebook_id))
@@ -414,6 +418,7 @@ class NotebookStore:
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchall()
+            self._retain_user_activity_before_delete(db, notebook_id)
             # knowledge_embeddings has no FK to notebooks (see DDL), so
             # deleting the notebooks row does NOT cascade to it. Delete it here so
             # every public delete caller leaves zero orphan embedding rows.
@@ -427,6 +432,75 @@ class NotebookStore:
             db.execute("DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,))
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
         return [row["file_path"] for row in source_rows]
+
+    def _retain_user_activity_before_delete(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> None:
+        """Snapshot analysis metadata while the notebook row still exists.
+
+        This runs inside the same write transaction as ``DELETE notebooks``:
+        either the three projections and the delete commit together, or none
+        do. The table intentionally carries no notebook FK. It is not a backup:
+        answer bodies, traces, citations, source content and report sections
+        never cross this boundary.
+        """
+        deleted_at, expires_at = activity_retention_window(
+            self.now(), retention_days=self.activity_retention_days
+        )
+        deleted_text = deleted_at.isoformat()
+        expires_text = expires_at.isoformat()
+
+        # Ring-style physical cleanup on every new archive write. Reads also
+        # gate on expires_at, so an expired row is invisible even before the
+        # next deletion/startup sweep reaches it.
+        db.execute(
+            "DELETE FROM retained_user_activity "
+            "WHERE julianday(expires_at) <= julianday(?)",
+            (deleted_text,),
+        )
+        common_columns = (
+            "activity_type,record_id,actor_id,notebook_id,notebook_owner_id,"
+            "notebook_name,created_at,updated_at,asked_at,conversation_id,"
+            "question,mode,status,display_title,file_name,source_type,"
+            "parse_status,parse_failed,depth,generation_started_at,deleted_at,"
+            "expires_at"
+        )
+        db.execute(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            "SELECT 'ask',j.id,j.created_by,j.notebook_id,n.created_by,n.name,"
+            "j.created_at,j.updated_at,j.asked_at,j.conversation_id,j.question,"
+            "j.mode,j.status,'','','','',0,0,'',?,? "
+            "FROM ask_jobs j JOIN notebooks n ON n.id=j.notebook_id "
+            "WHERE j.notebook_id=? ON CONFLICT(activity_type,record_id) DO NOTHING",
+            (deleted_text, expires_text, notebook_id),
+        )
+        db.execute(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            "SELECT 'source',s.id,n.created_by,s.notebook_id,n.created_by,n.name,"
+            "s.created_at,s.updated_at,'','','','',s.status,"
+            "CASE WHEN COALESCE(pm.is_paper,0)=1 "
+            "AND trim(COALESCE(pm.paper_title,''))<>'' "
+            "THEN trim(pm.paper_title) ELSE trim(CASE "
+            "WHEN COALESCE(s.title,'')<>'' THEN s.title "
+            "ELSE COALESCE(s.file_name,'') END) END,"
+            "s.file_name,s.source_type,s.parse_status,"
+            "CASE WHEN s.parse_status='failed' THEN 1 ELSE 0 END,0,'',?,? "
+            "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
+            "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
+            f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+            "ON CONFLICT(activity_type,record_id) DO NOTHING",
+            (deleted_text, expires_text, notebook_id),
+        )
+        db.execute(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            "SELECT 'report',r.id,r.created_by,r.notebook_id,n.created_by,n.name,"
+            "r.created_at,r.updated_at,'','',r.question,'',r.status,'','','','',"
+            "0,r.depth,COALESCE(json_extract(r.understanding_json,"
+            "'$._generation_started_at'),''),?,? FROM reports r "
+            "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=? "
+            "ON CONFLICT(activity_type,record_id) DO NOTHING",
+            (deleted_text, expires_text, notebook_id),
+        )
 
     # ------------------------------------------------- Task 26 primitives
     @staticmethod

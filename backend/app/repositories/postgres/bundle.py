@@ -180,7 +180,12 @@ class PostgresPersistenceBundleFactory:
         try:
             _initialize(database, settings, seams)
             identity = IdentityStore(database, settings)
-            notebooks = NotebookStore(database, new_id=seams.new_id, now=seams.now)
+            notebooks = NotebookStore(
+                database,
+                new_id=seams.new_id,
+                now=seams.now,
+                activity_retention_days=settings.user_activity_retention_days,
+            )
             sharing = SharingStore(
                 database,
                 settings,

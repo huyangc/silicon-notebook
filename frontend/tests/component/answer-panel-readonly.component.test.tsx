@@ -205,3 +205,37 @@ test("回调齐全时同一份答案照常渲染这些控件", async () => {
   expect(screen.getAllByRole("button", { name: "在表格中查看" }))
     .toHaveLength(2); // 清单卡那颗 + 浮层那颗
 });
+
+
+test("删除笔记本后的提问详情说明留存边界且不冒充答案缺失", () => {
+  const deletedItem: ActivityAsk = {
+    ...ITEM,
+    answer_id: "",
+    notebook_name: "旧项目",
+    notebook_deleted_at: "2026-08-04T11:00:00",
+    retained_until: "2027-01-31T11:00:00",
+  };
+  const deletedDetail: AskDetail = {
+    ...detailFixture(),
+    answer: null,
+    trace: [],
+    notebook_name: deletedItem.notebook_name,
+    notebook_deleted_at: deletedItem.notebook_deleted_at,
+    retained_until: deletedItem.retained_until,
+  };
+
+  render(
+    <ActivityDetail
+      askDetail={deletedDetail}
+      askDetailError=""
+      askDetailLoading={false}
+      item={deletedItem}
+      notebookNames={{}}
+      now={NOW}
+    />,
+  );
+
+  expect(screen.getByRole("note")).toHaveTextContent("原笔记本《旧项目》已删除");
+  expect(screen.getByRole("note")).toHaveTextContent("正文、答案、引用和推理过程已随笔记本删除");
+  expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
+});

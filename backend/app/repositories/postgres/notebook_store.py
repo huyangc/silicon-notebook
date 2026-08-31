@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Literal, Sequence
 
+from app.core.activity_time import activity_retention_window
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -21,6 +22,7 @@ from app.repositories.postgres.mount_sql import (
     MOUNT_VALID_EXPR as _MOUNT_VALID_EXPR,
 )
 from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
+from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 
 
 class NotebookStore:
@@ -32,10 +34,12 @@ class NotebookStore:
         *,
         new_id: Callable[[str], str],
         now: Callable[[], TimestampInput],
+        activity_retention_days: int,
     ) -> None:
         self.database = database
         self.new_id = new_id
         self.now = normalized_clock(now)
+        self.activity_retention_days = int(activity_retention_days)
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         ids = list(dict.fromkeys(value for value in notebook_ids if value))
@@ -359,14 +363,79 @@ class NotebookStore:
 
     def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
         with self.database.write() as connection:
+            # Lock the aggregate root before reading any child rows. PostgreSQL
+            # FK inserts take FOR KEY SHARE on this row, which conflicts with
+            # FOR UPDATE: after this point a concurrent ask/source/report can
+            # neither commit between the snapshot and cascade nor be silently
+            # deleted without entering the snapshot.
+            connection.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchone()
             rows = connection.execute(
                 "SELECT file_path FROM sources WHERE notebook_id=%s", (notebook_id,)
             ).fetchall()
+            self._retain_user_activity_before_delete(connection, notebook_id)
             connection.execute(
                 "DELETE FROM knowledge_embeddings WHERE notebook_id=%s", (notebook_id,)
             )
             connection.execute("DELETE FROM notebooks WHERE id=%s", (notebook_id,))
         return [row["file_path"] for row in rows]
+
+    def _retain_user_activity_before_delete(
+        self, connection, notebook_id: str
+    ) -> None:
+        """PostgreSQL twin of SQLite's atomic, content-minimal projection."""
+        deleted_at, expires_at = activity_retention_window(
+            self.now(), retention_days=self.activity_retention_days
+        )
+        connection.execute(
+            "DELETE FROM retained_user_activity WHERE expires_at<=%s",
+            (deleted_at,),
+        )
+        common_columns = (
+            "activity_type,record_id,actor_id,notebook_id,notebook_owner_id,"
+            "notebook_name,created_at,updated_at,asked_at,conversation_id,"
+            "question,mode,status,display_title,file_name,source_type,"
+            "parse_status,parse_failed,depth,generation_started_at,deleted_at,"
+            "expires_at"
+        )
+        connection.execute(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            "SELECT 'ask',j.id,j.created_by,j.notebook_id,n.created_by,n.name,"
+            "j.created_at,j.updated_at,j.asked_at,j.conversation_id,j.question,"
+            "j.mode,j.status,'','','','',false,0,'',%s,%s "
+            "FROM ask_jobs j JOIN notebooks n ON n.id=j.notebook_id "
+            "WHERE j.notebook_id=%s ON CONFLICT DO NOTHING",
+            (deleted_at, expires_at, notebook_id),
+        )
+        connection.execute(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            "SELECT 'source',s.id,n.created_by,s.notebook_id,n.created_by,n.name,"
+            "s.created_at,s.updated_at,'','','','',s.status,"
+            "CASE WHEN COALESCE(pm.is_paper,false)=true "
+            "AND btrim(COALESCE(pm.paper_title,''))<>'' "
+            "THEN btrim(pm.paper_title) ELSE btrim(CASE "
+            "WHEN COALESCE(s.title,'')<>'' THEN s.title "
+            "ELSE COALESCE(s.file_name,'') END) END,"
+            "s.file_name,s.source_type,s.parse_status,"
+            "CASE WHEN s.parse_status='failed' THEN true ELSE false END,0,'',%s,%s "
+            "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
+            "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
+            f"WHERE s.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+            "ON CONFLICT DO NOTHING",
+            (deleted_at, expires_at, notebook_id),
+        )
+        connection.execute(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            "SELECT 'report',r.id,r.created_by,r.notebook_id,n.created_by,n.name,"
+            "r.created_at,r.updated_at,'','',r.question,'',r.status,'','','','',"
+            "false,r.depth,COALESCE(r.understanding_json->>"
+            "'_generation_started_at',''),%s,%s FROM reports r "
+            "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=%s "
+            "ON CONFLICT DO NOTHING",
+            (deleted_at, expires_at, notebook_id),
+        )
 
     @staticmethod
     def meta_row(connection, notebook_id: str) -> dict | None:

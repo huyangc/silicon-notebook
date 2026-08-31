@@ -1683,6 +1683,21 @@
         "type": "index"
       },
       {
+        "name": "idx_retained_activity_actor_type_created",
+        "sql_sha256": "8c55d07ee78aab1e675b08ba775e18a08b5ced42e6491af1b0e12b539cfc24f0",
+        "type": "index"
+      },
+      {
+        "name": "idx_retained_activity_expires",
+        "sql_sha256": "d262c2e6ce9d94714930e7c12eebd1ea5ab724605ac95a7f18f673b01f0b44da",
+        "type": "index"
+      },
+      {
+        "name": "idx_retained_activity_owner_created",
+        "sql_sha256": "8dcfe646ed5f0ff74bd67c60e205057ea56c43027e374874a0536f21f5c7361d",
+        "type": "index"
+      },
+      {
         "name": "idx_share_requests_group",
         "sql_sha256": "832ba7b09d01fbba79a74ca0c29b14d978b3b9741d0c3d9aa3d0d341a687df01",
         "type": "index"
@@ -2243,6 +2258,11 @@
         "type": "table"
       },
       {
+        "name": "retained_user_activity",
+        "sql_sha256": "2925d941c655daa8fb31e4684af4503b630aee8c936eb4a7ce5f5de006e6a2a7",
+        "type": "table"
+      },
+      {
         "name": "retrieval_experiences",
         "sql_sha256": "f78e9c7fe19bf575e86ad35e086451d24f68b7e9f185dd101be1095b70d39a3e",
         "type": "table"
@@ -2318,6 +2338,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 64
+    "user_version": 65
   }
 }

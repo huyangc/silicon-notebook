@@ -452,8 +452,9 @@ For a large source, throughput and reliability are dominated by a few levers:
   password with a fresh salt and unconditionally updates the built-in `user-local` row on every
   start. Two further writes are data-dependent: `recover_interrupted_jobs()` settles leftover
   running `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs`, `knowhow_rows` in
-  `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing` before readiness, and
-  clears both KG scratch tables; and `_reproject_legacy_knowhow_tables()` runs *after*
+  `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing` before readiness,
+  removes expired `retained_user_activity` rows, and clears both KG scratch tables; and
+  `_reproject_legacy_knowhow_tables()` runs *after*
   `mark_ready()`, scheduling background cell-level reprojection that replaces KG objects for any
   knowhow table still carrying the older fixed KOs. A provably write-free rollback therefore has
   to be decided *before* the first PostgreSQL start — there is no "started but untouched" state.
@@ -468,6 +469,12 @@ For a large source, throughput and reliability are dominated by a few levers:
 - Merely toggling the URL during development selects two independent histories. Neither side
   is kept synchronized. Never run SQLite-only maintenance against PostgreSQL, and never run a
   direct batch mutation while live application/background writers still use that database.
+
+The retained user-activity projection is also pruned in the same transaction that creates a
+new projection during notebook deletion. Its `expires_at` read gate is authoritative, so a
+row stops contributing to admin totals/feed/detail at expiry even on a long-running process
+that has not yet reached either physical-prune opportunity. No manual maintenance command is
+required.
 
 ## PostgreSQL notebook-aware lexical indexes
 

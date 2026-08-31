@@ -44,6 +44,24 @@ function asTrace(value: unknown[]): ReasoningTraceStep[] {
   return Array.isArray(value) ? (value as ReasoningTraceStep[]) : [];
 }
 
+function RetainedActivityNotice({
+  item,
+  now,
+}: {
+  item: ActivityItem;
+  now?: Date;
+}) {
+  if (!item.notebook_deleted_at) return null;
+  const name = (item.notebook_name ?? "").trim();
+  const until = formatQuestionTime(item.retained_until ?? "", now);
+  return (
+    <div className="activity-retained-notice" role="note">
+      原笔记本{name ? `《${name}》` : ""}已删除。这里只保留分析所需的活动摘要
+      {until ? `，留存至 ${until}` : ""}；正文、答案、引用和推理过程已随笔记本删除。
+    </div>
+  );
+}
+
 function AskDetailPane({
   item,
   detail,
@@ -78,6 +96,7 @@ function AskDetailPane({
         </span>
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
+      <RetainedActivityNotice item={item} now={now} />
       {error ? <div className="errorbar">{error}</div> : null}
       {loading ? <div className="empty">加载中…</div> : null}
       {!loading && !error && failure ? (
@@ -107,7 +126,7 @@ function AskDetailPane({
           />
         </div>
       ) : null}
-      {!loading && !error && !answer && !failure ? (
+      {!loading && !error && !answer && !failure && !item.notebook_deleted_at ? (
         <div className="empty">这次提问没有留下答案</div>
       ) : null}
     </div>
@@ -143,6 +162,7 @@ function SourceDetailPane({
         {createdText ? <span className="activity-detail-time">{createdText}</span> : null}
       </div>
       <h2 className="activity-detail-title">{title}</h2>
+      <RetainedActivityNotice item={item} now={now} />
       {originalFile ? (
         <dl className="activity-detail-facts">
           <dt>原始文件</dt>
@@ -173,6 +193,7 @@ function ReportDetailPane({
         </span>
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
+      <RetainedActivityNotice item={item} now={now} />
       {/* 与活动流行上同一条规则：耗时只能来自 generation_started_at → updated_at。 */}
       <p className="activity-detail-time">
         {formatReportTiming(

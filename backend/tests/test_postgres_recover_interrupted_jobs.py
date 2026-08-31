@@ -4,7 +4,7 @@
 形态,无需真 PostgreSQL 服务器——故放在主测试根,不进 ``backend/tests/postgres/``(那目录
 整体在无服务器时 skip)。
 
-验证 ``PostgresMaintenanceAdapter.recover_interrupted_jobs`` 改造后的核心不变量:11 条
+验证 ``PostgresMaintenanceAdapter.recover_interrupted_jobs`` 改造后的核心不变量:12 条
 结算步骤各自独立事务、任一条失败只记账并跳过,绝不阻断其余步骤,也绝不向上抛出。
 """
 from __future__ import annotations
@@ -60,8 +60,9 @@ class _FakeRuntime:
         self.seams = _FakeSeams()
 
 
-# 11 条结算步骤的标签,与 recover_interrupted_jobs 里 _settle(...) 调用顺序逐字一致。
+# 12 条结算步骤的标签,与 recover_interrupted_jobs 里 _settle(...) 调用顺序逐字一致。
 _ALL_STEP_LABELS = (
+    "retained_user_activity",
     "merge_review_jobs",
     "ask_jobs",
     "knowhow_rows",
@@ -76,20 +77,21 @@ _ALL_STEP_LABELS = (
 )
 
 
-def test_first_statement_failure_does_not_block_the_remaining_ten(caplog):
-    """第一条(merge_review_jobs 的 UPDATE)抛错:其余 10 条仍必须全部执行、函数
+def test_first_statement_failure_does_not_block_the_remaining_eleven(caplog):
+    """第一条(retained_user_activity 的 DELETE)抛错:其余 11 条仍必须全部执行、函数
     本身不向上抛、失败标签进最终汇总日志。"""
     executed: list[str] = []
-    runtime = _FakeRuntime(executed, fail_marker="merge_review_jobs")
+    runtime = _FakeRuntime(executed, fail_marker="retained_user_activity")
     adapter = PostgresMaintenanceAdapter(runtime)
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()  # ① 必须不向上抛(否则本调用本身就会让测试出错)
 
-    # ② 其余 10 条步骤仍全部执行:除了被注入失败的那条(merge_review_jobs 的 SQL
+    # ② 其余 11 条步骤仍全部执行:除了被注入失败的那条(retained_user_activity 的 SQL
     # 从未进 executed),其余每条语句的 SQL 都真的跑到了 fake 连接上。
-    assert len(executed) == 10
-    assert not any("merge_review_jobs" in sql for sql in executed)
+    assert len(executed) == 11
+    assert not any("retained_user_activity" in sql for sql in executed)
+    assert any("merge_review_jobs" in sql for sql in executed)
     assert any("ask_jobs" in sql for sql in executed)
     assert any("kg_build_jobs" in sql for sql in executed)
     assert any("TRUNCATE kg_cluster_scratch" in sql for sql in executed)
@@ -104,19 +106,20 @@ def test_first_statement_failure_does_not_block_the_remaining_ten(caplog):
         )
     ]
     assert len(summary_records) == 1
-    assert "merge_review_jobs" in summary_records[0].getMessage()
+    assert "retained_user_activity" in summary_records[0].getMessage()
 
     # 逐语句的失败也各自记了一条 exception 日志(与汇总日志分开的两条独立证据)。
     per_step_records = [
         r for r in caplog.records
-        if r.levelno == logging.ERROR and "结算 merge_review_jobs 失败" in r.getMessage()
+        if r.levelno == logging.ERROR
+        and "结算 retained_user_activity 失败" in r.getMessage()
     ]
     assert len(per_step_records) == 1
 
 
 def test_last_statement_failure_still_reports_only_that_one_label(caplog):
     """再钉一次最后一条(kg_canonical_scratch 的 TRUNCATE)失败的对称场景:前面
-    10 条必须已经执行完,不能因为最后一条失败而被追溯性影响。"""
+    11 条必须已经执行完,不能因为最后一条失败而被追溯性影响。"""
     executed: list[str] = []
     runtime = _FakeRuntime(executed, fail_marker="kg_canonical_scratch")
     adapter = PostgresMaintenanceAdapter(runtime)
@@ -124,7 +127,7 @@ def test_last_statement_failure_still_reports_only_that_one_label(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()
 
-    assert len(executed) == 10
+    assert len(executed) == 11
     assert any("merge_review_jobs" in sql for sql in executed)
     assert any("TRUNCATE kg_cluster_scratch" in sql for sql in executed)
     assert not any("TRUNCATE kg_canonical_scratch" in sql for sql in executed)
@@ -143,7 +146,7 @@ class _FakeWriteConnectionByIndex:
     """Fails on exactly the ``fail_index``-th ``execute()`` call across the
     whole session (1-indexed, by **call order**, not by SQL text). Needed for
     ``test_each_step_failure_in_call_order_is_isolated`` below: two of the
-    eleven ``_ALL_STEP_LABELS`` — ``"sources(extracting)"`` and
+    twelve ``_ALL_STEP_LABELS`` — ``"sources(extracting)"`` and
     ``"sources(queued/parsing)"`` — annotate the step with the *status
     values* it targets, which never appear verbatim in that step's actual
     UPDATE SQL (e.g. ``WHERE parse_status='extracting'``, not
@@ -187,7 +190,7 @@ class _FakeRuntimeByIndex:
 )
 def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expected_label):
     """把 ``_ALL_STEP_LABELS`` 用起来(此前定义了却从未被任何用例引用的死代码):按
-    ``recover_interrupted_jobs`` 里 ``_settle(...)`` 的调用顺序,把全部 11 条逐一钉一遍
+    ``recover_interrupted_jobs`` 里 ``_settle(...)`` 的调用顺序,把全部 12 条逐一钉一遍
     ——不只是 Z2 补测已经手工挑的头(``merge_review_jobs``)尾
     (``kg_canonical_scratch``)两条。用**第 N 次 execute() 调用**注入失败(而不是按 SQL
     文本里能不能找到标签字符串——见 ``_FakeWriteConnectionByIndex`` 的 docstring:两个
@@ -202,7 +205,7 @@ def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expecte
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()  # 必须不向上抛
 
-    assert len(executed) == 10  # 其余 10 条仍全部执行
+    assert len(executed) == 11  # 其余 11 条仍全部执行
     summary_records = [
         r for r in caplog.records
         if r.levelno == logging.ERROR and r.getMessage().startswith(
@@ -213,8 +216,8 @@ def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expecte
     assert expected_label in summary_records[0].getMessage()
 
 
-def test_no_failure_means_no_summary_log_and_all_eleven_run(caplog):
-    """健康路径的对照组:零失败时不发汇总 error 日志,11 条全部执行。"""
+def test_no_failure_means_no_summary_log_and_all_twelve_run(caplog):
+    """健康路径的对照组:零失败时不发汇总 error 日志,12 条全部执行。"""
     executed: list[str] = []
     runtime = _FakeRuntime(executed, fail_marker="__never_matches__")
     adapter = PostgresMaintenanceAdapter(runtime)
@@ -222,7 +225,7 @@ def test_no_failure_means_no_summary_log_and_all_eleven_run(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()
 
-    assert len(executed) == 11
+    assert len(executed) == 12
     assert not any(
         r.levelno == logging.ERROR for r in caplog.records
     )

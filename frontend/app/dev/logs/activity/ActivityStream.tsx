@@ -66,6 +66,9 @@ function ActivityRow({
             {label(REPORT_DEPTH, String(item.depth), "自定义深度")}
           </span>
         ) : null}
+        {item.notebook_deleted_at ? (
+          <span className="activity-chip">原笔记本已删除</span>
+        ) : null}
         <span className="logrow-spacer" />
         {item.type !== "report" ? (
           <span className="logrow-num">

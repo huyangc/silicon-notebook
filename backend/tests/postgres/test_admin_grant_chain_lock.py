@@ -139,7 +139,7 @@ def _chained(connection, user_id: str) -> bool:
 @pytest.mark.postgres_integration
 def test_the_locked_chain_pair_equals_the_single_definition_point(postgres_database):
     """逐格比对:两条加锁语句合起来 ≡ `ADMIN_GRANT_PROBE_SQL`,且都等于期望值。"""
-    assert PostgresMigrator(postgres_database).migrate() == 43
+    assert PostgresMigrator(postgres_database).migrate() == 44
     with postgres_database.write() as connection:
         _seed(connection)
 
@@ -196,7 +196,7 @@ def test_the_group_chain_statement_locks_both_links(postgres_database):
 
     from psycopg import errors
 
-    assert PostgresMigrator(postgres_database).migrate() == 43
+    assert PostgresMigrator(postgres_database).migrate() == 44
     with postgres_database.write() as connection:
         _seed(connection)
 

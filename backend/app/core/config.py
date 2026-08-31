@@ -1200,6 +1200,16 @@ class Settings(BaseSettings):
     user_activity_view_enabled: bool = Field(
         True, validation_alias="USER_ACTIVITY_VIEW_ENABLED"
     )
+    # Deleting a notebook removes its corpus, answers and traces immediately,
+    # but the administrator's content-minimal activity snapshot remains for a
+    # bounded audit window. The deletion path stamps each snapshot with its
+    # exact expiry; reads exclude expired rows even before physical GC runs.
+    user_activity_retention_days: int = Field(
+        180,
+        ge=1,
+        le=3650,
+        validation_alias="USER_ACTIVITY_RETENTION_DAYS",
+    )
 
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use local PyMuPDF4LLM (pypdf last resort; no GPU, offline)

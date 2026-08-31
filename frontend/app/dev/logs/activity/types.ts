@@ -27,6 +27,9 @@ export type ActivityAsk = {
   status: string;
   answer_id: string;
   error: string;
+  notebook_name?: string;
+  notebook_deleted_at?: string;
+  retained_until?: string;
 };
 
 // extraction_warning/parse_quality_warning/paper_meta_status 是
@@ -49,6 +52,9 @@ export type ActivitySource = {
   extraction_warning: string;
   parse_quality_warning: boolean;
   paper_meta_status: string;
+  notebook_name?: string;
+  notebook_deleted_at?: string;
+  retained_until?: string;
 };
 
 // generation_started_at 为空串表示旧报告缺这个开始戳(红线:不得编造耗时)。
@@ -65,6 +71,9 @@ export type ActivityReport = {
   depth: number;
   status: string;
   generation_started_at: string;
+  notebook_name?: string;
+  notebook_deleted_at?: string;
+  retained_until?: string;
 };
 
 // 按 `type` 判别的活动流条目联合类型。三类各自数据来源不同(ask_jobs+answers /
@@ -92,4 +101,7 @@ export type AskDetail = {
   trace: unknown[];
   // `unknown` 已经包含 null,`unknown | null` 是多余的联合。
   answer: unknown;
+  notebook_name?: string;
+  notebook_deleted_at?: string;
+  retained_until?: string;
 };

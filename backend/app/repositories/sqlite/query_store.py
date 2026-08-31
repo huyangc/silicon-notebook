@@ -732,8 +732,14 @@ class QueryStore:
             sources = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT nb.created_by AS k, COUNT(*) AS c FROM sources s "
-                    "JOIN notebooks nb ON nb.id = s.notebook_id GROUP BY nb.created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
+                    "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
+                    "WHERE activity_type='source' "
+                    "AND julianday(expires_at)>julianday('now') GROUP BY actor_id"
+                    ") GROUP BY k"
                 ).fetchall()
             }
             conversations = {
@@ -745,7 +751,13 @@ class QueryStore:
             questions = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k, COUNT(*) AS c FROM ask_jobs GROUP BY created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
+                    "WHERE activity_type='ask' "
+                    "AND julianday(expires_at)>julianday('now') GROUP BY actor_id"
+                    ") GROUP BY k"
                 ).fetchall()
             }
             # 报告按**创建者**归集,不按笔记本 owner(群组知识共享 P1-T3b 裁决)。
@@ -757,7 +769,13 @@ class QueryStore:
             reports = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k, COUNT(*) AS c FROM reports GROUP BY created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM reports GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
+                    "WHERE activity_type='report' "
+                    "AND julianday(expires_at)>julianday('now') GROUP BY actor_id"
+                    ") GROUP BY k"
                 ).fetchall()
             }
             active = {
@@ -975,6 +993,24 @@ class QueryStore:
                 params.extend([before_arg, before_arg, before_id])
             return clause, params
 
+        def _retained_range_and_cursor_clause() -> tuple[str, list[Any]]:
+            instant = _absolute_instant("a.created_at")
+            clause = ""
+            params: list[Any] = []
+            if since_arg is not None:
+                clause += f" AND {instant} >= julianday(?)"
+                params.append(since_arg)
+            if until_arg is not None:
+                clause += f" AND {instant} < julianday(?)"
+                params.append(until_arg)
+            if cursor_active:
+                clause += (
+                    f" AND ({instant} < julianday(?) OR "
+                    f"({instant} = julianday(?) AND a.record_id < ?))"
+                )
+                params.extend([before_arg, before_arg, before_id])
+            return clause, params
+
         with self.database.connect() as db:
             if notebook_id is not None:
                 # 显式收窄到单个 notebook 时,必须先校验它属于该用户——不属于就返回
@@ -997,16 +1033,15 @@ class QueryStore:
                     ).fetchall()
                 ]
             all_question_submissions = activity_type == "ask" and notebook_id is None
-            if not owned_notebook_ids and not all_question_submissions:
-                # 三类都按自有笔记本收窄,一个都没有就没有任何活动可列。
-                return empty
             owned_placeholders = ",".join("?" for _ in owned_notebook_ids)
 
             # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,同 sources)。
             # notebook_id 已在上面解析成 owned_notebook_ids == [notebook_id],所以这
             # 条 IN 同时兑现了「按库过滤」和「归属校验」两件事,不需要第二条谓词。
             ask_rows = []
-            if activity_type in (None, "ask"):
+            if activity_type in (None, "ask") and (
+                all_question_submissions or owned_notebook_ids
+            ):
                 # 提问概览与用户总览的 questions 合计同口径：无 notebook_id 时按
                 # created_by 覆盖该用户在自有库和共享库里的全部提交。混合流以及显式
                 # 选中左栏某库时仍保持既有 owner-only 展开语义。
@@ -1045,7 +1080,7 @@ class QueryStore:
             # 派生 paper_meta_status / parse_quality_warning,本身都不作为返回字段
             # (error_message 是 str(exc) 原样落库、可能带服务端绝对路径,见下)。
             source_rows = []
-            if activity_type in (None, "source"):
+            if activity_type in (None, "source") and owned_notebook_ids:
                 source_params: list[Any] = list(owned_notebook_ids)
                 source_range_clause, source_range_params = _range_and_cursor_clause("s.")
                 source_params.extend(source_range_params)
@@ -1082,7 +1117,7 @@ class QueryStore:
             # row_to_dict 同一个 "$._generation_started_at" 表达式,不发明第二套提取
             # 写法),understanding_json 本身不作为返回字段。
             report_rows = []
-            if activity_type in (None, "report"):
+            if activity_type in (None, "report") and owned_notebook_ids:
                 report_params: list[Any] = [user_id, *owned_notebook_ids]
                 report_range_clause, report_range_params = _range_and_cursor_clause("")
                 report_params.extend(report_range_params)
@@ -1094,6 +1129,39 @@ class QueryStore:
                     f"{report_range_clause} "
                     f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
                     [*report_params, fetch_limit],
+                ).fetchall()
+
+            # 4. 已删除 notebook 的最小分析快照。它没有 notebook FK，且
+            # expires_at 是强读闸：物理 GC 即使稍后执行，过期行也不会再返回。
+            # 普通用户的 self-service 视图仍要求实时 notebook 读权，因此删除
+            # 后的快照只进入管理员审计（include_inaccessible_questions=True）。
+            retained_rows = []
+            if notebook_id is None and include_inaccessible_questions:
+                retained_params: list[Any] = [user_id]
+                retained_scope = ""
+                if activity_type == "ask":
+                    retained_scope = " AND a.activity_type='ask'"
+                elif activity_type in ("source", "report"):
+                    retained_scope = (
+                        " AND a.activity_type=? AND a.notebook_owner_id=?"
+                    )
+                    retained_params.extend([activity_type, user_id])
+                else:
+                    retained_scope = " AND a.notebook_owner_id=?"
+                    retained_params.append(user_id)
+                retained_range, retained_range_params = (
+                    _retained_range_and_cursor_clause()
+                )
+                retained_params.extend(retained_range_params)
+                retained_rows = db.execute(
+                    "SELECT a.*," + _absolute_instant("a.created_at")
+                    + " AS sort_instant FROM retained_user_activity a "
+                    "WHERE a.actor_id=? "
+                    "AND julianday(a.expires_at)>julianday('now')"
+                    f"{retained_scope}{retained_range} "
+                    f"ORDER BY {_absolute_instant('a.created_at')} DESC,"
+                    "a.record_id DESC LIMIT ?",
+                    [*retained_params, fetch_limit],
                 ).fetchall()
 
         # 归并键与 SQL 逐位同源:(sort_instant, id) 就是 SQL 自己算出来的那两个值。
@@ -1164,12 +1232,55 @@ class QueryStore:
                     "generation_started_at": generation_started_at,
                 })
             )
+        for row in retained_rows:
+            common = {
+                "type": row["activity_type"],
+                "id": row["record_id"],
+                "notebook_id": row["notebook_id"],
+                "notebook_name": row["notebook_name"],
+                "notebook_deleted_at": row["deleted_at"],
+                "retained_until": row["expires_at"],
+                "created_at": row["created_at"],
+                "status": row["status"],
+            }
+            if row["activity_type"] == "ask":
+                item = {
+                    **common,
+                    "asked_at": row["asked_at"],
+                    "conversation_id": row["conversation_id"],
+                    "question": row["question"],
+                    "mode": row["mode"],
+                    "answer_id": "",
+                    "error": "",
+                }
+            elif row["activity_type"] == "source":
+                item = {
+                    **common,
+                    "display_title": row["display_title"],
+                    "file_name": row["file_name"],
+                    "source_type": row["source_type"],
+                    "parse_status": row["parse_status"],
+                    "parse_failed": bool(row["parse_failed"]),
+                    "extraction_warning": "",
+                    "parse_quality_warning": False,
+                    "paper_meta_status": "",
+                }
+            else:
+                item = {
+                    **common,
+                    "updated_at": row["updated_at"],
+                    "question": row["question"],
+                    "depth": int(row["depth"]),
+                    "generation_started_at": row["generation_started_at"],
+                }
+            pool.append((row["sort_instant"], row["record_id"], item))
 
         pool.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         has_more = (
             len(ask_rows) > limit
             or len(source_rows) > limit
             or len(report_rows) > limit
+            or len(retained_rows) > limit
             or len(pool) > limit
         )
         page = [entry[2] for entry in pool[:limit]]

@@ -1097,6 +1097,12 @@ retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
 identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
 `SILICON_NOTEBOOK_SINGLE_USER_NAME`).
 
+`USER_ACTIVITY_RETENTION_DAYS` controls how long the content-minimal user-analysis
+projection survives after its notebook is deleted (default 180, accepted range 1–3650).
+It never extends the lifetime of answer/source/report bodies, citations, or reasoning
+traces. The setting is read at backend startup and applies to notebooks deleted after
+that process starts; existing retained rows keep their stamped `expires_at`.
+
 `MODEL_JSON_REPAIR_MODE` applies only to `reasoning_agent` and `ask_answer`.
 `off` keeps strict rejection, `shadow` records whether a response would be safely
 repairable but still rejects it, and `on` accepts conservative repairs (the default).
