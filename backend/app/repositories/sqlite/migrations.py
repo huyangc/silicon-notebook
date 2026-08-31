@@ -3592,7 +3592,7 @@ class SqliteMigrator:
                   updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_wishes_kind_created
-                  ON wishes(kind, created_at DESC, id DESC);
+                  ON wishes(kind, julianday(created_at) DESC, id DESC);
                 CREATE TABLE IF NOT EXISTS wish_votes (
                   wish_id TEXT NOT NULL REFERENCES wishes(id) ON DELETE CASCADE,
                   user_id TEXT NOT NULL REFERENCES users(id),

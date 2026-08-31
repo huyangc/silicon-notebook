@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -95,3 +97,33 @@ def test_wish_input_is_trimmed_and_over_limit_is_actionable(client):
 
 def test_wish_wall_requires_authentication(client):
     assert client.get("/api/wishes").status_code == 401
+
+
+def test_wishes_sort_by_absolute_time_across_offset_fallback(client, tmp_path):
+    user = _register(client, "d00000004")
+    earlier = client.post(
+        "/api/wishes",
+        headers=user,
+        json={"kind": "bug", "title": "回拨前", "content": "第一条"},
+    ).json()
+    later = client.post(
+        "/api/wishes",
+        headers=user,
+        json={"kind": "bug", "title": "回拨后", "content": "第二条"},
+    ).json()
+
+    # 01:15 at UTC-05 is 45 minutes later than 01:30 at UTC-04, even though
+    # raw ISO text has the opposite lexical order around the DST fall-back.
+    with sqlite3.connect(tmp_path / "wish.db") as database:
+        database.execute(
+            "UPDATE wishes SET created_at=? WHERE id=?",
+            ("2026-11-01T01:30:00-04:00", earlier["id"]),
+        )
+        database.execute(
+            "UPDATE wishes SET created_at=? WHERE id=?",
+            ("2026-11-01T01:15:00-05:00", later["id"]),
+        )
+
+    for sort in ("latest", "priority"):
+        items = client.get(f"/api/wishes?sort={sort}", headers=user).json()["items"]
+        assert [item["id"] for item in items] == [later["id"], earlier["id"]]

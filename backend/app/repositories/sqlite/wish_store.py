@@ -83,9 +83,9 @@ class WishStore:
         order = (
             "CASE WHEN w.kind='plan' THEN 0 ELSE 1 END,"
             "CASE WHEN w.kind!='plan' THEN COUNT(v.user_id) END DESC,"
-            "w.created_at DESC,w.id DESC"
+            "julianday(w.created_at) DESC,w.id DESC"
             if sort == "priority"
-            else "w.created_at DESC,w.id DESC"
+            else "julianday(w.created_at) DESC,w.id DESC"
         )
         with self.database.connect() as db:
             total = int(
