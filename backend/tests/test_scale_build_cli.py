@@ -554,6 +554,69 @@ def test_import_refuses_to_publish_when_pipeline_identity_drifts_during_staging(
     assert len(staged) == 1, "the staged copy is left for the operator"
 
 
+def test_import_rolls_back_when_pipeline_identity_drifts_during_the_swap(
+    storage, store, tmp_path
+):
+    """codex PR#643 R8 P1: the R5 re-check above only catches a pipeline
+    switch that lands BEFORE the renames start. A switch landing DURING them
+    — a rebuild does not wait on this claim either — sails past it and gets
+    published. The identity is read a THIRD time once the main root (last in
+    PUBLISH_ORDER) is live; a drift there must undo the publish: every root
+    rolled back to exactly its previous state, the rejected build left
+    staged for inspection, exit code 1 (``ScaleBuildCliFailure``).
+
+    Mutation anchors: (1) removing the post-swap re-check makes this pass
+    with the drifted package published anyway (RED without a raise here);
+    (2) keeping the raise but skipping ``rollback_swap`` makes the exception
+    still fire but leaves the live tree on the drifted generation (RED on
+    the version/``.old`` assertions below).
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def drifting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return base(notebook_id)
+        # A pipeline switch completed while the renames themselves were
+        # running — after the pre-rename (R5) check already passed.
+        return ["acme-pipeline", "3"]
+
+    projections.pipeline_identity = drifting  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="changed"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] >= 3, "the identity must be re-read a third time after the swap"
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the live main index must be rolled back to the previous generation"
+    )
+    assert json.loads(
+        (Path(store.viz_dir("nb-1")) / "manifest.json").read_text()
+    ) == {"generation": "old"}, "the live viz root must be rolled back too"
+    assert json.loads(
+        (Path(store.source_partition_dir("nb-1")) / "manifest.json").read_text()
+    )["parent_version"] == ["nb-1", 1], "the live companion must be rolled back too"
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert not Path(str(root) + ".old").exists(), (
+            "rollback must restore the previous .old back onto live, leaving "
+            "no .old behind"
+        )
+        assert len(_staging_glob(root)) == 1, (
+            "the rejected (drifted) build must remain staged for inspection, "
+            "not be discarded"
+        )
+
+
 def test_a_held_claim_makes_every_command_refuse(storage, store, tmp_path):
     repository = _Repository(
         storage, store, _Database(None), _Projections(PIPELINE)
@@ -595,10 +658,11 @@ def test_a_deferred_interrupt_that_published_everything_is_not_a_failure(
     delivered: list[int] = []
 
     def swap_and_signal(live, temporary, **kwargs):
-        original(live, temporary, **kwargs)
+        preserved = original(live, temporary, **kwargs)
         if not delivered:
             delivered.append(1)
             signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+        return preserved
 
     store.swap_staging_directory = swap_and_signal  # type: ignore[method-assign]
     messages: list[str] = []
@@ -613,6 +677,11 @@ def test_a_deferred_interrupt_that_published_everything_is_not_a_failure(
     assert receipt["roots"] == list(cli.PUBLISH_ORDER)
     assert _published_version(store, "nb-1") == ["nb-1", 7]
     assert any("deferred interrupt" in message for message in messages)
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert not Path(str(root) + ".old").exists(), (
+            "a fully published run must still finalize .old cleanup for "
+            "every root (codex PR#643 R8 P1/P2 keep_old bookkeeping)"
+        )
 
 
 # ───────────────────────────────────────────────── which library is this ──
@@ -927,6 +996,90 @@ def test_swap_reports_the_actual_tokenized_staging_path_on_lock_loss(tmp_path):
     assert temporary.is_dir()
 
 
+def test_swap_with_keep_old_leaves_old_on_disk_and_returns_preserved(tmp_path):
+    """P1, codex PR#643 R8: ``keep_old=True`` is what lets a caller decide,
+    AFTER the fact, whether a publish should stand — that only works if the
+    previous generation is actually still there to roll back to."""
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    (live / "marker").write_text("old", encoding="utf-8")
+    temporary = tmp_path / "kg_index.tmp-token"
+    temporary.mkdir()
+    (temporary / "marker").write_text("new", encoding="utf-8")
+
+    preserved = ScaleArtifactStore.swap_staging_directory(
+        live, temporary, keep_old=True
+    )
+
+    assert preserved is True
+    assert (live / "marker").read_text(encoding="utf-8") == "new"
+    assert Path(str(live) + ".old").is_dir(), (
+        "keep_old=True must leave .old on disk instead of deleting it"
+    )
+
+
+def test_rollback_swap_restores_a_replacing_publish(tmp_path):
+    """P1, codex PR#643 R8: rolling back a publish that replaced an existing
+    generation must restore that exact previous live directory and put the
+    rejected build back at its own staging name — the shape a swap leaves
+    when ``preserved`` is True."""
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    (live / "marker").write_text("old", encoding="utf-8")
+    temporary = tmp_path / "kg_index.tmp-token"
+    temporary.mkdir()
+    (temporary / "marker").write_text("new", encoding="utf-8")
+
+    preserved = ScaleArtifactStore.swap_staging_directory(
+        live, temporary, keep_old=True
+    )
+    assert preserved is True
+
+    ScaleArtifactStore.rollback_swap(live, temporary, preserved)
+
+    assert (live / "marker").read_text(encoding="utf-8") == "old", (
+        "the previous generation must be exactly restored"
+    )
+    assert not Path(str(live) + ".old").exists()
+    assert (temporary / "marker").read_text(encoding="utf-8") == "new", (
+        "the rejected build must reappear at its own staging name"
+    )
+
+
+def test_rollback_swap_restores_a_first_time_publish(tmp_path):
+    """P1, codex PR#643 R8: a first-ever publish has no ``.old`` — rollback
+    must leave the notebook with no live directory at all, exactly as before
+    that publish, the shape a swap leaves when ``preserved`` is False."""
+    live = tmp_path / "kg_index"
+    temporary = tmp_path / "kg_index.tmp-token"
+    temporary.mkdir()
+    (temporary / "marker").write_text("new", encoding="utf-8")
+
+    preserved = ScaleArtifactStore.swap_staging_directory(
+        live, temporary, keep_old=True
+    )
+    assert preserved is False
+    assert not Path(str(live) + ".old").exists()
+
+    ScaleArtifactStore.rollback_swap(live, temporary, preserved)
+
+    assert not live.exists(), "no live directory existed before this publish"
+    assert (temporary / "marker").read_text(encoding="utf-8") == "new"
+
+
+def test_finalize_swap_deletes_old_only_when_preserved(tmp_path):
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    old = Path(str(live) + ".old")
+    old.mkdir()
+
+    ScaleArtifactStore.finalize_swap(live, False)
+    assert old.is_dir(), "preserved=False must not touch an unrelated .old"
+
+    ScaleArtifactStore.finalize_swap(live, True)
+    assert not old.exists()
+
+
 # ──────────────────────────────────────────────────────── interrupt guard ──
 
 def test_the_swap_guard_defers_sigint_and_restores_the_handler():
@@ -999,6 +1152,81 @@ def test_the_store_defers_sigint_across_its_own_rename_sequence(store, tmp_path)
     assert (live / "marker").read_text(encoding="utf-8") == "new"
     assert not Path(str(live) + ".old").exists()
     assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_old_directory_deletion_runs_outside_the_sigint_mask(
+    store, tmp_path, monkeypatch
+):
+    """P2, codex PR#643 R8: only the two renames — the steps that can leave a
+    notebook with no live index — run inside ``SwapInterruptGuard``. Deleting
+    the (potentially multi-GB) previous generation must not extend that
+    masked window. Structural check: by the time ``.old`` is removed, the
+    installed SIGINT handler must no longer be the guard's.
+
+    Mutation anchor: move the ``rmtree(old_dir, ...)`` call back inside the
+    ``with SwapInterruptGuard():`` block and this goes red."""
+    live = tmp_path / "root"
+    live.mkdir()
+    (live / "marker").write_text("old", encoding="utf-8")
+    staged = store.prepare_staging_directory(live, "guard-token")
+    (staged / "marker").write_text("new", encoding="utf-8")
+
+    previous = signal.getsignal(signal.SIGINT)
+    real_rmtree = shutil.rmtree
+    observed: list[bool] = []
+
+    def observing_rmtree(path, *args, **kwargs):
+        if str(path) == str(live) + ".old":
+            handler = signal.getsignal(signal.SIGINT)
+            observed.append(
+                isinstance(getattr(handler, "__self__", None), SwapInterruptGuard)
+            )
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.repositories.filesystem.scale_artifact_store.shutil.rmtree",
+        observing_rmtree,
+    )
+    ScaleArtifactStore.swap_staging_directory(live, staged)
+
+    assert observed == [False], (
+        "the .old rmtree must run after the guard's handler has already been "
+        "uninstalled, not while SIGINT is still masked"
+    )
+    assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_a_real_interrupt_during_old_cleanup_is_honoured_immediately(
+    store, tmp_path, monkeypatch
+):
+    """P2, codex PR#643 R8: Ctrl-C landing while the previous generation is
+    being deleted must interrupt right away, not be deferred — the new
+    generation is already live and correct by then, so there is nothing left
+    for the deferral to protect."""
+    live = tmp_path / "root"
+    live.mkdir()
+    (live / "marker").write_text("old", encoding="utf-8")
+    staged = store.prepare_staging_directory(live, "guard-token")
+    (staged / "marker").write_text("new", encoding="utf-8")
+
+    real_rmtree = shutil.rmtree
+
+    def interrupting_rmtree(path, *args, **kwargs):
+        if str(path) == str(live) + ".old":
+            raise KeyboardInterrupt
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.repositories.filesystem.scale_artifact_store.shutil.rmtree",
+        interrupting_rmtree,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        ScaleArtifactStore.swap_staging_directory(live, staged)
+
+    # The new generation is already live; only the (harmless, inspect-
+    # reported) leftover .old is a consequence of the interrupted cleanup.
+    assert (live / "marker").read_text(encoding="utf-8") == "new"
 
 
 def test_a_nested_guard_leaves_the_outer_deferral_window_intact():

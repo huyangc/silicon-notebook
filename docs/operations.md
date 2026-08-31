@@ -901,10 +901,12 @@ first place, so an offline builder could never be excluded from the serving
 process here.
 
 Exit codes: `0` success; `1` attempted and failed (the claim is held elsewhere,
-the build failed, the pre-swap re-verification failed); `2` refused before
-touching anything (SQLite, unknown notebook, migration-ledger drift, package
-validation); `130` Ctrl-C. The database URL is read from the environment and
-**never printed**; receipts are content-free (notebook ids, fixed artifact file
+the build failed, the pre-swap or post-swap identity re-verification failed —
+the latter rolls the publish back before returning it, see "Ctrl-C" below);
+`2` refused before touching anything (SQLite, unknown notebook, migration-
+ledger drift, package validation); `130` Ctrl-C. The database URL is read from
+the environment and **never printed**; receipts are content-free (notebook
+ids, fixed artifact file
 names, sizes, counts, versions).
 
 #### Same-host, online
@@ -966,14 +968,33 @@ Copying — the slow, failure-prone half — happens entirely inside a
 claim-unique `.tmp-<token>` staging directory (see below); the live tree is
 untouched until the final renames.
 
+The import claim does not block an indexing-pipeline switch from publishing a
+new identity, because a plugin activation is a different mechanism entirely —
+so the identity this package was validated against is re-read twice more:
+once right before the renames begin (catches a switch that lands during the
+staging copy) and once more right after the main index is live (catches a
+switch that lands *during* the renames themselves, which the first re-read
+cannot see). A drift on the second re-read means this run's own publish is
+what fell out of date; it is rolled back — every root that was published,
+in reverse order, back to exactly its previous state — before `import`
+refuses. Nothing on the live tree is left changed either way, and the staged
+package is left on disk for inspection in both cases. Re-export against a
+current checkout and re-run.
+
 #### Ctrl-C: what is masked, and what a build's Ctrl-C leaves behind
 
-`SIGINT` is masked across **every** rename sequence — `build`'s and `fold`'s as
-well as `import`'s, because the masking lives in the publish primitive itself,
-not in one subcommand. A Ctrl-C between `live → .old` and `tmp → live` would
-otherwise leave the notebook with no live index at all: the one data-losing
-window in this channel. The signal is *deferred*, not ignored; the sequence
-takes milliseconds and the interrupt is honoured the instant it completes.
+`SIGINT` is masked across **only the two renames** of every swap — `build`'s
+and `fold`'s as well as `import`'s, because the masking lives in the publish
+primitive itself, not in one subcommand. A Ctrl-C between `live → .old` and
+`tmp → live` would otherwise leave the notebook with no live index at all: the
+one data-losing window in this channel. The signal is *deferred*, not
+ignored; the two renames take milliseconds and the interrupt is honoured the
+instant they complete. Deleting the *previous* generation once it is safely
+in `.old` is **not** masked: the new generation is already live at that
+point, so a Ctrl-C landing during that (potentially multi-GB, tens-of-seconds)
+cleanup is honoured immediately instead of being held for as long as the
+deletion takes — a leftover `.old` from an interrupted cleanup is exactly the
+shape the leftovers section below already covers.
 
 What each command does with the interrupt differs, because only `import`
 holds the claim for its whole run (build/fold's claim lives and dies inside
@@ -985,7 +1006,12 @@ the ordinary facade path — see the leftovers section below):
   own `.tmp-<claim_token>` directories (the claim it holds the whole time names
   them precisely) and exits `130` — including a first-time import, whose
   "staging present, live absent" shape is normal copying, not a half publish;
-  only `.old` counts as publish evidence.
+  only `.old` counts as publish evidence. Between the renames and the final
+  `.old` cleanup, `import` additionally holds every published root's `.old`
+  open for its own post-swap identity re-check (see above) — an interrupt
+  landing in that narrow window is not deferred either, and simply leaves that
+  root's `.old` for the next `inspect`/cleanup, same as any other interrupted
+  cleanup.
 - **`build` / `build --fold`** — this command never holds the claim itself, so
   by the time it can react to Ctrl-C it no longer knows the `claim_token` its
   own staging directory (if it staged one at all) was suffixed with, and
@@ -1058,6 +1084,27 @@ stays on disk and the exception note names the path. Manual recovery:
 # Confirm no build is running first (inspect's build_claim is "free"), then:
 mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
 ```
+
+Only the two renames run with `SIGINT` deferred; the final `rm .old` runs
+right after, not masked (see "Ctrl-C" above), so a `.old` can also be left
+behind by an *interrupted cleanup* on an otherwise fully-published swap — the
+live directory is correct either way, and the recovery above is the same:
+confirm no build is running, then remove it (`rm -rf`, not `mv`, since `live`
+already holds the new generation).
+
+`import` additionally holds every root's `.old` open past its own swap —
+`keep_old` — for a third identity re-check once the main index is live; see
+"What must be pinned" and "Ctrl-C" above. On a match it deletes `.old` the
+same un-masked way. On a drift it rolls the publish back instead of deleting
+anything: for every published root, in reverse order, the just-published tree
+moves back to its own staging name and (when a previous generation existed)
+`.old` moves back onto `live` — two renames, `SIGINT` deferred across the
+whole reverse loop exactly like the original publish. An interrupt landing
+there does not exit `130`: the deferral finishes the rollback first, `live`
+ends up untouched, and `import` still exits `1` with its usual "pipeline
+identity changed" refusal — the same "nothing abandoned" contract as the
+publish loop, just for the loop that undoes a publish instead of the one that
+makes it.
 
 Staging is `{live}.tmp-<claim_token>` — one directory per claim, not a fixed
 shared name. This closes a corruption race the old fixed `{live}.tmp` left
