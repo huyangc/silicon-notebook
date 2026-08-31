@@ -301,7 +301,7 @@ def test_report_source_rows_executes_every_aggregate_and_scopes_paper_meta(
     # A malformed legacy row must not be joined across notebook ownership.
     store.upsert_paper_meta(
         "profile-corrupt-meta",
-        other_notebook_id,
+        notebook_id,
         {
             "is_paper": True,
             # Deliberately collides with the valid title above. Removing the
@@ -312,6 +312,13 @@ def test_report_source_rows_executes_every_aggregate_and_scopes_paper_meta(
             "authors": [],
         },
     )
+    # Current writers receive the source's real notebook. Corrupt the stored
+    # row afterward to model the malformed legacy state this test exercises.
+    with store.database.write() as connection:
+        connection.execute(
+            "UPDATE source_paper_meta SET notebook_id=? WHERE source_id=?",
+            (other_notebook_id, "profile-corrupt-meta"),
+        )
 
     snapshot = store.report_source_rows(
         notebook_id, representative_limit=16, distribution_limit=16
