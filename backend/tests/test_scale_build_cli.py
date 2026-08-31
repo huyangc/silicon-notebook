@@ -166,6 +166,16 @@ def _main_manifest(**overrides) -> dict:
     return manifest
 
 
+def _write_transfer_manifest(package: Path) -> None:
+    """(Re)generate ``transfer_manifest.json`` via the PRODUCTION generator
+    (codex PR#643 R24 P1), never a parallel test-side implementation. Call
+    this again any time a test adds/removes/mutates package content AFTER a
+    ``_package``/``_full_package`` call and still expects ``run_import`` to
+    publish successfully — a stale manifest would make ``verify_staged_
+    transfer`` refuse a perfectly good package."""
+    cli.write_transfer_manifest(package, cli.PUBLISH_ORDER, lambda _message: None)
+
+
 def _package(tmp_path, *, name: str = "package", companion=None, **overrides) -> Path:
     """A three-root export package built from the frozen v9 artifact."""
     package = tmp_path / name
@@ -174,6 +184,7 @@ def _package(tmp_path, *, name: str = "package", companion=None, **overrides) ->
     _write_manifest(main, _main_manifest(**overrides))
     if companion is not None:
         _write_manifest(package / cli.COMPANION_ROOT, companion)
+    _write_transfer_manifest(package)
     return package
 
 
@@ -442,6 +453,234 @@ def test_npy_row_count_reads_the_header_without_unpickling(tmp_path):
         np.load(path, allow_pickle=False)
 
 
+# ──────────────────────────────────────────────────────── transfer manifest ──
+
+def test_a_package_with_no_transfer_manifest_is_refused_by_validate(tmp_path):
+    """codex PR#643 R24 P1: this CLI has not shipped, so there is no
+    compatibility obligation to a package built before the transfer manifest
+    existed — a missing manifest is refused outright, not treated as an
+    older-but-valid package.
+
+    Mutation anchor: drop the ``_read_transfer_manifest`` call from
+    ``validate_import_package`` and this goes green on a package with no
+    manifest at all.
+    """
+    package = _full_package(tmp_path)
+    (package / cli.TRANSFER_MANIFEST_FILENAME).unlink()
+    with pytest.raises(cli.ScaleBuildCliError, match="transfer_manifest.json"):
+        _validate(package)
+
+
+def test_a_malformed_transfer_manifest_is_refused_by_validate(tmp_path):
+    package = _full_package(tmp_path)
+    (package / cli.TRANSFER_MANIFEST_FILENAME).write_text(
+        json.dumps({"files": {"kg_index/manifest.json": {"bytes": "not-an-int"}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(cli.ScaleBuildCliError, match="not a usable"):
+        _validate(package)
+
+
+def test_export_writes_a_transfer_manifest_covering_every_copied_file(
+    repository, store, tmp_path
+):
+    """codex PR#643 R24 P1: the manifest ``run_export`` writes must list
+    EVERY file it actually copied — not a subset — or ``import``'s check
+    against it is worthless. Independently walks ``destination`` (not via
+    ``cli.build_transfer_manifest``, which would just check the function
+    against itself) and compares the path set.
+
+    Mutation anchor: have ``write_transfer_manifest`` skip a root (or a file
+    within one) and this goes red.
+    """
+    _seed_live(store, "nb-1")
+    destination = tmp_path / "out"
+    cli.run_export(repository, "nb-1", destination, report=lambda _m: None)
+
+    manifest = json.loads(
+        (destination / cli.TRANSFER_MANIFEST_FILENAME).read_text(encoding="utf-8")
+    )
+    listed = set(manifest["files"])
+
+    actual: set[str] = set()
+    for root_name in cli.PUBLISH_ORDER:
+        root_dir = destination / root_name
+        if not root_dir.is_dir():
+            continue
+        for current, _dirs, names in os.walk(root_dir):
+            for filename in names:
+                relative = (
+                    Path(current) / filename
+                ).relative_to(root_dir).as_posix()
+                actual.add(f"{root_name}/{relative}")
+
+    assert listed == actual
+    assert actual, "the fixture must actually copy files for this to prove anything"
+    # The manifest itself must not be nested inside a live root's own copy
+    # (it never is — it is written at ``destination``, not inside a root).
+    assert not any(name == cli.TRANSFER_MANIFEST_FILENAME for name in listed)
+
+
+def test_export_then_import_round_trips_with_a_real_transfer_manifest(
+    repository, store, tmp_path
+):
+    """The true end-to-end path: a package ``run_export`` actually wrote,
+    re-imported by ``run_import`` — not the ``_package``/``_full_package``
+    hand-assembled fixtures used everywhere else in this file. Proves
+    ``write_transfer_manifest`` and ``verify_staged_transfer`` agree with
+    each other, not just with themselves.
+    """
+    _seed_live(store, "nb-1")
+    destination = tmp_path / "out"
+    cli.run_export(repository, "nb-1", destination, report=lambda _m: None)
+
+    receipt = cli.run_import(
+        repository,
+        "nb-1",
+        destination,
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+    assert receipt["roots"] == list(cli.PUBLISH_ORDER)
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert _staging_glob(root) == []
+        assert not Path(str(root) + ".old").exists()
+
+
+def _truncate_after_header(path: Path, keep_extra_bytes: int = 8) -> None:
+    """Truncate a ``.npy`` file to its (intact) header plus a few payload
+    bytes — the shape ``artifact_inventory_error``'s header-only check
+    cannot see (codex PR#643 R24 P1)."""
+    from numpy.lib import format as npy_format
+
+    with open(path, "rb") as handle:
+        version = npy_format.read_magic(handle)
+        if version == (1, 0):
+            npy_format.read_array_header_1_0(handle)
+        else:
+            npy_format.read_array_header_2_0(handle)
+        header_end = handle.tell()
+    with open(path, "rb") as handle:
+        truncated = handle.read(header_end + keep_extra_bytes)
+    path.write_bytes(truncated)
+
+
+def test_import_refuses_a_transfer_truncated_npy_after_a_valid_header(
+    repository, store, tmp_path
+):
+    """codex PR#643 R24 P1, the exact defect from the review finding: a
+    transfer that truncates a ``.npy``'s PAYLOAD after an intact header is
+    invisible to ``artifact_inventory_error`` (header-only) — the row count
+    it reports still matches the manifest, since the shape lives in the
+    header. Only the transfer manifest's byte count catches it.
+
+    Mutation anchor: drop the ``verify_staged_transfer`` call in
+    ``run_import`` and this goes green on a corrupted staged copy.
+    """
+    _seed_live(store, "nb-1")
+    package = _full_package(tmp_path)
+    target = package / cli.MAIN_ROOT / "node_ids.npy"
+    original_size = target.stat().st_size
+    _truncate_after_header(target)
+    assert target.stat().st_size < original_size, "the file must actually shrink"
+    # The header-only check alone must still be satisfied — this is the
+    # whole point of the defect: it is NOT what catches this corruption.
+    assert cli.npy_row_count(target) is not None
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="bytes"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the live tree must stay untouched"
+    )
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert _staging_glob(root) == [], "the corrupted staging must be discarded"
+
+
+def test_import_refuses_a_transfer_that_flips_one_byte_in_ann_bin(
+    repository, store, tmp_path
+):
+    """``ann.bin`` has no header check at all — only existence is verified
+    elsewhere — so a same-size, single-byte corruption is invisible to every
+    check except the transfer manifest's SHA-256.
+
+    Mutation anchor: have ``verify_staged_transfer`` compare only ``bytes``
+    (not ``sha256``) and this goes green on a same-size corruption.
+    """
+    _seed_live(store, "nb-1")
+    package = _full_package(tmp_path)
+    ann_path = package / cli.MAIN_ROOT / "ann.bin"
+    data = bytearray(ann_path.read_bytes())
+    assert data, "the fixture's ann.bin must be non-empty for this to prove anything"
+    data[0] ^= 0xFF
+    ann_path.write_bytes(bytes(data))
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="sha256"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert _staging_glob(root) == []
+
+
+def test_import_refuses_a_staged_file_the_transfer_manifest_does_not_list(
+    repository, store, tmp_path
+):
+    """A file the package gained AFTER its manifest was written (a corrupted
+    or tampered transfer) must be refused, not silently published."""
+    _seed_live(store, "nb-1")
+    package = _full_package(tmp_path)
+    (package / cli.MAIN_ROOT / "unexpected.bin").write_bytes(b"surprise")
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="not listed"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+
+
+def test_import_refuses_when_the_transfer_manifest_lists_a_file_the_package_lacks(
+    repository, store, tmp_path
+):
+    """``ann.bin`` is present in the fixture but not formally "required" by
+    ``artifact_inventory_error`` (the manifest here carries no ``n_ann``), so
+    removing it is invisible to every EXISTING pre-staging check — only the
+    transfer manifest, which recorded its presence at export/package-build
+    time, catches the loss."""
+    _seed_live(store, "nb-1")
+    package = _full_package(tmp_path)
+    (package / cli.MAIN_ROOT / "ann.bin").unlink()
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="missing"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+
+
 # ────────────────────────────────────────────────────────── import publish ──
 
 def _staging_glob(root: Path) -> list[Path]:
@@ -505,6 +744,10 @@ def _full_package(tmp_path) -> Path:
         tmp_path, companion={"parent_version": ["nb-1", 7], "published_sources": 2}
     )
     _write_viz_root(package / "kg_viz", {"generation": "new"})
+    # ``_package`` above already wrote a transfer manifest, but only over the
+    # roots it built (kg_index + kg_index_partitions) — kg_viz was added
+    # after. Regenerate so the manifest covers all three roots.
+    _write_transfer_manifest(package)
     return package
 
 
@@ -1388,6 +1631,7 @@ def test_import_retires_a_stale_companion_when_the_package_omits_it(
     package = _package(tmp_path, version=["nb-1", 1])  # same version, no companion
     assert not (package / cli.COMPANION_ROOT).exists()
     _write_viz_root(package / "kg_viz", {"generation": "kept"})
+    _write_transfer_manifest(package)  # regenerate: now covers kg_viz too
 
     receipt = cli.run_import(
         repository,
@@ -1553,6 +1797,7 @@ def test_import_rolls_back_a_retired_companion_when_identity_drifts_during_the_s
     _seed_live(store, "nb-1")
     package = _package(tmp_path, version=["nb-1", 1])  # no companion
     _write_viz_root(package / "kg_viz", {"generation": "kept"})
+    _write_transfer_manifest(package)  # regenerate: now covers kg_viz too
     calls = {"n": 0}
     projections = _Projections(PIPELINE)
     base = projections.pipeline_identity
