@@ -519,15 +519,20 @@ def get_admin_user_ask_detail(
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
     require_job_access(refreshed)
-    job = refreshed
-    asked_at = job.get("asked_at") or ""
-    conversation_id = job.get("conversation_id") or ""
-    if not job.get("notebook_deleted_at") and answer_detail is not None:
+    if refreshed.get("notebook_deleted_at"):
+        job = refreshed
+        asked_at = job.get("asked_at") or ""
+        conversation_id = job.get("conversation_id") or ""
+        answer = None
+        answered_at = ""
+    elif answer_detail is not None:
+        # The final read is only a deletion fence. Keep the first live job
+        # snapshot so a concurrent running→done transition cannot produce an
+        # internally inconsistent ``done`` response without its new answer.
         answer = answer_detail["payload"]
         answered_at = str(answer_detail["payload"].get("answered_at") or "")
     else:
         answer = None
-        answered_at = ""
 
     return AskDetail(
         job_id=job["job_id"],
