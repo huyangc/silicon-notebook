@@ -25,8 +25,13 @@ from app.services.source_subgraph import GRAPH_CONTRACT_VERSION
 # Sunk to app.domain.kg.source_partition in B3 (app.repositories'
 # maintenance modules import it directly there); re-exported here
 # unchanged for this module's own use and existing importers such as
-# filesystem/scale_artifact_store.py.
-from app.domain.kg.source_partition import SOURCE_PARTITION_FORMAT_VERSION  # noqa: F401
+# filesystem/scale_artifact_store.py. ``build_generation_mismatch`` lives
+# there for the same reason (P1, codex PR#643 R26) — the store, both
+# maintenance backends and the offline CLI all apply the same gate.
+from app.domain.kg.source_partition import (  # noqa: F401
+    SOURCE_PARTITION_FORMAT_VERSION,
+    build_generation_mismatch,
+)
 
 _PARTITION_FILES = (
     "graph.npz",
@@ -58,6 +63,12 @@ class SourceGraphPartition:
     object_types: Mapping[str, str]
     chunks_by_node: Mapping[str, str]
     relation_endpoints: tuple[tuple[str, str, str], ...]
+    # The ``build_id`` of the main manifest this partition was produced
+    # beside (P1, codex PR#643 R26). Last and defaulted so a caller that
+    # predates the key — a test double, an older direct user — keeps
+    # constructing this the way it always did; ``None`` persists as "no id"
+    # and pairs on ``parent_version`` alone.
+    parent_build_id: Any = None
 
 
 def _json_list(value: Any) -> list[Any]:
@@ -93,6 +104,7 @@ def build_source_partition(
     *,
     source_id: str,
     parent_version: Any,
+    parent_build_id: Any = None,
     max_memberships: int = 60_000,
 ) -> SourceGraphPartition:
     """Normalize one source-only offline projection into a safe CSR."""
@@ -232,6 +244,7 @@ def build_source_partition(
         relation_endpoints=tuple(
             (left, right, edge_type) for left, right, edge_type in relation_endpoints
         ),
+        parent_build_id=parent_build_id,
     )
     return partition
 
@@ -257,6 +270,12 @@ def save_source_partition(directory: Path, partition: SourceGraphPartition) -> N
         "format_version": SOURCE_PARTITION_FORMAT_VERSION,
         "source_id": partition.source_id,
         "parent_version": partition.parent_version,
+        # Written even when it is ``None`` (P1, codex PR#643 R26): a null and
+        # an absent key mean the same thing to ``build_generation_mismatch``
+        # — "this side carries no id" — so there is nothing to gain from
+        # omitting it, and a present key makes the generation binding
+        # visible to an operator reading the manifest.
+        "parent_build_id": partition.parent_build_id,
         "source_signature": partition.source_signature,
         "source_generation": partition.source_generation,
         "projection_version": partition.projection_version,
@@ -277,12 +296,14 @@ def load_source_partition(
     source_id: str,
     expected_parent_version: Any,
     expected_source_signature: Any,
+    expected_parent_build_id: Any = None,
 ) -> SourceGraphPartition:
     directory, manifest = inspect_source_partition_manifest(
         root,
         source_id=source_id,
         expected_parent_version=expected_parent_version,
         expected_source_signature=expected_source_signature,
+        expected_parent_build_id=expected_parent_build_id,
     )
     try:
         hashes = manifest.get("file_sha256")
@@ -374,6 +395,7 @@ def load_source_partition(
     partition = SourceGraphPartition(
         source_id=source_id,
         parent_version=manifest.get("parent_version"),
+        parent_build_id=manifest.get("parent_build_id"),
         source_signature=manifest.get("source_signature"),
         source_generation=str(manifest.get("source_generation") or ""),
         projection_version=int(manifest.get("projection_version") or 0),
@@ -393,6 +415,7 @@ def inspect_source_partition_manifest(
     source_id: str,
     expected_parent_version: Any,
     expected_source_signature: Any,
+    expected_parent_build_id: Any = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Validate one small header without opening any partition payload."""
     directory = root / source_partition_key(source_id)
@@ -413,6 +436,13 @@ def inspect_source_partition_manifest(
         raise SourcePartitionUnavailable("source_partition_identity_mismatch")
     if _identity(manifest.get("parent_version")) != _identity(expected_parent_version):
         raise SourcePartitionUnavailable("source_partition_identity_mismatch")
+    # The version above is reusable across republishes; the build id is not
+    # (P1, codex PR#643 R26). Same existing exit — a mismatched pair is
+    # capability-unavailable, never a new error shape.
+    if build_generation_mismatch(
+        expected_parent_build_id, manifest.get("parent_build_id")
+    ):
+        raise SourcePartitionUnavailable("source_partition_identity_mismatch")
     if _identity(manifest.get("source_signature")) != _identity(
         expected_source_signature
     ):
@@ -424,7 +454,11 @@ def inspect_source_partition_manifest(
     return directory, manifest
 
 
-def validate_partition_root(root: Path, expected_parent_version: Any) -> None:
+def validate_partition_root(
+    root: Path,
+    expected_parent_version: Any,
+    expected_parent_build_id: Any = None,
+) -> None:
     try:
         with open(root / "manifest.json") as handle:
             manifest = json.load(handle)
@@ -437,4 +471,11 @@ def validate_partition_root(root: Path, expected_parent_version: Any) -> None:
     if manifest.get("format_version") != SOURCE_PARTITION_FORMAT_VERSION:
         raise SourcePartitionUnavailable("source_partition_artifact_legacy")
     if _identity(manifest.get("parent_version")) != _identity(expected_parent_version):
+        raise SourcePartitionUnavailable("source_partition_identity_mismatch")
+    # Same generation gate as the per-source headers above, applied to the
+    # companion ROOT so an unpaired companion is refused before any selected
+    # header is opened (P1, codex PR#643 R26).
+    if build_generation_mismatch(
+        expected_parent_build_id, manifest.get("parent_build_id")
+    ):
         raise SourcePartitionUnavailable("source_partition_identity_mismatch")

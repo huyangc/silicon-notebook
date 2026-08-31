@@ -966,7 +966,8 @@ reporting a mixed-generation package as success. A swap is two renames, and a
 `copytree` landing between them collects a set that mixes two generations. The companion
 root (`kg_index_partitions`) is rebuilt *after* the main swap, so a "new main,
 old companion" window exists by design. Export therefore verifies that the
-companion's `parent_version` equals the main manifest's `version` and refuses
+companion's `parent_version` equals the main manifest's `version` **and that
+their build ids agree** (see "Generation pairing" below) and refuses
 otherwise. A present companion with no readable `manifest.json`, or a live
 `kg_viz` the serving-side loader reads as "no viz", refuses the same way:
 copying either verbatim would produce a package this CLI's own `import`
@@ -990,9 +991,32 @@ immediately — a viz publish is seconds, not hours. SQLite deployments have no
 cross-process claim at all, and this CLI refuses them outright, so the viz
 rebuild behaves there exactly as it always has.
 
+**Generation pairing is per *build*, not per version.** Every build — a full
+rebuild, a fold, or this CLI's own `build` — stamps its main manifest with a
+unique `build_id` and copies that value onto the companion root manifest and
+every per-source manifest it publishes in the same pass, as
+`parent_build_id`. The serving reader, `import`'s package validation,
+`export`'s live-tree check and the cheap readiness probe behind
+`prepare_selected_source_graph.py` all require **both** to match: same
+`version` *and* same build id. Republishing the same version is a supported
+operation, so the version by itself cannot tell two builds apart — an
+`import` interrupted after the companion rename but before the main one
+leaves a *new* companion beside an *old* main index with both versions equal,
+and an online rebuild that loses its claim after the main swap leaves the
+mirror image. Such a pair now fails to match and degrades to "no companion",
+which is the intended fail-soft; before the build id it was accepted and
+served as one generation.
+
+Roots written before this key existed carry no id on one or both sides. Those
+keep pairing on `version` alone, so nothing already on disk becomes
+unreadable after an upgrade — with one residual worth knowing during a
+rollout: such a pair still has the old same-version blind spot until a single
+rebuild or fold republishes both roots and stamps them. There is nothing to
+migrate; the next ordinary index build closes it.
+
 `import` publishes in the order **companion → viz → main index**: any failure
 mid-sequence leaves the *live* main index on its previous generation, and the
-companion's `parent_version` gate makes an unpaired companion unreadable
+companion's generation gate makes an unpaired companion unreadable
 (degrading to "no companion") rather than describing a different generation.
 Copying — the slow, failure-prone half — happens entirely inside a
 claim-unique `.tmp-<token>` staging directory (see below); the live tree is
@@ -1018,7 +1042,11 @@ matching (the version number did not change) and its stat signature
 unchanged, so a reader keeps pairing it with the new main index even though
 this import never vouched for it — the exact "companion describing a
 different generation" the publish order above exists to prevent, reached
-here from the omission side instead of a mid-sequence failure. A root absent
+here from the omission side instead of a mid-sequence failure. The build id
+refuses that pair as well whenever both roots carry one, but retirement is
+still what runs: it also covers legacy roots that carry no id, and a retired
+generation's tree has no business sitting beside a live index either way. A
+root absent
 from **both** the package and the live tree is unaffected: that is still the
 ordinary "no companion" shape and stays skipped.
 
@@ -1358,7 +1386,7 @@ Current scale-index builds and delta folds also write `chunk_ann_source_names.np
 
 The same `viz.npz` now carries the stable degree order and by-source edge order/indptr used by bounded graph views. Older compact and legacy JSON artifacts remain loadable and derive these arrays once on demand; rebuilding moves that cost into artifact publication. A bounded core request enumerates only the kept nodes' outgoing segments and restores the original edge stream order. Multi-library PPR remains lazy, but its ordered participant graph is assembled and normalized once rather than copying the cumulative CSR after every mounted library; differential tests pin the historical PPR scores and ranking. Maintenance submissions enter separate fixed heavy/light worker queues, so a burst increases queue entries rather than blocked OS threads. Queue wait disclosure remains metadata-only.
 
-With the default `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`, the same offline index command also rebuilds `<storage>/kg_index_partitions/<notebook-id>` after the main scale artifact is published. The companion is staged and swapped atomically, contains one SHA-256-addressed directory per visible source, hashes every partition payload, and is bound to the current main manifest version. A failed, over-limit, or corrupt companion does not damage the legacy scale index, but its reader stays unavailable; older companion formats require a rebuild. Re-run the index command after repairing source-fact coverage or adjusting the documented source-subgraph rails; do not copy a companion root between scale-index generations. `SOURCE_PARTITIONED_PPR_ENABLED` may be turned off independently while retaining the files.
+With the default `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`, the same offline index command also rebuilds `<storage>/kg_index_partitions/<notebook-id>` after the main scale artifact is published. The companion is staged and swapped atomically, contains one SHA-256-addressed directory per visible source, hashes every partition payload, and is bound to the current main manifest version *and* to that build's `build_id` (see "Generation pairing" above — a companion left over from another build is unreadable even when the version is unchanged). A failed, over-limit, or corrupt companion does not damage the legacy scale index, but its reader stays unavailable; older companion formats require a rebuild. Re-run the index command after repairing source-fact coverage or adjusting the documented source-subgraph rails; do not copy a companion root between scale-index generations. `SOURCE_PARTITIONED_PPR_ENABLED` may be turned off independently while retaining the files.
 
 For a production regression, capture stacks and the slow-stage breakdown with `python3 scripts/diag.py incident` and `python3 scripts/diag.py slow --since 6 --deep`. In `_retrieve_scored` events, compare `candidate_ms` (then its `scale_index_ms` / `kg_ann_open_ms` / `kg_ann_knn_ms` / `kg_delta_ms` / `kg_lexical_ms` split), `hydrate_ms`, and `fold_ms`; a small candidate count must not cause hydration work proportional to total relation or cluster rows. Before/after acceptance should use the exact replay comparison below.
 

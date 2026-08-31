@@ -805,3 +805,87 @@ def test_a_failed_worker_start_rolls_back_everything_it_took(
     assert scale.idle_queue[indexed_notebook] == ("fold", stamp)
     assert scale._scale_pending[indexed_notebook] == ("full", stamp)
     assert scale._scale_failure_state == {}
+
+
+# ── P1, codex PR#643 R26: one build, one generation id, on BOTH roots ──
+
+
+def _generation(store, notebook_id) -> tuple:
+    """``(main build_id, companion root parent_build_id)`` as they are
+    actually on disk after a publish. The per-source manifests carry the same
+    id and are asserted where a fixture with complete source-fact provenance
+    actually publishes partitions (``test_source_partitioned_ppr``); this
+    notebook's single source has none, so its companion root is legitimately
+    empty."""
+    main = json.loads((store.scale_dir(notebook_id) / "manifest.json").read_text())
+    companion = json.loads(
+        (store.source_partition_dir(notebook_id) / "manifest.json").read_text()
+    )
+    return main.get("build_id"), companion.get("parent_build_id")
+
+
+def test_a_full_build_stamps_one_generation_on_the_main_root_and_companion(
+    repo, indexed_notebook
+):
+    """``version`` is reusable across republishes and therefore cannot bind a
+    companion to the main index it was built beside; ``build_id`` is minted
+    per build and copied onto the companion root AND every per-source
+    manifest, because both are gates the reader applies.
+
+    Mutation anchor: stop passing ``parent_build_id=`` from
+    ``_rebuild_source_partitions``'s caller (or inherit the id instead of
+    minting one) and the ids stop agreeing.
+    """
+    store = repo._runtime.scale_artifact_store
+
+    main_id, companion_id = _generation(store, indexed_notebook)
+
+    assert isinstance(main_id, str) and len(main_id) == 32
+    assert companion_id == main_id
+
+
+def test_a_fold_mints_a_new_generation_for_both_roots(repo, indexed_notebook):
+    """A fold republishes both roots, so it must NOT inherit the base
+    artifact's id — the companion rebuild is a separate publish that can fail
+    or lose the claim, and reusing the id would let the previous generation's
+    companion keep pairing with the new main index.
+
+    Mutation anchor: remove ``"build_id": new_build_id()`` from ``fold``'s
+    ``manifest.update`` and the fold silently keeps the base's generation.
+    """
+    store = repo._runtime.scale_artifact_store
+    before_main, _before_companion = _generation(store, indexed_notebook)
+    _add_delta_source(repo, indexed_notebook)
+
+    _scale(repo).fold(indexed_notebook)
+
+    main_id, companion_id = _generation(store, indexed_notebook)
+    assert main_id != before_main
+    assert companion_id == main_id
+
+
+def test_a_fold_that_publishes_only_the_main_root_leaves_the_pair_mismatched(
+    repo, indexed_notebook, monkeypatch
+):
+    """The interruption codex R26 P1 named, in its online direction: the main
+    swap lands and the companion rebuild does not. Both roots still carry the
+    SAME ``parent_version`` (the delta moved the version, but the reader
+    compares the companion against whatever version it is asked for), so only
+    the build id can tell that this pair is not one generation. (What the
+    reader and the status probe then DO with that is pinned in
+    ``test_scale_artifact_compatibility`` and
+    ``test_selected_source_graph_artifact_status``.)
+    """
+    scale = _scale(repo)
+    store = repo._runtime.scale_artifact_store
+    _add_delta_source(repo, indexed_notebook)
+    monkeypatch.setattr(
+        scale.builder,
+        "_rebuild_source_partitions",
+        lambda *args, **kwargs: None,   # the companion half never publishes
+    )
+
+    scale.fold(indexed_notebook)
+
+    main_id, companion_id = _generation(store, indexed_notebook)
+    assert companion_id != main_id

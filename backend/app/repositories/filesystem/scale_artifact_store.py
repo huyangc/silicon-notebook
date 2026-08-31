@@ -296,6 +296,25 @@ class ScaleArtifactStore:
         # 继续走磁盘探针(load_scale_index 已有 isinstance 守卫、能正确判 [] 为损坏)。
         return data.get("version") if isinstance(data, dict) else None
 
+    def scale_build_id(self, notebook_id: str):
+        """The live main index's per-build generation id, or ``None``.
+
+        ``None`` covers three shapes that all mean the same thing to
+        ``build_generation_mismatch`` — no live main manifest, a manifest
+        built before this key existed, and a manifest this call could not
+        read — so the companion pairing falls back to ``parent_version``
+        alone (older-index-stays-valid). ``read_manifest`` deliberately
+        raises on a corrupt manifest for its other callers' frozen
+        watermark/status semantics; here that must stay fail-soft, because
+        refusing a readable companion over an unreadable MAIN manifest would
+        be reporting the wrong artifact broken (P1, codex PR#643 R26).
+        """
+        try:
+            manifest = self.read_manifest(self.scale_dir(notebook_id))
+        except (OSError, ValueError):
+            return None
+        return manifest.get("build_id") if isinstance(manifest, dict) else None
+
     def scale_manifest_identity(self, notebook_id: str) -> "tuple[bool, object]":
         """H8 体检缓存键:磁盘 scale 索引的**产物身份** `(manifest 是否存在, manifest.version)`。
 
@@ -394,6 +413,7 @@ class ScaleArtifactStore:
         parent_version,
         source_ids,
         load_rows,
+        parent_build_id=None,
         claim_token: Optional[str] = None,
         verify_held: Optional[Callable[[], bool]] = None,
     ) -> dict:
@@ -403,6 +423,13 @@ class ScaleArtifactStore:
         manifest intentionally carries counts only: runtime addresses a
         selected source by SHA-256 and never reads an O(all-sources) directory
         map.  The parent identity is written last and gates every load.
+
+        ``parent_build_id`` is the ``build_id`` of the main manifest this same
+        build published (P1, codex PR#643 R26). It is stamped on the root
+        manifest AND on every per-source manifest, because both are pairing
+        gates the reader applies. A caller with no id (a test double, a direct
+        store user) writes ``None`` and the pair falls back to matching on
+        ``parent_version`` alone.
         """
         from app.services.kg.source_partition_index import (
             SOURCE_PARTITION_FORMAT_VERSION,
@@ -422,6 +449,7 @@ class ScaleArtifactStore:
                     load_rows(source_id),
                     source_id=source_id,
                     parent_version=parent_version,
+                    parent_build_id=parent_build_id,
                     max_memberships=self.settings.source_subgraph_max_memberships,
                 )
             except SourcePartitionUnavailable:
@@ -434,6 +462,7 @@ class ScaleArtifactStore:
         manifest = {
             "format_version": SOURCE_PARTITION_FORMAT_VERSION,
             "parent_version": parent_version,
+            "parent_build_id": parent_build_id,
             "published_sources": published,
             "unavailable_sources": unavailable,
         }
@@ -471,7 +500,19 @@ class ScaleArtifactStore:
         )
 
         root = self.source_partition_dir(notebook_id)
-        validate_partition_root(root, expected_parent_version)
+        # The generation this companion must pair with, read ONCE per cold
+        # load and threaded through every header/payload gate below (P1,
+        # codex PR#643 R26). It is deliberately taken from the LIVE main
+        # manifest rather than from ``expected_parent_version``: the caller's
+        # expected version is database-derived and is exactly what a
+        # same-version republish cannot move, which is the hole this closes.
+        # Cost is one manifest parse on a path that then SHA-256s every byte
+        # of every selected partition payload, so it is noise against the
+        # work it gates; the warm-cache path never reaches here at all.
+        expected_parent_build_id = self.scale_build_id(notebook_id)
+        validate_partition_root(
+            root, expected_parent_version, expected_parent_build_id
+        )
         max_nodes = max_nodes or (
             int(self.settings.source_subgraph_max_objects)
             + int(self.settings.source_subgraph_max_chunks)
@@ -488,6 +529,7 @@ class ScaleArtifactStore:
                 source_id=source_id,
                 expected_parent_version=expected_parent_version,
                 expected_source_signature=expected_source_signatures[source_id],
+                expected_parent_build_id=expected_parent_build_id,
             )[1]
             for source_id in source_ids
         ]
@@ -508,6 +550,7 @@ class ScaleArtifactStore:
                 source_id=source_id,
                 expected_parent_version=expected_parent_version,
                 expected_source_signature=expected_source_signatures[source_id],
+                expected_parent_build_id=expected_parent_build_id,
             )
             for source_id in source_ids
         ]
@@ -788,6 +831,13 @@ class ScaleArtifactStore:
         contract). Retiring the stale root closes that: it degrades to "no
         companion", the same safe shape a first-ever import with no companion
         in the package already produces.
+
+        The ``parent_build_id`` gate (P1, codex PR#643 R26) now refuses that
+        pair as well, but it does not make this redundant: it is silent about
+        LEGACY roots (either side without a build id keeps pairing on version
+        alone), and leaving a retired generation's tree lying beside a live
+        index is a disk-hygiene and operator-confusion problem regardless of
+        whether a reader would open it. The two are the belt and the braces.
 
         ``live`` present → a single rename, ``live`` → ``.old`` — the first
         half of ``swap_staging_directory``'s two-rename sequence, with no

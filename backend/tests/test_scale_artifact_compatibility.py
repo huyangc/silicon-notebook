@@ -395,6 +395,135 @@ def test_save_source_partitions_publishes_when_the_claim_holds(store):
     )
 
 
+# ── P1, codex PR#643 R26: a companion is bound to one BUILD, not merely to a
+# reusable database version. Same-version republish is a supported scenario,
+# so an interrupted publish (companion swapped, main index not — or the
+# reverse, online) leaves two roots whose versions agree and whose builds do
+# not. Every reader gate compares the build id too. ──
+
+
+def _pair(store, notebook_id, *, main_build_id, companion_build_id):
+    """One live main manifest and one live companion root manifest, agreeing
+    on ``version``/``parent_version`` and differing only in build id. Both are
+    written with the keys the production writers write; ``None`` stands for a
+    root produced before the key existed."""
+    _write_manifest(
+        Path(store.scale_dir(notebook_id)),
+        {"version": ["v", 1], "build_id": main_build_id},
+    )
+    _write_manifest(
+        Path(store.source_partition_dir(notebook_id)),
+        {
+            "format_version": 2,
+            "parent_version": ["v", 1],
+            "parent_build_id": companion_build_id,
+            "published_sources": 0,
+            "unavailable_sources": 0,
+        },
+    )
+
+
+def _load_root(store, notebook_id):
+    """Root-manifest admission only — no source is selected, so no payload is
+    opened. Explicit rails keep this off ``settings`` (the storage-only test
+    carrier has none)."""
+    return store.load_source_partitions(
+        notebook_id,
+        [],
+        expected_parent_version=["v", 1],
+        expected_source_signatures={},
+        max_nodes=10,
+        max_nnz=10,
+    )
+
+
+def test_a_companion_from_another_build_is_refused_at_the_root(store):
+    """The mixed-generation shape the version-only gate used to accept.
+
+    Mutation anchor: drop the ``build_generation_mismatch`` check from
+    ``validate_partition_root`` and this goes green — the reader admits a
+    companion published beside a different main index.
+    """
+    from app.services.kg.source_partition_index import SourcePartitionUnavailable
+
+    _pair(store, "nb-mixed", main_build_id="a" * 32, companion_build_id="b" * 32)
+
+    with pytest.raises(SourcePartitionUnavailable) as error:
+        _load_root(store, "nb-mixed")
+    assert error.value.reason == "source_partition_identity_mismatch"
+
+
+def test_a_companion_from_the_same_build_is_admitted(store):
+    """Negative anchor: identical shape, one shared build id — the ordinary
+    healthy pair, which must still load."""
+    _pair(store, "nb-paired", main_build_id="a" * 32, companion_build_id="a" * 32)
+
+    assert _load_root(store, "nb-paired") == []
+
+
+@pytest.mark.parametrize(
+    "main_build_id, companion_build_id",
+    [(None, None), ("a" * 32, None), (None, "b" * 32)],
+    ids=["neither-side", "main-only", "companion-only"],
+)
+def test_a_pair_missing_a_build_id_on_either_side_still_matches_on_version(
+    store, main_build_id, companion_build_id
+):
+    """older-index-stays-valid: artifacts written before this key existed keep
+    pairing on ``parent_version`` alone, on either side. This is the residual
+    documented on ``build_generation_mismatch`` — such a pair still has the
+    original same-version blind spot until one new build stamps ids on both
+    roots. A gate that fail-closed on a missing id would make every
+    pre-existing companion unreadable until a full rebuild."""
+    _pair(
+        store,
+        "nb-legacy",
+        main_build_id=main_build_id,
+        companion_build_id=companion_build_id,
+    )
+
+    assert _load_root(store, "nb-legacy") == []
+
+
+def test_an_unreadable_main_manifest_does_not_refuse_a_readable_companion(store):
+    """``scale_build_id`` is fail-soft on purpose: a corrupt MAIN manifest is
+    not evidence about the companion, and refusing here would report the wrong
+    artifact broken. (``read_manifest`` raises for its other callers' frozen
+    watermark/status semantics, so this is a real branch, not a hypothetical.)
+    """
+    _write_manifest(Path(store.source_partition_dir("nb-corrupt")), {
+        "format_version": 2,
+        "parent_version": ["v", 1],
+        "parent_build_id": "b" * 32,
+        "published_sources": 0,
+        "unavailable_sources": 0,
+    })
+    main = Path(store.scale_dir("nb-corrupt"))
+    main.mkdir(parents=True, exist_ok=True)
+    (main / "manifest.json").write_text("{not json", encoding="utf-8")
+
+    assert store.scale_build_id("nb-corrupt") is None
+    assert _load_root(store, "nb-corrupt") == []
+
+
+def test_save_source_partitions_stamps_the_publishing_builds_generation(store):
+    """The write side of the gate: whatever the caller published its main root
+    under is copied onto the companion root manifest verbatim."""
+    manifest = store.save_source_partitions(
+        "nb-stamped",
+        parent_version=["v", 2],
+        parent_build_id="c" * 32,
+        source_ids=[],
+        load_rows=lambda _source_id: None,
+    )
+    assert manifest["parent_build_id"] == "c" * 32
+    live = store.source_partition_dir("nb-stamped")
+    assert (
+        json.loads((live / "manifest.json").read_text())["parent_build_id"]
+        == "c" * 32
+    )
+
+
 # ── full rebuild is atomic: staging + swap, never an in-place overwrite ──
 
 
