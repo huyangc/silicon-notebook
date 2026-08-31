@@ -39,6 +39,22 @@ from app.services.kg import viz_index as viz_index_module
 ScaleBuildArtifacts = Mapping[str, object]
 
 
+class ScaleArtifactSwapRefused(RuntimeError):
+    """Raised by ``swap_staging_directory`` when it finds a live/.old shape it
+    is not safe to clean up on its own (P1, codex PR#643 R9) — currently just
+    the recovery state left by a swap that was interrupted between its two
+    renames: ``live`` absent, ``.old`` present as the only surviving
+    generation. Nothing is renamed or deleted before this is raised; the
+    staged build stays exactly where the caller left it.
+
+    A plain ``RuntimeError`` subclass, not a bespoke type nobody expects: every
+    existing caller (``save_full``, ``save_source_partitions``, the fold
+    builder, the CLI's ``run_import``/``run_build``) that does not specifically
+    catch this still gets a readable, un-swallowed failure — the message
+    carries the exact recovery command — rather than an exception type its
+    generic handlers do not recognize."""
+
+
 class SwapInterruptGuard:
     """Defer ``SIGINT`` across a rename sequence.
 
@@ -514,16 +530,47 @@ class ScaleArtifactStore:
         caller (``save_full``, ``save_source_partitions``, the fold builder)
         passes nothing and gets the previous one-call cleanup.
 
+        Before any of that: a stale ``.old`` already on disk (left behind by
+        an EARLIER swap, not this one) is dealt with BEFORE the guard is
+        entered and BEFORE ``out_dir`` is even read for ``preserved`` (P1/P2,
+        codex PR#643 R9). Two shapes are possible:
+
+        * ``live`` present, ``.old`` present — an earlier swap finished both
+          its renames but never got to (or lost the race to) delete its own
+          leftover ``.old``; that tree is pure cruft and safe to remove.
+        * ``live`` ABSENT, ``.old`` present — a previous swap was interrupted
+          BETWEEN its two renames (a hard kill, not the deferred Ctrl-C this
+          guard exists to prevent) and ``.old`` is the ONLY surviving
+          generation. Deleting it here — the old bug — destroys the
+          notebook's last artifact before the ``temporary → live`` rename
+          that would replace it has even been attempted; if that rename then
+          fails, both generations are gone. This shape is refused outright
+          with ``ScaleArtifactSwapRefused`` instead: nothing is renamed or
+          deleted, and the message tells the operator to restore ``.old``
+          onto ``live`` by hand and re-run.
+
+        That pre-clean ``rmtree`` runs with NO ``SwapInterruptGuard`` around
+        it (P2, codex PR#643 R9): unlike the two renames below, deleting
+        confirmed cruft cannot leave the notebook without a live index —
+        ``live``'s presence is checked first — so a Ctrl-C landing during a
+        multi-GB delete here should take effect immediately rather than being
+        deferred for as long as the rmtree takes. It also runs without
+        ``ignore_errors``: a failure here must stop the swap loudly, not
+        leave a half-deleted ``.old`` for the renames below to trip over.
+
         Only the two renames — the steps that can leave a notebook with no live
-        index at all — run inside ``SwapInterruptGuard``; the deletion of the
-        (multi-GB, potentially tens-of-seconds) previous generation runs after
-        it, deliberately NOT masked (P2, codex PR#643 R8): the new generation
-        is already live by then, so a Ctrl-C landing during cleanup is safe to
-        honour immediately rather than deferring it for as long as the rmtree
-        takes. A deferred interrupt that arrived DURING the renames is still
-        honoured, just after cleanup instead of before it — ``reraise=False``
-        on the guard hands that decision to this method rather than to
-        ``__exit__``, precisely so cleanup gets a chance to run first."""
+        index at all — run inside ``SwapInterruptGuard``; deletion of a
+        previous generation, whether the pre-clean above or the post-swap
+        cleanup below, deliberately runs outside it (P2, codex PR#643 R8/R9):
+        by the time either one runs, the notebook already has exactly one
+        confirmed-live generation, so a Ctrl-C landing during that
+        (potentially multi-GB, tens-of-seconds) delete is safe to honour
+        immediately rather than deferring it for as long as the rmtree takes.
+        A deferred interrupt that arrived DURING the renames is still
+        honoured, just after post-swap cleanup instead of before it —
+        ``reraise=False`` on the guard hands that decision to this method
+        rather than to ``__exit__``, precisely so cleanup gets a chance to
+        run first."""
         out_dir = str(live)
         if verify_held is not None and not verify_held():
             raise ScaleBuildLockLost(
@@ -532,6 +579,26 @@ class ScaleArtifactStore:
                 f"remains at {temporary}"
             )
         old_dir = out_dir + ".old"
+        if os.path.exists(old_dir):
+            if not os.path.exists(out_dir):
+                # Recovery state: a previous swap was interrupted between its
+                # two renames and ``.old`` is the ONLY surviving generation.
+                # Deleting it here (the old bug, codex PR#643 R9 P1) would
+                # destroy the notebook's last artifact before the rename
+                # below has even been attempted — refuse instead of guessing.
+                raise ScaleArtifactSwapRefused(
+                    f"{out_dir} is absent while {old_dir} exists — this "
+                    "looks like a swap that was interrupted between its two "
+                    f"renames, leaving {old_dir} as the only surviving "
+                    f"generation. Restore it first: `mv {old_dir} {out_dir}`, "
+                    "then re-run the build. Nothing was renamed or deleted; "
+                    f"the staged build remains at {temporary}."
+                )
+            # ``live`` is present, so this ``.old`` is leftover cruft an
+            # earlier swap's own cleanup never finished deleting — safe to
+            # remove. No ``SwapInterruptGuard`` here and no ``ignore_errors``
+            # — see the docstring above.
+            shutil.rmtree(old_dir)
         guard = SwapInterruptGuard(reraise=False)
         # Everything inside is the destructive part, and Ctrl-C landing inside
         # it is the only way this process can leave a notebook with no live
@@ -539,8 +606,6 @@ class ScaleArtifactStore:
         # KeyboardInterrupt is not). Deferred, not ignored — see the docstring
         # above and ``SwapInterruptGuard``.
         with guard:
-            if os.path.exists(old_dir):
-                shutil.rmtree(old_dir)
             preserved = os.path.exists(out_dir)
             if preserved:
                 os.rename(out_dir, old_dir)
