@@ -1226,6 +1226,43 @@ def test_import_refuses_a_package_where_an_optional_root_is_a_regular_file(
     )
 
 
+def test_import_refuses_a_package_where_an_optional_root_is_a_dangling_symlink(
+    repository, store, tmp_path
+):
+    """codex PR#643 R13 follow-up P2: a corrupted transfer can also leave the
+    optional root as a DANGLING symlink — ``entry.exists()`` follows the link
+    and reports False, so the regular-file guard alone reads it as an omitted
+    root and retires the healthy live artifact for it.
+
+    Mutation anchor: drop the ``is_symlink()`` half of the guard and this
+    goes red the same way the regular-file test does.
+    """
+    _seed_live(store, "nb-1")
+    package = _package(
+        tmp_path, companion={"parent_version": ["nb-1", 7], "published_sources": 2}
+    )
+    (package / "kg_viz").symlink_to(package / "no-such-target")
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="kg_viz"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    viz_dir = Path(store.viz_dir("nb-1"))
+    assert json.loads((viz_dir / "manifest.json").read_text()) == {
+        "generation": "old"
+    }, "the healthy live viz root must not be retired"
+    assert not Path(f"{viz_dir}.old").exists()
+    storage_root = Path(store.settings.storage_dir)
+    assert not list(storage_root.rglob("*.tmp-*")), (
+        "the refusal must land before any staging copy starts"
+    )
+
+
 def test_import_rolls_back_a_retired_companion_when_identity_drifts_during_the_swap(
     storage, store, tmp_path
 ):
@@ -1948,6 +1985,33 @@ def test_finalize_swap_deletes_old_only_when_preserved(tmp_path):
 
     ScaleArtifactStore.finalize_swap(live, True)
     assert not old.exists()
+
+
+def test_finalize_swap_skips_the_claim_check_on_a_first_ever_publish(tmp_path):
+    """codex PR#643 R13 follow-up P2: ``preserved`` False means a first-ever
+    publish left no ``.old``, so there is no destructive cleanup for
+    ``verify_held`` to protect. A lock session that died AFTER the roots were
+    fully published and identity-verified must not turn that no-op into a
+    ``ScaleBuildLockLost`` — the CLI would exit 1 and falsely report leftover
+    ``.old`` directories that never existed.
+
+    Mutation anchor: move the ``preserved`` early-return back below the
+    ``verify_held`` check and this goes red.
+    """
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    calls = []
+
+    def dead_claim() -> bool:
+        calls.append(True)
+        return False
+
+    ScaleArtifactStore.finalize_swap(live, False, verify_held=dead_claim)
+    assert calls == [], "no .old to delete means no claim check at all"
+
+    with pytest.raises(ScaleBuildLockLost):
+        ScaleArtifactStore.finalize_swap(live, True, verify_held=dead_claim)
+    assert calls == [True], "a real cleanup must still verify the claim"
 
 
 def test_retire_clears_a_stale_old_before_renaming_live(tmp_path):

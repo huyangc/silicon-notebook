@@ -1357,13 +1357,25 @@ def run_import(
         # ``package/kg_index`` to be a directory and refuses otherwise.
         # Checked before any staging begins, same as the nesting guards
         # above, so a refusal here leaves nothing on disk to clean up.
+        # A DANGLING symlink (codex PR#643 R13 follow-up P2) is the same
+        # trap one step further: ``entry.exists()`` follows the link and
+        # reports False, so without ``is_symlink()`` — which does not
+        # follow — the damaged entry would fall through to "omitted" and
+        # retire the healthy live root exactly like the regular-file shape.
         for name in PUBLISH_ORDER:
             if name == MAIN_ROOT:
                 continue
             entry = package / name
-            if entry.exists() and not entry.is_dir():
+            if (entry.exists() and not entry.is_dir()) or (
+                entry.is_symlink() and not entry.exists()
+            ):
+                shape = (
+                    "is a symlink whose target does not exist"
+                    if entry.is_symlink() and not entry.exists()
+                    else "exists but is not a directory"
+                )
                 raise ScaleBuildCliFailure(
-                    f"{entry} exists but is not a directory; this looks "
+                    f"{entry} {shape}; this looks "
                     "like a corrupted transfer, not a package that omits "
                     f"the {name} root. Refusing the entire import rather "
                     f"than retiring the live {name} artifact for it. "
