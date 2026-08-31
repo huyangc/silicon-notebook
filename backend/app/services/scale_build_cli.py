@@ -1068,6 +1068,28 @@ def run_import(
     — right before the destructive renames begin, and a drift refuses the
     publish outright rather than let it land unusable.
 
+    codex PR#643 R8 P1: that pre-rename re-read is still a TOCTOU — a pipeline
+    rebuild can publish its new identity in the window between it and the
+    ``kg_index`` rename, since a rebuild does not participate in this claim
+    either. So each root's swap is called with ``keep_old=True`` (it publishes
+    but does not delete ``.old``), and once the main root — always last in
+    ``PUBLISH_ORDER`` — is live, the identity is read a THIRD time. A drift
+    here means this run's own publish is what made the identity stale
+    contract fail, so it is undone: every published root is rolled back
+    (``ScaleArtifactStore.rollback_swap``, live tree exactly as it was, staged
+    copies back at their original names) and the import refuses, the same
+    "nothing published, staging left for inspection" contract as the R5
+    branch above — just reached after publishing and then reverting, instead
+    of before publishing at all. The residual window is now only between this
+    third read succeeding and the (now un-masked, see
+    ``ScaleArtifactStore.swap_staging_directory``) ``.old`` cleanup that
+    follows it — a switch landing there is superseded by that same pipeline
+    rebuild's OWN scale rebuild, which runs immediately after it publishes a
+    new identity (``execute_indexing_pipeline_rebuild``), so it is no longer
+    the "silent degradation until the next rebuild" this check exists to
+    close; a failure in that rebuild is that flow's own existing failure mode,
+    not a new one this CLI introduces.
+
     Registered, not fixed (codex W-CLI R1 N3): each root's rename is atomic, the
     SET of three is not. A hard kill (SIGKILL, power loss) between two of them
     leaves companion/viz from the new generation beside a main index from the
@@ -1107,6 +1129,12 @@ def run_import(
 
         staged: dict[str, Path] = {}
         published: list[str] = []
+        # Rollback info for every root actually swapped below — the staging
+        # path it was published from (its name once rolled back) and whether
+        # a previous generation was set aside as ``.old`` (codex PR#643 R8
+        # P1). Populated alongside ``published``; consumed by the post-swap
+        # identity re-check further down.
+        swap_state: dict[str, tuple[Path, bool]] = {}
         # One guard around ALL the renames, not one per root: an interrupt
         # between two roots would leave the pair mismatched (fail-soft, but
         # avoidable), and the whole sequence is milliseconds. ``reraise`` is off
@@ -1141,9 +1169,21 @@ def run_import(
                 for name in PUBLISH_ORDER:
                     if name not in staged:
                         continue
-                    store.swap_staging_directory(
-                        roots[name], staged[name], verify_held=handle.verify_held
+                    temporary = staged[name]
+                    # codex PR#643 R8 P1: ``keep_old=True`` — the ``.old``
+                    # this leaves behind is what the post-swap identity
+                    # re-check below needs in order to roll this root back if
+                    # a pipeline switch raced past the pre-rename check
+                    # above. ``preserved`` records which shape (replacing an
+                    # existing generation vs. a first-ever publish) so the
+                    # rollback/finalize calls know whether one exists.
+                    preserved = store.swap_staging_directory(
+                        roots[name],
+                        temporary,
+                        verify_held=handle.verify_held,
+                        keep_old=True,
                     )
+                    swap_state[name] = (temporary, preserved)
                     published.append(name)
                     staged.pop(name)
         except _ImportPipelineIdentityDrifted as error:
@@ -1187,6 +1227,64 @@ def run_import(
                     {roots[name]: path for name, path in staged.items()}, report
                 )
             raise
+
+        # codex PR#643 R8 P1: the pre-rename check above (R5) cannot see a
+        # pipeline switch that lands DURING the renames themselves — a
+        # rebuild does not wait on this claim. Read the identity a THIRD
+        # time now that the main root (always last in PUBLISH_ORDER) is
+        # live, and undo the publish if it no longer matches: keeping an
+        # artifact the retrieval side's own pipeline gate will silently
+        # discard is worse than refusing after the fact.
+        if MAIN_ROOT in published:
+            post_swap_pipeline_identity = projections.pipeline_identity(
+                notebook_id
+            )
+            if list(post_swap_pipeline_identity) != list(
+                expected_pipeline_identity
+            ):
+                reverted = list(reversed(published))
+                # One guard around the whole rollback, same reasoning as the
+                # publish loop above: an interrupt between two roots'
+                # rollback renames would leave the set mismatched.
+                rollback_guard = SwapInterruptGuard(report, reraise=False)
+                with rollback_guard:
+                    for name in reverted:
+                        temporary, preserved = swap_state[name]
+                        store.rollback_swap(roots[name], temporary, preserved)
+                if rollback_guard.interrupted:
+                    report(
+                        "the deferred interrupt is being honoured now: the "
+                        "rollback completed first"
+                    )
+                report(
+                    "rolled back after publish: the live pipeline identity "
+                    f"changed to {list(post_swap_pipeline_identity)} during "
+                    f"the artifact swap; reverted roots: {reverted}"
+                )
+                raise ScaleBuildCliFailure(
+                    "the live pipeline identity for "
+                    f"{notebook_id} changed to "
+                    f"{list(post_swap_pipeline_identity)} during the "
+                    "artifact swap (this package was validated against "
+                    f"{list(expected_pipeline_identity)}). The publish has "
+                    "been rolled back; the live tree is unchanged and the "
+                    "staged copies remain on disk for inspection. Re-export "
+                    "the package with a current checkout against the new "
+                    "pipeline and re-run import."
+                ) from None
+
+        # Only reached once the post-swap identity check above has confirmed
+        # this generation stands. Deletion of each root's ``.old`` is
+        # deliberately NOT under any SIGINT guard here (P2, codex PR#643
+        # R8): every root is already live and correct, so a Ctrl-C landing
+        # during cleanup is safe to honour immediately rather than
+        # deferring it for as long as the (potentially multi-GB) rmtree
+        # takes; a leftover ``.old`` is exactly the shape ``inspect`` and
+        # the manual-recovery docs already cover.
+        for name in published:
+            _, preserved = swap_state[name]
+            store.finalize_swap(roots[name], preserved)
+
         if guard.interrupted:
             # The interrupt arrived while the renames were being deferred and
             # they all completed. Nothing was abandoned, so this exits 0 with

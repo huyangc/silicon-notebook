@@ -489,16 +489,14 @@ class ScaleArtifactStore:
         temporary,
         *,
         verify_held: Optional[Callable[[], bool]] = None,
-    ) -> None:
+        keep_old: bool = False,
+    ) -> bool:
         """Atomic-swap sequence for ANY artifact root (caller holds the claim):
-        live → .old, temporary → live, rm .old. If publishing temporary
-        fails after the first rename, restore .old → live before re-raising
-        the original publish error. A failed rollback leaves .old intact.
-
-        A first-ever publish has no live directory yet — so the live → .old
-        step is skipped when it is absent. Rollback semantics follow: only a
-        live directory that was actually set aside can be (and needs to be) put
-        back.
+        live → .old, temporary → live, (rm .old unless ``keep_old``). If
+        publishing temporary fails after the first rename, restore .old → live
+        before re-raising the original publish error. A failed rollback leaves
+        .old intact. Returns ``preserved`` — whether a previous live directory
+        existed and was set aside as ``.old`` (a first-ever publish has none).
 
         ``verify_held`` re-checks the caller's cross-process build claim in the
         last instant before the first rename — the one step that destroys the
@@ -506,7 +504,26 @@ class ScaleArtifactStore:
         session, failed over database) means another process may already be
         publishing here, so the build is abandoned: nothing is renamed, the
         staged ``.tmp`` is left on disk, and the failure is loud. Callers with
-        no cross-process claim (SQLite, direct builder use) pass nothing."""
+        no cross-process claim (SQLite, direct builder use) pass nothing.
+
+        ``keep_old`` (P2, codex PR#643 R8): when set, the ``.old`` directory is
+        left on disk instead of being removed here — the caller has its own
+        reason to want it a moment longer (``run_import``'s post-swap identity
+        re-check, see ``rollback_swap``/``finalize_swap`` below) and takes
+        responsibility for eventually calling one of those two. Every other
+        caller (``save_full``, ``save_source_partitions``, the fold builder)
+        passes nothing and gets the previous one-call cleanup.
+
+        Only the two renames — the steps that can leave a notebook with no live
+        index at all — run inside ``SwapInterruptGuard``; the deletion of the
+        (multi-GB, potentially tens-of-seconds) previous generation runs after
+        it, deliberately NOT masked (P2, codex PR#643 R8): the new generation
+        is already live by then, so a Ctrl-C landing during cleanup is safe to
+        honour immediately rather than deferring it for as long as the rmtree
+        takes. A deferred interrupt that arrived DURING the renames is still
+        honoured, just after cleanup instead of before it — ``reraise=False``
+        on the guard hands that decision to this method rather than to
+        ``__exit__``, precisely so cleanup gets a chance to run first."""
         out_dir = str(live)
         if verify_held is not None and not verify_held():
             raise ScaleBuildLockLost(
@@ -514,13 +531,14 @@ class ScaleArtifactStore:
                 f"{out_dir}; nothing was published and the staged build "
                 f"remains at {temporary}"
             )
-        # Everything below is the destructive part, and Ctrl-C landing inside it
-        # is the only way this process can leave a notebook with no live index
-        # (the rollback below catches ``Exception``, which a KeyboardInterrupt
-        # is not). Deferred, not ignored: the interrupt is re-raised the instant
-        # the sequence is complete. See ``SwapInterruptGuard``.
-        with SwapInterruptGuard():
-            old_dir = out_dir + ".old"
+        old_dir = out_dir + ".old"
+        guard = SwapInterruptGuard(reraise=False)
+        # Everything inside is the destructive part, and Ctrl-C landing inside
+        # it is the only way this process can leave a notebook with no live
+        # index (the rollback below catches ``Exception``, which a
+        # KeyboardInterrupt is not). Deferred, not ignored — see the docstring
+        # above and ``SwapInterruptGuard``.
+        with guard:
             if os.path.exists(old_dir):
                 shutil.rmtree(old_dir)
             preserved = os.path.exists(out_dir)
@@ -538,8 +556,50 @@ class ScaleArtifactStore:
                             f"remains at {old_dir}: {rollback_error!r}"
                         )
                 raise
+        # A real failure above propagates straight out of the ``with`` block
+        # and skips everything below — cleanup only runs once the swap itself
+        # is known to have succeeded.
+        if not keep_old and preserved:
+            shutil.rmtree(old_dir, ignore_errors=True)
+        if guard.interrupted:
+            raise KeyboardInterrupt
+        return preserved
+
+    @staticmethod
+    def finalize_swap(live, preserved: bool) -> None:
+        """Delete the ``.old`` a ``keep_old=True`` swap left behind, once the
+        caller has confirmed the published generation should stand (P1/P2,
+        codex PR#643 R8). Never wrapped in ``SwapInterruptGuard``: the new
+        generation is already live, so Ctrl-C here is safe to honour
+        immediately — a leftover ``.old`` is exactly the shape ``inspect`` and
+        the manual-recovery docs already cover."""
+        if preserved:
+            shutil.rmtree(f"{live}.old", ignore_errors=True)
+
+    @staticmethod
+    def rollback_swap(live, temporary, preserved: bool) -> None:
+        """Undo a ``keep_old=True`` swap the caller has decided, after the
+        fact, must not stand (P1, codex PR#643 R8 — ``run_import``'s post-swap
+        pipeline-identity re-check). Two renames, mirroring the original swap
+        in reverse: ``live`` (the just-published, now-rejected tree) moves back
+        to ``temporary`` — its original staging name, so it is exactly where a
+        caller's existing staging-recovery story already expects it — and, if
+        ``preserved``, ``.old`` (the previous generation) moves back to
+        ``live``. A first-ever publish (``preserved`` False) has no ``.old`` to
+        restore: ``live`` is simply absent afterward, same as before that
+        publish ever ran. Wrapped in its own ``SwapInterruptGuard`` — this is
+        just as destructive as the swap it undoes, and nests transparently
+        under a caller's own outer guard the same way ``swap_staging_directory``
+        does."""
+        out_dir = str(live)
+        old_dir = out_dir + ".old"
+        guard = SwapInterruptGuard(reraise=False)
+        with guard:
+            os.rename(out_dir, str(temporary))
             if preserved:
-                shutil.rmtree(old_dir, ignore_errors=True)
+                os.rename(old_dir, out_dir)
+        if guard.interrupted:
+            raise KeyboardInterrupt
 
     def prepare_fold_directory(
         self, notebook_id: str, claim_token: Optional[str] = None
