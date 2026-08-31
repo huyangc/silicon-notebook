@@ -914,6 +914,57 @@ def test_admin_unanswered_ask_detail_rechecks_delete_lifecycle(client, monkeypat
     assert body["retained_until"]
 
 
+def test_admin_ask_detail_final_delete_fence_keeps_first_live_snapshot(
+    client, monkeypatch
+):
+    owner = _auth(client, 31)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "详情正常完成竞态")
+    with _repo()._write() as db:
+        _insert_conversation(
+            db, "conv-finish-race", notebook_id, owner_id,
+            "2026-08-01T17:00:00+00:00",
+        )
+        _insert_ask_job(
+            db, "job-finish-race", notebook_id, owner_id,
+            "2026-08-01T17:00:00+00:00", conversation_id="conv-finish-race",
+            question="正在完成？", status="running",
+        )
+
+    repo = _repo()
+    original_job_detail = repo.ask_job_detail
+    reads = 0
+
+    def finish_before_delete_fence(job_id):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            with repo._write() as db:
+                _insert_answer(
+                    db, "ans-finish-race", notebook_id, "conv-finish-race",
+                    "正在完成？", {"answer": "刚刚完成", "conclusion": "刚刚完成"},
+                    "2026-08-01T17:01:00+00:00",
+                )
+                db.execute(
+                    "UPDATE ask_jobs SET status='done', answer_id=? WHERE id=?",
+                    ("ans-finish-race", job_id),
+                )
+        return original_job_detail(job_id)
+
+    monkeypatch.setattr(repo, "ask_job_detail", finish_before_delete_fence)
+    response = client.get(
+        f"/api/admin/users/{owner_id}/asks/job-finish-race",
+        headers=_auth_admin(client),
+    )
+    assert reads == 2
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "running"
+    assert body["answer"] is None
+    assert body["answered_at"] == ""
+    assert body["notebook_deleted_at"] == ""
+
+
 # --- 部署开关 -------------------------------------------------------------
 
 def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):
