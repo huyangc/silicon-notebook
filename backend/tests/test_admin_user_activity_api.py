@@ -51,6 +51,13 @@ def _repo():
     return deps.repository()
 
 
+def _independent_database(repo):
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    primary = repo._runtime.database
+    return SqliteDatabase(primary.settings, primary.root_dir)
+
+
 def _username(n: int) -> str:
     # Must match the seeded username shape ^[a-z][0-9]{8}$.
     return f"z{n:08d}"
@@ -813,12 +820,12 @@ def test_admin_ask_detail_delete_before_guard_returns_retained(
     triggered = False
 
     @contextmanager
-    def delete_before_guard(job_id):
+    def delete_before_guard(job_id, **kwargs):
         nonlocal triggered
         if not triggered:
             triggered = True
             repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
-        with original_guard(job_id) as snapshot:
+        with original_guard(job_id, **kwargs) as snapshot:
             yield snapshot
 
     monkeypatch.setattr(repo, "guarded_ask_detail", delete_before_guard)
@@ -853,9 +860,9 @@ def test_admin_unanswered_ask_detail_delete_before_guard_returns_retained(
     original_guard = repo.guarded_ask_detail
 
     @contextmanager
-    def delete_before_guard(job_id):
+    def delete_before_guard(job_id, **kwargs):
         repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
-        with original_guard(job_id) as snapshot:
+        with original_guard(job_id, **kwargs) as snapshot:
             yield snapshot
 
     monkeypatch.setattr(repo, "guarded_ask_detail", delete_before_guard)
@@ -894,23 +901,37 @@ def test_guarded_ask_detail_holds_delete_until_snapshot_released(client):
         )
 
     repo = _repo()
+    second_database = _independent_database(repo)
+    second_notebooks = type(repo._runtime.notebook_store)(
+        second_database,
+        new_id=repo._runtime.notebook_store.new_id,
+        now=repo._runtime.notebook_store.now,
+        activity_retention_days=(
+            repo._runtime.notebook_store.activity_retention_days
+        ),
+    )
     delete_started = threading.Event()
     delete_finished = threading.Event()
 
     def delete_notebook():
         delete_started.set()
         try:
-            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+            second_notebooks.delete_row_and_orphan_embeddings(notebook_id)
         finally:
             delete_finished.set()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with repo.guarded_ask_detail("job-guarded-delete") as snapshot:
-            assert snapshot["answer_detail"]["payload"]["answer"] == "受保护答案"
-            future = executor.submit(delete_notebook)
-            assert delete_started.wait(timeout=2)
-            assert not delete_finished.wait(timeout=0.1)
-        future.result(timeout=5)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with repo.guarded_ask_detail(
+                "job-guarded-delete", actor_id=owner_id, reader_id=None
+            ) as snapshot:
+                assert snapshot["answer_detail"]["payload"]["answer"] == "受保护答案"
+                future = executor.submit(delete_notebook)
+                assert delete_started.wait(timeout=2)
+                assert not delete_finished.wait(timeout=0.1)
+            future.result(timeout=5)
+    finally:
+        second_database.close()
     assert delete_finished.is_set()
     retained = repo.ask_job_detail("job-guarded-delete")
     assert retained["notebook_deleted_at"]
@@ -933,13 +954,14 @@ def test_guarded_ask_detail_freezes_running_to_done_snapshot(client):
         )
 
     repo = _repo()
+    second_database = _independent_database(repo)
     finish_started = threading.Event()
     finish_done = threading.Event()
 
     def finish_job():
         finish_started.set()
         try:
-            with repo._write() as db:
+            with second_database.write(operation="test.ask_finish") as db:
                 _insert_answer(
                     db, "ans-finish-race", notebook_id, "conv-finish-race",
                     "正在完成？", {"answer": "刚刚完成", "conclusion": "刚刚完成"},
@@ -952,16 +974,83 @@ def test_guarded_ask_detail_freezes_running_to_done_snapshot(client):
         finally:
             finish_done.set()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with repo.guarded_ask_detail("job-finish-race") as snapshot:
-            assert snapshot["job"]["status"] == "running"
-            assert snapshot["answer_detail"] is None
-            future = executor.submit(finish_job)
-            assert finish_started.wait(timeout=2)
-            assert not finish_done.wait(timeout=0.1)
-        future.result(timeout=5)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with repo.guarded_ask_detail(
+                "job-finish-race", actor_id=owner_id, reader_id=None
+            ) as snapshot:
+                assert snapshot["job"]["status"] == "running"
+                assert snapshot["answer_detail"] is None
+                future = executor.submit(finish_job)
+                assert finish_started.wait(timeout=2)
+                assert not finish_done.wait(timeout=0.1)
+            future.result(timeout=5)
+    finally:
+        second_database.close()
     assert repo.ask_job_detail("job-finish-race")["status"] == "done"
     assert repo.ask_answer_detail("ans-finish-race") is not None
+
+
+def test_guarded_ask_detail_holds_member_authority_until_snapshot_released(client):
+    owner = _auth(client, 32)
+    reader = _auth(client, 33)
+    owner_id = _me(client, owner)
+    reader_id = _me(client, reader)
+    notebook_id = _create_notebook(client, owner, "详情权限撤销竞态")
+    with _repo()._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members(notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,'reader',?)",
+            (notebook_id, reader_id, "2026-08-01T18:00:00+00:00"),
+        )
+        _insert_conversation(
+            db, "conv-access-race", notebook_id, reader_id,
+            "2026-08-01T18:00:00+00:00",
+        )
+        _insert_answer(
+            db, "ans-access-race", notebook_id, "conv-access-race", "还能读吗？",
+            {"answer": "受权限保护", "conclusion": "受权限保护"},
+            "2026-08-01T18:01:00+00:00",
+        )
+        _insert_ask_job(
+            db, "job-access-race", notebook_id, reader_id,
+            "2026-08-01T18:00:00+00:00", conversation_id="conv-access-race",
+            question="还能读吗？", status="done", answer_id="ans-access-race",
+        )
+
+    repo = _repo()
+    second_database = _independent_database(repo)
+    revoke_started = threading.Event()
+    revoke_finished = threading.Event()
+
+    def revoke_member():
+        revoke_started.set()
+        try:
+            with second_database.write(operation="test.revoke_member") as db:
+                db.execute(
+                    "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                    (notebook_id, reader_id),
+                )
+        finally:
+            revoke_finished.set()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with repo.guarded_ask_detail(
+                "job-access-race", actor_id=reader_id, reader_id=reader_id
+            ) as snapshot:
+                assert snapshot["answer_detail"]["payload"]["answer"] == "受权限保护"
+                future = executor.submit(revoke_member)
+                assert revoke_started.wait(timeout=2)
+                assert not revoke_finished.wait(timeout=0.1)
+            future.result(timeout=5)
+    finally:
+        second_database.close()
+
+    response = client.get(
+        f"/api/admin/users/{reader_id}/asks/job-access-race", headers=reader
+    )
+    assert response.status_code == 404
 
 
 # --- 部署开关 -------------------------------------------------------------

@@ -34,14 +34,14 @@ CREATE INDEX idx_retained_activity_actor_type_created
     actor_id,
     activity_type,
     (COALESCE(created_at, TIMESTAMPTZ '0001-01-01T00:00:00+00:00')) DESC,
-    record_id DESC
+    record_id COLLATE "C" DESC
   );
 
 CREATE INDEX idx_retained_activity_owner_created
   ON retained_user_activity (
     notebook_owner_id,
     (COALESCE(created_at, TIMESTAMPTZ '0001-01-01T00:00:00+00:00')) DESC,
-    record_id DESC
+    record_id COLLATE "C" DESC
   );
 
 CREATE INDEX idx_retained_activity_expires

@@ -15,6 +15,9 @@
 * `postgres/sharing_store.py`:`user_can_access_notebook`(写权)、
   `user_can_admin_notebook`(管理权)、`user_can_read_notebook`(读权)、
   `is_member`(成员探测)。
+* `postgres/ask_state_store.py::guarded_ask_detail`:先锁 notebook root，再用
+  `MEMBER_PROBE_FOR_SHARE_SQL` 或本文件的 direct/group grant-chain probe 锁住一条
+  当前有效的 self-service 读权链，直到详情响应对象组装完。
 * `postgres/memory_store.py`:`_read_access_clause`、`_answer_save_scope_exists`、
   `validate_promotion_approval_access_on`(用列引用形式)。
 * `postgres/mount_sql.py::MOUNT_VALID_EXPR` —— 「读权 ⇒ 可挂载」,用列引用形式嵌入,
@@ -339,6 +342,39 @@ def admin_grant_group_chain_params(notebook_id: str, user_id: str) -> tuple[str,
     user_id)` 会把两个 id 对调,而两者都是不透明字符串,查询只会安静地返回空集
     (= 管理权判假),不会报错。
     """
+    return (user_id, notebook_id)
+
+
+# Ask admin-detail reads return answer/trace content, so their self-service
+# authority must remain valid through response projection. These two probes
+# lock one complete currently-valid grant chain. Direct-user/everyone grants
+# have one row; group grants require both the edge and the membership row.
+READ_GRANT_DIRECT_FOR_SHARE_SQL = (
+    "SELECT 1 FROM notebook_grants ng "
+    "WHERE ng.notebook_id=%s AND ("
+    "(ng.principal_type='user' AND ng.principal_id=%s) "
+    "OR ng.principal_type='everyone') "
+    'ORDER BY ng.id COLLATE "C" LIMIT 1 FOR SHARE OF ng'
+)
+
+READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL = (
+    "SELECT 1 FROM notebook_grants ng "
+    "JOIN group_members ngm ON ngm.group_id=ng.principal_id "
+    "AND ngm.user_id=%s "
+    "WHERE ng.notebook_id=%s AND (ng.principal_type='group' OR "
+    "(ng.principal_type='group_admins' AND ngm.role='admin')) "
+    'ORDER BY ng.id COLLATE "C", ngm.group_id COLLATE "C" '
+    "LIMIT 1 FOR SHARE OF ng, ngm"
+)
+
+
+def read_grant_direct_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    return (notebook_id, user_id)
+
+
+def read_grant_group_chain_params(
+    notebook_id: str, user_id: str
+) -> tuple[str, ...]:
     return (user_id, notebook_id)
 
 

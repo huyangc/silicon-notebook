@@ -3335,6 +3335,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.guarded_ask_detail",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.hidden_source_ids",
         "target": "_runtime"
       },
@@ -4830,21 +4836,6 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest') -> 'AskResponse'"
   },
-  "ask_answer_detail": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/admin_routes.py",
-        "scope": "<module>.get_admin_user_ask_detail",
-        "target": "ask_answer_detail"
-      }
-    ],
-    "kind": "method",
-    "owner": "AskStateStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, answer_id: 'str') -> \"'dict | None'\""
-  },
   "ask_chunk": {
     "consumers": [
       {
@@ -4862,12 +4853,6 @@
   },
   "ask_job_detail": {
     "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/admin_routes.py",
-        "scope": "<module>.get_admin_user_ask_detail",
-        "target": "ask_job_detail"
-      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
@@ -6979,6 +6964,50 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'SourceDetail'"
+  },
+  "guarded_ask_detail": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_ask_detail",
+        "target": "guarded_ask_detail"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_admin_ask_detail_delete_before_guard_returns_retained",
+        "target": "guarded_ask_detail"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_admin_unanswered_ask_detail_delete_before_guard_returns_retained",
+        "target": "guarded_ask_detail"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_admin_ask_detail_delete_before_guard_returns_retained",
+        "target": "guarded_ask_detail"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_admin_unanswered_ask_detail_delete_before_guard_returns_retained",
+        "target": "guarded_ask_detail"
+      }
+    ],
+    "scope": "facade",
+    "signature": "(self, job_id: 'str', *, actor_id: 'str', reader_id: \"'str | None'\")"
   },
   "hidden_source_ids": {
     "consumers": [
@@ -10504,12 +10533,6 @@
   },
   "user_can_read_notebook": {
     "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/admin_routes.py",
-        "scope": "<module>.get_admin_user_ask_detail",
-        "target": "user_can_read_notebook"
-      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",

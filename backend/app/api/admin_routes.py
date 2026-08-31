@@ -473,43 +473,23 @@ def get_admin_user_ask_detail(
     """右栏「选中提问」详情。存活笔记本返回完整问答与推理轨迹；删除后的
     未到期活动只返回最小摘要。自己或 admin 可查；job_id 不属于该用户时 404。
 
-    首次 ``ask_job_detail(job_id)`` 只完成目标用户与实时 notebook 访问校验。
-    随后的 ``guarded_ask_detail`` 在 adapter 的删除协调事务内一次投影 job、
-    trace 与至多一条 answer，并把生命周期锁保持到本响应对象组装完成；因此不会
-    经 ``get_conversation`` 线性加载整段会话，也不会把删除前读到的答案带过删除
-    提交边界。answered_at 仍以 answers.created_at 回填；没有 answer_id 或答案行
-    时保持空，不编造时间或正文。
+    ``guarded_ask_detail`` 在 adapter 的删除协调事务内同时复核目标用户、实时
+    notebook 读权，并一次投影 job、trace 与至多一条 answer；生命周期与有效授权链
+    的锁保持到本响应对象组装完成。因此不会经 ``get_conversation`` 线性加载整段
+    会话，也不会把删除前或撤权前读到的答案带过提交边界。answered_at 仍以
+    answers.created_at 回填；没有 answer_id 或答案行时保持空，不编造时间或正文。
     """
     _require_activity_enabled()
     _require_self_or_admin(user, user_id)
     repo = repository()
-    try:
-        job = repo.ask_job_detail(job_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="ask job not found")
-
-    def require_job_access(candidate: dict) -> None:
-        if candidate["created_by"] != user_id:
-            raise HTTPException(status_code=404, detail="ask job not found")
-        if user.role != "admin" and not repo.user_can_read_notebook(
-            candidate["notebook_id"], user.id
-        ):
-            raise HTTPException(status_code=404, detail="ask job not found")
-
-    require_job_access(job)
 
     try:
-        with repo.guarded_ask_detail(job_id) as snapshot:
+        with repo.guarded_ask_detail(
+            job_id,
+            actor_id=user_id,
+            reader_id=None if user.role == "admin" else user.id,
+        ) as snapshot:
             job = snapshot["job"]
-            # Initial access validation ran before acquiring the guard so a
-            # max-size=1 PostgreSQL pool never needs a nested connection while
-            # the guarded transaction is held. Identity is immutable; the only
-            # lifecycle transition relevant here is live→retained, which is
-            # admin-only and must fail closed for self-service readers.
-            if job["created_by"] != user_id or (
-                user.role != "admin" and job.get("notebook_deleted_at")
-            ):
-                raise HTTPException(status_code=404, detail="ask job not found")
             answer_detail: "dict[str, Any] | None" = snapshot["answer_detail"]
             answer = answer_detail["payload"] if answer_detail is not None else None
             answered_at = (

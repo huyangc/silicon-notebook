@@ -352,7 +352,9 @@ def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
     assert answer_id
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        with asks.guarded_ask_detail(job_id) as snapshot:
+        with asks.guarded_ask_detail(
+            job_id, actor_id="guard-detail-owner", reader_id=None
+        ) as snapshot:
             assert snapshot["answer_detail"]["payload"]["answer"] == (
                 "protected answer"
             )
@@ -368,6 +370,99 @@ def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
     assert retained["notebook_deleted_at"]
     assert retained["answer_id"] == ""
     assert retained["trace"] == []
+
+
+@pytest.mark.postgres_integration
+def test_guarded_ask_detail_locks_group_read_authority_postgres(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        for user_id in ("guard-owner", "guard-reader"):
+            connection.execute(
+                "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+                "VALUES (%s,%s,%s,'user',%s,%s)",
+                (user_id, f"{user_id}@x", user_id, now, now),
+            )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('guard-access-nb','Guard Access','guard-owner','ready',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,updated_at) "
+            "VALUES ('guard-access-group','Guard Access','project','',"
+            "'guard-owner',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO group_members(group_id,user_id,role,added_at,added_by) "
+            "VALUES ('guard-access-group','guard-reader','reader',%s,'guard-owner')",
+            (now,),
+        )
+        connection.execute(
+            "INSERT INTO notebook_grants"
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES ('guard-access-grant','guard-access-nb','group',"
+            "'guard-access-group','reader','guard-owner',%s)",
+            (now,),
+        )
+
+    counter = iter(range(1, 20))
+    asks = AskStateStore(
+        postgres_database,
+        RepositoryCompatibilitySeams(
+            new_id=lambda prefix: f"{prefix}-guard-access-{next(counter)}",
+            now=lambda: now,
+            copy_chunk_size=lambda: 100,
+            remap_json_ids=lambda value, _mapping: value,
+            in_chunk_size=lambda: 100,
+        ),
+    )
+    request = AskRequest(question="group access")
+    job_id, conversation_id = asks.begin_durable_job(
+        "guard-access-nb", request, "chunk", "guard-reader"
+    )
+    assert asks.save_answer_for_job(
+        job_id,
+        "guard-access-nb",
+        conversation_id,
+        request.question,
+        AskResponse(
+            answer="group protected",
+            conclusion="group protected",
+            citations=[],
+            anchors=[],
+        ),
+        "guard-reader",
+    )
+
+    def revoke_group_membership() -> None:
+        with postgres_database.write() as connection:
+            connection.execute(
+                "DELETE FROM group_members "
+                "WHERE group_id='guard-access-group' AND user_id='guard-reader'"
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with asks.guarded_ask_detail(
+            job_id, actor_id="guard-reader", reader_id="guard-reader"
+        ) as snapshot:
+            assert snapshot["answer_detail"]["payload"]["answer"] == (
+                "group protected"
+            )
+            revoke_future = executor.submit(revoke_group_membership)
+            _wait_for_lock_wait(
+                postgres_database, "DELETE FROM group_members", revoke_future
+            )
+        revoke_future.result(timeout=5)
+
+    with pytest.raises(KeyError):
+        with asks.guarded_ask_detail(
+            job_id, actor_id="guard-reader", reader_id="guard-reader"
+        ):
+            pass
 
 
 @pytest.mark.postgres_integration

@@ -523,8 +523,9 @@ SQLite v65 / PostgreSQL v44 adds `retained_user_activity`, the notebook-FK-free,
 content-minimal user-analysis projection written in the notebook-delete transaction.
 It contains only activity attribution/status/display metadata and explicit deletion/
 expiry timestamps; answer/citation/trace/source-body/report-body data never enters it.
-The actor/owner keyset indexes mirror the Activity query order and the expiry index
-backs startup/delete-path pruning. This leaf table adds one replicated primary-key
+The actor/owner keyset indexes mirror the Activity query order, including PostgreSQL's
+explicit `record_id COLLATE "C"`, and the expiry index backs startup/delete-path
+pruning. This leaf table adds one replicated primary-key
 unique surface and no FK edge, so the current pair is SQLite 65 / PostgreSQL 44 /
 epoch 1 with 86 application tables, 115 replicated unique surfaces, and the same
 12-row-slot closure bound.

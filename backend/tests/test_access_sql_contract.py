@@ -773,6 +773,11 @@ _PG_ONLY_SYMBOLS = {
     "ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL",
     "admin_grant_user_arm_params",
     "admin_grant_group_chain_params",
+    # Ask detail 自助读取会投影回答/轨迹内容，因此同样需要把读权链锁到投影结束。
+    "READ_GRANT_DIRECT_FOR_SHARE_SQL",
+    "READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL",
+    "read_grant_direct_params",
+    "read_grant_group_chain_params",
 }
 _SQLITE_ONLY_SYMBOLS: set[str] = set()
 
@@ -810,6 +815,12 @@ _CALLABLE_PROBES = {
     ),
     "admin_grant_group_chain_params": lambda mod: repr(
         mod.admin_grant_group_chain_params("N", "U")
+    ),
+    "read_grant_direct_params": lambda mod: repr(
+        mod.read_grant_direct_params("N", "U")
+    ),
+    "read_grant_group_chain_params": lambda mod: repr(
+        mod.read_grant_group_chain_params("N", "U")
     ),
 }
 

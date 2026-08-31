@@ -38,11 +38,28 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
             "to_jsonb(d) AS catalog FROM pg_database AS d "
             "WHERE datname=current_database()"
         ).fetchone()
+        retained_indexdefs = {
+            index["indexname"]: index["indexdef"]
+            for index in conn.execute(
+                "SELECT indexname,indexdef FROM pg_indexes "
+                "WHERE schemaname=current_schema() AND indexname IN ("
+                "'idx_retained_activity_actor_type_created',"
+                "'idx_retained_activity_owner_created')"
+            ).fetchall()
+        }
     catalog = _database_catalog(row)
     _validate_database_catalog(catalog, expected="non-c")
     assert catalog.encoding == "UTF8"
     assert catalog.provider == "i"
     assert catalog.provider_locale == "en-US"
+    assert set(retained_indexdefs) == {
+        "idx_retained_activity_actor_type_created",
+        "idx_retained_activity_owner_created",
+    }
+    assert all(
+        'record_id COLLATE "C" DESC' in definition
+        for definition in retained_indexdefs.values()
+    )
 
 
 @pytest.mark.postgres_integration
@@ -533,6 +550,7 @@ def test_packaged_index_migration_phases_are_exact():
         if not line.strip().startswith("--")
     )
     assert "CREATE TABLE retained_user_activity" in v44_ddl_only
+    assert v44_ddl_only.count('record_id COLLATE "C" DESC') == 2
     assert "REFERENCES notebooks" not in v44_ddl_only
     assert "answer_id" not in v44_ddl_only
     assert "error text" not in v44_ddl_only

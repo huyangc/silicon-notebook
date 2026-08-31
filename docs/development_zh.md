@@ -176,7 +176,8 @@ SQLite 64 / PostgreSQL 43 / epoch 1。
 SQLite v65 / PostgreSQL v44 新增 `retained_user_activity`：它是不带 notebook
 外键、在删除笔记本事务内写入的最小用户分析投影，只包含活动归属、状态、显示元数据与
 删除/到期时间；答案、引用、轨迹、来源正文和报告正文绝不进入这张表。actor/owner 两条
-keyset 索引与活动流排序同形，expiry 索引用于启动/删除路径清理。这个无父叶表只新增一张
+keyset 索引与活动流排序同形（包括 PostgreSQL 显式的 `record_id COLLATE "C"`），
+expiry 索引用于启动/删除路径清理。这个无父叶表只新增一张
 复制业务表和一个主键 unique surface，不增加 FK 边；当前配对为 SQLite 65 /
 PostgreSQL 44 / epoch 1，共 86 张应用表、115 个复制面 unique surface，闭包上界仍为
 12 个 row slot。

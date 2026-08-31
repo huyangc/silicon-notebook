@@ -934,6 +934,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.get_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.get_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.global_document_limit_default', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.guarded_ask_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.hidden_source_ids', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.import_sources', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.incremental_fuse_source', kind='attribute', target='_runtime'),
@@ -1307,16 +1308,6 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
-        name='ask_answer_detail',
-        owner='AskStateStore',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='ask_answer_detail'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
         name='ask_chunk',
         owner='AskService',
         kind='method',
@@ -1331,7 +1322,6 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='ask_job_detail'),
@@ -2217,6 +2207,20 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='get_source'),
         ),
         patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='guarded_ask_detail',
+        owner='AskStateStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='guarded_ask_detail'),
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_ask_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_ask_detail'),
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_unanswered_ask_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_ask_detail'),
+        ),
+        patches=(
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_ask_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_ask_detail'),
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_unanswered_ask_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_ask_detail'),
         ),
     ),
     SurfaceMember(
@@ -3700,7 +3704,6 @@ SURFACE_MEMBERS = (
         owner='NotebookSharingService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._public_conversation_or_404', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._record_agent_call', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='user_can_read_notebook'),

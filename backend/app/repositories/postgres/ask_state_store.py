@@ -33,6 +33,13 @@ from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalize_timestamp,
 )
+from app.repositories.postgres.access_sql import (
+    MEMBER_PROBE_FOR_SHARE_SQL,
+    READ_GRANT_DIRECT_FOR_SHARE_SQL,
+    READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
+    read_grant_direct_params,
+    read_grant_group_chain_params,
+)
 from app.core.capability_tokens import new_capability_token
 from app.core.internal_observability import (
     public_trace_steps,
@@ -635,7 +642,13 @@ class AskStateStore:
         }
 
     @contextmanager
-    def guarded_ask_detail(self, job_id: str) -> Iterator[dict]:
+    def guarded_ask_detail(
+        self,
+        job_id: str,
+        *,
+        actor_id: str,
+        reader_id: str | None,
+    ) -> Iterator[dict]:
         """Yield one self-consistent admin-detail snapshot under the root lease.
 
         The notebook ``FOR KEY SHARE`` lease conflicts with whole-notebook
@@ -645,20 +658,28 @@ class AskStateStore:
         """
         with self.database.write() as db:
             row = db.execute(
-                "SELECT notebook_id FROM ask_jobs WHERE id=%s", (job_id,)
+                "SELECT notebook_id FROM ask_jobs WHERE id=%s AND created_by=%s",
+                (job_id, actor_id),
             ).fetchone()
             if row is not None:
                 notebook_id = row["notebook_id"]
                 root = db.execute(
-                    "SELECT 1 FROM notebooks WHERE id=%s FOR KEY SHARE",
+                    "SELECT created_by FROM notebooks WHERE id=%s FOR KEY SHARE",
                     (notebook_id,),
                 ).fetchone()
                 if root is not None:
+                    if reader_id is not None and not self._lock_reader_access_on(
+                        db,
+                        notebook_id,
+                        reader_id,
+                        notebook_owner_id=root["created_by"],
+                    ):
+                        raise KeyError(job_id)
                     row = db.execute(
                         "SELECT id,notebook_id,conversation_id,created_by,mode,"
                         "question,status,answer_id,error,asked_at FROM ask_jobs "
-                        "WHERE id=%s AND notebook_id=%s FOR SHARE",
-                        (job_id, notebook_id),
+                        "WHERE id=%s AND notebook_id=%s AND created_by=%s FOR SHARE",
+                        (job_id, notebook_id, actor_id),
                     ).fetchone()
                     if row is None:
                         raise KeyError(job_id)
@@ -706,12 +727,13 @@ class AskStateStore:
                 "conversation_id,mode,question,status,asked_at,deleted_at,"
                 "expires_at FROM retained_user_activity "
                 "WHERE activity_type='ask' AND record_id=%s "
+                "AND actor_id=%s "
                 "AND expires_at>CURRENT_TIMESTAMP "
                 "AND NOT EXISTS(SELECT 1 FROM notebooks live "
                 "WHERE live.id=retained_user_activity.notebook_id)",
-                (job_id,),
+                (job_id, actor_id),
             ).fetchone()
-            if retained is None:
+            if retained is None or reader_id is not None:
                 raise KeyError(job_id)
             yield {
                 "job": {
@@ -732,6 +754,31 @@ class AskStateStore:
                 },
                 "answer_detail": None,
             }
+
+    @staticmethod
+    def _lock_reader_access_on(
+        db,
+        notebook_id: str,
+        reader_id: str,
+        *,
+        notebook_owner_id: str,
+    ) -> bool:
+        """Lock one complete live read-authority chain, root already leased."""
+        if notebook_owner_id == reader_id:
+            return True
+        if db.execute(
+            MEMBER_PROBE_FOR_SHARE_SQL, (notebook_id, reader_id)
+        ).fetchone() is not None:
+            return True
+        if db.execute(
+            READ_GRANT_DIRECT_FOR_SHARE_SQL,
+            read_grant_direct_params(notebook_id, reader_id),
+        ).fetchone() is not None:
+            return True
+        return db.execute(
+            READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
+            read_grant_group_chain_params(notebook_id, reader_id),
+        ).fetchone() is not None
 
     # ------------------------------------------------------------------
     # answers
