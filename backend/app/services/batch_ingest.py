@@ -2330,15 +2330,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             finally:
                 reset_request_user(user_token)
     except ScaleBuildLockLost as exc:
-        # 与 CLI 的同一件事:swap 前复验发现锁没了→整次构建作废、`.tmp` 留盘、
-        # 一个字节都没发布。裸抛会在终端糊一段 traceback,而运维需要知道的是
-        # 「前序阶段成果都在库里、磁盘上多了一个可删的 .tmp、先查锁会话为什么死」
-        # (codex W-CLI R1 P2-7,消息与 scale_build_cli.run_build 保持一致)。
+        # swap 前复验发现锁没了。发布状态取决于失锁落在哪一段——主根 swap 前
+        # 失锁=一个字节没发布、上一代原样服务;companion 段失锁=主根**已经**
+        # 换代、companion 未发布(operations.md 记档的 new-main/old-companion
+        # 窗口)。异常自身的消息带着精确的分段事实,这里不再重复断言发布状态
+        # (codex #643 R3 P2:无条件说「未发布」在 companion 段是假话,会让
+        # 运维检查/恢复错误的代次)。
         print(f"error: {exc}", file=sys.stderr)
         print(
-            "scale 索引没有发布任何内容,上一代产物原样服务;staged 的 .tmp 目录"
-            "留在磁盘上供检查(确认后可删)。请先查清锁会话为何中断(空闲连接被"
-            "回收、数据库 failover、后端进程被杀),再重跑同一命令补索引这一步。",
+            "以上错误消息说明了哪些根已发布、哪些没有;staged 的 .tmp-* 目录"
+            "留在磁盘上供检查(确认后可删,`inspect` 子命令会列出残留)。请先查清"
+            "锁会话为何中断(空闲连接被回收、数据库 failover、后端进程被杀),"
+            "再重跑同一命令补齐。前序阶段的摄取成果都已在库里,不受影响。",
             file=sys.stderr,
         )
         return 1
