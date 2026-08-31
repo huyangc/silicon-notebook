@@ -21,6 +21,7 @@ import pytest
 
 from app.repositories.filesystem.scale_artifact_store import (
     ScaleArtifactStore,
+    ScaleArtifactSwapRefused,
     SwapInterruptGuard,
 )
 from app.repositories.scale_build_lock import (
@@ -617,6 +618,132 @@ def test_import_rolls_back_when_pipeline_identity_drifts_during_the_swap(
         )
 
 
+def test_import_rolls_back_when_post_swap_verification_is_interrupted(
+    storage, store, tmp_path
+):
+    """P2, codex PR#643 R9: a Ctrl-C landing on the post-swap identity read
+    ITSELF — not a mismatch it finds, but the read failing to complete at
+    all — used to bypass rollback entirely, propagating straight out of
+    ``run_import`` and leaving an UNVERIFIED publish live with every root's
+    ``.old`` still on disk. It must roll back exactly like a detected drift,
+    then re-raise ``KeyboardInterrupt`` unchanged so the ordinary
+    interrupted-run path (``main``'s ``except KeyboardInterrupt`` — prints
+    "interrupted", exit 130) still applies.
+
+    Mutation anchor: drop the ``except KeyboardInterrupt`` branch (or its
+    rollback call) around this read and this goes red — the live tree stays
+    on the unverified new generation and every root keeps its ``.old``.
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def interrupting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return base(notebook_id)
+        # The post-swap read itself is interrupted, not just slow.
+        raise KeyboardInterrupt
+
+    projections.pipeline_identity = interrupting  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] >= 3, "the identity must be re-read a third time after the swap"
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the live main index must be rolled back to the previous generation"
+    )
+    assert json.loads(
+        (Path(store.viz_dir("nb-1")) / "manifest.json").read_text()
+    ) == {"generation": "old"}, "the live viz root must be rolled back too"
+    assert json.loads(
+        (Path(store.source_partition_dir("nb-1")) / "manifest.json").read_text()
+    )["parent_version"] == ["nb-1", 1], "the live companion must be rolled back too"
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert not Path(str(root) + ".old").exists(), (
+            "rollback must restore the previous .old back onto live, leaving "
+            "no .old behind"
+        )
+        assert len(_staging_glob(root)) == 1, (
+            "the unverified build must remain staged for inspection, not be "
+            "discarded"
+        )
+
+
+class _FakeOperationalError(Exception):
+    """Stands in for a transient database error (e.g. sqlalchemy's
+    ``OperationalError``) on the post-swap identity read, without requiring a
+    real database connection to provoke one."""
+
+
+def test_import_rolls_back_when_post_swap_verification_raises(
+    storage, store, tmp_path
+):
+    """P2, codex PR#643 R9: a transient database error on the post-swap
+    identity read — not a drift it detects, but the read itself failing —
+    must roll back exactly like a detected drift and surface a clean
+    ``ScaleBuildCliFailure`` (exit code 1) instead of letting the bare
+    database exception escape with an unverified publish left live.
+
+    Mutation anchor: drop the ``except BaseException`` branch (or its
+    rollback call) around this read and this goes red — the live tree stays
+    on the unverified new generation, every root keeps its ``.old``, and the
+    bare ``_FakeOperationalError`` escapes uncaught instead of a
+    ``ScaleBuildCliFailure``.
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def failing(notebook_id):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return base(notebook_id)
+        raise _FakeOperationalError("server closed the connection unexpectedly")
+
+    projections.pipeline_identity = failing  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="could not complete"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] >= 3, "the identity must be re-read a third time after the swap"
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the live main index must be rolled back to the previous generation"
+    )
+    assert json.loads(
+        (Path(store.viz_dir("nb-1")) / "manifest.json").read_text()
+    ) == {"generation": "old"}, "the live viz root must be rolled back too"
+    assert json.loads(
+        (Path(store.source_partition_dir("nb-1")) / "manifest.json").read_text()
+    )["parent_version"] == ["nb-1", 1], "the live companion must be rolled back too"
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert not Path(str(root) + ".old").exists(), (
+            "rollback must restore the previous .old back onto live, leaving "
+            "no .old behind"
+        )
+        assert len(_staging_glob(root)) == 1, (
+            "the unverified build must remain staged for inspection, not be "
+            "discarded"
+        )
+
+
 def test_a_held_claim_makes_every_command_refuse(storage, store, tmp_path):
     repository = _Repository(
         storage, store, _Database(None), _Projections(PIPELINE)
@@ -996,6 +1123,45 @@ def test_swap_reports_the_actual_tokenized_staging_path_on_lock_loss(tmp_path):
     assert temporary.is_dir()
 
 
+def test_swap_refuses_to_delete_the_sole_surviving_old_when_live_is_absent(
+    tmp_path,
+):
+    """P1, codex PR#643 R9: a previous swap that was interrupted BETWEEN its
+    two renames leaves ``live`` absent and ``.old`` as the ONLY surviving
+    generation. The old pre-clean unconditionally deleted ``.old`` before
+    even attempting the ``temporary -> live`` rename that would replace it —
+    if that rename then failed, both generations were gone. The swap must
+    refuse this recovery state outright instead of guessing.
+
+    Mutation anchor: drop the ``if not os.path.exists(out_dir): raise ...``
+    branch (restoring the old unconditional pre-clean) and this goes red —
+    ``.old`` disappears instead of the refusal firing.
+    """
+    live = tmp_path / "kg_index"
+    old = Path(str(live) + ".old")
+    old.mkdir()
+    (old / "marker").write_text("recovered", encoding="utf-8")
+    temporary = tmp_path / "kg_index.tmp-token"
+    temporary.mkdir()
+    (temporary / "marker").write_text("new", encoding="utf-8")
+
+    with pytest.raises(ScaleArtifactSwapRefused) as excinfo:
+        ScaleArtifactStore.swap_staging_directory(live, temporary)
+
+    message = str(excinfo.value)
+    assert "mv" in message
+    assert str(old) in message
+    assert str(live) in message
+    assert str(temporary) in message
+    # Nothing was renamed or deleted: .old is still the only surviving
+    # generation, and the staged build is untouched.
+    assert not live.exists()
+    assert old.is_dir()
+    assert (old / "marker").read_text(encoding="utf-8") == "recovered"
+    assert temporary.is_dir()
+    assert (temporary / "marker").read_text(encoding="utf-8") == "new"
+
+
 def test_swap_with_keep_old_leaves_old_on_disk_and_returns_preserved(tmp_path):
     """P1, codex PR#643 R8: ``keep_old=True`` is what lets a caller decide,
     AFTER the fact, whether a publish should stand — that only works if the
@@ -1194,6 +1360,61 @@ def test_old_directory_deletion_runs_outside_the_sigint_mask(
         "uninstalled, not while SIGINT is still masked"
     )
     assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_stale_old_pre_clean_runs_outside_the_sigint_mask(
+    store, tmp_path, monkeypatch
+):
+    """P2, codex PR#643 R9: a leftover ``.old`` from an EARLIER swap's own
+    cleanup (that swap finished both renames but never got to, or lost the
+    race to, delete its own ``.old``) is pure cruft once ``live`` is present
+    — deleting it here cannot leave the notebook without a live index, so it
+    must be removed BEFORE ``SwapInterruptGuard`` is even entered, not inside
+    it. Structural check, same technique as
+    ``test_old_directory_deletion_runs_outside_the_sigint_mask``: at the
+    moment this PRE-clean rmtree runs, the installed SIGINT handler must not
+    be the guard's (the guard does not exist yet at that point).
+
+    Mutation anchor: move the pre-clean ``shutil.rmtree(old_dir)`` call back
+    inside the ``with guard:`` block and this goes red."""
+    live = tmp_path / "root"
+    live.mkdir()
+    (live / "marker").write_text("live", encoding="utf-8")
+    old = Path(str(live) + ".old")
+    old.mkdir()
+    (old / "marker").write_text("stale", encoding="utf-8")
+    staged = store.prepare_staging_directory(live, "guard-token")
+    (staged / "marker").write_text("new", encoding="utf-8")
+
+    previous = signal.getsignal(signal.SIGINT)
+    real_rmtree = shutil.rmtree
+    observed: list[bool] = []
+
+    def observing_rmtree(path, *args, **kwargs):
+        if str(path) == str(old):
+            handler = signal.getsignal(signal.SIGINT)
+            observed.append(
+                isinstance(getattr(handler, "__self__", None), SwapInterruptGuard)
+            )
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.repositories.filesystem.scale_artifact_store.shutil.rmtree",
+        observing_rmtree,
+    )
+    ScaleArtifactStore.swap_staging_directory(live, staged)
+
+    # The FIRST rmtree of ``.old`` is the pre-clean of the stale cruft found
+    # before the swap even started; it must run unmasked. (A second call may
+    # follow for the post-swap cleanup of the generation this swap itself
+    # just replaced — R8's already-covered window — also unmasked.)
+    assert observed, "the stale .old must actually be deleted"
+    assert observed[0] is False, (
+        "the pre-clean rmtree must run before the guard installs its "
+        "handler, not while SIGINT is masked"
+    )
+    assert signal.getsignal(signal.SIGINT) is previous
+    assert (live / "marker").read_text(encoding="utf-8") == "new"
 
 
 def test_a_real_interrupt_during_old_cleanup_is_honoured_immediately(

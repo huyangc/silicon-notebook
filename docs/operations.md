@@ -831,10 +831,15 @@ first place, so an offline builder could never be excluded from the serving
 process here.
 
 Exit codes: `0` success; `1` attempted and failed (the claim is held elsewhere,
-the build failed, the pre-swap or post-swap identity re-verification failed —
-the latter rolls the publish back before returning it, see "Ctrl-C" below);
-`2` refused before touching anything (SQLite, unknown notebook, migration-
-ledger drift, package validation); `130` Ctrl-C. The database URL is read from
+the build failed, the pre-swap or post-swap identity re-verification found a
+mismatch or could not even complete, a swap was refused because the on-disk
+`live`/`.old` shape looked unsafe to touch automatically — see "`.old` /
+`.tmp-<claim_token>` leftovers" below — the latter two roll the publish back
+before returning it where a publish had already happened, see "Ctrl-C"
+below); `2` refused before touching anything (SQLite, unknown notebook,
+migration-ledger drift, package validation); `130` Ctrl-C, including a Ctrl-C
+that landed on the post-swap identity read itself (rolled back first, then
+re-raised — see "Ctrl-C" below). The database URL is read from
 the environment and **never printed**; receipts are content-free (notebook
 ids, fixed artifact file
 names, sizes, counts, versions).
@@ -907,9 +912,14 @@ switch that lands *during* the renames themselves, which the first re-read
 cannot see). A drift on the second re-read means this run's own publish is
 what fell out of date; it is rolled back — every root that was published,
 in reverse order, back to exactly its previous state — before `import`
-refuses. Nothing on the live tree is left changed either way, and the staged
-package is left on disk for inspection in both cases. Re-export against a
-current checkout and re-run.
+refuses. The same rollback fires if that second re-read cannot even
+*complete* — a Ctrl-C or a transient database error while reading it —
+because a publish this check was unable to clear is worse than refusing
+after the fact: a Ctrl-C there re-raises once the rollback finishes and this
+exits `130` like any other interrupted run, and any other failure becomes
+the usual `1`. Nothing on the live tree is left changed in any of these
+cases, and the staged package is left on disk for inspection every time.
+Re-export against a current checkout (or simply retry) and re-run.
 
 #### Ctrl-C: what is masked, and what a build's Ctrl-C leaves behind
 
@@ -925,6 +935,14 @@ point, so a Ctrl-C landing during that (potentially multi-GB, tens-of-seconds)
 cleanup is honoured immediately instead of being held for as long as the
 deletion takes — a leftover `.old` from an interrupted cleanup is exactly the
 shape the leftovers section below already covers.
+
+The swap primitive also clears a *stale* `.old` — cruft an EARLIER swap's own
+cleanup left behind, not this swap's — before it does anything else, and that
+pre-clean is likewise **not** masked: `live` is confirmed present first (see
+"leftovers" below for the one shape where it refuses instead of deleting), so
+deleting a confirmed-stale `.old` here cannot leave the notebook without a
+live index either, and a Ctrl-C landing during that delete is honoured right
+away.
 
 What each command does with the interrupt differs, because only `import`
 holds the claim for its whole run (build/fold's claim lives and dies inside
@@ -1022,6 +1040,30 @@ live directory is correct either way, and the recovery above is the same:
 confirm no build is running, then remove it (`rm -rf`, not `mv`, since `live`
 already holds the new generation).
 
+Before touching either directory, every swap also checks for one shape it
+refuses outright instead of cleaning up: `.old` present while `live` is
+**absent**. That means an *earlier* swap was interrupted between its own two
+renames and `.old` is the only surviving generation — deleting it here, before
+even attempting the rename that would replace it, is exactly the bug this
+check exists to close (a failed replacement would then lose both
+generations). The command exits `1` with a message that names both paths and
+the exact fix:
+
+```bash
+# error: /data/storage/kg_index/nb-xxx is absent while
+# /data/storage/kg_index/nb-xxx.old exists — restore it first:
+mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
+# then re-run the build. Nothing was renamed or deleted.
+```
+
+Confirm no build is running, run the `mv`, let `inspect` show a normal
+single-generation tree, then re-run. This is a *different* shape from the
+`live`-present, `.old`-present case above: once `live` is back, any `.old`
+still beside it is ordinary leftover cruft from an earlier swap's own
+unfinished cleanup, and the *next* swap attempt clears it itself before doing
+anything else — unmasked, same as the interrupted-cleanup case above — with
+no manual action needed.
+
 `import` additionally holds every root's `.old` open past its own swap —
 `keep_old` — for a third identity re-check once the main index is live; see
 "What must be pinned" and "Ctrl-C" above. On a match it deletes `.old` the
@@ -1035,6 +1077,17 @@ ends up untouched, and `import` still exits `1` with its usual "pipeline
 identity changed" refusal — the same "nothing abandoned" contract as the
 publish loop, just for the loop that undoes a publish instead of the one that
 makes it.
+
+The same rollback also covers the third read itself failing to complete at
+all, not only a mismatch it finds once it succeeds: a Ctrl-C or a transient
+database error there triggers the identical reverse-rename rollback, `live`
+ends up untouched either way, and the staged package is left on disk for
+inspection. What differs is only how the command then exits — a Ctrl-C
+re-raises once the rollback finishes, so this one **does** exit `130` (unlike
+the detected-drift case above, which always exits `1`); every other read
+failure becomes a `ScaleBuildCliFailure` naming the underlying error and
+confirming the rollback, exiting `1`. Only a read that both succeeds and
+matches reaches the ordinary `.old` cleanup two paragraphs up.
 
 Staging is `{live}.tmp-<claim_token>` — one directory per claim, not a fixed
 shared name. This closes a corruption race the old fixed `{live}.tmp` left

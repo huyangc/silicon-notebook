@@ -39,7 +39,10 @@ from typing import Callable, Iterator, Optional
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
-from app.repositories.filesystem.scale_artifact_store import SwapInterruptGuard
+from app.repositories.filesystem.scale_artifact_store import (
+    ScaleArtifactSwapRefused,
+    SwapInterruptGuard,
+)
 from app.repositories.scale_build_lock import (
     SCALE_BUILD_LOCK_UNAVAILABLE,
     ScaleBuildBusy,
@@ -1228,20 +1231,19 @@ def run_import(
                 )
             raise
 
-        # codex PR#643 R8 P1: the pre-rename check above (R5) cannot see a
-        # pipeline switch that lands DURING the renames themselves — a
-        # rebuild does not wait on this claim. Read the identity a THIRD
-        # time now that the main root (always last in PUBLISH_ORDER) is
-        # live, and undo the publish if it no longer matches: keeping an
-        # artifact the retrieval side's own pipeline gate will silently
-        # discard is worse than refusing after the fact.
+        # codex PR#643 R8/R9 P1/P2: the pre-rename check above (R5) cannot see
+        # a pipeline switch that lands DURING the renames themselves — a
+        # rebuild does not wait on this claim. Read the identity a THIRD time
+        # now that the main root (always last in PUBLISH_ORDER) is live, and
+        # undo the publish if it no longer matches OR if the read itself
+        # cannot be completed at all (Ctrl-C, a transient database error):
+        # keeping an artifact this check could not clear is worse than
+        # refusing after the fact. The only path to ``finalize_swap`` below
+        # is a read that both succeeded and matched — see the ``except``
+        # clauses immediately below (codex PR#643 R9 P2).
         if MAIN_ROOT in published:
-            post_swap_pipeline_identity = projections.pipeline_identity(
-                notebook_id
-            )
-            if list(post_swap_pipeline_identity) != list(
-                expected_pipeline_identity
-            ):
+
+            def _rollback_published_roots(reason: str) -> list[str]:
                 reverted = list(reversed(published))
                 # One guard around the whole rollback, same reasoning as the
                 # publish loop above: an interrupt between two roots'
@@ -1257,9 +1259,52 @@ def run_import(
                         "rollback completed first"
                     )
                 report(
-                    "rolled back after publish: the live pipeline identity "
-                    f"changed to {list(post_swap_pipeline_identity)} during "
-                    f"the artifact swap; reverted roots: {reverted}"
+                    f"rolled back after publish: {reason}; reverted roots: "
+                    f"{reverted}"
+                )
+                return reverted
+
+            try:
+                post_swap_pipeline_identity = projections.pipeline_identity(
+                    notebook_id
+                )
+            except KeyboardInterrupt:
+                # An interrupt landing on this read used to bypass rollback
+                # entirely, leaving an UNVERIFIED publish live with a full
+                # set of ``.old`` directories still on disk. Roll back first,
+                # then re-raise unchanged so this still takes the ordinary
+                # interrupted-run path (``main``'s ``except KeyboardInterrupt``
+                # — prints "interrupted", exits 130); the report above already
+                # says the rollback happened and the live tree is unchanged.
+                _rollback_published_roots(
+                    "post-swap pipeline identity verification was "
+                    "interrupted before it could complete"
+                )
+                raise
+            except BaseException as error:
+                # A transient database error here (a dropped connection, a
+                # statement timeout) used to leave the same unverified
+                # publish live. Roll back and surface a clean CLI failure
+                # instead of letting the bare database exception escape.
+                _rollback_published_roots(
+                    f"post-swap pipeline identity verification failed: "
+                    f"{error!r}"
+                )
+                raise ScaleBuildCliFailure(
+                    "post-swap pipeline identity verification could not "
+                    f"complete for {notebook_id}: {error!r}. The publish has "
+                    "been rolled back; the live tree is unchanged and the "
+                    "staged copies remain on disk for inspection. Re-run "
+                    "import once the failure above is resolved."
+                ) from error
+
+            if list(post_swap_pipeline_identity) != list(
+                expected_pipeline_identity
+            ):
+                reverted = _rollback_published_roots(
+                    "the live pipeline identity changed to "
+                    f"{list(post_swap_pipeline_identity)} during the "
+                    "artifact swap"
                 )
                 raise ScaleBuildCliFailure(
                     "the live pipeline identity for "
@@ -1407,6 +1452,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except ScaleBuildCliFailure as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except ScaleArtifactSwapRefused as error:
+        # A recovery state the swap primitive refused to touch (codex
+        # PR#643 R9 P1) — ``build``/``fold``/``import`` all reach it through
+        # the same primitive and none of them wrap it into a
+        # ``ScaleBuildCliFailure`` of their own, so it is caught here,
+        # centrally, with the same exit code and message shape. The message
+        # already carries the exact `mv` recovery command.
         print(f"error: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
