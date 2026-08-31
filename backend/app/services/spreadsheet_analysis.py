@@ -92,6 +92,10 @@ def _contains_intent_term(text: str, term: str) -> bool:
     return term in text
 
 
+def _filter_text(value: Any) -> str:
+    return "" if value is None else str(value).casefold()
+
+
 def _has_spreadsheet_intent(question: str) -> bool:
     text = question.casefold()
     if any(pattern.search(text) is not None for pattern in _CLEAR_TABLE_OPERATION_PATTERNS):
@@ -1044,7 +1048,7 @@ class SpreadsheetAnalysisService:
             operator = item["operator"]
             left_number, right_number = _numeric(left), _numeric(right)
             if operator == "contains":
-                matched = str(right or "").casefold() in str(left or "").casefold()
+                matched = _filter_text(right) in _filter_text(left)
             elif operator in {"gt", "gte", "lt", "lte"}:
                 if left_number is None or right_number is None:
                     return False
@@ -1055,7 +1059,10 @@ class SpreadsheetAnalysisService:
                     "lte": left_number <= right_number,
                 }[operator]
             else:
-                matched = str(left or "").casefold() == str(right or "").casefold()
+                if left_number is not None and right_number is not None:
+                    matched = left_number == right_number
+                else:
+                    matched = _filter_text(left) == _filter_text(right)
                 if operator == "ne":
                     matched = not matched
             if not matched:

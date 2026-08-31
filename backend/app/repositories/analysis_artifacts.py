@@ -235,12 +235,14 @@ class AnalysisArtifactStore:
         neutral_id = secrets.token_hex(16)
         issue.update({
             "id": f"analysis-redacted-{neutral_id}",
+            "code": "",
             "owner_id": "",
             "notebook_id": "",
             "notebook_name": "",
             "source_id": "",
             "source_title": "",
             "file_name": "",
+            "source_type": "",
             "source_hash": "",
             "summary": "原来源已删除；仅保留问题分类与时间信息。",
             "artifact_available": False,
@@ -271,7 +273,7 @@ class AnalysisArtifactStore:
         issue_root = self.root / "issues"
         if not issue_root.is_dir():
             return rows
-        for metadata_path in issue_root.glob("*/*/*/issue.json"):
+        for metadata_path in list(issue_root.glob("*/*/*/issue.json")):
             try:
                 item = json.loads(metadata_path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
@@ -281,6 +283,9 @@ class AnalysisArtifactStore:
             expires = _parse_time(str(item.get("expires_at") or ""))
             if expires is not None and expires <= current:
                 shutil.rmtree(metadata_path.parent, ignore_errors=True)
+                self._remove_empty_parents(
+                    metadata_path.parent.parent, issue_root
+                )
                 continue
             if owner_id and item.get("owner_id") != owner_id:
                 continue

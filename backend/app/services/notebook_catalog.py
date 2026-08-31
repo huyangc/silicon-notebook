@@ -716,9 +716,6 @@ class NotebookCatalogService:
         # route — which reaches this service directly, not via the facade —
         # gets the cleanup too).
         with diagnostics.diagnostic_phase("notebook_delete.files"):
-            for file_path in file_paths:
-                _delete_source_file(file_path)
-            _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
             analysis_artifacts = getattr(self, "_analysis_artifacts", None)
             if analysis_artifacts is not None:
                 try:
@@ -729,6 +726,9 @@ class NotebookCatalogService:
                     _log.warning(
                         "analysis artifact redaction failed (%s)", type(exc).__name__
                     )
+            for file_path in file_paths:
+                _delete_source_file(file_path)
+            _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

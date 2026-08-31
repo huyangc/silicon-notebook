@@ -1875,7 +1875,6 @@ class SourceIngestionService:
             # (outside the existence guard), exactly as the post-commit call
             # was: this change moves the bump's time point, never its count.
             self.kg_mutations.mark_unified_kg_dirty_in_tx(db, source.notebook_id)
-        self.source_files.delete(source.file_path)
         if self.analysis_artifacts is not None:
             try:
                 self.analysis_artifacts.redact_source(
@@ -1886,6 +1885,7 @@ class SourceIngestionService:
                     "analysis artifact redaction failed (%s)",
                     type(redact_error).__name__,
                 )
+        self.source_files.delete(source.file_path)
         self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)
         # A deletion changes the corpus exactly as much as an addition does —

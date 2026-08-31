@@ -1039,6 +1039,29 @@ def test_source_deletion_bumps_the_seq_even_if_the_image_cleanup_raises(
     assert {item["rel_id"] for item in repo.review_queue(nb.id)} == set()
 
 
+def test_source_artifact_redaction_precedes_fallible_file_cleanup(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source_for_reset(repo, nb.id)
+    service = repo._runtime.source_ingestion
+    redacted: list[tuple[str, str]] = []
+
+    def _redact(notebook_id: str, source_id: str, *, occurred_at: str) -> None:
+        redacted.append((notebook_id, source_id))
+
+    def _fail_file_cleanup(file_path: str) -> None:
+        raise OSError("source cleanup failed")
+
+    monkeypatch.setattr(service.analysis_artifacts, "redact_source", _redact)
+    monkeypatch.setattr(service.source_files, "delete", _fail_file_cleanup)
+
+    with pytest.raises(OSError, match="source cleanup failed"):
+        repo.delete_source(sid)
+
+    assert redacted == [(nb.id, sid)]
+    with pytest.raises(KeyError):
+        repo.get_source(sid)
+
+
 def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeypatch):
     frozen = json.loads(PHASES.read_text(encoding="utf-8"))["process_source"]
     assert frozen["sequence"] == [

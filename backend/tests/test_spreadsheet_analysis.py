@@ -373,6 +373,22 @@ def test_ambiguous_single_characters_do_not_trigger_spreadsheet_planning(tmp_pat
     assert planner.prompt
 
 
+def test_filter_comparisons_preserve_zero_and_false_values():
+    service = object.__new__(SpreadsheetAnalysisService)
+    equals_zero = [{"column": "value", "operator": "eq", "value": 0}]
+    equals_false = [{"column": "value", "operator": "eq", "value": False}]
+
+    assert service._matches({"value": 0}, equals_zero)
+    assert service._matches({"value": 0.0}, equals_zero)
+    assert service._matches({"value": "0"}, equals_zero)
+    assert not service._matches({"value": None}, equals_zero)
+    assert not service._matches({"value": ""}, equals_zero)
+    assert not service._matches({"value": False}, equals_zero)
+    assert service._matches({"value": False}, equals_false)
+    assert service._matches({"value": "FALSE"}, equals_false)
+    assert not service._matches({"value": None}, equals_false)
+
+
 def test_reasoning_spreadsheet_lane_honors_exclude_scope():
     from app.services.ask_service import AskService
     from app.services.source_scope import ActiveSourceScope
@@ -649,6 +665,8 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     assert redacted["notebook_name"] == ""
     assert redacted["source_title"] == ""
     assert redacted["file_name"] == ""
+    assert redacted["code"] == ""
+    assert redacted["source_type"] == ""
     assert "nb-1" not in redacted["id"]
     assert "src-1" not in redacted["id"]
     assert not (store.root / "issues" / "nb-1").exists()
@@ -660,6 +678,30 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     assert store.list_issues(
         now=datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
     ) == []
+    assert not (store.root / "issues" / "redacted").exists()
+
+
+def test_expired_issue_removes_identifier_directories(tmp_path):
+    store = AnalysisArtifactStore(tmp_path, retention_days=1)
+    store.record_issue(
+        notebook_id="nb-private",
+        notebook_name="Private notebook",
+        owner_id="user-private",
+        source_id="src-private",
+        source_title="Private source",
+        file_name="private.xlsx",
+        source_type="xlsx",
+        category="spreadsheet_analysis",
+        code="SPREADSHEET_INVALID_OOXML",
+        summary="safe",
+        occurred_at="2026-08-29T00:00:00+00:00",
+        archive_file=False,
+    )
+
+    assert store.list_issues(
+        now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+    ) == []
+    assert not (store.root / "issues" / "nb-private").exists()
 
 
 def test_notebook_delete_does_not_fail_after_artifact_redaction_error(
@@ -690,3 +732,41 @@ def test_notebook_delete_does_not_fail_after_artifact_redaction_error(
 
     assert "analysis artifact redaction failed (OSError)" in caplog.text
     assert "private filesystem detail" not in caplog.text
+
+
+def test_notebook_artifact_redaction_precedes_fallible_file_cleanup(
+    tmp_path, monkeypatch
+):
+    from app.services import notebook_catalog
+
+    redacted: list[tuple[str, str]] = []
+
+    class _Store:
+        @staticmethod
+        def delete_row_and_orphan_embeddings(notebook_id: str) -> list[str]:
+            return ["private-source"]
+
+    class _Artifacts:
+        @staticmethod
+        def redact_notebook(notebook_id: str, *, occurred_at: str) -> None:
+            redacted.append((notebook_id, occurred_at))
+
+    service = object.__new__(notebook_catalog.NotebookCatalogService)
+    service._store = _Store()
+    service._storage_dir = lambda: tmp_path
+    service._analysis_artifacts = _Artifacts()
+    service.get_notebook = lambda notebook_id: object()
+
+    def _fail_file_cleanup(file_path: str) -> None:
+        raise OSError("private filesystem detail")
+
+    monkeypatch.setattr(notebook_catalog, "_delete_source_file", _fail_file_cleanup)
+    monkeypatch.setattr(
+        notebook_catalog, "_delete_notebook_asset_dir", lambda *args: None
+    )
+
+    with pytest.raises(OSError, match="private filesystem detail"):
+        service.delete_notebook("nb-private")
+
+    assert len(redacted) == 1
+    assert redacted[0][0] == "nb-private"
