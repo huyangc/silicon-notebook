@@ -57,6 +57,36 @@ def _version_key(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _companion_signature_superseded(cached_signature: Any, current_signature: Any) -> bool:
+    """Mirrors ``ScaleArtifactCatalog._signature_superseded`` (W-CLI T-W3) for
+    this companion cache (codex PR#643 R4 P1, corner reversed by R5 P2).
+
+    ``current_signature is None`` — no manifest right now (mid-swap window) or
+    the ``artifacts`` adapter has no stat probe at all — is "can't tell", not
+    "changed": fail-soft, keep serving the cached entry, same as T-W3's
+    ``signature is None`` early-return.
+
+    ``cached_signature is None`` is NOT given the same pass, though (codex
+    #643 R5 P2). That combination is a real, reachable window here too: the
+    stat this call takes right before touching the cache (see ``_graph``) can
+    land exactly inside the companion's live→``.old``→live swap and read
+    ``None``, while the ``load_source_partitions`` call a few lines later —
+    now a moment after the rename finished — opens the genuinely new
+    generation. The entry adopted from that load is valid but gets recorded
+    with an unknown signature. Treating that combination as "can't tell
+    either" (the old behavior) means it can NEVER be superseded again by a
+    same-``parent_version`` republish, since the recorded signature stays
+    ``None`` forever once written — a permanent stale-cache window until this
+    process restarts. So only THIS corner reverses: a signature that IS
+    readable now, matched against a cached entry recorded as unknown, counts
+    as superseded — one extra reload that records a real signature, after
+    which ordinary value comparison resumes.
+    """
+    if current_signature is None:
+        return False
+    return cached_signature != current_signature
+
+
 class SourcePartitionedPprService:
     """Single-flight, bounded-handle runtime for selected source partitions."""
 
@@ -67,8 +97,24 @@ class SourcePartitionedPprService:
         self._settings = settings
         self._artifacts = artifacts
         self._projections = projections
-        self._cache: OrderedDict[tuple[str, str, str], _CombinedGraph] = OrderedDict()
+        # Value is (graph, companion disk signature at load time) — the
+        # signature lets a cache HIT be revalidated against the live root
+        # without a second cache dimension; see ``_graph``.
+        self._cache: OrderedDict[tuple[str, str, str], tuple[_CombinedGraph, Any]] = (
+            OrderedDict()
+        )
         self._lock = threading.RLock()
+
+    def _companion_signature(self, notebook_id: str) -> Any:
+        """One stat of the companion root's ``manifest.json``, or ``None`` if
+        it cannot be read (missing, or the ``artifacts`` adapter has no
+        probe — old test doubles). Called at most once per ``_graph()`` call
+        (T-W3's "one load, one stat" discipline) and reused for both the hit
+        check and the entry this call may write."""
+        probe = getattr(self._artifacts, "manifest_stat_signature", None)
+        if not callable(probe):
+            return None
+        return probe(self._artifacts.source_partition_dir(notebook_id))
 
     @property
     def cache_size(self) -> int:
@@ -243,13 +289,34 @@ class SourcePartitionedPprService:
             _version_key(parent_version),
             _version_key(signature),
         )
+        # codex PR#643 R4 P1 / W-CLI T-W3 mirror: ``signature`` above is
+        # entirely DB-derived (kg_mutation_seq, extraction-run/backfill rows)
+        # — it never changes when a CROSS-PROCESS builder (the offline CLI,
+        # another replica) republishes the companion under the SAME
+        # parent_version. Without this, a warmed cache entry here would keep
+        # serving the retired generation until incidental LRU eviction, in
+        # this process, for as long as it stays up — violating the dedicated-
+        # LRU invalidation contract (docs/development.md:37; same-process
+        # rebuild/fold already call ``invalidate()`` explicitly and are
+        # unaffected by this). One stat of the companion root's manifest
+        # before touching the cache gives that generation a comparable
+        # signature.
+        disk_signature = self._companion_signature(notebook_id)
         # Hold through lazy load/combine: concurrent cold requests for one
         # identity open one selected partition set and retain one CSR.
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
-                self._cache.move_to_end(key)
-                return cached, True
+                cached_graph, cached_signature = cached
+                if not _companion_signature_superseded(
+                    cached_signature, disk_signature
+                ):
+                    self._cache.move_to_end(key)
+                    return cached_graph, True
+                # Superseded: drop it now so a concurrent reader under this
+                # same key cannot be handed the retired object while this
+                # call reloads below.
+                self._cache.pop(key, None)
             if len(self._cache) >= self._CACHE_ENTRIES:
                 self._cache.popitem(last=False)
             partitions = self._artifacts.load_source_partitions(
@@ -270,7 +337,7 @@ class SourcePartitionedPprService:
                 ),
             )
             graph = self._combine(partitions)
-            self._cache[key] = graph
+            self._cache[key] = (graph, disk_signature)
             return graph, False
 
     def retrieve(

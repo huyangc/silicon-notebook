@@ -52,16 +52,26 @@ _COMPUTE_SIGNATURE = object()
 def _signature_superseded(cached, signature) -> bool:
     """缓存实例是否已被磁盘上的**新一代产物**取代(W-CLI T-W3)。
 
-    只在「两边都知道自己是哪一代、且不是同一代」时判 True。``signature is None``
-    (manifest 此刻读不到——例如 swap 的两次 rename 之间那一瞬)刻意不算失配:
-    那不是「换代了」,是「暂时看不见」,继续服务手上的实例是既有的 fail-soft 语义。
-    ``recorded is None`` 表示这个实例不是 ``load()`` 放进缓存的(理论上不存在,
-    只有 ``load()`` 写这个缓存),同样按「不知道」放行,绝不因此丢一个多 GB 的 handle。
+    ``signature is None``(manifest 此刻读不到——例如 swap 的两次 rename 之间
+    那一瞬)刻意不算失配:那不是「换代了」,是「暂时看不见」,继续服务手上的
+    实例是既有的 fail-soft 语义。
+
+    ``recorded is None``(codex #643 R5 P2)**不再**同等对待。它曾经被当成
+    「这个实例理论上不该存在」的死角,按「不知道」放行——但它其实是一条真实
+    可复现的窗口:``load()`` 顶部那次 ``_manifest_signature`` 恰好落在
+    live→``.old`` 的 rename 缝隙里读到 ``None``,而同一次调用里随后的
+    ``load_scale`` 已经晚了一步、读到的是 rename 完成后的新产物——于是一个
+    **合法** 的新索引被 ``_adopt`` 记成「签名未知」。旧谓词从此对它永远判
+    False:同 version 之后再换代(离线 CLI/import 反复发布)一律判不出来,直到
+    进程重启。方向只在这一格反过来:``signature`` **这次**是可读的、
+    ``recorded`` 却是「不知道」→ 判 True,补记一次真实签名(此后又是正常的
+    值比较,不会反复重载)。``signature is None``(现在也读不到)仍然维持
+    fail-soft,不因为「recorded 也是 None」被误判——上面的早退已经处理了。
     """
     if signature is None or signature is _SIGNATURE_UNSUPPORTED:
         return False
     recorded = getattr(cached, _DISK_SIGNATURE_ATTR, None)
-    return recorded is not None and recorded != signature
+    return recorded != signature
 
 
 class _AnnLoadState:

@@ -386,6 +386,171 @@ def test_source_provenance_drift_invalidates_cache_without_main_version_change(r
     assert not stale.hits
 
 
+def test_cross_process_companion_republish_invalidates_warm_cache(repo, monkeypatch):
+    """codex PR#643 R4 P1: a cross-process publish (offline CLI, another
+    replica) that republishes the companion under the SAME parent_version and
+    with NO database change is invisible to the DB-derived
+    ``source_subgraph_signature`` — the in-process ``invalidate()`` call the
+    builder makes never fires for it either, since the builder never ran in
+    THIS process. Only a disk generation probe on the companion manifest can
+    catch it; without one this process would keep serving the retired CSR
+    handle until incidental LRU eviction (docs/development.md:37)."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    original = store.load_source_partitions
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "load_source_partitions", counted)
+    service = repo._runtime.source_partitioned_ppr
+
+    first = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert first.capability.enabled and not first.cache_hit
+    assert calls == 1 and service.cache_size == 1
+
+    # Simulate ANOTHER process republishing the companion: same parent_version,
+    # same DB rows (so the DB-derived signature this process reads is bit-for-
+    # bit identical), reached through the store directly — never through
+    # ``service.invalidate()`` or the in-process builder.
+    _publish(repo, notebook_id, (source_a,), version)
+
+    reloaded = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert reloaded.capability.enabled
+    assert not reloaded.cache_hit, (
+        "stale generation served: the companion disk signature changed but "
+        "the cached CSR handle was still handed back"
+    )
+    assert calls == 2
+
+    # No further republish: the same identity now hits the freshly-loaded
+    # entry — signature unchanged must NOT force another reload.
+    again = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert again.cache_hit
+    assert calls == 2
+
+
+def test_companion_entry_adopted_with_an_unknown_signature_is_still_supersedable(
+    repo, monkeypatch
+):
+    """codex #643 R5 P2 (companion mirror of the catalog fix): the stat this
+    service takes before touching the cache (see ``_graph``) can itself land
+    in the companion's live→``.old``→live swap gap and read ``None``, even
+    though the ``load_source_partitions`` call a moment later — after the
+    rename finished — opens a genuinely new, valid generation. That entry
+    gets cached with an unknown recorded signature.
+
+    Unlike a transient CURRENT-side gap (which resolves itself on the very
+    next call, since the file is stable again), an unknown RECORDED signature
+    never heals on its own — it stays ``None`` on the cached entry forever.
+    It must still be treated as supersedable once a real signature is
+    available, or a same-identity republish after this point could never be
+    picked up again until process restart.
+
+    **Mutation anchor**: reverting ``_companion_signature_superseded`` to
+    ``cached_signature is not None and cached_signature != current_signature``
+    (the pre-R5 guard) makes this red.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    real_stat = store.manifest_stat_signature
+    calls = {"n": 0}
+
+    def gapped_once(directory):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real_stat(directory)
+
+    monkeypatch.setattr(store, "manifest_stat_signature", gapped_once)
+    service = repo._runtime.source_partitioned_ppr
+
+    first = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert first.capability.enabled and not first.cache_hit
+    assert service.cache_size == 1
+
+    monkeypatch.setattr(store, "manifest_stat_signature", real_stat)  # the gap has passed
+
+    # Same identity, republished again (offline CLI / another replica).
+    _publish(repo, notebook_id, (source_a,), version)
+
+    second = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert second.capability.enabled
+    assert not second.cache_hit, (
+        "stale generation served: an entry recorded with an unknown "
+        "companion signature must still be superseded once a real "
+        "signature is available, not cached forever"
+    )
+
+
+def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):
+    """T-W3's 'one load, one stat' discipline, mirrored here: the companion
+    manifest stat must not be repeated inside a single ``retrieve()`` call."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["v1"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    original = store.manifest_stat_signature
+    stat_calls = 0
+
+    def counted(directory):
+        nonlocal stat_calls
+        stat_calls += 1
+        return original(directory)
+
+    monkeypatch.setattr(store, "manifest_stat_signature", counted)
+    service = repo._runtime.source_partitioned_ppr
+
+    service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert stat_calls == 1
+
+    stat_calls = 0
+    service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert stat_calls == 1
+
+
 def test_zero_budget_is_zero_io_and_cold_load_is_single_flight(repo, monkeypatch):
     notebook_id, source_a, _source_b = _seed(repo)
     version = ["v1"]

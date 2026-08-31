@@ -214,6 +214,65 @@ def test_a_transiently_unreadable_manifest_keeps_serving_the_cached_index(
     assert store.load_calls == 1
 
 
+def test_an_entry_adopted_with_an_unknown_signature_is_still_supersedable(
+    tmp_path,
+):
+    """codex #643 R5 P2: ``load()``'s OWN top-of-call stat — not just an
+    external caller's — can land in the live→``.old``→live rename gap and
+    read ``None``, while the ``load_scale`` a few lines later (now a moment
+    AFTER the rename finished) opens a genuinely new, valid generation. That
+    legitimate instance gets ``_adopt``-ed with an unknown recorded signature.
+
+    The old guard (``recorded is not None and recorded != signature``) treated
+    "recorded unknown" the same as "current unknown" — fail-soft forever. But
+    unlike the current-side gap (which resolves itself on the very next call,
+    since the file is stable again), an unknown RECORDED signature never heals
+    on its own: it stays ``None`` on this cached instance permanently, so a
+    same-version republish after this point could never be picked up again
+    until process restart.
+
+    **Mutation anchor**: reverting to ``recorded is not None and recorded !=
+    signature`` makes this red — the second ``load()`` keeps returning the
+    gen-1 instance.
+    """
+    version = {"value": ["v-stable"]}
+    catalog, store, _cache = _catalog(tmp_path, version)
+    _publish(catalog, "nb", {"version": ["v-stable"], "marker": "gen-1"})
+
+    # Simulate the gap on load()'s FIRST stat only: unreadable right now, even
+    # though the manifest is actually there and load_scale succeeds moments
+    # later (the exact race the guard has to survive).
+    real_stat = store.manifest_stat_signature
+    calls = {"n": 0}
+
+    def gapped_once(directory):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real_stat(directory)
+
+    store.manifest_stat_signature = gapped_once
+
+    first = catalog.load("nb")
+    assert first is not None and first.manifest["marker"] == "gen-1"
+    assert store.load_calls == 1
+
+    store.manifest_stat_signature = real_stat  # the gap has passed
+
+    # Same version, republished again (offline CLI / import), same as the
+    # blind-spot tests above.
+    _publish(catalog, "nb", {"version": ["v-stable"], "marker": "gen-2"})
+
+    second = catalog.load("nb")
+    assert second is not first, (
+        "stale generation served: an entry recorded with an unknown "
+        "signature must still be superseded once a real signature is "
+        "available, not cached forever"
+    )
+    assert second.manifest["marker"] == "gen-2"
+    assert store.load_calls == 2
+
+
 # ──────────────────────────────────────────── 3. 一次 load 只 stat 一次 ──
 @pytest.mark.parametrize("allow_stale", [False, True])
 @pytest.mark.parametrize("warm", [False, True])

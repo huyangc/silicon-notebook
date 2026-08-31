@@ -299,6 +299,19 @@ def test_an_absent_companion_is_not_a_refusal(tmp_path):
     _validate(package)
 
 
+def test_a_companion_root_with_no_manifest_is_refused(tmp_path):
+    """codex PR#643 R4 P2: a PRESENT ``kg_index_partitions`` directory with no
+    ``manifest.json`` is not "no companion" (that is an absent root, still
+    unconditionally allowed above) — it is an incomplete package. Skipping the
+    generation check here would publish it straight over a healthy live
+    companion and leave the companion unreadable until the next rebuild."""
+    package = _package(tmp_path)
+    (package / cli.COMPANION_ROOT).mkdir()
+    assert not (package / cli.COMPANION_ROOT / "manifest.json").exists()
+    with pytest.raises(cli.ScaleBuildCliError, match="no manifest.json"):
+        _validate(package)
+
+
 def test_a_directory_that_is_not_an_export_is_refused(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -493,6 +506,52 @@ def test_import_refuses_to_publish_when_the_claim_was_lost(
     staged = _staging_glob(store.source_partition_dir("nb-1"))
     assert len(staged) == 1, "the staged copy is left for the operator"
     assert lost.released is True
+
+
+def test_import_refuses_to_publish_when_pipeline_identity_drifts_during_staging(
+    storage, store, tmp_path
+):
+    """codex PR#643 R5 P1: the import claim (T-W1's advisory lock) does not
+    block a pipeline switch (``execute_indexing_pipeline_rebuild``) from
+    publishing a NEW live identity while this package's multi-GB roots are
+    being staged — a plugin activation is a different mechanism entirely.
+    A package validated against the identity that was live a MOMENT AGO must
+    not be published once the identity has moved on: the retrieval side's own
+    pipeline gate (``scale_artifact_catalog``) would silently discard it.
+
+    Mutation anchor: removing the re-check between "staging done" and "first
+    rename" makes this pass with the drifted package published anyway.
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    read_at_validation_time = projections.pipeline_identity
+
+    def drifting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return read_at_validation_time(notebook_id)
+        # A pipeline switch completed while staging (the slow part) ran.
+        return ["acme-pipeline", "3"]
+
+    projections.pipeline_identity = drifting  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="pipeline identity"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] >= 2, "the identity must be re-read after staging"
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the drifted package must never reach the live tree"
+    )
+    staged = _staging_glob(store.source_partition_dir("nb-1"))
+    assert len(staged) == 1, "the staged copy is left for the operator"
 
 
 def test_a_held_claim_makes_every_command_refuse(storage, store, tmp_path):

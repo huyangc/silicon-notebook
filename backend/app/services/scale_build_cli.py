@@ -106,6 +106,15 @@ class ScaleBuildCliFailure(RuntimeError):
     """The command was attempted and failed. Operator-facing; exit code 1."""
 
 
+class _ImportPipelineIdentityDrifted(RuntimeError):
+    """Internal to ``run_import`` (codex PR#643 R5 P1): the live pipeline
+    identity changed while this package's roots were being staged. Caught
+    separately from the generic staging-failure handler so the staged copies
+    are left on disk for inspection instead of being discarded — the same
+    "nothing published, staging preserved" contract ``ScaleBuildLockLost``
+    already gets below."""
+
+
 # ─────────────────────────────────────────────────────── migration ledger ──
 
 def packaged_migrations() -> tuple:
@@ -722,8 +731,23 @@ def validate_import_package(
         raise ScaleBuildCliError(f"the package is incomplete: {inventory}")
 
     companion = package / COMPANION_ROOT
-    companion_manifest = _read_manifest(companion) if companion.is_dir() else None
-    if companion_manifest is not None:
+    if companion.is_dir():
+        # codex PR#643 R4 P2: a MISSING root (the switch that produces
+        # companions is off) is the normal "no companion" shape and passes
+        # below unconditionally — that conditional stays exactly as it was.
+        # A PRESENT root with no readable manifest.json is a different
+        # thing: not "no companion" but an incomplete package, and
+        # ``_read_manifest`` returning ``None`` for a missing file would
+        # otherwise skip the parent_version check entirely and let this
+        # publish over a healthy live companion, leaving it unreadable
+        # until the next rebuild.
+        companion_manifest = _read_manifest(companion)
+        if companion_manifest is None:
+            raise ScaleBuildCliError(
+                f"{companion} exists but has no manifest.json; the package "
+                "is incomplete. Rebuild the package with a current checkout "
+                "or remove the empty companion root before importing."
+            )
         parent = companion_manifest.get("parent_version")
         if parent != manifest.get("version"):
             raise ScaleBuildCliError(
@@ -1041,6 +1065,19 @@ def run_import(
     untouched. Only when every root is staged does the claim get re-verified and
     the renames run, under ``SIGINT`` masking.
 
+    codex PR#643 R5 P1: the import claim (T-W1's per-notebook advisory lock)
+    does not block ``execute_indexing_pipeline_rebuild`` from completing a
+    pipeline switch and publishing a NEW live identity during that staging
+    window — a plugin activation is a different mechanism entirely, with no
+    reason to wait on a scale-build claim. A package validated against the
+    identity that was live a moment ago, and then staged for as long as a
+    multi-GB copy takes, can therefore describe a pipeline the retrieval side
+    has already stopped trusting: ``scale_artifact_catalog``'s own pipeline
+    gate discards it silently, same as any other identity-mismatched core.
+    So the identity is re-read — same method, ``projections.pipeline_identity``
+    — right before the destructive renames begin, and a drift refuses the
+    publish outright rather than let it land unusable.
+
     Registered, not fixed (codex W-CLI R1 N3): each root's rename is atomic, the
     SET of three is not. A hard kill (SIGKILL, power loss) between two of them
     leaves companion/viz from the new generation beside a main index from the
@@ -1065,11 +1102,12 @@ def run_import(
         raise ScaleBuildCliError(f"unknown notebook: {notebook_id}")
 
     with claim_notebook(repository, notebook_id) as handle:
+        expected_pipeline_identity = projections.pipeline_identity(notebook_id)
         manifest, warnings = validate_import_package(
             package,
             expected_notebook_id=notebook_id,
             known_source_ids=lambda: projections.source_ids(notebook_id),
-            expected_pipeline_identity=projections.pipeline_identity(notebook_id),
+            expected_pipeline_identity=expected_pipeline_identity,
             runtime_dim=_runtime_dim(settings),
             runtime_libraries=_runtime_libraries(),
             allow_library_mismatch=allow_library_mismatch,
@@ -1096,6 +1134,19 @@ def run_import(
                 shutil.copytree(source, target, dirs_exist_ok=True)
                 report(f"staged {name}")
 
+            # codex PR#643 R5 P1: re-verify the identity the package was
+            # validated against, right before the first rename — the staging
+            # copy above is the slow, interruptible part, and a claim/identity
+            # proven fresh before it says nothing about what is live now.
+            current_pipeline_identity = projections.pipeline_identity(notebook_id)
+            if list(current_pipeline_identity) != list(expected_pipeline_identity):
+                raise _ImportPipelineIdentityDrifted(
+                    f"the live pipeline identity for {notebook_id} changed "
+                    f"from {list(expected_pipeline_identity)} to "
+                    f"{list(current_pipeline_identity)} while this package "
+                    "was being staged"
+                )
+
             with guard:
                 for name in PUBLISH_ORDER:
                     if name not in staged:
@@ -1105,6 +1156,17 @@ def run_import(
                     )
                     published.append(name)
                     staged.pop(name)
+        except _ImportPipelineIdentityDrifted as error:
+            # Same contract as the ScaleBuildLockLost branch below: nothing
+            # was renamed, so the staged copies are left on disk rather than
+            # discarded — re-exporting is real work an operator should not
+            # have to repeat while diagnosing this.
+            report(f"staged before the pipeline identity changed: {list(staged)}")
+            raise ScaleBuildCliFailure(
+                f"{error}. Nothing was published; the staged copies are left "
+                "on disk for inspection. Re-export the package with a current "
+                "checkout against the new pipeline and re-run import."
+            ) from None
         except ScaleBuildLockLost as error:
             # The claim is the reason a second writer cannot be here; losing it
             # mid-publish means abandoning the operation with the live tree as
