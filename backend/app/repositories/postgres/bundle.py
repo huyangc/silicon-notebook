@@ -192,7 +192,11 @@ class PostgresPersistenceBundleFactory:
                 now=seams.now,
                 insert_row=SharingStore.insert_row_values,
             )
-            sources = SourceStore(database, now=seams.now)
+            sources = SourceStore(
+                database,
+                now=seams.now,
+                current_user_id=lambda: identity.current_user().id,
+            )
             chunks = ChunkStore(database)
             embeddings = EmbeddingStore(write=database.write)
             knowledge = KnowledgeStore(database, seams)

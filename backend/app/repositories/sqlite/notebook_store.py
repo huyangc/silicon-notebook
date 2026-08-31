@@ -504,7 +504,8 @@ class NotebookStore:
             (deleted_text, expires_text, notebook_id),
         )
         source_rows = db.execute(
-            "SELECT s.id,s.notebook_id,n.created_by AS notebook_owner_id,"
+            "SELECT s.id,s.notebook_id,s.uploaded_by,"
+            "n.created_by AS notebook_owner_id,"
             "n.name AS notebook_name,s.created_at,s.updated_at,s.status,"
             "s.title,s.file_name,s.source_type,s.parse_status,"
             "pm.is_paper,pm.paper_title "
@@ -519,7 +520,7 @@ class NotebookStore:
             f"VALUES ({values_sql}){refresh_on_conflict}",
             [
                 (
-                    "source", row["id"], row["notebook_owner_id"],
+                    "source", row["id"], row["uploaded_by"] or "",
                     row["notebook_id"], row["notebook_owner_id"],
                     row["notebook_name"], row["created_at"], row["updated_at"],
                     "", "", "", "", row["status"], source_display_title(row),

@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 44
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 45
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 44
-    assert migrator.migrate() == 44
-    assert migrator.current_version() == 44
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 44
+    assert migrator.migrate() == 45
+    assert migrator.migrate() == 45
+    assert migrator.current_version() == 45
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 45
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 44
+    assert migrator.migrate() == 45
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 44
+        assert PostgresMigrator(databases[1]).migrate() == 45
     finally:
         for database in databases:
             database.close()
@@ -231,6 +231,7 @@ def test_packaged_index_migration_phases_are_exact():
         (42, "hotpath_batch2_search_indexes"),
         (43, "concept_cluster_keyset_index"),
         (44, "retained_user_activity"),
+        (45, "source_upload_actor"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -556,6 +557,18 @@ def test_packaged_index_migration_phases_are_exact():
     assert "error text" not in v44_ddl_only
     assert "trace_json" not in v44_ddl_only
     assert "sections_json" not in v44_ddl_only
+
+    # Migration 45 records the true user action for visible source uploads;
+    # historical rows can only be attributed best-effort to the notebook owner.
+    assert index_declarations(45) == [
+        (False, "idx_sources_uploaded_by_created"),
+    ]
+    v45_ddl_only = "\n".join(
+        line for line in migrations[45].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert "ALTER TABLE sources ADD COLUMN uploaded_by" in v45_ddl_only
+    assert "source_type NOT IN ('memory', 'knowhow')" in v45_ddl_only
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

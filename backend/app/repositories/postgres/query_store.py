@@ -567,12 +567,12 @@ class QueryStore:
                     "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
                     "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
                     "UNION ALL "
-                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "SELECT a.notebook_owner_id AS k,COUNT(*) AS c "
                     "FROM retained_user_activity a "
                     "WHERE a.activity_type='source' AND a.expires_at>CURRENT_TIMESTAMP "
                     "AND NOT EXISTS(SELECT 1 FROM notebooks live "
                     "WHERE live.id=a.notebook_id) "
-                    "GROUP BY a.actor_id) retained_counts GROUP BY k"
+                    "GROUP BY a.notebook_owner_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             conversations = {
@@ -611,11 +611,35 @@ class QueryStore:
                     "GROUP BY a.actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
+            # 与 SQLite 侧同一口径:最近一次上传可见来源、提交提问或发起深度
+            # 报告。created_at 表示用户触发动作的时刻；updated_at 可能由后台
+            # worker 在用户离开后继续推进，不能拿来冒充用户活跃。
             active = {
-                row["k"]: row["m"]
+                row["k"]: (
+                    None if row["m"] == UNRESOLVED_INSTANT else row["m"]
+                )
                 for row in db.execute(
-                    "SELECT created_by AS k, MAX(updated_at) AS m FROM conversations "
-                    "GROUP BY created_by"
+                    "SELECT k,MAX(m) AS m FROM ("
+                    "SELECT s.uploaded_by AS k,MAX(s.created_at) AS m FROM sources s "
+                    "JOIN notebooks nb ON nb.id=s.notebook_id "
+                    "WHERE nb.status!='copying' "
+                    "AND s.uploaded_by IS NOT NULL AND s.uploaded_by!='' "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY s.uploaded_by "
+                    "UNION ALL "
+                    "SELECT created_by AS k,MAX(COALESCE(created_at,%s)) AS m "
+                    "FROM ask_jobs GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT created_by AS k,MAX(created_at) AS m "
+                    "FROM reports GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,MAX(COALESCE(created_at,%s)) AS m "
+                    "FROM retained_user_activity a "
+                    "WHERE a.activity_type IN ('source','ask','report') "
+                    "AND a.expires_at>CURRENT_TIMESTAMP "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) GROUP BY actor_id"
+                    ") activity_candidates GROUP BY k",
+                    (UNRESOLVED_INSTANT, UNRESOLVED_INSTANT),
                 ).fetchall()
             }
             overrides = {
@@ -647,7 +671,7 @@ class QueryStore:
                 "conversations": conversations.get(user["id"], 0),
                 "questions": questions.get(user["id"], 0),
                 "reports": reports.get(user["id"], 0),
-                "last_active": iso_timestamp(active.get(user["id"])),
+                "last_active": iso_timestamp(active.get(user["id"])) or None,
                 "upload_limit": overrides.get(user["id"], global_default),
                 "upload_limit_overridden": user["id"] in overrides,
             }
@@ -950,28 +974,43 @@ class QueryStore:
 
             retained_rows = []
             if notebook_id is None and include_inaccessible_questions:
-                retained_params: list[Any] = [user_id]
-                retained_scope = ""
+                retained_params: list[Any] = []
                 if activity_type == "ask":
-                    retained_scope = " AND a.activity_type='ask'"
-                elif activity_type in ("source", "report"):
-                    retained_scope = (
-                        " AND a.activity_type=%s AND a.notebook_owner_id=%s"
-                    )
-                    retained_params.extend([activity_type, user_id])
-                else:
-                    retained_scope = " AND a.notebook_owner_id=%s"
+                    retained_scope = "a.activity_type='ask' AND a.actor_id=%s"
                     retained_params.append(user_id)
+                elif activity_type == "source":
+                    retained_scope = (
+                        "a.activity_type='source' AND a.notebook_owner_id=%s"
+                    )
+                    retained_params.append(user_id)
+                elif activity_type == "report":
+                    retained_scope = (
+                        "a.activity_type='report' AND a.actor_id=%s "
+                        "AND a.notebook_owner_id=%s"
+                    )
+                    retained_params.extend([user_id, user_id])
+                else:
+                    retained_scope = (
+                        "((a.activity_type='ask' AND a.actor_id=%s "
+                        "AND a.notebook_owner_id=%s) OR "
+                        "(a.activity_type='source' AND a.notebook_owner_id=%s) OR "
+                        "(a.activity_type='report' AND a.actor_id=%s "
+                        "AND a.notebook_owner_id=%s))"
+                    )
+                    retained_params.extend(
+                        [user_id, user_id, user_id, user_id, user_id]
+                    )
                 retained_range, retained_range_params = (
                     _retained_range_and_cursor_clause()
                 )
                 retained_params.extend(retained_range_params)
                 retained_rows = db.execute(
                     "SELECT a.* FROM retained_user_activity a "
-                    "WHERE a.actor_id=%s AND a.expires_at>CURRENT_TIMESTAMP"
+                    f"WHERE {retained_scope} "
+                    "AND a.expires_at>CURRENT_TIMESTAMP"
                     " AND NOT EXISTS(SELECT 1 FROM notebooks live "
                     "WHERE live.id=a.notebook_id)"
-                    f"{retained_scope}{retained_range} "
+                    f"{retained_range} "
                     f"ORDER BY {_absolute_instant('a.created_at')} DESC,"
                     "a.record_id COLLATE \"C\" DESC LIMIT %s",
                     [*retained_params, fetch_limit],

@@ -50,6 +50,8 @@ FIXTURE_SECRETS = (
 
 def _rollback_v65(db: sqlite3.Connection) -> None:
     """Undo _migration_65's standalone retained-activity table."""
+    db.execute("DROP INDEX idx_sources_uploaded_by_created")
+    db.execute("ALTER TABLE sources DROP COLUMN uploaded_by")
     db.execute("DROP TABLE retained_user_activity")
 
 

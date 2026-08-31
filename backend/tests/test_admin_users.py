@@ -33,8 +33,9 @@ def _seed(repo):
         # 提问次数必须数 ask_jobs，失败/取消也属于一次已提交问题。
         for sid in ("s1", "s2"):
             db.execute(
-                "INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?)", (sid, "n1", sid, "md", now, now),
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,created_at,updated_at,uploaded_by) "
+                "VALUES (?,?,?,?,?,?,?)", (sid, "n1", sid, "md", now, now, "u1"),
             )
         # 两份报告都建在 u1 的 notebook n1 里,但创建者不同:r1 是 owner 自己建的,
         # r2 是共享成员 u2 在同一本库里建的**他自己的**报告(群组知识共享 P1)。
@@ -79,15 +80,150 @@ def test_list_user_usage_counts(repo):
     assert a["questions"] == 2
     # 只数 u1 自己建的那一份;u2 在同一本库里建的 r2 不算 u1 的用量。
     assert a["reports"] == 1
-    assert a["last_active"] == "2026-07-06T12:00:00"
+    assert a["last_active"] == "2026-07-07T00:00:00"
     b = rows["b00000002"]
     assert b["notebooks"] == 0 and b["sources"] == 0
     assert b["conversations"] == 1 and b["questions"] == 1
     # u2 一本自己的库都没有,但他在别人的共享库里建了一份报告——按创建者归集,
     # 这一份必须记在他头上(与 `questions` 含共享库提交是同一条口径)。
     assert b["reports"] == 1
-    assert b["last_active"] == "2026-07-05T12:00:00"
+    assert b["last_active"] == "2026-07-07T00:00:00"
 
+
+def test_last_active_tracks_user_actions_not_conversation_updates(repo):
+    _seed(repo)
+
+    def last_active(user_id="u1"):
+        return next(
+            row["last_active"]
+            for row in repo.list_user_usage()
+            if row["id"] == user_id
+        )
+
+    # 上传可见来源、提交提问、发起深度报告都会立即刷新。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET created_at=? WHERE id='s1'",
+            ("2026-07-08T01:00:00+00:00",),
+        )
+    assert last_active() == "2026-07-08T01:00:00+00:00"
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE ask_jobs SET created_at=? WHERE id='j1'",
+            ("2026-07-08T02:00:00+00:00",),
+        )
+    assert last_active() == "2026-07-08T02:00:00+00:00"
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE reports SET created_at=? WHERE id='r1'",
+            ("2026-07-08T03:00:00+00:00",),
+        )
+    assert last_active() == "2026-07-08T03:00:00+00:00"
+
+    # 后台回答落库会推进 conversation.updated_at，但那不是新的用户动作。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE conversations SET updated_at=? WHERE id='c1'",
+            ("2026-07-08T04:00:00+00:00",),
+        )
+        db.execute(
+            "UPDATE sources SET source_type='memory',created_at=? WHERE id='s2'",
+            ("2026-07-08T05:00:00+00:00",),
+        )
+    assert last_active() == "2026-07-08T03:00:00+00:00"
+
+
+def test_last_active_attributes_shared_upload_to_the_actual_uploader(repo):
+    _seed(repo)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,created_at,updated_at,uploaded_by) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                "shared-upload", "n1", "Shared", "pdf",
+                "2026-07-09T00:00:00+00:00", "2026-07-09T00:00:00+00:00", "u2",
+            ),
+        )
+    rows = {row["id"]: row for row in repo.list_user_usage()}
+    assert rows["u2"]["last_active"] == "2026-07-09T00:00:00+00:00"
+    assert rows["u1"]["last_active"] == "2026-07-07T00:00:00"
+
+
+def test_last_active_source_group_uses_absolute_time_not_text_order(repo):
+    _seed(repo)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET created_at=? WHERE id='s1'",
+            ("2026-07-08T02:00:00+00:00",),
+        )
+        # 文本更大但绝对时刻是 01:30Z，不能盖过 s1 的 02:00Z。
+        db.execute(
+            "UPDATE sources SET created_at=? WHERE id='s2'",
+            ("2026-07-08T10:30:00+09:00",),
+        )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["last_active"] == "2026-07-08T02:00:00+00:00"
+
+
+def test_last_active_does_not_expose_unresolved_time_sentinel(repo):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "legacy", "legacy@x", "Legacy", "user", "active",
+                "l00000001", "", "",
+            ),
+        )
+        db.execute(
+            "INSERT INTO notebooks "
+            "(id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("legacy-nb", "Legacy", "legacy", "ready", "", ""),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs "
+            "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "legacy-ask", "legacy-nb", "legacy", "chunk", "q", "done", "", "",
+            ),
+        )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "legacy")
+    assert usage["last_active"] is None
+
+
+def test_source_store_stamps_visible_upload_actor_but_not_hidden_projection(repo):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("actor-nb", "Actor", "user-local", "ready", "t0", "t0"),
+        )
+    store = repo._runtime.source_store
+    common = {
+        "notebook_id": "actor-nb", "status": "ready", "parse_status": "ready",
+        "file_name": "", "file_path": "", "file_size": 0, "file_hash": "",
+        "summary": "", "doc_type": "",
+    }
+    store.insert_source(
+        source_id="visible-actor", title="Visible", source_type="pdf", **common
+    )
+    store.insert_source(
+        source_id="hidden-actor", title="Hidden", source_type="memory", **common
+    )
+    with repo._connect() as db:
+        rows = {
+            row["id"]: row["uploaded_by"]
+            for row in db.execute(
+                "SELECT id,uploaded_by FROM sources WHERE notebook_id='actor-nb'"
+            )
+        }
+    assert rows == {"visible-actor": "user-local", "hidden-actor": None}
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):

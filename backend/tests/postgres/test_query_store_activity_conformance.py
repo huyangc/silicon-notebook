@@ -78,12 +78,14 @@ def _insert_source(connection, source_id, notebook_id, created_at, **kw) -> None
     connection.execute(
         "INSERT INTO sources "
         "(id,notebook_id,title,source_type,status,parse_status,file_name,"
-        "error_message,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "error_message,created_at,updated_at,uploaded_by) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             source_id, notebook_id, kw.get("title", "Doc"),
             kw.get("source_type", "pdf"), kw.get("status", "parsed"),
             kw.get("parse_status", "parsed"), kw.get("file_name", "doc.pdf"),
             kw.get("error_message", ""), created_at, created_at,
+            kw.get("uploaded_by"),
         ),
     )
 
@@ -128,7 +130,7 @@ def _insert_report(connection, report_id, notebook_id, created_by, created_at, *
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -148,6 +150,93 @@ def test_merges_three_types_in_time_descending_order(postgres_database, store):
     # created_at must come back as an ISO string (not a raw datetime) — same
     # wire shape as the SQLite backend.
     assert isinstance(result["items"][0]["created_at"], str)
+
+
+def test_user_usage_last_active_tracks_three_public_activity_types(
+    postgres_database, store
+):
+    source_at = datetime(2026, 8, 2, 1, tzinfo=timezone.utc)
+    ask_at = datetime(2026, 8, 2, 2, tzinfo=timezone.utc)
+    report_at = datetime(2026, 8, 2, 3, tzinfo=timezone.utc)
+    hidden_at = datetime(2026, 8, 2, 4, tzinfo=timezone.utc)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-last-active")
+        _insert_notebook(connection, "n-last-active", "u-last-active")
+        _insert_source(
+            connection, "src-last-active", "n-last-active", source_at,
+            uploaded_by="u-last-active",
+        )
+    usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-last-active"
+    )
+    assert usage["last_active"] == source_at.isoformat()
+
+    with postgres_database.write() as connection:
+        _insert_ask(
+            connection, "ask-last-active", "n-last-active", "u-last-active", ask_at
+        )
+    usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-last-active"
+    )
+    assert usage["last_active"] == ask_at.isoformat()
+
+    with postgres_database.write() as connection:
+        _insert_report(
+            connection,
+            "rep-last-active",
+            "n-last-active",
+            "u-last-active",
+            report_at,
+        )
+        # Memory/Knowhow 投影是内部合成来源，不代表用户又上传了一份文档。
+        _insert_source(
+            connection,
+            "hidden-last-active",
+            "n-last-active",
+            hidden_at,
+            source_type="memory",
+        )
+    usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-last-active"
+    )
+    assert usage["last_active"] == report_at.isoformat()
+
+
+def test_user_usage_last_active_attributes_shared_upload_to_uploader_postgres(
+    postgres_database, store
+):
+    owner_at = datetime(2026, 8, 2, 1, tzinfo=timezone.utc)
+    upload_at = datetime(2026, 8, 2, 2, tzinfo=timezone.utc)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-owner")
+        _insert_user(connection, "u-uploader")
+        _insert_notebook(connection, "n-shared-upload", "u-owner")
+        _insert_ask(
+            connection, "ask-owner", "n-shared-upload", "u-owner", owner_at
+        )
+        _insert_source(
+            connection, "src-shared-upload", "n-shared-upload", upload_at,
+            uploaded_by="u-uploader",
+        )
+
+    usage = {row["id"]: row for row in store.list_user_usage()}
+    assert usage["u-owner"]["last_active"] == owner_at.isoformat()
+    assert usage["u-uploader"]["last_active"] == upload_at.isoformat()
+
+
+def test_user_usage_last_active_hides_unresolved_time_sentinel_postgres(
+    postgres_database, store
+):
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-legacy-time")
+        _insert_notebook(connection, "n-legacy-time", "u-legacy-time")
+        _insert_ask(
+            connection, "ask-legacy-time", "n-legacy-time", "u-legacy-time", None
+        )
+    usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-legacy-time"
+    )
+    assert usage["last_active"] is None
 
 
 def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(
@@ -768,6 +857,7 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
     assert usage["sources"] == 1
     assert usage["questions"] == 1
     assert usage["reports"] == 1
+    assert usage["last_active"] == created_at.isoformat()
 
     with postgres_database.write() as connection:
         connection.execute(
@@ -777,6 +867,10 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
     assert store.list_user_activity(
         "u-retained", include_inaccessible_questions=True, limit=50,
     )["items"] == []
+    expired_usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-retained"
+    )
+    assert expired_usage["last_active"] is None
 
 
 def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
