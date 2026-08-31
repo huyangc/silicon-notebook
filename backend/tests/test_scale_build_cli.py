@@ -339,6 +339,21 @@ def test_a_directory_that_is_not_an_export_is_refused(tmp_path):
         _validate(empty)
 
 
+def test_a_regular_file_named_kg_index_is_refused_like_a_missing_export(tmp_path):
+    """codex PR#643 R13 P2-b anchor: the MAIN root is never read as
+    "omitted" the way an optional root can be — a package where ``kg_index``
+    is a REGULAR FILE (not a directory) is already caught by the same
+    ``main.is_dir()`` check that refuses a missing ``kg_index`` altogether,
+    so this needs no new guard alongside the one added for the optional
+    roots. Pinned here so a future refactor that loosens that check to
+    "exists" cannot silently reopen this hole for the main root too."""
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / cli.MAIN_ROOT).write_text("not a directory", encoding="utf-8")
+    with pytest.raises(cli.ScaleBuildCliError, match="does not look like an export"):
+        _validate(package)
+
+
 def test_npy_row_count_reads_the_header_without_unpickling(tmp_path):
     """Object arrays would need ``allow_pickle`` to materialize — an arbitrary
     code execution surface the validation must not touch."""
@@ -1171,6 +1186,46 @@ def test_import_skips_an_optional_root_absent_from_both_package_and_disk(
     assert not Path(store.source_partition_dir("nb-1")).exists()
 
 
+def test_import_refuses_a_package_where_an_optional_root_is_a_regular_file(
+    repository, store, tmp_path
+):
+    """codex PR#643 R13 P2-b: a damaged transfer that leaves a REGULAR FILE
+    named ``kg_viz`` inside the package looks exactly like an omitted root
+    to the retiring judgment — ``source.is_dir()`` is False either way — so
+    without a guard the healthy LIVE viz root would be silently retired and
+    the rest of the package published in its place.
+
+    Mutation anchor: drop the non-directory guard added ahead of the
+    staging loop in ``run_import`` and this goes red — the live viz root is
+    retired even though the package never validly omitted it.
+    """
+    _seed_live(store, "nb-1")
+    package = _package(
+        tmp_path, companion={"parent_version": ["nb-1", 7], "published_sources": 2}
+    )
+    (package / "kg_viz").write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="kg_viz"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    viz_dir = Path(store.viz_dir("nb-1"))
+    assert json.loads((viz_dir / "manifest.json").read_text()) == {
+        "generation": "old"
+    }, "the healthy live viz root must not be retired"
+    assert not Path(f"{viz_dir}.old").exists()
+    # Refused before any staging began: no root's .tmp-<token> is left behind.
+    storage_root = Path(store.settings.storage_dir)
+    assert not list(storage_root.rglob("*.tmp-*")), (
+        "the refusal must land before any staging copy starts"
+    )
+
+
 def test_import_rolls_back_a_retired_companion_when_identity_drifts_during_the_swap(
     storage, store, tmp_path
 ):
@@ -1893,6 +1948,78 @@ def test_finalize_swap_deletes_old_only_when_preserved(tmp_path):
 
     ScaleArtifactStore.finalize_swap(live, True)
     assert not old.exists()
+
+
+def test_retire_clears_a_stale_old_before_renaming_live(tmp_path):
+    """P2-a, codex PR#643 R13: an earlier interrupted cleanup can leave both
+    a populated ``live`` and a leftover ``.old`` on disk — the same safe
+    "live present, .old present" shape ``swap_staging_directory`` already
+    self-heals. Retirement's target IS that ``.old`` path, so plain
+    ``os.rename`` would otherwise fail every time with "destination not
+    empty" until an operator cleaned it up by hand. This must clear the
+    stale ``.old`` first, then retire ``live`` into a fresh one.
+
+    Mutation anchor: drop the pre-clean ``shutil.rmtree(old_dir)`` this test
+    exercises and this goes red — ``os.rename`` raises ``OSError`` (the
+    destination directory is not empty).
+    """
+    live = tmp_path / "kg_viz"
+    live.mkdir()
+    (live / "marker").write_text("live", encoding="utf-8")
+    old = Path(str(live) + ".old")
+    old.mkdir()
+    (old / "marker").write_text("stale", encoding="utf-8")
+
+    preserved = ScaleArtifactStore.retire_live_directory(live)
+
+    assert preserved is True
+    assert not live.exists()
+    assert old.is_dir()
+    assert (old / "marker").read_text(encoding="utf-8") == "live", (
+        "the new .old must be the just-retired live directory, not the "
+        "stale one that was pre-cleaned"
+    )
+
+
+def test_retire_reverifies_the_claim_after_the_stale_old_preclean(tmp_path):
+    """P2-a, codex PR#643 R13: mirrors
+    ``test_swap_reverifies_the_claim_after_the_stale_old_preclean`` — the
+    pre-clean ``rmtree`` of a large stale ``.old`` can itself take tens of
+    seconds, long enough for the claim's lock session to die and a second
+    builder to legitimately take over. Retirement must re-check
+    ``verify_held`` right after the pre-clean, before its own rename, or it
+    would go on to rename over the new owner's generation.
+
+    Mutation anchor: drop the second ``verify_held`` re-check that follows
+    the pre-clean and this goes red — retirement proceeds despite the claim
+    already being gone.
+    """
+    live = tmp_path / "kg_viz"
+    live.mkdir()
+    (live / "marker").write_text("live", encoding="utf-8")
+    old = Path(str(live) + ".old")
+    old.mkdir()
+    (old / "marker").write_text("stale", encoding="utf-8")
+
+    results = iter([True, False])
+    seen: list[bool] = []
+
+    def verify_held() -> bool:
+        value = next(results)
+        seen.append(value)
+        return value
+
+    with pytest.raises(ScaleBuildLockLost) as excinfo:
+        ScaleArtifactStore.retire_live_directory(live, verify_held=verify_held)
+
+    assert "nothing was renamed" in str(excinfo.value)
+    assert seen == [True, False], (
+        "verify_held must be called once at entry and once more after the "
+        "stale .old pre-clean"
+    )
+    # Nothing was RENAMED: live is exactly as it was before this call.
+    assert live.is_dir()
+    assert (live / "marker").read_text(encoding="utf-8") == "live"
 
 
 # ──────────────────────────────────────────────────────── interrupt guard ──
