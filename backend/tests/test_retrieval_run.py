@@ -12,6 +12,7 @@ from app.services.cancellation import AskCancelled
 from app.services.retrieval_run import (
     current_retrieval_run,
     memoized_query_embedding,
+    memoized_retrieval_value,
     retrieval_fanout_slot,
     retrieval_run,
 )
@@ -94,6 +95,159 @@ def test_failed_embedding_is_not_cached():
         assert memoized_query_embedding("q", compute) == [1.0]
         assert state.embedding_requests == 2
         assert state.embedding_errors == 1
+
+
+def test_copy_context_threads_share_one_infrastructure_value_single_flight():
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def compute():
+        calls.append("source-snapshot")
+        entered.set()
+        assert release.wait(timeout=2)
+        return ("source-a", "source-b")
+
+    with retrieval_run(run_kind="report_generation") as state:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(
+                contextvars.copy_context().run,
+                memoized_retrieval_value,
+                ("sources", "notebook"),
+                compute,
+            )
+            assert entered.wait(timeout=2)
+            second = pool.submit(
+                contextvars.copy_context().run,
+                memoized_retrieval_value,
+                ("sources", "notebook"),
+                compute,
+            )
+            release.set()
+            assert first.result(timeout=2) == ("source-a", "source-b")
+            assert second.result(timeout=2) == ("source-a", "source-b")
+
+        assert calls == ["source-snapshot"]
+        # Infrastructure memoization must not pollute model telemetry.
+        assert state.embedding_requests == 0
+        assert state.embedding_hits == 0
+
+
+def test_cancelled_infrastructure_value_waiter_stops_before_owner_finishes(
+    monkeypatch,
+):
+    import app.services.retrieval_run as retrieval_run_module
+
+    cancel_event = threading.Event()
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    waiter_blocked = threading.Event()
+    real_pending = retrieval_run_module._PendingEmbedding
+
+    class _ObservedReady:
+        def __init__(self, ready):
+            self._ready = ready
+
+        def wait(self, timeout=None):
+            waiter_blocked.set()
+            return self._ready.wait(timeout)
+
+        def set(self):
+            return self._ready.set()
+
+    monkeypatch.setattr(
+        retrieval_run_module,
+        "_PendingEmbedding",
+        lambda ready: real_pending(_ObservedReady(ready)),
+    )
+
+    def compute():
+        owner_entered.set()
+        assert release_owner.wait(timeout=2)
+        return ("snapshot",)
+
+    with retrieval_run(
+        run_kind="report_generation", cancel_event=cancel_event
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            owner = pool.submit(
+                contextvars.copy_context().run,
+                memoized_retrieval_value,
+                ("sources", "notebook"),
+                compute,
+            )
+            assert owner_entered.wait(timeout=2)
+            waiter = pool.submit(
+                contextvars.copy_context().run,
+                memoized_retrieval_value,
+                ("sources", "notebook"),
+                compute,
+            )
+            assert waiter_blocked.wait(timeout=2)
+            cancel_event.set()
+            with pytest.raises(AskCancelled):
+                waiter.result(timeout=2)
+            assert not owner.done()
+            release_owner.set()
+            assert owner.result(timeout=2) == ("snapshot",)
+
+
+@pytest.mark.parametrize(
+    "memoizer",
+    [memoized_query_embedding, memoized_retrieval_value],
+)
+def test_singleflight_waiter_rechecks_cancellation_after_successful_wakeup(
+    monkeypatch, memoizer,
+):
+    import app.services.retrieval_run as retrieval_run_module
+
+    cancel_event = threading.Event()
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    waiter_blocked = threading.Event()
+    real_pending = retrieval_run_module._PendingEmbedding
+
+    class _CancelOnWakeReady:
+        def __init__(self, ready):
+            self._ready = ready
+
+        def wait(self, timeout=None):
+            waiter_blocked.set()
+            completed = self._ready.wait(timeout)
+            if completed:
+                cancel_event.set()
+            return completed
+
+        def set(self):
+            return self._ready.set()
+
+    monkeypatch.setattr(
+        retrieval_run_module,
+        "_PendingEmbedding",
+        lambda ready: real_pending(_CancelOnWakeReady(ready)),
+    )
+
+    def compute():
+        owner_entered.set()
+        assert release_owner.wait(timeout=2)
+        return ("value",)
+
+    with retrieval_run(
+        run_kind="report_generation", cancel_event=cancel_event
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            owner = pool.submit(
+                contextvars.copy_context().run, memoizer, "same-key", compute
+            )
+            assert owner_entered.wait(timeout=2)
+            waiter = pool.submit(
+                contextvars.copy_context().run, memoizer, "same-key", compute
+            )
+            assert waiter_blocked.wait(timeout=2)
+            release_owner.set()
+            with pytest.raises(AskCancelled):
+                waiter.result(timeout=2)
+            assert owner.result(timeout=2) == ("value",)
 
 
 def test_leaf_fanout_is_bounded_and_outer_workers_do_not_deadlock():

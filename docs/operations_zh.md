@@ -445,20 +445,34 @@ FROM pg_stat_progress_create_index;
 savepoint，首次超时会为当前 retrieval run 的该 notebook 打开熔断，后续通用调用不再发数据库
 语句，已经在飞的调用不做强制取消。精确短语/标识符定位是独立通道，绝不进入该熔断。
 
-chunk ANN 健康时，深度报告 planning/generation 默认跳过逐自然语言 query 的通用 FTS union；
-普通 Ask 仍保持 ANN∪FTS。可设 `CHUNK_FTS_WITH_ANN_ENABLED=true` 做 A/B 或恢复报告的这份词法
-补召回；ANN 不可用时，报告仍用有界 FTS fail-open 回退。冻结的全选来源清单在不可变 source
-sidecar 证明全部索引 source code 均获允许时，也不再支付 HNSW Python filter callback；只要出现
-未知或未授权 code，就继续走过滤/按范围路径。
+不可变 chunk ANN source sidecar 覆盖完整冻结授权范围时，深度报告 planning/generation 默认跳过
+逐自然语言 query 的通用 FTS union；普通 Ask 仍保持 ANN∪FTS。冻结范围混有已索引与等待 fold
+的来源时，保留 ANN 核，只给 sidecar 中缺失且已授权的来源补词法检索。没有 producer scope 的
+报告调用会先冻结「可见来源 + 当前 actor 自己的隐藏来源」，每库每 retrieval run 只读取一次，
+并把同一 ceiling 统一施加到 ANN、有界 FTS、暴力回退、hydrate、delta FTS 与可选候选贡献器。
+报告期间即使索引 reload，也不能扩大这份冻结全集。授权探针失败会让该库本轮检索 fail closed
+为空，并且只发无正文诊断；绝不把 ANN 扩大或落入无 scope FTS。不可变 source-code/filter 计划按
+索引代际与 run scope 只构建一次，不再每 leaf 扫描整份 row sidecar。sidecar 中没有、但本身也没有
+chunk 的空来源不会触发 delta FTS；报告每个 leaf 都会重查这些来源是否已有 chunk，因此即使独立的
+KG mutation-version bump 失败，已经提交的 chunk 也会在同一 run 内变得可见。所有词法调用仍受
+上面的私有 timeout 与熔断保护。
+该补偿恢复的是 sidecar 缺失来源的词法可见性，不是对已索引来源内部变更或无词面重合
+delta 的语义强一致；这些内容仍须完成 fold 或开启 `SCALE_SEARCH_INCLUDE_DELTA=true`。可设
+`CHUNK_FTS_WITH_ANN_ENABLED=true` 做 A/B 或恢复报告的完整词法补召回；ANN 不可用时，报告仍用
+有界 FTS fail-open 回退。冻结的全选来源清单在 sidecar 证明全部索引 source code 均获允许时，
+也不再支付 HNSW Python filter callback；只要出现未知或未授权 code，就继续走过滤/按范围路径。
 
 诊断时用无正文耗时事件，不要再把旧聚合字段当成纯 ANN：`site=chunk_scale_index` 给出
 `scale_index_load_ms`；`site=chunk_ann` 拆出 `ann_prepare_ms`、`ann_open_ms`、`knn_ms`、
-`delta_ms`、`lexical_prepare_ms`、`chunk_fts_ms`、`hydrate_ms` 与 `score_ms`；`site=_retrieve_scored` 给出宽口径
+`delta_ms`、`lexical_prepare_ms`、`chunk_fts_ms`、`hydrate_ms`、`score_ms`，以及固定枚举的
+`lexical_mode`（`report_ann_only`、`report_delta_fallback`、`report_quality_union` 或
+`non_report_union`）；`site=_retrieve_scored` 给出宽口径
 `candidate_ms` 以及 `scale_index_ms`、`kg_ann_ms`、`kg_lexical_ms`。retrieval-run 汇总另含
 `chunk_fts_timeouts` 与 `chunk_fts_circuit_skips`。这些事件还携带兼容的 `stage` / `latency_ms`
 字段（`chunk_scale_index`、`chunk_ann`、`chunk_fts` 或 `kg_candidates`），因此
-`diag.py slow` 与 `diag.py latency` 都会聚合它们。部署后应验证：报告 ANN 命中的
-`chunk_fts_ms` 接近零；一次 FTS 超时只花独立 deadline 而非 30 秒；readiness 已预热全部必需
+`diag.py slow` 与 `diag.py latency` 都会聚合它们。部署后应验证：范围完整的报告 ANN 命中显示
+`report_ann_only`，其 `chunk_fts_ms` 接近零；等待 fold 的来源显示
+`report_delta_fallback`；一次 FTS 超时只花独立 deadline 而非 30 秒；readiness 已预热全部必需
 scale index。
 
 需要可 review 的子阶段分布时运行：

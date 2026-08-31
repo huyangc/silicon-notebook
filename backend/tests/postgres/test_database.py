@@ -262,12 +262,21 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
             source_mode=None,
             source_ids=(),
         )
+        present_source_rows = chunks.ids_for_sources(
+            connection,
+            notebook_id,
+            ("missing", "source-pg-knowhow", "source-pg-visible"),
+            presence_only=True,
+        )
 
     assert {row["id"] for row in rows} == {
         "chunk-source-pg-visible",
         "chunk-source-pg-knowhow",
         "chunk-source-pg-memory-alice",
     }
+    assert [row["source_id"] for row in present_source_rows] == [
+        "source-pg-knowhow", "source-pg-visible",
+    ]
     question_rows = chunks.question_index_rows(
         notebook_id,
         actor_id=alice.id,

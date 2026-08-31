@@ -690,6 +690,45 @@ def test_retrieval_contribution_authority_filters_private_memory_without_scope(
     }
 
 
+def test_large_frozen_source_ceiling_uses_bounded_sqlite_parameters(repo):
+    import sqlite3
+
+    notebook = _seed_original_chunk(repo)
+    actor_id = repo.current_user().id
+    store = repo._runtime.chunk_store
+    store.replace_chunk_questions(
+        "chunk-1",
+        notebook.id,
+        "source-1",
+        (("question-1", "Which controller?", [0.25] * 16),),
+        created_at=_now(),
+    )
+    allowed = ("source-1", *(f"source-{index}" for index in range(2, 32)))
+
+    with repo._connect() as db:
+        previous = db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 4)
+        try:
+            assert store.database.connect() is db
+            assert db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) == 4
+            question_rows = store.question_index_rows(
+                notebook.id,
+                actor_id=actor_id,
+                allowed_source_ids=allowed,
+                limit=10,
+            )
+            chunks = repo.retrieval.candidates._hydrate_generated_question_chunks(
+                notebook.id,
+                actor_id,
+                ("chunk-1",),
+                allowed_source_ids=allowed,
+            )
+        finally:
+            db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
+
+    assert [row["chunk_id"] for row in question_rows] == ["chunk-1"]
+    assert [chunk.chunk_id for chunk in chunks] == ["chunk-1"]
+
+
 def test_untrusted_question_row_cannot_bypass_actor_chunk_authority(
     repo, monkeypatch
 ):

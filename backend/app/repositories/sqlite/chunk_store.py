@@ -86,9 +86,12 @@ class ChunkStore:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
-            placeholders = ",".join("?" for _ in source_ids)
-            source_clause = f"AND q.source_id IN ({placeholders}) "
-            params.extend(source_ids)
+            source_clause = (
+                "AND q.source_id IN ("
+                "SELECT CAST(value AS TEXT) FROM json_each(?)"
+                ") "
+            )
+            params.append(json.dumps(source_ids))
         params.append(int(limit))
         with self.database.connect() as db:
             rows = db.execute(
@@ -124,15 +127,30 @@ class ChunkStore:
         }
 
     @staticmethod
-    def ids_for_sources(db, notebook_id: str, source_ids: Sequence[str]):
+    def ids_for_sources(
+        db,
+        notebook_id: str,
+        source_ids: Sequence[str],
+        *,
+        presence_only: bool = False,
+    ):
         values = list(dict.fromkeys(source_ids))
         if not values:
             return []
-        placeholders = ",".join("?" for _ in values)
+        if presence_only:
+            return db.execute(
+                "SELECT CAST(requested.value AS TEXT) AS source_id "
+                "FROM json_each(?) AS requested "
+                "WHERE EXISTS (SELECT 1 FROM chunks c "
+                "WHERE c.notebook_id=? "
+                "AND c.source_id=CAST(requested.value AS TEXT)) "
+                "ORDER BY CAST(requested.key AS INTEGER)",
+                (json.dumps(values), notebook_id),
+            ).fetchall()
         return db.execute(
-            f"SELECT id FROM chunks WHERE notebook_id=? "
-            f"AND source_id IN ({placeholders})",
-            (notebook_id, *values),
+            "SELECT id FROM chunks WHERE notebook_id=? "
+            "AND source_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))",
+            (notebook_id, json.dumps(values)),
         ).fetchall()
 
     def source_elements_for_chunking(self, source_id: str) -> list:
@@ -422,10 +440,13 @@ class ChunkStore:
         source_clause = ""
         params: list[object] = [notebook_id, *ids]
         if source_mode in {"include", "exclude"} and sources:
-            source_placeholders = ",".join("?" for _ in sources)
             operator = "IN" if source_mode == "include" else "NOT IN"
-            source_clause = f" AND c.source_id {operator} ({source_placeholders})"
-            params.extend(sources)
+            source_clause = (
+                f" AND c.source_id {operator} ("
+                "SELECT CAST(value AS TEXT) FROM json_each(?)"
+                ")"
+            )
+            params.append(json.dumps(sources))
         memory_clause = (
             " AND (s.source_type <> 'memory' OR EXISTS ("
             "SELECT 1 FROM memory_items m "

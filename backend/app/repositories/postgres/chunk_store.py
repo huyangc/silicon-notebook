@@ -104,8 +104,8 @@ class ChunkStore:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
-            source_clause = f"AND q.source_id IN ({placeholders(source_ids)}) "
-            params.extend(source_ids)
+            source_clause = "AND q.source_id=ANY(%s) "
+            params.append(source_ids)
         params.append(int(limit))
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -147,10 +147,27 @@ class ChunkStore:
         }
 
     @staticmethod
-    def ids_for_sources(connection, notebook_id: str, source_ids: Sequence[str]):
+    def ids_for_sources(
+        connection,
+        notebook_id: str,
+        source_ids: Sequence[str],
+        *,
+        presence_only: bool = False,
+    ):
         values = list(dict.fromkeys(source_ids))
         if not values:
             return []
+        if presence_only:
+            return connection.execute(
+                "SELECT requested.source_id FROM "
+                "unnest(%s::text[]) WITH ORDINALITY "
+                "AS requested(source_id, ordinal) "
+                "WHERE EXISTS (SELECT 1 FROM chunks c "
+                "WHERE c.notebook_id=%s "
+                "AND c.source_id=requested.source_id) "
+                "ORDER BY requested.ordinal",
+                (values, notebook_id),
+            ).fetchall()
         return connection.execute(
             "SELECT id FROM chunks WHERE notebook_id=%s AND source_id=ANY(%s)",
             (notebook_id, values),
@@ -417,11 +434,12 @@ class ChunkStore:
         source_clause = ""
         params: list[object] = [notebook_id, *ids]
         if source_mode in {"include", "exclude"} and sources:
-            operator = "IN" if source_mode == "include" else "NOT IN"
             source_clause = (
-                f" AND c.source_id {operator} ({placeholders(sources)})"
+                " AND c.source_id=ANY(%s)"
+                if source_mode == "include"
+                else " AND c.source_id<>ALL(%s)"
             )
-            params.extend(sources)
+            params.append(sources)
         memory_clause = (
             " AND (s.source_type <> 'memory' OR EXISTS ("
             "SELECT 1 FROM memory_items m "
