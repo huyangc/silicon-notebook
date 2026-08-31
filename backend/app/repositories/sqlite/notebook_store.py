@@ -5,6 +5,7 @@ import sqlite3
 from typing import Callable, List, Literal, Sequence
 
 from app.core.activity_time import activity_retention_window
+from app.domain.source_display import source_display_title
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
@@ -481,29 +482,40 @@ class NotebookStore:
             "WHERE j.notebook_id=?" + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
         )
-        db.execute(
-            f"INSERT INTO retained_user_activity ({common_columns}) "
-            "SELECT 'source',s.id,n.created_by,s.notebook_id,n.created_by,n.name,"
-            "s.created_at,s.updated_at,'','','','',s.status,"
-            "CASE WHEN COALESCE(pm.is_paper,0)=1 "
-            "AND trim(COALESCE(pm.paper_title,''))<>'' "
-            "THEN trim(pm.paper_title) ELSE trim(CASE "
-            "WHEN COALESCE(s.title,'')<>'' THEN s.title "
-            "ELSE COALESCE(s.file_name,'') END) END,"
-            "s.file_name,s.source_type,s.parse_status,"
-            "CASE WHEN s.parse_status='failed' THEN 1 ELSE 0 END,0,'',?,? "
+        source_rows = db.execute(
+            "SELECT s.id,s.notebook_id,n.created_by AS notebook_owner_id,"
+            "n.name AS notebook_name,s.created_at,s.updated_at,s.status,"
+            "s.title,s.file_name,s.source_type,s.parse_status,"
+            "pm.is_paper,pm.paper_title "
             "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
             "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
-            f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
-            + refresh_on_conflict,
-            (deleted_text, expires_text, notebook_id),
+            f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+            (notebook_id,),
+        ).fetchall()
+        values_sql = ",".join("?" for _ in common_columns.split(","))
+        db.executemany(
+            f"INSERT INTO retained_user_activity ({common_columns}) "
+            f"VALUES ({values_sql}){refresh_on_conflict}",
+            [
+                (
+                    "source", row["id"], row["notebook_owner_id"],
+                    row["notebook_id"], row["notebook_owner_id"],
+                    row["notebook_name"], row["created_at"], row["updated_at"],
+                    "", "", "", "", row["status"], source_display_title(row),
+                    row["file_name"], row["source_type"], row["parse_status"],
+                    int(row["parse_status"] == "failed"), 0, "", deleted_text,
+                    expires_text,
+                )
+                for row in source_rows
+            ],
         )
         db.execute(
             f"INSERT INTO retained_user_activity ({common_columns}) "
             "SELECT 'report',r.id,r.created_by,r.notebook_id,n.created_by,n.name,"
             "r.created_at,r.updated_at,'','',r.question,'',r.status,'','','','',"
-            "0,r.depth,COALESCE(json_extract(r.understanding_json,"
-            "'$._generation_started_at'),''),?,? FROM reports r "
+            "0,r.depth,COALESCE(json_extract(CASE "
+            "WHEN json_valid(r.understanding_json) THEN r.understanding_json "
+            "ELSE '{}' END,'$._generation_started_at'),''),?,? FROM reports r "
             "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=?"
             + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
