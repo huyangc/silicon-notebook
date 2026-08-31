@@ -3297,10 +3297,15 @@ class AskService:
             return []
         try:
             notebook_id = prepared.notebook_id
-            frozen_source_ids = getattr(runtime.scope, "source_ids", None)
-            if frozen_source_ids is None:
+            visible_source_ids = tuple(
+                self.ask_engine_visible_sources(notebook_id)
+            )
+            if runtime.scope is None:
+                frozen_source_ids = visible_source_ids
+            else:
                 frozen_source_ids = tuple(
-                    self.ask_engine_visible_sources(notebook_id)
+                    source_id for source_id in visible_source_ids
+                    if runtime.scope.allows(notebook_id, source_id)
                 )
             hidden_source_ids = set(
                 self.ask_engine_hidden_sources(notebook_id, prepared.user_id)

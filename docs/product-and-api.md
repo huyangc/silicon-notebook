@@ -2485,7 +2485,11 @@ source's ordinary parse status or remove it from text retrieval.
 
 Only `reasoning` Ask can consume the snapshot. The lane remains dormant unless the frozen,
 user-selected source scope contains a compiled workbook and the question has an analytical
-spreadsheet intent. It then reuses the deployment's existing `reasoning_agent` chat workload
+spreadsheet intent. Include/exclude scopes are resolved through the same frozen `allows`
+semantics as retrieval; excluded workbooks never reach the planner. Intent requires either
+explicit workbook/table context plus an analysis phrase, or an unambiguous table operation;
+an isolated `行`/`列` character inside an unrelated word does not qualify. The lane then
+reuses the deployment's existing `reasoning_agent` chat workload
 for at most one bounded planning call—there is no general-purpose SDK agent—and validates
 the result into the closed operations `profile`, `aggregate`, `top`, and `filter`. Aggregation
 and filters also use closed operator lists; execution is local and deterministic. A planner

@@ -326,6 +326,73 @@ def test_workbook_without_row_anchors_uses_source_level_citation(tmp_path):
     assert evidence["k6001"]["object_type"] == "source"
 
 
+def test_ambiguous_single_characters_do_not_trigger_spreadsheet_planning(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+
+    for question in ("银行政策是什么", "执行这个方案", "分析这个方案"):
+        planner = _CapturingProfilePlanner()
+        results, trace = service.analyze(
+            notebook_id="nb-1",
+            source_ids=("src-1",),
+            question=question,
+            planner_client=planner,
+        )
+        assert results == []
+        assert trace is None
+        assert planner.prompt == ""
+
+
+def test_reasoning_spreadsheet_lane_honors_exclude_scope():
+    from app.services.ask_service import AskService
+    from app.services.source_scope import ActiveSourceScope
+
+    class _CapturingAnalysis:
+        def __init__(self) -> None:
+            self.source_ids = ()
+
+        def analyze(self, **kwargs):
+            self.source_ids = kwargs["source_ids"]
+            return [], None
+
+    analysis = _CapturingAnalysis()
+    service = object.__new__(AskService)
+    service.spreadsheet_analysis = analysis
+    service.ask_engine_visible_sources = lambda notebook_id: (
+        "src-kept", "src-excluded", "src-hidden"
+    )
+    service.ask_engine_hidden_sources = lambda notebook_id, user_id: ("src-hidden",)
+    service.model_clients = SimpleNamespace(chat=lambda workload: _OfflinePlanner())
+    runtime = SimpleNamespace(
+        scope=ActiveSourceScope(
+            notebook_id="nb-1",
+            mode="exclude",
+            source_ids=frozenset({"src-excluded"}),
+        ),
+        cancellation=None,
+        trace_sink=None,
+    )
+    prepared = SimpleNamespace(
+        notebook_id="nb-1",
+        user_id="user-1",
+        research_question="按地区汇总销售额",
+    )
+
+    assert service._spreadsheet_reasoning_results(prepared, runtime, []) == []
+    assert analysis.source_ids == ("src-kept",)
+
+
 def test_planner_cancellation_is_not_downgraded_to_local_profile(tmp_path):
     path = tmp_path / "sales.xlsx"
     _workbook(path)

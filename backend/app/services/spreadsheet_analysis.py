@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import zipfile
 from collections import Counter, defaultdict
 from datetime import date, datetime
@@ -27,11 +28,19 @@ SPREADSHEET_SUFFIXES = frozenset({".xlsx", ".xlsm", ".xls"})
 PLAN_OPERATIONS = frozenset({"profile", "aggregate", "top", "filter"})
 AGGREGATIONS = frozenset({"sum", "avg", "min", "max", "count"})
 FILTER_OPERATORS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains"})
-_ANALYTICAL_TERMS = (
-    "excel", "工作簿", "表格", "sheet", "worksheet", "数据", "分析", "统计",
-    "汇总", "合计", "总和", "平均", "最大", "最小", "中位", "趋势", "排名",
-    "top", "筛选", "过滤", "分组", "透视", "占比", "同比", "环比", "异常",
-    "缺失", "重复", "列", "行", "sum", "average", "count", "group", "filter",
+_SPREADSHEET_CONTEXT_TERMS = (
+    "excel", "workbook", "spreadsheet", "worksheet", "sheet", "table", "data",
+    "工作簿", "电子表格", "表格", "数据集", "数据",
+)
+_GENERIC_ANALYSIS_TERMS = (
+    "analyze", "analysis", "profile", "statistics", "summary", "trend", "outlier",
+    "分析", "统计", "概况", "质量", "结构", "趋势", "异常", "多少", "行数", "列数",
+    "列名", "字段", "表头", "列出", "缺失", "重复", "最大", "最小", "中位",
+)
+_STRONG_TABLE_OPERATION_TERMS = (
+    "aggregate", "top", "filter", "group", "rank", "count", "sum", "average",
+    "汇总", "合计", "总和", "平均", "最大值", "最小值", "中位数", "排名", "筛选",
+    "过滤", "分组", "透视", "占比", "同比", "环比", "缺失值", "重复值",
 )
 
 
@@ -68,6 +77,27 @@ def _json_bytes(value: Any) -> int:
     return len(
         json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     )
+
+
+def _contains_intent_term(text: str, term: str) -> bool:
+    if term.isascii():
+        return re.search(
+            rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", text
+        ) is not None
+    return term in text
+
+
+def _has_spreadsheet_intent(question: str) -> bool:
+    text = question.casefold()
+    if any(_contains_intent_term(text, term) for term in _STRONG_TABLE_OPERATION_TERMS):
+        return True
+    has_context = any(
+        _contains_intent_term(text, term) for term in _SPREADSHEET_CONTEXT_TERMS
+    )
+    has_analysis = any(
+        _contains_intent_term(text, term) for term in _GENERIC_ANALYSIS_TERMS
+    )
+    return has_context and has_analysis
 
 
 def _numeric(value: Any) -> float | None:
@@ -522,7 +552,7 @@ class SpreadsheetAnalysisService:
     ) -> tuple[list[SpreadsheetAnalysisResult], TraceStep | None]:
         if not self.settings.spreadsheet_analysis_enabled:
             return [], None
-        if not any(term in question.lower() for term in _ANALYTICAL_TERMS):
+        if not _has_spreadsheet_intent(question):
             return [], None
         manifests = [
             manifest
