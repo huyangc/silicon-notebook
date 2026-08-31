@@ -354,7 +354,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
   `propose_memory`，及 knowhow 四工具 `list_knowhow_tables`、`get_knowhow_discrimination`、
   `get_knowhow_row`、`put_knowhow_cell_code`（2026-07-16 随 knowhow 表 Agent 面加入，读取需
-  `knowledge:read`、代码写入需 `knowhow:code`）。**以上是本条目交付当时的工具面；后续已扩展至二十三个工具
+  `knowledge:read`、代码写入需 `knowhow:code`）。**以上是本条目交付当时的工具面；后续已扩展至二十四个工具
   （引用点查、来源管理、构建与库理解工具组，当前权威清单见 `mcp_server.PUBLIC_TOOLS` 与
   `docs/product-and-api.md`）。** 每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
   候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 默认

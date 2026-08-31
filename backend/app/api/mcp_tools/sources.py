@@ -1,4 +1,4 @@
-"""Source creation, status, reparse, and deletion MCP tools."""
+"""Source inventory, creation, status, reparse, and deletion MCP tools."""
 
 import base64
 import binascii
@@ -29,6 +29,8 @@ from app.services.source_format_admission import (
 )
 
 from ._shared import (
+    OUTPUT_INTEGER_LIMIT,
+    RESULT_LIMIT,
     _record_agent_call,
     _budget_response,
     _owner_request_context,
@@ -150,6 +152,98 @@ def _markdown_source_file_name(title: str) -> str:
 def register_source_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
+    @server.tool(
+        description=(
+            "List the user-visible sources owned by the selected notebook, "
+            "in the same stable order as its Sources panel. Returns a bounded "
+            "page with source ids, display titles, file/type metadata, stored "
+            "summary excerpts, and parse/extraction state. Hidden Memory and "
+            "Knowhow projection rows and sources from mounted reference "
+            "notebooks are excluded. Follow `next_offset` until it is null to "
+            "read the complete inventory. Requires knowledge:read scope."
+        )
+    )
+    async def list_sources(
+        ctx: Context, offset: int = 0, limit: int = RESULT_LIMIT
+    ) -> dict[str, Any]:
+        if offset < 0 or offset > OUTPUT_INTEGER_LIMIT - RESULT_LIMIT:
+            raise ValueError(
+                "offset must be between zero and the MCP integer limit"
+            )
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                page = repo.list_sources_page(
+                    notebook_id, offset=offset, limit=cap
+                )
+                items = [
+                    {
+                        "source_id": item.id,
+                        # Use the same single display-name rule as source cards,
+                        # citations, and the Reasoning Ask source inventory.
+                        "title": (
+                            item.display_title or item.title or item.file_name
+                        ),
+                        "file_name": item.file_name,
+                        "source_type": item.type,
+                        "doc_type": item.doc_type,
+                        "summary": item.summary,
+                        "parse_status": item.parse_status,
+                        "status": item.status,
+                        "parse_failed": item.parse_status == "failed",
+                        "parse_quality_warning": item.parse_quality_warning,
+                        "indexing_chunk_fallback": item.indexing_chunk_fallback,
+                        "element_count": item.element_count,
+                        "kg_extracted": item.kg_extracted,
+                        "kg_analyzed_empty": item.kg_analyzed_empty,
+                        "agent_created": item.agent_created,
+                        "created_at": item.created_at,
+                    }
+                    for item in page.items
+                ]
+                return {
+                    "notebook_id": notebook_id,
+                    "items": items,
+                    "total_count": page.total_count,
+                    "offset": page.offset,
+                    "limit": page.limit,
+                    # Reserve the widest allowed scalar before the global
+                    # response-budget pass. The real cursor is filled below;
+                    # replacing this value can only make the payload smaller,
+                    # never push an already-budgeted response back over 12 KB.
+                    "next_offset": OUTPUT_INTEGER_LIMIT,
+                }
+
+        response = _budget_response(
+            await _run_with_progress(ctx, load, label="list_sources"),
+            field_limits={
+                "title": 300,
+                "file_name": 300,
+                "source_type": 80,
+                "doc_type": 80,
+                "summary": 500,
+                "parse_status": 40,
+                "status": 40,
+                "created_at": 80,
+            },
+        )
+        # The global MCP budget may have to drop trailing page rows after the
+        # database read. Point the cursor at the first row not actually
+        # delivered so following it can never skip user data.
+        delivered = response.get("items", [])
+        delivered_count = len(delivered) if isinstance(delivered, list) else 0
+        response["next_offset"] = (
+            offset + delivered_count
+            if offset + delivered_count < int(response.get("total_count", 0))
+            else None
+        )
+        return response
+
     @server.tool(
         description=(
             "Add a Markdown document to the selected notebook from text you "

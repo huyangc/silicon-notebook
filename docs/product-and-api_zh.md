@@ -561,7 +561,7 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
 检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 23 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 24 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -613,8 +613,8 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 `-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十三个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 23 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十四个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 24 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
@@ -625,13 +625,13 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | 引用点查 | `get_cited_element` | `knowledge:read` |
 | 来源管理 | `add_source_text`、`add_source_file`、`add_source_url`、`reparse_source` | `sources:write`（owner-only） |
 | 来源删除 | `delete_source` | `sources:delete`（owner-only，且仅限 Agent 添加的来源） |
-| 来源状态读取 | `get_source_status` | `knowledge:read` |
+| 来源读取 | `list_sources`、`get_source_status` | `knowledge:read` |
 | 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
 | 构建状态读取 | `get_build_status` | `knowledge:read` |
 | 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-23 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+24 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/scope/allowlist/成员权，所有写 scope 都强制经过 owner-only
 notebook 闸。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
 先被完整构造出来才裁剪。这份有界拷贝随后被逐步、可见地压缩（先缩最长字符串，再丢 map 条目，
@@ -676,6 +676,16 @@ scope 时整行在结果截断**之前**被过滤，且不计入截断计数，�
 **来源管理。** 这一组里凡是接受 `source_id` 的工具，都只在**当前所选笔记本内**解析它——不含
 挂载的参与库，也不含隐藏的 `memory`/`knowhow` 投影行。这比 `get_cited_element` 更窄：后者刻意
 覆盖已挂载的参考库，因为答案的引用本来就会指向那里。
+
+`list_sources(offset=0, limit=20)` 是当前所选笔记本的只读来源目录，需要 `knowledge:read`。
+它直接复用网页 Sources 面板的 `list_sources_page` 投影、稳定的 `(created_at, id)` 顺序与同一份
+可见性谓词：只列本库直接持有、用户可见的导入来源，不列隐藏的 Memory/Knowhow 投影行，也不把
+挂载参考库持有的来源混进来。每行返回 `source_id`、统一规则生成的显示 `title`、`file_name`、
+`source_type`、`doc_type`、已存的 `summary` 摘要，以及解析/KG 状态、`agent_created` 与
+`created_at`；不返回 `file_path`、原始 `error_message` 或文件哈希。`limit` 受 MCP 共用结果护栏
+限制，最大 20。响应同时给出 `total_count`、实际 `offset`/`limit` 与 `next_offset`，调用方沿
+`next_offset` 读到 `null` 即拿全；若共用 12,000-byte 响应护栏不得不移除页尾条目，服务端会按
+真正发出的条数重算 `next_offset`，不会让翻页跳过用户数据，并仍由 `truncation` 元数据显式披露。
 
 `add_source_text` 用 Agent 提供的文本建立一份 Markdown 文档来源：`title` 至多
 200 字符，`content_md` 必须非空且不超过本部署的 `SOURCE_UPLOAD_MAX_MB` 单文件上限（按存储的

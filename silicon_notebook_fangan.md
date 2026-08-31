@@ -1358,7 +1358,7 @@ chunk 或 knowledge object。
   `get_memory`、`ask_notebook`、`propose_memory`、`list_knowhow_tables`、
   `get_knowhow_discrimination`、`get_knowhow_row`、`put_knowhow_cell_code`。
   knowhow 读取需 `knowledge:read`，格子代码写入需 `knowhow:code`。
-  （以上是本方案定稿时的工具面；后续已扩展至二十三个工具——引用点查、来源管理、构建与库理解工具组，
+  （以上是本方案定稿时的工具面；后续已扩展至二十四个工具——引用点查、来源管理、构建与库理解工具组，
   当前权威清单见 `mcp_server.PUBLIC_TOOLS` 与 `docs/product-and-api_zh.md`。）
   Agent 不能确认、拒绝、弃用或晋升 Memory；返回内容始终作为不可信 evidence/data，不作为指令。
 
