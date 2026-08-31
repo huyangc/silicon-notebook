@@ -11,11 +11,27 @@ Ownership crosses threads (an admitting thread acquires, the worker it spawns
 releases), so this is deliberately NOT a context manager: the handle is entered
 and exited by hand and every exit path must either hand the handle to the
 worker or release it.
+
+A probe has **three** outcomes, not two (``ScaleBuildLockAttempt`` below):
+
+* a handle — the claim is held by this caller;
+* ``None`` — the claim is provably held by SOMEBODY ELSE (another thread, a
+  service replica, the offline CLI). "Somebody is building it" is a true
+  statement about the notebook, so a caller may report it as such and leave
+  whatever queue entry it found alone;
+* ``SCALE_BUILD_LOCK_UNAVAILABLE`` — the claim could not be EVALUATED: this
+  process has spent its budget of dedicated lock sessions, or the probe itself
+  failed. Nothing is known about who owns the notebook, so a caller must
+  neither claim "already building" nor drop the work; it parks it and retries.
+
+Collapsing the last two is what made a lock-session budget exhaustion report
+itself as ``already_building`` while queueing nothing — an admission that both
+lied and lost the request (codex W-CLI R1 P1-1).
 """
 from __future__ import annotations
 
 import zlib
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, Union, runtime_checkable
 
 
 class ScaleBuildLockLost(RuntimeError):
@@ -72,6 +88,26 @@ class UnsupportedScaleBuildLock:
 
 
 UNSUPPORTED_SCALE_BUILD_LOCK = UnsupportedScaleBuildLock()
+
+
+class ScaleBuildLockUnavailable:
+    """Sentinel: the claim could not be evaluated (see the module docstring).
+
+    Deliberately NOT a :class:`ScaleBuildLock` — it has no ``verify_held`` and
+    no ``release``, so a caller that forgets to discriminate fails loudly at the
+    first use instead of silently building with a claim it never held.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "SCALE_BUILD_LOCK_UNAVAILABLE"
+
+
+SCALE_BUILD_LOCK_UNAVAILABLE = ScaleBuildLockUnavailable()
+
+# What every ``try_scale_build_lock`` implementation returns. The two failure
+# values are distinguished by identity (``attempt is
+# SCALE_BUILD_LOCK_UNAVAILABLE``), never by truthiness.
+ScaleBuildLockAttempt = Optional[Union[ScaleBuildLock, ScaleBuildLockUnavailable]]
 
 
 def advisory_lock_key(value: str) -> int:

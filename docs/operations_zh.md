@@ -760,15 +760,32 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 `import` 的发布顺序是**伴生 → viz → 主索引**：任何中途失败都让**活着的主索引**停在
 上一代，而伴生根的 `parent_version` 闸让不配对的伴生读不出来（退化成「没有伴生」），
 不会变成「伴生描述了另一代」。拷贝（慢、易失败的那一半）全部发生在 `.tmp` 里，活目录
-在最后那几次 rename 之前一个字节都不动。rename 序列期间**屏蔽 SIGINT**——Ctrl-C 落在
-`live→.old` 与 `tmp→live` 之间会让这个 notebook 一个活索引都不剩，这是全流程唯一
-一个「Ctrl-C 会丢数据」的窗口。
+在最后那几次 rename 之前一个字节都不动。
+
+#### Ctrl-C：屏蔽的是哪一段，build 被打断会留下什么
+
+**每一次** rename 序列都屏蔽 `SIGINT`——`build`/`fold` 与 `import` 一视同仁，因为屏蔽
+装在发布原语本身，不在某一个子命令里。Ctrl-C 落在 `live→.old` 与 `tmp→live` 之间会让
+这个 notebook 一个活索引都不剩，这是本通道唯一一个「Ctrl-C 会丢数据」的窗口。信号是
+**延后**而不是忽略：这段序列是毫秒级的，跑完立刻兑现中断。
+
+各命令收到中断后的行为：
+
+- **`import`**：延后的中断兑现时若三根都已发布，就没有任何东西被放弃——命令说明这一点
+  并以退出码 `0` 打出正常收据。落在**拷贝暂存**阶段的中断则删掉本次 staged 的 `.tmp`，
+  退出码 `130`。
+- **`build` / `build --fold`**：落在构建（那几个小时）里的中断删掉本次 `.tmp` 后退
+  `130`，重跑即从头重建。落在**发布段**里的中断则**一个目录都不删**：上一代在
+  `{dir}.old`、这一代在 `{dir}.tmp`，命令会把两个路径连同恢复用的 `mv` 一起打出来。
+  在 `inspect` 显示出你预期的树之前不要删任何一个——那个 `.tmp` 可能是几个小时构建
+  成果的唯一副本。
 
 #### 两机 pin 清单
 
 | 项 | 要求 | 不符时 |
 | --- | --- | --- |
-| 代码版本（迁移账本） | 构建机 checkout 的迁移数 == 生产库 `silicon_schema_migrations` 的 `max(version)` | 组装仓库**之前**用裸连接预检，不等直接退出码 2 |
+| 代码版本（迁移账本） | 构建机 checkout 的迁移数 == 生产库 `silicon_schema_migrations` 的 `max(version)`，**且每条已记录的 checksum 与本 checkout 的 SQL 相同** | 组装仓库**之前**用裸连接预检，不等直接退出码 2。checksum 这一层挡的是「迁移条数相同、SQL 不同」（rebase、cherry-pick、手改过的文件） |
+| 笔记本身份 | `manifest.notebook_id` == `--notebook`（该键出现之前构建的包：`manifest.watermark_sources` 必须是本库 source id 的子集） | `import` 硬拒。校验里其它每一项（管线身份、维度、hnswlib）都是**部署级**事实，同一台机器上所有库都一样，所以少了这一条，`--notebook` 敲错就会把另一个库的索引发布到这里并开始服务 |
 | 已发布 indexing pipeline | `manifest.pipeline_identity` 与该 notebook 当前发布的身份一致 | `import` 硬拒（不符会让检索侧整体丢弃 scale 核并**静默**退化） |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | 生效维必须相同 | `import` 硬拒（不符会让 `open_ann` fail-open → **静默零召回**）；manifest 没有 `dim` 同样拒绝 |
 | hnswlib | **严格相等** | `import` 默认硬拒；`--allow-library-mismatch` 可覆盖。`ann.bin` 没有格式版本头，失配可能被 fail-open 吞成静默零召回；任一侧版本未知也按失配处理 |
@@ -790,8 +807,12 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 - 迁移账本预检另开一条裸连接，读完就关。
 
 `max_connections` 紧的部署要把「服务池上限 + 服务侧构建锁会话上限 + 同时在跑的 CLI 条数」
-一起算进去，否则新构建会以「busy」的形式失败（锁会话预算耗尽与「别人占着」共用同一个
-返回值，都表示「现在别建」）。
+一起算进去。两种拒绝都表示「现在别建」，但**分开上报**，因为只有一种是在说这个 notebook：
+
+- **别人占着**：服务侧报 `already_building`，既有的待办条目原样不动；CLI 退出码 `1`；
+- **没有空余锁会话**（本进程的预算耗尽）：服务侧把请求**存放**起来等下一个槽位并报
+  `queued`（也就是稍后真的会跑）；CLI 退出码 `1` 并在消息里点名预算，`inspect` 报
+  `build_claim: unknown`，而不是凭空说有人在建。
 
 #### PgBouncer 前提
 
@@ -812,7 +833,13 @@ mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
 
 `.tmp` 是本次构建的暂存。构建作废（swap 前复验持锁失败）时**刻意保留**它供排查，
 下一次构建会自己清掉；确认不需要时直接 `rm -rf` 即可。`inspect` 会把两类残留连同
-大小一起报告出来。Ctrl-C 时本命令会删掉**自己这次**staged 的 `.tmp` 并打印路径。
+大小一起报告出来。Ctrl-C 时本命令会删掉**自己这次**staged 的 `.tmp` 并打印路径——
+除非该根呈现「发布做到一半」的形态（旁边有 `.old`，或有 `.tmp` 却没有活目录），
+那时一个目录都不删，改为打印恢复用的 `mv`（见上面的 Ctrl-C 一节）。
+
+另外 `inspect` 的 `build_claim` 有三个取值：`free`、`held_elsewhere`、`unknown`。
+最后一个表示本进程没有空余的专用锁会话去探测，因此它是关于**这次 CLI 运行**的陈述，
+不是关于该 notebook 的（见上面的连接预算）。
 
 #### allow_pickle 来源约束（安全）
 

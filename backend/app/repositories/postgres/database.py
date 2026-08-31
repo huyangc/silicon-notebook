@@ -20,7 +20,8 @@ from app.core.config import Settings
 from app.core.database_url import database_identity, redact_database_url
 from app.repositories.postgres.rows import PostgresRow
 from app.repositories.scale_build_lock import (
-    ScaleBuildLock,
+    SCALE_BUILD_LOCK_UNAVAILABLE,
+    ScaleBuildLockAttempt,
     advisory_lock_key,
     advisory_lock_oid,
 )
@@ -594,15 +595,22 @@ class PostgresDatabase:
             except Exception:  # noqa: BLE001 - reported by the next statement
                 pass
 
-    def try_scale_build_lock(self, notebook_id: str) -> ScaleBuildLock | None:
+    def try_scale_build_lock(self, notebook_id: str) -> ScaleBuildLockAttempt:
         """Claim one notebook's scale-index build across processes, or fail fast.
 
-        Returns a held :class:`PostgresScaleBuildLock`, or ``None`` when the
-        claim is unavailable — another thread, another service process, or the
-        offline build CLI holds it, or this process has already spent its
-        budget of dedicated lock sessions. Every one of those means the same
-        thing to the caller (*do not build now*), so they deliberately share one
-        return value.
+        Three outcomes, per ``scale_build_lock``'s ``ScaleBuildLockAttempt``:
+
+        * a held :class:`PostgresScaleBuildLock`;
+        * ``None`` — ``pg_try_advisory_lock`` said somebody else owns this
+          notebook (another thread, another service process, the offline CLI);
+        * ``SCALE_BUILD_LOCK_UNAVAILABLE`` — this process has spent its budget
+          of dedicated lock sessions, so the claim was never even asked about.
+
+        The last two used to share ``None``. They are opposite facts: "held
+        elsewhere" is a true statement about the NOTEBOOK, while an exhausted
+        session budget is a fact about THIS PROCESS, and reporting it as
+        "already building" both lies and (with no queue entry behind it) loses
+        the request (codex W-CLI R1 P1-1).
 
         Non-blocking on purpose: admission runs on request-serving threads and
         an offline build legitimately runs for tens of minutes. Unlike
@@ -613,7 +621,7 @@ class PostgresDatabase:
         lock_key = advisory_lock_key(notebook_id)
         self._ensure_projection_lock_open()
         if not self._scale_build_lock_slots.acquire(blocking=False):
-            return None
+            return SCALE_BUILD_LOCK_UNAVAILABLE
         connection = None
         try:
             connection = self._open_scale_build_lock_connection()

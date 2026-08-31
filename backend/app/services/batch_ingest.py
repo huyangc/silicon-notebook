@@ -47,7 +47,7 @@ from app.services.maintenance_cli import (
     MaintenanceCliError,
     open_maintenance_cli_repository,
 )
-from app.repositories.scale_build_lock import ScaleBuildBusy
+from app.repositories.scale_build_lock import ScaleBuildBusy, ScaleBuildLockLost
 from app.repositories.ports import (
     BatchMaintenancePort,
     ExtractionProgress,
@@ -2329,6 +2329,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 2
             finally:
                 reset_request_user(user_token)
+    except ScaleBuildLockLost as exc:
+        # 与 CLI 的同一件事:swap 前复验发现锁没了→整次构建作废、`.tmp` 留盘、
+        # 一个字节都没发布。裸抛会在终端糊一段 traceback,而运维需要知道的是
+        # 「前序阶段成果都在库里、磁盘上多了一个可删的 .tmp、先查锁会话为什么死」
+        # (codex W-CLI R1 P2-7,消息与 scale_build_cli.run_build 保持一致)。
+        print(f"error: {exc}", file=sys.stderr)
+        print(
+            "scale 索引没有发布任何内容,上一代产物原样服务;staged 的 .tmp 目录"
+            "留在磁盘上供检查(确认后可删)。请先查清锁会话为何中断(空闲连接被"
+            "回收、数据库 failover、后端进程被杀),再重跑同一命令补索引这一步。",
+            file=sys.stderr,
+        )
+        return 1
     except ScaleBuildBusy as exc:
         # 停服闸只挡住「另一个维护命令」,挡不住与本命令并存的离线 scale 构建进程
         # (W-CLI 用的是 per-notebook 锁,不是全局维护锁)。取锁恒为「全局维护锁 →

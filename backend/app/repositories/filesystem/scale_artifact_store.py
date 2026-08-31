@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
+import threading
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -34,6 +36,89 @@ from app.services.kg import scale_index as scale_index_module
 from app.services.kg import viz_index as viz_index_module
 
 ScaleBuildArtifacts = Mapping[str, object]
+
+
+class SwapInterruptGuard:
+    """Defer ``SIGINT`` across a rename sequence.
+
+    The renames in ``swap_staging_directory`` are the only steps that destroy a
+    published artifact, and they are milliseconds long. A ``KeyboardInterrupt``
+    landing between ``live → .old`` and ``tmp → live`` leaves the notebook with
+    no live index at all AND escapes the rollback there (which catches
+    ``Exception``, not ``BaseException``) — the one window in a build where
+    Ctrl-C loses data. Worse, the offline CLI's interrupt cleanup would then
+    delete the ``.tmp`` that holds the hours of work just staged. So the signal
+    is recorded and re-raised after the sequence completes.
+
+    Lives here, beside the primitive, rather than in the CLI that first grew it:
+    a build's publish step is reached only through the store, so the CLI has no
+    other seam at which to protect it (codex W-CLI R1 B1).
+
+    Two properties make it safe to install on a production path:
+
+    * off the main thread (the service's build workers) installing a handler is
+      impossible, so the guard is a no-op there rather than a crash;
+    * nesting is a no-op too — an outer guard (the CLI wraps a whole multi-root
+      publish in one) keeps ownership of the deferral, so an inner guard cannot
+      chop that sequence into per-root pieces.
+
+    ``reraise=False`` hands the decision back to the caller, which then reads
+    ``interrupted`` / ``completed``: an interrupt that arrived while the guarded
+    block ran to completion did not stop anything, and reporting it as a failure
+    would be a false alarm.
+    """
+
+    def __init__(
+        self,
+        report: Optional[Callable[[str], None]] = None,
+        *,
+        reraise: bool = True,
+    ) -> None:
+        self._report = report
+        self._reraise = reraise
+        self._previous = None
+        self._installed = False
+        self.interrupted = False
+        self.completed = False
+
+    def _handle(self, _signum, _frame) -> None:
+        self.interrupted = True
+        if self._report is not None:
+            self._report(
+                "interrupt received during the artifact swap; finishing the "
+                "rename sequence first (this takes milliseconds)"
+            )
+
+    def __enter__(self) -> "SwapInterruptGuard":
+        # Signal handlers can only be installed on the main thread; a worker
+        # thread simply gets no masking rather than a crash.
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        previous = signal.getsignal(signal.SIGINT)
+        if isinstance(getattr(previous, "__self__", None), SwapInterruptGuard):
+            # Already inside somebody else's deferral window; taking it over
+            # would end that window early, at this block's exit.
+            return self
+        if previous is None:
+            # ``getsignal`` returns None when the current handler was installed
+            # from C, which this cannot put back (``signal.signal(sig, None)``
+            # raises). Masking that nobody can undo is worse than not masking.
+            return self
+        self._previous = previous
+        signal.signal(signal.SIGINT, self._handle)
+        self._installed = True
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self._installed:
+            signal.signal(signal.SIGINT, self._previous)
+            self._installed = False
+        self.completed = exc_type is None
+        # Only re-raise when the guarded block itself succeeded: a real failure
+        # is the more informative one and must not be replaced.
+        if self.interrupted and self.completed and self._reraise:
+            raise KeyboardInterrupt
+        return False
 
 
 class ScaleArtifactStore:
@@ -173,6 +258,14 @@ class ScaleArtifactStore:
         return viz_index_module.load_viz_index(str(self.viz_dir(notebook_id)))
 
     def save_viz(self, notebook_id: str, artifacts: Mapping) -> dict:
+        # Registered, not fixed (codex W-CLI R1 N3): the ONLINE viz write lands
+        # straight in the live directory with no staging, so a crash mid-write
+        # can leave a half-written viz root. Its readers already treat a
+        # unreadable/absent viz as "no viz" (fail-soft, the graph view degrades
+        # to the main index), and the offline ``import`` does publish this root
+        # through the tmp+rename primitive; converting the online writer is an
+        # artifact-format-adjacent change with its own peak-disk cost and does
+        # not belong in this review batch.
         return viz_index_module.save_viz_index(
             str(self.viz_dir(notebook_id)), **artifacts
         )
@@ -375,26 +468,32 @@ class ScaleArtifactStore:
                 f"{out_dir}; nothing was published and the staged build "
                 f"remains at {out_dir}.tmp"
             )
-        old_dir = out_dir + ".old"
-        if os.path.exists(old_dir):
-            shutil.rmtree(old_dir)
-        preserved = os.path.exists(out_dir)
-        if preserved:
-            os.rename(out_dir, old_dir)
-        try:
-            os.rename(str(temporary), out_dir)
-        except Exception as publish_error:
+        # Everything below is the destructive part, and Ctrl-C landing inside it
+        # is the only way this process can leave a notebook with no live index
+        # (the rollback below catches ``Exception``, which a KeyboardInterrupt
+        # is not). Deferred, not ignored: the interrupt is re-raised the instant
+        # the sequence is complete. See ``SwapInterruptGuard``.
+        with SwapInterruptGuard():
+            old_dir = out_dir + ".old"
+            if os.path.exists(old_dir):
+                shutil.rmtree(old_dir)
+            preserved = os.path.exists(out_dir)
             if preserved:
-                try:
-                    os.rename(old_dir, out_dir)
-                except Exception as rollback_error:
-                    publish_error.add_note(
-                        "scale artifact rollback failed; previous artifact "
-                        f"remains at {old_dir}: {rollback_error!r}"
-                    )
-            raise
-        if preserved:
-            shutil.rmtree(old_dir, ignore_errors=True)
+                os.rename(out_dir, old_dir)
+            try:
+                os.rename(str(temporary), out_dir)
+            except Exception as publish_error:
+                if preserved:
+                    try:
+                        os.rename(old_dir, out_dir)
+                    except Exception as rollback_error:
+                        publish_error.add_note(
+                            "scale artifact rollback failed; previous artifact "
+                            f"remains at {old_dir}: {rollback_error!r}"
+                        )
+                raise
+            if preserved:
+                shutil.rmtree(old_dir, ignore_errors=True)
 
     def prepare_fold_directory(self, notebook_id: str) -> Path:
         """Staging for BOTH fold and full rebuild (the name predates save_full

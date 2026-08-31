@@ -31,9 +31,7 @@ import argparse
 import json
 import os
 import shutil
-import signal
 import sys
-import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,7 +39,12 @@ from typing import Callable, Iterator, Optional
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
-from app.repositories.scale_build_lock import ScaleBuildBusy, ScaleBuildLockLost
+from app.repositories.filesystem.scale_artifact_store import SwapInterruptGuard
+from app.repositories.scale_build_lock import (
+    SCALE_BUILD_LOCK_UNAVAILABLE,
+    ScaleBuildBusy,
+    ScaleBuildLockLost,
+)
 from app.services.kg.scale_index import (
     MANIFEST_LIBRARY_KEY,
     runtime_library_versions,
@@ -105,15 +108,18 @@ class ScaleBuildCliFailure(RuntimeError):
 
 # ─────────────────────────────────────────────────────── migration ledger ──
 
-def packaged_migration_count() -> int:
-    """How many migrations this checkout carries."""
+def packaged_migrations() -> tuple:
+    """The migrations this checkout carries, in version order."""
     from app.repositories.postgres import migrator as migrator_module
 
-    return len(
-        migrator_module.load_migrations(
-            Path(migrator_module.__file__).with_name("migrations")
-        )
+    return migrator_module.load_migrations(
+        Path(migrator_module.__file__).with_name("migrations")
     )
+
+
+def packaged_migration_count() -> int:
+    """How many migrations this checkout carries."""
+    return len(packaged_migrations())
 
 
 def verify_migration_ledger(database_url: str) -> tuple[int, int]:
@@ -125,12 +131,27 @@ def verify_migration_ledger(database_url: str) -> tuple[int, int]:
     columns the live service does not have, or misses ones it does, and the
     artifact it produces is quietly wrong rather than loudly broken.
 
+    The count alone is not that evidence (codex W-CLI R1 P2-8). Two checkouts
+    can carry the same NUMBER of migrations and different SQL — a rebased
+    branch, a cherry-pick, an edited file — and the ledger already stores the
+    per-migration checksum the service's own migrator validates on startup. So
+    this compares every recorded checksum, not just ``max(version)``; one extra
+    column on a query that was already being issued.
+
     Read on a bare connection, before the repository (and its pool) exists, so a
     refusal costs one connection and leaves no trace in the live database.
     """
     import psycopg
 
-    expected = packaged_migration_count()
+    migrations = packaged_migrations()
+    expected = len(migrations)
+    # Registered, not fixed (codex W-CLI R1 N4): this is the one connection in
+    # the command that is NOT wrapped by the pool's credential-safe error
+    # rendering, so a psycopg connection failure here can surface a message
+    # naming the host/user (never the password — libpq redacts it, and this
+    # process is the operator's own shell). Routing it through
+    # ``PostgresDatabase`` would mean composing the pool before the very check
+    # that decides whether composing is safe.
     with psycopg.connect(database_url, autocommit=True) as connection:
         present = connection.execute(
             "SELECT to_regclass('silicon_schema_migrations') IS NOT NULL"
@@ -141,16 +162,30 @@ def verify_migration_ledger(database_url: str) -> tuple[int, int]:
                 "this CLI never migrates — start the service (or a maintenance "
                 "CLI) against it once before building here"
             )
-        row = connection.execute(
-            "SELECT max(version) FROM silicon_schema_migrations"
-        ).fetchone()
-    applied = int(row[0]) if row and row[0] is not None else 0
+        rows = connection.execute(
+            "SELECT version, checksum FROM silicon_schema_migrations "
+            "ORDER BY version"
+        ).fetchall()
+    applied = max((int(row[0]) for row in rows), default=0)
     if applied != expected:
         raise ScaleBuildCliError(
             f"migration ledger mismatch: the database is at version {applied}, "
             f"this checkout carries {expected}. Check out the exact revision the "
             "service is running (this CLI deliberately does not migrate)."
         )
+    for version, checksum in ((int(row[0]), row[1]) for row in rows):
+        if not 1 <= version <= expected:
+            raise ScaleBuildCliError(
+                f"migration ledger mismatch: the database records version "
+                f"{version}, which this checkout does not carry."
+            )
+        if checksum != migrations[version - 1].checksum:
+            raise ScaleBuildCliError(
+                f"migration checksum mismatch at version {version}: the "
+                "database was migrated by different SQL than this checkout "
+                "carries under the same version number. Check out the exact "
+                "revision the service is running."
+            )
     return applied, expected
 
 
@@ -216,8 +251,51 @@ def open_scale_build_repository(settings: Settings) -> Iterator[object]:
         repository.close()
 
 
+def require_safe_notebook_id(store, notebook_id: str) -> None:
+    """Refuse an id that would aim this command's ``rmtree``s somewhere else.
+
+    The notebook id is an operator-typed string that becomes the last path
+    segment of three directories this CLI creates, renames and — via
+    ``prepare_staging_directory`` — ``rmtree``s. A separator or a ``..`` in it
+    escapes the storage tree entirely: ``--notebook ../../etc`` would have
+    ``{storage}/kg_index/../../etc.tmp`` removed recursively (codex W-CLI R1
+    P2-5). Two independent checks, because either alone can be argued around:
+    the syntactic one is what an operator can read off the error message, and
+    the containment one holds even if the layout, or a symlinked storage root,
+    ever changes.
+    """
+    separators = [os.sep, "/", "\0"]
+    if os.altsep:
+        separators.append(os.altsep)
+    if (
+        not notebook_id
+        or notebook_id in (".", "..")
+        or any(marker in notebook_id for marker in separators)
+    ):
+        raise ScaleBuildCliError(
+            f"{notebook_id!r} is not a usable notebook id: it must be a single "
+            "path segment (no separators, not '.' or '..')"
+        )
+    root = Path(str(store.settings.storage_dir)).resolve()
+    for live in (
+        store.scale_dir(notebook_id),
+        store.viz_dir(notebook_id),
+        store.source_partition_dir(notebook_id),
+    ):
+        if not Path(str(live)).resolve().is_relative_to(root):
+            raise ScaleBuildCliError(
+                f"the artifact directory for {notebook_id!r} resolves outside "
+                f"the storage root {root}; refusing to touch it"
+            )
+
+
 def artifact_roots(store, notebook_id: str) -> dict[str, Path]:
-    """The three independent on-disk roots one notebook's index spans."""
+    """The three independent on-disk roots one notebook's index spans.
+
+    Every subcommand starts here, which is why the id guard lives here: it is
+    the one function all four paths must call before naming a directory.
+    """
+    require_safe_notebook_id(store, notebook_id)
     return {
         MAIN_ROOT: Path(str(store.scale_dir(notebook_id))),
         "kg_viz": Path(str(store.viz_dir(notebook_id))),
@@ -235,6 +313,12 @@ def claim_notebook(repository, notebook_id: str) -> Iterator[object]:
     """
     database = repository._runtime.database  # noqa: SLF001 — CLI composition root
     handle = database.try_scale_build_lock(notebook_id)
+    if handle is SCALE_BUILD_LOCK_UNAVAILABLE:
+        raise ScaleBuildCliFailure(
+            f"the scale-build claim for {notebook_id} could not be evaluated: "
+            "this process has no dedicated lock session left. Nothing was "
+            "changed; retry once the other builds on this host finish."
+        )
     if handle is None:
         raise ScaleBuildCliFailure(
             f"the scale-build claim for {notebook_id} is held by another process "
@@ -249,47 +333,27 @@ def claim_notebook(repository, notebook_id: str) -> Iterator[object]:
 
 # ─────────────────────────────────────────────────── interrupt handling ──
 
-class SwapInterruptGuard:
-    """Defer ``SIGINT`` across the rename sequence.
+# ``SwapInterruptGuard`` (imported above) is defined beside the publish
+# primitive it protects: a build's publish step is reached only through the
+# store, so masking SIGINT from here would have covered ``import`` and nothing
+# else. This module still wraps the multi-root import publish in one guard —
+# nesting is a no-op, so the outer one owns the whole sequence.
 
-    The renames are the only steps that destroy a published artifact, and they
-    are milliseconds long. A ``KeyboardInterrupt`` landing between the
-    ``live → .old`` and ``tmp → live`` renames leaves the notebook with no live
-    index at all — the one window in the whole command where Ctrl-C can lose
-    data. So the signal is recorded and re-raised after the sequence completes.
+
+def publish_started(live) -> bool:
+    """Filesystem evidence that this root's rename sequence had BEGUN.
+
+    ``{live}.old`` exists only between the two renames (it is removed as the
+    last step), and "``.tmp`` present while ``live`` is absent" is the same
+    moment seen from the other side. Either means the ``.tmp`` may already be
+    the only copy of a generation, so it must not be deleted as "abandoned
+    staging" — which is exactly what an interrupt cleanup would otherwise do
+    with hours of work (codex W-CLI R1 B1).
     """
-
-    def __init__(self, report: Callable[[str], None]) -> None:
-        self._report = report
-        self._previous = None
-        self._installed = False
-        self.interrupted = False
-
-    def _handle(self, _signum, _frame) -> None:
-        self.interrupted = True
-        self._report(
-            "interrupt received during the artifact swap; finishing the rename "
-            "sequence first (this takes milliseconds)"
-        )
-
-    def __enter__(self) -> "SwapInterruptGuard":
-        # Signal handlers can only be installed on the main thread; a worker
-        # thread simply gets no masking rather than a crash.
-        if threading.current_thread() is threading.main_thread():
-            self._previous = signal.getsignal(signal.SIGINT)
-            signal.signal(signal.SIGINT, self._handle)
-            self._installed = True
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        if self._installed:
-            signal.signal(signal.SIGINT, self._previous)
-            self._installed = False
-        # Only re-raise when the guarded block itself succeeded: a real failure
-        # is the more informative one and must not be replaced.
-        if self.interrupted and exc_type is None:
-            raise KeyboardInterrupt
-        return False
+    path = str(live)
+    if os.path.exists(path + ".old"):
+        return True
+    return os.path.exists(path + ".tmp") and not os.path.exists(path)
 
 
 def discard_staging(paths, report: Callable[[str], None]) -> None:
@@ -301,6 +365,34 @@ def discard_staging(paths, report: Callable[[str], None]) -> None:
                 report(f"removed staged build directory {path}")
         except OSError as error:  # noqa: PERF203 - one report per root
             report(f"could not remove staged build directory {path}: {error!r}")
+
+
+def discard_staging_unless_publishing(
+    roots, report: Callable[[str], None]
+) -> None:
+    """Interrupt cleanup that can tell staging from a half-finished publish.
+
+    ``roots`` maps each live directory to the ``.tmp`` this run staged for it.
+    If ANY root shows publish evidence the whole cleanup is skipped and the
+    recovery is printed instead: a publish sequence that was cut in half has the
+    previous generation in ``{live}.old`` and the new one in ``{live}.tmp``, and
+    deleting either is the data loss.
+    """
+    interrupted_publish = [live for live in roots if publish_started(live)]
+    if not interrupted_publish:
+        discard_staging(list(roots.values()), report)
+        return
+    for live in interrupted_publish:
+        report(
+            f"the publish of {live} was interrupted between renames; nothing "
+            f"was deleted. The previous generation is at {live}.old (restore "
+            f"with `mv {live}.old {live}`) and this run's build is at "
+            f"{live}.tmp"
+        )
+    report(
+        "staged directories are kept for every root of this notebook; run "
+        "`inspect` once the tree is restored"
+    )
 
 
 # ──────────────────────────────────────────────────────────── validation ──
@@ -395,9 +487,65 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
     return None
 
 
+def _require_package_belongs_to(
+    manifest: dict, main: Path, notebook_id: str, known_source_ids
+) -> None:
+    """Refuse a package that is not provably this notebook's index.
+
+    Nothing else in the validation notices a typo in ``--notebook``: pipeline
+    identity, dim and hnswlib are all DEPLOYMENT-wide facts, identical for every
+    library on the host. So ``import --notebook nb-B --from <nb-A's pack>``
+    passed every gate, published library A's artifacts into library B's
+    directories, and B started serving them — the retrieval side reads the
+    manifest that arrived and never compares it against the database
+    (codex W-CLI R1 P1-2).
+
+    Two bindings, in order of strength:
+
+    1. ``manifest["notebook_id"]``, written by every build from this revision on
+       — exact match required;
+    2. for artifacts built before that key existed: ``watermark_sources`` (the
+       source ids the index was built over) must be a subset of this notebook's
+       source ids. A foreign package fails it on the first id; a legitimate
+       older package can only have sources this notebook still has, or fewer.
+
+    A package that offers neither is refused. That is a deliberate fail-closed:
+    every artifact this codebase has ever written carries ``watermark_sources``
+    (the delta scan needs it), so "neither key" means an artifact this tool
+    cannot vouch for at all.
+    """
+    recorded = manifest.get("notebook_id")
+    if isinstance(recorded, str) and recorded:
+        if recorded != notebook_id:
+            raise ScaleBuildCliError(
+                f"this package belongs to notebook {recorded!r}, not "
+                f"{notebook_id!r}. Importing it would publish another "
+                "library's index here and start serving it."
+            )
+        return
+    watermark = manifest.get("watermark_sources")
+    if not isinstance(watermark, list) or not watermark:
+        raise ScaleBuildCliError(
+            f"{main}/manifest.json carries neither notebook_id nor "
+            "watermark_sources, so it cannot be shown to belong to "
+            f"{notebook_id!r}. Rebuild the package with a current checkout."
+        )
+    foreign = sorted(set(map(str, watermark)) - set(known_source_ids()))
+    if foreign:
+        raise ScaleBuildCliError(
+            f"this package was built over sources {notebook_id!r} does not "
+            f"have ({', '.join(foreign[:3])}"
+            f"{'…' if len(foreign) > 3 else ''}); it is another library's "
+            "index. (This package predates the manifest's notebook_id, so the "
+            "watermark is the only binding available.)"
+        )
+
+
 def validate_import_package(
     package: Path,
     *,
+    expected_notebook_id: str,
+    known_source_ids,
     expected_pipeline_identity,
     runtime_dim: int,
     runtime_libraries: dict,
@@ -406,12 +554,18 @@ def validate_import_package(
     """Everything that must be true before a foreign package touches live disk.
 
     Returns ``(main manifest, warnings)``; every refusal raises.
+    ``known_source_ids`` is a callable, not a list: on a 48k-source library it
+    is a full column read, and only the legacy binding path below needs it.
 
-    The first three checks refuse rather than warn because each failure mode is
+    The first four checks refuse rather than warn because each failure mode is
     *silent* at serve time. The standing redline for this whole batch is
     "answer quality does not change", and an index that quietly answers nothing
-    is the worst possible violation of it:
+    — or answers from another library — is the worst possible violation of it:
 
+    0. ``notebook_id`` / ``watermark_sources`` — which LIBRARY this package
+       describes (see ``_require_package_belongs_to``). Everything else here is
+       a deployment-wide fact, so this is the only check a typo in
+       ``--notebook`` cannot walk past.
     1. ``pipeline_identity`` — a mismatched identity makes the retrieval side
        discard the scale core wholesale (``scale_artifact_catalog``'s pipeline
        gate) and fall back to live retrieval, with no error anywhere.
@@ -439,6 +593,9 @@ def validate_import_package(
         raise ScaleBuildCliError(f"{main} has no manifest.json")
     if manifest.get("version") is None:
         raise ScaleBuildCliError(f"{main}/manifest.json has no version")
+    _require_package_belongs_to(
+        manifest, main, expected_notebook_id, known_source_ids
+    )
 
     warnings: list[str] = []
 
@@ -584,7 +741,12 @@ def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> 
     # would make an inspection block a real build.
     database = runtime.database
     probe = database.try_scale_build_lock(notebook_id)
-    if probe is None:
+    if probe is SCALE_BUILD_LOCK_UNAVAILABLE:
+        # Says nothing about the notebook — only that this process could not ask
+        # (no lock session left). Reporting it as "held_elsewhere" would send an
+        # operator looking for a builder that may not exist.
+        lock_state = "unknown"
+    elif probe is None:
         lock_state = "held_elsewhere"
     else:
         probe.release()
@@ -654,12 +816,17 @@ def run_build(
     companion when the deployment's switch is on — so the offline path and the
     online path are literally the same code, which is the only way "the offline
     builder produces what the service would have produced" stays true.
+
+    The publish step is masked against ``SIGINT`` inside the store's swap
+    primitive, which is the only seam this path has: a build's renames happen
+    deep inside ``build_scale_index``, hours after this frame started, and
+    masking from here would mean masking Ctrl-C for the whole build.
     """
     store = repository._runtime.scale_artifact_store  # noqa: SLF001
-    staging = [
-        Path(str(live) + ".tmp")
+    staging = {
+        live: Path(str(live) + ".tmp")
         for live in artifact_roots(store, notebook_id).values()
-    ]
+    }
     started = time.perf_counter()
     try:
         if mode == "fold":
@@ -670,10 +837,18 @@ def run_build(
 
             result = repository.build_scale_index(notebook_id, on_stage)
     except KeyboardInterrupt:
-        # An interrupted build leaves an incomplete ``.tmp`` behind; the next
-        # build would discard it anyway, so remove it now and say where it was
-        # rather than leaving a multi-GB directory unexplained.
-        discard_staging(staging, report)
+        # An interrupted build usually leaves an incomplete ``.tmp`` behind; the
+        # next build would discard it anyway, so remove it now and say where it
+        # was rather than leaving a multi-GB directory unexplained.
+        #
+        # Usually — but not when the interrupt landed inside the publish
+        # sequence (the swap guard makes that a narrow, deferred window rather
+        # than an impossible one; a second signal source, a hard kill mid-rename
+        # on a previous run, or an unmasked worker thread can all still produce
+        # it). There the ``.tmp`` is not abandoned staging, it is one of the two
+        # copies of the index that exist — deleting it while the live directory
+        # sits in ``.old`` is how hours of work disappear (codex W-CLI R1 B1).
+        discard_staging_unless_publishing(staging, report)
         raise
     except ScaleBuildBusy as error:
         raise ScaleBuildCliFailure(
@@ -748,18 +923,36 @@ def run_import(
     tree); it happens entirely in ``.tmp`` directories with the live tree
     untouched. Only when every root is staged does the claim get re-verified and
     the renames run, under ``SIGINT`` masking.
+
+    Registered, not fixed (codex W-CLI R1 N3): each root's rename is atomic, the
+    SET of three is not. A hard kill (SIGKILL, power loss) between two of them
+    leaves companion/viz from the new generation beside a main index from the
+    old one. That state is fail-soft by construction — the companion's
+    ``parent_version`` gate makes it unreadable rather than wrong, and viz is
+    advisory — which is exactly why the publish order is companion → viz → main.
+    A cross-root journal is the only thing that would close it, and it would buy
+    nothing the ordering does not already give.
     """
     runtime = repository._runtime  # noqa: SLF001
     store = runtime.scale_artifact_store
     roots = artifact_roots(store, notebook_id)
     settings = repository.settings
+    projections = runtime.index_projections
+    # An unknown notebook must be refused HERE, not left to the validation
+    # below: ``pipeline_identity`` answers with the builtin default for a
+    # notebook that has no ``unified_kg_state`` row rather than raising, so a
+    # mistyped id would sail past the identity gate and publish a directory tree
+    # for a library that does not exist (codex W-CLI R1 P1-2). This is the same
+    # cheap tier read ``status()`` uses to keep its missing-notebook contract.
+    if projections.notebook_tier(notebook_id) is None:
+        raise ScaleBuildCliError(f"unknown notebook: {notebook_id}")
 
     with claim_notebook(repository, notebook_id) as handle:
         manifest, warnings = validate_import_package(
             package,
-            expected_pipeline_identity=runtime.index_projections.pipeline_identity(
-                notebook_id
-            ),
+            expected_notebook_id=notebook_id,
+            known_source_ids=lambda: projections.source_ids(notebook_id),
+            expected_pipeline_identity=projections.pipeline_identity(notebook_id),
             runtime_dim=_runtime_dim(settings),
             runtime_libraries=_runtime_libraries(),
             allow_library_mismatch=allow_library_mismatch,
@@ -769,6 +962,11 @@ def run_import(
 
         staged: dict[str, Path] = {}
         published: list[str] = []
+        # One guard around ALL the renames, not one per root: an interrupt
+        # between two roots would leave the pair mismatched (fail-soft, but
+        # avoidable), and the whole sequence is milliseconds. ``reraise`` is off
+        # because this frame can tell the two interrupt cases apart — see below.
+        guard = SwapInterruptGuard(report, reraise=False)
         try:
             for name in PUBLISH_ORDER:
                 source = package / name
@@ -779,7 +977,7 @@ def run_import(
                 shutil.copytree(source, target, dirs_exist_ok=True)
                 report(f"staged {name}")
 
-            with SwapInterruptGuard(report):
+            with guard:
                 for name in PUBLISH_ORDER:
                     if name not in staged:
                         continue
@@ -799,11 +997,25 @@ def run_import(
             ) from None
         except BaseException:
             # Covers a staging failure (nothing renamed yet, live tree pristine)
-            # and Ctrl-C. Only this run's own ``.tmp`` directories are removed.
+            # and Ctrl-C. Only this run's own ``.tmp`` directories are removed —
+            # and only those that are not half-published (see B1 above).
             if published:
                 report(f"already published before the failure: {published}")
-            discard_staging(list(staged.values()), report)
+            discard_staging_unless_publishing(
+                {roots[name]: path for name, path in staged.items()}, report
+            )
             raise
+        if guard.interrupted:
+            # The interrupt arrived while the renames were being deferred and
+            # they all completed. Nothing was abandoned, so this exits 0 with
+            # the ordinary receipt: raising here would print "interrupted" and
+            # return 130 for a publish that fully succeeded, sending an operator
+            # to check a tree that is exactly as they asked for it
+            # (codex W-CLI R1 P2-6).
+            report(
+                "the deferred interrupt is being honoured now: every root was "
+                "published before it could take effect, so this run completed"
+            )
 
     return {
         "notebook_id": notebook_id,

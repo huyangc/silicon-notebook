@@ -18,8 +18,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
-from app.repositories.scale_build_lock import ScaleBuildLockLost
+from app.repositories.filesystem.scale_artifact_store import (
+    ScaleArtifactStore,
+    SwapInterruptGuard,
+)
+from app.repositories.scale_build_lock import (
+    SCALE_BUILD_LOCK_UNAVAILABLE,
+    ScaleBuildLockLost,
+)
 from app.services import scale_build_cli as cli
 
 FIXTURES = (
@@ -63,11 +69,21 @@ class _Database:
 
 
 class _Projections:
-    def __init__(self, identity) -> None:
+    def __init__(self, identity, *, sources=("s-1", "s-2"), tier="base") -> None:
         self._identity = identity
+        self._sources = list(sources)
+        self._tier = tier
+        self.source_id_reads = 0
 
     def pipeline_identity(self, _notebook_id: str):
         return self._identity
+
+    def notebook_tier(self, _notebook_id: str):
+        return self._tier
+
+    def source_ids(self, _notebook_id: str):
+        self.source_id_reads += 1
+        return list(self._sources)
 
 
 class _Runtime:
@@ -115,6 +131,8 @@ def _write_manifest(directory: Path, payload: dict) -> None:
 def _main_manifest(**overrides) -> dict:
     manifest = {
         "version": ["nb-1", 7],
+        "notebook_id": "nb-1",
+        "watermark_sources": ["s-1"],
         "pipeline_identity": list(PIPELINE),
         "dim": 4,
         "n_nodes": 2,
@@ -139,6 +157,8 @@ def _package(tmp_path, *, name: str = "package", companion=None, **overrides) ->
 
 def _validate(package: Path, **kwargs):
     arguments = {
+        "expected_notebook_id": "nb-1",
+        "known_source_ids": lambda: ["s-1", "s-2"],
         "expected_pipeline_identity": PIPELINE,
         "runtime_dim": 4,
         "runtime_libraries": dict(LIBRARIES),
@@ -478,6 +498,208 @@ def test_a_refused_package_never_reaches_the_disk(repository, store, tmp_path):
     assert not Path(str(store.scale_dir("nb-1")) + ".tmp").exists()
 
 
+def test_a_deferred_interrupt_that_published_everything_is_not_a_failure(
+    repository, store, tmp_path
+):
+    """codex W-CLI R1 P2-6. Ctrl-C during the renames is deferred; if every
+    root then lands, nothing was abandoned. Re-raising there printed
+    "interrupted" and returned 130 for a publish that fully succeeded."""
+    _seed_live(store, "nb-1")
+    original = ScaleArtifactStore.swap_staging_directory
+    delivered: list[int] = []
+
+    def swap_and_signal(live, temporary, **kwargs):
+        original(live, temporary, **kwargs)
+        if not delivered:
+            delivered.append(1)
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+
+    store.swap_staging_directory = swap_and_signal  # type: ignore[method-assign]
+    messages: list[str] = []
+    receipt = cli.run_import(
+        repository,
+        "nb-1",
+        _full_package(tmp_path),
+        allow_library_mismatch=False,
+        report=messages.append,
+    )
+
+    assert receipt["roots"] == list(cli.PUBLISH_ORDER)
+    assert _published_version(store, "nb-1") == ["nb-1", 7]
+    assert any("deferred interrupt" in message for message in messages)
+
+
+# ───────────────────────────────────────────────── which library is this ──
+
+def test_a_package_built_for_another_notebook_is_refused(tmp_path):
+    """codex W-CLI R1 P1-2. Pipeline identity, dim and hnswlib are
+    deployment-wide facts — identical for every library on the host — so a
+    mistyped ``--notebook`` walked past all of them and published library A's
+    index into library B. Mutation anchor: drop the notebook binding and this
+    goes green while the wrong library starts serving."""
+    package = _package(tmp_path, notebook_id="nb-other")
+    with pytest.raises(cli.ScaleBuildCliError, match="belongs to notebook"):
+        _validate(package)
+
+
+def test_a_legacy_package_is_bound_by_its_watermark_sources(tmp_path):
+    """Artifacts built before the manifest carried ``notebook_id`` are still
+    bound: the sources they were built over must be sources this notebook
+    has."""
+    manifest = _main_manifest()
+    manifest.pop("notebook_id")
+    package = _package(tmp_path)
+    _write_manifest(package / cli.MAIN_ROOT, manifest)
+    _validate(package)  # {"s-1"} ⊆ {"s-1", "s-2"}
+
+    manifest["watermark_sources"] = ["s-1", "s-from-another-library"]
+    _write_manifest(package / cli.MAIN_ROOT, manifest)
+    with pytest.raises(cli.ScaleBuildCliError, match="does not have"):
+        _validate(package)
+
+
+def test_a_package_with_no_binding_at_all_is_refused(tmp_path):
+    """Fail closed: every artifact this codebase writes carries a watermark,
+    so "neither key" is an artifact this tool cannot vouch for."""
+    manifest = _main_manifest()
+    manifest.pop("notebook_id")
+    manifest.pop("watermark_sources")
+    package = _package(tmp_path)
+    _write_manifest(package / cli.MAIN_ROOT, manifest)
+    with pytest.raises(cli.ScaleBuildCliError, match="neither notebook_id"):
+        _validate(package)
+
+
+def test_the_watermark_is_only_read_when_the_manifest_has_no_notebook_id(
+    repository, store, tmp_path
+):
+    """A 48k-source library makes that a full column read; the strong binding
+    must not pay for it."""
+    _seed_live(store, "nb-1")
+    projections = repository._runtime.index_projections
+    cli.run_import(
+        repository,
+        "nb-1",
+        _full_package(tmp_path),
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+    assert projections.source_id_reads == 0
+
+
+def test_an_unknown_notebook_is_refused_before_anything_is_staged(
+    storage, store, tmp_path, lock
+):
+    """``pipeline_identity`` answers with the builtin default for a notebook
+    with no state row instead of raising, so the identity gate cannot catch a
+    typo; the tier read can."""
+    repository = _Repository(
+        storage, store, _Database(lock), _Projections(PIPELINE, tier=None)
+    )
+    with pytest.raises(cli.ScaleBuildCliError, match="unknown notebook"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+    assert not Path(str(store.scale_dir("nb-1")) + ".tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "notebook_id", ["../../etc", "nb/../..", "", ".", "a/b"]
+)
+def test_a_notebook_id_that_escapes_the_storage_root_is_refused(
+    store, notebook_id
+):
+    """codex W-CLI R1 P2-5: the id becomes the last path segment of three
+    directories this CLI creates, renames and ``rmtree``s."""
+    with pytest.raises(cli.ScaleBuildCliError):
+        cli.artifact_roots(store, notebook_id)
+
+
+def test_a_traversing_notebook_id_never_reaches_the_staging_rmtree(
+    repository, store, tmp_path
+):
+    # {storage}/kg_index/../../victim.tmp is what prepare_staging_directory
+    # would rmtree for --notebook ../../victim.
+    victim = Path(str(store.settings.storage_dir)).parent / "victim.tmp"
+    victim.mkdir(parents=True)
+    (victim / "keep").write_text("data", encoding="utf-8")
+
+    with pytest.raises(cli.ScaleBuildCliError):
+        cli.run_import(
+            repository,
+            "../../victim",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+    assert (victim / "keep").exists()
+
+
+# ─────────────────────────────────────────────────── build interruption ──
+
+class _BuildRepository(_Repository):
+    def __init__(self, settings, store, database, projections, build) -> None:
+        super().__init__(settings, store, database, projections)
+        self._build = build
+
+    def build_scale_index(self, notebook_id, on_stage=None):
+        return self._build(notebook_id)
+
+
+def test_an_interrupt_before_the_publish_removes_this_run_s_staging(
+    storage, store, lock, tmp_path
+):
+    _seed_live(store, "nb-1")
+    live = Path(store.scale_dir("nb-1"))
+
+    def build(_notebook_id):
+        store.prepare_staging_directory(live)
+        raise KeyboardInterrupt
+
+    repository = _BuildRepository(
+        storage, store, _Database(lock), _Projections(PIPELINE), build
+    )
+    messages: list[str] = []
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_build(repository, "nb-1", mode="full", report=messages.append)
+
+    assert not Path(str(live) + ".tmp").exists()
+    assert (live / "manifest.json").is_file()
+
+
+def test_an_interrupt_inside_the_publish_keeps_both_copies(
+    storage, store, lock, tmp_path
+):
+    """codex W-CLI R1 B1, the loss the reviewer found: the ``.tmp`` between the
+    two renames is not abandoned staging, it is one of the two copies of the
+    index that exist — and the previous generation is sitting in ``.old``.
+    Deleting it there discards hours of work. Mutation anchor: call
+    ``discard_staging`` unconditionally here and the staged build disappears."""
+    _seed_live(store, "nb-1")
+    live = Path(store.scale_dir("nb-1"))
+
+    def build(_notebook_id):
+        staged = store.prepare_staging_directory(live)
+        (staged / "manifest.json").write_text("{}", encoding="utf-8")
+        os.rename(live, str(live) + ".old")  # the first of the two renames
+        raise KeyboardInterrupt
+
+    repository = _BuildRepository(
+        storage, store, _Database(lock), _Projections(PIPELINE), build
+    )
+    messages: list[str] = []
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_build(repository, "nb-1", mode="full", report=messages.append)
+
+    assert Path(str(live) + ".tmp").is_dir(), "the new generation must survive"
+    assert Path(str(live) + ".old").is_dir(), "so must the previous one"
+    assert any(f"mv {live}.old {live}" in message for message in messages)
+
+
 # ──────────────────────────────────────────────────────────────── export ──
 
 def test_export_copies_every_present_root_under_the_claim(
@@ -557,6 +779,86 @@ def test_the_swap_guard_does_not_replace_a_real_failure():
     assert signal.getsignal(signal.SIGINT) is previous
 
 
+def test_the_store_defers_sigint_across_its_own_rename_sequence(store, tmp_path):
+    """codex W-CLI R1 B1. A build's renames happen deep inside
+    ``build_scale_index``, hours after the CLI frame started, so the guard has
+    to live at the primitive. Mutation anchor: drop the ``with
+    SwapInterruptGuard()`` from ``swap_staging_directory`` and the interrupt
+    escapes between the two renames — the live directory is left in ``.old``
+    and this run's build is what the CLI's cleanup would then delete."""
+    live = tmp_path / "root"
+    live.mkdir()
+    (live / "marker").write_text("old", encoding="utf-8")
+    staged = store.prepare_staging_directory(live)
+    (staged / "marker").write_text("new", encoding="utf-8")
+
+    real_rename = os.rename
+    renames: list[int] = []
+    guarded: list[bool] = []
+
+    def rename_and_signal(source, destination):
+        real_rename(source, destination)
+        renames.append(1)
+        if len(renames) == 1:  # between live → .old and tmp → live
+            handler = signal.getsignal(signal.SIGINT)
+            guarded.append(
+                isinstance(getattr(handler, "__self__", None), SwapInterruptGuard)
+            )
+            handler(signal.SIGINT, None)  # what the OS would deliver
+
+    previous = signal.getsignal(signal.SIGINT)
+    original = os.rename
+    os.rename = rename_and_signal  # type: ignore[assignment]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            ScaleArtifactStore.swap_staging_directory(live, staged)
+    finally:
+        os.rename = original  # type: ignore[assignment]
+
+    assert guarded == [True]
+    # The sequence finished before the interrupt was honoured.
+    assert (live / "marker").read_text(encoding="utf-8") == "new"
+    assert not Path(str(live) + ".old").exists()
+    assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_a_nested_guard_leaves_the_outer_deferral_window_intact():
+    """The CLI wraps a whole multi-root publish in one guard, and each root's
+    swap opens its own. If the inner one took over, the interrupt would land
+    between two roots instead of after all of them."""
+    outer = cli.SwapInterruptGuard(lambda _message: None, reraise=False)
+    with outer:
+        inner = cli.SwapInterruptGuard(lambda _message: None)
+        with inner:
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+        # No KeyboardInterrupt from the inner exit: the outer still owns it.
+        assert inner.interrupted is False
+        assert outer.interrupted is True
+    assert outer.completed is True
+
+
+def test_the_guard_reports_a_completed_block_without_raising():
+    """codex W-CLI R1 P2-6: an interrupt that arrived while everything was
+    published did not stop anything."""
+    guard = cli.SwapInterruptGuard(lambda _message: None, reraise=False)
+    with guard:
+        signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+    assert (guard.interrupted, guard.completed) == (True, True)
+
+
+def test_publish_started_recognizes_a_half_finished_swap(tmp_path):
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    assert cli.publish_started(live) is False
+    (tmp_path / "kg_index.tmp").mkdir()
+    assert cli.publish_started(live) is False, "staging alone is not publishing"
+    (tmp_path / "kg_index.old").mkdir()
+    assert cli.publish_started(live) is True
+    shutil.rmtree(tmp_path / "kg_index.old")
+    shutil.rmtree(live)
+    assert cli.publish_started(live) is True, "tmp without live is mid-rename"
+
+
 def test_discard_staging_removes_only_what_it_is_given(tmp_path):
     staged = tmp_path / "kg_index.tmp"
     staged.mkdir()
@@ -620,6 +922,38 @@ def test_the_offline_statement_timeout_is_applied_before_composition(monkeypatch
     )
     with pytest.raises(cli.ScaleBuildCliError):
         cli.resolve_settings(0)
+
+
+def test_the_composition_root_disowns_the_schema_at_the_call_site(monkeypatch):
+    """codex W-CLI R1 P2-4. The PostgreSQL lane proves the SEAM works; this
+    proves the CLI still uses it. Deleting both kwargs from
+    ``open_scale_build_repository`` left every lane but that one green — and the
+    damage is a composition that migrates the live database and rewrites the
+    production admin credential with a fresh salt."""
+    from app import bootstrap
+    from app.core.config import Settings
+    from app.repositories.postgres import repository as repository_module
+
+    captured: dict = {}
+
+    class _Composed:
+        def __init__(self, settings, **kwargs) -> None:
+            captured.update(kwargs)
+            self.settings = settings
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(repository_module, "PostgresRepository", _Composed)
+    monkeypatch.setattr(bootstrap, "prime_extension_admission", lambda _repo: None)
+
+    settings = Settings(database_url="postgresql://example/silicon_notebook")
+    with cli.open_scale_build_repository(settings) as repository:
+        assert isinstance(repository, _Composed)
+    assert captured["migrate"] is False
+    assert captured["seed"] is False
+    assert repository.closed is True
 
 
 def test_packaged_migration_count_matches_the_schema_manifest():

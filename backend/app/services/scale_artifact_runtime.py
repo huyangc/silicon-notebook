@@ -15,10 +15,12 @@ from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
 from app.repositories.scale_build_lock import (
+    SCALE_BUILD_LOCK_UNAVAILABLE,
     UNSUPPORTED_SCALE_BUILD_LOCK,
     ScaleBuildAlreadyBuilding,
     ScaleBuildBusy,
     ScaleBuildLock,
+    ScaleBuildLockAttempt,
 )
 
 
@@ -126,7 +128,7 @@ class ScaleArtifactRuntime:
         facts_repo,
         copy_stats_memo,
         require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
-        scale_build_lock: Callable[[str], Optional[ScaleBuildLock]] | None = None,
+        scale_build_lock: Callable[[str], ScaleBuildLockAttempt] | None = None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -693,15 +695,17 @@ class ScaleArtifactRuntime:
 
     def _acquire_scale_build_lock(
         self, notebook_id: str
-    ) -> Optional[ScaleBuildLock]:
-        """Try this notebook's cross-process build claim; ``None`` = busy.
+    ) -> ScaleBuildLockAttempt:
+        """Try this notebook's cross-process build claim (three-state).
 
-        Fails CLOSED. An unreachable or erroring lock backend cannot authorize
-        a build: the whole point of the claim is that a second writer would
-        publish over the same artifact directory, and a build admitted without
-        one is exactly the race the claim exists to prevent. The caller's busy
-        path leaves the durable queue entry alone, so the work returns on a
-        later tick rather than being lost.
+        ``None`` = provably held by somebody else;
+        ``SCALE_BUILD_LOCK_UNAVAILABLE`` = the claim could not be evaluated (an
+        exhausted lock-session budget, a probe that raised). Both refuse the
+        build — this fails CLOSED, because a second writer publishing over the
+        same artifact directory is exactly the race the claim exists to prevent
+        — but only the first is a statement about the notebook, so only the
+        first may be reported to a user as "somebody is building this". The
+        second parks the request instead (see ``_admit_scale_op``).
         """
         acquire = self._scale_build_lock
         if acquire is None:
@@ -715,7 +719,7 @@ class ScaleArtifactRuntime:
                 )
             except Exception:
                 pass
-            return None
+            return SCALE_BUILD_LOCK_UNAVAILABLE
 
     @staticmethod
     def _release_scale_build_handle(handle: Optional[ScaleBuildLock]) -> None:
@@ -767,11 +771,32 @@ class ScaleArtifactRuntime:
         Closes the historical gap where ``build()`` claimed nothing at all and
         ``fold()`` claimed only in-process: the facade's ``build_scale_index``
         (offline batch ingest) now excludes both the service's own workers and
-        any other process. The two claims are taken cross-process first so a
-        holder in this very process is reported by the same code path as a
-        holder elsewhere.
+        any other process.
+
+        The IN-PROCESS claim is checked first (codex W-CLI R1 N1). Both
+        backends must agree on what "already building here" means, and they
+        could not while the cross-process probe came first: on PostgreSQL the
+        in-flight build in THIS process is itself holding the advisory lock, so
+        the probe returned "held elsewhere" and this raised the generic
+        ``ScaleBuildBusy``, while SQLite (whose sentinel is always granted) fell
+        through to the in-process set and raised ``ScaleBuildAlreadyBuilding``.
+        Callers key on that distinction — ``fold`` turns the subclass into
+        ``{"status": "already_building"}`` — so the backend decided the status.
+        The check is repeated under the lock below; this one only picks the
+        honest exception.
         """
+        with self.building_lock:
+            if notebook_id in self.building:
+                raise ScaleBuildAlreadyBuilding(
+                    f"a scale index build for {notebook_id} is already running"
+                )
         handle = self._acquire_scale_build_lock(notebook_id)
+        if handle is SCALE_BUILD_LOCK_UNAVAILABLE:
+            raise ScaleBuildBusy(
+                f"the scale build claim for {notebook_id} could not be taken "
+                "(the lock backend is unavailable — an exhausted lock-session "
+                "budget or a failing probe); nothing was built"
+            )
         if handle is None:
             raise ScaleBuildBusy(
                 f"another process is building the scale index for {notebook_id}"
@@ -814,16 +839,37 @@ class ScaleArtifactRuntime:
     def fold(self, notebook_id: str, assume_locked: bool = False) -> dict:
         if assume_locked:
             return self.builder.fold(notebook_id, assume_locked=True)
+        # Notification is the builder's ``completed`` semantics, restored: only
+        # a fold that actually folded rings the bell (codex W-CLI R1 P2-2).
+        # ``fold()`` returns early — unchanged manifest, no swap — whenever the
+        # delta is empty, and "auto-fold on add" calls this on every source
+        # write, so notifying unconditionally announced a finished index build
+        # to every owner of a notebook where nothing was rebuilt.
+        #
+        # The notification stays OUTSIDE the claim (that part of T-W1 was
+        # right): the builder used to emit it from a finally that had already
+        # dropped ``building``, and a snapshot pushed while this notebook still
+        # looks "building" contradicts itself. The admitted worker's tail keeps
+        # its own unconditional-on-success notification: it was admitted for an
+        # operation, and its ``fold`` may legitimately fall back to a full
+        # build, which publishes.
+        completed = False
+
+        def mark_completed() -> None:
+            nonlocal completed
+            completed = True
+
         try:
             with self._claim_scale_build(notebook_id):
                 # The claim above IS this call's in-process mutex, so the
-                # builder must not take a second (nested) one. That also moves
-                # the completion notification the builder used to emit up here
-                # — the same shape the admitted worker's tail already has.
-                result = self.builder.fold(notebook_id, assume_locked=True)
+                # builder must not take a second (nested) one.
+                result = self.builder.fold(
+                    notebook_id, assume_locked=True, on_completed=mark_completed
+                )
         except ScaleBuildAlreadyBuilding:
             return {"status": "already_building"}
-        self.notify_index_done(notebook_id)
+        if completed:
+            self.notify_index_done(notebook_id)
         return result
 
     def build_viz(self, notebook_id: str) -> Optional[dict]:
@@ -1320,11 +1366,35 @@ class ScaleArtifactRuntime:
 
             publish_snapshot(self._resolve_index_owner(notebook_id))
             return _SCALE_OP_QUEUED
+        # Pure in-memory verdicts first (codex W-CLI R1 P2-1). Every one of
+        # these three refuses without looking at the claim, and the claim probe
+        # is a dedicated PostgreSQL session: without this, a notebook that is
+        # already building here opened (and closed) one fresh non-pooled
+        # connection per status-driven admission attempt — every scheduler tick,
+        # every post-publish follow-up — purely to be told what the ``building``
+        # set already knew. The authoritative copies of all three stay inside
+        # ``_admit_claimed_scale_op``, under the same lock that claims
+        # ``building``; this pass is an early-out, not the decision.
+        early = self._refuse_before_probing(
+            notebook_id,
+            claim_idle=claim_idle,
+            claim_pending=claim_pending,
+            queue_full_if_busy=queue_full_if_busy,
+        )
+        if early is not None:
+            return early
         # W-CLI: the cross-process claim is probed BEFORE the concurrency
         # ticket, so a notebook an offline builder already owns never burns a
-        # slot. It is non-blocking; failing it is indistinguishable from (and
-        # handled exactly like) "this process is already building it".
+        # slot. It is non-blocking.
         lock_handle = self._acquire_scale_build_lock(notebook_id)
+        if lock_handle is SCALE_BUILD_LOCK_UNAVAILABLE:
+            return self._park_for_unavailable_claim(
+                notebook_id,
+                mode,
+                supersede_idle=supersede_idle,
+                claim_idle=claim_idle,
+                claim_pending=claim_pending,
+            )
         if lock_handle is None:
             return self._queue_for_busy_claim(
                 notebook_id, queue_full_if_busy=queue_full_if_busy
@@ -1339,14 +1409,53 @@ class ScaleArtifactRuntime:
             queue_full_if_busy=queue_full_if_busy,
         )
 
+    def _refuse_before_probing(
+        self,
+        notebook_id: str,
+        *,
+        claim_idle: bool,
+        claim_pending: bool,
+        queue_full_if_busy: bool,
+    ) -> Optional[str]:
+        """The verdicts that need no claim probe, or ``None`` to carry on.
+
+        Caller must NOT hold ``building_lock``. Identical predicates and
+        identical outcomes to the first three checks in
+        ``_admit_claimed_scale_op`` — deliberately duplicated rather than
+        shared, because there they run in the same critical section that adds
+        to ``building`` (which is what makes them authoritative) and here they
+        must run before a dedicated database session is opened.
+        """
+        with self.building_lock:
+            if notebook_id in self.building:
+                if queue_full_if_busy:
+                    self._queue_full_followup(notebook_id)
+                    return _SCALE_OP_QUEUED
+                return _SCALE_OP_REFUSED
+            if claim_idle and notebook_id not in self.idle_queue:
+                return _SCALE_OP_REFUSED
+            if claim_pending and notebook_id not in self._scale_pending:
+                return _SCALE_OP_REFUSED
+        return None
+
     def _queue_for_busy_claim(
         self, notebook_id: str, *, queue_full_if_busy: bool
     ) -> str:
-        """Outcome for a notebook whose build claim is held by someone else.
+        """Outcome for a notebook whose build claim is HELD BY SOMEBODY ELSE.
+
+        Only for that case: the probe answered, and the answer was "another
+        thread/process owns this notebook". A probe that could not answer at
+        all goes to ``_park_for_unavailable_claim`` instead — the two used to
+        share this path, which is how an exhausted lock-session budget became a
+        report of ``already_building`` with no entry in any container behind it
+        (codex W-CLI R1 P1-1).
 
         Deliberately the same shape as the in-process ``building`` branch of
-        ``_admit_claimed_scale_op``: work already parked in a queue stays
-        exactly where it is, a caller that owes a durable follow-up gets one
+        ``_admit_claimed_scale_op``, and for the same reason: in both, somebody
+        IS building this notebook, so the work this call represents is either
+        already covered by that build or belongs in the durable follow-up.
+        Concretely — work already parked in a queue stays exactly where it is, a
+        caller that owes a durable follow-up (``queue_full_if_busy``) gets one
         registered, and nothing else is touched. In particular no failure is
         recorded — an offline build that legitimately runs for 40 minutes must
         not push this notebook's automatic-retry backoff to its ceiling.
@@ -1360,6 +1469,44 @@ class ScaleArtifactRuntime:
                 self._queue_full_followup(notebook_id)
             return _SCALE_OP_QUEUED
         return _SCALE_OP_REFUSED
+
+    def _park_for_unavailable_claim(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        supersede_idle: bool,
+        claim_idle: bool = False,
+        claim_pending: bool = False,
+    ) -> str:
+        """Outcome when the claim could not be EVALUATED (not "held").
+
+        Nothing is known about who owns the notebook, so the two things this
+        must not do are: claim somebody is building it, and drop the request.
+        It therefore takes the slot-exhaustion path — park as DATA in
+        ``_scale_pending`` and report ``queued`` — which is exactly the promise
+        that shape already carries: no thread, no claim, drained by every
+        scheduler tick and by every completion handoff regardless of the
+        off-peak window. A lock-session budget frees up on the timescale of the
+        builds holding it, so the retry lands.
+
+        ``supersede_idle`` pops this notebook's own off-peak entry for the same
+        reason the slot-exhaustion branch does: the parked request will run
+        strictly sooner, so no work is lost.
+        """
+        if claim_idle or claim_pending:
+            # Already parked in a queue whose drain is walking it; a second
+            # record would start the same notebook twice.
+            return _SCALE_OP_QUEUED
+        with self.building_lock:
+            if supersede_idle:
+                self.idle_queue.pop(notebook_id, None)
+            self._park_pending(notebook_id, mode)
+        self._ensure_scheduler()
+        from app.services.pending_bus import publish_snapshot
+
+        publish_snapshot(self._resolve_index_owner(notebook_id))
+        return _SCALE_OP_QUEUED
 
     def _admit_claimed_scale_op(
         self,

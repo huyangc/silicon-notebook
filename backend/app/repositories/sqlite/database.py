@@ -708,6 +708,10 @@ class SqliteDatabase:
         SQLite deployment instead of racing an in-process build over the same
         ``{scale_dir}.tmp``. The serving process falls back to its in-process
         ``building`` claim, which is the only mutex this backend ever had.
+
+        The other two ``ScaleBuildLockAttempt`` values never occur here: there
+        is no lock session to run out of and nothing that can fail, so this
+        backend answers unconditionally.
         """
         del notebook_id
         return UNSUPPORTED_SCALE_BUILD_LOCK

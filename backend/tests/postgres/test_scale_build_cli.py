@@ -172,6 +172,26 @@ def test_the_ledger_preflight_accepts_a_matching_checkout(
     assert applied == expected == cli.packaged_migration_count()
 
 
+def test_the_ledger_preflight_refuses_edited_sql_under_the_same_version(
+    postgres_scope, postgres_settings
+):
+    """codex W-CLI R1 P2-8. Two checkouts can carry the same NUMBER of
+    migrations and different SQL — a rebase, a cherry-pick, an edited file — and
+    the count alone calls that a match. The ledger stores the per-migration
+    checksum the service's own migrator validates; reading one more column
+    closes it. Mutation anchor: drop the checksum loop and this goes green while
+    the builder reads a schema it does not actually agree with."""
+    owner = PostgresRepository(postgres_settings, model_provider=_provider())
+    owner.close()
+    with psycopg.connect(postgres_scope.url, autocommit=True) as connection:
+        connection.execute(
+            "UPDATE silicon_schema_migrations SET checksum = 'deadbeef' "
+            "WHERE version = 1"
+        )
+    with pytest.raises(cli.ScaleBuildCliError, match="checksum mismatch"):
+        cli.verify_migration_ledger(postgres_scope.url)
+
+
 def test_the_ledger_preflight_refuses_a_checkout_that_is_ahead(
     postgres_scope, postgres_settings
 ):
@@ -307,6 +327,52 @@ def test_a_claim_held_elsewhere_stops_the_build(indexed_notebook, capsys):
         other.close()
 
 
+def test_an_exhausted_lock_session_budget_queues_instead_of_lying(
+    indexed_notebook, capsys
+):
+    """codex W-CLI R1 P1-1, end to end and on the real budget.
+
+    The reviewer's probe: fill this process's dedicated lock-session budget,
+    then ask the service side for an immediate build. Collapsed into "held
+    elsewhere" it answered ``already_building`` — naming a build nobody is
+    running — and left no entry in ``building``, ``_scale_pending`` or
+    ``idle_queue``, so the request was silently lost. It must queue instead, and
+    the CLI's own probe must say ``unknown`` rather than inventing a builder.
+    """
+    notebook_id, settings = indexed_notebook
+    assert cli.main(["build", "--notebook", notebook_id]) == 0
+    capsys.readouterr()
+
+    repository = PostgresRepository(settings, model_provider=_provider())
+    try:
+        database = repository._runtime.database
+        scale = repository._runtime.scale_artifacts
+        held = [
+            database.try_scale_build_lock(f"nb-budget-filler-{index}")
+            for index in range(database._scale_build_lock_capacity)
+        ]
+        try:
+            assert all(handle is not None for handle in held)
+            assert scale.trigger(notebook_id, when="now", manual=True) == {
+                "status": "queued",
+                "notebook_id": notebook_id,
+            }
+            assert notebook_id in scale._scale_pending
+            assert notebook_id not in scale.building
+
+            assert cli.main(["inspect", "--notebook", notebook_id]) == 0
+            claim = json.loads(capsys.readouterr().out)["build_claim"]
+        finally:
+            for handle in held:
+                if handle is not None:
+                    handle.release()
+    finally:
+        repository.close()
+
+    # The CLI is a different process with its own budget, so it can still probe.
+    assert claim == "free"
+
+
 def test_an_import_from_a_foreign_deployment_is_refused(
     indexed_notebook, tmp_path, capsys
 ):
@@ -337,6 +403,59 @@ def test_an_import_from_a_foreign_deployment_is_refused(
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["manifest"]["version"] == published
     assert receipt["leftovers"] == {}
+
+
+def test_an_import_into_the_wrong_library_is_refused(
+    indexed_notebook, tmp_path, capsys
+):
+    """codex W-CLI R1 P1-2, end to end. Every other gate (pipeline identity,
+    dim, hnswlib) is a deployment-wide fact, so a mistyped ``--notebook`` used
+    to publish this package into another library and start serving it — the
+    retrieval side reads the manifest that arrived and never compares it with
+    the database."""
+    notebook_id, _settings = indexed_notebook
+    assert cli.main(["build", "--notebook", notebook_id]) == 0
+    capsys.readouterr()
+
+    package = tmp_path / "pack"
+    assert cli.main([
+        "export", "--notebook", notebook_id, "--to", str(package)
+    ]) == 0
+    capsys.readouterr()
+
+    manifest_path = package / cli.MAIN_ROOT / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # The manifest a build writes names its own library, which is the whole
+    # point: this is what a package from ANOTHER library looks like here.
+    assert manifest["notebook_id"] == notebook_id
+    manifest["notebook_id"] = "nb-some-other-library"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert cli.main([
+        "import", "--notebook", notebook_id, "--from", str(package)
+    ]) == 2
+    assert "belongs to notebook" in capsys.readouterr().err
+
+    assert cli.main(["inspect", "--notebook", notebook_id]) == 0
+    assert json.loads(capsys.readouterr().out)["leftovers"] == {}
+
+
+def test_an_import_naming_an_unknown_notebook_refuses_before_touching_disk(
+    indexed_notebook, tmp_path, capsys
+):
+    notebook_id, _settings = indexed_notebook
+    assert cli.main(["build", "--notebook", notebook_id]) == 0
+    capsys.readouterr()
+    package = tmp_path / "pack-unknown"
+    assert cli.main([
+        "export", "--notebook", notebook_id, "--to", str(package)
+    ]) == 0
+    capsys.readouterr()
+
+    assert cli.main([
+        "import", "--notebook", "nb-does-not-exist", "--from", str(package)
+    ]) == 2
+    assert "unknown notebook" in capsys.readouterr().err
 
 
 def test_sqlite_is_refused_even_with_a_reachable_database(

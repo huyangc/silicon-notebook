@@ -2033,6 +2033,34 @@ def test_main_index_reports_a_busy_scale_build_claim(repo, monkeypatch, capsys):
     assert "已落库" in captured.err
 
 
+def test_main_index_reports_a_lost_scale_build_claim(repo, monkeypatch, capsys):
+    """codex W-CLI R1 P2-7: the sibling of the busy path. A claim that
+    evaporated mid-build abandons the swap — nothing published, the previous
+    generation still serving, a ``.tmp`` left on disk. Bare, that is a traceback
+    ending in a path; the operator needs to know what survived and what to
+    investigate before re-running."""
+    from app.repositories.scale_build_lock import ScaleBuildLockLost
+
+    nb_id = bi.ensure_notebook(repo, None, "nb-index-lost-claim")
+
+    def lost(_repo, notebook_id):
+        raise ScaleBuildLockLost(
+            "scale build lock was lost before the artifact swap for "
+            f"/data/kg_index/{notebook_id}; nothing was published and the "
+            f"staged build remains at /data/kg_index/{notebook_id}.tmp"
+        )
+
+    monkeypatch.setattr(bi, "run_index", lost)
+
+    rc = bi.main(["index", "--notebook-id", nb_id])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "lock was lost before the artifact swap" in captured.err
+    assert ".tmp" in captured.err
+    assert "锁会话" in captured.err
+
+
 # --- vectors-to-blob backfill CLI --------------------------------------------
 
 def _seed_json_vector(repo, table, id_col, vid, nb_id, dim=16, created_at="2026-01-01T00:00:00"):
