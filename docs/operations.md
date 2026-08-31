@@ -905,7 +905,11 @@ validation necessarily rejects. Once every root is copied (and re-verified),
 `export` reads every copied file one more time to build `transfer_manifest.json`
 — a full SHA-256 and byte count per file, written at the package's top level
 (never inside a root, so `import` never copies it into a live artifact
-directory) — see "What must be pinned across the two machines" below.
+directory) — see "What must be pinned across the two machines" below. That
+hashing pass runs **after the claim is released**: the package bytes are
+already independent of the live tree, so a multi-GB re-read no longer blocks
+online builds, folds or imports; a failure during it removes everything this
+run wrote, same as a copy failure.
 
 The serving process's standalone **viz** rebuild takes that same per-notebook
 claim — for the whole of its build *and* its publish — and writes `kg_viz`

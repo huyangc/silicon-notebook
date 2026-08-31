@@ -2530,6 +2530,65 @@ def test_export_aborts_and_removes_the_package_when_the_claim_is_lost_mid_copy(
     )
 
 
+def test_a_manifest_write_failure_removes_the_partial_package(
+    repository, store, tmp_path, monkeypatch
+):
+    """P2, codex PR#643 R31: hashing/writing ``transfer_manifest.json`` can
+    fail (I/O error, disk exhaustion, Ctrl-C) after every root was copied;
+    without cleanup the destination stays non-empty and the documented
+    re-run is refused until an operator hand-deletes it.
+
+    Mutation anchor: drop the cleanup around the post-claim manifest write
+    and this goes red — the copied roots survive.
+    """
+    _seed_live(store, "nb-1")
+    destination = tmp_path / "out"
+
+    def failing(_destination, _exported, _report):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cli, "write_transfer_manifest", failing)
+    with pytest.raises(OSError, match="No space left"):
+        cli.run_export(
+            repository, "nb-1", destination, report=lambda _m: None
+        )
+
+    assert not destination.exists(), (
+        "a failed manifest write must not leave a partial package behind"
+    )
+
+
+def test_the_transfer_manifest_is_hashed_after_the_claim_releases(
+    repository, store, tmp_path, lock, monkeypatch
+):
+    """P2, codex PR#643 R31: the manifest pass re-reads every copied byte;
+    holding the per-notebook claim through it would block online builds,
+    folds and imports for the whole multi-GB hashing run, even though the
+    package bytes are already independent of the live tree.
+
+    Mutation anchor: move ``write_transfer_manifest`` back inside
+    ``claim_notebook`` and this goes red — the claim is still held when the
+    hashing pass starts.
+    """
+    _seed_live(store, "nb-1")
+    real = cli.write_transfer_manifest
+    observed: list[bool] = []
+
+    def observing(destination, exported, report):
+        observed.append(lock.released)
+        return real(destination, exported, report)
+
+    monkeypatch.setattr(cli, "write_transfer_manifest", observing)
+    receipt = cli.run_export(
+        repository, "nb-1", tmp_path / "out", report=lambda _m: None
+    )
+
+    assert receipt["roots"]
+    assert observed == [True], (
+        "the claim must already be released when the hashing pass runs"
+    )
+
+
 def test_export_refuses_a_companion_with_no_readable_manifest(
     repository, store, tmp_path
 ):
