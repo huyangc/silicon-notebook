@@ -961,15 +961,37 @@ mid-sequence leaves the *live* main index on its previous generation, and the
 companion's `parent_version` gate makes an unpaired companion unreadable
 (degrading to "no companion") rather than describing a different generation.
 Copying — the slow, failure-prone half — happens entirely inside `.tmp`; the
-live tree is untouched until the final renames. `SIGINT` is masked across that
-rename sequence: a Ctrl-C between `live → .old` and `tmp → live` would leave the
-notebook with no live index at all, the one data-losing window in the command.
+live tree is untouched until the final renames.
+
+#### Ctrl-C: what is masked, and what a build's Ctrl-C leaves behind
+
+`SIGINT` is masked across **every** rename sequence — `build`'s and `fold`'s as
+well as `import`'s, because the masking lives in the publish primitive itself,
+not in one subcommand. A Ctrl-C between `live → .old` and `tmp → live` would
+otherwise leave the notebook with no live index at all: the one data-losing
+window in this channel. The signal is *deferred*, not ignored; the sequence
+takes milliseconds and the interrupt is honoured the instant it completes.
+
+What each command does with the interrupt:
+
+- **`import`** — if every root was published before the deferred interrupt took
+  effect, nothing was abandoned: the command says so and exits `0` with its
+  ordinary receipt. An interrupt during the *staging* copies removes this run's
+  `.tmp` directories and exits `130`.
+- **`build` / `build --fold`** — an interrupt during the build (the hours-long
+  part) removes this run's `.tmp` and exits `130`; re-running rebuilds from
+  scratch. If the interrupt landed inside the publish instead, **nothing is
+  deleted**: the previous generation is in `{dir}.old` and the new one in
+  `{dir}.tmp`, and the command prints both paths with the `mv` that restores
+  the live directory. Do not delete either until `inspect` shows the tree you
+  expect — that `.tmp` may be the only copy of a build that took hours.
 
 #### What must be pinned across the two machines
 
 | Item | Requirement | On mismatch |
 | --- | --- | --- |
-| Code revision (migration ledger) | the build host's migration count == the production database's `max(version)` in `silicon_schema_migrations` | preflighted on a bare connection **before** the repository is composed; exit code 2 |
+| Code revision (migration ledger) | the build host's migration count == the production database's `max(version)` in `silicon_schema_migrations`, **and every recorded checksum matches this checkout's SQL** | preflighted on a bare connection **before** the repository is composed; exit code 2. The checksums are what catch two checkouts that carry the same number of migrations with different SQL (a rebase, a cherry-pick, an edited file) |
+| Notebook identity | `manifest.notebook_id` == `--notebook` (packages built before that key: `manifest.watermark_sources` must be a subset of this notebook's source ids) | `import` refuses. Nothing else in the validation notices a typed-wrong `--notebook`: pipeline identity, dim and hnswlib are deployment-wide facts, identical for every library on the host, so without this check another library's index publishes here and starts serving |
 | Published indexing pipeline | `manifest.pipeline_identity` matches the notebook's currently published identity | `import` refuses (a mismatch makes retrieval discard the scale core **silently**) |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | the effective dimension must match | `import` refuses (a mismatch makes `open_ann` fail open → **silent zero recall**); a manifest with no `dim` is refused for the same reason |
 | hnswlib | **strict equality** | `import` refuses by default; `--allow-library-mismatch` overrides. `ann.bin` has no format version header, so a mismatch can be swallowed by the fail-open into silent zero recall; an unknown version on either side counts as a mismatch |
@@ -995,9 +1017,15 @@ This channel does **not** use pooled connections:
 
 A deployment with a tight `max_connections` must budget for "pool ceiling +
 service-side lock-session ceiling + concurrently running CLI invocations".
-Otherwise new builds fail as *busy* — an exhausted lock-session budget and "held
-by somebody else" deliberately share one return value, because both mean *do not
-build now*.
+Both refusals mean *do not build now*, but they are reported separately,
+because only one of them says anything about the notebook:
+
+- **held by somebody else** — the service reports `already_building` and leaves
+  any durable follow-up entry alone; the CLI exits `1`;
+- **no lock session left** (this process's budget) — the service **parks** the
+  request for the next free slot and reports `queued`, so it actually runs
+  later; the CLI exits `1` with a message naming the budget, and `inspect`
+  reports `build_claim: unknown` rather than inventing a builder.
 
 #### PgBouncer prerequisite
 
@@ -1023,7 +1051,15 @@ mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
 re-verification found the claim gone) it is **deliberately kept** for
 inspection; the next build discards it, and `rm -rf` is safe once you are done.
 `inspect` reports both kinds of leftover with their sizes. On Ctrl-C the command
-removes the `.tmp` directories **this run** staged and prints their paths.
+removes the `.tmp` directories **this run** staged and prints their paths —
+unless that root shows a half-finished publish (a `.old` beside it, or a `.tmp`
+with no live directory), in which case nothing is deleted and the recovery `mv`
+is printed instead. See the Ctrl-C section above.
+
+Note also `inspect`'s `build_claim`, which has three values: `free`,
+`held_elsewhere`, and `unknown` — the last means this process had no dedicated
+lock session left to probe with, so it is a statement about the CLI run, not
+about the notebook (see the connection budget above).
 
 #### allow_pickle provenance constraint (security)
 

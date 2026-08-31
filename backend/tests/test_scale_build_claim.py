@@ -15,7 +15,9 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.scale_build_lock import (
+    SCALE_BUILD_LOCK_UNAVAILABLE,
     UNSUPPORTED_SCALE_BUILD_LOCK,
+    ScaleBuildAlreadyBuilding,
     ScaleBuildBusy,
     ScaleBuildLock,
     ScaleBuildLockLost,
@@ -367,11 +369,21 @@ def test_admission_releases_its_claim_when_nothing_starts(
 ):
     """Handoff discipline: every non-started exit of the claimed half must
     release. Mutation anchor — delete the ``finally`` in
-    ``_admit_claimed_scale_op`` and the leaked handle shows up here."""
+    ``_admit_claimed_scale_op`` and the leaked handle shows up here.
+
+    The entry vanishes *while the claim is being taken*, which is also the only
+    reason the check inside the claimed half must survive the cheap pre-probe
+    copy of it (P2-1): a drain, a cancel or a competing admission can empty the
+    queue in exactly this window."""
     scale = _scale(repo)
     handle = _StubLock()
-    monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: handle)
-    # Nothing to claim: the idle entry a drain thinks it is consuming is gone.
+    scale.idle_queue[indexed_notebook] = ("fold", "2026-08-31T00:00:00+00:00")
+
+    def issue(notebook_id):
+        scale.idle_queue.pop(notebook_id, None)
+        return handle
+
+    monkeypatch.setattr(scale, "_scale_build_lock", issue)
     assert scale._admit_scale_op(indexed_notebook, "auto", claim_idle=True) == (
         "refused"
     )
@@ -434,6 +446,206 @@ def test_a_busy_claim_leaves_a_drained_queue_entry_where_it_was(
 
     assert scale.idle_queue[indexed_notebook][0] == "fold"
     assert scale._scale_failure_state == {}
+
+
+def test_an_unevaluable_claim_parks_the_request_instead_of_naming_a_builder(
+    repo, indexed_notebook, monkeypatch
+):
+    """codex W-CLI R1 P1-1, the reviewer's exact scenario.
+
+    An exhausted lock-session budget is a fact about THIS PROCESS, not about the
+    notebook. Collapsed into "held elsewhere" it produced the worst possible
+    pair of answers: ``trigger(when="now")`` reported ``already_building`` — a
+    build nobody is running — while every container (``building``,
+    ``_scale_pending``, ``idle_queue``) stayed empty, so the request was simply
+    gone. Mutation anchor: make ``_acquire_scale_build_lock`` return ``None``
+    for the unavailable case (i.e. merge the three states back into two) and
+    both assertions below go red.
+    """
+    scale = _scale(repo)
+    monkeypatch.setattr(
+        scale, "_scale_build_lock", lambda _nb: SCALE_BUILD_LOCK_UNAVAILABLE
+    )
+
+    assert scale.trigger(indexed_notebook, when="now", manual=True) == {
+        "status": "queued",
+        "notebook_id": indexed_notebook,
+    }
+
+    assert indexed_notebook in scale._scale_pending
+    assert indexed_notebook not in scale.building
+    # Parking is not failing: the backoff window must not move for work that
+    # was never attempted.
+    assert scale._scale_failure_state == {}
+
+
+def test_a_probe_that_raises_is_unavailable_not_held(
+    repo, indexed_notebook, monkeypatch
+):
+    """A probe that blew up knows nothing about who owns the notebook."""
+    def explode(_notebook_id):
+        raise RuntimeError("database unreachable")
+
+    scale = _scale(repo)
+    monkeypatch.setattr(scale, "_scale_build_lock", explode)
+
+    assert (
+        scale._acquire_scale_build_lock(indexed_notebook)
+        is SCALE_BUILD_LOCK_UNAVAILABLE
+    )
+    assert scale._admit_scale_op(indexed_notebook, "full") == "queued"
+    assert indexed_notebook in scale._scale_pending
+
+
+def test_an_unevaluable_claim_leaves_a_drained_entry_where_it_was(
+    repo, indexed_notebook, monkeypatch
+):
+    """Parking is for FRESH immediate requests. A drain's entry is already
+    parked; a second record would start the same notebook twice."""
+    scale = _scale(repo)
+    stamp = "2026-08-31T00:00:00+00:00"
+    scale.idle_queue[indexed_notebook] = ("fold", stamp)
+    monkeypatch.setattr(
+        scale, "_scale_build_lock", lambda _nb: SCALE_BUILD_LOCK_UNAVAILABLE
+    )
+
+    assert scale._admit_scale_op(
+        indexed_notebook, "auto", claim_idle=True
+    ) == "queued"
+
+    assert scale.idle_queue[indexed_notebook] == ("fold", stamp)
+    assert indexed_notebook not in scale._scale_pending
+
+
+def test_a_notebook_already_building_here_never_opens_a_lock_session(
+    repo, indexed_notebook, monkeypatch
+):
+    """codex W-CLI R1 P2-1: the claim probe is a dedicated non-pooled
+    PostgreSQL session. Admission attempts for a notebook this process is
+    already building are answered by the ``building`` set alone — otherwise
+    every scheduler tick and every post-publish follow-up opened (and closed) a
+    fresh connection to be told what memory already knew."""
+    scale = _scale(repo)
+    probes: list[str] = []
+
+    def issue(notebook_id):
+        probes.append(notebook_id)
+        return _StubLock()
+
+    monkeypatch.setattr(scale, "_scale_build_lock", issue)
+    with scale.building_lock:
+        scale.building.add(indexed_notebook)
+    try:
+        assert scale._admit_scale_op(indexed_notebook, "full") == "refused"
+        assert scale._admit_scale_op(
+            indexed_notebook, "full", queue_full_if_busy=True
+        ) == "queued"
+        # A stale drain is answered the same way, and just as cheaply.
+        assert scale._admit_scale_op(
+            indexed_notebook, "auto", claim_pending=True
+        ) == "refused"
+    finally:
+        with scale.building_lock:
+            scale.building.discard(indexed_notebook)
+
+    assert probes == []
+    assert scale.idle_queue[indexed_notebook][0] == "full"
+
+
+def test_both_backends_report_an_in_process_build_the_same_way(
+    repo, indexed_notebook, monkeypatch
+):
+    """codex W-CLI R1 N1. On PostgreSQL the in-flight build in this very
+    process holds the advisory lock, so the cross-process probe answers "held
+    elsewhere" — which used to make ``fold`` raise ``ScaleBuildBusy`` there while
+    SQLite (always-granted sentinel) fell through to the in-process set and
+    raised ``ScaleBuildAlreadyBuilding``, the subclass ``fold`` turns into a
+    status. Mutation anchor: move the in-process check back below the probe and
+    this raises instead of returning."""
+    scale = _scale(repo)
+    monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
+    with scale.building_lock:
+        scale.building.add(indexed_notebook)
+    try:
+        assert scale.fold(indexed_notebook) == {"status": "already_building"}
+        with pytest.raises(ScaleBuildAlreadyBuilding):
+            scale.build(indexed_notebook)
+    finally:
+        with scale.building_lock:
+            scale.building.discard(indexed_notebook)
+
+
+# ------------------------------------------------------- fold discipline ---
+
+def _add_delta_source(repo, notebook_id: str) -> None:
+    _add_source(
+        repo, notebook_id, source_id="s2", object_id="o2", chunk_id="c2", day=2
+    )
+
+
+def test_a_fold_with_nothing_to_fold_announces_nothing(
+    repo, indexed_notebook, monkeypatch
+):
+    """codex W-CLI R1 P2-2. ``fold`` returns the unchanged manifest and swaps
+    nothing when the delta is empty — and ``scale_auto_fold_on_add`` calls it on
+    every source write. Notifying there announced a finished index build to the
+    notebook's owner for a build that did not happen. Mutation anchor: notify
+    unconditionally after the claim block and the first assertion goes red."""
+    scale = _scale(repo)
+    rings: list[str] = []
+    monkeypatch.setattr(scale, "notify_index_done", rings.append)
+
+    scale.fold(indexed_notebook)
+    assert rings == []
+
+    _add_delta_source(repo, indexed_notebook)
+    scale.fold(indexed_notebook)
+    assert rings == [indexed_notebook]
+
+
+def test_the_fold_reverifies_its_claim_outside_the_process_global_lock(
+    repo, indexed_notebook, monkeypatch
+):
+    """codex W-CLI R1 P2-3. ``building_lock`` guards every notebook's status
+    poll and every admission; the re-verification is a database round trip on
+    the lock session. Holding one inside the other lets a network stall freeze
+    scale status for the whole deployment. Mutation anchor: move the call back
+    inside the ``with self.building_lock`` block and this goes red."""
+    scale = _scale(repo)
+    _add_delta_source(repo, indexed_notebook)
+    observed: list[bool] = []
+
+    def verify(_notebook_id: str) -> bool:
+        observed.append(scale.building_lock.locked())
+        return True
+
+    monkeypatch.setattr(scale.builder, "verify_scale_build_lock", verify)
+    scale.fold(indexed_notebook)
+
+    assert observed == [False]
+
+
+def test_a_fold_still_refuses_to_swap_when_the_claim_is_gone(
+    repo, indexed_notebook, monkeypatch
+):
+    """The re-verification moved; it did not weaken. Mutation anchor: drop
+    ``verify_held=`` from the fold's swap call and this goes green while a fold
+    whose lock session died republishes over whoever owns the directory now."""
+    scale = _scale(repo)
+    store = repo._runtime.scale_artifact_store
+    _add_delta_source(repo, indexed_notebook)
+    before = (store.scale_dir(indexed_notebook) / "manifest.json").read_bytes()
+    monkeypatch.setattr(
+        scale.builder, "verify_scale_build_lock", lambda _nb: False
+    )
+
+    with pytest.raises(ScaleBuildLockLost):
+        scale.fold(indexed_notebook)
+
+    assert (
+        store.scale_dir(indexed_notebook) / "manifest.json"
+    ).read_bytes() == before
+    assert indexed_notebook not in scale.building
 
 
 def test_a_failed_worker_start_rolls_back_everything_it_took(

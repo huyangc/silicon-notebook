@@ -458,6 +458,13 @@ class ScaleIndexBuilder:
         # freed (see above).
         manifest = {
             "version": self.version(notebook_id),
+            # W-CLI R1 P1-2: which library this artifact describes. The offline
+            # CLI's ``import`` publishes a directory tree into whatever
+            # ``--notebook`` the operator typed, and nothing else in the package
+            # names its origin — a typo published library A's index into library
+            # B and it started serving, because the retrieval side reads the
+            # manifest that arrived, never the database's version.
+            "notebook_id": notebook_id,
             "pipeline_identity": list(
                 self.projections.pipeline_identity(notebook_id)
             ),
@@ -600,7 +607,23 @@ class ScaleIndexBuilder:
             "indexed": True,
         }
 
-    def fold(self, notebook_id: str, assume_locked: bool = False) -> dict:
+    def fold(
+        self,
+        notebook_id: str,
+        assume_locked: bool = False,
+        *,
+        on_completed: Callable[[], None] | None = None,
+    ) -> dict:
+        """``on_completed`` fires only when this call actually FOLDED.
+
+        Every early return above the staging block — no index yet, pipeline or
+        dim drift (both fall back to a full rebuild), an empty delta — leaves it
+        unfired, which is the same ``completed`` gate the in-builder
+        notification below has always used. The caller that took the claim
+        (``ScaleArtifactRuntime.fold``) notifies from outside it, where
+        ``building`` is already released, instead of announcing a finished index
+        for a fold that did nothing (codex W-CLI R1 P2-2).
+        """
         fold_started = time.perf_counter()
         idx = self.load_scale(notebook_id)
         if idx is None:
@@ -807,6 +830,10 @@ class ScaleIndexBuilder:
             manifest.update(
                 {
                     "version": self.version(notebook_id),
+                    # Written, never inherited from ``idx`` — same reason as
+                    # ``library_versions`` below, and the binding the offline
+                    # ``import`` checks against ``--notebook`` (W-CLI R1 P1-2).
+                    "notebook_id": notebook_id,
                     "pipeline_identity": pipeline_identity,
                     # W-CLI T-W3: refreshed, never inherited from ``idx``. A
                     # fold appends to the .bin with THIS process's hnswlib, so
@@ -834,13 +861,27 @@ class ScaleIndexBuilder:
             )
             scale_index_module.save_fold_manifest(str(temporary), manifest)
 
+            # Same last-instant re-verification as the full rebuild — a fold's
+            # swap is equally destructive — but read OUTSIDE ``building_lock``
+            # (codex W-CLI R1 P2-3). That lock is process-global: every
+            # notebook's status poll and every admission takes it, and this
+            # re-verification is a PostgreSQL round trip on the lock session. A
+            # network stall there (up to the session's ``statement_timeout``)
+            # would freeze scale status and admission for EVERY notebook, not
+            # just this one. The claim is therefore proven here and the proven
+            # verdict handed to the swap, which keeps the single refusal site
+            # (and its message, and its "leave the .tmp" contract) in the store.
+            # The window this opens is the lock acquisition plus a stale-.old
+            # cleanup — microseconds of local work, versus a round trip whose
+            # tail is unbounded by anything this process controls; and it is a
+            # window of the same kind the check already lives with, since no
+            # claim can be proven to still be held one instruction later.
+            claim_held = self.verify_scale_build_lock(notebook_id)
             with self.building_lock:
                 self.artifacts.swap_fold_directory(
                     notebook_id,
                     temporary,
-                    # Same last-instant re-verification as the full rebuild —
-                    # a fold's swap is equally destructive.
-                    verify_held=lambda: self.verify_scale_build_lock(notebook_id),
+                    verify_held=lambda: claim_held,
                 )
                 self.invalidate_scale_cache(notebook_id)
             if bool(
@@ -856,6 +897,8 @@ class ScaleIndexBuilder:
             completed = True
             return manifest
         finally:
+            if completed and on_completed is not None:
+                on_completed()
             if not assume_locked:
                 with self.building_lock:
                     self.building.discard(notebook_id)

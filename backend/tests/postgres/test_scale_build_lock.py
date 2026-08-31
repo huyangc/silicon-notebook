@@ -17,6 +17,7 @@ from app.repositories.postgres.database import (
     PostgresDatabaseClosedError,
 )
 from app.repositories.scale_build_lock import (
+    SCALE_BUILD_LOCK_UNAVAILABLE,
     ScaleBuildLock,
     advisory_lock_key,
     advisory_lock_oid,
@@ -166,7 +167,15 @@ def test_the_lock_session_is_named_and_keeps_its_idle_reaper_disabled(
 
 def test_scale_build_lock_sessions_are_bounded(postgres_database):
     """Each claim pins one non-pooled connection for the whole build; the
-    budget is a connection budget, and exhausting it reads as "busy"."""
+    budget is a connection budget.
+
+    Exhausting it is reported as UNAVAILABLE, never as ``None``: ``None`` means
+    "somebody else holds this notebook", a statement about the notebook, and
+    the admission side turns it into ``already_building``. An exhausted budget
+    is a statement about this process and nothing else (codex W-CLI R1 P1-1).
+    Mutation anchor: return ``None`` here and the runtime suite's parked-request
+    tests go red.
+    """
     capacity = postgres_database._scale_build_lock_capacity
     handles = [
         postgres_database.try_scale_build_lock(f"nb-budget-{index}")
@@ -174,7 +183,9 @@ def test_scale_build_lock_sessions_are_bounded(postgres_database):
     ]
     try:
         assert all(handle is not None for handle in handles)
-        assert postgres_database.try_scale_build_lock("nb-budget-over") is None
+        assert postgres_database.try_scale_build_lock("nb-budget-over") is (
+            SCALE_BUILD_LOCK_UNAVAILABLE
+        )
     finally:
         for handle in handles:
             if handle is not None:
@@ -183,12 +194,14 @@ def test_scale_build_lock_sessions_are_bounded(postgres_database):
     # The budget comes back with the handles.
     extra = postgres_database.try_scale_build_lock("nb-budget-over")
     assert extra is not None
+    assert extra is not SCALE_BUILD_LOCK_UNAVAILABLE
     extra.release()
 
 
 def test_a_refused_claim_returns_its_session_budget(postgres_database):
     """A lock somebody else holds must not leak this process's budget — a leak
-    would turn one busy notebook into a permanently unbuildable service."""
+    would turn one busy notebook into a permanently unbuildable service. It is
+    also what keeps "held elsewhere" answerable more than ``capacity`` times."""
     held = postgres_database.try_scale_build_lock("nb-refused")
     assert held is not None
     try:
@@ -196,6 +209,7 @@ def test_a_refused_claim_returns_its_session_budget(postgres_database):
             assert postgres_database.try_scale_build_lock("nb-refused") is None
         spare = postgres_database.try_scale_build_lock("nb-refused-other")
         assert spare is not None
+        assert spare is not SCALE_BUILD_LOCK_UNAVAILABLE
         spare.release()
     finally:
         held.release()
@@ -230,7 +244,10 @@ def test_concurrent_claimants_produce_exactly_one_winner(postgres_database):
     def contend() -> None:
         start.wait(timeout=5)
         handle = postgres_database.try_scale_build_lock("nb-contended")
-        if handle is not None:
+        # More threads than the session budget: a loser is either "held
+        # elsewhere" (None) or "no session left" (the sentinel), and neither is
+        # a claim.
+        if handle is not None and handle is not SCALE_BUILD_LOCK_UNAVAILABLE:
             with winners_lock:
                 winners.append(handle)
 
