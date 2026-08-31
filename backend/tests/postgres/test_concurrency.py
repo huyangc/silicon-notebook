@@ -385,6 +385,193 @@ def test_final_answer_and_notebook_delete_share_root_first_lock_order(
 
 
 @pytest.mark.postgres_integration
+def test_new_job_and_final_answer_use_compatible_notebook_leases(
+    postgres_database, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('begin-save-owner','begin-save@x','Begin Save','user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('begin-save-nb','Begin Save','begin-save-owner','ready',%s,%s)",
+            (now, now),
+        )
+
+    counter = iter(range(1, 20))
+    counter_lock = threading.Lock()
+
+    def new_id(prefix: str) -> str:
+        with counter_lock:
+            return f"{prefix}-begin-save-{next(counter)}"
+
+    seams = RepositoryCompatibilitySeams(
+        new_id=new_id,
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    asks = AskStateStore(postgres_database, seams)
+    old_request = AskRequest(question="old turn")
+    old_job, conversation_id = asks.begin_durable_job(
+        "begin-save-nb", old_request, "chunk", "begin-save-owner"
+    )
+    begin_holds_conversation = threading.Event()
+    allow_begin_insert = threading.Event()
+    original_ensure_conversation = asks.ensure_conversation
+
+    def pause_after_conversation_lock(*args, **kwargs):
+        result = original_ensure_conversation(*args, **kwargs)
+        begin_holds_conversation.set()
+        assert allow_begin_insert.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(asks, "ensure_conversation", pause_after_conversation_lock)
+    new_request = AskRequest(question="new turn", conversation_id=conversation_id)
+    response = AskResponse(
+        answer="old answer",
+        conclusion="old answer",
+        citations=[],
+        anchors=[],
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        begin_future = executor.submit(
+            asks.begin_durable_job,
+            "begin-save-nb",
+            new_request,
+            "chunk",
+            "begin-save-owner",
+        )
+        assert begin_holds_conversation.wait(timeout=5)
+        save_future = executor.submit(
+            asks.save_answer_for_job,
+            old_job,
+            "begin-save-nb",
+            conversation_id,
+            old_request.question,
+            response,
+            "begin-save-owner",
+        )
+        try:
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM conversations", save_future
+            )
+        finally:
+            allow_begin_insert.set()
+        new_job, continued_conversation = begin_future.result(timeout=5)
+        answer_id = save_future.result(timeout=5)
+
+    assert continued_conversation == conversation_id
+    assert answer_id
+    assert asks.ask_job_status(old_job)["status"] == "done"
+    assert asks.ask_job_status(new_job)["status"] == "running"
+
+
+@pytest.mark.postgres_integration
+def test_bulk_conversation_delete_holds_root_against_notebook_delete(
+    postgres_database, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('bulk-delete-owner','bulk-delete@x','Bulk Delete','user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('bulk-delete-nb','Bulk Delete','bulk-delete-owner','ready',%s,%s)",
+            (now, now),
+        )
+
+    counter = iter(range(1, 30))
+    seams = RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-bulk-delete-{next(counter)}",
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    asks = AskStateStore(postgres_database, seams)
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    conversation_ids = []
+    for ordinal in range(2):
+        request = AskRequest(question=f"terminal {ordinal}")
+        job_id, conversation_id = asks.begin_durable_job(
+            "bulk-delete-nb", request, "chunk", "bulk-delete-owner"
+        )
+        response = AskResponse(
+            answer=f"answer {ordinal}",
+            conclusion=f"answer {ordinal}",
+            citations=[],
+            anchors=[],
+        )
+        assert asks.save_answer_for_job(
+            job_id,
+            "bulk-delete-nb",
+            conversation_id,
+            request.question,
+            response,
+            "bulk-delete-owner",
+        )
+        conversation_ids.append(conversation_id)
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE conversations SET updated_at='2000-01-01T00:00:00+00:00' "
+            "WHERE notebook_id='bulk-delete-nb'"
+        )
+
+    bulk_reached_children = threading.Event()
+    allow_bulk_delete = threading.Event()
+    original_delete_idle = asks._delete_idle_conversation_on
+
+    def pause_before_first_child_delete(*args, **kwargs):
+        if not bulk_reached_children.is_set():
+            bulk_reached_children.set()
+            assert allow_bulk_delete.wait(timeout=10)
+        return original_delete_idle(*args, **kwargs)
+
+    monkeypatch.setattr(
+        asks, "_delete_idle_conversation_on", pause_before_first_child_delete
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        bulk_future = executor.submit(
+            asks.bulk_delete_conversations,
+            "bulk-delete-nb",
+            1,
+            "bulk-delete-owner",
+        )
+        assert bulk_reached_children.wait(timeout=5)
+        notebook_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "bulk-delete-nb"
+        )
+        try:
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM notebooks", notebook_future
+            )
+        finally:
+            allow_bulk_delete.set()
+        bulk_result = bulk_future.result(timeout=5)
+        assert notebook_future.result(timeout=5) == []
+
+    assert bulk_result.deleted == 2
+    assert sorted(bulk_result.deleted_ids) == sorted(conversation_ids)
+
+
+@pytest.mark.postgres_integration
 def test_notebook_delete_waits_for_existing_source_update_before_snapshot(
     postgres_database,
 ):
