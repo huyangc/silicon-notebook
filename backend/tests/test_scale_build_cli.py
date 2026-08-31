@@ -2061,6 +2061,36 @@ def test_export_refuses_a_companion_from_another_generation(
         )
 
 
+def test_export_aborts_and_removes_the_package_when_the_claim_is_lost_mid_copy(
+    storage, store, tmp_path
+):
+    """codex PR#643 R20 P1: a multi-GB ``copytree`` can outlive the
+    advisory-lock session. Once the claim is gone another builder can legally
+    swap a root mid-walk, so the package being written may mix two
+    generations — for a same-version rebuild, undetectably. The claim must be
+    re-verified after every copied root; a loss removes what this run wrote
+    and fails loudly instead of reporting the mixed package as success.
+
+    Mutation anchor: drop the per-copy ``verify_held`` re-check in
+    ``run_export`` and this goes red — the export succeeds.
+    """
+    _seed_live(store, "nb-1")
+    lock = _ScriptedLock([False])
+    repository = _Repository(storage, store, _Database(lock), _Projections(PIPELINE))
+    destination = tmp_path / "out"
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="was lost while copying"):
+        cli.run_export(repository, "nb-1", destination, report=lambda _m: None)
+
+    assert not destination.exists(), (
+        "an untrustworthy partial package must not be left on disk"
+    )
+    assert lock.checks >= 1
+    assert (Path(store.scale_dir("nb-1")) / "manifest.json").is_file(), (
+        "the live tree stays untouched"
+    )
+
+
 def test_export_refuses_a_companion_with_no_readable_manifest(
     repository, store, tmp_path
 ):

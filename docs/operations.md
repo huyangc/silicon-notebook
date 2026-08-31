@@ -958,8 +958,12 @@ rsync -a /data/nb-xxx-pack/ prod:/data/nb-xxx-pack/
 PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx --from /data/nb-xxx-pack
 ```
 
-`export` **also takes the claim**: a swap is two renames, and a `copytree`
-landing between them collects a set that mixes two generations. The companion
+`export` **also takes the claim** — and re-verifies it after every copied
+root: a multi-GB `copytree` can outlive the lock session, and once the claim
+is gone another builder can legally swap a root mid-walk. A loss removes the
+partial package and fails loudly (the live tree is untouched) instead of
+reporting a mixed-generation package as success. A swap is two renames, and a
+`copytree` landing between them collects a set that mixes two generations. The companion
 root (`kg_index_partitions`) is rebuilt *after* the main swap, so a "new main,
 old companion" window exists by design. Export therefore verifies that the
 companion's `parent_version` equals the main manifest's `version` and refuses

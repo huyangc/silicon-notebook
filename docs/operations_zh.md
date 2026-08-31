@@ -814,7 +814,10 @@ rsync -a /data/nb-xxx-pack/ prod:/data/nb-xxx-pack/
 PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx --from /data/nb-xxx-pack
 ```
 
-`export` **也取锁**：swap 是两次 rename，中间那一刻 `copytree` 会拷出跨代混合的集合；
+`export` **也取锁**——并且每拷完一根就复验一次：多 GB 的 `copytree` 可能比锁会话活得久，
+claim 一丢别的构建方就可以合法地在半途 swap 某个根。丢失时删掉本次已写的半成品包并
+响亮失败（活树不受影响），而不是把混代包报成成功。swap 是两次 rename，中间那一刻
+`copytree` 会拷出跨代混合的集合；
 伴生根（`kg_index_partitions`）还是在主 swap **之后**才重建，「主新伴旧」的窗口是设计
 使然。导出前会校验伴生根的 `parent_version` 等于主 manifest 的 `version`，不符拒绝导出。
 在场却没有可读 `manifest.json` 的伴生根，或 serving 侧加载器读成「没有 viz」的活
