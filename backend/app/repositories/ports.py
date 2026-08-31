@@ -63,6 +63,7 @@ from app.models.identity import (
     UserProfile,
 )
 from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
+from app.models.wishes import WISH_PAGE_DEFAULT
 from app.models.memory import MemoryHit, MemoryRecord, MemoryUpdate, PaginatedMemories
 from app.models.notebooks import (
     NotebookAnalytics,
@@ -424,7 +425,7 @@ class WishStorePort(Protocol):
         kind: str | None = None,
         sort: str = "priority",
         offset: int = 0,
-        limit: int = 50,
+        limit: int = WISH_PAGE_DEFAULT,
     ) -> dict: ...
 
     def toggle_wish_vote(self, wish_id: str, actor_id: str) -> dict: ...

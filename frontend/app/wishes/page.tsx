@@ -11,7 +11,6 @@ import {
   WISH_CONTENT_MAX_CHARS,
   WISH_KIND_LABELS,
   WISH_PAGE_MAX,
-  WISH_PAGE_SIZE,
   WISH_TITLE_MAX_CHARS,
   type WishItem,
   type WishKind,
@@ -59,7 +58,7 @@ async function loadWishWindow(kind: WishKind | "", count: number): Promise<{ ite
 type LoadState =
   | { kind: "loading" }
   | { kind: "error"; notice: string }
-  | { kind: "ready"; items: WishItem[]; total: number; nextOffset: number };
+  | { kind: "ready"; items: WishItem[]; total: number; nextOffset: number; pageSize: number };
 
 export default function WishWallPage() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -91,7 +90,13 @@ export default function WishWallPage() {
       ]);
       if (requestGeneration !== listRequestGeneration.current) return;
       setUser(me);
-      setState({ kind: "ready", items: page.items, total: page.total, nextOffset: page.items.length });
+      setState({
+        kind: "ready",
+        items: page.items,
+        total: page.total,
+        nextOffset: page.items.length,
+        pageSize: page.limit,
+      });
     } catch (error) {
       if (requestGeneration !== listRequestGeneration.current) return;
       setState({ kind: "error", notice: toUserMessage(error, "许愿墙加载失败，请重试") });
@@ -146,7 +151,13 @@ export default function WishWallPage() {
         const currentFilter = filterRef.current;
         const page = await listWishes({ kind: currentFilter || undefined, sort: sortRef.current });
         if (requestGeneration === listRequestGeneration.current) {
-          setState({ kind: "ready", items: page.items, total: page.total, nextOffset: page.items.length });
+          setState({
+            kind: "ready",
+            items: page.items,
+            total: page.total,
+            nextOffset: page.items.length,
+            pageSize: page.limit,
+          });
         }
       } catch {
         if (requestGeneration === listRequestGeneration.current) {
@@ -161,8 +172,9 @@ export default function WishWallPage() {
   }
 
   async function vote(item: WishItem) {
-    if (votingId || loadingMore) return;
-    const visibleCount = state.kind === "ready" ? state.items.length : WISH_PAGE_SIZE;
+    if (state.kind !== "ready" || votingId || loadingMore) return;
+    const visibleCount = state.items.length;
+    const visiblePageSize = state.pageSize;
     setVotingId(item.id);
     window.clearTimeout(voteNoticeTimers.current[item.id]);
     delete voteNoticeTimers.current[item.id];
@@ -186,14 +198,32 @@ export default function WishWallPage() {
           if (mounted.current && requestGeneration === listRequestGeneration.current) {
             setState((previous) => {
               if (previous.kind !== "ready") {
-                return { kind: "ready", items: page.items, total: page.total, nextOffset: page.items.length };
+                return {
+                  kind: "ready",
+                  items: page.items,
+                  total: page.total,
+                  nextOffset: page.items.length,
+                  pageSize: visiblePageSize,
+                };
               }
               if (page.items.some((row) => row.id === item.id)) {
-                return { kind: "ready", items: page.items, total: page.total, nextOffset: page.items.length };
+                return {
+                  kind: "ready",
+                  items: page.items,
+                  total: page.total,
+                  nextOffset: page.items.length,
+                  pageSize: previous.pageSize,
+                };
               }
               const votedItem = previous.items.find((row) => row.id === item.id);
               if (!votedItem) {
-                return { kind: "ready", items: page.items, total: page.total, nextOffset: page.items.length };
+                return {
+                  kind: "ready",
+                  items: page.items,
+                  total: page.total,
+                  nextOffset: page.items.length,
+                  pageSize: previous.pageSize,
+                };
               }
               const serverItems = page.items.slice(0, Math.max(0, visibleCount - 1));
               return {
@@ -201,6 +231,7 @@ export default function WishWallPage() {
                 items: [...serverItems, votedItem],
                 total: page.total,
                 nextOffset: serverItems.length,
+                pageSize: previous.pageSize,
               };
             });
           }
@@ -240,7 +271,12 @@ export default function WishWallPage() {
     const nextOffset = state.nextOffset;
     setLoadingMore(true);
     try {
-      const page = await listWishes({ kind: filter || undefined, sort, offset: nextOffset });
+      const page = await listWishes({
+        kind: filter || undefined,
+        sort,
+        offset: nextOffset,
+        limit: state.pageSize,
+      });
       if (requestGeneration !== listRequestGeneration.current) return;
       const existingIds = new Set(existingItems.map((item) => item.id));
       setState({
@@ -248,6 +284,7 @@ export default function WishWallPage() {
         items: [...existingItems, ...page.items.filter((item) => !existingIds.has(item.id))],
         total: page.total,
         nextOffset: nextOffset + page.items.length,
+        pageSize: state.pageSize,
       });
     } catch (error) {
       if (requestGeneration !== listRequestGeneration.current) return;
@@ -371,7 +408,7 @@ export default function WishWallPage() {
                   {loadingMore ? "加载中…" : `加载更多（还有 ${state.total - state.items.length} 条）`}
                 </button>
               )}
-              {state.items.length > WISH_PAGE_SIZE && <span className="wish-result-count">已显示 {state.items.length} 条</span>}
+              {state.items.length > state.pageSize && <span className="wish-result-count">已显示 {state.items.length} 条</span>}
             </div>
           )}
         </section>

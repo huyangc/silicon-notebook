@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from app.models.wishes import WISH_PAGE_DEFAULT
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -76,7 +77,7 @@ class WishStore:
         kind: str | None = None,
         sort: str = "priority",
         offset: int = 0,
-        limit: int = 50,
+        limit: int = WISH_PAGE_DEFAULT,
     ) -> dict:
         where = " WHERE w.kind=?" if kind else ""
         filter_params = [kind] if kind else []

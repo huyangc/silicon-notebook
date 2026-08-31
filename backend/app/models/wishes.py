@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 WISH_TITLE_MAX_CHARS = 120
 WISH_CONTENT_MAX_CHARS = 4000
+WISH_PAGE_DEFAULT = 50
 WISH_PAGE_MAX = 100
 
 WishKind = Literal["bug", "feature", "plan"]
@@ -38,7 +39,7 @@ class PaginatedWishes(BaseModel):
     items: list[WishItem] = Field(default_factory=list)
     total: int = 0
     offset: int = 0
-    limit: int = 50
+    limit: int = WISH_PAGE_DEFAULT
 
 
 class WishVoteResult(BaseModel):

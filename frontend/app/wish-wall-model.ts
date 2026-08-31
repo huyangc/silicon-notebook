@@ -1,6 +1,5 @@
 export const WISH_TITLE_MAX_CHARS = 120;
 export const WISH_CONTENT_MAX_CHARS = 4000;
-export const WISH_PAGE_SIZE = 50;
 export const WISH_PAGE_MAX = 100;
 
 export type WishKind = "bug" | "feature" | "plan";
