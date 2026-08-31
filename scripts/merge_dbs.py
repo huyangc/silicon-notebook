@@ -28,7 +28,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
 )
 
-# --- 表分类(SCHEMA_VERSION=66) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=67) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -144,6 +144,9 @@ GLOBAL_UNION_TABLES = [
     # 支持次数不可加和(同一批 run 可能在两边都被蒸馏过),而这张表的用途是排序
     # 提示,宁可低估。
     "retrieval_experiences",
+    # v65 global feedback: author/user foreign keys point into the users union;
+    # insert the parent wishes before their composite vote children.
+    "wishes", "wish_votes",
 ]
 
 OBJECT_SCHEMA_SEMANTIC_COLUMNS = (

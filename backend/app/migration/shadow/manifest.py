@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=66, postgres_version=45, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=67, postgres_version=46, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -773,6 +773,18 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         91,
         "timestamptz+boolean",
+    ),
+    # SQLite v67 / PostgreSQL v46: global wish wall and one-vote-per-user
+    # relation. wishes precedes wish_votes because the latter references it.
+    _table(
+        "wishes", ("id",), ReplicationKeyKind.DECLARED_PK, 92, "timestamptz"
+    ),
+    _table(
+        "wish_votes",
+        ("wish_id", "user_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        93,
+        "timestamptz",
     ),
 )
 

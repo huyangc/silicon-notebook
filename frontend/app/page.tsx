@@ -835,6 +835,7 @@ export default function Home() {
   // codex #535 R3 P2:初始 false——config 未返回/瞬态失败/旧后端时不得先亮出
   // 一个 PATCH 端点不存在的入口;system-api 对缺失字段也归一成 false,两侧同向。
   const [userSearchProfileEnabled, setUserSearchProfileEnabled] = useState(false);
+  const [userActivityViewEnabled, setUserActivityViewEnabled] = useState(false);
   // 待上传列表：文件 + 每项文档类型 + 每项是否被用户显式表态，**一个** state 对象。
   // 三条数组必须逐项对齐（uploadDocTypeFields 按下标配对），而入列会被跨 await 的
   // 异步链触发（文件夹遍历或兼容 ZIP intake）——拆成三个 state 就只能各自 setState，等长
@@ -2552,6 +2553,7 @@ export default function Home() {
       setSourceImageMaxPerSource(systemConfiguration.source_image_max_per_source);
       setSourceImagesEnabled(systemConfiguration.source_images_enabled);
       setUserSearchProfileEnabled(systemConfiguration.user_search_profile_enabled);
+      setUserActivityViewEnabled(systemConfiguration.user_activity_view_enabled);
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
@@ -5159,6 +5161,7 @@ export default function Home() {
             canChangePassword={currentUser.id !== "user-local"}
             advancedMode={isAdvanced(uiMode)}
             searchProfileEnabled={userSearchProfileEnabled}
+            activityViewEnabled={userActivityViewEnabled}
             onOpenMemory={showGlobalMemory}
             onOpenGroups={() => showGroups({}, "push")}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}

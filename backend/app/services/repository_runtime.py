@@ -276,6 +276,7 @@ class _PersistenceSeats:
     # service) and T4 (the admin route + PATCH endpoint) wire on top of
     # this. See ExtensionToggleStorePort in repositories/ports.py.
     extension_toggles: Any
+    wishes: Any
     source_store: Any
     chunk_store: Any
     # Task 25: reports-table row persistence is seam-free (the shared
@@ -375,6 +376,7 @@ def _build_persistence_seats(
         retrieval_experiences=bundle.retrieval_experiences,
         agent_observations=bundle.agent_observations,
         extension_toggles=bundle.extension_toggles,
+        wishes=bundle.wishes,
         source_store=bundle.sources,
         chunk_store=bundle.chunks,
         report_store=bundle.reports,
@@ -964,8 +966,7 @@ class RepositoryRuntime:
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
     ) -> None:
-        """Call the domain builders in order, then mount their fields: the
-        call order below IS the dependency topology."""
+        """Call domain builders in order; their call order is the dependency topology."""
         foundation = _build_process_foundation(
             settings, root_dir, seams, model_provider,
             retrieval_contributor_host=retrieval_contributor_host,
@@ -1007,6 +1008,7 @@ class RepositoryRuntime:
         self.retrieval_experiences = seats.retrieval_experiences
         self.agent_observations = seats.agent_observations
         self.extension_toggles = seats.extension_toggles
+        self.wishes = seats.wishes
         self.source_store = seats.source_store
         self.chunk_store = seats.chunk_store
         self.report_store = seats.report_store

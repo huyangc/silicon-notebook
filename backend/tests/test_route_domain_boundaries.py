@@ -17,6 +17,7 @@ from app.api.notebook_routes import router as notebook_router
 from app.api.report_routes import router as report_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
+from app.api.wish_routes import router as wish_router
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +36,7 @@ DOMAIN_ROUTERS = (
     catalog_router,
     group_router,
     agent_profile_router,
+    wish_router,
 )
 EXPECTED_COMPOSITION_NAMES = (
     "memory_router",
@@ -59,6 +61,8 @@ EXPECTED_COMPOSITION_NAMES = (
     "group_router",
     # Agentic Memory P1(T6),同上:接在末尾只是延续写法。
     "agent_profile_router",
+    # 许愿墙是全局反馈域，不归属于任何单个笔记本。
+    "wish_router",
 )
 
 
@@ -153,6 +157,17 @@ def test_kg_and_admin_endpoints_have_domain_owners():
         "list_online_users": "app.api.admin_routes",
         "test_system_model_service": "app.api.admin_routes",
         "test_all_system_model_services": "app.api.admin_routes",
+    }
+    for endpoint, module in expected.items():
+        assert modules[endpoint] == module, endpoint
+
+
+def test_wish_wall_endpoints_have_a_domain_owner():
+    modules = _endpoint_modules()
+    expected = {
+        "list_wishes": "app.api.wish_routes",
+        "create_wish": "app.api.wish_routes",
+        "toggle_wish_vote": "app.api.wish_routes",
     }
     for endpoint, module in expected.items():
         assert modules[endpoint] == module, endpoint

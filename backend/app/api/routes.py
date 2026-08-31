@@ -14,6 +14,7 @@ from app.api.notebook_routes import router as notebook_router
 from app.api.report_routes import router as report_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
+from app.api.wish_routes import router as wish_router
 
 
 router = APIRouter()
@@ -41,5 +42,6 @@ for domain_router in (
     # Agentic Memory P1(T6)。同上:注册顺序不影响 api_contract 夹具,接在末尾
     # 只是延续写法。
     agent_profile_router,
+    wish_router,
 ):
     router.include_router(domain_router)

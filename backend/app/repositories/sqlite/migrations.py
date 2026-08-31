@@ -110,7 +110,8 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # v66 adds sources.uploaded_by, the user who actually created a visible source
 # row. Historical visible rows can only be attributed best-effort to their
 # notebook owner; hidden synthetic Memory/Knowhow rows remain NULL.
-SCHEMA_VERSION = 66
+# v67 adds the global wish wall and its per-user vote relation.
+SCHEMA_VERSION = 67
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3574,6 +3575,33 @@ class SqliteMigrator:
                 "ON sources(uploaded_by, created_at, id) "
                 "WHERE uploaded_by IS NOT NULL "
                 "AND source_type NOT IN ('memory','knowhow')"
+            )
+
+    def _migration_67(self) -> None:
+        """Global wish wall plus one-vote-per-user relation."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS wishes (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  kind TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  content TEXT NOT NULL,
+                  author_id TEXT NOT NULL REFERENCES users(id),
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_wishes_kind_created
+                  ON wishes(kind, created_at DESC, id DESC);
+                CREATE TABLE IF NOT EXISTS wish_votes (
+                  wish_id TEXT NOT NULL REFERENCES wishes(id) ON DELETE CASCADE,
+                  user_id TEXT NOT NULL REFERENCES users(id),
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (wish_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_wish_votes_user
+                  ON wish_votes(user_id, wish_id);
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

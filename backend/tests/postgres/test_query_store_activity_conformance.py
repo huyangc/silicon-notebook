@@ -239,6 +239,51 @@ def test_user_usage_last_active_hides_unresolved_time_sentinel_postgres(
     assert usage["last_active"] is None
 
 
+def test_admin_question_overview_combines_ask_and_report(postgres_database, store):
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_ask(
+            connection, "ask-global", "n1", "u1", NOW,
+            question="如何降低噪声？",
+        )
+        _insert_report(
+            connection, "report-global", "n1", "u1", NOW,
+            question="分析放大器稳定性",
+        )
+
+    result = store.list_admin_questions(query="稳定", limit=50)
+    assert result["stats"] == {
+        "total": 1, "asks": 0, "reports": 1, "active_users": 1,
+    }
+    assert result["items"][0]["id"] == "report-global"
+    assert isinstance(result["items"][0]["created_at"], str)
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO retained_user_activity "
+            "(activity_type,record_id,actor_id,notebook_id,notebook_name,question,"
+            "status,created_at,deleted_at,expires_at) VALUES "
+            "('ask','ask-global','u1','n1','NB-n1','如何降低噪声？','completed',"
+            "NULL,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + INTERVAL '1 day'),"
+            "('report','report-global','u1','n1','NB-n1','分析放大器稳定性','done',"
+            "%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + INTERVAL '1 day')",
+            (NOW,),
+        )
+        connection.execute("DELETE FROM notebooks WHERE id='n1'")
+
+    retained = store.list_admin_questions(limit=50)
+    assert retained["stats"] == {
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1,
+    }
+    assert {item["id"] for item in retained["items"]} == {
+        "ask-global", "report-global",
+    }
+    assert [item["id"] for item in retained["items"]] == [
+        "report-global", "ask-global",
+    ]
+
+
 def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(
     postgres_database, store
 ):

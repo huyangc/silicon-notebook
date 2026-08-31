@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 66. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v66 and remains readable. Those migrations
+The current schema version is 67. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v67 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -538,6 +538,15 @@ best-effort to their notebook owner because older schemas retained no upload
 actor. This adds no table, foreign key, or unique surface, so the current pair
 is SQLite 66 / PostgreSQL 45 / epoch 1 with 86 application tables, 115
 replicated unique surfaces, and the same 12-row-slot closure bound.
+
+SQLite v67 and PostgreSQL v46 add the global `wishes` and `wish_votes` tables.
+`wishes.author_id` and the composite vote identity both reference `users`; deleting
+a wish cascades its votes, while deleting an author remains restricted. The vote
+primary key `(wish_id, user_id)` is the database-level one-vote-per-user guard.
+Both adapters expose the same `WishStorePort`, and the shadow manifest includes
+both new business tables. The resulting current shadow contract is 88 business
+tables, 117 replicated unique surfaces, and the unchanged 12-row-slot ancestor
+bound. The current schema pair is SQLite 67 / PostgreSQL 46 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

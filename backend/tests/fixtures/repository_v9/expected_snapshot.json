@@ -1794,6 +1794,16 @@
         "type": "index"
       },
       {
+        "name": "idx_wish_votes_user",
+        "sql_sha256": "fc17d6f8463bc757991c169375df664128173d11b02d998588d9bccc7c5469da",
+        "type": "index"
+      },
+      {
+        "name": "idx_wishes_kind_created",
+        "sql_sha256": "2ea22181f7db2b362b602b7f44a516484cae9b2f5343127d0d17481eaa43424b",
+        "type": "index"
+      },
+      {
         "name": "uq_clusters_notebook_type_member",
         "sql_sha256": "8ac332952599b7949d12d9591820d427879fda5ccf6b4083857a0db9ace288b0",
         "type": "index"
@@ -2334,6 +2344,16 @@
         "type": "table"
       },
       {
+        "name": "wish_votes",
+        "sql_sha256": "08977e072449fdccc887d664b3ec26cd2366b0df2666fade7a2470b1595ee6a6",
+        "type": "table"
+      },
+      {
+        "name": "wishes",
+        "sql_sha256": "06e2b10a0b02e5940d802fcfa80d31ee3c09ac0d2b114f0ee99270c6b45b9755",
+        "type": "table"
+      },
+      {
         "name": "memory_items_fts_delete",
         "sql_sha256": "6d2df4a4e3156e571304769322f7b1685036e262356f13abf2c26f8e2515cd7d",
         "type": "trigger"
@@ -2349,6 +2369,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 66
+    "user_version": 67
   }
 }

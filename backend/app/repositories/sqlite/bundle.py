@@ -36,6 +36,7 @@ from app.repositories.sqlite.retrieval_experience_store import (
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.repositories.sqlite.wish_store import WishStore
 
 
 def _not_wired(*_args: object, **_kwargs: object) -> Any:
@@ -77,6 +78,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     retrieval_experiences: RetrievalExperienceStore
     agent_observations: AgentObservationStore
     extension_toggles: ExtensionToggleStore
+    wishes: WishStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -149,6 +151,7 @@ class SqlitePersistenceBundleFactory:
             database, new_id=seams.new_id, now=seams.now
         )
         extension_toggles = ExtensionToggleStore(database)
+        wishes = WishStore(database, new_id=seams.new_id, now=seams.now)
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -176,4 +179,5 @@ class SqlitePersistenceBundleFactory:
             retrieval_experiences=retrieval_experiences,
             agent_observations=agent_observations,
             extension_toggles=extension_toggles,
+            wishes=wishes,
         )

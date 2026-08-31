@@ -33,6 +33,7 @@ from app.repositories.ports import (
     SharingStorePort,
     SourceStorePort,
     UnifiedKgStorePort,
+    WishStorePort,
 )
 
 
@@ -64,6 +65,7 @@ class PersistenceBundle(Protocol):
     retrieval_experiences: RetrievalExperienceStorePort
     agent_observations: AgentObservationStorePort
     extension_toggles: ExtensionToggleStorePort
+    wishes: WishStorePort
 
 
 class PersistenceBundleFactory(Protocol):
