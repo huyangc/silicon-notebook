@@ -105,12 +105,13 @@ class SourcePartitionedPprService:
         self._settings = settings
         self._artifacts = artifacts
         self._projections = projections
-        # Value is (graph, companion disk signature at load time) — the
-        # signature lets a cache HIT be revalidated against the live root
-        # without a second cache dimension; see ``_graph``.
-        self._cache: OrderedDict[tuple[str, str, str], tuple[_CombinedGraph, Any]] = (
-            OrderedDict()
-        )
+        # Value is (graph, companion disk signature, MAIN disk signature),
+        # both signatures taken at load time — they let a cache HIT be
+        # revalidated against both live roots without a second cache
+        # dimension; see ``_graph`` (main added by P1, codex PR#643 R27).
+        self._cache: OrderedDict[
+            tuple[str, str, str], tuple[_CombinedGraph, Any, Any]
+        ] = OrderedDict()
         self._lock = threading.RLock()
 
     def _companion_signature(self, notebook_id: str) -> Any:
@@ -128,10 +129,30 @@ class SourcePartitionedPprService:
           has no probe at all (old test doubles), or this one stat failed
           (permission, transient I/O). Fail-soft, exactly as before.
         """
+        return self._root_signature(self._artifacts.source_partition_dir(notebook_id))
+
+    def _main_signature(self, notebook_id: str) -> Any:
+        """One stat of the MAIN index root's ``manifest.json``, same discipline
+        and same three outcomes as ``_companion_signature`` (P1, codex PR#643
+        R27). The build-id pairing gate runs on COLD loads
+        (``validate_partition_root`` reads the live main manifest), so a warm
+        hit must notice when the main generation moved underneath it — a
+        cross-process main republish whose companion half failed changes
+        neither the DB-derived cache key nor the companion's own signature,
+        and without this the warm graph keeps serving a companion paired
+        with a main root that no longer exists. One extra stat per read,
+        honestly registered; adapters without ``scale_dir`` (old doubles)
+        answer ``None`` — fail-soft, exactly like a probeless adapter."""
+        scale_dir = getattr(self._artifacts, "scale_dir", None)
+        if not callable(scale_dir):
+            return None
+        return self._root_signature(scale_dir(notebook_id))
+
+    def _root_signature(self, directory: Any) -> Any:
         probe = getattr(self._artifacts, "manifest_stat_signature", None)
         if not callable(probe):
             return None
-        signature = probe(self._artifacts.source_partition_dir(notebook_id))
+        signature = probe(directory)
         if signature is not MANIFEST_ABSENT:
             return signature
         # codex PR#643 R22 P2: one ENOENT is NOT durable absence. The
@@ -147,9 +168,7 @@ class SourcePartitionedPprService:
         # deleted live root keeps this fail-soft until the operator resolves
         # that documented recovery state (mv it back, or remove it) — the
         # conservative side of the trade, and it converges either way.
-        old_probe = probe(
-            str(self._artifacts.source_partition_dir(notebook_id)) + ".old"
-        )
+        old_probe = probe(str(directory) + ".old")
         if old_probe is not MANIFEST_ABSENT:
             return None
         # codex PR#643 R23 P2: ``.old`` absent is still not the last word —
@@ -160,7 +179,7 @@ class SourcePartitionedPprService:
         # (superseded-vs-recorded comparison then reloads it, exactly
         # right); still absent means absent at BOTH probes of the live path
         # with no ``.old`` in between — durable retirement.
-        recheck = probe(self._artifacts.source_partition_dir(notebook_id))
+        recheck = probe(directory)
         if recheck is not MANIFEST_ABSENT:
             return recheck
         # codex PR#643 R25 P2: back-to-back publications can thread all three
@@ -171,9 +190,7 @@ class SourcePartitionedPprService:
         # consecutive misses (live, .old, live, .old) with no generation
         # surfacing in between is durable absence — a publisher would have
         # left at least one of the four visible.
-        if probe(
-            str(self._artifacts.source_partition_dir(notebook_id)) + ".old"
-        ) is not MANIFEST_ABSENT:
+        if probe(str(directory) + ".old") is not MANIFEST_ABSENT:
             return None
         return MANIFEST_ABSENT
 
@@ -378,14 +395,26 @@ class SourcePartitionedPprService:
             # post-filtering (docs/development.md:37).
             self.invalidate(notebook_id)
             raise SourcePartitionUnavailable("source_partition_artifact_unavailable")
+        # P1, codex PR#643 R27: the MAIN root's generation is part of what a
+        # warm hit is implicitly asserting — the build-id pairing gate runs
+        # on cold loads only, and a cross-process main republish whose
+        # companion half failed moves neither the DB-derived key nor the
+        # companion's own signature. Recorded verbatim (including
+        # ``MANIFEST_ABSENT``: an entry adopted under a legacy absent main
+        # stays stable instead of reloading forever); compared with the same
+        # predicate, so a moved main generation supersedes the entry and the
+        # cold path re-runs its pairing gates against the new live manifest.
+        main_signature = self._main_signature(notebook_id)
         # Hold through lazy load/combine: concurrent cold requests for one
         # identity open one selected partition set and retain one CSR.
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
-                cached_graph, cached_signature = cached
+                cached_graph, cached_signature, cached_main_signature = cached
                 if not _companion_signature_superseded(
                     cached_signature, disk_signature
+                ) and not _companion_signature_superseded(
+                    cached_main_signature, main_signature
                 ):
                     self._cache.move_to_end(key)
                     return cached_graph, True
@@ -413,7 +442,7 @@ class SourcePartitionedPprService:
                 ),
             )
             graph = self._combine(partitions)
-            self._cache[key] = (graph, disk_signature)
+            self._cache[key] = (graph, disk_signature, main_signature)
             return graph, False
 
     def retrieve(

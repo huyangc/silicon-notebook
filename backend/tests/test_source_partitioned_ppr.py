@@ -423,6 +423,37 @@ def test_a_companion_from_the_live_build_is_served(repo):
     assert partition_manifest["parent_build_id"] == "a" * 32
 
 
+def test_a_warm_companion_is_dropped_when_the_main_generation_moves(repo):
+    """P1, codex PR#643 R27: the build-id pairing gate runs on COLD loads
+    only. A cross-process main republish whose companion half failed moves
+    neither the DB-derived cache key nor the companion's own manifest
+    signature, so a warm hit used to keep serving a companion paired with a
+    main generation that no longer exists. The entry records the MAIN root's
+    disk signature too, and a moved main supersedes it — the cold path then
+    re-runs the pairing gate against the new live manifest and refuses.
+
+    Mutation anchor: drop the main-signature comparison on the hit path and
+    this goes red — the warm mismatched graph keeps answering.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+    warmed = _retrieve(repo, notebook_id, source_a, version)
+    assert warmed.capability.enabled
+
+    # A new main generation lands (fresh inode ⇒ fresh disk signature); its
+    # companion half never completed, so the companion root is untouched.
+    _write_main_manifest(repo, notebook_id, version=version, build_id="b" * 32)
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+    assert not result.capability.enabled, (
+        "a warm companion must not keep serving after the main generation "
+        "moved underneath it"
+    )
+    assert result.capability.reason == "source_partition_identity_mismatch"
+
+
 def test_a_partition_copied_in_from_another_generation_is_refused(repo):
     """The per-source gate carries its own weight, not just the root's.
 
@@ -982,12 +1013,21 @@ def test_the_manifest_probe_separates_absence_from_an_unreadable_stat(
 
 
 def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):
-    """T-W3's 'one load, one stat' discipline, mirrored here: the companion
-    manifest stat must not be repeated inside a single ``retrieve()`` call."""
+    """T-W3's 'one load, one stat' discipline, mirrored here: PER ROOT, the
+    manifest stat must not be repeated inside a single ``retrieve()`` call.
+    Two roots are statted since P1 codex PR#643 R27 — the companion (its own
+    generation) and the MAIN index (the generation the pairing gate ran
+    against) — so the honest budget is exactly two stats per call, never
+    more. A durably ABSENT root instead pays the four-look absence dance
+    (R22/R23/R25), which is why this test gives the main root a manifest —
+    the common serving shape."""
     notebook_id, source_a, _source_b = _seed(repo)
     version = ["v1"]
     _publish(repo, notebook_id, (source_a,), version)
     store = repo._runtime.scale_artifact_store
+    main_dir = store.scale_dir(notebook_id)
+    main_dir.mkdir(parents=True, exist_ok=True)
+    (main_dir / "manifest.json").write_text(json.dumps({"version": version}))
     original = store.manifest_stat_signature
     stat_calls = 0
 
@@ -1005,7 +1045,7 @@ def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):
         parent_version=version,
         object_seeds={"ko-a1": 1.0},
     )
-    assert stat_calls == 1
+    assert stat_calls == 2
 
     stat_calls = 0
     service.retrieve(
@@ -1014,7 +1054,7 @@ def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):
         parent_version=version,
         object_seeds={"ko-a1": 1.0},
     )
-    assert stat_calls == 1
+    assert stat_calls == 2
 
 
 def test_zero_budget_is_zero_io_and_cold_load_is_single_flight(repo, monkeypatch):
