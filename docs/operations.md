@@ -539,24 +539,43 @@ opens a per-notebook circuit for the rest of the current retrieval run; later ge
 skip the database statement. Calls already in flight are not forcibly cancelled. Exact
 phrase/identifier lookup is a separate channel and is never covered by this circuit.
 
-When a chunk ANN index is healthy, Deep Report planning/generation skips the generic
-natural-language FTS union by default; ordinary Ask keeps ANN∪FTS. Set
-`CHUNK_FTS_WITH_ANN_ENABLED=true` to A/B or restore that report lexical supplement. If ANN
-is unavailable, the report still uses bounded FTS as its fail-open fallback. A frozen
-all-selected source list also no longer pays the HNSW Python filter callback when the
-immutable source sidecar proves every indexed source code is allowed; any unknown or
-unallowed code keeps the filtered/scoped path.
+When an immutable chunk ANN source sidecar covers the frozen authorized scope, Deep Report
+planning/generation skips the generic natural-language FTS union by default; ordinary Ask
+keeps ANN∪FTS. A mixed indexed/pending-fold scope retains its ANN core and lexical-searches
+only the authorized sources missing from that sidecar. A report call without a producer
+scope first freezes visible sources plus that actor's hidden sources, once per
+library/retrieval run, and applies that same ceiling to ANN, bounded FTS, brute-force
+fallback, hydration, delta FTS, and optional candidate contributors. An index reload during
+the report cannot widen the frozen universe. Authority-probe failure fails closed to an empty
+arm for that library and emits only a content-free diagnostic; it never widens ANN or falls
+through to unscoped FTS. The immutable source-code/filter plan is built once per index and
+run scope instead of rescanning the row sidecar per leaf. Sidecar-missing sources with no
+chunks do not trigger delta FTS; their indexed existence is rechecked per report leaf, so a
+chunk commit becomes visible inside the same run even if the separate KG mutation-version
+bump fails. All lexical calls keep the private timeout and circuit above.
+This restores lexical visibility for a source missing from the sidecar, not
+semantic strong consistency for changes inside an already indexed source or delta with no
+term overlap; those still require a fold or `SCALE_SEARCH_INCLUDE_DELTA=true`. Set
+`CHUNK_FTS_WITH_ANN_ENABLED=true` to A/B or restore the full report lexical supplement. If
+ANN is unavailable, the report still uses bounded FTS as its fail-open fallback. A frozen
+all-selected source list also no longer pays the HNSW Python filter callback when the sidecar
+proves every indexed source code is allowed; any unknown or unallowed code keeps the
+filtered/scoped path.
 
 Use the content-free latency events to identify the remaining cost instead of interpreting
 the legacy aggregate as pure ANN: `site=chunk_scale_index` reports
 `scale_index_load_ms`; `site=chunk_ann` splits `ann_prepare_ms`, `ann_open_ms`, `knn_ms`,
-`delta_ms`, `lexical_prepare_ms`, `chunk_fts_ms`, `hydrate_ms`, and `score_ms`; `site=_retrieve_scored` reports the broad
+`delta_ms`, `lexical_prepare_ms`, `chunk_fts_ms`, `hydrate_ms`, `score_ms`, and the fixed
+`lexical_mode` classification (`report_ann_only`, `report_delta_fallback`,
+`report_quality_union`, or `non_report_union`); `site=_retrieve_scored` reports the broad
 `candidate_ms` plus `scale_index_ms`, `kg_ann_ms`, and `kg_lexical_ms`. The retrieval-run
 summary reports `chunk_fts_timeouts` and `chunk_fts_circuit_skips`. These events also carry
 the compatible `stage`/`latency_ms` pair (`chunk_scale_index`, `chunk_ann`, `chunk_fts`, or
 `kg_candidates`), so both `diag.py slow` and `diag.py latency` aggregate them. After deploying, verify
-that report ANN hits show near-zero `chunk_fts_ms`, FTS timeouts cost roughly the private
-deadline rather than 30 seconds, and readiness has preloaded every required scale index.
+that scope-complete report ANN hits show `report_ann_only` and near-zero `chunk_fts_ms`;
+pending-fold sources show `report_delta_fallback`; FTS timeouts cost roughly
+the private deadline rather than 30 seconds; and readiness has preloaded every required scale
+index.
 
 For the reviewable component distribution, run:
 

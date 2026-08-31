@@ -58,6 +58,8 @@ class RetrievalRunState:
         self._lock = threading.RLock()
         self._embedding_cache: dict[Hashable, Any] = {}
         self._embedding_pending: dict[Hashable, _PendingEmbedding] = {}
+        self._value_cache: dict[Hashable, Any] = {}
+        self._value_pending: dict[Hashable, _PendingEmbedding] = {}
         self._chunk_fts_open: set[str] = set()
         self.embedding_requests = 0
         self.embedding_hits = 0
@@ -77,19 +79,30 @@ class RetrievalRunState:
         """
         while True:
             owner = False
+            cache_hit = False
             with self._lock:
                 if key in self._embedding_cache:
                     self.embedding_hits += 1
-                    return self._embedding_cache[key]
-                pending = self._embedding_pending.get(key)
-                if pending is None:
-                    pending = _PendingEmbedding(threading.Event())
-                    self._embedding_pending[key] = pending
-                    self.embedding_requests += 1
-                    owner = True
+                    cached = self._embedding_cache[key]
+                    cache_hit = True
+                else:
+                    pending = self._embedding_pending.get(key)
+                    if pending is None:
+                        pending = _PendingEmbedding(threading.Event())
+                        self._embedding_pending[key] = pending
+                        self.embedding_requests += 1
+                        owner = True
+            if cache_hit:
+                raise_if_cancelled(self.cancel_event)
+                return cached
             if owner:
                 break
-            pending.ready.wait()
+            while not pending.ready.wait(timeout=_CANCEL_POLL_SECONDS):
+                raise_if_cancelled(self.cancel_event)
+            # Completion and cancellation can race.  A successful Event.wait()
+            # must not skip the cancellation check and return freshly cached
+            # work to a report leaf that has already been cancelled.
+            raise_if_cancelled(self.cancel_event)
 
         try:
             value = compute()
@@ -104,6 +117,51 @@ class RetrievalRunState:
             if value is not None:
                 self._embedding_cache[key] = value
             current = self._embedding_pending.pop(key, None)
+            if current is not None:
+                current.ready.set()
+        return value
+
+    def memoized_value(self, key: Hashable, compute: Callable[[], T]) -> T:
+        """Single-flight one successful run-local infrastructure value.
+
+        Unlike the embedding cache this records no model counters.  It is for
+        small, content-free snapshots shared by report leaf queries (for
+        example one notebook's current source-id tuple).  Exceptions are not
+        retained, so a later caller may retry the ordinary fail-soft path.
+        """
+        while True:
+            owner = False
+            cache_hit = False
+            with self._lock:
+                if key in self._value_cache:
+                    cached = self._value_cache[key]
+                    cache_hit = True
+                else:
+                    pending = self._value_pending.get(key)
+                    if pending is None:
+                        pending = _PendingEmbedding(threading.Event())
+                        self._value_pending[key] = pending
+                        owner = True
+            if cache_hit:
+                raise_if_cancelled(self.cancel_event)
+                return cached
+            if owner:
+                break
+            while not pending.ready.wait(timeout=_CANCEL_POLL_SECONDS):
+                raise_if_cancelled(self.cancel_event)
+            raise_if_cancelled(self.cancel_event)
+
+        try:
+            value = compute()
+        except BaseException:
+            with self._lock:
+                current = self._value_pending.pop(key, None)
+                if current is not None:
+                    current.ready.set()
+            raise
+        with self._lock:
+            self._value_cache[key] = value
+            current = self._value_pending.pop(key, None)
             if current is not None:
                 current.ready.set()
         return value
@@ -230,6 +288,11 @@ def memoized_query_embedding(key: Hashable, compute: Callable[[], T]) -> T:
     return state.memoized_embedding(key, compute) if state is not None else compute()
 
 
+def memoized_retrieval_value(key: Hashable, compute: Callable[[], T]) -> T:
+    state = current_retrieval_run()
+    return state.memoized_value(key, compute) if state is not None else compute()
+
+
 @contextmanager
 def retrieval_fanout_slot() -> Iterator[None]:
     state = current_retrieval_run()
@@ -244,6 +307,7 @@ __all__ = [
     "RetrievalRunState",
     "current_retrieval_run",
     "memoized_query_embedding",
+    "memoized_retrieval_value",
     "retrieval_fanout_slot",
     "retrieval_run",
 ]

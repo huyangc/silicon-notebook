@@ -2522,13 +2522,14 @@ class KnowledgeStore:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
-            placeholders = ",".join("?" for _ in source_ids)
+            source_payload = json.dumps(source_ids, ensure_ascii=False)
             rows = db.execute(
                 "SELECT f.chunk_id,bm25(chunks_fts) AS rank FROM chunks_fts f "
                 "JOIN chunks c ON c.id=f.chunk_id "
                 "WHERE f.notebook_id=? AND chunks_fts MATCH ? "
-                f"AND c.source_id IN ({placeholders}) ORDER BY rank LIMIT ?",
-                (notebook_id, match_query, *source_ids, k),
+                "AND c.source_id IN (SELECT CAST(value AS TEXT) "
+                "FROM json_each(?)) ORDER BY rank LIMIT ?",
+                (notebook_id, match_query, source_payload, k),
             ).fetchall()
         else:
             rows = db.execute(

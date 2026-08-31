@@ -1530,7 +1530,11 @@ class ChunkStorePort(Protocol):
     def retrieval_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
     def ids_for_sources(
-        db: object, notebook_id: str, source_ids: Sequence[str]
+        db: object,
+        notebook_id: str,
+        source_ids: Sequence[str],
+        *,
+        presence_only: bool = False,
     ) -> list[Any]: ...
     @staticmethod
     def count_row(db: object, notebook_id: str) -> Any: ...

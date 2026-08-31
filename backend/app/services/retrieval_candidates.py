@@ -56,6 +56,7 @@ from app.services.retrieval import (
 from app.services.retrieval_run import (
     current_retrieval_run,
     memoized_query_embedding,
+    memoized_retrieval_value,
 )
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import (
@@ -100,6 +101,12 @@ _GENERATED_QUESTION_QUERY_EVENT_FIELDS = frozenset({
     "matched_chunks",
     "added_chunks",
 })
+
+# A report cannot safely reinterpret an authority-read failure as an absent
+# source ceiling: ``None`` is the historical spelling of "unbounded" all the
+# way down to SQL/FTS. Keep a process-private identity sentinel so the failed
+# verdict can be cached once per retrieval run without entering telemetry.
+_REPORT_CHUNK_AUTHORITY_FAILED = object()
 
 
 def _first_relation_sample(raw: object) -> str:
@@ -915,6 +922,8 @@ class CandidateRetrievalService(_RetrievalState):
                 if hit is not None:
                     return hit
             vec = _compute()
+        except AskCancelled:
+            raise
         except Exception as exc:
             self._note_model_error(
                 "embed",
@@ -2485,11 +2494,18 @@ class CandidateRetrievalService(_RetrievalState):
         allowed_source_ids=None, producer_explicit: bool = False,
         drifted: Optional[bool] = None,
     ):
+        effective_allowed = self._chunk_source_ceiling(
+            notebook_id, allowed_source_ids
+        )
+        if effective_allowed is _REPORT_CHUNK_AUTHORITY_FAILED:
+            return [], [], None
+        if effective_allowed is not None and not effective_allowed:
+            return [], [], None
         baseline = self._retrieve_chunks_baseline(
             notebook_id,
             query,
             recall,
-            allowed_source_ids=allowed_source_ids,
+            allowed_source_ids=effective_allowed,
             producer_explicit=producer_explicit,
             drifted=drifted,
         )
@@ -2497,7 +2513,54 @@ class CandidateRetrievalService(_RetrievalState):
             notebook_id,
             query,
             baseline,
-            allowed_source_ids=allowed_source_ids,
+            allowed_source_ids=effective_allowed,
+        )
+
+    def _chunk_source_ceiling(self, notebook_id: str, allowed_source_ids=None):
+        """Return the effective producer ceiling for every chunk recall lane.
+
+        Mounted/compatibility report calls do not always carry the active
+        notebook's frozen checkbox scope. Freeze that library's authorized
+        visible + actor-hidden universe here, above ANN/FTS/brute-force and the
+        optional contributor seam. The run-local key deliberately excludes
+        the ScaleIndex object: an auto-fold/reload must not widen a report that
+        is already in flight.
+        """
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        scoped = scoped_allowed_source_ids(notebook_id, allowed_source_ids)
+        if scoped is not None:
+            return tuple(dict.fromkeys(str(value) for value in scoped))
+        run = current_retrieval_run()
+        if run is None or run.run_kind not in {
+            "report_planning", "report_generation"
+        }:
+            return None
+
+        def _authorized_source_ids():
+            try:
+                visible = self.sources.all_visible_source_ids(notebook_id)
+                hidden = self.sources.hidden_source_ids(
+                    notebook_id, run.actor_id or ""
+                )
+                return tuple(dict.fromkeys([*visible, *hidden]))
+            except Exception:  # noqa: BLE001 - fail closed and cache per run
+                try:
+                    self.event_log.emit({
+                        "kind": "chunk_ann_authority_probe_failed",
+                        "notebook_id": notebook_id,
+                    })
+                except Exception:  # noqa: BLE001 - observability is fail-open
+                    pass
+                return _REPORT_CHUNK_AUTHORITY_FAILED
+
+        return memoized_retrieval_value(
+            (
+                "report_chunk_authorized_sources",
+                notebook_id,
+                run.actor_id,
+            ),
+            _authorized_source_ids,
         )
 
     def _run_chunk_candidate_contributors(
@@ -2567,11 +2630,24 @@ class CandidateRetrievalService(_RetrievalState):
             }),
         )
         try:
+            admission_hydrate = self.hydrate_retrieval_contribution_chunks
+            if allowed_source_ids is not None:
+                def _hydrate_with_frozen_ceiling(
+                    admitted_notebook_id, admitted_actor_id, identities
+                ):
+                    return self._hydrate_generated_question_chunks(
+                        admitted_notebook_id,
+                        admitted_actor_id,
+                        identities,
+                        allowed_source_ids=allowed_source_ids,
+                    )
+
+                admission_hydrate = _hydrate_with_frozen_ceiling
             call_context = generated_question_call_context(
                 call,
                 actor_id=actor_id,
                 connection_probe=self.database,
-                admission_hydrate=self.hydrate_retrieval_contribution_chunks,
+                admission_hydrate=admission_hydrate,
                 max_items=max(
                     self.settings.chunk_recall,
                     self.settings.generated_question_recall,
@@ -2789,15 +2865,17 @@ class CandidateRetrievalService(_RetrievalState):
         own tests, ``_retrieve_elements``) since a single call to this method
         is trivially "once per arm" already.
         """
-        from app.services.source_scope import scoped_allowed_source_ids
-
         # The list binds this query either way; ``source_restricted`` is the
         # separate LANE question both lexical arms below need — see
         # ``_lexical_gate_source_scoped``.  Computed once here and threaded
         # down so both lexical arms answer it identically.
-        allowed_source_ids = scoped_allowed_source_ids(
+        allowed_source_ids = self._chunk_source_ceiling(
             notebook_id, allowed_source_ids
         )
+        if allowed_source_ids is _REPORT_CHUNK_AUTHORITY_FAILED:
+            return [], [], None
+        if allowed_source_ids is not None and not allowed_source_ids:
+            return [], [], None
         if drifted is None:
             drifted = _CHUNK_ARM_DRIFTED.get()
         if drifted is None:
@@ -2829,16 +2907,11 @@ class CandidateRetrievalService(_RetrievalState):
                 "status": "ready" if idx is not None else "unavailable",
             })
             if idx is not None and getattr(idx, "chunk_ann_labels", None):
-                if allowed_source_ids is None:
-                    ann = self._retrieve_chunks_ann(
-                        notebook_id, query, query_vector, idx, recall
-                    )
-                else:
-                    ann = self._retrieve_chunks_ann(
-                        notebook_id, query, query_vector, idx, recall,
-                        allowed_source_ids=allowed_source_ids,
-                        source_restricted=source_restricted,
-                    )
+                ann = self._retrieve_chunks_ann(
+                    notebook_id, query, query_vector, idx, recall,
+                    allowed_source_ids=allowed_source_ids,
+                    source_restricted=source_restricted,
+                )
                 if ann is not None:
                     return ann
         if allowed_source_ids is not None:
@@ -2984,16 +3057,30 @@ class CandidateRetrievalService(_RetrievalState):
         )
         from app.services.vector_index import build_matrix, query_sims
         t0 = time.perf_counter()
+        effective_allowed = self._chunk_source_ceiling(
+            notebook_id, allowed_source_ids
+        )
+        if effective_allowed is _REPORT_CHUNK_AUTHORITY_FAILED:
+            return [], [], None
+        allowed = (
+            frozenset(str(value) for value in effective_allowed)
+            if effective_allowed is not None else None
+        )
+        if allowed == frozenset():
+            return [], [], None
         labels = idx.chunk_ann_labels
         if not labels:
             return None
-        allowed = (
-            frozenset(str(value) for value in allowed_source_ids)
-            if allowed_source_ids is not None else None
+        run = current_retrieval_run()
+        is_report = bool(
+            run is not None
+            and run.run_kind in {"report_planning", "report_generation"}
         )
         source_codes = getattr(idx, "chunk_ann_source_codes", None)
         source_names = getattr(idx, "chunk_ann_source_names", None)
         source_counts = getattr(idx, "chunk_ann_source_counts", None)
+        scope_ann_complete = True
+        unindexed_allowed_sources = frozenset()
         if allowed is not None and (
             source_codes is None
             or source_names is None
@@ -3004,6 +3091,8 @@ class CandidateRetrievalService(_RetrievalState):
             # and filter its Top-K afterward: out-of-scope rows could starve
             # valid evidence.  Returning None selects the bounded scoped-FTS
             # fallback until the index is rebuilt/folded.
+            return None
+        if allowed is not None and len(source_counts) != len(source_names):
             return None
         qarr = np.asarray(query_vector, dtype=np.float32)
         dim = int(idx.manifest.get("dim", qarr.shape[0]))
@@ -3024,29 +3113,87 @@ class CandidateRetrievalService(_RetrievalState):
                 k = min(recall, len(labels))
                 labs, dists = ann.knn_query(qarr, k=k)
             else:
-                code_by_source = {
-                    str(source_id): code
-                    for code, source_id in enumerate(source_names)
-                }
-                allowed_codes = frozenset(
-                    code_by_source[source_id]
-                    for source_id in allowed
-                    if source_id in code_by_source
+                manifest = getattr(idx, "manifest", {}) or {}
+
+                def _build_source_scope_plan():
+                    # Disk-loaded artifacts were already checked against the
+                    # row-aligned sidecar. Keep the defensive in-memory check
+                    # for injected/legacy objects, but pay its NumPy scan only
+                    # once per index/scope plan rather than once per leaf.
+                    if not manifest.get("has_chunk_ann_sources"):
+                        codes = np.asarray(source_codes)
+                        if (
+                            np.any(codes < 0)
+                            or np.any(codes >= len(source_names))
+                        ):
+                            return None
+                    code_by_source = {
+                        str(source_id): code
+                        for code, source_id in enumerate(source_names)
+                    }
+                    allowed_codes = frozenset(
+                        code_by_source[source_id]
+                        for source_id in allowed
+                        if source_id in code_by_source
+                    )
+                    missing_sources = allowed.difference(code_by_source)
+                    eligible = sum(
+                        int(source_counts[code]) for code in allowed_codes
+                    )
+                    return (
+                        allowed_codes,
+                        frozenset(missing_sources),
+                        eligible,
+                        eligible == len(labels),
+                    )
+
+                scope_plan = memoized_retrieval_value(
+                    (
+                        "chunk_ann_source_scope_plan",
+                        notebook_id,
+                        id(idx),
+                        str(manifest.get("version") or ""),
+                        str(manifest.get("built_at") or ""),
+                        allowed,
+                    ),
+                    _build_source_scope_plan,
                 )
-                indexed_codes = frozenset(int(code) for code in source_codes)
-                if any(
-                    code < 0 or code >= len(source_names)
-                    for code in indexed_codes
-                ):
-                    # A malformed sidecar must never turn a frozen allow-list
-                    # into an unfiltered query.  Fail to the scoped FTS lane.
+                if scope_plan is None:
                     return None
-                eligible = sum(
-                    int(source_counts[code]) for code in allowed_codes
-                )
+                (
+                    allowed_codes,
+                    unindexed_allowed_sources,
+                    eligible,
+                    all_index_rows_allowed,
+                ) = scope_plan
+                # Empty sources have no ANN row by definition and must not turn
+                # every report leaf into a lexical fallback.  The sidecar plan
+                # above is immutable and shared, but physical chunk presence is
+                # deliberately re-probed per report leaf: chunk rows commit
+                # before the separate KG mutation-sequence bump on one
+                # best-effort ingestion path, so that sequence cannot safely
+                # cache an empty verdict.  On uncertainty retain every missing
+                # source and take conservative bounded FTS.
+                if is_report and unindexed_allowed_sources:
+                    try:
+                        with self._connect() as db:
+                            searchable = self.chunks.ids_for_sources(
+                                db,
+                                notebook_id,
+                                tuple(sorted(unindexed_allowed_sources)),
+                                presence_only=True,
+                            )
+                        unindexed_allowed_sources = (
+                            unindexed_allowed_sources.intersection(
+                                str(row["source_id"]) for row in searchable
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 - conservative FTS fallback
+                        pass
+                scope_ann_complete = not unindexed_allowed_sources
                 if eligible:
                     k = min(recall, eligible)
-                    if indexed_codes.issubset(allowed_codes):
+                    if all_index_rows_allowed:
                         # The immutable index contains no row outside this
                         # frozen ceiling, so the callback is provably vacuous.
                         # This is the common all-selected case on a large
@@ -3067,7 +3214,11 @@ class CandidateRetrievalService(_RetrievalState):
                     # result: return None so the caller uses source-bounded FTS
                     # instead of letting the report ANN-only fast path erase
                     # every candidate.
+                    if scope_ann_complete:
+                        return [], [], None
                     return None
+        except AskCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
             self._note_model_error(
                 "chunk_ann_query",
@@ -3119,21 +3270,35 @@ class CandidateRetrievalService(_RetrievalState):
         semantic_ids = set(chunk_sims)
         lexical_ids = set()
         fts_leaf_ms = 0
-        # Healthy ANN is the scalable default for Deep Report's high-fanout
-        # runs only.  Ordinary Ask keeps its historical ANN∪FTS quality lane;
-        # exact identifier/quoted probes use their separate path, and ANN
-        # failure still falls back to bounded FTS.  The setting is a report
-        # quality rollback that restores the union there too.
-        run = current_retrieval_run()
-        report_ann_only = bool(
-            run is not None
-            and run.run_kind in {"report_planning", "report_generation"}
-            and not self.settings.chunk_fts_with_ann_enabled
-        )
+        # A scope-complete ANN generation is the scalable Deep Report default.
+        # If its source sidecar misses an authorized source, keep the indexed
+        # ANN candidates and restore the existing bounded/circuit-broken FTS
+        # only for that missing part.  This is not delta brute force: changes
+        # inside an already indexed source, and purely semantic delta, still
+        # require a fold (or SCALE_SEARCH_INCLUDE_DELTA=true).
+        lexical_allowed = allowed
+        if not is_report:
+            lexical_mode = "non_report_union"
+        elif self.settings.chunk_fts_with_ann_enabled:
+            lexical_mode = "report_quality_union"
+        elif not scope_ann_complete:
+            # The immutable sidecar is the ANN coverage fact.  Searching only
+            # its missing part preserves the indexed semantic core and avoids
+            # turning a one-source delta into full-scope FTS.
+            lexical_mode = "report_delta_fallback"
+            lexical_allowed = unindexed_allowed_sources
+        else:
+            lexical_mode = "report_ann_only"
+        report_ann_only = lexical_mode == "report_ann_only"
         if not report_ann_only:
             try:
+                delta_scoped = (
+                    lexical_allowed is not None
+                    and frozenset(lexical_allowed) != allowed
+                )
                 corpus_langs = self._lexical_corpus_langs(
-                    notebook_id, source_scoped=source_restricted
+                    notebook_id,
+                    source_scoped=source_restricted or delta_scoped,
                 )
                 with self._connect() as db:
                     fts_started = time.perf_counter()
@@ -3144,8 +3309,8 @@ class CandidateRetrievalService(_RetrievalState):
                             query,
                             k=recall,
                             allowed_source_ids=(
-                                tuple(sorted(allowed))
-                                if allowed is not None else None
+                                tuple(sorted(lexical_allowed))
+                                if lexical_allowed is not None else None
                             ),
                             corpus_langs=corpus_langs,
                         )
@@ -3184,6 +3349,7 @@ class CandidateRetrievalService(_RetrievalState):
                 "score_ms": 0,
                 "total_ms": total_ms,
                 "source_filter_mode": source_filter_mode,
+                "lexical_mode": lexical_mode,
                 "candidates": 0,
             })
             return [], [], None
@@ -3230,6 +3396,7 @@ class CandidateRetrievalService(_RetrievalState):
             "score_ms": round((t_score - t_hydrate) * 1000),
             "total_ms": total_ms,
             "source_filter_mode": source_filter_mode,
+            "lexical_mode": lexical_mode,
             "candidates": len(cand_ids),
         })
         return scored, ids, mat

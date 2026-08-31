@@ -305,6 +305,7 @@ def test_chunk_candidate_host_anchor_stays_between_baseline_and_selection():
     ]
 
     assert calls == [
+        "_chunk_source_ceiling",
         "_retrieve_chunks_baseline",
         "_run_chunk_candidate_contributors",
     ]
@@ -926,3 +927,31 @@ def test_registered_independent_generated_question_contribution_still_enters_the
     assert [item.chunk_id for item in scored] == ["base", "other"]
     assert ids == ["base", "other"]
     assert matrix == "MATRIX"
+
+    scoped_admissions = []
+
+    def _scoped_hydrate(
+        notebook_id, actor_id, identities, *, allowed_source_ids
+    ):
+        scoped_admissions.append((
+            notebook_id,
+            actor_id,
+            tuple(identities),
+            tuple(allowed_source_ids),
+        ))
+        return []
+
+    candidates._hydrate_generated_question_chunks = _scoped_hydrate
+    with retrieval_run(run_kind="report_generation", actor_id="actor"):
+        frozen = candidates._run_chunk_candidate_contributors(
+            "notebook",
+            "question",
+            baseline,
+            allowed_source_ids=("frozen-source",),
+        )
+
+    assert frozen is baseline
+    assert contributor.calls == 2
+    assert scoped_admissions == [(
+        "notebook", "actor", ("other",), ("frozen-source",)
+    )]

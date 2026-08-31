@@ -1,4 +1,7 @@
+import contextvars
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -107,6 +110,37 @@ def _seed_chunks(repo, texts):
     return nb, sid
 
 
+def _add_chunked_source(repo, notebook_id, texts, *, source_id=None):
+    """Add one post-index source through the production chunk writer."""
+    import uuid
+
+    sid = source_id or f"src-{uuid.uuid4().hex[:8]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,file_name,file_path,file_size,"
+            "file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                sid, notebook_id, sid, "document", f"{sid}.md", f"/tmp/{sid}.md",
+                0, f"hash-{sid}", "", "", "extracted", now, now,
+            ),
+        )
+        for index, text in enumerate(texts, 1):
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    f"el-{sid}-{index:04d}", sid, "paragraph", f"p{index}",
+                    text, "{}", now,
+                ),
+            )
+    repo._chunk_and_embed_source(sid)
+    return sid
+
+
 def test_retrieve_chunks_returns_scored_with_matrix(repo):
     nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts " * 20,
                                 "tomato soup cooking recipe " * 20])
@@ -212,6 +246,7 @@ def test_report_ann_skips_generic_fts_and_reports_pure_leaf_timings(
     assert timing["stage"] == "chunk_ann"
     assert timing["latency_ms"] == timing["total_ms"]
     assert timing["source_filter_mode"] == "vacuous"
+    assert timing["lexical_mode"] == "report_ann_only"
     assert timing["chunk_fts_ms"] == 0
     assert {
         "ann_prepare_ms", "ann_open_ms", "knn_ms", "delta_ms",
@@ -446,6 +481,887 @@ def test_source_scoped_ann_without_any_eligible_source_requests_fts_fallback(
         recall=1,
         allowed_source_ids=("new-source",),
     ) is None
+
+
+def test_report_unscoped_ann_applies_actor_source_ceiling_before_knn(
+    repo, monkeypatch
+):
+    """A foreign hidden source cannot enter through the ANN core."""
+    import numpy as np
+    from app.services.retrieval_run import retrieval_run
+
+    observed = []
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        @staticmethod
+        def knn_query(_query, *, k, **kwargs):
+            source_filter = kwargs.get("filter")
+            observed.append(source_filter)
+            labels = [label for label in (0, 1) if source_filter(label)]
+            return (
+                np.asarray([labels[:k]], dtype=np.int64),
+                np.asarray([[0.0] * min(k, len(labels))], dtype=np.float32),
+            )
+
+    index = SimpleNamespace(
+        chunk_ann_labels=["foreign-private", "visible-chunk"],
+        chunk_ann_source_names=["visible-source", "foreign-private-source"],
+        chunk_ann_source_codes=np.asarray([1, 0], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1, 1], dtype=np.int64),
+        manifest={"dim": 16},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "all_visible_source_ids",
+        lambda _notebook_id: ["visible-source"],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "hidden_source_ids",
+        lambda _notebook_id, actor_id: [] if actor_id == "actor-b" else pytest.fail(
+            "wrong report actor"
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_open_scale_ann", lambda *_args: _Ann()
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_hydrate_chunk_candidates",
+        lambda chunk_ids: (
+            [
+                {
+                    "chunk_id": "visible-chunk",
+                    "source_id": "visible-source",
+                    "source_title": "visible",
+                    "section_path": "",
+                    "text": "visible evidence",
+                    "element_ids": [],
+                }
+            ] if chunk_ids == ["visible-chunk"] else pytest.fail(
+                f"unauthorized ANN ids reached hydration: {chunk_ids}"
+            ),
+            ["visible-chunk"],
+            np.asarray([[1.0] + [0.0] * 15], dtype=np.float32),
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_chunk_fts_hits",
+        lambda *_args, **_kwargs: pytest.fail("complete report ANN called FTS"),
+    )
+
+    with retrieval_run(run_kind="report_generation", actor_id="actor-b"):
+        out = repo._retrieve_chunks_ann(
+            "shared-library", "visible evidence", [1.0] + [0.0] * 15,
+            index, recall=1,
+        )
+
+    assert out is not None
+    assert [chunk.source_id for chunk in out[0]] == ["visible-source"]
+    assert len(observed) == 1 and callable(observed[0])
+    assert observed[0](0) is False  # foreign private source
+    assert observed[0](1) is True   # actor-authorized visible source
+
+
+def test_report_unscoped_ann_authority_probe_failure_fails_closed(
+    repo, monkeypatch
+):
+    from app.services.retrieval_run import retrieval_run
+
+    index = SimpleNamespace(chunk_ann_labels=["chunk"], manifest={"dim": 16})
+    probe_calls = []
+
+    def _fail_probe(_notebook_id):
+        probe_calls.append("visible")
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "all_visible_source_ids",
+        _fail_probe,
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_open_scale_ann",
+        lambda *_args: pytest.fail("authority failure issued unscoped KNN"),
+    )
+
+    with retrieval_run(run_kind="report_planning", actor_id="actor"):
+        assert repo._retrieve_chunks_ann(
+            "shared-library", "query", [0.25] * 16, index, recall=1
+        ) == ([], [], None)
+        assert repo._retrieve_chunks_ann(
+            "shared-library", "another query", [0.25] * 16, index, recall=1
+        ) == ([], [], None)
+
+    assert probe_calls == ["visible"]
+
+
+@pytest.mark.parametrize(
+    "failure_mode", ("embedding", "no_index", "legacy_sidecar", "ann_open")
+)
+def test_report_unscoped_baseline_fallback_keeps_actor_source_ceiling(
+    repo, monkeypatch, failure_mode
+):
+    """Every ANN-unavailable branch must reach FTS with the actor ceiling."""
+    from app.services.retrieval_run import retrieval_run
+
+    visible_source = "visible-source"
+    foreign_private = "foreign-private-source"
+    index = SimpleNamespace(
+        chunk_ann_labels=["visible-chunk"],
+        chunk_ann_source_names=[visible_source],
+        chunk_ann_source_codes=[0],
+        chunk_ann_source_counts=[1],
+        manifest={"dim": 16},
+    )
+    if failure_mode == "legacy_sidecar":
+        index = SimpleNamespace(
+            chunk_ann_labels=["visible-chunk"], manifest={"dim": 16}
+        )
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "all_visible_source_ids",
+        lambda _notebook_id: [visible_source],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "hidden_source_ids",
+        lambda _notebook_id, actor_id: [] if actor_id == "actor" else pytest.fail(
+            "wrong report actor"
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_embed_query",
+        lambda _query: None if failure_mode == "embedding" else [0.25] * 16,
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_scale_index",
+        lambda *_args, **_kwargs: None if failure_mode == "no_index" else index,
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_open_scale_ann",
+        lambda *_args: None if failure_mode == "ann_open" else pytest.fail(
+            "unexpected ANN open"
+        ),
+    )
+    observed = []
+
+    def _bounded_fts(*_args, **kwargs):
+        allowed = kwargs.get("allowed_source_ids")
+        observed.append(tuple(allowed) if allowed is not None else None)
+        # Model the producer boundary: a missing ceiling would admit the
+        # foreign private row, while the effective actor ceiling cannot.
+        return (
+            ([foreign_private], [], None)
+            if allowed is None else ([], [], None)
+        )
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_retrieve_chunks_fts_degraded",
+        _bounded_fts,
+    )
+
+    with retrieval_run(run_kind="report_generation", actor_id="actor"):
+        out = repo.retrieval.candidates._retrieve_chunks_baseline(
+            "shared-library", "query", drifted=False
+        )
+
+    assert out == ([], [], None)
+    assert observed == [(visible_source,)]
+
+
+def test_report_unscoped_authority_failure_blocks_baseline_and_contributors(
+    repo, monkeypatch
+):
+    from app.services.retrieval_run import retrieval_run
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "all_visible_source_ids",
+        lambda _notebook_id: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_retrieve_chunks_baseline",
+        lambda *_args, **_kwargs: pytest.fail("failed authority reached baseline"),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_run_chunk_candidate_contributors",
+        lambda *_args, **_kwargs: pytest.fail("failed authority reached contributor"),
+    )
+
+    with retrieval_run(run_kind="report_planning", actor_id="actor"):
+        assert repo.retrieval.candidates._retrieve_chunks(
+            "shared-library", "query"
+        ) == ([], [], None)
+
+
+def test_report_unscoped_empty_actor_ceiling_cannot_fall_back_to_foreign_ann(
+    repo, monkeypatch
+):
+    from app.services.retrieval_run import retrieval_run
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "all_visible_source_ids",
+        lambda _notebook_id: [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "hidden_source_ids",
+        lambda _notebook_id, _actor_id: [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_embed_query",
+        lambda _query: [0.25] * 16,
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_scale_index",
+        lambda *_args, **_kwargs: pytest.fail("deny-all opened the index"),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_retrieve_chunks_fts_degraded",
+        lambda *_args, **_kwargs: pytest.fail("deny-all called FTS"),
+    )
+
+    with retrieval_run(run_kind="report_generation", actor_id="actor"):
+        assert repo.retrieval.candidates._retrieve_chunks_baseline(
+            "shared-library", "query", drifted=False
+        ) == ([], [], None)
+
+
+def test_report_unscoped_ann_source_ceiling_is_singleflight_across_leaves(
+    repo, monkeypatch
+):
+    import numpy as np
+    import app.services.retrieval_run as retrieval_run_module
+    from app.services.retrieval_run import retrieval_run
+
+    entered = threading.Event()
+    release = threading.Event()
+    waiter_blocked = threading.Event()
+    probe_calls = []
+    real_pending = retrieval_run_module._PendingEmbedding
+
+    class _ObservedReady:
+        def __init__(self, ready):
+            self._ready = ready
+
+        def wait(self, timeout=None):
+            waiter_blocked.set()
+            return self._ready.wait(timeout)
+
+        def set(self):
+            return self._ready.set()
+
+    monkeypatch.setattr(
+        retrieval_run_module,
+        "_PendingEmbedding",
+        lambda ready: real_pending(_ObservedReady(ready)),
+    )
+
+    def _visible(_notebook_id):
+        probe_calls.append("visible")
+        entered.set()
+        assert release.wait(timeout=2)
+        return ["visible-source"]
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        @staticmethod
+        def knn_query(_query, *, k, **_kwargs):
+            return (
+                np.asarray([[0]], dtype=np.int64),
+                np.asarray([[0.0]], dtype=np.float32),
+            )
+
+    index = SimpleNamespace(
+        chunk_ann_labels=["visible-chunk"],
+        chunk_ann_source_names=["visible-source"],
+        chunk_ann_source_codes=np.asarray([0], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1], dtype=np.int64),
+        manifest={"dim": 16},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources, "all_visible_source_ids", _visible
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "hidden_source_ids",
+        lambda _notebook_id, _actor_id: [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_open_scale_ann", lambda *_args: _Ann()
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_hydrate_chunk_candidates",
+        lambda _ids: ([], [], None),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_chunk_fts_hits",
+        lambda *_args, **_kwargs: pytest.fail("complete report ANN called FTS"),
+    )
+
+    def _leaf(query):
+        return repo._retrieve_chunks_ann(
+            "shared-library", query, [0.25] * 16, index, recall=1
+        )
+
+    with retrieval_run(run_kind="report_generation", actor_id="actor"):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(contextvars.copy_context().run, _leaf, "first")
+            assert entered.wait(timeout=2)
+            second = pool.submit(contextvars.copy_context().run, _leaf, "second")
+            assert waiter_blocked.wait(timeout=2)
+            release.set()
+            assert first.result(timeout=2) is not None
+            assert second.result(timeout=2) is not None
+
+    assert probe_calls == ["visible"]
+
+
+def test_embed_query_singleflight_waiter_propagates_cancellation(
+    repo, monkeypatch
+):
+    import app.services.retrieval_run as retrieval_run_module
+    from app.services.cancellation import AskCancelled
+    from app.services.retrieval_run import retrieval_run
+
+    cancel_event = threading.Event()
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    waiter_blocked = threading.Event()
+    embed_calls = []
+    real_pending = retrieval_run_module._PendingEmbedding
+
+    class _ObservedReady:
+        def __init__(self, ready):
+            self._ready = ready
+
+        def wait(self, timeout=None):
+            waiter_blocked.set()
+            return self._ready.wait(timeout)
+
+        def set(self):
+            return self._ready.set()
+
+    monkeypatch.setattr(
+        retrieval_run_module,
+        "_PendingEmbedding",
+        lambda ready: real_pending(_ObservedReady(ready)),
+    )
+
+    def _embed(_query):
+        embed_calls.append("owner")
+        owner_entered.set()
+        assert release_owner.wait(timeout=2)
+        return [0.25] * 16
+
+    monkeypatch.setattr(repo.retrieval.candidates.embedder, "embed_query", _embed)
+
+    with retrieval_run(
+        run_kind="report_generation", cancel_event=cancel_event
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            owner = pool.submit(
+                contextvars.copy_context().run, repo._embed_query, "same query"
+            )
+            assert owner_entered.wait(timeout=2)
+            waiter = pool.submit(
+                contextvars.copy_context().run, repo._embed_query, "same query"
+            )
+            assert waiter_blocked.wait(timeout=2)
+            cancel_event.set()
+            with pytest.raises(AskCancelled):
+                waiter.result(timeout=2)
+            release_owner.set()
+            assert owner.result(timeout=2) == [0.25] * 16
+
+    assert embed_calls == ["owner"]
+
+
+def test_report_ann_source_scope_plan_is_singleflight_across_leaves(
+    repo, monkeypatch
+):
+    import numpy as np
+    import app.services.retrieval_run as retrieval_run_module
+    from app.services.cancellation import AskCancelled
+    from app.services.retrieval_run import retrieval_run
+
+    cancel_event = threading.Event()
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    waiter_blocked = threading.Event()
+    plan_calls = []
+    real_pending = retrieval_run_module._PendingEmbedding
+
+    class _ObservedReady:
+        def __init__(self, ready):
+            self._ready = ready
+
+        def wait(self, timeout=None):
+            waiter_blocked.set()
+            return self._ready.wait(timeout)
+
+        def set(self):
+            return self._ready.set()
+
+    monkeypatch.setattr(
+        retrieval_run_module,
+        "_PendingEmbedding",
+        lambda ready: real_pending(_ObservedReady(ready)),
+    )
+
+    class _BlockingSourceNames:
+        def __len__(self):
+            return 1
+
+        def __iter__(self):
+            plan_calls.append("sidecar")
+            owner_entered.set()
+            assert release_owner.wait(timeout=2)
+            return iter(("indexed-source",))
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        @staticmethod
+        def knn_query(_query, *, k, **_kwargs):
+            return (
+                np.asarray([[0]], dtype=np.int64),
+                np.asarray([[0.0]], dtype=np.float32),
+            )
+
+    index = SimpleNamespace(
+        chunk_ann_labels=["indexed-chunk"],
+        chunk_ann_source_names=_BlockingSourceNames(),
+        chunk_ann_source_codes=np.asarray([0], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1], dtype=np.int64),
+        manifest={"dim": 16, "version": "same-generation"},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_open_scale_ann", lambda *_args: _Ann()
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_hydrate_chunk_candidates",
+        lambda _ids: ([], [], None),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_chunk_fts_hits",
+        lambda *_args, **_kwargs: pytest.fail("empty missing source called FTS"),
+    )
+
+    def _leaf(query):
+        return repo._retrieve_chunks_ann(
+            "shared-library",
+            query,
+            [0.25] * 16,
+            index,
+            recall=1,
+            allowed_source_ids=("indexed-source",),
+        )
+
+    with retrieval_run(
+        run_kind="report_generation", cancel_event=cancel_event
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            owner = pool.submit(contextvars.copy_context().run, _leaf, "first")
+            assert owner_entered.wait(timeout=2)
+            waiter = pool.submit(contextvars.copy_context().run, _leaf, "second")
+            assert waiter_blocked.wait(timeout=2)
+            cancel_event.set()
+            with pytest.raises(AskCancelled):
+                waiter.result(timeout=2)
+            release_owner.set()
+            assert owner.result(timeout=2) is not None
+
+    assert plan_calls == ["sidecar"]
+
+
+def test_report_source_ceiling_stays_frozen_across_index_reload(
+    repo, monkeypatch
+):
+    import numpy as np
+    from app.services.retrieval_run import retrieval_run
+
+    probe_calls = []
+
+    def _visible(_notebook_id):
+        probe_calls.append("visible")
+        return (
+            ["source-a"]
+            if len(probe_calls) == 1 else ["source-a", "source-added-later"]
+        )
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        def __init__(self, row_count):
+            self.row_count = row_count
+
+        def knn_query(self, _query, *, k, **kwargs):
+            source_filter = kwargs.get("filter")
+            labels = list(range(self.row_count))
+            if source_filter is not None:
+                labels = [label for label in labels if source_filter(label)]
+            labels = labels[:k]
+            return (
+                np.asarray([labels], dtype=np.int64),
+                np.asarray([[0.0] * len(labels)], dtype=np.float32),
+            )
+
+    first_index = SimpleNamespace(
+        chunk_ann_labels=["chunk-a"],
+        chunk_ann_source_names=["source-a"],
+        chunk_ann_source_codes=np.asarray([0], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1], dtype=np.int64),
+        manifest={"dim": 16, "version": "first"},
+    )
+    reloaded_index = SimpleNamespace(
+        chunk_ann_labels=["chunk-a", "chunk-added-later"],
+        chunk_ann_source_names=["source-a", "source-added-later"],
+        chunk_ann_source_codes=np.asarray([0, 1], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1, 1], dtype=np.int64),
+        manifest={"dim": 16, "version": "second"},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources, "all_visible_source_ids", _visible
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "hidden_source_ids",
+        lambda _notebook_id, _actor_id: [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_open_scale_ann",
+        lambda idx, _kind: _Ann(len(idx.chunk_ann_labels)),
+    )
+
+    def _hydrate(ids):
+        rows = [
+            {
+                "chunk_id": chunk_id,
+                "source_id": (
+                    "source-added-later"
+                    if chunk_id == "chunk-added-later" else "source-a"
+                ),
+                "source_title": "source",
+                "section_path": "",
+                "text": "evidence",
+                "element_ids": [],
+            }
+            for chunk_id in ids
+        ]
+        return rows, list(ids), np.ones((len(ids), 16), dtype=np.float32)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_hydrate_chunk_candidates", _hydrate
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_chunk_fts_hits",
+        lambda *_args, **_kwargs: pytest.fail("complete frozen scope called FTS"),
+    )
+
+    with retrieval_run(run_kind="report_generation", actor_id="actor"):
+        first = repo._retrieve_chunks_ann(
+            "shared-library", "query", [0.25] * 16, first_index, recall=2
+        )
+        second = repo._retrieve_chunks_ann(
+            "shared-library", "query", [0.25] * 16, reloaded_index, recall=2
+        )
+
+    assert probe_calls == ["visible"]
+    assert {chunk.source_id for chunk in first[0]} == {"source-a"}
+    assert {chunk.source_id for chunk in second[0]} == {"source-a"}
+
+
+def test_report_mixed_indexed_and_delta_scope_restores_bounded_fts(
+    repo, monkeypatch
+):
+    """An eligible old source must not hide a selected post-watermark source."""
+    from app.services.retrieval_run import retrieval_run
+
+    nb, old_source = _seed_chunks(
+        repo, ["indexed report evidence baseline " * 20]
+    )
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    delta_source = _add_chunked_source(
+        repo, nb.id, ["DELTA9000 fresh report evidence " * 20]
+    )
+    excluded_source = _add_chunked_source(
+        repo, nb.id, ["DELTA9000 excluded report evidence " * 20]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    assert old_source in idx.chunk_ann_source_names
+    assert delta_source not in idx.chunk_ann_source_names
+
+    real_hits = repo.retrieval.candidates._chunk_fts_hits
+    calls = []
+
+    def _spy(*args, **kwargs):
+        calls.append(kwargs.get("allowed_source_ids"))
+        return real_hits(*args, **kwargs)
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _spy)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    allowed = (old_source, delta_source)
+    query = "indexed report evidence DELTA9000"
+    with retrieval_run(run_kind="report_planning"):
+        out = repo._retrieve_chunks_ann(
+            nb.id,
+            query,
+            repo._embed_query(query),
+            idx,
+            recall=10,
+            allowed_source_ids=allowed,
+        )
+
+    assert out is not None
+    sources = {chunk.source_id for chunk in out[0]}
+    assert {old_source, delta_source} <= sources
+    assert excluded_source not in sources
+    assert calls == [(delta_source,)]
+    timing = next(event for event in events if event.get("site") == "chunk_ann")
+    assert timing["lexical_mode"] == "report_delta_fallback"
+    assert timing["chunk_fts_ms"] >= 0
+
+
+def test_report_unscoped_sidecar_missing_source_restores_bounded_fts(
+    repo, monkeypatch
+):
+    """A mounted source absent from the immutable sidecar gets bounded FTS."""
+    from app.services.retrieval_run import retrieval_run
+
+    nb, _old_source = _seed_chunks(
+        repo, ["indexed mounted-library baseline " * 20]
+    )
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    delta_source = _add_chunked_source(
+        repo, nb.id, ["MOUNTDELTA9000 fresh mounted evidence " * 20]
+    )
+    repo.backfill_chunk_fts(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+
+    real_hits = repo.retrieval.candidates._chunk_fts_hits
+    calls = []
+
+    def _spy(*args, **kwargs):
+        calls.append(kwargs.get("allowed_source_ids"))
+        return real_hits(*args, **kwargs)
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _spy)
+    real_visible = repo.retrieval.candidates.sources.all_visible_source_ids
+    real_hidden = repo.retrieval.candidates.sources.hidden_source_ids
+    source_universe_calls = []
+
+    def _visible(notebook_id):
+        source_universe_calls.append(("visible", notebook_id))
+        return real_visible(notebook_id)
+
+    def _hidden(notebook_id, actor_id):
+        source_universe_calls.append(("hidden", notebook_id, actor_id))
+        return real_hidden(notebook_id, actor_id)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources, "all_visible_source_ids", _visible
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources, "hidden_source_ids", _hidden
+    )
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    query = "MOUNTDELTA9000 mounted evidence"
+    actor_id = repo.current_user().id
+    with retrieval_run(run_kind="report_generation", actor_id=actor_id):
+        out = repo._retrieve_chunks_ann(
+            nb.id,
+            query,
+            repo._embed_query(query),
+            idx,
+            recall=10,
+        )
+        repeated = repo._retrieve_chunks_ann(
+            nb.id,
+            query,
+            repo._embed_query(query),
+            idx,
+            recall=10,
+        )
+
+    assert out is not None
+    assert repeated is not None
+    assert delta_source in {chunk.source_id for chunk in out[0]}
+    assert calls == [(delta_source,), (delta_source,)]
+    assert source_universe_calls == [
+        ("visible", nb.id),
+        ("hidden", nb.id, actor_id),
+    ]
+    timing = next(event for event in events if event.get("site") == "chunk_ann")
+    assert timing["lexical_mode"] == "report_delta_fallback"
+    assert timing["chunk_fts_ms"] >= 0
+
+
+def test_report_empty_source_missing_from_sidecar_does_not_trigger_fts(
+    repo, monkeypatch
+):
+    from app.services.retrieval_run import retrieval_run
+
+    nb, indexed_source = _seed_chunks(repo, ["indexed evidence " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    empty_source = _add_chunked_source(repo, nb.id, [])
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_chunk_fts_hits",
+        lambda *_args, **_kwargs: pytest.fail("empty source triggered FTS"),
+    )
+
+    with retrieval_run(run_kind="report_generation"):
+        out = repo._retrieve_chunks_ann(
+            nb.id,
+            "indexed evidence",
+            repo._embed_query("indexed evidence"),
+            idx,
+            recall=5,
+            allowed_source_ids=(indexed_source, empty_source),
+        )
+
+    assert out is not None and out[0]
+
+
+def test_report_empty_source_is_reprobed_after_chunk_commit_without_kg_bump(
+    repo, monkeypatch
+):
+    from app.repositories.ports import ChunkWrite
+    from app.services.retrieval_run import retrieval_run
+
+    nb, indexed_source = _seed_chunks(repo, ["indexed baseline " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    pending_source = _add_chunked_source(repo, nb.id, [])
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    real_hits = repo.retrieval.candidates._chunk_fts_hits
+    calls = []
+
+    def _spy(*args, **kwargs):
+        calls.append(kwargs.get("allowed_source_ids"))
+        return real_hits(*args, **kwargs)
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _spy)
+    allowed = (indexed_source, pending_source)
+    with retrieval_run(run_kind="report_generation"):
+        first = repo._retrieve_chunks_ann(
+            nb.id,
+            "indexed baseline",
+            repo._embed_query("indexed baseline"),
+            idx,
+            recall=5,
+            allowed_source_ids=allowed,
+        )
+        assert first is not None and first[0]
+        assert calls == []
+
+        with repo._connect() as db:
+            before_seq = db.execute(
+                "SELECT kg_mutation_seq FROM unified_kg_state "
+                "WHERE notebook_id=?",
+                (nb.id,),
+            ).fetchone()["kg_mutation_seq"]
+        now = _now()
+        repo._runtime.chunk_store.replace_source_chunks(
+            pending_source,
+            nb.id,
+            (
+                ChunkWrite(
+                    id="late-chunk",
+                    text="LATECHUNK9000 report evidence " * 20,
+                    section_path="late",
+                    element_ids=(),
+                ),
+            ),
+            created_at=now,
+            mark_chunked_at=now,
+        )
+        with repo._connect() as db:
+            after_seq = db.execute(
+                "SELECT kg_mutation_seq FROM unified_kg_state "
+                "WHERE notebook_id=?",
+                (nb.id,),
+            ).fetchone()["kg_mutation_seq"]
+        assert after_seq == before_seq
+
+        second = repo._retrieve_chunks_ann(
+            nb.id,
+            "LATECHUNK9000 report evidence",
+            repo._embed_query("LATECHUNK9000 report evidence"),
+            idx,
+            recall=5,
+            allowed_source_ids=allowed,
+        )
+
+    assert second is not None
+    assert pending_source in {chunk.source_id for chunk in second[0]}
+    assert calls == [(pending_source,)]
+
+
+def test_sqlite_chunk_fts_source_scope_uses_one_json_bind(repo):
+    import sqlite3
+
+    nb, first_source = _seed_chunks(repo, ["JSONSCOPE9000 evidence " * 20])
+    source_ids = [first_source]
+    for _index in range(4):
+        source_ids.append(_add_chunked_source(
+            repo, nb.id, ["JSONSCOPE9000 evidence " * 20]
+        ))
+    repo.backfill_chunk_fts(nb.id)
+
+    with repo._connect() as db:
+        previous = db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 4)
+        try:
+            hits = repo._runtime.knowledge.chunk_fts_search(
+                db,
+                nb.id,
+                "JSONSCOPE9000 evidence",
+                k=10,
+                allowed_source_ids=source_ids,
+            )
+        finally:
+            db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
+
+    assert hits
 
 
 def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):
