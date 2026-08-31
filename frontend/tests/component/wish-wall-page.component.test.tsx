@@ -231,7 +231,12 @@ test("加载超过单次上限后点赞会分块刷新窗口并保留遗漏卡�
 
   await user.click(screen.getByRole("button", { name: /加载更多/ }));
   expect(await screen.findByText(boundary.title)).toBeInTheDocument();
-  expect(mocks.listWishes).toHaveBeenLastCalledWith({ kind: undefined, sort: "priority", offset: 100 });
+  expect(mocks.listWishes).toHaveBeenLastCalledWith({
+    kind: undefined,
+    sort: "priority",
+    offset: 100,
+    limit: 50,
+  });
   expect(screen.getAllByText(feature.title)).toHaveLength(1);
 });
 
@@ -326,6 +331,26 @@ test("优先级排序加载更多在途时禁用点赞，完成后恢复", async
   resolveLoadMore({ items: [{ ...feature, id: "late-item", title: "迟到的分页项" }], total: 2, offset: 1, limit: 50 });
   expect(await screen.findByText("迟到的分页项")).toBeInTheDocument();
   await waitFor(() => expect(voteButton).toBeEnabled());
+});
+
+test("加载更多沿用服务端返回的默认页大小", async () => {
+  const second = { ...feature, id: "wish-second", title: "第二条需求" };
+  mocks.listWishes.mockReset();
+  mocks.listWishes
+    .mockResolvedValueOnce({ items: [feature], total: 2, offset: 0, limit: 1 })
+    .mockResolvedValueOnce({ items: [second], total: 2, offset: 1, limit: 1 });
+  const user = userEvent.setup();
+  render(<WishWallPage />);
+
+  await screen.findByText(feature.title);
+  await user.click(screen.getByRole("button", { name: /加载更多/ }));
+  expect(await screen.findByText(second.title)).toBeInTheDocument();
+  expect(mocks.listWishes).toHaveBeenLastCalledWith({
+    kind: undefined,
+    sort: "priority",
+    offset: 1,
+    limit: 1,
+  });
 });
 
 test("最新排序加载更多在途时禁用点赞，避免迟到分页覆盖票数", async () => {

@@ -99,6 +99,14 @@ def test_wish_wall_requires_authentication(client):
     assert client.get("/api/wishes").status_code == 401
 
 
+def test_wish_wall_uses_the_named_default_page_size(client):
+    from app.models.wishes import WISH_PAGE_DEFAULT
+
+    user = _register(client, "e00000005")
+    page = client.get("/api/wishes", headers=user).json()
+    assert page["limit"] == WISH_PAGE_DEFAULT
+
+
 def test_wishes_sort_by_absolute_time_across_offset_fallback(client, tmp_path):
     user = _register(client, "d00000004")
     earlier = client.post(

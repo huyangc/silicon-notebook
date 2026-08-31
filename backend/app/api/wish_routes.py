@@ -13,6 +13,7 @@ from app.models.wishes import (
     WishItem,
     WishVoteResult,
     WISH_CONTENT_MAX_CHARS,
+    WISH_PAGE_DEFAULT,
     WISH_PAGE_MAX,
     WISH_TITLE_MAX_CHARS,
 )
@@ -44,7 +45,7 @@ def list_wishes(
     kind: Literal["bug", "feature", "plan"] | None = Query(None),
     sort: Literal["priority", "latest"] = Query("priority"),
     offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=WISH_PAGE_MAX),
+    limit: int = Query(WISH_PAGE_DEFAULT, ge=1, le=WISH_PAGE_MAX),
     user: UserProfile = Depends(get_current_user),
 ) -> PaginatedWishes:
     result = wish_repository().list_wishes(
