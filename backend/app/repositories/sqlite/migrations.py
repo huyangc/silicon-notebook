@@ -3496,7 +3496,9 @@ class SqliteMigrator:
         The two activity indexes mirror ``query_store._absolute_instant`` so
         creator-wide and owner-wide keyset reads stay bounded despite SQLite's
         historical mix of naive and offset timestamps. The expiry index backs
-        startup/delete-path physical GC.
+        startup/delete-path physical GC; the notebook index bounds replacement
+        of a merge-era archive while the notebook delete transaction holds its
+        write lock.
         """
         with self._connect() as db:
             db.executescript(
@@ -3542,6 +3544,8 @@ class SqliteMigrator:
                   );
                 CREATE INDEX IF NOT EXISTS idx_retained_activity_expires
                   ON retained_user_activity(julianday(expires_at));
+                CREATE INDEX IF NOT EXISTS idx_retained_activity_notebook
+                  ON retained_user_activity(notebook_id);
                 """
             )
 

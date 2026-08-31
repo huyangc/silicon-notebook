@@ -947,6 +947,11 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
             row["name"]
             for row in db.execute("PRAGMA table_info(retained_user_activity)")
         }
+        archive_indexes = {
+            row["name"]
+            for row in db.execute("PRAGMA index_list(retained_user_activity)")
+        }
+        assert "idx_retained_activity_notebook" in archive_indexes
         assert not {
             "answer", "answer_id", "error", "trace", "trace_json", "sections_json",
             "source_content", "citation",

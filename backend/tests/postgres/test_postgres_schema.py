@@ -526,6 +526,7 @@ def test_packaged_index_migration_phases_are_exact():
         (False, "idx_retained_activity_actor_type_created"),
         (False, "idx_retained_activity_owner_created"),
         (False, "idx_retained_activity_expires"),
+        (False, "idx_retained_activity_notebook"),
     ]
     v44_ddl_only = "\n".join(
         line for line in migrations[44].sql.splitlines()
