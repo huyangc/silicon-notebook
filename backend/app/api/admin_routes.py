@@ -503,28 +503,31 @@ def get_admin_user_ask_detail(
 
     asked_at = job.get("asked_at") or ""
     answered_at = ""
-    answer: "dict[str, Any] | None" = None
+    answer_detail: "dict[str, Any] | None" = None
     conversation_id = job.get("conversation_id") or ""
     answer_id = job.get("answer_id") or ""
     if answer_id:
-        detail = repo.ask_answer_detail(answer_id)
-        if detail is not None:
-            answer = detail["payload"]
-            answered_at = str(detail["payload"].get("answered_at") or "")
-        else:
-            # Notebook deletion can commit after ask_job_detail's final live
-            # check but before this separately bounded answer lookup. Re-read
-            # the lifecycle once: a newly retained row must replace the stale
-            # live shell instead of rendering a false “no answer” state.
-            try:
-                refreshed = repo.ask_job_detail(job_id)
-            except KeyError:
-                raise HTTPException(status_code=404, detail="ask job not found")
-            require_job_access(refreshed)
-            if refreshed.get("notebook_deleted_at"):
-                job = refreshed
-                asked_at = job.get("asked_at") or ""
-                conversation_id = job.get("conversation_id") or ""
+        answer_detail = repo.ask_answer_detail(answer_id)
+
+    # Notebook deletion can commit after the first job read or after the
+    # separately bounded answer read. Re-read the lifecycle on every path:
+    # a newly retained row is authoritative and must discard any answer/trace
+    # payload already held by this request. This also covers unanswered jobs,
+    # which never enter the answer lookup branch above.
+    try:
+        refreshed = repo.ask_job_detail(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ask job not found")
+    require_job_access(refreshed)
+    job = refreshed
+    asked_at = job.get("asked_at") or ""
+    conversation_id = job.get("conversation_id") or ""
+    if not job.get("notebook_deleted_at") and answer_detail is not None:
+        answer = answer_detail["payload"]
+        answered_at = str(answer_detail["payload"].get("answered_at") or "")
+    else:
+        answer = None
+        answered_at = ""
 
     return AskDetail(
         job_id=job["job_id"],

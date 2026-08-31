@@ -831,6 +831,89 @@ def test_admin_ask_detail_answer_lookup_delete_race_returns_retained(
     assert body["retained_until"]
 
 
+def test_admin_ask_detail_successful_answer_read_then_delete_returns_retained(
+    client, monkeypatch
+):
+    owner = _auth(client, 29)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "答案读取后删除竞态")
+    with _repo()._write() as db:
+        _insert_conversation(
+            db, "conv-detail-after-read", notebook_id, owner_id,
+            "2026-08-01T15:00:00+00:00",
+        )
+        _insert_answer(
+            db, "ans-detail-after-read", notebook_id, "conv-detail-after-read",
+            "答案读完再删除？",
+            {"conclusion": "不能越过删除边界", "answer": "不能越过删除边界"},
+            "2026-08-01T15:01:00+00:00",
+        )
+        _insert_ask_job(
+            db, "job-detail-after-read", notebook_id, owner_id,
+            "2026-08-01T15:00:00+00:00",
+            conversation_id="conv-detail-after-read", question="答案读完再删除？",
+            status="done", answer_id="ans-detail-after-read",
+        )
+
+    repo = _repo()
+    original_answer_detail = repo.ask_answer_detail
+
+    def delete_after_answer_read(answer_id):
+        detail = original_answer_detail(answer_id)
+        assert detail is not None
+        repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        return detail
+
+    monkeypatch.setattr(repo, "ask_answer_detail", delete_after_answer_read)
+    response = client.get(
+        f"/api/admin/users/{owner_id}/asks/job-detail-after-read",
+        headers=_auth_admin(client),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] is None
+    assert body["trace"] == []
+    assert body["error"] == ""
+    assert body["notebook_deleted_at"]
+    assert "不能越过删除边界" not in json.dumps(body, ensure_ascii=False)
+
+
+def test_admin_unanswered_ask_detail_rechecks_delete_lifecycle(client, monkeypatch):
+    owner = _auth(client, 30)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "无答案删除竞态")
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db, "job-unanswered-race", notebook_id, owner_id,
+            "2026-08-01T16:00:00+00:00", question="还没有答案？", status="failed",
+        )
+
+    repo = _repo()
+    original_job_detail = repo.ask_job_detail
+    reads = 0
+
+    def delete_before_final_lifecycle_read(job_id):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        return original_job_detail(job_id)
+
+    monkeypatch.setattr(repo, "ask_job_detail", delete_before_final_lifecycle_read)
+    response = client.get(
+        f"/api/admin/users/{owner_id}/asks/job-unanswered-race",
+        headers=_auth_admin(client),
+    )
+    assert reads == 2
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] is None
+    assert body["trace"] == []
+    assert body["error"] == ""
+    assert body["notebook_deleted_at"]
+    assert body["retained_until"]
+
+
 # --- 部署开关 -------------------------------------------------------------
 
 def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):

@@ -1509,7 +1509,8 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
         def execute(self, query, params=None):
             cursor = self.delegate.execute(query, params)
             if query.startswith(
-                "SELECT id FROM conversations WHERE id=%s FOR UPDATE"
+                "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s "
+                "FOR UPDATE"
             ):
                 delete_locked.set()
                 assert release_delete.wait(timeout=5)
