@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import secrets
 import sys
 import threading
 from contextlib import contextmanager
@@ -91,6 +92,13 @@ class PostgresScaleBuildLock:
         self._on_release = on_release
         self._released = False
         self._mutex = threading.Lock()
+        # Minted once per acquisition (not per notebook): a claim-unique
+        # staging-path suffix (codex PR#643 R1 P1). Random hex rather than
+        # ``pg_backend_pid()`` — an extra round trip this constructor would
+        # otherwise need, and OS pids can be recycled across a later session
+        # on the same notebook, which a purely random token cannot collide
+        # with by construction.
+        self.claim_token = secrets.token_hex(8)
 
     def verify_held(self) -> bool:
         """Re-read the lock from ``pg_locks`` on the owning session.

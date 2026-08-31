@@ -95,6 +95,12 @@ def test_indexed_notebook_ids_lists_only_published_live_directories(store):
     _write_manifest(store.scale_dir("nb-a"), {"version": ["v", 1]})
     _write_manifest(Path(str(store.scale_dir("nb-a")) + ".tmp"), {"version": []})
     _write_manifest(Path(str(store.scale_dir("nb-b")) + ".old"), {"version": []})
+    # P1, codex PR#643 R1: the claim-unique staging shape must be excluded
+    # too, not just the legacy fixed ``.tmp`` — a scratch dir can carry a
+    # manifest.json right up until the swap.
+    _write_manifest(
+        Path(str(store.scale_dir("nb-c")) + ".tmp-abc123"), {"version": []}
+    )
     (store.scale_dir("no-manifest") / "graph.npz").parent.mkdir(parents=True)
 
     assert store.indexed_notebook_ids() == ["nb-a", "nb-b"]
@@ -165,16 +171,29 @@ def test_save_viz_and_load_viz_roundtrip(store):
 
 
 def test_prepare_fold_directory_resets_leftovers(store):
+    """P1, codex PR#643 R1: staging is now ``{scale_dir}.tmp-<claim_token>``,
+    not a fixed name — ``prepare`` only ever resets ITS OWN token's residue
+    (a retry under the SAME token, e.g. after a transient failure). The one
+    exception is a pre-existing NO-SUFFIX ``.tmp``, discarded once as a
+    one-time compatibility cleanup for staging left over from before this
+    change."""
     live = store.scale_dir("nb1")
     _write_manifest(live, {"version": ["v", 1]})
-    leftover = Path(str(live) + ".tmp")
-    leftover.mkdir(parents=True)
-    (leftover / "junk.bin").write_text("stale")
-    temporary = store.prepare_fold_directory("nb1")
-    assert Path(temporary) == leftover
+    legacy_leftover = Path(str(live) + ".tmp")
+    legacy_leftover.mkdir(parents=True)
+    (legacy_leftover / "junk.bin").write_text("stale")
+
+    temporary = store.prepare_fold_directory("nb1", "retry-token")
+    assert Path(temporary) == Path(str(live) + ".tmp-retry-token")
     assert Path(temporary).is_dir()
-    assert not (Path(temporary) / "junk.bin").exists()     # leftovers cleared
+    assert not legacy_leftover.exists()   # legacy no-suffix leftover cleared
     assert store.read_manifest_version(live) == ["v", 1]   # live untouched
+
+    # A retry under the SAME token clears its OWN prior residue too.
+    (Path(temporary) / "junk.bin").write_text("stale")
+    temporary_again = store.prepare_fold_directory("nb1", "retry-token")
+    assert Path(temporary_again) == Path(temporary)
+    assert not (Path(temporary_again) / "junk.bin").exists()
 
 
 def test_swap_fold_directory_replaces_live_and_cleans_up(store):
@@ -200,6 +219,106 @@ def test_unswapped_temporary_never_touches_live(store):
     # no swap — a fold failure before the swap leaves the old artifact intact
     assert store.read_manifest_version(live) == ["v", 1]
     assert (live / "manifest.json").stat().st_mtime_ns == before
+
+
+# ── P1, codex PR#643 R1: claim-unique staging closes the zombie/fresh-claim
+# corruption race — a fixed shared `{live}.tmp` let a lock-session-lost
+# builder and the process that took over its claim reset and write the same
+# directory. ──
+
+
+def test_two_claim_tokens_stage_independent_trees(store):
+    """Mutation anchor: revert ``prepare_staging_directory`` to the fixed
+    ``{live}.tmp`` path (ignore ``claim_token``) and the second prepare below
+    ``rmtree``s the first claim's still-in-flight tree out from under it —
+    this goes red."""
+    live = store.scale_dir("nb-race")
+    _write_manifest(live, {"version": ["v", 1]})
+
+    zombie_temp = store.prepare_fold_directory("nb-race", "zombie-token")
+    _write_manifest(zombie_temp, {"version": ["v", "zombie"]})
+
+    fresh_temp = store.prepare_fold_directory("nb-race", "fresh-token")
+    (fresh_temp / "marker.txt").write_text("fresh", encoding="utf-8")
+
+    assert zombie_temp != fresh_temp
+    # The zombie's in-flight tree must be exactly what it wrote — a shared
+    # fixed path would have had it rmtree'd by the fresh prepare above.
+    assert store.read_manifest(zombie_temp) == {"version": ["v", "zombie"]}
+    assert (fresh_temp / "marker.txt").read_text(encoding="utf-8") == "fresh"
+
+    # Re-preparing the SAME token only clears ITS OWN residue.
+    zombie_temp_again = store.prepare_fold_directory("nb-race", "zombie-token")
+    assert zombie_temp_again == zombie_temp
+    assert store.read_manifest(zombie_temp) is None      # its own leftover cleared
+    assert (fresh_temp / "marker.txt").read_text(encoding="utf-8") == "fresh"  # untouched
+
+
+def test_a_zombie_swap_is_rejected_without_touching_the_new_claimants_tree(
+    store,
+):
+    """The zombie's belated swap — refused by re-verification — must not step
+    on the tree the process that took over its claim is building. Mutation
+    anchor: same as above (fixed staging path) makes this scenario
+    impossible to even set up distinctly, which is itself the bug."""
+    live = store.scale_dir("nb-zombie")
+    _write_manifest(live, {"version": ["v", 1]})
+
+    zombie_temp = store.prepare_fold_directory("nb-zombie", "zombie-token")
+    _write_manifest(zombie_temp, {"version": ["v", "zombie"]})
+    fresh_temp = store.prepare_fold_directory("nb-zombie", "fresh-token")
+    (fresh_temp / "marker.txt").write_text("fresh", encoding="utf-8")
+
+    with pytest.raises(store_module.ScaleBuildLockLost):
+        store.swap_fold_directory(
+            "nb-zombie", zombie_temp, verify_held=lambda: False
+        )
+
+    assert store.read_manifest_version(live) == ["v", 1]   # nothing published
+    assert zombie_temp.is_dir()                              # left for inspection
+    assert (fresh_temp / "marker.txt").read_text(encoding="utf-8") == "fresh"
+
+
+# ── P2, codex PR#643 R1: the source-partition companion re-verifies the
+# claim exactly like the main root's swap does — it runs strictly AFTER the
+# main root is already published, so a claim lost by then must not let a
+# stale companion overwrite whoever else is publishing there. ──
+
+
+def test_save_source_partitions_honors_verify_held(store):
+    """Mutation anchor: drop ``verify_held=verify_held`` from
+    ``save_source_partitions``'s swap call and this goes green while a
+    lock-lost companion rebuild silently overwrites the live companion."""
+    live = store.source_partition_dir("nb-companion")
+    _write_manifest(live, {"parent_version": ["v", 1], "published_sources": 1})
+    before = (live / "manifest.json").read_bytes()
+
+    with pytest.raises(store_module.ScaleBuildLockLost):
+        store.save_source_partitions(
+            "nb-companion",
+            parent_version=["v", 2],
+            source_ids=[],
+            load_rows=lambda _source_id: None,
+            verify_held=lambda: False,
+        )
+
+    assert (live / "manifest.json").read_bytes() == before  # companion untouched
+
+
+def test_save_source_partitions_publishes_when_the_claim_holds(store):
+    live = store.source_partition_dir("nb-companion-ok")
+    manifest = store.save_source_partitions(
+        "nb-companion-ok",
+        parent_version=["v", 2],
+        source_ids=[],
+        load_rows=lambda _source_id: None,
+        verify_held=lambda: True,
+    )
+    assert manifest["parent_version"] == ["v", 2]
+    assert (
+        json.loads((live / "manifest.json").read_text())["parent_version"]
+        == ["v", 2]
+    )
 
 
 # ── full rebuild is atomic: staging + swap, never an in-place overwrite ──
@@ -230,26 +349,35 @@ def test_save_full_failure_leaves_previous_artifact_byte_identical(
 
     monkeypatch.setattr(
         store_module.scale_index_module, "save_scale_index", half_write_then_fail)
+    # A literal claim_token, standing in for "this operator's retry keeps the
+    # same claim" (P1, codex PR#643 R1) — the property this test demonstrates
+    # is per-token, not "any subsequent save clears any prior leftover".
     with pytest.raises(RuntimeError, match="injected save failure"):
         store.save_full("nb-atomic", _artifacts(
             ["a", "b", "c"],
-            {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}))
+            {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}),
+            claim_token="retry-token")
 
     assert _snapshot(live) == before                   # not one byte moved
     assert store.read_manifest_version(live) == ["v", 1]
     # the abandoned staging directory is inert — loading ignores it entirely
-    assert Path(str(live) + ".tmp").is_dir()
+    staged = Path(str(live) + ".tmp-retry-token")
+    assert staged.is_dir()
     stale = store.load_scale("nb-atomic")
     assert stale is not None and list(stale.node_ids) == ["a", "b"]
     assert stale.manifest["version"] == ["v", 1]
-    # ...and the next successful rebuild clears it and publishes normally
+    # ...and a retry under the SAME claim_token clears its own leftover and
+    # publishes normally. A DIFFERENT token would leave it as an orphan for
+    # `inspect` to report instead (see test_scale_build_cli.py's leftover
+    # coverage) — no token here means "the same build attempt retrying".
     monkeypatch.undo()
     store.save_full("nb-atomic", _artifacts(
         ["a", "b", "c"],
-        {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}))
+        {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}),
+        claim_token="retry-token")
     assert store.read_manifest_version(live) == ["v", 2]
     assert list(store.load_scale("nb-atomic").node_ids) == ["a", "b", "c"]
-    assert not Path(str(live) + ".tmp").exists()
+    assert not staged.exists()
 
 
 def test_save_full_first_build_publishes_without_a_live_directory(store):
@@ -265,7 +393,7 @@ def test_save_full_first_build_publishes_without_a_live_directory(store):
     for artifact in ("graph.npz", "node_ids.npy", "idf.npy", "chunk_index.npy",
                      "ann.bin", "ann_labels.npy", "manifest.json"):
         assert (live / artifact).exists(), artifact
-    assert not Path(str(live) + ".tmp").exists()
+    assert list(live.parent.glob(f"{live.name}.tmp*")) == []
     assert not Path(str(live) + ".old").exists()
     idx = store.load_scale("nb-first")
     assert list(idx.node_ids) == ["a", "b"]

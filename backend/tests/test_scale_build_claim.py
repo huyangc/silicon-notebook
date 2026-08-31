@@ -8,6 +8,7 @@ SQLite repository with a stub lock standing in for the PostgreSQL adapter.
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 
 import pytest
@@ -109,6 +110,7 @@ class _StubLock:
     def __init__(self, held: bool = True) -> None:
         self.held = held
         self.releases = 0
+        self.claim_token = secrets.token_hex(8)
 
     def verify_held(self) -> bool:
         return self.held
@@ -230,6 +232,23 @@ def test_verification_reads_the_claim_registered_for_that_notebook(repo):
     scale._discard_scale_build_lock("nb-a")
     assert handle.releases == 1
     assert scale.verify_scale_build_lock("nb-a") is True
+
+
+def test_the_claim_token_is_read_from_the_registered_handle(repo):
+    """P1, codex PR#643 R1: the store's staging path is keyed by this token,
+    so it must be the SAME one the registered claim's handle carries — not
+    some independently-generated value."""
+    scale = _scale(repo)
+    handle = _StubLock()
+    scale._register_scale_build_lock("nb-a", handle)
+
+    assert scale.scale_build_claim_token("nb-a") == handle.claim_token
+    # No registered claim: a fresh random fallback, not a crash and not a
+    # constant that could collide across notebooks.
+    first = scale.scale_build_claim_token("nb-unclaimed")
+    second = scale.scale_build_claim_token("nb-unclaimed")
+    assert isinstance(first, str) and first
+    assert first != second
 
 
 def test_an_unverifiable_claim_counts_as_lost(repo):
@@ -622,7 +641,11 @@ def test_the_fold_reverifies_its_claim_outside_the_process_global_lock(
     monkeypatch.setattr(scale.builder, "verify_scale_build_lock", verify)
     scale.fold(indexed_notebook)
 
-    assert observed == [False]
+    # One re-verification for the main swap, and a SECOND, independent one
+    # for the source-partition companion's own swap (codex PR#643 R1 P2,
+    # ``source_partitioned_graph_artifacts_enabled`` defaults True) — both
+    # must be read outside the lock.
+    assert observed and all(locked is False for locked in observed)
 
 
 def test_a_fold_still_refuses_to_swap_when_the_claim_is_gone(
@@ -646,6 +669,54 @@ def test_a_fold_still_refuses_to_swap_when_the_claim_is_gone(
         store.scale_dir(indexed_notebook) / "manifest.json"
     ).read_bytes() == before
     assert indexed_notebook not in scale.building
+
+
+def test_a_lost_claim_during_the_companion_rebuild_propagates_and_does_not_overwrite_it(
+    repo, indexed_notebook, monkeypatch
+):
+    """P2, codex PR#643 R1: the companion rebuild runs strictly AFTER the
+    main swap, so a claim that survived long enough for that swap can still
+    be lost by the time the companion swaps. That loss must propagate as
+    ``ScaleBuildLockLost`` — not be swallowed into the optional artifact's
+    usual fail-open — and must not overwrite whatever companion is already
+    published; the main index, meanwhile, IS already the new generation.
+    Mutation anchor: swallow ``ScaleBuildLockLost`` inside
+    ``_rebuild_source_partitions`` (or drop ``verify_held`` from its
+    ``save_source_partitions`` call) and this goes green while a lock-lost
+    companion rebuild silently "succeeds" or overwrites the live companion.
+    """
+    scale = _scale(repo)
+    store = repo._runtime.scale_artifact_store
+    _add_delta_source(repo, indexed_notebook)
+
+    companion_dir = store.source_partition_dir(indexed_notebook)
+    companion_dir.mkdir(parents=True, exist_ok=True)
+    (companion_dir / "manifest.json").write_text(
+        json.dumps({"parent_version": ["stale-parent"], "published_sources": 0}),
+        encoding="utf-8",
+    )
+    before_companion = (companion_dir / "manifest.json").read_bytes()
+    before_main_version = json.loads(
+        (store.scale_dir(indexed_notebook) / "manifest.json").read_text()
+    )["version"]
+
+    calls = {"n": 0}
+
+    def verify(_notebook_id: str) -> bool:
+        calls["n"] += 1
+        return calls["n"] == 1  # the main swap sees True; the companion sees False
+
+    monkeypatch.setattr(scale.builder, "verify_scale_build_lock", verify)
+
+    with pytest.raises(ScaleBuildLockLost, match="companion"):
+        scale.fold(indexed_notebook)
+
+    assert calls["n"] == 2
+    main_manifest = json.loads(
+        (store.scale_dir(indexed_notebook) / "manifest.json").read_text()
+    )
+    assert main_manifest["version"] != before_main_version   # main WAS published
+    assert (companion_dir / "manifest.json").read_bytes() == before_companion
 
 
 def test_a_failed_worker_start_rolls_back_everything_it_took(

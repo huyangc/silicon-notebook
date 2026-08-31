@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import signal
 import threading
@@ -146,10 +147,11 @@ class ScaleArtifactStore:
         """Return published scale-index directory names in stable order.
 
         Only a direct child carrying ``manifest.json`` is a published artifact.
-        Atomic-build scratch/rollback directories (``*.tmp`` / ``*.old``) are
-        deliberately excluded even if an interrupted operator copied a manifest
-        into them.  This is a filesystem inventory only; the runtime separately
-        drops orphan artifacts whose notebook row no longer exists.
+        Atomic-build scratch/rollback directories (``*.tmp`` / ``*.old`` /
+        ``*.tmp-<claim_token>``, P1 codex PR#643 R1) are deliberately excluded
+        even if an interrupted operator copied a manifest into them.  This is
+        a filesystem inventory only; the runtime separately drops orphan
+        artifacts whose notebook row no longer exists.
         """
         root = Path(os.path.join(self.settings.storage_dir, "kg_index"))
         if not root.is_dir():
@@ -158,7 +160,9 @@ class ScaleArtifactStore:
             entry.name
             for entry in root.iterdir()
             if entry.is_dir()
-            and not entry.name.endswith((".tmp", ".old"))
+            and not entry.name.endswith(".old")
+            and not entry.name.endswith(".tmp")
+            and ".tmp-" not in entry.name
             and (entry / "manifest.json").is_file()
         )
 
@@ -275,24 +279,28 @@ class ScaleArtifactStore:
         notebook_id: str,
         artifacts: ScaleBuildArtifacts,
         *,
+        claim_token: Optional[str] = None,
         verify_held: Optional[Callable[[], bool]] = None,
     ) -> dict:
-        """Full rebuild: stage into {scale_dir}.tmp, then publish atomically.
+        """Full rebuild: stage into a claim-unique {scale_dir}.tmp-*, then
+        publish atomically.
 
         Writing straight into the live directory meant a rebuild that died
         mid-save left the previous manifest.json (written last, so it survived)
         next to half-overwritten arrays — an index that still looked loadable
         but silently described the wrong data. Staging + swap makes the rebuild
         all-or-nothing: a failure anywhere before the swap leaves the previous
-        artifact serving untouched, and the abandoned .tmp is discarded by the
-        next prepare_fold_directory.
+        artifact serving untouched, and the abandoned staging directory is
+        discarded on the next ``prepare_fold_directory`` call for the SAME
+        ``claim_token`` — a different (or absent) token leaves it for
+        ``inspect`` (P1, codex PR#643 R1; see ``prepare_staging_directory``).
 
         Cost: peak disk during a rebuild is roughly two copies of the index
         (GB-scale ANN on large libraries). Fold has always paid exactly this;
         full now does too. There is deliberately no switch to turn it off —
         atomicity is not an option.
         """
-        temporary = self.prepare_fold_directory(notebook_id)
+        temporary = self.prepare_fold_directory(notebook_id, claim_token)
         manifest = scale_index_module.save_scale_index(str(temporary), **artifacts)
         # The claim is re-verified here rather than at build entry: the staging
         # above is the hours-long part, and a claim proven fresh before it says
@@ -307,6 +315,8 @@ class ScaleArtifactStore:
         parent_version,
         source_ids,
         load_rows,
+        claim_token: Optional[str] = None,
+        verify_held: Optional[Callable[[], bool]] = None,
     ) -> dict:
         """Build source companions one-at-a-time and atomically publish root.
 
@@ -324,7 +334,7 @@ class ScaleArtifactStore:
         )
 
         live = self.source_partition_dir(notebook_id)
-        temporary = self.prepare_staging_directory(live)
+        temporary = self.prepare_staging_directory(live, claim_token)
         published = 0
         unavailable = 0
         for source_id in source_ids:
@@ -352,11 +362,15 @@ class ScaleArtifactStore:
             json.dump(manifest, handle, ensure_ascii=False)
 
         # Same tmp+rename publish as the main root, from the same primitive.
-        # No ``verify_held``: the companion rebuild runs inside the build that
-        # already re-verified the claim for its main swap, and this root's
-        # ``parent_version`` gate makes a stale companion unreadable rather
-        # than wrong.
-        self.swap_staging_directory(live, temporary)
+        # ``verify_held`` IS re-checked here, separately from the main swap's
+        # own check (codex PR#643 R1 P2): the companion rebuild can run for
+        # a long time AFTER the main swap already published, so a claim proven
+        # fresh back then says nothing about who owns this directory now. A
+        # lost claim raises ``ScaleBuildLockLost`` here exactly as it does for
+        # the main root — nothing is renamed and the caller decides how to
+        # explain that the main index is already the new generation while the
+        # companion is not (see ``_rebuild_source_partitions``).
+        self.swap_staging_directory(live, temporary, verify_held=verify_held)
         return manifest
 
     def load_source_partitions(
@@ -421,8 +435,8 @@ class ScaleArtifactStore:
 
     # ──────────────────────────────────────────────────────── fold swap ──
     @staticmethod
-    def prepare_staging_directory(live) -> Path:
-        """Reset and hand back ``{live}.tmp`` for ANY artifact root.
+    def prepare_staging_directory(live, claim_token: Optional[str] = None) -> Path:
+        """Reset and hand back ``{live}.tmp-{claim_token}`` for ANY artifact root.
 
         W-CLI T-W2 generalized this (and ``swap_staging_directory`` below) from
         "the notebook's main scale directory" to "a live directory": an offline
@@ -430,10 +444,42 @@ class ScaleArtifactStore:
         source-partition companion — and "main atomic, the rest copied straight
         over the live tree" is not a publishing story anybody can reason about.
         The two notebook-scoped wrappers below keep the original call shape.
+
+        P1, codex PR#643 R1: the staging path used to be the FIXED
+        ``{live}.tmp`` regardless of who was building. That let a builder
+        whose lock session died mid-build keep writing into ``{live}.tmp``
+        while a second process — having legitimately taken over the now-free
+        claim — called this same method, ``rmtree``'d the zombie's in-flight
+        tree out from under it, and started writing its own data into the
+        same directory; both processes' writes could then interleave before
+        either swap, and the pre-swap ``verify_held`` re-check only protects
+        the RENAME, not the directory the zombie was still filling in. Keying
+        the staging path by ``claim_token`` (from the lock handle's session
+        identity when there is a real lock, otherwise a random one — no lock
+        at all, or a test double) makes every claim's tree its own directory,
+        so two claims can never collide on the same path no matter how long a
+        zombie keeps writing.
+
+        Only THIS token's own residue is ever cleared here — a retry that
+        reuses the same claim_token (the same build attempt, staging again
+        after a transient failure) gets a clean directory, but another
+        claim's ``{live}.tmp-<other token>`` is left completely alone. The
+        one exception is a pre-existing NO-SUFFIX ``{live}.tmp``: that name
+        predates this change, so nothing still running could legitimately be
+        writing to it, and it is discarded here as a one-time compatibility
+        cleanup (the "next build self-heals" contract this method used to
+        promise for every leftover, narrowed to just that legacy shape).
+        Anything shaped ``{live}.tmp-<token>`` that is not THIS token's own is
+        never auto-deleted by anyone — ``inspect`` reports it and an operator
+        judges whether it is safe to remove (see docs/operations.md).
         """
-        tmp_dir = str(live) + ".tmp"
+        token = claim_token if claim_token else secrets.token_hex(8)
+        tmp_dir = f"{live}.tmp-{token}"
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
+        legacy_tmp = f"{live}.tmp"
+        if os.path.exists(legacy_tmp):
+            shutil.rmtree(legacy_tmp, ignore_errors=True)
         os.makedirs(tmp_dir, exist_ok=True)
         return Path(tmp_dir)
 
@@ -495,13 +541,19 @@ class ScaleArtifactStore:
             if preserved:
                 shutil.rmtree(old_dir, ignore_errors=True)
 
-    def prepare_fold_directory(self, notebook_id: str) -> Path:
+    def prepare_fold_directory(
+        self, notebook_id: str, claim_token: Optional[str] = None
+    ) -> Path:
         """Staging for BOTH fold and full rebuild (the name predates save_full
         joining; renaming it would churn ownership_manifest.py and the existing
-        suites for no functional gain). Resets {scale_dir}.tmp — leftovers from
-        an interrupted fold or rebuild are discarded — and hands it back; the
-        live artifact is untouched until swap_fold_directory."""
-        return self.prepare_staging_directory(self.scale_dir(notebook_id))
+        suites for no functional gain). Resets THIS claim's
+        {scale_dir}.tmp-{claim_token} — leftovers from an earlier attempt
+        under the SAME token are discarded, a different token's tree is left
+        alone (P1, codex PR#643 R1) — and hands it back; the live artifact is
+        untouched until swap_fold_directory."""
+        return self.prepare_staging_directory(
+            self.scale_dir(notebook_id), claim_token
+        )
 
     def swap_fold_directory(
         self,

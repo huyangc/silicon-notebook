@@ -8,6 +8,7 @@ write-through compatibility properties and thin method delegates.
 from __future__ import annotations
 
 import datetime
+import secrets
 import threading
 import time
 import weakref
@@ -240,6 +241,7 @@ class ScaleArtifactRuntime:
         self.builder.building_lock = self.building_lock
         self.builder.notify_index_done = self.notify_index_done
         self.builder.verify_scale_build_lock = self.verify_scale_build_lock
+        self.builder.scale_build_claim_token = self.scale_build_claim_token
 
     def get_notebook(self, notebook_id: str):
         return self.notebooks.get_notebook(notebook_id)
@@ -800,6 +802,21 @@ class ScaleArtifactRuntime:
             return bool(handle.verify_held())
         except Exception:  # noqa: BLE001 - unverifiable == lost
             return False
+
+    def scale_build_claim_token(self, notebook_id: str) -> str:
+        """This build's claim-unique staging-path token (P1, codex PR#643 R1).
+
+        Mirrors ``verify_scale_build_lock``: reads the SAME registered claim,
+        so the token handed to ``prepare_staging_directory`` matches the
+        session that ``verify_held`` will later re-check. No registered claim
+        (a builder used directly, outside a build/fold this runtime claimed)
+        falls back to a fresh random token — nothing to derive one from, and
+        nothing that could collide with a real claim's token either.
+        """
+        with self._scale_lock_handles_lock:
+            handle = self._scale_build_lock_handles.get(notebook_id)
+        token = getattr(handle, "claim_token", None) if handle is not None else None
+        return token if isinstance(token, str) and token else secrets.token_hex(8)
 
     @contextmanager
     def _claim_scale_build(self, notebook_id: str) -> Iterator[None]:

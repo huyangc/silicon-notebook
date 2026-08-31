@@ -138,6 +138,16 @@ def verify_migration_ledger(database_url: str) -> tuple[int, int]:
     this compares every recorded checksum, not just ``max(version)``; one extra
     column on a query that was already being issued.
 
+    Neither is ``max(version)`` evidence that every migration in between was
+    actually applied (codex PR#643 R1 P2): a ledger recording ``1, 3, ...,
+    expected`` — version 2 missing — has ``max(version) == expected`` and
+    every recorded checksum matches, so the old count-plus-checksums check
+    passed it, even though the repository's own migrator
+    (``app.repositories.postgres.migrator``) treats a gapped ledger as
+    invalid and refuses to run against it. This compares the exact SET of
+    recorded versions against ``1..expected`` — no gaps, no duplicates, no
+    stragglers above ``expected`` — before trusting any checksum in it.
+
     Read on a bare connection, before the repository (and its pool) exists, so a
     refusal costs one connection and leaves no trace in the live database.
     """
@@ -166,19 +176,17 @@ def verify_migration_ledger(database_url: str) -> tuple[int, int]:
             "SELECT version, checksum FROM silicon_schema_migrations "
             "ORDER BY version"
         ).fetchall()
-    applied = max((int(row[0]) for row in rows), default=0)
-    if applied != expected:
+    recorded_versions = sorted(int(row[0]) for row in rows)
+    applied = recorded_versions[-1] if recorded_versions else 0
+    if recorded_versions != list(range(1, expected + 1)):
         raise ScaleBuildCliError(
-            f"migration ledger mismatch: the database is at version {applied}, "
-            f"this checkout carries {expected}. Check out the exact revision the "
-            "service is running (this CLI deliberately does not migrate)."
+            f"migration ledger mismatch: the database records versions "
+            f"{recorded_versions}, this checkout expects exactly "
+            f"1..{expected} with no gaps or duplicates. Check out the exact "
+            "revision the service is running (this CLI deliberately does not "
+            "migrate)."
         )
     for version, checksum in ((int(row[0]), row[1]) for row in rows):
-        if not 1 <= version <= expected:
-            raise ScaleBuildCliError(
-                f"migration ledger mismatch: the database records version "
-                f"{version}, which this checkout does not carry."
-            )
         if checksum != migrations[version - 1].checksum:
             raise ScaleBuildCliError(
                 f"migration checksum mismatch at version {version}: the "
@@ -344,20 +352,34 @@ def publish_started(live) -> bool:
     """Filesystem evidence that this root's rename sequence had BEGUN.
 
     ``{live}.old`` exists only between the two renames (it is removed as the
-    last step), and "``.tmp`` present while ``live`` is absent" is the same
-    moment seen from the other side. Either means the ``.tmp`` may already be
-    the only copy of a generation, so it must not be deleted as "abandoned
-    staging" — which is exactly what an interrupt cleanup would otherwise do
-    with hours of work (codex W-CLI R1 B1).
+    last step), and "a staging sibling present while ``live`` is absent" is
+    the same moment seen from the other side — the rename that publishes a
+    FIRST-EVER generation (no ``.old`` step at all) was cut off mid-flight.
+    Either means the staged directory may already be the only copy of a
+    generation, so it must not be deleted as "abandoned staging" — which is
+    exactly what an interrupt cleanup would otherwise do with hours of work
+    (codex W-CLI R1 B1). Checks BOTH staging shapes a sibling can carry
+    (P1, codex PR#643 R1): the legacy fixed ``.tmp`` and the claim-unique
+    ``.tmp-<claim_token>``.
     """
     path = str(live)
     if os.path.exists(path + ".old"):
         return True
-    return os.path.exists(path + ".tmp") and not os.path.exists(path)
+    if os.path.exists(path):
+        return False
+    parent = os.path.dirname(path) or "."
+    prefix = os.path.basename(path) + ".tmp"
+    try:
+        siblings = os.listdir(parent)
+    except OSError:
+        return False
+    return any(
+        name == prefix or name.startswith(prefix + "-") for name in siblings
+    )
 
 
 def discard_staging(paths, report: Callable[[str], None]) -> None:
-    """Remove the ``.tmp`` directories this run staged, and say which."""
+    """Remove the staging directories this run created, and say which."""
     for path in paths:
         try:
             if os.path.exists(path):
@@ -372,11 +394,17 @@ def discard_staging_unless_publishing(
 ) -> None:
     """Interrupt cleanup that can tell staging from a half-finished publish.
 
-    ``roots`` maps each live directory to the ``.tmp`` this run staged for it.
-    If ANY root shows publish evidence the whole cleanup is skipped and the
-    recovery is printed instead: a publish sequence that was cut in half has the
-    previous generation in ``{live}.old`` and the new one in ``{live}.tmp``, and
-    deleting either is the data loss.
+    ``roots`` maps each live directory to the EXACT staging directory this
+    run created for it — the ``Path`` ``prepare_staging_directory`` returned,
+    a claim-unique ``{live}.tmp-<claim_token>`` (P1, codex PR#643 R1) — never
+    a guessed name. If ANY root shows publish evidence the whole cleanup is
+    skipped and the recovery is printed instead: a publish sequence that was
+    cut in half has the previous generation in ``{live}.old`` and the new one
+    in the staged directory, and deleting either is the data loss.
+
+    Only a caller that held its OWN claim throughout staging AND publish can
+    supply an accurate ``roots`` mapping here — currently only ``import``
+    (see ``run_build``, which cannot).
     """
     interrupted_publish = [live for live in roots if publish_started(live)]
     if not interrupted_publish:
@@ -387,11 +415,46 @@ def discard_staging_unless_publishing(
             f"the publish of {live} was interrupted between renames; nothing "
             f"was deleted. The previous generation is at {live}.old (restore "
             f"with `mv {live}.old {live}`) and this run's build is at "
-            f"{live}.tmp"
+            f"{roots[live]}"
         )
     report(
         "staged directories are kept for every root of this notebook; run "
         "`inspect` once the tree is restored"
+    )
+
+
+def report_interrupted_build(
+    roots, notebook_id: str, mode: str, report: Callable[[str], None]
+) -> None:
+    """``build``'s interrupt diagnostics — never deletes anything.
+
+    Unlike ``import`` (``discard_staging_unless_publishing`` above), this
+    command holds no claim of its own: ``build``/``fold`` acquire and release
+    the runtime's claim internally (T-W1's ``_claim_scale_build``), entirely
+    before this frame regains control on ``KeyboardInterrupt``. So it never
+    learns the ``claim_token`` its own staging directory — if it staged one
+    at all — was suffixed with, and cannot safely name, let alone delete, a
+    ``{live}.tmp-<claim_token>`` this attempt may have left behind (P1, codex
+    PR#643 R1). Only the claim-INDEPENDENT ``.old`` signal is trustworthy
+    here, so a mid-publish interrupt is still reported precisely; anything
+    else defers entirely to ``inspect`` and an operator's judgment.
+    """
+    interrupted_publish = [live for live in roots if publish_started(live)]
+    if interrupted_publish:
+        for live in interrupted_publish:
+            report(
+                f"the publish of {live} was interrupted between renames; "
+                f"nothing was deleted. The previous generation is at "
+                f"{live}.old (restore with `mv {live}.old {live}`) and this "
+                f"run's staged build is the `{live}.tmp-*` directory beside it"
+            )
+        return
+    report(
+        f"{mode} for {notebook_id} was interrupted; this command holds no "
+        "claim of its own here, so it cannot identify its own staged "
+        "`{live}.tmp-<claim_token>` directory. Run `inspect` to see any "
+        "leftover under `leftovers` and remove it once you have confirmed no "
+        "other builder still owns it."
     )
 
 
@@ -718,6 +781,37 @@ def _runtime_dim(settings: Settings) -> int:
 
 # ────────────────────────────────────────────────────────── subcommands ──
 
+def leftover_staging_directories(roots: dict[str, Path]) -> dict[str, dict]:
+    """Every ``.old`` and staging sibling next to each live root, by report key.
+
+    Staging can be the legacy fixed ``{live}.tmp`` (a leftover from before P1,
+    codex PR#643 R1, or the one-time compatibility form ``prepare_staging_
+    directory`` still self-heals) or a claim-unique ``{live}.tmp-<token>`` —
+    reported here as ``{root}.tmp-<token>``. Nothing here is a signal to
+    delete automatically: ``inspect`` only reports what it can SEE, never
+    what it can prove is abandoned — see the module docs for why (an
+    unaffiliated process cannot tell a still-writing zombie from dead work by
+    filesystem shape alone).
+    """
+    leftovers: dict[str, dict] = {}
+    for name, live in roots.items():
+        old_candidate = Path(str(live) + ".old")
+        if old_candidate.exists():
+            leftovers[name + ".old"] = directory_report(old_candidate)
+        legacy_tmp = Path(str(live) + ".tmp")
+        if legacy_tmp.exists():
+            leftovers[name + ".tmp"] = directory_report(legacy_tmp)
+        prefix = live.name + ".tmp-"
+        parent = live.parent
+        if not parent.is_dir():
+            continue
+        for entry in sorted(parent.iterdir()):
+            if entry.is_dir() and entry.name.startswith(prefix):
+                suffix = entry.name[len(prefix) :]
+                leftovers[f"{name}.tmp-{suffix}"] = directory_report(entry)
+    return leftovers
+
+
 def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> dict:
     """Read-only: what is on disk, what the database thinks, who holds the claim.
 
@@ -752,12 +846,7 @@ def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> 
         probe.release()
         lock_state = "free"
 
-    leftovers = {}
-    for name, live in roots.items():
-        for suffix in (".tmp", ".old"):
-            candidate = Path(str(live) + suffix)
-            if candidate.exists():
-                leftovers[name + suffix] = directory_report(candidate)
+    leftovers = leftover_staging_directories(roots)
 
     receipt = {
         "notebook_id": notebook_id,
@@ -793,7 +882,11 @@ def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> 
     if leftovers:
         report(
             "leftover staging/rollback directories are present; a `.old` "
-            "directory can be restored with `mv {dir}.old {dir}`"
+            "directory can be restored with `mv {dir}.old {dir}`. A "
+            "`.tmp`/`.tmp-<token>` directory is NOT auto-removed by anything "
+            "— it may belong to a build still running elsewhere. Cross-check "
+            "`build_claim` above (and the process list on both machines if "
+            "still unsure) before deleting one by hand."
         )
     return receipt
 
@@ -821,12 +914,13 @@ def run_build(
     primitive, which is the only seam this path has: a build's renames happen
     deep inside ``build_scale_index``, hours after this frame started, and
     masking from here would mean masking Ctrl-C for the whole build.
+
+    Unlike ``import`` below, this command never holds the claim itself, so an
+    interrupt here cannot be resolved to a specific staging directory — see
+    ``report_interrupted_build`` (P1, codex PR#643 R1).
     """
     store = repository._runtime.scale_artifact_store  # noqa: SLF001
-    staging = {
-        live: Path(str(live) + ".tmp")
-        for live in artifact_roots(store, notebook_id).values()
-    }
+    roots = list(artifact_roots(store, notebook_id).values())
     started = time.perf_counter()
     try:
         if mode == "fold":
@@ -837,19 +931,16 @@ def run_build(
 
             result = repository.build_scale_index(notebook_id, on_stage)
     except KeyboardInterrupt:
-        # An interrupted build usually leaves an incomplete ``.tmp`` behind; the
-        # next build would discard it anyway, so remove it now and say where it
-        # was rather than leaving a multi-GB directory unexplained.
-        #
-        # Usually — but not when the interrupt landed inside the publish
-        # sequence (the swap guard makes that a narrow, deferred window rather
-        # than an impossible one; a second signal source, a hard kill mid-rename
-        # on a previous run, or an unmasked worker thread can all still produce
-        # it). There the ``.tmp`` is not abandoned staging, it is one of the two
-        # copies of the index that exist — deleting it while the live directory
-        # sits in ``.old`` is how hours of work disappear (codex W-CLI R1 B1).
-        discard_staging_unless_publishing(staging, report)
+        report_interrupted_build(roots, notebook_id, mode, report)
         raise
+    except KeyError:
+        # An unknown (or currently-copying) notebook: the write-admission
+        # check inside build/fold — ``require_write_admission`` reading
+        # ``indexing_pipeline_state`` — raises a bare ``KeyError(notebook_id)``
+        # for both, same as the row lookups ``inspect``/``import`` already
+        # translate. Uncaught here it would surface a Python traceback instead
+        # of the documented exit-code-2 refusal (codex PR#643 R1 P2).
+        raise ScaleBuildCliError(f"unknown notebook: {notebook_id}") from None
     except ScaleBuildBusy as error:
         raise ScaleBuildCliFailure(
             f"{error}. Nothing was published; retry once the other builder "
@@ -972,7 +1063,9 @@ def run_import(
                 source = package / name
                 if not source.is_dir():
                     continue
-                target = store.prepare_staging_directory(roots[name])
+                target = store.prepare_staging_directory(
+                    roots[name], handle.claim_token
+                )
                 staged[name] = target
                 shutil.copytree(source, target, dirs_exist_ok=True)
                 report(f"staged {name}")

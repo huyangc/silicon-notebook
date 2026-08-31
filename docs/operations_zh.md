@@ -756,13 +756,14 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 上面的 `batch_ingest.py index` 是**停服**通道（数据库级全局 advisory lock，要求
 `--confirm-service-stopped`）。这条脚本是另一条通道：**与运行中的服务并存**，取
-per-notebook 的跨进程构建锁，产物写 `.tmp` 后原子 rename 换目录，服务进程按既有的
-逐请求探测自动换代——**不需要重启**（rename 换上来的是新 inode，manifest 磁盘签名必变）。
-动机是大库：49 万对象的库曾把 64GB 机器打爆，scale 索引常驻约 5GB，构建要几小时；
-把这几小时挪到另一台机器上跑，是让在役服务不受影响的唯一办法。
+per-notebook 的跨进程构建锁，产物写进按 claim 唯一的 `.tmp-<claim_token>` 目录后
+原子 rename 换目录，服务进程按既有的逐请求探测自动换代——**不需要重启**（rename
+换上来的是新 inode，manifest 磁盘签名必变）。动机是大库：49 万对象的库曾把 64GB
+机器打爆，scale 索引常驻约 5GB，构建要几小时；把这几小时挪到另一台机器上跑，是
+让在役服务不受影响的唯一办法。
 
-**只支持 PostgreSQL。** SQLite 部署会被直接拒绝（退出码 2）：单进程部署没有跨进程锁，
-两个 writer 会在同一个 `.tmp` 上互相踩。
+**只支持 PostgreSQL。** SQLite 部署会被直接拒绝（退出码 2）：单进程部署本来就没有
+跨进程锁可取，离线构建者从一开始就没法与在役服务互斥。
 
 退出码：`0` 成功；`1` 已开始但失败（锁被别人占、构建失败、swap 前复验持锁失败）；
 `2` 未动手就拒绝（SQLite、未知 notebook、迁移账本不一致、包校验不通过）；`130` Ctrl-C。
@@ -776,7 +777,7 @@ per-notebook 的跨进程构建锁，产物写 `.tmp` 后原子 rename 换目录
 
 ```bash
 # 只读体检：manifest 摘要、三个工件根的清单与大小、与 DB 版本是否一致、
-# .tmp/.old 残留、以及此刻锁被谁占（探测=非阻塞 try + 立刻释放）
+# .tmp-<token>/.old 残留、以及此刻锁被谁占（探测=非阻塞 try + 立刻释放）
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
 
 # 全量重建（默认）/ 只折叠增量
@@ -805,7 +806,7 @@ PYTHONPATH=backend python scripts/build_scale_index.py export --notebook nb-xxx 
 # 2) 拷回（--to 目录必须不存在或为空；三个工件根各一个子目录）
 rsync -a /data/nb-xxx-pack/ prod:/data/nb-xxx-pack/
 
-# 3) 生产机（校验 → 三根各自 .tmp + rename 原子落位）
+# 3) 生产机（校验 → 三根各自落进按 claim 唯一的 .tmp-<token> → rename 原子落位）
 PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx --from /data/nb-xxx-pack
 ```
 
@@ -815,8 +816,8 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 
 `import` 的发布顺序是**伴生 → viz → 主索引**：任何中途失败都让**活着的主索引**停在
 上一代，而伴生根的 `parent_version` 闸让不配对的伴生读不出来（退化成「没有伴生」），
-不会变成「伴生描述了另一代」。拷贝（慢、易失败的那一半）全部发生在 `.tmp` 里，活目录
-在最后那几次 rename 之前一个字节都不动。
+不会变成「伴生描述了另一代」。拷贝（慢、易失败的那一半）全部发生在按 claim 唯一的
+`.tmp-<token>` 暂存目录里（见下文）；活目录在最后那几次 rename 之前一个字节都不动。
 
 #### Ctrl-C：屏蔽的是哪一段，build 被打断会留下什么
 
@@ -825,22 +826,25 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 这个 notebook 一个活索引都不剩，这是本通道唯一一个「Ctrl-C 会丢数据」的窗口。信号是
 **延后**而不是忽略：这段序列是毫秒级的，跑完立刻兑现中断。
 
-各命令收到中断后的行为：
+各命令收到中断后的行为不同，因为只有 `import` 全程持有 claim（`build`/`fold` 的
+claim 生生灭灭都在普通门面路径内部，见下面残留一节）：
 
 - **`import`**：延后的中断兑现时若三根都已发布，就没有任何东西被放弃——命令说明这一点
-  并以退出码 `0` 打出正常收据。落在**拷贝暂存**阶段的中断则删掉本次 staged 的 `.tmp`，
-  退出码 `130`。
-- **`build` / `build --fold`**：落在构建（那几个小时）里的中断删掉本次 `.tmp` 后退
-  `130`，重跑即从头重建。落在**发布段**里的中断则**一个目录都不删**：上一代在
-  `{dir}.old`、这一代在 `{dir}.tmp`，命令会把两个路径连同恢复用的 `mv` 一起打出来。
-  在 `inspect` 显示出你预期的树之前不要删任何一个——那个 `.tmp` 可能是几个小时构建
-  成果的唯一副本。
+  并以退出码 `0` 打出正常收据。落在**拷贝暂存**阶段的中断会删掉本次 staged 的
+  `.tmp-<claim_token>`（全程持有的 claim 让它能精确点名自己的目录），退出码 `130`。
+- **`build` / `build --fold`**：本命令自己从不持有 claim，等它能响应 Ctrl-C 时，
+  自己那个暂存目录（如果确实 stage 过）用的 `claim_token` 早已看不见了，因此**一个
+  目录都不删**。若中断落在**发布段**里，上一代在 `{dir}.old`、这一代在
+  `{dir}.tmp-<token>`，命令会把两个路径连同恢复用的 `mv` 一起打出来——在 `inspect`
+  显示出你预期的树之前不要删任何一个，那个暂存目录可能是几个小时构建成果的唯一
+  副本。其余情况本命令只会指向 `inspect`；为什么这里说不出更具体的话，见下面
+  「`.old` / `.tmp-<claim_token>` 残留」一节。
 
 #### 两机 pin 清单
 
 | 项 | 要求 | 不符时 |
 | --- | --- | --- |
-| 代码版本（迁移账本） | 构建机 checkout 的迁移数 == 生产库 `silicon_schema_migrations` 的 `max(version)`，**且每条已记录的 checksum 与本 checkout 的 SQL 相同** | 组装仓库**之前**用裸连接预检，不等直接退出码 2。checksum 这一层挡的是「迁移条数相同、SQL 不同」（rebase、cherry-pick、手改过的文件） |
+| 代码版本（迁移账本） | 生产库 `silicon_schema_migrations` 里记录的版本号必须恰好是 `1..N`（`N` 为构建机 checkout 的迁移数），不缺号也不重号，**且每条已记录的 checksum 与本 checkout 的 SQL 相同** | 组装仓库**之前**用裸连接预检，不等直接退出码 2。checksum 这一层挡的是「迁移条数相同、SQL 不同」（rebase、cherry-pick、手改过的文件）；恰好 `1..N` 这一层挡的是「账本有缺口」（例如 `1, 3, ..., N`，缺第 2 条）——单看 `max(version) == N` 看不出这种缺口，仓库自己的迁移器也会拒绝对着这种账本跑 |
 | 笔记本身份 | `manifest.notebook_id` == `--notebook`（该键出现之前构建的包：`manifest.watermark_sources` 必须是本库 source id 的子集） | `import` 硬拒。校验里其它每一项（管线身份、维度、hnswlib）都是**部署级**事实，同一台机器上所有库都一样，所以少了这一条，`--notebook` 敲错就会把另一个库的索引发布到这里并开始服务 |
 | 已发布 indexing pipeline | `manifest.pipeline_identity` 与该 notebook 当前发布的身份一致 | `import` 硬拒（不符会让检索侧整体丢弃 scale 核并**静默**退化） |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | 生效维必须相同 | `import` 硬拒（不符会让 `open_ann` fail-open → **静默零召回**）；manifest 没有 `dim` 同样拒绝 |
@@ -877,7 +881,7 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 session 级 advisory lock 的持有者语义就不成立了。这条通道要求 **session pooling
 或直连**；transaction pooling 后面跑它等于没有互斥。
 
-#### `.old` / `.tmp` 残留与人工恢复
+#### `.old` / `.tmp-<claim_token>` 残留与人工恢复
 
 swap 序列是 `live → .old`、`tmp → live`、`rm .old`。第二步失败会自动把 `.old` 换回去；
 连回滚都失败时 `.old` 会留在盘上，并在异常 note 里点名路径。人工恢复：
@@ -887,11 +891,29 @@ swap 序列是 `live → .old`、`tmp → live`、`rm .old`。第二步失败会
 mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
 ```
 
-`.tmp` 是本次构建的暂存。构建作废（swap 前复验持锁失败）时**刻意保留**它供排查，
-下一次构建会自己清掉；确认不需要时直接 `rm -rf` 即可。`inspect` 会把两类残留连同
-大小一起报告出来。Ctrl-C 时本命令会删掉**自己这次**staged 的 `.tmp` 并打印路径——
-除非该根呈现「发布做到一半」的形态（旁边有 `.old`，或有 `.tmp` 却没有活目录），
-那时一个目录都不删，改为打印恢复用的 `mv`（见上面的 Ctrl-C 一节）。
+暂存路径是 `{live}.tmp-<claim_token>`——每个 claim 一个目录，不再是固定共享的
+名字。这堵上了旧的固定路径 `{live}.tmp` 留的一道腐化竞态：锁会话中途死掉不会让
+进程停下手里的写，而随后合法拿到这个空出来的 claim 的第二个进程，过去会重置并
+复用第一个进程还在写的**同一个**目录，两边的写在各自 swap 之前就可能交错。token
+来自持有这个 claim 的跨进程锁会话；调用处根本没有这种锁时（直接调用的 builder、
+测试替身），退而给一个随机的。`prepare` 每次只清理**自己这个 token** 的残留——
+复用同一个 `claim_token` 重试（同一次构建尝试、瞬时失败后重来）会拿到干净目录，
+而**另一个** claim 的 `.tmp-<其他 token>` 完全不碰；唯一例外是不带后缀的旧形
+`.tmp`，那个名字早于这套方案，不可能还有活跃写入者在用它，因而作为一次性兼容清理
+被丢弃。`swap` 也只 rename 调用方明确给出的那一个目录。
+
+正因为每个 claim 的暂存目录各自独立，**除了那个 claim 自己，没有人分得清某个
+`.tmp-<token>` 是还在写的构建、还是僵尸留下的残局——所以任何人的
+`.tmp-<token>` 都不会被自动删除。** `inspect` 会把找到的每一个 `.tmp-<token>`
+（以及不带后缀的旧形 `.tmp`）连同大小列进 `leftovers`；动手 `rm -rf` 之前先对照
+`build_claim`（仍拿不准就查两台机器的进程列表）。
+
+各命令在 Ctrl-C 上的行为不同，因为只有 `import` 全程持有 claim：`import` 全程
+都知道自己的 token（它取的 claim 覆盖暂存**和**发布），所以拷贝阶段的中断能精确
+删掉本次创建的目录。`build` / `build --fold` 是在普通门面路径内部取、还路径内部
+就还的 claim——等这条命令能响应 Ctrl-C 时，token 早已看不见了，所以它什么都不删；
+残留和其它任何一个一样，交给 `inspect` 报告、由人来判断。逐命令的确切行为见上面
+的 Ctrl-C 一节。
 
 另外 `inspect` 的 `build_claim` 有三个取值：`free`、`held_elsewhere`、`unknown`。
 最后一个表示本进程没有空余的专用锁会话去探测，因此它是关于**这次 CLI 运行**的陈述，

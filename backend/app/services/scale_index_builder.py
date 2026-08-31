@@ -7,11 +7,13 @@ still live on ``SQLiteRepository``; it never retains the facade itself.
 from __future__ import annotations
 
 import gc
+import secrets
 import time
 from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
+from app.repositories.scale_build_lock import ScaleBuildLockLost
 from app.services.kg import scale_index as scale_index_module
 from app.services.kg import viz_index as viz_index_module
 from app.services.vector_index import resolve_runtime_dim
@@ -97,15 +99,37 @@ class ScaleIndexBuilder:
         # builder used directly (tests, no runtime) holds no claim and so has
         # nothing to re-verify.
         self.verify_scale_build_lock: Callable[[str], bool] = lambda _nb: True
+        # This build's claim-unique staging-path token (P1, codex PR#643 R1).
+        # Retargeted by ``ScaleArtifactRuntime`` to read the registered claim's
+        # ``claim_token``; a builder used directly falls back to a fresh random
+        # token per call — no claim to derive one from, so no attempt could
+        # collide with another anyway.
+        self.scale_build_claim_token: Callable[[str], str] = (
+            lambda _nb: secrets.token_hex(8)
+        )
 
     def _rebuild_source_partitions(
-        self, notebook_id: str, parent_version: Any
+        self,
+        notebook_id: str,
+        parent_version: Any,
+        *,
+        claim_token: str,
+        verify_held: Callable[[], bool],
     ) -> dict | None:
         """Publish optional companions after the main artifact is durable.
 
         Failure is fail-open for the legacy scale index and fail-closed for the
         new capability: an old companion's parent identity no longer matches,
         so runtime returns unavailable instead of traversing stale/full graph.
+
+        ``ScaleBuildLockLost`` is the one exception this does NOT swallow into
+        that fail-open (codex PR#643 R1 P2): the companion runs strictly AFTER
+        the main root's swap, so by the time this loses its claim the main
+        index is already the new generation — silently returning ``None``
+        here would read as "nothing changed" when in fact half of a two-root
+        publish happened. It is re-raised with that distinction spelled out
+        so it reaches the same operator-facing translation the main swap's
+        loss does (``ScaleBuildCliFailure`` in the offline CLI).
         """
         if not bool(
             getattr(
@@ -129,10 +153,19 @@ class ScaleIndexBuilder:
                         notebook_id, source_id
                     )
                 ),
+                claim_token=claim_token,
+                verify_held=verify_held,
             )
             if self.invalidate_source_partition_cache is not None:
                 self.invalidate_source_partition_cache(notebook_id)
             return manifest
+        except ScaleBuildLockLost as error:
+            raise ScaleBuildLockLost(
+                f"{error} The main scale index for {notebook_id!r} was "
+                "already published (this companion rebuild runs after the "
+                "main swap); only the source-partition companion was left "
+                "unpublished. Re-run `fold` or `build` to complete it."
+            ) from error
         except Exception:  # noqa: BLE001 - optional artifact is fail-open
             self.event_log.logger.exception(
                 "source-partition artifact build failed for %s", notebook_id
@@ -500,6 +533,10 @@ class ScaleIndexBuilder:
             "build_ms": dict(timings),
         }
         persist_started = time.perf_counter()
+        # Minted once and reused for BOTH roots this build may publish (the
+        # main index below and the source-partition companion further down):
+        # one claim, one staging token (P1, codex PR#643 R1).
+        claim_token = self.scale_build_claim_token(notebook_id)
         saved_manifest = self.artifacts.save_full(
             notebook_id,
             {
@@ -533,6 +570,7 @@ class ScaleIndexBuilder:
             # before the swap (the store calls this immediately before its
             # first rename); a lost claim abandons the build instead of
             # publishing over whoever owns the directory now.
+            claim_token=claim_token,
             verify_held=lambda: self.verify_scale_build_lock(notebook_id),
         )
         if bool(
@@ -545,7 +583,15 @@ class ScaleIndexBuilder:
             timed(
                 "source_partitions",
                 lambda: self._rebuild_source_partitions(
-                    notebook_id, saved_manifest.get("version")
+                    notebook_id,
+                    saved_manifest.get("version"),
+                    claim_token=claim_token,
+                    # A FRESH re-verification, not the value already used
+                    # above: this companion rebuild can run long after the
+                    # main swap (codex PR#643 R1 P2).
+                    verify_held=lambda: self.verify_scale_build_lock(
+                        notebook_id
+                    ),
                 ),
             )
         persist_ms = round((time.perf_counter() - persist_started) * 1000)
@@ -669,6 +715,10 @@ class ScaleIndexBuilder:
                 self.building.add(notebook_id)
 
         completed = False
+        # Minted once and reused for BOTH roots this fold may publish (the
+        # main index and, further down, the source-partition companion) —
+        # one claim, one staging token (P1, codex PR#643 R1).
+        claim_token = self.scale_build_claim_token(notebook_id)
         try:
             for source_id in delta["delta_sources"]:
                 try:
@@ -705,7 +755,9 @@ class ScaleIndexBuilder:
                 )
             )
             live_dir = self.artifacts.scale_dir(notebook_id)
-            temporary = self.artifacts.prepare_fold_directory(notebook_id)
+            temporary = self.artifacts.prepare_fold_directory(
+                notebook_id, claim_token
+            )
             scale_index_module.save_fold_core(
                 str(temporary), node_ids, transition, idf, chunk_index
             )
@@ -892,7 +944,16 @@ class ScaleIndexBuilder:
                 )
             ):
                 self._rebuild_source_partitions(
-                    notebook_id, manifest.get("version")
+                    notebook_id,
+                    manifest.get("version"),
+                    claim_token=claim_token,
+                    # A FRESH re-verification, not the ``claim_held`` snapshot
+                    # taken above for the main swap: this companion rebuild
+                    # can run long after that snapshot was proven (codex
+                    # PR#643 R1 P2).
+                    verify_held=lambda: self.verify_scale_build_lock(
+                        notebook_id
+                    ),
                 )
             completed = True
             return manifest

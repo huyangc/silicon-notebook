@@ -30,6 +30,7 @@ lied and lost the request (codex W-CLI R1 P1-1).
 """
 from __future__ import annotations
 
+import secrets
 import zlib
 from typing import Optional, Protocol, Union, runtime_checkable
 
@@ -56,6 +57,14 @@ class ScaleBuildLock(Protocol):
     """An acquired per-notebook build claim."""
 
     supported: bool
+    # A random-hex identifier minted once, at acquisition, and stable for the
+    # handle's whole lifetime. It makes ``{live}.tmp-{claim_token}`` unique
+    # per claim (codex PR#643 R1 P1): a fixed shared staging path let a
+    # lock-session-lost builder and the process that took over its claim
+    # both reset and write the same directory. Every implementation carries
+    # one, including ``UnsupportedScaleBuildLock`` — a caller with no real
+    # lock still needs a token that cannot collide with a concurrent one.
+    claim_token: str
 
     def verify_held(self) -> bool:
         """Whether the claim is still provably held, re-read from the source.
@@ -79,6 +88,13 @@ class UnsupportedScaleBuildLock:
     """
 
     supported = False
+
+    def __init__(self) -> None:
+        # No cross-process claim exists to derive a session identity from
+        # (and the offline CLI refuses SQLite outright, so this token never
+        # protects a real race there); still random, not a fixed literal, so
+        # nothing downstream can be tempted to treat it as a shared constant.
+        self.claim_token = secrets.token_hex(8)
 
     def verify_held(self) -> bool:
         return True

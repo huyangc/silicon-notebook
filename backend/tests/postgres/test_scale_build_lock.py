@@ -96,6 +96,25 @@ def test_a_held_lock_verifies_itself_and_a_released_one_does_not(
     handle.release()  # idempotent
 
 
+def test_the_claim_token_is_unique_per_acquisition(postgres_database):
+    """P1, codex PR#643 R1: ``claim_token`` is what makes
+    ``{live}.tmp-{claim_token}`` unique per claim, so a zombie holder and a
+    fresh claimant never share a staging directory. Two acquisitions — even
+    of the same notebook, sequentially — must never mint the same token."""
+    first = postgres_database.try_scale_build_lock("nb-token")
+    assert first is not None
+    token_one = first.claim_token
+    assert isinstance(token_one, str) and token_one
+    first.release()
+
+    second = postgres_database.try_scale_build_lock("nb-token")
+    assert second is not None
+    try:
+        assert second.claim_token != token_one
+    finally:
+        second.release()
+
+
 def test_a_negative_advisory_key_is_still_self_verifiable(postgres_database):
     """``pg_locks`` stores the key unsigned. Comparing against the signed value
     would report "not held" for half of all notebooks — every one of which

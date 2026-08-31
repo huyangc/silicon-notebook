@@ -208,6 +208,28 @@ def test_the_ledger_preflight_refuses_a_checkout_that_is_ahead(
         cli.verify_migration_ledger(postgres_scope.url)
 
 
+def test_the_ledger_preflight_refuses_a_gap_in_the_middle(
+    postgres_scope, postgres_settings
+):
+    """A ledger recording ``1, 3, ..., expected`` — version 2 missing — has
+    ``max(version) == expected`` and every recorded checksum matches, so the
+    old count-plus-checksums check passed it even though the repository's own
+    migrator (``app.repositories.postgres.migrator``) treats a gapped ledger
+    as invalid and refuses to run against it (codex PR#643 R1 P2). Mutation
+    anchor: compare against ``max(version)`` instead of the exact ``1..
+    expected`` set and this goes green while the builder composes against a
+    schema its own migrator would refuse."""
+    owner = PostgresRepository(postgres_settings, model_provider=_provider())
+    owner.close()
+    assert cli.packaged_migration_count() >= 2
+    with psycopg.connect(postgres_scope.url, autocommit=True) as connection:
+        connection.execute(
+            "DELETE FROM silicon_schema_migrations WHERE version = 2"
+        )
+    with pytest.raises(cli.ScaleBuildCliError, match="migration ledger mismatch"):
+        cli.verify_migration_ledger(postgres_scope.url)
+
+
 # ───────────────────────────────────────────────────────── the CLI loop ──
 
 @pytest.fixture
@@ -300,6 +322,25 @@ def test_an_unknown_notebook_is_a_readable_refusal(indexed_notebook, capsys):
     """``status()`` raises ``KeyError``; letting it escape would print a bare
     traceback with the id as the entire message."""
     assert cli.main(["inspect", "--notebook", "nb-does-not-exist"]) == 2
+    assert "unknown notebook" in capsys.readouterr().err
+
+
+def test_build_of_an_unknown_notebook_is_a_readable_refusal(
+    indexed_notebook, capsys
+):
+    """P2, codex PR#643 R1, end to end: ``require_write_admission`` (reached
+    deep inside ``build_scale_index``) raises a bare ``KeyError`` for an
+    unknown notebook, same as ``status()`` does for ``inspect`` above.
+    Uncaught it prints a Python traceback instead of the documented
+    exit-code-2 refusal. Mutation anchor: drop the ``except KeyError`` clause
+    in ``run_build`` and this returns something other than 2 (or prints a
+    traceback instead of the refusal message)."""
+    assert cli.main(["build", "--notebook", "nb-does-not-exist"]) == 2
+    assert "unknown notebook" in capsys.readouterr().err
+
+    assert cli.main(
+        ["build", "--notebook", "nb-does-not-exist", "--fold"]
+    ) == 2
     assert "unknown notebook" in capsys.readouterr().err
 
 
