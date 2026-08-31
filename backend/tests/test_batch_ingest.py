@@ -2008,6 +2008,31 @@ def test_main_index_does_not_reconfigure_kg_scheduler(repo, monkeypatch):
     assert configure_calls == []
 
 
+def test_main_index_reports_a_busy_scale_build_claim(repo, monkeypatch, capsys):
+    """W-CLI T-W1: the stopped-service gate is a database-wide maintenance lock;
+    it does not exclude the offline scale-build CLI, which takes a per-notebook
+    claim instead. Losing that claim must read as "someone else is building",
+    not as a traceback — and must say the earlier phases are already durable so
+    the operator knows a re-run only redoes the index step."""
+    from app.repositories.scale_build_lock import ScaleBuildBusy
+
+    nb_id = bi.ensure_notebook(repo, None, "nb-index-busy")
+
+    def busy(_repo, notebook_id):
+        raise ScaleBuildBusy(
+            f"another process is building the scale index for {notebook_id}"
+        )
+
+    monkeypatch.setattr(bi, "run_index", busy)
+
+    rc = bi.main(["index", "--notebook-id", nb_id])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "another process is building the scale index" in captured.err
+    assert "已落库" in captured.err
+
+
 # --- vectors-to-blob backfill CLI --------------------------------------------
 
 def _seed_json_vector(repo, table, id_col, vid, nb_id, dim=16, created_at="2026-01-01T00:00:00"):

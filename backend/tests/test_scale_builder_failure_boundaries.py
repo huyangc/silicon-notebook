@@ -190,7 +190,7 @@ def test_fold_failure_before_swap_keeps_old_artifact(
     monkeypatch.setattr(
         store,
         "swap_fold_directory",
-        lambda notebook_id, temporary: (_ for _ in ()).throw(
+        lambda notebook_id, temporary, **kwargs: (_ for _ in ()).throw(
             RuntimeError("injected swap failure")
         ),
     )
@@ -281,7 +281,7 @@ def test_full_save_failure_keeps_existing_cached_artifact(
     monkeypatch.setattr(
         repo._runtime.scale_artifact_store,
         "save_full",
-        lambda notebook_id, artifacts: (_ for _ in ()).throw(
+        lambda notebook_id, artifacts, **kwargs: (_ for _ in ()).throw(
             RuntimeError("injected full-save failure")
         ),
     )

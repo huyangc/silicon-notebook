@@ -5,7 +5,6 @@ import logging
 import math
 import sys
 import threading
-import zlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -20,6 +19,11 @@ from psycopg_pool import ConnectionPool, PoolTimeout
 from app.core.config import Settings
 from app.core.database_url import database_identity, redact_database_url
 from app.repositories.postgres.rows import PostgresRow
+from app.repositories.scale_build_lock import (
+    ScaleBuildLock,
+    advisory_lock_key,
+    advisory_lock_oid,
+)
 
 
 class PostgresDatabaseError(RuntimeError):
@@ -51,6 +55,96 @@ _ISOLATION_LEVELS = {
 
 _CONNECTION_LOG_STATE = threading.local()
 _KNOWHOW_PROJECTION_LOCK_NAMESPACE = 0x534E4B48  # "SNKH"
+_SCALE_BUILD_LOCK_NAMESPACE = 0x53434C42  # "SCLB"
+# A lock session sits idle for the whole build (hours on a 9M-object library).
+# TCP keepalives make a dead peer surface as a broken session -- which releases
+# the advisory lock -- instead of a half-open socket that looks alive forever.
+_LOCK_SESSION_KEEPALIVES = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
+}
+
+
+class PostgresScaleBuildLock:
+    """One held per-notebook advisory lock on its own dedicated session.
+
+    Ownership crosses threads: the admitting thread acquires, the build worker
+    verifies and releases.  Only one of them touches the session at a time, and
+    the mutex below makes that literal rather than merely intended.
+    """
+
+    supported = True
+
+    def __init__(
+        self,
+        connection: psycopg.Connection[PostgresRow],
+        namespace: int,
+        key: int,
+        on_release: Callable[[], None],
+    ) -> None:
+        self._connection = connection
+        self._namespace = namespace
+        self._key = key
+        self._on_release = on_release
+        self._released = False
+        self._mutex = threading.Lock()
+
+    def verify_held(self) -> bool:
+        """Re-read the lock from ``pg_locks`` on the owning session.
+
+        This is the guard in front of the only destructive step (the artifact
+        swap).  A session that was terminated -- managed-PostgreSQL idle
+        reaper, failover, operator ``pg_terminate_backend`` -- released the
+        advisory lock silently, so a heartbeat that merely proves the object
+        still exists in this process proves nothing about the database.
+        """
+        with self._mutex:
+            if self._released:
+                return False
+            try:
+                row = self._connection.execute(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND granted "
+                    "AND pid = pg_backend_pid() "
+                    "AND classid = %s::oid AND objid = %s::oid"
+                    ") AS held",
+                    (
+                        advisory_lock_oid(self._namespace),
+                        advisory_lock_oid(self._key),
+                    ),
+                ).fetchone()
+                self._connection.commit()
+            except Exception:  # noqa: BLE001 - an unusable session is "not held"
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                return False
+            return bool(row is not None and row["held"])
+
+    def release(self) -> None:
+        """Unlock and close. Closing the session is the authoritative release."""
+        with self._mutex:
+            if self._released:
+                return
+            self._released = True
+            try:
+                self._connection.execute(
+                    "SELECT pg_advisory_unlock(%s, %s)",
+                    (self._namespace, self._key),
+                )
+                self._connection.commit()
+            except Exception:  # noqa: BLE001 - the close below is the no-leak net
+                pass
+            finally:
+                try:
+                    self._connection.close()
+                except Exception:  # noqa: BLE001 - nothing left to salvage
+                    pass
+                self._on_release()
 
 
 class _ConnectingThreadLogFilter(logging.Filter):
@@ -126,6 +220,17 @@ class PostgresDatabase:
         )
         self._projection_lock_slots = threading.BoundedSemaphore(
             self._projection_lock_capacity
+        )
+        # Scale-build locks get their own budget rather than sharing the
+        # projection lock's: a build holds its session for hours, and a shared
+        # semaphore would let concurrent builds starve every knowhow projection
+        # on this process. Sized one above the build ceiling so an admission
+        # probe can always run while every executing build holds a session.
+        self._scale_build_lock_capacity = max(
+            1, int(getattr(settings, "scale_build_concurrency", 2)) + 1
+        )
+        self._scale_build_lock_slots = threading.BoundedSemaphore(
+            self._scale_build_lock_capacity
         )
         self._opened = False
         self._closed = False
@@ -407,9 +512,7 @@ class PostgresDatabase:
         Closing the dedicated session is the final safety net that releases
         the session advisory lock even if explicit unlock fails.
         """
-        lock_key = zlib.crc32(table_id.encode("utf-8"))
-        if lock_key >= 2**31:
-            lock_key -= 2**32
+        lock_key = advisory_lock_key(table_id)
         self._ensure_projection_lock_open()
         self._projection_lock_slots.acquire()
         try:
@@ -453,6 +556,105 @@ class PostgresDatabase:
                     connection.close()
         finally:
             self._projection_lock_slots.release()
+
+    def _open_scale_build_lock_connection(self):
+        """Open the dedicated, keepalive-armed session one build lock rides on."""
+        with self._lifecycle_lock:
+            if self._closed:
+                raise PostgresDatabaseClosedError(
+                    f"PostgreSQL pool is closed for {self._diagnostic_url}"
+                )
+            return _SafeDiagnosticConnection.connect(
+                self._database_url,
+                autocommit=False,
+                row_factory=dict_row,
+                application_name="silicon-notebook-scale-build-lock",
+                connect_timeout=self._projection_connect_timeout_seconds,
+                **_LOCK_SESSION_KEEPALIVES,
+            )
+
+    @staticmethod
+    def _disable_idle_session_timeout(
+        conn: psycopg.Connection[PostgresRow],
+    ) -> None:
+        """Stop a managed instance from reaping this idle lock session.
+
+        ``idle_session_timeout`` is commonly non-zero on hosted PostgreSQL and
+        would terminate the holder mid-build — which releases the advisory lock
+        *silently*, leaving two writers on one artifact tree. The GUC is USERSET
+        so this always works where it exists; it does not exist before
+        PostgreSQL 14, where there is no such reaper to disable.
+        """
+        try:
+            conn.execute("SET idle_session_timeout = 0")
+            conn.commit()
+        except psycopg.Error:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - reported by the next statement
+                pass
+
+    def try_scale_build_lock(self, notebook_id: str) -> ScaleBuildLock | None:
+        """Claim one notebook's scale-index build across processes, or fail fast.
+
+        Returns a held :class:`PostgresScaleBuildLock`, or ``None`` when the
+        claim is unavailable — another thread, another service process, or the
+        offline build CLI holds it, or this process has already spent its
+        budget of dedicated lock sessions. Every one of those means the same
+        thing to the caller (*do not build now*), so they deliberately share one
+        return value.
+
+        Non-blocking on purpose: admission runs on request-serving threads and
+        an offline build legitimately runs for tens of minutes. Unlike
+        ``table_projection_lock`` this session keeps the pool's normal
+        ``statement_timeout`` — it never waits on a lock, and an unbounded
+        timeout would let a wedged re-verification stall a swap forever.
+        """
+        lock_key = advisory_lock_key(notebook_id)
+        self._ensure_projection_lock_open()
+        if not self._scale_build_lock_slots.acquire(blocking=False):
+            return None
+        connection = None
+        try:
+            connection = self._open_scale_build_lock_connection()
+            self._restore_session_defaults(connection)
+            # Any SET has to follow the RESET ALL inside the call above, or it
+            # is wiped before it ever takes effect (see table_projection_lock).
+            connection.execute(
+                "SET application_name = 'silicon-notebook-scale-build-lock'"
+            )
+            connection.commit()
+            self._disable_idle_session_timeout(connection)
+            row = connection.execute(
+                "SELECT pg_try_advisory_lock(%s, %s) AS acquired",
+                (_SCALE_BUILD_LOCK_NAMESPACE, lock_key),
+            ).fetchone()
+            connection.commit()
+            acquired = bool(row is not None and row["acquired"])
+        except PostgresDatabaseClosedError:
+            self._close_and_release_lock_session(connection)
+            raise
+        except Exception:
+            self._close_and_release_lock_session(connection)
+            raise self._safe_error("scale build lock acquisition") from None
+        if not acquired:
+            self._close_and_release_lock_session(connection)
+            return None
+        return PostgresScaleBuildLock(
+            connection,
+            _SCALE_BUILD_LOCK_NAMESPACE,
+            lock_key,
+            self._scale_build_lock_slots.release,
+        )
+
+    def _close_and_release_lock_session(self, connection) -> None:
+        """Give the session budget back on every path that keeps no handle."""
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:  # noqa: BLE001 - nothing left to salvage
+                pass
+        self._scale_build_lock_slots.release()
 
     def close(self) -> None:
         """Close the pool once. Closing an unopened/already-closed pool is safe."""

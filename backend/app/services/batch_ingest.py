@@ -47,6 +47,7 @@ from app.services.maintenance_cli import (
     MaintenanceCliError,
     open_maintenance_cli_repository,
 )
+from app.repositories.scale_build_lock import ScaleBuildBusy
 from app.repositories.ports import (
     BatchMaintenancePort,
     ExtractionProgress,
@@ -2328,6 +2329,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 2
             finally:
                 reset_request_user(user_token)
+    except ScaleBuildBusy as exc:
+        # 停服闸只挡住「另一个维护命令」,挡不住与本命令并存的离线 scale 构建进程
+        # (W-CLI 用的是 per-notebook 锁,不是全局维护锁)。取锁恒为「全局维护锁 →
+        # per-notebook 锁」且后者只做非阻塞 try,故不构成死锁环:这里只会读到
+        # 「别人正在建」,然后带着可读消息退出。
+        print(f"error: {exc}", file=sys.stderr)
+        print(
+            "该笔记本的 scale 索引正被另一个进程构建。本命令此前阶段"
+            "(摄取 / KG / 向量 / 回填)的成果都已落库,等对方结束后重跑同一"
+            "命令即可只补索引这一步。",
+            file=sys.stderr,
+        )
+        return 2
     except (MaintenanceCliError, ImageBackfillRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

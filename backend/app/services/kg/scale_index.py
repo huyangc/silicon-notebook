@@ -628,6 +628,43 @@ def _unusable(out_dir: str, detail: str):
     return None
 
 
+MANIFEST_LIBRARY_KEY = "library_versions"
+_LIBRARY_VERSIONS: "dict | None" = None
+
+
+def runtime_library_versions() -> dict:
+    """本进程构建 scale 工件所用的三个库版本(W-CLI T-W3)。
+
+    写进 manifest 的 ``library_versions``,给**异机构建**留下比对依据:工件本身
+    可移植(manifest 无机器绑定、npy/npz 平台无关、hnswlib ``.bin`` 是数据),
+    但 ``requirements`` 只有下界 ``>=``,两台机器的 hnswlib 漂移是常态,而
+    ``.bin`` **没有格式版本头** —— 版本不符时 ``load_index`` 可能不报错而读出
+    垃圾,被 open_ann 的 fail-open 吞成「静默零召回」。所以版本必须随工件落盘。
+
+    取值优先用已导入模块的 ``__version__``(numpy/scipy 有),hnswlib 没有该属性
+    → 回落发行版元数据。任何一项取不到就**不写这个键**:版本发现绝不能让一次
+    多小时的构建失败,缺键在读侧等价于「未知,不判失配」(older-index-stays-valid)。
+    进程级 memo:版本在进程生命周期内不会变。
+    """
+    global _LIBRARY_VERSIONS
+    if _LIBRARY_VERSIONS is None:
+        import sys
+        from importlib.metadata import version as _distribution_version
+
+        found: dict = {}
+        for name in ("hnswlib", "numpy", "scipy"):
+            value = getattr(sys.modules.get(name), "__version__", None)
+            if not value:
+                try:
+                    value = _distribution_version(name)
+                except Exception:  # noqa: BLE001 — 见 docstring:绝不失败构建。
+                    value = None
+            if value:
+                found[name] = str(value)
+        _LIBRARY_VERSIONS = found
+    return dict(_LIBRARY_VERSIONS)
+
+
 def _manifest_count(manifest: dict, key: str):
     """取 manifest 里的计数字段。缺键(老索引根本没写过 n_ann/n_viz_nodes 这类
     键)或不是整数 → None,表示「这一项不参与校验」。older-index-stays-valid:
