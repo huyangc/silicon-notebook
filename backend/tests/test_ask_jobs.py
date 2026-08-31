@@ -42,6 +42,15 @@ def test_begin_creates_running_job_and_conversation(repo):
     assert repo._ask_cancel_events.get(job_id) is ev   # 注册表登记
 
 
+def test_begin_preserves_full_valid_question(repo):
+    nb = _nb(repo)
+    question = "完整提问：" + "电路噪声分析" * 60
+    payload = AskRequest(question=question, mode="chunk")
+    job_id, _ = repo.begin_ask_job(nb.id, payload, "chunk", threading.Event())
+
+    assert repo.ask_job_detail(job_id)["question"] == question
+
+
 def test_finish_done_records_answer_and_deregisters(repo):
     nb = _nb(repo)
     ev = threading.Event()

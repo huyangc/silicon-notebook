@@ -240,12 +240,18 @@ def test_user_usage_last_active_hides_unresolved_time_sentinel_postgres(
 
 
 def test_admin_question_overview_combines_ask_and_report(postgres_database, store):
+    full_ask_question = "如何降低噪声？这是历史已完成提问的尾部检索词"
     with postgres_database.write() as connection:
         _insert_user(connection, "u1")
         _insert_notebook(connection, "n1", "u1")
+        connection.execute(
+            "INSERT INTO answers(id,notebook_id,question,payload,created_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            ("answer-global", "n1", full_ask_question, jsonb({}), NOW),
+        )
         _insert_ask(
             connection, "ask-global", "n1", "u1", NOW,
-            question="如何降低噪声？",
+            question="如何降低噪声？", answer_id="answer-global",
         )
         _insert_report(
             connection, "report-global", "n1", "u1", NOW,
@@ -258,6 +264,10 @@ def test_admin_question_overview_combines_ask_and_report(postgres_database, stor
     }
     assert result["items"][0]["id"] == "report-global"
     assert isinstance(result["items"][0]["created_at"], str)
+
+    ask_tail = store.list_admin_questions(kind="ask", query="尾部检索词", limit=50)
+    assert ask_tail["total"] == 1
+    assert ask_tail["items"][0]["question"] == full_ask_question
 
     with postgres_database.write() as connection:
         connection.execute(
@@ -862,12 +872,25 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
     from app.repositories.postgres.notebook_store import NotebookStore
 
     created_at = datetime.now(timezone.utc).replace(microsecond=0)
+    full_ask_question = "retained question with a legacy-completed full tail"
     with postgres_database.write() as connection:
         _insert_user(connection, "u-retained")
         _insert_notebook(connection, "n-retained", "u-retained")
         _insert_ask(
             connection, "ask-retained", "n-retained", "u-retained", created_at,
             question="retained question",
+        )
+        connection.execute(
+            "INSERT INTO answers(id,notebook_id,question,payload,created_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (
+                "answer-retained", "n-retained", full_ask_question,
+                jsonb({}), created_at,
+            ),
+        )
+        connection.execute(
+            "UPDATE ask_jobs SET answer_id=%s WHERE id=%s",
+            ("answer-retained", "ask-retained"),
         )
         _insert_source(
             connection, "src-retained", "n-retained", created_at,
@@ -896,6 +919,8 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
     assert all(item["notebook_name"] == "NB-n-retained" for item in result["items"])
     assert all(item["notebook_deleted_at"] for item in result["items"])
     assert all(item["retained_until"] for item in result["items"])
+    retained_ask = next(item for item in result["items"] if item["type"] == "ask")
+    assert retained_ask["question"] == full_ask_question
 
     usage = next(row for row in store.list_user_usage() if row["id"] == "u-retained")
     assert usage["notebooks"] == 0
