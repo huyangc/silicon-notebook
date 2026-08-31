@@ -822,6 +822,7 @@ claim 生生灭灭都在普通门面路径内部，见下面残留一节）：
 | 已发布 indexing pipeline | `manifest.pipeline_identity` 与该 notebook 当前发布的身份一致 | `import` 硬拒（不符会让检索侧整体丢弃 scale 核并**静默**退化） |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | 生效维必须相同 | `import` 硬拒（不符会让 `open_ann` fail-open → **静默零召回**）；manifest 没有 `dim` 同样拒绝 |
 | hnswlib | **严格相等** | `import` 默认硬拒；`--allow-library-mismatch` 可覆盖。`ann.bin` 没有格式版本头，失配可能被 fail-open 吞成静默零召回；任一侧版本未知也按失配处理 |
+| `--from` 包路径 | 不得等于或位于该笔记本自己任一工件根（`kg_index`、`kg_viz`、source-partition 伴生）之内，也不得在它们的 `.old` 之内 | `import` 硬拒，退出码 `1`，任何拷贝之前就报错——否则发布会把该根挪成 `.old` 再删掉，静默删掉操作员自己的输入包 |
 | numpy / scipy | 建议相同 | 只告警：npy/npz 带格式版本，失配会响亮失败 |
 | 生产 `.env` | 构建机必须用生产 `.env`（storage 根可以不同） | 无自动检查——这是运维纪律 |
 

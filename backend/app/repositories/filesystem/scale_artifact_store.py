@@ -522,6 +522,23 @@ class ScaleArtifactStore:
         staged ``.tmp`` is left on disk, and the failure is loud. Callers with
         no cross-process claim (SQLite, direct builder use) pass nothing.
 
+        It is checked TWICE when a stale ``.old`` is found and removed below
+        (P1, codex PR#643 R10): the first check, at entry, protects against a
+        claim that was already gone before this call started. The pre-clean
+        ``rmtree`` of a large stale ``.old`` can itself take tens of seconds,
+        long enough for the PostgreSQL lock session backing the claim to die
+        mid-delete; a second builder would then legitimately acquire the now-
+        free claim and could publish before this call ever reaches its own
+        renames. Re-checking ``verify_held`` right after that ``rmtree`` —
+        immediately before the guarded block that performs the first rename —
+        closes that window: this call abandons the swap instead of renaming
+        over whatever the new owner has already published. When there is no
+        stale ``.old`` to pre-clean, that second check is skipped entirely —
+        nothing slow happens between the entry check and the renames, so
+        nothing can invalidate the claim in between, and calling
+        ``verify_held`` a second time for no reason would just be a needless
+        extra database round trip.
+
         ``keep_old`` (P2, codex PR#643 R8): when set, the ``.old`` directory is
         left on disk instead of being removed here — the caller has its own
         reason to want it a moment longer (``run_import``'s post-swap identity
@@ -599,6 +616,19 @@ class ScaleArtifactStore:
             # remove. No ``SwapInterruptGuard`` here and no ``ignore_errors``
             # — see the docstring above.
             shutil.rmtree(old_dir)
+            # P1, codex PR#643 R10: that rmtree can run for tens of seconds on
+            # a large stale ``.old`` — long enough for the claim's lock
+            # session to die and a second builder to legitimately take over
+            # in the meantime. Re-verify right here, before the first rename
+            # below, or this call would go on to overwrite the new owner's
+            # generation. Only reached on the branch that actually did the
+            # slow delete — see the docstring above.
+            if verify_held is not None and not verify_held():
+                raise ScaleBuildLockLost(
+                    "scale build lock was lost before the artifact swap for "
+                    f"{out_dir}; nothing was published and the staged build "
+                    f"remains at {temporary}"
+                )
         guard = SwapInterruptGuard(reraise=False)
         # Everything inside is the destructive part, and Ctrl-C landing inside
         # it is the only way this process can leave a notebook with no live

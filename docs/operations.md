@@ -981,6 +981,7 @@ the ordinary facade path — see the leftovers section below):
 | Published indexing pipeline | `manifest.pipeline_identity` matches the notebook's currently published identity | `import` refuses (a mismatch makes retrieval discard the scale core **silently**) |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | the effective dimension must match | `import` refuses (a mismatch makes `open_ann` fail open → **silent zero recall**); a manifest with no `dim` is refused for the same reason |
 | hnswlib | **strict equality** | `import` refuses by default; `--allow-library-mismatch` overrides. `ann.bin` has no format version header, so a mismatch can be swallowed by the fail-open into silent zero recall; an unknown version on either side counts as a mismatch |
+| `--from` package location | must not equal or sit inside any of the notebook's own artifact roots (`kg_index`, `kg_viz`, the source-partition companion), or their `.old` | `import` refuses, exit code `1`, before anything is copied — publishing would rename that root to `.old` and delete it, silently deleting the operator's own input package |
 | numpy / scipy | same version recommended | warning only: npy/npz carry a format version and fail loudly |
 | Production `.env` | the build host must use the production `.env` (the storage root may differ) | not checked automatically — operational discipline |
 
