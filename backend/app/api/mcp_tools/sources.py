@@ -186,9 +186,9 @@ def register_source_tools(
                         "source_id": item.id,
                         # Use the same single display-name rule as source cards,
                         # citations, and the Reasoning Ask source inventory.
-                        "title": (
-                            item.display_title or item.title or item.file_name
-                        ),
+                        # An empty value is the canonical unnamed-source result;
+                        # do not reinterpret legacy whitespace-only titles here.
+                        "title": item.display_title,
                         "file_name": item.file_name,
                         "source_type": item.type,
                         "doc_type": item.doc_type,
