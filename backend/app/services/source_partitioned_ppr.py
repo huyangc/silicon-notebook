@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import scipy.sparse as sp
 
+from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
 from app.services.kg.edge_schema import is_queryable_edge_pair
 from app.services.kg.scale_index import personalized_ppr
 from app.services.kg.source_partition_index import SourcePartitionUnavailable
@@ -61,10 +62,17 @@ def _companion_signature_superseded(cached_signature: Any, current_signature: An
     """Mirrors ``ScaleArtifactCatalog._signature_superseded`` (W-CLI T-W3) for
     this companion cache (codex PR#643 R4 P1, corner reversed by R5 P2).
 
-    ``current_signature is None`` — no manifest right now (mid-swap window) or
-    the ``artifacts`` adapter has no stat probe at all — is "can't tell", not
-    "changed": fail-soft, keep serving the cached entry, same as T-W3's
-    ``signature is None`` early-return.
+    ``current_signature is None`` — the ``artifacts`` adapter has no stat
+    probe at all (old test doubles), or this one stat could not be completed —
+    is "can't tell", not "changed": fail-soft, keep serving the cached entry,
+    same as T-W3's ``signature is None`` early-return.
+
+    ``MANIFEST_ABSENT`` never reaches this predicate (P1, codex PR#643 R12):
+    "the companion is provably gone" is not a comparison against the cached
+    entry at all, it is an eviction, and ``_graph`` acts on it before it ever
+    consults the cache. It is likewise never RECORDED on an entry — an entry
+    is only written on a path where the load succeeded, and this value says
+    the root was not there.
 
     ``cached_signature is None`` is NOT given the same pass, though (codex
     #643 R5 P2). That combination is a real, reachable window here too: the
@@ -106,11 +114,20 @@ class SourcePartitionedPprService:
         self._lock = threading.RLock()
 
     def _companion_signature(self, notebook_id: str) -> Any:
-        """One stat of the companion root's ``manifest.json``, or ``None`` if
-        it cannot be read (missing, or the ``artifacts`` adapter has no
-        probe — old test doubles). Called at most once per ``_graph()`` call
-        (T-W3's "one load, one stat" discipline) and reused for both the hit
-        check and the entry this call may write."""
+        """One stat of the companion root's ``manifest.json``. Called at most
+        once per ``_graph()`` call (T-W3's "one load, one stat" discipline) and
+        reused for both the hit check and the entry this call may write.
+
+        THREE outcomes, never collapsed (P1, codex PR#643 R12):
+
+        * a stat signature tuple — the companion generation now on disk;
+        * ``MANIFEST_ABSENT`` — the root was probed and there is provably no
+          live companion (a same-version ``import`` that omitted the root
+          retired it, an operator deleted it). A positive fact, acted on;
+        * ``None`` — nothing could be concluded: the ``artifacts`` adapter
+          has no probe at all (old test doubles), or this one stat failed
+          (permission, transient I/O). Fail-soft, exactly as before.
+        """
         probe = getattr(self._artifacts, "manifest_stat_signature", None)
         if not callable(probe):
             return None
@@ -302,6 +319,21 @@ class SourcePartitionedPprService:
         # before touching the cache gives that generation a comparable
         # signature.
         disk_signature = self._companion_signature(notebook_id)
+        if disk_signature is MANIFEST_ABSENT:
+            # P1, codex PR#643 R12: the companion root is provably GONE — a
+            # same-version ``import`` whose package omitted it retired it
+            # (``retire_live_directory``), or an operator removed it. Nothing
+            # about this heals: the cache key above is entirely DB-derived and
+            # does not move, and the probe will keep answering "absent", so
+            # the fail-soft branch below would hand back the retired
+            # generation's ``_CombinedGraph`` for the life of this process.
+            # Drop this notebook's entries and take the "no companion" path —
+            # the same ``source_partition_artifact_unavailable`` a cold read
+            # of a missing root produces (``validate_partition_root``), which
+            # is capability-unavailable and never authorizes whole-graph
+            # post-filtering (docs/development.md:37).
+            self.invalidate(notebook_id)
+            raise SourcePartitionUnavailable("source_partition_artifact_unavailable")
         # Hold through lazy load/combine: concurrent cold requests for one
         # identity open one selected partition set and retain one CSR.
         with self._lock:

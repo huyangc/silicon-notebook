@@ -170,6 +170,80 @@ def test_save_viz_and_load_viz_roundtrip(store):
     assert viz.manifest["version"] == ["v", 2]
 
 
+def _viz_payload(marker: str) -> dict:
+    adjacency = sp.csr_matrix(np.array([[0, 1], [1, 0]], dtype=np.int8))
+    return dict(
+        viz_ids=["a", "b"],
+        viz_adj=adjacency,
+        viz_deg=np.asarray([1, 1], dtype=np.int32),
+        viz_types=["concept", "claim"],
+        viz_names=["A", "B"],
+        viz_payload={"edges": [["a", "b", "relates"]]},
+        manifest={"version": [marker, 2], "n_viz_nodes": 2, "n_viz_edges": 1},
+    )
+
+
+def test_save_viz_stages_and_swaps_instead_of_writing_the_live_root(store):
+    """P2, codex PR#643 R12: the online viz write used to land straight in the
+    live ``kg_viz`` directory — the one artifact writer outside the publishing
+    contract every other root follows. A crash mid-write left a half-written
+    root, an ``export`` under the claim could copy one, and an ``import``
+    could rename it out from under the writer. It now stages into
+    ``{viz_dir}.tmp-<token>`` and swaps.
+
+    Mutation anchor: write straight to ``self.viz_dir(notebook_id)`` again and
+    this goes red on the in-flight assertion — the live root is mutated while
+    the write is still running.
+    """
+    live = store.viz_dir("nb-viz")
+    store.save_viz("nb-viz", _viz_payload("first"))
+    assert store.load_viz("nb-viz").manifest["version"] == ["first", 2]
+
+    seen: list[str] = []
+    real_save = store_module.viz_index_module.save_viz_index
+
+    def spy(out_dir, **kwargs):
+        seen.append(out_dir)
+        # Mid-write: the live root must still be the PREVIOUS generation.
+        assert json.loads(
+            (Path(live) / "manifest.json").read_text()
+        )["version"] == ["first", 2]
+        return real_save(out_dir, **kwargs)
+
+    store_module.viz_index_module.save_viz_index = spy
+    try:
+        store.save_viz("nb-viz", _viz_payload("second"), claim_token="tok-1")
+    finally:
+        store_module.viz_index_module.save_viz_index = real_save
+
+    assert seen == [f"{live}.tmp-tok-1"], "the write must land in staging"
+    assert store.load_viz("nb-viz").manifest["version"] == ["second", 2]
+    assert not Path(f"{live}.tmp-tok-1").exists(), "staging is consumed by the swap"
+    assert not Path(f"{live}.old").exists(), "the previous generation is cleaned up"
+
+
+def test_save_viz_publishes_nothing_when_the_claim_was_lost(store):
+    """The same ``verify_held`` contract every other root's publish has: a
+    claim that died during the (potentially long) derive must not rename over
+    whatever a second builder has published in the meantime."""
+    live = store.viz_dir("nb-viz")
+    store.save_viz("nb-viz", _viz_payload("first"))
+
+    with pytest.raises(store_module.ScaleBuildLockLost):
+        store.save_viz(
+            "nb-viz",
+            _viz_payload("second"),
+            claim_token="tok-2",
+            verify_held=lambda: False,
+        )
+
+    assert store.load_viz("nb-viz").manifest["version"] == ["first", 2]
+    assert Path(f"{live}.tmp-tok-2").is_dir(), (
+        "the staged build is left on disk for the operator, same as every "
+        "other refused publish"
+    )
+
+
 def test_prepare_fold_directory_resets_leftovers(store):
     """P1, codex PR#643 R1: staging is now ``{scale_dir}.tmp-<claim_token>``,
     not a fixed name — ``prepare`` only ever resets ITS OWN token's residue

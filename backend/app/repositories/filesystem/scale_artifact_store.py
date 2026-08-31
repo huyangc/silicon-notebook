@@ -17,8 +17,12 @@ Locking stays with the caller: ``swap_fold_directory`` only performs the
 frozen filesystem sequence (live → .old, tmp → live, rm .old) and is invoked
 under the facade's ``_scale_building_lock`` (Task 20 moves that state); a
 fold failure before the swap leaves the live artifact untouched. Full
-rebuilds (``save_full``) stage through the same .tmp + swap pair, so a
-crashed rebuild can no longer leave the live directory half-overwritten.
+rebuilds (``save_full``), the source-partition companion
+(``save_source_partitions``) and the standalone viz root (``save_viz``) all
+stage through the same .tmp + swap pair, so a crashed write can no longer
+leave a live directory half-overwritten — and every one of them accepts the
+same optional ``claim_token``/``verify_held`` pair, so an online write is
+excluded from the offline CLI's publishes by the very same claim.
 """
 
 from __future__ import annotations
@@ -37,6 +41,34 @@ from app.services.kg import scale_index as scale_index_module
 from app.services.kg import viz_index as viz_index_module
 
 ScaleBuildArtifacts = Mapping[str, object]
+
+
+class _ManifestAbsent:
+    """Probe verdict: the manifest path was read and is confirmed NOT there.
+
+    ``manifest_stat_signature`` used to answer ``None`` for both "confirmed
+    absent" and "the stat itself could not be completed" (a permission error,
+    an I/O error on a network mount). A caller that memoizes a generation
+    cannot treat those alike: "I could not tell" must keep serving what it
+    already has (fail-soft), while "there is no live manifest here" is a
+    positive statement that the generation it cached is GONE.
+
+    Collapsing them is what let a retired companion keep serving (P1, codex
+    PR#643 R12): a same-version ``import`` that omits an optional root retires
+    it (``retire_live_directory``), and the reader's cache key — derived
+    entirely from database state — does not move, so the only signal left is
+    this probe. Answering ``None`` there routed the retirement into the
+    fail-soft branch and the warm ``_CombinedGraph`` served the retired
+    generation until the process restarted.
+
+    Identity, never truthiness: both this and ``None`` are falsy.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "MANIFEST_ABSENT"
+
+
+MANIFEST_ABSENT = _ManifestAbsent()
 
 
 class ScaleArtifactSwapRefused(RuntimeError):
@@ -197,8 +229,8 @@ class ScaleArtifactStore:
             data = json.load(fh)
         return data if isinstance(data, dict) else None
 
-    def manifest_stat_signature(self, directory) -> "tuple | None":
-        """``directory/manifest.json`` 的**磁盘身份签名**,或文件不在时 ``None``。
+    def manifest_stat_signature(self, directory) -> "tuple | None | _ManifestAbsent":
+        """``directory/manifest.json`` 的**磁盘身份签名**,或两种「没有签名」。
 
         热路径修复批 2 · R2-5(审计 P1-15):``_stale_manifest_admissible`` 每次
         都用整份 ``read_manifest`` 做身份比对,而生产 manifest 里的
@@ -218,9 +250,16 @@ class ScaleArtifactStore:
         · ``st_mtime_ns`` 是纳秒精度,不是 ``scale_manifest_identity`` 那种
           秒级 mtime 会踩的同秒改写坑;
         · ``st_size`` 再兜一层。
-        任何一项变化都强制重新解析,方向保守。``OSError``(含文件不存在)→
-        ``None``,调用方按「无工件」处理,与 ``read_manifest`` 的缺失分支同款
-        fail-soft。
+        任何一项变化都强制重新解析,方向保守。
+
+        **返回值是三态,不是两态**(P1, codex PR#643 R12)。``FileNotFoundError``
+        ——路径**确认**不存在(文件没了,或整个根被 ``retire_live_directory``
+        改名走了)——返回 ``MANIFEST_ABSENT`` 哨兵;其余 ``OSError``(权限、
+        网络挂载 I/O、``ENOTDIR``)是「这次问不出来」,仍返回 ``None``。两者
+        以前都是 ``None``,于是「工件被退休了」和「探针这一瞬失灵」在调用方
+        眼里完全一样,只能一起走 fail-soft ——而 fail-soft 对前者是错的:那一代
+        产物已经不在了,继续服务它没有任何时候会自愈。判别一律按**身份**
+        (``is MANIFEST_ABSENT``),不按真值——两者都是 falsy。
 
         ⚠ 前提写清楚(评审 P2-5):``st_mtime_ns`` 的「纳秒精度」是**文件系统的
         属性,不是这个 API 的属性** —— ext4/APFS/XFS 给到亚微秒,而某些网络或
@@ -234,6 +273,8 @@ class ScaleArtifactStore:
         path = os.path.join(str(directory), "manifest.json")
         try:
             info = os.stat(path)
+        except FileNotFoundError:
+            return MANIFEST_ABSENT
         except OSError:
             return None
         return (info.st_mtime_ns, info.st_size, info.st_ino)
@@ -277,18 +318,40 @@ class ScaleArtifactStore:
     def load_viz(self, notebook_id: str):
         return viz_index_module.load_viz_index(str(self.viz_dir(notebook_id)))
 
-    def save_viz(self, notebook_id: str, artifacts: Mapping) -> dict:
-        # Registered, not fixed (codex W-CLI R1 N3): the ONLINE viz write lands
-        # straight in the live directory with no staging, so a crash mid-write
-        # can leave a half-written viz root. Its readers already treat a
-        # unreadable/absent viz as "no viz" (fail-soft, the graph view degrades
-        # to the main index), and the offline ``import`` does publish this root
-        # through the tmp+rename primitive; converting the online writer is an
-        # artifact-format-adjacent change with its own peak-disk cost and does
-        # not belong in this review batch.
-        return viz_index_module.save_viz_index(
-            str(self.viz_dir(notebook_id)), **artifacts
-        )
+    def save_viz(
+        self,
+        notebook_id: str,
+        artifacts: Mapping,
+        *,
+        claim_token: Optional[str] = None,
+        verify_held: Optional[Callable[[], bool]] = None,
+    ) -> dict:
+        """Publish the standalone viz root through staging + atomic swap.
+
+        P2, codex PR#643 R12 (this was the N3 "registered, not fixed" item —
+        it is fixed now). The ONLINE viz write used to land straight in the
+        live ``kg_viz`` directory, which made it the one artifact writer
+        outside the publishing contract every other root follows
+        (docs/development.md:33): a crash mid-write left a half-written root;
+        an ``export`` running under the claim could ``copytree`` a root this
+        writer was in the middle of; and an ``import`` could rename or retire
+        the directory out from under it. Staging into ``{viz_dir}.tmp-<token>``
+        and swapping makes the write all-or-nothing and puts it on the same
+        two-rename sequence, and ``claim_token``/``verify_held`` — the same
+        optional pair ``save_full`` takes — put it under the same
+        cross-process claim (see ``ScaleArtifactRuntime.build_viz``).
+
+        Peak disk during a viz publish is now two copies of the viz root.
+        That root is the small one (a node/edge projection, no ANN), so this
+        is nothing like the full index's cost; atomicity is not optional here
+        either. A caller with no claim (a direct store user, a test) passes
+        nothing and gets the same staging with a random token.
+        """
+        live = self.viz_dir(notebook_id)
+        temporary = self.prepare_staging_directory(live, claim_token)
+        manifest = viz_index_module.save_viz_index(str(temporary), **artifacts)
+        self.swap_staging_directory(live, temporary, verify_held=verify_held)
+        return manifest
 
     def save_full(
         self,
@@ -661,7 +724,12 @@ class ScaleArtifactStore:
         return preserved
 
     @staticmethod
-    def finalize_swap(live, preserved: bool) -> None:
+    def finalize_swap(
+        live,
+        preserved: bool,
+        *,
+        verify_held: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Delete the ``.old`` a ``keep_old=True`` swap left behind, once the
         caller has confirmed the published generation should stand (P1/P2,
         codex PR#643 R8). Never wrapped in ``SwapInterruptGuard``: the new
@@ -672,12 +740,31 @@ class ScaleArtifactStore:
         Unchanged for ``retire_live_directory`` (codex PR#643 R11 P2-a): a
         retired root's ``.old`` is deleted the exact same way — this method
         never reads a ``temporary`` at all, so the "no replacement tree"
-        shape needs nothing new here."""
+        shape needs nothing new here.
+
+        ``verify_held`` (P1, codex PR#643 R12) re-checks the caller's claim
+        immediately before the delete, same contract as
+        ``swap_staging_directory``: not ``None`` and returning ``False``
+        raises ``ScaleBuildLockLost`` and nothing is removed. THIS method's
+        window: between the swap that left this ``.old`` and this call, the
+        caller does its post-swap verification — a database read that can
+        outlive the lock session. If the claim died in there, a second
+        builder can legitimately take over, publish its own generation and
+        leave ITS ``.old`` (its only rollback copy) at this exact path; the
+        unguarded ``rmtree`` would then delete another owner's rollback
+        generation. A caller with no cross-process claim passes nothing."""
+        if verify_held is not None and not verify_held():
+            raise ScaleBuildLockLost(
+                "scale build lock was lost before the .old cleanup for "
+                f"{live}; nothing was deleted and {live}.old was left on disk"
+            )
         if preserved:
             shutil.rmtree(f"{live}.old", ignore_errors=True)
 
     @staticmethod
-    def retire_live_directory(live) -> bool:
+    def retire_live_directory(
+        live, *, verify_held: Optional[Callable[[], bool]] = None
+    ) -> bool:
         """Publish "no such root" — the degenerate form of a swap that has no
         ``temporary`` to publish in its place (codex PR#643 R11 P2-a).
 
@@ -708,7 +795,23 @@ class ScaleArtifactStore:
         nothing. The caller's contract for that case is unchanged: an
         optional root absent from both the package and the live tree stays
         skipped, same as always.
-        """
+
+        ``verify_held`` (P1, codex PR#643 R12) re-checks the caller's claim
+        before the rename, same contract as ``swap_staging_directory``: not
+        ``None`` and returning ``False`` raises ``ScaleBuildLockLost`` and
+        nothing is renamed. THIS method's window: a retire is reached after
+        the staging copies — potentially a multi-GB, multi-minute
+        ``copytree`` — so a claim proven fresh before them says nothing about
+        who owns this directory now. Without the re-check, a builder whose
+        lock session died mid-staging renames the NEW owner's live root to
+        ``.old`` and no later handler puts it back. Checked before the
+        existence test on purpose: a lost claim means abandon the operation,
+        not "abandon it only if there happened to be something here"."""
+        if verify_held is not None and not verify_held():
+            raise ScaleBuildLockLost(
+                "scale build lock was lost before the retirement of "
+                f"{live}; nothing was renamed"
+            )
         out_dir = str(live)
         if not os.path.exists(out_dir):
             return False
@@ -721,7 +824,13 @@ class ScaleArtifactStore:
         return True
 
     @staticmethod
-    def rollback_swap(live, temporary, preserved: bool) -> None:
+    def rollback_swap(
+        live,
+        temporary,
+        preserved: bool,
+        *,
+        verify_held: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Undo a ``keep_old=True`` swap the caller has decided, after the
         fact, must not stand (P1, codex PR#643 R8 — ``run_import``'s post-swap
         pipeline-identity re-check). Two renames, mirroring the original swap
@@ -747,7 +856,29 @@ class ScaleArtifactStore:
         when ``retire_live_directory`` returned ``True``, so ``preserved`` is
         always ``True`` on this path — the branch below still guards on it
         rather than assuming that, for the same reason every other caller of
-        this method passes its own ``preserved`` rather than a literal."""
+        this method passes its own ``preserved`` rather than a literal.
+
+        ``verify_held`` (P1, codex PR#643 R12) re-checks the caller's claim
+        before the renames, same contract as ``swap_staging_directory``: not
+        ``None`` and returning ``False`` raises ``ScaleBuildLockLost`` and
+        nothing is renamed. THIS method's window is the widest of the three:
+        a rollback is decided by a post-swap verification step that reads the
+        database, and it walks several roots in sequence, so the claim can
+        die between the swap and this call — or between two roots of the same
+        rollback. Undoing a publish with no claim is exactly as destructive
+        as making one: ``live`` here may already be the NEW owner's
+        generation, and moving it to this run's staging name while restoring
+        this run's ``.old`` over it would hand the notebook a generation
+        nobody published. A caller walking several roots must therefore stop
+        at the first refusal rather than continue — the roots it already
+        restored stay restored, and the ones it did not are reported, not
+        guessed at (see ``run_import``)."""
+        if verify_held is not None and not verify_held():
+            raise ScaleBuildLockLost(
+                "scale build lock was lost before the rollback of "
+                f"{live}; nothing was renamed and this root is still the "
+                "generation this run published"
+            )
         out_dir = str(live)
         old_dir = out_dir + ".old"
         guard = SwapInterruptGuard(reraise=False)

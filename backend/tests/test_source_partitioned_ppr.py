@@ -10,6 +10,7 @@ import pytest
 import app.services.kg.source_partition_index as partition_module
 import app.repositories.source_subgraph_projection as source_projection
 from app.core.config import Settings
+from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
 from app.services.kg.source_partition_index import (
     SourcePartitionUnavailable,
     build_source_partition,
@@ -513,6 +514,154 @@ def test_companion_entry_adopted_with_an_unknown_signature_is_still_supersedable
         "companion signature must still be superseded once a real "
         "signature is available, not cached forever"
     )
+
+
+def _warm(service, notebook_id, source_a, version):
+    """One retrieve that leaves exactly one warm cache entry behind."""
+    result = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert result.capability.enabled
+    assert service.cache_size == 1
+    return result
+
+
+def test_a_retired_companion_root_invalidates_the_warm_cache(repo):
+    """P1, codex #643 R12: a same-version ``import`` whose package OMITS the
+    companion RETIRES the live root (``retire_live_directory`` renames it to
+    ``.old``). Nothing else moves: ``parent_version`` is unchanged by
+    definition, the cache key is entirely DB-derived, and the manifest probe
+    can only answer "no manifest". Reading that as the pre-existing fail-soft
+    "can't tell" left the warm ``_CombinedGraph`` serving the RETIRED
+    generation for the life of the process — the opposite of the
+    capability-unavailable contract a missing companion carries
+    (docs/development.md:37).
+
+    **Mutation anchors**, one per half of the fix:
+
+    1. make ``manifest_stat_signature`` answer ``None`` again for a missing
+       manifest (drop the ``FileNotFoundError`` branch) → the retirement is
+       indistinguishable from a transient probe failure, the fail-soft branch
+       hands back the retired ``_CombinedGraph``, and the capability
+       assertions below go red;
+    2. drop the ``MANIFEST_ABSENT`` branch in ``_graph`` → the queried key is
+       still dropped by the ordinary signature comparison, but every OTHER
+       cached scope of the same notebook keeps its retired graph until it is
+       separately queried; ``cache_size`` below goes red at 1.
+    """
+    notebook_id, source_a, source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a, source_b), version)
+    store = repo._runtime.scale_artifact_store
+    service = repo._runtime.source_partitioned_ppr
+    _warm(service, notebook_id, source_a, version)
+    # A SECOND scope of the same notebook: its own cache key, its own retired
+    # graph once the root goes away.
+    service.retrieve(
+        notebook_id,
+        [source_a, source_b],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert service.cache_size == 2
+
+    # Exactly what ``import`` does for an omitted optional root.
+    live = store.source_partition_dir(notebook_id)
+    live.rename(str(live) + ".old")
+
+    retired = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert not retired.capability.enabled, (
+        "a retired companion must degrade to capability-unavailable, not keep "
+        "serving the generation that was retired"
+    )
+    assert retired.capability.reason == "source_partition_artifact_unavailable"
+    assert service.cache_size == 0, (
+        "every cached scope of this notebook describes the retired "
+        "generation, so all of them must go — not just the one queried"
+    )
+
+
+def test_a_probeless_artifacts_adapter_still_serves_from_cache(repo):
+    """Negative anchor for the branch above: ``None`` from
+    ``_companion_signature`` because the adapter has NO ``manifest_stat_
+    signature`` at all (the old test doubles this seam was built duck-typed
+    for) is "can't tell", and must keep hitting the cache exactly as before.
+    Only a probe that positively reports ABSENCE invalidates."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["v1"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+
+    class _ProbelessArtifacts:
+        """Everything the service uses, minus the stat probe."""
+
+        def source_partition_dir(self, nb):
+            return store.source_partition_dir(nb)
+
+        def load_source_partitions(self, *args, **kwargs):
+            return store.load_source_partitions(*args, **kwargs)
+
+    service = SourcePartitionedPprService(
+        settings=repo.settings,
+        artifacts=_ProbelessArtifacts(),
+        projections=repo._runtime.index_projections,
+    )
+    _warm(service, notebook_id, source_a, version)
+    again = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert again.capability.enabled and again.cache_hit
+
+
+def test_a_transient_probe_failure_still_serves_from_cache(repo, monkeypatch):
+    """Negative anchor: ``None`` because THIS stat could not be completed (a
+    permission error, transient I/O on a network mount) is also "can't tell"
+    — the file may well be there — so the warm entry keeps serving. Only
+    ``MANIFEST_ABSENT`` is a statement that the generation is gone."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["v1"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    service = repo._runtime.source_partitioned_ppr
+    _warm(service, notebook_id, source_a, version)
+
+    monkeypatch.setattr(store, "manifest_stat_signature", lambda _directory: None)
+    again = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert again.capability.enabled and again.cache_hit
+    assert service.cache_size == 1
+
+
+def test_the_manifest_probe_separates_absence_from_an_unreadable_stat(
+    repo, monkeypatch
+):
+    """The tri-state itself (P1, codex #643 R12): a confirmed-missing manifest
+    answers ``MANIFEST_ABSENT``, while any other ``OSError`` keeps answering
+    ``None``. Identity, never truthiness — both are falsy."""
+    store = repo._runtime.scale_artifact_store
+    missing = store.source_partition_dir("nb-never-published")
+    assert store.manifest_stat_signature(missing) is MANIFEST_ABSENT
+
+    def unreadable(_path):
+        raise PermissionError("stat refused")
+
+    monkeypatch.setattr("os.stat", unreadable)
+    assert store.manifest_stat_signature(missing) is None
 
 
 def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):

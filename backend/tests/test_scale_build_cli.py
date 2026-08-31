@@ -61,6 +61,25 @@ class _Lock:
         self.released = True
 
 
+class _ScriptedLock(_Lock):
+    """A claim whose ``verify_held`` follows a script, so a test can place the
+    loss at ONE specific destructive step (P1, codex PR#643 R12).
+
+    ``answers`` is consumed front to back, one entry per ``verify_held`` call;
+    once exhausted it keeps answering ``False`` — a lock session that died
+    stays dead, and every later step must see the same verdict.
+    """
+
+    def __init__(self, answers) -> None:
+        super().__init__()
+        self.answers = list(answers)
+        self.checks = 0
+
+    def verify_held(self) -> bool:
+        self.checks += 1
+        return self.answers.pop(0) if self.answers else False
+
+
 class _Database:
     def __init__(self, handle) -> None:
         self.handle = handle
@@ -1200,6 +1219,245 @@ def test_import_rolls_back_a_retired_companion_when_identity_drifts_during_the_s
     assert not Path(f"{companion_dir}.old").exists(), (
         "rollback must restore .old back onto live, leaving no .old behind"
     )
+
+
+class _ExclusiveDatabase:
+    """A claim backend that grants ONE holder at a time — the single property
+    a PostgreSQL session advisory lock provides. Both the CLI's
+    ``claim_notebook`` and the serving process's viz rebuild
+    (``ScaleArtifactRuntime._acquire_scale_build_lock``) reach the claim
+    through this one method, so this is enough to state the exclusion between
+    them without a database."""
+
+    def __init__(self) -> None:
+        self.held: dict[str, _Lock] = {}
+
+    def try_scale_build_lock(self, notebook_id: str):
+        if notebook_id in self.held:
+            return None  # "provably held by somebody else"
+        handle = _Lock()
+        granted_release = handle.release
+
+        def release() -> None:
+            self.held.pop(notebook_id, None)
+            granted_release()
+
+        handle.release = release  # type: ignore[method-assign]
+        self.held[notebook_id] = handle
+        return handle
+
+
+def test_the_import_claim_excludes_an_online_viz_rebuild(
+    storage, store, tmp_path
+):
+    """P2, codex PR#643 R12: the serving process's standalone viz rebuild now
+    takes the same per-notebook claim this command holds for its whole run.
+    Probed from inside the publish window — the exact moment ``import`` is
+    renaming roots — that claim must come back "held by somebody else", which
+    is the branch that makes the viz rebuild give way instead of writing into
+    a ``kg_viz`` directory this run may be renaming or retiring.
+
+    Mutation anchor: have the viz rebuild skip the claim (see
+    ``ScaleArtifactRuntime.build_viz``) and this exclusion buys nothing — the
+    online writer is back inside the window, which is the state the finding
+    describes.
+    """
+    _seed_live(store, "nb-1")
+    database = _ExclusiveDatabase()
+    repository = _Repository(storage, store, database, _Projections(PIPELINE))
+    probes: list[object] = []
+    original = ScaleArtifactStore.swap_staging_directory
+
+    def spy(live, temporary, **kwargs):
+        probes.append(database.try_scale_build_lock("nb-1"))
+        return original(live, temporary, **kwargs)
+
+    store.swap_staging_directory = spy  # type: ignore[method-assign]
+    cli.run_import(
+        repository,
+        "nb-1",
+        _full_package(tmp_path),
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+
+    assert probes and all(probe is None for probe in probes), (
+        "a viz rebuild probing the claim mid-import must be refused"
+    )
+    # And the claim is free again the moment the command releases it.
+    assert database.try_scale_build_lock("nb-1") is not None
+
+
+def test_import_refuses_to_retire_a_root_when_the_claim_was_lost(
+    storage, store, tmp_path
+):
+    """P1, codex PR#643 R12: retiring a root is a ``live -> .old`` rename —
+    just as destructive as a swap — and it used to run with NO claim
+    re-verification, on the theory that the main root's later swap would catch
+    the loss. It would, but far too late: by then this rename has already
+    happened to whatever is live NOW, which after a lost claim may be a second
+    builder's freshly published root, and no handler puts it back.
+
+    The claim here survives the companion's swap and dies immediately before
+    the viz retirement. Nothing may be renamed for viz, and the companion this
+    run DID publish must be reported precisely — its rollback re-verifies the
+    same (now dead) claim, so it stops without renaming either.
+
+    Mutation anchor: drop ``verify_held=`` from the ``retire_live_directory``
+    call and this goes red on the viz assertion below — the stale-claim run
+    retires the live viz root anyway.
+    """
+    _seed_live(store, "nb-1")
+    package = _package(
+        tmp_path,
+        version=["nb-1", 7],
+        companion={"parent_version": ["nb-1", 7], "published_sources": 2},
+    )  # no kg_viz: the live viz root is a retire candidate
+    lock = _ScriptedLock([True])  # companion swap ok, then the session dies
+    repository = _Repository(
+        storage, store, _Database(lock), _Projections(PIPELINE)
+    )
+    messages: list[str] = []
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="lock was lost"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=messages.append,
+        )
+
+    viz_dir = Path(store.viz_dir("nb-1"))
+    assert json.loads((viz_dir / "manifest.json").read_text()) == {
+        "generation": "old"
+    }, "a retirement without the claim must not rename anything"
+    assert not Path(f"{viz_dir}.old").exists()
+    # The companion swap that DID happen stays exactly as published: its
+    # rollback re-verifies the same dead claim and refuses too.
+    companion = Path(store.source_partition_dir("nb-1"))
+    assert json.loads((companion / "manifest.json").read_text())[
+        "parent_version"
+    ] == ["nb-1", 7]
+    assert Path(f"{companion}.old").exists()
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    assert any(
+        f"mv {companion}.old" in message and "still live" in message
+        for message in messages
+    ), "the un-reverted root must be reported with its concrete recovery"
+
+
+def test_import_stops_a_rollback_that_loses_the_claim_midway(
+    storage, store, tmp_path
+):
+    """P1, codex PR#643 R12: the post-swap rollback is two renames per root
+    and used to run unverified. Undoing a publish without the claim is exactly
+    as destructive as making one — ``live`` may already belong to a second
+    builder — so each root re-verifies first, and a refusal stops the walk
+    where it is rather than plowing on.
+
+    The script here lets all three roots publish, lets the FIRST rollback (the
+    main root, since rollback walks in reverse) succeed, and kills the claim
+    before the second. The run must report which roots were reverted, which
+    were not, and the exact ``mv`` for each of the latter.
+
+    Mutation anchor: drop ``verify_held=`` from the ``rollback_swap`` call and
+    this goes red — all three roots roll back and the viz/companion
+    assertions below (still on this run's generation) fail.
+    """
+    _seed_live(store, "nb-1")
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+    calls = {"n": 0}
+
+    def drifting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return base(notebook_id)
+        return ["acme-pipeline", "3"]  # a switch landed during the renames
+
+    projections.pipeline_identity = drifting  # type: ignore[method-assign]
+    # 3 swaps, then the main root's rollback, then the session dies.
+    lock = _ScriptedLock([True, True, True, True])
+    repository = _Repository(storage, store, _Database(lock), projections)
+    messages: list[str] = []
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="rollback that was under way"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=messages.append,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "the main root's rollback ran while the claim was still held"
+    )
+    viz_dir = Path(store.viz_dir("nb-1"))
+    assert json.loads((viz_dir / "manifest.json").read_text()) == {
+        "generation": "new"
+    }, "the viz rollback must NOT run without the claim"
+    companion = Path(store.source_partition_dir("nb-1"))
+    assert json.loads((companion / "manifest.json").read_text())[
+        "parent_version"
+    ] == ["nb-1", 7], "the companion rollback must not run either"
+    for root in (viz_dir, companion):
+        assert Path(f"{root}.old").exists(), (
+            "the previous generation stays in .old for the manual recovery"
+        )
+    reported = "\n".join(messages)
+    assert f"mv {viz_dir} " in reported and f"mv {viz_dir}.old {viz_dir}" in reported
+    assert f"mv {companion}.old {companion}" in reported
+
+
+def test_import_stops_the_old_cleanup_when_the_claim_is_lost(
+    repository, storage, store, tmp_path
+):
+    """P1, codex PR#643 R12: ``finalize_swap`` deletes each root's ``.old``.
+    After a lost claim that directory may be a SECOND builder's rollback
+    generation — its only way back — so every delete re-verifies first and a
+    refusal stops the rest.
+
+    Unlike the two cases above nothing here is half-published: the whole
+    generation is live and identity-verified, so the only residue is a
+    leftover ``.old``, exactly the shape the leftovers documentation covers.
+    The run still fails loudly and names the roots that kept one.
+
+    Mutation anchor: drop ``verify_held=`` from the ``finalize_swap`` call and
+    this goes red — every ``.old`` is deleted and the run reports success.
+    """
+    _seed_live(store, "nb-1")
+    # 3 swaps + the companion's finalize succeed; the session dies before the
+    # viz finalize.
+    lock = _ScriptedLock([True, True, True, True])
+    repository = _Repository(
+        storage, store, _Database(lock), _Projections(PIPELINE)
+    )
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="SUCCEEDED"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    # Everything is live on the new generation — the publish itself stood.
+    assert _published_version(store, "nb-1") == ["nb-1", 7]
+    assert json.loads(
+        (Path(store.viz_dir("nb-1")) / "manifest.json").read_text()
+    ) == {"generation": "new"}
+    companion = Path(store.source_partition_dir("nb-1"))
+    assert not Path(f"{companion}.old").exists(), (
+        "the finalize that ran under a held claim did its job"
+    )
+    for name in ("kg_viz", cli.MAIN_ROOT):
+        root = cli.artifact_roots(store, "nb-1")[name]
+        assert Path(f"{root}.old").exists(), (
+            "a .old must be LEFT, not deleted, once the claim is gone"
+        )
 
 
 # ───────────────────────────────────────────────── which library is this ──

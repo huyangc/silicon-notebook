@@ -7,6 +7,7 @@ import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -408,6 +409,137 @@ def test_auto_index_once_set_short_circuits_before_scale_fact_aggregates(
         lambda *_: (_ for _ in ()).throw(AssertionError("copy aggregates queried")),
     )
     scale.maybe_auto_index(notebook.id)
+
+
+class _VizClaim:
+    """A granted cross-process claim for the viz-rebuild tests."""
+
+    supported = True
+
+    def __init__(self, *, held: bool = True) -> None:
+        self.claim_token = "viz-token"
+        self._held = held
+        self.released = False
+
+    def verify_held(self) -> bool:
+        return self._held
+
+    def release(self) -> None:
+        self.released = True
+
+
+def test_a_background_viz_rebuild_gives_way_when_the_claim_is_held(
+    repo, monkeypatch
+):
+    """P2, codex PR#643 R12: the standalone viz rebuild used to write the live
+    ``kg_viz`` root with only a process-local marker for company — so the
+    offline CLI's ``export`` could copy a half-written root, and its
+    ``import`` could rename or retire that root out from under the writer. The
+    rebuild now takes the SAME per-notebook cross-process claim; when somebody
+    else holds it (a CLI import, another replica) this run gives way entirely.
+
+    Giving way must leave no residue: ``viz_building`` is the marker that
+    suppresses duplicate spawns, and a rebuild that never ran must clear it or
+    no later trigger can ever start one.
+
+    Mutation anchor: call ``self.builder.build_viz`` without taking the claim
+    and this goes red — the builder runs while the CLI owns the notebook.
+    """
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    # "Provably held by somebody else" — the CLI's import is mid-publish.
+    monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
+    # Recorded, not raised: the background worker is fail-open by design and
+    # would swallow an AssertionError, hiding exactly the regression this
+    # pins.
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        scale.builder, "build_viz", lambda nb: attempts.append(nb)
+    )
+
+    scale._spawn_viz_build(notebook.id)
+
+    assert attempts == [], (
+        "the viz rebuild ran while another process held the notebook's claim"
+    )
+    assert notebook.id not in scale.viz_building
+    assert notebook.id not in scale._scale_build_lock_handles
+
+
+def test_the_synchronous_viz_path_does_not_block_on_a_held_claim(
+    repo, monkeypatch
+):
+    """The small-notebook branch of ``viz_index`` builds synchronously on the
+    request thread. A held claim there must SKIP the build and answer with
+    whatever is already available — never wait for the other builder, and
+    never raise into an interactive graph-view read."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
+    monkeypatch.setattr(
+        scale.builder,
+        "build_viz",
+        lambda *_: (_ for _ in ()).throw(AssertionError("sync build attempted")),
+    )
+    monkeypatch.setattr(scale.settings, "viz_sync_build_max_objects", 10**6)
+
+    assert scale.viz_index(notebook.id) is None
+
+
+def test_an_unsupported_lock_backend_keeps_the_in_process_viz_behaviour(
+    repo, monkeypatch
+):
+    """SQLite has no cross-process claim at all and the offline CLI refuses
+    that deployment outright, so ``UNSUPPORTED`` is not a failure (the
+    three-state contract) — the viz rebuild runs exactly as it always has, and
+    nothing is registered as a claim."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    built: list[str] = []
+    monkeypatch.setattr(
+        scale.builder, "build_viz", lambda nb: built.append(nb) or {"n": 1}
+    )
+
+    assert scale.build_viz(notebook.id) == {"n": 1}
+    assert built == [notebook.id]
+    assert notebook.id not in scale._scale_build_lock_handles
+
+
+def test_a_viz_rebuild_registers_its_claim_for_the_swap_to_reverify(
+    repo, monkeypatch
+):
+    """The claim is held across build AND publish, and it is REGISTERED while
+    held: that is what makes the builder's existing
+    ``scale_build_claim_token``/``verify_scale_build_lock`` hooks resolve to
+    it, carrying the token into the staging path and the re-verification into
+    the swap. A claim lost mid-build is refused by that swap and comes back as
+    "nothing built" rather than escaping into a graph-view read."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    lost = _VizClaim(held=False)
+    monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: lost)
+    observed: dict[str, object] = {}
+
+    def observe(notebook_id):
+        observed["token"] = scale.scale_build_claim_token(notebook_id)
+        observed["held"] = scale.verify_scale_build_lock(notebook_id)
+        return scale.builder.__class__.build_viz(scale.builder, notebook_id)
+
+    monkeypatch.setattr(scale.builder, "build_viz", observe)
+
+    assert scale.build_viz(notebook.id) is None, (
+        "a claim lost before the swap must read as 'nothing built', not raise"
+    )
+    assert observed == {"token": "viz-token", "held": False}
+    assert lost.released is True
+    assert notebook.id not in scale._scale_build_lock_handles
+    live = repo._runtime.scale_artifact_store.viz_dir(notebook.id)
+    assert not live.exists(), "the refused swap must not publish anything"
+    assert Path(f"{live}.tmp-viz-token").is_dir(), (
+        "the build DID run and staged under this claim's own token — without "
+        "this the assertion above would pass vacuously on an empty graph"
+    )
 
 
 def test_daemon_and_viz_failures_clear_build_markers(repo, monkeypatch):
