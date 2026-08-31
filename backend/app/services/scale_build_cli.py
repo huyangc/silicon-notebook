@@ -1670,6 +1670,8 @@ def run_export(
                 return
             for copied in (*exported, *((current,) if current else ())):
                 shutil.rmtree(destination / copied, ignore_errors=True)
+            # A partial transfer manifest counts too (P2, codex PR#643 R31).
+            (destination / TRANSFER_MANIFEST_FILENAME).unlink(missing_ok=True)
 
         current_root: Optional[str] = None
         try:
@@ -1715,6 +1717,11 @@ def run_export(
             # path, everything else its own report).
             _discard_partial_package(current_root)
             raise
+    # OUTSIDE the claim (P2, codex PR#643 R31): once every root is copied and
+    # per-copy re-verified, the package bytes are independent of the live
+    # tree, so the multi-GB hashing pass must not keep blocking online
+    # builds, folds, imports and other exports for its whole duration.
+    try:
         # codex PR#643 R24 P1: a full-payload transfer manifest, written only
         # once every root has been copied AND the per-copy claim
         # re-verification above (R20) has passed for every one of them — see
@@ -1722,12 +1729,20 @@ def run_export(
         # no further claim re-verification follows this write.
         write_transfer_manifest(destination, exported, report)
         # Read the manifest that was just copied into `destination`, not the
-        # live one: the claim releases when this block exits, and another
-        # builder can publish a new generation the instant it does. Reading
-        # `roots[MAIN_ROOT]` after release would describe whatever version
-        # happens to be live at read time, not the package actually written
-        # to disk (codex PR#643 R2 P2).
+        # live one: the claim released above, and another builder can publish
+        # a new generation the instant it did. Reading `roots[MAIN_ROOT]`
+        # after release would describe whatever version happens to be live at
+        # read time, not the package actually written to disk (codex PR#643
+        # R2 P2).
         manifest = _read_manifest(destination / MAIN_ROOT) or {}
+    except BaseException:
+        # P2, codex PR#643 R31: a hashing/write failure here (I/O error,
+        # disk exhaustion, Ctrl-C) used to leave every copied root — and
+        # possibly a partial manifest — in the destination, so the
+        # documented re-run refused on "destination is not empty". Same
+        # cleanup as the copy loop.
+        _discard_partial_package(None)
+        raise
     return {
         "notebook_id": notebook_id,
         "to": str(destination),
