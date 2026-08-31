@@ -823,6 +823,16 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 不会变成「伴生描述了另一代」。拷贝（慢、易失败的那一半）全部发生在按 claim 唯一的
 `.tmp-<token>` 暂存目录里（见下文）；活目录在最后那几次 rename 之前一个字节都不动。
 
+包若**省略**了某个可选根（`kg_viz` 或伴生——主索引不算，缺主索引本来就硬拒），并不是
+简单放着不管：如果盘上还留着上一代的活目录，这一根在这次发布里就**发布成空**——
+按同一个伴生 → viz → 主索引的位置，把它 rename 成 `.old`，等这一代站住脚之后清掉，
+和一次没有替换树的正常 swap 一模一样。没有这一步的话，包无伴生的同版本重发会让**旧**
+伴生的 `parent_version` 照样对得上（版本号没变），stat 签名也不变，reader 就会一直
+把它跟新主索引配对，尽管这次 import 根本没为它背书——这正是上面发布顺序要挡住的
+「伴生描述了另一代」，只是这次是从「省略」这一侧撞进来，不是从「中途失败」。如果
+一个可选根在包里**和**活树上都不存在，不受影响：那仍然是普通的「没有伴生」形态，
+照旧跳过。
+
 import 的 claim 挡不住 indexing pipeline 切换发布新身份——插件启用是完全另一套机制，
 所以这份包校验时对齐的身份要再读两次：一次在 rename 开始前（挡住落在拷贝暂存阶段的
 切换），一次在主索引换上去**之后**（挡住落在 rename 本身期间的切换——第一次复读看不
@@ -878,7 +888,7 @@ claim 生生灭灭都在普通门面路径内部，见下面残留一节）：
 | 已发布 indexing pipeline | `manifest.pipeline_identity` 与该 notebook 当前发布的身份一致 | `import` 硬拒（不符会让检索侧整体丢弃 scale 核并**静默**退化） |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | 生效维必须相同 | `import` 硬拒（不符会让 `open_ann` fail-open → **静默零召回**）；manifest 没有 `dim` 同样拒绝 |
 | hnswlib | **严格相等** | `import` 默认硬拒；`--allow-library-mismatch` 可覆盖。`ann.bin` 没有格式版本头，失配可能被 fail-open 吞成静默零召回；任一侧版本未知也按失配处理 |
-| `--from` 包路径 | 不得等于或位于该笔记本自己任一工件根（`kg_index`、`kg_viz`、source-partition 伴生）之内，也不得在它们的 `.old` 之内 | `import` 硬拒，退出码 `1`，任何拷贝之前就报错——否则发布会把该根挪成 `.old` 再删掉，静默删掉操作员自己的输入包 |
+| `--from` 包路径 | 不得等于或位于该笔记本自己任一工件根（`kg_index`、`kg_viz`、source-partition 伴生）之内，不得在它们的 `.old` 之内，也不得在 `prepare_staging_directory` 会为其中任何一根清理的 `.tmp`/`.tmp-<token>` 暂存目录之内 | `import` 硬拒，退出码 `1`，任何拷贝之前就报错——否则发布会把该根挪成 `.old` 再删掉（若是 `.tmp*` 暂存目录，则在拷贝开始之前就被 `rmtree`），静默删掉操作员自己的输入包 |
 | numpy / scipy | 建议相同 | 只告警：npy/npz 带格式版本，失配会响亮失败 |
 | 生产 `.env` | 构建机必须用生产 `.env`（storage 根可以不同） | 无自动检查——这是运维纪律 |
 
@@ -903,6 +913,11 @@ claim 生生灭灭都在普通门面路径内部，见下面残留一节）：
 - **没有空余锁会话**（本进程的预算耗尽）：服务侧把请求**存放**起来等下一个槽位并报
   `queued`（也就是稍后真的会跑）；CLI 退出码 `1` 并在消息里点名预算，`inspect` 报
   `build_claim: unknown`，而不是凭空说有人在建。
+
+第三种情况和预算耗尽同款上报，理由一样——**锁后端本身探测失败**（专用连接开不出来，
+或 `pg_try_advisory_lock` 报错）：这同样不是在说这个 notebook，所以取 claim 的命令
+（`build`/`export`/`import`）都会干净拒绝，消息点名锁后端不可用、什么都没改；
+`inspect` 同样报 `build_claim: unknown`，而不是让裸数据库异常逃逸成一段 traceback。
 
 #### PgBouncer 前提
 
@@ -986,8 +1001,9 @@ Ctrl-C 会在回滚跑完后重新抛出，所以**这一支会退出 `130`**（
 的 Ctrl-C 一节。
 
 另外 `inspect` 的 `build_claim` 有三个取值：`free`、`held_elsewhere`、`unknown`。
-最后一个表示本进程没有空余的专用锁会话去探测，因此它是关于**这次 CLI 运行**的陈述，
-不是关于该 notebook 的（见上面的连接预算）。
+最后一个合并了两种成因——都不是关于该 notebook 的陈述，所以归成同一个值：本进程没有
+空余的专用锁会话去探测，或者探测本身失败了（锁后端不可用）；两种都是关于**这次
+CLI 运行**的陈述（见上面的连接预算）。
 
 #### allow_pickle 来源约束（安全）
 

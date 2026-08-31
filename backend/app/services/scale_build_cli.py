@@ -67,6 +67,12 @@ DEFAULT_STATEMENT_TIMEOUT_SECONDS = 86_400
 # companion's ``parent_version`` gate refuses a companion that does not match
 # the live main index, so a mismatched pair degrades to "no companion", never
 # to "companion describing a different generation".
+#
+# codex PR#643 R11 P2-a: an OPTIONAL root (everything but ``kg_index``) that
+# the package OMITS is not always left alone any more — if a live directory
+# from an earlier generation is still there, ``run_import`` retires it in
+# this same order (``ScaleArtifactStore.retire_live_directory``), so a stale
+# companion/viz can never outlive the main root it no longer pairs with.
 PUBLISH_ORDER = ("kg_index_partitions", "kg_viz", "kg_index")
 
 MAIN_ROOT = "kg_index"
@@ -330,9 +336,30 @@ def claim_notebook(repository, notebook_id: str) -> Iterator[object]:
     ``build`` does NOT use this — the runtime's own ``build``/``fold`` take the
     claim and hand it to the swap's re-verification, and a second claim from
     this process's own separate lock session would simply refuse itself.
+
+    codex PR#643 R11 P2-b: ``try_scale_build_lock`` can also RAISE — opening
+    the dedicated lock session or running ``pg_try_advisory_lock`` on it can
+    fail (a connection error, an exhausted server-side connection limit). The
+    online runtime (``scale_artifact_runtime``'s ``_acquire_scale_build_lock``)
+    already catches that and reports ``SCALE_BUILD_LOCK_UNAVAILABLE``, the
+    same three-state contract the branch below already handles — but this CLI
+    calls the database method directly, bypassing that wrapper entirely, so a
+    lock-backend failure used to escape as a bare ``PostgresDatabaseError``
+    traceback instead of the documented clean refusal. Translated here, at the
+    one call site that owns it, rather than in the lock primitive itself
+    (which stays free to raise — the online wrapper depends on that).
     """
+    from app.repositories.postgres.database import PostgresDatabaseError
+
     database = repository._runtime.database  # noqa: SLF001 — CLI composition root
-    handle = database.try_scale_build_lock(notebook_id)
+    try:
+        handle = database.try_scale_build_lock(notebook_id)
+    except PostgresDatabaseError as error:
+        raise ScaleBuildCliFailure(
+            f"the scale-build lock backend is unavailable for {notebook_id}: "
+            f"{error}. Nothing was changed; retry once the lock backend "
+            "recovers."
+        ) from None
     if handle is SCALE_BUILD_LOCK_UNAVAILABLE:
         raise ScaleBuildCliFailure(
             f"the scale-build claim for {notebook_id} could not be evaluated: "
@@ -829,6 +856,42 @@ def leftover_staging_directories(roots: dict[str, Path]) -> dict[str, dict]:
     return leftovers
 
 
+def staging_tmp_family(root: Path, claim_token: Optional[str] = None) -> list[Path]:
+    """Every ``{root}.tmp``/``{root}.tmp-<token>`` staging directory that
+    ``prepare_staging_directory`` would clear before copying THIS root (codex
+    PR#643 R11 P1).
+
+    ``prepare_staging_directory`` unconditionally ``rmtree``s two shapes for a
+    root it is about to stage: the legacy no-suffix ``{root}.tmp`` (always
+    attempted, ``ignore_errors=True``), and ``{root}.tmp-<this run's own claim
+    token>`` (a retry of the same attempt reusing the same token). A package
+    the operator staged under either — say, by copying an export into a
+    leftover ``.tmp`` directory before running ``import`` — would be deleted
+    out from under itself the instant staging for that root begins, before any
+    copy that reads it has even started. The legacy name and this run's own
+    token directory are included even when nothing exists there yet on disk:
+    the containment check that calls this runs BEFORE staging, so the
+    directory this run's own claim is about to create has to be named, not
+    discovered. Every OTHER ``.tmp-<token>`` actually present on disk (another
+    process's claim, live or a zombie's) is also included — ``inspect``'s
+    ``leftover_staging_directories`` never deletes another claim's token
+    automatically, but a package nested there is exactly as unsafe if that
+    zombie's own next staging attempt reuses its token and self-heals over it,
+    or if an operator later runs ``rm -rf`` on what ``inspect`` reported as a
+    leftover.
+    """
+    candidates = [Path(f"{root}.tmp")]
+    if claim_token:
+        candidates.append(Path(f"{root}.tmp-{claim_token}"))
+    parent = root.parent
+    if parent.is_dir():
+        prefix = root.name + ".tmp-"
+        for entry in parent.iterdir():
+            if entry.is_dir() and entry.name.startswith(prefix):
+                candidates.append(entry)
+    return candidates
+
+
 def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> dict:
     """Read-only: what is on disk, what the database thinks, who holds the claim.
 
@@ -837,6 +900,8 @@ def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> 
     notebook. That is the point: "is this artifact stale, and by how much" is
     the question an operator is actually asking before deciding build vs fold.
     """
+    from app.repositories.postgres.database import PostgresDatabaseError
+
     runtime = repository._runtime  # noqa: SLF001 — CLI composition root
     store = runtime.scale_artifact_store
     roots = artifact_roots(store, notebook_id)
@@ -851,7 +916,15 @@ def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> 
     # this right now" without a lock table of our own. Holding it any longer
     # would make an inspection block a real build.
     database = runtime.database
-    probe = database.try_scale_build_lock(notebook_id)
+    # codex PR#643 R11 P2-b: a lock-backend failure (the dedicated connection
+    # or the advisory-lock statement itself) is not a statement about the
+    # notebook any more than an exhausted session budget is — both fold into
+    # the SAME "unknown" claim state below rather than crashing the read-only
+    # inspect an operator is running to diagnose exactly this kind of trouble.
+    try:
+        probe = database.try_scale_build_lock(notebook_id)
+    except PostgresDatabaseError:
+        probe = SCALE_BUILD_LOCK_UNAVAILABLE
     if probe is SCALE_BUILD_LOCK_UNAVAILABLE:
         # Says nothing about the notebook — only that this process could not ask
         # (no lock session left). Reporting it as "held_elsewhere" would send an
@@ -1117,6 +1190,19 @@ def run_import(
     to exist (``validate_import_package`` above already confirmed
     ``package/kg_index`` is a directory) and before the staging loop makes
     its first copy.
+
+    codex PR#643 R11 P1: that R10 guard checked only ``{root}``/``{root}.old``
+    — it missed a THIRD shape that is just as destructive: ``{root}.tmp`` and
+    ``{root}.tmp-<token>``. ``prepare_staging_directory`` unconditionally
+    clears both before copying that root's tree in (see
+    ``staging_tmp_family``), so a package staged under either is ``rmtree``'d
+    out from under itself before the very copy that reads it even starts —
+    the R10 guard's danger, reached by a different path and one step earlier.
+    Checked in the same loop, against ``staging_tmp_family(root,
+    handle.claim_token)`` for every root: the legacy name and every
+    ``.tmp-<token>`` actually on disk are covered by construction, and this
+    run's OWN future staging directory (named from the claim just taken,
+    ``handle.claim_token``) is covered even though nothing exists there yet.
     """
     runtime = repository._runtime  # noqa: SLF001
     store = runtime.scale_artifact_store
@@ -1169,15 +1255,49 @@ def run_import(
                         "Move the package outside every artifact root (and "
                         "its .old) before importing."
                     )
+            # codex PR#643 R11 P1: the same danger, one step earlier — a
+            # package staged under ``{root}.tmp``/``{root}.tmp-<token>`` is
+            # rmtree'd by ``prepare_staging_directory`` before this root's
+            # copy even begins (see ``staging_tmp_family`` and the docstring
+            # above), never reaching the rename-based check above at all.
+            for tmp_variant in staging_tmp_family(root, handle.claim_token):
+                tmp_resolved = tmp_variant.resolve()
+                if (
+                    package_resolved == tmp_resolved
+                    or package_resolved.is_relative_to(tmp_resolved)
+                ):
+                    raise ScaleBuildCliFailure(
+                        f"--from {package} is inside {tmp_variant}, a "
+                        f"staging directory this import's own preparation "
+                        f"for the {name} artifact root clears before "
+                        "copying begins; publishing would delete the input "
+                        "package it contains before that root's copy even "
+                        "starts. Move the package outside every artifact "
+                        "root (and its .old and any .tmp/.tmp-<token> "
+                        "staging siblings) before importing."
+                    )
 
         staged: dict[str, Path] = {}
+        # codex PR#643 R11 P2-a: names PUBLISH_ORDER visits that the package
+        # OMITS but that still have a live directory on disk from an earlier
+        # generation — populated during the staging loop below, acted on in
+        # the same guarded publish loop, in the same PUBLISH_ORDER position
+        # the root would have staged/swapped in had the package included it.
+        # Never includes MAIN_ROOT: a package missing it is already refused
+        # by ``validate_import_package`` above, long before this loop runs.
+        retiring: set[str] = set()
         published: list[str] = []
+        # Which of ``published`` were RETIRED (package omitted the root, a
+        # stale live generation was set aside) rather than actually replaced
+        # with new content — surfaced on the receipt so it reads honestly.
+        retired: list[str] = []
         # Rollback info for every root actually swapped below — the staging
-        # path it was published from (its name once rolled back) and whether
-        # a previous generation was set aside as ``.old`` (codex PR#643 R8
-        # P1). Populated alongside ``published``; consumed by the post-swap
-        # identity re-check further down.
-        swap_state: dict[str, tuple[Path, bool]] = {}
+        # path it was published from (its name once rolled back, or ``None``
+        # for a retired root — see ``ScaleArtifactStore.rollback_swap``) and
+        # whether a previous generation was set aside as ``.old`` (codex
+        # PR#643 R8 P1). Populated alongside ``published``; consumed by the
+        # post-swap identity re-check further down.
+        swap_state: dict[str, tuple[Optional[Path], bool]] = {}
         # One guard around ALL the renames, not one per root: an interrupt
         # between two roots would leave the pair mismatched (fail-soft, but
         # avoidable), and the whole sequence is milliseconds. ``reraise`` is off
@@ -1187,6 +1307,20 @@ def run_import(
             for name in PUBLISH_ORDER:
                 source = package / name
                 if not source.is_dir():
+                    # codex PR#643 R11 P2-a: an OPTIONAL root (never the main
+                    # index — that absence is already a hard error above) the
+                    # package omits but that is still live on disk is a stale
+                    # generation waiting to be misread by a future rebuild's
+                    # reader: its parent_version/stat signature never changes
+                    # once this import replaces the main root, so it can pair
+                    # with a generation it does not actually describe (see
+                    # ``retire_live_directory``'s docstring). Mark it for
+                    # retirement in the publish loop below rather than acting
+                    # on it here — retirement is a disk mutation and belongs
+                    # inside the same guarded, claim-verified sequence as
+                    # every other publish action.
+                    if name != MAIN_ROOT and roots[name].exists():
+                        retiring.add(name)
                     continue
                 target = store.prepare_staging_directory(
                     roots[name], handle.claim_token
@@ -1210,25 +1344,49 @@ def run_import(
 
             with guard:
                 for name in PUBLISH_ORDER:
-                    if name not in staged:
-                        continue
-                    temporary = staged[name]
-                    # codex PR#643 R8 P1: ``keep_old=True`` — the ``.old``
-                    # this leaves behind is what the post-swap identity
-                    # re-check below needs in order to roll this root back if
-                    # a pipeline switch raced past the pre-rename check
-                    # above. ``preserved`` records which shape (replacing an
-                    # existing generation vs. a first-ever publish) so the
-                    # rollback/finalize calls know whether one exists.
-                    preserved = store.swap_staging_directory(
-                        roots[name],
-                        temporary,
-                        verify_held=handle.verify_held,
-                        keep_old=True,
-                    )
-                    swap_state[name] = (temporary, preserved)
-                    published.append(name)
-                    staged.pop(name)
+                    if name in staged:
+                        temporary = staged[name]
+                        # codex PR#643 R8 P1: ``keep_old=True`` — the ``.old``
+                        # this leaves behind is what the post-swap identity
+                        # re-check below needs in order to roll this root
+                        # back if a pipeline switch raced past the
+                        # pre-rename check above. ``preserved`` records which
+                        # shape (replacing an existing generation vs. a
+                        # first-ever publish) so the rollback/finalize calls
+                        # know whether one exists.
+                        preserved = store.swap_staging_directory(
+                            roots[name],
+                            temporary,
+                            verify_held=handle.verify_held,
+                            keep_old=True,
+                        )
+                        swap_state[name] = (temporary, preserved)
+                        published.append(name)
+                        staged.pop(name)
+                    elif name in retiring:
+                        # codex PR#643 R11 P2-a: publish "no such root" —
+                        # ``retire_live_directory`` is the degenerate swap
+                        # with no ``temporary``. No ``verify_held`` here (the
+                        # primitive takes none): the main root's own swap,
+                        # always later in PUBLISH_ORDER, still re-verifies
+                        # the claim before it renames, and a companion/viz
+                        # retired just ahead of a lock loss there is exactly
+                        # as fail-soft as any other partial publish (see the
+                        # ``ScaleBuildLockLost`` handler below) — "no
+                        # companion" is even safer than a mismatched one.
+                        preserved = store.retire_live_directory(roots[name])
+                        retiring.discard(name)
+                        if preserved:
+                            swap_state[name] = (None, preserved)
+                            published.append(name)
+                            retired.append(name)
+                            report(
+                                f"retired {name}: the package has no "
+                                f"replacement for it, so the previous "
+                                f"{roots[name]} generation was set aside "
+                                "rather than left live to pair with the "
+                                "new main index"
+                            )
         except _ImportPipelineIdentityDrifted as error:
             # Same contract as the ScaleBuildLockLost branch below: nothing
             # was renamed, so the staged copies are left on disk rather than
@@ -1386,6 +1544,12 @@ def run_import(
         "notebook_id": notebook_id,
         "from": str(package),
         "roots": published,
+        # codex PR#643 R11 P2-a: which of ``roots`` were RETIRED — the
+        # package omitted them and a stale live generation was set aside —
+        # rather than actually replaced with content from this package. A
+        # root can appear in both lists; this one says which publishes were
+        # empty.
+        "retired": retired,
         "version": manifest.get("version"),
         "warnings": warnings,
     }

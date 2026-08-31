@@ -667,9 +667,58 @@ class ScaleArtifactStore:
         codex PR#643 R8). Never wrapped in ``SwapInterruptGuard``: the new
         generation is already live, so Ctrl-C here is safe to honour
         immediately — a leftover ``.old`` is exactly the shape ``inspect`` and
-        the manual-recovery docs already cover."""
+        the manual-recovery docs already cover.
+
+        Unchanged for ``retire_live_directory`` (codex PR#643 R11 P2-a): a
+        retired root's ``.old`` is deleted the exact same way — this method
+        never reads a ``temporary`` at all, so the "no replacement tree"
+        shape needs nothing new here."""
         if preserved:
             shutil.rmtree(f"{live}.old", ignore_errors=True)
+
+    @staticmethod
+    def retire_live_directory(live) -> bool:
+        """Publish "no such root" — the degenerate form of a swap that has no
+        ``temporary`` to publish in its place (codex PR#643 R11 P2-a).
+
+        A valid import package is allowed to OMIT an optional root
+        (``kg_index_partitions``/``kg_viz`` — the switch that produces them can
+        be off). Before this existed, an omitted root simply left whatever was
+        already live untouched: on a same-version republish the old
+        companion's ``parent_version`` still matches, its stat signature never
+        changes, and a reader pairs it with the NEW main index — the exact
+        "companion describing a different generation" the publish ORDER
+        (companion → viz → main) exists to prevent, reached here from a
+        different direction (docs/operations.md's generation-pairing
+        contract). Retiring the stale root closes that: it degrades to "no
+        companion", the same safe shape a first-ever import with no companion
+        in the package already produces.
+
+        ``live`` present → a single rename, ``live`` → ``.old`` — the first
+        half of ``swap_staging_directory``'s two-rename sequence, with no
+        second rename because there is no replacement tree — wrapped in its
+        own ``SwapInterruptGuard`` the same way every other rename here is.
+        Returns ``True`` (``preserved``, the exact vocabulary ``swap_state``
+        already uses in ``run_import``), so a retired root needs no new shape
+        in the caller's bookkeeping: ``rollback_swap`` below reverses it with
+        ``temporary=None``, and ``finalize_swap`` deletes the ``.old`` it left
+        exactly as it does for a real swap.
+
+        ``live`` absent → nothing to retire; returns ``False`` and touches
+        nothing. The caller's contract for that case is unchanged: an
+        optional root absent from both the package and the live tree stays
+        skipped, same as always.
+        """
+        out_dir = str(live)
+        if not os.path.exists(out_dir):
+            return False
+        old_dir = out_dir + ".old"
+        guard = SwapInterruptGuard(reraise=False)
+        with guard:
+            os.rename(out_dir, old_dir)
+        if guard.interrupted:
+            raise KeyboardInterrupt
+        return True
 
     @staticmethod
     def rollback_swap(live, temporary, preserved: bool) -> None:
@@ -685,12 +734,26 @@ class ScaleArtifactStore:
         publish ever ran. Wrapped in its own ``SwapInterruptGuard`` — this is
         just as destructive as the swap it undoes, and nests transparently
         under a caller's own outer guard the same way ``swap_staging_directory``
-        does."""
+        does.
+
+        ``temporary=None`` (codex PR#643 R11 P2-a) reverses
+        ``retire_live_directory`` instead of a real swap: a retire published
+        "no such root" by renaming ``live`` straight to ``.old`` with nothing
+        to replace it, so ``live`` is already absent and there is no
+        just-published tree to move back to a staging name — the first rename
+        is simply skipped. Only the second rename runs: ``.old`` → ``live``,
+        restoring the retired generation exactly as it stood before. Every
+        caller that retires a root also only records it in ``swap_state``
+        when ``retire_live_directory`` returned ``True``, so ``preserved`` is
+        always ``True`` on this path — the branch below still guards on it
+        rather than assuming that, for the same reason every other caller of
+        this method passes its own ``preserved`` rather than a literal."""
         out_dir = str(live)
         old_dir = out_dir + ".old"
         guard = SwapInterruptGuard(reraise=False)
         with guard:
-            os.rename(out_dir, str(temporary))
+            if temporary is not None:
+                os.rename(out_dir, str(temporary))
             if preserved:
                 os.rename(old_dir, out_dir)
         if guard.interrupted:
