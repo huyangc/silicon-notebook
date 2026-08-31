@@ -52,6 +52,7 @@ from app.services.kg.scale_index import (
     MANIFEST_LIBRARY_KEY,
     runtime_library_versions,
 )
+from app.services.kg import viz_index as viz_index_module
 
 
 # A build on a 9M-object library runs for hours; the online default (30s, sized
@@ -774,6 +775,29 @@ def validate_import_package(
                 "the source-partition companion in this package belongs to a "
                 f"different generation (parent_version={parent!r}, main index "
                 f"version={manifest.get('version')!r})"
+            )
+
+    viz = package / "kg_viz"
+    if viz.is_dir():
+        # codex PR#643 R15 P2: a PRESENT kg_viz directory that is empty or
+        # missing any of its three files (manifest.json / viz.npz /
+        # viz_adj.npz), or whose arrays fail ``load_viz_index``'s own
+        # consistency checks, would otherwise sail through — ``run_import``
+        # then atomically replaces a healthy live viz root with a tree the
+        # serving side reads as ``None`` and reports success. The probe IS
+        # the serving-side loader, so "valid" here means exactly "the
+        # imported tree will be readable", not a parallel re-implementation
+        # of its rules. (A kg_viz entry that is not a directory at all —
+        # regular file, dangling symlink — is refused later by
+        # ``run_import``'s shape guard; ``is_dir()`` is False for those.)
+        if viz_index_module.load_viz_index(str(viz)) is None:
+            raise ScaleBuildCliError(
+                f"{viz} exists but is not a readable viz artifact "
+                "(manifest.json, viz.npz and viz_adj.npz must all be present "
+                "and consistent); importing it would replace a healthy live "
+                "viz root with one the serving side rejects. Rebuild the "
+                "package with a current checkout or remove the kg_viz root "
+                "before importing."
             )
     return manifest, warnings
 

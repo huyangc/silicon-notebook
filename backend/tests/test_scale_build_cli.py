@@ -197,6 +197,28 @@ def test_a_matching_package_validates_with_no_warnings(tmp_path):
     assert warnings == []
 
 
+def test_a_present_but_unreadable_viz_root_is_refused(tmp_path):
+    """codex PR#643 R15 P2: a present ``kg_viz`` that the serving-side
+    ``load_viz_index`` reads as ``None`` (here: manifest.json but no npz
+    files) must refuse the package — importing it would atomically replace a
+    healthy live viz root with an unreadable tree and still report success.
+
+    Mutation anchor: drop the ``load_viz_index`` probe in
+    ``validate_import_package`` and both these shapes validate cleanly.
+    """
+    package = _package(tmp_path)
+    _write_manifest(package / "kg_viz", {"generation": "new"})
+    with pytest.raises(cli.ScaleBuildCliError, match="kg_viz"):
+        _validate(package)
+
+
+def test_an_empty_viz_directory_is_refused(tmp_path):
+    package = _package(tmp_path)
+    (package / "kg_viz").mkdir()
+    with pytest.raises(cli.ScaleBuildCliError, match="kg_viz"):
+        _validate(package)
+
+
 def test_a_foreign_pipeline_identity_is_refused(tmp_path):
     """Mutation anchor: the retrieval side discards a scale core built by a
     different pipeline WITHOUT any error, so this must refuse, not warn."""
@@ -401,11 +423,32 @@ def _seed_live(store, notebook_id: str) -> None:
     )
 
 
+def _write_viz_root(out_dir: Path, manifest: dict) -> None:
+    """A REAL minimal viz root (codex PR#643 R15 P2): ``validate_import_package``
+    probes a present ``kg_viz`` with the serving-side ``load_viz_index``, so a
+    manifest-only fake no longer passes as a package root."""
+    import numpy as _np  # noqa: F401 - save_viz_index needs the array stack
+    import scipy.sparse as _sp
+
+    from app.services.kg import viz_index as _viz_index
+
+    _viz_index.save_viz_index(
+        str(out_dir),
+        viz_ids=["a"],
+        viz_adj=_sp.csr_matrix((1, 1)),
+        viz_deg=[0],
+        viz_types=["concept"],
+        viz_names=["a"],
+        viz_payload={},
+        manifest=manifest,
+    )
+
+
 def _full_package(tmp_path) -> Path:
     package = _package(
         tmp_path, companion={"parent_version": ["nb-1", 7], "published_sources": 2}
     )
-    _write_manifest(package / "kg_viz", {"generation": "new"})
+    _write_viz_root(package / "kg_viz", {"generation": "new"})
     return package
 
 
@@ -1174,7 +1217,7 @@ def test_import_retires_a_stale_companion_when_the_package_omits_it(
     _seed_live(store, "nb-1")  # companion parent_version=["nb-1", 1]
     package = _package(tmp_path, version=["nb-1", 1])  # same version, no companion
     assert not (package / cli.COMPANION_ROOT).exists()
-    _write_manifest(package / "kg_viz", {"generation": "kept"})
+    _write_viz_root(package / "kg_viz", {"generation": "kept"})
 
     receipt = cli.run_import(
         repository,
@@ -1339,7 +1382,7 @@ def test_import_rolls_back_a_retired_companion_when_identity_drifts_during_the_s
     """
     _seed_live(store, "nb-1")
     package = _package(tmp_path, version=["nb-1", 1])  # no companion
-    _write_manifest(package / "kg_viz", {"generation": "kept"})
+    _write_viz_root(package / "kg_viz", {"generation": "kept"})
     calls = {"n": 0}
     projections = _Projections(PIPELINE)
     base = projections.pipeline_identity
