@@ -122,12 +122,19 @@ _FLAGGED_FILES = {
     ),
     "has_relation_ann": ("relation_ann.bin", "relation_ann_labels.npy"),
 }
-# manifest count key → the .npy whose row count must equal it.
+# manifest count key → the .npy file(s) whose row count must equal it.
+# codex PR#643 R32 P2-a: ``idf.npy`` is one entry per node exactly like
+# ``node_ids.npy`` (``load_scale_index`` compares both against the same
+# ``n_nodes``), and ``chunk_index.npy`` is one entry per chunk node — the
+# builder writes ``manifest["n_chunks"] = len(chunk_ids)`` alongside it
+# (``scale_index_builder.py``). Both used to carry no entry here at all, so a
+# truncated/malformed header on either sailed straight through this function.
 _COUNTED_ARRAYS = {
-    "n_nodes": "node_ids.npy",
-    "n_ann": "ann_labels.npy",
-    "n_chunk_ann": "chunk_ann_labels.npy",
-    "n_relation_ann": "relation_ann_labels.npy",
+    "n_nodes": ("node_ids.npy", "idf.npy"),
+    "n_chunks": ("chunk_index.npy",),
+    "n_ann": ("ann_labels.npy",),
+    "n_chunk_ann": ("chunk_ann_labels.npy",),
+    "n_relation_ann": ("relation_ann_labels.npy",),
 }
 
 # codex PR#643 R24 P1: the full-payload transfer manifest. Written by
@@ -613,12 +620,16 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
     Two DIFFERENT "no answer" shapes reach this function, and they get opposite
     verdicts (P2, codex PR#643 R18):
 
-    * the manifest carries no expected value for an array, or the file the key
-      would be compared against is not part of this package — nothing to check,
-      the package passes. This is the ``older-index-stays-valid`` contract every
-      optional artifact relies on (``has_chunk_ann`` and friends), and it is
-      expressed HERE, at the call site, by the ``isinstance``/``exists`` guards
-      below — never by the probes;
+    * the manifest carries no expected COUNT for an array, or the file a count
+      key would be compared against is not part of this package — nothing to
+      COMPARE, the package passes on that count. This is the
+      ``older-index-stays-valid`` contract every optional artifact relies on
+      (``has_chunk_ann`` and friends), and it is expressed HERE, at the call
+      site, by the ``isinstance``/``row_counts`` guards below — never by the
+      probes. It applies ONLY to the count comparison, never to readability
+      (codex PR#643 R32 P2-a): every required ``.npy`` gets its header probed
+      unconditionally, whether or not any manifest key names it, because
+      ``load_scale_index`` reads every one of them unconditionally too;
     * the file IS present and its header/shape cannot be read back. That is a
       truncated or malformed artifact, and it is an inventory ERROR. Skipping it
       as "unchecked" is what let such a package pass ``import``, atomically
@@ -639,23 +650,45 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
     if missing:
         return f"the package is missing {', '.join(sorted(missing))}"
 
-    for key, filename in _COUNTED_ARRAYS.items():
-        expected = manifest.get(key)
-        if not isinstance(expected, int) or isinstance(expected, bool):
+    # codex PR#643 R32 P2-a: probe EVERY required ``.npy``'s header, not just
+    # the ones a manifest count key happens to cover. ``load_scale_index``
+    # reads ``idf.npy``/``chunk_index.npy`` unconditionally alongside
+    # ``node_ids.npy``/``ann_labels.npy`` in the same all-or-nothing try —
+    # any one of them being truncated/malformed makes the WHOLE index
+    # unusable at serve time, regardless of whether this package's manifest
+    # happened to declare a count that would have caught it below. Skipping
+    # a file here just because no count key names it is what let a
+    # truncated ``idf.npy``/``chunk_index.npy`` sail through, publish over a
+    # healthy live index, and only fail once ``load_scale_index`` tried to
+    # read it. ``.npz``/``.bin`` required files are unaffected — ``graph.npz``
+    # gets its own shape probe below, and ``ann.bin``/``*.bin`` carry no
+    # header ``npy_row_count`` can read (see the module docstring).
+    row_counts: dict[str, int] = {}
+    for filename in required:
+        if not filename.endswith(".npy"):
             continue
-        path = directory / filename
-        if not path.exists():
-            continue
-        actual = npy_row_count(path)
+        actual = npy_row_count(directory / filename)
         if actual is None:
             return (
                 f"{filename} is present but its .npy header could not be read "
                 "(truncated or malformed)"
             )
-        if actual != expected:
-            return (
-                f"manifest.{key}={expected} but {filename} holds {actual} rows"
-            )
+        row_counts[filename] = actual
+
+    for key, filenames in _COUNTED_ARRAYS.items():
+        expected = manifest.get(key)
+        if not isinstance(expected, int) or isinstance(expected, bool):
+            continue
+        for filename in filenames:
+            if filename not in row_counts:
+                # Not part of this package (e.g. an optional array whose
+                # flag is unset) — older-index-stays-valid, nothing to check.
+                continue
+            actual = row_counts[filename]
+            if actual != expected:
+                return (
+                    f"manifest.{key}={expected} but {filename} holds {actual} rows"
+                )
     nodes = manifest.get("n_nodes")
     if isinstance(nodes, int) and not isinstance(nodes, bool):
         # graph.npz is a CORE file, so the missing-files check above already
@@ -1185,6 +1218,35 @@ def validate_import_package(
                 f"parent_build_id={parent_build!r}, main index "
                 f"build_id={manifest.get('build_id')!r})"
             )
+        # codex PR#643 R32 P2-b: parent_version and parent_build_id both
+        # agreeing does not mean the companion is USABLE — a package built
+        # by an older checkout can carry a companion whose root manifest
+        # names an old/missing/malformed ``format_version``. The reader's
+        # own gate (``validate_partition_root``) refuses any format that is
+        # not the current ``SOURCE_PARTITION_FORMAT_VERSION`` outright and
+        # treats the WHOLE companion as capability-unavailable, so importing
+        # such a package would replace a healthy live companion with one
+        # that is unusable the instant it goes live. Only the ROOT manifest
+        # is checked here, deliberately: a stale PER-SOURCE manifest is
+        # caught by the identical format_version gate inside
+        # ``inspect_source_partition_manifest`` at read time and fails
+        # closed for just that one source (a lesser, already-handled
+        # degradation) — the destructive "swap a healthy companion for a
+        # globally unusable one" harm this check exists to prevent is a
+        # root-level failure mode only.
+        from app.services.kg.source_partition_index import (
+            SOURCE_PARTITION_FORMAT_VERSION,
+        )
+
+        companion_format = companion_manifest.get("format_version")
+        if companion_format != SOURCE_PARTITION_FORMAT_VERSION:
+            raise ScaleBuildCliError(
+                f"{companion}/manifest.json has format_version="
+                f"{companion_format!r}, this checkout requires "
+                f"{SOURCE_PARTITION_FORMAT_VERSION!r}. The package was "
+                "exported by an older checkout; rebuild and re-export it "
+                "with the current checkout before importing."
+            )
 
     viz = package / "kg_viz"
     if viz.is_dir():
@@ -1251,6 +1313,25 @@ def companion_generation_error(roots: dict[str, Path]) -> Optional[str]:
             f"generation (build id mismatch: parent_build_id={parent_build!r}, "
             f"main index build_id={main_build!r}); rebuild the index before "
             "exporting"
+        )
+    # codex PR#643 R32 P2-b: the same format_version gate as import's, over
+    # the LIVE root. A live companion built by an older checkout (or by hand)
+    # can have a healthy pairing on parent_version/parent_build_id while its
+    # root manifest's format_version is old, missing or malformed —
+    # packaging it verbatim would hand the operator an export that ``import``
+    # (the check above) refuses on the receiving end, or worse, one that
+    # publishes on a receiving checkout that has not picked up this same
+    # fix. Refuse it here instead, at the source, with the same message
+    # shape as every other refusal in this function.
+    from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
+
+    companion_format = companion_manifest.get("format_version")
+    if companion_format != SOURCE_PARTITION_FORMAT_VERSION:
+        return (
+            "the live source-partition companion has "
+            f"format_version={companion_format!r}, this checkout requires "
+            f"{SOURCE_PARTITION_FORMAT_VERSION!r}; rebuild the index with "
+            "the current checkout before exporting"
         )
     return None
 

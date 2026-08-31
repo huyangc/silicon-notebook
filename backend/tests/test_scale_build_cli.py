@@ -29,6 +29,7 @@ from app.repositories.scale_build_lock import (
     ScaleBuildLockLost,
 )
 from app.services import scale_build_cli as cli
+from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 
 FIXTURES = (
     Path(__file__).resolve().parent / "fixtures" / "repository_v9" / "storage"
@@ -183,7 +184,15 @@ def _package(tmp_path, *, name: str = "package", companion=None, **overrides) ->
     shutil.copytree(FIXTURES / "kg_index" / "nb-fixture", main)
     _write_manifest(main, _main_manifest(**overrides))
     if companion is not None:
-        _write_manifest(package / cli.COMPANION_ROOT, companion)
+        # codex PR#643 R32 P2-b: every existing caller's hand-built companion
+        # dict predates the format_version gate and describes a healthy
+        # companion in every other respect — default it to the CURRENT
+        # format so those callers keep validating without each having to
+        # spell it out. A test exercising the gate itself overrides the key
+        # explicitly, which this ``setdefault`` never touches.
+        payload = dict(companion)
+        payload.setdefault("format_version", SOURCE_PARTITION_FORMAT_VERSION)
+        _write_manifest(package / cli.COMPANION_ROOT, payload)
     _write_transfer_manifest(package)
     return package
 
@@ -340,6 +349,96 @@ def test_a_truncated_required_array_is_refused(tmp_path):
         _validate(package)
 
 
+def test_a_truncated_idf_array_is_refused_even_with_no_declared_count(tmp_path):
+    """P2-a, codex PR#643 R32: ``idf.npy`` carried NO entry in
+    ``_COUNTED_ARRAYS`` at all before this fix, so a truncated header on it
+    passed unnoticed regardless of what the manifest declared —
+    ``load_scale_index`` reads it unconditionally in the same all-or-nothing
+    try as ``node_ids.npy``, so a broken ``idf.npy`` makes the whole index
+    unusable exactly like a broken ``node_ids.npy`` does.
+
+    Mutation anchor: drop the unconditional per-required-``.npy`` header
+    probe loop in ``artifact_inventory_error`` and this package validates
+    cleanly.
+    """
+    package = _package(tmp_path)
+    (package / cli.MAIN_ROOT / "idf.npy").write_bytes(b"\x93NUMPY")
+    with pytest.raises(
+        cli.ScaleBuildCliError, match="idf.npy.*truncated or malformed"
+    ):
+        _validate(package)
+
+
+def test_a_truncated_chunk_index_array_is_refused(tmp_path):
+    """Same defect, ``chunk_index.npy``. Mutation anchor: same as above."""
+    package = _package(tmp_path)
+    (package / cli.MAIN_ROOT / "chunk_index.npy").write_bytes(b"\x93NUMPY")
+    with pytest.raises(
+        cli.ScaleBuildCliError, match="chunk_index.npy.*truncated or malformed"
+    ):
+        _validate(package)
+
+
+def test_an_idf_row_count_disagreeing_with_n_nodes_is_refused(tmp_path):
+    """``idf.npy`` is one entry per node exactly like ``node_ids.npy`` —
+    ``load_scale_index`` compares both against the same ``n_nodes`` — so a
+    manifest declaring a different node count than ``idf.npy`` actually holds
+    must be refused the same way a ``node_ids.npy`` mismatch already is.
+
+    Mutation anchor: drop ``"idf.npy"`` from the ``"n_nodes"`` entry in
+    ``_COUNTED_ARRAYS`` and this package validates cleanly (``node_ids.npy``
+    itself still agrees with the declared count, so only the ``idf.npy``
+    check would have caught it).
+    """
+    package = _package(tmp_path)
+    idf = package / cli.MAIN_ROOT / "idf.npy"
+    np.save(idf, np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
+    with pytest.raises(
+        cli.ScaleBuildCliError, match=r"n_nodes=2 but idf\.npy holds 3 rows"
+    ):
+        _validate(package)
+
+
+def test_a_chunk_index_row_count_disagreeing_with_n_chunks_is_refused(tmp_path):
+    """The builder stamps ``manifest["n_chunks"] = len(chunk_ids)`` alongside
+    ``chunk_index.npy`` (``scale_index_builder.py``); a declared count that
+    disagrees with what is actually on disk is the same silent-corruption
+    shape as every other counted array.
+
+    Mutation anchor: drop the ``"n_chunks": ("chunk_index.npy",)`` entry from
+    ``_COUNTED_ARRAYS`` and this package validates cleanly.
+    """
+    package = _package(tmp_path)
+    chunk_index = package / cli.MAIN_ROOT / "chunk_index.npy"
+    np.save(chunk_index, np.asarray([0, 1, 0, 1, 0], dtype=np.int32))
+    with pytest.raises(
+        cli.ScaleBuildCliError,
+        match=r"n_chunks=2 but chunk_index\.npy holds 5 rows",
+    ):
+        _validate(package)
+
+
+def test_a_manifest_with_no_n_nodes_and_a_healthy_idf_still_validates(tmp_path):
+    """Negative anchor for the two refusals above (``older-index-stays-valid``):
+    an old package whose manifest predates ``n_nodes`` must not be refused
+    just because there is nothing to compare ``idf.npy``'s row count
+    against — readability is unconditional, but the COUNT comparison stays
+    gated on the manifest declaring the key. ``idf.npy`` itself is untouched
+    and perfectly readable here.
+
+    A fix that made the header probe itself require a declared count would
+    wrongly refuse this package.
+    """
+    package = _package(tmp_path)
+    manifest = _main_manifest()
+    manifest.pop("n_nodes")
+    manifest.pop("n_chunks")
+    _write_manifest(package / cli.MAIN_ROOT, manifest)
+
+    _manifest, warnings = _validate(package)
+    assert warnings == []
+
+
 def test_a_truncated_graph_matrix_is_refused(tmp_path):
     """The same for ``graph.npz``'s shape. Second mutation anchor: a truncated
     npz raises ``zipfile.BadZipFile``, which is neither ``OSError`` nor
@@ -465,6 +564,47 @@ def test_a_package_missing_a_build_id_on_either_side_still_pairs_on_version(
         **main_extra,
     )
     _validate(package)
+
+
+def test_a_companion_with_a_stale_format_version_is_refused(tmp_path):
+    """P2-b, codex PR#643 R32: ``parent_version``/``parent_build_id`` both
+    agreeing does not mean the companion is USABLE — the reader's own gate
+    (``validate_partition_root``) refuses any ``format_version`` other than
+    the current ``SOURCE_PARTITION_FORMAT_VERSION`` outright and treats the
+    WHOLE companion as capability-unavailable. Importing a package whose
+    companion carries a stale format would replace a healthy live companion
+    with one that is unusable the instant it goes live.
+
+    Mutation anchor: drop the ``format_version`` check from
+    ``validate_import_package``'s companion block and this package validates
+    cleanly.
+    """
+    package = _package(
+        tmp_path,
+        companion={
+            "parent_version": ["nb-1", 7],
+            "published_sources": 1,
+            "format_version": SOURCE_PARTITION_FORMAT_VERSION - 1,
+        },
+    )
+    with pytest.raises(cli.ScaleBuildCliError, match="format_version"):
+        _validate(package)
+
+
+def test_a_companion_with_no_format_version_is_refused(tmp_path):
+    """Same defect, the ``format_version`` key simply absent (a package built
+    before the key existed at all)."""
+    package = _package(
+        tmp_path,
+        companion={"parent_version": ["nb-1", 7], "published_sources": 1},
+    )
+    manifest = json.loads(
+        (package / cli.COMPANION_ROOT / "manifest.json").read_text()
+    )
+    del manifest["format_version"]
+    _write_manifest(package / cli.COMPANION_ROOT, manifest)
+    with pytest.raises(cli.ScaleBuildCliError, match="format_version"):
+        _validate(package)
 
 
 def test_an_absent_companion_is_not_a_refusal(tmp_path):
@@ -636,6 +776,7 @@ def test_export_then_import_carries_the_build_generation_across_both_roots(
             "parent_version": ["nb-1", 1],
             "parent_build_id": "a" * 32,
             "published_sources": 1,
+            "format_version": SOURCE_PARTITION_FORMAT_VERSION,
         },
     )
     destination = tmp_path / "out"
@@ -823,7 +964,15 @@ def _seed_live(store, notebook_id: str) -> None:
     _write_viz_root(Path(store.viz_dir(notebook_id)), {"generation": "old"})
     _write_manifest(
         Path(store.source_partition_dir(notebook_id)),
-        {"parent_version": ["nb-1", 1], "published_sources": 1},
+        {
+            "parent_version": ["nb-1", 1],
+            "published_sources": 1,
+            # codex PR#643 R32 P2-b: a healthy live companion, so it must
+            # carry the current format — every ``run_export`` call in this
+            # file goes through ``companion_generation_error``, which now
+            # gates on it.
+            "format_version": SOURCE_PARTITION_FORMAT_VERSION,
+        },
     )
 
 
@@ -2492,12 +2641,38 @@ def test_export_accepts_a_live_pair_from_the_same_build(repository, store, tmp_p
             "parent_version": ["nb-1", 1],
             "parent_build_id": "a" * 32,
             "published_sources": 1,
+            "format_version": SOURCE_PARTITION_FORMAT_VERSION,
         },
     )
     receipt = cli.run_export(
         repository, "nb-1", tmp_path / "out", report=lambda _message: None
     )
     assert sorted(receipt["roots"]) == sorted(cli.PUBLISH_ORDER)
+
+
+def test_export_refuses_a_live_companion_with_a_stale_format_version(
+    repository, store, tmp_path
+):
+    """P2-b, codex PR#643 R32: parent_version/build_id both pairing correctly
+    does not make the live companion USABLE if its own manifest's
+    ``format_version`` is stale — a live tree built by an older checkout (or
+    hand-assembled) can be in exactly this state. Packaging it verbatim would
+    hand the operator an export that this same CLI's ``import`` validation
+    refuses on arrival.
+
+    Mutation anchor: drop the ``format_version`` check from
+    ``companion_generation_error`` and this export succeeds.
+    """
+    _seed_live(store, "nb-1")
+    manifest = json.loads(
+        (Path(store.source_partition_dir("nb-1")) / "manifest.json").read_text()
+    )
+    manifest["format_version"] = SOURCE_PARTITION_FORMAT_VERSION - 1
+    _write_manifest(Path(store.source_partition_dir("nb-1")), manifest)
+    with pytest.raises(cli.ScaleBuildCliError, match="format_version"):
+        cli.run_export(
+            repository, "nb-1", tmp_path / "out", report=lambda _message: None
+        )
 
 
 def test_export_aborts_and_removes_the_package_when_the_claim_is_lost_mid_copy(
