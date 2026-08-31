@@ -14,6 +14,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
 from app.services.embedding import FakeEmbedder
 from app.services.scale_artifact_runtime import offpeak_window_state
 from app.services.sqlite_repository import SQLiteRepository
@@ -657,6 +658,36 @@ def test_the_viz_mid_swap_window_keeps_serving_the_warm_cache(repo, monkeypatch)
 
     assert scale.viz_index(notebook.id) is first, (
         "a transiently invisible root (.old still on disk) must stay fail-soft"
+    )
+    assert notebook.id in scale.viz_cache
+
+
+def test_a_viz_swap_completed_between_probes_is_not_read_as_retirement(
+    repo, monkeypatch
+):
+    """codex PR#643 R23 P2, viz mirror: between the live probe (ENOENT,
+    mid-swap) and the ``.old`` probe, the publisher can finish ``tmp → live``
+    and delete ``.old`` — both probes then miss a generation that is now
+    live. The probe rechecks the live path before declaring durable absence.
+
+    Mutation anchor: drop the live recheck in ``_viz_signature`` and this
+    goes red — the warm index is evicted.
+    """
+    notebook, scale, first = _warm_standalone_viz(repo)
+    monkeypatch.setattr(scale.builder, "build_viz", lambda *_: None)
+    real = scale.artifacts.manifest_stat_signature
+    answers = iter([MANIFEST_ABSENT, MANIFEST_ABSENT])
+
+    def racing(directory):
+        try:
+            return next(answers)
+        except StopIteration:
+            return real(directory)
+
+    monkeypatch.setattr(scale.artifacts, "manifest_stat_signature", racing)
+    assert scale.viz_index(notebook.id) is first, (
+        "a swap that completed between the two probes must not evict the "
+        "warm index"
     )
     assert notebook.id in scale.viz_cache
 

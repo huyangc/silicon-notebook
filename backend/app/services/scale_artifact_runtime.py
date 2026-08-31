@@ -436,9 +436,17 @@ class ScaleArtifactRuntime:
         # answers "could not tell" and the warm entry keeps serving. The
         # second stat is paid only in this corner, never on the hot path.
         old_probe = probe(str(self.artifacts.viz_dir(notebook_id)) + ".old")
-        if old_probe is MANIFEST_ABSENT:
+        if old_probe is not MANIFEST_ABSENT:
+            return None
+        # codex PR#643 R23 P2 (same race as the companion probe): between
+        # the two probes the publisher can complete ``tmp → live`` and
+        # delete ``.old``, so both reads miss a generation that is now
+        # live. Recheck the live path once: a manifest there is the new
+        # generation's real signature; still absent is durable.
+        recheck = probe(self.artifacts.viz_dir(notebook_id))
+        if recheck is MANIFEST_ABSENT:
             return MANIFEST_ABSENT
-        return None
+        return recheck
 
     @staticmethod
     def _recordable_viz_signature(signature: Any) -> Any:
