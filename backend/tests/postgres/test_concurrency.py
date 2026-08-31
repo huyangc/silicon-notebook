@@ -572,6 +572,99 @@ def test_bulk_conversation_delete_holds_root_against_notebook_delete(
 
 
 @pytest.mark.postgres_integration
+def test_single_conversation_delete_holds_root_against_notebook_delete(
+    postgres_database, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('single-delete-owner','single-delete@x','Single Delete',"
+            "'user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('single-delete-nb','Single Delete','single-delete-owner',"
+            "'ready',%s,%s)",
+            (now, now),
+        )
+
+    counter = iter(range(1, 30))
+    seams = RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-single-delete-{next(counter)}",
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    asks = AskStateStore(postgres_database, seams)
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    first_request = AskRequest(question="completed turn")
+    first_job, conversation_id = asks.begin_durable_job(
+        "single-delete-nb", first_request, "chunk", "single-delete-owner"
+    )
+    response = AskResponse(
+        answer="completed answer",
+        conclusion="completed answer",
+        citations=[],
+        anchors=[],
+    )
+    assert asks.save_answer_for_job(
+        first_job,
+        "single-delete-nb",
+        conversation_id,
+        first_request.question,
+        response,
+        "single-delete-owner",
+    )
+    second_request = AskRequest(
+        question="cancelled turn", conversation_id=conversation_id
+    )
+    second_job, continued_conversation = asks.begin_durable_job(
+        "single-delete-nb", second_request, "chunk", "single-delete-owner"
+    )
+    assert continued_conversation == conversation_id
+    assert asks.cancel_running_job(second_job, "single-delete-owner")["cancelled"]
+
+    single_reached_children = threading.Event()
+    allow_single_delete = threading.Event()
+    original_delete_idle = asks._delete_idle_conversation_on
+
+    def pause_before_child_delete(*args, **kwargs):
+        single_reached_children.set()
+        assert allow_single_delete.wait(timeout=10)
+        return original_delete_idle(*args, **kwargs)
+
+    monkeypatch.setattr(
+        asks, "_delete_idle_conversation_on", pause_before_child_delete
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        conversation_future = executor.submit(
+            asks.delete_conversation, conversation_id
+        )
+        assert single_reached_children.wait(timeout=5)
+        notebook_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "single-delete-nb"
+        )
+        try:
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM notebooks", notebook_future
+            )
+        finally:
+            allow_single_delete.set()
+        assert conversation_future.result(timeout=5) is None
+        assert notebook_future.result(timeout=5) == []
+
+
+@pytest.mark.postgres_integration
 def test_notebook_delete_waits_for_existing_source_update_before_snapshot(
     postgres_database,
 ):

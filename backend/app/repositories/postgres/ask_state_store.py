@@ -929,9 +929,17 @@ class AskStateStore:
 
     def delete_conversation(self, conversation_id: str) -> None:
         with self.database.write() as db:
-            parent = db.execute(
-                "SELECT id FROM conversations WHERE id=%s FOR UPDATE",
+            scope = db.execute(
+                "SELECT notebook_id FROM conversations WHERE id=%s",
                 (conversation_id,),
+            ).fetchone()
+            if scope is None:
+                raise KeyError(conversation_id)
+            self._lock_notebook_against_delete_on(db, scope["notebook_id"])
+            parent = db.execute(
+                "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s "
+                "FOR UPDATE",
+                (conversation_id, scope["notebook_id"]),
             ).fetchone()
             if parent is None:
                 raise KeyError(conversation_id)
