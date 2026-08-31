@@ -115,6 +115,44 @@ def test_database_close_releases_a_still_held_scale_build_lock(
         holder.close()
 
 
+def test_a_close_racing_the_acquisition_still_releases_the_lock(
+    postgres_settings, monkeypatch
+):
+    """P2, codex PR#643 R34: ``close()`` can run after the dedicated session
+    acquired its advisory lock but before the handle is registered — the
+    shutdown snapshot is then empty and an untracked live claim survives.
+    Registration re-checks the closed state atomically: the racing
+    acquisition releases its own session and raises instead of returning a
+    live handle from a closed database.
+
+    Mutation anchor: register unconditionally (drop the closed re-check)
+    and this goes red — no raise, and the claim survives the shutdown.
+    """
+    holder = _second_process(postgres_settings)
+    other = _second_process(postgres_settings)
+    original = database_module.PostgresScaleBuildLock
+
+    class Racing(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # The shutdown lands exactly between acquisition and
+            # registration.
+            holder.close()
+
+    monkeypatch.setattr(database_module, "PostgresScaleBuildLock", Racing)
+    try:
+        with pytest.raises(PostgresDatabaseClosedError):
+            holder.try_scale_build_lock("nb-close-race")
+        regained = other.try_scale_build_lock("nb-close-race")
+        assert regained is not None, (
+            "the racing acquisition must release its own session"
+        )
+        regained.release()
+    finally:
+        other.close()
+        holder.close()
+
+
 def test_a_normal_release_leaves_no_handle_in_the_registry(postgres_database):
     handle = postgres_database.try_scale_build_lock("nb-registry")
     assert handle is not None

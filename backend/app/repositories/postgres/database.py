@@ -734,8 +734,23 @@ class PostgresDatabase:
             lock_key,
             lambda: self._retire_scale_build_lock(handle),
         )
+        # Registration is atomic with the closed-state check (P2, codex
+        # PR#643 R34): ``close()`` sets ``_closed`` BEFORE it snapshots this
+        # registry (both under this lock's happens-before), so either this
+        # branch sees ``_closed`` and releases the just-acquired session
+        # itself, or the snapshot includes this handle and ``close()``
+        # releases it — an acquisition can no longer thread the gap and
+        # leave an untracked advisory lock alive after shutdown.
         with self._scale_build_lock_registry_lock:
-            self._active_scale_build_locks.add(handle)
+            closed = self._closed
+            if not closed:
+                self._active_scale_build_locks.add(handle)
+        if closed:
+            handle.release()
+            raise PostgresDatabaseClosedError(
+                "the database closed while the scale build lock was being "
+                "acquired; the lock was released and nothing is held"
+            )
         return handle
 
     def _retire_scale_build_lock(self, handle) -> None:
