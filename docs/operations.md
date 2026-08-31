@@ -987,7 +987,15 @@ so the identity this package was validated against is re-read twice more:
 once right before the renames begin (catches a switch that lands during the
 staging copy) and once more right after the main index is live (catches a
 switch that lands *during* the renames themselves, which the first re-read
-cannot see). A drift on the second re-read means this run's own publish is
+cannot see). If the FIRST re-read cannot itself *complete* — a Ctrl-C or a
+transient database error, not a drift it finds — nothing has been published
+yet, so no rollback is needed: a non-Ctrl-C failure there becomes the usual
+`ScaleBuildCliFailure` and exits `1`, and the three already-staged roots are
+kept on disk for inspection exactly as-is (unlike a plain staging failure,
+e.g. a copy error, which discards them) — re-run `import` directly, no need
+to re-export. A Ctrl-C there is still treated as the ordinary "interrupt
+during staging" case above: it deletes this run's own staged
+`.tmp-<claim_token>` and exits `130`. A drift on the second re-read means this run's own publish is
 what fell out of date; it is rolled back — every root that was published,
 in reverse order, back to exactly its previous state — before `import`
 refuses. The same rollback fires if that second re-read cannot even
@@ -1083,6 +1091,20 @@ This channel does **not** use pooled connections:
 - each `build`/`export`/`import` run of this CLI pins one more;
 - `inspect`'s claim probe opens one and releases it immediately;
 - the migration-ledger preflight opens one bare connection and closes it.
+
+The lock session (shared by both the build lock and `inspect`'s claim probe)
+carries its own client transport bound: `connect_timeout=5` (seconds, the
+handshake) and `tcp_user_timeout=6000` (milliseconds, send/recv on an already
+established connection). These cover what the verify query's own
+`statement_timeout` (5 seconds) cannot — the client-side wait during a
+network or database stall, since the claim verify runs while this process
+holds the process-global build mutex, so an unbounded stall there would
+freeze every notebook's status/admission behind it until TCP keepalives
+eventually notice the dead peer (roughly 80 seconds or more, depending on the
+platform). `tcp_user_timeout` depends on OS TCP-stack support: it is
+effective on production Linux; on local macOS development it is silently
+ignored by libpq and the session falls back to keepalives alone — an expected
+platform difference, not a regression.
 
 A deployment with a tight `max_connections` must budget for "pool ceiling +
 service-side lock-session ceiling + concurrently running CLI invocations".

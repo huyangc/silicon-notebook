@@ -184,6 +184,48 @@ def test_the_lock_session_is_named_and_keeps_its_idle_reaper_disabled(
         handle.release()
 
 
+def test_scale_build_lock_session_has_a_bounded_client_transport_timeout(
+    postgres_database, monkeypatch
+):
+    """codex PR#643 R19 P2-a: ``verify_held``'s ``statement_timeout`` only
+    bounds SERVER-side execution of the query it wraps -- it cannot bound a
+    stalled client send/recv on that same round trip, or the ``set_config``
+    call that installs it. This session runs ``verify_held`` from inside the
+    process-global ``building_lock``, so an unbounded client-side stall there
+    would freeze every notebook's status/admission until TCP keepalives
+    eventually notice a dead peer (~80s with ``_LOCK_SESSION_KEEPALIVES``).
+    ``connect_timeout``/``tcp_user_timeout`` are the client-side bound; this
+    pins both being present on the dedicated lock session's own connect call.
+
+    Mutation anchor: drop either kwarg from
+    ``_open_scale_build_lock_connection`` and this goes red.
+    """
+    captured: dict = {}
+    original_connect = database_module._SafeDiagnosticConnection.connect
+
+    def capture_connect(conninfo="", **kwargs):
+        captured.update(kwargs)
+        return original_connect(conninfo, **kwargs)
+
+    monkeypatch.setattr(
+        database_module._SafeDiagnosticConnection, "connect", capture_connect
+    )
+
+    handle = postgres_database.try_scale_build_lock("nb-transport-timeout")
+    assert handle is not None
+    try:
+        assert handle.verify_held() is True
+    finally:
+        handle.release()
+
+    assert captured["connect_timeout"] == (
+        database_module._LOCK_SESSION_CONNECT_TIMEOUT_SECONDS
+    )
+    assert captured["tcp_user_timeout"] == (
+        database_module._LOCK_SESSION_TCP_USER_TIMEOUT_MS
+    )
+
+
 def test_scale_build_lock_sessions_are_bounded(postgres_database):
     """Each claim pins one non-pooled connection for the whole build; the
     budget is a connection budget.

@@ -76,6 +76,33 @@ _LOCK_SESSION_KEEPALIVES = {
 # (via ``set_config(..., true)``) scopes this to the single verify query's
 # transaction and reverts to the session default on the next commit.
 _VERIFY_HELD_STATEMENT_TIMEOUT_MS = 5000
+# codex PR#643 R19 P2-a: ``statement_timeout`` above only bounds SERVER-side
+# execution of the query it wraps — not the SET LOCAL call that installs it,
+# and not a stalled TCP send/recv on either statement. If PostgreSQL or the
+# network wedges mid-round-trip, both are unbounded at the client, and
+# ``verify_held`` runs from inside the process-global ``building_lock``, so
+# every notebook's status/admission would stay blocked until the OS notices
+# the dead peer via keepalives (``_LOCK_SESSION_KEEPALIVES`` above — roughly
+# 30 + 10*5 = 80s, more on some platforms). These two connection-level
+# parameters cap the CLIENT side of that same round trip so it fails no later
+# than the server-side cap does:
+#
+# * ``connect_timeout`` (seconds) bounds the initial TCP handshake/startup —
+#   the same knob ``table_projection_lock``'s dedicated session uses, but
+#   fixed at the ``verify_held`` tier rather than derived from the pool's
+#   (potentially much larger) acquire timeout.
+# * ``tcp_user_timeout`` (milliseconds) bounds how long the kernel will wait
+#   for an ACKed send before giving up on the socket, which is what actually
+#   caps a stalled ``set_config``/query send or read once the connection is
+#   already established. libpq only forwards it where the OS TCP stack
+#   supports ``TCP_USER_TIMEOUT`` (Linux); on platforms without it — notably
+#   macOS, so every local dev run — libpq silently ignores the parameter and
+#   the session falls back to the keepalive-only bound above. Production runs
+#   on Linux, where this is the parameter that actually fires; a developer
+#   seeing the old ~80s keepalive bound on macOS is that expected fallback,
+#   not a regression.
+_LOCK_SESSION_CONNECT_TIMEOUT_SECONDS = 5
+_LOCK_SESSION_TCP_USER_TIMEOUT_MS = 6000
 
 
 class PostgresScaleBuildLock:
@@ -589,7 +616,21 @@ class PostgresDatabase:
             self._projection_lock_slots.release()
 
     def _open_scale_build_lock_connection(self):
-        """Open the dedicated, keepalive-armed session one build lock rides on."""
+        """Open the dedicated, keepalive-armed session one build lock rides on.
+
+        ``connect_timeout``/``tcp_user_timeout`` are this session's own client
+        transport bound (codex PR#643 R19 P2-a) — deliberately NOT
+        ``self._projection_connect_timeout_seconds`` (derived from the pool's
+        acquire timeout, and shared with ``table_projection_lock``'s dedicated
+        session): a wedged ``verify_held`` round trip runs inside the
+        process-global ``building_lock`` and must fail no later than that
+        call's own ``_VERIFY_HELD_STATEMENT_TIMEOUT_MS`` server-side cap, so
+        this session gets a fixed bound at the same tier instead of whatever
+        the pool happens to be configured with. See the constants' docstring
+        above for the platform caveat: ``tcp_user_timeout`` is a no-op where
+        the OS does not support it (macOS/local dev falls back to the
+        keepalive bound; production Linux is where it actually fires).
+        """
         with self._lifecycle_lock:
             if self._closed:
                 raise PostgresDatabaseClosedError(
@@ -600,7 +641,8 @@ class PostgresDatabase:
                 autocommit=False,
                 row_factory=dict_row,
                 application_name="silicon-notebook-scale-build-lock",
-                connect_timeout=self._projection_connect_timeout_seconds,
+                connect_timeout=_LOCK_SESSION_CONNECT_TIMEOUT_SECONDS,
+                tcp_user_timeout=_LOCK_SESSION_TCP_USER_TIMEOUT_MS,
                 **_LOCK_SESSION_KEEPALIVES,
             )
 

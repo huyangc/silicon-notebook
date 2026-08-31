@@ -853,6 +853,120 @@ def test_import_refuses_to_publish_when_pipeline_identity_drifts_during_staging(
     assert len(staged) == 1, "the staged copy is left for the operator"
 
 
+def test_import_translates_a_failed_pre_publish_identity_read_into_a_cli_failure(
+    storage, store, tmp_path
+):
+    """codex PR#643 R19 P2-b: the R5 pre-rename re-read above does not only
+    ever find a MISMATCH (the drift test above) — the read itself can fail to
+    complete at all (a dropped connection, a statement timeout) after a
+    multi-GB package has already been staged. That failure used to fall
+    through to the generic ``except BaseException`` staging-discard handler,
+    which both deleted the expensive staged copies AND let the raw database
+    exception escape uncaught past ``main()`` as a traceback instead of the
+    documented ``ScaleBuildCliFailure``/exit-1 contract. It must instead
+    surface as a clean ``ScaleBuildCliFailure`` with the staged copies KEPT
+    for a cheap retry, exactly like a detected drift — nothing was renamed,
+    so there is nothing to roll back.
+
+    Mutation anchors: (1) drop the translating ``try/except`` around the
+    pre-publish read and the bare ``_FakeOperationalError`` escapes instead
+    of ``ScaleBuildCliFailure`` (RED on ``pytest.raises``); (2) route the
+    translated failure back through the generic ``except BaseException``
+    branch instead of a dedicated one and the staged copies are deleted
+    instead of kept (RED on the staging-glob assertions below).
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def failing(notebook_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return base(notebook_id)
+        # The pre-rename (R5) re-read itself fails to complete — not a
+        # mismatch it finds, but the read never returning an answer.
+        raise _FakeOperationalError("server closed the connection unexpectedly")
+
+    projections.pipeline_identity = failing  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(
+        cli.ScaleBuildCliFailure, match="could not be re-verified"
+    ):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] == 2, "the identity must be re-read exactly once before publishing"
+    assert _published_version(store, "nb-1") == ["nb-1", 1], (
+        "nothing may be published when the pre-publish identity check itself fails"
+    )
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert not Path(str(root) + ".old").exists(), (
+            "no rename ever happened, so there is no previous generation to "
+            "roll back — .old must not appear"
+        )
+        assert len(_staging_glob(root)) == 1, (
+            "the staged copies must be KEPT for a cheap retry, not discarded"
+        )
+
+
+def test_import_pre_publish_identity_interrupt_discards_staging_like_any_other(
+    storage, store, tmp_path
+):
+    """codex PR#643 R19 P2-b anchor: ``KeyboardInterrupt`` on the pre-publish
+    (R5) identity re-read is deliberately NOT translated — it must keep
+    taking the ordinary pre-rename interrupt path (discard this run's own
+    staging, propagate ``KeyboardInterrupt`` unchanged), the exact contract
+    ``test_a_staging_failure_never_touches_the_live_tree`` above already pins
+    for a plain ``OSError`` at the same point in the sequence. This confirms
+    the P2-b translation added just above did not also swallow or change the
+    interrupt case.
+
+    Mutation anchor: route this ``KeyboardInterrupt`` through the same
+    translation the other exceptions get and this goes red — either the
+    exception type changes to ``ScaleBuildCliFailure`` (RED on
+    ``pytest.raises``) or staging survives instead of being discarded
+    (mismatching every other pre-rename interrupt in this file).
+    """
+    _seed_live(store, "nb-1")
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def interrupting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return base(notebook_id)
+        # The pre-rename (R5) re-read itself is interrupted, not just slow.
+        raise KeyboardInterrupt
+
+    projections.pipeline_identity = interrupting  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_import(
+            repository,
+            "nb-1",
+            _full_package(tmp_path),
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] == 2, "the identity must be re-read exactly once before publishing"
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert _staging_glob(root) == [], (
+            "a pre-rename interrupt discards this run's own staging, exactly "
+            "like the OSError case above"
+        )
+
+
 def test_import_rolls_back_when_pipeline_identity_drifts_during_the_swap(
     storage, store, tmp_path
 ):
