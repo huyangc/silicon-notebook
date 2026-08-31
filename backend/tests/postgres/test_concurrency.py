@@ -298,6 +298,79 @@ def test_ask_detail_delete_race_falls_back_to_retained_postgres(
 
 
 @pytest.mark.postgres_integration
+def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('guard-detail-owner','guard-detail@x','Guard Detail',"
+            "'user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('guard-detail-nb','Guard Detail','guard-detail-owner',"
+            "'ready',%s,%s)",
+            (now, now),
+        )
+
+    counter = iter(range(1, 20))
+    seams = RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-guard-detail-{next(counter)}",
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    asks = AskStateStore(postgres_database, seams)
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    request = AskRequest(question="guarded detail")
+    job_id, conversation_id = asks.begin_durable_job(
+        "guard-detail-nb", request, "chunk", "guard-detail-owner"
+    )
+    answer_id = asks.save_answer_for_job(
+        job_id,
+        "guard-detail-nb",
+        conversation_id,
+        request.question,
+        AskResponse(
+            answer="protected answer",
+            conclusion="protected answer",
+            citations=[],
+            anchors=[],
+        ),
+        "guard-detail-owner",
+    )
+    assert answer_id
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with asks.guarded_ask_detail(job_id) as snapshot:
+            assert snapshot["answer_detail"]["payload"]["answer"] == (
+                "protected answer"
+            )
+            delete_future = executor.submit(
+                notebooks.delete_row_and_orphan_embeddings, "guard-detail-nb"
+            )
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM notebooks", delete_future
+            )
+        assert delete_future.result(timeout=5) == []
+
+    retained = asks.ask_job_detail(job_id)
+    assert retained["notebook_deleted_at"]
+    assert retained["answer_id"] == ""
+    assert retained["trace"] == []
+
+
+@pytest.mark.postgres_integration
 def test_final_answer_and_notebook_delete_share_root_first_lock_order(
     postgres_database, monkeypatch
 ):
