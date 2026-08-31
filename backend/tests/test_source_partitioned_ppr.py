@@ -986,6 +986,40 @@ def test_a_second_publication_racing_the_recheck_stays_fail_soft(
     assert service.cache_size == 1
 
 
+def test_generation_probes_run_under_the_cache_lock(repo, monkeypatch):
+    """P2, codex PR#643 R29: signatures captured BEFORE the cache lock go
+    stale while waiting behind another loader — the delayed request would
+    then evict a freshly cached current graph, reload the same generation
+    and record it under the stale signatures. Both probes therefore run
+    inside ``_lock``.
+
+    Mutation anchor: move the probes back in front of the lock and this
+    goes red — the probe observes the lock unheld.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["v1"]
+    _publish(repo, notebook_id, (source_a,), version)
+    service = repo._runtime.source_partitioned_ppr
+    original = service._root_signature
+    held: list[bool] = []
+
+    def observing(directory):
+        held.append(service._lock._is_owned())
+        return original(directory)
+
+    monkeypatch.setattr(service, "_root_signature", observing)
+    result = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert result.capability.enabled
+    assert held and all(held), (
+        "every generation probe must run while holding the cache lock"
+    )
+
+
 def test_a_probeless_artifacts_adapter_still_serves_from_cache(repo):
     """Negative anchor for the branch above: ``None`` from
     ``_companion_signature`` because the adapter has NO ``manifest_stat_

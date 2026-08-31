@@ -277,9 +277,12 @@ class ScaleArtifactCatalog:
             # codex PR#643 R21 P1:与下面 stale 冷路径同一把 per-nb 单飞锁。
             # 同版本 import 原子换代后,签名失效让**所有**并发 exact 读同时脱
             # 缓存;不串行就是 N 个 graph/status 请求各自 load 一份多 GB 的
-            # CSR/ANN——恰好在发布完成那一刻打爆内存。锁内 double-check 用
-            # 本次 load 的同一个签名(与 stale 路径同款纪律,不再 stat)。
+            # CSR/ANN——恰好在发布完成那一刻打爆内存。锁内先**重探签名**
+            # (codex PR#643 R29 P1):等锁期间别的线程可能已把新一代装好,拿
+            # 锁前那份陈旧签名去 double-check 会误逐已是当前代的缓存、再装
+            # 一份、还把它记在旧签名下——下一请求又装一遍,瞬时两份多 GB 同驻。
             with self._notebook_load_lock(notebook_id):
+                signature = self._manifest_signature(notebook_id)
                 cached = self.scale_cache().get(notebook_id)
                 if self._still_current(cached, cur, signature):
                     return cached
@@ -300,8 +303,10 @@ class ScaleArtifactCatalog:
             return cached
         # cold:单飞加载。全局锁只护锁表,load 在 per-nb 锁内、不持全局锁。
         with self._notebook_load_lock(notebook_id):
-            # double-check:等锁期间别的线程可能已加载好当前磁盘索引。身份仍走
-            # 本次 load 的那一个签名(memo 命中,不再 stat)。
+            # double-check:等锁期间别的线程可能已加载好当前磁盘索引——而且
+            # 可能装的是**又换过一代**的盘面,所以签名也要重探(codex PR#643
+            # R29 P1 同款理由),拿锁前那份陈旧签名会误逐+旧签名入账。
+            signature = self._manifest_signature(notebook_id)
             cached = self.scale_cache().get(notebook_id)
             disk_manifest = self._stale_manifest_admissible(
                 notebook_id, signature
