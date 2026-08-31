@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import gc
+import shutil
 import threading
 import time
 import weakref
@@ -455,6 +456,124 @@ def test_a_viz_rebuild_registers_its_claim_for_the_swap_to_reverify(
         "the build DID run and staged under this claim's own token — without "
         "this the assertion above would pass vacuously on an empty graph"
     )
+
+
+# ─────────────────────────── standalone viz cache · disk-generation probing ──
+
+def _warm_standalone_viz(repo):
+    """A published standalone ``kg_viz`` plus the warm cache entry a serving
+    process would hold for it, and the notebook it belongs to."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    assert scale.build_viz(notebook.id) is not None
+    index = scale.viz_index(notebook.id)
+    assert index is not None
+    return notebook, scale, index
+
+
+def _replace_viz_root_out_of_band(repo, notebook_id):
+    """A cross-process republish of the SAME generation: identical manifest
+    (same ``version``, same ``cluster_seq``), new inode, and no call into this
+    process's invalidation. Exactly what the offline CLI's ``import`` leaves
+    behind when the package repeats the live version."""
+    live = Path(str(repo._runtime.scale_artifact_store.viz_dir(notebook_id)))
+    staged = live.parent / f"{live.name}.newgen"
+    shutil.copytree(live, staged)
+    shutil.rmtree(live)
+    staged.rename(live)
+
+
+def test_a_same_version_viz_republish_is_picked_up_without_a_restart(repo):
+    """P2, codex PR#643 R18. ``_viz_manifest_fresh``'s two gates
+    (``version``/``cluster_seq``) are database-derived, so a cross-process
+    ``import`` that replaces ``kg_viz`` under the same version moves neither —
+    the warm entry would be served for the life of the process. One stat of the
+    viz root's manifest gives the on-disk generation a comparable identity, the
+    same way the source-partition companion cache does.
+
+    Mutation anchor: drop the ``_viz_signature_superseded`` check on the hit
+    path and the stale object is returned (``second is first``).
+    """
+    notebook, scale, first = _warm_standalone_viz(repo)
+    _replace_viz_root_out_of_band(repo, notebook.id)
+
+    second = scale.viz_index(notebook.id)
+
+    assert second is not None
+    assert second is not first, "the warm cache served the superseded generation"
+    assert second.manifest == first.manifest, (
+        "same generation content — only the bytes on disk were replaced, which "
+        "is precisely what the version/cluster_seq gates cannot see"
+    )
+    assert scale.viz_index(notebook.id) is second, (
+        "the reload must RECORD the new signature; otherwise every later read "
+        "reloads too"
+    )
+
+
+def test_one_viz_read_takes_at_most_one_viz_stat_probe(repo, monkeypatch):
+    """The "one load, one stat" discipline the companion cache follows: a cache
+    HIT pays a single probe of the VIZ root, shared with the entry that read may
+    write. (``load()``'s own probe of the SCALE root is the catalog's, counted
+    separately and unchanged by this.)"""
+    notebook, scale, _first = _warm_standalone_viz(repo)
+    viz_dir = repo._runtime.scale_artifact_store.viz_dir(notebook.id)
+    probe = scale.artifacts.manifest_stat_signature
+    calls: list[object] = []
+    monkeypatch.setattr(
+        scale.artifacts,
+        "manifest_stat_signature",
+        lambda directory: calls.append(directory) or probe(directory),
+    )
+
+    assert scale.viz_index(notebook.id) is not None
+    assert [str(call) for call in calls].count(str(viz_dir)) == 1, calls
+
+
+def test_a_retired_viz_root_is_evicted_instead_of_served_forever(repo, monkeypatch):
+    """A same-version ``import`` whose package omits ``kg_viz`` RETIRES the live
+    root. Nothing about that moves the database-derived gates, and the probe
+    keeps answering "absent", so a fail-soft reading of that answer would serve
+    the removed generation until the process restarted — the R12 finding, in the
+    viz cache instead of the companion cache.
+
+    ``build_viz`` is stubbed out so the eviction is observable on its own; in
+    production this call goes on to the existing "no standalone viz" path and
+    spawns or runs a rebuild exactly as a cold read would.
+
+    Mutation anchors: (a) drop the ``MANIFEST_ABSENT`` eviction *and* the
+    superseded check, or (b) collapse ``_viz_signature`` back to a two-state
+    probe that answers ``None`` for an absent root — either way the retired
+    index is handed back.
+    """
+    notebook, scale, _first = _warm_standalone_viz(repo)
+    monkeypatch.setattr(scale.builder, "build_viz", lambda *_: None)
+    shutil.rmtree(Path(str(repo._runtime.scale_artifact_store.viz_dir(notebook.id))))
+
+    assert scale.viz_index(notebook.id) is None
+    assert notebook.id not in scale.viz_cache
+
+
+def test_an_adapter_without_a_stat_probe_keeps_its_warm_viz(repo, monkeypatch):
+    """Negative anchor: "no probe on this adapter" is not "changed". Old test
+    doubles and any artifacts adapter without ``manifest_stat_signature`` keep
+    the pre-existing behaviour exactly — fail-soft, keep serving."""
+    notebook, scale, first = _warm_standalone_viz(repo)
+    monkeypatch.setattr(scale.artifacts, "manifest_stat_signature", None)
+    _replace_viz_root_out_of_band(repo, notebook.id)
+
+    assert scale.viz_index(notebook.id) is first
+
+
+def test_a_probe_that_cannot_answer_keeps_the_warm_viz(repo, monkeypatch):
+    """Negative anchor: a transient ``None`` (a permission error, an I/O blip on
+    a network mount) is "could not tell", not "the root changed" — serving the
+    warm entry is the safe reading. Only a CONFIRMED absence evicts."""
+    notebook, scale, first = _warm_standalone_viz(repo)
+    monkeypatch.setattr(scale.artifacts, "manifest_stat_signature", lambda _d: None)
+    _replace_viz_root_out_of_band(repo, notebook.id)
+
+    assert scale.viz_index(notebook.id) is first
 
 
 def test_daemon_and_viz_failures_clear_build_markers(repo, monkeypatch):

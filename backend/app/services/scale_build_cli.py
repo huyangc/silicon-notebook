@@ -511,6 +511,12 @@ def npy_row_count(path: Path) -> Optional[int]:
     Object arrays (``node_ids``/``ann_labels``) would need ``allow_pickle`` to
     materialize, which is an arbitrary-code-execution surface; the header is
     plain and tells us everything the count check needs.
+
+    ``None`` means exactly one thing — this file's header could not be read
+    back (absent, truncated, malformed, an ``.npy`` format version this numpy
+    cannot parse). It never means "not applicable"; see
+    ``artifact_inventory_error``, which decides applicability itself and treats
+    a ``None`` from a file it knows is present as an inventory error.
     """
     from numpy.lib import format as npy_format
 
@@ -523,13 +529,26 @@ def npy_row_count(path: Path) -> Optional[int]:
                 shape, _fortran, _dtype = npy_format.read_array_header_2_0(handle)
             else:
                 return None
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 - every unreadable reason is one verdict
         return None
     return int(shape[0]) if shape else 0
 
 
 def _graph_shape(path: Path) -> Optional[tuple[int, int]]:
-    """``graph.npz``'s declared matrix shape, read without the data members."""
+    """``graph.npz``'s declared matrix shape, read without the data members.
+
+    Two-valued like ``npy_row_count``: ``None`` is "the shape could not be read
+    back" (absent, unreadable, no ``shape`` member — every ``scipy.save_npz``
+    writes one — or not two-dimensional), never "not applicable".
+
+    The catch is ``Exception``, not the three concrete types it used to name: a
+    truncated ``graph.npz`` raises ``zipfile.BadZipFile``/``EOFError``, neither
+    of which is an ``OSError`` or a ``ValueError``, so exactly the corruption
+    this probe exists to report escaped as an unhandled traceback out of
+    ``validate_import_package`` instead of a readable refusal. Same rule
+    ``load_scale_index`` already applies to the core artifacts: any reason a
+    file cannot be read back points at one verdict.
+    """
     import numpy as np
 
     try:
@@ -537,7 +556,7 @@ def _graph_shape(path: Path) -> Optional[tuple[int, int]]:
             if "shape" not in archive.files:
                 return None
             shape = tuple(int(value) for value in archive["shape"])
-    except (OSError, ValueError, KeyError):
+    except Exception:  # noqa: BLE001 - see docstring
         return None
     return shape if len(shape) == 2 else None
 
@@ -547,6 +566,25 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
 
     Header-only: the check is O(number of files), not O(index size), so it runs
     in milliseconds on a multi-GB package.
+
+    Two DIFFERENT "no answer" shapes reach this function, and they get opposite
+    verdicts (P2, codex PR#643 R18):
+
+    * the manifest carries no expected value for an array, or the file the key
+      would be compared against is not part of this package — nothing to check,
+      the package passes. This is the ``older-index-stays-valid`` contract every
+      optional artifact relies on (``has_chunk_ann`` and friends), and it is
+      expressed HERE, at the call site, by the ``isinstance``/``exists`` guards
+      below — never by the probes;
+    * the file IS present and its header/shape cannot be read back. That is a
+      truncated or malformed artifact, and it is an inventory ERROR. Skipping it
+      as "unchecked" is what let such a package pass ``import``, atomically
+      replace a healthy live index, and only then be rejected by
+      ``load_scale_index`` at serve time — leaving the notebook with no usable
+      scale core until an operator noticed and rebuilt.
+
+    ``npy_row_count``/``_graph_shape`` therefore stay two-valued probes that say
+    only "readable / not readable"; the applicability judgement is not theirs.
     """
     required = list(_CORE_FILES)
     if int(manifest.get("n_ann") or 0) > 0:
@@ -566,13 +604,26 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
         if not path.exists():
             continue
         actual = npy_row_count(path)
-        if actual is not None and actual != expected:
+        if actual is None:
+            return (
+                f"{filename} is present but its .npy header could not be read "
+                "(truncated or malformed)"
+            )
+        if actual != expected:
             return (
                 f"manifest.{key}={expected} but {filename} holds {actual} rows"
             )
     nodes = manifest.get("n_nodes")
-    shape = _graph_shape(directory / "graph.npz")
-    if isinstance(nodes, int) and not isinstance(nodes, bool) and shape is not None:
+    if isinstance(nodes, int) and not isinstance(nodes, bool):
+        # graph.npz is a CORE file, so the missing-files check above already
+        # returned for an absent one: reaching here with an unreadable shape
+        # means the file is there and broken.
+        shape = _graph_shape(directory / "graph.npz")
+        if shape is None:
+            return (
+                "graph.npz is present but its matrix shape could not be read "
+                "(truncated or malformed)"
+            )
         if shape != (nodes, nodes):
             return (
                 f"manifest.n_nodes={nodes} but graph.npz is {shape[0]}×{shape[1]}"

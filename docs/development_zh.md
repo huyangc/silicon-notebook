@@ -48,7 +48,16 @@
   让路（该产物只是辅助，下次触发自然重试），SQLite 的 `UNSUPPORTED` 哨兵则保持
   该后端一贯的进程内行为。`import` 的每一个毁灭性动作——每次 swap、包省略某根时的
   退休、每根的回滚、每根的 `.old` 清理——都在动盘之前复验 claim，验不过就既不
-  rename 也不删除。
+  rename 也不删除。校验还会拒绝「必需 `.npy` 的头部或 `graph.npz` 的形状读不回来」
+  的包：文件在场却被截断，此前被当成「没检查」跳过，于是这种包照样发布、顶掉健康的
+  活索引，随后才被 `load_scale_index` 拒读，笔记本就此没有 scale 核；而 manifest
+  没有声明某个数组的期望条数、或声明了包里根本不带的那个数组，仍然放行（老索引依旧
+  有效）。服务进程暖着的那份**独立 viz** 缓存也按与伴生产物同一套失效——它的
+  `version`/`cluster_seq` 闸都由数据库派生，同版本 `import` 一个都不动，所以缓存
+  命中时会再 stat 一次 viz 根的 `manifest.json`，把盘上这一代与条目缓存时记下的那一
+  代比对：被替换就重新加载，被退休（确认根不在）就逐出该条目、退回「没有独立 viz」
+  的既有路径，「问不出来」（适配器没有探针，或这次 stat 失败）维持 fail-soft。因此
+  替换或退休 `kg_viz` 无需重启服务即可生效。
 - `prepare_selected_source_graph.py` 把可移植维护操作编排成全 notebook 部署状态机：持久来源反查索引页、持久 source-fact 代次、低成本版本/计数工件探针（失配时才做有界重建）及独立事实审计都在离线维护锁内完成。receipt 无正文且不是权威状态。只有 repository 关闭后脚本才能原子写入四个不可见 shadow 环境变量；任一阶段失败都保留原 env 文件。再次进入会重新验证权威状态并跳过当前代次/工件，不在大库上重复已完成工作。
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。组合按领域拆分：`RepositoryRuntime.__init__` 只按顺序调用模块级 `_build_*` 领域构造函数（外加它自己的两把 `threading.Lock()`），再把每个返回的 frozen bundle 的字段逐条显式挂到自己身上，一个座位一行。调用顺序即依赖拓扑——构造函数只接收更早的 bundle，绝不接收 runtime 本身，因此写不出回指组合根的环；唯一允许的runtime 绑定输入是窄的迟绑定 callable（当前用户访问器、`ask_service` 访问器与 `_note_ask_completed`）。进程级副作用（scheduler 校验、event logger、`kg_scheduler.initialize`）与那唯一一次持久化 bundle 构造保持原有顺序；`backend/tests/test_repository_runtime_composition.py` 冻结已挂载属性集合并钉住这两条规则。
 - 内置 KG 关系统一由 `backend/app/domain/kg/edge_schema.py` 的有类型注册表治理（`backend/app/services/kg/edge_schema.py` 只是 re-export shim，不得在那里声明新 EdgeSpec）。核心抽取 fail-closed；graph/PPR/canonical/relation 与 Ask 证据上下文消费者过滤历史非法 core 端点，同时保留连接管理员扩展类型的已知边；`EDGE_SCHEMA_VERSION` 进入 scale/PPR 工件 identity。可选关系补全按模式和来源代次的持久 keyset 水位逐页推进，通过索引化且契约合法的 relation `EXISTS` 优先 anchor，并只使用同源、有界 overfetch 的 FTS/ANN 候选及 section/pair/batch/字符护栏。每个任务只 hydrate 当前有界对象及其受限证据 ID；未完水位重新入队，启动时恢复当前代次的 pending 状态；模式改变用同一 generation-CAS 事务先发布新模式可恢复游标，再把旧模式游标标为 `stale`。proposal 与 verification 在数据库事务外完成，最后在短写事务内复核代次、归属、存在性，保存 verifier 看到的同一段服务端 excerpt 并幂等写入；非法零值护栏 fail-closed 且不推进水位。检索来源保存为按 producer 累积的 support record，选择层不得从 score 反推来源。
