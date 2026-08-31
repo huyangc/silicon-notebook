@@ -150,9 +150,20 @@ class SourcePartitionedPprService:
         old_probe = probe(
             str(self._artifacts.source_partition_dir(notebook_id)) + ".old"
         )
-        if old_probe is MANIFEST_ABSENT:
+        if old_probe is not MANIFEST_ABSENT:
+            return None
+        # codex PR#643 R23 P2: ``.old`` absent is still not the last word —
+        # between the two probes the publisher can complete ``tmp → live``
+        # AND delete ``.old`` (finalize), making both reads miss a
+        # generation that is now live. One recheck of the live path settles
+        # it: a manifest there is the new generation's real signature
+        # (superseded-vs-recorded comparison then reloads it, exactly
+        # right); still absent means absent at BOTH probes of the live path
+        # with no ``.old`` in between — durable retirement.
+        recheck = probe(self._artifacts.source_partition_dir(notebook_id))
+        if recheck is MANIFEST_ABSENT:
             return MANIFEST_ABSENT
-        return None
+        return recheck
 
     @property
     def cache_size(self) -> int:

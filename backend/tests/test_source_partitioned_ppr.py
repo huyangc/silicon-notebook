@@ -633,6 +633,54 @@ def test_the_mid_swap_window_keeps_serving_the_warm_cache(repo):
     assert service.cache_size == 1, "the warm scope must survive the window"
 
 
+def test_a_completed_swap_between_probes_is_not_read_as_retirement(
+    repo, monkeypatch
+):
+    """codex PR#643 R23 P2: the ``.old`` confirmation itself races the
+    publisher — between the live probe (ENOENT, mid-swap) and the ``.old``
+    probe, the second rename AND the ``.old`` cleanup can both complete, so
+    both probes miss a generation that is now live. The probe must recheck
+    the live path before declaring durable absence.
+
+    Simulated by scripting the first two stats to answer ``MANIFEST_ABSENT``
+    while the root actually sits healthy on disk — exactly what that
+    interleaving looks like from this thread. The recheck reads the real
+    signature and the warm scope survives.
+
+    Mutation anchor: drop the live recheck and this goes red — the warm
+    scope is evicted and the request degrades.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    service = repo._runtime.source_partitioned_ppr
+    _warm(service, notebook_id, source_a, version)
+    assert service.cache_size == 1
+
+    real = store.manifest_stat_signature
+    answers = iter([MANIFEST_ABSENT, MANIFEST_ABSENT])
+
+    def racing(directory):
+        try:
+            return next(answers)
+        except StopIteration:
+            return real(directory)
+
+    monkeypatch.setattr(store, "manifest_stat_signature", racing)
+    result = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert result.capability.enabled, (
+        "a swap that completed between the two probes must not read as "
+        "retirement"
+    )
+    assert service.cache_size == 1
+
+
 def test_a_probeless_artifacts_adapter_still_serves_from_cache(repo):
     """Negative anchor for the branch above: ``None`` from
     ``_companion_signature`` because the adapter has NO ``manifest_stat_
