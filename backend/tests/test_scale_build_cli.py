@@ -312,6 +312,62 @@ def test_a_manifest_count_that_disagrees_with_the_arrays_is_refused(tmp_path):
         _validate(package)
 
 
+def test_a_truncated_required_array_is_refused(tmp_path):
+    """P2, codex PR#643 R18: a present-but-unreadable ``.npy`` header used to be
+    skipped as "unchecked" — the package validated, ``import`` published it over
+    a healthy live index, and only then did ``load_scale_index`` reject it,
+    leaving the notebook with no scale core at all.
+
+    Mutation anchor: restore the ``actual is not None`` skip in
+    ``artifact_inventory_error`` and this package validates cleanly.
+    """
+    package = _package(tmp_path)
+    (package / cli.MAIN_ROOT / "node_ids.npy").write_bytes(b"\x93NUMPY")
+    with pytest.raises(
+        cli.ScaleBuildCliError, match="node_ids.npy.*truncated or malformed"
+    ):
+        _validate(package)
+
+
+def test_a_truncated_graph_matrix_is_refused(tmp_path):
+    """The same for ``graph.npz``'s shape. Second mutation anchor: a truncated
+    npz raises ``zipfile.BadZipFile``, which is neither ``OSError`` nor
+    ``ValueError`` — narrow the ``_graph_shape`` catch back to those and this
+    escapes ``validate_import_package`` as an unhandled traceback instead of a
+    refusal, so ``pytest.raises(ScaleBuildCliError)`` fails either way."""
+    package = _package(tmp_path)
+    graph = package / cli.MAIN_ROOT / "graph.npz"
+    graph.write_bytes(graph.read_bytes()[:24])
+    with pytest.raises(
+        cli.ScaleBuildCliError, match="graph.npz.*truncated or malformed"
+    ):
+        _validate(package)
+
+
+def test_a_manifest_that_declares_no_count_still_validates(tmp_path):
+    """Negative anchor for the refusal above (``older-index-stays-valid``): the
+    two "nothing to check" shapes must keep passing, because they are decided at
+    the CALL SITE, not by the probes —
+
+    * the manifest carries no expected value (here: no ``n_nodes``, so neither
+      ``node_ids.npy``'s row count nor ``graph.npz``'s shape has anything to be
+      compared against);
+    * the manifest carries a count for an array this package does not include
+      (here: ``n_chunk_ann`` with no ``has_chunk_ann`` flag and no
+      ``chunk_ann_labels.npy``).
+
+    A fix that made the probes themselves fail-closed would refuse both.
+    """
+    package = _package(tmp_path)
+    manifest = _main_manifest(n_chunk_ann=5)
+    manifest.pop("n_nodes")
+    _write_manifest(package / cli.MAIN_ROOT, manifest)
+    assert not (package / cli.MAIN_ROOT / "chunk_ann_labels.npy").exists()
+
+    _manifest, warnings = _validate(package)
+    assert warnings == []
+
+
 def test_a_flagged_optional_artifact_must_be_present(tmp_path):
     package = _package(tmp_path, has_relation_ann=True, n_relation_ann=3)
     with pytest.raises(cli.ScaleBuildCliError, match="relation_ann"):

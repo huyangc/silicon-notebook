@@ -15,6 +15,7 @@ import weakref
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
+from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
 from app.repositories.scale_build_lock import (
     SCALE_BUILD_LOCK_UNAVAILABLE,
     UNSUPPORTED_SCALE_BUILD_LOCK,
@@ -100,6 +101,33 @@ def offpeak_window_state(
     if candidate <= now:
         candidate = candidate + datetime.timedelta(days=1)
     return False, candidate
+
+
+def _viz_signature_superseded(cached_signature: Any, current_signature: Any) -> bool:
+    """Isomorphic with ``source_partitioned_ppr._companion_signature_superseded``
+    (which in turn mirrors ``ScaleArtifactCatalog._signature_superseded``, W-CLI
+    T-W3) — this one guards the STANDALONE viz cache (P2, codex PR#643 R18).
+
+    ``current_signature is None`` — the ``artifacts`` adapter carries no stat
+    probe (old test doubles), or this one stat could not be completed — is
+    "can't tell", not "changed": fail-soft, keep serving the cached entry.
+
+    ``MANIFEST_ABSENT`` never reaches this predicate and is never RECORDED on an
+    entry: "the viz root is provably gone" is an eviction, not a comparison, and
+    ``viz_index`` acts on it before it consults the cache.
+
+    ``cached_signature is None`` with a readable ``current_signature`` counts as
+    SUPERSEDED (the R5 corner). A cached entry can legitimately carry an unknown
+    signature — the stat taken just before ``load_viz`` can land inside the
+    live→``.old``→live rename window and read nothing while the load a moment
+    later opens the genuinely new generation. Treating that as "can't tell
+    either" would freeze the entry as un-supersedable forever, since the
+    recorded ``None`` never changes on its own. One extra reload records a real
+    signature and ordinary value comparison resumes.
+    """
+    if current_signature is None:
+        return False
+    return cached_signature != current_signature
 
 
 class ScaleArtifactRuntime:
@@ -377,7 +405,47 @@ class ScaleArtifactRuntime:
         return lifecycle.unified_kg_status(notebook_id)
 
     def _cache_viz(self, notebook_id: str, index: Any) -> None:
-        self.viz_cache[notebook_id] = index
+        # Written right after ``build_viz`` published a NEW generation, so the
+        # signature has to be probed here rather than reused from whatever
+        # ``viz_index`` read before the build — that one describes the
+        # generation this build just replaced, and recording it would mark the
+        # fresh entry superseded on the very next read.
+        self.viz_cache[notebook_id] = (
+            index, self._recordable_viz_signature(self._viz_signature(notebook_id))
+        )
+
+    def _viz_signature(self, notebook_id: str) -> Any:
+        """One stat of the STANDALONE viz root's ``manifest.json``. Three-valued
+        exactly like the companion probe: a stat signature, ``MANIFEST_ABSENT``
+        (the root was probed and provably has no live manifest), or ``None``
+        (nothing could be concluded — no probe on this adapter, or this one stat
+        failed). Called at most once per ``viz_index()`` read, and reused for
+        both the hit check and the entry that call may write."""
+        probe = getattr(self.artifacts, "manifest_stat_signature", None)
+        if not callable(probe):
+            return None
+        return probe(self.artifacts.viz_dir(notebook_id))
+
+    @staticmethod
+    def _recordable_viz_signature(signature: Any) -> Any:
+        """``MANIFEST_ABSENT`` is a statement about the root a moment ago, not
+        about the generation a load actually opened, so it is never stored on a
+        cache entry — it degrades to ``None`` (unknown), which the R5 corner in
+        ``_viz_signature_superseded`` resolves with one extra reload."""
+        return None if signature is MANIFEST_ABSENT else signature
+
+    @staticmethod
+    def _viz_cache_entry(cached: Any) -> tuple[Any, Any]:
+        """Unpack a ``viz_cache`` value into ``(index, recorded signature)``.
+
+        Entries are ``(index, signature)`` pairs; ``VizIndex`` is a dataclass,
+        never a tuple, so the shapes cannot be confused. A bare index (an
+        adapter that writes the cache without going through ``_cache_viz``)
+        reads back with an unknown signature, which self-heals into a recorded
+        one on the next read rather than sticking."""
+        if isinstance(cached, tuple):
+            return cached
+        return cached, None
 
     # ------------------------------ version/read catalog
 
@@ -653,20 +721,50 @@ class ScaleArtifactRuntime:
             return scale
         cur = self.version(notebook_id)
         cur_cseq = int(self.projections.version_signal(notebook_id)[1])
-        cached = self.viz_cache.get(notebook_id)
-        if cached is not None and self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
-            return cached
+        # P2, codex PR#643 R18: the two gates above are DATABASE-derived, so a
+        # CROSS-PROCESS writer (the offline CLI's ``import``, another replica)
+        # that replaces or RETIRES ``kg_viz`` under the same version and the
+        # same cluster_seq moves neither of them. A warm entry here would then
+        # serve the superseded generation — or a deliberately removed one — for
+        # the life of this process. One stat of the viz root's manifest gives
+        # that generation a comparable identity, exactly as the source-partition
+        # companion cache does (see ``_viz_signature_superseded``). This is the
+        # STANDALONE branch only: scale-EMBEDDED viz returned above rides
+        # ``load()``'s own version gate over the main root, which the catalog
+        # already revalidates against disk.
+        disk_signature = self._viz_signature(notebook_id)
+        if disk_signature is MANIFEST_ABSENT:
+            # Provably retired. Drop the warm entry and take the "no standalone
+            # viz" path below — ``load_viz`` reads the same absent root as None,
+            # so this ends in the existing build/spawn logic, not in a return of
+            # the removed generation.
+            self.viz_cache.pop(notebook_id, None)
+        else:
+            cached, cached_signature = self._viz_cache_entry(
+                self.viz_cache.get(notebook_id)
+            )
+            if cached is not None and self._viz_manifest_fresh(
+                cached.manifest, cur, cur_cseq
+            ):
+                if not _viz_signature_superseded(cached_signature, disk_signature):
+                    return cached
+                # A newer generation is on disk under the same version/cseq:
+                # drop it now so a concurrent reader cannot be handed the stale
+                # object while this call reloads.
+                self.viz_cache.pop(notebook_id, None)
         index = self.artifacts.load_viz(notebook_id)
         if index is not None:
             if self._viz_manifest_fresh(index.manifest, cur, cur_cseq):
-                self.viz_cache[notebook_id] = index
+                self.viz_cache[notebook_id] = (
+                    index, self._recordable_viz_signature(disk_signature)
+                )
                 return index
             self._spawn_viz_build(notebook_id)
             return index
         count = self.projections.effective_object_count(notebook_id)
         if int(count) <= self.settings.viz_sync_build_max_objects:
             self.build_viz(notebook_id)
-            return self.viz_cache.get(notebook_id)
+            return self._viz_cache_entry(self.viz_cache.get(notebook_id))[0]
         self._spawn_viz_build(notebook_id)
         return None
 
@@ -681,7 +779,14 @@ class ScaleArtifactRuntime:
         by design (see viz_index). Manifests written before cluster_seq existed
         default to cur_cseq → version-only check, so a deploy never force-rebuilds
         every existing viz (no thundering herd; a bounded accepted staleness for a
-        pre-cseq manifest whose version still matches after a same-second edit)."""
+        pre-cseq manifest whose version still matches after a same-second edit).
+
+        Both inputs are DATABASE-derived, which is precisely why this predicate
+        cannot see a cross-process republish or retirement of ``kg_viz`` under an
+        unchanged version and cluster_seq. That case is covered by a separate,
+        disk-derived gate on the cache-hit path (``_viz_signature_superseded``),
+        not by widening this one — a rewrite under the same DB state is not a
+        staleness question, it is a "which generation is on disk" question."""
         return (
             manifest.get("version") == cur
             and int(manifest.get("cluster_seq", cur_cseq)) == cur_cseq
